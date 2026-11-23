@@ -192,6 +192,41 @@ class EventShapeTest(unittest.TestCase):
                 engine_ledger.validate_event(variant)
         engine_ledger.validate_event({**EXAMPLES["wait_started"], "until": None})
 
+    def test_optional_members_round_trip_and_are_checked(self):
+        validate = engine_ledger.validate_event
+        stored, continued = EXAMPLES["result_stored"], EXAMPLES["run_continued"]
+        for accepted in ({**stored, "head": "a" * 40}, {**stored, "head": "b" * 64},
+                         {**stored, "outcome": "failed"},
+                         {**stored, "head": "a" * 40, "outcome": "ok"},
+                         {**continued, "step": "draft"},
+                         {**continued, "step": "draft", "visit": 2}):
+            with self.subTest(accepted=accepted):
+                self.assertEqual(validate(dict(accepted)), accepted)
+        for refused in ({**stored, "head": "A" * 40}, {**stored, "head": "a" * 39},
+                        {**stored, "head": 40}, {**stored, "head": None},
+                        {**stored, "outcome": ""}, {**stored, "outcome": 3},
+                        {**continued, "step": "draft", "visit": 0},
+                        {**continued, "step": "draft", "visit": True},
+                        {**continued, "step": "no such"},
+                        {**continued, "visit": 2},
+                        {**EXAMPLES["step_entered"], "head": "a" * 40}):
+            with self.subTest(refused=refused), self.assertRaises(LedgerError):
+                validate(refused)
+
+    def test_a_recorded_continue_without_a_step_is_read_but_never_appended(self):
+        recorded = FIXTURES / "continued.jsonl"
+        line = json.loads(recorded.read_text(encoding="utf-8").splitlines()[6])
+        self.assertEqual(line["event"], "run_continued")
+        self.assertNotIn("step", line)
+        self.assertEqual(len(engine_ledger.replay(recorded)), 8)
+        with tempfile.TemporaryDirectory() as tmp:
+            run = new_run(tmp)
+            with self.assertRaises(LedgerError):
+                engine_ledger.append_event(run, EXAMPLES["run_continued"])
+            self.assertEqual((run / "events.jsonl").read_bytes(), b"")
+            engine_ledger.append_event(run, {**EXAMPLES["run_continued"], "step": "draft"})
+            self.assertEqual(len((run / "events.jsonl").read_text().splitlines()), 1)
+
 
 class ResultOrderTest(unittest.TestCase):
     def test_a_failed_event_append_leaves_the_result_on_disk_and_no_event(self):
@@ -203,6 +238,19 @@ class ResultOrderTest(unittest.TestCase):
             self.assertEqual(json.loads((run / "results/scope.1.json").read_text()),
                              {"verdict": "ok"})
             self.assertEqual((run / "events.jsonl").read_bytes(), b"")
+
+    def test_a_stored_result_carries_head_and_outcome_only_when_given(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run = new_run(tmp)
+            common = dict(result={}, at=AT, wall_seconds=0, turns=0, tokens=ZERO_TOKENS,
+                          spend_usd=0)
+            engine_ledger.store_result(run, step="scope", visit=1, head="c" * 40,
+                                       outcome="failed", **common)
+            engine_ledger.store_result(run, step="scope", visit=2, **common)
+            first, second = engine_ledger.replay(run / "events.jsonl")
+            self.assertEqual((first["head"], first["outcome"]), ("c" * 40, "failed"))
+            self.assertNotIn("head", second)
+            self.assertNotIn("outcome", second)
 
     def test_a_failed_result_write_appends_no_event(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -605,7 +653,7 @@ class ReviewDefectsTest(unittest.TestCase):
             with self.subTest(tail=tail), tempfile.TemporaryDirectory() as tmp:
                 run = new_run(tmp)
                 (run / "events.jsonl").write_bytes(stopped + tail)
-                event = {"event": "run_continued", "at": "2026-11-21T16:10:00Z"}
+                event = {"event": "run_continued", "at": "2026-11-21T16:10:00Z", "step": "scope"}
                 engine_ledger.append_event(run, event)
                 self.assertEqual((run / "events.jsonl").read_bytes(), stopped + compact(event).encode())
                 self.assertEqual(engine_ledger.replay(run / "events.jsonl"),
@@ -621,7 +669,7 @@ class ReviewDefectsTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             run = new_run(tmp)
             (run / "events.jsonl").write_bytes(stopped + b'{"at":"2026-11-21T16:09:00Z","event":"run_contin')
-            first = {"event": "run_continued", "at": "2026-11-21T16:10:00Z"}
+            first = {"event": "run_continued", "at": "2026-11-21T16:10:00Z", "step": "scope"}
             second = {"event": "run_done", "at": "2026-11-21T16:11:00Z"}
             real_truncate = os.ftruncate
             outcome = []

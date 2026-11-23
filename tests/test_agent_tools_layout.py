@@ -74,12 +74,15 @@ ALLOWED_IMPORTS: dict[str, frozenset[str]] = {
         "agent_tools.delivery.context_map_lint",  # conformance_checks
         "agent_tools.delivery.standards_lint",  # conformance_checks
         "agent_tools.delivery.never_rise",  # conformance_checks
+        "agent_tools.delivery.node_lint",  # conformance_checks
         "agent_tools.delivery.record_lint",  # conformance_checks
         "agent_tools.delivery.size_lint",  # conformance_checks
         "agent_tools.delivery.comment_lint",  # conformance_checks
         "agent_tools.delivery.ruff_lint",  # conformance_checks
+        "agent_tools.delivery.lint_time",  # conformance
         "agent_tools.delivery.skipped_test_lint",  # conformance_checks
         "agent_tools.delivery.copied_test_lint",  # conformance_checks
+        "agent_tools.delivery.instruction_surface_lint",  # conformance_checks
         "agent_tools.release.railway_deploy_adapter",  # host_readiness
         "agent_tools.release.codesigned_artifact_adapter",  # host_readiness
     }),

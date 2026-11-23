@@ -27,6 +27,7 @@ WORKFLOW = WORKFLOWS / "ci.yaml"
 BUDGET_WORKFLOW = WORKFLOWS / "instruction-budget.yaml"
 CONFORMANCE_WORKFLOW = WORKFLOWS / "conformance.yaml"
 CLEANUP_WORKFLOW = WORKFLOWS / "cleanup-issue.yaml"
+LINT_TIME_WORKFLOW = WORKFLOWS / "lint-time.yaml"
 PROTECTION = REPO_ROOT / ".github" / "branch-protection.json"
 
 # The indentation convention that ci.yaml and instruction-budget.yaml share:
@@ -102,7 +103,7 @@ EXPECTED_WORKFLOW_PERMISSIONS = {"contents": "read"}
 # The one command the Conformance job exists to run, and the whole of its step: the
 # non-blank lines of the step are exactly these, so no `shell:`, `env:`,
 # `working-directory:` or `if:` can ride on it.
-CONFORMANCE_INVOCATION = "nix shell .#agent-platform --command conformance run --purpose ci"
+CONFORMANCE_INVOCATION = "nix shell .#agent-platform --command conformance run --purpose ci --lint-times"
 CONFORMANCE_STEP = ["      - name: Run conformance",
                     f"        run: {CONFORMANCE_INVOCATION}"]
 CONFORMANCE_CHECKOUT_REF = "          ref: ${{ github.event.pull_request.head.sha || github.sha }}"
@@ -1082,6 +1083,74 @@ class CleanupIssueWorkflowTest(unittest.TestCase):
     def test_the_job_is_not_a_required_context(self):
         self.assertNotIn("Cleanup Issue", required_contexts())
         self.assertEqual(CLEANUP_WORKFLOW, required_jobs()["Cleanup Issue"][0])
+
+
+class LintTimeWorkflowTest(unittest.TestCase):
+    """The push-to-main job that files the lint-time issue (ADR-delivery-020)."""
+
+    def test_runs_on_push_to_main_only_with_issue_write_and_no_other_write(self):
+        triggers = [
+            line for line in _top_level_block("on", LINT_TIME_WORKFLOW) if re.match(r"^  \S", line)
+        ]
+        self.assertEqual(["  push:"], triggers)
+        self.assertEqual(["main"], trigger_branches("push", LINT_TIME_WORKFLOW))
+        self.assertIsNone(job_if_expression("lint-time", LINT_TIME_WORKFLOW))
+        self.assertEqual(
+            {"actions": "read", "contents": "read", "issues": "write"},
+            workflow_permissions(LINT_TIME_WORKFLOW),
+        )
+        overrides = {
+            key: job_permission_lines(block)
+            for key, block in job_blocks(LINT_TIME_WORKFLOW).items()
+            if job_permission_lines(block)
+        }
+        self.assertEqual({}, overrides)
+
+    def test_pushes_run_one_after_another(self):
+        self.assertEqual(
+            ["  group: lint-time", "  cancel-in-progress: false", "  queue: max"],
+            [line for line in _top_level_block("concurrency", LINT_TIME_WORKFLOW) if line.strip()],
+        )
+
+    def test_the_job_stores_the_token_then_reads_the_lint_times_through_the_command(self):
+        self.assertEqual({"Lint Time": "lint-time"}, job_names(LINT_TIME_WORKFLOW))
+        steps = step_blocks("lint-time", LINT_TIME_WORKFLOW)
+        self.assertEqual(
+            ["Checkout", "Store the workflow token for gh", "Read the lint times"], list(steps)
+        )
+        cleanup_token = step_blocks("cleanup-issue", CLEANUP_WORKFLOW)[
+            "Store the workflow token for gh"
+        ]
+        token_step = steps["Store the workflow token for gh"]
+        self.assertEqual(
+            [line for line in cleanup_token if line.strip()],
+            [line for line in token_step if line.strip()],
+        )
+        read_step = steps["Read the lint times"]
+        self.assertEqual(
+            [
+                "      - name: Read the lint times",
+                "        run: PYTHONPATH=python python3 -m agent_tools.delivery.lint_time file"
+                " --repo \"$GITHUB_REPOSITORY\" --branch \"$GITHUB_REF_NAME\"",
+            ],
+            [line for line in read_step if line.strip()],
+        )
+        # No `env:` on the command step: no token reaches the command.
+        self.assertIsNone(step_env(read_step))
+        text = LINT_TIME_WORKFLOW.read_text(encoding="utf-8")
+        for key in ("defaults:", "shell:", "working-directory:", "continue-on-error:"):
+            self.assertNotIn(key, text)
+        self.assertEqual(
+            ["    name: Lint Time", "    runs-on: ubuntu-24.04", "    timeout-minutes: 10",
+             "    steps:"],
+            [line for line in job_blocks(LINT_TIME_WORKFLOW)["lint-time"]
+             if line.startswith("    ") and not line.startswith("     ")],
+        )
+        self.assertEqual([], green_without_work(job_blocks(LINT_TIME_WORKFLOW)["lint-time"], None))
+
+    def test_the_job_is_not_a_required_context(self):
+        self.assertNotIn("Lint Time", required_contexts())
+        self.assertEqual(LINT_TIME_WORKFLOW, required_jobs()["Lint Time"][0])
 
 
 if __name__ == "__main__":

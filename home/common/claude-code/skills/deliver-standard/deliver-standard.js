@@ -12,73 +12,69 @@ export const meta = {
   ],
 }
 
-// Args: repo_root (the checkout), issue (number), session_id or batch_id (the claim
-// holder is <host>/<batch_id> or <host>/session-<session_id>), decisions (owner answers to a
-// needs_user stop, or to a blocked task, #996; decisions also come from a fully ticked decision prompt read after the claim), spec (path of an approved design spec), mode (plan: stop after the plan
-// review with { stage: 'planned', plan, cont }; ready: stop after verify with { stage: 'ready',
-// head, branch, worktree, verify, flaky? (#972: [{id, summary}], each check that failed outside the branch's changed files and passed on its one rerun), outside_fixes? (#972: [{file, why}], each file outside the branch's diff a verification fix edited, with the cause it established; a done result carries both too), tasks, acceptance, fix_waves, cont } and no PR, keeping the claim;
-// ship, the default: merge. A ready cont resumed in ship skips the final review and verify when
-// the head is unchanged and the tree clean), lane (standard, the default, or direct: no planner, one
-// implementer following the deliver-direct skill, one fresh reviewer and at most one fix round; or live (#1433): no planner, one implementer that returns a test run failing at its start head and passing at its commit, and one reviewer of that commit, chosen by a standing live-fault declaration of the issue (sprint recap), which a lane-less fresh run reads in its setup, a failed read stopping it at live-fault before any planner; a cont keeps
-// its lane and no direct or live plan mode exists), cont (the `cont` object of an earlier stop, passed
-// back unchanged to resume; see RESUME below), review_sizing (boolean, default off, #747: sized Claude reviews; an argument only, never kept in cont, so a resume passes it again), look (#1139: with cont, in ship mode, the owner's answer to an awaiting-look stop: {answer: approve, head: <the 40-hex head the owner saw>, message? (a string, or the number the sprint inbox prints; an approve ignores it)} lands on the approval recorded for that head (look-approval status), never posting one, when the pull request head is still it, first verifying it in a look-verify step when it is not the verified head (landed only when it gained nothing but clean merges of the integration branch and its verification passes); an approval it cannot find recorded stops with a reason naming the approved head and the head found; {answer: fix, head, words, message?} (#1211) records the approval of that head with the owner's words when the pull request head is still it, runs one fix round on the words, verifies again and lands the fixed head when look-approval status keeps the approval for it; {answer: changes, words} runs one fix round on the owner's words, verifies again and stops at awaiting-look at the new head; an unmarked delivery ignores an approve answer), clerk_model (sonnet, the default, or haiku, #803: the model of every clerk call except the setup steps (setup, worktree) and the steps that emit a lifecycle verb (land-push, pr, look-pr, look-push, land-lock, land-relock, merge, land-unlock, hold), which stay on sonnet, #813; an argument only, never kept in cont, so a resume passes it again), amend (#811: on a resume of a standard-lane cont with a plan, a non-empty list of {file, find, replace} edits of files in cont.setup.plan_dir, file relative to it or absolute under it; a clerk applies them all or none with plan-amend before the next task and records each under Amendments in plan.md; an argument only, never kept in cont, and an applied edit sent again is skipped).
-// Every policy value comes from the project contract that setup resolves; this
-// file carries no project literal and defaults no policy value.
-//
-// CLAIM: the claim is a forge-claim claim: acquired before the worktree step, renewed
-// before each stage boundary (the tasks boundary's renew rides in the first implementer call, #745; a fresh run's setup acquire, or after an already_held acquire the setup's own renew, stands for the plan boundary's renew, #745; a renew that finds the claim ended stops with no cont; one
-// that gets no answer stops with a cont whose resume acquires again), released at close-out. A renew or acquire that
-// answers `error` with `transient` (forge-claim's own transport retries ran out) is re-called once, a folded step whole, before it stops (#740).
-//
-// A fresh run re-adopts an existing branch or worktree (never resetting it) and stops `dirty` when it holds uncommitted changes.
-// #1019: every setup first puts a worktree back on its branch when its HEAD is detached at the branch tip and the tree is clean.
-//
-// RESUME: every stop from the claim on returns { stage, ..., cont }, where cont is
-// { setup, lane, plan (declared branches, when any, as [{name, worktree, base, head, current, toplevel, common_dir, clean}]), plan_reviewed, plan_findings?, prior_findings? (#988: the blocking findings left on each plan this delivery dropped after its review, bounded; carried through every stop until a plan passes review, and shown to the planner that plans again), decisions?, done, pr? (a batch-built close-out cont: the PR the batch merged), fix_waves, fix_findings? (#924: the findings a fix-wave-review stop left open, bounded; the resume's first fix wave gets them with what its round's review raises; #1370: a stop after any review verdict keeps them, a wave that answered and failed and a lost re-review included; #940: such a stop also carries diverging: {file, waves} beside cont when the waves spent across runs reached FIX_WAVES_BOUND and a finding it left open is in a file the findings carried into the run named, and deliver-batch then hands the issue to the owner instead of relaunching it; #1000: it carries oscillating: {file, rounds} the same way when two fixes of one file in a row each drew a new finding there, rounds being that file's findings per round and each wave's range (its notes too when it changed that file alone), and deliver-batch reports it to the owner too; that stop keeps oscillating in cont beside fix_findings, and a resume of such a cont with no decision the cont does not hold and no amend stops before any agent, while one with a decision gives it, as binding, with the history to its first fix wave and that wave's re-review; #1370: round_cap {rounds, findings}. A round's verdict that leaves findings open after ROUND_CAP rounds (one full and two scoped) stops at fix-wave-review before any fix wave, carrying round_cap beside cont and in it, and deliver-batch reports it to the owner. A resume of a cont holding round_cap and open findings, with no new decision and no amend, stops before any agent. One with a decision or an amend runs one more round, giving it as binding to its scoped reviewer, first fix wave and re-review. That round's fix waves ending open stop at the cap again), checks_fixes?, sync_fixes?, verified?, final_reviewed?, review_rounds? (#1370: the final-review rounds that reached a verdict, counted across runs; a cont with no such member counts 1 when its final_reviewed names a head), reviewed? ({head, branches?, amended?}: the commit the last review read, which a scoped round reviews from), fix_findings_dropped? (#1370: open findings the CARRY_MAX bound cut from fix_findings; the next round reviews the whole delivery), follow_ups? (#1386: [{issue, file, summary, failing_input?, commit}], the follow-up issues filed for the findings of a scoped round, its fix-wave re-reviews included, that are not critical and name no unmet criterion; the done result carries them too), follow_ups_pending? (#1386: those whose filing was not confirmed; filed before verify, and a run that cannot file them stops at final-review), untested? (#1371: {stage, start_head, head}, the commit a push-bound fix made with no test command recorded; a resume runs fix-retest on the head being shipped before any push, and a reply that does not record a test command at that unchanged head stops at stage again), partial?, blocked? (#996: {task, notes, asked?}, the task whose implementer returned blocked and its notes, kept until that task runs again; an amend with no decision clears it and the implementer runs on the plan files as they then are; see BLOCKED), reordered? (#896: [{task, after, notes}], each a blocked task moved once to just after the later task it named; cont.plan.tasks is already in that order), claim_incomplete?, look_acs? (#1356: the AC ids the issue's look-marker lines had when the plan was made, kept so the plan's ids, never the issue's later checklist order, name the criterion a landing leaves out of its hold; a checklist reordered by hand while the delivery waits is a stated limit, not handled), look? (#1139: {pr, head, approved?}, the pull request and head an awaiting-look stop left for the owner's look, and the head the owner's approval was recorded for, once it was; a resume of such a cont lands without a second approval, and a head other than approved stops at awaiting-look again) }. Passing it back as args.cont
-// re-adopts the claimed worktree (setup re-checks it and refuses a dirty tree
-// unless cont.partial names the task that left the edits), reuses cont.plan
-// (reviewing it first unless plan_reviewed; a plan-review stop keeps the revised plan with plan_findings { rules, findings, rounds, noted? (#988: the rules reviewer's minor findings on the criteria of rules, context for the revise only) }, and the resume reads the owner's answer and, when every finding left names a rule and none has source codex, runs one rules-only revise of it whatever triggered the full revise (#823), dropping the plan once rounds reach two (#1019: the second of those two revises runs in the same run, with no stop between, when the first one's re-review leaves only findings on criteria that revise changed); any other finding left has spent the plan's one full revise, so the resume plans again), skips the tasks in cont.done, then
-// runs final review, verify and ship again (ship reuses an open PR). Every resume re-reads the facts of each branch cont.plan declares (a missing or wrong one stops setup with branch_heads.<name> missing, but only for a plan whose declarations are valid: an invalid one is dropped by the Plan section first); cont.verified and cont.final_reviewed carry branches { <name>: <head> }, and a resume reuses either only when every declared head the setup re-read is unchanged. When the PR
-// is already merged, the re-adopt goes straight to close-out; that PR is the delivery's own only when it is cont.pr or carries a commit of cont.done (#752). A resume skips the final review when cont.final_reviewed names the head it
-// passed at and the head is unchanged or only gained integration-branch merges with no unreviewed conflict resolution; a stop between a
-// sync merge and its acceptance drops the marker. #1370: a resume of a cont holding review_rounds and reviewed (and no fix_findings_dropped) that does not skip the review runs a scoped round (final-scoped): one reviewer over what changed since reviewed.head, plus the carried findings it re-checks at the head, with no whole-range, Codex or integration review. #1386: a scoped round blocks only on a critical finding or one naming an unmet criterion (ac); every other finding it raises is filed as a follow-up issue (follow-ups-<m>), and a replay of a merged PR goes straight to close-out and files nothing (its follow_ups_pending is the record). A result also carries dead_agents,
-// the labels of agents that returned nothing or threw, when any did, and lost_reviews, the labels of reviews that answered twice with
-// no usable review (#992). A red check, and a sync-review
-// finding, each get one fix wave per delivery (an implementer with a regression test, then a fresh reviewer); a second one stops with cont.
-//
-// LAND: ship opens the PR at the verified head, takes the cross-host land lock of the integration branch with --wait
-// (the CLI does the waiting); the same PR call then waits for the first checks once the lock is held (#801). Later it syncs, pushes and moves the lock after every head change, waits for every check on head (issue 756),
-// re-checks the lock once, merges and releases it; the lock is released on every stop after it was taken, and a release that
-// fails is reported as lock_unreleased on the result (#677). After a merge the lock is released first thing in the hold call;
-// a release that call does not confirm gets one standalone release after close-out (#801). Every stop before the merge still releases it.
-// A sync merge that conflicts is aborted and the lock released: its resolution, review and fix wave run outside the lock, and the accepted
-// head takes it again with --wait in the next round's checks call (#913, at lockOut).
-// Before it asks for the lock, the pr call probes whether the integration branch merges cleanly into the head (#941, PROBE): a conflict found
-// there is resolved, reviewed and fixed first, holding and waiting for nothing, and the accepted head then takes the lock for the first time.
-// A red check the branch itself caused is fixed outside the lock too (#1001, at OWN_RED): one that had already failed on a reused PR is
-// read before the lock is asked for, and one the first poll under the lock shows makes the fix step release the lock before it edits.
-//
-// LOOK (#1139): the setup reads, once per run, whether the issue is marked for the owner's look (look-approval marked, the shared reader; look: {verdict: marked|unmarked|error, covers?}).
-// A marked delivery runs no land command before the owner answers: after verify it pushes the branch and opens or reuses the pull request in a look-pr call (the pr call's PR text and
-// probe, no lock), syncs a branch that is behind the integration branch outside any lock (a conflict resolved and reviewed first), pushes the synced head in a look-push call and stops at
-// awaiting-look { issue, pr, head, reason, covers, pictures? (the before/after pictures verify wrote), flaky?, outside_fixes?, ways, cont } with cont.look = {pr, head}; it holds no lock and merges nothing.
-// #1373: every awaiting-look stop, the look path's and an answer re-ask's, follows a look-checks-<k> wait (renew, no lock, no push, bound to the pull request head read after the watch, then the base's ancestry) that read every
-// check passed and every required name passing. The look path syncs and pushes on a behind answer (twice at most, then sync-contention), spends the one red-check fix on a failed one (fix-ci, fix-ci-review, look-push, so a second
-// red poll stops at checks), and verifies a moved head again (look-reverify) and waits on the forge once more before the stop; a re-ask only waits. An approve of the unmoved approved head reuses the pull request and pushes nothing.
-// A read with neither verdict stops at stage look after verify (in ship and ready mode alike), and ready mode reports look: {verdict, covers}.
-// #1566: a landing resync that brings a marked delivery's head past the owner's approved head asks look-approval status first; when that says needed it verifies the new head (look-carry-verify: only clean merges of the integration branch past the owner's head, the declared verification, the pictures) and asks look-approval carry (look-carry) to record a carry line for it. A usable carried lands the new head under the owner's approval; anything else shows the owner the new head with its pictures (awaiting-look) or stops at look-carry, never merging. The program never posts an approval. #1597: when the verification wrote no pictures, the carry is asked with none and judged by the unchanged look-file diff, and the carry line names the rule it was carried by (pictures or look-files).
-// A landing under a recorded approval ticks the look marker in step 0 of its close-out call (look-approval tick); a reply that did not tick is logged, never a stop (#1186). The same landing leaves out of the hold the criterion that the setup's look read names in acs (the issue's own marker line, found by its place as the plan numbered it (cont.look_acs), never by the plan's wording), so no owner check is posted for it (#1356). A landing that leaves a criterion out first makes a read-only look-stale call: when a hold posted earlier still checks that criterion on a split child, or on the issue with nothing else left to hold, it stops at hold with look_checks, and a reply it cannot read stops at hold too; a check on the issue with another criterion still open is removed in place by the hold. A replay after the PR merged stops at look when the setup's look read failed, and always reads the merged head: the approval is always read again with look-approval status for the merged PR and head, never taken from a cont (which may hold another PR's), and anything but approved holds the look criterion and ticks nothing; the landing commit is resolved first (a PR merged indirectly has none on the pull) and both status and tick name it with --merge-commit. The look-stale read must say complete, and a hold of this issue with recorded results is never rewritten (its block version would change); a split child's returned fence naming an answered criterion stops the landing.
-//
-// FOLDS (#801): consecutive clerk steps with no program decision between them share one call. Folded: the lock release into the hold call,
-// the first poll into the pr call, a moved round's renew into its push call, its lock move into its checks call, and the look tick into the close-out call (#1186). Kept separate, each with a program
-// decision between the two: checks then merge (the state picks fix, sync, re-poll or merge), merge then release (a refused or retaken merge loops
-// instead), hold then close-out (the hold's gates read its reply first); the push then the lock move (the pushed full sha is the value the lock
-// command names, so the program must read the push reply first); and the renew before the final review and the verify, which are not consecutive
-// (reviewers run between them; the verify call already carries its own renew).
-//
-// Lifecycle forms follow the contract (merge strategy, delete_branch, credential
-// unsets). A host guard that accepts fewer forms refuses at that command; the
-// step then returns its stop with the guard's message instead of working around it.
+// Args: repo_root (the checkout), issue, session_id or batch_id (the claim holder is <host>/<batch_id> or
+// <host>/session-<session_id>), decisions (owner answers to a needs_user stop or a blocked task), spec (path of an
+// approved design spec) and cont (an earlier stop's cont, passed back unchanged to resume; see RESUME).
+
+// mode: plan stops after plan review with { stage: 'planned', plan, cont }; ready stops after verify with no PR and the
+// claim kept; ship, the default, merges. A ready cont resumed in ship skips the final review and verify when the head
+// is unchanged and the tree clean.
+
+// lane: standard, the default; direct has no planner, one implementer following deliver-direct, one fresh reviewer and
+// at most one fix round; live, chosen by a standing live-fault declaration of the issue, has one implementer that shows
+// a test failing then passing and one reviewer. A cont keeps its lane; direct and live have no plan mode.
+
+// amend: {file, find, replace} edits of files in cont.setup.plan_dir, applied all or none by plan-amend before the next
+// task. look (with cont, in ship mode): the owner's answer to an awaiting-look stop, {answer: approve|fix|changes,
+// head, words?, message?}; a head lands only under an approval that look-approval status records for it. review_sizing
+// and clerk_model are arguments only, never kept in cont, so a resume passes them again.
+
+// Every policy value comes from the project contract that setup resolves; this file carries no project literal and
+// defaults no policy value.
+
+// CLAIM: the claim is a forge-claim claim, acquired before the worktree step, renewed before each stage boundary and
+// released at close-out. A renew that finds the claim ended stops with no cont; one that gets no answer stops with a
+// cont whose resume acquires again. A renew or acquire that answers `error` with `transient` is re-called once before
+// it stops.
+
+// RESUME: every stop from the claim on returns { stage, ..., cont }. Passing it back as args.cont re-adopts the claimed
+// worktree (a dirty tree is refused unless cont.partial names the task that left the edits), reuses cont.plan, skips
+// the tasks in cont.done, then runs final review, verify and ship again; ship reuses an open PR. Every resume re-reads
+// the facts of each branch the plan declares, and reuses cont.verified or cont.final_reviewed only when every declared
+// head is unchanged. A final review is skipped when cont.final_reviewed names the head it passed at and the head is
+
+// unchanged or only gained integration-branch merges with no unreviewed conflict resolution.
+
+// A merged PR is the delivery's own only when it is cont.pr or carries a commit of cont.done. A result also carries
+// dead_agents (labels of agents that returned nothing or threw) and lost_reviews (reviews that answered twice with no
+// usable review). A red check and a sync-review finding each get one fix wave per delivery; a second one stops with
+// cont.
+
+// LAND: ship opens the PR at the verified head and takes the cross-host land lock of the integration branch with --wait
+// (the CLI does the waiting). Later it syncs, pushes and moves the lock after every head change, waits for every check
+// on head, re-checks the lock once, merges and releases it. The lock is released on every stop after it was taken; a
+// release that fails is reported as lock_unreleased on the result.
+
+// A sync merge that conflicts is aborted and the lock released: its resolution, review and fix wave run outside the
+// lock, and the accepted head takes it again with --wait (lockOut). Before it asks for the lock, the pr call probes
+// whether the integration branch merges cleanly into the head (PROBE), and a red check the branch itself caused is
+// fixed outside the lock too (OWN_RED).
+
+// LOOK: the setup reads once per run whether the issue is marked for the owner's look. A marked delivery runs no land
+// command before the owner answers: after verify it pushes the branch, opens or reuses the PR (look-pr, no lock), syncs
+// a branch that is behind outside any lock, and stops at awaiting-look with cont.look = {pr, head}. Every such stop
+// follows a look-checks wait that read every check passed. A landing under a recorded approval ticks the look marker
+// and leaves that criterion out of the hold; a resync that moves the head past the approved one is verified and carried
+
+// (look-carry) or shown to the owner again. The program never posts an approval.
+
+// FOLDS: consecutive clerk steps with no program decision between them share one call. Kept separate, each with a
+// program decision between the two: checks then merge, merge then release, hold then close-out, the push then the lock
+// move (the lock command names the pushed full sha) and the renew before the final review and the verify.
+
+// Lifecycle forms follow the contract (merge strategy, delete_branch, credential unsets). A host guard that accepts
+// fewer forms refuses at that command; the step then returns its stop with the guard's message instead of working
+// around it.
 
 const REPO = args && args.repo_root
 const ISSUE = args && args.issue
@@ -88,7 +84,7 @@ if (!['plan', 'ready', 'ship'].includes(MODE)) return { stage: 'args', error: 'm
 let CONT = args.cont || null
 if (args.lane !== undefined && !['standard', 'direct', 'live'].includes(args.lane)) return { stage: 'args', error: 'lane must be standard, direct or live' }
 if (CONT && args.lane && args.lane !== (CONT.lane || 'standard')) return { stage: 'args', error: 'a cont keeps its lane; start again without cont: setup re-adopts the branch and the claim' }
-// #1433: a lane-less fresh run reads the live-fault declaration in its setup and may switch to live there (the only lane change), so LANE is a let.
+// A lane-less fresh run reads the live-fault declaration in its setup and may switch to live there, so LANE is a let.
 let LANE = args.lane || (CONT && CONT.lane) || 'standard'
 if (LANE === 'direct' && MODE === 'plan') return { stage: 'args', error: 'the direct lane has no plan mode' }
 if (LANE === 'live' && MODE === 'plan') return { stage: 'args', error: 'the live-fault lane has no plan mode' }
@@ -99,7 +95,7 @@ if (args.review_sizing !== undefined && typeof args.review_sizing !== 'boolean')
 const REVIEW_SIZING = args.review_sizing === true
 if (args.clerk_model !== undefined && !['sonnet', 'haiku'].includes(args.clerk_model)) return { stage: 'args', error: 'clerk_model must be sonnet or haiku' }
 const CLERK_MODEL = args.clerk_model === undefined ? 'sonnet' : args.clerk_model
-// #1139: the owner's answer to an awaiting-look stop: {answer: approve, head, message?}, {answer: fix, head, words, message?} or {answer: changes, words}; only with a cont, only in ship mode.
+// The owner's answer to an awaiting-look stop, valid only with a cont and in ship mode.
 const LOOK_ANSWER = args.look === undefined ? null : args.look
 if (LOOK_ANSWER !== null) {
   if (!CONT) return { stage: 'args', error: 'look needs a cont: it answers an awaiting-look stop' }
@@ -115,13 +111,14 @@ if (LOOK_ANSWER !== null) {
   if (!sound) return { stage: 'args', error: 'look must be {answer: approve, head, message?}, {answer: fix, head, words, message?} or {answer: changes, words}' }
   if (LOOK_ANSWER.answer === 'fix' && !heldLook) return { stage: 'args', error: 'look fix needs a cont that stopped at awaiting-look' }
 }
-// The owner's changes answer rejects the approved head, and a fix answer replaces the approval of the head it was given for with a new one made after the fix: the approval leaves the cont here, before any stop, so every stop of this resume (a setup, amend,
-// blocked, dirty or plan stop that returns the cont as it came, or the fix itself) carries a cont with no approval and a resume with no look cannot land that head.
+// A changes or fix answer rejects the approved head, so the approval leaves the cont here, before any stop: every stop
+// of this resume carries a cont with no approval, and a resume with no look cannot land that head.
 if (LOOK_ANSWER && (LOOK_ANSWER.answer === 'changes' || LOOK_ANSWER.answer === 'fix') && CONT && CONT.look && typeof CONT.look === 'object' && CONT.look.approved !== undefined) {
   const { approved: _revoked, ...unapproved } = CONT.look
   CONT = { ...CONT, look: unapproved }
 }
-// #813: a setup step or one that emits a lifecycle verb must reproduce a wide schema or a guard-exact command, so it never takes the trial model.
+// A setup step or one that emits a lifecycle verb must reproduce a wide schema or a guard-exact command, so it never
+// takes the trial model.
 const DEFAULT_CLERK_MODEL = 'sonnet'
 // The claim holder: a resume keeps cont.setup.holder; else it is built from the host and an id.
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
@@ -134,7 +131,7 @@ if (!(CONT && CONT.setup && CONT.setup.holder)) {
 // A fresh run, or a resume whose claim stopped part way, runs the (idempotent) claim step.
 const CLAIMING = !CONT || !!CONT.claim_incomplete
 
-// forge-claim retries a transport error itself (#740), up to 150 s in a hanging outage, above the Bash tool's 120 s default.
+// forge-claim retries a transport error itself, up to 150 s in a hanging outage, above the Bash tool's 120 s default.
 const FORGE_TIMEOUT = 'Give each forge-claim command a Bash timeout of 20 minutes (1200000 ms). Only a land acquire command that ends in --wait gets more: the flag takes no value, so write nothing after it, and the command itself waits for up to 50 minutes and then answers land-contended by itself, so give it a Bash timeout of 60 minutes (3600000 ms) and never run it in the background. The reason for both: forge-claim retries a forge outage itself before it prints its one JSON line.'
 const BASE_RULES = `
 Hard rules for this step (they override anything else you remember):
@@ -146,17 +143,16 @@ Hard rules for this step (they override anything else you remember):
 - Global skills, agents and standards are shared by other projects: never write a project-specific literal (check names, branch names, recipe names, repository paths) into them.
 - Run git as git -C <worktree> and name every file by its absolute path; never prefix a command with cd <worktree> &&, except for a tool that must run inside the worktree and has no directory flag (a test runner or a build).`
 
-// #992: a StructuredOutput call sent beside another tool call is taken as the step's final answer before that call's result exists: a
-// review once returned a placeholder finding that way and it spent the fix round. One sentence, the same line in deliver-batch.js, added
-// last in call() so no step can miss it. It is about the reply alone, so it stands with the ROUNDS sentences: those put a round's
-// lookups in one message, this keeps the reply out of every round.
+// A StructuredOutput call sent beside another tool call is taken as the final answer before that call's result exists,
+// so a pending lookup's placeholder would become the reply. This sentence is added last in call(), the same line in
+// deliver-batch.js, so no step can miss it; it is about the reply alone.
 const REPLY_ALONE = 'Call StructuredOutput alone in its own message, never beside another tool call, only after every other tool result has come back: the first accepted call is final and ends the step.'
-// #1019: a reviewer once detached the worktree to run a script at the commit under review, and the next run's setup stopped on the
-// detached HEAD. One sentence, the same line in deliver-batch.js, added in readReview() so no review step can miss it.
+// A reviewer that detaches the worktree to run a script at the commit under review leaves the next setup a detached
+// HEAD. This sentence is added in readReview(), the same line in deliver-batch.js, so no review step can miss it.
 const READ_ONLY = 'Never check out, switch, reset or stash in the worktree: read another commit with git show.'
 
 const SEV = { type: 'string', enum: ['critical', 'important', 'minor'] }
-// #992: incomplete is the verdict of a review that could not finish; readReview() below reads every reply of this schema.
+// incomplete is the verdict of a review that could not finish; readReview() below reads every reply of this schema.
 const FINDINGS = {
   type: 'object',
   properties: {
@@ -180,15 +176,15 @@ const CODEX = {
 // The delivery's changed-line count from the diff-size clerk; measured false means it could not be read.
 const SIZE_SCHEMA = { type: 'object', properties: { measured: { type: 'boolean' }, changed_lines: { type: 'integer', minimum: 0 } }, required: ['measured'] }
 const FULL_SHA = { type: 'string', pattern: '^[0-9a-f]{40}$' }
-// #992: start_head and commit are full shas or absent (a blocked reply names none), so the harness refuses a placeholder and the agent corrects it.
+// start_head and commit are full shas or absent (a blocked reply names none), so the harness refuses a placeholder.
 const IMPL = {
   type: 'object',
   properties: { status: { type: 'string', enum: ['done', 'blocked'] }, start_head: FULL_SHA, commit: FULL_SHA, tests: { type: 'array', items: { type: 'string' } }, notes: { type: 'string' }, blocked_on: { type: 'integer' } },
   required: ['status', 'notes'],
 }
-// #986, #992: the sync review's schema; with followup it also returns descends. Named so that every FINDINGS schema of the program is one readReview() reads.
+// The sync review's schema; with followup it also returns descends. Every FINDINGS schema is one readReview() reads.
 const SYNC_REVIEW_SCHEMA = followup => (followup ? { ...FINDINGS, properties: { ...FINDINGS.properties, descends: { type: 'boolean' } }, required: [...FINDINGS.required, 'descends'] } : FINDINGS)
-// #1002: how a removal check is run. One per criterion bounds their number; the filter and the incremental build bound the cost of each.
+// How a removal check is run: one per criterion bounds their number, the filter and incremental build bound each cost.
 const REMOVALS = "For a removal run only the tests that pin it, through the runner's filter, as an incremental build: never the suite, never a clean rebuild; removals that are independent may be made and checked in one script, and a run of zero tests confirms nothing."
 const IMPL_RETURN = 'Return start_head (git rev-parse HEAD before you change anything) and commit (the full sha of HEAD after your last commit).'
 // A wave that may commit on several branches reports the issue worktree's commits only in start_head and commit.
@@ -197,7 +193,7 @@ const STRS = { type: 'array', items: { type: 'string' } }
 // A forge or agent may report a short sha; the same head must not read as moved.
 const BRANCH_HEADS = { type: 'array', items: { type: 'object', properties: { name: { type: 'string' }, head: FULL_SHA, current: { type: 'string' }, toplevel: { type: 'string' }, common_dir: { type: 'string' } }, required: ['name', 'head'] } }
 const FIX_WAVE_IMPL = { ...IMPL, properties: { ...IMPL.properties, branch_heads: BRANCH_HEADS } }
-// #950: a final-review fix wave and its re-review each also return the files the wave's commits changed in the issue worktree.
+// A fix-wave review and its re-review each return the files the wave's commits changed in the issue worktree.
 const withChanged = schema => ({ ...schema, properties: { ...schema.properties, changed_files: STRS } })
 const normSha = x => x.trim().toLowerCase()
 const sameSha = (a, b) => {
@@ -210,9 +206,8 @@ const sameSha = (a, b) => {
 }
 const fuller = (a, b) => { const x = normSha(a), y = normSha(b); return y.length > x.length ? y : x }
 const REVIEW_STATE = { type: 'string', enum: ['available', 'blocked', 'unsupported', 'absent'] }
-// #1139: the look-approval marked verdict the setup reads once per run; error carries the detail of its failure.
+// The look-approval marked verdict the setup reads once per run; error carries the detail of its failure.
 const LOOK_SCHEMA = { type: 'object', properties: { verdict: { type: 'string', enum: ['marked', 'unmarked', 'error'] }, covers: STRS, acs: STRS, detail: { type: 'string' } }, required: ['verdict'] }
-// #1433: the live-fault declaration of this issue as the console's sprint recap reports it (declared: fault is the entry of live_faults for this issue); read in the setup only when the lane may be live.
 const LIVE_READ = { type: 'object', properties: { verdict: { type: 'string', enum: ['declared', 'none', 'no-sprint', 'error'] }, sprint_id: { type: 'string' }, fault: { type: 'object', properties: { id: { type: 'integer' }, issue: { type: 'integer' }, observed: { type: 'string' }, when: { type: 'string' }, proven: { type: 'string' }, at: { type: 'string' } } }, detail: { type: 'string' } }, required: ['verdict'] }
 const SETUP_SCHEMA = {
   type: 'object',
@@ -252,30 +247,30 @@ const RENEW_SCHEMA = {
   properties: { verdict: { type: 'string', enum: ['renewed', 'not_held', 'error'] }, by: { type: 'string' }, detail: { type: 'string' }, transient: { type: 'boolean' } },
   required: ['verdict'],
 }
-// A folded step (#716) returns its own result plus the claim renew it ran first as a required nested member.
+// A folded step returns its own result plus the claim renew it ran first as a required nested member.
 const NULLABLE = s => ({ anyOf: [s, { type: 'null' }] })
 const ANSWER_SCHEMA = { type: 'object', properties: { verdict: { type: 'string' }, comment_id: { type: ['integer', 'null'] }, questions: { type: 'array', items: { type: 'object' } }, decisions: { type: 'string' } }, required: ['verdict'] }
-// The fresh setup also claims the issue and sets up the worktree (#716): holder, acquire and claim ride beside its own fields;
-// a standard-lane setup also reads the owner's answer and, after an already_held acquire, renews the claim (#745): answer and renew.
-// #870: the claim fields are required (null on a refusal before the claim), so a reply cannot leave out a claim it took.
+// The fresh setup also claims the issue and sets up the worktree: holder, acquire and claim ride beside its own fields,
+// and a standard-lane setup also reads the owner's answer and, after an already_held acquire, renews the claim. The
+// claim fields are required (null on a refusal before the claim), so a reply cannot leave out a claim it took.
 const SETUP_FOLDED = { ...SETUP_SCHEMA, properties: { ...SETUP_SCHEMA.properties, holder: NULLABLE({ type: 'string' }), acquire: NULLABLE(ACQUIRE_SCHEMA), claim: NULLABLE(CLAIM_SCHEMA), answer: NULLABLE(ANSWER_SCHEMA), renew: NULLABLE(RENEW_SCHEMA) }, required: ['ok', 'holder', 'acquire', 'claim'] }
 const withRenew = (s, extra = {}) => ({ ...s, properties: { ...s.properties, renew: RENEW_SCHEMA, ...extra }, required: ['renew'] })
-// A reply is complete when every member the schema requires is present and not null (a folded schema requires only its renew).
 const complete = (r, schema) => !!r && schema.required.every(k => r[k] !== undefined && r[k] !== null)
-// A renew or acquire that ran out of forge-claim's transport retries is re-called once (#740); the second reply stands whatever it is.
+// A renew or acquire that ran out of forge-claim's transport retries is re-called once; the second reply stands.
 const transientError = r => !!r && r.verdict === 'error' && r.transient === true
 const recall = async (make, pick = r => r) => { const r = await make(); return r && transientError(pick(r)) ? make() : r }
 const findingsOf = r => r.findings.filter(f => f.severity !== 'minor')
-// #1386: a finding naming an acceptance criterion blocks at any severity; the full round's filter is findingsOf plus a minor finding that names one.
+// A finding naming an acceptance criterion blocks at any severity; a full round's filter is findingsOf plus a minor one
+// naming one.
 const namesAc = f => typeof f.ac === 'string' && f.ac.trim() !== ''
 const blockingOf = r => r.findings.filter(f => isEntry(f) && (f.severity !== 'minor' || namesAc(f)))
 const present = v => v !== undefined && v !== null && v !== ''
-// Extra branches a plan declares (#713): validated, then granted non-force pushes in the lifecycle rules.
+// Extra branches a plan declares are validated, then granted non-force pushes in the lifecycle rules.
 const own = (o, k) => !!o && typeof o === 'object' && Object.prototype.hasOwnProperty.call(o, k)
 const isEntry = b => !!b && typeof b === 'object' && !Array.isArray(b)
 const declared = p => (p && Array.isArray(p.branches) ? p.branches.filter(isEntry) : [])
 const SHA_RE = /^[0-9a-f]{40}$/
-// #1370: a commit id read back from a cont or a reviewer's reply, used in a git command only when it is 4 to 40 hex digits (git's shortest abbreviation).
+// A commit id read back from a cont or a reviewer's reply is used in a git command only when 4 to 40 hex digits.
 const isCommit = v => typeof v === 'string' && /^[0-9a-f]{4,40}$/.test(normSha(v))
 const factOf = (list, name) => (Array.isArray(list) ? list.find(f => isEntry(f) && f.name === name) || null : null)
 const headOf = (list, name) => {
@@ -303,7 +298,7 @@ const factProblem = (b, f) => {
   return null
 }
 
-// The problems with a plan's declared branches (#713); empty when valid. Never throws on any JSON value.
+// The problems with a plan's declared branches; empty when valid. Never throws on any JSON value.
 const branchProblems = (p, w = W, int = INT) => {
   const show = JSON.stringify
   const out = [], good = []
@@ -325,14 +320,15 @@ const branchProblems = (p, w = W, int = INT) => {
       if (bp) out.push(`branch ${show(b.name)}: base ${show(b.base)} ${bp}`)
       const fp = factProblem(b, b)
       if (fp) out.push(`branch ${show(b.name)}: ${fp}`)
-      // Admission only: a resume may find a task's own uncommitted edits in the worktree, but a plan declares a worktree with none.
+      // Admission only: a resume may find a task's own uncommitted edits in the worktree, but a plan declares a
+      // worktree with none.
       if (b.clean !== true) out.push(`branch ${show(b.name)}: the worktree is not clean (git status --porcelain must print nothing at declaration)`)
       if (out.length === before) good.push(b)
     })
   }
   if (Array.isArray(p.tasks)) {
     for (const t of p.tasks) {
-      // #864: the delivery's own branch is where an undeclared task commits anyway, so naming it declares nothing.
+      // The delivery's own branch is where an undeclared task commits anyway, so naming it declares nothing.
       if (!isEntry(t) || t.branch === undefined || t.branch === setup.branch) continue
       if (typeof t.branch !== 'string' || !good.some(g => g.name === t.branch)) out.push(`task ${show(t.n)}: branch ${show(t.branch)} is not declared`)
     }
@@ -340,9 +336,10 @@ const branchProblems = (p, w = W, int = INT) => {
   return out
 }
 
-// ---------------- Stop reason (#869) ----------------
-// One line saying why a stop stopped: its stage, then the detail the stop already carries, capped. Every stop from the claim on carries it as reason
-// (planned and ready are not stops); a setup stop and an ended claim do not, and deliver-batch, which shows the reason in the stopped issue's row, reads those stops' own fields.
+// ---------------- Stop reason ----------------
+// One line saying why a stop stopped: its stage, then the detail the stop already carries, capped. Every stop from the
+// claim on carries it as reason (planned and ready are not stops); a setup stop and an ended claim do not, and
+// deliver-batch shows the reason in the stopped issue's row, reading those stops' own fields.
 const REASON_MAX = 300
 const implDone = i => !!(i && i.status === 'done' && present(i.commit) && present(i.start_head))
 const stopReason = (stage, x) => {
@@ -350,20 +347,19 @@ const stopReason = (stage, x) => {
   const say = v => { if (typeof v === 'string' && v.trim()) parts.push(v) }
   const names = (k, what) => { if (Array.isArray(x[k]) && x[k].length) say(`${what} ${x[k].map(v => (isEntry(v) ? v.id || v.ac || v.file : v)).join(', ')}`) }
   const task = isEntry(x.task) ? `task ${x.task.n} ` : ''
-  // #940: a stop whose fix waves do not converge says so first, so the cap cuts the findings and never the verdict.
+  // A stop whose fix waves do not converge says so first, so the cap cuts the findings and never the verdict.
   if (isEntry(x.diverging)) say(`the fix waves do not converge on ${String(x.diverging.file).slice(0, 120)} after ${x.diverging.waves} waves; an owner decision on the design is needed`)
-  // #1000: so does a stop on a file two fixes in a row each drew a new finding in.
+  // So does a stop on a file two fixes in a row each drew a new finding in.
   if (isEntry(x.oscillating)) say(`the fix waves go back and forth on ${String(x.oscillating.file).slice(0, 120)}: two fixes of it in a row each drew a new finding there; an owner decision on the approach is needed`)
-  // #1370: the round cap, said after the verdicts above it (a stop may carry them too).
+  // The round cap, said after the verdicts above it (a stop may carry them too).
   if (isEntry(x.round_cap) && Array.isArray(x.round_cap.findings)) say(`the review round cap is reached after ${x.round_cap.rounds} rounds (one full and two scoped); an owner decision is needed on the ${x.round_cap.findings.length} finding(s) still open: ${x.round_cap.findings.join('; ')}`)
-  // #988: a criterion whose classification the rules revise changed and that then broke another classification rule; said first, as the diverging verdict is.
   if (isEntry(x.conflict) && Array.isArray(x.conflict.rules)) say(`the acceptance rules ${x.conflict.rules.join(' and ')} conflict for ${x.conflict.ac}: the revise that settled one broke the other; an owner decision on how ${x.conflict.ac} is classified is the expected way out: ${x.conflict.revises_left ? 'a relaunch without one gets the one rules revise left' : 'the plan was dropped, and a relaunch without one plans again'}`)
   say(x.details)
   say(x.error)
   if (Array.isArray(x.branch_problems)) say(`branch problems: ${x.branch_problems.join('; ')}`)
   else if (own(x, 'invalid')) say(`the ${x.step} reply is not a well-formed plan`)
   if (Array.isArray(x.needs_user)) say(`${x.needs_user.length} question(s) for the owner`)
-  // #896: why a blocked task was not moved, ahead of the implementer's notes so the cap cuts the notes.
+  // Why a blocked task was not moved, ahead of the implementer's notes so the cap cuts the notes.
   if (present(x.order)) say(`${task}${x.order}`)
   if (isEntry(x.blocked)) say(`${task}${['blocked', x.blocked.notes].filter(present).join(': ')}`)
   for (const k of ['impl', 'fix', 'fw']) {
@@ -389,15 +385,14 @@ const stopReason = (stage, x) => {
     say(isEntry(v) ? [v.reason, v.verdict, v.status, v.details, v.detail, v.notes].filter(present).join(', ') : `the ${k} step returned nothing`)
   }
   const text = [stage, parts.join('; ')].filter(present).join(': ').replace(/\s+/g, ' ').trim()
-  // #996: the ways out of a blocked task end the reason, after the cap, so long notes never cut them.
+  // The ways out of a blocked task end the reason, after the cap, so long notes never cut them.
   const tail = present(x.ways) ? `; ${x.ways}` : ''
   const room = REASON_MAX - tail.length
   return `${text.length > room ? `${text.slice(0, room - 3)}...` : text}${tail}`
 }
 const why = r => ({ ...r, reason: stopReason(r.stage, r) })
 
-// ---------------- Amend (#811) ----------------
-// An owner's amendment of the plan on a resume, checked before any agent runs; every refusal returns the cont unchanged.
+// ---------------- Amend ----------------
 const AMEND = args.amend === undefined ? null : args.amend
 if (AMEND !== null && !CONT) return { stage: 'args', error: 'amend needs a cont: it amends the plan of a resumed delivery' }
 if (AMEND !== null && !(Array.isArray(AMEND) && AMEND.length > 0 && AMEND.every(e => isEntry(e) && typeof e.file === 'string' && e.file !== '' && typeof e.find === 'string' && e.find !== '' && typeof e.replace === 'string'))) {
@@ -407,7 +402,6 @@ if (AMEND !== null && (LANE !== 'standard' || !isEntry(CONT.plan) || typeof CONT
   return why({ stage: 'amend', error: 'amend needs a standard-lane cont whose plan has a plan_root and whose setup has a plan_dir', cont: CONT })
 }
 const AMEND_DIR = AMEND !== null ? CONT.setup.plan_dir.replace(/\/+$/, '') : null
-// The absolute path of an amend file when it is spelled under plan_dir, else null (Task 1's command checks the resolved paths).
 const amendTarget = f => {
   if (!canonPath(AMEND_DIR)) return null
   if (f.startsWith('/')) return canonPath(f) && f.startsWith(`${AMEND_DIR}/`) ? f : null
@@ -420,15 +414,14 @@ if (AMEND !== null) {
   if (!root.startsWith('/') || amendTarget(root) === null) refused.push({ file: root, reason: 'outside plan_dir' })
   if (refused.length) return why({ stage: 'amend', refused, details: 'an amend file or the plan root is outside cont.setup.plan_dir; nothing was applied', cont: CONT })
 }
-// ---------------- Blocked task (#996) ----------------
-// A task stop whose implementer returned blocked keeps { task, notes } in cont.blocked. Running that task again with the same task file
-// blocks again, so its resume needs something new from the owner: a decision the cont does not hold yet (args.decisions; a planner then
-// revises the task file from it and the notes before the implementer runs, and in the direct lane, which has no plan, the implementer
-// gets both), or an amend. With neither it stops here, before any agent runs, with the cont unchanged. asked marks a revise whose planner
-// asked the owner: that resume reads the decision prompt's answer first. A cont from before this member (partial with no blocked) cannot
-// tell a blocked task from a cut-off one, so it resumes as it always did: the implementer runs again.
-// The decision whose whole text is rerun is the third way out, for a cause outside the task file (a rejected token the owner repaired):
-// it clears blocked and runs the implementer on the unchanged task file with no planner step, and is never kept as a decision.
+// ---------------- Blocked task ----------------
+// A task stop whose implementer returned blocked keeps { task, notes } in cont.blocked. Running that task again with
+// the same task file blocks again, so its resume needs something new from the owner: a decision the cont does not hold
+// (a planner revises the task file from it; the direct lane gives the implementer both) or an amend. With neither it
+// stops here, before any agent, with the cont unchanged. asked marks a revise whose planner asked the owner.
+
+// The decision whose whole text is rerun clears blocked and reruns the implementer on the unchanged task file, for a
+// cause outside the task file, and is never kept as a decision.
 const NOTES_MAX = 2000
 const BLOCKED = CONT && isEntry(CONT.blocked) && Number.isInteger(CONT.blocked.task) && CONT.partial === CONT.blocked.task &&
   !(Array.isArray(CONT.done) && CONT.done.some(d => isEntry(d) && d.n === CONT.blocked.task)) && (LANE !== 'standard' || (isEntry(CONT.plan) && CONT.plan_reviewed === true))
@@ -442,22 +435,21 @@ let newDecision = BLOCKED && !RERUN_WORD && typeof args.decisions === 'string' &
 const waysOut = () => LANE !== 'standard' ? 'resume with decisions (the implementer gets it with these notes), or decisions rerun if the cause was outside the task' : 'resume with decisions (a planner revises the task file), amend {file, find, replace}, or decisions rerun if the cause was outside the task file'
 const UNSETTLED = { details: 'not run again: this resume brings nothing new from the owner', ways: waysOut() }
 if (BLOCKED && !RERUN && newDecision === null && AMEND === null && !(BLOCKED.asked && LANE === 'standard')) return why({ stage: 'task', task: { n: BLOCKED.task }, blocked: BLOCKED, ...UNSETTLED, cont: CONT })
-// (Hoisted above the gates that read them.)
-// Bounded on the way out and on the way in (at most CARRY_MAX findings, each text capped), so a cont cannot grow from stop to stop.
 const CARRY_MAX = 10
 const clip = v => (v.length > REASON_MAX ? `${v.slice(0, REASON_MAX - 3)}...` : v)
 const carryable = list => (Array.isArray(list) ? list : []).filter(f => isEntry(f) && typeof f.summary === 'string' && f.summary.trim() && (f.severity !== 'minor' || namesAc(f)))
 const carryOf = list => carryable(list).slice(0, CARRY_MAX)
   .map(f => ({ severity: f.severity === 'critical' ? 'critical' : 'important', ...(typeof f.file === 'string' && f.file ? { file: clip(f.file) } : {}), summary: clip(f.summary), ...(typeof f.failing_input === 'string' && f.failing_input ? { failing_input: clip(f.failing_input) } : {}), ...(namesAc(f) ? { ac: clip(f.ac) } : {}) }))
-// #1000: a cont stopped on a file its fix waves went back and forth on resumes only on something new from the owner, as a blocked task
-// does: a decision the cont does not hold (the first fix wave and its re-review get it as binding) or an amend of the plan.
+// A cont stopped on a file its fix waves went back and forth on resumes only on something new from the owner, as a
+// blocked task does: a decision the cont does not hold (the first fix wave and its re-review get it as binding) or an
+// amend.
 const OSC_KEPT = CONT && isEntry(CONT.oscillating) && typeof CONT.oscillating.file === 'string' && CONT.oscillating.file.trim() && Array.isArray(CONT.oscillating.rounds) && Array.isArray(CONT.fix_findings) && CONT.fix_findings.length ? CONT.oscillating : null
 const oscDecision = OSC_KEPT && !RERUN_WORD && typeof args.decisions === 'string' && args.decisions.trim() && !heldDecision(args.decisions) ? args.decisions : null
 const OSC_WAYS = `resume with decisions (the approach)${LANE !== 'standard' ? '' : ', or amend'}`
 if (OSC_KEPT && oscDecision === null && AMEND === null) return why({ stage: 'fix-wave-review', oscillating: OSC_KEPT, details: UNSETTLED.details, ways: OSC_WAYS, fix_waves: CONT.fix_waves || 0, cont: CONT })
-// #1370: one full review and two scoped rounds (owner, 21 Nov): a round's verdict that leaves findings open after ROUND_CAP rounds stops before any
-// fix wave and keeps round_cap in cont. A resume of that cont goes on only on something new from the owner, as an oscillating one does. The gate
-// reads the persisted marker, never review_rounds: a stop the cap did not make (a lost wave, a lost re-review) is no cap stop.
+// A verdict that leaves findings open after ROUND_CAP rounds stops before any fix wave and keeps round_cap in cont. A
+// resume of that cont goes on only on something new from the owner, as an oscillating one does. The gate reads the
+// persisted marker, never review_rounds: a stop the cap did not make (a lost wave, a lost re-review) is no cap stop.
 const ROUND_CAP = 3
 const CAP_MARK = LANE === 'standard' && CONT && isEntry(CONT.round_cap) && Number.isInteger(CONT.round_cap.rounds) && CONT.round_cap.rounds >= 1
   ? { rounds: CONT.round_cap.rounds, findings: (Array.isArray(CONT.round_cap.findings) ? CONT.round_cap.findings : []).filter(v => typeof v === 'string').slice(0, CARRY_MAX).map(clip) } : null
@@ -475,9 +467,11 @@ const AMEND_STOP = AMEND === null ? null
 const AMEND_INPUT = AMEND !== null ? { plan_dir: AMEND_DIR, plan_root: CONT.plan.plan_root, stop: AMEND_STOP, edits: AMEND.map(e => ({ file: amendTarget(e.file), find: e.find, replace: e.replace })) } : null
 const AMEND_SCHEMA = { type: 'object', properties: { status: { type: 'string', enum: ['applied', 'refused', 'error'] }, edits: { type: 'array', items: { type: 'object', properties: { file: { type: 'string' }, exists: { type: 'boolean' }, occurrences: { type: 'integer', minimum: 0 }, already: { type: 'boolean' } }, required: ['file', 'exists', 'occurrences', 'already'] } }, refused: { type: 'array', items: { type: 'object', properties: { file: { type: 'string' }, reason: { type: 'string' } }, required: ['file', 'reason'] } }, detail: { type: 'string' } }, required: ['status', 'edits', 'refused'] }
 
-// #1370: a full round whose end commit the program does not know asks its reviewers for the head they read; a scoped round's reviewer also
-// returns closed, the numbers of the carried findings the head shows closed.
-// #1386: the final reviewers' findings may name the acceptance criterion they find unmet (ac); a scoped finding also names its file and the full sha it was read at.
+// A full round whose end commit the program does not know asks its reviewers for the head they read; a scoped round's
+// reviewer also returns closed, the numbers of the carried findings the head shows closed.
+
+// The final reviewers' findings may name the acceptance criterion they find unmet (ac); a scoped finding also names its
+// file and the full sha it was read at.
 const withItems = (schema, item) => ({ ...schema, properties: { ...schema.properties, findings: { ...schema.properties.findings, items: item } } })
 const FINAL_ITEM = { ...FINDINGS.properties.findings.items, properties: { ...FINDINGS.properties.findings.items.properties, ac: { type: 'string' } } }
 const SCOPED_ITEM = { ...FINAL_ITEM, properties: { ...FINAL_ITEM.properties, commit: FULL_SHA }, required: ['severity', 'summary', 'file', 'commit'] }
@@ -487,7 +481,7 @@ const SCOPED_FINDINGS = withItems({ ...FINDINGS, properties: { ...FINDINGS.prope
 // final-codex reports unmet criteria by ac like the other final reviewers.
 const FINAL_CODEX = { ...CODEX, properties: { ...CODEX.properties, findings: FINAL_FINDINGS.properties.findings } }
 const FOLLOW_UPS = { type: 'object', properties: { filed: { type: 'array', items: { type: 'object', properties: { n: { type: 'integer', minimum: 1 }, issue: { type: 'integer', minimum: 1 } }, required: ['n', 'issue'] } } }, required: ['filed'] }
-// #1386 (owner, 21 Nov): what critical means to every final reviewer, and what a scoped round blocks on.
+// What critical means to every final reviewer, and what a scoped round blocks on.
 const CRITICAL_MEANS = 'A finding is critical only when it is a security defect, a data loss, or an acceptance criterion of the issue that is not met; every other blocking finding is important.'
 const SCOPED_BLOCKS = 'After the first full review only a critical finding, or one whose ac names the acceptance criterion it finds unmet, blocks the merge: every other finding you report is filed as a follow-up issue and the delivery goes on, so never mark a hardening point critical to make it block.'
 // The ask of a scoped reviewer: where each finding was read and which criterion it finds unmet.
@@ -502,24 +496,21 @@ On refusal return ok=false, reason contract, and in details the resolver's error
 - knowledge: bindings.paths.standards, bindings.paths.hints and bindings.paths.rejections, each as given (empty when absent).
 - verification: for each id in bindings.workflow.verification its bindings.commands argv, its cwd relative to project.root (. for the root), and any bindings.workflow.verification_conditions entry (when_changed globs, skip_reason), and pre_commit: true on an entry whose verification_conditions entry has pre_commit true (omit pre_commit otherwise).
 Then run alone and exactly: look-approval marked --repo <slug> --issue ${ISSUE} and return its verdict (marked or unmarked), covers and acs (the array of its acs, [] when it names none) as look; on a non-zero exit return look with verdict error and the error and detail of its JSON line as detail.`
-// Labels of agents that returned nothing or threw: deliver-batch's breaker reads them (#636).
-// #1433: read once in the setup when the lane may be live; the answer picks the lane and names the declaration a live delivery stands on.
 const LIVE_STEP = LIVE_READING ? `
 Also run alone and exactly: sprint recap, before you return any refusal, and return live_fault on every reply, a refusal included. When it exits 0 its one JSON line gives sprint_id: return verdict declared, that sprint_id and fault (the entry of its live_faults whose issue is ${ISSUE}, every member as printed) when there is one, and verdict none when it lists none for issue ${ISSUE}. When it exits 2 printing sprint: no sprint id, return verdict no-sprint; on any other non-zero exit return verdict error and the stderr line as detail. Change nothing.` : ''
 const DEAD = []
-// #992: labels of reviews that answered twice with no usable review (readReview). Not dead agents: the breaker does not count them.
 const LOST = []
 // What a review that gave the program nothing did: with no label, any review of this run.
 const silence = (...labels) => ((labels.length ? labels.some(l => LOST.includes(l)) : LOST.length) ? 'answered twice with no usable review' : 'returned nothing')
-// #987: every reviewer and implementer step opens with its one-sentence turn procedure. Measured over four runs, both kinds sent one
-// tool call in 80 to 100% of their tool messages at up to 183k of context; the planner, under the same wording first in its prompt, 27%.
-// Added in call(), not per prompt, so no site of either kind can miss it. reviewer-lite is left out: a median of three turns under 20k.
+// Every reviewer and implementer step opens with its one-sentence turn procedure: both kinds otherwise sent one tool
+// call in only 80 to 100% of their tool messages at up to 183k of context. Added in call(), not per prompt, so no site
+// can miss it. reviewer-lite is left out: its median is three turns under 20k.
 const ROUNDS = {
   reviewer: `Look things up in rounds: load the files under review in one message, then put every open question's Bash, Grep or Read call in the same message as the others, never one small lookup per turn.`,
   implementer: `Work in rounds: put a round's lookups in one message, send its independent edits as several Edit calls in one message, and run the tests once per round of edits, never one small call per turn.`,
 }
 const withRounds = (prompt, opts) => (opts && ROUNDS[opts.agentType] ? `${ROUNDS[opts.agentType]}\n${prompt}` : prompt)
-// #992: every step that replies through a schema ends with the one sentence about that reply.
+// Every step that replies through a schema ends with the one sentence about that reply.
 const withReply = (prompt, opts) => (opts && opts.schema ? `${prompt}\n${REPLY_ALONE}` : prompt)
 // optional: a step whose failure the caller recovers (the diff-size measurement) is not reported as a dead agent.
 const call = async (prompt, opts, optional) => {
@@ -534,15 +525,14 @@ const call = async (prompt, opts, optional) => {
   return reply
 }
 const deadOf = () => ({ ...(DEAD.length ? { dead_agents: DEAD.slice() } : {}), ...(LOST.length ? { lost_reviews: LOST.slice() } : {}) })
-// #992: every FINDINGS reply is read through readReview(). A reply whose verdict is incomplete, or that carries a blocking finding naming
-// neither a file nor a failing input (what a reply sent beside a pending lookup holds), is a lost review, never a finding: the same step
-// runs once more as <label>-again, and a second such reply is returned as null. So it reaches no findingsOf and spends no fix round.
-// The step did answer, so it is no dead agent: DEAD is left alone, LOST names it, a stop carries LOST as lost_reviews beside
-// dead_agents, and its reason says the review answered twice with no usable review.
-// Every review is held to that. Measured over 35 runs, all 390 blocking findings of the final, fix-wave, plan and direct reviews named
-// a file or a failing input. Two named exceptions: ruled, the two plan reviews, where a finding that names its criterion (ac) or the
-// rule it breaks (rule) names its subject; and fileless, the reviews of a task that first ended with no commit, judged on outputs
-// that may be no file, which are held to the verdict only.
+// Every FINDINGS reply is read through readReview(). A reply whose verdict is incomplete, or that carries a blocking
+// finding naming neither a file nor a failing input, is a lost review, never a finding: the step runs once more as
+// <label>-again, a second such reply is returned as null, and it spends no fix round. It is no dead agent: DEAD is left
+// alone, LOST names it.
+
+// Two exceptions are held to less: ruled (the two plan reviews, where a finding naming its criterion (ac) or the rule
+// (rule) names its subject) and fileless (the reviews of a task that first ended with no commit), held to the verdict
+// only.
 const AGAIN = '-again'
 const unusable = (r, { fileless = false, ruled = false } = {}) => {
   if (!r) return ''
@@ -557,7 +547,8 @@ const readReview = async (asked, opts, { fileless = false, ruled = false, option
   const first = await call(prompt, opts, optional)
   const why = unusable(first, lax)
   if (!why) return first
-  // #1433: a step that may run once only (the live-fault lane's one review) is never asked again: its unusable reply is a lost review.
+  // A step that may run once only (the live-fault lane's one review) is never asked again: its unusable reply is a lost
+  // review.
   if (once) {
     log(`${opts.label}: the reply is no review (${why}); the review is lost`)
     LOST.push(opts.label)
@@ -573,38 +564,39 @@ const readReview = async (asked, opts, { fileless = false, ruled = false, option
 
 // Shared by the fresh setup and the re-deriving resume of a claim_incomplete cont that lacks its location.
 const DERIVE_LOCATION = `Run alone and exactly issue-branch --repo-root ${REPO} --issue ${ISSUE}: it prints one JSON line, and branch and worktree_path are its branch and worktree_path. On a non-zero exit refuse (ok=false) with reason branch and the line it wrote to stderr in details. On any refusal set transient true only when the failed command's stderr JSON has transient true anywhere in it.`
-// Only a new child's early cont (a stop after the folded claim, whatever fields are missing) can lack its location; an old cont has both.
+// Only a new child's early cont (a stop after the folded claim, whatever fields are missing) can lack its location.
 const REDERIVE = !!(CONT && CONT.claim_incomplete && !(CONT.setup && present(CONT.setup.branch) && present(CONT.setup.worktree_path)))
 const RES_BRANCH = REDERIVE ? '<branch>' : CONT && CONT.setup && CONT.setup.branch
 const RES_PATH = REDERIVE ? '<worktree_path>' : CONT && CONT.setup && CONT.setup.worktree_path
-// #1019: a worktree left on a detached HEAD at its branch's own tip, with a clean tree, lost nothing: the setup puts it back on the
-// branch (a switch, never a reset) and goes on. Any other detached HEAD is left as found and refused as before.
+// A worktree left on a detached HEAD at its branch's own tip, with a clean tree, lost nothing: the setup puts it back
+// on the branch (a switch, never a reset) and goes on. Any other detached HEAD is left as found and refused.
 const REATTACH = (branch, path) => `When HEAD in ${path} is detached (git -C ${path} symbolic-ref -q HEAD fails), put it back on ${branch} first, only when git -C ${path} rev-parse HEAD and git -C ${path} rev-parse refs/heads/${branch} print the same sha and git -C ${path} status --porcelain prints nothing: run git -C ${path} switch ${branch}, alone, and return reattached true. It is the one change this read may make; never reset, and leave any other detached HEAD as it is.`
 // Shared by the fresh setup and the incomplete-claim resume: the facts the worktree step chooses its command from.
 const EXISTING_READ = (branch, path) => `Read what already exists for the delivery, and change nothing: never reset, clean, restore or stash, and never delete a branch or worktree. ${REATTACH(branch, path)} Return existing with local_branch (a local branch named ${branch} exists), remote_branch (origin/${branch} exists), worktree (the path ${path} exists and is on branch ${branch}), dirty (git -C ${path} status --porcelain is non-empty), status (that output, its first 40 lines) and head (git -C ${path} rev-parse HEAD, or the branch tip when there is no worktree). Omit existing when there is no such branch and no such path. Refuse with reason worktree-mismatch and the path when ${path} is on another branch or ${branch} is checked out at another path.`
 // The head the final review passed at, when a resume's cont names one: the setup then reports how HEAD relates to it.
-// #1370: both go into the setup's Git commands, so each is a commit id before it is read (a marker that fails is no marker: the review runs again).
+// Both go into the setup's Git commands, so each is a commit id before it is read (a marker that fails is no marker).
 const FR_HEAD = CONT && CONT.final_reviewed && isCommit(CONT.final_reviewed.head) ? normSha(CONT.final_reviewed.head) : null
 const FR_ACCEPTED = FR_HEAD && Array.isArray(CONT.final_reviewed.accepted) ? CONT.final_reviewed.accepted.filter(isCommit).map(normSha) : []
 const BRANCH_READ = CONT && CONT.plan && declared(CONT.plan).length ? ` For each declared branch of the plan (${declared(CONT.plan).map(b => `${b.name} in ${b.worktree}`).join(', ')}) return branch_heads: one {name, head, current, toplevel, common_dir} each, with ${BRANCH_FACTS}; give a missing worktree no entry.` : ''
 const SINCE_REVIEWED = FR_HEAD ? ` The final review passed at ${FR_HEAD}: after git -C <worktree> fetch origin, return since_reviewed: same when HEAD is ${FR_HEAD}; merge_only when git -C <worktree> merge-base --is-ancestor ${FR_HEAD} HEAD succeeds, git -C <worktree> rev-list --no-merges ${FR_HEAD}..HEAD ^origin/<integration_branch> prints nothing (the head only gained integration-branch merges), and every merge in git -C <worktree> rev-list --merges ${FR_HEAD}..HEAD ${FR_ACCEPTED.length ? `is one of ${FR_ACCEPTED.join(', ')} or ` : ''}is a clean two-parent merge, meaning git -C <worktree> merge-tree --write-tree <merge>^1 <merge>^2 exits 0 and prints the tree id that git -C <worktree> rev-parse <merge>^{tree} gives (a conflict resolved by hand, or an octopus merge, gives a different tree; never judge this from git show --cc, which omits a hunk where the merge keeps one parent unchanged); else moved.` : ''
-// Both lanes' fresh setups renew right after the acquire (#745, #799): an already_held acquire refreshes nothing, and the gate below grades the renew
-// whichever the lane. A standard-lane setup also reads the owner's answer to the decision prompt (#745).
+// Both lanes' fresh setups renew right after the acquire: an already_held acquire refreshes nothing, and the gate below
+// grades the renew whichever the lane. A standard-lane setup also reads the owner's answer to the decision prompt.
 const RENEW_STEP = `6. Only when step 5's verdict is already_held (an already_held acquire refreshes nothing), renew the claim: run, alone and exactly, forge-claim renew --repo <slug> --issue ${ISSUE} --holder <host>/${HOLDER_ID} --branch <branch>. It prints one JSON line. ${FORGE_TIMEOUT} Return its verdict (error, with detail, on exit 1 or 2), by, detail and transient (true only when its JSON line has transient true) as renew.
 `
 const FRESH_READS = `${RENEW_STEP}7. Only when step 5's verdict is acquired or already_held, read the owner's answer to the decision prompt: run alone, exactly, forge-claim owner-action status --repo <slug> --issue ${ISSUE} --reason decision. It prints one JSON line. Change nothing: post nothing, edit nothing, end nothing. Return verdict, comment_id, questions and decisions exactly as printed as answer.
 `
 const WT_STEP = LANE === 'standard' ? 8 : 7
-// #752: a merged PR found only by its head name may be a spec merged from a branch of the same name, so a resume closes out only the PR
-// it can name (the number a batch built its cont after merging, or a PR whose own commit list holds a commit of cont.done). Identity is by
-// number or commit oid, never by ancestry of base_sha: a squash or rebase merge rewrites every commit but the PR's own list.
+// A merged PR found only by its head name may be a spec merged from a branch of the same name, so a resume closes out
+// only the PR it can name (the number a batch built its cont after merging, or a PR whose own commit list holds a
+// commit of cont.done). Identity is by number or commit oid, never by ancestry of base_sha: a squash or rebase merge
+// rewrites every commit.
 const closingPr = refs => {
   const hit = Array.isArray(refs) ? refs.find(r => isEntry(r) && r.closes === true && Number.isInteger(r.number)) : undefined
   return hit ? hit.number : null
 }
 const OWN_PR = CONT && Number.isInteger(CONT.pr) ? CONT.pr : null
 const OWN_COMMITS = CONT && Array.isArray(CONT.done) ? CONT.done.filter(d => isEntry(d) && typeof d.commit === 'string' && d.commit !== '').map(d => d.commit) : []
-// A recorded cont.pr decides alone: a reused branch can list one commit on several merged PRs, so commits name the PR only when none is recorded.
+// A recorded cont.pr decides alone: a reused branch can list one commit on several merged PRs.
 const ownMerged = heads => {
   const list = (Array.isArray(heads) ? heads : []).filter(h => isEntry(h) && Number.isInteger(h.number))
   if (OWN_PR !== null) return list.find(h => h.number === OWN_PR)
@@ -628,27 +620,30 @@ ${LANE === 'standard' ? FRESH_READS : RENEW_STEP}${WT_STEP}. Set up the worktree
 ${WT_STEP + 1}. Return ok=true with branch, worktree_path and every other field above, ${LANE === 'standard' ? 'holder, acquire, renew, answer' : 'holder, acquire, renew'}, and claim: ok, worktree (<worktree_path>), base_sha and plan_dir. A refusal before step 5 returns holder, acquire and claim null. Once the claim step ran, keep ok true: report a worktree failure only as claim with ok=false, the reason and what you already did.
 ${BASE_RULES}`, { label: 'setup', phase: 'Setup', agentType: 'clerk', model: DEFAULT_CLERK_MODEL, effort: 'low', schema: CONT ? SETUP_SCHEMA : SETUP_FOLDED })
 let setup = await setupCall()
-// #870: a refusal marked transient (a forge or network failure) whose reply took no claim is asked once more; the second answer stands.
+// A refusal marked transient (a forge or network failure) whose reply took no claim is asked once more; the second
+// answer stands.
 const claimed = r => !!r.acquire && (r.acquire.verdict === 'acquired' || r.acquire.verdict === 'already_held')
 if (setup && setup.ok === false && setup.transient === true && !claimed(setup)) setup = await setupCall()
-// #870: a fresh reply of ok true that names neither holder nor acquire left its claim fields out, though it may have claimed: the setup is
-// asked once more (the acquire and the worktree step are idempotent); a second such reply stops at the holder gate below. A reply that
-// names its holder but no acquire stops at claim with a cont, as before.
+// A fresh reply of ok true that names neither holder nor acquire left its claim fields out, though it may have claimed:
+// the setup is asked once more (the acquire and the worktree step are idempotent); a second such reply stops at the
+// holder gate below. A reply that names its holder but no acquire stops at claim with a cont.
 else if (!CONT && setup && setup.ok === true && !setup.acquire && !present(setup.holder)) setup = await setupCall()
-// A lost reply carries no cont, fresh or resumed: a fresh reply that never showed the refusal checks pass must not resume past them,
-// and a rerun redoes the full fresh setup (the acquire is idempotent for the same holder).
+// A lost reply carries no cont, fresh or resumed: a fresh reply that never showed the refusal checks pass must not
+// resume past them, and a rerun redoes the full fresh setup (the acquire is idempotent for the same holder).
 if (!setup) return { stage: 'setup', result: null, ...deadOf() }
-// #1356: a marked look read that names no acs array is incomplete (the delivery would read it as no criterion and ask the owner twice): the setup is asked once more, and a second such reply is a look read that failed.
+// A marked look read that names no acs array is incomplete: the setup is asked once more, and a second such reply is a
+// failed read.
 const lookIncomplete = r => !!r && r.ok !== false && isEntry(r.look) && r.look.verdict === 'marked' && !Array.isArray(r.look.acs)
 if (lookIncomplete(setup)) setup = await setupCall()
 if (!setup) return { stage: 'setup', result: null, ...deadOf() }
 if (lookIncomplete(setup)) setup.look = { verdict: 'error', detail: 'look-approval marked named no acs' }
-// #1019: said once in the log, never kept: the cont's setup must not claim it for a later run.
+// Said once in the log, never kept: the cont's setup must not claim it for a later run.
 if (setup.reattached === true) log('setup: the worktree was on a detached HEAD at its branch tip with a clean tree; it is back on its branch')
 delete setup.reattached
-// #1433: the live-fault read, taken out of setup so no cont keeps it. A standing entry is a declaration of this issue with a positive id, a time and a sprint id. A lane-less fresh run
-// becomes live on a standing entry, on a failed read, and on an ok reply with no usable read, so a declared issue is never planned by mistake; the gate below stops the unread ones.
-// The lane is fixed here, before the first exit that builds a cont.
+// The live-fault read is taken out of setup so no cont keeps it. A standing entry is a declaration of this issue with a
+// positive id, a time and a sprint id. A lane-less fresh run becomes live on a standing entry, on a failed read and on
+// an ok reply with no usable read, so a declared issue is never planned by mistake. The lane is fixed here, before the
+// first exit that builds a cont.
 const LIVE_RAW = setup.live_fault
 delete setup.live_fault
 const liveStanding = r => isEntry(r) && r.verdict === 'declared' && typeof r.sprint_id === 'string' && /^[0-9a-f]{16}$/.test(r.sprint_id) && isEntry(r.fault)
@@ -663,12 +658,11 @@ if (LIVE_AUTO && (LIVE || LIVE_UNREAD)) LANE = 'live'
 const LIVE_REC = CONT && isEntry(CONT.live_fault) ? { id: CONT.live_fault.id, sprint_id: CONT.live_fault.sprint_id, issue: CONT.live_fault.issue, at: CONT.live_fault.at }
   : LIVE ? { id: LIVE.id, sprint_id: LIVE.sprint_id, issue: LIVE.issue, at: LIVE.at } : null
 const liveSame = (a, b) => isEntry(a) && isEntry(b) && a.id === b.id && a.sprint_id === b.sprint_id && a.at === b.at
-// The stages that end a live-fault delivery for good (a resume stops at once), and the one way out every such stop names.
 const LIVE_FINAL = ['live-evidence', 'live-refused', 'live-review', 'live-bound']
 const LIVE_WAY = 'deliver the fault in an ordinary delivery: rerun with lane standard and no cont'
-// The fresh reply's folded claim, read once and removed so setup (and every cont built from it) keeps its old shape.
-// A batch child's folded acquire answers already_held, because the batch's own acquire claimed first and is kept since it gates the readopt path;
-// that acquire refreshes nothing, so the setup renews (issue 745).
+// The fresh reply's folded claim, read once and removed so setup (and every cont built from it) keeps its old shape. A
+// batch child's folded acquire answers already_held, because the batch's own acquire claimed first and gates the
+// readopt path; that acquire refreshes nothing, so the setup renews.
 const FOLD_ACQ = !CONT && setup.acquire ? setup.acquire : null
 const FOLD_CLAIM = !CONT && setup.claim ? setup.claim : null
 const FOLD_HOLDER = !CONT ? setup.holder : undefined
@@ -679,15 +673,15 @@ const ACQ_RECALL = !CONT && transientError(FOLD_ACQ)
 const SETUP_HELD = !!(FOLD_ACQ && FOLD_ACQ.verdict === 'already_held')
 const RENEW_RECALL = SETUP_HELD && transientError(FOLD_RENEW)
 const CLAIM_TAKEN = !!(FOLD_ACQ && (FOLD_ACQ.verdict === 'acquired' || FOLD_ACQ.verdict === 'already_held'))
-// #870: a reply that names the worktree only in its folded claim still has its location; a failed claim, or one never taken, names none.
 if (CLAIM_TAKEN && FOLD_CLAIM && FOLD_CLAIM.ok === true && !present(setup.worktree_path) && present(FOLD_CLAIM.worktree)) setup.worktree_path = FOLD_CLAIM.worktree
 const BUILT = present(setup.host) ? `${setup.host}/${HOLDER_ID}` : null
-// Every stop after the folded claim was taken keeps a cont that finishes it on resume, whatever fields are missing (stop() is not defined yet).
+// Every stop after the folded claim was taken keeps a cont that finishes it on resume, whatever fields are missing.
 const earlyCont = () => (CLAIM_TAKEN ? { cont: { setup: { ...setup, ...(BUILT && HOLDER_RE.test(BUILT) ? { holder: BUILT } : {}) }, lane: LANE, ...(LANE === 'live' && LIVE_REC ? { live_fault: LIVE_REC } : {}), plan: null, plan_reviewed: false, done: [], fix_waves: 0, claim_incomplete: true } } : {})
 // Held by another holder: nothing of ours exists yet, so the stop carries no cont.
 if (FOLD_ACQ && (FOLD_ACQ.verdict === 'held_by' || FOLD_ACQ.verdict === 'lost_to')) return { stage: 'claimed', verdict: FOLD_ACQ.verdict, by: FOLD_ACQ.by }
-// The folded renew after an already_held acquire (#745) is graded before any other setup exit, so a setup failure cannot mask a lost renewal.
-// A transient one is left to the owner-answer step, which renews again. Defined before stop(): a stop here carries earlyCont's cont.
+// The folded renew after an already_held acquire is graded before any other setup exit, so a setup failure cannot mask
+// a lost renewal. A transient one is left to the owner-answer step, which renews again. Defined before stop(): a stop
+// here carries earlyCont's cont.
 const CLAIM_ENDED = 'the claim was ended (released, or honoured as stale by the owner); start again without cont: setup re-adopts the branch and acquire decides'
 if (SETUP_HELD && !RENEW_RECALL && !(FOLD_RENEW && FOLD_RENEW.verdict === 'renewed')) {
   return FOLD_RENEW && FOLD_RENEW.verdict === 'not_held'
@@ -698,7 +692,8 @@ if (!setup.ok) return { stage: 'setup', result: setup, ...deadOf(), ...earlyCont
 // A fresh run never closes out a merged PR: it is a possible duplicate delivery, for the owner to judge.
 const DUP = !CONT ? closingPr(setup.merged_refs) : null
 if (DUP) return { stage: 'setup', result: setup, duplicate: DUP, ...deadOf(), ...earlyCont() }
-// #752: a resume closes out only a merged PR it can name; a reported merged_pr the facts do not confirm stops before any claim or task.
+// A resume closes out only a merged PR it can name; a reported merged_pr the facts do not confirm stops before any
+// claim or task.
 if (CONT) {
   const own = ownMerged(setup.merged_heads)
   if (present(setup.merged_pr) && !(own && own.number === setup.merged_pr)) return { stage: 'setup', result: setup, invalid: 'merged_pr', ...deadOf(), cont: CONT }
@@ -706,24 +701,23 @@ if (CONT) {
 }
 // No policy is defaulted: a field the contract read did not return stops the run (before any claim on a fresh run).
 const missing = ['slug', 'integration_branch', 'default_branch', 'branch', 'merge_strategy', 'delete_branch', 'unset_env', 'verification']
-  .concat(CONT && !REDERIVE ? [] : ['worktree_path'])  // a resume carries it in cont.setup, unless it re-derives the location
+  .concat(CONT && !REDERIVE ? [] : ['worktree_path'])  // a resume's cont.setup holds it unless it re-derives it
   .concat(CONT && CONT.setup && CONT.setup.holder ? [] : ['host'])  // a resume carries the holder in cont.setup
   .filter(f => !present(setup[f]))
-// Each review capability needs an explicit state, and an available one its command id, or a review could vanish silently.
 for (const k of ['code', 'plan']) {
   const st = setup.review_state && setup.review_state[k]
   if (!present(st)) missing.push(`review_state.${k}`)
   else if (st === 'available' && !(setup.review && present(setup.review[k]))) missing.push(`review.${k}`)
 }
 const RULE_IDS = PLAN_REVIEW.properties.findings.items.properties.rule.enum
-// #993: the program's own finding on a criterion that only restates the declared verification; no rule of the standard, settled like one.
 const VERIFY_RULE = 'verify'
-// A rules-only revise may settle the findings left when each names a rule and none has source codex, whatever triggered the full
-// revise. #823 dropped the PR 718 clause (b7a7a921) that also refused it to every Codex-triggered plan: Codex raises a finding on
-// nearly every plan, so the revise never ran, while the findings left were the rules re-reviewer's own.
+// A rules-only revise may settle the findings left when each names a rule and none has source codex, whatever triggered
+// the full revise: Codex raises a finding on nearly every plan, so refusing it to every Codex-triggered plan meant the
+// revise never ran, while the findings left were the rules re-reviewer's own.
 const rulesOnly = rules => rules.length > 0 && rules.every(f => (RULE_IDS.includes(f.rule) || f.rule === VERIFY_RULE) && f.source !== 'codex')
-// The Plan section below drops a kept plan with an invalid declaration, and one a plan-review stop kept with findings no rules-only
-// revise may settle; no fact of such a plan is demanded here, or a vanished worktree would stop every resume before the replan.
+// The Plan section below drops a kept plan with an invalid declaration, and one a plan-review stop kept with findings
+// no rules-only revise may settle; no fact of such a plan is demanded here, or a vanished worktree would stop every
+// resume.
 const keptDropped = !!(CONT && CONT.plan && !CONT.plan_reviewed && CONT.plan_findings && Array.isArray(CONT.plan_findings.rules)
   && !rulesOnly(CONT.plan_findings.rules))
 if (CONT && CONT.plan && !keptDropped && !setup.merged_pr && !missing.length && !branchProblems(CONT.plan, CONT.setup && (CONT.setup.worktree || CONT.setup.worktree_path), setup.integration_branch).length) {
@@ -741,22 +735,22 @@ let planReviewed = !!(CONT && CONT.plan && CONT.plan_reviewed)
 // A plan-review stop keeps the revised plan and the findings left on it; a resume runs one rules-only revise on it.
 const KEPT = CONT && CONT.plan && !CONT.plan_reviewed && CONT.plan_findings && Array.isArray(CONT.plan_findings.rules) ? CONT.plan_findings : null
 let planFindingsKept = KEPT ? { rules: KEPT.rules, findings: Array.isArray(KEPT.findings) ? KEPT.findings : [], rounds: Number.isInteger(KEPT.rounds) ? KEPT.rounds : 0, ...(Array.isArray(KEPT.noted) && KEPT.noted.length ? { noted: KEPT.noted } : {}) } : null
-// #1372: the Codex plan review was skipped for this unreviewed plan's size (codexSkipped), or is owed on it (codexOwed): an applied amend, a late
-// review a revise made due, or a review that stopped before it passed. Both are kept in cont while the plan is unreviewed, and codexOwed stays
-// set until a Codex plan review comes back available, so no stop and resume can mark the plan reviewed without it.
+// The Codex plan review was skipped for this unreviewed plan's size (codexSkipped), or is owed on it (codexOwed): an
+// applied amend, a late review a revise made due, or a review that stopped before it passed. Both stay in cont while
+// the plan is unreviewed, and codexOwed stays set until a Codex plan review comes back available.
 let codexSkipped = !!(CONT && CONT.plan && !CONT.plan_reviewed && CONT.codex_plan_skipped === true)
 let codexOwed = !!(CONT && CONT.plan && !CONT.plan_reviewed && CONT.codex_plan_owed === true)
 const taskLog = CONT && CONT.done ? CONT.done.slice() : []
 let claimIncomplete = !!(CONT && CONT.claim_incomplete) || CLAIM_TAKEN
 // A partial task's edits stay claimed through any stop until that task is done.
 let partial = CONT && CONT.partial !== undefined ? CONT.partial : undefined
-// #896: the blocked tasks this delivery moved behind the later task each named, one move per task; dropped with the plan they reorder.
 let reordered = CONT && Array.isArray(CONT.reordered) ? CONT.reordered.filter(r => r && Number.isInteger(r.task) && Number.isInteger(r.after)) : []
 // Fix waves already spent, carried through a resume; declared before stop() because early failures call it.
 let fixWaves = (CONT && CONT.fix_waves) || 0
-// #1370: the final-review rounds that reached a verdict, counted across runs (a lost reviewer, a Codex stop and a skipped review count none), and
-// the commit the last review read: {head, branches?, amended?}, each commit id validated on the way in (a marker that fails is no marker, and its
-// round is a full review). A cont from before this change has neither member: its final_reviewed head counts as one round and is the commit read.
+// The final-review rounds that reached a verdict, counted across runs (a lost reviewer, a Codex stop and a skipped
+// review count none), and the commit the last review read: {head, branches?, amended?}, each commit id validated on the
+// way in (a marker that fails is no marker, and its round is a full review). A cont with neither counts its
+// final_reviewed head as one round.
 const reviewedOf = r => {
   if (!isEntry(r) || !isCommit(r.head)) return null
   const branches = isEntry(r.branches) ? Object.fromEntries(Object.entries(r.branches).filter(([k, v]) => REF_RE.test(k) && isCommit(v)).map(([k, v]) => [k, normSha(v)])) : {}
@@ -765,22 +759,22 @@ const reviewedOf = r => {
 const LEGACY_ROUND = !!CONT && !own(CONT, 'review_rounds') && isEntry(CONT.final_reviewed) && isCommit(CONT.final_reviewed.head)
 let reviewRounds = CONT && Number.isInteger(CONT.review_rounds) && CONT.review_rounds > 0 ? CONT.review_rounds : LEGACY_ROUND ? 1 : 0
 let reviewed = reviewedOf(CONT && CONT.reviewed) || (LEGACY_ROUND ? reviewedOf({ head: CONT.final_reviewed.head, branches: CONT.final_reviewed.branches }) : null)
-// #924: the findings a stop after a review verdict left open, kept in cont.fix_findings until a fix wave's re-review has judged them (#1370: a
-// wave that answered and failed, and a re-review that was lost, keep them too; the next round re-checks each against the head).
+// The findings a stop after a review verdict left open, kept in cont.fix_findings until a fix wave's re-review has
+// judged them (a wave that answered and failed, and a lost re-review, keep them too; the next round re-checks each
+// against the head).
 const findingKey = f => `${typeof f.file === 'string' ? f.file : ''}\n${clip(String(f.summary)).toLowerCase().replace(/\s+/g, ' ').trim()}`
 let carried = carryOf(CONT && CONT.fix_findings)
-// #1370: the open findings the bound cut (those of the stop that wrote the cont, and any a hand-edited fix_findings holds beyond it): nothing but
-// a full review can find them again, so a round with any is a full one. Every stop that keeps open findings goes through keep().
+// The open findings the bound cut (those of the stop that wrote the cont, and any a hand-edited fix_findings holds
+// beyond it): nothing but a full review can find them again, so a round with any is a full one. Every stop that keeps
+// open findings goes through keep().
 let dropped = (CONT && Number.isInteger(CONT.fix_findings_dropped) && CONT.fix_findings_dropped > 0 ? CONT.fix_findings_dropped : 0) + carryable(CONT && CONT.fix_findings).length - carried.length
 const keep = list => { carried = carryOf(list); dropped = carryable(list).length - carried.length }
-// The commit a review read becomes the commit the next scoped round reviews from; the declared branches' heads are recorded with it.
 const markReviewed = head => { if (head) reviewed = { head: normSha(head), ...branchSnap() } }
-// #1386: the follow-up issues filed for the findings of a scoped round that do not block (followUps), and those whose filing was not confirmed
-// (pending); both ride through every stop. An entry needs a file, a summary and the full sha its reviewer read it at.
+// The follow-up issues filed for the findings of a scoped round that do not block (followUps), and those whose filing
+// was not confirmed (pending); both ride through every stop. An entry needs a file, a summary and the full sha its
+// reviewer read it at.
 const fullSha = v => typeof v === 'string' && SHA_RE.test(normSha(v))
 const textOf = v => (typeof v === 'string' && v.trim() ? clip(v) : '')
-// A finding's identity is read from its full fields, before clip: one whose text a clip shortened carries key, a hash of the full file, summary and failing input,
-// so two findings that differ only past the clip stay two (an unclipped one is its own identity).
 const hashOf = s => {
   let a = 0xdeadbeef
   let b = 0x41c6ce57
@@ -809,9 +803,9 @@ let followUps = (CONT && Array.isArray(CONT.follow_ups) ? CONT.follow_ups : []).
 let pending = (CONT && Array.isArray(CONT.follow_ups_pending) ? CONT.follow_ups_pending : []).map(f => followUpOf(f, false)).filter(Boolean)
 let followUpCalls = 0
 const followUpKey = f => (f.key ? `${textOf(f.file)}\n${f.key}` : `${textOf(f.file)}\n${clip(String(f.summary))}\n${textOf(f.failing_input)}`)
-// #1386: the follow-up issues of the findings a scoped round does not block on: one clerk call files one issue per entry. The program builds each
-// title (no shell quote character in it) and body; an entry is confirmed only by exactly one issue number of its own, so a lost, partial or shared
-// reply leaves it pending, and the gate before Verify files it again.
+// The follow-up issues of the findings a scoped round does not block on: one clerk call files one issue per entry. The
+// program builds each title (no shell quote character in it) and body; an entry is confirmed only by exactly one issue
+// number of its own, so a lost, partial or shared reply leaves it pending, and the gate before Verify files it again.
 const titleOf = f => `Follow-up of #${ISSUE}: ${f.file}: ${f.summary}`.replace(/['"`$\\]/g, '').replace(/\s+/g, ' ').slice(0, 120)
 const bodyOf = f => [f.lead || `Follow-up of #${ISSUE}: a scoped review round of its delivery raised this ${f.severity} finding, which does not block that delivery.`, '', `File: ${f.file}`, `Commit: ${f.commit}`, `Finding: ${f.summary}`, ...(f.failing_input ? [`Failing input: ${f.failing_input}`] : []), ...(f.key ? [`Identity: ${f.key}`] : [])].join('\n')
 const LOOKUP_LIMIT = 1000
@@ -846,18 +840,18 @@ ${RULES}`, { label: `follow-ups-${m}`, phase: 'Final review', agentType: 'clerk'
   log(`final review: ${list.length - left} follow-up issue(s) filed for findings that do not block`)
   if (left) log(`final review: ${left} follow-up(s) not confirmed filed; they are kept and filed before verify`)
 }
-// #1000: the history of a file the fix waves went back and forth on, kept in cont.oscillating beside the findings that stop left open;
-// bounded on the way out and on the way in (the last ROUNDS_MAX entries, each round's findings and every text capped).
+// The history of a file the fix waves went back and forth on, kept in cont.oscillating beside the findings that stop
+// left open; bounded on the way out and on the way in (the last ROUNDS_MAX entries, each round's findings and every
+// text capped).
 const ROUNDS_MAX = 12
 const roundsOf = list => list.filter(isEntry).slice(-ROUNDS_MAX).map(x => ({ ...(Number.isInteger(x.round) ? { round: x.round } : {}), ...(Number.isInteger(x.wave) ? { wave: x.wave } : {}), ...(Array.isArray(x.findings) ? { findings: x.findings.filter(v => typeof v === 'string').slice(0, CARRY_MAX).map(clip) } : {}), ...(typeof x.notes === 'string' && x.notes ? { notes: clip(x.notes) } : {}), ...(typeof x.range === 'string' && x.range ? { range: clip(x.range) } : {}) }))
 let osc = OSC_KEPT ? { file: clip(OSC_KEPT.file.trim()), rounds: roundsOf(OSC_KEPT.rounds) } : null
-// The decision on it is left out of cont.decisions until a fix wave has had it, so a stop before that leaves it new for the next resume.
 let oscPending = oscDecision !== null
-// Likewise the decision on the findings left open at the round cap: it stays out of cont.decisions until a fix wave has had it.
 let capPending = capDecision !== null
-// #988: the blocking findings left on a plan this delivery dropped after its review (a second failed rules revise, a kept plan no rules
-// revise may settle, a revise that came back as questions or not well formed). Kept in cont.prior_findings through every stop until a
-// plan passes review, newest first and bounded as the fix findings are, so the next planner does not rediscover them.
+// The blocking findings left on a plan this delivery dropped after its review (a second failed rules revise, a kept
+// plan no rules revise may settle, a revise that came back as questions or not well formed). Kept in
+// cont.prior_findings until a plan passes review, newest first and bounded as the fix findings are, so the next planner
+// does not rediscover them.
 const PRIOR_MAX = 20
 const priorOf = list => {
   const seen = new Set()
@@ -875,14 +869,15 @@ const dropPlan = (left = []) => {
   codexOwed = false
 }
 const CARRIED_AT_START = carried
-// #940: fix waves that do not converge. A fix-wave-review stop that leaves findings open once the waves spent across runs (cont.fix_waves
-// and this run's) have reached FIX_WAVES_BOUND, with a finding left in a file the findings carried into this run already named, is marked
-// diverging: { file, waves }: more waves on that file are not expected to close it, so the owner decides the design. A first run carries no
-// findings in, so it is never marked; neither is a resume whose open findings are all in other files.
+// Fix waves that do not converge: a fix-wave-review stop that leaves findings open once the waves spent across runs
+// have reached FIX_WAVES_BOUND, with a finding left in a file the findings carried into this run already named, is
+// marked diverging: { file, waves }, so the owner decides the design. A first run carries no findings in, so it is
+// never marked; neither is a resume whose open findings are all in other files.
 const FIX_WAVES_BOUND = 4
-// Reviewers name one file as path, ./path, an absolute path under the worktree, path:line, path:line-line, path:line:column or path#L<line>
-// (#L<line>-L<line> too): files are compared, and the marker names the file, as the path relative to the worktree without the surrounding
-// whitespace, a leading ./ and that trailing position; nothing else is folded, case included.
+// Reviewers name one file as path, ./path, an absolute path under the worktree, path:line, path:line-line,
+// path:line:column or path#L<line> (#L<line>-L<line> too): the marker names the file as the path relative to the
+// worktree without the surrounding whitespace, a leading ./ and that trailing position; nothing else is folded, case
+// included.
 const fileOf = f => {
   if (typeof f.file !== 'string') return ''
   let p = f.file.trim().replace(/#L\d+(?:-L?\d+)?$/, '').replace(/:\d+(?:[-:]\d+)?$/, '').trim()
@@ -890,12 +885,10 @@ const fileOf = f => {
   for (const r of roots) if (r && p.startsWith(`${r}/`)) { p = p.slice(r.length + 1); break }
   return p.replace(/^(?:\.\/)+/, '').trim()
 }
-// #950: the files a fix wave's commits changed, for admitting a new finding in one of them to the next wave. The program reads no
-// repository, so the list is the output of one command it words itself over the range it holds (git diff --no-renames --name-only
-// <start_head>..<commit> in the issue worktree, a rename listing both paths), asked of the two steps that already read that range: the
-// wave's implementer and its re-reviewer. A file counts only when both list it, so neither one's word admits a wave alone; a missing
-// list, an idle wave and a commit on a declared branch count nothing. A wrong list can only earn a wave that MAX_WAVES bounds and a
-// re-review follows; it clears no finding.
+// The files a fix wave's commits changed, for admitting a new finding in one of them to the next wave. The program
+// reads no repository, so the list is one git diff --no-renames --name-only <start_head>..<commit> in the issue
+// worktree, asked of the wave's implementer and its re-reviewer. A file counts only when both list it, so neither one's
+// word admits a wave alone. A wrong list can only earn a wave that MAX_WAVES bounds and a re-review follows.
 const CHANGED_CMD = range => `git -C ${W} diff --no-renames --name-only ${range}`
 const changedBy = r => (r && Array.isArray(r.changed_files) ? r.changed_files : []).map(file => fileOf({ file })).filter(Boolean)
 const divergingOf = left => {
@@ -903,70 +896,61 @@ const divergingOf = left => {
   const hit = left.map(fileOf).find(f => f && CARRIED_AT_START.map(fileOf).includes(f))
   return hit ? { file: hit, waves: fixWaves } : null
 }
-// The head the final review and its fix waves passed at ({ head, accepted? }), carried so a resume on it skips the review.
 let finalReviewed = (CONT && CONT.final_reviewed) || null
 // The stages between a sync merge and its acceptance: a stop there must not carry a marker over the unreviewed merge.
 const SYNC_WINDOW = ['sync', 'sync-review', 'sync-fix']
 // Ship fix waves already spent (a red check, a sync-review finding): one each per delivery, carried through a resume.
 let checksFixes = (CONT && CONT.checks_fixes) || 0
 let syncFixes = (CONT && CONT.sync_fixes) || 0
-// The verified head, results and verification contract of a ready stop; carried until a resume finds the head moved; its results are reused only under the same contract.
 let verified = (CONT && CONT.verified) || null
-// #1371: the commit a push-bound fix made with no test command recorded, carried in cont until a fix-retest step records its tests at the head being shipped.
 const UNTESTED_STAGES = ['checks-fix', 'sync-fix', 'look-fix']
 const untestedOf = u => (isEntry(u) && UNTESTED_STAGES.includes(u.stage) && present(u.head) && present(u.start_head) ? { stage: u.stage, start_head: String(u.start_head), head: String(u.head) } : null)
 let untested = untestedOf(CONT && CONT.untested)
-// #1371: a push-bound fix reply that moved the head and records no test command, whatever its status, is carried in cont.untested so a resume retests it before any push; true when it recorded one.
-// The commit is compared with before, the head the program knew when it asked for the fix, never with the start_head the reply names: a reply that names another start_head moved the head all the same, and before stays the base of the retest.
-// A range already pending keeps its start: the retest covers everything since the earliest untested commit.
+// A push-bound fix reply that moved the head and records no test command is carried in cont.untested so a resume
+// retests it before any push; true when it recorded one. The commit is compared with before, the head the program knew
+// when it asked for the fix, never with the start_head the reply names, which can name another head all the same. A
+// range already pending keeps its start: the retest covers everything since the earliest untested commit.
 const noteUntested = (stage, f, before) => {
   const from = present(before) ? before : f && present(f.start_head) ? f.start_head : null
   if (!f || !present(f.commit) || !present(from) || sameSha(f.commit, from) || tested(f)) return false
   untested = { stage, start_head: untested ? untested.start_head : String(from), head: String(f.commit) }
   return true
 }
-// #1139: the setup's look read. A marked delivery stops at awaiting-look instead of landing; a read with neither verdict stops at stage look after verify.
 const LOOK = isEntry(setup.look) ? setup.look : null
 const LOOK_READ = !!LOOK && (LOOK.verdict === 'marked' || LOOK.verdict === 'unmarked')
 const MARKED = LOOK_READ && LOOK.verdict === 'marked'
 const COVERS = MARKED && Array.isArray(LOOK.covers) ? LOOK.covers.filter(c => typeof c === 'string' && c.trim()) : []
-// #1356: the ids of the criteria the issue's own look-marker lines name (look-approval marked, acs); a plan may reword that criterion, so its id, never its text, finds it.
 const acsOf = xs => (Array.isArray(xs) ? xs : []).filter(a => typeof a === 'string' && a.trim()).map(a => a.trim().toUpperCase())
 const LOOK_ACS = MARKED ? acsOf(LOOK.acs) : []
-// The ids as the plan numbered them: the issue's checkboxes can be reordered while the delivery waits, so a plan keeps the ids its planning read (cont.look_acs) and a later read is used only for a plan that carries none.
 let lookAcs = CONT && CONT.plan && Array.isArray(CONT.look_acs) ? acsOf(CONT.look_acs) : LOOK_ACS
 const LOOK_REASON = `issue ${ISSUE} needs the owner's look before merge`
 const LOOK_WAYS = `Resume with cont and look {answer: approve, head: <head>, message?} to land on the approval recorded for that head (the owner records it where they answered; this program never posts one, so an approve with none recorded stops), or look {answer: fix, head: <head>, words: <the owner's words>, message?} to approve that head with one fix, or look {answer: changes, words: <the owner's words>} to ask for a change.`
-// #1139: the head the owner's approval was recorded for (an approved cont carries it); a marked delivery stops at awaiting-look until it holds one.
-// The pull request and head the awaiting-look stop left for the owner, carried in cont.look; a resume keeps it only when well formed.
+// The head the owner's approval was recorded for (an approved cont carries it); a marked delivery stops at
+// awaiting-look until it holds one. The pull request and head the stop left for the owner ride in cont.look; a resume
+// keeps it only when well formed.
 const lookOf = l => (isEntry(l) && Number.isInteger(l.pr) && l.pr > 0 && typeof l.head === 'string' && SHA_RE.test(l.head) ? { pr: l.pr, head: l.head, ...(typeof l.approved === 'string' && SHA_RE.test(l.approved) ? { approved: l.approved, ...(typeof l.owner === 'string' && SHA_RE.test(l.owner) ? { owner: l.owner } : {}) } : {}) } : null)
 let lookAt = lookOf(CONT && CONT.look)
 let approvedHead = lookAt && lookAt.approved ? lookAt.approved : null
-// #1566: the head the owner's recorded approval names; a kept or carried head never moves it (approvedHead does), and it rides in cont.look.owner, so a later resync, in this run or after a stop, carries from the owner's head, not from a kept one.
 let ownerHead = approvedHead && lookAt.owner ? lookAt.owner : approvedHead
 // The look entry of cont for an approved head: owner is there only when the approved head is not the owner's own.
 const approvedLook = (pr, head) => ({ pr, head, approved: head, ...(ownerHead && ownerHead !== head ? { owner: ownerHead } : {}) })
 let LOOK_STOP = MARKED && approvedHead === null
-// #972: the files outside the branch's diff a verification fix edited, each with the cause the fix step established. Carried in cont on its
-// own, not with the verified head: the edit stays on the branch when a resume finds the head moved, so the flag stays too.
 const outsideOf = xs => (Array.isArray(xs) ? xs : []).filter(x => isEntry(x) && present(x.file) && present(x.why)).map(x => ({ file: String(x.file), why: String(x.why).slice(0, REASON_MAX) }))
 const outsideFixes = outsideOf(CONT && CONT.outside_fixes)
-// The owner's binding decisions: distinct non-empty strings, from args, from cont and from the decision prompt read after the claim.
 let decisions = []
 const addDecision = text => { if (typeof text === 'string' && text.trim() && !decisions.includes(text)) decisions.push(text) }
 if (CONT && Array.isArray(CONT.decisions)) CONT.decisions.forEach(addDecision)
 if (!RERUN_WORD) addDecision(args.decisions)
-// True once plan-amend applied the amend: every later stop says so, so deliver-batch stops sending an amend that no longer needs to be (#811).
 let amendApplied = false
-// #996: the blocked task a stop carries, until an amend, a revise or a decision-bearing implementer call has answered it; and whether the
-// decision that settles it is still unused: a stop before it was used leaves it out of cont.decisions, so the same resume counts it as new again.
 let blocked = RERUN ? null : BLOCKED
 let decisionPending = newDecision !== null
 const keptDecisions = () => decisions.filter(d => !(decisionPending && d === newDecision) && !(oscPending && d === oscDecision) && !(capPending && d === capDecision))
 const blockedKept = () => !!blocked && (LANE !== 'standard' || !!plan) && !taskLog.some(d => d.n === blocked.task)
-// #1246: why an owner's approval was not recorded, naming the approved head and the head found; once set, every later stop's reason starts with it.
+// Why an owner's approval was not recorded, naming the approved head and the head found; once set, every later stop's
+// reason starts with it.
 let lookWhy = null
-// #1433: a live stop that names the ordinary delivery as its way on is final: its cont says so, and a resume stops at once. A live-review stop is final only when it carries findings or the review answered with no usable review; any other stop keeps the mark its cont came with.
+// A live stop that names the ordinary delivery as its way on is final: its cont says so, and a resume stops at once. A
+// live-review stop is final only when it carries findings or the review answered with no usable review.
 const liveFinalOf = (stage, extra) => (LIVE_FINAL.includes(stage) && (stage !== 'live-review' || !!(extra && extra.findings) || LOST.includes('live-review')) ? stage
   : CONT && isEntry(CONT.live_fault) && LIVE_FINAL.includes(CONT.live_fault.final) ? CONT.live_fault.final : null)
 const stop = (stage, extra) => {
@@ -975,18 +959,17 @@ const stop = (stage, extra) => {
   return { stage, ...extra, ...(stage === 'planned' || stage === 'ready' ? {} : { reason: lookWhy ? `${lookWhy}; ${stopReason(stage, extra || {})}` : stopReason(stage, extra || {}) }), ...(amendApplied ? { amended: true } : {}), ...deadOf(), cont: { setup, lane: LANE, ...(LANE === 'live' && LIVE_REC ? { live_fault: { ...LIVE_REC, ...(liveFinal ? { final: liveFinal } : {}) } } : {}), plan, plan_reviewed: planReviewed, ...(plan && !planReviewed && planFindingsKept ? { plan_findings: planFindingsKept } : {}), ...(plan && !planReviewed && codexSkipped ? { codex_plan_skipped: true } : {}), ...(plan && !planReviewed && codexOwed ? { codex_plan_owed: true } : {}), ...(!planReviewed && priorFindings.length ? { prior_findings: priorFindings } : {}), ...(keptDecisions().length ? { decisions: keptDecisions() } : {}), done: taskLog, ...(OWN_PR !== null ? { pr: OWN_PR } : {}), fix_waves: fixWaves, ...(carried.length ? { fix_findings: carried } : {}), ...(carried.length && osc ? { oscillating: osc } : {}), ...(carried.length && capMark ? { round_cap: capMark } : {}), ...(dropped > 0 && carried.length ? { fix_findings_dropped: dropped } : {}), ...(reviewRounds > 0 ? { review_rounds: reviewRounds } : {}), ...(reviewRounds > 0 && reviewed ? { reviewed } : {}), ...(followUps.length ? { follow_ups: followUps } : {}), ...(pending.length ? { follow_ups_pending: pending } : {}), ...(checksFixes ? { checks_fixes: checksFixes } : {}), ...(syncFixes ? { sync_fixes: syncFixes } : {}), ...(verified ? { verified } : {}), ...(untested ? { untested } : {}), ...(lookAt ? { look: lookAt } : {}), ...(plan && lookAcs.length ? { look_acs: lookAcs } : {}), ...(outsideFixes.length ? { outside_fixes: outsideFixes } : {}), ...(fr ? { final_reviewed: fr } : {}), ...(claimIncomplete ? { claim_incomplete: true } : {}), ...(partial !== undefined ? { partial } : {}), ...(blockedKept() ? { blocked } : {}), ...(reordered.length ? { reordered } : {}) } }
 }
 
-// #1433: the live-fault lane's bound stop: the delivered commit is the one head every later step reads, and a step that would need a second implementer or reviewer stops here, final, naming the ordinary delivery as its way on.
 const liveCommit = () => taskLog.find(d => d.n === 1).commit
 const liveBound = (details, extra) => stop('live-bound', { ...extra, details: details + '; ' + LIVE_WAY })
 
-// #1425: the plan directory is a checkout path and may hold spaces, quotes or shell metacharacters, so the clerk's two commands name it shell-quoted
-// (bare when every character is plain, else in single quotes with each embedded one written '\'').
+// The plan directory is a checkout path and may hold spaces, quotes or shell metacharacters, so the clerk's two
+// commands name it shell-quoted (bare when every character is plain, else in single quotes with each embedded one
+// written '\'').
 const shq = text => /^[A-Za-z0-9_\/.:@%+=,-]+$/.test(text) ? text : `'${text.replace(/'/g, `'\\''`)}'`
-// A look marker the setup could not read is neither marked nor unmarked: a fix answer and a merged replay stop here, before any hold.
 const LOOK_UNREAD = () => stop('look', { details: clip(`the look marker of issue ${ISSUE} was not read: ${LOOK && present(LOOK.detail) ? LOOK.detail : 'no verdict'}`) })
 
 const haltTask = (n, stage, extra) => { const s = stop(stage, extra); return { ...s, cont: { ...s.cont, partial: n } } }
-// #996: a task stop on an implementer that returned blocked keeps its notes in the cont and names the ways out in its reason.
+// A task stop on an implementer that returned blocked keeps its notes in the cont and names the ways out in its reason.
 const haltImpl = (n, extra) => {
   const said = isEntry(extra.impl) && extra.impl.status === 'blocked'
   if (said) blocked = { task: n, notes: typeof extra.impl.notes === 'string' ? extra.impl.notes.slice(0, NOTES_MAX) : '' }
@@ -998,7 +981,6 @@ if (CONT && setup.dirty && !setup.merged_pr && partial === undefined) {
 }
 
 const SLUG = setup.slug, INT = setup.integration_branch, STRATEGY = setup.merge_strategy
-// The land lock command, its return sentence and the conditional second release, one line each, byte for byte the same as deliver-batch.js (#716).
 const LAND_ACQUIRE = (sha, wait) => `forge-claim land acquire --repo ${SLUG} --branch ${INT} --sha ${sha}${wait ? ' --wait' : ''}`
 const LOCK_RETURN = `Return its verdict (acquired, already_held, moved, land-contended, held_by, lost_to, or error on any other exit), lock_sha, by, detail, waited_s and waited_on from its output, and position and ahead when it prints them. ${FORGE_TIMEOUT}`
 const RELEASE_AGAIN = maybe => `When it prints not_held with lock_sha ${maybe}, run alone and exactly: forge-claim land release --repo ${SLUG} --branch ${INT} --sha ${maybe}, then return the verdict of that second release.\n`
@@ -1024,18 +1006,16 @@ const commandOutside = c => {
   return command !== null && !VERIFY_IDS.includes(command)
 }
 
-// A note is the orchestrator's own observation (R9): never held, never graded. Only these kinds keep an issue open after the merge.
 const OPEN_KINDS = ['evidence', 'human']
 const isOpen = a => !!(a && OPEN_KINDS.includes(a.kind))
-// Closure is never inferred from the absence of a kind: every row must be a recognised kind before anything ships or closes (#736).
 const ACCEPT_KINDS = ['code', 'evidence', 'human', 'note']
 const badKinds = acceptance => acceptance.filter(a => !(a && ACCEPT_KINDS.includes(a.kind))).map(a => (a && a.id) || null)
-// A check that asks the owner is a human check (verify-pending ties ask and act runs to kind human), so a code or evidence criterion is never held as one (#1281).
 const SHA40 = /^[0-9a-f]{40}$/
 const asksOwner = v => !!v && typeof v === 'object' && (v.kind === 'human' || (!!v.run && typeof v.run === 'object' && (Object.prototype.hasOwnProperty.call(v.run, 'ask') || Object.prototype.hasOwnProperty.call(v.run, 'act'))))
 const HUMAN_REFUSED = (ids, issues) => `${ids.join(', ')} ${ids.length === 1 ? 'is a criterion' : 'are criteria'} of kind code or evidence, and a hold never makes one a human check (kind human, an ask or an act run): hold an evidence criterion as a kind evidence check the runner settles by itself (a verification command, a committed script or a probe)` + (issues.length ? `. The verify fence of the hold comment on ${issues.map(n => '#' + n).join(', ')} already holds such a check: remove it from that fence, or delete that comment and remove the needs-verification label, by hand before resuming, since a resume reads the posted fence again` : '') + ', then resume'
 
-// #1281: the invocation the runner makes for a check that runs a committed script: the path, the commit it checks out (run.at, else the block's merge) and the ordered args. Two checks run the same script only when all three match.
+// The invocation the runner makes for a check that runs a committed script: the path, the commit it checks out (run.at,
+// else the block's merge) and the ordered args. Two checks run the same script only when all three match.
 const scriptRun = (check, merge) => {
   const run = check && typeof check === 'object' ? check.run : null
   if (!run || typeof run !== 'object' || typeof run.script !== 'string') return null
@@ -1048,31 +1028,31 @@ const RUN_OK = r => !!(r && r.ran === true && r.exit === 0)
 const LINT_V = { type: 'object', properties: { ok: { type: 'boolean' }, errors: { type: 'array' } } }
 const RUN_V = { type: 'object', properties: { ran: { type: 'boolean' }, exit: { type: 'integer' } }, required: ['ran', 'exit'] }
 const RELEASE_SCHEMA = { type: 'object', properties: { verdict: { type: 'string' }, detail: { type: 'string' } }, required: ['verdict'] }
-// #1186: the reply of the look tick, step 0 of the close-out call of an approved marked delivery. Declared above closeOut: the merged-PR resume calls it before later consts run.
 const LOOK_TICK_SCHEMA = { type: 'object', properties: { verdict: { type: 'string' }, ticked: { type: 'integer' }, detail: { type: 'string' } }, required: ['verdict'] }
 const HOLD_SCHEMA = { type: 'object', properties: {
   merge_commit_local: { type: 'boolean' }, code_unmet: STRS, blocks: { type: 'array', items: { type: 'integer' } },
   split: { type: 'array', items: { type: 'object', properties: { ac: { type: 'string' }, issue: { type: 'integer' }, block: { type: 'object' }, lint: LINT_V, verify_run: RUN_V, issue_state: { type: 'string' } }, required: ['ac', 'issue', 'lint', 'verify_run', 'issue_state'] } },
   block: { type: 'object' }, lint: LINT_V, verify_run: RUN_V, issue_state: { type: 'string' }, already_closed: { type: 'boolean' }, notes: { type: 'string' } },
   required: ['merge_commit_local', 'code_unmet', 'issue_state', 'notes'] }
-// #1281: the reply of the read-only hold-draft call: the merge commit, the fences already posted and the checks written for the criteria that carry no verify member. Declared above closeOut: the merged-PR resume calls it before later consts run.
+// The reply of the read-only hold-draft call: the merge commit, the fences already posted and the checks written for
+// the criteria that carry no verify member. Declared above closeOut: the merged-PR resume calls it before later consts
+// run.
 const HOLD_DRAFT_SCHEMA = { type: 'object', properties: { complete: { type: 'boolean' }, merge: { type: 'string' }, written: { type: 'array', items: { type: 'object' } }, posted: { type: 'array', items: { type: 'object', properties: { issue: { type: 'integer' }, merge: { type: 'string' }, checks: { type: 'array' } }, required: ['issue', 'checks'] } }, detail: { type: 'string' } }, required: ['complete', 'written', 'posted'] }
-// #1356: the reply of the read-only look-stale call: one entry per issue whose hold fence still checks a criterion the owner's look approval answers.
 const LOOK_STALE_SCHEMA = { type: 'object', properties: { complete: { type: 'boolean' }, stale: { type: 'array', items: { type: 'object', properties: { issue: { type: 'integer' }, acs: STRS, results: { type: 'boolean' } }, required: ['issue', 'acs', 'results'] } }, detail: { type: 'string' } }, required: ['complete', 'stale'] }
 const STATES = ['OPEN', 'CLOSED']
 
-// The criterion ids no check of the block names: a hold must cover every criterion it leaves open, or the issue would close on a partial check.
 const covers = (checks, ids) => ids.filter(id => !checks.some(c => c && c.ac === id))
 
-// The steps that resolve the merge commit of a PR whose mergeCommit is null (merged indirectly); `fail` is what the reply says when they cannot.
 const INDIRECT_FOR = (PR, fail, same = false) => ` When that mergeCommit is null${same ? ', or when its oid equals headRefOid (the forge records a PR merged indirectly with its own head as the merge commit too)' : ''}, read gh pr view ${PR} --repo ${SLUG} --json state: only when it is MERGED (the PR was merged indirectly: its head reached ${INT} through another PR's merge), confirm git -C ${REPO} merge-base --is-ancestor <headRefOid> origin/${INT} succeeds, then run git -C ${REPO} rev-list --first-parent <headRefOid>..origin/${INT} (the first-parent line of origin/${INT}, newest first) and git -C ${REPO} rev-list --ancestry-path <headRefOid>..origin/${INT} (the commits that contain the head): ${same ? `when the last commit of the first list has <headRefOid> as its first parent (git -C ${REPO} rev-parse <that commit>^1), whatever mergeCommit is (null or the head's own oid), the head itself is on the first-parent line, so it landed as itself (a fast-forward): no commit before the head names the tip of ${INT} before the landing, and the first commit that contains the head is the head's own child, never a landing commit, so return ${fail} and stop here; otherwise ` : ''}the merge commit is the last commit of the first list that is also in the second (the first commit on the first-parent line that contains the head); when the first list is empty, the tip of origin/${INT} is the head itself and ${same ? `it landed as itself: return ${fail} and stop here` : 'the merge commit is <headRefOid>'}. When the state is not MERGED or the head is not an ancestor, return ${fail} and stop here.`
-// The folded release reply of this run's hold call, or null (#801).
+// The folded release reply of this run's hold call, or null.
 let landRelease = null
-// #1356: the landing commit a merged replay resolved before it judged the approval; its tick names it too.
+// The landing commit a merged replay resolved before it judged the approval; its tick names it too.
 let landedCommit = null
-// #1433: the declaration the live-fault lane's pull request names; it holds no quote, dollar sign, backtick or backslash.
+// The declaration the live-fault lane's pull request names; it holds no quote, dollar sign, backtick or backslash.
 const LIVE_LINE = () => `Live-fault lane: declaration ${LIVE_REC.id} of sprint ${LIVE_REC.sprint_id} for issue #${LIVE_REC.issue}, declared ${LIVE_REC.at}`
-// #1433: the seconds from the declaration to the green time, kept to the microsecond (the first-use verifier compares them unrounded), or null when either is unreadable or green is before the declaration.
+// The seconds from the declaration to the green time, kept to the microsecond (the first-use verifier compares them
+// unrounded), or null when either is unreadable or green is before the declaration. The timing is reported, never a
+// gate: an unread, failed or pending green time still lands the delivery.
 const secondsBetween = (declaredAt, greenAt) => {
   const us = v => {
     const m = typeof v === 'string' ? /^([^.]*?)(?:\.(\d+))?(Z|[+-]\d\d:?\d\d)?$/.exec(v.trim()) : null
@@ -1102,38 +1082,40 @@ ${RULES_FOR(setup.worktree || '<worktree>')}`, { label: 'live-green', phase: 'Sh
 
 const closeOut = async (PR, mergeCommit, W, prHead, lock = null) => {
   const planned = plan ? plan.acceptance : null
-  // #1356: a landing under a recorded approval answers the criterion the issue's look-marker line names: the close-out ticks it, so the hold leaves it out and raises no second ask.
   const acceptance = planned && MARKED && approvedHead ? planned.filter(a => !(a && typeof a.id === 'string' && lookAcs.includes(a.id.toUpperCase()))) : planned
   if (!acceptance) return stop('close-out', { pr: PR, details: 'merged, but no plan acceptance to grade the issue against; close out by hand' })
   const unknown = badKinds(acceptance)
   if (unknown.length) return stop('close-out', { pr: PR, details: 'merged, but a plan criterion has a kind that is not code, evidence, human or note; close out by hand', bad_kinds: unknown })
   const answered = planned.filter(a => !acceptance.includes(a)).map(a => a && a.id)
-  // #1356: the runner compares check ids upper-cased (verify_answer.held_acs), so a fence that spells one in lower case still checks it.
   const upId = v => typeof v === 'string' ? v.toUpperCase() : v
   const isAnswered = v => answered.some(a => upId(a) === upId(v))
   const noHold = !acceptance.some(isOpen)
   const openCriteria = acceptance.filter(isOpen)
   const notes = acceptance.filter(a => a && a.kind === 'note')
-  // #1281: the criteria the runner settles by itself, and the ones of them a list of checks makes a human check (plan spelling, in check order).
   const machine = acceptance.filter(a => a && (a.kind === 'code' || a.kind === 'evidence') && typeof a.id === 'string')
   const machineOf = v => { const a = machine.find(m => upId(m.id) === upId(v)); return a ? a.id : null }
   const humanFor = checks => [...new Set(checks.filter(c => asksOwner(c)).map(c => machineOf(c.ac)).filter(id => id !== null))]
-  // #1281: the human criteria a list of checks settles with a check that does not ask the owner: a human criterion always reaches the owner.
   const humans = acceptance.filter(a => a && a.kind === 'human' && typeof a.id === 'string')
   const humanOf = v => { const a = humans.find(m => upId(m.id) === upId(v)); return a ? a.id : null }
   const notOwnerFor = checks => [...new Set(checks.filter(c => c && typeof c === 'object' && !asksOwner(c)).map(c => humanOf(c.ac)).filter(id => id !== null))]
-  // Ship regrades the code rows for every plan; a plan with a non-code row is then held by the acceptance-planning rules' "Linting a hold" procedure.
-  // #1356: a replay of a PR merged indirectly has already resolved the landing commit (landedCommit), so the hold and the look-stale read are given it, not asked to resolve it again.
+  // Ship regrades the code rows for every plan; a plan with a non-code row is then held by the acceptance-planning
+  // rules' "Linting a hold" procedure. A replay of a PR merged indirectly has already resolved the landing commit
+  // (landedCommit), so the hold and the look-stale read are given it, not asked to resolve it again.
   const known = mergeCommit || landedCommit
   const merged = known ? known : `read from gh pr view ${PR} --repo ${SLUG} --json mergeCommit,headRefOid`
-  // A PR merged indirectly (its head reached the integration branch through another PR's merge) is MERGED with a null mergeCommit.
   const indirect = known ? '' : INDIRECT_FOR(PR, 'merge_commit_local false')
   const heldBlock = authorized => noHold ? '' : `
 4. Read the issues this one blocks: gh api repos/${SLUG}/issues/${ISSUE}/dependencies/blocking (their numbers, returned as blocks).
 5. When blocks is non-empty, move each human criterion into its own new issue that blocks no other issue (forge-issue create --repo ${SLUG}, its body naming #${ISSUE}), hold that issue by step 6 with only that criterion's check (no --blocks flag; its once-run uses --issue <child>${answered.length ? `; no child's verify fence may hold a check for ${answered.join(', ')}: when a hold of that child already exists and its fence names any of them, edit that comment in place as step 6 does, before that child's once-run` : ''}), and return one split entry per moved criterion with its issue, block, lint, verify_run and issue_state.
 6. For the criteria left (evidence or human, not split): none left means close #${ISSUE} with a comment naming the evidence and the split issues. Otherwise assemble one hold comment: a line per criterion, then exactly one \`\`\`verify fence holding {"v": 1, "merge": <the merge commit>, "checks": [...]} built from each criterion's verify member with every occurrence of the base sha ${setup.base_sha} replaced by the merge commit (a criterion without a verify member gets one written per ~/.agents/standards/acceptance-planning.md; an unattended evidence command run must be one of ${JSON.stringify(VERIFY_IDS)}, else use a script or a probe). Write it to a file outside any work tree and run verify-pending lint --input <file> --repo-root ${REPO} --pr-head ${prHead || '<the headRefOid read in step 1>'} --pr-branch ${setup.branch} plus one --pr-workflow <name> per distinct workflow of gh pr checks ${PR} --repo ${SLUG} --json workflow and one --blocks <n> per blocked issue. On refusal post nothing and return its verdict as lint. Otherwise, when no hold comment with a verify fence exists yet, gh issue comment ${ISSUE} --repo ${SLUG} --body-file <file> (when one exists, post nothing: write its fence JSON to the file and lint that, so lint is still returned), add the needs-verification label (create it if missing), then run alone, once, even when an earlier attempt ran it: verify-pending run --host ${setup.host} --repo ${SLUG} --issue ${ISSUE}. ${answered.length ? `The owner's look approval answers ${answered.join(', ')}, so no check for it may stand in the verify fence: when a hold comment with a verify fence already exists and its checks name any of them, remove those checks (an id compared ignoring case) from the fence JSON and their lines from the comment text, edit that comment in place (gh api --method PATCH repos/${SLUG}/issues/comments/<comment id> --field body=@<file>), then lint the reduced fence and run the once-run, never before the edit. ` : ''}Return block (the posted JSON, as it stands in the comment after any such edit), lint, verify_run (ran, exit) and issue_state read back from the tracker. The program has built and checked those checks: post exactly the checks of the Checks line below, unchanged, never one of your own; this issue's fence holds those of the criteria not split, a split child's fence only its own criterion's check.
 Checks: ${JSON.stringify(authorized)}`
-  // #1356: a hold posted before the approval was read (by an earlier landing of this issue, or on a child it split) may still check a criterion the approval answers. Read it before the hold call (a cross-referencing issue counts as a split child only when its fence's merge is this PR's merge commit, since AC ids are local to each issue and an unrelated issue that mentions this one may hold the same id): a check on a split child, or on this issue with nothing left to hold, is not the hold's to remove, so the landing stops; so does a check on this issue whose hold already has recorded results, because rewriting that block changes its version and discards the results of the checks that stay; on this issue with a criterion still open and no result recorded, step 6 removes it in place.
+  // A hold posted before the approval was read (by an earlier landing, or on a child it split) may still check a
+  // criterion the approval answers, so it is read before the hold call. A cross-referencing issue counts as a split
+  // child only when its fence's merge is this PR's merge commit, since AC ids are local to each issue. A check on a
+  // split child, or on this issue with nothing left to hold, is not the hold's to remove, so the landing stops; so does
+  // one whose hold has recorded results, because rewriting that block discards them. Otherwise step 6 removes it in
+
+  // place.
   const FENCE_READ = `1. Run gh issue view ${ISSUE} --repo ${SLUG} --json state. Only when it is OPEN, run gh api repos/${SLUG}/issues/${ISSUE}/comments --paginate and select the comment the verification runner would use: the newest by id whose author_association is OWNER or MEMBER, whose first line is not a marker (a marker comment's first line, without a trailing carriage return, is exactly <!-- agent:KIND v1, then zero or more space-separated key=value fields, then -->, KIND being lowercase letters, digits and hyphens that start with a letter) and whose body holds a \`\`\`verify fence.
 2. Run gh api repos/${SLUG}/issues/${ISSUE}/timeline --paginate. For each cross-referenced event whose source issue is an issue (it has no pull_request key) of ${SLUG} and is OPEN, run gh api repos/${SLUG}/issues/<that issue>/comments --paginate and make the same selection. Such an issue is a split of #${ISSUE} only when its selected fence's merge member is the merge commit of PR ${PR} (${merged}); an issue whose fence names any other merge only mentions #${ISSUE}, is none of this landing's holds, and is left out.`
   if (answered.length) {
@@ -1150,9 +1132,13 @@ ${RULES_FOR(W || '<worktree>')}`, { label: 'look-stale', phase: 'Ship', agentTyp
       return stop('hold', { pr: PR, look_checks: ids, stale: blocking, details: `a hold posted before the approval was read still checks ${ids.join(', ')} on ${blocking.map(e => '#' + e.issue).join(', ')}: remove those checks (or close that issue) by hand, then resume (a hold of this issue with recorded results is never rewritten here: that would discard the results of its other checks)` })
     }
   }
-  // #1281: before the call that posts, labels and runs once, read every check that call would leave standing (the fences already posted) and write the ones the plan lacks, so a check that asks the owner for a code or evidence criterion is refused before anything is posted.
+  // Before the call that posts, labels and runs once, read every check that call would leave standing (the fences
+  // already posted) and write the ones the plan lacks, so a check that asks the owner for a code or evidence criterion
+  // is refused before anything is posted.
   let authorized = []
-  // #1281: the invocation each evidence criterion that runs a committed script is held with, read off the authorized check (the verify member with the base sha replaced by the merge commit, or the check the draft wrote), keyed by the criterion's id in upper case.
+  // The invocation each evidence criterion that runs a committed script is held with, read off the authorized check
+  // (the verify member with the base sha replaced by the merge commit, or the check the draft wrote), keyed by the
+  // criterion's id in upper case.
   const wantedRun = new Map()
   if (!noHold) {
     const draft = await call(`Issue #${ISSUE} of ${SLUG}: PR #${PR} is merged into ${INT}. Draft the hold of the issue's acceptance, changing nothing: post, edit, label, file and run nothing, and run no verify-pending command. Each command in its own Bash call:
@@ -1195,13 +1181,15 @@ ${RULES_FOR(W || '<worktree>')}`, { label: 'hold-draft', phase: 'Ship', agentTyp
         const a = c && openCriteria.find(m => wantedRun.has(upId(m.id)) && upId(m.id) === upId(c.ac))
         if (a && scriptRun(c, at) !== wantedRun.get(upId(a.id))) flag(a, e.issue)
       }
-      // The parent's own fence stands in the once-run that follows, which closes the issue when its checks pass: every scripted criterion must be in it, or the once-run could close the issue without running the script.
+      // The parent's own fence stands in the once-run that follows, which closes the issue when its checks pass: every
+      // scripted criterion must be in it, or the once-run could close the issue without running the script.
       if (e.issue === ISSUE) for (const a of openCriteria) {
         if (wantedRun.has(upId(a.id)) && !e.checks.some(c => c && upId(c.ac) === upId(a.id))) flag(a, e.issue)
       }
     }
     if (scriptIds.length) return stop('hold', { pr: PR, draft, script_checks: scriptIds, posted_holds: scriptIssues, details: SCRIPT_REFUSED(scriptIds, scriptIssues) })
-    // The same once-run closes the issue on the parent's posted fence, so every open criterion must be in it; a human criterion may be absent only when a posted fence of another issue for this merge holds it (a split child).
+    // The same once-run closes the issue on the parent's posted fence, so every open criterion must be in it; a human
+    // criterion may be absent only when a posted fence of another issue for this merge holds it (a split child).
     const parentFence = posted.find(e => e.issue === ISSUE)
     if (parentFence) {
       const absent = openCriteria.filter(a => !parentFence.checks.some(c => c && upId(c.ac) === upId(a.id)) && !(a.kind === 'human' && posted.some(e => e.issue !== ISSUE && e.merge === mergeSha && e.checks.some(c => c && upId(c.ac) === upId(a.id))))).map(a => a.id)
@@ -1218,7 +1206,8 @@ ${RULES_FOR(W || '<worktree>')}`, { label: 'hold', phase: 'Ship', agentType: 'cl
   if (held.merge_commit_local !== true) return stop('hold', { pr: PR, hold: held })
   if (!Array.isArray(held.code_unmet)) return stop('hold', { pr: PR, hold: held })
   if (held.code_unmet.length) return stop('code-unmet', { pr: PR, code_unmet: held.code_unmet })
-  // #1281: the reply's own block and each split entry's block are read once more, whatever the draft said: a hold that made a code or evidence criterion a human check is refused here, before close-out.
+  // The reply's own block and each split entry's block are read once more, whatever the draft said: a hold that made a
+  // code or evidence criterion a human check is refused here, before close-out.
   const heldChecks = [
     ...(isEntry(held.block) && Array.isArray(held.block.checks) ? [{ issue: ISSUE, checks: held.block.checks }] : []),
     ...(Array.isArray(held.split) ? held.split.filter(x => isEntry(x) && Number.isInteger(x.issue) && isEntry(x.block) && Array.isArray(x.block.checks)).map(x => ({ issue: x.issue, checks: x.block.checks })) : []),
@@ -1229,7 +1218,8 @@ ${RULES_FOR(W || '<worktree>')}`, { label: 'hold', phase: 'Ship', agentType: 'cl
     const issues = heldHuman.map(e => e.issue)
     return stop('hold', { pr: PR, hold: held, human_checks: ids, posted_holds: issues, details: HUMAN_REFUSED(ids, issues) })
   }
-  // An issue the clerk found closed before the hold posted or ran anything has no parent evidence to check. One the once-run closed is not that case: its evidence is still validated. Split children are checked either way.
+  // An issue the clerk found closed before the hold posted or ran anything has no parent evidence to check. One the
+  // once-run closed is not that case: its evidence is still validated. Split children are checked either way.
   const closedBefore = held.already_closed === true && held.issue_state === 'CLOSED'
   if (!noHold) {
     if (!Array.isArray(held.blocks) || !Array.isArray(held.split)) return stop('hold', { pr: PR, hold: held })
@@ -1266,7 +1256,6 @@ ${RULES_FOR(W || '<worktree>')}`, { label: 'hold', phase: 'Ship', agentType: 'cl
     } else if (held.issue_state !== 'CLOSED') return stop('hold', { pr: PR, hold: held })
     if (!STATES.includes(held.issue_state)) return stop('hold', { pr: PR, hold: held })
   }
-  // #1186: a landing under a recorded approval ticks the look marker's box first; the reply decides nothing, so it shares the close-out call.
   const tickStep = MARKED && approvedHead ? `0. Tick the look marker's box in the issue body under the owner's approval of the merged head. Run alone and exactly: look-approval tick --repo ${SLUG} --issue ${ISSUE} --pr ${PR} --head ${approvedHead}${landedCommit ? ` --merge-commit ${landedCommit}` : ''}
 It prints one JSON line; return its verdict, ticked and any detail as look_tick. Run it on a retry too (a box already ticked answers already). Whatever it answers, go on with step 1.
 ` : ''
@@ -1288,7 +1277,10 @@ ${RULES_FOR(W || '<worktree>')}`, { label: 'close-out', phase: 'Ship', agentType
 if (CONT && setup.merged_pr) {
   phase('Ship')
   log(`PR #${setup.merged_pr} is already merged; closing out`)
-  // #1356: a replay after the approved PR merged reads the recorded approval against the merged head before the hold is built, whatever approval the cont kept (an awaiting-look cont carries none, a merge stop's names the head before the merge): an approved one is ticked and its criterion left out of the hold; a look the setup could not read stops here.
+  // A replay after the approved PR merged reads the recorded approval against the merged head before the hold is built,
+  // whatever approval the cont kept (an awaiting-look cont carries none, a merge stop's names the head before the
+  // merge): an approved one is ticked and its criterion left out of the hold; a look the setup could not read stops
+  // here.
   if (!LOOK_READ) return LOOK_UNREAD()
   if (MARKED) {
     const MR = setup.merged_pr
@@ -1311,16 +1303,16 @@ ${RULES_FOR(setup.worktree || '<worktree>')}`, { label: 'look-read', phase: 'Shi
   return await closeOut(setup.merged_pr, null, setup.worktree, null)
 }
 
-// ---------------- Live-fault gate (#1433) ----------------
+// ---------------- Live-fault gate ----------------
 let LIVE_ENDED = null
-// The live lane acts on the declaration it started under, before any agent: first hit wins. A stop here before the claim was validated keeps claim_incomplete, so its resume finishes the claim.
+// The live lane acts on the declaration it started under, before any agent: first hit wins. A stop here before the
+// claim was validated keeps claim_incomplete, so its resume finishes the claim.
 if (LANE === 'live') {
   const unreadWhy = LIVE_RAW === undefined || LIVE_RAW === null ? 'the setup returned no live_fault' : isEntry(LIVE_RAW) && LIVE_RAW.verdict === 'error' ? (present(LIVE_RAW.detail) ? String(LIVE_RAW.detail).slice(0, 80) : 'the read failed') : 'the read was no usable live_fault'
   const liveStop = (stage, details) => { if (!CONT) claimIncomplete = true; return stop(stage, { details }) }
   const seen = CONT && isEntry(CONT.live_fault) ? CONT.live_fault : null
   if (seen && LIVE_FINAL.includes(seen.final)) {
     const ended = () => liveStop(seen.final, `this live-fault delivery already stopped at ${seen.final}; ${LIVE_WAY}`)
-    // The final stop ends the delivery, not the filing: a follow-up it left unconfirmed is filed again first, once the agents' rules exist.
     if (!pending.length) return ended()
     LIVE_ENDED = ended
   }
@@ -1341,8 +1333,9 @@ for (const k of LANE === 'live' ? [] : ['plan', 'code']) {
 const REVIEW_CODE = LANE !== 'live' && RS.code === 'available' && setup.review && setup.review.code ? setup.review.code : null
 const REVIEW_PLAN = LANE !== 'live' && RS.plan === 'available' && setup.review && setup.review.plan ? setup.review.plan : null
 
-// A fresh run's setup already ran the claim and the worktree: validate its nested results. A claim_incomplete resume runs them itself,
-// and so does a fresh run whose folded acquire was transient (its acquire step runs once more, then the worktree).
+// A fresh run's setup already ran the claim and the worktree: validate its nested results. A claim_incomplete resume
+// runs them itself, and so does a fresh run whose folded acquire was transient (its acquire step runs once more, then
+// the worktree).
 if (!CONT && !ACQ_RECALL) {
   if (!CLAIM_TAKEN) { claimIncomplete = true; return stop('claim', { result: FOLD_ACQ }) }
   if (!FOLD_CLAIM || !FOLD_CLAIM.ok || !present(FOLD_CLAIM.worktree) || !present(FOLD_CLAIM.base_sha) || !present(FOLD_CLAIM.plan_dir)) { claimIncomplete = true; return stop('claim', { result: FOLD_CLAIM }) }
@@ -1353,7 +1346,6 @@ if (!CONT && !ACQ_RECALL) {
     return stop('dirty', { details: `the adopted worktree ${setup.worktree} has uncommitted changes, left as found; commit or discard them, then resume with cont: ${EX.status}`, status: EX.status })
   }
 } else if (CLAIMING) {
-  // This run's own setup report, never an earlier run's: a failed worktree step may have left the branch or the worktree behind.
   const EX = setup.existing || null
   const acquireStep = () => call(`Claim issue #${ISSUE} of ${SLUG} for delivery. Run, alone and exactly: forge-claim acquire --repo ${SLUG} --issue ${ISSUE} --holder ${setup.holder} --branch ${setup.branch}
 It prints one JSON line and adds the in-progress label itself. ${FORGE_TIMEOUT} Return its verdict (error, with detail, on exit 1 or 2), by, comment_id and transient (true only when its JSON line has transient true). Run nothing else and change nothing.
@@ -1423,7 +1415,7 @@ const PLAN_SCHEMA = {
     plan_root: { type: 'string' },
     acceptance: { type: 'array', items: { type: 'object', properties: { id: { type: 'string' }, text: { type: 'string' }, kind: { type: 'string', enum: ['code', 'evidence', 'human', 'note'] }, verify: { type: 'object' }, lint: { type: 'object', properties: { ok: { type: 'boolean' }, errors: { type: 'array', items: { type: 'object', properties: { field: { type: 'string' }, code: { type: 'string' }, message: { type: 'string' } } } } } }, metric: { type: 'boolean' } }, required: ['id', 'text', 'kind'] } },
     scripts: STRS,
-    // #819: on a revise, the ids of the criteria whose wording the planner changed; never kept in the plan.
+    // On a revise, the ids of the criteria whose wording the planner changed; never kept in the plan.
     criteria_edited: STRS,
     tasks: { type: 'array', items: { type: 'object', properties: { n: { type: 'integer' }, title: { type: 'string' }, file: { type: 'string' }, risk: { type: 'string', enum: ['mechanical', 'low', 'standard', 'security'] }, branch: { type: 'string' } }, required: ['n', 'title', 'file', 'risk'] } },
     branches: { type: 'array', items: { type: 'object', properties: { name: { type: 'string' }, worktree: { type: 'string' }, base: { type: 'string' }, head: FULL_SHA, current: { type: 'string' }, toplevel: { type: 'string' }, common_dir: { type: 'string' }, clean: { type: 'boolean' } }, required: ['name', 'worktree', 'base', 'head', 'current', 'toplevel', 'common_dir', 'clean'] } },
@@ -1433,8 +1425,8 @@ const PLAN_SCHEMA = {
 const wellFormed = p => !!(p && p.status === 'planned' && present(p.plan_root) && Array.isArray(p.acceptance) && p.acceptance.length && Array.isArray(p.tasks) && p.tasks.length)
 const HUMAN_REASONS = ['senses', 'hands', 'credentials', 'money', 'taste']
 const RULE_OF = { pre_merge_only: 'R1', approval_ask: 'R2', reason_required: 'R3' }
-// #988: every message names each way out the rules allow, so a planner that follows it is not led into another rule's violation
-// (a message that named only the evidence check turned a locally enforced cap into a post-merge hold, an R1 violation).
+// Every message names each way out the rules allow, so a planner that follows it is not led into another rule's
+// violation (a message that named only the evidence check turned a locally enforced cap into a post-merge hold).
 const HUMAN_FIX = `name the one of ${HUMAN_REASONS.join(', ')} that applies, or, when none does, make the criterion code or evidence`
 const CODE_FIX = `make it a code criterion when a test, CI or a local evaluation shows it before merge (R1)`
 const LINT_FIX = {
@@ -1442,20 +1434,21 @@ const LINT_FIX = {
   approval_ask: `: the approval is given on the pull request, so drop the post-merge ask; keep a human check only for what a person must sense or do after the merge (R3)`,
   reason_required: `: ${HUMAN_FIX}`,
 }
-// #993: a code criterion whose every word is a declared verification id, a word of its argv or filler names no test of its own: the
-// verify step already runs and proves it, and reviewers asked to show it ran the whole suite again. Anything else is left to review.
+// A code criterion whose every word is a declared verification id, a word of its argv or filler names no test of its
+// own: the verify step already runs and proves it, and reviewers asked to show it ran the whole suite again. Anything
+// else is left to review.
 const VERIFY_NAMES = setup.verification.flatMap(e => [e.id].concat(Array.isArray(e.argv) ? e.argv : [])).filter(v => typeof v === 'string' && v).map(v => v.toLowerCase())
 const VERIFY_FILLER = ['a', 'all', 'and', 'are', 'at', 'both', 'branch', 'check', 'checks', 'clean', 'command', 'commands', 'declared', 'exit', 'exits', 'green', 'head', 'in', 'is', 'of', 'on', 'or', 'pass', 'passes', 'passing', 'run', 'runs', 'still', 'succeed', 'succeeds', 'suite', 'the', 'tip', 'verification', 'with', 'zero', '0']
 const restatesVerify = text => {
   const words = (typeof text === 'string' ? text : '').toLowerCase().split(/[^a-z0-9:_./-]+/).map(w => w.replace(/^[.:/-]+|[.:/-]+$/g, '')).filter(w => w !== '')
   return words.some(w => VERIFY_NAMES.includes(w)) && words.every(w => VERIFY_NAMES.includes(w) || VERIFY_FILLER.includes(w))
 }
-// The program-checkable violations of the acceptance planning rules (R1 to R5, and R9); the rules file is the source, never copied here.
 const planRules = p => {
   const out = []
   const scripts = Array.isArray(p.scripts) ? p.scripts : []
-  // #993: dropping is the fix, and a plan with no criterion is not well formed: when every criterion restates the verification
-  // none is refused, or the revise would empty the plan, drop it and the relaunch would plan the same thing again.
+  // Dropping is the fix, and a plan with no criterion is not well formed: when every criterion restates the
+  // verification none is refused, or the revise would empty the plan, drop it and the relaunch would plan the same
+  // thing again.
   const restates = a => a.kind === 'code' && restatesVerify(a.text)
   const droppable = p.acceptance.some(a => !restates(a))
   for (const a of p.acceptance) {
@@ -1488,35 +1481,33 @@ const planRules = p => {
   return out
 }
 const SPEC = args.spec ? `\nThe approved design spec for this issue is ${args.spec}: plan from it, its decisions are binding, and never edit or commit it.` : ''
-// The planner's code map (#743): beside the plan in plan_dir, so outside the tree and never committed.
+// The planner's code map, beside the plan in plan_dir, so outside the tree and never committed.
 const CODE_MAP = `${setup.plan_dir}/context.md`
 const MAP_FIRST = `Read the code map ${CODE_MAP} first: open the code only to check one of its claims or where it is silent; when it is missing, read the code; check against HEAD every claim of it that a finding or a change relies on.`
 // The plan reviewer's defect list, shared so the planner checks against the review it will get.
 const PLAN_RUBRIC = `an acceptance criterion with no task, a task whose test cannot fail, wrong or missing interfaces, a design choice that breaks the project's documented conventions, or a project-specific literal written into global skills or agents`
-// #747: the narrowed Claude plan review when the Codex plan review runs; the acceptance-planning clause stays the shared one in the prompt, and the Codex sentence is a separate suffix after it.
 const PLAN_RUBRIC_SIZED = `an acceptance criterion with no task, a design choice that breaks the project's documented conventions, standards or docs (name the document it breaks), a project-specific literal written into global skills or agents, or an internal inconsistency (a task, interface, file or decision that the plan root or another task contradicts, or that no task defines)`
 const PLAN_CODEX_OWNS = `The Codex plan review running beside you owns code correctness (whether a task's code, tests and interfaces will work): do not sweep for it.`
-// #1372: a plan of at most this many tasks, none of risk security, skips the Codex plan review; the Claude plan review still runs. An applied amend
-// makes the planner's risk labels stale, so it marks the Codex review owed (codexOwed) until one passes; a revise that leaves the plan no longer
-// small runs the review on the revised plan.
+// A plan of at most this many tasks, none of risk security, skips the Codex plan review; the Claude plan review still
+// runs. An applied amend makes the planner's risk labels stale, so it marks the Codex review owed (codexOwed) until one
+// passes; a revise that leaves the plan no longer small runs the review on the revised plan.
 const SMALL_PLAN_TASKS = 3
 const smallPlan = p => p.tasks.length <= SMALL_PLAN_TASKS && !p.tasks.some(t => t.risk === 'security')
-// #819: the planner's own half of that check, the finding classes a planner can settle itself; never part of the reviewer's rubric.
 const PLAN_SELF_CHECK = `Also before you return: run every grep or deny gate a task prescribes against the text this plan requires and confirm it does not reject that text; for each invariant, threshold and decision a task states, name the test case that fails when that one rule is removed; one with no such case needs a test; and list for each new test or doc the CI workflow test list, the generated index and the project gate that must also change.`
-// The plan step's turn structure (#737, #819), first in the prompt: at least four lookups a message and writing by the twelfth, then one message of writes.
-// #967: the review-findings revise gets its own pace instead (one message that checks every finding, at most two more), never both.
-// No subagent grant: the Agent tool does not exist inside a workflow agent.
+// The plan step's turn structure, first in the prompt: at least four lookups a message and writing by the twelfth, then
+// one message of writes. The review-findings revise gets its own pace instead (one message that checks every finding,
+// at most two more), never both. No subagent grant: the Agent tool does not exist inside a workflow agent.
 const PLAN_PACE = `send at least four lookups in each exploration message and start writing by your twelfth message`
 const REVISE_PACE = `check every finding's claim in the first lookup message after the load below, one call per finding, and send at most two follow-up lookup messages before editing`
 const PLAN_LOOKUPS = pace => `Procedure for this step. Look things up in rounds: put every open question's Bash or Read call in the same message as the others (several tool calls per message, never one small lookup per turn), ${pace}. No subagent can be dispatched: the Agent tool does not exist in this step. Check against the tree yourself every path and symbol you write into a task.`
 const PLAN_WRITES = `Then write the code map, plan.md and every task file as parallel Write calls in one message (a second message only if the output limit forces it), then run any checks in one message.`
-// #967: parallel Read calls, since one cat of the plan directory overflows the Bash output cap.
+// Parallel Read calls, since one cat of the plan directory overflows the Bash output cap.
 const PLAN_EDITS = `This is a revision: first list ${setup.plan_dir}/*.md and load them all as parallel Read calls in one message, then fix the findings with Edit in place, the independent Edit calls in one message; rewrite a whole file only when most of it changes; leave each acceptance criterion's text unchanged unless fixing a finding requires changing it. Then run any checks in one message.`
 const FACTS = present(setup.details) ? `\nSetup facts: ${setup.details}` : ''
 const KIND_GUIDE = `kind code if a test or command in this repo can show it, evidence if it needs a deploy, an activation or observation over time, human if only the user can judge, note if a decision makes a post-deploy reading the orchestrator's own observation or not a hold (no verify member, no script and no metric, R9 of ~/.agents/standards/acceptance-planning.md)`
-// #746 trial: only this plan step asks for test cases; writing-plans keeps full test code for its other callers until the trial reports.
+// Only this plan step asks for test cases; writing-plans keeps full test code for its other callers.
 const TEST_CASES = `Task files of this plan step state each failing test as a case, not as code: its name, the arrange, the act, the exact assertion and the expected failure. This replaces writing-plans' "Write failing tests out in full." here; full test code stays only under its carve-out, where prose cannot preserve a decision (an exact wire format). The implementer writes the test code from the case.`
-// #1384: the planner names each task's one proving test first, and the plan review checks it.
+// The planner names each task's one proving test first, and the plan review checks it.
 const PROVING_TEST = `Each task file names first, before any other test, the one test that proves its slice: the case that fails until the slice works and passes once it does.`
 const PROVING_FINDING = `a task that does not name first, before any other test, the one test that proves its slice`
 const planPrompt = (extra, pace = PLAN_PACE) => `${PLAN_LOOKUPS(pace)} ${extra ? PLAN_EDITS : PLAN_WRITES}
@@ -1524,9 +1515,10 @@ ${CTX}
 ${TEST_CASES} ${PROVING_TEST}
 Plan this issue. Read the issue (gh issue view ${ISSUE} --repo ${SLUG} --json title,body,comments) and the code it touches.${SPEC}${FACTS} Use the writing-plans skill for the plan's form only: its file location, size checks and reports do not apply here. Write the plan to ${setup.plan_dir}/plan.md and one task file per task beside it (${setup.plan_dir}/task-<n>.md); never commit them and never write under the project's artifact directories. Also write the code map ${CODE_MAP} for the agents after you, who read it before the code: per area the plan touches, list the files and symbols with line ranges, their tests and fixtures, the callers that matter and the facts you confirmed (for example a library's behaviour, with its source), each with a pointer (a path:line or a URL). Like the plan, it is never committed. On a revision, read it first and keep it true to the plan and the code. Do not build, prototype or run the change; confirming each task's failing test later is the implementers' job. If the issue needs a decision only the user can make (a preference, an irreversible or scope choice not settled by the issue, the spec, the repo's docs or ADRs), return status needs_user, never for an action that R8 of ~/.agents/standards/acceptance-planning.md says the delivery does itself, with questions, each {question, options}: every option one full sentence naming a real choice, a single option for a yes or no, and, when you would choose one option, recommended: its exact text; then stop. Otherwise return status planned with plan_root ${setup.plan_dir}/plan.md, the issue's acceptance criteria (${KIND_GUIDE}) and the task list in execution order with each task's file and a risk: security for authentication, permission or command guards, secrets, CI/CD or deploy config, data migrations; mechanical or low for small contained edits; else standard. When a task commits to a branch other than ${setup.branch}, declare it in branches as {name, worktree, base, head, current, toplevel, common_dir, clean}: only a branch already checked out in its own existing worktree other than ${W}, never ${INT} or ${setup.default_branch}; worktree as git -C <it> rev-parse --show-toplevel prints it, base the ref its changes are measured from, and ${BRANCH_FACTS}, and clean: true only when git -C <its worktree> status --porcelain prints nothing (a worktree with any staged, unstaged or untracked change is not declared); give each task that commits there branch: <name>. Classify and write every acceptance criterion by ~/.agents/standards/acceptance-planning.md (read it); set metric true only on an evidence criterion, never on a note (R9: an owner-designated observation stays a note even when it reads a cost, a time or a rate), whose threshold is a cost, a time or a rate that only a deploy or observation over time shows, and give its verify member mode observe (R5); a bound that a test or a run before merge enforces belongs to a code criterion with metric false (R1). Return no criterion that only restates a declared verification command passing: the verify step proves it. Give every evidence or human criterion a verify member: one check of the verify block grammar with ac its id and kind its kind, writing any sha that will name the merge commit as the base sha ${setup.base_sha} (ship substitutes the merge commit); an unattended evidence command run must be one of ${JSON.stringify(VERIFY_IDS)}, else use a script or a probe. Lint each member alone: write {"v": 1, "merge": "${setup.base_sha}", "checks": [<that member>]} to a file in ${setup.plan_dir} and run verify-pending lint --input <that file> --repo-root ${W} --pr-branch ${setup.branch} plus one --pr-workflow <name> for each CI workflow that runs on this repository's pull requests; return the verdict as that criterion's lint. List in scripts each script path a verify run names that a task of this plan commits. Before you return, check the plan against the review it will get: ${PLAN_RUBRIC}, or ${PROVING_FINDING}; and every rule ${RULE_IDS[0]}-${RULE_IDS[RULE_IDS.length - 1]} of ~/.agents/standards/acceptance-planning.md (read it). ${PLAN_SELF_CHECK}${decisions.length ? `\nThe owner has answered the open decisions for this issue; they are binding: ${decisions.join('\n')} Do not ask them again; record them as decisions in the plan.` : ''}${!extra && priorFindings.length ? `\nAn earlier plan of this issue was dropped at plan review with these findings left on it; write this plan so that none of them recurs: ${JSON.stringify(priorFindings)}` : ''}${extra || ''}
 ${RULES}`
-// A planner reply is either questions (the plan is dropped so a resume plans again with decisions) or a well-formed plan.
-// #869: a well-formed plan refused only for its declared branches gets one revise in place first, so a naming fault does not cost the whole plan.
-// #819: the accepted reply's criteria_edited, taken off the plan so it reaches no cont and no stop.
+// A planner reply is either questions (the plan is dropped so a resume plans again with decisions) or a well-formed
+// plan. A well-formed plan refused only for its declared branches gets one revise in place first, so a naming fault
+// does not cost the whole plan. The accepted reply's criteria_edited is taken off the plan so it reaches no cont and no
+// stop.
 let planEdited
 const takePlan = async (p, label, left) => {
   const fresh = label === 'plan'
@@ -1549,65 +1541,63 @@ const takePlan = async (p, label, left) => {
   return null
 }
 
-// #771: the contract's fast pre-commit ids (verification_conditions pre_commit: true), named with argv and cwd; none keeps the generic sentence.
 const PRE_COMMIT = setup.verification.filter(e => e && e.pre_commit === true).map(e => ({ id: e.id, argv: e.argv, cwd: e.cwd }))
 const FMT = PRE_COMMIT.length
   ? `Before committing, run the fast pre-commit checks of that verification: each of ${JSON.stringify(PRE_COMMIT)} (its argv with <worktree>/<its cwd> as working directory), and fix what it reports.`
   : `Before committing, run any formatter or lint fix the project's standards (${list(K.standards)}) name on the files you changed.`
 const FOCUSED = `Run only the tests covering the files you changed, not the full suite or the declared verification (it runs once later). ${FMT}`
-// #787: whole test files after the task loop; one class missed a failing sibling test three times.
+// Whole test files after the task loop: running one class alone missed a failing sibling test.
 const WHOLE = files => `run in full every test file among or covering ${files} (never a single test class) and any fast suite the project declares, not the declared verification; return tests: each command and its result`
-// #1371: the same text in deliver-batch.js; the push_tests payload is what a test reads, the sentence around it is for the agent.
 const PUSH_TESTS = (guards, onFailure = 'fix-and-rerun') => `If you made a commit, then before pushing, run in full every test file among or covering the files you changed (never a single test class), the test files of their direct callers and checkers, and the declared cheap guards (with none declared, any fast suite the project declares), not the declared verification, as this payload lists them: ${JSON.stringify({ push_tests: { when: 'committed', scopes: ['touched', 'callers', 'guards'], guards, on_failure: onFailure, report: 'tests' } })}. touched: every test file among or covering the files you changed; callers: for each function, constant, option, command or file name the commit changed, added or removed, git grep the tree and take the test files of every file that uses or checks it; guards: each entry's argv, run with <worktree>/<its cwd> as working directory. on_failure fix-and-rerun: fix a run that fails and run it again; report: change nothing and return status blocked with the failing command in notes; either way a failing or unrun commit is never pushed. Then return tests: each command and its result, one entry per command; a commit whose report records no test command is refused`
 const tested = f => !!f && Array.isArray(f.tests) && f.tests.some(t => typeof t === 'string' && t.trim() !== '')
 const FIX_TESTS = `The program pushes this fix to the open pull request next. ${PUSH_TESTS(PRE_COMMIT)}. ${FMT}`
 const UNTESTED = 'the fix report records no test command, so its commit is not pushed'
-// #1371: the retest's reply also says whether the worktree is still clean once its tests ran: a guard may rewrite a tracked file, and the tested contents would then differ from the commit.
+// The retest's reply also says whether the worktree is still clean once its tests ran: a guard may rewrite a tracked
+// file, and the tested contents would then differ from the commit.
 const RETEST = { ...IMPL, properties: { ...IMPL.properties, clean: { type: 'boolean' } } }
 const RETEST_DIRTY = 'the retest left the worktree changed, so the tested contents are not the commit and it is not pushed'
-// #963: the fix wave and the verification fix are each followed by the verify step, so they run no suite: it ran twice per wave.
 const OWN_TESTS = `Before returning, run in full every test file among or covering the files you changed (never a single test class) and no suite: the verify step runs it next; return tests: each command and its result. ${FMT}`
-// #941: what the resolution of a conflicted sync merge tests, the same text in deliver-batch.js: the files it resolved, not everything the merge brought in.
 const RESOLVE_SCOPE = 'the checks of the pull request cover everything else the merge brought in, so run no test for a file that merged cleanly'
 // A fix agent once committed a lock file a tool had generated beside its fix; every fix prompt carries this.
 const COMMIT_SCOPE = 'Before committing, read git status in the worktree you commit in and stage by path only the files the fix itself changed or created; never run git add -A, git commit -a or git add on a directory (the dot included); a lock file, a generated file or an untracked file the fix did not need is left unstaged and named in notes.'
-// #907: the conflicted-sync wording, the same text in deliver-batch.js. The marker check runs before the merge is committed, when HEAD is still the
-// branch's own head: git diff --check HEAD compares the whole working tree with it, so it reads every line the merge brings in, in a file
-// resolved by hand as in one merged cleanly, staged or not (the plain form goes silent once a file is staged, --cached misses a later edit).
-// It also reports content the integration branch brought in (a setext or RST underline of seven =, a fixture with markers, whitespace), so the same
-// check runs against origin's head too: a line both report, by file and line number, is in neither parent, so it is a real leftover, wherever else
-// such a line stands. Removal is limited to those lines in hand-resolved files; markers_checked says both checks ran, whatever they reported.
+// The conflicted-sync wording, the same text in deliver-batch.js. The marker check runs before the merge is committed,
+// when HEAD is still the branch's own head: git diff --check HEAD reads every line the merge brings in, in a file
+// resolved by hand as in one merged cleanly, staged or not (the plain form goes silent once staged, --cached misses a
+// later edit).
+
+// It also reports content the integration branch brought in, so the same check runs against origin's head too: a line
+// both report is in neither parent, so it is a real leftover. Removal is limited to those lines in hand-resolved files.
 const MARKER_CHECK = (wt, int) => `run git -C ${wt} diff --check HEAD and git -C ${wt} diff --check origin/${int} before committing and remove each leftover conflict marker both report (same file and line) in a file you resolved by hand; every other line they report is content and stays`
 const MARKERS_UNCHECKED = ' The merge was not checked for leftover conflict markers: report any left in the files it changed.'
 const SYNC_FIX = (wt, mc, findings, after = '') => `A reviewer found defects in the conflict resolution of merge commit ${mc} (git -C ${wt} show --cc ${mc})${after}: ${JSON.stringify(findings)}. Fix each real defect on top of ${after ? 'that head' : 'the merge'} with a regression test (never redo or rewrite the merge), then commit; if a finding is wrong, commit nothing for it and say so with evidence in notes.`
 const SYNC_REREVIEW = (wt, mc, findings, fix, moved, after = '') => `Re-review these conflict-resolution findings against ${moved ? `the fix (git -C ${wt} diff ${fix.start_head}..${fix.commit}) made on top of` : 'the rebuttal (no new commit) of'} merge commit ${mc}${after}: ${JSON.stringify(findings)}; notes: ${fix.notes}. ${moved ? '' : `Check each rebuttal against the code yourself (git -C ${wt} show --cc ${mc}); a finding the evidence does not refute is still unresolved. `}Report any still unresolved and any new Important or Critical defect. Do not edit anything.`
-// #986: a resolution may carry plain commits on top of its merge commit (a fix its tests asked for once the merge was committed). The
-// program cannot read git, so the sync review proves the ancestry itself (DESCENDS) and reads the merge and the range from it to the head;
-// the fix round and the re-review name the same range (SYNC_AFTER). A head that does not descend from its merge commit never lands.
-// The same text in both programs, like the wording above.
+// A resolution may carry plain commits on top of its merge commit (a fix its tests asked for once the merge was
+// committed). The program cannot read git, so the sync review proves the ancestry itself (DESCENDS) and reads the merge
+// and the range from it to the head; the fix round and the re-review name the same range (SYNC_AFTER). A head that does
+// not descend from its merge commit never lands. The same text in both programs, like the wording above.
 const SYNC_AFTER = (wt, mc, head) => ` and the commits made on top of it up to the head ${head} (git -C ${wt} diff ${mc}..${head})`
 const DESCENDS = (wt, mc, head) => ` The resolution's head ${head} is not its merge commit: first run git -C ${wt} merge-base --is-ancestor ${mc} ${head} and git -C ${wt} rev-list --count --min-parents=2 ${mc}..${head}, and return descends true only when the first exits 0 and the second prints 0 (the head is the merge commit with plain commits on top of it), else descends false and no finding. When it descends, review those commits as well (git -C ${wt} diff ${mc}..${head}), above all for a test or check they weaken, skip or delete, and report any conflict marker git -C ${wt} diff --check ${mc} ${head} shows in them.`
 const RESOLVE_ORDER = 'Fix in the resolution itself what those tests show and commit the merge only once they pass. When a defect shows only after the merge is committed, never amend or redo the merge: fix it in a commit on top of it, run those tests again, and report the merge commit and the head as they are'
-// #986: a rerun covers every failed run of the head. Each check is its own workflow run, so a gate or aggregate check that failed only
-// because another check failed keeps its old failure unless its own run is rerun too; a gate that waits for the head's other runs then
-// goes green with them, so the reruns need no order.
+// A rerun covers every failed run of the head. Each check is its own workflow run, so a gate or aggregate check that
+// failed only because another check failed keeps its old failure unless its own run is rerun too; a gate that waits for
+// the head's other runs then goes green with them, so the reruns need no order.
 const RERUN_ALL = (unset, slug, sha) => `rerun the failed jobs once, with ${unset}gh run rerun <run-id> --repo ${slug} --failed for each failed run of the head: list them with ${unset}gh run list --repo ${slug} --commit ${sha} --json databaseId,workflowName,conclusion, keep the newest run of each workflowName (the highest databaseId; never an older run that one superseded) and rerun each of those whose conclusion is failure, cancelled or timed_out, not only the run of the check that broke first. Every check is its own run, so a gate or aggregate check that failed only because another check failed is rerun too, with the same command`
-// #986: the backstop for a gate that was not rerun, or was rerun before the checks it reports on finished: in the one poll that follows a
-// rerun, the checks step reruns such a gate and names its runs as stale. The program then polls once more and does not count that poll
-// as red; the poll after it carries no such instruction, so a check that is red there ends the landing as any second red poll does.
+// The backstop for a gate that was not rerun, or was rerun before the checks it reports on finished: in the one poll
+// that follows a rerun, the checks step reruns such a gate and names its runs as stale. The program then polls once
+// more and does not count that poll as red; the poll after it carries no such instruction, so a red check there ends
+// the landing.
 const STALE_RERUN = (unset, slug) => `This poll follows a rerun of failed jobs at this head. When checks still fail once none is pending, decide whether every failing check is stale: a check that only reports on other checks (a gate or aggregate job) is stale when every check it reports on now passes at head and its own run finished before theirs did (compare updatedAt from ${unset}gh run view <run-id> --repo ${slug} --json updatedAt; it was not rerun, or it was rerun too early). Only when every failing check is stale, rerun each of their runs once with ${unset}gh run rerun <run-id> --repo ${slug} --failed (the run id is in the check's link), do not wait for them, and answer failed with failing and with stale: the run ids you reran. In every other case rerun nothing and return no stale.`
 const WITH_STALE = s => ({ ...s, properties: { ...s.properties, stale: { type: 'array', items: { type: 'integer' } } } })
 const staleOf = ck => (Array.isArray(ck.stale) ? ck.stale.filter(Number.isInteger) : [])
 const CX_USE = 'Use the codex-collaboration skill (invoke it with the Skill tool) to run that Codex'
 const CX_WAIT = 'this step may dispatch the Codex reviewer that skill uses, and must wait for its result in this turn.'
 const CX_NONE = 'If Codex cannot be run, return available false with the reason in raw_summary; never substitute your own review.'
-// #790: a codex-unavailable stop says why (a usage limit and its reset time), so no diagnosis run is needed.
+// A codex-unavailable stop says why (a usage limit and its reset time), so no diagnosis run is needed.
 const codexWhy = r => (!r ? 'the Codex review step returned nothing' : typeof r.raw_summary === 'string' && r.raw_summary.trim() ? r.raw_summary : 'the Codex review step gave no reason')
-// #996: a Codex refusal whose message is the provider's usage or quota limit (codex-collaboration returns the message verbatim, with the
-// reset time; the provider's wording is matched, so "not a quota limit" or "Disk quota exceeded" is no quota stop)
-// carries retry_after: the reset time the message gives after "try again at" or "resets at" (up to the sentence's end, an a.m. or p.m. kept whole), null when it gives none. The limit does not
-// lift by a relaunch, so deliver-batch hands such a stop to the owner; any other codex-unavailable stop carries no retry_after and is unchanged.
-// The message is read, not a schema member: CODEX's keys are the codex-collaboration skill's contract, and no review prompt grows.
+// A Codex refusal whose message is the provider's usage or quota limit (the provider's wording is matched, so "Disk
+// quota exceeded" is no quota stop) carries retry_after: the reset time the message gives after "try again at" or
+// "resets at", null when it gives none. The limit does not lift by a relaunch, so deliver-batch hands such a stop to
+// the owner. The message is read, not a schema member: CODEX's keys are the codex-collaboration skill's contract.
 const codexStop = (step, r) => {
   const said = r && typeof r.raw_summary === 'string' ? r.raw_summary : ''
   const quota = /hit your usage limit|exceeded your (?:current )?quota|(?<!disk )quota exceeded|usage limit reached/i.test(said)
@@ -1615,7 +1605,7 @@ const codexStop = (step, r) => {
   return stop('codex-unavailable', { step, details: codexWhy(r), codex: r, ...(quota ? { retry_after: reset || null } : {}) })
 }
 let ACS = null, PLAN_REF = null
-// The last head this run knows for each declared branch (#713); read only through own().
+// The last head this run knows for each declared branch; read only through own().
 const branchTips = Object.create(null)
 const branchSnap = () => (declared(plan).length ? { branches: { ...branchTips } } : {})
 const planRefs = () => {
@@ -1631,7 +1621,6 @@ let chunked = false
 const branchesSame = rec => declared(plan).every(b => !!rec && own(rec.branches, b.name) && sameSha(rec.branches[b.name], headOf(setup.branch_heads, b.name)))
 // A ready stop's verified head, unchanged and clean, needs no second review or verify.
 let SKIP_REVIEW = !!(verified && plan && sameSha(setup.head, verified.head) && !setup.dirty && plan.tasks.every(t => taskLog.some(d => d.n === t.n)) && branchesSame(verified))
-// A passed final review, on the head it passed at (or one that only gained integration-branch merges), is not run again; verify still is.
 let SKIP_FINAL = !SKIP_REVIEW && LANE === 'standard' && !!finalReviewed && isCommit(finalReviewed.head) && !!plan && plan.tasks.every(t => taskLog.some(d => d.n === t.n)) && !setup.dirty && (sameSha(setup.head, finalReviewed.head) || setup.since_reviewed === 'merge_only') && branchesSame(finalReviewed)
 if (!SKIP_REVIEW) verified = null
 if (!SKIP_REVIEW && !SKIP_FINAL) finalReviewed = null
@@ -1642,29 +1631,29 @@ const canon = v => Array.isArray(v) ? `[${v.map(canon).join(',')}]` : v && typeo
 const VERIFY_CONTRACT = canon(setup.verification)
 let VERIFY_CACHED = SKIP_REVIEW && verified.contract === VERIFY_CONTRACT
 const DIRECT_IMPL = { ...IMPL, properties: { ...IMPL.properties, acceptance: PLAN_SCHEMA.properties.acceptance, sensitive: { type: 'boolean' }, ineligible: { type: 'boolean' } } }
-// The direct lane's first-pass review grades each criterion: met, and the test (name, file:line) or command that shows it.
 const GRADED_FINDINGS = {
   ...FINDINGS,
   properties: { ...FINDINGS.properties, acceptance: { type: 'array', items: { type: 'object', properties: { id: { type: 'string' }, met: { type: 'boolean' }, evidence: { type: 'string' } }, required: ['id', 'met', 'evidence'] } } },
   required: [...FINDINGS.required, 'acceptance'],
 }
 const DIRECT_FINDINGS = { ...GRADED_FINDINGS, properties: { ...GRADED_FINDINGS.properties, escalate: { type: 'boolean' } } }
-// A code criterion the review did not grade met with evidence is an Important finding; a human or evidence criterion cannot be shown by a test or command here, so it is not held to this.
+// A code criterion the review did not grade met with evidence is an Important finding; a human or evidence criterion
+// cannot be shown by a test or command here, so it is not held to this.
 const ungradedFindings = (review, criteria) => criteria.filter(a => a.kind === 'code').flatMap(a => {
   const g = (Array.isArray(review.acceptance) ? review.acceptance : []).find(x => x && x.id === a.id)
   if (g && g.met === true && typeof g.evidence === 'string' && g.evidence.trim()) return []
-  // #992: the criterion is the finding's subject, so a re-review that restates the finding is a usable review.
+  // The criterion is the finding's subject, so a re-review that restates the finding is a usable review.
   return [{ severity: 'important', failing_input: `criterion ${a.id}`, summary: `Acceptance criterion ${a.id} (${a.text}) is not shown met with evidence: ${g ? (g.met === true ? 'the review gave no evidence' : 'the review graded it unmet') : 'the review did not grade it'}. Assert it with a test, or show the command that proves it.` }]
 })
-// #935: a criterion restating the declared verification had no evidence before verify (the direct lane runs focused tests only), so it stopped the delivery.
 const NO_VERIFY_AC = 'Do not write the declared verification commands as an acceptance criterion: the verify step gates on them.'
-// #935: a fix round whose findings are all ungraded criteria produces their evidence; FOCUSED would forbid the command a criterion names.
 const EVIDENCE_FIX = `Produce the evidence each criterion asks for: run the command it names (or the test that asserts it, written first when none exists) in the worktree, and report in notes, per criterion id, the command, its exit status and its last lines. The focused-tests-only rule does not apply to a command a criterion names. If it fails, fix the cause with a regression test and commit; when nothing has to change, commit nothing and return commit equal to start_head. ${FMT}`
 const EVIDENCE_REREVIEW = ' These findings are acceptance criteria the review did not see shown met, and the notes carry the evidence produced for each (the command, its exit status and last lines; the diff is empty when nothing had to change): a criterion that evidence shows met is resolved, and one without it, or whose command failed, is still unresolved.'
 
-// #1433: the live-fault lane's one implementer returns the test it ran twice: failing at start_head, passing at its commit.
+// The live-fault lane's one implementer returns the test it ran twice: failing at start_head, passing at its commit.
 const RUN = { type: 'object', properties: { command: { type: 'string' }, exit: { type: 'integer' }, head: FULL_SHA, failed: STRS, passed: STRS, output: { type: 'string' } }, required: ['command', 'exit', 'head'] }
-// #1433: a finding of the live-fault review blocks only when it is critical, names a criterion of the issue the review did not grade met with evidence, is an ungraded code criterion, or cannot be filed; every other finding is a follow-up issue, as is each item the implementer left out.
+// A finding of the live-fault review blocks only when it is critical, names a criterion of the issue the review did not
+// grade met with evidence, is an ungraded code criterion, or cannot be filed; every other finding is a follow-up issue,
+// as is each item the implementer left out.
 const LIVE_FINDING_LEAD = f => `Follow-up of #${ISSUE}: the live-fault lane's diff review raised this ${f.severity} finding, which does not block that delivery.`
 const LIVE_BEYOND_LEAD = `Follow-up of #${ISSUE}: the live-fault lane left this out of the fix, which stops the harm and nothing more.`
 const metWithEvidence = (review, id) => (Array.isArray(review.acceptance) ? review.acceptance : []).some(x => isEntry(x) && x.id === id && x.met === true && typeof x.evidence === 'string' && x.evidence.trim() !== '')
@@ -1688,7 +1677,8 @@ const LIVE_IMPL = {
   },
 }
 const LIVE_FINDINGS = withItems({ ...GRADED_FINDINGS, properties: { ...GRADED_FINDINGS.properties, head: FULL_SHA }, required: [...GRADED_FINDINGS.required, 'head'] }, SCOPED_ITEM)
-// #1433: the diff the one live-fault review reads is bounded and read for sensitivity first; the rows are those of git diff --numstat --no-renames, so a rename is a deletion row for its old path and an addition row for its new one.
+// The diff the one live-fault review reads is bounded and read for sensitivity first; the rows are those of git diff
+// --numstat --no-renames, so a rename is a deletion row for its old path and an addition row for its new one.
 const LIVE_MAX_LINES = 80
 const LIVE_MAX_FILES = 3
 const TEST_PATH = /(^|\/)(tests?|__tests__|specs?)\/|(^|\/)test_[^/]*$|[^/]*(_test\.|\.test\.|\.spec\.)[^/]*$/
@@ -1709,7 +1699,8 @@ const liveRefusal = size => {
   if (size.sensitive.length) return `the diff touches ${size.sensitive[0].why} in ${size.sensitive[0].path}`
   return null
 }
-// The evidence is structural: one command runs at start_head and fails (not 126 or 127: it ran), the runner names the test failed and gives its failure line; the same command at the commit passes and the runner names the test passed.
+// The evidence is structural: one command runs at start_head and fails (not 126 or 127: it ran), the runner names the
+// test failed and gives its failure line; the same command at the commit passes and the runner names the test passed.
 // null, or a short text naming the first missing piece.
 const faultTestProblem = impl => {
   const ft = impl && impl.fault_test
@@ -1742,7 +1733,7 @@ Then deliver issue #${ISSUE} in the direct lane. Invoke the deliver-direct skill
 An earlier attempt at this task was cut off and may have left uncommitted edits or commits in the worktree (git -C ${W} status, git -C ${W} diff and git -C ${W} log ${RANGE}). Inspect them: keep what matches, finish or redo the rest, and make sure every test was seen failing first; of the removals, make only those not already made against the final result; start_head is the head before this task's first commit.` : ''}${newDecision !== null ? `
 That attempt returned blocked: ${JSON.stringify(BLOCKED.notes)}. The owner's decision settles it and is binding: ${JSON.stringify(newDecision)}` : ''}
 ${RULES}`, { label: 'direct-impl', phase: 'Tasks', agentType: 'implementer', model: 'sonnet', schema: withRenew(DIRECT_IMPL) }), r => r.renew)
-    // #996: a reply means the decision reached the implementer; a blocked one below records its own notes.
+    // A reply means the decision reached the implementer; a blocked one below records its own notes.
     if (impl) { decisionPending = false; blocked = null }
     if (impl) {
       const lost = renewed(impl.renew, 'tasks')
@@ -1771,7 +1762,8 @@ ${RULES}`, { label: 'direct-impl', phase: 'Tasks', agentType: 'implementer', mod
 ${PLAN_REF} Acceptance criteria: ${ACS}.
 Run the project's configured independent code review: the contract's workflow.review.code is the command ${REVIEW_CODE}. ${CX_USE} diff review over the delivery range ${RANGE} in the worktree ${W}, with no review package; ${CX_WAIT} Return Codex's Important or Critical findings as they are (correctness defects with a concrete failing input, unmet criteria) without adding your own review; verdict pass if none. ${CX_NONE}
 ${RULES}`, { label: 'direct-codex', phase: 'Final review', agentType: 'clerk', model: CLERK_MODEL, effort: 'high', schema: CODEX }) : Promise.resolve(null)
-    // The stored plan's risk, not this run's reply, picks the reviewer, so a resumed review keeps the implementer's choice.
+    // The stored plan's risk, not this run's reply, picks the reviewer, so a resumed review keeps the implementer's
+    // choice.
     const lite = plan.tasks[0].risk !== 'security'
     const reviewPrompt = isLite => `${CTX}
 ${isLite ? 'lane: direct. ' : ''}Review the delivery diff git -C ${W} diff ${RANGE} for issue #${ISSUE} against its acceptance criteria ${ACS}. ${KNOW} Report Important or Critical correctness defects and unmet code criteria only, each with a concrete failing input. Return acceptance with one entry per criterion id: met, and evidence, which is the test name and file:line that asserts the criterion, or the command that shows it; a code criterion that is not met, or has no evidence, is an Important finding, and criteria of other kinds are not findings (grade them and give what you observed). ${isLite ? 'If the diff touches authentication or authorization, permission or command guards, secrets or credentials, CI/CD or deploy config, or data migrations, set escalate true. ' : ''}Do not edit anything.`
@@ -1802,7 +1794,6 @@ Re-review only these previously reported findings against the fix: ${span(fix)};
     Object.assign(d1, { reviewed_head: fix ? fix.commit : reviewHead, review_rounds: fix ? 1 : 0, reviewer: passedBy })
   }
 } else if (LANE === 'live') {
-  // #1433: no plan, one implementer on the declared fault, one reviewer; the implementer's commit is the one head every later step reads.
   let impl = null
   if (!taskLog.some(d => d.n === 1)) {
     phase('Tasks')
@@ -1817,7 +1808,8 @@ An earlier attempt at this task was cut off and may have left uncommitted edits 
 ${RULES}`, { label: 'live-impl', phase: 'Tasks', agentType: 'implementer', model: 'sonnet', schema: LIVE_IMPL })
     if (impl && impl.status === 'blocked') return stop('live-bound', { details: `the live-fault implementer returned blocked: ${clip(typeof impl.notes === 'string' ? impl.notes : '').slice(0, 100)}; ${LIVE_WAY}` })
     if (!implDone(impl)) return haltTask(1, 'task', { task: { n: 1 }, impl })
-    // The commit exists: asking again would be a second implementer, so a reply without criteria is final here, never a partial task.
+    // The commit exists: asking again would be a second implementer, so a reply without criteria is final here, never a
+    // partial task.
     if (!Array.isArray(impl.acceptance) || !impl.acceptance.length) { partial = undefined; return liveBound(`the live-fault implementer committed ${impl.commit} and returned no acceptance criteria, and asking again would be a second implementer`) }
     const problem = faultTestProblem(impl)
     if (problem !== null) {
@@ -1850,18 +1842,21 @@ ${RULES}`, { label: 'live-size', phase: 'Final review', agentType: 'clerk', mode
     if (!sameSha(size.head, d1.commit)) return liveBound(`the diff was measured at ${typeof size.head === 'string' ? size.head : 'no head'}, not the delivered commit ${d1.commit}`)
     const refusal = liveRefusal(size)
     if (refusal !== null) return stop('live-refused', { details: `${refusal}; ${LIVE_WAY}` })
-    // The evidence test must be one this diff changes: a run of a test the diff leaves alone shows nothing about this change.
+    // The evidence test must be one this diff changes: a run of a test the diff leaves alone shows nothing about this
+    // change.
     const testFile = d1.fault_test.file.trim().replace(/^\.\//, '')
     if (!size.files.some(f => f.path === testFile)) return stop('live-evidence', { details: `the change carries no test shown failing before it and passing after it: the test file ${testFile} is not a path the diff changes; ${LIVE_WAY}` })
     const review = await readReview(`${CTX}
 lane: live. Review git -C ${W} diff ${RANGE} for issue #${ISSUE}, the fix of the live fault ${JSON.stringify({ observed: LIVE.observed, when: LIVE.when, proven: LIVE.proven })}: it must stop the harm and nothing more. Acceptance criteria: ${ACS}. The implementer's failing-then-passing test: ${JSON.stringify(d1.fault_test)}. Confirm the test is in the diff and that the failure line of its first run is the observed harm. Return head (git -C ${W} rev-parse HEAD). ${KNOW} ${CRITICAL_MEANS} ${COMMIT_ASK(d1.commit)} Return acceptance with one entry per criterion id: met, and evidence, which is the test name and file:line that asserts the criterion, or the command that shows it; a code criterion that is not met, or has no evidence, is an Important finding, and criteria of other kinds are not findings (grade them and give what you observed). Do not edit anything.`, { label: 'live-review', phase: 'Final review', agentType: 'reviewer', schema: LIVE_FINDINGS }, { once: true })
-    // An answered review that was no review is spent (the lane asks once): that stop is final. A reviewer that answered nothing is the one step a resume runs again.
+    // An answered review that was no review is spent (the lane asks once): that stop is final. A reviewer that answered
+    // nothing is the one step a resume runs again.
     if (!review) return LOST.includes('live-review') ? stop('live-review', { review: null, details: `the live-fault review answered with no usable review, and asking again would be a second reviewer; ${LIVE_WAY}` }) : stop('live-review', { review: null })
     if (!sameSha(review.head, d1.commit)) return stop('live-bound', { details: `the review read ${typeof review.head === 'string' ? review.head : 'no head'}, not the delivered commit ${d1.commit}; ${LIVE_WAY}` })
     liveReview = review
     liveSplitOf = liveSplit(review, plan.acceptance)
   }
-  // #1433: every filing comes first, whatever the outcome: the filed findings and the items the implementer left out, then d1.beyond is gone, and only then does a blocking finding stop the lane.
+  // Every filing comes first, whatever the outcome: the filed findings and the items the implementer left out, then
+  // d1.beyond is gone, and only then does a blocking finding stop the lane.
   const liveEntries = liveSplitOf.filed.concat((Array.isArray(d1.beyond) ? d1.beyond : []).map(b => followUpOf({ severity: 'minor', file: b.file, summary: b.summary, commit: d1.commit, lead: LIVE_BEYOND_LEAD }, false)).filter(Boolean))
   if (liveEntries.length) await fileFollowUps(liveEntries)
   delete d1.beyond
@@ -1880,7 +1875,6 @@ if ((!plan || !planReviewed) && !ANSWER_NEEDED) {
   const lost = await renew('plan', 'Plan')
   if (lost) return lost
 }
-// Grades an answer to the decision prompt. null = usable (an answered one has joined the decisions); else the stop to return.
 const takeAnswer = answer => {
   if (!complete(answer, ANSWER_SCHEMA) || !['none', 'open', 'answered'].includes(answer.verdict)) return stop('owner-answer', { result: answer })
   if (answer.verdict === 'answered') {
@@ -1891,7 +1885,7 @@ const takeAnswer = answer => {
   return null
 }
 const readAnswer = async () => {
-  // After a transient setup renew this step is the one retry (#740): it is not re-called, as the acquire fallback is not.
+  // After a transient setup renew this step is the one retry: it is not re-called, as the acquire fallback is not.
   const askAnswer = () => call(`${CTX}
 ${RENEW_FIRST}
 Then read the owner's answer to the decision prompt of issue #${ISSUE}: run alone, exactly, forge-claim owner-action status --repo ${SLUG} --issue ${ISSUE} --reason decision. It prints one JSON line. Change nothing: post nothing, edit nothing, end nothing. Return verdict, comment_id, questions and decisions exactly as printed.`, { label: 'owner-answer', phase: 'Plan', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: withRenew(ANSWER_SCHEMA) })
@@ -1901,18 +1895,17 @@ Then read the owner's answer to the decision prompt of issue #${ISSUE}: run alon
   if (lost) return lost
   return takeAnswer(answer)
 }
-// Only findings the rules-only revise may touch resume as one, a Codex-triggered plan's included (#823). A kept plan with any other
-// finding left has spent its one full revise, so it is dropped and planned again with the owner's answer; the kept state stays in the cont until that answer is read.
+// Only findings the rules-only revise may touch resume as one, a Codex-triggered plan's included. A kept plan with any
+// other finding left has spent its one full revise, so it is dropped and planned again with the owner's answer; the
+// kept state stays in the cont until that answer is read.
 const RESUME_RULES = RESUME_KEPT && rulesOnly(planFindingsKept.rules)
 if (ANSWER_NEEDED) {
-  // A fresh run's setup already read the answer, and renewed after an already_held acquire; a resume or a transient fold reads it again.
   const stopped = !CONT && !ACQ_RECALL && !RENEW_RECALL ? takeAnswer(FOLD_ANSWER) : await readAnswer()
   if (stopped) return stopped
 }
 if (RESUME_KEPT && !RESUME_RULES) dropPlan()
 if (AMEND !== null) {
   if (!plan) return why({ stage: 'amend', error: 'this resume plans the kept plan again, which would overwrite the amendment; resume without amend, then amend the new plan after its stop', ...deadOf(), cont: CONT })
-  // A plan not yet reviewed was renewed above; a reviewed plan's renew would ride in the first implementer call, which runs after this step.
   if (planReviewed) {
     const lost = await renew('amend', 'Plan')
     if (lost) return lost
@@ -1921,9 +1914,10 @@ if (AMEND !== null) {
 Apply the owner's amendment to the plan at ${AMEND_INPUT.plan_root} with one plan-amend run and nothing else. (1) Make a fresh directory with mktemp -d and write the JSON of the Input line below, byte for byte, to a file in it. (2) Run alone and exactly: plan-amend apply --input <that file>. It prints one JSON line; return its status, edits, refused and detail exactly as printed. On a non-zero exit with no JSON line, return status error, empty edits and refused, and its stderr as detail. Edit no file yourself and commit nothing.
 Input: ${JSON.stringify(AMEND_INPUT)}
 ${RULES}`, { label: 'amend', phase: 'Plan', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: AMEND_SCHEMA })
-  // The clerk may have written the plan before its reply was lost or came back uncertain, so a stop here cannot hand back results cached before
-  // the amend: a relaunch would find every edit already recorded and skip the review and verify of the amended plan. Only a refusal the helper
-  // reported itself is known to have written nothing, and it keeps the cont as it came.
+  // The clerk may have written the plan before its reply was lost or came back uncertain, so a stop here cannot hand
+  // back results cached before the amend: a relaunch would find every edit already recorded and skip the review and
+  // verify of the amended plan. Only a refusal the helper reported itself is known to have written nothing, and it
+  // keeps the cont as it came.
   const STALE = (({ verified: _v, final_reviewed: _f, ...rest }) => ({ ...rest, ...(isEntry(CONT.reviewed) ? { reviewed: { ...CONT.reviewed, amended: true } } : {}) }))(CONT)
   if (!am) return why({ stage: 'amend', result: null, ...deadOf(), cont: STALE })
   const graded = am.status === 'applied' && Array.isArray(am.edits) && am.edits.length === AMEND_INPUT.edits.length &&
@@ -1931,14 +1925,17 @@ ${RULES}`, { label: 'amend', phase: 'Plan', agentType: 'clerk', model: CLERK_MOD
   if (!graded) return why({ stage: 'amend', amend: am, details: 'plan-amend did not apply every edit; a refused or error status wrote nothing', ...deadOf(), cont: am.status === 'refused' ? CONT : STALE })
   log(`amend: applied ${AMEND_INPUT.edits.length} edit(s) to the plan`)
   amendApplied = true
-  // #1372: the amended plan's risk labels may be stale, so an unreviewed plan owes the Codex plan review, however small it reads, until one comes back.
+  // The amended plan's risk labels may be stale, so an unreviewed plan owes the Codex plan review, however small it
+  // reads, until one comes back.
   if (!planReviewed) codexOwed = true
-  // #1370: the amendment is graded by the next round's verdict only; a stop before it (a lost scoped reviewer, a blocked task) hands the mark back, and markReviewed drops it.
+  // The amendment is graded by the next round's verdict only; a stop before it (a lost scoped reviewer, a blocked task)
+  // hands the mark back, and markReviewed drops it.
   if (reviewed) reviewed = { ...reviewed, amended: true }
-  // #996: the amended task file is the owner's answer to a blocked task, unless a decision is still to be worked in below.
+  // The amended task file is the owner's answer to a blocked task, unless a decision is still to be worked in below.
   if (newDecision === null && !(BLOCKED && BLOCKED.asked)) blocked = null
-  // An applied amend makes every cached result stale, even when every edit was recorded already: an earlier run may have died after the clerk
-  // wrote the plan and before any stop said so, leaving only a cont from before the amend. The final review and verify run again.
+  // An applied amend makes every cached result stale, even when every edit was recorded already: an earlier run may
+  // have died after the clerk wrote the plan and before any stop said so, leaving only a cont from before the amend.
+  // The final review and verify run again.
   SKIP_REVIEW = false
   SKIP_FINAL = false
   VERIFY_CACHED = false
@@ -1950,36 +1947,35 @@ if (!plan) {
   if (halted) return halted
 }
 const rulesReview = async triggered => {
-  // #992: a rule finding may name its criterion and its rule and no file: ruled, as the plan review is.
+  // A rule finding may name its criterion and its rule and no file: ruled, as the plan review is.
   return readReview(`${CTX}
 Re-check only the acceptance criteria of the revised plan at ${plan.plan_root} against every rule of ~/.agents/standards/acceptance-planning.md (read it). The findings that triggered the revision were ${JSON.stringify(triggered)}. Report each criterion that still or newly breaks a rule, with the broken rule's id in the finding's rule and the criterion's id in its ac (on a minor finding too).${decisions.length ? ` The owner's decisions for this issue are binding, so a criterion classified as one of them says breaks no rule: ${decisions.join('\n')}` : ''} Do not edit anything.`, { label: 'plan-rules-review', phase: 'Plan', agentType: 'reviewer', schema: PLAN_REVIEW }, { ruled: true })
 }
-// #819: the members of a criterion the rules judge (its wording among them), key order aside; a revise that leaves them as reviewed needs no rules re-review.
 const ruleFacts = p => canon(p.acceptance.map(a => [a.id, a.text === undefined ? null : a.text, a.kind, a.metric === true, a.verify === undefined ? null : a.verify]))
-// #819: the criterion text lives only in the issue and the planner's reply (plan.md maps ids, it holds no text), and a planner retypes
-// every criterion it returns. The candidate gives each criterion that existed before and that the revise does not list as edited
-// (ids compared without case) its earlier text; the caller takes it whole or not at all. #951: the revise is asked about the member
-// that is restored, the criterion's text (plan.md's rows hold none), and for a change made to fix a finding, not a retyping; a text
-// rewritten to fix a finding is listed and so kept. A finding that names a criterion no longer keeps its retyped text (in 6 of 9
-// measured re-reviews that was the only blocker, with no wording changed).
+// The criterion text lives only in the issue and the planner's reply (plan.md maps ids and holds no text), and a
+// planner retypes every criterion it returns. The candidate gives each criterion that existed before and that the
+// revise does not list as edited its earlier text; the caller takes it whole or not at all. A finding that names a
+// criterion no longer keeps its retyped text: that was often the only blocker.
 const keepUnlistedText = (before, after, edited) => after.map(a => {
   const was = a && typeof a.id === 'string' && a.id ? before.find(b => b && b.id === a.id) : null
   if (!was || typeof was.text !== 'string' || was.text === a.text || edited.includes(a.id.toLowerCase())) return a
   return { ...a, text: was.text }
 })
-// #988: the rules reviewer's minor findings on a criterion that also has a blocking finding (the program's or the reviewer's), matched by
-// the ac member alone (case and spaces aside, never by reading the summary). They go to the rules revise as context: they are no part
-// of rules, so they neither block nor count toward a stop. A minor finding with no ac, or on another criterion, stays dropped.
+// The rules reviewer's minor findings on a criterion that also has a blocking finding (the program's or the
+// reviewer's), matched by the ac member alone (case and spaces aside, never by reading the summary). They go to the
+// rules revise as context: they are no part of rules, so they neither block nor count toward a stop. A minor finding
+// with no ac, or on another criterion, stays dropped.
 const acKey = f => (isEntry(f) && typeof f.ac === 'string' ? f.ac.replace(/\s+/g, '').toLowerCase() : '')
 const notedOn = (found, blocking) => {
   const keys = blocking.map(acKey).filter(k => k !== '')
   return (Array.isArray(found) ? found : []).filter(f => isEntry(f) && f.severity === 'minor' && keys.includes(acKey(f))).slice(0, 8)
 }
-// One targeted planner call fixing only the given findings, then the program's rule check and the rules re-review (D4-D6).
-// Its findings all carry a rule, so its re-review always runs.
-// #988: a criterion (by its ac member) whose classification the rules pull two ways: a classification rule (R1, R3, R5, R9) blocked it
-// before the rules revise, that rule is gone after it, and another classification rule the criterion did not break before blocks it
-// now. A rule that survives its revise, and R4 (a verify block still to get right), are mechanical: they stay plain plan-review stops.
+// One targeted planner call fixing only the given findings, then the program's rule check and the rules re-review. Its
+// findings all carry a rule, so its re-review always runs.
+
+// A criterion whose classification the rules pull two ways: a classification rule (R1, R3, R5, R9) blocked it before
+// the rules revise, that rule is gone after it, and another one it did not break before blocks it now. A rule that
+// survives its revise, and R4, are mechanical: they stay plain plan-review stops.
 const CLASS_RULES = ['R1', 'R3', 'R5', 'R9']
 const conflictOf = (before, after) => {
   for (const f of after) {
@@ -1992,7 +1988,6 @@ const conflictOf = (before, after) => {
   }
   return null
 }
-// left: the review findings to keep as prior findings when this revise drops a plan that no plan-review stop has kept yet.
 const rulesRevise = async (findings, noted, left = []) => {
   const root = plan.plan_root, was = plan.acceptance
   const also = noted.length ? ` The rules reviewer also noted these minor findings on the same criteria; they are context for choosing the fix, not findings to fix by themselves: ${JSON.stringify(noted)}` : ''
@@ -2003,18 +1998,19 @@ const rulesRevise = async (findings, noted, left = []) => {
   if (!rr) return { silent: true }
   const rules = still.concat(findingsOf(rr))
   const conflict = conflictOf(findings, rules)
-  // #1019: the criteria this revise was asked to fix and did change, by the members the rules judge (ruleFacts), as acKey spells an
-  // id. A planner retypes every criterion it returns, so one it was not asked about is never read as changed, whatever its wording.
+  // The criteria this revise was asked to fix and did change, by the members the rules judge (ruleFacts), as acKey
+  // spells an id. A planner retypes every criterion it returns, so one it was not asked about is never read as changed,
+  // whatever its wording.
   const facts = a => ruleFacts({ acceptance: [a] })
   const asked = findings.map(acKey).filter(k => k !== '')
   const changed = plan.acceptance.filter(a => !was.some(b => facts(b) === facts(a))).map(a => acKey({ ac: a.id })).filter(k => asked.includes(k))
   return { rules, changed, noted: notedOn(rr.findings, rules), ...(conflict ? { extra: { conflict } } : {}) }
 }
-// #1019: the rules revises of one run, two at most across the delivery (spent: those an earlier stop already counted). The second runs
-// right away, without a stop and a relaunch, only when every finding the first re-review left is on a criterion that revise was asked to fix and changed:
-// a finding where the fix was made narrows it, as #950 reads a fix wave's findings by the files it changed. A finding on a criterion
-// the revise left alone, one that names no criterion, one no rules revise may touch, or a conflict between classification rules
-// stops as before, and so does whatever the second re-review leaves: a third revise is never run.
+// The rules revises of one run, two at most across the delivery (spent: those an earlier stop already counted). The
+// second runs without a stop only when every finding the first re-review left is on a criterion that revise was asked
+// to fix and changed. A finding on another criterion, one that names none, one no rules revise may touch, or a conflict
+// between classification rules stops, and so does whatever the second re-review leaves.
+
 // before and was: the findings and notes the last revise was given, for a stop whose re-review said nothing.
 const rulesRounds = async (rules, noted, spent, left = []) => {
   let r = await rulesRevise(rules, noted, left), rounds = spent + 1, before = rules, was = noted
@@ -2037,14 +2033,13 @@ const reviewStop = (rules, findings, rounds, given, noted = []) => {
   return stop('plan-review', { ...(extra || {}), rules, findings })
 }
 const SILENT = () => ({ details: `the rules re-reviewer ${silence('plan-rules-review')}` })
-// What follows a full revise (the plan review's, and #996's task revise): the reply through takePlan, then the program's rule check and
-// the rules re-review. null = the revised plan stands; else the stop to return.
 const settleRevise = async (revised, planFindings, reviewedFacts, reviewedCriteria) => {
   const halted = await takePlan(revised, 'plan-revise', planFindings)
   if (halted) return { ...halted, findings: planFindings }
-  // #819: the restored candidate replaces the reply only when it makes the skip below fire; a renumbered, reused or duplicated id,
-  // or any other change, leaves the reply exactly as returned. A plan-revise reply with no criteria_edited is unknown: no restore.
-  // A branch revise that takePlan ran after it adds its own list to the plan-revise reply's.
+  // The restored candidate replaces the reply only when it makes the skip below fire; a renumbered, reused or
+  // duplicated id, or any other change, leaves the reply exactly as returned. A plan-revise reply with no
+  // criteria_edited is unknown: no restore. A branch revise that takePlan ran after it adds its own list to the
+  // plan-revise reply's.
   if (Array.isArray(revised.criteria_edited) && !planFindings.some(f => present(f.rule))) {
     const edited = [revised.criteria_edited, planEdited].flatMap(l => (Array.isArray(l) ? l : [])).filter(x => typeof x === 'string').map(x => x.toLowerCase())
     const candidate = { ...plan, acceptance: keepUnlistedText(reviewedCriteria, plan.acceptance, edited) }
@@ -2055,7 +2050,6 @@ const settleRevise = async (revised, planFindings, reviewedFacts, reviewedCriter
     }
   }
   const still = planRules(plan)
-  // #819: no trigger named a rule, the program's rule check is clean and no criterion's id, text, kind, metric or verify changed.
   const sameRules = !planFindings.some(f => present(f.rule)) && !still.length && ruleFacts(plan) === reviewedFacts
   if (sameRules) log('plan rules re-review skipped: no finding named a rule and the acceptance criteria are unchanged')
   const rr = sameRules ? { findings: [] } : await rulesReview(planFindings)
@@ -2073,13 +2067,11 @@ const settleRevise = async (revised, planFindings, reviewedFacts, reviewedCriter
   if (rules.length) return reviewStop(rules, planFindings, rounds, extra, noted)
   return null
 }
-// #996: the task revise. A resume of a task-blocked cont with a new decision has a planner amend that task's file from the decision and
-// the implementer's notes before the implementer runs again, through the plan-revise path above. A revise that does not end in an
-// accepted plan (questions, a malformed reply, rule findings left (a rules conflict among them), a done task dropped or given another file or branch, a criterion
-// removed: restating a criterion's text is allowed, removing one stays an owner amend) keeps the cont's plan and its blocked member (it stays reviewed, so the stop carries no prior_findings); the
-// task files on disk may hold its edits. The decision stays unused, so the same resume tries again, except after questions: then it is
-// kept, and the resume that brings the answer shows the planner both; so it is after a rules conflict, whose stop carries the conflict
-// for deliver-batch's rules-conflict owner action: the owner's classification is the new decision that revises again.
+// The task revise: a resume of a task-blocked cont with a new decision has a planner amend that task's file from the
+// decision and the implementer's notes before the implementer runs again. A revise that does not end in an accepted
+// plan (questions, a malformed reply, rule findings left, a done task dropped or re-pointed, a criterion removed) keeps
+// the cont's plan and its blocked member. The decision stays unused so the same resume tries again, except after
+// questions, where it is kept; a rules conflict's stop carries the conflict for deliver-batch's owner action.
 const BLOCKED_TASK = BLOCKED && !RERUN && plan && planReviewed ? plan.tasks.find(t => isEntry(t) && t.n === BLOCKED.task) || null : null
 // A decision for a blocked task the plan no longer lists has nothing to revise: it is kept as any other.
 if (!BLOCKED_TASK) decisionPending = false
@@ -2099,7 +2091,6 @@ if (BLOCKED_TASK) {
 }
 if (BLOCKED_TASK && newDecision !== null) {
   const t = BLOCKED_TASK
-  // The implementer's first call would renew, but it runs after this step (as after an amend, whose own renew stands for this one).
   if (!renewedHere) {
     const lost = await renew('plan', 'Plan')
     if (lost) return lost
@@ -2120,7 +2111,8 @@ if (BLOCKED_TASK && newDecision !== null) {
     reordered = prior.reordered
     planReviewed = true
     planFindingsKept = null
-    // The decision reached the planner, which asked on: it is kept, so the resume with the answer shows the planner both.
+    // The decision reached the planner, which asked on: it is kept, so the resume with the answer shows the planner
+    // both.
     if (Array.isArray(failed.needs_user)) { blocked = { ...blocked, asked: true }; decisionPending = false }
     if (isEntry(failed.conflict)) decisionPending = false
     const said = Object.fromEntries(['needs_user', 'invalid', 'branch_problems', 'rules', 'conflict', 'details'].filter(k => own(failed, k)).map(k => [k, failed[k]]))
@@ -2140,8 +2132,9 @@ const codexPlanCall = () => call(`${CTX}
 Plan: ${plan.plan_root} (task files beside it). Acceptance criteria: ${JSON.stringify(plan.acceptance)}.${SPEC}
 Run the project's configured independent plan review: the contract's workflow.review.plan is the command ${REVIEW_PLAN}. ${CX_USE} plan review over the plan at that path against issue #${ISSUE} in the worktree ${W}, giving it the code map ${CODE_MAP} as its code map input; ${CX_WAIT} Return Codex's Important or Critical findings as they are without adding your own review; verdict pass if none. ${CX_NONE}
 ${RULES}`, { label: 'plan-codex', phase: 'Plan', agentType: 'clerk', model: CLERK_MODEL, effort: 'high', schema: CODEX })
-// #1372: the skip was decided on the plan before a revise or an amend; a plan that is no longer small gets the Codex plan review it skipped,
-// before it is marked reviewed. Owed from the first call, so a stop of it keeps the review due on a resume. null = nothing owed or it passed.
+// The skip was decided on the plan before a revise or an amend; a plan that is no longer small gets the Codex plan
+// review it skipped, before it is marked reviewed. Owed from the first call, so a stop of it keeps the review due on a
+// resume. null = nothing owed or it passed.
 const lateCodexPlan = async () => {
   if (!(REVIEW_PLAN && (codexOwed || (codexSkipped && !smallPlan(plan))))) return null
   log('codex plan review: owed (the plan is no longer small or was amended), running it on the plan as it stands')
@@ -2168,7 +2161,8 @@ if (RESUME_RULES) {
 }
 if (!planReviewed) {
   const PLAN_CODEX = REVIEW_PLAN && (!smallPlan(plan) || codexOwed) ? REVIEW_PLAN : null
-  // Owed stays set through every stop below until the review comes back available; with none configured nothing is owed.
+  // Owed stays set through every stop below until the review comes back available; with none configured nothing is
+  // owed.
   if (!PLAN_CODEX) codexOwed = false
   codexSkipped = !!REVIEW_PLAN && !PLAN_CODEX
   if (REVIEW_PLAN && !PLAN_CODEX) log(`codex plan review: skipped, a small plan (${plan.tasks.length} of at most ${SMALL_PLAN_TASKS} tasks, none of risk security)`)
@@ -2207,10 +2201,10 @@ phase('Tasks')
 let tasksRenewed = false
 const taskDone = n => taskLog.some(d => d.n === n)
 const worktreeOf = t => { const b = typeof t.branch === 'string' ? declared(plan).find(d => d.name === t.branch) : null; return b ? b.worktree : W }
-// #896: a blocked task that names a later task of the plan (blocked_on) is moved once to just after it, so every other task keeps its
-// place. A plan declares no dependencies between tasks, only their order and each task's branch, so the move is refused, and the task
-// stops with why, when the task was moved before, another moved task still waits, or the named task is not a later unfinished one or commits
-// in another worktree. A task that needed the moved one blocks in its turn and stops there. No done task runs again.
+// A blocked task that names a later task of the plan (blocked_on) is moved once to just after it, so every other task
+// keeps its place. A plan declares no dependencies between tasks, so the move is refused, and the task stops with why,
+// when the task was moved before, another moved task still waits, or the named task is not a later unfinished one or
+// commits in another worktree. No done task runs again.
 const reorder = (i, impl) => {
   const t = plan.tasks[i]
   if (!impl || impl.status !== 'blocked') return {}
@@ -2259,34 +2253,32 @@ ${RULES}`
     ti--
     continue
   }
-  // #923: a task that ends with no new commit (its output is not a file change: an issue comment, a check that needs no edit) has no
-  // diff, and a review of the empty range head..head is refused as a missing diff boundary. Its first pass is a no-change check
-  // instead: a reviewer judges from the task file whether the task needs a tracked file changed (then it is not done, and the finding
-  // goes back to the implementer as any other) and confirms each required output itself. reviewer-lite reviews only a bounded diff,
-  // so every review without one runs on reviewer, whatever the task's risk. Once such a task does commit (a fix round), that diff gets
-  // the first pass a task diff always gets; a fix that answers with evidence and no commit is re-reviewed as a rebuttal, with no range.
-  // Whether a reply added a commit is never taken from its own start_head: it is read against a head the program holds. For the
-  // task, that is the head its worktree was accepted at: the tip this run tracks, or, for the task a stop left partial (the setup's
-  // head then already holds the cut-off attempt's commits), the last done task of that worktree, else the worktree's base. A reply
-  // whose commit is another head gets a diff review from the accepted head, whatever start it names (#923: a start above it would hide commits). For a fix, it is the head just reviewed.
+  // A task that ends with no new commit (an issue comment, a check that needs no edit) has no diff, and a review of the
+  // empty range head..head is refused. Its first pass is a no-change check instead: a reviewer judges from the task
+  // file whether a tracked file must change (then it is not done) and confirms each required output. reviewer-lite
+  // reads only a bounded diff, so such reviews run on reviewer.
+
+  // Whether a reply added a commit is read against a head the program holds, never its own start_head: for a task, the
+  // head its worktree was accepted at (for a partial task, the last done task of that worktree, else the worktree's
+  // base); for a fix, the head just reviewed. A start above it would hide commits.
   const lastDone = taskLog.filter(d => (B ? d.branch === B.name : !present(d.branch))).pop()
   const tracked = partial === t.n ? null : B ? branchTips[B.name] : tip
   const accepted = present(tracked) ? tracked : lastDone && present(lastDone.commit) ? lastDone.commit : B ? B.base : setup.base_sha
-  // An honest reply starts at the accepted head and keeps its own spelling of it; any other start would hide the commits beneath it.
   const taskStart = sameSha(impl.start_head, accepted) ? impl.start_head : accepted
   const liteLane = t.risk === 'mechanical' || t.risk === 'low'
   // False until the task's diff had its first pass; a task with no commit has none to review.
   let diffReviewed = !sameSha(impl.commit, accepted)
-  // #932: a no-change check names the head the program holds (the fuller spelling), never the reply's short or uppercase one.
-  // #992: IMPL's pattern now refuses such a spelling, so no IMPL reply reaches this with one; kept for a reply the harness let through.
+  // A no-change check names the head the program holds (the fuller spelling), never the reply's short or uppercase one.
+  // IMPL's pattern refuses such a spelling, so no IMPL reply reaches this with one; kept for a reply the harness let
+  // through.
   let held = diffReviewed ? impl.commit : fuller(accepted, impl.commit)
   // reviewer-lite first-passes only a task whose declared lane is mechanical or low (its lane verification mode).
   let reviewer = liteLane && diffReviewed ? 'reviewer-lite' : 'reviewer'
-  // #992: a task that first ended with no commit is judged on outputs that may be no file, and its later reviews repeat those findings: fileless.
   const fileless = !diffReviewed
   const diffReview = (range, label, answers) => readReview(`${start}
 ${reviewer === 'reviewer-lite' ? `lane: ${t.risk}. ` : ''}Review the diff of task ${t.n} only: ${range} (and the task file ${t.file} as its contract). ${KNOW} Report Important or Critical correctness defects and unmet task requirements only, each with a concrete failing input. No style notes. Do not edit anything.${answers ? ` The task first ended with no commit, and this diff answers these findings: ${JSON.stringify(answers)}; report any still unresolved.` : ''}`, { label, phase: 'Tasks', agentType: reviewer, schema: FINDINGS }, { fileless })
-  // Tracked files only: an untracked file (a build output, a tool's cache) is no edit of the task, and a waiting task's kept edits are not this task's.
+  // Tracked files only: an untracked file (a build output, a tool's cache) is no edit of the task, and a waiting task's
+  // kept edits are not this task's.
   const HEAD_UNMOVED = h => `First confirm that git -C ${TW} rev-parse HEAD prints ${h} and git -C ${TW} status --porcelain --untracked-files=no prints nothing: another head or an uncommitted change to a tracked file is a finding.${waiting ? `${WAITS}those are not a finding.` : ''}`
   const CONFIRM = `with read-only commands that change nothing, the task file's own verification commands or a lookup (run a gh command as ${UNSET}gh ...)`
   let review = diffReviewed ? await diffReview(`git -C ${TW} diff ${taskStart}..${impl.commit}`, `review-${t.n}`) : await readReview(`${start}
@@ -2323,22 +2315,22 @@ Re-review only these previously reported findings for task ${t.n} against the fi
   else tip = impl.commit
   if (partial === t.n) partial = undefined
 }
-// #923: when every task ended with no commit, the branch holds nothing to review, verify or land: the final review would get an
-// empty range and the pull request no commit. Read from the done record (no_change), which a resume carries, never from a head. The tasks' outputs are in place and recorded; the owner closes the issue.
+// When every task ended with no commit, the branch holds nothing to review, verify or land: the final review would get
+// an empty range and the pull request no commit. Read from the done record (no_change), which a resume carries, never
+// from a head. The tasks' outputs are in place and recorded; the owner closes the issue.
 if (plan.tasks.length && plan.tasks.every(t => taskLog.some(d => d.n === t.n && d.no_change === true))) {
   return stop('no-changes', { details: `every task ended with no commit: the branch ${setup.branch} holds nothing to review or land. The tasks' outputs are in place; close the issue by hand, or amend the plan if a file change was meant` })
 }
 
 // ---------------- Final review ----------------
 phase('Final review')
-// #747: with review_sizing on, a delivery of more tasks than one chunk holds is split for review only above this many changed lines.
 const SIZED_CHUNK_LINES = 1500
 let groups = []
 let sizedWhole = false
 const PER = 3
 for (let i = 0; i < plan.tasks.length; i += PER) groups.push(plan.tasks.slice(i, i + PER))
 chunked = groups.length > 1
-// A resume that skips the final review reports the shape it had (#747).
+// A resume that skips the final review reports the shape it had.
 if ((SKIP_REVIEW || SKIP_FINAL) && finalReviewed && finalReviewed.whole === true) chunked = false
 if (SKIP_FINAL) log(`final review passed at ${finalReviewed.head}; skipped`)
 if (!SKIP_REVIEW && !SKIP_FINAL) {
@@ -2346,22 +2338,24 @@ if (!SKIP_REVIEW && !SKIP_FINAL) {
   const lost = await renew('final-review', 'Final review')
   if (lost) return lost
 }
-// #1370: the first round reviews the whole delivery; a later one reviews only what changed since the commit the last review read, with the
-// findings still open re-checked at the head. Findings the bound cut from the cont (dropped) can only be found again by a full review.
+// The first round reviews the whole delivery; a later one reviews only what changed since the commit the last review
+// read, with the findings still open re-checked at the head. Findings the bound cut from the cont (dropped) can only be
+// found again by a full review.
 if (dropped > 0) log(`final review: ${dropped} open finding(s) were not kept in cont: this round reviews the whole delivery`)
 const SCOPED = LANE === 'standard' && reviewRounds > 0 && reviewed !== null && dropped === 0
 // The round's end commit: the tip when the run knows one, else the head a reviewer of the round read.
 const endOf = replies => (isCommit(tip) ? normSha(tip) : ((replies.find(r => isEntry(r) && isCommit(r.head)) || {}).head || null))
 const FINAL_SCHEMA = isCommit(tip) ? FINAL_FINDINGS : FINDINGS_HEAD
 const HEAD_ASK = ` Return head: the full sha git -C ${W} rev-parse HEAD prints, run before you read anything.`
-// #993: shared by the chunk, the integration and the scoped review.
+// Shared by the chunk, the integration and the scoped review.
 const VERIFY_OWNED = `The verify step runs the declared verification: run only the targeted tests a finding needs, never the whole suite.`
 const TWO_AXES = `Two axes: correctness (real defects with a concrete failing input) and conformance (each task and each acceptance criterion of kind code is met, with the test or command that shows it).`
-// The binding sentence of a round the owner admitted after the cap; an oscillating resume says its own (DECIDED) instead.
+// The binding sentence of a round the owner admitted after the cap; an oscillating resume says its own (DECIDED).
 const CAP_BINDING = osc !== null ? '' : capDecision !== null ? ` The owner decided how to settle the findings left open at the review round cap, and the decision is binding: ${JSON.stringify(capDecision)}.`
   : CAP_KEPT && amendApplied ? ' The owner amended the plan after the review round cap (plan.md, Amendments): it is binding.' : ''
 const AMENDED = ' The owner amended the plan since the last review (plan.md, Amendments): grade the head against the amended tasks and acceptance criteria, not only the commits above.'
-// #1370: an oscillating resume's decision binds the scoped reviewer too, which judges the disputed behavior again before any fix wave does; the cap's own sentence is CAP_BINDING.
+// An oscillating resume's decision binds the scoped reviewer too, which judges the disputed behavior again before any
+// fix wave does; the cap's own sentence is CAP_BINDING.
 const SCOPED_BINDING = osc !== null ? (oscDecision !== null ? ` The owner decided the approach for ${osc.file}, and the decision is binding: ${JSON.stringify(oscDecision)}.` : amendApplied ? ` The owner amended the plan for ${osc.file} (plan.md, Amendments): it is binding.` : '') : CAP_BINDING
 let finalFindings = []
 let closedNums = []
@@ -2388,7 +2382,6 @@ if (REVIEW_SIZING && chunked) {
   let sizeReply = null
   let sizeWhy = 'no usable reply'
   try {
-    // optional call: a failed measurement is recovered here and must not be reported as a dead agent (deliver-batch's breaker reads those).
     sizeReply = await call(`${CTX}
 Measure the delivery's diff size. Run git -C ${W} fetch origin, then git -C ${W} diff --shortstat ${RANGE}${declared(plan).map(b => `, then git -C ${b.worktree} diff --shortstat ${b.base}...${b.name}`).join('')}. Each prints at most one line (N files changed, X insertions(+), Y deletions(-)); an empty output or a missing count is 0. Return measured true and changed_lines: the sum of the insertions and deletions over those lines. If any of these commands exits non-zero or prints an error, return measured false and no changed_lines; never return a partial sum. Run nothing else and change nothing.
 ${RULES}`, { label: 'diff-size', phase: 'Final review', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: SIZE_SCHEMA }, true)
@@ -2417,8 +2410,9 @@ if (finals.some(r => !r)) {
   await codexP
   return stop('final-review', { details: `a final reviewer ${silence(...groups.map((g, gi) => `final-${gi + 1}`))}`, finals })
 }
-// #967: the integration review reads only the chunk verdicts, so it runs beside Codex. It counts as dead only where its reply is read:
-// a Codex stop leaves it unused, and still running unread, on purpose: waiting for it would cost wall time for nothing.
+// The integration review reads only the chunk verdicts, so it runs beside Codex. It counts as dead only where its reply
+// is read: a Codex stop leaves it unused, and still running unread, on purpose: waiting for it would cost wall time for
+// nothing.
 const integP = chunked ? readReview(`${CTX}
 ${PLAN_REF} Integration review. The delivery was reviewed in ${groups.length} chunks by task; their verdicts: ${JSON.stringify(finals)}. Read the full changed-file list (git -C ${W} diff --stat ${RANGE}) and the head tree as needed.${EXTRA_RANGES()} ${KNOW} Check the interfaces between chunks and grade every acceptance criterion: ${ACS}. ${VERIFY_OWNED} ${CRITICAL_MEANS} Report Important or Critical findings only.${isCommit(tip) ? '' : HEAD_ASK}`, { label: 'final-integration', phase: 'Final review', agentType: 'reviewer', schema: FINAL_SCHEMA }, { optional: true }) : null
 if (integP) integP.catch(() => {})
@@ -2443,8 +2437,9 @@ reviewRounds++
 dropped = 0
 markReviewed(endOf(finals.concat(integ ? [integ] : [])))
 }
-// #924: what an earlier stop left open joins the fresh findings, a repeat (same file and summary) once. #1370: a scoped reviewer drops the ones it closed.
-// A reported finding stands for one carried finding only: two carried ones alike in file and summary but not in failing input are two findings, and a repeat of one is not the other.
+// What an earlier stop left open joins the fresh findings, a repeat (same file and summary) once; a scoped reviewer
+// drops the ones it closed. A reported finding stands for one carried finding only: two carried ones alike in file and
+// summary but not in failing input are two findings, and a repeat of one is not the other.
 const taken = new Set()
 const fromStop = carried.filter((c, i) => {
   if (closedNums.includes(i + 1)) return false
@@ -2453,9 +2448,10 @@ const fromStop = carried.filter((c, i) => {
   return j < 0
 })
 if (fromStop.length) log(`final review: ${fromStop.length} finding(s) carried from the earlier fix-wave-review stop`)
-// #1386: a scoped round blocks only on a critical finding or one naming an unmet criterion. Closures are reconciled above, and a report that stands for
-// an open carried finding blocks; each other report is blocking or filed as a follow-up. This runs before any severity filter, so a minor one is filed too.
-// A finding that cannot be filed (no file or no full commit) is handled as before: non-minor blocks, minor is dropped. One already filed or pending is not filed again.
+// A scoped round blocks only on a critical finding or one naming an unmet criterion. Closures are reconciled above, and
+// a report that stands for an open carried finding blocks; each other report is blocking or filed as a follow-up,
+// before any severity filter, so a minor one is filed too. A finding that cannot be filed (no file or no full commit)
+// blocks when non-minor and is dropped when minor.
 const triage = async list => {
   const blocking = []
   const toFile = []
@@ -2478,8 +2474,9 @@ const triage = async list => {
 }
 if (SCOPED) finalFindings = finalFindings.filter((f, at) => taken.has(at)).concat(await triage(finalFindings.filter((f, at) => !taken.has(at))))
 finalFindings = finalFindings.concat(fromStop)
-// #1370: a round that leaves findings open at the cap stops here, before any fix wave, unless the owner brought something new to this resume.
-// Set once a fix wave starts away from the reviewed head: the passed marker then never records the tip, below which lie commits no review has read.
+// A round that leaves findings open at the cap stops here, before any fix wave, unless the owner brought something new
+// to this resume. Set once a fix wave starts away from the reviewed head: the passed marker then never records the tip,
+// below which lie commits no review has read.
 let gapSeen = false
 const ownerNew = capDecision !== null || oscDecision !== null || amendApplied
 if (!finalFindings.length) capMark = null
@@ -2490,23 +2487,18 @@ if (finalFindings.length && reviewRounds >= ROUND_CAP && !ownerNew) {
   return stop('fix-wave-review', { round_cap: capMark, fix_waves: fixWaves })
 }
 if (finalFindings.length) {
-  // At most MAX_WAVES waves. The second runs only when the first re-review's findings all narrow the first round (same kind of defect on
-  // another path); a new kind stops. The third (#924) runs only when the second re-review's findings all narrow, all are important
-  // (none critical, none without a severity) and they are no more than the first re-review left. #950: a finding that is not marked
-  // narrowing (new, or with no relation: unknown is new) counts as narrowing in both admissions when its file is one the wave just
-  // re-reviewed changed, a regression inside the fix's own diff; with no file, or in a file the fix left alone, it stops as before.
-  // #1000: a fix that draws a new finding where it was made. The signal: a re-review's finding not marked narrowing, in a file the wave
-  // just re-reviewed changed (inFix, as #950 reads it) and the round before also had a finding in. Its first firing on a file changes
-  // nothing about which wave runs (#950 still admits or refuses it); the wave that follows gets that file's history (the earlier rounds'
-  // findings on it, each fix's notes and range) with the request to change the approach or rebut, and the class sentence leaves that
-  // file out. Its second firing on the same file stops at fix-wave-review with oscillating: { file, rounds }, whatever wave was left,
-  // and deliver-batch hands the issue to the owner. That stop keeps the marker in cont, so the count outlives the run: a resume starts
-  // that file at its stopped count, gives its first wave and that wave's re-review the history and the owner's decision, and stops again
-  // on the next firing there. The #940 bound (diverging) still counts waves across runs, and a stop may carry both. A wave's notes are
-  // in a file's history only when the wave changed that file alone: otherwise they say nothing about it, and the range does.
-  // Waves after the first get only the first-round findings that may still be open: those in a file a current finding names, and all
-  // of them when a finding (theirs or a current one) names no file or a current narrowing finding is in a file no first-round finding
-  // named (its parent cannot be told). Every wave is told to change only what its findings need.
+  // At most MAX_WAVES waves. The second runs only when the first re-review's findings all narrow the first round (same
+  // kind of defect on another path); a new kind stops. The third runs only when the second's findings all narrow, are
+  // all important and no more than the first left. A finding not marked narrowing counts as narrowing when its file is
+  // one the wave just re-reviewed changed: a regression inside the fix's own diff.
+
+  // A fix that draws a new finding where it was made is the oscillation signal. Its first firing gives the next wave
+  // that file's history with the request to change the approach or rebut; its second stops at fix-wave-review with
+  // oscillating: { file, rounds }, which survives in cont so a resume starts at the stopped count. The diverging bound
+  // still counts waves across runs.
+
+  // Waves after the first get only the first-round findings that may still be open, all of them when a finding names no
+  // file or its parent cannot be told. Every wave is told to change only what its findings need.
   const MAX_WAVES = 3
   const rounds = [finalFindings]
   const fixes = []
@@ -2515,24 +2507,25 @@ if (finalFindings.length) {
   const fired = RESUMED ? { [RESUMED.file]: 2 } : {}
   let turning = RESUMED ? [RESUMED.file] : []
   const onFile = (list, file) => list.filter(f => fileOf(f) === file).slice(0, CARRY_MAX).map(f => clip(String(f.summary)))
-  // The kept history ends with the findings its stop left open: this run's first round holds them again, so that entry gives way to it.
   const before = file => (RESUMED && RESUMED.file === file ? RESUMED.rounds.slice(0, RESUMED.rounds.length && own(RESUMED.rounds[RESUMED.rounds.length - 1], 'round') ? -1 : undefined) : [])
   const historyOf = file => {
     const kept = before(file)
     const base = kept.filter(x => own(x, 'wave')).length
     return kept.concat(fixes.flatMap((x, j) => [{ round: base + j, findings: onFile(rounds[j], file) }, { wave: base + j + 1, ...(x.files.length === 1 && x.files[0] === file && x.notes ? { notes: clip(x.notes) } : {}), range: x.range }]))
   }
-  // What the owner brought to the resume: the decision, else the amend. Every wave and re-review of this run whose findings name the file gets it with the history.
   const DECIDED = !RESUMED ? '' : oscDecision !== null ? ` The owner decided the approach for ${RESUMED.file}, and the decision is binding: ${JSON.stringify(oscDecision)}.` : amendApplied ? ` The owner amended the plan for ${RESUMED.file} (plan.md, Amendments): it is binding.` : ''
   const FOLLOW = oscDecision !== null ? 'follow that decision' : 'follow that amendment'
   let waveFindings = finalFindings
-  // #1386: a scoped round's re-review blocks on a report that stands for one of the wave's findings (one each: its exact repeat, else one in its file), a critical one and one
-  // naming an unmet criterion; the other reports are filed. The full round's re-review keeps its rule.
+  // A scoped round's re-review blocks on a report that stands for one of the wave's findings (one each: its exact
+  // repeat, else one in its file), a critical one and one naming an unmet criterion; the other reports are filed. The
+  // full round's re-review keeps its rule.
   const rereviewed = async (rv, wave) => {
     const reports = rv.findings.filter(isEntry)
-    // Each wave finding is stood for by at most one report, and each report stands for at most one: an exact repeat first, then, for a finding left without one,
-    // a report in its file (marked narrowing first), whatever its relation, since a reviewer may reword a finding it still holds. A minor report that names no
-    // criterion and is not marked narrowing is a note of its own, not a rewording of a blocker: it never stands for one, and triage files it.
+    // Each wave finding is stood for by at most one report, and each report stands for at most one: an exact repeat
+    // first, then, for a finding left without one, a report in its file (marked narrowing first), whatever its
+    // relation, since a reviewer may reword a finding it still holds. A minor report that names no criterion and is not
+    // marked narrowing is a note of its own, not a rewording of a blocker: it never stands for one, and triage files
+    // it.
     const stands = new Map()
     const open = []
     wave.forEach((w, i) => {
@@ -2547,8 +2540,9 @@ if (finalFindings.length) {
       const j = same.find(at => reports[at].relation === 'narrowing')
       if (j !== undefined || same.length) stands.set(j !== undefined ? j : same[0], w)
     }
-    // A report that stands for a wave finding blocks, as an important or critical one always did. A minor repeat of a critical finding or one naming a criterion
-    // keeps the finding's severity and ac: it is still open until a review resolves it. A minor repeat of any other finding is dropped, as it was.
+    // A report that stands for a wave finding blocks, as an important or critical one always did. A minor repeat of a
+    // critical finding or one naming a criterion keeps the finding's severity and ac: it is still open until a review
+    // resolves it. A minor repeat of any other finding is dropped.
     const held = [...stands.keys()].sort((x, y) => x - y).flatMap(at => {
       const f = reports[at]
       const w = stands.get(at)
@@ -2565,7 +2559,6 @@ if (finalFindings.length) {
     const rvLabel = k === 1 ? 'fix-wave-review' : `fix-wave-review-${k}`
     log(`final review: ${waveFindings.length} blocking findings, fix wave ${k}`)
     fixWaves++
-    // #1000: a first-round finding stays in the prompt while a current finding may still be about it; a turning file's are in its history.
     const orphan = waveFindings.some(f => f.relation === 'narrowing' && fileOf(f) && !finalFindings.some(g => fileOf(g) === fileOf(f)))
     const unplaced = orphan || waveFindings.some(f => !fileOf(f))
     const resumedHere = !!RESUMED && (k === 1 || waveFindings.some(f => fileOf(f) === RESUMED.file))
@@ -2575,12 +2568,13 @@ if (finalFindings.length) {
     const settled = finalFindings.filter(f => !turning.includes(fileOf(f))).length - stillOpen.length
     const classWide = k === 3 && waveFindings.some(f => !turning.includes(fileOf(f)))
     const fw = await call(`${CTX}\n${PLAN_REF} Fix these final-review findings, each real defect with a regression test, then commit: ${JSON.stringify(waveFindings)}.${k === 1 && fromStop.length ? ` The last ${fromStop.length} were left open by an earlier run's fix waves and may repeat the ones before them: check each against the current head, and explain one that no longer holds in notes; when you commit nothing, return commit equal to start_head.` : ''}${k === 1 ? CAP_BINDING : ''}${k >= 2 && (stillOpen.length || !orphan) ? ` They ${regressions ? 'follow the fix of' : 'narrow'} ${stillOpen.length ? 'these' : 'the'} first-round findings${regressions ? ' (any not marked narrowing is a defect in a file the previous fix wave changed)' : ''}${stillOpen.length ? `: ${JSON.stringify(stillOpen)}.${settled ? ` The other ${settled} ${settled === 1 ? 'is' : 'are'} settled.` : ''}` : '; none of those is still open.'}` : ''}${turning.map(file => ` ${file} has now been judged more than once in the same place: the fix of one finding drew the next.${decided(file)} Its history, oldest first: ${JSON.stringify(historyOf(file).slice(-ROUNDS_MAX))}. Read each range (git -C ${W} diff <range> -- ${file}), then ${decided(file) ? FOLLOW : 'change the approach or rebut the finding with evidence in notes'}; do not move the same lines back.`).join('')}${classWide ? ` Fix the class of defect: enumerate every path of the same kind as each reported one and close them all, not only the reported instance.${turning.length ? ` Not in ${turning.join(' or ')}: fix only what is reported there.` : ''}` : ''} If a finding is wrong, explain with evidence in notes. Change only what ${classWide ? 'closing that class needs, its' : 'fixing these findings needs, their'} regression tests included. ${OWN_TESTS} ${COMMIT_SCOPE} ${hasBranches ? IMPL_RETURN_AT(W) : IMPL_RETURN} Also return changed_files: the output lines of ${CHANGED_CMD('<start_head>..<commit>')}, run alone after your last commit.${hasBranches ? ` A finding on a declared branch is fixed in that branch's worktree and pushed with its push form. Return branch_heads: one {name, head} per declared branch (${declared(plan).map(b => b.name).join(', ')}), head being git -C <its worktree> rev-parse HEAD after your last commit.` : ''}\n${RULES}`, { label: fwLabel, phase: 'Final review', agentType: 'implementer', model: 'sonnet', schema: withChanged(hasBranches ? FIX_WAVE_IMPL : IMPL) })
-    // #1370: a stop after a review verdict keeps the findings still open, a wave that answered and failed included: the next round re-checks
-    // each against the head. An answered failed wave left no oscillating marker, so that goes.
+    // A stop after a review verdict keeps the findings still open, a wave that answered and failed included: the next
+    // round re-checks each against the head. An answered failed wave left no oscillating marker, so that goes.
     if (fw) { oscPending = false; capPending = false; capMark = null }
     const spent = details => {
       keep(waveFindings)
-      // A wave after the first ran on the findings its run's own re-review raised, not on the ones the marker was kept for.
+      // A wave after the first ran on the findings its run's own re-review raised, not on the ones the marker was kept
+      // for.
       if (fw || k > 1) osc = null
       if (fw && carried.length) log(`fix-wave: ${carried.length} open finding(s) kept in cont after a wave that failed`)
       return stop('fix-wave', { fw, finalFindings: waveFindings, fix_waves: fixWaves, ...(details ? { details } : {}) })
@@ -2593,11 +2587,11 @@ if (finalFindings.length) {
       if (!sameSha(h, branchTips[b.name])) collected.push(`git -C ${b.worktree} diff ${branchTips[b.name]}..${h}`)
       branchTips[b.name] = h
     }
-    // The head the last review read: a wave's re-review reads only start_head..commit, so it may advance the reviewed head only from there. A wave that
-    // started elsewhere leaves a gap, and the reviewed head stays below it: the next wave starts at that wave's commit, never at the reviewed head.
+    // The head the last review read: a wave's re-review reads only start_head..commit, so it may advance the reviewed
+    // head only from there. A wave that started elsewhere leaves a gap, and the reviewed head stays below it: the next
+    // wave starts at that wave's commit, never at the reviewed head.
     const waveBase = reviewed ? reviewed.head : null
     tip = fw.commit
-    // A wave that had carried findings and committed nothing found them closed already: its re-review reads the head, with no diff range.
     const idle = k === 1 && fromStop.length > 0 && sameSha(fw.commit, fw.start_head) && !collected.length
     if (!idle) carried = []
     const rv = await readReview(`${CTX}\nRe-review these findings against ${idle ? `the current head of ${W}${hasBranches ? ` and of each declared branch's worktree (${declared(plan).map(b => `${b.name} in ${b.worktree}`).join(', ')})` : ''} (the fix wave committed nothing, so there is no diff to read). Nothing changed since these were raised, so each finding stands unless the code at the head shows it does not hold. The notes are the implementer's claims: check each against the code and never clear a finding on the notes alone` : `the fix (${span(fw)}${collected.length ? ` and ${collected.join(' and ')}` : ''})`}; notes: ${fw.notes}. Findings: ${JSON.stringify(waveFindings)}.${k === 1 && fromStop.length && !idle ? ` The last ${fromStop.length} were left open by an earlier run and may repeat the ones before them: check each against the head, not only the diff.` : ''}${k === 1 && CAP_BINDING ? `${CAP_BINDING} Report no finding that only disputes it.` : ''}${resumedHere ? `${DECIDED ? `${DECIDED} Report no finding that only disputes it.` : ''} ${RESUMED.file} was judged more than once in the same place before this fix; its history, oldest first: ${JSON.stringify(historyOf(RESUMED.file).slice(-ROUNDS_MAX))}.` : ''} ${CRITICAL_MEANS}${SCOPED ? ` ${SCOPED_BLOCKS} ${COMMIT_ASK(fw.commit)}` : ''} Report any still unresolved and any new Important or Critical defect, setting relation on each finding you still report: narrowing when it is the same kind of defect as one above, reached on another path, input or call site; else new. Unsure is new.${idle ? '' : ` Also return changed_files: the output lines of ${CHANGED_CMD(`${fw.start_head}..${fw.commit}`)}, run alone.`}`, { label: rvLabel, phase: 'Final review', agentType: 'reviewer', schema: withChanged(SCOPED ? withItems(FINDINGS, SCOPED_ITEM) : FINAL_FINDINGS) })
@@ -2648,7 +2642,6 @@ if (present(tip) && !gapSeen) finalReviewed = { head: tip, ...branchSnap(), ...(
 }
 }
 
-// #1386: no delivery passes Verify while a follow-up filing is unconfirmed. A resume that skipped the final review passes this gate too.
 if (pending.length) {
   const again = pending
   pending = []
@@ -2663,22 +2656,20 @@ const VERIFY = {
   properties: { head: FULL_SHA, clean: { type: 'boolean' }, results: { type: 'array', items: { type: 'object', properties: { id: { type: 'string' }, status: { type: 'string', enum: ['pass', 'fail', 'skipped'] }, summary: { type: 'string' }, outside_diff: { type: 'boolean' }, no_slot: { type: 'boolean' } }, required: ['id', 'status', 'summary'] } }, pictures: { type: 'array', items: { type: 'object', properties: { kind: { type: 'string', enum: ['before', 'after'] }, path: { type: 'string' } }, required: ['kind', 'path'] } } },
   required: ['head', 'clean', 'results'],
 }
-// #1139: the before and after pictures a verification command wrote, kept when well formed.
+// The before and after pictures a verification command wrote, kept when well formed.
 const picturesOf = v => (v && Array.isArray(v.pictures) ? v.pictures.filter(p => isEntry(p) && (p.kind === 'before' || p.kind === 'after') && typeof p.path === 'string' && p.path.trim()).map(p => ({ kind: p.kind, path: p.path })) : [])
-// #1383: each declared argv runs behind verify-slot, which holds one of the host's verify slots while the command runs; the declared entries stay the contract.
 const SLOT_WAIT_SECONDS = 600
 const SLOT_ATTEMPTS = 12
-// #1434: the live-fault lane's runs wait ahead of every ordinary run for the host's verify slot (verify-slot --live), never preempting one.
 const slotted = e => ({ ...e, argv: ['verify-slot', 'run', '--wait-limit', String(SLOT_WAIT_SECONDS), ...(LANE === 'live' ? ['--live'] : []), '--', ...e.argv] })
 const verifyBodyFor = entries => `Run the project's declared verification once on the worktree head, in the foreground, each command with a Bash timeout of up to 60 minutes: ${JSON.stringify(entries.map(slotted))}. Run each argv with <worktree>/<its cwd> as working directory. Each argv runs its declared command inside one of the host's verify slots: verify-slot run holds the slot while the command runs and gives it back when it ends. An attempt that prints verify-slot: no verify slot came free within ${SLOT_WAIT_SECONDS}s; nothing ran and exits 75 ran nothing and does not count as a run of that command: run the same argv again, up to ${SLOT_ATTEMPTS} attempts in all, and after the last return that id as fail with the summary no verify slot came free in ${SLOT_ATTEMPTS} attempts and no_slot: true (no_slot is true on that result only, never on a command that ran). Every other exit is the command's own result. If an entry has when_changed globs and none of the files changed (git -C ${W} diff --no-renames --name-only ${RANGE}, so a rename lists both paths) match, mark it skipped with its skip_reason. Return head (git -C ${W} rev-parse HEAD, the full sha), clean (git -C ${W} status --porcelain is empty, checked before and after the runs) and one result per id; for failures, summarize the failing tests or errors precisely. On each failure also return outside_diff: true only when no failing test file and no erroring file is in that git diff --name-only list, else false. When a command's output names image files it wrote as before or after pictures of the change, return them as pictures, one {kind: before or after, path: its absolute path} each; otherwise return no pictures. Do not change any file.
 ${RULES}`
-// #1383: a result whose command never ran, because no slot came free in every attempt, is no test failure: nothing below fixes or reruns it.
 const noSlot = v => !!v && Array.isArray(v.results) && v.results.some(r => isEntry(r) && r.status === 'fail' && r.no_slot === true)
 const verifyBody = verifyBodyFor(setup.verification)
 const verifyPrompt = `${CTX}\n${verifyBody}`
-// The first verification also renews the claim (#716); the reruns do not.
+// The first verification also renews the claim; the reruns do not.
 const verifyFirst = `${CTX}\n${RENEW_FIRST}\n${verifyBody}`
-// Every declared id needs exactly one result; skipped only where the contract gives when_changed globs; and a clean tree.
+// Every declared id needs exactly one result; skipped only where the contract gives when_changed globs; and a clean
+// tree.
 const verifyProblems = v => {
   if (!v) return [{ id: '?', summary: 'verification returned nothing' }]
   const out = v.results.filter(r => r.status === 'fail')
@@ -2690,8 +2681,8 @@ const verifyProblems = v => {
   if (!v.clean) out.push({ id: '?', summary: 'the worktree has uncommitted changes, so the verified tree is not the pushed head' })
   return out
 }
-// #741: `git diff -b --ignore-blank-lines` and the extension allow-list are a prefilter only. Carrying passes
-// forward also needs the reviewer's attestation, because whitespace inside a literal can change behaviour.
+// `git diff -b --ignore-blank-lines` and the extension allow-list are a prefilter only. Carrying passes forward also
+// needs the reviewer's attestation, because whitespace inside a literal can change behaviour.
 const WS_INSENSITIVE = /\.(c|cc|cpp|cxx|h|hh|hpp|cs|css|scss|less|dart|go|java|js|jsx|mjs|cjs|ts|tsx|mts|cts|json|kt|kts|rs|scala|swift|php|html|xml|vue|svelte|sql|proto)$/i
 const WS_CHECK = { type: 'object', properties: { whitespace_exit: { type: 'integer' }, changed_paths: STRS }, required: ['whitespace_exit', 'changed_paths'] }
 const WS_REVIEW = { ...FINDINGS, properties: { ...FINDINGS.properties, whitespace_insignificant: { type: 'boolean' }, whitespace_evidence: { type: 'string' } }, required: [...FINDINGS.required, 'whitespace_insignificant', 'whitespace_evidence'] }
@@ -2716,13 +2707,11 @@ git -C ${W} diff --no-renames --name-only ${f.start_head} ${f.commit}
 Return its output lines as changed_paths. Run nothing else.
 ${RULES}`
 const wsAsk = ws => ` The fix changes only whitespace amounts and blank lines, in ${ws.changed_paths.map(p => p.trim()).join(', ')}. Also judge whether each of its whitespace changes is insignificant: outside every string, template, character and regex literal, heredoc and raw block, and in no construct where whitespace changes behaviour or output. Return whitespace_insignificant true only when you read every hunk and that holds, with whitespace_evidence naming each changed path and why it holds there; otherwise false, with whitespace_evidence naming the hunk where it matters.`
-// #972: a failure the clerk places wholly outside the branch's changed files is rerun once, the failed ids only, before any fix step.
-// The rerun is each failed id's whole command, never a selection of its tests: a test the branch made order-dependent passes alone, and
-// a selection that matches nothing passes too.
-// A result that passes there is a pass that keeps the first failure as flaky; one that fails again stays the first failure.
-// Each verification gets at most this one rerun, and its reply counts only at the same clean head.
+// A failure the clerk places wholly outside the branch's changed files is rerun once, the failed ids only, before any
+// fix step. The rerun is each failed id's whole command, never a selection of its tests: a test the branch made
+// order-dependent passes alone. A pass there keeps the first failure as flaky; one that fails again stays the first
+// failure. A reply counts only at the same clean head.
 const flakySeen = []
-// True when the last verification's one rerun ran at the same clean head and a failed id did not pass there: the failure is not a flake.
 let rerunFailed = false
 const noteFlaky = rs => { for (const r of Array.isArray(rs) ? rs : []) if (isEntry(r) && present(r.flaky) && !flakySeen.some(f => f.id === r.id && f.summary === r.flaky)) flakySeen.push({ id: r.id, summary: r.flaky }) }
 const rerunOnce = async (v, n) => {
@@ -2745,7 +2734,6 @@ const rerunOnce = async (v, n) => {
 }
 const FIX_OR_UNRELATED = { ...IMPL, properties: { ...IMPL.properties, outside_diff: { type: 'array', items: { type: 'object', properties: { file: { type: 'string' }, why: { type: 'string' } }, required: ['file', 'why'] } }, unrelated: { type: 'object', properties: { test: { type: 'string' }, evidence: { type: 'string' } }, required: ['test', 'evidence'] } } }
 let verify = null
-// The awaiting-look stop of a marked delivery: its pull request is open and its head pushed and current; it holds no lock and merges nothing.
 const lookStop = (pr, sha) => {
   lookAt = { pr, head: sha }
   // A fix answer stops here before its verify has run: the cont's own verified record stays and speaks for the stop.
@@ -2753,20 +2741,21 @@ const lookStop = (pr, sha) => {
   const shown = picturesOf(verify || verified)
   return { ...stop('awaiting-look', { issue: ISSUE, pr, head: sha, covers: COVERS, ...(shown.length ? { pictures: shown } : {}), ...(flakySeen.length ? { flaky: flakySeen } : {}), ...(outsideFixes.length ? { outside_fixes: outsideFixes } : {}), ways: LOOK_WAYS }), reason: lookWhy ? `${lookWhy}; ${LOOK_REASON}` : LOOK_REASON }
 }
-// #1008: the minutes a checks poll waits for the first check to be reported on a head (gh pr checks --watch returns at once while
-// none is, so quick pending answers would spend the pending waits before the runs register); TRAIN_NO_CHECKS_MIN in deliver-batch.js,
-// and the wait sentence is the same text there.
+// The minutes a checks poll waits for the first check to be reported on a head (gh pr checks --watch returns at once
+// while none is, so quick pending answers would spend the pending waits before the runs register); TRAIN_NO_CHECKS_MIN
+// in deliver-batch.js, and the wait sentence is the same text there.
 const NO_CHECKS_MIN = 5
 // The pending polls a wait spends before it stops at checks-pending: the landing's and the look's alike.
 const PENDING_WAITS = 3
-// #1373: the checks the owner's look waits for. behind is the base's ancestry of the head read after the watch (the base can move during it).
 const LOOK_CHECKS = { type: 'object', properties: { state: { type: 'string', enum: ['passed', 'failed', 'pending'] }, head: FULL_SHA, behind: { type: 'boolean' }, required: STRS, passed: STRS, failing: STRS, pending: STRS, details: { type: 'string' } }, required: ['state', 'head', 'behind'] }
-// The look's own wait, never CHECKS_WAIT: it pushes nothing (a head another writer pushed is read as it is), answers from one read of the pull request made after the watch, and reports the base's ancestry of that head after that read.
+// The look's own wait, never CHECKS_WAIT: it pushes nothing (a head another writer pushed is read as it is), answers
+// from one read of the pull request made after the watch, and reports the base's ancestry of that head after that read.
 const LOOK_CHECKS_WAIT = (pr, sha) => `for the checks of PR #${pr} at the head ${sha}, changing nothing. 1. Wait once with ${UNSET}gh pr checks ${pr} --repo ${SLUG} --watch (Bash timeout up to 60 minutes): that is this poll's one deadline, so never run it a second time here, whether it returned early, returned with a check still pending or timed out; this program polls again. Its list can be partial, so its output is never the answer. While no check is reported on the pull request at all, do not answer yet: read ${UNSET}gh pr checks ${pr} --repo ${SLUG} --json name,bucket,link about once a minute, running alone timeout 60 tail -f /dev/null between two reads (this step's own wait, which ends by itself with exit 124), and answer pending only when none is reported ${NO_CHECKS_MIN} minutes after your first read. 2. Then read the pull request once: ${UNSET}gh pr view ${pr} --repo ${SLUG} --json headRefOid,statusCheckRollup. head is its headRefOid (the full sha), even when it is not ${sha}. Its rollup names no app, so read the app of each check run from the check runs of that same head, once: ${UNSET}gh api repos/${SLUG}/commits/<its headRefOid>/check-runs --paginate (each run's name, status, conclusion, started_at and app.id). Answer from these two reads alone and read nothing again. 3. Collect the required checks from both sources and never one in place of the other: the required_status_checks rules of ${UNSET}gh api repos/${SLUG}/rules/branches/${INT} (each with its integration_id when it names one) and the required_status_checks checks of classic branch protection, ${UNSET}gh api repos/${SLUG}/branches/${INT}/protection (each with its app_id when it names one). Return their union as required, always, even as an empty list (an empty list only when neither source lists any; a reply with no required is read as pending). 4. Classify from the reads of step 2: the check runs from the check-runs read (a run's app is its app.id), the commit statuses from the rollup (a status names no app, so it counts only for a required name that names none). Take the newest run (the latest started_at) of each pair of check name and app. A required check is judged by its runs of the app its rule or protection entry names (any app when it names none): a newer run of another app never replaces that app's run, so a green run of another app never hides a failed run of the required app and never counts as the required check passing. A check run whose status is not completed (COMPLETED in the rollup), or a status whose state is PENDING or EXPECTED, is pending; a check run whose conclusion is success, neutral or skipped (any case), or a status whose state is SUCCESS, has passed; any other conclusion, or a status whose state is FAILURE or ERROR, has failed. 5. Then run git -C ${W} fetch origin and return behind true when git -C ${W} merge-base --is-ancestor origin/${INT} <that headRefOid> fails (the base moved past the head, during the wait or before it), else false. Return state passed only when that read shows no check pending, failed or cancelled, with required and passed (every name passing at that head, of the required app for a required name); failed when any check failed, required or not, with failing (every failed name) and details (for each failed check, the last 60 lines of its failed log: ${UNSET}gh run view <run id> --repo ${SLUG} --log-failed); otherwise pending, with pending (the names still running) and the observed state when the wait ran out.`
 const namesOf = v => (Array.isArray(v) ? v.filter(x => typeof x === 'string' && x !== '') : [])
 // The required names no passing run covers (a passed reply that leaves one out proves nothing for it).
 const missingOf = ck => namesOf(ck.required).filter(x => !namesOf(ck.passed).includes(x))
-// A required list the reply omits is a list nobody read: a required build that has not reported is invisible in it, so a passed reply without one proves nothing.
+// A required list the reply omits is a list nobody read: a required build that has not reported is invisible in it, so
+// a passed reply without one proves nothing.
 const unproven = ck => !Array.isArray(ck.required) || missingOf(ck).length > 0
 const lookRead = ck => {
   const failing = namesOf(ck.failing)
@@ -2776,7 +2765,6 @@ const lookRead = ck => {
 }
 let lookPolls = 0
 let lookWaits = 0
-// One poll of the look wait: a stop row when the claim was lost, the reply is unusable or names another head, else null and the reply.
 const lookPoll = async (pr, sha, stale) => {
   const label = `look-checks-${++lookPolls}`
   const ck = await recall(() => call(`${CTX}
@@ -2788,7 +2776,6 @@ ${RULES}`, { label, phase: 'Ship', agentType: 'clerk', model: CLERK_MODEL, effor
   const row = lost || (!complete(ck, LOOK_CHECKS) ? stop('checks', { pr, checks: null }) : !sameSha(ck.head, sha) ? stop('head-moved', { pr, expected: sha, head: ck.head }) : null)
   return { ck, row }
 }
-// #1373: an answer re-ask shows the pull request head as it is, so it only waits for that head's checks: no push, no sync, no fix.
 const lookWaitStop = async (pr, sha) => {
   for (;;) {
     const { ck, row } = await lookPoll(pr, sha, false)
@@ -2803,14 +2790,15 @@ const lookWaitStop = async (pr, sha) => {
   }
 }
 const LOOK_HEAD_SCHEMA = { type: 'object', properties: { state: { type: 'string' }, head: { type: 'string' } }, required: ['state', 'head'] }
-// #1246: the verification of an approved head the verified record does not name: what the worktree reached, whether it is only clean merges of the integration branch past the verified head, and the verification.
 const LOOK_VERIFY = { ...VERIFY, properties: { ...VERIFY.properties, merge_only: { type: 'boolean' }, ahead: { type: 'boolean' } }, required: [...VERIFY.required, 'merge_only', 'ahead'] }
 const LOOK_POST_SCHEMA = { type: 'object', properties: { verdict: { type: 'string' }, comment_id: { type: 'integer' }, detail: { type: 'string' } }, required: ['verdict'] }
-// #1211: the owner's fix answer approves the head it was given for with one fix. The approval is recorded before the fix, only while the pull request is open and its head is
-// both the head the owner saw and the head the awaiting-look stop left; anything else posts nothing and stops at awaiting-look with the head just read.
+// The owner's fix answer approves the head it was given for with one fix. The approval is recorded before the fix, only
+// while the pull request is open and its head is both the head the owner saw and the head the awaiting-look stop left;
+// anything else posts nothing and stops at awaiting-look with the head just read.
 const FIX_WORDS_FILE = `${setup.plan_dir}/look-fix-words.txt`
-// #1425: the clerk has no Write tool, so the program encodes the owner's words (UTF-8, then base64: only A-Z a-z 0-9 + / =) and the clerk decodes them
-// into the file with one Bash command, byte for byte whatever quotes, dollar signs, backticks or newlines they hold.
+// The clerk has no Write tool, so the program encodes the owner's words (UTF-8, then base64: only A-Z a-z 0-9 + / =)
+// and the clerk decodes them into the file with one Bash command, byte for byte whatever quotes, dollar signs,
+// backticks or newlines they hold.
 const B64_DIGITS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
 const base64Utf8 = text => {
   const escaped = encodeURIComponent(text)
@@ -2825,7 +2813,6 @@ const base64Utf8 = text => {
   }
   return out
 }
-// A look marker the setup could not read is neither marked nor unmarked: a fix answer stops here, before the head check, the approval and the fix round.
 if (!LOOK_READ && LOOK_ANSWER && LOOK_ANSWER.answer === 'fix') return LOOK_UNREAD()
 if (LANE === 'live' && LOOK_ANSWER && (LOOK_ANSWER.answer === 'changes' || LOOK_ANSWER.answer === 'fix')) return liveBound('the owner asked for a change at the look, and a fix would be a second implementer')
 if (MARKED && LOOK_ANSWER && LOOK_ANSWER.answer === 'fix') {
@@ -2846,12 +2833,13 @@ It prints one JSON line. Return its verdict, comment_id and any detail. Run noth
 ${RULES}`, { label: 'look-post', phase: 'Ship', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: LOOK_POST_SCHEMA })
   if (!posted || posted.verdict !== 'posted') return stop('look-approve', { result: posted })
 }
-// #1139: the owner looked and asked for changes (#1211: or approved with one fix): one fix round on their words, then a fresh verify; a review that finds a defect stops.
+// The owner looked and asked for changes (or approved with one fix): one fix round on their words, then a fresh verify;
+// a review that finds a defect stops.
 if (LOOK_ANSWER && (LOOK_ANSWER.answer === 'changes' || LOOK_ANSWER.answer === 'fix')) {
   const asked = [{ severity: 'important', source: 'owner', summary: LOOK_ANSWER.words, failing_input: `the owner's look at head ${lookAt ? lookAt.head : setup.head}` }]
-  // The approval was revoked at the top of the program (see lookAt); the fix is tried with the delivery stopped at the look.
   LOOK_STOP = MARKED
-  // The fix edits and commits on the branch, so the claim is renewed first: a holder that lost it stops before any edit.
+  // The fix edits and commits on the branch, so the claim is renewed first: a holder that lost it stops before any
+  // edit.
   const lostClaim = await renew('look-fix', 'Verify')
   if (lostClaim) return lostClaim
   const lookFix = await call(`${CTX}\n${PLAN_REF} The owner looked at the pull request head and asked for changes; the owner's words are the one finding of this fix round: ${JSON.stringify(asked)}. Fix it in the worktree, with a regression test for each real defect, then commit. ${FIX_TESTS} ${COMMIT_SCOPE} ${IMPL_RETURN}\n${RULES}`, { label: 'look-fix', phase: 'Verify', agentType: 'implementer', model: 'sonnet', schema: IMPL })
@@ -2861,7 +2849,6 @@ if (LOOK_ANSWER && (LOOK_ANSWER.answer === 'changes' || LOOK_ANSWER.answer === '
   if (!lookReview || findingsOf(lookReview).length) return stop('look-fix-review', { review: lookReview })
   VERIFY_CACHED = false
   verified = null
-  // The fix answer's approval was recorded for the head it was given for: the delivery lands the fixed head when look-approval status keeps it.
   if (MARKED && LOOK_ANSWER.answer === 'fix') {
     approvedHead = LOOK_ANSWER.head
     ownerHead = approvedHead
@@ -2888,8 +2875,9 @@ let vRounds = 0
 while (verify && !noSlot(verify) && verifyProblems(verify).length && vRounds < 2) {
   vRounds++
   const fix = await call(`${CTX}\n${PLAN_REF} The project's verification failed: ${JSON.stringify(verifyProblems(verify).map(p => ({ id: p.id, status: p.status, summary: p.summary })))}.${rerunFailed ? ' It failed again on the one rerun at the same head, so it is not flaky.' : ''} Find the cause in this branch's changes (git -C ${W} diff ${RANGE}), fix it with the smallest change, commit. Never weaken, skip or delete a test to make it pass. When what fails lies outside that diff, first establish with evidence why it fails here: this branch's change, or this delivery's environment (the worktree path, the branch name). Only with that cause shown may you edit a file outside the diff, and then return outside_diff: [{file, why}], one entry per such file with the cause. With no cause established (it fails without this branch${rerunFailed ? '' : ', or it is flaky'}), change and commit nothing and return status blocked with unrelated {test, evidence}, evidence being what you ran or read: establish it by reading, or by running the test, never by checking out another commit in the worktree. ${OWN_TESTS} ${COMMIT_SCOPE} ${IMPL_RETURN}\n${RULES}`, { label: `verify-fix-${vRounds}`, phase: 'Verify', agentType: 'implementer', model: 'sonnet', schema: FIX_OR_UNRELATED })
-  // #972: a failure for which the fix step can establish no cause here (the branch's change or the delivery's environment) is not edited
-  // green: the delivery stops naming the test, and nothing ships. A fix outside the diff with a stated cause goes on, flagged (outsideFixes).
+  // A failure for which the fix step can establish no cause here (the branch's change or the delivery's environment) is
+  // not edited green: the delivery stops naming the test, and nothing ships. A fix outside the diff with a stated cause
+  // goes on, flagged (outsideFixes).
   if (fix && isEntry(fix.unrelated) && present(fix.unrelated.test) && present(fix.unrelated.evidence)) {
     const stray = present(fix.commit) && present(fix.start_head) && !sameSha(fix.commit, fix.start_head) ? fix.commit : null
     return stop('verify-unrelated', { details: `${String(fix.unrelated.test).slice(0, 120)} fails outside this branch's diff, so ${stray ? `it is not shipped (the fix step still committed ${stray}, unreviewed)` : 'no fix was made'}: ${fix.unrelated.evidence}`, unrelated: { test: fix.unrelated.test, evidence: fix.unrelated.evidence }, ...(stray ? { commit: stray } : {}), verify })
@@ -2910,9 +2898,8 @@ while (verify && !noSlot(verify) && verifyProblems(verify).length && vRounds < 2
 }
 if (verifyProblems(verify).length) return stop('verify', { verify, problems: verifyProblems(verify) })
 const PICTURES = picturesOf(verify)
-// #1139: a look read with neither verdict is not read as unmarked: nothing is pushed or landed until the marker is read.
+// A look read with neither verdict is not read as unmarked: nothing is pushed or landed until the marker is read.
 if (!LOOK_READ) return LOOK_UNREAD()
-// #1371: a resumed delivery whose cont carries an untested commit records its tests at the head being shipped before it is returned as ready or pushed.
 if (untested) {
   const rt = await call(`${CTX}\n${PLAN_REF} The commits in git -C ${W} diff ${untested.start_head}..${verify.head} are a fix committed with no test command recorded; treat them as the commit you made. The program pushes this head to the open pull request next. ${PUSH_TESTS(PRE_COMMIT, 'report')}. Commit nothing: return status done with start_head and commit both ${verify.head} (git -C ${W} rev-parse HEAD), and clean true only when git -C ${W} status --porcelain prints nothing after the last test, else clean false.\n${RULES}`, { label: 'fix-retest', phase: 'Verify', agentType: 'implementer', model: 'sonnet', schema: RETEST })
   if (!implDone(rt) || !sameSha(rt.start_head, verify.head) || !sameSha(rt.commit, verify.head) || !tested(rt)) return stop(untested.stage, { fix: rt, details: UNTESTED })
@@ -2943,38 +2930,36 @@ const LOCK_SCHEMA = {
   properties: { verdict: { type: 'string', enum: ['acquired', 'already_held', 'moved', 'held_by', 'lost_to', 'land-contended', 'error'] }, lock_sha: { type: 'string' }, pr: { type: 'integer' }, by: { type: 'string' }, detail: { type: 'string' }, waited_s: { type: 'integer' }, waited_on: { type: 'array', items: { type: 'integer' } }, position: { anyOf: [{ type: 'integer' }, { type: 'null' }] }, ahead: { type: 'array', items: { type: 'integer' } } },
   required: ['verdict'],
 }
-// #913: a wait for the land lock of this many seconds or more is logged with the pull requests it waited on (forge-claim's waited_on).
 const LOCK_WAIT_LOG_S = 300
 const logWait = (label, lock) => {
   if (!lock || !(lock.waited_s >= LOCK_WAIT_LOG_S)) return
   const on = Array.isArray(lock.waited_on) ? lock.waited_on : []
   log(`${label}: waited ${Math.round(lock.waited_s / 60)} min for the land lock of ${INT}${on.length ? ` behind PR ${on.map(p => `#${p}`).join(', ')}` : ''}`)
 }
-// #1001: a red check the branch itself caused is found and fixed outside the land lock, the same rules in deliver-batch.js.
-// Before the lock is asked for, a pull request that already existed (a resumed delivery) is read once (OWN_RED): a check that already
-// failed at the head sends the delivery to its fix wave with no lock asked for. A pull request opened in the same call has no finished
-// check, so it is not read, and a green landing gains at most that one read. Under the lock, the fix step of a red poll at a head no
-// sync has changed under the lock releases the lock itself, once it knows the fix needs a commit (FIX_OFF_LOCK): the fix, its tests and
-// its review then run outside the lock, and the next round pushes the reviewed head and takes the lock again, waiting (lockOut, as
-// after a conflict, #913; with no place kept among the waiters: the branch was not ready). A failure with no cause in the code keeps
-// the lock and reruns its jobs as before (#818, #986). One fix wave per delivery either way (checksFixes), so this never repeats, and a
-// red check after a sync under the lock is fixed under it.
-// #1018: a check that failed at a head behind its base counts in that read only while another landing holds the lock (one land status
-// read): the branch is then brought up to date before the lock is asked for, and a failure that survives is fixed there too.
+// A red check the branch itself caused is found and fixed outside the land lock, the same rules in deliver-batch.js.
+// Before the lock is asked for, a pull request that already existed is read once (OWN_RED): a check that already failed
+// at the head sends the delivery to its fix wave with no lock. Under the lock, the fix step of a red poll at a head no
+// sync has changed releases the lock itself once it knows the fix needs a commit (FIX_OFF_LOCK); the fix, its tests and
+// its review run outside it, and the next round takes the lock again, waiting. A failure with no cause in the code
+
+// keeps the lock and reruns its jobs. One fix wave per delivery either way (checksFixes).
+
+// A check that failed at a head behind its base counts in that read only while another landing holds the lock: the
+// branch is brought up to date before the lock is asked for.
 const OWN_RED = (wt, prRef, sha) => `Otherwise, and only when an open PR already existed and was reused (a PR this step opened has no finished check, so skip this read), read the checks of the pushed head once before any lock command: ${UNSET}gh pr view ${prRef} --repo ${SLUG} --json headRefOid,statusCheckRollup, one read, never a watch and never a wait. A head that was just pushed can still show the checks of the head before it, so the read counts only when its headRefOid is ${sha}. Only when it is and a check there has failed (count only the newest run of each check name, the one with the latest startedAt, so a failed attempt whose re-run passed does not count; a check run whose conclusion is FAILURE or TIMED_OUT, or a status whose state is FAILURE or ERROR; a cancelled check does not count), see whether origin/${INT} is an ancestor of HEAD (git -C ${wt} merge-base --is-ancestor origin/${INT} HEAD succeeds). When it is not, the head is behind its base and gets new checks once it is synced, so the failure counts only while another landing holds the lock and this one would wait: read the lock once, run alone and exactly: forge-claim land status --repo ${SLUG} --branch ${INT} --sha ${sha} (a Bash timeout of 20 minutes), and it counts only on the verdict held_by with a lock_sha other than ${sha}. When the failure counts, run no other lock command and wait for no check: return own_red with head (the headRefOid you read), failing (the name of every failed check), details (their links) and behind (true when the head is behind its base, else false), and lock null and checks null, because a later step fixes the branch before the lock is asked for, after it brought a head that is behind up to date. In every other case (another head, a head behind its base while no other landing holds the lock, no failed check, checks still running, none reported, or a read failed) return own_red null and go on.`
 const OWN_RED_SCHEMA = { type: 'object', properties: { head: { type: 'string' }, failing: STRS, details: { type: 'string' }, behind: { type: 'boolean' } }, required: ['head', 'failing'] }
 // The program checks the head itself: a reply that names another head, or none, diverts nothing.
 const ownRed = (r, sha) => !!r && typeof r === 'object' && !Array.isArray(r) && sameSha(r.head, sha) && Array.isArray(r.failing) && r.failing.some(x => typeof x === 'string' && x !== '')
-// The diagnosis is the one part of the fix that stays under the lock, so it is bounded: reading only, and a release when in doubt.
+// The diagnosis is the one part of the fix that stays under the lock, so it is bounded: reading only, and a release
+// when in doubt.
 const FIX_OFF_LOCK = sha => `The landing lock of the branch ${INT} is held for this pull request at ${sha}, and other landings wait for it. So decide first, quickly and changing nothing, whether the fix needs a commit: read only the failed job log, the check details and the branch's diff, and run no build and no test before the release. When the cause is in this branch's changes, or you cannot tell, release the lock before you edit any file: run alone and exactly: forge-claim land release --repo ${SLUG} --branch ${INT} --sha ${sha}
 released and not_held are both fine (give it a Bash timeout of 20 minutes). Return lock_released true once it answered either; the program takes the lock again after the review (that costs this landing one wait; holding the lock costs every waiter). Only when the failure clearly has no cause in the code (no commit is needed), keep the lock: run no forge-claim command and return lock_released false.`
 const FIX_NO_LOCK = `The landing lock of the branch ${INT} is not held and was not asked for yet: run no forge-claim command.`
-// #941: the probe a landing runs before it asks for the land lock, the same text in deliver-batch.js. git merge-tree --write-tree (git 2.38
-// or later) merges in memory: it writes no commit and touches neither the worktree nor the index, and its exit status alone says whether
-// the merge is clean (0, a head that is already current included) or conflicts (1). It also exits 1, with nothing on stdout, when a ref
-// is missing, so a conflict is exit 1 with the merged tree's id as the first line of output; the program checks that id itself. Anything
-// else proves nothing, so it reads as not conflicted and the landing goes on as it did before the probe existed: the sync under the lock
-// then finds the conflict (#913).
+// The probe a landing runs before it asks for the land lock, the same text in deliver-batch.js. git merge-tree
+// --write-tree (git 2.38 or later) merges in memory, touching neither the worktree nor the index, and its exit status
+// alone says whether the merge is clean (0) or conflicts (1). It also exits 1, with nothing on stdout, when a ref is
+// missing, so a conflict is exit 1 with the merged tree's id as the first line; the program checks that id itself.
+// Anything else proves nothing and reads as not conflicted: the sync under the lock then finds the conflict.
 const PROBE = (wt, int) => `before any lock command, probe whether ${int} merges cleanly into the pushed head, changing nothing: run git -C ${wt} fetch origin, then alone and exactly: git -C ${wt} merge-tree --write-tree --name-only --no-messages HEAD origin/${int}
 Only its exit status and the first line of its output count: exit 0 is a clean merge; exit 1 is a conflict only when the first line of its output is a tree id (40 hexadecimal characters), and the conflicting files follow that line. Exit 1 with any other output (a missing ref prints nothing there) and every other exit are errors, not conflicts. It commits nothing and touches neither the worktree nor the index; never run git merge in this step. Return it as probe: conflicted (true only for that conflict), tree (the first line of the output, exactly as printed, when exit is 1), files (the conflicting files) and, on an error, conflicted false with the error in detail.
 When probe's conflicted is true, run no lock command and wait for no check: return lock null and checks null, because a later step resolves the conflict before the lock is asked for.`
@@ -2986,27 +2971,23 @@ let expected = verify.head
 let head = expected
 let syncs = 0
 let round = 0
-// #1008: a passed reply that names no passing check is a head no check has reported on yet (runs register up to minutes after a
-// push), so it is read as pending and counts against the pending waits. This program reads no required checks from the contract,
-// and the contract cannot declare an empty list anyway, so the rule has no opt-out.
+// A passed reply that names no passing check is a head no check has reported on yet (runs register up to minutes after
+// a push), so it is read as pending and counts against the pending waits. This program reads no required checks from
+// the contract, and the contract cannot declare an empty list anyway, so the rule has no opt-out.
 const noCheckYet = ck => ck.state === 'passed' && !(Array.isArray(ck.passed) ? ck.passed : []).some(x => typeof x === 'string' && x !== '')
-// #1008: a merge the forge refused for the base branch's policy, with the head up to date, usually means the checks were not in yet.
 const POLICY_REFUSAL = m => !!m && m.merged === false && m.behind !== true && /base branch policy/i.test(String(m.notes || ''))
 let policyPolls = 0
-// #818: the extra waits a landing spends on the land lock after its first acquire --wait answered land-contended at the CLI's own bound.
 const LAND_WAIT_RETRIES = 3
-// #1018: the retries are spent only by a wait that made no progress. A wait that ended first in line (position 1), or at a better
-// place than the wait before it, is made again for nothing: 2441 stopped first in line with nobody ahead after 200.8 minutes, and
-// its relaunch redid the whole landing. A reply with no position (the queue was not read) spends a retry, as every wait did before.
-// The ceiling bounds what progress alone cannot: a landing held the lock for 20 to 40 minutes and waits of 100 to 200 minutes were
-// normal with three ahead, so six hours is nine such landings; a wait is made again only when it can end within that, at the CLI's
-// bound of 50 minutes a call (LAND_WAIT_CALL_S, the least a wait that ran out counts for).
+// Retries are spent only by a wait that made no progress: a wait that ended first in line, or at a better place than
+// the one before, is made again for nothing. The ceiling bounds what progress alone cannot: waits of 100 to 200 minutes
+// were normal with three ahead, so a wait is made again only when it can end within six hours, at the CLI's bound of 50
+// minutes a call (LAND_WAIT_CALL_S).
 const LAND_WAIT_MAX_S = 6 * 3600
 const LAND_WAIT_CALL_S = 3000
-// One ceiling per landing and one count of retries per run of waits: waitBudget() is made once for a landing, and each run of waits
-// asks it for a function, which is asked with the lock reply of the wait that just ran out (null when the program asks for a first
-// wait itself) and answers whether to wait again. A wait that ran out counts as a whole call at least, whatever its reply says it
-// waited, so no reply can lift the ceiling.
+// One ceiling per landing and one count of retries per run of waits: waitBudget() is made once for a landing, and each
+// run of waits asks it for a function, which is asked with the lock reply of the wait that just ran out (null when the
+// program asks for a first wait itself) and answers whether to wait again. A wait that ran out counts as a whole call
+// at least, whatever its reply says it waited, so no reply can lift the ceiling.
 const waitBudget = () => {
   let total = 0
   return () => {
@@ -3025,35 +3006,32 @@ let mg = null
 let mergeRefusals = 0
 let raced = false
 let contended = 0
-// True after a rerun of failed jobs at an unchanged head, until the poll that follows it answered (#986).
+// True after a rerun of failed jobs at an unchanged head, until the poll that follows it answered.
 let reran = false
-// The cross-host land lock of the integration branch (#677): taken with --wait right after the PR opens, before any sync,
-// moved with a one-shot acquire after every head change, re-checked once before the merge, released after the merge and on every stop;
-// a conflicted sync merge releases it and its accepted resolution takes it again, waiting (lockOut below, #913).
-// lockSha is the last sha this run owned or may own: set before the pr call, whose lock may be taken before its reply is lost, then after each holding verdict to the head that acquire named.
+// The cross-host land lock of the integration branch: taken with --wait right after the PR opens, before any sync,
+// moved with a one-shot acquire after every head change, re-checked once before the merge, released after the merge and
+// on every stop. lockSha is the last sha this run owned or may own: set before the pr call, whose lock may be taken
+// before its reply is lost.
 let lockHeld = false
 let lockSha = null
-// The sha a move acquire may have left held when its answer was lost (#716); cleared by a definitive answer.
+// The sha a move acquire may have left held when its answer was lost; cleared by a definitive answer.
 let lockMaybe = null
-// #913: true from the release of the lock for a conflicted sync merge until the reviewed head takes it again. The sync step runs under the
-// lock and only merges cleanly: a merge that conflicts is aborted there, the lock is released, and the resolution, its tests, its review and
-// its fix wave run outside it. The next round pushes the accepted head and takes the lock again with --wait in its checks call, whose poll
-// answers behind when the integration branch moved meanwhile: the loop then syncs again, a clean merge under the lock and a conflicted one
-// outside it once more, within the sync bounds below (sync-contention, the merge refusal budget). A stop in between holds no lock.
+// True from the release of the lock for a conflicted sync merge until the reviewed head takes it again. A merge that
+// conflicts is aborted under the lock, the lock is released, and the resolution, its tests, its review and its fix wave
+// run outside it. The next round pushes the accepted head and takes the lock again with --wait in its checks call; a
+// stop in between holds no lock.
 let lockOut = false
-// #941: true while lockOut stands for a conflict the probe found before the lock was ever asked for: the take is then the landing's first.
 let lockFirst = false
-// #1001: true while lockOut stands for a red check of the branch that is fixed outside the lock, not for a conflict.
+// True while lockOut stands for a red check of the branch that is fixed outside the lock, not for a conflict.
 let fixedOut = false
-// #1018: true while lockOut stands for a branch that was only brought up to date before the lock was asked for.
+// True while lockOut stands for a branch that was only brought up to date before the lock was asked for.
 let syncedOut = false
-// #1001: the sync merges made under the lock; while there is none, a red poll shows the branch's own failure.
+// The sync merges made under the lock; while there is none, a red poll shows the branch's own failure.
 let lockSyncs = 0
 let relocks = 0
 const waits = waitBudget()
 let retakes = 0
 const HOLDING = ['acquired', 'already_held', 'moved']
-// Releases the last held sha once; {} when nothing was held or it was released, else lock_unreleased (and a fresh dead_agents) for the result to carry. Never throws.
 const unlock = async () => {
   if (!lockHeld) return {}
   lockHeld = false
@@ -3071,16 +3049,15 @@ ${lockMaybe && !sameSha(lockMaybe, lockSha) ? RELEASE_AGAIN(lockMaybe) : ''}${RU
   if (r && (r.verdict === 'released' || r.verdict === 'not_held')) return {}
   return { lock_unreleased: { sha: lockSha, ...(lockMaybe ? { maybe: lockMaybe } : {}), verdict: r ? r.verdict : null, ...(error ? { error } : {}) }, ...deadOf() }
 }
-// One bounded Ship fix wave: an implementer commits a fix on top of the current head (not pushed), then a fresh reviewer re-reviews it.
-// The repair must start from the head the caller accepted (start_head), or the reviewer would see only its own diff and miss an unreviewed commit beneath it.
-// Returns { fix, ok: false } when the fix failed, started elsewhere, or added no commit (unless rebuttal allows an answer with evidence and no commit),
-// else { fix, review, moved } for the caller to grade; moved is false for an accepted rebuttal, and the head stays expected.
-// With rerun (the CI fix alone, #818), done at the unchanged head is a rerun of jobs that failed for no cause in the code: { fix, ok: true, rerun: true }, with no review.
-// #1001: schema is the fix reply's (the CI fix under the lock also says whether it released the lock), and committed runs between a fix
-// that made a commit and its review (the release of the lock, when the fix step did not report it).
-// #1371: a committed fix with no test command recorded is refused before its review and its push, and its commit is carried in cont.
+// One bounded Ship fix wave: an implementer commits a fix on top of the current head (not pushed), then a fresh
+// reviewer re-reviews it. The repair must start from the head the caller accepted (start_head), or the reviewer would
+// miss an unreviewed commit beneath it. Returns { fix, ok: false } when the fix failed, started elsewhere or added no
+// commit (unless rebuttal allows evidence and no commit), else { fix, review, moved }; with rerun, done at the
+// unchanged head is a rerun of jobs that failed for no cause in the code. A committed fix with no test command recorded
+
+// is refused before its review and push.
 const shipFix = async ({ stage, label, reviewLabel, fixPrompt, reviewPrompt, rebuttal = false, rerun = false, schema = IMPL, committed = null }) => {
-  // #1433: the live-fault lane has no second implementer: its caller stops, bound, before any fix or review.
+  // The live-fault lane has no second implementer: its caller stops, bound, before any fix or review.
   if (LANE === 'live') return { fix: null, ok: false, bound: true }
   const fix = await call(fixPrompt, { label, phase: 'Ship', agentType: 'implementer', model: 'sonnet', schema })
   if (noteUntested(stage, fix, expected)) return { fix, ok: false, details: UNTESTED }
@@ -3092,24 +3069,27 @@ const shipFix = async ({ stage, label, reviewLabel, fixPrompt, reviewPrompt, reb
   const review = await readReview(reviewPrompt(fix, moved), { label: reviewLabel, phase: 'Ship', agentType: 'reviewer', schema: FINDINGS })
   return { fix, review, moved, ok: true }
 }
-// #1139: the pull request text of the pr call, shared with a marked delivery's look-pr call. #1246: a function, so its Evidence names the results of verify as it is when the call is made (an approved head's verification replaces them).
 const prOpen = (reusePr = null) => reusePr !== null ? `Then reuse the open pull request #${reusePr} of this branch: the owner approved its head ${expected}, which is already pushed, so push nothing, open no pull request and edit none. Return pr (${reusePr}) and head (git -C ${W} rev-parse HEAD, the full sha).` : `Then open the pull request for this branch. Push the branch (git -C ${W} push origin ${setup.branch}). If an open PR with head ${setup.branch} already exists (a resumed delivery), reuse it; else open one against ${INT}. Title: a short summary of the issue. Body, plain prose, no single or double quotes, dollar signs, backticks or backslashes: sections Why, What changes, Acceptance (a table with one row per criterion: id, criterion, kind, and the test or command that shows it; criteria ${ACS}), Evidence (verification ${JSON.stringify(verify.results)}${outsideFixes.length ? `; verification fixes outside the branch's diff, each with its cause: ${JSON.stringify(outsideFixes)}` : ''}; ${taskLog.length} tasks reviewed; ${LANE === 'direct' ? 'direct-lane review' : LANE === 'live' ? 'live-fault lane review: one reviewer, no plan' : 'final review ' + (chunked ? 'chunked' : 'whole')}${REVIEW_CODE ? ' plus the configured independent review' : ''}${LANE === 'live' && LIVE_REC ? `; the Evidence section also holds, on a line of its own, exactly: ${LIVE_LINE()}` : ''}), Merge danger; then the line ${closesLine} as the last line, with no attribution or generated-by line. Never attach or link the plan or the spec. Return pr (number) and head (full sha of the pushed head).`
 const LOOK_STATUS_SCHEMA = { type: 'object', properties: { verdict: { type: 'string' }, kept_from: { type: ['string', 'null'] }, detail: { type: 'string' } }, required: ['verdict'] }
-// #1566: a landing resync that moved a marked head past the owner's approved head. LOOK_CARRY_VERIFY adds merge_only to the verification reply; the carry command's JSON line is LOOK_CARRY_SCHEMA.
+// A landing resync that moved a marked head past the owner's approved head. LOOK_CARRY_VERIFY adds merge_only to the
+// verification reply; the carry command's JSON line is LOOK_CARRY_SCHEMA.
 const LOOK_CARRY_VERIFY = { ...VERIFY, properties: { ...VERIFY.properties, merge_only: { type: 'boolean' } }, required: [...VERIFY.required, 'merge_only'] }
 const LOOK_CARRY_SCHEMA = { type: 'object', properties: { verdict: { type: 'string' }, from: { type: ['string', 'null'] }, reason: { type: ['string', 'null'] }, rule: { type: ['string', 'null'] }, comment_id: { type: ['integer', 'null'] }, detail: { type: 'string' } }, required: ['verdict'] }
 // The reasons look-approval carry gives for a needed answer; any other reason is an unreadable reply.
 const CARRY_REASONS = ['no-approval', 'source-differs', 'pictures-unreadable', 'pictures-missing', 'pictures-differ', 'not-merges', 'no-look-files', 'look-files-differ']
 // The rules a carried reply may name; with no picture passed it must be look-files.
 const CARRY_RULES = ['pictures', 'look-files']
-// A picture path the carry command is given: absolute and on one line; shq quotes it, so a space or a shell character is fine.
 const USABLE_PICTURE = /^\/[^\0\r\n]+$/
-// A stop row, or null when the owner's approval of ownerHead carries to H (look-approval carry recorded the carry line). #1597: since is the head the worktree was last verified at (the owner's head at the landing; the verified head an approve resume found the PR head moved past), and how names what brought the PR to H. The verification of H always runs. outside is true when H was not made by this delivery (a head moved outside it): H is then recorded as verified only when it is clean merges of the integration branch past the owner's head, so a commit nobody here reviewed never reads as a reviewed one and still gets its code review on the next resume.
+// A stop row, or null when the owner's approval of ownerHead carries to H (look-approval carry recorded the carry
+// line). since is the head the worktree was last verified at, and how names what brought the PR to H. The verification
+// of H always runs. outside is true when H was not made by this delivery: H is then recorded as verified only when it
+// is clean merges of the integration branch past the owner's head, so a commit nobody here reviewed never reads as a
+// reviewed one.
 const carryLook = async (pr, H, since = ownerHead, how = 'the landing', outside = false) => {
   const S = ownerHead
   const CLEAN = `a clean two-parent merge, meaning git -C ${W} merge-tree --write-tree <merge>^1 <merge>^2 exits 0 and prints the tree id that git -C ${W} rev-parse <merge>^{tree} gives (a conflict resolved by hand, or an octopus merge, gives a different tree; never judge this from git show --cc, which omits a hunk where the merge keeps one parent unchanged)`
   const only = from => `git -C ${W} rev-list --no-merges ${from}..${H} ^origin/${INT} prints nothing, and every merge in git -C ${W} rev-list --merges ${from}..${H} ^origin/${INT} is ${CLEAN}`
-  // #1597: with the verified head not the owner's, the check reaches back to whichever of the two is earlier.
+  // With the verified head not the owner's, the check reaches back to whichever of the two is earlier.
   const merges = sameSha(since, S) ? `merge_only is true only when git -C ${W} merge-base --is-ancestor ${S} ${H} succeeds, ${only(S)}; else false.`
     : `merge_only is true only when git -C ${W} merge-base --is-ancestor ${S} ${H} succeeds and one of these holds: (a) git -C ${W} merge-base --is-ancestor ${since} ${S} succeeds (the verified head is at or before the owner's head, so the check reaches back to it), and ${only(since)}; (b) otherwise, git -C ${W} merge-base --is-ancestor ${S} ${since} succeeds (the verified head is past the owner's head: the worktree already holds the merge, or ${S} is an earlier kept head), and ${only(S)}; else false.`
   const lv = await call(`${CTX}
@@ -3117,7 +3097,9 @@ The owner approved head ${S} of PR #${pr}; ${how} brought it to ${H}. Run only g
 1. git -C ${W} fetch origin. When git -C ${W} rev-parse HEAD is not ${H} and git -C ${W} merge-base --is-ancestor HEAD ${H} succeeds, run git -C ${W} merge --ff-only ${H}; never any other merge, reset, checkout or push. When HEAD is then not ${H}, run nothing more and return head (git -C ${W} rev-parse HEAD), clean, results [] and merge_only false.
 2. ${merges}
 3. Whatever merge_only is: ${verifyBody}`, { label: 'look-carry-verify', phase: 'Ship', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: LOOK_CARRY_VERIFY })
-  // A worktree that could not be brought to H (a force-push replaced the head with one the worktree does not contain) answers with its own head, merge_only false and no results: H was never verified, so the owner is asked for a look at it.
+  // A worktree that could not be brought to H (a force-push replaced the head with one the worktree does not contain)
+  // answers with its own head, merge_only false and no results: H was never verified, so the owner is asked for a look
+  // at it.
   if (complete(lv, LOOK_CARRY_VERIFY) && SHA_RE.test(lv.head) && !sameSha(lv.head, H) && lv.merge_only === false && lv.results.length === 0) {
     lookWhy = `the approval of ${S} does not carry to ${H}: the worktree head ${lv.head} cannot be brought to it`
     return lookWaitStop(pr, H)
@@ -3138,7 +3120,6 @@ The owner approved head ${S} of PR #${pr}; ${how} brought it to ${H}. Run only g
 Record whether the owner's look approval of issue #${ISSUE} of ${SLUG} carries from ${S} to the head ${H} of PR #${pr}. Run alone and exactly: look-approval carry --repo ${SLUG} --issue ${ISSUE} --pr ${pr} --from ${S} --head ${H}${pics.map(x => ` --${x.kind} ${shq(x.path)}`).join('')}
 It prints one JSON line. Return its verdict, from, reason, rule, comment_id and any detail. Run nothing else.
 ${RULES}`, { label: 'look-carry', phase: 'Ship', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: LOOK_CARRY_SCHEMA })
-  // approved: the owner approved exactly H between the status read and this call, so H lands under that approval and is the owner's head from now on.
   if (isEntry(reply) && reply.verdict === 'approved') {
     log(`look-carry: the owner approved ${H} itself; nothing to carry`)
     ownerHead = H
@@ -3154,10 +3135,13 @@ ${RULES}`, { label: 'look-carry', phase: 'Ship', agentType: 'clerk', model: CLER
   }
   return stop('look-carry', { pr: pr, head: H, result: reply })
 }
-// #1139: the owner's approve answer is always validated here, never from a cached approval: the answer clears it, the pull request head is read, and the approval is read back
-// (look-approval status, #1260: the owner records it where they answered; this program never posts one) for the head the owner saw. #1246: when that is the pull request head and not the verified head, it is verified first (a look-verify step), and recorded only when it
-// gained nothing but clean merges of the integration branch and its verification passes. #1597: a pull request head that moved outside the delivery (a merge made by hand) is verified and carried under the landing's carry rules once the approval of the owner's head is read;
-// an unrecorded approval stops as before, and an unmarked or unknown read is reported. Anything else merges nothing and stops naming the approved head and the head found.
+// The owner's approve answer is always validated here, never from a cached approval: the answer clears it, the pull
+// request head is read, and the approval is read back (look-approval status; this program never posts one) for the head
+// the owner saw. When that is not the verified head it is verified first (look-verify) and recorded only when it gained
+// nothing but clean merges of the integration branch and its verification passes. A head that moved outside the
+// delivery is verified and carried under the landing's carry rules. Anything else merges nothing and stops naming the
+
+// approved head and the head found.
 if (MARKED && LOOK_ANSWER && LOOK_ANSWER.answer === 'approve') {
   const A = LOOK_ANSWER.head
   const V0 = verify.head
@@ -3169,7 +3153,8 @@ if (MARKED && LOOK_ANSWER && LOOK_ANSWER.answer === 'approve') {
 ${RENEW_FIRST}
 Then read the head of PR #${P}, changing nothing: run ${UNSET}gh pr view ${P} --repo ${SLUG} --json state,headRefOid and return state and head (headRefOid, the full sha). Run nothing else.
 ${RULES}`, { label: 'look-head', phase: 'Ship', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: withRenew(LOOK_HEAD_SCHEMA) }), r => r.renew)
-  // A failed read says nothing about whether the owner recorded the approval: report the read, never a missing approval.
+  // A failed read says nothing about whether the owner recorded the approval: report the read, never a missing
+  // approval.
   const UNREAD = { details: `the approval of ${A} could not be checked: PR #${P}'s head could not be read; the verified head is ${V0}`, result: hd }
   if (!hd) return stop('look-approve', UNREAD)
   const lostLook = renewed(hd.renew, 'look-approve')
@@ -3182,14 +3167,16 @@ It prints one JSON line. Return its verdict, kept_from and any detail. Run nothi
 ${RULES}`, { label: 'look-read', phase: 'Ship', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: LOOK_STATUS_SCHEMA })
   const answeredOf = read => `look-approval status answered ${read ? (read.verdict || 'no verdict') : 'nothing'}${read && present(read.detail) ? `: ${read.detail}` : ''}`
   if (!sameSha(hd.head, A)) {
-    // Only a stop for a new look says the approval was not recorded: a read that failed, a carry and every later stop speak for themselves.
+    // Only a stop for a new look says the approval was not recorded: a read that failed, a carry and every later stop
+    // speak for themselves.
     const MOVED = `${NOT_RECORDED}: PR #${P}'s head is now ${hd.head}`
     // The live lane lands only the commit its one reviewer read: a moved head is never read or carried there.
     if (LANE === 'live') {
       lookWhy = MOVED
       return lookWaitStop(P, hd.head)
     }
-    // #1597: the approval is read for A; a head moved outside the delivery (a merge made by hand) is verified, then carried under the landing's rules.
+    // The approval is read for A; a head moved outside the delivery (a merge made by hand) is verified, then carried
+    // under the landing's rules.
     const read = await lookRead()
     const answered = answeredOf(read)
     if (!read || typeof read.verdict !== 'string' || read.verdict === 'error') return stop('look-approve', { details: `the approval of ${A} could not be checked: PR #${P}'s head is now ${hd.head} and ${answered}`, result: read })
@@ -3206,7 +3193,8 @@ ${RULES}`, { label: 'look-read', phase: 'Ship', agentType: 'clerk', model: CLERK
     approvedHead = expected
     lookAt = approvedLook(P, expected)
   } else {
-    // The live lane lands only the commit its one reviewer read: an approved head that moved (an integration merge, a push) is never verified, recorded or merged here.
+    // The live lane lands only the commit its one reviewer read: an approved head that moved (an integration merge, a
+    // push) is never verified, recorded or merged here.
     if (LANE === 'live' && !sameSha(A, liveCommit())) return liveBound(`the owner approved ${A}, not the delivered commit ${liveCommit()}, and landing it would merge a commit the live review never read`)
     let recordable = sameSha(A, V0)
     if (!recordable) {
@@ -3217,7 +3205,8 @@ ${RULES}`, { label: 'look-read', phase: 'Ship', agentType: 'clerk', model: CLERK
   3. Otherwise: ${verifyBody}`, { label: 'look-verify', phase: 'Ship', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: LOOK_VERIFY })
       if (!lv || !complete(lv, LOOK_VERIFY) || !SHA_RE.test(lv.head)) return stop('look-approve', { details: `${NOT_RECORDED}: its verification returned no usable reply; the verified head is ${V0}`, result: lv })
       if (!sameSha(lv.head, A)) {
-        // The worktree could not be brought to the approved head. One that contains it pushes as an ordinary fast-forward over it; any other cannot be pushed.
+        // The worktree could not be brought to the approved head. One that contains it pushes as an ordinary
+        // fast-forward over it; any other cannot be pushed.
         if (lv.ahead !== true) return stop('look-approve', { details: `${NOT_RECORDED}: the worktree head ${lv.head} neither fast-forwards to it nor contains it, so it cannot be pushed over it` })
         lookWhy = `${NOT_RECORDED}: the worktree head ${lv.head} is ahead of it`
       } else if (lv.merge_only !== true) {
@@ -3234,7 +3223,8 @@ ${RULES}`, { label: 'look-read', phase: 'Ship', agentType: 'clerk', model: CLERK
     if (recordable) {
       const read = await lookRead()
       const answered = answeredOf(read)
-      // An outage, an empty reply or an error verdict says nothing about whether the owner recorded the approval: report that it could not be checked, never that it is missing.
+      // An outage, an empty reply or an error verdict says nothing about whether the owner recorded the approval:
+      // report that it could not be checked, never that it is missing.
       if (!read || typeof read.verdict !== 'string' || read.verdict === 'error') return stop('look-approve', { details: `the approval of ${A} could not be checked: the verified head was ${V0} and ${answered}`, result: read })
       if (read.verdict !== 'approved') return stop('look-approve', { details: `${NOT_RECORDED}: the verified head was ${V0} and ${answered}`, result: read })
       approvedHead = A
@@ -3245,8 +3235,9 @@ ${RULES}`, { label: 'look-read', phase: 'Ship', agentType: 'clerk', model: CLERK
   LOOK_STOP = MARKED && approvedHead === null
 }
 const landBody = async () => {
-  // The pr call may take the lock (--wait) after opening the PR: mark the verified head as possibly held before it, so a lost reply still reaches the release.
-  // A marked delivery takes no lock (#1139): its look-pr call is the same step without one.
+  // The pr call may take the lock (--wait) after opening the PR: mark the verified head as possibly held before it, so
+  // a lost reply still reaches the release. A marked delivery takes no lock: its look-pr call is the same step without
+  // one.
   if (!LOOK_STOP) {
     lockHeld = true
     lockSha = expected
@@ -3265,11 +3256,12 @@ Otherwise take the cross-host landing lock of the branch ${INT} for that PR at t
 ${LOCK_RETURN} Return it as lock; when no PR was opened or reused, run neither the probe nor a lock command and return probe null and lock null. Then, only when lock's verdict is acquired, already_held or moved and the pushed head is ${expected}, wait ${CHECKS_WAIT('<the PR number>')} Return those fields as checks; otherwise run nothing more and return checks null.
 ${RULES}`, { label: 'pr', phase: 'Ship', agentType: 'clerk', model: DEFAULT_CLERK_MODEL, effort: 'high', schema: withRenew(PR_SCHEMA, { probe: NULLABLE(PROBE_SCHEMA), own_red: NULLABLE(OWN_RED_SCHEMA), lock: NULLABLE(LOCK_SCHEMA), checks: NULLABLE(CHECKS) }) }), r => r.renew)
   if (!prR) return stop('pr', { result: null })
-  // #941: the probe found a conflict, so the call ran no lock command: nothing is held and nothing was waited for. A reply that names a
-  // lock verdict all the same, or no tree id, is read as before the probe existed (the sync under the lock finds the conflict, #913).
+  // The probe found a conflict, so the call ran no lock command: nothing is held and nothing was waited for. A reply
+  // that names a lock verdict all the same, or no tree id, is read as before the probe existed (the sync under the lock
+  // finds the conflict).
   const early = probeConflict(prR.probe) && !prR.lock ? prR.probe : null
-  // #1001: a check had already failed at the head, so the call ran no lock command either. A reply that names a lock verdict all the
-  // same is read as before (the first poll under the lock finds the red check).
+  // A check had already failed at the head, so the call ran no lock command either. A reply that names a lock verdict
+  // all the same is read as before (the first poll under the lock finds the red check).
   const preRed = !early && !prR.lock && ownRed(prR.own_red, expected) ? prR.own_red : null
   if (early || preRed) lockHeld = false
   // A renew that ended, or a refused lock, means the prompt ran no lock command that holds anything.
@@ -3286,9 +3278,9 @@ ${RULES}`, { label: 'pr', phase: 'Ship', agentType: 'clerk', model: DEFAULT_CLER
   if (!sameSha(prR.head, verify.head)) return stop('head-moved', { pr: PR, expected: verify.head, head: prR.head })
   expected = fuller(verify.head, prR.head)
   head = expected
-  // #818: land-contended is the wait running out at the CLI's bound behind other landings, so the claim is renewed and the same acquire
-  // waits again, within the budget of waitBudget (#1018: a wait that ended first in line or at a better place spends no retry).
-  // Each call is marked as possibly holding the lock first, as the pr call is.
+  // land-contended is the wait running out at the CLI's bound behind other landings, so the claim is renewed and the
+  // same acquire waits again, within the budget of waitBudget (a wait that ended first in line or at a better place
+  // spends no retry). Each call is marked as possibly holding the lock first, as the pr call is.
   let waited = false
   const more = waits()
   let ranOut = prR.lock || null
@@ -3311,11 +3303,12 @@ ${RULES}`, { label: `land-lock-${k}`, phase: 'Ship', agentType: 'clerk', model: 
     if (lost) return lost
   }
   // One sync merge of the integration branch into the branch; a row ends the landing, null goes on to the next round.
-  // #941: with early (the probe's reply), the pr call found the conflict before it asked for the lock, so no sync step runs and nothing is
-  // held or waited for: the resolution, its review and its fix wave are the same steps, and the next round pushes the accepted head and
-  // takes the lock for the first time, waiting. That merge is no answer to a behind poll, so it spends none of the sync-contention budget.
-  // #1018: with prelock, the pr call read a failed check at a head behind ${INT} while another landing held the lock: the same sync
-  // step (and, on a conflict, the same resolution and review) runs before the lock is asked for, and spends none of that budget either.
+  // With early (the probe's reply), the pr call found the conflict before the lock was asked for, so no sync step runs:
+  // the resolution, its review and its fix wave are the same steps, the next round takes the lock for the first time,
+  // and that merge spends none of the sync-contention budget. With prelock, a failed check at a head behind ${INT}
+  // while another landing held the lock runs the same sync step before the lock is asked for, and spends none of that
+
+  // budget either.
   const syncRound = async (early, prelock = false) => {
     if (LANE === 'live') return liveBound(`the branch is behind ${INT} or conflicts with it, and a sync merge would be a second implementer`, { pr: PR })
     if (!early && !prelock && !raced) {
@@ -3332,7 +3325,6 @@ ${RULES}`, { label: `sync-${syncs}`, phase: 'Ship', agentType: 'implementer', mo
     const aborted = !!sy && (sy.status === 'conflicted' || (sy.status === 'blocked' && sy.conflicted === true))
     // The reply that names the merge to land: the sync step's own, or the resolution's.
     let merge = sy
-    // #913: a conflict is resolved outside the lock. A sync step that resolved it itself, against its prompt, is released and reviewed the same way.
     if (aborted || (sy && sy.status === 'done' && sy.conflicted)) {
       lockOut = true
       lockFirst = !!early || prelock
@@ -3346,14 +3338,16 @@ ${RULES}`, { label: `sync-resolve-${syncs}`, phase: 'Ship', agentType: 'implemen
       }
     }
     if (!merge || merge.status !== 'done' || !present(merge.merge_commit)) return stop('sync', { pr: PR, sync: merge })
-    // #986: the head the landing goes on with is the merge commit, or the resolution's head when it made plain commits on top of the merge.
-    // The sync review then proves that ancestry and reads the range between them too; any other head stops at the sync stage.
+    // The head the landing goes on with is the merge commit, or the resolution's head when it made plain commits on top
+    // of the merge. The sync review then proves that ancestry and reads the range between them too; any other head
+    // stops at the sync stage.
     const mc = merge.merge_commit
     const followup = present(merge.head) && !sameSha(merge.head, mc)
     const after = followup ? SYNC_AFTER(W, mc, merge.head) : ''
     expected = followup ? merge.head : mc
-    // A merge that conflicted is reviewed whatever its resolution says of itself: the sync step saw the conflict. A head that is not the
-    // merge commit is reviewed too, whatever the merge was: nothing else would read the commits on top of it.
+    // A merge that conflicted is reviewed whatever its resolution says of itself: the sync step saw the conflict. A
+    // head that is not the merge commit is reviewed too, whatever the merge was: nothing else would read the commits on
+    // top of it.
     if (aborted || merge.conflicted || followup) {
       const sr = await readReview(`${CTX}
 Review the conflict resolution in merge commit ${merge.merge_commit}: git -C ${W} show --cc ${merge.merge_commit} and the resolved files ${JSON.stringify(merge.resolved_files || [])}; the tests run: ${JSON.stringify(merge.tests || [])}. Report Important or Critical defects only: a dropped change from either side, a broken merge of intent, a resolved file whose tests were not run.${merge.markers_checked === true ? '' : MARKERS_UNCHECKED}${followup ? DESCENDS(W, mc, merge.head) : ''}`, { label: `sync-review-${syncs}`, phase: 'Ship', agentType: 'reviewer', schema: SYNC_REVIEW_SCHEMA(followup) })
@@ -3378,8 +3372,9 @@ Review the conflict resolution in merge commit ${merge.merge_commit}: git -C ${W
     }
     return null
   }
-  // A stop before the first take (#941): a pr call that answered conflicted may have taken the lock at the verified head all the same,
-  // against its prompt, so that head is marked possibly held and the stop's release names it once (not_held normally).
+  // A stop before the first take: a pr call that answered conflicted may have taken the lock at the verified head all
+  // the same, against its prompt, so that head is marked possibly held and the stop's release names it once (not_held
+  // normally).
   const readyHead = expected
   const unheld = row => {
     if ((early || preRed) && lockFirst) {
@@ -3389,12 +3384,13 @@ Review the conflict resolution in merge commit ${merge.merge_commit}: git -C ${W
     }
     return row
   }
-  // The one fix wave of a red check (checksFixes bounds it): the caller grades its result as before.
-  // #1001: mode says where the lock is. held: under the lock, as before (a red check after a sync under the lock). first: the lock is
-  // held at a head no sync has changed under it, so the red check was the branch's own before the lock arrived: the fix step releases
-  // the lock itself once it knows the fix needs a commit (FIX_OFF_LOCK), a release it did not report is made before the review, and
-  // the review runs outside the lock too. unasked: the pr call read the red check and asked for no lock. The lock stays marked held at
-  // its last sha on the fix step's word alone, so a stop releases it once more (not_held normally).
+  // The one fix wave of a red check (checksFixes bounds it). mode says where the lock is. held: under the lock (a red
+  // check after a sync under it). first: the lock is held at a head no sync has changed, so the red check was the
+  // branch's own: the fix step releases the lock itself once it knows the fix needs a commit (FIX_OFF_LOCK), a release
+  // it did not report is made before the review, and the review runs outside the lock. unasked: the pr call read the
+  // red check and asked for no lock. The lock stays marked held at its last sha on the fix step's word alone, so a stop
+
+  // releases it once more.
   const ciFix = (ck, failingNames, mode) => {
     const failing = JSON.stringify(failingNames)
     return shipFix({
@@ -3411,7 +3407,6 @@ When the failure has no cause in the code (an infrastructure, cache or network e
       reviewPrompt: fix => `${CTX}\nReview this fix for failing checks: ${span(fix)}; the failure it answers: ${failing} (${ck.details || 'no log'}); notes: ${fix.notes}. Report Important or Critical defects only, above all a weakened, skipped or deleted test or check, or a fix with no regression test. Do not edit anything.`,
     })
   }
-  // #1139: a marked delivery brings its branch up to date outside any lock, pushes a head the sync moved, and stops for the owner's look.
   if (LOOK_STOP) {
     const stopped = early ? await syncRound(early) : prR.behind === true ? await syncRound(null, true) : null
     if (stopped) return stopped
@@ -3431,8 +3426,6 @@ ${RULES}`, { label: 'look-push', phase: 'Ship', agentType: 'clerk', model: DEFAU
       const pushed = await lookPush()
       if (pushed) return pushed
     }
-    // #1373: the stop waits for the checks of the head the owner will see, outside any lock. A red one gets the delivery's one fix; a base that moved
-    // during the wait is synced and pushed (twice at most); the wait then reads the new head again.
     for (;;) {
       const stalePoll = reran
       const { ck, row } = await lookPoll(PR, expected, stalePoll)
@@ -3458,7 +3451,6 @@ ${RULES}`, { label: 'look-push', phase: 'Ship', agentType: 'clerk', model: DEFAU
         continue
       }
       if (rd.state === 'failed') {
-        // #986: every failing check was a gate on an old result and the poll reran it: not a red poll, asked once after the one rerun.
         if (stalePoll && staleOf(ck).length) {
           log(`${'look-checks-' + lookPolls} reran ${staleOf(ck).length === 1 ? 'a stale gate run' : `${staleOf(ck).length} stale gate runs`} (${staleOf(ck).join(', ')}); polling once more`)
           continue
@@ -3479,7 +3471,9 @@ ${RULES}`, { label: 'look-push', phase: 'Ship', agentType: 'clerk', model: DEFAU
         if (pushed) return pushed
         continue
       }
-      // #1373: a head a fix or a sync moved is verified before the owner sees it, so the stop, its verified record and its pictures name one head. The verification runs after the poll's forge read, so the wait reads the forge again (the pull request head, its checks, the base's ancestry) before the stop.
+      // A head a fix or a sync moved is verified before the owner sees it, so the stop, its verified record and its
+      // pictures name one head. The verification runs after the poll's forge read, so the wait reads the forge again
+      // (the pull request head, its checks, the base's ancestry) before the stop.
       if (!sameSha(verify.head, expected)) {
         const rv = await call(`${CTX}\nThe branch of PR #${PR} moved to the head ${expected} after its verification at ${verify.head}; verify that head before the owner looks at it.\n${verifyBody}`, { label: 'look-reverify', phase: 'Ship', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: VERIFY })
         if (!complete(rv, VERIFY) || !sameSha(rv.head, expected)) return stop('verify', { pr: PR, verify: rv, problems: [{ id: '?', summary: `the verification of ${expected} returned no usable reply for it` }] })
@@ -3496,19 +3490,17 @@ ${RULES}`, { label: 'look-push', phase: 'Ship', agentType: 'clerk', model: DEFAU
     const stopped = await syncRound(early)
     if (stopped) return unheld(stopped)
   } else if (preRed) {
-    // #1001: the fix wave runs first, holding and waiting for nothing; the next round pushes the head and takes the lock for the
-    // first time, waiting (a reviewed fix commit, or the unchanged head when the wave only reran failed jobs).
     let failingNames = preRed.failing.filter(present)
     let ck = { state: 'failed', head: expected, failing: failingNames, details: preRed.details }
     let red = true
     lockOut = true
     lockFirst = true
     if (preRed.behind === true) {
-      // #1018: the failed check was read at a head behind its base while another landing held the lock, so this landing would wait,
-      // and the sync under the lock would then rerun that check with every other landing waiting behind it. The branch is brought
-      // up to date now, outside the lock (the usual sync step, resolution and review), and the checks of the new head are waited
-      // for with no lock asked for. Still red: the fix wave below runs before the lock, as for any check that had failed at the
-      // head. Anything else: the next round takes the lock, waiting. A green head that is behind is never synced early.
+      // The failed check was read at a head behind its base while another landing held the lock, so the sync under the
+      // lock would rerun that check with every other landing waiting behind it. The branch is brought up to date now,
+      // outside the lock, and the checks of the new head are waited for with no lock asked for. Still red: the fix wave
+      // below runs before the lock. Anything else: the next round takes the lock, waiting. A green head that is behind
+      // is never synced early.
       log(`${failingNames.join(', ')} had failed at a head behind ${INT} and the land lock is held; bringing the branch up to date before the lock is asked for`)
       lockOut = false
       const stopped = await syncRound(null, true)
@@ -3550,8 +3542,9 @@ ${RULES}`, { label: `checks-${round}`, phase: 'Ship', agentType: 'clerk', model:
   } else if (!HOLDING.includes(v)) return stop(refusal(v) ? 'land-contended' : 'land-lock', { pr: PR, lock: v })
   for (;;) {
     round++
-    // A sync merge, sync fix or CI fix moved the head: the push call renews and pushes it, then the checks call moves the lock to it before it waits (#801).
-    // #913: the lock was released for a conflicted sync; this round takes it again at the accepted head, waiting.
+    // A sync merge, sync fix or CI fix moved the head: the push call renews and pushes it, then the checks call moves
+    // the lock to it before it waits. When the lock was released for a conflicted sync, this round takes it again at
+    // the accepted head, waiting.
     const retake = lockOut
     const moved = retake || !sameSha(lockSha, expected)
     if (moved) {
@@ -3567,20 +3560,20 @@ ${RULES}`, { label: `land-push-${round}`, phase: 'Ship', agentType: 'clerk', mod
       lockMaybe = expected
       // As for the pr call: the waiting acquire may take the lock before its reply is lost.
       if (retake) lockHeld = true
-      // #941: a first take holds nothing at an earlier head, so the accepted head is the one sha a release names.
+      // A first take holds nothing at an earlier head, so the accepted head is the one sha a release names.
       if (retake && lockFirst) {
         lockSha = expected
         lockMaybe = null
       }
     }
-    // Round 1 reads the poll the pr call carried (its renew covered the claim), unless a retried wait took the lock, which polled no checks;
-    // a moved round moves the lock then polls, one call; every other unmoved round polls on its own with a renew.
+    // Round 1 reads the poll the pr call carried (its renew covered the claim), unless a retried wait took the lock,
+    // which polled no checks; a moved round moves the lock then polls, one call; every other unmoved round polls on its
+    // own with a renew.
     const folded = round === 1 && !moved && !waited
-    // #986: the poll that follows a rerun of failed jobs (the head is unchanged, so it is an unmoved poll), the only one that may answer
-    // stale; a poll whose wait ran out keeps it for the next.
-    // #1001: a rerun made while the lock was not held (before it was asked for, or by a step that released it) is followed by a round
-    // that takes the lock at the unchanged head, so that round asks the stale question too. reran is cleared by the first poll that
-    // is not pending, so while it stands the head is the one the jobs were rerun at.
+    // The poll that follows a rerun of failed jobs is the only one that may answer stale; a poll whose wait ran out
+    // keeps it for the next. A rerun made while the lock was not held is followed by a round that takes the lock at the
+    // unchanged head, so that round asks the stale question too. reran is cleared by the first poll that is not
+    // pending.
     const stalePoll = reran && !folded
     let ck
     if (folded) ck = prR.checks || null
@@ -3592,8 +3585,6 @@ ${RULES}`, { label: `checks-${round}`, phase: 'Ship', agentType: 'clerk', model:
       if (moved) {
         let mv = ck && ck.lock ? ck.lock.verdict : null
         if (ck) logWait(`checks-${round}`, ck.lock)
-        // #913: the retake's wait ran out behind other landings, so another holder has the lock: renew the claim and wait again,
-        // within the budget of waitBudget, as the first wait does. Each call is marked as possibly holding the lock first.
         let relocked = false
         const more = waits()
         let ranOut = ck ? ck.lock || null : null
@@ -3648,36 +3639,35 @@ ${RULES}`, { label: `land-relock-${relocks}`, phase: 'Ship', agentType: 'clerk',
     }
     reran = false
     if (state === 'failed') {
-      // #986: every failing check was a gate on an old result and the checks step reran it: not a red poll. Once per landing, since
-      // only the one poll after the one rerun is asked; the next poll counts whatever it shows.
       if (stalePoll && staleOf(ck).length) {
         log(`checks-${round} reran ${staleOf(ck).length === 1 ? 'a stale gate run' : `${staleOf(ck).length} stale gate runs`} (${staleOf(ck).join(', ')}); polling once more`)
         continue
       }
       if (checksFixes >= 1) return stop('checks', { pr: PR, failing: failingNames, checks: ck })
       checksFixes++
-      // #1001: no sync has changed the head under the lock, so the red check is the branch's own: its fix goes outside the lock.
+      // No sync has changed the head under the lock, so the red check is the branch's own: its fix goes outside the
+      // lock.
       const first = lockSyncs === 0
       const w = await ciFix(ck, failingNames, first ? 'first' : 'held')
       if (w.bound) return liveBound(`a check failed at ${expected}, and a fix would be a second implementer`, { pr: PR })
       if (!w.ok) return stop('checks-fix', { pr: PR, checks: ck, fix: w.fix, ...(w.details ? { details: w.details } : {}) })
-      // #818: the failed jobs were rerun at the unchanged head. The loop polls again; checksFixes still ends a second red poll at the checks stop.
-      // #986: that next poll alone may rerun a stale gate (STALE_RERUN).
       if (w.rerun) {
         reran = true
         // A step that released the lock for a rerun, against its prompt: the next round takes it again, waiting.
         if (first && w.fix.lock_released === true) { lockOut = true; lockFirst = false; fixedOut = true }
         continue
       }
-      // The lock is released (or its release is still owed, lockHeld): the next round takes it again at the reviewed head, waiting.
+      // The lock is released (or its release is still owed, lockHeld): the next round takes it again at the reviewed
+      // head.
       if (first) { lockOut = true; lockFirst = false; fixedOut = true }
       if (!w.review || findingsOf(w.review).length) return stop('checks-fix-review', { pr: PR, checks: ck, review: w.review })
       expected = w.fix.commit
       continue
     }
     if (state === 'passed') {
-      // #1139: a marked delivery merges only a head the owner's approval covers. #1211: a head that moved since lands when look-approval status
-      // says the approval is kept; needed stops for a new look, the lock released, and any other reply stops without asking the owner (a forge failure is no reason for a look).
+      // A marked delivery merges only a head the owner's approval covers. A head that moved since lands when
+      // look-approval status says the approval is kept; needed stops for a new look, the lock released, and any other
+      // reply stops without asking the owner (a forge failure is no reason for a look).
       if (MARKED && approvedHead && !sameSha(head, approvedHead)) {
         const ls = await call(`${CTX}
 Read whether the owner's look approval of issue #${ISSUE} of ${SLUG} still covers the head ${head} of PR #${PR}. Run alone and exactly: look-approval status --repo ${SLUG} --issue ${ISSUE} --pr ${PR} --head ${head}
@@ -3688,12 +3678,10 @@ ${RULES}`, { label: 'look-status', phase: 'Ship', agentType: 'clerk', model: CLE
           const row = await carryLook(PR, head)
           if (row) return row
         }
-        // The owner's head: a kept approval's own (kept_from), the head itself when the owner approved it exactly; a carry leaves it where it was.
         if (ls.verdict === 'approved') ownerHead = typeof ls.kept_from === 'string' && SHA_RE.test(ls.kept_from) ? ls.kept_from : head
         approvedHead = head
         lookAt = approvedLook(PR, head)
       }
-      // One call: renew, the pre-merge lock check (still held or moved merges; retaken after a loss rechecks first, once), then the merge.
       mg = await recall(() => call(`${CTX}
 ${RENEW_FIRST}
 Then re-check the cross-host landing lock of the branch ${INT} for PR #${PR}: run alone and exactly: ${LAND_ACQUIRE(expected, false)}
@@ -3714,10 +3702,11 @@ ${RULES}`, { label: 'merge', phase: 'Ship', agentType: 'clerk', model: DEFAULT_C
       // The folded schema requires only the renew, and a merged PR needs no notes: only merged decides.
       if (typeof mg.merged !== 'boolean') return stop('merge', { pr: PR, merge: mg })
       if (mg.merged) return null
-      // Refused as not up to date: the next round's checks step fetches, reports behind and syncs; three refusals, or any other, stop.
-      // That sync is bounded by the refusal budget alone, so syncs made before the first merge attempt never consume it.
-      // #1008: refused by the base branch's policy and not behind: the next round polls the checks once more, and that poll picks the
-      // merge, the fix or the stop. A second such refusal stops, as every other refusal does.
+      // Refused as not up to date: the next round's checks step fetches, reports behind and syncs; three refusals, or
+      // any other, stop. That sync is bounded by the refusal budget alone, so syncs made before the first merge attempt
+      // never consume it. Refused by the base branch's policy and not behind: the next round polls the checks once
+      // more, and that poll picks the merge, the fix or the stop. A second such refusal stops, as every other refusal
+      // does.
       if (POLICY_REFUSAL(mg) && policyPolls < 1) {
         policyPolls++
         log(`the merge was refused by the policy of ${INT}; polling the checks once more`)

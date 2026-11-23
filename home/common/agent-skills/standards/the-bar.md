@@ -1,7 +1,5 @@
 # The Bar
 
-Layer 0: the universal bar, true on every project in every language. Paste this whole file into implementer and Standards-reviewer briefs. Stack idioms are Layer 1 (`stacks/*.md`); project deltas are Layer 2 (the repo's `docs/standards/`).
-
 ### B1. Defense in depth
 
 Every trust boundary is checked on both sides. The outer check exists for experience — fail fast, say something useful; the inner check exists for correctness, because a malicious or buggy caller must not be able to bypass it. "The other side has it covered" never justifies dropping either.
@@ -99,3 +97,7 @@ A test its framework skips, disables, focuses away or excludes proves nothing wh
 ### B24. No two tests share a body
 
 A test whose body, minus comments and whitespace, repeats another's adds cost without a check: give the case to the first test as data. The count of copies may not rise against the merge base. ([decision](https://github.com/fagenorn/nix-config/issues/1421))
+
+### B25. Instruction surfaces stay in budget
+
+No instruction surface may grow past its platform budget, which no project sets, and one already over it may not grow at all. ([decision](https://github.com/fagenorn/nix-config/issues/1422))
