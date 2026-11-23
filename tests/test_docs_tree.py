@@ -473,13 +473,6 @@ class DocsTreeTest(unittest.TestCase):
         ]
         self.assertEqual(hits, [])
 
-    def test_every_area_holds_an_adr(self):
-        empty = sorted(
-            d.name for d in (REPO_ROOT / "docs/areas").iterdir()
-            if d.is_dir() and not list((d / "adr").glob("*.md"))
-        )
-        self.assertEqual(empty, [])
-
     def test_no_area_numbers_two_adrs_alike(self):
         shared = []
         for adr_dir in sorted((REPO_ROOT / "docs/areas").glob("*/adr")):

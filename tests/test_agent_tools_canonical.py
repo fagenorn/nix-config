@@ -59,6 +59,7 @@ class Rfc3339Test(unittest.TestCase):
     def test_parse_refuses_what_is_not_an_rfc3339_instant(self):
         from agent_tools.canonical import parse_rfc3339_utc
         for value in (None, 3, "2026-11-09", "2026-11-09T21:22:00", "2026-13-09T21:22:00Z",
-                      "2026-11-09 21:22:00Z"):
+                      "2026-11-09 21:22:00Z", "0001-01-01T00:00:00+01:00",
+                      "9999-12-31T23:59:59-01:00"):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 parse_rfc3339_utc(value)
