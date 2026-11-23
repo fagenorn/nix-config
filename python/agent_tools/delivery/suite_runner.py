@@ -13,7 +13,10 @@ create `.git/objects/maintenance.lock` while the test reads that repository. Eve
 command that inherits a member's environment, at any depth, reads them as if given
 `git -c maintenance.auto=false -c gc.auto=0`: they win over an inherited entry, a test's own
 `GIT_CONFIG_COUNT` entry and any config file for the same key, a test's other count entries
-still apply, and a `git -c` option a command adds comes after them and wins.
+still apply, and a `git -c` option a command adds comes after them and wins. The entries do
+not reach a process started with an environment built from scratch or with its own
+`GIT_CONFIG_PARAMETERS`, nor the receive-pack of a push to a local repository, so that
+receiving repository still runs automatic maintenance.
 
 Scratch directory (issue 1283). Members write their temporary files where `TMPDIR` points.
 Unless `SUITE_RUNNER_SCRATCH` says otherwise the runner creates one `suite-runner-tmp-*`
@@ -35,15 +38,23 @@ wrote instead of compiling again. Parallel writers need no coordination: CPython
 file under a temporary name and renames it into place, and skips a write it cannot make. The
 prefix redirects every bytecode lookup, the standard library's included, so a run compiles
 the standard-library source modules its processes import instead of reading the
-interpreter's own bytecode, and its later processes read that result.
+interpreter's own bytecode, and its later processes read that result. The cache does not reach
+a process started with an environment built from scratch, nor one run with `-I` or `-E`.
+CPython takes a cached file as current while its source's modification time, in whole
+seconds, and its size match, so a test that rewrites an importable source in place to the
+same size within one second, then imports it in a new process, gives that process its own
+`PYTHONPYCACHEPREFIX` directory. Outside the runner, as in a direct `python -m unittest`
+run, a test's Python children write bytecode beside their sources where those are writable.
 A script run as a main file is compiled on every start. The runner removes
 the directory when the run ends, after the report, after an interrupted run has waited for
-its members, or on an error, and a failure to remove it is raised, never ignored.
+its members, or on an error, and a failure to remove it is raised, never ignored. A
+descendant still running after the run ends may recreate part of the removed directory.
 
 Jobs and order (issue 604). At most `--jobs N` members run at once. The default is
 `SUITE_RUNNER_JOBS` when that variable is set and non-empty, else `min(8, CPUs - 2)` with a
 floor of 1 (also when the CPU count is unknown); an explicit `--jobs` wins over both, and a
-bad `SUITE_RUNNER_JOBS` is a usage error (exit 2). In parallel mode members start
+bad `SUITE_RUNNER_JOBS` is a usage error (exit 2); the hosted CI job sets it to 4, the vCPUs
+of its runner (`.github/workflows/ci.yaml:101`). In parallel mode members start
 longest-first (LPT): the order comes from `python/agent_tools/delivery/suite_timings.json`, a
 committed map of member path to wall seconds taken from a full run's timing table, with
 members it does not name starting first in list order, ties in list order, and a missing or

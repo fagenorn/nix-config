@@ -5,7 +5,7 @@
 
 ## Context
 
-ADR-console-021 left a manager's session on the owner's global `defaultMode`, `auto`, with every permission prompt refused. In `auto` the client's classifier still stops a manager at steps nobody watching can answer, so a sprint stalls in the project where nothing the manager runs could reach production unguarded. The guard (ADR-guard-011) already refuses what production rules forbid, so where a project declares no production, or its production rules are in the guard's policy, the mode `bypassPermissions` costs no safety the guard did not already hold. The owner's own sessions must keep `auto`.
+ADR-console-021 left a manager's session on the owner's global `defaultMode`, `auto`, with every permission prompt refused. In `auto` the client's classifier still stops a manager at steps nobody watching can answer, so a sprint stalls in the project where nothing the manager runs could reach production unguarded. The guard (ADR-guard-009) already refuses what production rules forbid, so where a project declares no production, or its production rules are in the guard's policy, the mode `bypassPermissions` costs no safety the guard did not already hold. The owner's own sessions must keep `auto`.
 
 ## Decision
 

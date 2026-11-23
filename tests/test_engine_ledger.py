@@ -19,7 +19,7 @@ import sys
 import tempfile
 import threading
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -80,6 +80,8 @@ EXAMPLES = {
     "wait_ended": {"event": "wait_ended", "at": AT, "wait": "usage-limit"},
     "stop_reached": {"event": "stop_reached", "at": AT, "step": "scope",
                      "stop": "needs-owner", "need": "owner-decision"},
+    "call": {"event": "call", "at": AT, "step": "children", "visit": 1,
+             "child": "1511-20261121T160232Z-c3d4", "index": 0, "items": 3},
     "keep_alive_ran": {"event": "keep_alive_ran", "at": AT, "step": "draft", "visit": 1,
                        "attempt": 1, "verdict": "renewed"},
     "run_continued": {"event": "run_continued", "at": AT},
@@ -164,6 +166,50 @@ class RunCreationTest(unittest.TestCase):
                 self.assertEqual(list(Path(tmp).iterdir()), [])
 
 
+class ChildRunTest(unittest.TestCase):
+    def test_find_runs_returns_only_root_runs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root_run = new_run(tmp)
+            new_run(tmp, token="c3d4", now=NOW + timedelta(seconds=1), parent=root_run.name)
+            self.assertEqual(engine_ledger.find_runs(Path(tmp), 1511, None), [root_run])
+            self.assertEqual(engine_ledger.find_run(Path(tmp), 1511, None), root_run)
+
+    def test_a_child_run_json_names_its_parent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root_run = new_run(tmp)
+            child = new_run(tmp, token="c3d4", now=NOW + timedelta(seconds=1),
+                            parent=root_run.name)
+            self.assertEqual(json.loads((child / "run.json").read_text())["parent"],
+                             root_run.name)
+            self.assertEqual(engine_ledger.read_run(child)["parent"], root_run.name)
+            self.assertNotIn("parent", engine_ledger.read_run(root_run))
+            self.assertEqual(engine_ledger.read_run(root_run)["sequence"], 1)
+            self.assertEqual(engine_ledger.read_run(child)["sequence"], 2)
+            later = new_run(tmp, token="e5f6", now=NOW + timedelta(seconds=2))
+            self.assertEqual(engine_ledger.read_run(later)["sequence"], 3)
+            self.assertEqual(engine_ledger.find_runs(Path(tmp), 1511, None),
+                             [root_run, later])
+
+    def test_a_parent_that_is_no_run_id_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(LedgerError):
+                new_run(tmp, parent="nope")
+            self.assertEqual(list(Path(tmp).iterdir()), [])
+
+    def test_a_run_json_whose_parent_is_no_run_id_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root_run = new_run(tmp)
+            child = new_run(tmp, token="c3d4", now=NOW + timedelta(seconds=1),
+                            parent=root_run.name)
+            copy = Path(tmp) / "copy" / child.name
+            shutil.copytree(child, copy)
+            document = json.loads((copy / "run.json").read_text())
+            document["parent"] = "nope"
+            (copy / "run.json").write_text(compact(document), encoding="utf-8")
+            with self.assertRaises(LedgerError):
+                engine_ledger.read_run(copy)
+
+
 class EventShapeTest(unittest.TestCase):
     def test_each_event_type_round_trips_and_a_wrong_shape_is_refused(self):
         self.assertEqual(set(EVENT_MEMBERS), set(EXAMPLES))
@@ -181,6 +227,11 @@ class EventShapeTest(unittest.TestCase):
                {**EXAMPLES["step_entered"], "stage": "nowhere"},
                {**EXAMPLES["wait_started"], "wait": "coffee"},
                {**EXAMPLES["result_stored"], "result": "results/other.1.json"},
+               {**EXAMPLES["call"], "index": -1},
+               {**EXAMPLES["call"], "items": 0},
+               {**EXAMPLES["call"], "index": 3, "items": 3},
+               {**EXAMPLES["call"], "child": "nope"},
+               {**EXAMPLES["call"], "index": True},
                {**EXAMPLES["keep_alive_ran"], "attempt": 0},
                {**EXAMPLES["keep_alive_ran"], "attempt": True},
                {**EXAMPLES["keep_alive_ran"], "verdict": ""},
@@ -191,6 +242,41 @@ class EventShapeTest(unittest.TestCase):
             with self.subTest(variant=variant), self.assertRaises(LedgerError):
                 engine_ledger.validate_event(variant)
         engine_ledger.validate_event({**EXAMPLES["wait_started"], "until": None})
+
+    def test_optional_members_round_trip_and_are_checked(self):
+        validate = engine_ledger.validate_event
+        stored, continued = EXAMPLES["result_stored"], EXAMPLES["run_continued"]
+        for accepted in ({**stored, "head": "a" * 40}, {**stored, "head": "b" * 64},
+                         {**stored, "outcome": "failed"},
+                         {**stored, "head": "a" * 40, "outcome": "ok"},
+                         {**continued, "step": "draft"},
+                         {**continued, "step": "draft", "visit": 2}):
+            with self.subTest(accepted=accepted):
+                self.assertEqual(validate(dict(accepted)), accepted)
+        for refused in ({**stored, "head": "A" * 40}, {**stored, "head": "a" * 39},
+                        {**stored, "head": 40}, {**stored, "head": None},
+                        {**stored, "outcome": ""}, {**stored, "outcome": 3},
+                        {**continued, "step": "draft", "visit": 0},
+                        {**continued, "step": "draft", "visit": True},
+                        {**continued, "step": "no such"},
+                        {**continued, "visit": 2},
+                        {**EXAMPLES["step_entered"], "head": "a" * 40}):
+            with self.subTest(refused=refused), self.assertRaises(LedgerError):
+                validate(refused)
+
+    def test_a_recorded_continue_without_a_step_is_read_but_never_appended(self):
+        recorded = FIXTURES / "continued.jsonl"
+        line = json.loads(recorded.read_text(encoding="utf-8").splitlines()[6])
+        self.assertEqual(line["event"], "run_continued")
+        self.assertNotIn("step", line)
+        self.assertEqual(len(engine_ledger.replay(recorded)), 8)
+        with tempfile.TemporaryDirectory() as tmp:
+            run = new_run(tmp)
+            with self.assertRaises(LedgerError):
+                engine_ledger.append_event(run, EXAMPLES["run_continued"])
+            self.assertEqual((run / "events.jsonl").read_bytes(), b"")
+            engine_ledger.append_event(run, {**EXAMPLES["run_continued"], "step": "draft"})
+            self.assertEqual(len((run / "events.jsonl").read_text().splitlines()), 1)
 
 
 class ResultOrderTest(unittest.TestCase):
@@ -203,6 +289,19 @@ class ResultOrderTest(unittest.TestCase):
             self.assertEqual(json.loads((run / "results/scope.1.json").read_text()),
                              {"verdict": "ok"})
             self.assertEqual((run / "events.jsonl").read_bytes(), b"")
+
+    def test_a_stored_result_carries_head_and_outcome_only_when_given(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run = new_run(tmp)
+            common = dict(result={}, at=AT, wall_seconds=0, turns=0, tokens=ZERO_TOKENS,
+                          spend_usd=0)
+            engine_ledger.store_result(run, step="scope", visit=1, head="c" * 40,
+                                       outcome="failed", **common)
+            engine_ledger.store_result(run, step="scope", visit=2, **common)
+            first, second = engine_ledger.replay(run / "events.jsonl")
+            self.assertEqual((first["head"], first["outcome"]), ("c" * 40, "failed"))
+            self.assertNotIn("head", second)
+            self.assertNotIn("outcome", second)
 
     def test_a_failed_result_write_appends_no_event(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -605,7 +704,7 @@ class ReviewDefectsTest(unittest.TestCase):
             with self.subTest(tail=tail), tempfile.TemporaryDirectory() as tmp:
                 run = new_run(tmp)
                 (run / "events.jsonl").write_bytes(stopped + tail)
-                event = {"event": "run_continued", "at": "2026-11-21T16:10:00Z"}
+                event = {"event": "run_continued", "at": "2026-11-21T16:10:00Z", "step": "scope"}
                 engine_ledger.append_event(run, event)
                 self.assertEqual((run / "events.jsonl").read_bytes(), stopped + compact(event).encode())
                 self.assertEqual(engine_ledger.replay(run / "events.jsonl"),
@@ -621,7 +720,7 @@ class ReviewDefectsTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             run = new_run(tmp)
             (run / "events.jsonl").write_bytes(stopped + b'{"at":"2026-11-21T16:09:00Z","event":"run_contin')
-            first = {"event": "run_continued", "at": "2026-11-21T16:10:00Z"}
+            first = {"event": "run_continued", "at": "2026-11-21T16:10:00Z", "step": "scope"}
             second = {"event": "run_done", "at": "2026-11-21T16:11:00Z"}
             real_truncate = os.ftruncate
             outcome = []

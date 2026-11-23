@@ -13,13 +13,21 @@ is never named `done`, `exhausted`, `out-of-bounds`, `quota-wait` or like a step
 no stop, declared verdict or reply enum value carries either. `quota-wait` is the engine's own stop, taken when every account
 is out of usage (`engine_shell`).
 
-Step. Common members: `id` (never `run` or `done`), `stage` (one of `STAGES`), `kind` (one of `KINDS`), `in` (distinct paths,
-`<step id>.<member>` or `run.<input>`), `on` (outcome -> target; required on every step except a group member, forbidden on
-one), `max_visits` (integer >= 1; its presence makes the step bounded) and `mutates` (bool). Kind members: `command`:
-`command` and optional `subcommand`, its arguments being its `in` paths; `agent`: `role`, `prompt` (a bare `*.md` name),
-`reply` (a bare `*.reply.json` name) and `outcome_from`; `decide`: `grader`; `group`: `members`, a non-empty list of objects
-with exactly `step` and `pass` (distinct strings); `call`: `procedure`, optional `each` (one of the step's `in` paths) and
-`parallel` (an integer >= 1, only with `each`). A member a level does not define is `undefined_field`.
+Step. Common members: `id` (never `run` or `done`), `stage` (one of `STAGES`),
+`kind` (one of `KINDS`), `holds` (one of `HOLDS`, required: how long the step's
+stored result holds when a stopped run continues), `in` (distinct paths,
+`<step id>.<member>` or `run.<input>`), `on` (outcome -> target; required on every step except a group
+member, forbidden on one), `max_visits` (integer >= 1; its presence makes the
+step bounded) and `mutates` (bool). Kind members: `command`: `command`,
+optional `subcommand`, its arguments being its `in` paths, and optional `check`
+(an object with `command` and optional `subcommand`: the command that reads
+whether the step's effect already happened; a command step with `mutates` true
+requires one and no other step carries one); `agent`: `role`,
+`prompt` (a bare `*.md` name), `reply` (a bare `*.reply.json` name) and
+`outcome_from`; `decide`: `grader`; `group`: `members`, a non-empty list of
+objects with exactly `step` and `pass` (distinct strings); `call`: `procedure`,
+optional `each` (one of the step's `in` paths) and `parallel` (an integer >= 1,
+only with `each`). A member a level does not define is `undefined_field`.
 
 Groups. A group member is a step of the same list, listed by exactly one group, not a group, not the first step and never an
 `on` target or a stop's `reenter`. The first step is the entry. Command ids and verdicts are declared in
@@ -33,7 +41,7 @@ for a header, `keep_alive` or stop defect. Phase A (structure, per file): `unrea
 Phase B (references, only on a file with no phase A refusal; the header, `keep_alive` and stops first, then the steps in
 order): `unknown_target` (an `on` target that is no step, stop or `done`, a stop `reenter` or a group member `step` that is
 no step), `missing_claim_lost` (a `keep_alive` and no stop `claim-lost`), `unknown_command` and `undeclared_verdicts` (a
-`command` step or `keep_alive` against `command_verdicts.json`: an id that is no key, or a `subcommand` on a `verdicts`-form
+`command` step, its `check` or `keep_alive` against `command_verdicts.json`: an id that is no key, or a `subcommand` on a `verdicts`-form
 declaration, is the first; a `null` declaration, or a `subcommands`-form declaration that lacks the named subcommand, is the
 second), `unknown_role` (not in `ROLES`), `missing_prompt`, `missing_reply` (no such file in the procedure directory, a file
 that resolves outside it, or for `missing_prompt` a prompt that is not UTF-8 text), `invalid_reply` (the reply schema is not
@@ -53,8 +61,8 @@ renewal failure as an edge to `claim-lost` into a `mutates` step; a group member
 `unknown_outcome` (a step's `on` keys against `outcomes_of`; an `agent` step also produces `no-reply`, the shell's outcome when
 no valid reply came back, so a non-member agent step whose `on` lacks it is `unmapped_outcome`; an agent step outside a group also
 produces `out-of-bounds`, which its `on` must map, and a command step may map it; a command step also produces
-`refused`, because the engine calls the lifecycle guard before every command (issue 1515), so its `on` maps it; a step on a
-cycle of `step_graph` also produces `exhausted`, any step may map it, and a group member's `pass` entries are checked at the
+`refused`, because the engine calls the lifecycle guard before every command (issue 1515), so its `on` maps it; a step in
+`exhaustible` also produces `exhausted`, any step may map it, and a group member's `pass` entries are checked at the
 group, where neither `no-reply` nor `refused` passes) and `unbounded_cycle` (a cycle among steps
 with no `max_visits`, or a step on a cycle whose `exhausted` target re-enters the loop, or a loop through the `exhausted`
 entries of steps on a cycle, alone or mixed with ordinary entries, which never ends once every bound is spent; refused at its
@@ -69,8 +77,12 @@ it maps `no-reply` to produces none of its members, and a reader reached through
 schema resolved and `m` is not in its `properties` or its `required` list, since a value the reply may leave out cannot be
 consumed; a step ended by a bound (`out-of-bounds`) produces none of its members, so a read of `<X>.<m>` is refused on a
 route where `X` ended by the bound, unless the route reenters `X` and passes a normal outcome before the reader (the `exhausted` entry of a step on a cycle follows an earlier visit and keeps that visit's reply, unless the bound route leads back to the step); `X` is a decide step and `m` is not `verdict`, the only member its result publishes; the result of any other kind
-declares no schema and is not member-checked) and `unknown_placeholder` (a `{{<path>}}` of the step's prompt that is none of
-its `in` paths; skipped when the prompt is missing)."""
+declares no schema and is not member-checked), `unknown_placeholder` (a `{{<path>}}` of the step's prompt that is none of
+its `in` paths; skipped when the prompt is missing) and `each_not_a_list` (a `call` step's `each` path that resolved with
+no refusal above and reads a value that is not a list: a run input, a decide step's `verdict`, an agent reply member
+whose property schema has no `"type": "array"`, or a member of a platform command's output that
+`PLATFORM_LISTS` does not name; a path that did not resolve keeps its own refusal alone, and a producer of any other
+kind, a project command, or an agent whose reply did not resolve, declares no schema and is not list-checked)."""
 
 from __future__ import annotations
 
@@ -96,7 +108,7 @@ DEFECTS = ("unreadable_procedure", "undefined_field", "invalid_field",
            "invalid_reply", "unsupported_reply", "unknown_grader", "missing_procedure",
            "unreachable_step", "unreachable_done", "unmapped_outcome",
            "unknown_outcome", "unbounded_cycle", "unproduced_input",
-           "unknown_member", "unknown_placeholder")
+           "unknown_member", "unknown_placeholder", "each_not_a_list")
 EXHAUSTED = "exhausted"
 OUT_OF_BOUNDS = "out-of-bounds"
 NO_REPLY = "no-reply"
@@ -111,10 +123,17 @@ PATH_RE = re.compile(r"^([a-z][a-z0-9-]*)\.([a-z][a-z0-9_]*)$")
 FILE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 PLACEHOLDER_RE = re.compile(r"\{\{\s*([^{}]*?)\s*\}\}")
 
-COMMON_REQUIRED = ("id", "stage", "kind")
+# The members of each platform command's JSON output that are lists; every other member is not one.
+PLATFORM_LISTS: Mapping[str, frozenset[str]] = {
+    "diff-scope": frozenset({"files"}),
+    "forge-claim": frozenset(),
+}
+
+HOLDS = ("run", "head", "live")
+COMMON_REQUIRED = ("id", "stage", "kind", "holds")
 COMMON_OPTIONAL = ("in", "on", "max_visits", "mutates")
 KIND_MEMBERS = {
-    "command": (("command",), ("subcommand",)),
+    "command": (("command",), ("subcommand", "check")),
     "agent": (("role", "prompt", "reply", "outcome_from"), ()),
     "decide": (("grader",), ()),
     "group": (("members",), ()),
@@ -142,6 +161,7 @@ class StepResolved:
     outcomes: tuple[str, ...] | None = None
     reply_properties: frozenset[str] | None = None
     reply_required: frozenset[str] | None = None
+    reply_lists: frozenset[str] | None = None
     child_stops: tuple[str, ...] | None = None
     prompt: str | None = None
 
@@ -364,6 +384,7 @@ def _kind_members(item: dict, kind: str, label: str | None, found: _Findings) ->
             invalid("command must be a command id.")
         if "subcommand" in item and not (isinstance(item["subcommand"], str) and NAME_RE.fullmatch(item["subcommand"])):
             invalid(f"subcommand must match {NAME_RE.pattern}.")
+        _check_member(item, label, found)
     elif kind == "agent":
         if "role" in item and not _is_text(item["role"]):
             invalid("role must be a non-empty string.")
@@ -385,6 +406,25 @@ def _kind_members(item: dict, kind: str, label: str | None, found: _Findings) ->
             invalid("each must be one of the step's in paths.")
         if "parallel" in item and not (_is_int(item["parallel"]) and item["parallel"] >= 1 and "each" in item):
             invalid("parallel must be an integer >= 1 and needs each.")
+
+
+def _check_member(item: dict, label: str | None, found: _Findings) -> None:
+    """A command step's `check` pairs with `mutates`: a mutating step has one, no other does."""
+    mutating = item.get("mutates") is True
+    if "check" not in item:
+        if mutating:
+            found.add("invalid_field", "a command step that mutates needs a check.", label)
+        return
+    check = item["check"]
+    if not mutating:
+        found.add("invalid_field", "check belongs only to a command step whose mutates is true.", label)
+    if not isinstance(check, dict):
+        found.add("invalid_field", "check must be an object.", label)
+        return
+    _members(check, ("command",), ("subcommand",), found, label, "check")
+    for member in ("command", "subcommand"):
+        if member in check and not (isinstance(check[member], str) and NAME_RE.fullmatch(check[member])):
+            found.add("invalid_field", f"check {member} must match {NAME_RE.pattern}.", label)
 
 
 def _listed(item: dict) -> list:
@@ -435,6 +475,8 @@ def _step(item: dict, index: int, layout: _Layout, found: _Findings) -> None:
         _paths(item["in"], False, found, label, "in")
     if "max_visits" in item and not (_is_int(item["max_visits"]) and item["max_visits"] >= 1):
         found.add("invalid_field", "max_visits must be an integer >= 1.", label)
+    if "holds" in item and item["holds"] not in HOLDS:
+        found.add("invalid_field", f"holds must be one of {', '.join(HOLDS)}.", label)
     if "mutates" in item and not isinstance(item["mutates"], bool):
         found.add("invalid_field", "mutates must be a boolean.", label)
     if "on" in item:
@@ -498,6 +540,7 @@ class _Reply:
     properties: frozenset[str]
     required: frozenset[str]
     outcomes: tuple[str, ...]
+    lists: frozenset[str]
 
 
 def _reply_schema(path: Path, outcome_from: str, name: str) -> _Reply | tuple[str, str]:
@@ -527,7 +570,9 @@ def _reply_schema(path: Path, outcome_from: str, name: str) -> _Reply | tuple[st
     problem = schema_problem(schema)
     if problem:
         return "unsupported_reply", f"{name} uses {problem}, outside the reply schema subset."
-    return _Reply(frozenset(properties), frozenset(required), tuple(enum))
+    lists = frozenset(name for name, schema in properties.items()
+                      if isinstance(schema, dict) and schema.get("type") == "array")
+    return _Reply(frozenset(properties), frozenset(required), tuple(enum), lists)
 
 
 def _command_outcomes(reference: dict, commands: Mapping[str, CommandDeclaration | None],
@@ -587,7 +632,8 @@ def _agent_references(item: dict, directory: Path, replies: dict[str, _Reply | t
     if isinstance(reply, tuple):
         found.add(reply[0], reply[1], label)
         return StepResolved(prompt=prompt)
-    return StepResolved(reply.outcomes, reply.properties, reply.required, prompt=prompt)
+    return StepResolved(reply.outcomes, reply.properties, reply.required,
+                        reply.lists, prompt=prompt)
 
 
 def check_references(name: str, doc: dict, directory: Path,
@@ -617,6 +663,8 @@ def check_references(name: str, doc: dict, directory: Path,
         step = StepResolved()
         if kind == "command":
             step = StepResolved(_command_outcomes(item, commands, found, label))
+            if "check" in item:
+                _command_outcomes(item["check"], commands, found, label)
         elif kind == "agent":
             step = _agent_references(item, directory, replies, found, label)
         elif kind == "decide":
@@ -723,6 +771,38 @@ def on_cycle(graph: Mapping[str, tuple[str, ...]]) -> frozenset[str]:
     return frozenset(node for node in graph if node in _reach(graph, node))
 
 
+def stop_closed_graph(procedure: dict) -> dict[str, tuple[str, ...]]:
+    """`step_graph` plus, for each step with an `on` entry to a stop, an edge to the stop's
+    re-entry step when that step does not dominate it. Such a step may never have been
+    reached, so continuing enters it fresh and keeps every visit already spent; that step
+    then leads to it (an over-approximation: the re-entry step itself may never run past
+    its bound)."""
+    graph = step_graph(procedure)
+    members = _members_of(procedure)
+    group_of = {member["step"]: item["id"] for item in procedure["steps"]
+                if item["kind"] == "group" for member in item["members"]}
+    stops = procedure["stops"]
+    routes = {item["id"]: tuple(t for t in item["on"].values() if t != "done")
+              for item in procedure["steps"] if item["id"] not in members}
+    routes.update({name: (stop["reenter"],) for name, stop in stops.items()})
+    dom = dominators(routes, procedure["steps"][0]["id"])
+    closed = {node: set(targets) for node, targets in graph.items()}
+    for item in procedure["steps"]:
+        for outcome, stop in item.get("on", {}).items():
+            if item["id"] not in dom or outcome == EXHAUSTED or stop not in stops:
+                continue
+            reenter = stops[stop]["reenter"]
+            fresh = group_of.get(reenter, reenter)
+            if fresh in graph and reenter not in dom[item["id"]]:
+                closed[item["id"]].add(fresh)
+    return {node: tuple(targets) for node, targets in closed.items()}
+
+
+def exhaustible(procedure: dict) -> frozenset[str]:
+    """The steps that can be entered past their bound: on a cycle of `stop_closed_graph`."""
+    return on_cycle(stop_closed_graph(procedure))
+
+
 def _changing_steps(procedure: dict) -> set[str]:
     """The ids of the `mutates` steps and of the groups with a `mutates` member."""
     changing = {item["id"] for item in procedure["steps"] if item.get("mutates")}
@@ -737,7 +817,7 @@ def flow_graph(procedure: dict) -> dict[str, tuple[str, ...]]:
     A node entering a `mutates` step of a procedure with a `keep_alive` and a `claim-lost` stop also goes to that stop.
     """
     members = _members_of(procedure)
-    cyclic = on_cycle(step_graph(procedure))
+    cyclic = exhaustible(procedure)
     renews = "keep_alive" in procedure and CLAIM_LOST in procedure["stops"]
     changing = _changing_steps(procedure)
     graph: dict[str, tuple[str, ...]] = {START: (procedure["steps"][0]["id"],)}
@@ -769,7 +849,7 @@ def result_flow_graph(procedure: dict) -> dict[str, tuple[str, ...]]:
     through steps, the one way the previous visit can have ended with no member stored.
     """
     members = _members_of(procedure)
-    cyclic = on_cycle(step_graph(procedure))
+    cyclic = exhaustible(procedure)
     renews = "keep_alive" in procedure and CLAIM_LOST in procedure["stops"]
     changing = _changing_steps(procedure)
     graph = flow_graph(procedure)
@@ -827,13 +907,15 @@ def _check_data_flow(procedure: dict, resolved: Resolved, found: _Findings) -> N
     dom = dominators(graph, START)
     inputs = set(procedure["inputs"])
 
-    def check_path(path: str, step: dict | None) -> None:
+    def check_path(path: str, step: dict | None) -> bool:
+        """Report a path that does not resolve; true when it resolved."""
+        refused = len(found.refusals)
         label = None if step is None else step["id"]
         producer, member = path.split(".", 1)
         if producer == "run":
             if member not in inputs:
                 found.add("unproduced_input", f"{path!r} is not an input of the procedure.", label)
-            return
+            return len(found.refusals) == refused
         if step is not None:
             owner = group_of.get(label, label)
             if owner in dom:
@@ -855,13 +937,31 @@ def _check_data_flow(procedure: dict, resolved: Resolved, found: _Findings) -> N
             found.add("unknown_member",
                       f"{path!r} is not a member the result of {producer!r} carries; a decide step publishes only 'verdict'.",
                       label)
+        return len(found.refusals) == refused
+
+    def is_list(path: str) -> bool:
+        """Whether a resolved path reads a list; a producer with no schema is taken as one."""
+        producer, member = path.split(".", 1)
+        if producer == "run":
+            return False
+        kind = by_id[producer]["kind"] if producer in by_id else None
+        if kind == "decide":
+            return False
+        if kind == "command" and by_id[producer]["command"] in PLATFORM_LISTS:
+            return member in PLATFORM_LISTS[by_id[producer]["command"]]
+        known = resolved.steps.get(producer)
+        if kind == "agent" and known is not None and known.reply_lists is not None:
+            return member in known.reply_lists
+        return True
 
     for path in procedure.get("keep_alive", {}).get("in", ()):
         check_path(path, None)
     for item in procedure["steps"]:
         reads = item.get("in", [])
-        for path in reads:
-            check_path(path, item)
+        resolved_reads = {path: check_path(path, item) for path in reads}
+        each = item.get("each") if item["kind"] == "call" else None
+        if resolved_reads.get(each) and not is_list(each):
+            found.add("each_not_a_list", f"{each!r} is not a list the producer publishes.", item["id"])
         prompt = resolved.steps[item["id"]].prompt
         if item["kind"] == "agent" and prompt is not None:
             for name in dict.fromkeys(PLACEHOLDER_RE.findall(prompt)):
@@ -873,7 +973,7 @@ def _check_data_flow(procedure: dict, resolved: Resolved, found: _Findings) -> N
 def _check_reachability(procedure: dict, found: _Findings) -> None:
     members = _members_of(procedure)
     graph = flow_graph(procedure)
-    cyclic = on_cycle(step_graph(procedure))
+    cyclic = exhaustible(procedure)
     reached = {START} | _reach(graph, START)
     group_of = {member["step"]: item["id"] for item in procedure["steps"]
                 if item["kind"] == "group" for member in item["members"]}
@@ -892,7 +992,7 @@ def _check_reachability(procedure: dict, found: _Findings) -> None:
 
 
 def _check_outcomes(procedure: dict, resolved: Resolved, found: _Findings) -> None:
-    cyclic = on_cycle(step_graph(procedure))
+    cyclic = exhaustible(procedure)
     by_id = {item["id"]: item for item in procedure["steps"]}
     members = _members_of(procedure)
     for item in procedure["steps"]:
@@ -944,10 +1044,10 @@ def _loop_heads(graph: Mapping[str, tuple[str, ...]], order: list[str]) -> list[
 
 
 def _check_cycles(procedure: dict, found: _Findings) -> None:
-    graph = step_graph(procedure)
+    graph = stop_closed_graph(procedure)
     bounded = {item["id"] for item in procedure["steps"] if "max_visits" in item}
     unbounded = {node: tuple(t for t in targets if t not in bounded)
-                 for node, targets in graph.items() if node not in bounded}
+                 for node, targets in step_graph(procedure).items() if node not in bounded}
     refused: dict[str, str] = {}
     order = [item["id"] for item in procedure["steps"]]
     by_id = {item["id"]: item for item in procedure["steps"]}

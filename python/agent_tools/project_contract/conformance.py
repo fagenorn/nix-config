@@ -19,9 +19,10 @@ also exits 2 but prints no JSON, which is how a caller tells the two apart.
 (after printing the report, so a red CI job still carries its findings), and 0
 for every other purpose, however its outcome reads.
 
-Nothing here reads a clock: no report member and no source line carries a
-timestamp, and `FORBIDDEN_MEMBER_NAMES` is validated at every object depth so
-none can be added later without the validator refusing it.
+No report member carries a timestamp or a time, and `FORBIDDEN_MEMBER_NAMES` is
+validated at every object depth so none can be added later without the validator
+refusing it. The one clock read is the opt-in `--lint-times` stopwatch, whose
+line goes to stderr and never into the report.
 """
 
 from __future__ import annotations
@@ -32,6 +33,7 @@ from pathlib import Path
 import platform
 import sys
 
+from agent_tools.delivery import lint_time
 from agent_tools.project_contract import conformance_checks as CHECKS_MODULE
 from agent_tools.project_contract import conformance_registry as registry
 from agent_tools.project_contract import resolve_project
@@ -640,6 +642,7 @@ def command_run(args: argparse.Namespace) -> int:
     non-passing workflow_entry, or 1 for a non-passing ci. It catches nothing:
     an unexpected exception reaches main's single boundary and becomes the D15
     refusal (D29)."""
+    stopwatch = lint_time.Stopwatch() if args.lint_times else None
     context = Context(
         root=(Path(args.repo_root).resolve() if args.repo_root
               else Path.cwd().resolve()),
@@ -647,10 +650,14 @@ def command_run(args: argparse.Namespace) -> int:
         offline=args.offline,
         required=tuple(sorted(set(args.require))),
         resolver=load_resolver(),
+        stopwatch=stopwatch,
     )
     report = build_report(args.purpose, context, evaluate(args.purpose, context))
     validate_report(report)
     emit_json(report)
+    record = stopwatch.record() if stopwatch is not None else None
+    if record is not None:
+        sys.stderr.write(lint_time.record_line(record) + "\n")
     if args.purpose == "workflow_entry" and report["outcome"]["status"] != "passed":
         return 2
     if args.purpose == "ci" and report["outcome"]["status"] != "passed":
@@ -707,6 +714,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--require", action="append", default=[], metavar="CAPABILITY",
         choices=load_resolver().CAPABILITY_NAMES,
         help="a capability this run demands; repeatable")
+    judge.add_argument(
+        "--lint-times", action="store_true",
+        help="print each never-rise lint's wall time as one line on stderr")
     validate = subparsers.add_parser(
         "validate-report",
         help="refuse unless the named file is a schema-valid ConformanceReport")
