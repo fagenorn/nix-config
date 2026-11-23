@@ -1,11 +1,11 @@
-"""A stand-in forge for the console screenshots' land queue (#1679)."""
+"""A stand-in forge for the console screenshots' land queue."""
 from agent_tools.console import movement
 
 
 def land_queue_reader(waiting: tuple[int, ...]):
-    """A `pull_reader` over `movement.read_pulls` and two stand-in forge calls: pull request 8
-    (issue 99) holds the land lock of `main`; pull request 7 (the issues of `waiting`) is
-    registered behind it."""
+    """A `pull_reader` over `movement.read_pulls` and two stand-in forge calls: the pull request of
+    another issue holds the land lock of `main`; the one of the issues of `waiting` is registered
+    behind it."""
     def pull(number: int, issues: tuple[int, ...], oid: str) -> dict:
         return {"number": number, "headRefName": f"work-{number}", "baseRefName": "main",
                 "headRefOid": oid, "isCrossRepository": False,

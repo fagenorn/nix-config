@@ -99,7 +99,7 @@ Every call prints one JSON object on one stdout line with `command` (`look-appro
    environment. A refusal (exit 1) adds, after `covers` and each only when non-empty, `candidates`
    (`[{"issue", "head", "answer"}, ...]`, the carry candidates of the failing issues) and then
    `need` (the paths a further carry run must read). An admit is unchanged.
-9. `carry` (issues 1566, 1597, 1679) records the carry line that lets the owner's approval of `--from` stand
+9. `carry` records the carry line that lets the owner's approval of `--from` stand
    at `--head` when only merges of the integration branch came in. `--from` and `--head` are 40
    lowercase hex and different. Each `--before`, `--after` and `--picture` (a picture with no role)
    is a file read whole and every picture flag is optional (the ids are `look_marker.picture_id`, the
@@ -135,7 +135,7 @@ Every call prints one JSON object on one stdout line with `command` (`look-appro
    names the smallest such trusted live line, and no such line is `untrusted`. A forge error is the
    `status` forge error, `look_marker.Unreadable` being `payload_invalid`. `carry` never posts a
    `look` marker.
-   With `--own-files` (issue 1679; a flag with no value, a usage error with any of `--before`,
+   With `--own-files` (a flag with no value, a usage error with any of `--before`,
    `--after` and `--picture`, before any `gh` call) the rule is `own-files` and `pictures` is null:
    no pictures or set file is read, so an approval with a pictures digest and one without are
    carried alike (a `fix` answer is never a candidate); an approval whose `pictures` field is not a

@@ -670,7 +670,7 @@ wait, `NOW_QUOTA_TEXT`; a stated pause (`sprints.stated_hold`, #1380), `NOW_PAUS
 #1379), `NOW_UNREAD_TEXT`; with no merge refusal shown, a wait signal that alone moves the sprint
 (`sprint_wait`), the first of `NOW_CI_TEXT`, `NOW_COMMITTING_TEXT`, `NOW_RELEASE_TEXT` and `NOW_LOCK_TEXT`
 whose signal is inside the window (`NOW_LOCK_POSITION_TEXT`, the place in the queue, in place of `NOW_LOCK_TEXT` when the sprint's smallest
-`ProjectMovement.positions` is known, #1679); no report, `NOW_STARTING_TEXT`; else a shown merge refusal
+`ProjectMovement.positions` is known); no report, `NOW_STARTING_TEXT`; else a shown merge refusal
 (`sprints.merge_refused`), `NOW_REFUSED_TEXT` with its reason; else the stage phrase,
 `NOW_STAGE_TEXT`: the leading stage, its issue count, the total and the report's whole milestone (just the milestone when the report names no issue); either prefixed by `NOW_QUIET_TEXT` when the
 ball is `nobody`. The
@@ -1572,8 +1572,8 @@ def sprint_wait(state: SprintState, now_ms: int | None, listed: Collection[str],
 
 def fresh_wait(waits: WaitSignals, now_ms: int) -> str | None:
     """The first of CI, a committing delivery, a release step and the land lock whose signal is
-    inside `QUIET_AFTER_MS`. The idle hold of an in-progress run reads it too (#1381). The land lock
-    reads `NOW_LOCK_POSITION_TEXT` when `lock_position` is known (#1679)."""
+    inside `QUIET_AFTER_MS`. The idle hold of an in-progress run reads it too. The land lock
+    reads `NOW_LOCK_POSITION_TEXT` when `lock_position` is known."""
     for ms, text in ((waits.ci_ms, NOW_CI_TEXT), (waits.commit_ms, NOW_COMMITTING_TEXT),
                      (waits.release_ms, NOW_RELEASE_TEXT), (waits.lock_ms, NOW_LOCK_TEXT)):
         if ms is not None and now_ms - ms < QUIET_AFTER_MS:

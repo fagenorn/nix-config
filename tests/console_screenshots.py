@@ -20,9 +20,9 @@ Contract:
   lacks): the sprint line carries the declaration and the owner's Withdraw, and on a base console
   that ignores the row the same sprint shows neither, which is the before picture (#1432);
   `waiting-its-turn` is a sprint whose only movement is the land lock held by a pull request of another issue,
-  with the sprint's own pull request registered behind it (`console_land_queue`) and a live delivery run of issue 12
+  with the sprint's own pull request registered behind it (`console_land_queue`) and a live delivery run of the sprint's issue
   in its `pr` step (a run that is not live is no holder of the sprint's), whose run line reads "waiting its turn to
-  merge, position 1", not quiet; a base console reads "waiting its turn to merge", the before picture (#1679);
+  merge, position 1", not quiet; a base console reads "waiting its turn to merge", the before picture;
   `manager-cannot-hear` is a running sprint whose manager session (listed, named for the sprint)
   has a transcript whose last peer-message record is one the client held and did not deliver
   (#1229), read once through the movement poll, so its line reads that the manager cannot hear

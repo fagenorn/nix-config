@@ -1,4 +1,4 @@
-"""The sprint's now-sentence names its place in the land queue (#1679); the fixtures are those of `test_console_view`."""
+"""The sprint's now-sentence names its place in the land queue; the fixtures are those of `test_console_view`."""
 import unittest
 
 from agent_tools.console import view

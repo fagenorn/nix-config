@@ -118,7 +118,7 @@ listing it cannot read raises `Unreadable`. When it decides false the issue 1211
 pictures line; `settle_look_files` drives it alone. `carry_rule` names the rule a candidate's line
 must carry, or None.
 
-Carried own files (issue 1679). Any `approved` approval, with a `pictures` digest or without, is also
+Carried own files. Any `approved` approval, with a `pictures` digest or without, is also
 carried by a trusted live `look-carry` line that names the own-files rule:
 `<!-- agent:look-carry v1 issue=<issue> pr=<pr> from=<approved head> to=<head> rule=own-files -->`
 then `Carried the owner's look approval of head <from[:7]> of pull request <pr> to head <to[:7]>:
@@ -377,8 +377,8 @@ def carry_fields(issue: int, pr: int, approved_head: str, head: str, pictures: s
                  rule: str | None = None) -> dict[str, str]:
     """The fields of a look-carry line, in marker order; ValueError outside the grammar.
 
-    A digest names the pictures rule; None names the look-files rule (issue 1597); `rule` of
-    `OWN_FILES_RULE` names the own-files rule (issue 1679) and takes no digest.
+    A digest names the pictures rule; None names the look-files rule; `rule` of
+    `OWN_FILES_RULE` names the own-files rule and takes no digest.
     """
     _positive("issue", issue)
     _positive("pr", pr)
@@ -422,8 +422,8 @@ def carry_matches(fields: Mapping[str, str], issue: int, pr: int, approved_head:
     """Whether a carry line's fields name exactly these and exactly one rule.
 
     A digest names the pictures rule and the line holds no `rule` field; None names the look-files
-    rule and the line holds no `pictures` field; `rule` of `OWN_FILES_RULE` names the own-files rule
-    (issue 1679), a line with `rule=own-files` and no `pictures` field. The reader and the writer's
+    rule and the line holds no `pictures` field; `rule` of `OWN_FILES_RULE` names the own-files rule,
+    a line with `rule=own-files` and no `pictures` field. The reader and the writer's
     contention share it.
     """
     wanted = {"issue": str(issue), "pr": str(pr), "from": approved_head, "to": head}
@@ -806,7 +806,7 @@ def merges_only(approved_head: str, head: str, carry: Carry) -> Kept:
 
 
 def own_files_untouched(approved_head: str, head: str, carry: Carry) -> Kept:
-    """Whether only merges came in and none changed a file the pull request itself changed (issue 1679).
+    """Whether only merges came in and none changed a file the pull request itself changed.
 
     Reads only `B...A`, `A...H` and `B...H`. The pull request's own files are the names `B...A` lists;
     no merge may have changed one (`A...H`), and `B...H` may list no name `B...A` does not, so a merge

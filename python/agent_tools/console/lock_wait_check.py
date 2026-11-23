@@ -33,7 +33,7 @@ judged sprint has `state == "quiet"` or `ball == "nobody"`.
 
 Met (exit 0, `{"queued", "sprints": [{"sprint_id", "state", "now_text"}], "status": "met"}`) only
 when no judged sprint reads quiet and at least one waiter's sprint has `now_text ==
-sprints.NOW_LOCK_TEXT` or starts with `NOW_LOCK_TEXT + ", position "` (#1679): the wait itself is shown. When every waiter's sprint reads moving for
+sprints.NOW_LOCK_TEXT` or starts with `NOW_LOCK_TEXT + ", position "`: the wait itself is shown. When every waiter's sprint reads moving for
 another reason (another lane building, an owner question), the reading proves nothing about the
 lock wait: it prints `{"queued", "sprints", "status": "no_wait_shown"}` and exits 75.
 
@@ -122,7 +122,7 @@ def sprint_issues(sprint: dict) -> set[int]:
 
 
 def is_lock_wait(text) -> bool:
-    """Whether a `now_text` names the lock wait: `NOW_LOCK_TEXT`, with or without its place (#1679)."""
+    """Whether a `now_text` names the lock wait: `NOW_LOCK_TEXT`, with or without its place."""
     return text == sprints.NOW_LOCK_TEXT or (
         isinstance(text, str) and text.startswith(sprints.NOW_LOCK_TEXT + ", position "))
 

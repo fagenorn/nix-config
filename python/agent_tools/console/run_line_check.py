@@ -14,7 +14,7 @@ The rules are read in this order:
    `http.client.HTTPException`) prints `{"reason", "status": "no_console"}` and exits 75.
 3. The waiting sprints are the running sprints (`ended_at` null) of the project entry whose
    `project_id` is `--project` in `/api/state` (an entry or a `quiet_group`'s `projects`) whose
-   `now_text` equal to `sprints.NOW_LOCK_TEXT` or starting with `NOW_LOCK_TEXT + ", position "` (#1679). None prints `{"queued", "status": "no_wait_shown"}`, exit 75.
+   `now_text` equal to `sprints.NOW_LOCK_TEXT` or starting with `NOW_LOCK_TEXT + ", position "`. None prints `{"queued", "status": "no_wait_shown"}`, exit 75.
 4. The judged run lines are the delivery entries of that project entry, in
    `outside_sprints.sessions[].deliveries[]` and in each running sprint's
    `sessions[].deliveries[]`, that carry one issue common to all three of the union of the `issues` of

@@ -1,4 +1,4 @@
-"""The cross-host land lock (issue 629): `forge-claim land acquire|release|status|refresh|hold`.
+"""The cross-host land lock: `forge-claim land acquire|release|status|refresh|hold`.
 
 The lock serialises landings on one branch across hosts. Each action takes `--repo <owner/name>`,
 `--branch <name>` and `--sha <40 hex>`; `--wait` and `--release` exist on `acquire` only, as does
@@ -147,7 +147,7 @@ differs from the one it read before restarts its watch exactly as a changed lock
 read (D3): only a change counts, the beat's value means nothing, and the beat holds and releases
 nothing, so one that nobody deletes is harmless. A waiter that predates this rule ignores the beat.
 
-`hold --sha <sha> [--seconds N]` (issue 1679) is the lease's own refresh, D13.
+`hold --sha <sha> [--seconds N]` is the lease's own refresh, D13.
 
 D12, waiters queue (issue 1001, ADR-claims-012). The queue decides only who tries: the lock is
 still granted by nothing but the create and the compare-and-swap of D1, so no queue state, true
@@ -210,7 +210,7 @@ they find one, exactly as before, they are never held back by the queue, and a r
 waiter is held back by them only as it always was, by the lock they hold. Against them only the
 first in line competes, with a poll six times as fast.
 
-D13, the lease (issue 1679, ADR-claims-005). A delivery whose pull request is green and, when it
+D13, the lease (ADR-claims-005). A delivery whose pull request is green and, when it
 needs one, approved holds the lock until its merge, so a landing waits behind nobody's CI. It says
 so with `acquire --lease` (not with `--release`): after a holding verdict it writes the lease, the
 ref `refs/agent-locks/land-lease/<branch>/<since>-<pr>-<beat>` at the lock's sha, named like a

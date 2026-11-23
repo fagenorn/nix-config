@@ -1058,7 +1058,7 @@ class SettleTest(unittest.TestCase):
 
 
 class OwnFilesLineTest(unittest.TestCase):
-    """Issue 1679: an own-files line carries an approval over merges that touch none of the pull request's files."""
+    """An own-files line carries an approval over merges that touch none of the pull request's files."""
 
     def test_judge_refuses_when_a_merged_in_path_is_an_own_path(self):
         facts = [lm.IssueFacts(1200, BODY, (pics_approval(10), own_files_comment(11)))]

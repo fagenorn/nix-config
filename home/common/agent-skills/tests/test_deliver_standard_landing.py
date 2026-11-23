@@ -1,4 +1,4 @@
-"""deliver-standard.js landing scenarios against stub agents: the green-first lease, the queue it leaves and the look carry (#1679).
+"""deliver-standard.js landing scenarios against stub agents: the green-first lease, the queue it leaves and the look carry.
 
 Run: just agent-workflow-tests
 """
@@ -244,7 +244,7 @@ class LostLeaseTest(unittest.TestCase):
 
 
 class LookCarryLandingTest(unittest.TestCase):
-    """#1566: a landing resync that moves the head asks look-approval carry, after verifying the new head, before it asks the owner again."""
+    """A landing resync that moves the head asks look-approval carry, after verifying the new head, before it asks the owner again."""
 
     PICS = [{"kind": "before", "path": "/r/pics/before.png"}, {"kind": "after", "path": "/r/pics/after.png"}]
     NEEDED = dict(base.LookResumeTest.MOVED, **{"look-status": {"verdict": "needed", "kept_from": None},

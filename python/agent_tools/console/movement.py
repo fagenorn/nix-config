@@ -15,7 +15,7 @@ each one's `headRefOid`, `baseRefName` and `isCrossRepository`. The land lock is
 when it is not cross-repository and the lock of its own head branch is at its head oid: a release's head is
 the locked integration branch itself, whatever its base, and a fork's branch of that name never holds. A
 node whose `headRefOid` or `baseRefName` is not a str or whose `isCrossRepository` is not a bool is
-payload_invalid. Its place in the queue (#1679): `waiters_from_answer` maps base branch to the `(since, pr)`
+payload_invalid. Its place in the queue: `waiters_from_answer` maps base branch to the `(since, pr)`
 pairs of every item whose ref starts with `forge_land_lock.WAIT_PREFIX`, the branch being the text up to the
 last `/` and the last segment matching `WAITER` entirely (others are skipped, shape errors as for the
 locks). A pull request's `queue_position` is its 1-based place among the pull requests of one read with the
@@ -57,7 +57,7 @@ are seen no more and the sprint ages out to may be stuck (ADR-console-061 D1); i
 becomes `max(now_ms, kept)`; an issue not seen keeps its time, never refreshed; `locks` is ascending by
 issue. A failed read sees nothing and keeps `locks` unchanged whatever `locking` holds, so a lock time ages
 out after the quiet window like every signal (ADR-console-050 D5), a journal lock step's included. `positions` is each issue of a read pull with a `queue_position` mapped to its smallest, ascending by issue; a good read
-replaces it and a failed read keeps it (#1679). `merged` keys pull requests by number and returns them ascending by number. With `pulls` None
+replaces it and a failed read keeps it. `merged` keys pull requests by number and returns them ascending by number. With `pulls` None
 (a failed read) the result keeps `previous.pulls` and `previous.read_ms` unchanged. With `pulls` given,
 `read_ms = now_ms`, and each read pull becomes a `PullMovement` with its read `issues` and
 `committed_ms` (the larger of it and the previous pull's, so a rewritten head never moves it back,

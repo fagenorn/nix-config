@@ -1,4 +1,4 @@
-"""deliver-batch.js landing scenarios against stub agents: the green-first lease, a conflict resolved outside it and the waits for it (#1679).
+"""deliver-batch.js landing scenarios against stub agents: the green-first lease, a conflict resolved outside it and the waits for it.
 
 Run: just agent-workflow-tests
 """
@@ -37,7 +37,7 @@ TIER = "integration"
 
 
 class ConflictedSyncOutsideLockTest(unittest.TestCase):
-    """#913: a sync merge that conflicts is aborted under the land lock and resolved, tested, reviewed and fixed outside it; the
+    """A sync merge that conflicts is aborted under the land lock and resolved, tested, reviewed and fixed outside it; the
     reviewed head is read green before it takes the lock again, waiting, and a clean merge never leaves it."""
 
     RELEASE = "forge-claim land release --repo owner/repo --branch dev --sha "
@@ -185,7 +185,7 @@ class ConflictedSyncOutsideLockTest(unittest.TestCase):
                 # The accepted head is never rewritten, so a relaunch finds the pushed merge unaccepted and reviews it through the child.
                 for gone in ("land-record-1-1", "land-merge-1", "close-out-1"):
                     self.assertNotIn(gone, ls)
-                # #1371: a fix commit a stop left unpushed is carried as untested; every other stop keeps the child's cont.
+                # A fix commit a stop left unpushed is carried as untested; every other stop keeps the child's cont.
                 self.assertEqual(result["relaunch"]["conts"], unpushed("sync-fix", B, base.SyncFixRoundTest.FIXED) if name == "the finding survives" else PRE_MERGE_CONTS)
 
     def test_a_relaunch_after_a_stop_outside_the_lock_goes_through_the_child(self):
@@ -226,7 +226,7 @@ class ConflictedSyncOutsideLockTest(unittest.TestCase):
     DESCENDS = {"verdict": "pass", "findings": [], "descends": True}
 
     def test_a_resolution_whose_head_does_not_descend_from_its_merge_commit_never_lands(self):
-        """#986: only the sync review's own proof of ancestry accepts a head that is not the merge commit."""
+        """Only the sync review's own proof of ancestry accepts a head that is not the merge commit."""
         unrelated = {"verdict": "pass", "findings": [], "descends": False}
         unproven = {"verdict": "pass", "findings": []}
         for name, replies in {
@@ -252,7 +252,7 @@ class ConflictedSyncOutsideLockTest(unittest.TestCase):
         self.assertNotIn("descends", prompt(out["calls"], "land-sync-review-1-1"))
 
     def test_a_resolution_with_commits_on_top_of_its_merge_commit_is_reviewed_over_both_and_lands_at_its_head(self):
-        """#986: a follow-up commit the resolver made after the merge is reviewed with the merge, and the head is what lands."""
+        """A follow-up commit the resolver made after the merge is reviewed with the merge, and the head is what lands."""
         out = self.land(**{"land-sync-resolve-1-1": self.FOLLOWED, "land-sync-review-1-1": self.DESCENDS, "land-checks-1-2": green(C)})
         result, calls = out["result"], out["calls"]
         self.assertEqual(row(result, 1)["outcome"], "landed")
@@ -278,7 +278,7 @@ class ConflictedSyncOutsideLockTest(unittest.TestCase):
         self.assertEqual(land_release_shas(calls), [SHA, C])
 
     def test_a_resolution_that_names_no_merge_commit_never_lands(self):
-        """#986: the head may be a follow-up commit, so a conflicted resolution naming a head alone names no merge to review."""
+        """The head may be a follow-up commit, so a conflicted resolution naming a head alone names no merge to review."""
         result, calls, _ = run(patch=BEHIND, replies={"land-sync-1-1": ABORTED, "land-sync-resolve-1-1": {
             "status": "done", "conflicted": True, "head": C, "resolved_files": ["x.py"], "notes": "ok"}})
         got = row(result, 1)
@@ -292,7 +292,7 @@ class ConflictedSyncOutsideLockTest(unittest.TestCase):
         self.assertEqual(ls.count("land-unlock-1"), 1)
 
     def test_a_sync_step_that_resolved_the_conflict_itself_and_names_no_merge_commit_never_lands(self):
-        """#986: the same refusal when the sync step, not the resolve step, answers conflicted with a head alone."""
+        """The same refusal when the sync step, not the resolve step, answers conflicted with a head alone."""
         result, calls, _ = run(patch=BEHIND, replies={"land-sync-1-1": {
             "status": "done", "conflicted": True, "head": C, "resolved_files": ["x.py"], "notes": "ok"}})
         got = row(result, 1)
@@ -414,7 +414,7 @@ class ConflictedSyncOutsideLockTest(unittest.TestCase):
 
 
 class WaitByPlaceTest(unittest.TestCase):
-    """#1018: the retries of a lock wait are spent only by a wait that made no progress. A wait that ended first in line, or at a
+    """The retries of a lock wait are spent only by a wait that made no progress. A wait that ended first in line, or at a
     better place than the wait before it, is made again for nothing, and a ceiling of six hours bounds the waits in all."""
 
     @staticmethod
@@ -516,7 +516,7 @@ class WaitByPlaceTest(unittest.TestCase):
 
 
 class BatchGreenFirstTest(unittest.TestCase):
-    """#1679: a serial landing asks for the land lease only once its head is green, beats it while it waits for the checks and
+    """A serial landing asks for the land lease only once its head is green, beats it while it waits for the checks and
     waits again at the back when it loses it; a train takes no lease."""
 
     PASSED = {"state": "passed", "head": SHA, "required": ["ci"], "passed": ["ci"]}

@@ -1,4 +1,4 @@
-"""forge-claim land (issue 1679, D13): a delivery holds the land lock as a lease that beats, and the first in line takes over one that lapsed."""
+"""forge-claim land (D13): a delivery holds the land lock as a lease that beats, and the first in line takes over one that lapsed."""
 from unittest import mock
 
 from agent_tools.claims import forge_land_lock as land_lock
@@ -28,9 +28,9 @@ LEASE = "refs/agent-locks/land-lease/main/"
 
 
 class LeaseTest(base.QueueTest):
-    """Issue 1679, D13: a delivery holds the lock as a lease that beats; the first in line takes
-    over one whose beats stopped or that has held past its bound. The waiter under test is pull
-    request 11 at A; pull request 12 holds the lock at B, pull request 13 waits at D."""
+    """D13: a delivery holds the lock as a lease that beats; the first in line takes
+    over one whose beats stopped or that has held past its bound. The waiter under test is 11
+    at A; 12 holds the lock at B and 13 waits at D."""
 
     def setUp(self):
         super().setUp()
@@ -148,11 +148,11 @@ class LeaseTest(base.QueueTest):
 
         def hook(elapsed):
             if elapsed >= 300 and not taken:
-                taken.append(elapsed)  # pull request 11 merges and its lock is released
+                taken.append(elapsed)  # the holder merges and its lock is released
                 self.pulls(A, pull(11, state="closed", merged=True, sha=A))
                 self.world.set_ref(REF, None)
             elif taken and len(taken) == 1 and elapsed >= taken[0] + 60:
-                taken.append(elapsed)  # pull request 13, first in line, takes the lock
+                taken.append(elapsed)  # the first in line takes the lock
                 self.register(13, None, None)
                 self.world.set_ref(REF, D)
             elif len(taken) == 2 and elapsed >= taken[1] + 300:

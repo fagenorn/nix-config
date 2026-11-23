@@ -1,12 +1,12 @@
-"""The stand-in `gh` of the permission guard's table (issue 552), as the source of a Python script."""
+"""The stand-in `gh` of the permission guard's table as the source of a Python script."""
 # Stand-in for `gh`. Answers the lookups the guard makes for any slug and
 # any protected branch, so the merge path can be exercised in every fixture
-# repository: the PR, its protection, and (issue 1138) the PR body, an issue and
+# repository: the PR, its protection, and the PR body, an issue and
 # an issue's comments, the last two from FAKE_ISSUES (a JSON object of issue
 # number -> {"body", "comments"}; an absent number answers an empty issue).
 # FAKE_<STAGE>_MODE injects failures; FAKE_<STAGE>_JSON overrides
 # the payload. Mode `http_error` replays a failed `gh api` read as gh reports
-# it (issue 552): exit 1, the response body on stdout (FAKE_<STAGE>_JSON, else
+# it: exit 1, the response body on stdout (FAKE_<STAGE>_JSON, else
 # GitHub's plan-gated protection answer) and `gh: <message> (HTTP <status>)` on
 # stderr, or `gh: HTTP 403` when the body holds no string message and status.
 FAKE_GH_SCRIPT = '''
