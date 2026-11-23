@@ -226,14 +226,8 @@ def remote_slug(root: Path) -> str:
 # --------------------------------------------------------------------------
 
 
-def required_checks(root: Path) -> list[str]:
-    """The contexts of the branch protection's required checks, in file order."""
-    try:
-        text = read_text(root / PROTECTION_SOURCE)
-    except OSError:
-        raise Underivable(f"cannot be derived: {PROTECTION_SOURCE} could not be read") from None
-    except UnicodeDecodeError:
-        raise Underivable(f"cannot be derived: {PROTECTION_SOURCE} is not valid JSON") from None
+def checks_in(text: str) -> list[str]:
+    """The contexts of the required checks the protection file's `text` lists, in file order."""
     try:
         document = json.loads(text)
     except (ValueError, RecursionError):
@@ -255,6 +249,17 @@ def required_checks(root: Path) -> list[str]:
             raise refusal
         contexts.append(context)
     return contexts
+
+
+def required_checks(root: Path) -> list[str]:
+    """The contexts of the branch protection's required checks, in file order."""
+    try:
+        text = read_text(root / PROTECTION_SOURCE)
+    except OSError:
+        raise Underivable(f"cannot be derived: {PROTECTION_SOURCE} could not be read") from None
+    except UnicodeDecodeError:
+        raise Underivable(f"cannot be derived: {PROTECTION_SOURCE} is not valid JSON") from None
+    return checks_in(text)
 
 
 # --------------------------------------------------------------------------

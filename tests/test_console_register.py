@@ -237,14 +237,11 @@ def plan_doc(outcome="reconcile", state="draft", open_questions=0, blockers=(),
 
 
 def draft_fields() -> list[dict]:
-    return [
-        {"field": "project-id", "label": "Project id", "value": "sample-owner/sample-app",
-         "source": "remote", "options": [], "text": True, "reason": None,
-         "ask": "Which project is this repository?"},
-        {"field": "build-command", "label": "Build command", "value": None, "source": "none",
-         "options": [], "text": True, "reason": None,
-         "ask": "Which command builds sample-app?\nThe console found none in its files: type "
-                "the command, or say it has none."}]
+    """The draft of a checkout whose remote names it and whose files give a test command but no lint command."""
+    return contract_draft.draft("/x/sample-app", {
+        "remotes": [("origin", "git@github.com:sample-owner/sample-app.git")],
+        "default_branch": "trunk", "branches": ["trunk"], "files": ["justfile"],
+        "texts": {"justfile": "test:\n\techo t\n"}})
 
 
 class SummaryTest(unittest.TestCase):
@@ -918,17 +915,19 @@ class RowTest(unittest.TestCase):
         self.assertEqual(row["headline"],
                          "What the console read from sample-app: it has no project contract yet")
         self.assertEqual(row["note"], "The draft has 1 open question.")
-        self.assertEqual([q["subject"] for q in row["questions"]], ["build-command"])
+        self.assertEqual([q["subject"] for q in row["questions"]], ["lint-command"])
         self.assertEqual(row["questions"][0]["ask"], fields[1]["ask"])
         self.assertEqual(row["draft"], fields)
         self.assertEqual(row["project_id"], "sample-owner/sample-app")
         self.assertEqual(register.ended(row)[2], row)
+        unread = [{**f, "source": None} if f["field"] == "project-identity" else f for f in fields]
+        self.assertIsNone(register.drafting("/x/sample-app", unread)["project_id"])
 
-    def test_a_repository_with_no_remote_words_its_default_branch_card_plainly(self):
+    def test_a_repository_with_no_remote_words_its_integration_branch_card_plainly(self):
         fields = contract_draft.draft("/x/sample-app", {
             "remotes": [], "default_branch": None, "branches": ["trunk"], "files": [], "texts": {}})
         row = register.drafting("/x/sample-app", fields)
-        (ask,) = [q["ask"] for q in row["questions"] if q["subject"] == "default-branch"]
+        (ask,) = [q["ask"] for q in row["questions"] if q["subject"] == "integration-branch"]
         self.assertIn("It has no remote, so the console cannot tell", ask)
         self.assertNotIn("Its remote", ask)
 
@@ -937,35 +936,35 @@ class RowTest(unittest.TestCase):
                    "texts": {}}
         now = contract_draft.draft("/x/sample-app", reading)
         # The same draft as an earlier console saved it: internal labels, old option and card words.
-        old_label = {"projections": "projections", "worktree-prefix": "worktree name prefix"}
+        old_label = {"production": "production", "release": "release profile"}
         saved = []
         for f in now:
             f = {**f, "label": old_label.get(f["field"], f["label"])}
-            if f["field"] == "projections":
-                f["options"] = [{"value": "none", "label": "It has no projections"}]
-            if f["field"] == "default-branch":
+            if f["field"] == "production":
+                f["options"] = [{"value": "none", "label": "It has no production"}]
+            if f["field"] == "integration-branch":
                 f["ask"] = ("Which branch is the default branch of sample-app?\n"
-                            "Its remote did not say: choose a branch or type its name.")
-            if f["field"] == "worktree-prefix":
-                f.update(value="mine-", source="owner")
+                            "It has no remote at all: choose a branch or type its name.")
+            if f["field"] == "release":
+                f.update(value='{"kind": "x"}', source="owner")
             saved.append(f)
         row = register.drafting("/x/sample-app", saved)
         found = register.latest([Event(1, "t1", register.ENDED, None, row)])
         draft = {f["field"]: f for f in found["draft"]}
-        self.assertEqual(draft["projections"]["label"], "generated agent files")
-        self.assertEqual(draft["projections"]["options"],
-                         [{"value": "none", "label": "It generates no agent instruction files"}])
-        self.assertEqual(draft["worktree-prefix"]["label"], "start of each work copy's name")
-        self.assertEqual((draft["worktree-prefix"]["value"], draft["worktree-prefix"]["source"]),
-                         ("mine-", "owner"))
-        self.assertIn("It has no remote, so the console cannot tell", draft["default-branch"]["ask"])
-        self.assertEqual(draft["default-branch"]["options"], [{"value": "trunk", "label": "trunk"}])
-        (branch,) = [q for q in found["questions"] if q["subject"] == "default-branch"]
-        self.assertEqual(branch["ask"], draft["default-branch"]["ask"])
+        self.assertEqual(draft["production"]["label"], "production rules")
+        self.assertEqual(draft["production"]["options"],
+                         [{"value": "none", "label": "It declares no production rules"}])
+        self.assertEqual(draft["release"]["label"], "how it is released")
+        self.assertEqual((draft["release"]["value"], draft["release"]["source"]),
+                         ('{"kind": "x"}', "owner"))
+        self.assertIn("It has no remote, so the console cannot tell", draft["integration-branch"]["ask"])
+        self.assertEqual(draft["integration-branch"]["options"], [{"value": "trunk", "label": "trunk"}])
+        (branch,) = [q for q in found["questions"] if q["subject"] == "integration-branch"]
+        self.assertEqual(branch["ask"], draft["integration-branch"]["ask"])
         self.assertNotIn("Its remote", "".join(q["ask"] for q in found["questions"]))
         self.assertEqual(found["plan_id"], row["plan_id"])
         shown = {e["field"]: e["line"] for e in register.view_entry(None, found)["draft"]}
-        self.assertNotIn("projections", shown["projections"].lower())
+        self.assertNotIn("production", shown["release"].lower())
 
     def test_a_row_saved_with_the_light_lane_field_reads_back_without_it(self):
         reading = {"remotes": [], "default_branch": None, "branches": ["trunk"], "files": [],
@@ -979,7 +978,7 @@ class RowTest(unittest.TestCase):
         saved = []
         for f in kept:
             saved.append(f)
-            if f["field"] == "attempt-budget":
+            if f["field"] == "test-command":
                 saved.append(light)
         row = register.drafting("/x/sample-app", saved)
         found = register.latest([Event(1, "t1", register.ENDED, None, row)])
@@ -995,12 +994,12 @@ class RowTest(unittest.TestCase):
                    "default_branch": "trunk", "branches": ["trunk"], "files": ["README.md"],
                    "texts": {}}
         fields = contract_draft.draft(root, reading)
-        for field in ("build-command", "test-command"):
-            fields, _ = contract_draft.set_value(fields, field, "none", entries=[], root=root)
+        for field in ("lint-command", "test-command"):
+            fields, _ = contract_draft.set_value(fields, field, "just " + field[:4])
         light = {"field": "light-lane", "label": "light lane", "value": light_value,
                  "source": "owner", "options": [{"value": "none", "label": "It has no light lane"}],
                  "text": True, "reason": refused, "ask": "What is the light lane of sample-app?"}
-        at = [f["field"] for f in fields].index("attempt-budget") + 1
+        at = [f["field"] for f in fields].index("test-command") + 1
         saved = [*fields[:at], light, *fields[at:]]
         if state is None:
             return root, register.drafting(root, saved)
@@ -1015,13 +1014,12 @@ class RowTest(unittest.TestCase):
         found = register.latest([Event(1, "t1", register.ENDED, None, row)])
         self.assertEqual((found["result"], found["state"]), ("drafting", "drafting"))
         self.assertEqual(found["plan_id"], PLAN_ID)
-        self.assertEqual([q["subject"] for q in found["questions"]], ["project-id"])
+        self.assertEqual([q["subject"] for q in found["questions"]], ["integration-branch"])
         self.assertNotIn("light-lane", [f["field"] for f in found["draft"]])
-        answered, refusal = contract_draft.set_value(
-            found["draft"], "project-id", "sample-owner/sample-app", entries=[], root=root)
+        answered, refusal = contract_draft.set_value(found["draft"], "integration-branch", "trunk")
         self.assertIsNone(refusal)
         self.assertEqual(contract_draft.open_fields(answered), [])
-        self.assertNotIn("light_lane", contract_draft.contract(answered)["bindings"]["workflow"])
+        self.assertNotIn("workflow", contract_draft.contract(answered)["bindings"])
 
     def test_a_cancel_naming_the_saved_plan_still_ends_a_replanned_registration(self):
         root, row = self.planned_with_light_lane(self.SHADOW, state="ready")
@@ -1041,7 +1039,7 @@ class RowTest(unittest.TestCase):
     def test_a_replanned_registration_with_an_adoption_past_a_failed_apply_has_no_question(self):
         _, row = self.planned_with_light_lane(self.SHADOW, state="ready")
         found = register.latest([Event(1, "t1", register.ENDED, None, row)])
-        self.assertEqual([q["subject"] for q in found["questions"]], ["project-id"])
+        self.assertEqual([q["subject"] for q in found["questions"]], ["integration-branch"])
         for step, state in (("applied", None), ("push_failed", None), ("open_failed", None),
                             ("opened", "ready"), ("opened", "failing"), ("opened", "merged")):
             with self.subTest(step=step, state=state):
@@ -1051,10 +1049,10 @@ class RowTest(unittest.TestCase):
         for step, state in ((None, None), ("apply_failed", None), ("opened", "closed")):
             with self.subTest(step=step, state=state):
                 shown = register.view_entry(None, found, adoption=self.adoption_entry(step, state))
-                self.assertEqual([q["subject"] for q in shown["questions"]], ["project-id"])
+                self.assertEqual([q["subject"] for q in shown["questions"]], ["integration-branch"])
                 self.assertTrue(register.plans_again(step, state))
         self.assertEqual([q["subject"] for q in register.view_entry(None, found)["questions"]],
-                         ["project-id"])
+                         ["integration-branch"])
 
     def test_the_saved_plan_stands_in_for_the_replanned_row_once_its_adoption_is_past_a_failed_apply(self):
         _, row = self.planned_with_light_lane(self.SHADOW, state="ready")
@@ -1110,7 +1108,7 @@ class RowTest(unittest.TestCase):
         self.assertEqual([q["subject"] for q in row["questions"]], ["light-lane"])
         found = register.latest([Event(1, "t1", register.ENDED, None, row)])
         self.assertEqual((found["result"], found["state"]), ("drafting", "drafting"))
-        self.assertEqual([q["subject"] for q in found["questions"]], ["project-id"])
+        self.assertEqual([q["subject"] for q in found["questions"]], ["integration-branch"])
         self.assertEqual(found["note"], "The draft has 1 open question.")
         self.assertNotIn("light-lane", [f["field"] for f in found["draft"]])
 
@@ -1145,7 +1143,7 @@ class RowTest(unittest.TestCase):
             "remotes": [("origin", "git@github.com:sample-owner/sample-app.git")],
             "default_branch": "trunk", "branches": ["trunk"], "files": ["README.md"], "texts": {}})
         shown = register.view_entry(None, {**register.drafting("/x/sample-app", full), "at": "t"})
-        self.assertEqual(shown["draft_more"], "and 20 more settings at their usual values")
+        self.assertEqual(shown["draft_more"], "and 2 more settings at their usual values")
 
     def test_the_draft_id_follows_the_values(self):
         one = draft_fields()
@@ -1428,12 +1426,12 @@ class AdopterTest(unittest.TestCase):
                          "tools/show.sh:1:5 rewrite")
 
     def test_plan_sends_the_drafted_contract_after_the_answers(self):
-        answer = {"id": "contract-draft", "subject": "build-command", "value": "make"}
+        answer = {"id": "contract-draft", "subject": "lint-command", "value": "make"}
         self.adopter().plan("/r", answers=[answer], contract="/s/d.json")
         self.adopter().plan("/r", answers=[answer])
         first, second = self.args.read_text().splitlines()[-2:]
         self.assertEqual(first, "plan --repo-root /r --format json --answer contract-draft "
-                                "build-command make --contract-draft /s/d.json")
+                                "lint-command make --contract-draft /s/d.json")
         self.assertNotIn("--contract-draft", second)
 
     def test_exit_0_and_2_return_the_object(self):

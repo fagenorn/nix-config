@@ -3604,9 +3604,9 @@ class RegisterItemViewTest(unittest.TestCase):
         self.assertEqual(shown["statement"]["headline"], "2 things need you")
 
     def test_a_text_question_is_a_counted_register_item_with_a_text_field(self):
-        ask = {"id": "contract-draft", "subject": "project-id",
-               "ask": "Which project is this repository?\nIt has no remote that names it: type "
-                      "its id, as owner/name.",
+        ask = {"id": "contract-draft", "subject": "integration-branch",
+               "ask": "Which branch does finished work of sample-app merge into?\nIt has no remote, "
+                      "so the console cannot tell: choose a branch or type its name.",
                "options": [], "recommended": None, "why": None, "text": True}
         shown = derive_view([], registration=reg([ask]))
         (entry,) = shown["inbox"]["open"]
@@ -3619,7 +3619,7 @@ class RegisterItemViewTest(unittest.TestCase):
         reading = {"remotes": [("origin", "git@github.com:sample-owner/sample-app.git")],
                    "default_branch": "trunk", "branches": ["trunk"],
                    "files": ["README.md", "justfile"],
-                   "texts": {"justfile": "build:\n\ttrue\ntest:\n\ttrue\n"}}
+                   "texts": {"justfile": "lint:\n\ttrue\ntest:\n\ttrue\n"}}
         fields = contract_draft.draft("/x/sample-app", reading)
         row = register.drafting("/x/sample-app", fields)
         shown = derive_view([], registration=register.view_entry(
@@ -3627,7 +3627,7 @@ class RegisterItemViewTest(unittest.TestCase):
         entries = shown["registration"]["draft"]
         texts = ([e["line"] for e in entries] + [o["label"] for e in entries for o in e["options"]]
                  + [shown["registration"]["draft_more"]])
-        self.assertEqual(len(entries), 27)
+        self.assertEqual(len(entries), len(contract_draft.FIELDS) + len(contract_draft.FACTS))
         for text in texts:
             for term in ("<num>", "<slug>", "light lane", "hint", "operations path",
                          "rejection path"):
@@ -3637,15 +3637,15 @@ class RegisterItemViewTest(unittest.TestCase):
             f"and {len([f for f in contract_draft.FIELDS if f not in contract_draft.MAIN])} more "
             "settings at their usual values")
         self.assertEqual(shown["registration"]["draft_more"],
-                         "and 20 more settings at their usual values")
+                         "and 2 more settings at their usual values")
 
     def test_a_text_card_carries_the_placeholder_of_its_field(self):
-        ask = {"id": "contract-draft", "subject": "project-id",
-               "ask": "Which project is this repository?", "options": [],
+        ask = {"id": "contract-draft", "subject": "integration-branch",
+               "ask": "Which branch does finished work merge into?", "options": [],
                "recommended": None, "why": None, "text": True}
         shown = derive_view([], registration=reg([ask, ASK_A]))
         first, second = shown["inbox"]["open"]
-        self.assertEqual(first["placeholder"], "owner/name")
+        self.assertEqual(first["placeholder"], "a branch name")
         self.assertIsNone(second["placeholder"])
 
     def test_the_registration_carries_its_draft_lines(self):
@@ -3784,15 +3784,14 @@ class ProposedEnvironmentViewTest(unittest.TestCase):
               "note": None, "questions": [], "remote": None}
 
     def latest(self):
-        fields = contract_draft.draft("/srv/sample-app", {
-            **contract_draft.read("/nonexistent"), "hooks": ["pre-commit"],
-            "environments": ["devenv.nix"]})
+        fields = contract_draft.reconcile_fields("/srv/sample-app", {
+            "stranded": ["pre-commit"], "environments": ["devenv.nix"]})
         return {**self.LATEST, "draft": fields}
 
-    def test_an_adopted_registration_offers_no_project_id_card(self):
+    def test_an_adopted_registration_offers_no_integration_branch_card(self):
         latest = {**self.LATEST, "result": "drafting", "state": "drafting", "outcome": None,
-                  "questions": [{"id": contract_draft.QUESTION_ID, "subject": "project-id",
-                                 "ask": "What is the project id?", "why": "It names the project.",
+                  "questions": [{"id": contract_draft.QUESTION_ID, "subject": "integration-branch",
+                                 "ask": "Which branch?", "why": "It names the branch.",
                                  "options": [], "text": True}]}
         adoption = {"status": "done", "step": "opened", "state": "merged", "headline": "adopted",
                     "lines": [], "note": None, "branch": None, "commit": None, "url": None}

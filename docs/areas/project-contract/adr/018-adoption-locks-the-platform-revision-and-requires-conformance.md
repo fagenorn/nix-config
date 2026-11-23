@@ -1,6 +1,6 @@
 # ADR-project-contract-018 — Adoption locks the platform revision and requires Conformance
 
-- **Status:** accepted
+- **Status:** accepted; D11 amended in place by #1485
 - **Decided in:** #1454 (per #1413, #1415, #1430)
 
 ## Context
@@ -29,7 +29,7 @@ Adoption stopped at the contract: it moved files, rewrote links and generated pr
 
 **D10. One ready gate, `conformance-plannable` (P7).** Last in `READY_GATES`, it keeps a plan `draft` when a repository with a `devenv.lock` cannot take the writes. The first failing cause, in order: `adopt.conformance.revision_unknown`, `tracker_unnamed`, `origin_mismatch`, `projection_collides`, `lock_unreadable`, `lock_entry_incompatible`, `pin_incompatible`, `input_undeclarable`, `input_incompatible`, `protection_file_unrequired`, then `contract_refused` from the final contract's scratch resolution (D15).
 
-**D11. Forge names (P8).** The request targets the authored schema-2 `bindings.tracker.repo_slug` (tracker kind `github`) and `bindings.vcs.integration_branch` of the contract the plan writes.
+**D11. Forge names (P8).** The request targets the authored schema-2 `bindings.tracker.repo_slug`, or for a schema-3 contract the slug derived from the checkout's origin remote (tracker kind `github`) and `bindings.vcs.integration_branch` of the contract the plan writes.
 
 **D12. Plan member and identity (P9).** The plan gains `plan.conformance` only when the writes are plannable, and it is the plan id's last input only then; the evidence record gains the `conformance` member and the gate row only for a repository the writes are planned for, so every existing plan id, document shape and evidence-record hash is unchanged.
 
