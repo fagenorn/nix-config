@@ -44,6 +44,11 @@
   "forge-issue": null,
   "guard-policy": null,
   "host-readiness": null,
+  "independent-review": {
+    "subcommands": {
+      "code": ["pass", "findings", "none", "unavailable", "error"]
+    }
+  },
   "instruction-surface-lint": null,
   "issue-branch": null,
   "issue-setup": {

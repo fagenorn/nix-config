@@ -127,6 +127,7 @@ PLACEHOLDER_RE = re.compile(r"\{\{\s*([^{}]*?)\s*\}\}")
 PLATFORM_LISTS: Mapping[str, frozenset[str]] = {
     "diff-scope": frozenset({"files"}),
     "forge-claim": frozenset(),
+    "independent-review": frozenset({"findings"}),
     "issue-setup": frozenset(),
     "look-approval": frozenset({"acs", "covers"}),
     "resolve-project": frozenset(),
