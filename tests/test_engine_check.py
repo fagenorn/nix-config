@@ -1168,10 +1168,19 @@ class ShippedProcedureTest(unittest.TestCase):
         self.assertEqual(step(deliver, "issue")["on"],
                          {"read": "lane", "error": "no-lane", "refused": "no-lane"})
         self.assertEqual(step(deliver, "lane")["on"], {
-            "direct": "done", "standard": "standard-not-on-engine", "needs-design": "needs-design",
+            "direct": "direct-lane", "standard": "standard-not-on-engine", "needs-design": "needs-design",
             "no-reply": "no-lane", "out-of-bounds": "no-lane"})
         for name in setup["stops"]:
             self.assertEqual(step(deliver, "start")["on"][name], name)
+        for called, procedure in (("direct-lane", "direct"), ("verification", "verify")):
+            mapped = step(deliver, called)["on"]
+            self.assertEqual(step(deliver, called)["procedure"], procedure)
+            for name in load(PROCEDURES, procedure)["stops"]:
+                self.assertEqual(mapped[name], name)
+        self.assertEqual(step(deliver, "direct-lane")["on"]["done"], "verification")
+        self.assertEqual(step(deliver, "verification")["on"]["done"], "done")
+        for name in ("ineligible", "task", "direct-review", "direct-fix", "codex-unavailable", "verify"):
+            self.assertIn(name, deliver["stops"])
         self.assertEqual(deliver["stops"]["needs-design"]["need"], "owner-decision")
 
     def test_the_worktree_mismatch_is_read_before_the_claim(self):
