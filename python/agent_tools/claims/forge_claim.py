@@ -79,7 +79,7 @@ listing is never undone. A renewal that lands between that listing and the end, 
 after the activity read, can still lose the claim; the holder's `renew` then answers `not_held`
 (D3).
 
-The `land` subcommand (`land acquire|release|status|refresh`, issue 629) is the cross-host land lock
+The `land` subcommand (`land acquire|release|status|refresh|hold`, issue 629) is the cross-host land lock
 of `agent_tools.claims.forge_land_lock`: `main` routes it there and reports its usage errors in its
 own one-line shape. `land acquire --release` (issue 875) acquires it for a release pull request,
 and with `--wait --follow-head` at that pull request's current head (issue 901).
@@ -99,8 +99,8 @@ idempotent for its holder under a lost reply (#623), so a retry finishes the sam
 a hanging forge holds a retried verb for about 150 s (3 x 30 s + 60 s), more when earlier calls of
 a try answer slowly: a caller gives the command a Bash timeout well above that (the delivery
 programs give 20 minutes). `land acquire --wait` keeps its own D8 bound and is never wrapped;
-`owner-action post`, `owner-action end`, `land status` and `land refresh` (its holder runs it
-again within minutes) run once. Every exit-1 line carries
+`owner-action post`, `owner-action end`, `land status`, `land refresh` (its holder runs it
+again within minutes) and `land hold` run once. Every exit-1 line carries
 `transient`: true when the error was a transport error (the tries ran out). A retried `land
 acquire` that raised after it sent a create or a swap reports `acquired`, not `already_held`, for
 a lock then found at its sha: the programs recheck the base on `acquired`. A retried `renew`
@@ -159,6 +159,12 @@ def _issue(value: str) -> int:
     return int(value)
 
 
+def _hold_seconds(value: str) -> int:
+    if not re.fullmatch(r"[0-9]+", value) or int(value) > forge_land_lock.HOLD_MAX:
+        raise argparse.ArgumentTypeError(f"seconds {value!r} is not an integer from 0 to {forge_land_lock.HOLD_MAX}")
+    return int(value)
+
+
 REPO = _pattern(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", "repo")
 HOLDER = _pattern(r"[A-Za-z0-9][A-Za-z0-9.-]*/[A-Za-z0-9][A-Za-z0-9._-]*", "holder")
 BRANCH = _pattern(r"[A-Za-z0-9_][A-Za-z0-9_./-]*", "branch")
@@ -191,6 +197,9 @@ def build_parser() -> argparse.ArgumentParser:
             sub.add_argument("--wait", action="store_true")
             sub.add_argument("--release", action="store_true")
             sub.add_argument("--follow-head", action="store_true")
+            sub.add_argument("--lease", action="store_true")
+        elif name == "hold":
+            sub.add_argument("--seconds", type=_hold_seconds, default=0)
     return parser
 
 

@@ -1,8 +1,9 @@
-"""The cross-host land lock (issue 629): `forge-claim land acquire|release|status|refresh`.
+"""The cross-host land lock (issue 629): `forge-claim land acquire|release|status|refresh|hold`.
 
 The lock serialises landings on one branch across hosts. Each action takes `--repo <owner/name>`,
 `--branch <name>` and `--sha <40 hex>`; `--wait` and `--release` exist on `acquire` only, as does
-`--follow-head`, which needs both (a usage error otherwise).
+`--follow-head`, which needs both (a usage error otherwise). `--lease` exists on `acquire` only
+and is a usage error with `--release` (D13); `hold` takes `--seconds`.
 
 D1, the lock is the ref `refs/agent-locks/land/<branch>`, whose value is a pull-request head sha:
 created by REST `POST git/refs` (HTTP 422 means not created), moved and deleted by the
@@ -57,7 +58,8 @@ the watch when the oid differs, and so does a holder's refresh (D11). A one-shot
 lock's own sha answers `already_held` and changes nothing, so it restarts no watch. A holder runs a one-shot `acquire` with its sha right before the
 merge and merges only when its verdict is `already_held` or `moved`, never on exit status alone:
 `acquired` also exits 0 and means the lock was lost and taken again, so the base may have moved and
-the holder resyncs first. A release holder merges only on `already_held` (ADR-claims-009).
+the holder resyncs first. A release holder merges only on `already_held` (ADR-claims-009). A lock
+held as a lease (D13) is also taken over by the first waiter in line, sooner than this watch.
 
 D5, a lock moves to the caller's new head (verdict `moved`: the lock sat at an earlier head of the
 same pull request) only when every open pull request containing it is the caller's; a branch
@@ -94,8 +96,8 @@ a `--release --wait` whose caller is bound to `--sha` (a resumed release), stop 
 when the head moved.
 
 D7, every call prints one JSON object on one stdout line with `command`, `action`, `repo`,
-`branch`, `sha`, `verdict`, `lock_sha`, `pr`, `by`, `took_over` (`null`, `"closed"` or `"idle"`)
-and `waited_s`. `sha` is always `--sha` as given and `lock_sha` is where the lock is: a successful
+`branch`, `sha`, `verdict`, `lock_sha`, `pr`, `by`, `took_over` (`null`, `"closed"`, `"idle"`,
+`"lapsed"` or `"bound"`, the last two of a lease, D13) and `waited_s`. `sha` is always `--sha` as given and `lock_sha` is where the lock is: a successful
 `acquire --release --wait --follow-head` adds `head_moved`, true when it took the lock at a head other than
 `--sha`, and the caller continues with `lock_sha` as its commit. `acquire --wait` adds `waited_on`
 (issue 913): the pull requests, in ascending order, its polls saw holding the lock while it waited,
@@ -145,6 +147,8 @@ differs from the one it read before restarts its watch exactly as a changed lock
 read (D3): only a change counts, the beat's value means nothing, and the beat holds and releases
 nothing, so one that nobody deletes is harmless. A waiter that predates this rule ignores the beat.
 
+`hold --sha <sha> [--seconds N]` (issue 1679) is the lease's own refresh, D13.
+
 D12, waiters queue (issue 1001, ADR-claims-012). The queue decides only who tries: the lock is
 still granted by nothing but the create and the compare-and-swap of D1, so no queue state, true
 or false, can make two holders. A registration is a ref
@@ -169,7 +173,8 @@ short read also asks whether the holder's pull request is still open); each grac
 that, and bounds what a waiter that died or hangs can cost. The queue is asked
 nothing else. `already_held` and `moved` concern only the caller's own lock and are answered
 before the queue is read, and the idle takeover of D4 does not depend on the caller's place: its
-own 45-minute watch is the bound. A following release's second attempt, right after it deleted
+own 45-minute watch is the bound; only the takeovers of a lapsed or overdue lease (D13) are
+asked of the first in line alone. A following release's second attempt, right after it deleted
 its own lock (D5), is not queued either, so the lock it gave up is not left free behind a
 waiter. A waiter registers only once a poll did not give it the lock, so a wait that finds the
 lock free with nobody ahead writes no registration. It refreshes after each poll that did not
@@ -204,6 +209,32 @@ client that predates this rule register nothing and are not ordered: they take a
 they find one, exactly as before, they are never held back by the queue, and a registered
 waiter is held back by them only as it always was, by the lock they hold. Against them only the
 first in line competes, with a poll six times as fast.
+
+D13, the lease (issue 1679, ADR-claims-005). A delivery whose pull request is green and, when it
+needs one, approved holds the lock until its merge, so a landing waits behind nobody's CI. It says
+so with `acquire --lease` (not with `--release`): after a holding verdict it writes the lease, the
+ref `refs/agent-locks/land-lease/<branch>/<since>-<pr>-<beat>` at the lock's sha, named like a
+registration (D12) and read from the forge's clock too. `acquired` creates `<now>-<pr>-<now>` and
+deletes the pull request's other leases; `already_held` and `moved` create `<since>-<pr>-<now>`,
+keeping the newest `<since>` it can trust (a fresh one when none), and delete the old one. A write
+that fails leaves the lock held and the answer's `lease` `null`; otherwise `lease` is `{since,
+beat}`. `hold --sha S [--seconds N]` (N from 0 to `HOLD_MAX`, default 0) reads the lock at once and
+every `LEASE_BEAT` seconds (60) of `monotonic()`: a lock not at S answers `not_held` (exit 3) at
+once, one at S with a lease at S rewrites its `<beat>` to the forge's clock, one at S with none
+answers `unleased` (exit 0) and writes nothing; after N seconds it answers `held` with `lease` and
+`held_s`, the seconds since `<since>`. The first in line, and only it (a read of this poll's queue
+that succeeded and put it first, so neither position 2 or later nor an unordered poll nor a
+one-shot `acquire`), takes a lock whose holder's newest lease has a `<beat>` more than
+`LEASE_LAPSE` (180) seconds behind the poll's queue clock (`took_over` `"lapsed"`), or a `<since>`
+that is `HOLD_BOUND` (1200) seconds old (`"bound"`), by the compare-and-swap of an idle takeover,
+and deletes the taken holder's leases. Its next poll comes when the earlier of the two ends. A
+holder with no lease ref of its pull request, a release, a train or a client that predates this
+rule among them, and one whose lease is more than `QUEUE_SKEW` ahead of the clock, is judged by D4
+alone; a failed read of the leases takes nothing over. Both ages use the forge's clock of the
+poll's own queue read, never a host clock. The holder that lost the lock asks again with `--wait
+--lease` and queues at the forge's clock of that moment, behind every earlier registration
+(ADR-claims-012). A lease can be forged: it can cut a hold short, and the holder waits again; it
+grants nothing, since the lock is still granted by D1's create and swap only.
 """
 import re
 import time
@@ -216,7 +247,8 @@ from agent_tools.system import forge_api
 LOCK_PREFIX = "refs/agent-locks/land/"
 BEAT_PREFIX = "refs/agent-locks/land-beat/"
 WAIT_PREFIX = "refs/agent-locks/land-wait/"
-WAITER = re.compile(r"(\d+)-(\d+)-(\d+)")  # D12: <since>-<pr>-<beat>
+LEASE_PREFIX = "refs/agent-locks/land-lease/"
+WAITER = re.compile(r"(\d+)-(\d+)-(\d+)")  # D12: <since>-<pr>-<beat>, a lease's name too (D13)
 CREATE_ROUNDS = 3
 READBACK_RETRIES = 3
 READBACK_DELAY = 1.0
@@ -230,7 +262,11 @@ QUEUE_REFRESH = POLL // 2  # D12: a registration is rewritten at most this often
 QUEUE_SKEW = 60  # D12: a registration whose beat is this far ahead of the forge's clock is dead
 FREE_GRACE = 60  # D12: a lock watched free this long is tried by a waiter that is not first
 CLOSED_GRACE = POLL + 30  # D12: and one seen closed this long; the first in line sees that in a whole poll
-ACTIONS = ("acquire", "release", "status", "refresh")
+HOLD_BOUND = 1200  # D13: a lease held this long is taken over by the first in line
+LEASE_BEAT = 60  # D13: `hold` rewrites the beat of its lease this often
+LEASE_LAPSE = 180  # D13: a lease whose beat is this far behind the forge's clock has lapsed
+HOLD_MAX = BOUND  # D13: the largest `hold --seconds`
+ACTIONS = ("acquire", "release", "status", "refresh", "hold")
 
 monotonic = time.monotonic
 sleep = time.sleep
@@ -276,6 +312,10 @@ def beat_ref(branch: str) -> str:
 
 def wait_prefix(branch: str) -> str:
     return WAIT_PREFIX + branch + "/"
+
+
+def lease_prefix(branch: str) -> str:
+    return LEASE_PREFIX + branch + "/"
 
 
 class Waiter(NamedTuple):
@@ -359,6 +399,43 @@ class Queue:
                 pass
 
 
+def read_leases(slug: str, branch: str) -> list[Waiter]:
+    """D13: every lease of `branch` in the forge, as it is named."""
+    prefix = lease_prefix(branch)
+    found = []
+    for ref, oid in fm.matching_refs(slug, prefix).items():
+        match = WAITER.fullmatch(ref[len(prefix):])
+        if match:
+            found.append(Waiter(int(match[1]), int(match[2]), int(match[3]), ref, oid))
+    return found
+
+
+def trusted(leases: list[Waiter], now: int) -> list[Waiter]:
+    """D13: the leases whose `<since>` and `<beat>` the forge's clock `now` does not contradict."""
+    return [w for w in leases if max(w.since, w.beat) <= now + QUEUE_SKEW]
+
+
+def drop_leases(slug: str, node: Callable[[], str], leases: Collection[Waiter]) -> None:
+    """D13: delete leases by compare-and-swap; one that changed, is gone or fails is left alone."""
+    for lease in leases:
+        try:
+            fm.cas_ref(slug, node(), lease.ref, lease.oid, fm.ZERO_OID)
+        except forge_api.ForgeError:
+            pass
+
+
+def write_lease(slug: str, branch: str, node: Callable[[], str], pr: int, sha: str,
+                since: int | None, old: list[Waiter], now: int) -> dict[str, int]:
+    """D13: a lease of `pr` at `sha` whose beat is `now`, in place of `old`, the pull request's
+    leases as they were read; `since` None starts the hold at `now`."""
+    since = now if since is None else since
+    name = f"{lease_prefix(branch)}{since}-{pr}-{now}"
+    if not any(w.ref == name and w.oid == sha for w in old) and not fm.create_ref(slug, name, sha):
+        raise forge_api.ForgeError("gh_failed", f"lease {name} not created")
+    drop_leases(slug, node, [w for w in old if w.ref != name])
+    return {"since": since, "beat": now}
+
+
 def pick_pr(pulls: list[fm.Pull]) -> int | None:
     """The smallest open number, else the largest closed number, else None."""
     opened = [p.number for p in pulls if p.state == "open"]
@@ -440,14 +517,17 @@ def acquire_once(slug: str, branch: str, sha: str, mine: list[fm.Pull],
                  idle: Callable[[str], bool], node: Callable[[], str],
                  seen: Callable[[str | None], None] | None = None,
                  attempts: Attempts | None = None,
-                 behind: Callable[[str | None], bool] | None = None) -> Outcome:
+                 behind: Callable[[str | None], bool] | None = None,
+                 overdue: Callable[[str, int | None], str | None] | None = None) -> Outcome:
     """One acquire attempt (D1, D2, D3, D5); `idle(lock)` lets a `held` lock be taken over.
 
     `behind`, a waiter's (D12), makes the attempt read the lock before it writes. It is asked
     with None before a free lock is created and with the lock before a closed one is taken
     over; true means another waiter is first, and nothing is written (`queued` for a free lock,
     `held_by` for a closed one). A lock at the caller's own sha or pull request never asks,
-    and neither does an idle one."""
+    and neither does an idle one. `overdue`, a first-in-line waiter's (D13), is asked with the
+    lock and its holder's pull request for a `held` lock `idle` did not take: `"lapsed"` or
+    `"bound"` takes it over, None leaves it held."""
     ref = lock_ref(branch)
 
     def observe() -> str | None:
@@ -478,9 +558,13 @@ def acquire_once(slug: str, branch: str, sha: str, mine: list[fm.Pull],
     theirs = _on_branch(slug, lock, branch)
     kind, pr = _kind(lock, theirs, {p.number for p in mine}, branch)
     if kind == "held":
-        if not idle(lock):
-            return Outcome("held_by", lock, pr, None)
-        kind = "idle"
+        if idle(lock):
+            kind = "idle"
+        else:
+            late = overdue(lock, pr) if overdue is not None else None
+            if late is None:
+                return Outcome("held_by", lock, pr, None)
+            kind = late
     if kind == "closed" and behind is not None and behind(lock):
         return Outcome("held_by", lock, pr, None)
     if attempts is not None:
@@ -549,6 +633,7 @@ def wait_acquire(args: Any, node: Callable[[], str],
     poll: list[Any] = [None, "", False, 0.0]  # pull request, sha, queue read, grace left when held back
     noticed: set[int] = set()  # issue 1204: holders seen closed by a short read, which polled once for each
     closed: list[Any] = [None, 0.0]  # [a lock seen closed with a waiter ahead, first seen so]
+    taken: list[Waiter] = []  # D13: the leases of the holder whose lapsed or overdue lock was taken
 
     def seen(oid: str | None) -> None:
         if watch[0] != oid:
@@ -585,8 +670,31 @@ def wait_acquire(args: Any, node: Callable[[], str],
         poll[3] = max(0.0, since + grace - monotonic())
         return poll[3] > 0
 
+    def overdue(lock: str, pr: int | None) -> str | None:
+        """D13: `"lapsed"` or `"bound"` for a lock whose holder's lease ran out, asked only of the
+        first in line by this poll's own queue read; a read that fails takes nothing over."""
+        consult()
+        if queue.position != 1 or pr is None:
+            return None
+        try:
+            leases = [w for w in read_leases(args.repo, args.branch) if w.pr == pr]
+        except forge_api.ForgeError:
+            return None
+        live = trusted(leases, queue.now)
+        if not live:
+            return None
+        lease = max(live, key=lambda w: (w.since, w.beat))
+        late = ("lapsed" if queue.now - lease.beat > LEASE_LAPSE
+                else "bound" if queue.now - lease.since >= HOLD_BOUND else None)
+        if late is not None:
+            taken[:] = leases
+            return late
+        wake = max(1, min(lease.beat + LEASE_LAPSE + 1, lease.since + HOLD_BOUND) - queue.now)
+        poll[3] = wake if not poll[3] else min(poll[3], wake)
+        return None
+
     def attempt(sha: str, mine: list[fm.Pull]) -> Outcome:
-        return acquire_once(args.repo, args.branch, sha, mine, idle, node, seen, behind=behind)
+        return acquire_once(args.repo, args.branch, sha, mine, idle, node, seen, behind=behind, overdue=overdue)
 
     try:
         first = False
@@ -618,6 +726,8 @@ def wait_acquire(args: Any, node: Callable[[], str],
             else:
                 failures = 0
                 if outcome.verdict in ("acquired", "already_held", "moved"):
+                    if outcome.took_over in ("lapsed", "bound"):
+                        drop_leases(args.repo, node, taken)
                     moved = {"head_moved": sha != args.sha} if _follows(args) else {}
                     return 0, result(args, outcome.verdict, lock_sha=outcome.lock_sha, pr=outcome.pr,
                                      took_over=outcome.took_over, waited_s=int(monotonic() - start),
@@ -694,6 +804,8 @@ def _follows(args: Any) -> bool:
 def _acquire(args: Any, attempts: Attempts | None = None) -> tuple[int, dict[str, Any]]:
     if _follows(args) and not (args.release and args.wait):
         return 2, result(args, "error", error="usage", detail="--follow-head needs --release and --wait")
+    if _leases(args) and args.release:
+        return 2, result(args, "error", error="usage", detail="--lease cannot be used with --release")
     default: list[str] = []
 
     def eligible() -> list[fm.Pull]:
@@ -718,23 +830,78 @@ def _acquire(args: Any, attempts: Attempts | None = None) -> tuple[int, dict[str
         return cached[0]
 
     if args.wait:
-        return wait_acquire(args, node, eligible)
+        code, out = wait_acquire(args, node, eligible)
+        return code, _lease(args, node, out) if code == 0 and _leases(args) else out
     mine = eligible()
     if not mine:
         return _no_open_pr(args)
     outcome = acquire_once(args.repo, args.branch, args.sha, mine, lambda _: False, node,
                            attempts=attempts)
     if outcome.verdict in ("acquired", "already_held", "moved"):
-        return 0, result(args, outcome.verdict, lock_sha=outcome.lock_sha, pr=outcome.pr,
-                         took_over=outcome.took_over)
+        out = result(args, outcome.verdict, lock_sha=outcome.lock_sha, pr=outcome.pr,
+                     took_over=outcome.took_over)
+        return 0, _lease(args, node, out) if _leases(args) else out
     return 3, result(args, outcome.verdict, lock_sha=outcome.lock_sha, pr=outcome.pr,
                      by=holder(args.repo, outcome.pr))
 
 
+def _leases(args: Any) -> bool:
+    """D13: `--lease`; a caller that builds its own arguments (`release_lock`) never leases."""
+    return bool(getattr(args, "lease", False))
+
+
+def _lease(args: Any, node: Callable[[], str], out: dict[str, Any]) -> dict[str, Any]:
+    """D13: write the lease of a holding answer and add `lease` to it; a failed write is `null`."""
+    try:
+        now = forge_now()
+        old = [w for w in read_leases(args.repo, args.branch) if w.pr == out["pr"]]
+        since = None
+        if out["verdict"] != "acquired":
+            since = max((w.since for w in trusted(old, now)), default=None)
+        out["lease"] = write_lease(args.repo, args.branch, node, out["pr"], out["lock_sha"], since, old, now)
+    except forge_api.ForgeError:
+        out["lease"] = None
+    return out
+
+
+def _hold(args: Any) -> tuple[int, dict[str, Any]]:
+    """D13: keep the lease of the lock at `--sha` beating for `--seconds`."""
+    cached: list[str] = []
+
+    def node() -> str:
+        if not cached:
+            cached.append(fm.repo_node_id(args.repo))
+        return cached[0]
+
+    start = monotonic()
+    while True:
+        lock = fm.read_ref(args.repo, lock_ref(args.branch))
+        if lock != args.sha:
+            pr = _pr_of(args.repo, args.branch, lock)
+            return 3, result(args, "not_held", lock_sha=lock, pr=pr, by=holder(args.repo, pr))
+        now = forge_now()
+        mine = trusted([w for w in read_leases(args.repo, args.branch) if w.oid == args.sha], now)
+        if not mine:
+            return 0, result(args, "unleased", lock_sha=lock)
+        newest = max(mine, key=lambda w: (w.since, w.beat))
+        lease = write_lease(args.repo, args.branch, node, newest.pr, args.sha, newest.since,
+                            [w for w in mine if w.pr == newest.pr], now)
+        left = args.seconds - (monotonic() - start)
+        if left <= 0:
+            return 0, result(args, "held", lock_sha=lock, pr=newest.pr, lease=lease,
+                             held_s=forge_now() - lease["since"])
+        sleep(min(LEASE_BEAT, left))
+
+
 def _release(args: Any) -> tuple[int, dict[str, Any]]:
     ref = lock_ref(args.branch)
-    failure = fm.cas_ref(args.repo, fm.repo_node_id(args.repo), ref, args.sha, fm.ZERO_OID)
+    node_id = fm.repo_node_id(args.repo)
+    failure = fm.cas_ref(args.repo, node_id, ref, args.sha, fm.ZERO_OID)
     after = fm.read_ref(args.repo, ref)
+    try:  # D13: the leases at the released sha go with the lock
+        drop_leases(args.repo, lambda: node_id, [w for w in read_leases(args.repo, args.branch) if w.oid == args.sha])
+    except forge_api.ForgeError:
+        pass
     if after is None:
         return 0, result(args, "released")
     if after == args.sha:
@@ -809,4 +976,4 @@ def run(args: Any, attempts: Attempts | None = None) -> tuple[int, dict[str, Any
     """Run the parsed action; a caller that retries `acquire` passes the same `attempts` each try."""
     if args.action == "acquire":
         return _acquire(args, attempts)
-    return {"release": _release, "status": _status, "refresh": _refresh}[args.action](args)
+    return {"release": _release, "status": _status, "refresh": _refresh, "hold": _hold}[args.action](args)
