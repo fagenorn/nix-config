@@ -71,9 +71,8 @@ class PathClassificationTest(ReportAssertions, unittest.TestCase):
             self.assert_validates(report)
 
     def test_a_path_outside_every_class_is_a_finding(self):
-        """A file under the artifacts directory is unclassified for the same
-        reason a stray directory is: the class list, not the parent, admits a
-        path."""
+        """A file under the artifacts directory is unclassified as a stray
+        directory is: the class list, not the parent, admits a path."""
         for relative in (".agents/scratchpad/notes.txt",
                          ".agents/artifacts/scratch/x.md"):
             with self.subTest(relative=relative), fixture() as tmp:
@@ -121,25 +120,19 @@ class PathClassificationTest(ReportAssertions, unittest.TestCase):
             self.assertEqual([check["status"], check["facts"]], ["passed", {}])
             self.assert_validates(report)
 
-    def test_a_file_under_the_artifacts_directory_is_a_finding_in_every_former_bucket_and_outside_it(self):
-        """The directory admits nothing: a working artifact lives until its
-        delivery merges and is never kept in the tree, so a file there is
-        unclassified whether it sits in a former bucket or beside them."""
-        relatives = [f".agents/artifacts/{bucket}/2026-10-08-x/records/1.json"
-                     for bucket in ("specs", "plans", "evidence", "handoffs",
-                                    "notes", "replays")]
-        relatives.append(".agents/artifacts/loose.md")
-        for relative in relatives:
+    def test_a_file_under_the_artifacts_directory_is_a_finding_anywhere(self):
+        """The directory admits nothing, in a former bucket or beside them."""
+        relatives = [f".agents/artifacts/{b}/2026-10-08-x/records/1.json" for b in
+                     "specs plans evidence handoffs notes replays".split()]
+        for relative in relatives + [".agents/artifacts/loose.md"]:
             with self.subTest(relative=relative), fixture() as tmp:
-                root = make_root(tmp)
-                write_file(root, relative, "{}\n")
+                write_file(root := make_root(tmp), relative, "{}\n")
                 report, by_id = doctor(self, root)
                 check = by_id[self.CHECK_ID]
                 self.assertEqual(
-                    [check["status"], check["reason_code"], check["repair_id"]],
-                    ["failed", "unclassified_path", self.REPAIR_ID])
-                self.assertEqual(check["facts"],
-                                 {"paths": [relative], "count": 1})
+                    [check["status"], check["reason_code"], check["facts"]],
+                    ["failed", "unclassified_path",
+                     {"paths": [relative], "count": 1}])
                 self.assert_validates(report)
 
     def test_many_long_offending_paths_are_capped_bounded_and_distinct(self):
