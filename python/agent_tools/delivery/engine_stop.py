@@ -13,6 +13,8 @@ after the last byte, never through a retried `communicate`: before Python 3.13 a
 carries input is refused and one that carries none stops writing, so a prompt larger than the
 pipe would never be delivered. `pause` is `time.sleep` that polls `stop` the same way, in slices
 of at most `POLL_SECONDS`.
+Given `drain`, `communicate` also returns once the process has exited and the pipes held nothing
+more for `drain` seconds, so a descendant holding a pipe never holds the caller (the agent slot of #1522).
 `requested` treats only a missing file as no request; any other read error propagates.
 
 `publication` is the exclusive flock on the run directory that orders a request's publication
@@ -144,9 +146,15 @@ def end_group(process: subprocess.Popen) -> None:
 
 def communicate(process: subprocess.Popen, data: bytes | None, *,
                 stop: Callable[[], bool] | None,
-                timeout: float | None = None) -> tuple[bytes, bytes | None]:
-    """`process.communicate(data, timeout=timeout)`, raising `Stopped` once `stop()` is true."""
-    if stop is None:
+                timeout: float | None = None,
+                drain: float | None = None) -> tuple[bytes, bytes | None]:
+    """`process.communicate(data, timeout=timeout)`, raising `Stopped` once `stop()` is true.
+
+    With `drain`, the process's exit ends the wait too, not only the end of its pipes: a slice that
+    finds the process ended gives the pipes `drain` seconds more, then closes them and returns what
+    was read, so a descendant that outlives the process and holds a pipe cannot hold the caller.
+    """
+    if stop is None and drain is None:
         return process.communicate(data, timeout=timeout)
     if data and process.stdin is not None:
         feeder = threading.Thread(target=_feed, args=(process.stdin, data), daemon=True)
@@ -159,14 +167,33 @@ def communicate(process: subprocess.Popen, data: bytes | None, *,
         try:
             output = process.communicate(None, timeout=wait)
         except subprocess.TimeoutExpired:
-            if stop():
+            if stop is not None and stop():
                 raise Stopped from None
+            if drain is not None and process.poll() is not None:
+                output = _drained(process, drain)
+                if stop is not None and stop():
+                    raise Stopped from None
+                return output
             if deadline is not None and time.monotonic() >= deadline:
                 raise
         else:
-            if stop():
+            if stop is not None and stop():
                 raise Stopped
             return output
+
+
+def _drained(process: subprocess.Popen, seconds: float) -> tuple[bytes, bytes | None]:
+    """What an ended process printed: its pipes read for at most `seconds`, then closed."""
+    try:
+        return process.communicate(None, timeout=seconds)
+    except subprocess.TimeoutExpired as late:  # a descendant outside the group holds a pipe
+        output = late.output or b"", late.stderr or b""
+        for pipe in (process.stdout, process.stderr):
+            if pipe is not None:
+                with contextlib.suppress(OSError):
+                    pipe.close()
+        process.wait()
+        return output
 
 
 def _feed(stdin, data: bytes) -> None:

@@ -515,7 +515,8 @@ def launch(argv: Sequence[str], cwd: str, prompt: str, *,
                 if remaining is not None and remaining <= 0:
                     raise subprocess.TimeoutExpired(list(argv), 0)
                 stdout, stderr = engine_stop.communicate(
-                    process, prompt.encode("utf-8"), stop=stop, timeout=remaining)
+                    process, prompt.encode("utf-8"), stop=stop, timeout=remaining,
+                    drain=DRAIN_SECONDS)
             except subprocess.TimeoutExpired:
                 timed_out = True
                 stdout, stderr = _end_overrun(process)

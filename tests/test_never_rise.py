@@ -386,6 +386,18 @@ class NeverRiseTest(unittest.TestCase):
                 dict(never_rise.read_snapshot(root, head, 60).line_counts),
                 {"x.py": 3, "y.py": 1})
 
+    def test_the_snapshot_keeps_each_text_file_s_committed_bytes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = repo(tmp)
+            write(root, "a.py", "x\n")
+            write(root, "b.bin", b"\0x")
+            write(root, "empty", "")
+            commit_all(root)
+            head = git(root, "rev-parse", "HEAD").strip()
+            write(root, "a.py", "changed\n")
+            self.assertEqual(
+                never_rise.read_snapshot(root, head, 60).contents, {"a.py": b"x\n"})
+
     def test_a_diff_attribute_does_not_change_which_files_are_counted(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = repo(tmp)
@@ -686,7 +698,9 @@ class SizeLintOutputTest(unittest.TestCase):
             git(Path(tmp), "clone", "-q", "--no-checkout", "--filter=blob:none",
                 f"file://{bare}", str(partial))
             blob = git(partial, "rev-parse", "HEAD:x.py").strip()
-            self.assertIsNone(size_lint.resolve(partial, blob))
+            done = self.run_command("--repo-root", str(partial), "--revision", blob)
+            self.assertEqual((done.returncode, done.stdout), (2, ""))
+            self.assertTrue(done.stderr.startswith("size-lint: "), done.stderr)
             probe = subprocess.run(
                 ["git", "-C", str(partial), "cat-file", "-e", blob],
                 env=fixture_env({"GIT_NO_LAZY_FETCH": "1"}), capture_output=True)

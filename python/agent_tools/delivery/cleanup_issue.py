@@ -108,7 +108,7 @@ from pathlib import Path
 from typing import NamedTuple, Protocol
 from urllib.parse import quote
 
-from agent_tools.delivery import never_rise, ruff_lint, size_lint
+from agent_tools.delivery import comment_lint, never_rise, ruff_lint, size_lint
 from agent_tools.delivery.never_rise import Enforcer, Snapshot, Violation
 from agent_tools.system import forge_api
 
@@ -150,10 +150,25 @@ RUFF_GUIDANCE = {
             "the same comment, the reason the line is right as written.",
 }
 
+COMMENT_BATCH = 10
+COMMENT_GUIDANCE = {
+    comment_lint.REFERENCE_RULE: "Reword each listed comment so it names no issue or pull request; "
+                                 "say in the comment what the code does or why.",
+    comment_lint.LENGTH_RULE: "Cut each listed comment block to at most five lines and each line "
+                              "to at most 120 characters, keeping the reason and dropping the "
+                              "narration.",
+    comment_lint.MARKER_RULE: "Do the work each listed placeholder marker stands for, or delete "
+                              "the comment that holds it.",
+}
+
+# The comment enforcers are built without the tracker repository, so B18 counts only the
+# shorthand references here; the never-rise check passes the contract's repository.
 RULES: tuple[CleanupRule, ...] = (
     CleanupRule(size_lint.ENFORCER, 1, B17_GUIDANCE),
     *(CleanupRule(enforcer, RUFF_BATCH, RUFF_GUIDANCE[enforcer.rule])
       for enforcer in ruff_lint.ENFORCERS),
+    *(CleanupRule(enforcer, COMMENT_BATCH, COMMENT_GUIDANCE[enforcer.rule])
+      for enforcer in comment_lint.enforcers(None)),
 )
 
 
