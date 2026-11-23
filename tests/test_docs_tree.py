@@ -199,6 +199,9 @@ def scanned_files(archived_dirs: tuple[str, ...] = ()) -> list[tuple[str, list[s
     return [(path, lines) for path, lines in tracked_text(archived_dirs) if path != ADOPTION_MAP]
 
 
+RETIRED_DELIVERY_RECORDS = (2, 9, 10, 11)
+
+
 class DocsTreeTest(unittest.TestCase):
     def test_the_index_routes_each_working_artifact_off_the_tree(self):
         lines = (REPO_ROOT / "docs/README.md").read_text(encoding="utf-8").splitlines()
@@ -262,6 +265,29 @@ class DocsTreeTest(unittest.TestCase):
             text=True, capture_output=True,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_every_hosts_record_keeps_the_record_form(self):
+        paths = sorted((REPO_ROOT / "docs/areas/hosts/adr").glob("*.md"))
+        self.assertTrue(paths)
+        breaches = {}
+        for path in paths:
+            relative = path.relative_to(REPO_ROOT).as_posix()
+            found = record_violations(relative, path.read_bytes())
+            if found:
+                breaches[relative] = [violation.text() for violation in found]
+        self.assertEqual(breaches, {})
+
+    def test_no_tracked_file_cites_a_retired_hosts_record(self):
+        numbers = ("001", "002", "003", "004")
+        pattern = "ADR-hosts-(" + "|".join(numbers) + ")([^0-9]|$)"
+        result = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "grep", "-n", "-E", pattern],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertEqual(result.stdout, "")
+        for number in numbers:
+            self.assertEqual(sorted((REPO_ROOT / "docs/areas/hosts/adr").glob(f"{number}-*.md")), [])
 
     def test_every_guard_record_keeps_the_record_form(self):
         paths = sorted((REPO_ROOT / "docs/areas/guard/adr").glob("*.md"))
@@ -484,6 +510,34 @@ class DocsTreeTest(unittest.TestCase):
             if "ADR-delivery-005" in line
         ]
         self.assertEqual(hits, [])
+
+    def test_the_delivery_records_001_to_011_keep_the_record_form(self):
+        records = [
+            p for p in sorted((REPO_ROOT / "docs/areas/delivery/adr").glob("[0-9][0-9][0-9]-*.md"))
+            if 1 <= int(p.name[:3]) <= 11
+        ]
+        found = [
+            (p.name, v.rule, v.line)
+            for p in records
+            for v in record_violations(f"docs/areas/delivery/adr/{p.name}", p.read_bytes())
+        ]
+        self.assertTrue(records)
+        self.assertEqual(found, [])
+
+    def test_the_retired_delivery_records_are_gone_and_cited_nowhere(self):
+        for n in RETIRED_DELIVERY_RECORDS:
+            with self.subTest(number=n):
+                pattern = re.compile(rf"\bADR-delivery-{n:03d}(?!\d)|delivery/adr/{n:03d}-")
+                files = sorted(
+                    p.name for p in (REPO_ROOT / "docs/areas/delivery/adr").glob(f"{n:03d}-*.md"))
+                hits = [
+                    f"{path}:{number}"
+                    for path, lines in tracked_text(())
+                    for number, line in enumerate(lines, start=1)
+                    if pattern.search(line)
+                ]
+                self.assertEqual(files, [])
+                self.assertEqual(hits, [])
 
     def test_no_area_numbers_two_adrs_alike(self):
         shared = []
@@ -837,8 +891,7 @@ class DocsTreeTest(unittest.TestCase):
                       "docs/areas/console/adr/008-only-the-page-writes-with-a-token-and-its-origin.md",
                       "docs/areas/console/adr/024-the-owner-signs-a-profile-in-from-the-page.md",
                       "docs/areas/console/CONTEXT.md",
-                      "docs/areas/hosts/CONTEXT.md",
-                      "docs/areas/hosts/adr/005-account-profiles-link-shared-config.md"):
+                      "docs/areas/hosts/CONTEXT.md"):
             self.assertIn("ADR-console-025", self.doc(older))
         self.assertIn("claude-account add", self.doc("docs/areas/hosts/CONTEXT.md"))
         self.assertIn("POST /api/account-add", self.doc(

@@ -1,4 +1,4 @@
-"""`program-copies`: a skill's Workflow programs, copied into the checkout (issues 912 and 981, ADR-delivery-008, ADR-delivery-009).
+"""`program-copies`: a skill's Workflow programs, copied into the checkout (issues 912 and 981, ADR-delivery-008).
 
 The Workflow tool loads a script by path. A skill directory reached through a store link
 stops resolving once an activation replaces it, and is then refused as a script path. So a
@@ -20,6 +20,9 @@ A set is never modified once it exists (issue 981). A running batch read its own
 once, at launch, but the Workflow runtime reads the child program from its path at every
 child launch; children launched from a set therefore run the version the batch was launched
 with, whatever is placed later. A caller takes every path of one launch from one output.
+A resume (`resumeFromRunId`) reuses its launch's paths and places nothing, so a batch resumed
+after its set was pruned cannot load its programs and is run as a relaunch, with both paths
+newly placed.
 
 `--repo-root` must be the top level of a git working tree: `git -C <checkout> rev-parse
 --show-toplevel` succeeds and prints a path that resolves to the same directory as
