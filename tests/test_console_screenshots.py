@@ -150,7 +150,7 @@ def fake_browser(present):
                 return list(shots.ACTIVATION_SHOWN["activation-tooling"])
             if expression == shots.REGISTER_READING:
                 self.reads += 1
-                return list(shots.REGISTER_SHOWN["register-apply"])
+                return list(shots.REGISTER_SHOWN["register-reconcile-apply"])
             if expression == shots.CARD_READING:
                 self.reads += 1
                 return list(self.card)
@@ -1485,14 +1485,13 @@ class ScreenshotFixtureTest(unittest.TestCase):
             return code, out.getvalue()
 
         line = "commits run in its development shell: devenv shell (found in its files)"
-        self.assertEqual(shots.REGISTER_SHOWN, {"register-apply": (line, None, False),
-                                                "register-draft": (None, line, True),
+        self.assertEqual(shots.REGISTER_SHOWN, {"register-draft": (None, shots.FACT_LINE, False),
                                                 "register-reconcile-apply": (line, None, False),
                                                 "register-reconcile-draft": (None, line, True)})
+        self.assertEqual(shots.REGISTER_BASE["register-draft"], (None, line, True))  # as the base drafts it
         phrase = "does not show the proposed commit environment"
-        self.assertIs(shots.proposes_environment(), True)
-        self.assertIs(shots.proposes_reconcile(), True)
-        counterpart = {"register-apply": "register-draft", "register-draft": "register-apply",
+        self.assertEqual((shots.shows_facts(), shots.proposes_reconcile()), (True, True))
+        counterpart = {"register-draft": "register-reconcile-draft",
                        "register-reconcile-apply": "register-reconcile-draft",
                        "register-reconcile-draft": "register-reconcile-apply"}
         for state, shown_ in shots.REGISTER_SHOWN.items():
@@ -1521,7 +1520,7 @@ class ScreenshotFixtureTest(unittest.TestCase):
                 browser, page = fake_browser(set())
                 shot = shots._shoot(browser, "http://console.test/", state, 480, Path(tmp))
                 self.assertEqual(page.reads, reads)
-                self.assertEqual(shot.register, shots.REGISTER_SHOWN["register-apply"] if reads else None)
+                self.assertEqual(shot.register, shots.REGISTER_SHOWN["register-reconcile-apply"] if reads else None)
 
     def test_an_ask_goal_shot_without_the_filled_box_fails_the_command(self) -> None:
         def run(shot):
@@ -2801,13 +2800,14 @@ class ScreenshotFixtureTest(unittest.TestCase):
                     self.assertEqual(registration["name"], "sample-app")
                     self.assertEqual(running, [])
                     reconcile = state.startswith("register-reconcile")
-                    proposes = shots.proposes_reconcile() if reconcile else shots.proposes_environment()
+                    proposes = shots.proposes_reconcile() if reconcile else shots.shows_facts()
                     if state.endswith("-apply"):
                         (card,) = view["inbox"]["open"]
                         self.assertEqual(card["reason"], "register_apply")
                         self.assertEqual(card["questions"][0]["options"], ["Apply it", "Not now"])
                         self.assertEqual(card["lines"][-2:], shots.REGISTER_PLAN_LINES)
-                        self.assertEqual(card["lines"][:-2], [shots.PROPOSAL_LINE] if proposes else [])
+                        self.assertEqual(card["lines"][:-2],
+                                         [shots.PROPOSAL_LINE] if proposes and reconcile else [])
                         self.assertIsNone(registration["draft"])
                     elif reconcile:
                         self.assertEqual(view["inbox"]["open"], [])
@@ -2820,8 +2820,8 @@ class ScreenshotFixtureTest(unittest.TestCase):
                     else:
                         self.assertEqual(view["inbox"]["open"], [])
                         rows = {row["field"]: row["line"] for row in registration["draft"]}
-                        self.assertEqual(rows.get("commit-environment"),
-                                         shots.PROPOSAL_LINE if shots.proposes_environment() else None)
+                        self.assertEqual(rows.get("project-identity"),
+                                         shots.FACT_LINE if shots.shows_facts() else None)
                 elif state in shots.ADOPTION_STATES:
                     (card,) = [i for i in view["inbox"]["open"] if i["reason"] == "adoption"]
                     if state in ("adoption-merge", "adoption-failed"):

@@ -143,6 +143,7 @@ agent-workflow-tests *args:
     home/common/agent-skills/tests/test_adopt_apply_formatting.py \
     home/common/agent-skills/tests/test_adopt_entries.py \
     home/common/agent-skills/tests/test_adopt_conformance.py \
+    home/common/agent-skills/tests/test_adopt_schema_three_draft.py \
     home/common/agent-skills/tests/test_adopt_conformance_apply.py \
     home/common/agent-skills/tests/test_adopt_verify.py \
     home/common/agent-skills/tests/test_adopt_links.py \
@@ -264,6 +265,7 @@ agent-workflow-tests *args:
     tests/test_console_prompt_card.py \
     tests/test_console_prompt_card_service.py \
     tests/test_console_view.py \
+    tests/test_console_draft_facts.py \
     tests/test_console_failed_start.py \
     tests/test_console_activation.py \
     tests/test_console_activation_check.py \
@@ -287,7 +289,9 @@ agent-workflow-tests *args:
     tests/test_console_checkout_remote.py \
     tests/test_console_register.py \
     tests/test_console_register_service.py \
+    tests/test_console_register_draft_service.py \
     tests/test_console_register_check.py \
+    tests/test_console_draft_register_check.py \
     tests/test_console_approve.py \
     tests/test_console_approve_service.py \
     tests/test_console_approve_waits.py \

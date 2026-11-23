@@ -304,7 +304,7 @@ The top-level `registration` member (#1052, ADR-console-028, #1053, ADR-console-
 (twenty-two keys; `remote`, #1233, is the sentence that the remote could not be read, else null, and
 the reduced entry keeps it beside the needs-you line), with the plan's plain open questions and, when the plan refused the last answer, the
 refusal's text and the question it answered (`refused`, `{"id", "subject"}`); `draft` is the drafted
-contract's lines (`contract_draft.shown`, ADR-console-031) when the latest row holds a draft, else
+contract's lines (`contract_draft.shown`, ADR-console-031; `fact` is true for a derived value, which has no Change) when the latest row holds a draft, else
 null; `draft_more` is the counted line for the shown settings outside the main ones
 (`contract_draft.more_line`), null when there are none or no draft. `adoption` is the approved adoption's `approve.entry` (#1054) and `approve` the action the
 page offers (`approve`, `retry` or null); with an adoption the `lines` are `[]`, `draft` and `draft_more` are

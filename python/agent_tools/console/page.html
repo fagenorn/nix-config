@@ -6282,7 +6282,7 @@ function changeBox(registration, entry, change) {
   if (change.failure !== "") box.appendChild(el("p", "fail", change.failure));
   return box;
 }
-// One entry's row. A fold entry is a quiet pick button until its change opens; every other entry has its own Change control.
+// One entry's row. A fold entry is a quiet pick button until its change opens; every other entry has its own Change control, and a fact has none.
 function draftRow(registration, entry, folded) {
   const row = el("li");
   // A Change the console accepted and the plan then refused: the refusal is on the entry it changed, and Change starts from what was sent.
@@ -6301,7 +6301,7 @@ function draftRow(registration, entry, folded) {
       pick.replaceChildren(pathWords(el("span"), entry.line));
       pick.setAttribute("aria-label", "Change: " + entry.line);
       row.appendChild(pick);
-    } else {
+    } else if (entry.fact !== true) {
       row.appendChild(actionButton("draft-change btn-quiet", "Change", () => openChange(entry, retry)));
     }
     if (refusedHere) row.appendChild(el("p", "fail draft-refusal", registration.refusal));
