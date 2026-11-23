@@ -259,8 +259,13 @@ class ProtectionFileTest(unittest.TestCase):
         return adopt_conformance.require_in_protection_file(json.dumps(document).encode())
 
     def test_conformance_is_appended_in_the_resolvers_shape(self):
-        data = (REPO_ROOT / ".github" / "branch-protection.json").read_bytes()
-        before = json.loads(data)
+        real = (REPO_ROOT / ".github" / "branch-protection.json").read_bytes()
+        before = json.loads(real)
+        before["required_status_checks"]["checks"] = [
+            entry for entry in before["required_status_checks"]["checks"]
+            if entry["context"] != "Conformance"]
+        data = (json.dumps(before, indent=2) + "\n").encode()
+        self.assertIsNone(adopt_conformance.require_in_protection_file(real))
         result = adopt_conformance.require_in_protection_file(data)
         after = json.loads(result)
         checks = before["required_status_checks"]["checks"]
