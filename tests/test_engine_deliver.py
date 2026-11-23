@@ -1005,9 +1005,12 @@ class InputsTest(unittest.TestCase):
                                         children={"kid": kid})
         done = project.deliver(procedures)
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
-        run = project.runs()[0]
-        host = json.loads((run / "run.json").read_text())["host"]
-        self.assertEqual(project.argvs("record"), [[f"{host}/{run.name}"]])
+        documents = {run: json.loads((run / "run.json").read_text()) for run in project.runs()}
+        roots = [run for run, document in documents.items() if "parent" not in document]
+        self.assertEqual(len(roots), 1)
+        self.assertEqual(len(documents), 2)
+        root = roots[0]
+        self.assertEqual(project.argvs("record"), [[f"{documents[root]['host']}/{root.name}"]])
 
 
 class RefusalTest(unittest.TestCase):
