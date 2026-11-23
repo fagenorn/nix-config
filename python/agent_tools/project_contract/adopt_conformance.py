@@ -122,7 +122,8 @@ from pathlib import Path
 from typing import NamedTuple
 
 from agent_tools.canonical import reject_duplicate_keys
-from agent_tools.project_contract import adopt_inspection, agent_platform, derived_values
+from agent_tools.project_contract import (adopt_inspection, agent_platform, derived_values,
+                                          schema_three)
 from agent_tools.project_contract.agent_platform import valid_revision
 from agent_tools.system import forge_api
 from agent_tools.system.github_remote import github_slug
@@ -461,8 +462,21 @@ def _git_failed() -> Exception:
                                    "a git inspection command did not succeed")
 
 
-def _tracker(contract_source: dict | None) -> tuple[str, str] | None:
-    """The tracker's `repo_slug` and the integration branch, or None when unnamed."""
+def _tracker(contract_source: dict | None, root: Path) -> tuple[str, str] | None:
+    """The tracker's `repo_slug` and the integration branch, or None when unnamed.
+
+    A schema-3 contract names neither the kind nor the slug: the kind is the
+    constant `github` and the slug is the `owner/repo` of `root`'s origin.
+    """
+    if schema_three.declares(contract_source):
+        bindings = contract_source.get("bindings")
+        vcs = bindings.get("vcs") if isinstance(bindings, dict) else None
+        branch = vcs.get("integration_branch") if isinstance(vcs, dict) else None
+        try:
+            slug = derived_values.remote_slug(root)
+        except derived_values.Underivable:
+            return None
+        return (slug, branch) if isinstance(branch, str) and branch else None
     bindings = contract_source.get("bindings") if isinstance(contract_source, dict) else None
     if not isinstance(bindings, dict):
         return None
@@ -524,7 +538,7 @@ def plan_conformance(root: Path, base_revision: str, contract_source: dict | Non
         return reference_after.get(path, entry[1])
 
     revision = agent_platform.platform_revision()
-    named = _tracker(contract_source)
+    named = _tracker(contract_source, root)
     collides, declared = (_projection_state(contract_source)
                           if named is not None and isinstance(contract_source, dict)
                           else (False, False))

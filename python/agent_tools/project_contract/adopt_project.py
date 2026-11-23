@@ -116,11 +116,15 @@ checkout already carries a contract file), `adopt.draft.unreadable` (the file
 cannot be read as one JSON object), `adopt.draft.inside_checkout` (the file
 lies in the checkout), `adopt.draft.invalid` (the resolver's own
 `{pointer, message}` violations, or a `/schema_version` the platform reads but
-adoption does not write: the draft declares a supported schema other than the
-one adoption writes, `adopt_planning.current_schema`) and
+adoption does not write: the draft declares a supported schema below the one
+adoption writes, `adopt_planning.current_schema`) and
 `adopt.draft.id_taken` (the drafted project id is registered for another
-checkout). A plan without the flag is unchanged, in its document and its
-`plan_id`.
+checkout). A draft of the adoption schema or a later one is planned; a schema-3
+draft leaves the derived values out, so it resolves strictly: in the
+scratch tree, with the checkout's origin, the conformance writes and the
+projections the contract generates, any refusal being `adopt.draft.invalid`,
+and it gains no interval. Its project id is the slug of the checkout's origin.
+A plan without the flag is unchanged, in its document and its `plan_id`.
 
 `plan --commit-environment COMMAND` adds the command the adoption commit runs
 through to a contract that names none (#1333, ADR-project-contract-009).
@@ -277,6 +281,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from collections.abc import Mapping
 from pathlib import Path
 import subprocess
 import sys
@@ -284,8 +289,9 @@ import tempfile
 
 from agent_tools.project_contract import (adopt_apply, adopt_conformance, adopt_entries,
                                           adopt_inspection, adopt_links, adopt_migrate,
-                                          adopt_planning, adopt_references, adopt_verify,
-                                          agent_platform)
+                                          adopt_planning, adopt_references, adopt_report,
+                                          adopt_verify,
+                                          agent_platform, derived_values, schema_three)
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
 from agent_tools.system.siblings import sibling_argv
 
@@ -433,12 +439,12 @@ def compose_plan(root: Path, manifest: dict, answered: list[dict],
         current = adopt_planning.current_schema(manifest)
         if (isinstance(declared, int) and not isinstance(declared, bool)
                 and declared in manifest["project_schema_versions"]
-                and declared != current):
+                and declared < current):
             raise adopt_inspection.AdoptError(
                 "adopt_failure", "adopt.draft.invalid",
                 [{"pointer": "/schema_version",
-                  "message": f"adoption writes project schema {current}, "
-                             "which a draft declares"}])
+                  "message": f"adoption writes project schema {current} or "
+                             "later, which a draft declares"}])
         # The stored plan is canonical JSON, which sorts every key, so the
         # draft is put in that order before anything is derived from it:
         # `apply` re-derives from the stored draft and must write the bytes
@@ -496,7 +502,37 @@ def compose_plan(root: Path, manifest: dict, answered: list[dict],
                 {"path": path, "target": target}
                 for path, target in sorted(unrewritable)]}, links.files)
     extra = {adopt_inspection.BOOTSTRAP_SOURCE: source} if source is not None else None
-    if draft is not None:
+    amendment = adopt_planning.commit_environment_amendment(
+        None if draft is not None else contract_source, environment,
+        adopt_planning.current_schema(manifest))
+    conformance = adopt_conformance.plan_conformance(
+        root, inventory.base_revision, contract_source,
+        {path: after.encode("utf-8")
+         for path, (_, after) in reference_files.items()
+         if path in adopt_conformance.CONFORMANCE_TARGETS})
+    three = schema_three.declares(draft)
+    if draft is not None and three and conformance.repair_id is not None:
+        # A conformance repair empties the planned bytes (the lock then has no
+        # platform node), so no tree can state the contract's derived values
+        # and a strict resolve would refuse `/platform` in place of the cause.
+        # The plan is a draft whose blocker names the repair (ADR-018 D10);
+        # the strict resolve runs once the repair is made.
+        projections_drift = False
+        contract_resolves, repair_id, payload = True, None, None
+    elif draft is not None and three:
+        # One strict resolve of the exact contract the plan writes, beside the
+        # conformance bytes it writes with it: the derived values come from
+        # the repository, so nothing short of that tree can state them.
+        written = adopt_inspection.authored_bytes(
+            adopt_planning.final_contract(
+                draft, manifest, found, None,
+                conformance=conformance.member is not None
+                and conformance.projection, entries=conversion))
+        projections_drift = resolve_draft(
+            root, inventory.base_revision, written, extra,
+            overlay=conformance.contents, strict=True)
+        contract_resolves, repair_id, payload = True, None, None
+    elif draft is not None:
         written = adopt_inspection.authored_bytes(
             adopt_planning.final_contract(
                 draft, manifest, found, None, conformance=False,
@@ -541,8 +577,15 @@ def compose_plan(root: Path, manifest: dict, answered: list[dict],
         # The resolver accepted the id as a non-empty string. Taking it from
         # the draft bypasses `derive_identity`'s collision check, so the
         # registry is asked here.
-        contract_id = draft["project"]["id"]
-        if adopt_planning.registry_collision(contract_id, root):
+        if not three:
+            contract_id = draft["project"]["id"]
+        else:
+            try:
+                contract_id = derived_values.remote_slug(root)
+            except derived_values.Underivable:
+                # Only a repaired conformance plan reaches here unresolved.
+                contract_id = None
+        if contract_id is not None and adopt_planning.registry_collision(contract_id, root):
             raise adopt_inspection.refuse(
                 "adopt_failure", "adopt.draft.id_taken", "/project/id",
                 "the project id is already registered for another checkout")
@@ -567,15 +610,7 @@ def compose_plan(root: Path, manifest: dict, answered: list[dict],
         "project_schema_versions": list(manifest["project_schema_versions"]),
         "resolved_schema_version": manifest["resolved_schema_version"],
     }
-    amendment = adopt_planning.commit_environment_amendment(
-        None if draft is not None else contract_source, environment,
-        adopt_planning.current_schema(manifest))
-    conformance = adopt_conformance.plan_conformance(
-        root, inventory.base_revision, contract_source,
-        {path: after.encode("utf-8")
-         for path, (_, after) in reference_files.items()
-         if path in adopt_conformance.CONFORMANCE_TARGETS})
-    if conformance.member is not None and conformance.projection:
+    if conformance.member is not None and conformance.projection and not three:
         # The bytes `build_operations` writes, resolved before the plan can be
         # `ready`: a contract the resolver refuses with the workflow's entry in
         # it is a repair of this plan, not a failure of `apply`.
@@ -743,7 +778,7 @@ def command_plan(args: argparse.Namespace) -> int:
     adopt_planning.store_document(
         document["plan"]["plan_id"], document)
     if args.format == "human":
-        return emit_human(document)
+        return adopt_report.emit_human(document)
     return emit_json(document)
 
 
@@ -769,10 +804,20 @@ def load_contract_draft(path: str, root: Path) -> dict:
     return draft
 
 
+def refusal_violations(payload: object) -> list[dict]:
+    """The resolver's `{pointer, message}` violations of one refusal document."""
+    return [{"pointer": violation["pointer"], "message": violation["message"]}
+            for violation in payload["error"]["violations"]]
+
+
 def resolve_scratch(root: Path, base_revision: str, written: bytes | None,
-                    extra: dict[str, bytes] | None) -> tuple[int, object]:
-    """The resolver's verdict on the base revision's tree with `written` as its
-    contract (kept as it is when None) and each `extra` file placed in it."""
+                    extra: dict[str, bytes] | None, *,
+                    strict: bool = False) -> tuple[int, object]:
+    """The resolver's verdict on the base revision's tree with `written` as its contract
+    (kept as it is when None) and each `extra` file placed in it. A schema-3 contract gets the
+    checkout's authored origin, which its derived values read. With `strict` the tree's
+    projections are generated first and a refusal to generate them is the draft's.
+    """
     with tempfile.TemporaryDirectory() as scratch:
         tree = Path(scratch) / "tree"
         adopt_inspection.export_commit(root, base_revision, tree)
@@ -783,27 +828,54 @@ def resolve_scratch(root: Path, base_revision: str, written: bytes | None,
         for relative, data in (extra or {}).items():
             (tree / relative).parent.mkdir(parents=True, exist_ok=True)
             (tree / relative).write_bytes(data)
+        if schema_three.declares(declared_contract(tree)):
+            adopt_inspection.seed_origin(root, tree)
+        if strict:
+            exit_code, payload = run_resolver(tree, "write-projections")
+            if exit_code != 0:
+                raise adopt_inspection.AdoptError(
+                    "adopt_failure", "adopt.draft.invalid",
+                    refusal_violations(payload)
+                    if adopt_inspection.resolver_error_code(payload) not in (
+                        None, "invalid_projection")
+                    else [{"pointer": "/projections",
+                           "message": "a planned projection could not be generated"}])
         return run_resolver(tree, "resolve")
 
 
+def declared_contract(tree: Path) -> object:
+    """The contract JSON in a scratch tree, or None when it has none readable."""
+    try:
+        return json.loads((tree / adopt_inspection.CONTRACT_FILENAME).read_bytes())
+    except (OSError, ValueError):
+        return None
+
+
 def resolve_draft(root: Path, base_revision: str, written: bytes,
-                   extra: dict[str, bytes] | None = None) -> bool:
+                  extra: dict[str, bytes] | None = None, *,
+                  overlay: Mapping[str, bytes] | None = None,
+                  strict: bool = False) -> bool:
     """Run the resolver on the bytes a drafted plan would write.
 
     The checkout is never written: the base revision's tree is exported into a
     scratch directory and the contract placed there, with each `extra` file the
-    plan also writes (the converted bootstrap source). Returns whether only the
-    projections are out of date, which the plan's own regeneration operations
-    repair; any other refusal is the draft's.
+    plan also writes (the converted bootstrap source) and every `overlay` path
+    (the other bytes the plan writes). Returns whether only the projections are
+    out of date, which the plan's own regeneration operations repair; any other
+    refusal is the draft's. With `strict` the tree's projections are generated
+    first and every refusal, stale projections included, is the draft's; the
+    return is then False.
     """
-    exit_code, payload = resolve_scratch(root, base_revision, written, extra)
+    exit_code, payload = resolve_scratch(
+        root, base_revision, written, {**(overlay or {}), **(extra or {})},
+        strict=strict)
     if exit_code == 0:
         return False
-    if adopt_inspection.resolver_error_code(payload) == "invalid_projection":
+    if (not strict
+            and adopt_inspection.resolver_error_code(payload) == "invalid_projection"):
         return True
-    raise adopt_inspection.AdoptError("adopt_failure", "adopt.draft.invalid", [
-        {"pointer": violation["pointer"], "message": violation["message"]}
-        for violation in payload["error"]["violations"]])
+    raise adopt_inspection.AdoptError(
+        "adopt_failure", "adopt.draft.invalid", refusal_violations(payload))
 
 
 def load_contract_source(root: Path) -> dict | None:
@@ -822,86 +894,6 @@ def load_contract_source(root: Path) -> dict | None:
     except (json.JSONDecodeError, UnicodeDecodeError):
         return None
     return source if isinstance(source, dict) else None
-
-
-def emit_human(document: dict) -> int:
-    """A bounded semantic view. What is stored is unchanged (R4.8)."""
-    plan = document["plan"]
-    rewrites = document["link_rewrites"]
-    inbound, outbound = rewrites["inbound"], rewrites["outbound"]
-    rows = document["path_references"]
-
-    def count(answer: str | None) -> int:
-        return sum(1 for row in rows if row["answer"] == answer)
-
-    lines = [
-        f"outcome: {plan['outcome']}",
-        f"state:   {plan['state']}",
-        f"project: {plan['project_id']}",
-        f"base:    {plan['base_revision']}",
-        f"plan id: {plan['plan_id']}",
-        f"evidence: {len(document['evidence'])} entries",
-        f"changes:  {len(document['changes'])} operations",
-        f"links: inbound {inbound['links']} in {len(inbound['files'])} "
-        f"files, outbound {outbound['links']} in {len(outbound['files'])} "
-        f"files, unrewritable {len(rewrites['unrewritable'])}, "
-        f"already broken {rewrites['already_broken']}",
-        f"references: {len(rows)} occurrences, "
-        f"extended {count('extend')}, rewritten {count('rewrite')}, "
-        f"retained {count('retain')}, open {count(None)}",
-    ]
-    member = plan.get("conformance")
-    if member is not None:
-        check = member["required_check"]
-        lines.insert(lines.index(f"changes:  {len(document['changes'])} operations") + 1, (
-            f"platform lock: {member['lock']['input']} at "
-            f"{member['revision']['rev']} ({member['lock']['path']})"))
-        lines.insert(lines.index(f"changes:  {len(document['changes'])} operations") + 2, (
-            f"workflow: {member['workflow']}"))
-        lines.insert(lines.index(f"changes:  {len(document['changes'])} operations") + 3, (
-            f"required check: {check['context']} on {check['branch']} of {check['repo']}"))
-    for row in document["reference_policies"]:
-        lines.append(
-            f"policy {row['subject']}: {row['files']} files, "
-            f"{row['occurrences']} occurrences, rewritable "
-            f"{row['rewritable']}, rewritten {row['rewritten']}, retained "
-            f"{row['retained']}, extended {row['extended']}, open "
-            f"{row['open']}")
-    for row in document["reference_formatting"]:
-        lines.append(
-            f"format {row['class']}: {len(row['files'])} files, "
-            f"command {row['command'] or 'none'}")
-    for entry in document["decisions"]["recommended"]:
-        lines.append(f"recommended {entry['id']}: {entry['value']}")
-    for entry in document["decisions"]["answered"]:
-        lines.append(f"answered {entry['id']} {entry['subject']}: "
-                     f"{entry['value']}")
-    for entry in document["decisions"]["open"]:
-        if entry["id"] == "candidate-class":
-            answer = "none" if entry["value"] is None else entry["value"]
-            lines.append(f"open {entry['id']} {entry['subject']} "
-                         f"(answer: {answer}): {entry['recommendation']}")
-        elif entry["id"] == "reference-policy":
-            answer = "none" if entry["value"] is None else entry["value"]
-            lines.append(f"open {entry['id']} {entry['subject']} (answers: "
-                         f"{'|'.join(entry['answers'])}, recommended: "
-                         f"{answer}): {entry['recommendation']}")
-        elif entry["id"] == "path-reference":
-            lines.append(f"open {entry['id']} {entry['subject']} (answers: "
-                         f"{'|'.join(entry['answers'])}): "
-                         f"{entry['recommendation']}")
-        else:
-            lines.append(f"open {entry['id']}: {entry['recommendation']}")
-    for item in plan.get("open_items", []):
-        lines.append(f"open item {item['id']}: {item['path']}")
-    for blocker in plan["blockers"]:
-        lines.append(f"blocked by {blocker['id']}: {blocker['message']}")
-    if plan["available_migration"] is not None:
-        lines.append(f"available: migrate {plan['available_migration']}")
-    lines.append(f"next: {document['handoff']['next_command'] or '(none)'}")
-    lines.append(f"stored at {document['handoff']['plan_path']}")
-    sys.stdout.write("\n".join(lines) + "\n")
-    return 0
 
 
 def require_manifest() -> dict:
