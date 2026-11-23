@@ -41,7 +41,8 @@ import os
 import re
 import subprocess
 import sys
-from collections.abc import Mapping
+from contextlib import contextmanager
+from collections.abc import Iterator, Mapping
 from pathlib import Path
 
 from agent_tools.delivery import issue_branch
@@ -54,7 +55,7 @@ PULL_FIELDS = "number,headRefOid,baseRefName,url"
 MERGE_FIELDS = "state,headRefOid,mergeCommit"
 CRITERIA_HEADING = re.compile(r"^##\s+acceptance criteria\s*$", re.IGNORECASE)
 HEADING = re.compile(r"^##\s")
-CRITERION = re.compile(r"^\s*-\s+\[[ xX]\]\s*(?:\[([a-z]+)\])?")
+CRITERION = re.compile(r"^\s*[-*+]\s+\[[ xX]\]\s*(?:\[([a-z]+)\])?")
 REMOVED_FROM_TITLE = re.compile("[\"'$`\\\\!\r\n]")
 # The variables that select another repository than the one `-C` names (a copy of the engine's list).
 REPOSITORY_ENV = ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
@@ -123,6 +124,16 @@ def placement(repo_root: str, issue: int) -> dict:
             "slug": snapshot["bindings"]["tracker"]["repo_slug"]}
 
 
+@contextmanager
+def _own_repository() -> Iterator[None]:
+    """Run with `REPOSITORY_ENV` removed from the process environment, restored on exit."""
+    held = {name: os.environ.pop(name) for name in REPOSITORY_ENV if name in os.environ}
+    try:
+        yield
+    finally:
+        os.environ.update(held)
+
+
 def _git(root: str, *args: str) -> str:
     env = {k: v for k, v in os.environ.items() if k not in REPOSITORY_ENV}
     try:
@@ -155,8 +166,9 @@ def prepare(args: argparse.Namespace) -> dict:
     head = _git(path, "rev-parse", "HEAD").strip()
     clean = not _git(path, "status", "--porcelain").strip()
     try:
-        recorded = verified_tree.read_record(verified_tree.record_path(Path(path)))
-        tree = verified_tree.current_tree(Path(path))
+        with _own_repository():
+            recorded = verified_tree.read_record(verified_tree.record_path(Path(path)))
+            tree = verified_tree.current_tree(Path(path))
     except verified_tree.VerifiedTreeError as error:
         raise Failure("verified_tree_failed", str(error)) from None
     ready = clean and recorded is not None and recorded["tree"] == tree

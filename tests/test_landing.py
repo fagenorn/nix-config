@@ -113,6 +113,21 @@ class PrepareTest(unittest.TestCase):
         (worktree / "stray.txt").write_text("x\n", encoding="utf-8")
         self.assertEqual(land.prepare()[1]["verdict"], "unverified")
 
+    def test_prepare_ignores_git_variables_naming_another_repository(self):
+        land = LandingWorld(self)
+        worktree = land.worktree()
+        land.commit(worktree, "unverified.txt")
+        other = land.fixture.root
+        with mock.patch.dict(os.environ, land.env):
+            tree = verified_tree.current_tree(other)
+            record = verified_tree.record_path(other)
+        record.write_text(json.dumps({"schema": verified_tree.SCHEMA, "tree": tree,
+                                      "verification": ["x"]}) + "\n", encoding="utf-8")
+        land.env = {**land.env, "GIT_DIR": str(other / ".git"), "GIT_WORK_TREE": str(other)}
+        code, answer = land.prepare()
+        self.assertEqual((code, answer["verdict"]), (0, "unverified"), answer)
+        self.assertEqual(answer["head"], land.world.git(worktree, "rev-parse", "HEAD").strip())
+
     def test_the_criteria_close_only_when_every_open_criterion_is_code(self):
         rows = {
             "all code": (criteria("- [ ] [code] a", "- [x] [code] b"), True),
@@ -120,6 +135,9 @@ class PrepareTest(unittest.TestCase):
             "one evidence": (criteria("- [ ] [code] a", "- [ ] [evidence] b"), False),
             "one human": (criteria("- [ ] [code] a", "- [ ] [human] b"), False),
             "one untagged": (criteria("- [ ] [code] a", "- [ ] b"), False),
+            "star bullet human": (criteria("- [ ] [code] a", "* [ ] [human] b"), False),
+            "plus bullet evidence": (criteria("- [ ] [code] a", "+ [ ] [evidence] b"), False),
+            "star bullet code": (criteria("* [ ] [code] a", "+ [x] [note] b"), True),
             "no section": ("Intro.\n\n- [ ] [code] a\n", False),
             "no criterion line": (criteria("prose only"), False),
         }
