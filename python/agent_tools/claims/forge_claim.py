@@ -60,20 +60,24 @@ D5, server now: "now" is the server's `Date` header of `gh api --include rate_li
 claim is stale when `now - activity >= 24 hours`, where activity is the latest of the claim's own
 `updated_at` (moved by each renewal, D3) and the branch activity of D4.
 
-D6, owner-action: a stale claim is never stolen. `status` reports one by posting one
-`owner-action` marker (`reason=stale-claim`, `claim=<id>`, extra line `- [ ] Release this
-claim`) when no live one exists for that claim, and on every stale call ensures and adds the
-`owner-action` label, so a label call that failed after the post is repaired by the next call.
-The next `status` or `acquire` honours a ticked box (`- [x] Release this claim`, either case)
-only while the claim it names is live and still stale at that moment: the claim is ended (reason
-`owner-action`), edited to `released=owner-action`, and the marker ended (reason `released`). An
-honour that ends a claim removes `in-progress` the same restoring way. A box ticked on a claim
-that is no longer stale is ended (reason `renewed`) and releases nothing. `acquire` against a
-stale claim without a ticked box is `held_by`.
+D6, owner-action: a stale claim is never stolen. Taking it over would end the block sooner, but a
+holder that is merely slow, or whose renewal was delayed, would lose work it is still doing and two
+sessions would deliver the issue, so an abandoned issue waits for the owner's tick instead.
+`status` reports one by posting one `owner-action` marker (`reason=stale-claim`, `claim=<id>`,
+extra line `- [ ] Release this claim`) when no live one exists for that claim, and on every stale
+call ensures and adds the `owner-action` label, so a label call that failed after the post is
+repaired by the next call. The next `status` or `acquire` honours a ticked box
+(`- [x] Release this claim`, either case) only while the claim it names is live and still stale at
+that moment: the claim is ended (reason `owner-action`), edited to `released=owner-action`, and the
+marker ended (reason `released`). An honour that ends a claim removes `in-progress` the same
+restoring way. A box ticked on a claim that is no longer stale is ended (reason `renewed`) and
+releases nothing. `acquire` against a stale claim without a ticked box is `held_by`.
 
-An honour reads the server time and the branch activity first, then takes a fresh listing and
-ends the claim right after judging that listing's `updated_at`, so a renewal that landed before
-that listing is never undone.
+An honour reads the server time and the branch activity first, then takes a fresh listing and ends
+the claim right after judging that listing's `updated_at`, so a renewal that landed before that
+listing is never undone. A renewal that lands between that listing and the end, or a branch push
+after the activity read, can still lose the claim; the holder's `renew` then answers `not_held`
+(D3).
 
 The `land` subcommand (`land acquire|release|status|refresh`, issue 629) is the cross-host land lock
 of `agent_tools.claims.forge_land_lock`: `main` routes it there and reports its usage errors in its
