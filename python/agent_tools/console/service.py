@@ -1861,7 +1861,7 @@ reserves it and dispatches one forced idle nudge (the idle-time and spacing rule
 other rule holds). The nudger, the listing and the full listing are never called with the ingest
 lock held, and no row or stderr line carries the owner's text or the sprint's secret.
 
-Retention (ADR-console-009): construction runs one retention pass (`EventLog.retain`) after
+Retention (ADR-console-001): construction runs one retention pass (`EventLog.retain`) after
 opening the log and before reading its events, and `RETENTION_THREAD`, started by `start()`, calls
 `retain()` every `retention_seconds` (`RETENTION_SECONDS`, one day). A pass that removed rows
 re-folds the sessions, the inbox records and the project questions and re-derives the last look and the moments from the

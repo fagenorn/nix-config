@@ -492,5 +492,103 @@ class PassTest(RealRuff):
         self.assertEqual(recordings(root), before)
 
 
+class AutofixTest(RealRuff):
+    def fix(self, rule, source, paths=("pkg/m.py",)):
+        root = covered_world(self.tmp, source)
+        enforcer = next(e for e in ruff_lint.ENFORCERS if e.rule == rule)
+        return enforcer.fix(snapshot_of(root), list(paths))
+
+    def test_the_autofix_applies_the_safe_fix_and_leaves_the_unsafe_one(self):
+        result = self.fix("PY7", "x = 1;\nif x == None:\n    pass\n")
+
+        self.assertEqual(
+            result, never_rise.Fix({"pkg/m.py": b"x = 1\nif x == None:\n    pass\n"}, 1))
+
+    def test_an_autofix_with_only_unsafe_fixes_changes_nothing(self):
+        result = self.fix("PY7", "x = 1\nif x == None:\n    pass\n")
+
+        self.assertEqual(result, never_rise.Fix({}, 0))
+
+    def test_the_fix_of_one_rule_leaves_another_rules_fixable_finding(self):
+        result = self.fix("PY7", "import os\nx = 1;\n")
+
+        self.assertEqual(result.changed, {"pkg/m.py": b"import os\nx = 1\n"})
+        self.assertEqual(result.fixed, 1)
+
+    def test_the_fix_reads_committed_bytes_and_writes_nothing_to_the_repository(self):
+        root = covered_world(self.tmp, "x = 1;\n")
+        write(root, "pkg/m.py", "y = 2;\n")
+        status = git(root, "status", "--porcelain", "--ignored")
+        enforcer = next(e for e in ruff_lint.ENFORCERS if e.rule == "PY7")
+
+        result = enforcer.fix(snapshot_of(root), ["pkg/m.py"])
+
+        self.assertEqual(result.changed, {"pkg/m.py": b"x = 1\n"})
+        self.assertEqual((Path(root) / "pkg/m.py").read_text(), "y = 2;\n")
+        self.assertEqual(git(root, "status", "--porcelain", "--ignored"), status)
+
+
+class AutofixFailClosedTest(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tmp = tmp.name
+
+    def run_fix(self, rule, snapshot, paths, tools):
+        with mock.patch.dict(os.environ):
+            os.environ.pop("AGENT_PLATFORM_TOOLS", None)
+            if tools is not None:
+                os.environ["AGENT_PLATFORM_TOOLS"] = tools
+            return ruff_lint.fix(rule, snapshot, paths)
+
+    def test_the_parse_and_suppression_rules_declare_no_autofix(self):
+        self.assertEqual(
+            [e.rule for e in ruff_lint.ENFORCERS if e.fix is not None],
+            ["PY6", "PY7", "PY9", "PY10", "PY11", "PY12"])
+        self.assertEqual(ruff_lint.codes("PY10"), (("F6", "F7", "F9"), ("F722",)))
+        self.assertEqual(ruff_lint.codes("PY6"), (("E4", "F4"), ()))
+        self.assertEqual(ruff_lint.codes("PY12"), (("ERA001",), ()))
+
+    def test_the_fix_asks_ruff_for_safe_fixes_only(self):
+        root = covered_world(self.tmp, "x = 1;\n")
+        tools = fake_ruff(self, 'printf "%s\\n" "$@" > "${0%/*}/argv"\necho "[]"\n')
+
+        self.run_fix("PY10", snapshot_of(root), ["pkg/m.py"], tools)
+
+        recorded = (Path(tools) / "argv").read_text().splitlines()
+        self.assertEqual(recorded, [
+            "check", "--isolated", "--no-cache", "--exit-zero", "--fix", "--no-unsafe-fixes",
+            "--target-version", "py313", "--select", "F6,F7,F9", "--ignore", "F722",
+            "--output-format", "json", "--", "pkg/m.py"])
+
+    def test_a_fix_fails_closed(self):
+        root = covered_world(self.tmp, "x = 1;\n")
+        snapshot = snapshot_of(root)
+        unmapped = (
+            'printf \'[{"code":"F401","filename":"%s/pkg/m.py","location":{"row":1,"column":1}}]\''
+            ' "$(pwd -P)"\n')
+        cases = {
+            "ruff_unavailable": None,
+            "ruff_failed": fake_ruff(self, "exit 3\n"),
+            "ruff_output_unreadable": fake_ruff(self, "echo 'not json'\n"),
+            "unmapped_code": fake_ruff(self, unmapped),
+        }
+        for reason, tools in cases.items():
+            with self.subTest(reason=reason), self.assertRaises(EnforcerFailed) as caught:
+                self.run_fix("PY7", snapshot, ["pkg/m.py"], tools)
+            self.assertEqual(caught.exception.reason, reason)
+
+    def test_a_fix_refuses_an_uncovered_path_and_runs_nothing_for_no_path(self):
+        root = covered_world(self.tmp, "x = 1;\n")
+        write(root, "README.md", "text\n")
+        commit_all(root)
+        snapshot = snapshot_of(root)
+        failing = fake_ruff(self, "exit 3\n")
+
+        with self.assertRaises(ValueError):
+            self.run_fix("PY7", snapshot, ["README.md"], failing)
+        self.assertEqual(self.run_fix("PY7", snapshot, (), failing), never_rise.Fix({}, 0))
+
+
 if __name__ == "__main__":
     unittest.main()
