@@ -15,9 +15,10 @@ began waiting. `waited_seconds` is the time from just before the first slot try 
 the slot and repository lock given back, or null when no slot was taken. Both are rounded to one
 decimal. `exit` is the code the run returns.
 
-The file is created with mode 0666, so every account of the host appends to it. It is appended
-without a lock, by one `O_APPEND` write per run, is never pruned, and is lost when the host clears
-its temporary directory at boot.
+The file is created with mode 0666, so every account of the host appends to it; it is opened
+without following a symlink or blocking, and a path that is not a regular file is refused, for the
+append and the read alike. It is appended without a lock, by one `O_APPEND` write per run, is never
+pruned, and is lost when the host clears its temporary directory at boot.
 
 `verify-slot report` reads the file back. A line is readable when it is a JSON object with exactly
 the types above (`held_seconds` a number or null, the numbers finite and not below 0); any other
@@ -37,10 +38,12 @@ from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
+import errno
 import json
 import math
 import os
 from pathlib import Path
+import stat
 import statistics
 
 from agent_tools import canonical
@@ -67,17 +70,33 @@ def entry(repository: str | None, argv: Sequence[str], started: datetime, waited
     }
 
 
-def _open_history(path: Path) -> int:
-    """Open the history file for appending, creating it with mode 0666 when it does not exist."""
+def _regular(descriptor: int, path: Path) -> int:
+    """`descriptor` when it is a regular file; otherwise close it and raise `OSError`."""
     try:
-        return os.open(path, os.O_WRONLY | os.O_APPEND)
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise OSError(errno.EINVAL, "not a regular file", str(path))
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
+def _open_history(path: Path) -> int:
+    """Open the history file for appending, creating it with mode 0666 when it does not exist.
+
+    The file sits in a directory every account can write to, so the open never follows a symlink,
+    never blocks on a FIFO and refuses anything that is not a regular file.
+    """
+    flags = os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK
+    try:
+        return _regular(os.open(path, flags), path)
     except FileNotFoundError:
         pass
     old = os.umask(0)
     try:
-        return os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_EXCL, 0o666)
+        return _regular(os.open(path, flags | os.O_CREAT | os.O_EXCL, 0o666), path)
     except FileExistsError:
-        return os.open(path, os.O_WRONLY | os.O_APPEND)
+        return _regular(os.open(path, flags), path)
     finally:
         os.umask(old)
 
@@ -130,9 +149,11 @@ def _readable(line: bytes) -> dict | None:
 def read(path: Path) -> tuple[list[dict], int]:
     """The readable records of `path` and the count of unreadable lines; absent is `([], 0)`."""
     try:
-        data = path.read_bytes()
+        descriptor = _regular(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), path)
     except FileNotFoundError:
         return [], 0
+    with os.fdopen(descriptor, "rb") as handle:
+        data = handle.read()
     pieces = data.split(b"\n")
     if pieces and pieces[-1] == b"":
         pieces.pop()

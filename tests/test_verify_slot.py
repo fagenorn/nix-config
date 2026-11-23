@@ -54,7 +54,9 @@ def wait_for(path, timeout=20):
     return False
 
 
-class VerifySlotTest(unittest.TestCase):
+class SlotHarness:
+    """The scratch slot directory and the run helpers both test classes share."""
+
     def setUp(self):
         scratch = tempfile.TemporaryDirectory()
         self.addCleanup(scratch.cleanup)
@@ -122,6 +124,8 @@ class VerifySlotTest(unittest.TestCase):
         text = (self.slots / "history.jsonl").read_text()
         return [json.loads(line) for line in text.splitlines()]
 
+
+class VerifySlotTest(SlotHarness, unittest.TestCase):
     def test_a_second_run_from_the_same_repository_waits_until_the_first_ends(self):
         self.declare(verify_slots=2)
         one = self.repository("alpha-one", "git@github.com:example/alpha.git")
@@ -601,6 +605,29 @@ class VerifySlotTest(unittest.TestCase):
         self.release("b")
         self.assertEqual(self.finish(self.start("b", "--wait-limit", "1"))[0], 0)
 
+    def test_a_history_path_that_is_a_symlink_is_never_written_through(self):
+        victim = Path(self.home) / "victim.txt"
+        victim.write_text("victim-original")
+        self.slots.mkdir()
+        (self.slots / "history.jsonl").symlink_to(victim)
+        self.release("a")
+        code, err = self.finish(self.start("a", code=3))
+        self.assertEqual(code, 3)
+        self.assertEqual(victim.read_text(), "victim-original")
+        failed = [line for line in err.splitlines()
+                  if line.startswith("verify-slot: cannot record this run in ")]
+        self.assertEqual(len(failed), 1)
+
+    def test_a_history_path_that_is_a_fifo_does_not_hold_the_run_up(self):
+        self.slots.mkdir()
+        os.mkfifo(self.slots / "history.jsonl")
+        self.release("a")
+        code, err = self.finish(self.start("a", code=3), timeout=10)
+        self.assertEqual(code, 3)
+        failed = [line for line in err.splitlines()
+                  if line.startswith("verify-slot: cannot record this run in ")]
+        self.assertEqual(len(failed), 1)
+
     def test_a_run_that_gets_no_slot_records_its_wait_and_no_hold(self):
         first = self.start("a")
         self.assertTrue(wait_for(self.mark("a", "start")))
@@ -630,6 +657,7 @@ class VerifySlotTest(unittest.TestCase):
         self.assertEqual(len(self.history()), 2)
 
 
+class VerifySlotReportTest(SlotHarness, unittest.TestCase):
     def write_history(self, *records, raw=()):
         self.slots.mkdir(exist_ok=True)
         lines = [json.dumps(record, separators=(",", ":")) for record in records] + list(raw)
@@ -643,7 +671,7 @@ class VerifySlotTest(unittest.TestCase):
     def report(self, *opts):
         result = subprocess.run(
             [sys.executable, "-m", "agent_tools.delivery.verify_slot", "report", *opts],
-            env=self.env(), cwd=self.home, capture_output=True, text=True)
+            env=self.env(), cwd=self.home, capture_output=True, text=True, timeout=20)
         return result.returncode, result.stdout.splitlines(), result.stderr
 
     def alpha_records(self):
@@ -735,6 +763,13 @@ class VerifySlotTest(unittest.TestCase):
         self.assertEqual(len(lines), 1)
         self.assertRegex(lines[0], r"^example/alpha runs=1 held_median=\d+s held_p90=\d+s"
                          r" held_total=\d+s waited_median=\d+s waited_p90=\d+s$")
+
+    def test_a_report_over_a_history_path_that_is_a_fifo_fails_instead_of_hanging(self):
+        self.slots.mkdir()
+        os.mkfifo(self.slots / "history.jsonl")
+        code, lines, err = self.report()
+        self.assertEqual((code, lines), (2, []))
+        self.assertTrue(err.strip())
 
     def test_report_takes_no_command(self):
         result = subprocess.run(
