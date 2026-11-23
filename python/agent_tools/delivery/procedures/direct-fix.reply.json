@@ -1,0 +1,1 @@
+{"type": "object", "properties": {"status": {"enum": ["done", "blocked"]}, "start_head": {"type": "string"}, "commit": {"type": "string"}, "notes": {"type": "string"}, "tests": {"type": "array", "items": {"type": "string"}}}, "required": ["status", "start_head", "commit", "notes", "tests"], "additionalProperties": false}

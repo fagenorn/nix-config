@@ -5,11 +5,15 @@ answers every `gh` call the run makes from the one scenario given to the constru
 launcher stand-in (`tests/fixtures/engine-stubbed-run/claude_stub.py`) that answers each agent step
 from the scenario's `replies`. `deliver()` runs `engine deliver <issue>` in the fixture checkout;
 the other methods read what the run left: its result line, its run directories and events, the
-claim comments and the launches.
+claim comments and the launches. `replies` overrides the default replies by step id (an entry
+`<step>.<visit>` answers that visit only); `review_code` is the answer list of the `codex-companion`
+stand-in that makes the independent code review supported; `conditions` is the contract's
+`verification_conditions`.
 """
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import shutil
@@ -27,8 +31,21 @@ from tests.guard_policy_world import REPO_ROOT, GuardPolicyWorld
 from tests.test_issue_setup import gh_only
 
 STUB = REPO_ROOT / "tests/fixtures/engine-stubbed-run/claude_stub.py"
+COMPANION = REPO_ROOT / "tests/fixtures/engine-stubbed-run/codex_companion_stub.py"
+ROLES = REPO_ROOT / "home/common/claude-code/agents"
 APPLIES = {"verdict": "applies", "details": "greet() is still missing.", "evidence": ""}
 DIRECT = {"lane": "direct", "why": "A one-file fix with checkable criteria."}
+CLEAN_LITE = {"verdict": "pass", "findings": [],
+              "acceptance": [{"id": "AC1", "met": True, "evidence": "checks/check_greet.py:8"}],
+              "escalate": False}
+IMPLEMENTED = {
+    "reply": {"status": "done", "notes": "Added farewell().",
+              "acceptance": [{"id": "AC1", "text": "greet() returns the greeting", "kind": "code",
+                              "result": "checks/check_greet.py fails without it"}],
+              "sensitive": False, "ineligible": False, "tests": ["checks/check_greet.py"]},
+    "commit": {"path": "fixture/farewell.py",
+               "text": 'def farewell(name: str) -> str:\n    return f"Goodbye, {name}."\n'}}
+DEFAULT_REPLIES = {"applies": APPLIES, "lane": DIRECT, "implement": IMPLEMENTED, "lite-review": CLEAN_LITE}
 DEFAULT_BODY = ("Add a greet() function to the fixture module.\n\n"
                 "## Acceptance criteria\n\n- [ ] greet() returns the greeting\n")
 PULL_FIELDS = "number,state,headRefName,closingIssuesReferences"
@@ -38,19 +55,27 @@ DROPPED_ENV = ("AGENT_PLATFORM_ROOT", "GITHUB_TOKEN", "GH_TOKEN", "CLAUDE_ACCOUN
 class StubbedRun:
     def __init__(self, test_case: unittest.TestCase, *, issue: int = 41, title: str = "Add a greeting",
                  body: str = DEFAULT_BODY, state: str = "open", labels=(), comments=(), pulls=(),
-                 replies: dict | None = None) -> None:
+                 replies: dict | None = None, review_code: list | None = None,
+                 conditions: dict | None = None) -> None:
         self.test = test_case
         self.issue = issue
         self.title = title
         self.world = GuardPolicyWorld(test_case)
-        self.fixture = FixtureProject(test_case, self.world)
+        self.companion_log = self.world.tmp / "companion.log"
+        if review_code is not None:
+            self._install_companion(review_code)
+        self.fixture = FixtureProject(test_case, self.world, review_code=review_code is not None,
+                                      conditions=conditions)
         self.forge = ForgeWorld(test_case)
         slug = self.fixture.slug
         self.forge.comment_store(slug, issue, comments, labels=list(labels))
         self._respond(slug, issue, title, state, labels, body, list(pulls))
         self.tmp = self.world.tmp / "stubbed-run"
         self.tmp.mkdir()
-        self.replies = {"verdict": APPLIES, "lane": DIRECT} if replies is None else replies
+        self.branch: str = issue_branch.render(self.fixture.branch_pattern, issue,
+                                               issue_branch.title_slug(title))
+        self.worktree_path: Path = self.fixture.worktree_root / (self.fixture.worktree_prefix + self.branch)
+        self.replies = self._with_worktree({**DEFAULT_REPLIES, **(replies or {})})
         scenario = self.tmp / "scenario.json"
         scenario.write_text(json.dumps(self.replies), encoding="utf-8")
         self.log = self.tmp / "launches.log"
@@ -64,11 +89,27 @@ class StubbedRun:
         self.env["PATH"] = os.pathsep.join(
             [str(stub_bin), str(gh_only(self.forge, self.tmp / "gh")), self.world.env["PATH"]])
         self.env["FORGE_WORLD"] = str(self.forge.state)
+        self.env["VERIFY_SLOT_DIR"] = str(self.tmp / "verify-slots")
         self._install_home()
-        contract_branch = issue_branch.render(self.fixture.branch_pattern, issue,
-                                              issue_branch.title_slug(title))
-        self.branch: str = contract_branch
-        self.worktree_path: Path = self.fixture.worktree_root / (self.fixture.worktree_prefix + contract_branch)
+
+    def _with_worktree(self, replies: dict) -> dict:
+        """The replies, each `commit` effect without a worktree made in the run's worktree."""
+        filled = copy.deepcopy(replies)
+        for entry in filled.values():
+            if isinstance(entry.get("commit"), dict) and "worktree" not in entry["commit"]:
+                entry["commit"]["worktree"] = str(self.worktree_path)
+        return filled
+
+    def _install_companion(self, answers: list) -> None:
+        shims = self.world.tmp / "companion"
+        shims.mkdir()
+        answers_path = shims / "answers.json"
+        answers_path.write_text(json.dumps(answers), encoding="utf-8")
+        shim = shims / "codex-companion"
+        shim.write_text(f"#!/bin/sh\nexec {sys.executable} {COMPANION} {answers_path} "
+                        f"{self.companion_log} \"$@\"\n", encoding="utf-8")
+        shim.chmod(0o755)
+        self.world.env["PATH"] = os.pathsep.join([str(shims), self.world.env["PATH"]])
 
     def _respond(self, slug: str, issue: int, title: str, state: str, labels, body: str,
                  pulls: list) -> None:
@@ -93,9 +134,9 @@ class StubbedRun:
         declaration = home / ".agents/share/host-declaration.json"
         declaration.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(REPO_ROOT / "home/common/agent-skills/host-declaration.json", declaration)
-        role = home / ".claude/agents/reviewer-lite.md"
-        role.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy(REPO_ROOT / "home/common/claude-code/agents/reviewer-lite.md", role)
+        (home / ".claude/agents").mkdir(parents=True, exist_ok=True)
+        for name in ("implementer", "reviewer", "reviewer-lite"):
+            shutil.copy(ROLES / f"{name}.md", home / ".claude/agents" / f"{name}.md")
 
     def deliver(self) -> subprocess.CompletedProcess:
         return subprocess.run([sys.executable, "-m", "agent_tools.delivery.engine", "deliver",
@@ -138,6 +179,11 @@ class StubbedRun:
         markers = (forge_markers.parse(comment) for comment in self.forge.stored())
         return [marker for marker in markers
                 if marker is not None and marker.kind == "claim" and "released" not in marker.fields]
+
+    def companion_launches(self) -> list[dict]:
+        if not self.companion_log.exists():
+            return []
+        return [json.loads(line) for line in self.companion_log.read_text(encoding="utf-8").splitlines()]
 
     def launches(self) -> list[dict]:
         if not self.log.exists():

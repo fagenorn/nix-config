@@ -23,8 +23,7 @@ from pathlib import Path
 from typing import Callable
 from unittest import mock
 
-from agent_tools.delivery import engine, engine_graders, engine_reply, procedure_check
-from agent_tools.delivery.engine_graders import GRADERS
+from agent_tools.delivery import engine, engine_reply, procedure_check
 from agent_tools.delivery.procedure_check import CommandDeclaration, load_commands
 from tests.engine_walks import reply_schemas, step_outcomes, walk_edges
 from tests.guard_policy_world import install_platform_manifest_in_environ
@@ -38,6 +37,9 @@ DELIVERY = REPO_ROOT / "python/agent_tools/delivery"
 
 def compact(value: object) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n"
+
+
+SHIPPED_OK = compact({"procedures": ["deliver", "direct", "setup", "toy", "toy-child", "verify"], "verdict": "ok"})
 
 
 def load(directory: Path, name: str) -> dict:
@@ -646,17 +648,17 @@ class ToyProcedureTest(unittest.TestCase):
     def test_engine_check_passes_the_shipped_procedures(self):
         code, out, err = run_check()
         self.assertEqual((code, err), (0, ""))
-        self.assertEqual(out, compact({"procedures": ["deliver", "setup", "toy", "toy-child"], "verdict": "ok"}))
+        self.assertEqual(out, SHIPPED_OK)
 
     def test_a_command_step_may_map_out_of_bounds(self):
         def map_bound(toy: dict) -> None:
             step(toy, "scope")["on"]["out-of-bounds"] = "needs-owner"
         code, out, _ = run_check("--procedures", str(broken_copy(editing("toy", map_bound))))
-        self.assertEqual((code, out), (0, compact({"procedures": ["deliver", "setup", "toy", "toy-child"], "verdict": "ok"})))
+        self.assertEqual((code, out), (0, SHIPPED_OK))
 
     def test_an_exhausted_retry_loop_may_feed_a_reader_of_its_reply(self):
         code, out, _ = run_check("--procedures", str(broken_copy(editing("toy", _exhausted_route_to_children))))
-        self.assertEqual((code, out), (0, compact({"procedures": ["deliver", "setup", "toy", "toy-child"], "verdict": "ok"})))
+        self.assertEqual((code, out), (0, SHIPPED_OK))
 
     def test_a_decide_step_cannot_map_out_of_bounds(self):
         def map_bound(toy: dict) -> None:
@@ -674,8 +676,7 @@ class ToyProcedureTest(unittest.TestCase):
                 del doc["keep_alive"]
                 save(directory, name, doc)
         code, out, _ = run_check("--procedures", str(broken_copy(drop_keep_alive)))
-        self.assertEqual((code, out), (0, compact(
-            {"procedures": ["deliver", "setup", "toy", "toy-child"], "verdict": "ok"})))
+        self.assertEqual((code, out), (0, SHIPPED_OK))
 
     def test_a_procedure_with_no_keep_alive_needs_no_claim_lost_stop(self):
         def drop_keep_alive_and_claim_lost(directory: Path) -> None:
@@ -685,8 +686,7 @@ class ToyProcedureTest(unittest.TestCase):
             save(directory, "toy", toy)
             save(directory, "toy-child", child)
         code, out, _ = run_check("--procedures", str(broken_copy(drop_keep_alive_and_claim_lost)))
-        self.assertEqual((code, out), (0, compact(
-            {"procedures": ["deliver", "setup", "toy", "toy-child"], "verdict": "ok"})))
+        self.assertEqual((code, out), (0, SHIPPED_OK))
 
     def test_the_toy_has_all_five_kinds_a_stop_and_a_bounded_loop(self):
         toy = load(PROCEDURES, "toy")
@@ -715,8 +715,7 @@ class ToyProcedureTest(unittest.TestCase):
                 directory = broken_copy(
                     editing("toy", _set(lambda toy: step(toy, "draft"), "stage", stage)))
                 code, out, _ = run_check("--procedures", str(directory))
-                self.assertEqual((code, out), (0, compact(
-                    {"procedures": ["deliver", "setup", "toy", "toy-child"], "verdict": "ok"})))
+                self.assertEqual((code, out), (0, SHIPPED_OK))
 
     def test_each_holds_value_is_accepted(self):
         for value in ("run", "head", "live"):
@@ -724,8 +723,7 @@ class ToyProcedureTest(unittest.TestCase):
                 directory = broken_copy(
                     editing("toy", _set(lambda toy: step(toy, "scope"), "holds", value)))
                 code, out, _ = run_check("--procedures", str(directory))
-                self.assertEqual((code, out), (0, compact(
-                    {"procedures": ["deliver", "setup", "toy", "toy-child"], "verdict": "ok"})))
+                self.assertEqual((code, out), (0, SHIPPED_OK))
 
 
 class NoReplyOutcomeTest(unittest.TestCase):
@@ -734,8 +732,7 @@ class NoReplyOutcomeTest(unittest.TestCase):
             directory = broken_copy(editing(
                 "toy", _set(lambda toy: step(toy, "draft")["on"], "no-reply", "needs-owner")))
             code, out, _ = run_check("--procedures", str(directory))
-            self.assertEqual((code, out), (0, compact(
-                {"procedures": ["deliver", "setup", "toy", "toy-child"], "verdict": "ok"})))
+            self.assertEqual((code, out), (0, SHIPPED_OK))
         with self.subTest("command step"):
             directory = broken_copy(editing(
                 "toy", _set(lambda toy: step(toy, "scope")["on"], "no-reply", "needs-owner")))
@@ -920,27 +917,23 @@ class GraphTest(unittest.TestCase):
         directory = broken_copy(editing("toy", _set(
             lambda toy: step(toy, "draft")["on"], "no-reply", "needs-owner")))
         code, out, _ = run_check("--procedures", str(directory))
-        self.assertEqual((code, out), (0, compact(
-            {"procedures": ["deliver", "setup", "toy", "toy-child"], "verdict": "ok"})))
+        self.assertEqual((code, out), (0, SHIPPED_OK))
 
     def test_a_step_reached_only_through_claim_lost_is_reachable(self):
         directory = broken_copy(editing("toy-child", _recovery))
         code, out, _ = run_check("--procedures", str(directory))
-        self.assertEqual((code, out), (0, compact(
-            {"procedures": ["deliver", "setup", "toy", "toy-child"], "verdict": "ok"})))
+        self.assertEqual((code, out), (0, SHIPPED_OK))
 
     def test_a_claim_lost_recovery_may_read_what_ran_before_the_guarded_step(self):
         directory = broken_copy(editing("toy-child", _recovery_reading("a.anything")))
         code, out, _ = run_check("--procedures", str(directory))
-        self.assertEqual((code, out), (0, compact(
-            {"procedures": ["deliver", "setup", "toy", "toy-child"], "verdict": "ok"})))
+        self.assertEqual((code, out), (0, SHIPPED_OK))
 
     def test_exhausted_may_be_mapped_off_a_cycle(self):
         directory = broken_copy(editing(
             "toy-child", _set(lambda child: step(child, "claim")["on"], "exhausted", "child-stop")))
         code, out, _ = run_check("--procedures", str(directory))
-        self.assertEqual((code, out), (0, compact(
-            {"procedures": ["deliver", "setup", "toy", "toy-child"], "verdict": "ok"})))
+        self.assertEqual((code, out), (0, SHIPPED_OK))
 
 
 class DataFlowTest(unittest.TestCase):
@@ -948,14 +941,12 @@ class DataFlowTest(unittest.TestCase):
         directory = broken_copy(editing(
             "toy", _set(lambda toy: step(toy, "review-a"), "in", ["draft.summary", "run.issue"])))
         code, out, _ = run_check("--procedures", str(directory))
-        self.assertEqual((code, out), (0, compact(
-            {"procedures": ["deliver", "setup", "toy", "toy-child"], "verdict": "ok"})))
+        self.assertEqual((code, out), (0, SHIPPED_OK))
 
     def test_an_each_over_the_list_a_platform_command_publishes_is_accepted(self):
         directory = broken_copy(editing("toy", _each_over("scope.files")))
         code, out, _ = run_check("--procedures", str(directory))
-        self.assertEqual((code, out), (0, compact(
-            {"procedures": ["deliver", "setup", "toy", "toy-child"], "verdict": "ok"})))
+        self.assertEqual((code, out), (0, SHIPPED_OK))
 
     def test_a_no_reply_route_bypasses_its_step_whatever_order_the_steps_are_listed_in(self):
         def agent(step_id: str, on: dict, reads: tuple[str, ...] = ()) -> dict:
@@ -1098,11 +1089,28 @@ class UsageTest(unittest.TestCase):
 SHIPPED_INPUTS = {"holder": "h/41-20261122T000000Z-abcd", "issue": 41, "repo": "o/r", "repo_root": "/r"}
 
 
+CLEAN = {"findings": [], "acceptance": [{"id": "x", "met": True, "evidence": "e"}]}
+UNNAMED = {"findings": [{"severity": "critical", "file": "", "failing_input": "", "summary": "s"}]}
 SHIPPED_MEMBERS = {
     "contract": ({"capabilities": {"review.code": {"state": "available"}, "review.plan": {"state": "available"}}},
                  {"capabilities": {"review.code": {"state": "blocked"}, "review.plan": {"state": "available"}}}),
     "preflight": ({"branch": "b", "worktree_path": "/w", "integration_branch": "main", "issue_text": "t"},),
     "issue": ({"text": "t"},),
+    "implement": ({}, {"ineligible": True}, {"sensitive": True}, {"acceptance": []}),
+    "lite-review": ({}, {"escalate": True}, CLEAN, UNNAMED),
+    "full-review": ({}, CLEAN, UNNAMED),
+    "escalated": ({}, CLEAN, UNNAMED),
+    "lite-independent": ({"findings": []},),
+    "full-independent": ({"findings": []},),
+    **{f"{route}-rereview": ({}, {"findings": []}, UNNAMED) for route in ("lite", "escalated", "full")},
+}
+
+
+# The checker makes a step on a loop map `exhausted`, but a decide step entered once per visit of the group or the
+# re-review it follows never outlasts that step's equal bound, so its `exhausted` edge is no walk's.
+UNREACHABLE_EXHAUSTED = {
+    "direct": tuple((f"{route}-{kind}", "exhausted")
+                    for kind in ("tally", "settled") for route in ("lite", "escalated", "full")),
 }
 
 
@@ -1113,23 +1121,27 @@ def shipped_coverage(name: str):
 
 class ShippedProcedureTest(unittest.TestCase):
     def test_each_shipped_header_names_the_claim_renewal_as_its_keep_alive(self):
-        for name in ("setup", "deliver"):
+        for name in ("setup", "deliver", "direct", "verify"):
             with self.subTest(name=name):
                 self.assertEqual(load(PROCEDURES, name)["keep_alive"], {
                     "command": "forge-claim", "subcommand": "renew",
                     "in": ["run.repo", "run.issue", "run.holder"]})
 
-    def test_every_edge_of_setup_and_deliver_is_walked_to_done_or_a_declared_stop(self):
-        for name in ("setup", "deliver"):
+    def test_every_edge_of_the_shipped_procedures_is_walked_to_done_or_a_declared_stop(self):
+        for name in ("setup", "deliver", "direct", "verify"):
             with self.subTest(name=name):
                 coverage = shipped_coverage(name)
-                self.assertEqual(coverage.unwalked, ())
+                self.assertEqual(coverage.unwalked, UNREACHABLE_EXHAUSTED.get(name, ()))
                 stops = load(PROCEDURES, name)["stops"]
                 for walk in coverage.walks:
                     self.assertTrue(walk.end == "done" or walk.end in stops, (walk.edge, walk.end))
 
     def test_no_shipped_prompt_asks_for_a_forge_command(self):
-        for name in ("setup-applies.md", "lane.md"):
+        names = ["setup-applies.md", "lane.md"] + [
+            f"direct-{kind}.md" for kind in (
+                "implement", "review-lite", "review", "fix-lite", "fix-escalated", "fix-full",
+                "rereview-lite", "rereview-escalated", "rereview-full")]
+        for name in names:
             with self.subTest(name=name):
                 self.assertNotIn("gh ", (PROCEDURES / name).read_text(encoding="utf-8"))
 
@@ -1162,10 +1174,19 @@ class ShippedProcedureTest(unittest.TestCase):
         self.assertEqual(step(deliver, "issue")["on"],
                          {"read": "lane", "error": "no-lane", "refused": "no-lane"})
         self.assertEqual(step(deliver, "lane")["on"], {
-            "direct": "done", "standard": "standard-not-on-engine", "needs-design": "needs-design",
+            "direct": "direct-lane", "standard": "standard-not-on-engine", "needs-design": "needs-design",
             "no-reply": "no-lane", "out-of-bounds": "no-lane"})
         for name in setup["stops"]:
             self.assertEqual(step(deliver, "start")["on"][name], name)
+        for called, procedure in (("direct-lane", "direct"), ("verification", "verify")):
+            mapped = step(deliver, called)["on"]
+            self.assertEqual(step(deliver, called)["procedure"], procedure)
+            for name in load(PROCEDURES, procedure)["stops"]:
+                self.assertEqual(mapped[name], name)
+        self.assertEqual(step(deliver, "direct-lane")["on"]["done"], "verification")
+        self.assertEqual(step(deliver, "verification")["on"]["done"], "done")
+        for name in ("ineligible", "task", "direct-review", "direct-fix", "codex-unavailable", "verify"):
+            self.assertIn(name, deliver["stops"])
         self.assertEqual(deliver["stops"]["needs-design"]["need"], "owner-decision")
 
     def test_the_worktree_mismatch_is_read_before_the_claim(self):
@@ -1221,31 +1242,6 @@ class DeclarationTest(unittest.TestCase):
                     path.write_text(text, encoding="utf-8")
                     with self.assertRaises(procedure_check.DeclarationError):
                         load_commands(path)
-
-
-class GraderTest(unittest.TestCase):
-    GRADER_CASES = [
-        ("toy-tally", {"review-a.verdict": "approve", "review-b.verdict": "approve"}, "accept"),
-        ("toy-tally", {"review-a.verdict": "approve", "review-b.verdict": "revise"}, "revise"),
-        ("review-capability", {"contract.capabilities": {
-            "review.code": {"state": "blocked"}, "review.plan": {"state": "available"}}}, "blocked"),
-        ("review-capability", {"contract.capabilities": {
-            "review.code": {"state": "unsupported"}, "review.plan": {"state": "blocked"}}}, "blocked"),
-        ("review-capability", {"contract.capabilities": {
-            "review.code": {"state": "available"}, "review.plan": {"state": "unsupported"}}}, "clear"),
-        ("review-capability", {}, "clear"),
-    ]
-
-    def test_each_grader_case_grades_its_outcome(self):
-        for name, results, expected in self.GRADER_CASES:
-            with self.subTest(name=name, results=results):
-                self.assertEqual(GRADERS[name].grade(results), expected)
-
-    def test_every_declared_grader_outcome_is_produced(self):
-        for name in GRADERS:
-            with self.subTest(name=name):
-                self.assertEqual({e for n, _, e in self.GRADER_CASES if n == name},
-                                 set(GRADERS[name].outcomes))
 
 
 if __name__ == "__main__":

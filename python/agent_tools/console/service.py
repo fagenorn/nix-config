@@ -691,7 +691,7 @@ never taken from it: a failed row names the checkout path when its key never res
 keeps that root, so a granted retry clears the card it answers. Any other exception is `console:
 trust_check_failed <Type>` and 500 `checking failed`.
 
-Folder trust at start (#1183, ADR-console-034 D9): when the service is given `trust_at_start`,
+Folder trust at start (#1183, ADR-console-034): when the service is given `trust_at_start`,
 `start()` starts `TRUST_START_THREAD`, which reads the registry once with `read_fleet` and runs
 `_grant_trust` with cause `console-start` for every registered project in every target
 (`~/.claude.json` when given a `trust_home`, and every profile), one row per project, in registry
@@ -700,7 +700,7 @@ result is a Check again card like any other. It stops between projects once `clo
 `close` joins it. An unreadable registry grants nothing (`console: trust_start_registry_unreadable`);
 a failing project is `console: trust_start_failed <project> <Type>` and the sweep goes on.
 
-`POST /api/adoption-register` (#1055, ADR-console-028 D10) is the Retry of a refused registration
+`POST /api/adoption-register` (#1055, ADR-console-028) is the Retry of a refused registration
 of a merged adoption. It runs the same checks with `MAX_ADOPTION_REGISTER_BYTES` (4096) and
 `approve.parse_approve_request`: 400 `bad registration retry`. The service refuses, each as 409
 with the text, one stderr line `console: adoption_register_refused <reason>`, appending and
@@ -1408,7 +1408,7 @@ not (`checks_error`) records that head and target with one such line, as `open` 
 `console: adoption_poll_loop_failed <Type>: <message>` and the loop goes on. The console merges only
 on the owner's Merge (`POST /api/adoption-merge`, ADR-console-088).
 
-The same round ends with the merged registration (#1055, ADR-console-028 D10, ADR-project-contract-005):
+The same round ends with the merged registration (#1055, ADR-console-028, ADR-project-contract-005):
 `register_merged()` runs `Adopter.register(root, cancel=..., integration_branch=<the recorded pull
 request base>, plan_id=<the adoption's plan id>)`, the bounded child, for each `opened`
 adoption whose pull request reads `merged` and whose registration is absent or `waiting`
@@ -5179,7 +5179,7 @@ class ConsoleService:
                 shown_root=None if self._registration is None else self._registration["root"]),
             release_items=release_card.inbox_entries(
                 release_card.live(self._release_cards, self._now())),
-            prompt_items=prompt_card.inbox_entries(self._open_prompts(), self._sprints),
+            prompt_items=prompt_card.inbox_entries(self._open_prompts(), self._sprints, {p: s.root for p, s in self._states.items()}),
             retry_items=approve.retry_entries(self._adoptions, self._enrolling),
             apply_items=apply_items,
             trust_items=folder_trust.items(self._trust_failures),

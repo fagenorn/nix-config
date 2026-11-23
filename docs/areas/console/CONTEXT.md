@@ -42,7 +42,7 @@ The sentence or two the owner states on the page for one registered project, kep
 _Avoid_: task, request
 
 **Brief**:
-The manager's answer to a goal: a title of at most 60 characters that names the sprint, what done looks like, what is excluded, the slices, the risks and what it expects to ask. It waits in the inbox until the owner approves it, which starts the sprint, or answers it with a reply; a newer brief replaces it (ADR-console-013, ADR-console-027). It may carry up to eight pictures, each with a line, shown as thumbnails on its card and full size in the viewer (ADR-console-041).
+The manager's answer to a goal: a title of at most 60 characters that names the sprint, what done looks like, what is excluded, the slices, the risks and what it expects to ask. It waits in the inbox until the owner approves it, which starts the sprint, or answers it with a reply; a newer brief replaces it (ADR-console-013, ADR-console-027). It may carry up to eight pictures, each with a line, shown as thumbnails on its card and full size in the viewer (ADR-console-038).
 _Avoid_: plan, proposal
 
 **Manager**:
@@ -54,7 +54,7 @@ The owner's approval of one release candidate, the pair of a commit and a versio
 _Avoid_: release permit, release authorization
 
 **Permission card**:
-A manager's held Bash permission prompt as a card the owner answers on the page with Allow once or Refuse; it names the command, shows the manager's stated reason and shows only while the manager's hook still waits for it, an unanswered prompt is refused after ten minutes, and a prompt with no stated reason is sent back to the manager for one and raises no card (ADR-console-100, ADR-console-104).
+A manager's held Bash permission prompt as a card the owner answers on the page with Allow once or Refuse; it names the command, shows the manager's stated reason and shows only while the manager's hook still waits for it, an unanswered prompt is refused after ten minutes, and a prompt with no stated reason is sent back to the manager for one and raises no card (ADR-console-100, ADR-console-104); a long command's card opens with a summary read from its text (what it writes and runs and anything outside the manager's worktree, or that it could not be read) and folds the full text (ADR-console-105).
 _Avoid_: terminal prompt, approval
 
 **Message**:
@@ -62,7 +62,7 @@ What the owner says to one sprint: an approval, a change request, free text or t
 _Avoid_: chat, comment
 
 **Question round**:
-The questions a manager sends at once with `sprint ask`: each leads with its ask (at most 140 characters), may add a context (at most 400), says what it blocks and offers two to four options of at most 80 characters, one recommended. Each question is an inbox item kept only in the console's log; the owner answers it on the page with an option, their own words, or both in one send, and the answer reaches the manager as a message (ADR-console-072). A sprint has one open round at a time unless a round is a blocker, and reads waiting on you (n) while any question is open (ADR-console-019, ADR-console-027). A question may carry up to eight pictures, each with a line and optionally marked before or after, shown on its card and full size in a viewer (ADR-console-038). A question whose ask or context names screenshots, a `.png` file or a screenshots folder must carry a picture, or the round is refused with the question named (ADR-console-039). A manager takes back its own open question with `sprint withdraw-question`, or replaces it by naming it in a new round, and the owner then sees only the new card; an answer to a question taken back is refused (ADR-console-040). A look card names its issue, pull request and head, and the console records the owner's approval on the issue itself (ADR-console-074). A question the manager marks consequential, and every look card, opens with no option picked: the Recommended badge stays and nothing is sent until the owner picks or types (ADR-console-092).
+The questions a manager sends at once with `sprint ask`: each leads with its ask (at most 140 characters), may add a context (at most 400), says what it blocks and offers two to four options of at most 80 characters, one recommended. Each question is an inbox item kept only in the console's log; the owner answers it on the page with an option, their own words, or both in one send, and the answer reaches the manager as a message (ADR-console-072). A sprint has one open round at a time unless a round is a blocker, and reads waiting on you (n) while any question is open (ADR-console-019, ADR-console-027). A question may carry up to eight pictures, each with a line and optionally marked before or after, shown on its card and full size in a viewer (ADR-console-038). A question whose ask or context names screenshots, a `.png` file or a screenshots folder must carry a picture, or the round is refused with the question named (ADR-console-038). A manager takes back its own open question with `sprint withdraw-question`, or replaces it by naming it in a new round, and the owner then sees only the new card; an answer to a question taken back is refused (ADR-console-019). A look card names its issue, pull request and head, and the console records the owner's approval on the issue itself (ADR-console-074). A question the manager marks consequential, and every look card, opens with no option picked: the Recommended badge stays and nothing is sent until the owner picks or types (ADR-console-092).
 _Avoid_: poll, survey
 
 **Notice**:
@@ -82,7 +82,7 @@ A project question and its follow-ups, in order: a follow-up's session gets the 
 _Avoid_: conversation, chat
 
 **Picture**:
-One PNG a manager sent to the console, kept by the console under its SHA-256 hash and shown only to the page; one nobody references is removed a day after it was last sent (ADR-console-036). A question's, a brief's and a report's pictures are shown as thumbnails on their card (a report's in its Detail fold) and full size in a modal viewer (ADR-console-038, ADR-console-041); an owner check card shows the PNGs its prompt names under the project's root or a configured screenshot location the same way (ADR-console-045).
+One PNG a manager sent to the console, kept by the console under its SHA-256 hash and shown only to the page; one nobody references is removed a day after it was last sent (ADR-console-036). A question's, a brief's and a report's pictures are shown as thumbnails on their card (a report's in its Detail fold) and full size in a modal viewer (ADR-console-038); an owner check card shows the PNGs its prompt names under the project's root or a configured screenshot location the same way (ADR-console-045).
 _Avoid_: screenshot file, attachment
 
 **Nudge**:
@@ -94,7 +94,7 @@ The console waking a gone manager in place, or starting a successor, while its s
 _Avoid_: restart loop, resurrection
 
 **Report**:
-The manager's fixed-shape account after each batch and on any change of state: a status line, each issue's stage or outcome, the inbox items it raised, the next step and the milestone; the closing report ends the sprint (ADR-console-014, ADR-console-018). It may carry up to eight pictures, each with a line, shown as thumbnails in its Detail fold and full size in the viewer (ADR-console-041). A status line that starts with `merge refused: <reason>` marks a merge the guard refused; the sprint's line reads it until a later report without it clears it (the manager's report after the issue lands), and it is never a question (ADR-console-048). A report may state a wait-until time or a pause, and the sprint's line then says so (ADR-console-020).
+The manager's fixed-shape account after each batch and on any change of state: a status line, each issue's stage or outcome, the inbox items it raised, the next step and the milestone; the closing report ends the sprint (ADR-console-014, ADR-console-018). It may carry up to eight pictures, each with a line, shown as thumbnails in its Detail fold and full size in the viewer (ADR-console-038). A status line that starts with `merge refused: <reason>` marks a merge the guard refused; the sprint's line reads it until a later report without it clears it (the manager's report after the issue lands), and it is never a question (ADR-console-048). A report may state a wait-until time or a pause, and the sprint's line then says so (ADR-console-020).
 _Avoid_: update, log
 
 **Sprint**:
@@ -194,5 +194,5 @@ A ready adoption plan the owner approved on the page by choosing `Apply it` on i
 _Avoid_: auto-adoption, auto-merge
 
 **Merged adoption**:
-An approved adoption whose pull request the owner merged: the console registers its project once origin's integration branch carries the adoption, says so in the digest, and asks the owner to Retry on a question card when the registration is refused (ADR-console-028 D10).
+An approved adoption whose pull request the owner merged: the console registers its project once origin's integration branch carries the adoption, says so in the digest, and asks the owner to Retry on a question card when the registration is refused (ADR-console-028).
 _Avoid_: auto-registration

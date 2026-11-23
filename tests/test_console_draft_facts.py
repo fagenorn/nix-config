@@ -1,4 +1,4 @@
-"""The drafted contract's derived values are fact lines with no Change control (ADR-console-033 D1)."""
+"""The drafted contract's derived values are fact lines with no Change control (ADR-console-033)."""
 
 import json
 import unittest

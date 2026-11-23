@@ -86,15 +86,24 @@ class VerifySlotTest(unittest.TestCase):
         return {**os.environ, "HOME": home or self.home, "PYTHONPATH": str(REPO_ROOT / "python"),
                 SLOT_DIR_ENV: str(self.slots)}
 
-    def start(self, name, *opts, code=None, argv=None, home=None):
+    def start(self, name, *opts, code=None, argv=None, home=None, cwd=None):
         tail = [str(code)] if code is not None else []
         command = argv if argv is not None else [
             sys.executable, "-c", CHILD, str(self.marks), name, *tail]
         proc = subprocess.Popen(
             [sys.executable, "-m", "agent_tools.delivery.verify_slot", "run", *opts, "--", *command],
-            env=self.env(home), cwd=self.home, stderr=subprocess.PIPE, text=True)
+            env=self.env(home), cwd=cwd or self.home, stderr=subprocess.PIPE, text=True)
         self.procs.append(proc)
         return proc
+
+    def repository(self, name, url=None):
+        directory = Path(self.home) / "repos" / name
+        directory.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["git", "init", "-q", str(directory)], check=True, capture_output=True)
+        if url is not None:
+            subprocess.run(["git", "-C", str(directory), "remote", "add", "origin", url],
+                           check=True, capture_output=True)
+        return directory
 
     def mark(self, name, suffix):
         return self.marks / f"{name}.{suffix}"
@@ -105,6 +114,127 @@ class VerifySlotTest(unittest.TestCase):
     def finish(self, proc, timeout=30):
         _, err = proc.communicate(timeout=timeout)
         return proc.returncode, err
+
+    def test_a_second_run_from_the_same_repository_waits_until_the_first_ends(self):
+        self.declare(verify_slots=2)
+        one = self.repository("alpha-one", "git@github.com:example/alpha.git")
+        two = self.repository("alpha-two", "https://github.com/Example/alpha")
+        first = self.start("a", cwd=one)
+        self.assertTrue(wait_for(self.mark("a", "start")))
+        second = self.start("b", cwd=two)
+        time.sleep(1.5)
+        self.assertFalse(self.mark("b", "start").exists())
+        self.release("a")
+        first_code, _ = self.finish(first)
+        self.assertTrue(wait_for(self.mark("b", "start")))
+        self.release("b")
+        second_code, second_err = self.finish(second)
+        self.assertEqual((first_code, second_code), (0, 0))
+        self.assertGreaterEqual(float(self.mark("b", "start").read_text()),
+                                float(self.mark("a", "end").read_text()))
+        self.assertEqual(second_err.splitlines().count(verify_slot.SAME_REPOSITORY_LINE), 1)
+        self.assertEqual(len(WAITED_PATTERN.findall(second_err)), 1)
+        self.assertNotIn(WAITING_LINE.format(count=2), second_err.splitlines())
+
+    def test_runs_from_different_repositories_hold_slots_together(self):
+        self.declare(verify_slots=2)
+        alpha = self.repository("alpha", "git@github.com:example/alpha.git")
+        beta = self.repository("beta", "git@github.com:example/beta.git")
+        first = self.start("a", cwd=alpha)
+        second = self.start("b", cwd=beta)
+        self.assertTrue(wait_for(self.mark("a", "start")))
+        self.assertTrue(wait_for(self.mark("b", "start")))
+        self.release("a")
+        self.release("b")
+        for proc in (first, second):
+            code, err = self.finish(proc)
+            self.assertEqual(code, 0)
+            self.assertIsNone(WAITED_PATTERN.search(err))
+            self.assertNotIn(verify_slot.SAME_REPOSITORY_LINE, err)
+
+    def test_runs_outside_a_repository_are_each_their_own_group(self):
+        self.declare(verify_slots=2)
+        plain = Path(self.home) / "not-a-repository"
+        plain.mkdir()
+        first = self.start("a", cwd=plain)
+        second = self.start("b", cwd=plain)
+        self.assertTrue(wait_for(self.mark("a", "start")))
+        self.assertTrue(wait_for(self.mark("b", "start")))
+        self.release("a")
+        self.release("b")
+        for proc in (first, second):
+            code, err = self.finish(proc)
+            self.assertEqual(code, 0)
+            self.assertNotIn(verify_slot.SAME_REPOSITORY_LINE, err)
+
+    def test_a_same_repository_waiter_leaves_the_free_slot_to_another_repository(self):
+        self.declare(verify_slots=2)
+        one = self.repository("alpha-one", "git@github.com:example/alpha.git")
+        two = self.repository("alpha-two", "https://github.com/Example/alpha")
+        beta = self.repository("beta", "git@github.com:example/beta.git")
+        first = self.start("a", cwd=one)
+        self.assertTrue(wait_for(self.mark("a", "start")))
+        second = self.start("b", cwd=two)
+        time.sleep(1.0)
+        third = self.start("c", cwd=beta)
+        self.assertTrue(wait_for(self.mark("c", "start")))
+        self.assertFalse(self.mark("b", "start").exists())
+        for name in ("a", "b", "c"):
+            self.release(name)
+        for proc in (first, second, third):
+            self.assertEqual(self.finish(proc)[0], 0)
+
+    def test_a_killed_holder_gives_back_its_repository(self):
+        self.declare(verify_slots=2)
+        one = self.repository("alpha-one", "git@github.com:example/alpha.git")
+        two = self.repository("alpha-two", "https://github.com/Example/alpha")
+        first = self.start("a", cwd=one)
+        self.assertTrue(wait_for(self.mark("a", "start")))
+        first.kill()
+        first.wait()
+        second = self.start("b", cwd=two)
+        self.assertTrue(wait_for(self.mark("b", "start")))
+        self.assertTrue(process_alive(int(self.mark("a", "pid").read_text())))
+        self.release("a")
+        self.release("b")
+        self.assertEqual(self.finish(second)[0], 0)
+
+    def test_a_live_run_waits_for_a_running_holder_of_its_repository(self):
+        self.declare(verify_slots=2)
+        one = self.repository("alpha-one", "git@github.com:example/alpha.git")
+        two = self.repository("alpha-two", "https://github.com/Example/alpha")
+        first = self.start("a", cwd=one)
+        self.assertTrue(wait_for(self.mark("a", "start")))
+        second = self.start("b", "--live", cwd=two)
+        time.sleep(1.5)
+        self.assertFalse(self.mark("b", "start").exists())
+        self.release("a")
+        self.assertTrue(wait_for(self.mark("b", "start")))
+        self.release("b")
+        self.assertEqual((self.finish(first)[0], self.finish(second)[0]), (0, 0))
+        self.assertGreaterEqual(float(self.mark("b", "start").read_text()),
+                                float(self.mark("a", "end").read_text()))
+
+    def test_the_repository_group_is_the_normalized_origin_remote(self):
+        scp = self.repository("scp", "git@github.com:Example/Alpha.git")
+        https = self.repository("https", "https://github.com/example/alpha")
+        ssh = self.repository("ssh", "ssh://git@github.com/example/alpha.git")
+        beta = self.repository("beta", "git@github.com:example/beta.git")
+        local = self.repository("local", "/srv/git/Alpha.git")
+        bare = self.repository("bare")
+        (scp / "sub").mkdir()
+        plain = Path(self.home) / "plain"
+        plain.mkdir()
+        group = verify_slot.repository_group
+        for path in (scp, https, ssh, scp / "sub"):
+            self.assertEqual(group(path), "example/alpha")
+        self.assertEqual(group(beta), "example/beta")
+        self.assertEqual(group(local), "/srv/git/alpha.git")
+        self.assertIsNone(group(bare))
+        self.assertIsNone(group(plain))
+        self.assertNotEqual(verify_slot.group_lock_name("example/alpha"),
+                            verify_slot.group_lock_name("example/beta"))
+        self.assertFalse(Path(verify_slot.group_lock_name("example/alpha")).match("slot-*.lock"))
 
     def test_with_one_slot_a_second_run_waits_until_the_first_ends(self):
         first = self.start("a")

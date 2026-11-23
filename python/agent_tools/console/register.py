@@ -30,7 +30,7 @@ exists but cannot be read (an absent registry is an empty fleet), also decided b
 
 Runner. `Adopter(command=None, environ=None, timeout=RUN_TIMEOUT, apply_timeout=APPLY_TIMEOUT)` runs
 `[*command, "plan", "--repo-root", root, "--format", "json"]` (`plan`, followed by `--answer <id>
-<subject> <value>` for each of its `answers`, in the given order: ADR-console-029 D4, then
+<subject> <value>` for each of its `answers`, in the given order: ADR-console-029, then
 `--contract-draft <contract>` when `contract` is given: ADR-console-031, then `--commit-environment
 <environment>` when `environment` is given: ADR-console-083) or
 `[*command, "verify", "--repo-root", root, "--register"]` (`register`) or `[*command, "apply",
@@ -159,12 +159,12 @@ members are exactly `MEMBERS` (a legacy row), `MEMBERS | EXTRA`, `MEMBERS | EXTR
 #1233), `by` is `owner`,
 `result` is one of `RESULTS` and `lines` is a list of strings; for twelve members also unless
 `plan_id` and `state` are strings or None, `questions` is a list of dicts and `answered` is a list
-of dicts with exactly the string keys `id`, `subject` and `value` (ADR-console-029 D1); for thirteen
+of dicts with exactly the string keys `id`, `subject` and `value` (ADR-console-029); for thirteen
 also unless `draft` is None or a list of dicts whose keys are exactly `FIELD_KEYS`. `ENDED` is
 `event_log.REGISTRATION_ENDED`, not in `KEPT_KINDS`. `latest(events, state=None)` is the last valid
 `ENDED` payload over `DEFAULTS` with `at` added (a saved draft is read back through
 `contract_draft.refresh`, and a `drafting` row's questions from it, so an earlier console's wording
-never shows, ADR-console-033 D2; a row whose draft held a retired field its plan may rest on, or whose last
+never shows, ADR-console-033; a row whose draft held a retired field its plan may rest on, or whose last
 card was that field, reads back as a `drafting` row, with the plan id it was saved under, whose integration branch card plans again, #1445), else `state`: the view's `registration` member, folded by the service.
 `fold(events, state=None)` is the `Fold` `(latest, before, roots)`: `before` the registrations shown
 before the current one, oldest first, one per root (an ended row naming another root pushes the
