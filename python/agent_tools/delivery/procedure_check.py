@@ -9,9 +9,10 @@ names matching `^[a-z][a-z0-9_]*$`), `stops` (stop name -> object with exactly `
 id) and `steps` (a non-empty list), all required, and `keep_alive`, optional (a procedure with none runs no keep-alive): an
 object with `command`, a command id, optional `subcommand`, and `in`, a list of distinct `run.<input>` paths, the one
 keep-alive command and where its arguments come from. A procedure naming a `keep_alive` declares a stop `claim-lost`. A stop
-is never named `done`, `exhausted`, `out-of-bounds`, `quota-wait` or like a step. `exhausted` and `out-of-bounds` are reserved:
+is never named `done`, `exhausted`, `out-of-bounds`, `quota-wait`, `superseded` or like a step. `exhausted` and `out-of-bounds` are reserved:
 no stop, declared verdict or reply enum value carries either. `quota-wait` is the engine's own stop, taken when every account
-is out of usage (`engine_shell`).
+is out of usage (`engine_shell`); `superseded` is the engine's own stop for a continued run whose procedure
+copy is in a format the engine does not read (`engine_shell`).
 
 Step. Common members: `id` (never `run` or `done`), `stage` (one of `STAGES`),
 `kind` (one of `KINDS`), `holds` (one of `HOLDS`, required: how long the step's
@@ -115,6 +116,7 @@ NO_REPLY = "no-reply"
 REFUSED = "refused"
 CLAIM_LOST = "claim-lost"
 QUOTA_WAIT = "quota-wait"
+SUPERSEDED = "superseded"
 START = "(start)"
 
 NAME_RE = re.compile(r"^[a-z][a-z0-9-]*$")
@@ -303,9 +305,14 @@ def _paths(value: object, only_run: bool, found: _Findings, step: str | None,
             found.add("invalid_field", f"{where} path {path!r} must be a run.<input> path.", step)
 
 
+def readable_format(value: object) -> bool:
+    """Whether `value` is the one procedure format this engine reads."""
+    return _is_int(value) and value == FORMAT
+
+
 def _header(doc: dict, found: _Findings) -> None:
     _members(doc, ("format", "inputs", "stops", "steps"), ("keep_alive",), found, None, "a procedure")
-    if "format" in doc and not (_is_int(doc["format"]) and doc["format"] == FORMAT):
+    if "format" in doc and not readable_format(doc["format"]):
         found.add("invalid_field", f"format must be the integer {FORMAT}.")
     if "keep_alive" in doc:
         keep_alive = doc["keep_alive"]
@@ -335,9 +342,9 @@ def _stops(doc: dict, ids: set[str], found: _Findings) -> None:
     for name, stop in stops.items():
         if not NAME_RE.fullmatch(name):
             found.add("invalid_field", f"stop name {name!r} must match {NAME_RE.pattern}.")
-        elif name in ("done", EXHAUSTED, OUT_OF_BOUNDS, QUOTA_WAIT) or name in ids:
+        elif name in ("done", EXHAUSTED, OUT_OF_BOUNDS, QUOTA_WAIT, SUPERSEDED) or name in ids:
             found.add("invalid_field",
-                      f"stop name {name!r} is `done`, `{EXHAUSTED}`, `{OUT_OF_BOUNDS}`, `{QUOTA_WAIT}` or a step id.")
+                      f"stop name {name!r} is `done`, `{EXHAUSTED}`, `{OUT_OF_BOUNDS}`, `{QUOTA_WAIT}`, `{SUPERSEDED}` or a step id.")
         if not isinstance(stop, dict):
             found.add("invalid_field", f"stop {name!r} must be an object.")
             continue

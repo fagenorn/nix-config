@@ -1,32 +1,3 @@
 # ADR-console-022 — A profile's sign-in is read from the client's status command
 
-- **Status:** accepted; amended by ADR-console-023, ADR-console-024, ADR-console-075
-- **Decided in:** #839, #842, #1010, #1035, #1036
-
-## Context
-
-A profile's login can end, or never have been made, and nothing on the page said so: a profile with no reading looked like an idle one (ADR-console-006), and the owner learned a login had lapsed only when a manager failed to start. The client answers "am I signed in, and until when" itself, so the console asks the client and reads no credential file.
-
-## Decision
-
-**D1. The command.** On Linux and macOS (ADR-console-075) the console runs `claude-account run auth status --json` with `CLAUDE_ACCOUNT=<profile>`, in an empty temporary directory with no terminal, in its own process group, within 30 seconds. The client prints one JSON object and exits 0 when signed in and 1 when not. Exit 0 with `loggedIn` true is signed in, and its end is `loginExpiresAt` (an ISO 8601 time; absent or null is signed in with no known end); exit 1 with `loggedIn` false is signed out; anything else is unknown. The command sends no model request, so it runs with `CLAUDE_CACHE_PROXY=0` and without an inherited base URL, key or token: a down cache proxy must not make the state unknown, and an inherited key must not stand in for the profile's own sign-in.
-
-**D2. What is stored.** One `signin.reading` row per change, with exactly the profile, the state (`signed_in`, `signed_out` or `unknown`) and the end (`ends_at`, an ISO time with an offset, null unless signed in). The row also carries `account`, the address the client prints as `email` while signed in (null when it prints none that is 1 to 320 printable characters; a failed read keeps the last one), and the organisation, the plan and every other member are dropped; it also carries `account_seq`, the log sequence number up to which the profile's capacity readings belong to an earlier account (set at a switch, copied on every other row, so the newest row that retention keeps holds it). While a profile has left an account with a capacity reading taken under it, the row also carries `left_account`, that account, and, when the reading carried one, `left_reading`, the proxy's account id of that reading (copied on every other row), so a reading of the left account stays with it and a late reply carrying that id is not read as the new account's. A row is appended when the state, the end or the account differs from the folded one; the account is shown in the profile's row of the accounts panel and is never written to stderr or to a check's output; no token, link or code is read. Because of that, the retention pass leaves each profile's newest `signin.reading` row in place whatever its age, and, amended by ADR-console-024 D8, its newest `signed_in` reading too, so the console still knows a profile was once signed in; every older one is removed like any other row.
-
-**D3. The schedule.** The reading is made inside each probe job of ADR-console-006, before the probe, under the same in-flight mark, stop event and schedule: 30 seconds after the console starts, then every 10 minutes. A service with a reader and no prober still runs the schedule.
-
-**D4. The ask.** A profile asks the owner when it is signed out, or signed in with a known end three days or less away (an end that has passed included). It is one inbox item, `signin/<profile>`, whose command is `CLAUDE_ACCOUNT=<profile> claude`, placed after the progress items and before the questions (briefs, stalls, progress, sign-in, questions, tracker items), counted in the statement and its headline. Amended by ADR-console-024: the item carries a Sign in action instead of the command. A fresh sign-in ends more than three days ahead and closes it.
-
-**D5. Unknown raises nothing.** A status that fails, times out, exits otherwise or cannot be read records `unknown`, one stderr line `console: signin_unknown <profile> <kind>` and nothing else: the last answer wins, so an unknown sign-in closes an open ask and asks none.
-
-**D6. Signed out is not "no reading".** In the shown capacity a signed-out profile is named as signed out, is left out of the no-reading note, and does not block "every profile is out": it has no room and is not waiting for a reading. Tight and all out are decided over the profiles that are not signed out. The quota wait does not change; the launch choice reads the capacity with sign-ins and never picks a signed-out profile (ADR-console-023), keeping ADR-console-015's order otherwise.
-
-**D7. Reading, not credentials.** The console opens no credential file and starts no client but the launcher; the client's own login answers.
-
-## Consequences
-
-- A lapsed or never-made login shows within one interval, with the action to fix it (ADR-console-024), and three days before an end it asks before anything fails.
-- A signed-out profile with an old capacity reading shows as signed out and no longer counts toward "every profile is out" in the shown capacity, and the launch never picks it (ADR-console-023).
-- Each listed profile costs one status command every 10 minutes, with no request to the model.
-- The log grows by one row per change of state or end.
-- Related: ADR-console-006 (the probe schedule and the listed profiles), ADR-console-015 (the profile rule).
+Context: a lapsed or missing login showed nowhere on the page. Decision: the console asks the client itself, `claude-account run auth status --json` per profile, beside each probe. It runs with the proxy off and no inherited key, and stores one row per change of state, end or account. A signed-out profile has no room, and an unknown status raises nothing. Rejected: reading the client's credential file.

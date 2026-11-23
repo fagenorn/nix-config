@@ -21,6 +21,13 @@ more for `drain` seconds, so a descendant holding a pipe never holds the caller 
 against the engine's recording of the stop and removal of the file (`engine_shell.request_stop`).
 `sigterm_exits` makes a SIGTERM to the engine raise `SystemExit` while a process group runs.
 
+A leftover process group is the one a killed engine left running (`engine_shell._end_leftover`). It is the
+recorded process only when `same_process` finds the pid alive with the start time `ps -o lstart=` reports
+(read with `TZ=UTC` and `LC_ALL=C`, so in UTC) within `START_SLACK_SECONDS` of the recorded `started`; a start
+time that cannot be read is no match, and a process that does not match is never signalled. `end_leftover`
+sends SIGTERM to the group, waits up to `LEFTOVER_GRACE_SECONDS` for it to be gone, then SIGKILL and waits up
+to the same bound again, and returns; a group left only as zombies (`PermissionError` on macOS) counts as gone.
+
 The module imports no other engine module, so `engine_commands` and `engine_session` can use it.
 """
 
@@ -37,14 +44,20 @@ import subprocess
 import threading
 import time
 from pathlib import Path
+from datetime import datetime, timezone
 from typing import Callable, Iterator, Mapping
 
-from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
+from agent_tools.canonical import (
+    parse_rfc3339_utc, reject_duplicate_keys, reject_nonfinite_literal,
+)
 
 REQUEST_NAME = "stop-request"
 STOPPED_BY_REQUEST = "stopped-by-request"
 STOP_NEED = "retry"
 POLL_SECONDS = 0.5
+START_SLACK_SECONDS = 5
+LEFTOVER_GRACE_SECONDS = 5
+LEFTOVER_POLL_SECONDS = 0.05
 
 
 class Stopped(Exception):
@@ -142,6 +155,58 @@ def end_group(process: subprocess.Popen) -> None:
         if pipe is not None:
             with contextlib.suppress(OSError):
                 pipe.close()
+
+
+def process_started_at(pid: int) -> datetime | None:
+    """The UTC start time of process `pid` as `ps` reports it, or None when it cannot be read."""
+    try:
+        done = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)],
+                              env={**os.environ, "TZ": "UTC", "LC_ALL": "C"},
+                              stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                              timeout=10, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    text = " ".join(done.stdout.split())
+    if done.returncode != 0 or not text:
+        return None
+    try:
+        return datetime.strptime(text, "%a %b %d %H:%M:%S %Y").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def same_process(pid: int, started: str) -> bool:
+    """Whether `pid` is alive and began within `START_SLACK_SECONDS` of the recorded `started`."""
+    if pid <= 0:
+        return False
+    try:
+        recorded = parse_rfc3339_utc(started)
+    except ValueError:
+        return False
+    actual = process_started_at(pid)
+    return actual is not None and abs((recorded - actual).total_seconds()) <= START_SLACK_SECONDS
+
+
+def _group_gone(pgid: int) -> bool:
+    try:
+        os.killpg(pgid, 0)
+    except (ProcessLookupError, PermissionError):  # gone, or only zombies left (macOS)
+        return True
+    return False
+
+
+def end_leftover(pid: int) -> None:
+    """End the leftover process group `pid`: SIGTERM, then SIGKILL, each waited for up to the grace."""
+    for sent in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(pid, sent)
+        except (ProcessLookupError, PermissionError):
+            return
+        deadline = time.monotonic() + LEFTOVER_GRACE_SECONDS
+        while time.monotonic() < deadline:
+            if _group_gone(pid):
+                return
+            time.sleep(LEFTOVER_POLL_SECONDS)
 
 
 def communicate(process: subprocess.Popen, data: bytes | None, *,

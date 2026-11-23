@@ -324,6 +324,10 @@ def _quota_wait_stop(toy: dict) -> None:
     toy["stops"]["quota-wait"] = {"need": "retry", "reenter": "draft"}
 
 
+def _superseded_stop(toy: dict) -> None:
+    toy["stops"]["superseded"] = {"need": "retry", "reenter": "draft"}
+
+
 def _entry_id_with_newline(toy: dict) -> None:
     step(toy, "scope")["id"] = "scope\n"
 
@@ -529,6 +533,8 @@ CASES = [
     Case("stop_named_exhausted", editing("toy", _exhausted_stop),
          [("toy", None, "invalid_field")]),
     Case("stop_named_quota_wait", editing("toy", _quota_wait_stop),
+         [("toy", None, "invalid_field")]),
+    Case("stop_named_superseded", editing("toy", _superseded_stop),
          [("toy", None, "invalid_field")]),
     Case("no_reply_to_a_reader_of_the_reply", editing("toy", _no_reply_to_review),
          [("toy", "children", "unproduced_input"), ("toy", "review-a", "unproduced_input"),

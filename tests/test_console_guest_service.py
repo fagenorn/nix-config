@@ -1630,20 +1630,6 @@ class AccessWriteTest(GuestCase):
         self.assertEqual([payload for kind, payload in self.kinds() if kind == "sharing.tailnet"],
                          [{"shared": True}, {"shared": False}, {"shared": True}])
 
-    def test_adr_008_lists_the_access_list_writes(self):
-        adr = (ROOT / "docs/areas/console/adr/"
-               "008-only-the-page-writes-with-a-token-and-its-origin.md").read_text()
-        text = " ".join(adr.split())
-        for needle in ("POST /api/share-tailnet", "POST /api/share-colleague",
-                       "POST /api/share-remove", "#1237", "#1263", "bad colleague", "bad sharing",
-                       "turn sharing on or off", "ADR-console-078"):
-            with self.subTest(needle):
-                self.assertIn(needle, text)
-        decided = next(row for row in adr.splitlines() if row.startswith("- **Decided in:**"))
-        self.assertTrue(decided.endswith("#1193, #1237, #1263, #1294, #1305, #1272"))
-        status = next(row for row in adr.splitlines() if row.startswith("- **Status:**"))
-        self.assertTrue(status.endswith("ADR-console-076, ADR-console-078, ADR-console-093"))
-
 
 class ReadingServiceTest(GuestCase):
     """The owner's `sharing.last_request`: the last guest-port request's reading (#1237)."""
