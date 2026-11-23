@@ -476,6 +476,7 @@ A project entry is `{"type": "project", "project_id", "root", "quiet",
 "sprints": [<sprint entry>, ...]}, "outside_sprints": <line>,
 "notices": [<notice entry>, ...], "notice_post": <bool>,
 "overlaps": [<overlap entry>, ...], "waits": [<wait entry>, ...],
+"engine_runs": [<engine run entry>, ...],
 "questions": null | {"label": "Questions", "count": <int>,
 "threads": [{"id", "questions": [<question entry>, ...], "follow_up": <bool>}, ...]},
 "tracker_read": {"ok": <bool>, "read_at": "<ISO time>" | null,
@@ -485,10 +486,13 @@ A project entry is `{"type": "project", "project_id", "root", "quiet",
 only. `unmanaged` is always present, possibly empty, sorted by `root`.
 
     `tracker_read` is the project's last tracker read, copied from its `ReadState` and
-    changing no statement, inbox count, headline or sentence. The service sets `read_at` to the
-    time each successful read finished and `began_at` to the time it began, before it fetched anything (a
-    read that began at or after a moment has seen the tracker as it was then); after a restart `read_at` is the
-    time of the last logged change between good and failed reads and `began_at` is null. It is null before any read, never a guessed time.
+    changing no statement, inbox count, headline or sentence. The service sets `read_at` to the time each
+    successful read finished and `began_at` to the time it began, before it fetched anything (a read that began
+    at or after a moment has seen the tracker as it was then); after a restart `read_at` is the time of the last
+    logged change between good and failed reads and `began_at` is null. It is null before any read, never a guessed time.
+
+    `engine_runs` is the `engine_runs` argument's runs of this project as `engine_runs.project_lines` gives them,
+    in issue order; it is empty without the argument, a run of an unregistered project shows nowhere, and a project with one is active.
 
     <wait entry> = {"key", "issue": <int>, "url", "until": "<ISO time>" | null, "text": "<text>"}
     <notice entry> = {"id": <int>, "sprint_id", "poster": "<sprint title>",
@@ -807,8 +811,8 @@ from pathlib import PurePosixPath
 from types import MappingProxyType
 
 from agent_tools.console import (
-    answer as owner_answer, contract_draft, inbox, project_question, question_records,
-    spend as spend_module)
+    answer as owner_answer, contract_draft, engine_runs as engine_runs_module, inbox, project_question,
+    question_records, spend as spend_module)
 from agent_tools.console.activation import Activation
 from agent_tools.console.activation_run import LastRun
 from agent_tools.console.capacity import EMPTY
@@ -1972,7 +1976,8 @@ def _project_entry(state: ProjectState, sessions: Sequence[SessionState],
                    waits: Sequence[Mapping] = (),
                    read: ReadState | None = None,
                    questions: Mapping | None = None,
-                   prompted: Collection[str] = ()) -> dict:
+                   prompted: Collection[str] = (),
+                   engine_runs: Sequence[Mapping] = ()) -> dict:
     manager_ids: dict[str, set[str]] = {}
     for sprint in sprints:
         ids = {s.session_id for s in (sprint_sessions or {}).get(sprint.sprint_id, ())}
@@ -1998,18 +2003,18 @@ def _project_entry(state: ProjectState, sessions: Sequence[SessionState],
         "type": "project",
         "project_id": state.project_id,
         "root": state.root,
-        "quiet": state.open_work == 0 and not sessions and not sprints and not waits,
+        "quiet": state.open_work == 0 and not sessions and not sprints and not waits and not engine_runs,
         "open_work": state.open_work,
         "last_activity": state.last_at,
         "sprints": entries(sprints),
         "finished_sprints": (None if not finished else
-                             {"label": FINISHED_LABEL, "count": len(finished),
-                              "sprints": entries(finished)}),
+                             {"label": FINISHED_LABEL, "count": len(finished), "sprints": entries(finished)}),
         "outside_sprints": _line(sessions, deliveries, now_ms, waits_of),
         "notices": [dict(n) for n in notices],
         "notice_post": notice_post,
         "overlaps": [dict(o) for o in overlaps],
         "waits": [dict(w) for w in waits],
+        "engine_runs": [dict(e) for e in engine_runs],
         "questions": questions,
         "tracker_read": None if read is None else {"ok": read.ok, "read_at": read.read_at, "began_at": read.began_at},
     }
@@ -2382,6 +2387,7 @@ def derive_view(
     spend: Mapping | None = None,
     project_questions: Mapping[str, Sequence[project_question.AskedQuestion]] | None = None,
     sharing: Mapping | None = None,
+    engine_runs: Iterable[engine_runs_module.RunState] | None = None,
 ) -> dict:
     states = list(states)
     sessions = list(sessions)
@@ -2391,18 +2397,15 @@ def derive_view(
     profile_sessions = {e["profile"]: running[e["profile"]] for e in capacity["profiles"]}
     registered = {s.project_id for s in states}
     health = health or {}
-    shown = [r for r in (records or {}).values()
-             if r.item.get("project_id") in registered]
-    open_items = sorted(
-        (r for r in shown if not r.item["answered"] and not is_waiting(r.item)),
-        key=lambda r: (-r.item["held_work"], r.waiting_since, r.item["key"],
-                       r.item["project_id"]))
+    shown = [r for r in (records or {}).values() if r.item.get("project_id") in registered]
+    open_items = sorted((r for r in shown if not r.item["answered"] and not is_waiting(r.item)),
+                        key=lambda r: (-r.item["held_work"], r.waiting_since, r.item["key"],
+                                       r.item["project_id"]))
     waiting_items = [r for r in shown if is_waiting(r.item)]
-    answered = sorted(
-        (r for r in shown if r.item["answered"]),
-        key=lambda r: (r.waiting_since, r.item["key"], r.item["project_id"]))
-    stale_projects = sorted(
-        p for p in registered if p in health and not health[p].ok)
+    answered = sorted((r for r in shown if r.item["answered"]),
+                      key=lambda r: (r.waiting_since, r.item["key"], r.item["project_id"]))
+    stale_projects = sorted(p for p in registered if p in health and not health[p].ok)
+    lines = engine_runs_module.project_lines(engine_runs or (), now_ms)
     drafted: dict[str, list[SprintState]] = {}
     finished: dict[str, list[SprintState]] = {}
     for sprint in sorted((sprints or {}).values(),
@@ -2411,22 +2414,17 @@ def derive_view(
             kept = finished if _finished(sprint, now_ms) else drafted
             kept.setdefault(sprint.project_id, []).append(sprint)
 
-    briefs = sorted((s for group in drafted.values() for s in group
-                     if brief_pending(s)),
+    briefs = sorted((s for group in drafted.values() for s in group if brief_pending(s)),
                     key=lambda s: (s.brief.sent_at, s.sprint_id))
     asked = sorted(((s, q) for group in drafted.values() for s in group
                     for q in (*open_questions(s), *pending_looks(s))),
-                   key=lambda pair: (pair[1].at, pair[0].sprint_id, pair[1].round_id,
-                                     pair[1].index))
+                   key=lambda pair: (pair[1].at, pair[0].sprint_id, pair[1].round_id, pair[1].index))
     stalls = sorted((s for group in drafted.values() for s in group if s.stalled is not None),
                     key=lambda s: (s.stalled_at, s.sprint_id))
-    unprogressed = sorted((s for group in drafted.values() for s in group
-                           if s.no_progress_at is not None),
+    unprogressed = sorted((s for group in drafted.values() for s in group if s.no_progress_at is not None),
                           key=lambda s: (s.no_progress_at, s.sprint_id))
-    signins = sorted((e for e in capacity["profiles"]
-                      if isinstance(e.get("signin"), Mapping) and e["signin"].get("ask")
-                      and not e.get("owner")),
-                     key=lambda e: e["profile"])
+    signins = sorted((e for e in capacity["profiles"] if isinstance(e.get("signin"), Mapping)
+                      and e["signin"].get("ask") and not e.get("owner")), key=lambda e: e["profile"])
     adoptions = [dict(item) for item in adoption_items]
     releases = [dict(item) for item in release_items]
     prompts = [dict(item) for item in prompt_items]
@@ -2489,7 +2487,8 @@ def derive_view(
 
     def is_active(state: ProjectState) -> bool:
         return (state.open_work > 0 or bool(owned.get(state.project_id))
-                or state.project_id in drafted or bool(project_waits.get(state.project_id)))
+                or state.project_id in drafted or bool(project_waits.get(state.project_id))
+                or bool(lines.get(state.project_id)))
 
     active = _order(s for s in states if is_active(s))
     quiet = _order(s for s in states if not is_active(s))
@@ -2506,7 +2505,7 @@ def derive_view(
                               overlaps=overlaps[s.project_id],
                               sprint_waits=sprint_waits, waits=project_waits.get(s.project_id, ()),
                               read=health.get(s.project_id), questions=asks[s.project_id],
-                              prompted=prompted)
+                              prompted=prompted, engine_runs=lines.get(s.project_id, ()))
                for s in active]
     quiet_entries = [_project_entry(s, (), runs, now_ms, (), managers, in_sprint,
                                     finished=finished.get(s.project_id, ()), capacity=capacity,

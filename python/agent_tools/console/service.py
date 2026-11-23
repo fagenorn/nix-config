@@ -1899,6 +1899,10 @@ A state request reads memory only. Stderr lines: `console: delivery_poll_failed 
 repository's pattern did not resolve, again only after it resolved in between), `console: journal_unreadable <path> <reason>` (a journal or its final record turned
 unreadable, again only after it read successfully in between) and `console: journals_unreadable
 <session_id> <reason>` (a session's journal listing turned unreadable, likewise).
+Engine runs: right after `poll_deliveries()` the same thread calls `poll_engine_runs()`, which reads the runs
+root with `engine_runs.EngineRuns` outside the ingest lock (none without `engine_runs_root`), holds the states in memory,
+never logs and publishes. Stderr lines: `console: engine_run_unreadable <run> <reason>` (once, until it reads again)
+and `console: engine_poll_failed <Type>: <message>`.
 
 Spend (#1134): the thread named `SPEND_THREAD`, started by `start()`, calls `poll_spend()` every
 `spend_seconds` (`SPEND_SECONDS`), the first poll `spend_seconds` after `start()`; construction never
@@ -2020,7 +2024,7 @@ from urllib.parse import parse_qsl
 
 from agent_tools.claims import owner_actions
 from agent_tools.console import (
-    project_question, account_add, account_remove, activation, checkout_remote, activation_run, answer, approve, capacity, contract_draft, deliveries, digest, exclusion, idle, inbox,
+    project_question, account_add, account_remove, activation, checkout_remote, activation_run, answer, approve, capacity, contract_draft, deliveries, digest, engine_runs, exclusion, idle, inbox,
     folder_trust, guest, manager, movement, nudge, peer, permission, permit, pin, plan_questions, probe, question_records, prompt_card, register, release_card, revive, pictures, sessions, signin, signin_run, spend, sprints, transcript_digest, write_guard)
 from agent_tools.console.event_log import (
     BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, FAULT_DECLARED, FAULT_WITHDRAWN, GOAL_STATED, GOAL_WITHDRAWN, MANAGER_FAILED,
@@ -4637,7 +4641,8 @@ class ConsoleService:
                  peer_lookups: int = PEER_LOOKUPS,
                  guest_peer_reader: peer.UnixPeerReader | None = peer.unix_reader_for(sys.platform),
                  guest_acl_reader: Callable[[str], bool] | None = guest.acl_reader_for(
-                     sys.platform)):
+                     sys.platform),
+                 engine_runs_root: Path | None = None):
         if guest_socket is not None and not Path(guest_socket).is_absolute():
             raise GuestSocketError(str(guest_socket), OSError(
                 errno.EINVAL, "the guest socket path is not absolute"))
@@ -4788,6 +4793,8 @@ class ConsoleService:
         self._runs: dict[Path, deliveries.RunFold] = {}
         self._run_moves: dict[tuple[str, str], int] = {}
         self._unreadable: set[str] = set()
+        self._engine = None if engine_runs_root is None else engine_runs.EngineRuns(engine_runs_root)
+        self._engine_states: tuple = ()
         self._session_poller: threading.Thread | None = None
         self._tracker = tracker
         self._tracker_seconds = tracker_seconds
@@ -4938,6 +4945,7 @@ class ConsoleService:
             self.refresh()
             self.poll_sessions()
             self.poll_deliveries()
+            self.poll_engine_runs()
         except BaseException:
             if self.log is not None:
                 self.log.close()
@@ -5191,7 +5199,7 @@ class ConsoleService:
                 cap, self._use.last, None, self._waiting_logins())),
             pin_launches=self._pin_launches.launched,
             managers=self._launcher is not None, pending=self._pending,
-            nudges=self._nudger is not None, looked=self._looked, movement=self._movement)
+            nudges=self._nudger is not None, looked=self._looked, movement=self._movement, engine_runs=self._engine_states)
         return inputs
 
     def _publish(self, *, guests: bool = True) -> None:
@@ -10317,38 +10325,29 @@ class ConsoleService:
             self._publish()
             return appended
 
+    def poll_engine_runs(self) -> None:
+        """Read the engine runs and publish; nothing is read or logged without a runs root."""
+        if self._engine is None:
+            return
+        poll = self._engine.poll()
+        for run, reason in poll.unreadable:
+            self._warn_once(f"engine {run}", f"console: engine_run_unreadable {run} {reason}")
+        failed = {run for run, _ in poll.unreadable}
+        self._unreadable.difference_update(f"engine {s.run}" for s in poll.states if s.run not in failed)
+        with self._ingest:
+            self._engine_states = poll.states
+            self._publish()
+
     def _poll_loop(self) -> None:
+        polls = (("poll_sessions", "session_poll"), ("poll_deliveries", "delivery_poll"),
+                 ("poll_engine_runs", "engine_poll"), ("renudge", "renudge"), ("finish_stops", "stop_poll"),
+                 ("revive", "revive"), ("nudge_idle", "idle_nudge"))
         while not self._stop.wait(self._session_poll_seconds):
-            try:
-                self.poll_sessions()
-            except Exception as error:
-                print(f"console: session_poll_failed {type(error).__name__}: {error}",
-                      file=sys.stderr)
-            try:
-                self.poll_deliveries()
-            except Exception as error:
-                print(f"console: delivery_poll_failed {type(error).__name__}: {error}",
-                      file=sys.stderr)
-            try:
-                self.renudge()
-            except Exception as error:
-                print(f"console: renudge_failed {type(error).__name__}: {error}",
-                      file=sys.stderr)
-            try:
-                self.finish_stops()
-            except Exception as error:
-                print(f"console: stop_poll_failed {type(error).__name__}: {error}",
-                      file=sys.stderr)
-            try:
-                self.revive()
-            except Exception as error:
-                print(f"console: revive_failed {type(error).__name__}: {error}",
-                      file=sys.stderr)
-            try:
-                self.nudge_idle()
-            except Exception as error:
-                print(f"console: idle_nudge_failed {type(error).__name__}: {error}",
-                      file=sys.stderr)
+            for method, label in polls:
+                try:
+                    getattr(self, method)()
+                except Exception as error:
+                    print(f"console: {label}_failed {type(error).__name__}: {error}", file=sys.stderr)
 
     def _fold(self, appended: list[Event]) -> None:
         new = digest.moments(appended, self._sessions, self._inbox, self._sprints)

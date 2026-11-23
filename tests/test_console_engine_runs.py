@@ -13,10 +13,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.console import engine_runs, sprints
+from agent_tools.console import console, engine_runs, guest, service, sprints, view
 from agent_tools.console.engine_runs import EngineRuns
 from agent_tools.delivery import engine, engine_ledger, procedure_check
 from agent_tools.delivery.engine_ledger import RunState
+
+from . import console_test_support as support
 
 TIER = "fast"
 
@@ -319,6 +321,177 @@ class StatusParityTest(unittest.TestCase):
                     state = EngineRuns(root).poll().states[0]
                     self.assertEqual(state.as_json(), json.loads(out.getvalue()))
                     self.assertIs(state.engine_alive, label == "alive")
+
+
+def live_state(project="acme/app"):
+    return RunState(run=RUN_ID, project=project, issue=41, stage="planning", step="plan", wait=None,
+                    stop=None, done=False, last_event="2026-11-21T16:00:00Z", process=None, alive=False,
+                    engine={"pid": 1, "started": "2026-11-21T16:00:00Z"}, engine_alive=True)
+
+
+def project_entries(derived):
+    return [project for entry in derived["entries"] for project in entry.get("projects", [entry])]
+
+
+class ViewLineTest(unittest.TestCase):
+    def derive(self, states, **kwargs):
+        return view.derive_view(states=states, now_ms=START_MS + 40 * 60 * 1000, **kwargs)
+
+    def test_an_engine_run_shows_under_its_project_and_makes_it_active(self):
+        now_ms = START_MS + 40 * 60 * 1000
+        state = live_state()
+        derived = self.derive([view.ProjectState("acme/app", "/srv/app", 1, "2026-11-21T10:00:00Z", 0)],
+                              engine_runs=[state])
+        self.assertEqual([entry["type"] for entry in derived["entries"]], ["project"])
+        entry = derived["entries"][0]
+        self.assertEqual(entry["engine_runs"], [engine_runs.engine_entry(state, now_ms)])
+        self.assertIs(entry["quiet"], False)
+
+    def test_a_run_of_an_unregistered_project_shows_nowhere(self):
+        derived = self.derive([view.ProjectState("acme/app", "/srv/app", 1, "2026-11-21T10:00:00Z", 0)],
+                              engine_runs=[live_state("other/app")])
+        self.assertNotIn(RUN_ID, json.dumps(derived))
+
+    def test_no_engine_runs_gives_every_project_an_empty_list(self):
+        states = [view.ProjectState(f"acme/{name}", f"/srv/{name}", n, "2026-11-21T10:00:00Z", work)
+                  for n, (name, work) in enumerate([("app", 3)] + [(f"quiet{i}", 0) for i in range(view.FOLD_AFTER + 1)])]
+        derived = self.derive(states)
+        self.assertEqual([entry["type"] for entry in derived["entries"]], ["project", "quiet_group"])
+        projects = project_entries(derived)
+        self.assertEqual(len(projects), view.FOLD_AFTER + 2)
+        for entry in projects:
+            self.assertEqual(entry.pop("engine_runs"), [])
+
+
+class ServiceLineTest(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.store = self.root / "state/console/events.sqlite3"
+        self.registry = self.root / "state/fleet/registry.json"
+        items = support.entries(1)
+        self.project = items[0]["project_id"]
+        support.write_registry(self.registry, items)
+
+    def holder(self):
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+        self.addCleanup(child.wait)
+        self.addCleanup(child.kill)
+        return child
+
+    def make_run(self, runs, child):
+        run_dir = make_run(runs, RUN_ID, None, project=self.project,
+                           holder={"pid": child.pid, "started": "2026-11-21T16:00:00Z"})
+        (run_dir / "events.jsonl").write_bytes(line(
+            at="2026-11-21T16:00:00Z", event="step_entered", stage="planning", step="plan", visit=1))
+        return run_dir
+
+    def entry(self, svc):
+        derived = json.loads(svc.view_bytes)
+        return next(entry for entry in project_entries(derived) if entry["project_id"] == self.project)
+
+    def test_ending_the_engine_process_turns_its_line_to_the_engine_is_not_running(self):
+        runs = self.root / "runs"
+        child = self.holder()
+        self.make_run(runs, child)
+        svc = support.service(self, self.store, self.registry, engine_runs_root=runs)
+        svc.poll_engine_runs()
+        self.assertEqual(self.entry(svc)["engine_runs"][0]["text"], "planning, moving")
+        child.kill()
+        child.wait()
+        svc.poll_engine_runs()
+        self.assertEqual(self.entry(svc)["engine_runs"][0]["text"], "planning, the engine is not running")
+        rows = len(support.log_rows(self.store))
+        svc.poll_engine_runs()
+        self.assertEqual(len(support.log_rows(self.store)), rows)
+
+    def test_an_unreadable_run_warns_once_and_keeps_its_line(self):
+        runs = self.root / "runs"
+        run_dir = self.make_run(runs, self.holder())
+        svc = support.service(self, self.store, self.registry, engine_runs_root=runs)
+        svc.poll_engine_runs()
+        with run_dir.joinpath("events.jsonl").open("ab") as handle:
+            handle.write(b'{"refused":1}\n')
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            svc.poll_engine_runs()
+            svc.poll_engine_runs()
+        self.assertEqual(err.getvalue().count(f"console: engine_run_unreadable {RUN_ID} "), 1)
+        self.assertEqual(self.entry(svc)["engine_runs"][0]["text"], "planning, moving")
+
+    def test_an_unreadable_run_that_reads_again_warns_again(self):
+        runs = self.root / "runs"
+        run_dir = self.make_run(runs, self.holder())
+        svc = support.service(self, self.store, self.registry, engine_runs_root=runs)
+        events = run_dir / "events.jsonl"
+        good = events.read_bytes()
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            for refused in (True, False, True):
+                events.write_bytes(good + b'{"refused":1}\n' if refused else good)
+                svc.poll_engine_runs()
+        self.assertEqual(err.getvalue().count("console: engine_run_unreadable"), 2)
+
+    def test_the_poll_thread_reads_the_engine_runs_and_names_a_failure(self):
+        svc = support.service(self, self.store, self.registry, engine_runs_root=self.root / "runs",
+                              session_poll_seconds=3600)
+        svc._session_poll_seconds = 0
+
+        def fail():
+            raise ValueError("boom")
+
+        err = io.StringIO()
+        with contextlib.ExitStack() as stack:
+            for name in ("poll_sessions", "poll_deliveries", "renudge", "finish_stops", "revive"):
+                stack.enter_context(mock.patch.object(svc, name))
+            stack.enter_context(mock.patch.object(svc, "nudge_idle", side_effect=svc._stop.set))
+            stack.enter_context(mock.patch.object(svc, "poll_engine_runs", side_effect=fail))
+            stack.enter_context(contextlib.redirect_stderr(err))
+            svc._poll_loop()
+        self.assertIn("console: engine_poll_failed ValueError: boom", err.getvalue())
+
+    def test_the_service_reads_the_engine_runs_at_startup(self):
+        runs = self.root / "runs"
+        self.make_run(runs, self.holder())
+        svc = support.service(self, self.store, self.registry, engine_runs_root=runs)
+        self.assertEqual(self.entry(svc)["engine_runs"][0]["text"], "planning, moving")
+
+    def test_a_guest_view_takes_no_engine_run(self):
+        scoped = guest.scoped({"engine_runs": [live_state()], "states": []}, frozenset({"acme/app"}))
+        self.assertEqual(scoped["engine_runs"], ())
+
+    def test_without_a_runs_root_no_engine_run_is_read(self):
+        home = self.root / "home"
+        self.make_run(home / ".agents/state/engine/runs", self.holder())
+        with mock.patch.dict(os.environ, {"HOME": str(home)}):
+            svc = support.service(self, self.store, self.registry, engine_runs_root=None)
+            svc.poll_engine_runs()
+        self.assertEqual(self.entry(svc)["engine_runs"], [])
+
+    def test_the_support_service_reads_a_fresh_empty_runs_root(self):
+        home = self.root / "home"
+        self.make_run(home / ".agents/state/engine/runs", self.holder())
+        with mock.patch.dict(os.environ, {"HOME": str(home)}):
+            svc = support.service(self, self.store, self.registry)
+            svc.poll_engine_runs()
+        self.assertIsNotNone(svc._engine)
+        self.assertNotIn(home, Path(svc._engine._root).parents)
+        self.assertEqual(self.entry(svc)["engine_runs"], [])
+
+
+class ConsoleMainTest(unittest.TestCase):
+    def test_the_console_passes_the_engines_runs_root(self):
+        recorded = {}
+
+        def stop(*args, **kwargs):
+            recorded.update(kwargs)
+            raise RuntimeError("stop")
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"HOME": tmp}), \
+                mock.patch.object(service, "ConsoleService", side_effect=stop):
+            self.assertRaises(RuntimeError, console.main, ["--port", "0"])
+            self.assertEqual(recorded["engine_runs_root"], engine_ledger.runs_root())
 
 
 class CountingFile:
