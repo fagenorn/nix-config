@@ -130,7 +130,6 @@ DIAGNOSTIC_KEYWORDS = frozenset({"msg", "places", "delta", "seq_type"})
 # The wording tests that name a credential word and were on main when the scan
 # landed (ADR-delivery-010). Adding an id here is a new decision with its own record.
 KEPT_AT_START = frozenset({
-    "tests/test_docs_tree.py::DocsTreeTest.test_adr_verification_008_records_the_boot_host_amendment",
     "tests/test_docs_tree.py::DocsTreeTest.test_the_owner_port_peer_decision_is_recorded",
     "tests/test_docs_tree.py::DocsTreeTest.test_the_tailscale_serve_boundary_decision_is_recorded",
     "tests/test_docs_tree.py::DocsTreeTest.test_the_console_approval_decision_is_recorded",
