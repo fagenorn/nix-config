@@ -388,7 +388,7 @@ none): the page refuses such an option until the owner has written words with it
 `QUESTION_SENTENCE` ("Choose an option with its number and press Enter, or answer in your own
 words.") says what the page offers.
 
-Each open question of a done registration's plan (#1066, ADR-console-029 D10; `registration.status`
+Each open question of a done registration's plan (#1066, ADR-console-029; `registration.status`
 is `done` and `registration.questions` is not empty) is one entry of `inbox.open` too, after the
 manager questions and before every tracker item, in the plan's order, and counts in `inbox_items`
 and the headline; a running registration, one with no question and none at all add nothing. Its
@@ -416,7 +416,7 @@ the page offers; `REGISTER_TYPE_SENTENCE` ("Type the answer on its card and pres
 when no register item offers options but one takes a typed answer; `REGISTER_STEP_SENTENCE` ("Each one says what to do next.") stands when no plan
 question offers an answer and nothing else is open.
 
-Each retry item a caller passes (`retry_items`; #1055, ADR-console-028 D10) is one entry of
+Each retry item a caller passes (`retry_items`; #1055, ADR-console-028) is one entry of
 `inbox.open` too: a registration the remote refused after its adoption merged, offering the one
 option `Retry`. It is copied as given and not filtered by the registered projects (the project is
 not registered yet), sits after the manager questions and before the plan questions, in the order
@@ -1335,7 +1335,7 @@ def _effective_stages(state: SprintState) -> list[tuple[int, str, str]]:
 
 def owner_check(item: Mapping) -> bool:
     """Whether a tracker item is a verification owner prompt or a held-issue review card
-    (ADR-console-051 D1, ADR-console-054)."""
+    (ADR-console-051, ADR-console-054)."""
     return item.get("reason") in verify_owner.REASONS or item.get("reason") == inbox.REVIEW_REASON
 
 
@@ -1603,7 +1603,7 @@ def run_reading(run: DeliveryState, now_ms: int | None,
     """A run's reading. Without `waits` it is the journal's alone. With them its base is the newest
     of the journal and the run's session output and running check, and its latest also takes the
     wait signals; the wait is named only with a clock when the base is `QUIET_AFTER_MS` old and a
-    wait is not (ADR-console-050 D3, ADR-console-069)."""
+    wait is not (ADR-console-050, ADR-console-069)."""
     signals = [run.moved_ms]
     if waits is not None:
         signals += [ms for ms in (waits.output_ms, waits.check_ms) if ms is not None]
@@ -1625,7 +1625,7 @@ def run_reading(run: DeliveryState, now_ms: int | None,
 def run_sprint(run: DeliveryState, sprints: Iterable[SprintState],
                manager_ids: Mapping[str, Collection[str]]) -> SprintState | None:
     """The sprint a run belongs to: the first of `sprints` (newest stated first) that has not ended
-    and either names one of the run's issues or lists the run's session (ADR-console-042 D3)."""
+    and either names one of the run's issues or lists the run's session (ADR-console-042)."""
     numbers = {i.issue for i in run.issues}
     return next((s for s in sprints
                  if ended_at(s) is None
