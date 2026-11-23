@@ -53,7 +53,8 @@ in
     # supported and how many agent slots one root session may hold), read by
     # the conformance check through `agent_tools.delivery.host_admission`.
     # A file under host-declarations/ named for the hostname replaces the
-    # shared one: the shared declaration plus its `verify_slots`.
+    # shared one: the shared declaration plus its `verify_slots` and
+    # `verify_budget_seconds`.
     ".agents/share/host-declaration.json".source = hostDeclaration;
 
     # Claude accepts Home Manager's recursive file links, so its view of the
