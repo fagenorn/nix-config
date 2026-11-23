@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
+
 from agent_tools.project_contract import resolve_project, schema_three
 
-from .test_resolve_project import REPO_ROOT, ResolverTestCase, source_contract
+from .test_resolve_project import REPO_ROOT, ResolverTestCase, run, source_contract
 
 TIER = "fast"
 
@@ -97,3 +99,32 @@ class VerificationBeforePullRequestTest(ResolverTestCase):
         source = (REPO_ROOT / "python/agent_tools/project_contract/resolve_project.py")
         self.assertEqual(source.read_text(encoding="utf-8").splitlines()[-1],
                          SIZE_SUPPRESSION)
+
+
+class CommittedPrePullRequestTest(ResolverTestCase):
+    """The repository's own contract opts in to the pre-pull-request list."""
+
+    def snapshot(self):
+        code, out, err = run("resolve", "--repo-root", str(REPO_ROOT), home=self.home)
+        self.assertEqual(code, 0, err)
+        return json.loads(out)["bindings"]
+
+    def test_the_repositorys_own_pre_pull_request_verification_is_lint_then_test_touched(self):
+        bindings = self.snapshot()
+        workflow = bindings["workflow"]
+        self.assertEqual(workflow["verification_before_pull_request"],
+                         ["lint", "test-touched"])
+        self.assertEqual(bindings["commands"]["test-touched"],
+                         {"argv": ["just", "test-touched"], "cwd": str(REPO_ROOT), "env": []})
+        self.assertEqual(workflow["verification"], ["lint", "test"])
+
+    def test_every_pre_pull_request_id_names_a_justfile_recipe(self):
+        bindings = self.snapshot()
+        justfile = (REPO_ROOT / "justfile").read_text(encoding="utf-8").splitlines()
+        for command_id in bindings["workflow"]["verification_before_pull_request"]:
+            with self.subTest(command_id=command_id):
+                argv = bindings["commands"][command_id]["argv"]
+                self.assertEqual(argv[0], "just")
+                self.assertEqual(len(argv), 2)
+                self.assertTrue(any(line.startswith(argv[1] + ":") for line in justfile),
+                                argv[1])
