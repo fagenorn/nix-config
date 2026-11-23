@@ -13,6 +13,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -448,7 +449,7 @@ def marker_issue(number: int) -> dict:
     return {"number": number, "body": MARK, **BOT}
 
 
-class CommandTest(unittest.TestCase):
+class ForgeWorld:
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
@@ -463,29 +464,54 @@ class CommandTest(unittest.TestCase):
             write(root, "b.py", numbered(b))
         return root
 
-    def call(self, argv, pages=None, created=41, reads=None):
+    def fixable_world(self) -> Path:
+        root = repo(self.tmp.name)
+        write(root, "python/pyproject.toml", "[project]\n")
+        write(root, "python/m.py", "x = 1;\n")
+        commit_all(root)
+        return root
+
+    def call(self, argv, pages=None, created=41, reads=None, registry=None):
         out, err = io.StringIO(), io.StringIO()
         answers = {"user": None, **(reads or {})}
 
-        def api_get(path, allow=()):
+        def read(path, allow=()):
             return answers[path]
 
         with mock.patch.object(cleanup_issue.forge_api, "api_pages") as api_pages, \
-                mock.patch.object(cleanup_issue.forge_api, "api_get", side_effect=api_get), \
+                mock.patch.object(cleanup_issue.forge_api, "api_get", side_effect=read) as api_get, \
                 mock.patch.object(cleanup_issue.forge_api, "create_issue",
                                   return_value=created) as create_issue, \
+                mock.patch.object(cleanup_issue.forge_markers, "create_ref",
+                                  return_value=True) as create_ref, \
+                mock.patch.object(cleanup_issue.forge_api, "commit_files",
+                                  return_value="c" * 40) as commit_files, \
+                mock.patch.object(cleanup_issue.forge_api, "create_pull",
+                                  return_value=77) as create_pull, \
+                mock.patch.object(cleanup_issue.agent_platform, "read_registry",
+                                  return_value=registry or []), \
                 contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             if isinstance(pages, Exception):
                 api_pages.side_effect = pages
             else:
                 api_pages.return_value = [[]] if pages is None else pages
             code = cleanup_issue.main(argv)
+        self.forge = types.SimpleNamespace(
+            api_get=api_get, create_ref=create_ref, commit_files=commit_files,
+            create_pull=create_pull)
         return code, out.getvalue(), err.getvalue(), api_pages, create_issue
 
     def file(self, root, pages=None, reads=None, *extra):
         return self.call(["file", "--repo-root", str(root), "--repo", "octo/widgets", *extra],
                          pages, reads=reads)
 
+    def assert_no_forge_write(self):
+        self.forge.create_ref.assert_not_called()
+        self.forge.commit_files.assert_not_called()
+        self.forge.create_pull.assert_not_called()
+
+
+class CommandTest(ForgeWorld, unittest.TestCase):
     def test_file_on_a_committed_tree_files_one_issue_through_the_forge(self):
         root = self.world()
 
@@ -536,6 +562,85 @@ class CommandTest(unittest.TestCase):
                    "author_association": "OWNER"}]]
         code, out, _, _, create_issue = self.file(root, owner)
         self.assertEqual(out, '{"action": "open", "issue": 7, "rule": null}\n')
+        create_issue.assert_not_called()
+
+    def test_file_with_a_fixable_ruff_rule_opens_one_pull_request_through_the_forge(self):
+        require_ruff(self)
+        root = self.fixable_world()
+        sha = git(root, "rev-parse", "HEAD").strip()
+        reads = {"user": {"login": "octo"},
+                 "repos/octo/widgets": {"owner": {"login": "octo", "type": "User"}},
+                 "repos/octo/widgets/git/ref/heads/main": {"object": {"sha": sha}}}
+
+        code, out, _, _, create_issue = self.file(root, None, reads, "--branch", "main")
+
+        self.assertEqual(code, 0)
+        self.assertEqual(out, '{"action": "opened", "issue": 77, "rule": "PY7"}\n')
+        create_issue.assert_not_called()
+        branch = "cleanup-fix-py7-" + sha[:12]
+        self.forge.create_ref.assert_called_once_with("octo/widgets", "refs/heads/" + branch, sha)
+        self.forge.commit_files.assert_called_once()
+        slug, commit_branch, expected, _, files = self.forge.commit_files.call_args.args
+        self.assertEqual((slug, commit_branch, expected, files),
+                         ("octo/widgets", branch, sha, {"python/m.py": b"x = 1\n"}))
+        self.forge.create_pull.assert_called_once()
+        slug, _, body, head, base = self.forge.create_pull.call_args.args
+        self.assertEqual((slug, head, base), ("octo/widgets", branch, "main"))
+        self.assertEqual(body.splitlines()[0], "<!-- agent:cleanup-fix v1 rule=PY7 -->")
+
+    def test_the_workflow_token_defers_a_fixable_rule(self):
+        require_ruff(self)
+        root = self.fixable_world()
+        repository = {"owner": {"login": "octo", "type": "User"}}
+        notice = ("cleanup-issue: rule PY7 needs a fix change; the verify-pending pass opens it "
+                  "from a host whose pull requests start checks\n")
+        for user in (None, {"login": "github-actions[bot]"}):
+            with self.subTest(user=user):
+                reads = {"user": user, "repos/octo/widgets": repository}
+
+                code, out, err, _, create_issue = self.file(root, None, reads)
+
+                self.assertEqual((code, out, err), (
+                    0, '{"action": "deferred", "issue": null, "rule": "PY7"}\n', notice))
+                create_issue.assert_not_called()
+                self.assert_no_forge_write()
+
+    def test_an_open_fix_change_in_the_listing_holds_the_slot(self):
+        pages = [[{"number": 5, "body": "<!-- agent:cleanup-fix v1 rule=PY7 -->",
+                   "pull_request": {}, **BOT}]]
+
+        code, out, _, api_pages, create_issue = self.file(self.world(), pages)
+
+        self.assertEqual((code, out), (0, '{"action": "open", "issue": 5, "rule": null}\n'))
+        api_pages.assert_called_once_with(LISTING)
+        create_issue.assert_not_called()
+
+    def test_a_fix_marker_by_an_untrusted_author_holds_nothing(self):
+        pages = [[{"number": 5, "body": "<!-- agent:cleanup-fix v1 rule=PY7 -->",
+                   "pull_request": {}, "user": {"login": "mallory"}, "author_association": "NONE"}]]
+
+        code, out, _, _, _ = self.file(self.world(), pages)
+
+        self.assertEqual((code, json.loads(out)["action"]), (0, "filed"))
+
+    def test_a_fix_change_without_branch_exits_2_before_any_write(self):
+        require_ruff(self)
+        reads = {"user": {"login": "octo"},
+                 "repos/octo/widgets": {"owner": {"login": "octo", "type": "User"}}}
+
+        code, out, err, _, create_issue = self.file(self.fixable_world(), None, reads)
+
+        self.assertEqual((code, out), (2, ""))
+        self.assertTrue(err.startswith("cleanup-issue: "), err)
+        create_issue.assert_not_called()
+        self.assert_no_forge_write()
+
+    def test_a_pull_request_without_a_body_field_is_a_forge_error(self):
+        code, out, err, _, create_issue = self.file(
+            self.world(), [[{"number": 4, "pull_request": {}, **BOT}]])
+
+        self.assertEqual((code, out), (2, ""))
+        self.assertTrue(err.startswith("cleanup-issue: "), err)
         create_issue.assert_not_called()
 
     def test_a_pull_request_in_the_listing_is_not_an_issue(self):
@@ -713,6 +818,155 @@ class CommandTest(unittest.TestCase):
                 self.assertTrue(err.startswith("cleanup-issue: "), err)
                 api_pages.assert_not_called()
                 create_issue.assert_not_called()
+
+
+class ForgeChangeTest(unittest.TestCase):
+    def run_gh(self, graphql_answer):
+        self.calls: list[list[str]] = []
+        self.requests: list[dict] = []
+
+        def fake(argv, allow=(), cancelled=None, cli="gh"):
+            self.calls.append(list(argv))
+            if argv[:3] == ["api", "graphql", "--input"]:
+                self.requests.append(json.loads(Path(argv[3]).read_text()))
+                return 0, graphql_answer
+            if argv[3] == "repos/o/w/pulls":
+                return 0, '{"number": 77}'
+            return 0, ""
+        return mock.patch.object(cleanup_issue.forge_api, "run_gh", side_effect=fake)
+
+    def test_open_change_creates_the_ref_then_one_commit_then_the_pull(self):
+        answer = '{"data": {"createCommitOnBranch": {"commit": {"oid": "cc"}}}}'
+        with self.run_gh(answer):
+            number = cleanup_issue.GitHubTracker("o/w", "main").open_change(
+                "cleanup-fix-py7-abc", "a" * 40, "T", "B", {"b.py": b"2", "a.py": b"1"})
+
+        self.assertEqual(number, 77)
+        self.assertEqual(len(self.calls), 3)
+        self.assertEqual(self.calls[1][:3], ["api", "graphql", "--input"])
+        self.assertEqual(self.calls[0], ["api", "-X", "POST", "repos/o/w/git/refs", "-f",
+                                         "ref=refs/heads/cleanup-fix-py7-abc", "-f", "sha=" + "a" * 40])
+        self.assertEqual(self.calls[2], ["api", "-X", "POST", "repos/o/w/pulls", "-f", "title=T",
+                                         "-f", "body=B", "-f", "head=cleanup-fix-py7-abc",
+                                         "-f", "base=main"])
+        self.assertEqual(self.requests, [{
+            "query": "mutation($input: CreateCommitOnBranchInput!) { createCommitOnBranch(input: "
+                     "$input) { commit { oid } } }",
+            "variables": {"input": {
+                "branch": {"repositoryNameWithOwner": "o/w", "branchName": "cleanup-fix-py7-abc"},
+                "message": {"headline": "T"},
+                "expectedHeadOid": "a" * 40,
+                "fileChanges": {"additions": [{"path": "a.py", "contents": "MQ=="},
+                                              {"path": "b.py", "contents": "Mg=="}]}}}}])
+
+    def test_a_commit_without_an_oid_opens_no_pull(self):
+        with self.run_gh('{"data": {"createCommitOnBranch": {"commit": null}}}'):
+            with self.assertRaises(ForgeError) as caught:
+                cleanup_issue.GitHubTracker("o/w", "main").open_change(
+                    "cleanup-fix-py7-abc", "a" * 40, "T", "B", {"a.py": b"1"})
+
+        self.assertEqual(caught.exception.code, "payload_invalid")
+        self.assertNotIn("repos/o/w/pulls", [call[3] for call in self.calls if len(call) > 3])
+
+    def test_a_ref_that_exists_returns_none_and_writes_nothing_more(self):
+        with mock.patch.object(cleanup_issue.forge_markers, "create_ref", return_value=False), \
+                mock.patch.object(cleanup_issue.forge_api, "commit_files") as commit_files, \
+                mock.patch.object(cleanup_issue.forge_api, "create_pull") as create_pull:
+            number = cleanup_issue.GitHubTracker("o/w", "main").open_change(
+                "cleanup-fix-py7-abc", "a" * 40, "T", "B", {"a.py": b"1"})
+
+        self.assertIsNone(number)
+        commit_files.assert_not_called()
+        create_pull.assert_not_called()
+
+    def test_starts_checks_is_false_for_the_workflow_token_and_the_bot(self):
+        for user, want in ((None, False), ({"login": "github-actions[bot]"}, False),
+                           ({"login": "octo"}, True)):
+            with self.subTest(user=user), mock.patch.object(
+                    cleanup_issue.forge_api, "api_get", return_value=user):
+                self.assertIs(cleanup_issue.GitHubTracker("o/w").starts_checks(), want)
+        with mock.patch.object(cleanup_issue.forge_api, "api_get", return_value={"login": ""}):
+            with self.assertRaises(ForgeError):
+                cleanup_issue.GitHubTracker("o/w").starts_checks()
+
+
+class FixCommandTest(ForgeWorld, unittest.TestCase):
+    REPOSITORY = {"owner": {"login": "octo", "type": "User"}}
+
+    def registered_world(self, fixable: bool = True) -> tuple[Path, str]:
+        root = self.fixable_world() if fixable else self.world()
+        origin = Path(self.tmp.name) / "origin.git"
+        subprocess.run(["git", "init", "-q", "--bare", str(origin)], check=True, timeout=60)
+        git(root, "remote", "add", "origin", str(origin))
+        git(root, "push", "-q", "origin", "main")
+        return root, git(root, "rev-parse", "HEAD").strip()
+
+    def fix(self, root, sha):
+        reads = {"user": {"login": "octo"}, "repos/octo/widgets": self.REPOSITORY,
+                 "repos/octo/widgets/git/ref/heads/main": {"object": {"sha": sha}}}
+        return self.call(["fix", "--project", "octo/widgets", "--repo", "octo/widgets",
+                          "--branch", "main"], reads=reads,
+                         registry=[{"project_id": "octo/widgets", "root": str(root)}])
+
+    def test_fix_reads_the_registered_root_fetches_the_tip_and_opens_the_change(self):
+        require_ruff(self)
+        root, pushed = self.registered_world()
+        write(root, "python/n.py", "y = 2;\n")
+        commit_all(root)
+
+        code, out, _, _, create_issue = self.fix(root, pushed)
+
+        self.assertEqual(code, 0)
+        self.assertEqual(out, '{"action": "opened", "issue": 77, "rule": "PY7"}\n')
+        self.forge.create_ref.assert_called_once_with(
+            "octo/widgets", "refs/heads/cleanup-fix-py7-" + pushed[:12], pushed)
+        files = self.forge.commit_files.call_args.args[4]
+        self.assertEqual(files, {"python/m.py": b"x = 1\n"})
+        create_issue.assert_not_called()
+
+    def test_fix_fetches_a_tip_the_root_does_not_hold(self):
+        require_ruff(self)
+        root, _ = self.registered_world()
+        other = Path(self.tmp.name) / "other"
+        git(self.tmp.name, "clone", "-q", str(Path(self.tmp.name) / "origin.git"), str(other))
+        write(other, "python/n.py", "y = 2;\n")
+        commit_all(other)
+        git(other, "push", "-q", "origin", "main")
+        tip = git(other, "rev-parse", "HEAD").strip()
+
+        code, out, _, _, _ = self.fix(root, tip)
+
+        self.assertEqual((code, json.loads(out)["action"]), (0, "opened"))
+        self.assertEqual(self.forge.create_ref.call_args.args[2], tip)
+
+    def test_a_failed_fetch_exits_2_before_any_forge_call(self):
+        root = self.fixable_world()
+
+        code, out, err, api_pages, create_issue = self.fix(root, "a" * 40)
+
+        self.assertEqual((code, out), (2, ""))
+        self.assertEqual(err, f"cleanup-issue: cannot fetch main in {root}\n")
+        self.forge.api_get.assert_not_called()
+        api_pages.assert_not_called()
+        create_issue.assert_not_called()
+
+    def test_an_unregistered_project_exits_2_before_any_forge_call(self):
+        code, out, err, api_pages, create_issue = self.call(
+            ["fix", "--project", "octo/widgets", "--repo", "octo/widgets", "--branch", "main"])
+
+        self.assertEqual((code, out, err), (2, "", "cleanup-issue: project not registered: octo/widgets\n"))
+        self.forge.api_get.assert_not_called()
+        api_pages.assert_not_called()
+        create_issue.assert_not_called()
+
+    def test_an_unfixable_pick_files_nothing(self):
+        root, pushed = self.registered_world(fixable=False)
+
+        code, out, _, _, create_issue = self.fix(root, pushed)
+
+        self.assertEqual((code, out), (0, '{"action": "unfixable", "issue": null, "rule": "B17"}\n'))
+        create_issue.assert_not_called()
+        self.assert_no_forge_write()
 
 
 STUB_GH = """#!/bin/sh
