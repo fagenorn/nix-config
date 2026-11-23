@@ -14,7 +14,7 @@ Every agent-workflow helper is a module of one standard-library Python package, 
 
 - Installed: call the launcher by its command name, for example `forge-issue` or `resolve-project`.
 - From source: `PYTHONPATH=python python3 -m agent_tools.<area>.<module>`, or `-m agent_tools.<module>` for a top-level module, from the repository root.
-- The `just` recipes that run package code (`agent-workflow-tests`, `agent-run-profile`, `verify`, `agent-instruction-budget` and the others) set `PYTHONPATH` to `python/` themselves.
+- The `just` recipes that run package code (`agent-workflow-tests`, `agent-run-profile`, `verify` and the others) set `PYTHONPATH` to `python/` themselves.
 - A command's contract (arguments, output, exit codes) is its module docstring. Read it with `python3 -m pydoc agent_tools.<area>.<module>` (`agent_tools.<module>` for a top-level module) or from the head of the file.
 
 ## Testing

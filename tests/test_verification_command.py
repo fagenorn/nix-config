@@ -520,16 +520,6 @@ CI_EVAL = (
     "nix eval --show-trace \\\n"
     "  --extra-experimental-features 'nix-command flakes' \\\n"
     "  --raw '.#nixosConfigurations.anis-desktop.config.system.build.toplevel.drvPath'")
-BUDGET = (
-    "set -euo pipefail\n"
-    "args=()\n"
-    "if [ \"$EVENT_NAME\" = pull_request ]; then\n"
-    "  args+=(--base HEAD^1)\n"
-    "  if [ \"$RAISE_LABEL\" = true ]; then\n"
-    "    args+=(--raise-label)\n"
-    "  fi\n"
-    "fi\n"
-    "PYTHONPATH=python python3 -m agent_tools.instruction_load check \"${args[@]}\"")
 SUITE_TIMING_COMPARE = (
     'PYTHONPATH=python python3 -m agent_tools.delivery.suite_timing compare '
     '--head suite-timing/head/suite-timing.json --base suite-timing/base/suite-timing.json '
@@ -544,7 +534,6 @@ CI_STEP_CLASSES = {
     ("ci.yaml", "nix-eval", INSTALL): SETUP,
     ("ci.yaml", "agent-workflow-tests", CHECKOUT): SETUP,
     ("ci.yaml", "agent-workflow-tests", INSTALL): SETUP,
-    ("instruction-budget.yaml", "instruction-budget", CHECKOUT): SETUP,
     ("ci.yaml", "flake-checker", "DeterminateSystems/flake-checker-action@v5"):
         ("not-lint", "annotates flake.lock health and never fails a run"),
     ("ci.yaml", "nix-eval", CI_EVAL): ("not-lint", "evaluates a host configuration"),
@@ -575,7 +564,6 @@ CI_STEP_CLASSES = {
         ("not-lint", "reports suite time growth over main and never fails a run"),
     ("ci.yaml", "nix-eval", "nix build --no-link '.#checks.x86_64-linux.agnostic-lint'"):
         ("lint", "agnostic-lint"),
-    ("instruction-budget.yaml", "instruction-budget", BUDGET): ("lint", "instruction-budget"),
     ("conformance.yaml", "conformance", CHECKOUT): SETUP,
     ("conformance.yaml", "conformance", INSTALL): SETUP,
     ("conformance.yaml", "conformance", "nix shell .#agent-platform --command conformance run --purpose ci --lint-times"):
