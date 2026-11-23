@@ -772,7 +772,7 @@ when the project has no question, else `{"label": QUESTIONS_LABEL, "count", "thr
 thread per `project_question.threads` group, newest first by the last question's `seq`, `count`
 their number. A thread is `{"id", "questions", "follow_up"}`: `id` is its first question's
 `thread_id` (its own id when it has none), `questions` its question entries ascending by `seq`, and
-`follow_up` true exactly when its last question is answered (#1178, ADR-console-059 D4).
+`follow_up` true exactly when its last question is answered (#1178, ADR-console-059).
 A question entry is `{"id", "question", "asked_at",
 "state": "working" | "answered" | "timed_out" | "failed", "state_text", "answered_at": <time> |
 null, "answer": <str> | null, "read_text", "ran_text", "unknown_text", "back_text",
@@ -793,7 +793,7 @@ over the integer mean tokens and mean dollars of the project's newest `DEEP_ESTI
 questions that are not working and spent above 0 tokens, or `ASK_DEEP_NO_ESTIMATE_TEXT` when none did
 (`DEEP_TIMEOUT_SECONDS // 60` minutes), and null otherwise.
 A question is never an inbox item; it changes no count, headline, sentence, `stale`, `quiet` or
-order (#1177, #1178, ADR-console-059 D3, D4).
+order (#1177, #1178, ADR-console-059).
 `encode_view` writes sorted keys, compact separators, non-ASCII kept, NaN
 refused, no newline.
 """

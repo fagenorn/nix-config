@@ -612,6 +612,12 @@ class DocsTreeTest(unittest.TestCase):
         self.assertEqual(console_form_findings(numbers), [])
         self.assertEqual(sub_decision_hits(numbers, SUB_DECISION_052_TO_076, LATER_THAN_076), [])
 
+    def test_the_console_question_records_are_cut_and_cited_whole(self):
+        numbers = (58, 59, 62, 65, 67)
+        self.assertEqual([int(p.name[:3]) for p in console_records(numbers)], [58, 59, 62, 65, 67])
+        self.assertEqual(console_form_findings(numbers), [])
+        self.assertEqual(sub_decision_hits(numbers, SUB_DECISION_052_TO_076, LATER_THAN_076), [])
+
     def test_the_console_records_027_to_051_are_the_kept_ones(self):
         records = [
             p for p in sorted((REPO_ROOT / "docs/areas/console/adr").glob("[0-9][0-9][0-9]-*.md"))
