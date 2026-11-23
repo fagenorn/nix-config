@@ -34,4 +34,4 @@ A background launch (`claude --bg`) and a wake of a parked session refuse a fold
 - A project registered before this decision, or whose trust a client write dropped, is granted again at the next console start (D9).
 - A residual remains: no lock is shared with the client, so a client that reads the console's interim merge in the instant between two swaps and later writes from it can drop the key; the next grant restores it.
 - The Darwin swap (`RENAME_SWAP`) is tested only by a local run on a Mac, since CI is Linux only.
-- Related: ADR-console-015, ADR-console-025, ADR-console-028, ADR-console-030, ADR-hosts-005.
+- Related: ADR-console-015, ADR-console-024, ADR-console-028, ADR-console-030, ADR-hosts-005.

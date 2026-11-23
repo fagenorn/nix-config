@@ -5,7 +5,7 @@
 
 ## Context
 
-A project question and its answer are kept in the console's log for 90 days (ADR-console-009), and a follow-up carries its thread's earlier turns into a new session (ADR-console-062). An owner who pasted a password, token or key into the Ask box had no way to take it back: the text stayed in the log, in the published view and in every later follow-up of that thread. ADR-console-001 and ADR-console-009 let only the retention pass delete a row.
+A project question and its answer are kept in the console's log for 90 days (ADR-console-001), and a follow-up carries its thread's earlier turns into a new session (ADR-console-062). An owner who pasted a password, token or key into the Ask box had no way to take it back: the text stayed in the log, in the published view and in every later follow-up of that thread. ADR-console-001 lets only the retention pass delete a row.
 
 ## Decision
 
@@ -21,5 +21,5 @@ A project question and its answer are kept in the console's log for 90 days (ADR
 
 - A pasted secret can be taken out of the console's log and view by deleting its thread, but not out of a transcript the session wrote elsewhere, nor out of anything the owner's account already received.
 - The log holds one small record per deleted thread forever, with ids and no text.
-- Amends ADR-console-001, ADR-console-008, ADR-console-009 and ADR-console-058.
+- Amends ADR-console-001, ADR-console-008 and ADR-console-058.
 - Related: ADR-console-062, ADR-console-089.

@@ -1,0 +1,5 @@
+#!/bin/sh
+# Verify check: the first cleanup fix change reports every required check, and a free cleanup
+# slot is picked within the window. Reads the forge only.
+# Exits 0 met, 1 not met, 75 not yet, 2 forge error.
+PYTHONPATH=python exec python3 -m agent_tools.verification.cleanup_fix_check "$@"

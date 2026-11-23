@@ -20,6 +20,7 @@ out the transport timeout. Without one a call is a plain `subprocess.run`.
 The module reads no host clock: "now" is the server's `Date` header (D5). The one exception is the
 `clock` a caller hands to `deadline`, which is the only clock the module ever reads.
 """
+import base64
 import contextlib
 import contextvars
 import json
@@ -27,10 +28,12 @@ import os
 import re
 import signal
 import subprocess
+import tempfile
 import time
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
@@ -208,6 +211,43 @@ def create_issue(slug: str, title: str, body: str, labels: Sequence[str] = ()) -
     number = created.get("number") if isinstance(created, dict) else None
     if isinstance(number, bool) or not isinstance(number, int):
         raise ForgeError("payload_invalid", "created issue has no number")
+    return number
+
+
+COMMIT_MUTATION = ("mutation($input: CreateCommitOnBranchInput!) { createCommitOnBranch(input: $input) "
+                   "{ commit { oid } } }")
+
+
+def commit_files(slug: str, branch: str, expected_head: str, headline: str,
+                 files: Mapping[str, bytes]) -> str:
+    """Append one commit adding `files` (path to bytes) to `branch`, which must still be at
+    `expected_head`, through `createCommitOnBranch`; the new commit's oid."""
+    additions = [{"path": path, "contents": base64.b64encode(files[path]).decode("ascii")}
+                 for path in sorted(files)]
+    request = {"query": COMMIT_MUTATION, "variables": {"input": {
+        "branch": {"repositoryNameWithOwner": slug, "branchName": branch},
+        "message": {"headline": headline}, "expectedHeadOid": expected_head,
+        "fileChanges": {"additions": additions}}}}
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / "request.json"
+        path.write_text(json.dumps(request))
+        created = gh_json(["api", "graphql", "--input", str(path)])
+    data = created.get("data") if isinstance(created, dict) else None
+    made = data.get("createCommitOnBranch") if isinstance(data, dict) else None
+    commit = made.get("commit") if isinstance(made, dict) else None
+    oid = commit.get("oid") if isinstance(commit, dict) else None
+    if not isinstance(oid, str) or not oid:
+        raise ForgeError("payload_invalid", "created commit has no oid")
+    return oid
+
+
+def create_pull(slug: str, title: str, body: str, head: str, base: str) -> int:
+    """Open a pull request from `head` into `base`; its number."""
+    created = gh_json(["api", "-X", "POST", f"repos/{slug}/pulls", "-f", f"title={title}",
+                       "-f", f"body={body}", "-f", f"head={head}", "-f", f"base={base}"])
+    number = created.get("number") if isinstance(created, dict) else None
+    if isinstance(number, bool) or not isinstance(number, int):
+        raise ForgeError("payload_invalid", "created pull request has no number")
     return number
 
 
