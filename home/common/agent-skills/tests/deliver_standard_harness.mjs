@@ -74,6 +74,8 @@ const DEFAULTS = [
   [/^look-stale$/, { complete: true, stale: [] }],
   // #1566: a landing resync's carry check: the verification of the new head (merges only, a passing verification and two pictures) and the carry command's answer.
   [/^look-carry-verify$/, prompt => ({ head: (/brought it to ([0-9a-f]{40})/.exec(prompt) || [])[1] || SHA, clean: true, merge_only: true, results: [{ id: 'build', status: 'pass', summary: 'ok' }], pictures: [{ kind: 'before', path: '/r/pics/before.png' }, { kind: 'after', path: '/r/pics/after.png' }] })],
+  // A clean sync's own-files carry: the default is the touched answer, which leaves the queue for the verified carry.
+  [/^look-carry-own$/, { verdict: 'needed', from: SHA, reason: 'own-files-touched', rule: 'own-files', comment_id: null }],
   [/^look-carry$/, { verdict: 'needed', from: SHA, reason: 'pictures-differ', comment_id: null }],
   [/^look-status$/, { verdict: 'needed', kept_from: null }],
   // #1246: the verification of an approved head; the fast-forward reached the head the prompt names.

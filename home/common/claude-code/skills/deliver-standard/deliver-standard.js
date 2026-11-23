@@ -65,9 +65,11 @@ export const meta = {
 // command before the owner answers: after verify it pushes the branch, opens or reuses the PR (look-pr, no lock), syncs
 // a branch that is behind outside any lock, and stops at awaiting-look with cont.look = {pr, head}. Every such stop
 // follows a look-checks wait that read every check passed. A landing under a recorded approval ticks the look marker
-// and leaves that criterion out of the hold; a resync that moves the head past the approved one is verified and carried
+// and leaves that criterion out of the hold; a resync that moves the head past the approved one is carried
 
-// (look-carry) or shown to the owner again. The program never posts an approval.
+// by own files under the lease when only clean syncs moved it (look-carry-own, no local verification); otherwise the
+// lease is released first and the head is verified and carried (look-carry) or shown to the owner again. The program
+// never posts an approval.
 
 // FOLDS: consecutive clerk steps with no program decision between them share one call. Kept separate, each with a
 // program decision between the two: checks then merge, merge then release, hold then close-out, the push then the lock
@@ -3039,6 +3041,8 @@ let lockOut = false
 let fixedOut = false
 // The sync merges made under the lock; while there is none, a red poll shows the branch's own failure.
 let lockSyncs = 0
+// True while every head change since the approved head was a clean sync merge: no conflict, no fix, no commit on top.
+let cleanSince = true
 let relocks = 0
 const waits = waitBudget()
 let retakes = 0
@@ -3087,9 +3091,9 @@ const LOOK_STATUS_SCHEMA = { type: 'object', properties: { verdict: { type: 'str
 const LOOK_CARRY_VERIFY = { ...VERIFY, properties: { ...VERIFY.properties, merge_only: { type: 'boolean' } }, required: [...VERIFY.required, 'merge_only'] }
 const LOOK_CARRY_SCHEMA = { type: 'object', properties: { verdict: { type: 'string' }, from: { type: ['string', 'null'] }, reason: { type: ['string', 'null'] }, rule: { type: ['string', 'null'] }, comment_id: { type: ['integer', 'null'] }, detail: { type: 'string' } }, required: ['verdict'] }
 // The reasons look-approval carry gives for a needed answer; any other reason is an unreadable reply.
-const CARRY_REASONS = ['no-approval', 'source-differs', 'pictures-unreadable', 'pictures-missing', 'pictures-differ', 'not-merges', 'no-look-files', 'look-files-differ']
+const CARRY_REASONS = ['no-approval', 'source-differs', 'pictures-unreadable', 'pictures-missing', 'pictures-differ', 'not-merges', 'no-look-files', 'look-files-differ', 'own-files-touched']
 // The rules a carried reply may name; with no picture passed it must be look-files.
-const CARRY_RULES = ['pictures', 'look-files']
+const CARRY_RULES = ['pictures', 'look-files', 'own-files']
 const USABLE_PICTURE = /^\/[^\0\r\n]+$/
 // A stop row, or null when the owner's approval of ownerHead carries to H (look-approval carry recorded the carry
 // line). since is the head the worktree was last verified at, and how names what brought the PR to H. The verification
@@ -3145,6 +3149,27 @@ ${RULES}`, { label: 'look-carry', phase: 'Ship', agentType: 'clerk', model: CLER
     return lookWaitStop(pr, H)
   }
   return stop('look-carry', { pr: pr, head: H, result: reply })
+}
+// Under the lease, with only clean syncs since the approved head: the owner's approval of ownerHead carries to H when
+// the syncs changed none of the pull request's own files (look-approval carry --own-files, no local verification).
+// Returns { landed: true } when the approval covers H, { row } to stop, or null when the verified carry must run
+// outside the queue (the own files were touched).
+const carryOwn = async (pr, H) => {
+  const S = ownerHead
+  const reply = await call(`${CTX}
+${lockHeld ? `${LEASE_BEAT(lockSha)}Then run` : 'Run'} alone and exactly: look-approval carry --repo ${SLUG} --issue ${ISSUE} --pr ${pr} --from ${S} --head ${H} --own-files
+It prints one JSON line. Return its verdict, from, reason, rule, comment_id and any detail. Run nothing else.
+${RULES}`, { label: 'look-carry-own', phase: 'Ship', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: LOOK_CARRY_SCHEMA })
+  if (isEntry(reply) && reply.verdict === 'approved') {
+    ownerHead = H
+    return { landed: true }
+  }
+  if (isEntry(reply) && reply.verdict === 'carried' && reply.rule === 'own-files' && typeof reply.from === 'string' && SHA_RE.test(reply.from) && sameSha(reply.from, S) && Number.isInteger(reply.comment_id) && reply.comment_id > 0) {
+    log(`look-carry-own: the approval of ${S} carried to ${H} by the own-files rule (comment ${reply.comment_id})`)
+    return { landed: true }
+  }
+  if (isEntry(reply) && reply.verdict === 'needed' && CARRY_REASONS.includes(reply.reason)) return null
+  return { row: stop('look-carry', { pr: pr, head: H, result: reply }) }
 }
 // The owner's approve answer is always validated here, never from a cached approval: the answer clears it, the pull
 // request head is read, and the approval is read back (look-approval status; this program never posts one) for the head
@@ -3379,6 +3404,7 @@ ${RULES}`, { label: `sync-resolve-${syncs}`, phase: 'Ship', agentType: 'implemen
     // head that is not the merge commit is reviewed too, whatever the merge was: nothing else would read the commits on
     // top of it.
     if (aborted || merge.conflicted || followup) {
+      cleanSince = false
       const sr = await readReview(`${CTX}
 Review the conflict resolution in merge commit ${merge.merge_commit}: git -C ${W} show --cc ${merge.merge_commit} and the resolved files ${JSON.stringify(merge.resolved_files || [])}; the tests run: ${JSON.stringify(merge.tests || [])}. Report Important or Critical defects only: a dropped change from either side, a broken merge of intent, a resolved file whose tests were not run.${merge.markers_checked === true ? '' : MARKERS_UNCHECKED}${followup ? DESCENDS(W, mc, merge.head) : ''}`, { label: `sync-review-${syncs}`, phase: 'Ship', agentType: 'reviewer', schema: SYNC_REVIEW_SCHEMA(followup) })
       if (!sr) return stop('sync-review', { pr: PR, review: sr })
@@ -3583,6 +3609,7 @@ ${RULES}`, { label, phase: 'Ship', agentType: 'clerk', model: CLERK_MODEL, effor
     else {
       if (!w.review || findingsOf(w.review).length) return stop('checks-fix-review', { pr: PR, checks: gk, review: w.review })
       expected = w.fix.commit
+      cleanSince = false
     }
     gk = null
   }
@@ -3719,6 +3746,7 @@ ${RULES}`, { label: `checks-${round}`, phase: 'Ship', agentType: 'clerk', model:
       if (first) { lockOut = true; fixedOut = true }
       if (!w.review || findingsOf(w.review).length) return stop('checks-fix-review', { pr: PR, checks: ck, review: w.review })
       expected = w.fix.commit
+      cleanSince = false
       continue
     }
     if (state === 'passed') {
@@ -3732,11 +3760,24 @@ It prints one JSON line. Return its verdict, kept_from and any detail. Run nothi
 ${RULES}`, { label: 'look-status', phase: 'Ship', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: LOOK_STATUS_SCHEMA })
         if (!complete(ls, LOOK_STATUS_SCHEMA) || (ls.verdict !== 'approved' && ls.verdict !== 'needed')) return stop('look-status', { pr: PR, head, result: ls })
         if (ls.verdict === 'needed') {
-          const row = await carryLook(PR, head)
-          if (row) return row
+          // With only clean syncs since the approved head the own-files rule runs under the lease; the verified carry
+          // and its verification run outside the queue, so the lease is released first and retaken after it.
+          const own = cleanSince ? await carryOwn(PR, head) : null
+          if (own && own.row) return own.row
+          if (!own) {
+            // A release that failed stays marked held, so the release of the next stop tries it again.
+            if ((await unlock()).lock_unreleased) lockHeld = true
+            lockOut = true
+            fixedOut = true
+            log(`left the land queue for the verified carry of ${head}`)
+            const row = await carryLook(PR, head)
+            if (row) return row
+            continue
+          }
         }
         if (ls.verdict === 'approved') ownerHead = typeof ls.kept_from === 'string' && SHA_RE.test(ls.kept_from) ? ls.kept_from : head
         approvedHead = head
+        cleanSince = true
         lookAt = approvedLook(PR, head)
       }
       mg = await recall(() => call(`${CTX}
