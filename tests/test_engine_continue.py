@@ -1,4 +1,4 @@
-"""Contract tests for the continuation of `engine deliver` (#1516): a run stopped at a step is continued
+"""Contract tests for the continuation of `engine deliver`: a run stopped at a step is continued
 by the next `engine deliver`, which resumes it instead of starting a new run.
 
 Split from tests/test_engine_deliver.py to keep that file under the size budget; the hermetic project,
