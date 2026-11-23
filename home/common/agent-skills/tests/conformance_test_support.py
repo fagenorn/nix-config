@@ -93,12 +93,16 @@ HERMETIC_ENV = {
 }
 
 
+# A hang guard, not a speed limit: a hosted runner takes over a minute to run `doctor` here.
+RUN_TIMEOUT_SECONDS = 300
+
+
 def run(*args: str, env: dict | None = None,
         cwd: str | Path | None = None) -> tuple[int, str, str]:
     """One S1 subprocess run of the engine."""
     proc = subprocess.run(
         [sys.executable, "-m", "agent_tools.project_contract.conformance", *args],
-        capture_output=True, text=True, timeout=60,
+        capture_output=True, text=True, timeout=RUN_TIMEOUT_SECONDS,
         env=HERMETIC_ENV if env is None else env, cwd=None if cwd is None else str(cwd),
     )
     return proc.returncode, proc.stdout, proc.stderr
