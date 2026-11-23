@@ -40,6 +40,7 @@ from .test_console_signin import SIGNED_IN
 from .test_console_stream import next_frame
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
+ROOT = Path(__file__).resolve().parents[1]
 TAILNET = "desk.invented-tailnet.ts.net"
 OTHER_HOST = "other.invented-tailnet.ts.net"
 COLLEAGUE = "colleague@example.invalid"
