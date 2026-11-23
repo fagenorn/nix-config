@@ -105,7 +105,7 @@ lint:
 test:
   PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.delivery.verification_command test
 
-# Run the agent workflow suite's members this branch touches, after a host build when it changes a build input (verification command `test-touched`).
+# Run the suite members this branch touches, after a host build when a build input changes (the `test-touched` command).
 test-touched:
   tools="$(nix build --no-link --print-out-paths '{{justfile_directory()}}#agent-platform.tools')" && test -n "$tools" && AGENT_PLATFORM_TOOLS="$tools/bin" WORKFLOW_POLICY_SURFACE=source PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.delivery.touched_tests --base origin/main --source-root python --pair home/common/claude-code/lifecycle_guard.py=tests/test_claude_permission_guard.py --build-command 'just build' --build-when '*.nix' --build-when flake.lock --build-when .sops.yaml --build-when 'data/*' --build-when 'homebrew/*' --build-when 'patches/*' --build-when 'secrets/*' --build-when 'vars/*'
 

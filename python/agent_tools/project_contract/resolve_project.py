@@ -2575,4 +2575,4 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
-# suppress-standard:B17 the contract's validators share this module's check helpers and violation shape, and a split module would import it back
+# suppress-standard:B17 the validators share this module's check helpers and violation shape, so it stays one file

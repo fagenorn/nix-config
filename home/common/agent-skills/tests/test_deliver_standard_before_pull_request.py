@@ -29,8 +29,7 @@ SETUP_READ = ("- verification_before_pull_request: only when bindings.workflow.v
               "for each of its ids its bindings.commands argv, its cwd relative to project.root (. for the root), and any "
               "bindings.workflow.verification_conditions entry for that id (when_changed globs, skip_reason); omit "
               "verification_before_pull_request when the binding is absent or null.")
-MARKER = ("// suppress-standard:B17 the delivery program's phases share module state (setup, verify, the look loop), "
-          "so the program stays one file")
+MARKER = ("// suppress-standard:B17 the program's phases share module state (setup, verify, the look loop), so it stays one file")
 
 
 def setup_with(**members):

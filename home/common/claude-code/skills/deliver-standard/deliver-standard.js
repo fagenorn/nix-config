@@ -3768,4 +3768,4 @@ try {
   released = await unlock()
 }
 return finished.stage === 'done' ? { ...finished, chunked, syncs, verify: verify.results, ...(flakySeen.length ? { flaky: flakySeen } : {}), ...(outsideFixes.length ? { outside_fixes: outsideFixes } : {}), ...released } : { ...finished, ...released }
-// suppress-standard:B17 the delivery program's phases share module state (setup, verify, the look loop), so the program stays one file
+// suppress-standard:B17 the program's phases share module state (setup, verify, the look loop), so it stays one file

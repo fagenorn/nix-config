@@ -12,9 +12,7 @@ TIER = "fast"
 
 POINTER = "/bindings/workflow/verification_before_pull_request"
 # B17 (D8): the resolver's one reasoned size suppression, its last line.
-SIZE_SUPPRESSION = (
-    "# suppress-standard:B17 the contract's validators share this module's check helpers"
-    " and violation shape, and a split module would import it back")
+SIZE_SUPPRESSION = "# suppress-standard:B17 the validators share this module's check helpers and violation shape, so it stays one file"
 
 
 class VerificationBeforePullRequestTest(ResolverTestCase):
