@@ -65,7 +65,7 @@ An issue whose `state` is `CLOSED` (a node with no `state` reads open, another v
 held block is settled (`verify_answer.held_settled`, #1327) raises no review item, and the next reading's
 `inbox.gone` removes one raised before.
 
-An approved look answers a look marker (#1186 and #1211, ADR-console-054 D8). A review criterion whose body line is a
+An approved look answers a look marker (#1186 and #1211, ADR-console-054). A review criterion whose body line is a
 look marker (`look_marker.marker_line`, issue 1138) raises no card when a pull request that a trusted (OWNER or MEMBER)
 live `agent:look` approval of the issue names (`look_marker.look_prs`) reads merged with a head that the latest trusted
 answer naming it approved, or that keeps an earlier approval (issue 1211), judged at the merge commit's first parent
@@ -450,7 +450,7 @@ def _review_item(project_id: str, slug: str, issue: int, held: int, criterion: C
 
 def _look_answered(slug: str, issue: int, comments: Sequence[dict], call: Callable[[list[str]], Any] | None,
                    cancelled: Callable[[], bool]) -> bool:
-    """Whether a pull request a trusted approval names merged under a look approval (ADR-console-054 D8).
+    """Whether a pull request a trusted approval names merged under a look approval (ADR-console-054).
 
     A merged head counts when the latest trusted answer naming it approves it, or when it keeps an earlier
     approval (issue 1211), judged at the merge commit's first parent. One pull is read per pull request a trusted

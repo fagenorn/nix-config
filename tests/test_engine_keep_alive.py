@@ -16,6 +16,7 @@ from agent_tools.delivery import engine_shell
 from tests.engine_guards import standin_guard
 from tests.test_engine_deliver import ANY_SENTENCE, EngineProject, step
 from tests.test_engine_fanout import GROUP, stamps
+from tests.test_engine_session import DRAFT_REPLY, RESULT_NORMAL, agent_step, copy_roles, install_stub
 
 TIER = "integration"  # every case runs `engine deliver` against the stand-in command
 
@@ -274,3 +275,43 @@ class GroupKeepAliveTest(unittest.TestCase):
 class ShapeTest(unittest.TestCase):
     def test_the_keep_alive_timeout_is_twenty_minutes(self):
         self.assertEqual(engine_shell.KEEP_ALIVE_SECONDS, 1200)
+
+
+class MutatingAgentStepTest(unittest.TestCase):
+    """A `mutates` agent step renews the claim before its session starts, once per visit."""
+
+    def run_draft(self, answer: dict) -> tuple[EngineProject, object, list]:
+        project = EngineProject(self)
+        project.env.pop("CLAUDE_ACCOUNT", None)
+        copy_roles(project, "implementer")
+        log = install_stub(project, RESULT_NORMAL)
+        project.answer(answer)
+        draft = agent_step("draft", "implementer", {"drafted": "done", "stuck": "needs-owner"},
+                           mutates=True)
+        directory = project.procedures(
+            [draft], keep_alive=KEEP_ALIVE,
+            stops={"needs-owner": {"need": "owner-decision", "reenter": "draft"},
+                   "step-failed": {"need": "retry", "reenter": "draft"},
+                   "claim-lost": {"need": "owner-decision", "reenter": "draft"}})
+        (directory / "draft.md").write_text("Draft issue {{run.issue}}.\n", encoding="utf-8")
+        (directory / "draft.reply.json").write_text(json.dumps(DRAFT_REPLY), encoding="utf-8")
+        done = project.deliver(directory)
+        return project, done, log
+
+    def test_a_mutating_agent_step_renews_the_claim_before_its_session(self):
+        project, done, _ = self.run_draft(RENEWED)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        events = project.events(project.runs()[0])
+        (kept,) = [e for e in events if e["event"] == "keep_alive_ran"]
+        self.assertEqual((kept["step"], kept["visit"], kept["verdict"]), ("draft", 1, "renewed"))
+        starting = [e for e in events if e["event"] == "session_starting" and e["step"] == "draft"]
+        self.assertEqual(len(starting), 1)
+        self.assertLess(events.index(kept), events.index(starting[0]))
+
+    def test_a_mutating_agent_step_whose_claim_is_not_renewed_ends_at_claim_lost_without_a_session(self):
+        project, done, log = self.run_draft({"stdout": '{"verdict":"not_held"}', "exit": 0})
+        self.assertEqual(done.returncode, 3, done.stdout + done.stderr)
+        self.assertEqual(json.loads(done.stdout)["end"], "claim-lost")
+        events = project.events(project.runs()[0])
+        self.assertEqual([e for e in events if e["event"] == "session_starting"], [])
+        self.assertTrue(not log.exists() or log.read_text(encoding="utf-8") == "")

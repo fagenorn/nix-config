@@ -3,7 +3,9 @@
 `FixtureProject(test_case, world)` copies `tests/fixtures/engine-fixture-project/` into a new
 checkout on `main`, drafts a contract for it from `GuardPolicyWorld.contract`, publishes it to a
 local bare `origin`, and runs `adopt-project plan` then `apply` on it exactly as any project is
-adopted: no contract is written by hand and nothing is registered. When the adoption cannot reach
+adopted: no contract is written by hand and nothing is registered. `review_code=True` makes the
+independent code review supported through the `codex-companion` command, and `conditions` is the
+contract's `verification_conditions`. When the adoption cannot reach
 a ready plan and a commit, the build fails with the command's own output.
 """
 
@@ -32,9 +34,12 @@ class FixtureProject:
     REQUIRED_CHECKS = ["Fixture Checks"]
 
     def __init__(self, test_case: unittest.TestCase, world: GuardPolicyWorld, *,
-                 slug: str = "example/fixture") -> None:
+                 slug: str = "example/fixture", review_code: bool = False,
+                 conditions: dict | None = None) -> None:
         self.world = world
         self.slug = slug
+        self.review_code = review_code
+        self.conditions = conditions
         self.root = world.tmp / "fixture"
         shutil.copytree(SOURCE, self.root)
         world.git(self.root, "init", "--quiet", "-b", "main")
@@ -64,6 +69,12 @@ class FixtureProject:
                                      "-p", "check_*.py"], "cwd": ".", "env": []}
         for review in ("codex-plan-review", "codex-diff-review"):
             commands[review] = {"argv": [sys.executable, "-c", "pass"], "cwd": ".", "env": []}
+        if self.review_code:
+            draft["capabilities"]["review.code"]["support"] = "supported"
+            commands["codex-diff-review"]["argv"] = ["codex-companion", "task", "--fresh", "--reviewer",
+                                                     "diff-review"]
+        if self.conditions is not None:
+            draft["bindings"]["workflow"]["verification_conditions"] = self.conditions
         # The fixture has no devenv and signs nothing: the adoption commit runs plain and unsigned.
         commands.pop("commit-environment")
         draft["bindings"]["vcs"]["commit"].update(signed=False)

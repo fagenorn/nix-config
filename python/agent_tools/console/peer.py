@@ -44,7 +44,7 @@ admits only root (Serve runs in the `tailscaled` service) and the owner.
 
 What the lookup cannot see: a non-root lookup sees only its own user's processes, so another
 user's connection has no holder (not-owner), and a descriptor an owner process hands to another
-user's process is seen only through the owner's holder (ADR-console-076 D6).
+user's process is seen only through the owner's holder (ADR-console-076).
 """
 
 import os
