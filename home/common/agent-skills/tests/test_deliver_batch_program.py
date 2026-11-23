@@ -7311,9 +7311,9 @@ class WaitByPlaceTest(unittest.TestCase):
 
     def test_both_programs_carry_the_same_budget(self):
         def budget(path):
-            text = path.read_text(encoding="utf-8")
+            text = "\n".join(l for l in path.read_text(encoding="utf-8").split("\n") if not l.lstrip().startswith("//"))
             start = text.index("const LAND_WAIT_RETRIES = ")
-            return text[start:text.index("\n}\n", text.index("const waitBudget = ", start)) + 3]
+            return "\n".join(l for l in text[start:text.index("\n}\n", text.index("const waitBudget = ", start)) + 3].split("\n") if not l.lstrip().startswith("//"))
         self.assertIn("return spent <= LAND_WAIT_RETRIES && total + LAND_WAIT_CALL_S <= LAND_WAIT_MAX_S", budget(PROGRAM))
         self.assertEqual(budget(PROGRAM), budget(PROGRAM.with_name("deliver-standard.js")))
 

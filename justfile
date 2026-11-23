@@ -133,6 +133,7 @@ agent-workflow-tests *args:
     home/common/agent-skills/tests/test_host_readiness.py \
     home/common/agent-skills/tests/test_conformance.py \
     home/common/agent-skills/tests/test_conformance_checks.py \
+    home/common/agent-skills/tests/test_conformance_records.py \
     home/common/agent-skills/tests/test_conformance_suppressions.py \
     home/common/agent-skills/tests/test_conformance_registry.py \
     home/common/agent-skills/tests/test_conformance_ruff.py \
@@ -163,6 +164,7 @@ agent-workflow-tests *args:
     tests/test_engine_session_limits.py \
     tests/test_engine_keep_alive.py \
     tests/test_engine_continue.py \
+    tests/test_engine_housekeeping.py \
     tests/test_engine_stop.py \
     tests/test_engine_caps.py \
     tests/test_engine_slots.py \
@@ -247,6 +249,9 @@ agent-workflow-tests *args:
     tests/test_comment_lint.py \
     tests/test_cleanup_issue.py \
     tests/test_ruff_lint.py \
+    tests/test_suite_source.py \
+    tests/test_skipped_test_lint.py \
+    tests/test_copied_test_lint.py \
     tests/test_suppressions.py \
     tests/test_decision_record_wording.py \
     tests/test_module_docstring_wording.py \

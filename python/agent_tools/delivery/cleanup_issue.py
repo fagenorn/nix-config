@@ -108,7 +108,9 @@ from pathlib import Path
 from typing import NamedTuple, Protocol
 from urllib.parse import quote
 
-from agent_tools.delivery import comment_lint, never_rise, ruff_lint, size_lint
+from agent_tools.delivery import (
+    comment_lint, copied_test_lint, never_rise, record_lint, ruff_lint, size_lint,
+    skipped_test_lint)
 from agent_tools.delivery.never_rise import Enforcer, Snapshot, Violation
 from agent_tools.system import forge_api
 
@@ -127,6 +129,15 @@ class CleanupRule:
     batch: int
     guidance: str
 
+
+TEST_BATCH = 5
+TEST_GUIDANCE = {
+    skipped_test_lint.RULE_ID: "Delete each listed skipped or disabled test, or make it run and "
+                               "pass, so that no test is skipped, disabled, focused or excluded.",
+    copied_test_lint.RULE_ID: "Give each listed test's case to the test it copies as data, or "
+                              "change it to check something else, so that no two tests share a "
+                              "body.",
+}
 
 RUFF_BATCH = 10
 RUFF_GUIDANCE = {
@@ -161,14 +172,28 @@ COMMENT_GUIDANCE = {
                               "the comment that holds it.",
 }
 
+RECORD_BATCH = 5
+RECORD_GUIDANCE = {
+    record_lint.RECORD_SIZE_RULE: "Cut each listed decision record to at most 1,500 bytes, "
+                                  "keeping the decision and the alternative it rejected and "
+                                  "dropping the narration.",
+    record_lint.RECORD_FORM_RULE: "Rewrite each listed decision record as its title header, an "
+                                  "optional `**Formerly:**` line and one paragraph: no section "
+                                  "heading, status line, list, quote, fence or second paragraph.",
+}
+
 # The comment enforcers are built without the tracker repository, so B18 counts only the
 # shorthand references here; the never-rise check passes the contract's repository.
 RULES: tuple[CleanupRule, ...] = (
     CleanupRule(size_lint.ENFORCER, 1, B17_GUIDANCE),
+    *(CleanupRule(enforcer, TEST_BATCH, TEST_GUIDANCE[enforcer.rule])
+      for enforcer in (skipped_test_lint.ENFORCER, copied_test_lint.ENFORCER)),
     *(CleanupRule(enforcer, RUFF_BATCH, RUFF_GUIDANCE[enforcer.rule])
       for enforcer in ruff_lint.ENFORCERS),
     *(CleanupRule(enforcer, COMMENT_BATCH, COMMENT_GUIDANCE[enforcer.rule])
       for enforcer in comment_lint.enforcers(None)),
+    *(CleanupRule(enforcer, RECORD_BATCH, RECORD_GUIDANCE[enforcer.rule])
+      for enforcer in record_lint.RECORD_ENFORCERS),
 )
 
 

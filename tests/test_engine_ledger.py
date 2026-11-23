@@ -131,6 +131,20 @@ class RunCreationTest(unittest.TestCase):
                 new_run(tmp)
             self.assertEqual((path / "run.json").read_bytes(), before)
 
+    def test_a_tracker_identity_is_stored_in_run_json_and_read_back_and_must_be_a_string(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = new_run(tmp, tracker="github:example/project")
+            self.assertEqual(engine_ledger.read_run(path)["tracker"], "github:example/project")
+            document = json.loads((path / "run.json").read_text())
+            for bad in (1, "", None, ["github"]):
+                with self.subTest(tracker=bad):
+                    document["tracker"] = bad
+                    (path / "run.json").write_text(compact(document))
+                    with self.assertRaises(LedgerError):
+                        engine_ledger.read_run(path)
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertNotIn("tracker", engine_ledger.read_run(new_run(tmp)))
+
     def test_creation_leaves_no_temporary_directory(self):
         with tempfile.TemporaryDirectory() as tmp:
             with mock.patch("os.rename", side_effect=OSError("cut")):

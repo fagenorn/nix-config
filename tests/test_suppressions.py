@@ -363,6 +363,34 @@ class SizeLintSuppressionTest(unittest.TestCase):
         self.assertEqual((done.returncode, done.stdout), (1, "B17 b.py:1501\nB17 b.py:1501\n"))
 
 
+class TestLintSuppressionTest(unittest.TestCase):
+    def run_lint(self, module, files):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = repo(tmp)
+            for path, text in files.items():
+                write(root, path, text)
+            commit_all(root)
+            done = subprocess.run(
+                [sys.executable, "-m", f"agent_tools.delivery.{module}", "--repo-root", str(root)],
+                capture_output=True, text=True, timeout=60,
+                env=fixture_env({"PYTHONPATH": str(REPO_ROOT / "python")}))
+        return done.returncode, done.stdout
+
+    def test_skipped_test_lint_omits_a_suppressed_test_and_prints_a_bare_marker(self):
+        text = ("import pytest\n@pytest.mark.skip\n"
+                "def test_a():  # " + suppress("B23", "waits on upstream") + "\n    assert 1\n"
+                "@pytest.mark.skip\ndef test_b():  # " + suppress("B23") + "\n    assert 2\n")
+
+        self.assertEqual(self.run_lint("skipped_test_lint", {"tests/test_a.py": text}),
+                         (1, "B23 tests/test_a.py:6\nB23 tests/test_a.py:6\n"))
+
+    def test_copied_test_lint_omits_a_suppressed_copy(self):
+        text = ("def test_a():\n    assert run(1)\n"
+                "def test_b():  # " + suppress("B24", "same case on purpose") + "\n    assert run(1)\n")
+
+        self.assertEqual(self.run_lint("copied_test_lint", {"tests/test_a.py": text}), (0, ""))
+
+
 class SuppressionLintTest(unittest.TestCase):
     PLATFORM_README = (
         "# Standards\n\n## Rule ids\n\n| Layer file | Prefix |\n|---|---|\n"

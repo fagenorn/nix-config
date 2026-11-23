@@ -63,6 +63,7 @@ let
     "conformance" = "project_contract.conformance";
     "console" = "console.console";
     "context-map-lint" = "delivery.context_map_lint";
+    "copied-test-lint" = "delivery.copied_test_lint";
     "diff-scope" = "delivery.diff_scope";
     "engine" = "delivery.engine";
     "fallback-audit" = "project_contract.fallback_audit";
@@ -86,6 +87,7 @@ let
     "ruff-lint" = "delivery.ruff_lint";
     "size-lint" = "delivery.size_lint";
     "skill-lint" = "skill_lint";
+    "skipped-test-lint" = "delivery.skipped_test_lint";
     "sprint" = "console.sprint";
     "standards-lint" = "delivery.standards_lint";
     "verified-tree" = "verification.verified_tree";

@@ -21,7 +21,7 @@ from agent_tools.delivery import context_map_lint, standards_lint
 from agent_tools.project_contract import resolve_project
 
 from .conformance_test_support import (
-    CLEAN_MAP, HERMETIC_ENV, INTEGRATION_REF, REPO_ROOT, ReportAssertions,
+    CLEAN_AREA, CLEAN_MAP, HERMETIC_ENV, INTEGRATION_REF, REPO_ROOT, ReportAssertions,
     commit_all, doctor, fixture, git, load_module, make_root, platform_env, run,
     write_clean_map,
 )
@@ -592,6 +592,37 @@ class NeverRiseCheckTest(ReportAssertions, unittest.TestCase):
             facts = self.red(root)["facts"]
             self.assertEqual(facts["rule"], "B18")
             self.assertEqual(facts["violations"], ["B18 src/ref.py:2"])
+
+    def rise(self, base_files: dict, added: dict, rule: str, line: int) -> None:
+        with fixture() as tmp:
+            root = make_root(tmp)
+            for path, text in base_files.items():
+                write_file(root, path, text)
+            commit_all(root, "base")
+            git(root, "update-ref", INTEGRATION_REF, "HEAD")
+            base = git(root, "rev-parse", "HEAD").strip()
+            for path, text in added.items():
+                write_file(root, path, text)
+            commit_all(root, "one more")
+            self.assertEqual(
+                self.summary(self.red(root)),
+                ["failed", "violation_count_rose", "violations.never_rise.reduce",
+                 {"merge_base": base, "rule": rule, "base_count": 1, "branch_count": 2,
+                  "violations": [f"{rule} tests/test_b.py:{line}"], "rules": [rule]}])
+
+    def test_one_more_skipped_test_turns_ci_red_naming_b23(self):
+        skipped = "import unittest\nclass T(unittest.TestCase):\n    @unittest.skip('x')\n"
+        self.rise({"tests/test_a.py": skipped + "    def test_a(self):\n        self.assertEqual(1, 1)\n"},
+                  {"tests/test_b.py": skipped + "    def test_b(self):\n        self.assertTrue(1)\n"},
+                  "B23", 4)
+
+    def test_one_more_copied_body_turns_ci_red_naming_b24(self):
+        head = "import unittest\nclass T(unittest.TestCase):\n"
+        body = "        self.assertEqual(compute(5), 6)\n"
+        self.rise({"tests/test_a.py": head + "    def test_a(self):\n" + body
+                   + "    def test_b(self):\n" + body},
+                  {"tests/test_b.py": head + "    # a third copy\n    def test_c(self):\n" + body},
+                  "B24", 4)
 
 
 class LintChecksTest(ReportAssertions, unittest.TestCase):

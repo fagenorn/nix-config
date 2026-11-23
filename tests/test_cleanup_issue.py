@@ -250,8 +250,8 @@ class RulesTest(unittest.TestCase):
                           conformance_checks.never_rise_enforcers({"bindings": {}})])
 
 
-COUNTS_OF_ONE_FILE = ("B17 1\n" + "".join(f"PY{n} 0\n" for n in range(6, 14))
-                      + "".join(f"B{n} 0\n" for n in range(18, 21)))
+COUNTS_OF_ONE_FILE = ("B17 1\nB23 0\nB24 0\n" + "".join(f"PY{n} 0\n" for n in range(6, 14))
+                      + "".join(f"B{n} 0\n" for n in range(18, 23)))
 BOT = {"user": {"login": "github-actions[bot]"}, "author_association": "NONE"}
 MARK = "<!-- agent:cleanup v1 rule=B17 -->"
 LISTING = "repos/octo/widgets/issues?state=open&per_page=100"
@@ -465,8 +465,8 @@ class CommandTest(unittest.TestCase):
         commit_all(root)
 
         self.assertEqual(self.call(["counts", "--repo-root", str(root)])[:2],
-                         (0, "B17 0\n" + "".join(f"PY{n} 0\n" for n in range(6, 14))
-                          + "".join(f"B{n} 0\n" for n in range(18, 21))))
+                         (0, "B17 0\nB23 0\nB24 0\n" + "".join(f"PY{n} 0\n" for n in range(6, 14))
+                          + "".join(f"B{n} 0\n" for n in range(18, 23))))
         listed = ["violations", "--repo-root", str(root), "--rule", "B17"]
         self.assertEqual(self.call(listed)[:2], (0, ""))
 

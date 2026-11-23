@@ -229,7 +229,8 @@ class ContinueTest(unittest.TestCase):
         self.assertEqual(second.returncode, 3, second.stdout + second.stderr)
         self.assertEqual(second.stderr, "")
         self.assertEqual(json.loads(second.stdout)["end"], "needs-owner")
-        self.assertEqual([e["event"] for e in project.events(run)], ["stop_reached"])
+        self.assertEqual([e["event"] for e in project.events(run)],
+                         ["transition_taken", "stop_reached"])
 
     def test_the_head_is_read_from_the_project_though_git_dir_names_another_checkout(self):
         project = EngineProject(self)
