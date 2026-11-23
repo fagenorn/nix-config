@@ -1,4 +1,4 @@
-"""Contract tests for the engine's reaping of its sessions (`agent_tools.delivery.engine_session.reaping`, #1517).
+"""Contract tests for the engine's reaping of its sessions (`agent_tools.delivery.engine_session.reaping`).
 
 Covers when a stop closes the session registry and that no session is spawned after it closes.
 """
