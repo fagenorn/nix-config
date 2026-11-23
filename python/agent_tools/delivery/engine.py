@@ -28,7 +28,7 @@ fold of the run's `events.jsonl` derives. It writes nothing and creates no direc
   an event file the ledger refuses.
 
 `engine deliver <issue> [--procedures <dir>]` runs `<dir>/deliver.json` (a procedure of
-`command`, `agent` and `decide` steps; an agent step runs as one headless session through the
+`command`, `agent`, `decide`, `group` and `call` steps; an agent step runs as one headless session through the
 account launcher, graded by its structured reply unless a bound fires, its files kept under the
 run's `sessions/`; a step with no valid structured answer is asked once more on the same session and
 then ends `no-reply`; every step runs within the platform's bounds, and a fired bound is the
@@ -37,7 +37,10 @@ current directory belongs to, to `done` or a stop, or continues the issue's open
 JSON when it ends (`engine_shell` is the contract). Once its run exists it drops the history
 lines older than 180 days and deletes the run directories of issues closed more than 14 days
 ago, never changing its own exit; a run that ends in `done` or a stop appends one line to
-`~/.agents/state/engine/history.jsonl`:
+`~/.agents/state/engine/history.jsonl`. A `group` step runs
+its members beside each other; a `call` step runs a child procedure once per item as child runs of
+their own (a `run.json` with a `parent`), never more than `parallel` at once, and admits no further
+child once one faults; `engine status` reads the root run, never a child:
 
 - exit 0: `{"detail", "end": "done", "need": null, "run"}`;
 - exit 3: `{"detail", "end": <stop name>, "need": <stop need>, "run"}`; the end may be the
@@ -120,7 +123,8 @@ def build_parser() -> argparse.ArgumentParser:
     stop_parser.add_argument("issue", type=_issue_number)
     stop_parser.add_argument("--project")
     deliver_parser = commands.add_parser(
-        "deliver", help="run a procedure of command, agent and decide steps to done or a stop")
+        "deliver",
+        help="run a procedure of command, agent, decide, group and call steps to done or a stop")
     deliver_parser.add_argument("issue", type=_issue_number)
     deliver_parser.add_argument("--procedures", type=Path, default=PROCEDURES_DIR)
     return parser

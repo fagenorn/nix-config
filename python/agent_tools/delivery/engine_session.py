@@ -63,7 +63,13 @@ a session is a process tree and ending it means killing the group, which a
 SIGTERM to the engine (turned into `SystemExit` while the session runs) and any
 other exception, `engine_stop.Stopped` from a polled `stop` included, both do; the
 kill reaps the launcher and closes the pipes without waiting for EOF, so a descendant
-outside the group that holds a pipe cannot hold the engine. Its `timeout` is the wall bound, counted from the spawn
+outside the group that holds a pipe cannot hold the engine. A session started off the main thread (a group
+member's, a child walk's) cannot install that handler, so it is registered from its spawn until it is
+reaped, and `reaping` (held by the main thread while it waits for such sessions) turns a
+SIGTERM or any other stop in the main thread into a kill of every registered group and closes
+the registry: after that `launch` starts no session and `ending()` is true. `ending()` is true
+as soon as the interpreter has taken a SIGTERM (`reaping` installs a wakeup descriptor), before the
+main thread has run the handler. The `timeout` of `launch` is the wall bound, counted from the spawn
 (so the time `on_start` takes is inside it, and the deadline is armed, as a `Watchdog` thread, before
 `on_start` runs, so a stalled `on_start` cannot keep the group past it): a session past it gets SIGTERM to
 its whole group, then `GRACE_SECONDS` for the group (not only the launcher) to
@@ -88,12 +94,14 @@ This module imports no `engine_core`.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import math
 import os
 import re
 import signal
 import subprocess
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -404,6 +412,89 @@ def _terminate(signum: int, frame: object) -> None:
     raise SystemExit(128 + signum)
 
 
+_registry = threading.Lock()
+_live: set[int] = set()
+_closed = False
+_wakeup_read: int | None = None
+
+
+def _sigterm_taken() -> bool:
+    """True once the interpreter has taken a SIGTERM that `_terminate` has not yet run for.
+
+    The interpreter writes each signal number it takes to the wakeup descriptor `reaping`
+    installs, from any thread; the caller holds `_registry`.
+    """
+    if _wakeup_read is None:
+        return False
+    try:
+        return signal.SIGTERM in os.read(_wakeup_read, 64)
+    except BlockingIOError:
+        return False
+
+
+def _is_closed() -> bool:
+    """Whether the registry is closed, closing it on a SIGTERM already taken; the caller holds `_registry`."""
+    global _closed
+    if not _closed and _sigterm_taken():
+        _closed = True
+    return _closed
+
+
+def ending() -> bool:
+    """True once the registry is closed, by `reaping` or by a SIGTERM taken: no session starts after that."""
+    with _registry:
+        return _is_closed()
+
+
+def _reap() -> None:
+    """Close the registry and kill every registered session's process group."""
+    global _closed
+    with _registry:
+        _closed = True
+        live = list(_live)
+    for pid in live:
+        try:
+            os.killpg(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+
+@contextlib.contextmanager
+def reaping():
+    """Turn SIGTERM into `SystemExit` while the main thread waits, and reap every live session.
+
+    A stop that is not an `Exception` leaving the block in the main thread closes the registry and
+    kills every session's process group before it propagates; the replaced handler is restored.
+    """
+    global _wakeup_read
+    try:
+        previous = signal.signal(signal.SIGTERM, _terminate)
+        installed = True
+    except ValueError:  # not the main thread: no handler can be installed
+        previous, installed = None, False
+    if installed:
+        read_end, write_end = os.pipe()
+        os.set_blocking(read_end, False)
+        os.set_blocking(write_end, False)
+        previous_wakeup = signal.set_wakeup_fd(write_end, warn_on_full_buffer=False)
+        _wakeup_read = read_end
+    try:
+        yield
+    except Exception:
+        raise
+    except BaseException:
+        if threading.current_thread() is threading.main_thread():
+            _reap()
+        raise
+    finally:
+        if installed:
+            signal.signal(signal.SIGTERM, previous if previous is not None else signal.SIG_DFL)
+            signal.set_wakeup_fd(previous_wakeup)
+            _wakeup_read = None
+            os.close(read_end)
+            os.close(write_end)
+
+
 def session_environment(environ: Mapping[str, str]) -> dict[str, str]:
     """The environment of a session: the caller's, without its config dir, with the host-settings switch."""
     env = {key: value for key, value in environ.items() if key != "CLAUDE_CONFIG_DIR"}
@@ -484,18 +575,25 @@ def launch(argv: Sequence[str], cwd: str, prompt: str, *,
     process = None
     timed_out = False
     try:
-        if stop is not None and stop():
-            raise engine_stop.Stopped
-        try:
-            process = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.PIPE,
-                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                       start_new_session=True,
-                                       env=session_environment(os.environ if env is None else env))
-        except OSError as error:
-            if deferred:  # no group to end, but the engine was told to stop
-                raise SystemExit(128 + deferred[0])
-            return Launched(NOT_STARTED, b"", f"{error}\n".encode("utf-8", "replace"),
-                            time.monotonic() - started)
+        # The registry stays locked from the check to the registration, so a close of the registry
+        # either comes first (nothing starts) or finds this session registered and kills it.
+        with _registry:
+            if _is_closed():
+                return Launched(NOT_STARTED, b"", b"the engine is ending\n",
+                                time.monotonic() - started)
+            if stop is not None and stop():
+                raise engine_stop.Stopped
+            try:
+                process = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.PIPE,
+                                           stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                           start_new_session=True,
+                                           env=session_environment(os.environ if env is None else env))
+            except OSError as error:
+                if deferred:  # no group to end, but the engine was told to stop
+                    raise SystemExit(128 + deferred[0])
+                return Launched(NOT_STARTED, b"", f"{error}\n".encode("utf-8", "replace"),
+                                time.monotonic() - started)
+            _live.add(process.pid)
         if previous is not None:  # the deferred signals end here: from now on the group is owned
             signal.signal(signal.SIGTERM, _terminate)
             if deferred:
@@ -525,6 +623,9 @@ def launch(argv: Sequence[str], cwd: str, prompt: str, *,
             engine_stop.end_group(process)
         raise
     finally:
+        if process is not None:
+            with _registry:
+                _live.discard(process.pid)
         if previous is not None:
             signal.signal(signal.SIGTERM, previous)
     return Launched(process.returncode, stdout, stderr, time.monotonic() - started, timed_out)
