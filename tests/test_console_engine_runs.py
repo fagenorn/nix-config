@@ -19,6 +19,7 @@ from agent_tools.delivery import engine, engine_ledger, procedure_check
 from agent_tools.delivery.engine_ledger import RunState
 
 from . import console_test_support as support
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
 TIER = "fast"
 
