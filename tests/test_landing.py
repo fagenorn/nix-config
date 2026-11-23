@@ -205,6 +205,11 @@ def check_run(name: str, status: str = "COMPLETED", conclusion: str | None = "SU
     return {"__typename": "CheckRun", "name": name, "status": status, "conclusion": conclusion}
 
 
+def stamped(entry: dict, clock: str, workflow: str = "Fixture", started: str | None = None) -> dict:
+    """The entry as the rollup carries it: `startedAt` (`clock` on 2026-11-06 unless `started`) and `workflowName`."""
+    return {**entry, "startedAt": started or f"2026-11-06T{clock}Z", "workflowName": workflow}
+
+
 def status_context(name: str, state: str) -> dict:
     return {"__typename": "StatusContext", "context": name, "state": state}
 
@@ -233,6 +238,21 @@ class ChecksTest(unittest.TestCase):
                  ["Fixture Checks"]),
                 ("one red of two runs", [check_run("Fixture Checks"),
                                          check_run("Fixture Checks", conclusion="FAILURE")], "red",
+                 ["Fixture Checks"]),
+                ("re-run green", [stamped(check_run("Fixture Checks", conclusion="FAILURE"), "10:00:00"),
+                                  stamped(check_run("Fixture Checks"), "10:05:00")], "green", None),
+                ("re-run red", [stamped(check_run("Fixture Checks"), "10:00:00"),
+                                stamped(check_run("Fixture Checks", conclusion="FAILURE"), "10:05:00")],
+                 "red", ["Fixture Checks"]),
+                ("tie stays judged", [stamped(check_run("Fixture Checks", conclusion="FAILURE"), "10:00:00"),
+                                      stamped(check_run("Fixture Checks"), "10:00:00")], "red",
+                 ["Fixture Checks"]),
+                ("another workflow's red stays", [
+                    stamped(check_run("Fixture Checks", conclusion="FAILURE"), "10:00:00", "Other"),
+                    stamped(check_run("Fixture Checks"), "10:05:00")], "red", ["Fixture Checks"]),
+                ("unreadable start stays", [stamped(check_run("Fixture Checks", conclusion="FAILURE"),
+                                                    "10:00:00", started="0001-01-01T00:00:00Z"),
+                                            stamped(check_run("Fixture Checks"), "10:05:00")], "red",
                  ["Fixture Checks"]),
                 ("running", [check_run("Fixture Checks", status="IN_PROGRESS", conclusion=None)], "pending",
                  None),

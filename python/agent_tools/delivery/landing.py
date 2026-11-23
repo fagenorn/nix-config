@@ -43,7 +43,9 @@ rollup every `CHECK_POLL_SECONDS` for at most `CHECK_BOUND_SECONDS`: `green`, `r
 names), `pending`, `moved` (the rollup was read at another head, `remote`) or `error`. A `CheckRun`
 is green when it is `COMPLETED` with conclusion `SUCCESS`, `SKIPPED` or `NEUTRAL`, a `StatusContext`
 when its state is `SUCCESS`. With required checks declared in the contract each must be named by an
-entry and every entry naming it green; with none declared every entry counts and one is needed.
+entry and every entry naming it green; with none declared every entry counts and one is needed. A check is judged
+by its latest runs only: an entry is skipped when another of the same name, type and `workflowName`
+has a strictly later readable `startedAt` (the guard's rule; a tie or an unreadable one stays).
 
 `criteria_close(body)` and `placement(repo_root, issue)` are the policy the engine's later
 steps import: whether the issue's criteria let a pull request close it, and the branch, the
@@ -60,6 +62,7 @@ import subprocess
 import sys
 import time
 from contextlib import contextmanager
+from datetime import datetime
 from collections.abc import Iterator, Mapping
 from pathlib import Path
 
@@ -75,6 +78,8 @@ CHECK_BOUND_SECONDS = 3000
 CHECK_FIELDS = "headRefOid,statusCheckRollup"
 GREEN_CONCLUSIONS = ("SUCCESS", "SKIPPED", "NEUTRAL")
 UNSETTLED_STATES = ("PENDING", "EXPECTED")
+# GitHub's `YYYY-MM-DDTHH:MM:SSZ`, a year from 1970 on (the guard's `ROLLUP_STARTED_AT_PATTERN`).
+STARTED_AT = re.compile(r"^(19[7-9][0-9]|[2-9][0-9]{3})-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
 LOCK_HELD = ("already_held", "moved")
 # The poll's clock and sleep, module level so a test can move time (as forge_land_lock does).
 monotonic = time.monotonic
@@ -317,13 +322,46 @@ def _entry_state(entry: dict) -> str:
     return "pending" if state in UNSETTLED_STATES or not isinstance(state, str) else "red"
 
 
+def _started(entry: dict) -> str | None:
+    """The entry's `startedAt` when it is a readable UTC instant from 1970 on, else None."""
+    started = entry.get("startedAt")
+    if isinstance(started, str) and STARTED_AT.match(started):
+        try:
+            datetime.strptime(started, "%Y-%m-%dT%H:%M:%SZ")
+        except ValueError:
+            return None
+        return started
+    return None
+
+
+def _latest_runs(entries: list[dict]) -> list[dict]:
+    """The entries of one check that no later run supersedes: the guard's rule (its `latest_runs`).
+
+    An entry drops only when another of its group (same type and string `workflowName`) has a
+    strictly later readable `startedAt` and its own is readable; a tie and an unstamped entry stay."""
+    def group(entry: dict) -> tuple:
+        workflow = entry.get("workflowName")
+        return entry.get("__typename"), workflow if isinstance(workflow, str) else None
+
+    latest: dict[tuple, str] = {}
+    for entry in entries:
+        stamp = _started(entry)
+        if stamp is not None and (group(entry) not in latest or stamp > latest[group(entry)]):
+            latest[group(entry)] = stamp
+    return [entry for entry in entries
+            if _started(entry) is None or _started(entry) == latest[group(entry)]]
+
+
 def _rollup_reading(rollup: object, declared: list[str]) -> tuple[str, list[str]]:
-    """(`green`, `red` or `pending`, the names of the failing checks) of one rollup read."""
+    """(`green`, `red` or `pending`, the names of the failing checks) of one rollup read.
+
+    Each check is judged by its latest runs only, as the guard's floor judges it."""
     if not isinstance(rollup, list) or not all(_entry_name(entry) for entry in rollup):
         raise Failure("payload_invalid", "the check rollup is not a list of named checks")
-    groups: dict[str, list[str]] = {}
+    entries: dict[str, list[dict]] = {}
     for entry in rollup:
-        groups.setdefault(_entry_name(entry), []).append(_entry_state(entry))
+        entries.setdefault(_entry_name(entry), []).append(entry)
+    groups = {name: [_entry_state(entry) for entry in _latest_runs(runs)] for name, runs in entries.items()}
     if declared:
         groups = {name: groups.get(name, ["pending"]) for name in declared}
     failing = sorted(name for name, states in groups.items() if "red" in states)
