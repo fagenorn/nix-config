@@ -19,11 +19,14 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.delivery import engine_commands, engine_ledger, engine_session, engine_shell
+from agent_tools.delivery import (
+    engine_commands, engine_ledger, engine_session, engine_shell, engine_stop,
+)
 from tests.test_engine_deliver import EngineProject, step
 from tests.test_engine_session import (
     DRAFT_REPLY, RESULT_NORMAL, canned_result, copy_roles, install_stub,
 )
+from tests.test_engine_slots import held_slots
 
 TIER = "integration"
 
@@ -785,6 +788,186 @@ class GroupSessionTest(unittest.TestCase):
             self.assertTrue((run / "sessions" / f"{name}.1.json").is_file(), name)
             self.assertEqual([e["outcome"] for e in graded(events, name)], ["no-reply"])
         self.assertEqual([e["outcome"] for e in graded(events, "reviews")], ["blocked"])
+
+
+class GroupQuotaTest(unittest.TestCase):
+    """A member's `quota-wait` and an engine stop inside a group (#1517 with #1524, #1525)."""
+
+    def deliver_with(self, out: dict[str, str], *, publish: bool = False):
+        """Deliver REVIEWS in process; each member's launch is `fake`: the members named in
+        `out` find every account out, the rest answer after the quota members have returned
+        and a quarter second more, publishing an engine stop in that window when `publish`."""
+        project = EngineProject(self)
+        project.env.pop("CLAUDE_ACCOUNT", None)
+        copy_roles(project, "reviewer", "reviewer-lite")
+        directory = with_session_files(project.procedures(REVIEWS()))
+        reply = canned_result()
+        returned, published = threading.Semaphore(0), []
+
+        def fake(argv, cwd, prompt, *, on_start, timeout=None, env=None, stop=None):
+            name = "ra" if argv[-1].endswith("ra.1.system.md") else "rb"
+            on_start(os.getpid())
+            answer = Path(env[engine_session.ANSWER_ENV])
+            if name in out:
+                answer.write_text(json.dumps({"all_out": True, "resumes_at": out[name]}))
+                returned.release()
+                return engine_session.Launched(engine_session.ALL_OUT_EXIT, b"", b"", 0.0)
+            for _ in out:
+                returned.acquire()
+            time.sleep(0.25)
+            if publish:
+                (run,) = project.runs()
+                published.append(engine_shell.request_stop(run))
+                if stop():
+                    raise engine_stop.Stopped
+            answer.write_text(json.dumps({"account": "stub"}))
+            return engine_session.Launched(0, reply, b"", 0.1)
+
+        with project.inside(), mock.patch.object(engine_session, "launch", fake):
+            code, line = engine_shell.deliver(1517, directory)
+        (run,) = project.runs()
+        return code, line, project.events(run), run, published
+
+    def test_a_members_quota_wait_is_the_last_event_of_the_run_after_the_running_sibling_ends(self):
+        code, line, events, run, _ = self.deliver_with({"ra": "2030-03-17T17:46:40Z"})
+
+        self.assertEqual((code, line["end"]), (3, "quota-wait"))
+        stops = [e for e in events if e["event"] == "stop_reached"]
+        self.assertEqual([(e["step"], e["stop"]) for e in stops], [("ra", "quota-wait")])
+        self.assertEqual(events[-1]["event"], "stop_reached")
+        self.assertIn("session_answered", [e["event"] for e in events[:-1] if e.get("step") == "rb"])
+
+    def test_two_members_out_of_every_account_record_one_quota_wait_stop(self):
+        code, line, events, run, _ = self.deliver_with({"ra": None, "rb": None})
+
+        self.assertEqual((code, line["end"]), (3, "quota-wait"))
+        self.assertEqual([e["step"] for e in events if e["event"] == "stop_reached"], ["ra"])
+        self.assertEqual(events[-1]["event"], "stop_reached")
+
+    def test_a_stop_published_while_a_member_waits_on_quota_is_honored_once_and_leaves_no_request(self):
+        code, line, events, run, published = self.deliver_with({"ra": None}, publish=True)
+
+        self.assertEqual(len(published), 1)
+        self.assertIsNotNone(published[0], "the request was refused: the run had already ended")
+        self.assertEqual((code, line["end"]), (3, engine_stop.STOPPED_BY_REQUEST))
+        stops = [e for e in events if e["event"] == "stop_reached"]
+        self.assertEqual([e["stop"] for e in stops], [engine_stop.STOPPED_BY_REQUEST])
+        self.assertEqual(events[-1]["event"], "stop_reached")
+        self.assertFalse(engine_stop.request_path(run).exists())
+
+
+class ScopeTest(unittest.TestCase):
+    """What a group's members and a call's child runs share with the root run (#1517 with
+    #1522, #1524, #1525): its stop request, its agent slots, its tracker."""
+
+    def setUp(self) -> None:
+        self.project = EngineProject(self)
+        self.project.env.pop("CLAUDE_ACCOUNT", None)
+        copy_roles(self.project, "reviewer", "reviewer-lite")
+
+    def deliver_call(self, launch) -> tuple[int, dict]:
+        """Deliver a call of three one-session child runs in process, one at a time."""
+        directory = self.project.procedures(FAN("standin-items", 1), children={
+            "fan-child": child([
+                {"id": "look", "stage": "building", "kind": "agent", "role": "reviewer",
+                 "prompt": "item.md", "reply": "draft.reply.json", "outcome_from": "status",
+                 "in": ["run.item"],
+                 "on": {"drafted": "done", "stuck": "child-stop", "no-reply": "child-stop",
+                        "out-of-bounds": "child-stop"}}])})
+        (directory / "item.md").write_text("Review item {{run.item}}.\n", encoding="utf-8")
+        (directory / "draft.reply.json").write_text(json.dumps(DRAFT_REPLY), encoding="utf-8")
+        return self.deliver(directory, launch)
+
+    def deliver(self, directory: Path, launch) -> tuple[int, dict]:
+        with self.project.inside(), mock.patch.object(engine_session, "launch", launch):
+            return engine_shell.deliver(1517, directory)
+
+    @staticmethod
+    def answer(env, document: dict) -> None:
+        Path(env[engine_session.ANSWER_ENV]).write_text(json.dumps(document))
+
+    def test_a_child_that_ends_at_quota_wait_makes_the_call_stop_there_after_the_child_recorded_its_own(self):
+        def launch(argv, cwd, prompt, *, on_start, timeout=None, env=None, stop=None):
+            on_start(os.getpid())
+            self.answer(env, {"all_out": True, "resumes_at": None})
+            return engine_session.Launched(engine_session.ALL_OUT_EXIT, b"", b"", 0.0)
+
+        code, line = self.deliver_call(launch)
+
+        self.assertEqual((code, line["end"]), (3, "quota-wait"))
+        (root,) = roots(self.project)
+        (kid,) = children_of(self.project)
+        events = self.project.events(root)
+        self.assertEqual([(e["step"], e["stop"]) for e in events if e["event"] == "stop_reached"],
+                         [("fan", "quota-wait")])
+        self.assertEqual(events[-1]["event"], "stop_reached")
+        self.assertEqual([(e["step"], e["stop"]) for e in self.project.events(kid)
+                          if e["event"] == "stop_reached"], [("look", "quota-wait")])
+
+    def test_a_stop_published_while_a_child_runs_ends_the_child_and_the_call_once_and_leaves_no_request(self):
+        published = []
+
+        def launch(argv, cwd, prompt, *, on_start, timeout=None, env=None, stop=None):
+            on_start(os.getpid())
+            (root,) = roots(self.project)
+            published.append(engine_shell.request_stop(root))
+            if stop():
+                raise engine_stop.Stopped
+            self.answer(env, {"account": "stub"})
+            return engine_session.Launched(0, canned_result(), b"", 0.1)
+
+        code, line = self.deliver_call(launch)
+
+        self.assertEqual(len(published), 1)
+        self.assertIsNotNone(published[0])
+        self.assertEqual((code, line["end"]), (3, engine_stop.STOPPED_BY_REQUEST))
+        (root,) = roots(self.project)
+        (kid,) = children_of(self.project)
+        for run in (root, kid):
+            events = self.project.events(run)
+            self.assertEqual([e["stop"] for e in events if e["event"] == "stop_reached"],
+                             [engine_stop.STOPPED_BY_REQUEST], run.name)
+            self.assertEqual(events[-1]["event"], "stop_reached", run.name)
+        self.assertFalse(engine_stop.request_path(root).exists())
+
+    def test_the_sessions_of_group_members_and_of_child_runs_hold_the_slots_of_the_root_run(self):
+        held: list[tuple[str, int, bool]] = []
+        both = threading.Barrier(2, timeout=30)
+
+        def launch(argv, cwd, prompt, *, on_start, timeout=None, env=None, stop=None):
+            on_start(os.getpid())
+            if argv[-1].endswith(("ra.1.system.md", "rb.1.system.md")):
+                both.wait()  # both members are in their launch at once
+            (root,) = roots(self.project)
+            held.append((argv[-1].rsplit("/", 1)[-1], held_slots(root),
+                         any((kid / "slots").exists() for kid in children_of(self.project))))
+            self.answer(env, {"account": "stub"})
+            return engine_session.Launched(0, canned_result(), b"", 0.1)
+
+        code, line = self.deliver(with_session_files(self.project.procedures(REVIEWS())), launch)
+        self.assertEqual(code, 0, line)
+        self.assertEqual([count for _, count, _ in held], [2, 2])
+        self.assertFalse(any(kid for _, _, kid in held))
+
+        held.clear()
+        project = self.project = EngineProject(self)
+        project.env.pop("CLAUDE_ACCOUNT", None)
+        copy_roles(project, "reviewer")
+        code, line = self.deliver_call(launch)
+        self.assertEqual(code, 0, line)
+        self.assertEqual([(count, kid) for _, count, kid in held], [(1, False)] * 3)
+
+    def test_a_child_run_records_the_tracker_of_its_root_run(self):
+        project = self.project
+        done = project.deliver(project.procedures(FAN("standin-items", 2),
+                                                  children=fan_children()), issue=1517)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        (root,) = roots(project)
+        self.assertIn("tracker", run_document(root))
+        kids = children_of(project)
+        self.assertEqual(len(kids), 3)
+        for kid in kids:
+            self.assertEqual(run_document(kid)["tracker"], run_document(root)["tracker"])
 
 
 def alive(pid: int) -> bool:

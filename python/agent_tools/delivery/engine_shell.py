@@ -517,11 +517,12 @@ class _Scope:
 
 
 class _Quota(Exception):
-    """A group member's session or a child run ended at the `quota-wait` stop; `line` is its result line."""
+    """A group member's session or a child run ended at the `quota-wait` stop, which the group
+    or the call records once its members have ended; `step` is the member that hit it, else None."""
 
-    def __init__(self, line: dict) -> None:
-        super().__init__(line["detail"])
-        self.line = line
+    def __init__(self, detail: str, step: str | None = None) -> None:
+        super().__init__(detail)
+        self.detail, self.step = detail, step
 
 
 def _walk(run_dir: Path, table: CommandTable, scope: _Scope) -> tuple[int, dict]:
@@ -589,7 +590,7 @@ def _walk(run_dir: Path, table: CommandTable, scope: _Scope) -> tuple[int, dict]
             except engine_stop.Stopped:
                 return _stopped(run_dir, action.step)
             except _Quota as quota:
-                return _quota_ended(run_dir, action.step, quota.line, stop)
+                return _quota_ended(run_dir, action.step, quota, stop)
             ran += len(action.members)
         elif isinstance(action, engine_core.RunCall):
             try:
@@ -597,7 +598,7 @@ def _walk(run_dir: Path, table: CommandTable, scope: _Scope) -> tuple[int, dict]
             except engine_stop.Stopped:
                 return _stopped(run_dir, action.step)
             except _Quota as quota:
-                return _quota_ended(run_dir, action.step, quota.line, stop)
+                return _quota_ended(run_dir, action.step, quota, stop)
         else:
             raise Fault(f"step {action.step} needs {type(action).__name__}, "
                         "which the engine does not run yet")
@@ -785,7 +786,7 @@ def _member(run_dir: Path, table: CommandTable, step: dict,
     if isinstance(action, engine_core.StartSession):
         stopped = _visit_session(run_dir, table.root, step, action, scope, member=True)
         if stopped is not None:
-            raise _Quota(stopped[1])
+            raise _Quota(stopped[1]["detail"], step["id"])
     else:
         _visit(run_dir, table, step, action, scope.stop, member=True)
 
@@ -857,7 +858,7 @@ def _child(run_dir: Path, table: CommandTable, run: dict, step: dict,
             raise
         _, line = _walk(child_dir, table, scope)
         if line["end"] == procedure_check.QUOTA_WAIT:
-            raise _Quota(line)
+            raise _Quota(line["detail"])
         if line["end"] == engine_stop.STOPPED_BY_REQUEST:
             raise engine_stop.Stopped
         return {"end": line["end"], "item": item, "run": child_dir.name}
@@ -926,12 +927,12 @@ def _call(run_dir: Path, table: CommandTable, run: dict, step: dict,
     _graded(run_dir, step, action.visit, engine_core.call_outcome([entry["end"] for entry in ends]))
 
 
-def _quota_ended(run_dir: Path, step: str, line: dict,
+def _quota_ended(run_dir: Path, step: str, quota: _Quota,
                  stop: Callable[[], bool]) -> tuple[int, dict]:
-    """The `quota-wait` stop of a group or a call: a member's session recorded it in this run, a child's is recorded here."""
-    if line["run"] == run_dir.name:
-        return EXIT_STOP, line
-    return _stop(run_dir, step, procedure_check.QUOTA_WAIT, QUOTA_NEED, line["detail"], stop)
+    """The `quota-wait` stop of a group or a call, recorded once its members or children have
+    ended, so it is the run's last event; a member's step names it, else the group's or call's."""
+    return _stop(run_dir, quota.step or step, procedure_check.QUOTA_WAIT, QUOTA_NEED,
+                 quota.detail, stop)
 
 
 def _visit_session(run_dir: Path, root: str, step: dict, action: engine_core.StartSession,
@@ -964,7 +965,8 @@ def _visit_session(run_dir: Path, root: str, step: dict, action: engine_core.Sta
             "session": session, "role": role.name,
             "account": os.environ.get("CLAUDE_ACCOUNT") or "console"})
         launched, reading, stopped, no_reply = _launch_until_answered(
-            run_dir, root, (name, visit, session), prompt, (role, schema, system), scope.stop)
+            run_dir, root, (name, visit, session), prompt, (role, schema, system), scope.stop,
+            defer=member)
     if stopped is not None:
         return stopped
     wall = (launched.wall_seconds if launched.timed_out or reading.wall_seconds is None
@@ -1004,6 +1006,7 @@ def _visit_session(run_dir: Path, root: str, step: dict, action: engine_core.Sta
 def _launch_until_answered(
         run_dir: Path, root: str, visit_of: tuple[str, int, str], prompt: str,
         launch_of: tuple[engine_session.Role, Mapping, Path], stop: Callable[[], bool],
+        defer: bool = False,
 ) -> tuple[engine_session.Launched, engine_session.Reading, tuple[int, dict] | None, bool]:
     """Launch the session, again with `--resume` after each usage limit, after the first other
     API error (once, after `API_RETRY_SECONDS`) and after the first miss (once, with `REASK_PROMPT`),
@@ -1011,7 +1014,7 @@ def _launch_until_answered(
     with the visit's record stored and the wait ended; a miss's launch and its resume are summed in
     the result's measurements. The third member is the `quota-wait` stop (record stored, wait open)
     when no account can answer, the fourth is true for the second API error or miss, the outcome
-    `no-reply`."""
+    `no-reply`. With `defer` the stop is returned unrecorded, for a group member's group to record."""
     name, visit, session = visit_of
     role, schema, system = launch_of
     attempt, limited, waiting, released, retried, no_reply = 1, set(), False, False, False, False
@@ -1035,6 +1038,10 @@ def _launch_until_answered(
     def quota_stop(launched: engine_session.Launched, reading: engine_session.Reading,
                    detail: str) -> tuple:
         record(launched, reading)
+        if defer:
+            line = {"detail": detail, "end": procedure_check.QUOTA_WAIT, "need": QUOTA_NEED,
+                    "run": run_dir.name}
+            return launched, reading, (EXIT_STOP, line), False
         return launched, reading, _stop(run_dir, name, procedure_check.QUOTA_WAIT, QUOTA_NEED,
                                         detail, stop), False
 
