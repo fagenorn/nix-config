@@ -408,6 +408,9 @@ CASES = [
          [("toy", "tally", "unknown_target")]),
     Case("stop_reenters_a_missing_step", editing("toy", _reenter_nowhere),
          [("toy", None, "unknown_target")]),
+    Case("stop_pinned_with_a_non_bool",
+         editing("toy", lambda toy: toy["stops"]["needs-owner"].update(pinned="yes")),
+         [("toy", None, "invalid_field")]),
     Case("unknown_command_id",
          editing("toy", _set(lambda toy: step(toy, "scope"), "command", "nope")),
          [("toy", "scope", "unknown_command")]),
@@ -725,6 +728,12 @@ class ToyProcedureTest(unittest.TestCase):
                     editing("toy", _set(lambda toy: step(toy, "scope"), "holds", value)))
                 code, out, _ = run_check("--procedures", str(directory))
                 self.assertEqual((code, out), (0, SHIPPED_OK))
+
+    def test_a_pinned_stop_is_accepted(self):
+        directory = broken_copy(
+            editing("toy", lambda toy: toy["stops"]["needs-owner"].update(pinned=True)))
+        code, out, _ = run_check("--procedures", str(directory))
+        self.assertEqual((code, out), (0, SHIPPED_OK))
 
 
 class NoReplyOutcomeTest(unittest.TestCase):

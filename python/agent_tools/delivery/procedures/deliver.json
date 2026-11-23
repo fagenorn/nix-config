@@ -23,10 +23,10 @@
     "head-moved": {"need": "owner-decision", "reenter": "landing"},
     "checks": {"need": "owner-decision", "reenter": "landing"},
     "land-contended": {"need": "retry", "reenter": "landing"},
-    "merge": {"need": "owner-decision", "reenter": "landing"},
-    "unreleased-lock": {"need": "owner-decision", "reenter": "landing"},
-    "close-out": {"need": "owner-decision", "reenter": "closing"},
-    "hold": {"need": "owner-decision", "reenter": "closing"}
+    "merge": {"need": "owner-decision", "reenter": "landing", "pinned": true},
+    "unreleased-lock": {"need": "owner-decision", "reenter": "landing", "pinned": true},
+    "close-out": {"need": "owner-decision", "reenter": "closing", "pinned": true},
+    "hold": {"need": "owner-decision", "reenter": "closing", "pinned": true}
   },
   "steps": [
     {"id": "start", "stage": "setup", "kind": "call", "procedure": "setup", "holds": "live",

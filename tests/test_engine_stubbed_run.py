@@ -585,6 +585,47 @@ class CloseOutTest(Landing):
         self.assertFalse(run.worktree_path.exists())
         self.assertEqual(self.branches(run), "")
 
+    def test_a_continue_after_hold_reenters_close_out_and_redoes_no_earlier_step(self):
+        body = ("Add a greet() function.\n\n## Acceptance criteria\n\n- [ ] [code] greet() returns the greeting\n"
+                "- [ ] [evidence] the owner has seen the greeting\n")
+        run = StubbedRun(self, body=body)
+        self.finish(run, "hold", "owner-decision")
+        root = run.runs()[0]
+        before = run.transitions(root)
+        claims = len(self.released_claims(run))
+
+        self.finish(run, "hold", "owner-decision")
+
+        self.assertEqual(len(run.runs()), 1)
+        continued = [e for e in run.events(root) if e["event"] == "run_continued"]
+        self.assertEqual([e["step"] for e in continued], ["closing"])
+        self.assertEqual(run.transitions(root)[len(before):], [("closing", "hold")])
+        self.assertEqual(len(self.released_claims(run)), claims)
+        self.assertEqual(run.claims(), [])
+        self.assertFalse(run.worktree_path.exists())
+        self.assertEqual(run.pulls()[0]["state"], "MERGED")
+        self.assertEqual(len(run.pulls()), 1)
+
+    def test_a_continue_after_a_failed_release_resumes_landing_and_closes_out(self):
+        run = StubbedRun(self, lock_release_fails=True)
+        self.finish(run, "unreleased-lock", "owner-decision")
+        root = run.runs()[0]
+        run.forge.ref_store(run.fixture.slug, run.forge.refs())
+
+        self.finish(run, "done")
+
+        self.assertEqual(len(run.runs()), 1)
+        continued = [e for e in run.events(root) if e["event"] == "run_continued"]
+        self.assertEqual([e["step"] for e in continued], ["landing"])
+        self.assertEqual(run.transitions(root)[-2:], [("landing", "done"), ("closing", "done")])
+        self.assertEqual(len(run.pulls()), 1)
+        self.assertEqual(run.pulls()[0]["state"], "MERGED")
+        self.assertEqual(run.forge.issue()["state"], "closed")
+        self.assertEqual(run.lock_refs(), {})
+        self.assertEqual(run.claims(), [])
+        self.assertFalse(run.worktree_path.exists())
+        self.assertEqual(self.branches(run), "")
+
 
 class CoverageTest(Landing):
     def scenarios(self):
@@ -611,6 +652,9 @@ class CoverageTest(Landing):
         for scenario in self.scenarios():
             run = StubbedRun(self, **scenario)
             run.deliver()
+            if scenario.get("lock_release_fails"):
+                run.forge.ref_store(run.fixture.slug, run.forge.refs())
+                run.deliver()
             for directory in run.runs() + [c for r in run.runs() for c in run.children(r)]:
                 visited |= {e["step"] for e in run.events(directory)
                             if e["event"] in ("step_entered", "transition_taken")}

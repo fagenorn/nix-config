@@ -13,7 +13,8 @@
   },
   "steps": [
     {"id": "renew", "stage": "landing", "kind": "command", "command": "forge-claim", "subcommand": "renew", "holds": "live", "in": ["run.repo", "run.issue", "run.holder"], "on": {"renewed": "prepare", "not_held": "claim-lost", "error": "claim", "refused": "claim"}},
-    {"id": "prepare", "stage": "landing", "kind": "command", "command": "landing", "subcommand": "prepare", "holds": "live", "in": ["run.repo_root", "run.issue", "run.repo"], "on": {"ready": "push", "unverified": "land", "error": "land", "refused": "land"}},
+    {"id": "prepare", "stage": "landing", "kind": "command", "command": "landing", "subcommand": "prepare", "holds": "live", "in": ["run.repo_root", "run.issue", "run.repo"], "on": {"ready": "settled", "unverified": "land", "error": "land", "refused": "land"}},
+    {"id": "settled", "stage": "landing", "kind": "command", "command": "closing", "subcommand": "read", "holds": "live", "in": ["run.repo_root", "run.issue", "run.repo"], "on": {"merged": "unlock-settled", "unmerged": "push", "error": "push", "refused": "push"}},
     {"id": "push", "stage": "landing", "kind": "command", "command": "git-push", "holds": "run", "in": ["run.repo_root", "prepare.branch"], "on": {"ok": "pushed", "failed": "pushed", "refused": "land"}},
     {"id": "pushed", "stage": "landing", "kind": "command", "command": "landing", "subcommand": "pushed", "holds": "live", "in": ["run.repo_root", "prepare.branch", "prepare.head"], "on": {"pushed": "find-pull", "head-moved": "head-moved", "absent": "land", "error": "land", "refused": "land"}},
     {"id": "find-pull", "stage": "landing", "kind": "command", "command": "landing", "subcommand": "pull", "holds": "live", "in": ["run.repo", "prepare.branch", "prepare.integration_branch"], "on": {"open": "opened", "absent": "create", "error": "land", "refused": "land"}},
@@ -30,6 +31,7 @@
     {"id": "unlock-contended", "stage": "landing", "kind": "command", "command": "landing", "subcommand": "unlock", "holds": "live", "in": ["run.repo", "prepare.integration_branch", "prepare.head"], "on": {"released": "land-contended", "unreleased": "unreleased-lock", "refused": "unreleased-lock"}},
     {"id": "unlock-moved", "stage": "landing", "kind": "command", "command": "landing", "subcommand": "unlock", "holds": "live", "in": ["run.repo", "prepare.integration_branch", "prepare.head"], "on": {"released": "head-moved", "unreleased": "unreleased-lock", "refused": "unreleased-lock"}},
     {"id": "unlock-merge", "stage": "landing", "kind": "command", "command": "landing", "subcommand": "unlock", "holds": "live", "in": ["run.repo", "prepare.integration_branch", "prepare.head"], "on": {"released": "merge-not-landed", "unreleased": "unreleased-lock", "refused": "unreleased-lock"}},
-    {"id": "unlock-failed", "stage": "landing", "kind": "command", "command": "landing", "subcommand": "unlock", "holds": "live", "in": ["run.repo", "prepare.integration_branch", "prepare.head"], "on": {"released": "land", "unreleased": "unreleased-lock", "refused": "unreleased-lock"}}
+    {"id": "unlock-failed", "stage": "landing", "kind": "command", "command": "landing", "subcommand": "unlock", "holds": "live", "in": ["run.repo", "prepare.integration_branch", "prepare.head"], "on": {"released": "land", "unreleased": "unreleased-lock", "refused": "unreleased-lock"}},
+    {"id": "unlock-settled", "stage": "landing", "kind": "command", "command": "landing", "subcommand": "unlock", "holds": "live", "in": ["run.repo", "prepare.integration_branch", "prepare.head"], "on": {"released": "done", "unreleased": "unreleased-lock", "refused": "unreleased-lock"}}
   ]
 }

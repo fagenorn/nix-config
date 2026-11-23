@@ -5,8 +5,9 @@ reply schema files `*.reply.json`. A procedure's name is its file stem and match
 JSON: a duplicate key or a non-finite literal makes it unreadable.
 
 Header. A procedure is an object with these members: `format` (the integer 1, the only version number), `inputs` (distinct
-names matching `^[a-z][a-z0-9_]*$`), `stops` (stop name -> object with exactly `need`, one of `NEEDS`, and `reenter`, a step
-id) and `steps` (a non-empty list), all required, and `keep_alive`, optional (a procedure with none runs no keep-alive): an
+names matching `^[a-z][a-z0-9_]*$`), `stops` (stop name -> object with `need`, one of `NEEDS`, and `reenter`, a step
+id, and optional `pinned`, a bool: a continue re-enters a pinned stop's `reenter` step without rewinding to an earlier
+stale result) and `steps` (a non-empty list), all required, and `keep_alive`, optional (a procedure with none runs no keep-alive): an
 object with `command`, a command id, optional `subcommand`, and `in`, a list of distinct `run.<input>` paths, the one
 keep-alive command and where its arguments come from. A procedure naming a `keep_alive` declares a stop `claim-lost`. A stop
 is never named `done`, `exhausted`, `out-of-bounds`, `quota-wait`, `superseded` or like a step. `exhausted` and `out-of-bounds` are reserved:
@@ -351,7 +352,9 @@ def _stops(doc: dict, ids: set[str], found: _Findings) -> None:
         if not isinstance(stop, dict):
             found.add("invalid_field", f"stop {name!r} must be an object.")
             continue
-        _members(stop, ("need", "reenter"), (), found, None, f"stop {name!r}")
+        _members(stop, ("need", "reenter"), ("pinned",), found, None, f"stop {name!r}")
+        if "pinned" in stop and not isinstance(stop["pinned"], bool):
+            found.add("invalid_field", f"stop {name!r} pinned must be a bool.")
         if "need" in stop and stop["need"] not in NEEDS:
             found.add("invalid_field", f"stop {name!r} need must be one of {', '.join(NEEDS)}.")
         if "reenter" in stop and not _is_text(stop["reenter"]):
