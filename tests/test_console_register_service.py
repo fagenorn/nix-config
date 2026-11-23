@@ -590,6 +590,9 @@ class RegisterRunTest(Case):
         status, _, body = self.confirm({"root": str(root), "choice": "register"})
         self.assertEqual((status, body), (204, b""))
         self.assertEqual(self.settled_row(root)["result"], "registered")
+        end = time.monotonic() + 120
+        while time.monotonic() < end and self.view()["registration"] is not None:
+            time.sleep(0.1)
         self.assertIsNone(self.view()["registration"])
         (_, row), = self.rows("registration.ended")[-1:]
         self.assertEqual(row["result"], "registered")
