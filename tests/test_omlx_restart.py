@@ -3,21 +3,27 @@
 Runs `hosts/darwin/eleven-m5/omlx-configure.py` against stub commands and a scratch state
 directory: each restart reason lands in `.restart-needed` right after its mutation, a model
 the declaration does not name is never rewritten, and an equal value is no change.
+Runs `hosts/darwin/eleven-m5/omlx-restart.py` against a stub restart command and a local
+`/health` server: the restart waits while the server holds a model or cannot be read.
 Run: just agent-workflow-tests
 """
 
+import http.server
 import json
 import os
 from pathlib import Path
+import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 
 TIER = "fast"
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIGURE = ROOT / "hosts/darwin/eleven-m5/omlx-configure.py"
+RESTART = ROOT / "hosts/darwin/eleven-m5/omlx-restart.py"
 
 PATCH_APPLIED = """#!/bin/sh
 exit 0
@@ -230,6 +236,170 @@ class ConfigureMarkerTest(unittest.TestCase):
             self.marker_lines(),
             ["settings.json memory/memory_guard_tier", "steering preset P changed"],
         )
+
+
+class HealthHandler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.server.requests += 1
+        body = self.server.body.encode()
+        self.send_response(self.server.status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass
+
+
+IDLE = {"status": "healthy", "engine_pool": {"loaded_count": 0, "model_count": 9}}
+
+
+def serving(count):
+    return {"status": "healthy", "engine_pool": {"loaded_count": count, "model_count": 9}}
+
+
+class RestartGateTest(unittest.TestCase):
+    REASONS = "settings.json memory/memory_guard_tier\nmodel GLM-New added\n"
+
+    def setUp(self):
+        scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        self.root = Path(scratch.name)
+        self.state = self.root / "state"
+        self.state.mkdir()
+        self.marker = self.state / ".restart-needed"
+        self.marker.write_text(self.REASONS)
+        self.calls = self.root / "calls"
+        self.rc = self.root / "rc"
+        self.stub = self.root / "restart"
+        self.stub.write_text(
+            '#!/bin/sh\nhere="$(dirname "$0")"\necho run >> "$here/calls"\n'
+            '[ -e "$here/rc" ] && exit "$(cat "$here/rc")"\nexit 0\n'
+        )
+        self.stub.chmod(0o755)
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), HealthHandler)
+        self.server.requests = 0
+        self.server.status = 200
+        self.server.body = json.dumps(IDLE)
+        thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.server.shutdown)
+        self.url = f"http://127.0.0.1:{self.server.server_address[1]}/health"
+        self.extra = []
+
+    def answer(self, status, body):
+        self.server.status = status
+        self.server.body = body if isinstance(body, str) else json.dumps(body)
+
+    def run_gate(self, url=None):
+        command = [
+            sys.executable, str(RESTART),
+            "--state-dir", str(self.state),
+            "--restart-bin", str(self.stub),
+            "--health-url", url or self.url,
+            *self.extra,
+        ]
+        return subprocess.run(command, text=True, capture_output=True)
+
+    def stub_calls(self):
+        return len(self.calls.read_text().splitlines()) if self.calls.exists() else 0
+
+    def marker_bytes(self):
+        return self.marker.read_bytes()
+
+    def deferral_lines(self, result):
+        return [line for line in result.stderr.splitlines() if line.startswith("oMLX: restart deferred (")]
+
+    def test_a_loaded_model_defers_the_restart_and_reports_it(self):
+        self.answer(200, serving(1))
+        before = self.marker_bytes()
+        result = self.run_gate()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.stub_calls(), 0)
+        self.assertEqual(self.marker_bytes(), before)
+        self.assertEqual(len(result.stderr.splitlines()), 1, result.stderr)
+        (line,) = self.deferral_lines(result)
+        for text in (
+            "1 model loaded",
+            "settings.json memory/memory_guard_tier",
+            "model GLM-New added",
+            "omlx-restart --now",
+        ):
+            self.assertIn(text, line)
+
+    def test_an_idle_server_is_restarted_and_the_marker_cleared(self):
+        result = self.run_gate()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.stub_calls(), 1)
+        self.assertFalse(self.marker.exists())
+        self.assertIn(
+            "oMLX: restarted for: settings.json memory/memory_guard_tier; model GLM-New added",
+            result.stderr,
+        )
+
+    def test_a_server_still_loading_its_pinned_models_defers(self):
+        self.answer(503, {"status": "loading", "engine_pool": {"loaded_count": 0}})
+        before = self.marker_bytes()
+        result = self.run_gate()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.stub_calls(), 0)
+        self.assertEqual(self.marker_bytes(), before)
+        (line,) = self.deferral_lines(result)
+        self.assertIn("pinned models still loading", line)
+
+    def test_a_server_that_is_down_is_restarted(self):
+        with socket.socket() as closed:
+            closed.bind(("127.0.0.1", 0))
+            port = closed.getsockname()[1]
+        result = self.run_gate(url=f"http://127.0.0.1:{port}/health")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.stub_calls(), 1)
+        self.assertFalse(self.marker.exists())
+
+    def test_an_unreadable_health_answer_defers(self):
+        self.answer(200, "not json")
+        before = self.marker_bytes()
+        result = self.run_gate()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.stub_calls(), 0)
+        self.assertEqual(self.marker_bytes(), before)
+        (line,) = self.deferral_lines(result)
+        self.assertIn("server state unknown", line)
+
+    def test_now_restarts_a_serving_server(self):
+        self.answer(200, serving(1))
+        self.extra = ["--now"]
+        result = self.run_gate()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.stub_calls(), 1)
+        self.assertFalse(self.marker.exists())
+
+    def test_a_failed_restart_keeps_the_marker_and_fails(self):
+        self.rc.write_text("3")
+        before = self.marker_bytes()
+        result = self.run_gate()
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(self.marker_bytes(), before)
+        self.assertIn("restart failed (exit 3)", result.stderr)
+
+    def test_no_marker_means_nothing_to_restart(self):
+        self.marker.unlink()
+        result = self.run_gate()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.stub_calls(), 0)
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(self.server.requests, 0)
+
+    def test_an_empty_marker_is_reported_as_an_unrecorded_change(self):
+        self.marker.write_text("")
+        self.answer(200, serving(2))
+        result = self.run_gate()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        (line,) = self.deferral_lines(result)
+        self.assertIn("2 models loaded", line)
+        self.assertIn("pending: unrecorded change.", line)
 
 
 if __name__ == "__main__":
