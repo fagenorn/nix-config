@@ -22,8 +22,8 @@ from pathlib import Path, PurePosixPath
 import subprocess
 
 from agent_tools.delivery import (
-    comment_lint, context_map_lint, host_admission, never_rise, record_lint, ruff_lint,
-    size_lint, standards_lint,
+    comment_lint, context_map_lint, copied_test_lint, host_admission, never_rise, record_lint,
+    ruff_lint, size_lint, skipped_test_lint, standards_lint,
 )
 from agent_tools.project_contract import agent_platform
 from agent_tools.release import release_adapter, release_profile
@@ -778,10 +778,11 @@ def check_standards_lint(context: "Context") -> "Outcome":
 
 
 def never_rise_enforcers(contract: dict) -> tuple[never_rise.Enforcer, ...]:
-    """The size rule, the ruff rules, the comment rules judged against the
+    """The size rule, the test rules, the ruff rules, the comment rules judged against the
     contract's own tracker repository when it authors one, then the record rules."""
     repository = contract["bindings"].get("tracker", {}).get("repo_slug") or None
-    return (size_lint.ENFORCER, *ruff_lint.ENFORCERS, *comment_lint.enforcers(repository),
+    return (size_lint.ENFORCER, skipped_test_lint.ENFORCER, copied_test_lint.ENFORCER,
+            *ruff_lint.ENFORCERS, *comment_lint.enforcers(repository),
             *record_lint.RECORD_ENFORCERS)
 
 

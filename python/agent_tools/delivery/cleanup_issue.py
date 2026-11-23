@@ -108,7 +108,9 @@ from pathlib import Path
 from typing import NamedTuple, Protocol
 from urllib.parse import quote
 
-from agent_tools.delivery import comment_lint, never_rise, record_lint, ruff_lint, size_lint
+from agent_tools.delivery import (
+    comment_lint, copied_test_lint, never_rise, record_lint, ruff_lint, size_lint,
+    skipped_test_lint)
 from agent_tools.delivery.never_rise import Enforcer, Snapshot, Violation
 from agent_tools.system import forge_api
 
@@ -127,6 +129,15 @@ class CleanupRule:
     batch: int
     guidance: str
 
+
+TEST_BATCH = 5
+TEST_GUIDANCE = {
+    skipped_test_lint.RULE_ID: "Delete each listed skipped or disabled test, or make it run and "
+                               "pass, so that no test is skipped, disabled, focused or excluded.",
+    copied_test_lint.RULE_ID: "Give each listed test's case to the test it copies as data, or "
+                              "change it to check something else, so that no two tests share a "
+                              "body.",
+}
 
 RUFF_BATCH = 10
 RUFF_GUIDANCE = {
@@ -175,6 +186,8 @@ RECORD_GUIDANCE = {
 # shorthand references here; the never-rise check passes the contract's repository.
 RULES: tuple[CleanupRule, ...] = (
     CleanupRule(size_lint.ENFORCER, 1, B17_GUIDANCE),
+    *(CleanupRule(enforcer, TEST_BATCH, TEST_GUIDANCE[enforcer.rule])
+      for enforcer in (skipped_test_lint.ENFORCER, copied_test_lint.ENFORCER)),
     *(CleanupRule(enforcer, RUFF_BATCH, RUFF_GUIDANCE[enforcer.rule])
       for enforcer in ruff_lint.ENFORCERS),
     *(CleanupRule(enforcer, COMMENT_BATCH, COMMENT_GUIDANCE[enforcer.rule])
