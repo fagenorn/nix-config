@@ -43,7 +43,7 @@ TEMPLATE = REPO_ROOT / ".agents/project.json"
 
 PR_FIELDS = "state,baseRefName,headRefName,headRefOid,mergeStateStatus,url,statusCheckRollup"
 PROOF_FIELDS = "state,headRefOid"
-LOOK_FIELDS = "title,body,commits,closingIssuesReferences"
+LOOK_FIELDS = "title,body,closingIssuesReferences"
 PLAN_GATED = ('{"message": "Upgrade to GitHub Pro or make this repository public to enable this '
               'feature.", "status": "403"}')
 
@@ -53,6 +53,7 @@ import sys
 
 STATE = {state!r}
 SLUG = {slug!r}
+PR = {pr!r}
 FIELD_LISTS = {fields!r}
 PLAN_GATED = {gated!r}
 
@@ -77,6 +78,10 @@ if len(argv) == 7 and argv[:2] == ["pr", "view"] and argv[3] == "--repo" and arg
         fail("fake gh: lookup down")
     pr = state["prs"][argv[2]]
     print(json.dumps({{name: pr[name] for name in argv[6].split(",")}}))
+elif argv == ["api", "--paginate", "--slurp",
+              "repos/" + SLUG + "/pulls/" + str(PR) + "/commits?per_page=100"]:
+    print(json.dumps([[{{"sha": state["prs"][str(PR)]["headRefOid"],
+                         "commit": {{"message": "bypass proof pr"}}}}]]))
 elif argv == ["api", "repos/" + SLUG + "/branches/main/protection"]:
     print(PLAN_GATED)
     sys.exit(1)
@@ -241,11 +246,10 @@ class BypassProofWorld:
             "statusCheckRollup": [{"__typename": "StatusContext",
                                    "context": bypass_proof.REQUIRED_CHECK, "state": "FAILURE"}],
             "title": "bypass proof", "body": "A pull request whose required check fails on purpose.",
-            "commits": [{"messageHeadline": "bypass proof pr", "messageBody": ""}],
             "closingIssuesReferences": []}}, "releases": [], "guard_lookup_fails": False}
         self.save_state()
         gh = self.bin / "gh"
-        gh.write_text(FAKE_GH.format(python=sys.executable, state=str(self.state_file), slug=SLUG,
+        gh.write_text(FAKE_GH.format(python=sys.executable, state=str(self.state_file), slug=SLUG, pr=PR,
                                      fields=[PROOF_FIELDS, PR_FIELDS, LOOK_FIELDS],
                                      gated=PLAN_GATED), encoding="utf-8")
         gh.chmod(0o755)
