@@ -494,6 +494,14 @@ class ThisRepositoryNodeTest(unittest.TestCase):
         log = Path(directory) / f"{name}.jsonl"
         return [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
 
+    def never_rise_check(self, directory: str) -> dict:
+        """The doctor's never-rise check on this repository, run with the tools in `directory`."""
+        _, by_id = doctor(self, REPO_ROOT, "--offline", env=tools_env(directory))
+        return by_id["verification.violations.never_rise"]
+
+    def assert_never_rise_passed(self, check: dict) -> None:
+        self.assertEqual(check["status"], "passed", check)
+
     def test_doctor_on_this_repository_lints_both_programs_with_both_tools(self) -> None:
         with fixture() as tmp:
             directory = self.recording_tools(tmp)
@@ -501,9 +509,8 @@ class ThisRepositoryNodeTest(unittest.TestCase):
                 hashlib.sha256(node_lint.wrap(git(REPO_ROOT, "show", f"HEAD:{path}")).text
                                .encode()).hexdigest()
                 for path in self.PROGRAMS}
-            _, by_id = doctor(self, REPO_ROOT, "--offline", env=tools_env(directory))
-            self.assertEqual(by_id["verification.violations.never_rise"]["status"], "passed")
-            seen = lambda name, flag: {  # noqa: E731
+            self.assert_never_rise_passed(self.never_rise_check(directory))
+            seen =lambda name, flag: {  # noqa: E731
                 d for call in self.calls(directory, name) if flag(call["argv"]) for d in call["digests"]}
             self.assertLessEqual(expected, seen(
                 "node", lambda argv: argv[:1] == ["--check"]))
@@ -512,11 +519,21 @@ class ThisRepositoryNodeTest(unittest.TestCase):
             self.assertLessEqual(expected, seen(
                 "eslint", lambda argv: node_lint.INLINE_CONFIG in argv))
 
+    def test_the_doctor_test_fails_when_the_doctor_reports_a_broken_tool(self) -> None:
+        broken = {"node": ("exit 3\n", "node_failed"), "eslint": ("exit 2\n", "eslint_failed")}
+        for tool, (script, reason) in broken.items():
+            with self.subTest(tool):
+                check = self.never_rise_check(tools_dir(self, **{tool: script}))
+                self.assertEqual(
+                    [check["status"], check["reason_code"], check["facts"]],
+                    ["failed", "enforcer_failed", {"enforcer": "node-lint", "reason": reason}])
+                with self.assertRaises(AssertionError):
+                    self.assert_never_rise_passed(check)
+
     def test_doctor_on_a_runner_that_takes_over_a_minute_still_completes(self) -> None:
         slowed = {name: f'/bin/sleep 10\nexec {pinned(name)} "$@"\n' for name in ("node", "eslint")}
         directory = tools_dir(self, **slowed)
-        _, by_id = doctor(self, REPO_ROOT, "--offline", env=tools_env(directory))
-        self.assertEqual(by_id["verification.violations.never_rise"]["status"], "passed")
+        self.assert_never_rise_passed(self.never_rise_check(directory))
 
 
 if __name__ == "__main__":
