@@ -94,7 +94,10 @@ revision, an unnamed tracker (not `github`, a slug that is not `owner/repo`, or 
 integration branch), an `origin` that is not the tracker's slug, a projection of
 another kind that holds the workflow's id or target, a lock or `devenv.yaml` that
 cannot take its edit, a kept lock entry that is not the installed revision, a
-branch protection file that cannot take the check. With no cause the plan carries
+branch protection file that cannot take the check, a base commit that tracks any
+file under the artifacts directory (the lock would pin a revision whose own
+Conformance check refuses it; a kept pin that differs from the installed
+revision is judged first, by its own cause). With no cause the plan carries
 a `member`, the one record of what the adoption locks and requires, which the plan
 document publishes as `plan.conformance`; the new bytes of each of the three
 files that change are `contents`, their base bytes `before`, and `projection` says whether the contract gains the workflow's entry.
@@ -149,6 +152,7 @@ PIN_INCOMPATIBLE = "adopt.conformance.pin_incompatible"
 INPUT_UNDECLARABLE = "adopt.conformance.input_undeclarable"
 INPUT_INCOMPATIBLE = "adopt.conformance.input_incompatible"
 PROTECTION_FILE_UNREQUIRED = "adopt.conformance.protection_file_unrequired"
+TRACKED_ARTIFACT = "adopt.conformance.tracked_artifact"
 CONTRACT_REFUSED = "adopt.conformance.contract_refused"
 
 REQUIRED_ORIGIN_MISMATCH = "adopt.required_check.origin_mismatch"
@@ -589,6 +593,17 @@ def plan_conformance(root: Path, base_revision: str, contract_source: dict | Non
             protection_after = require_in_protection_file(inputs(PROTECTION_FILE, protection))
     except Undeclarable as refused:
         causes.append(refused.repair_id)
+    if PIN_INCOMPATIBLE not in causes:
+        # The lock this plan commits pins the installed revision, whose
+        # Conformance check refuses every tracked file under the artifacts
+        # directory; a differing kept pin is judged by its own revision instead.
+        code, tracked = adopt_inspection.run_git(
+            root, "ls-tree", "-r", "--name-only", "-z", base_revision, "--", ".agents/artifacts",
+            local_only=True)
+        if code != 0:
+            raise _git_failed()
+        if tracked:
+            causes.append(TRACKED_ARTIFACT)
     contents: dict[str, bytes] = {}
     before: dict[str, bytes] = {}
     for path, source, after in ((PROTECTION_FILE, protection, protection_after),

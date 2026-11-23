@@ -1,6 +1,6 @@
 # ADR-project-contract-018 — Adoption locks the platform revision and requires Conformance
 
-- **Status:** accepted; D11 amended in place by #1485; D12, D17 and D20 amended in place by #1456
+- **Status:** accepted; D11 amended in place by #1485; D10, D12, D17 and D20 amended in place by #1456
 - **Decided in:** #1454 (per #1413, #1415, #1430)
 
 ## Context
@@ -27,7 +27,7 @@ Adoption stopped at the contract: it moved files, rewrote links and generated pr
 
 **D9. Forge order and outcomes (P6).** Before any mutation apply checks the origin (D13) and reads `required_status_checks`: a 404, or a readable answer listing no context, refuses (D3); `Conformance` already present means no request (`already_required`), unless it is bound to a GitHub App other than Actions, which the generated job cannot satisfy (`adopt.required_check.app_mismatch`). After the commit, the byte proof (D16), the branch proof and the worktree removal, apply writes a pending record and makes the one `POST`. On a failed `POST` it re-reads once: present is success (`added`); a readable answer without the context (an empty list or a 404 included) is a confirmed absence, so apply deletes the adoption branch with a compare-and-delete whose result it reads back and refuses `adopt.required_check.refused` (`adopt.required_check.rollback_failed` when the branch could not be deleted, naming the branch and the commit); a re-read that raises is an unknown outcome, so apply keeps the branch and the record and refuses `adopt.required_check.unknown`. The context is added without an app binding, the shape of the contexts endpoint.
 
-**D10. One ready gate, `conformance-plannable` (P7).** Last in `READY_GATES`, it keeps a plan `draft` when a repository with a `devenv.lock` cannot take the writes. The first failing cause, in order: `adopt.conformance.revision_unknown`, `tracker_unnamed`, `origin_mismatch`, `projection_collides`, `lock_unreadable`, `lock_entry_incompatible`, `pin_incompatible`, `input_undeclarable`, `input_incompatible`, `protection_file_unrequired`, then `contract_refused` from the final contract's scratch resolution (D15).
+**D10. One ready gate, `conformance-plannable` (P7).** Last in `READY_GATES`, it keeps a plan `draft` when a repository with a `devenv.lock` cannot take the writes. The first failing cause, in order: `adopt.conformance.revision_unknown`, `tracker_unnamed`, `origin_mismatch`, `projection_collides`, `lock_unreadable`, `lock_entry_incompatible`, `pin_incompatible`, `input_undeclarable`, `input_incompatible`, `protection_file_unrequired`, `tracked_artifact`, then `contract_refused` from the final contract's scratch resolution (D15). A planned repository whose base commit tracks a file under `.agents/artifacts/` would commit a lock its own Conformance check refuses, unless a kept pin that differs from the installed revision decides first.
 
 **D11. Forge names (P8).** The request targets the authored schema-2 `bindings.tracker.repo_slug`, or for a schema-3 contract the slug derived from the checkout's origin remote (tracker kind `github`) and `bindings.vcs.integration_branch` of the contract the plan writes.
 

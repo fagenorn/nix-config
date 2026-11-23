@@ -420,6 +420,14 @@ class ConformanceAdoptionPlanTest(AdoptTestCase):
             self.assertNotIn(path, touched)
         self.assertEqual(doc["plan"]["plan_id"], documented_plan_id(doc))
         self.assertEqual([gate["status"] for gate in self.gates(doc)], ["passed"])
+        with self.subTest("a tracked artifact is no cause without a lock"):
+            self.fresh_home()
+            root = nix_config_shape_repo(self.home)
+            write(root, ".agents/artifacts/notes/kept-by-a-fixture.md", "# kept\n")
+            commit(root, "track an artifact")
+            doc = self.ready_plan(root)
+            self.assertEqual(doc["plan"]["state"], "ready", doc["plan"]["blockers"])
+            self.assertEqual([gate["status"] for gate in self.gates(doc)], ["passed"])
 
     def test_the_platforms_own_tree_plans_none_of_the_three_writes(self):
         root = self.devenv_repo()
@@ -474,6 +482,42 @@ class ConformanceAdoptionPlanTest(AdoptTestCase):
         doc = self.ready_plan(root)
         self.assertEqual(doc["plan"]["state"], "draft")
         self.assertEqual(self.gates(doc), [conformance_failure(doc, "adopt.conformance.pin_incompatible")])
+
+    def test_a_tracked_artifact_keeps_the_plan_draft(self):
+        root = self.devenv_repo()
+        write(root, ".agents/artifacts/notes/kept-by-a-fixture.md", "# kept\n")
+        commit(root, "track an artifact")
+        code, doc, err = self.plan(root)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(doc["plan"]["state"], "draft")
+        self.assertEqual(self.gates(doc), [conformance_failure(doc, "adopt.conformance.tracked_artifact")])
+        self.assertNotIn("conformance", doc["plan"])
+
+    def test_a_differing_pin_is_judged_by_its_pin_not_by_tracked_artifacts(self):
+        stale = json.loads(locked_lock_text())
+        stale["nodes"]["agent-platform"] = locked_platform_node({**FIXTURE_REVISION, "rev": "1e" * 20})
+        root = self.devenv_repo(lock=json.dumps(stale, indent=2, sort_keys=True), yaml=DEVENV_YAML_DECLARED)
+        write(root, ".agents/artifacts/notes/kept-by-a-fixture.md", "# kept\n")
+        commit(root, "track an artifact")
+        doc = self.ready_plan(root)
+        self.assertEqual(self.gates(doc), [conformance_failure(doc, "adopt.conformance.pin_incompatible")])
+        # The same term keeps a settled tree settled when the host's revision differs.
+        self.fresh_home()
+        root = adopted_repo(self.home)
+        write_devenv(root, lock=locked_lock_text(), yaml=DEVENV_YAML_DECLARED)
+        edit_contract(root, lambda contract: contract["projections"].append(
+            dict(adopt_conformance.PROJECTION_ENTRY)))
+        proc = run_module("agent_tools.project_contract.resolve_project",
+                          ("write-projections", "--repo-root", str(root)),
+                          env={**os.environ, "HOME": str(self.home)})
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        write(root, ".agents/artifacts/notes/kept-by-a-fixture.md", "# kept\n")
+        commit(root, "the settled tree")
+        other = make_home()
+        install_platform_revision(other, {**FIXTURE_REVISION, "rev": "1e" * 20})
+        code, doc, err = self.plan(root, home=other)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(doc["plan"]["outcome"], "no_change", doc["plan"])
 
     def test_the_plan_repeats_the_conformance_member(self):
         root = self.devenv_repo()
