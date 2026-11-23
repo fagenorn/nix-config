@@ -237,9 +237,12 @@ client runs it when a tool call needs a permission and takes the one line it pri
 hook input from stdin and holds only a Bash prompt, a JSON object with `tool_name` `Bash`, a string `session_id`
 and a `tool_input.command` of 1 to `prompt_card.MAX_COMMAND_CHARS` characters (the optional string
 `tool_input.description` goes along), resolving the sprint and secret as `sprint inbox` does. A `tool_input` that
-asks to run outside the sandbox (`dangerouslyDisableSandbox` other than absent, null or false) prints one deny line
+asks to run outside the sandbox (`dangerouslyDisableSandbox` other than absent, null or `false`, `0` included) prints one deny line
 with `prompt_card.SANDBOX_TEXT` and sends nothing: Allow once would approve the whole input, the exception included,
-while the card shows only the command. It sends `POST /api/permission-prompt` with phase `ask` and, when the reply is
+while the card shows only the command. Before asking the console it allows, with the client's allow and no request,
+a Bash prompt that `agent_tools.console.own_reads.allowed` admits with `$CONSOLE_SPRINT_ROOT` and the host's transcript
+stores (a plain `sed -n`, `head`, `tail`, `cat`, `grep` or `wc` read of the session's own saved tool output or the
+manager's project root, #1620, ADR-console-103); anything else goes to the card as before. It sends `POST /api/permission-prompt` with phase `ask` and, when the reply is
 `{"prompt": <n>, "state": <str>, "mac": <hex>}` with a number, repeats phase `wait` every `prompt_card.POLL_SECONDS` while the
 reply is `open` (a failed wait is polled again), up to `prompt_card.HOLD_SECONDS` after the ask: `allowed` prints the
 client's allow decision, `refused` its deny with `prompt_card.OWNER_REFUSED_TEXT`, `closed` its deny with
@@ -252,10 +255,13 @@ denies with the expiry. The secret is never sent: each request carries a fresh `
 under the secret of its other members (`prompt_card.request_auth`), and a reply counts only when its `mac` is the
 console's HMAC under the secret for that nonce, prompt and state (`prompt_card.reply_mac`): whatever else listens on
 the loopback port (another local account's process while the console restarts) learns no secret and has no decision
-honoured. A reply whose `mac` is not that one ends the hold with one deny line with `manager.REFUSAL`. Everything else prints one deny line with
+honoured. A reply whose `mac` is not that one ends the hold with one deny line with `manager.REFUSAL`. A reply
+`{"prompt": null, "state": "unexplained"}` (the console found no reason in the description, #1622) prints one deny line
+with `prompt_card.NO_REASON_TEXT`, which asks the manager to describe the call and run it again, and sends nothing
+further. Everything else prints one deny line with
 `manager.REFUSAL` and sends nothing further: stdin that is not such an object, any other tool, a command that is missing, empty or too long, no
 session, sprint id or secret, a console that is unreachable or answers other than 200 to the ask, a reply that is
-not `{"prompt", "state", "mac"}` and a null `prompt`. It prints exactly one line, always exit 0. The allow carries no rule,
+not `{"prompt", "state", "mac"}` and any other null `prompt`. It prints exactly one line, always exit 0. The allow carries no rule,
 so the deny rules and the `PreToolUse` hooks keep judging the call.
 
 `sprint contract` prints the manager's contract, the document `manager-contract.md` packaged
@@ -290,7 +296,8 @@ from collections.abc import Callable
 from pathlib import Path
 
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
-from agent_tools.console import manager, permit, prompt_card, service, sprints
+from agent_tools.console import (manager, own_reads, permit, project_question_hook, prompt_card,
+                                 service, sprints)
 from agent_tools.console.console import port_number
 
 TIMEOUT_SECONDS = 10
@@ -612,8 +619,10 @@ def run_permit(args: argparse.Namespace) -> int:
     return 0
 
 
-def prompt_hook(text: str) -> tuple[str, str, str | None]:
-    """The session id, Bash command and description (None when absent) of a hook input, else `HookFailure`."""
+def prompt_hook(text: str) -> tuple[str, str, str | None, str | None]:
+    """The session id, Bash command, description and cwd (None when absent or not a string) of a hook input.
+
+    Anything else is `HookFailure`; a request to leave the sandbox is `SandboxRequested`."""
     try:
         document = json.loads(text, object_pairs_hook=reject_duplicate_keys,
                               parse_constant=reject_nonfinite_literal)
@@ -627,10 +636,12 @@ def prompt_hook(text: str) -> tuple[str, str, str | None]:
     if (not isinstance(command, str) or not 0 < len(command) <= prompt_card.MAX_COMMAND_CHARS
             or not isinstance(session, str) or not session):
         raise HookFailure("the hook input has no session_id and a usable tool_input.command")
-    if tool.get("dangerouslyDisableSandbox") not in (None, False):
+    flag = tool.get("dangerouslyDisableSandbox")
+    if not (flag is None or flag is False):
         raise SandboxRequested("the prompt asks to run outside the sandbox")
-    description = tool.get("description")
-    return session, command, description if isinstance(description, str) else None
+    description, cwd = tool.get("description"), document.get("cwd")
+    return (session, command, description if isinstance(description, str) else None,
+            cwd if isinstance(cwd, str) else None)
 
 
 def prompt_reply(text: str, secret: str, sprint: str, nonce: str) -> tuple[int | None, str]:
@@ -670,12 +681,19 @@ def run_prompt(args: argparse.Namespace, *, clock: Callable[[], float] | None = 
     sleep = sleep or time.sleep
     refused = prompt_card.hook_output("deny", manager.REFUSAL)
     try:
-        session, command, description = prompt_hook(sys.stdin.read())
+        session, command, description, cwd = prompt_hook(sys.stdin.read())
+        if own_reads.allowed(command, cwd, session, os.environ.get(manager.ROOT_ENV),
+                             project_question_hook.transcript_dirs(os.environ), os.environ):
+            print(prompt_card.hook_output("allow"))
+            return 0
         sprint, secret = resolve_sprint(args), resolve_secret(args)
         body = {"sprint_id": sprint, "phase": "ask", "session_id": session, "command": command}
         if description is not None:
             body["description"] = description
-        prompt, _ = ask_signed(args.port, sprint, secret, body)
+        prompt, state = ask_signed(args.port, sprint, secret, body)
+        if prompt is None and state == prompt_card.UNEXPLAINED:
+            print(prompt_card.hook_output("deny", prompt_card.NO_REASON_TEXT))
+            return 0
         if prompt is None:
             raise HookFailure("the console holds no card for this prompt")
     except SandboxRequested:

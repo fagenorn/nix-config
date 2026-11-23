@@ -1,0 +1,37 @@
+// Fixture header, line one.
+// Fixture header, line two.
+// Header line three is wide: zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz
+// Fixture header, line four.
+// Fixture header, line five.
+// Fixture header, line six.
+// Fixture header, line seven.
+const x1: number = 1;
+// Kept for ADR-fixture-001.
+const x2: number = 2;
+// Remove once that ships: https://github.com/upstream-owner/upstream-repo/issues/42
+const x3: number = 3;
+// Added to fix #12.
+const x4: number = 4;
+// See https://github.com/fixture-owner/fixture-repo/issues/7
+const x5: number = 5;
+// Five line block, row a.
+// Five line block, row b.
+// Five line block, row c.
+// Five line block, row d.
+// Five line block, row e.
+const x6: number = 6;
+// Six line block, row a.
+// Six line block, row b.
+// Six line block, row c.
+// Six line block, row d.
+// Six line block, row e.
+// Six line block, row f.
+const x7: number = 7;
+// zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz
+const x8: number = 8;
+// zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz
+const x9: number = 9;
+// TODO later
+const x10: number = 10;
+const s: string = "TODO";
+const x11: number = 11;

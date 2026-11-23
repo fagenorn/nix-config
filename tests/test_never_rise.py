@@ -10,7 +10,7 @@ repository selection or forced colour; and a failed git read is no verdict.
 The suite holds `standard:B17`, the 1,500-line size rule, by judging its enforcer
 `agent_tools.delivery.size_lint` against real git worlds, so the rule index lists
 this enforcer. `RecordHistoryTest` judges the record enforcers of
-`agent_tools.delivery.context_map_lint` against real git worlds.
+`agent_tools.delivery.record_lint` against real git worlds.
 """
 
 import os
@@ -21,7 +21,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.delivery import context_map_lint, never_rise, rule_ids, size_lint
+from agent_tools.delivery import never_rise, record_lint, rule_ids, size_lint
 from agent_tools.delivery.never_rise import (
     Enforcer, Rise, Snapshot, Violation)
 
@@ -338,8 +338,8 @@ class NeverRiseTest(unittest.TestCase):
                 {"moved.txt": (lines(40).encode(), lines(40).encode())})
 
     def test_a_rename_carries_a_violation_only_when_the_enforcer_allows_it(self):
-        base = Snapshot("a" * 40, {}, {"a.rec": b"abcdef\n"})
-        branch = Snapshot("b" * 40, {}, {"b.rec": b"abcdef\n"})
+        base = Snapshot("a" * 40, {}, blobs={"a.rec": b"abcdef\n"})
+        branch = Snapshot("b" * 40, {}, blobs={"b.rec": b"abcdef\n"})
         renamed = {"b.rec": "a.rec"}
         rows = (
             ("no carries", MEASURED, ()),
@@ -484,6 +484,18 @@ class NeverRiseTest(unittest.TestCase):
                 dict(never_rise.read_snapshot(root, head, 60).line_counts),
                 {"x.py": 3, "y.py": 1})
 
+    def test_the_snapshot_keeps_each_text_file_s_committed_bytes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = repo(tmp)
+            write(root, "a.py", "x\n")
+            write(root, "b.bin", b"\0x")
+            write(root, "empty", "")
+            commit_all(root)
+            head = git(root, "rev-parse", "HEAD").strip()
+            write(root, "a.py", "changed\n")
+            self.assertEqual(
+                never_rise.read_snapshot(root, head, 60).contents, {"a.py": b"x\n"})
+
     def test_a_diff_attribute_does_not_change_which_files_are_counted(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = repo(tmp)
@@ -548,6 +560,111 @@ class NeverRiseTest(unittest.TestCase):
                 text = Violation("FX1", path, 7).text()
                 self.assertEqual(text, expected)
                 self.assertEqual(len(text.splitlines()), 1)
+
+    def test_an_enforcer_that_cannot_judge_is_raised_not_passed(self):
+        def find(snapshot):
+            raise never_rise.EnforcerFailed("fx", "broken")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = repo(tmp)
+            one_more_bad(root)
+            broken = Enforcer("FX9", find)
+            with self.assertRaises(never_rise.EnforcerFailed) as caught:
+                self.judge(root, (BAD, broken))
+            self.assertEqual(caught.exception.enforcer, "fx")
+            self.assertEqual(caught.exception.reason, "broken")
+            self.assertEqual(str(caught.exception), "fx: broken")
+
+    def test_an_enforcer_whose_history_read_fails_is_no_verdict(self):
+        def find(snapshot):
+            raise never_rise.HistoryUnavailable()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = repo(tmp)
+            one_more_bad(root)
+            unreadable = Enforcer("FX8", find)
+            self.assertIsNone(self.judge(root, (BAD, unreadable)))
+
+
+def committed_snapshot(root):
+    return never_rise.read_snapshot(root, never_rise.resolve_commit(root, "HEAD", 60), 60)
+
+
+class SnapshotFilesTest(unittest.TestCase):
+    def test_a_snapshot_reads_the_committed_bytes_not_the_working_tree(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = repo(tmp)
+            write(root, "pkg/a.py", "one\n")
+            commit_all(root)
+            write(root, "pkg/a.py", "two\n")
+            snap = committed_snapshot(root)
+            self.assertEqual(never_rise.read_files(snap, ["pkg/a.py"]), {"pkg/a.py": b"one\n"})
+            self.assertEqual(snap.root, root)
+            self.assertEqual(set(snap.files), {"pkg/a.py"})
+
+    def test_a_symlink_is_counted_but_is_no_file_to_read(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = repo(tmp)
+            write(root, "a.py", "x = 1\n")
+            os.symlink("a.py", root / "link.py")
+            commit_all(root)
+            snap = committed_snapshot(root)
+            with self.assertRaises(ValueError):
+                never_rise.read_files(snap, ["link.py"])
+            self.assertIn("link.py", snap.line_counts)
+            self.assertNotIn("link.py", snap.files)
+
+    def test_an_empty_file_is_a_file_with_no_line_count(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = repo(tmp)
+            write(root, "pyproject.toml", "")
+            write(root, "m.py", "x = 1\n")
+            write(root, "b.bin", b"\0x")
+            commit_all(root)
+            snap = committed_snapshot(root)
+            self.assertIn("pyproject.toml", snap.files)
+            self.assertNotIn("pyproject.toml", snap.line_counts)
+            self.assertNotIn("b.bin", snap.files)
+            self.assertNotIn("b.bin", snap.line_counts)
+            self.assertEqual(never_rise.read_files(snap, ["pyproject.toml"]),
+                             {"pyproject.toml": b""})
+
+    def test_a_hand_built_snapshot_reads_nothing(self):
+        with self.assertRaises(ValueError):
+            never_rise.read_files(Snapshot("a" * 40, {"a": 1}), ["a"])
+        self.assertEqual(never_rise.read_files(Snapshot("a" * 40, {"a": 1}), []), {})
+
+    def test_reading_files_writes_nothing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = repo(tmp)
+            write(root, "a.py", "one\n")
+            commit_all(root)
+            snap = committed_snapshot(root)
+            before = recordings(root)
+            never_rise.read_files(snap, ["a.py"])
+            self.assertEqual(recordings(root), before)
+
+    def test_a_malformed_batch_is_history_unavailable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = repo(tmp)
+            write(root, "a.py", "one\n")
+            commit_all(root)
+            snap = committed_snapshot(root)
+            oid = snap.files["a.py"]
+            other = "f" * 40
+            answers = {
+                "child failed": None,
+                "another oid": f"{other} blob 4\none\n\n".encode(),
+                "size not digits": f"{oid} blob x\none\n\n".encode(),
+                "payload short": f"{oid} blob 9\none\n".encode(),
+                "no terminator": f"{oid} blob 4\none\nX".encode(),
+                "missing": f"{oid} missing\n".encode(),
+                "not a blob": f"{oid} tree 4\none\n\n".encode(),
+                "trailing bytes": f"{oid} blob 4\none\n\nextra".encode()}
+            for name, answer in answers.items():
+                with self.subTest(name):
+                    with mock.patch.object(never_rise, "_git", return_value=answer):
+                        with self.assertRaises(never_rise.HistoryUnavailable):
+                            never_rise.read_files(snap, ["a.py"])
+            self.assertEqual(never_rise.read_files(snap, ["a.py"]), {"a.py": b"one\n"})
 
 
 def numbered(count):
@@ -679,7 +796,9 @@ class SizeLintOutputTest(unittest.TestCase):
             git(Path(tmp), "clone", "-q", "--no-checkout", "--filter=blob:none",
                 f"file://{bare}", str(partial))
             blob = git(partial, "rev-parse", "HEAD:x.py").strip()
-            self.assertIsNone(size_lint.resolve(partial, blob))
+            done = self.run_command("--repo-root", str(partial), "--revision", blob)
+            self.assertEqual((done.returncode, done.stdout), (2, ""))
+            self.assertTrue(done.stderr.startswith("size-lint: "), done.stderr)
             probe = subprocess.run(
                 ["git", "-C", str(partial), "cat-file", "-e", blob],
                 env=fixture_env({"GIT_NO_LAZY_FETCH": "1"}), capture_output=True)
@@ -708,7 +827,7 @@ class RecordHistoryTest(unittest.TestCase):
     P = "docs/areas/a/adr/001-a.md"
 
     def judge(self, root):
-        return never_rise.judge(root, "main", context_map_lint.RECORD_ENFORCERS, timeout=60)
+        return never_rise.judge(root, "main", record_lint.RECORD_ENFORCERS, timeout=60)
 
     def test_an_added_empty_record_breaches_the_form_and_is_listed(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -720,8 +839,8 @@ class RecordHistoryTest(unittest.TestCase):
             commit_all(root)
             verdict = self.judge(root)
             self.assertEqual(
-                verdict.rises, (Rise("B19", 0, 1, (Violation("B19", self.P, 1, 1),)),))
-            self.assertEqual(context_map_lint.added_records(verdict), [self.P])
+                verdict.rises, (Rise("B22", 0, 1, (Violation("B22", self.P, 1, 1),)),))
+            self.assertEqual(record_lint.added_records(verdict), [self.P])
 
     def test_an_over_cap_guide_moved_into_a_record_rises_and_is_listed(self):
         moved = "docs/areas/a/adr/002-b.md"
@@ -736,8 +855,8 @@ class RecordHistoryTest(unittest.TestCase):
             commit_all(root)
             verdict = self.judge(root)
             self.assertEqual(dict(verdict.renamed), {moved: "docs/guides/old.md"})
-            self.assertEqual(verdict.rises, (Rise("B18", 0, 1, (Violation("B18", moved, 3, 2020),)),))
-            self.assertEqual(context_map_lint.added_records(verdict), [moved])
+            self.assertEqual(verdict.rises, (Rise("B21", 0, 1, (Violation("B21", moved, 3, 2020),)),))
+            self.assertEqual(record_lint.added_records(verdict), [moved])
 
     def test_a_guide_moved_into_a_record_is_listed_and_a_moved_record_is_not(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -753,9 +872,9 @@ class RecordHistoryTest(unittest.TestCase):
             commit_all(root)
             verdict = self.judge(root)
             self.assertEqual(
-                context_map_lint.added_records(verdict), ["docs/areas/a/adr/002-b.md"])
-            self.assertEqual(verdict.rises, (Rise("B19", 0, 1, (
-                Violation("B19", "docs/areas/a/adr/002-b.md", 3, 1),)),))
+                record_lint.added_records(verdict), ["docs/areas/a/adr/002-b.md"])
+            self.assertEqual(verdict.rises, (Rise("B22", 0, 1, (
+                Violation("B22", "docs/areas/a/adr/002-b.md", 3, 1),)),))
 
     def test_a_renamed_over_cap_record_may_not_grow_through_its_header(self):
         prose = "".join(f"Line {n} of the context about the queue backend.\n" for n in range(40))
@@ -783,8 +902,8 @@ class RecordHistoryTest(unittest.TestCase):
                 self.assertEqual(dict(verdict.renamed), {moved: old})
                 self.assertGreater(len((header + prose).encode()), 1500)
                 self.assertEqual(tuple(rise.rule for rise in verdict.rises),
-                                 ("B18",) if rises else ())
-                self.assertEqual(context_map_lint.added_records(verdict), [moved] if rises else [])
+                                 ("B21",) if rises else ())
+                self.assertEqual(record_lint.added_records(verdict), [moved] if rises else [])
 
     def test_a_similar_superseding_record_is_judged_and_listed_as_added(self):
         prose = "".join(f"Line {n} of the context about the queue backend.\n" for n in range(8))
@@ -800,8 +919,8 @@ class RecordHistoryTest(unittest.TestCase):
             commit_all(root)
             verdict = self.judge(root)
             self.assertEqual(dict(verdict.renamed), {new: self.P})
-            self.assertEqual(context_map_lint.added_records(verdict), [new])
-            self.assertEqual(verdict.rises, (Rise("B19", 1, 1, (Violation("B19", new, 3, 2),)),))
+            self.assertEqual(record_lint.added_records(verdict), [new])
+            self.assertEqual(verdict.rises, (Rise("B22", 1, 1, (Violation("B22", new, 3, 2),)),))
 
 
 if __name__ == "__main__":

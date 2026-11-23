@@ -1,7 +1,7 @@
-"""The decision-record rules of `agent_tools.delivery.context_map_lint`.
+"""The decision-record rules of `agent_tools.delivery.record_lint`.
 
-The suite holds `standard:B18` and `standard:B19` by judging the record
-enforcers of `agent_tools.delivery.context_map_lint` on records built in memory
+The suite holds `standard:B21` and `standard:B22` by judging the record
+enforcers of `agent_tools.delivery.record_lint` on records built in memory
 and on real git worlds, so the rule index lists this file; the command's own
 findings are pinned beside them.
 """
@@ -13,7 +13,7 @@ import unittest
 from pathlib import Path
 
 from agent_tools.delivery import context_map_lint, never_rise, rule_ids
-from agent_tools.delivery.context_map_lint import (
+from agent_tools.delivery.record_lint import (
     RECORD_ENFORCERS, RECORD_SIZE_ENFORCER, RECORD_FORM_RULE, RECORD_SIZE_RULE, find_record_form,
     find_record_size, is_record_migration, is_record_path, record_violations)
 
@@ -202,31 +202,31 @@ class RecordFormTest(unittest.TestCase):
     def test_each_form_breach_yields_a_violation_and_one_paragraph_yields_none(self):
         rows = {
             "one paragraph": (H + b"\nOne paragraph.\n", []),
-            "over the cap": (H + b"\n" + b"x" * 1600 + b"\n", [V("B18", P, 3, 1620)]),
-            "heading": (H + b"\n## Context\nPara.\n", [V("B19", P, 3, 1)]),
-            "status line": (H + b"\n- **Status:** accepted\nPara.\n", [V("B19", P, 3, 1)]),
-            "bare status line": (H + b"\n**Status:** accepted\nPara.\n", [V("B19", P, 3, 1)]),
-            "heading under carriage returns": (H + b"\n##\r\nPara.\r\n", [V("B19", P, 3, 1)]),
-            "second paragraph": (H + b"\nOne.\n\nTwo.\n", [V("B19", P, 5, 1)]),
+            "over the cap": (H + b"\n" + b"x" * 1600 + b"\n", [V("B21", P, 3, 1620)]),
+            "heading": (H + b"\n## Context\nPara.\n", [V("B22", P, 3, 1)]),
+            "status line": (H + b"\n- **Status:** accepted\nPara.\n", [V("B22", P, 3, 1)]),
+            "bare status line": (H + b"\n**Status:** accepted\nPara.\n", [V("B22", P, 3, 1)]),
+            "heading under carriage returns": (H + b"\n##\r\nPara.\r\n", [V("B22", P, 3, 1)]),
+            "second paragraph": (H + b"\nOne.\n\nTwo.\n", [V("B22", P, 5, 1)]),
             "numbered sub-decisions": (
-                H + b"\n1. First choice\n2. Second choice\n", [V("B19", P, 3, 2)]),
-            "setext heading": (H + b"\nContext\n-------\nPara.\n", [V("B19", P, 4, 1)]),
-            "fence": (H + b"\nPara.\n```\ncode\n```\n", [V("B19", P, 4, 2)]),
-            "quote": (H + b"\n> Quoted.\n", [V("B19", P, 3, 1)]),
+                H + b"\n1. First choice\n2. Second choice\n", [V("B22", P, 3, 2)]),
+            "setext heading": (H + b"\nContext\n-------\nPara.\n", [V("B22", P, 4, 1)]),
+            "fence": (H + b"\nPara.\n```\ncode\n```\n", [V("B22", P, 4, 2)]),
+            "quote": (H + b"\n> Quoted.\n", [V("B22", P, 3, 1)]),
             "Formerly in prose": (
-                H + b"\nOne.\n\nSee **Formerly:** ADR-b-001 here.\n", [V("B19", P, 5, 1)]),
+                H + b"\nOne.\n\nSee **Formerly:** ADR-b-001 here.\n", [V("B22", P, 5, 1)]),
             "Formerly after the paragraph": (
-                H + b"\nOne.\n\n**Formerly:** ADR-b-001\n", [V("B19", P, 5, 1)]),
-            "emphasised status line": (H + b"\n*Status:* accepted\nPara.\n", [V("B19", P, 3, 1)]),
+                H + b"\nOne.\n\n**Formerly:** ADR-b-001\n", [V("B22", P, 5, 1)]),
+            "emphasised status line": (H + b"\n*Status:* accepted\nPara.\n", [V("B22", P, 3, 1)]),
             "adjacent bold sub-decisions": (
-                H + b"\n**D1.** First choice.\n**D2.** Second choice.\n", [V("B19", P, 4, 1)]),
+                H + b"\n**D1.** First choice.\n**D2.** Second choice.\n", [V("B22", P, 4, 1)]),
             "two Formerly lines": (
                 H + b"\n**Formerly:** ADR-b-001\n**Formerly:** ADR-c-001\n\nPara.\n",
-                [V("B19", P, 4, 2)]),
+                [V("B22", P, 4, 2)]),
             "soft-wrapped prose that starts a line with an ordinal": (
                 H + b"\nWe chose protocol version\n2. It supports retries.\n", []),
             "an ordinal opening a block": (
-                H + b"\n2. It supports retries.\n", [V("B19", P, 3, 1)]),
+                H + b"\n2. It supports retries.\n", [V("B22", P, 3, 1)]),
         }
         for name, (content, expected) in rows.items():
             with self.subTest(name):
@@ -235,12 +235,12 @@ class RecordFormTest(unittest.TestCase):
     def test_the_cap_is_1500_bytes(self):
         self.assertEqual(record_violations(P, H + b"\n" + b"x" * 1480 + b"\n"), [])
         self.assertEqual(
-            record_violations(P, H + b"\n" + b"x" * 1481 + b"\n"), [V("B18", P, 3, 1501)])
+            record_violations(P, H + b"\n" + b"x" * 1481 + b"\n"), [V("B21", P, 3, 1501)])
 
     def test_a_record_with_no_paragraph_breaches_the_form(self):
         for name, content in {"header alone": H, "empty": b""}.items():
             with self.subTest(name):
-                self.assertEqual(record_violations(P, content), [V("B19", P, 1, 1)])
+                self.assertEqual(record_violations(P, content), [V("B22", P, 1, 1)])
 
     def test_a_formerly_line_is_not_a_second_paragraph(self):
         self.assertEqual(
@@ -251,9 +251,9 @@ class RecordFormTest(unittest.TestCase):
         others = ["docs/areas/a/CONTEXT.md", "docs/areas/a/adr/README.md", "docs/guides/x.md"]
         blobs = {path: two_paragraphs for path in others}
         blobs[P] = H + b"\n- **Status:** accepted\n"
-        snapshot = never_rise.Snapshot("a" * 40, {}, blobs)
+        snapshot = never_rise.Snapshot("a" * 40, {}, blobs=blobs)
         self.assertEqual(find_record_size(snapshot), [])
-        self.assertEqual(find_record_form(snapshot), [V("B19", P, 3, 1)])
+        self.assertEqual(find_record_form(snapshot), [V("B22", P, 3, 1)])
         self.assertTrue(is_record_path(P))
         for path in [*others, "docs/areas/a/adr/sub/001-a.md", P + "/x"]:
             with self.subTest(path):
@@ -261,10 +261,10 @@ class RecordFormTest(unittest.TestCase):
 
     def test_an_over_cap_record_may_shrink_or_hold_but_not_grow(self):
         def snapshot(size):
-            return never_rise.Snapshot("a" * 40, {}, {P: H + b"\n" + b"x" * size + b"\n"})
+            return never_rise.Snapshot("a" * 40, {}, blobs={P: H + b"\n" + b"x" * size + b"\n"})
         base = snapshot(1580)
         for size, expected in ((1580, ()), (1530, ()), (1581, (
-                never_rise.Rise("B18", 1, 1, (V("B18", P, 3, 1601),)),))):
+                never_rise.Rise("B21", 1, 1, (V("B21", P, 3, 1601),)),))):
             with self.subTest(size=size):
                 self.assertEqual(
                     never_rise.compare(base, snapshot(size), {}, RECORD_ENFORCERS), expected)
@@ -274,10 +274,10 @@ class RecordFormTest(unittest.TestCase):
         moved = "docs/areas/b/adr/001-a.md"
         p_body = b"\n- **Status:** accepted\n\n## Context\n\nPara.\n"
         p_bytes = H + p_body
-        base = never_rise.Snapshot("a" * 40, {}, {P: p_bytes})
+        base = never_rise.Snapshot("a" * 40, {}, blobs={P: p_bytes})
         b_header = "# ADR-a-002 \u2014 B\n".encode()
         rise = lambda path, line, count: (never_rise.Rise(  # noqa: E731
-            "B19", 1, 1, (V("B19", path, line, count),)),)
+            "B22", 1, 1, (V("B22", path, line, count),)),)
         rows = {
             "unchanged": ({P: p_bytes}, {}, ()),
             "moved": ({moved: p_bytes}, {moved: P}, ()),
@@ -297,7 +297,7 @@ class RecordFormTest(unittest.TestCase):
         }
         for name, (blobs, renamed, expected) in rows.items():
             with self.subTest(name):
-                branch = never_rise.Snapshot("b" * 40, {}, blobs)
+                branch = never_rise.Snapshot("b" * 40, {}, blobs=blobs)
                 self.assertEqual(
                     never_rise.compare(base, branch, renamed, RECORD_ENFORCERS), expected)
 
@@ -309,17 +309,17 @@ class RecordFormTest(unittest.TestCase):
         rows = {
             "over the cap": (H + over, header + over, ()),
             "under the cap, over it after the move": (H + near_cap, header + near_cap, ()),
-            "body amended": (H + over, header + over + b"More.\n", ("B18",)),
-            "blank lines appended": (H + over, header + over + b"\n" * 5, ("B18",)),
+            "body amended": (H + over, header + over + b"More.\n", ("B21",)),
+            "blank lines appended": (H + over, header + over + b"\n" * 5, ("B21",)),
             "a padded blank line appended": (
-                H + over, header + over + b" " * 400 + b"\n", ("B18",)),
+                H + over, header + over + b" " * 400 + b"\n", ("B21",)),
             "two Formerly lines": (
-                H + over, header + b"**Formerly:** ADR-c-001\n" + over, ("B18",)),
+                H + over, header + b"**Formerly:** ADR-c-001\n" + over, ("B21",)),
         }
         for name, (old, new, expected) in rows.items():
             with self.subTest(name):
-                base = never_rise.Snapshot("a" * 40, {}, {P: old})
-                branch = never_rise.Snapshot("b" * 40, {}, {moved: new})
+                base = never_rise.Snapshot("a" * 40, {}, blobs={P: old})
+                branch = never_rise.Snapshot("b" * 40, {}, blobs={moved: new})
                 found = never_rise.compare(base, branch, {moved: P}, (RECORD_SIZE_ENFORCER,))
                 self.assertEqual(tuple(rise.rule for rise in found), expected if expected else ())
 
@@ -327,12 +327,12 @@ class RecordFormTest(unittest.TestCase):
         guide = "docs/guides/old.md"
         moved = "docs/areas/a/adr/002-b.md"
         body = b"\n" + b"x" * 2000 + b"\n"
-        base = never_rise.Snapshot("a" * 40, {}, {guide: b"# Guide\n" + body})
+        base = never_rise.Snapshot("a" * 40, {}, blobs={guide: b"# Guide\n" + body})
         branch = never_rise.Snapshot(
-            "b" * 40, {}, {moved: "# ADR-a-002 \u2014 B\n".encode() + body})
+            "b" * 40, {}, blobs={moved: "# ADR-a-002 \u2014 B\n".encode() + body})
         self.assertEqual(
             never_rise.compare(base, branch, {moved: guide}, RECORD_ENFORCERS),
-            (never_rise.Rise("B18", 0, 1, (V("B18", moved, 3, 2020),)),))
+            (never_rise.Rise("B21", 0, 1, (V("B21", moved, 3, 2020),)),))
 
     def test_the_record_rules_are_rules_of_the_bar(self):
         rules = rule_ids.sections(BAR.read_text(encoding="utf-8"))

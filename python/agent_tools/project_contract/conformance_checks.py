@@ -22,12 +22,14 @@ from pathlib import Path, PurePosixPath
 import subprocess
 
 from agent_tools.delivery import (
-    context_map_lint, host_admission, never_rise, size_lint, standards_lint,
+    comment_lint, context_map_lint, host_admission, never_rise, record_lint, ruff_lint,
+    size_lint, standards_lint,
 )
 from agent_tools.project_contract import agent_platform
 from agent_tools.release import release_adapter, release_profile
 from agent_tools.project_contract.conformance_registry import (
     CHILD_TIMEOUT_SECONDS, CODE_STAGES, Context, LIVE_OWNER, MAX_FACT_LIST,
+    MAX_FACT_STRING,
     NESTED_LEDGER_FINDINGS, NIX_STORE_PREFIX, Outcome, POLICY_PATH_MEMBERS,
     PROMOTED_DUPLICATE_DRIFTED, PROMOTED_DUPLICATE_FINDINGS,
     PROMOTED_DUPLICATE_PRESENT, PROMOTION_CANDIDATE_KIND,
@@ -755,8 +757,9 @@ def check_standards_lint(context: "Context") -> "Outcome":
     against the installed platform standards.
 
     The platform directory is the installation's, so its absence is its own
-    finding; an unreadable shard names the authored standards paths, never the
-    shard or the text that failed to decode.
+    finding; an unreadable shard, or a repository git cannot list, names the
+    authored standards paths, never the shard or the text that failed to decode.
+    A suppression naming a rule id in no layer is a finding of the lint.
     """
     platform = agent_platform.standards_dir()
     if not (platform / PLATFORM_STANDARDS_ANCHOR).is_file():
@@ -764,7 +767,7 @@ def check_standards_lint(context: "Context") -> "Outcome":
                        "platform.standards.install", {})
     try:
         problems = standards_lint.lint(context.root, platform)
-    except (UnicodeDecodeError, OSError):
+    except (ValueError, OSError):
         authored = context.contract["bindings"]["paths"]["standards"]
         return Outcome("failed", "standards_unreadable", "docs.standards.repair",
                        {"paths": bound_facts(authored), "count": 1})
@@ -774,7 +777,12 @@ def check_standards_lint(context: "Context") -> "Outcome":
     return Outcome("passed")
 
 
-NEVER_RISE_ENFORCERS = (size_lint.ENFORCER, *context_map_lint.RECORD_ENFORCERS)
+def never_rise_enforcers(contract: dict) -> tuple[never_rise.Enforcer, ...]:
+    """The size rule, the ruff rules, the comment rules judged against the
+    contract's own tracker repository when it authors one, then the record rules."""
+    repository = contract["bindings"].get("tracker", {}).get("repo_slug") or None
+    return (size_lint.ENFORCER, *ruff_lint.ENFORCERS, *comment_lint.enforcers(repository),
+            *record_lint.RECORD_ENFORCERS)
 
 
 def check_never_rise(context: "Context") -> "Outcome":
@@ -783,35 +791,47 @@ def check_never_rise(context: "Context") -> "Outcome":
 
     It starts only read-only, bounded git children, which read committed
     history and never the working tree; the authored contract supplies the
-    branch. No readable merge base is a failed check, never a pass.
+    branch. No readable merge base is a failed check, never a pass, and an
+    enforcer that cannot judge is a failed check, never a pass. A reasoned
+    suppression the branch adds is listed in the facts, passed or failed, and
+    never fails the check (ADR-project-contract-019). Each listed line holds its
+    rule, path, line and reason within the fact string bound (`Suppression.text`).
 
     The record enforcers judge both sides. The facts list each record the
     branch adds, for the reviewer to judge against the gate: at most
     `MAX_FACT_LIST` paths, with the true count beside them. The membership is
-    `context_map_lint.added_records`'s: each path `git diff-tree -r -M
+    `record_lint.added_records`'s: each path `git diff-tree -r -M
     --diff-filter=AR --name-status <merge_base> HEAD` names as added or as a
-    rename target that `context_map_lint.is_record_path` accepts, less each
+    rename target that `record_lint.is_record_path` accepts, less each
     rename whose source is a record path and whose pair
-    `context_map_lint.is_record_migration` accepts (a migration). Naming the
-    records past the bound is #1629.
+    `record_lint.is_record_migration` accepts (a migration).
     """
     branch = context.contract["bindings"]["vcs"]["integration_branch"]
-    verdict = never_rise.judge(context.root, branch, NEVER_RISE_ENFORCERS,
-                               CHILD_TIMEOUT_SECONDS)
+    try:
+        verdict = never_rise.judge(context.root, branch,
+                                   never_rise_enforcers(context.contract),
+                                   CHILD_TIMEOUT_SECONDS)
+    except never_rise.EnforcerFailed as error:
+        return Outcome("failed", "enforcer_failed", "violations.enforcer.repair", {
+            "enforcer": bound_fact(error.enforcer),
+            "reason": bound_fact(error.reason)})
     if verdict is None:
         return Outcome("failed", "history_unavailable", "violations.history.fetch",
                        {"integration_branch": bound_fact(branch)})
-    added = context_map_lint.added_records(verdict)
+    added = record_lint.added_records(verdict)
     listed = ({"added_records": bound_facts(added), "added_record_count": len(added)}
               if added else {})
+    suppressed = verdict.suppressions
+    extra = ({"suppressions": bound_facts([s.text(MAX_FACT_STRING) for s in suppressed]),
+              "suppression_count": len(suppressed)} if suppressed else {})
     if not verdict.rises:
-        return Outcome("passed", facts={"merge_base": verdict.merge_base, **listed})
+        return Outcome("passed", facts={"merge_base": verdict.merge_base, **listed, **extra})
     first = verdict.rises[0]
     return Outcome("failed", "violation_count_rose", "violations.never_rise.reduce", {
         "merge_base": verdict.merge_base, "rule": first.rule,
         "base_count": first.base_count, "branch_count": first.branch_count,
         "violations": [bound_fact(v.text()) for v in first.new[:MAX_FACT_LIST]],
-        "rules": bound_facts([r.rule for r in verdict.rises]), **listed})
+        "rules": bound_facts([r.rule for r in verdict.rises]), **listed, **extra})
 
 
 # --------------------------------------------------------------------------

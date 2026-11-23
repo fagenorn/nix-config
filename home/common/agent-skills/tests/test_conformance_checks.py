@@ -542,87 +542,56 @@ class NeverRiseCheckTest(ReportAssertions, unittest.TestCase):
                               len(facts["violations"])], [0, 9, 8])
             self.assert_validates(report)
 
-    REC = "docs/areas/demo/adr/001-demo.md"
-
-    def record_root(self, tmp: Path) -> tuple[Path, str]:
-        """A root whose base holds a committed, lint-clean area `demo`; its sha."""
-        root = make_root(tmp)
-        write_file(root, "docs/CONTEXT-MAP.md",
-                   CLEAN_MAP.replace("./fixture-CONTEXT.md", "./areas/demo/CONTEXT.md"))
-        (root / "docs/fixture-CONTEXT.md").unlink()
-        write_file(root, "docs/areas/demo/CONTEXT.md", CLEAN_AREA)
-        commit_all(root, "area")
-        return root, self.mark_base(root)
-
-    def mark_base(self, root: Path) -> str:
-        git(root, "update-ref", INTEGRATION_REF, "HEAD")
-        return git(root, "rev-parse", "HEAD").strip()
-
-    def record(self, root: Path, relative: str, number: int, body: str) -> None:
-        write_file(root, relative, f"# ADR-demo-00{number} \u2014 Demo\n\n{body}")
-        commit_all(root, f"record {number}")
-
-    def passed_facts(self, root: Path) -> dict:
-        code, _, by_id = self.ci(root)
-        self.assertEqual(code, 0)
-        return by_id[self.CHECK_ID]["facts"]
-
-    def assert_rose(self, root: Path, base: str, rule: str, base_count: int, line: int,
-                    rules: list, added: list | None = None) -> None:
+    def red(self, root: Path) -> dict:
         code, report, by_id = self.ci(root)
-        self.assertEqual([code, report["outcome"]], [1, {
-            "status": "failed", "primary_check_id": self.CHECK_ID}])
-        listed = {"added_records": added, "added_record_count": len(added)} if added else {}
-        self.assertEqual(self.summary(by_id[self.CHECK_ID]), [
-            "failed", "violation_count_rose", "violations.never_rise.reduce",
-            {"merge_base": base, "rule": rule, "base_count": base_count, "branch_count": 1,
-             "violations": [f"{rule} {(added or [self.REC])[0]}:{line}"], "rules": rules, **listed}])
+        self.assertEqual(code, 1)
         self.assert_validates(report)
+        return by_id[self.CHECK_ID]
 
-    def test_an_added_record_over_the_cap_with_a_status_line_turns_ci_red_and_is_listed(self):
+    def test_a_committed_todo_comment_turns_ci_red_naming_b20(self):
         with fixture() as tmp:
-            root, base = self.record_root(tmp)
-            write_file(root, "notes/plain.txt")
-            self.record(root, self.REC, 1, "- **Status:** accepted\n\n" + "x" * 1950 + "\n")
-            self.assert_rose(root, base, "B18", 0, 5, ["B18", "B19"], [self.REC])
+            root = make_root(tmp)
+            base = git(root, "rev-parse", "refs/remotes/origin/main").strip()
+            write_file(root, "src/todo.py", "x = 1\n# TODO: finish\n")
+            commit_all(root, "todo")
+            self.assertEqual(
+                self.summary(self.red(root)),
+                ["failed", "violation_count_rose", "violations.never_rise.reduce",
+                 {"merge_base": base, "rule": "B20", "base_count": 0,
+                  "branch_count": 1, "violations": ["B20 src/todo.py:2"],
+                  "rules": ["B20"]}])
 
-    def test_an_added_conforming_record_passes_and_is_listed(self):
+    def test_a_long_block_holding_a_fixme_turns_ci_red_naming_b19_and_b20(self):
         with fixture() as tmp:
-            root, base = self.record_root(tmp)
-            self.record(root, self.REC, 1, "One paragraph naming the rejected alternative.\n")
-            self.assertEqual(self.passed_facts(root), {
-                "merge_base": base, "added_records": [self.REC], "added_record_count": 1})
+            root = make_root(tmp)
+            base = git(root, "rev-parse", "refs/remotes/origin/main").strip()
+            write_file(root, "src/long.py",
+                       "x = 1\n# a\n# FIXME: b\n# c\n# d\n# e\n# f\n")
+            commit_all(root, "long")
+            self.assertEqual(
+                self.summary(self.red(root)),
+                ["failed", "violation_count_rose", "violations.never_rise.reduce",
+                 {"merge_base": base, "rule": "B19", "base_count": 0,
+                  "branch_count": 1, "violations": ["B19 src/long.py:2"],
+                  "rules": ["B19", "B20"]}])
 
-    def test_an_over_cap_record_that_grows_turns_ci_red(self):
+    def test_a_link_to_the_contracts_own_tracker_turns_ci_red_naming_b18(self):
         with fixture() as tmp:
-            root, _ = self.record_root(tmp)
-            self.record(root, self.REC, 1, "x" * 1574 + "\n")
-            base = self.mark_base(root)
-            self.record(root, self.REC, 1, "x" * 1575 + "\n")
-            self.assert_rose(root, base, "B18", 1, 3, ["B18"])
-
-    def test_a_deleted_breaching_record_does_not_cover_an_added_one(self):
-        old, new = "docs/areas/demo/adr/001-old.md", "docs/areas/demo/adr/002-new.md"
-        prose = "".join(f"Line {n} of the context about the queue backend.\n" for n in range(8))
-        with fixture() as tmp:
-            root, _ = self.record_root(tmp)
-            self.record(root, old, 1, "- **Status:** accepted\n\n## Context\n\n" + prose)
-            base = self.mark_base(root)
-            git(root, "rm", "-q", old)
-            self.record(root, new, 2, f"- **Status:** accepted\n\n{prose}Superseded by the new backend.\n")
-            self.assertRegex(git(root, "diff-tree", "-r", "-M", "--diff-filter=R",
-                                 "--name-status", base, "HEAD"), rf"R\d+\t{old}\t{new}")
-            self.assert_rose(root, base, "B19", 1, 3, ["B19"], [new])
-
-    def test_more_added_records_than_the_list_holds_are_counted(self):
-        with fixture() as tmp:
-            root, _ = self.record_root(tmp)
-            paths = [f"docs/areas/demo/adr/00{n}-r{n}.md" for n in range(1, 10)]
-            for n, path in enumerate(paths, 1):
-                self.record(root, path, n, f"Paragraph {n}.\n")
-            facts = self.passed_facts(root)
-            self.assertEqual([facts["added_record_count"], facts["added_records"]],
-                             [9, paths[:8]])
+            root = make_root(tmp)
+            contract = root / ".agents/project.json"
+            authored = json.loads(contract.read_text(encoding="utf-8"))
+            other = authored["bindings"]["tracker"]["repo_slug"]
+            authored["bindings"]["tracker"]["repo_slug"] = "fixture-owner/fixture-repo"
+            targets = authored["release"]["profiles"]["github-release"]["bindings"]["targets"]
+            targets["repository"]["repository"] = "fixture-owner/fixture-repo"
+            contract.write_text(json.dumps(authored, indent=2), encoding="utf-8")
+            write_file(root, "src/ref.py",
+                       "x = 1\n# https://github.com/fixture-owner/fixture-repo/issues/7\n"
+                       + f"# https://github.com/{other}/issues/7\n")
+            commit_all(root, "ref")
+            facts = self.red(root)["facts"]
+            self.assertEqual(facts["rule"], "B18")
+            self.assertEqual(facts["violations"], ["B18 src/ref.py:2"])
 
 
 class LintChecksTest(ReportAssertions, unittest.TestCase):

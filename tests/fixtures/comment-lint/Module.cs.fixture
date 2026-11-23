@@ -1,0 +1,37 @@
+/**
+ * Fixture header.
+ * Wide third line of the header: zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz
+ * Four.
+ * Five.
+ * Six.
+ */
+int x1 = 1;
+// Kept for ADR-fixture-001.
+int x2 = 2;
+// Remove once that ships: https://github.com/upstream-owner/upstream-repo/issues/42
+int x3 = 3;
+// Added to fix #12.
+int x4 = 4;
+// See https://github.com/fixture-owner/fixture-repo/issues/7
+int x5 = 5;
+// Five line block, row a.
+// Five line block, row b.
+// Five line block, row c.
+// Five line block, row d.
+// Five line block, row e.
+int x6 = 6;
+// Six line block, row a.
+// Six line block, row b.
+// Six line block, row c.
+// Six line block, row d.
+// Six line block, row e.
+// Six line block, row f.
+int x7 = 7;
+// zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz
+int x8 = 8;
+// zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz
+int x9 = 9;
+// TODO later
+int x10 = 10;
+var s = "TODO";
+int x11 = 11;

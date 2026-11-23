@@ -12,12 +12,15 @@ unconditional Bash hook with no hook switch on (`engine_guard.locate`), checked 
 `<procedures_dir>/deliver.json` must pass `procedure_check.check_directory` against the platform
 declarations plus every project command, hold only `command`, `agent` and `decide` steps, a
 `mutates: true` step only as a `command` step, and no input but `issue`, and every agent step's role
-file must read (`engine_session.read_role`). The same checks run again on the run's staged copy, which
-is the copy the loop reads (`<run>/procedure/deliver.json`).
+file must read (`engine_session.read_role`), and the host declaration must admit the engine route (else the
+refusal starts with its reason code), checked after the guard. The same checks run again on the run's
+staged copy, which is the copy the loop reads (`<run>/procedure/deliver.json`).
 
 An agent step runs as one headless session (`engine_session`) in the project
 root: its role body, rendered prompt and a session record are stored under the
-run's `sessions/`, `session_starting` is on disk before the process is spawned,
+run's `sessions/`, the session holds one of the engine route's agent slots (`engine_slots`) from before
+`session_starting` to the end of its last launch, waiting with `wait_started` and `wait_ended` (`host-slot`)
+when none is free, `session_starting` is on disk before the process is spawned,
 and a session that ends normally is graded only by the `outcome_from` member of its
 structured reply, so neither the prose nor the exit code selects an outcome. A reading with no
 usable reply (none, or one that breaks the schema) is a miss when `engine_session.is_miss` accepts
@@ -66,6 +69,16 @@ Single writer: under the issue's creation lock the shell takes `<run>/lock`, an 
 until `deliver` returns. A run whose lock is held makes the call exit `EXIT_RUNNING`; a run not done and
 not locked is refused (continuing a run is a later slice).
 
+A stop request (`engine stop`, `engine_stop`) is the file `<run>/stop-request` naming this lock's holder
+(`pid` and `started`). While a step's process runs (a command, an agent session or the keep-alive),
+the shell polls it; a request for this holder ends that process's group, appends `stop_reached` named
+`stopped-by-request` (need `retry`) for the pending step, then removes the file, and the call exits
+`EXIT_STOP` with the run left open. The cut visit records no result, grade or transition.
+The API-error retry pause is polled too: a request in it ends the visit at once, with no resume.
+A request is published (`request_stop`) under one lock with the engine's recording of every end of
+the run (`run_done` and each stop) and removal of the file, and the engine checks for a pending
+request under that lock, so a request that was accepted is honored and none outlives the run.
+
 Exit codes: `engine.py` lists them; `Fault` and `Refused` print nothing on stdout.
 """
 
@@ -77,17 +90,16 @@ import os
 import socket
 import sys
 import tempfile
-import time
 import uuid
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Mapping
+from typing import Callable, Mapping
 
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
 from agent_tools.delivery import (
     engine_commands, engine_core, engine_guard, engine_ledger, engine_reply, engine_session,
-    procedure_check,
+    engine_slots, engine_stop, host_admission, procedure_check,
 )
 from agent_tools.delivery.engine_commands import CommandTable, UnknownCommand
 from agent_tools.project_contract import resolve_project
@@ -180,6 +192,14 @@ def _resolve() -> tuple[dict, CommandTable]:
         return snapshot, CommandTable.from_snapshot(snapshot)
     except procedure_check.DeclarationError as error:
         raise Refused(str(error)) from error
+
+
+def _admitted() -> int:
+    try:
+        return engine_slots.declared_slots()
+    except host_admission.DeclarationError as error:
+        raise Refused(f"{error.reason_code}: the host declaration does not admit the "
+                      f"{host_admission.ENGINE_ROUTE} route, so no run starts") from error
 
 
 def check_declarations() -> dict[str, procedure_check.CommandDeclaration | None]:
@@ -284,15 +304,17 @@ def deliver(issue: int, procedures_dir: Path) -> tuple[int, dict]:
     if isinstance(guard, engine_guard.Unavailable):
         raise Refused(f"the host's settings load no lifecycle guard hook, so no run starts: "
                       f"{guard.reason}")
+    slots = _admitted()
     procedure = _validate(procedures_dir, table)
     inputs = {name: issue for name in procedure["inputs"]}
+    holder = {"pid": os.getpid(), "started": _now()}
     held: list[int] = []
 
     def stage(staged: Path) -> None:
         # The copy that runs is the copy checked; the lock is held before the run is visible.
         if _validate(staged / "procedure", table)["inputs"] != procedure["inputs"]:
             raise Refused(f"the {ENTRY} procedure changed while its run was created")
-        held.append(_take_run_lock(staged, _now()))
+        held.append(_take_run_lock(staged, holder["started"]))
 
     try:
         creation = _lock_creation(issue)
@@ -325,7 +347,7 @@ def deliver(issue: int, procedures_dir: Path) -> tuple[int, dict]:
         _release(held)
         raise
     try:
-        return _walk(run_dir, table, inputs)
+        return _walk(run_dir, table, inputs, holder, slots)
     except (engine_ledger.LedgerError, engine_core.CoreError, UnknownCommand,
             OSError, ValueError, KeyError) as error:
         raise Fault(str(error)) from error
@@ -350,8 +372,13 @@ def _release(held: list[int]) -> None:
         os.close(held.pop())
 
 
-def _walk(run_dir: Path, table: CommandTable, inputs: dict) -> tuple[int, dict]:
+def _walk(run_dir: Path, table: CommandTable, inputs: dict, holder: Mapping[str, object],
+          slots: int) -> tuple[int, dict]:
     procedure = _load(run_dir / "procedure" / f"{ENTRY}.json")
+
+    def stop() -> bool:
+        return engine_stop.requested(run_dir, holder)
+
     steps = {item["id"]: item for item in procedure["steps"]}
     ran = 0
     while True:
@@ -359,7 +386,10 @@ def _walk(run_dir: Path, table: CommandTable, inputs: dict) -> tuple[int, dict]:
         walk = engine_core.replay(procedure, inputs, core_events(run_dir, ledger))
         action = walk.action
         if isinstance(action, engine_core.Done):
-            engine_ledger.append_event(run_dir, {"event": "run_done", "at": _now()})
+            with engine_stop.publication(run_dir):  # a request is honored or published after
+                if stop():
+                    return _record_stop(run_dir, walk.transitions[-1].step, "", "", "", True)
+                engine_ledger.append_event(run_dir, {"event": "run_done", "at": _now()})
             return EXIT_DONE, {
                 "detail": f"The {ENTRY} procedure reached done after {ran} step "
                           f"{'visit' if ran == 1 else 'visits'}.",
@@ -368,38 +398,85 @@ def _walk(run_dir: Path, table: CommandTable, inputs: dict) -> tuple[int, dict]:
             step = walk.transitions[-1].step
             return _stop(run_dir, step, action.name, action.need,
                          f"The {ENTRY} procedure stopped at step {step} with "
-                         f"{action.name}, which needs {action.need}.")
+                         f"{action.name}, which needs {action.need}.", stop)
         if isinstance(action, engine_core.StartSession):
-            stopped = _visit_session(run_dir, table.root, steps[action.step], action)
+            try:
+                stopped = _visit_session(run_dir, table.root, steps[action.step], action, stop,
+                                         slots)
+            except engine_stop.Stopped:
+                return _stopped(run_dir, action.step)
             if stopped is not None:
                 return stopped
         elif isinstance(action, engine_core.RunCommand):
-            if steps[action.step].get("mutates") is True and "keep_alive" in procedure:
-                lost = _renew(run_dir, table, procedure, inputs, action)
-                if lost is not None:
-                    return lost
-            _visit(run_dir, table, steps[action.step], action)
+            try:
+                if steps[action.step].get("mutates") is True and "keep_alive" in procedure:
+                    lost = _renew(run_dir, table, procedure, inputs, action, stop)
+                    if lost is not None:
+                        return lost
+                _visit(run_dir, table, steps[action.step], action, stop)
+            except engine_stop.Stopped:
+                return _stopped(run_dir, action.step)
         else:
             raise Fault(f"step {action.step} needs {type(action).__name__}, "
                         "which the engine does not run yet")
         ran += 1
 
 
-def _stop(run_dir: Path, step: str, name: str, need: str, detail: str) -> tuple[int, dict]:
+def _record_stop(run_dir: Path, step: str, name: str, need: str, detail: str,
+                requested: bool) -> tuple[int, dict]:
+    """Record the stop, the caller holding the publication lock; `requested` says a request ended it.
+
+    A request pending for this run is honored in place of `name`, so a request accepted late is
+    never left behind; the file goes once the stop is recorded."""
+    if requested:
+        name, need = engine_stop.STOPPED_BY_REQUEST, engine_stop.STOP_NEED
+        detail = (f"The {ENTRY} procedure stopped at step {step} on request, "
+                  "which needs a retry.")
     engine_ledger.append_event(run_dir, {"event": "stop_reached", "at": _now(), "step": step,
                                          "stop": name, "need": need})
+    if requested:
+        engine_stop.clear(run_dir)
     return EXIT_STOP, {"detail": detail, "end": name, "need": need, "run": run_dir.name}
 
 
+def _stop(run_dir: Path, step: str, name: str, need: str, detail: str,
+          stop: Callable[[], bool]) -> tuple[int, dict]:
+    """The stop that ends the run; recording and the request's removal are one step under the
+    publication lock, so no request is published between and a pending one wins."""
+    with engine_stop.publication(run_dir):
+        return _record_stop(run_dir, step, name, need, detail, stop())
+
+
+def _stopped(run_dir: Path, step: str) -> tuple[int, dict]:
+    """The stop a request ended `step`'s process with."""
+    return _stop(run_dir, step, "", "", "", lambda: True)
+
+
+def request_stop(run_dir: Path) -> dict | None:
+    """Publish a stop request for the holder of `run_dir`'s lock; its `{"pid", "started"}`, or None.
+
+    None when no process holds the lock or the run already ended (`stop_reached` or `run_done`
+    recorded), so a request is never left behind by an engine that has finished."""
+    with engine_stop.publication(run_dir):
+        holder = lock_holder(run_dir)
+        if holder is None:
+            return None
+        events = engine_ledger.replay(run_dir / "events.jsonl")
+        if events and events[-1]["event"] in ("stop_reached", "run_done"):
+            return None
+        engine_stop.write_request(run_dir, holder)
+        return holder
+
+
 def _renew(run_dir: Path, table: CommandTable, procedure: dict, inputs: dict,
-           action: engine_core.RunCommand) -> tuple[int, dict] | None:
+           action: engine_core.RunCommand, stop: Callable[[], bool]) -> tuple[int, dict] | None:
     """None when the claim is renewed before `action`'s step, else the `claim-lost` stop."""
     keep_alive = procedure["keep_alive"]
     args = tuple((path, inputs[path.split(".", 1)[1]]) for path in keep_alive["in"])
     for attempt in (1, 2):
         ran = engine_commands.run(table, keep_alive["command"], keep_alive.get("subcommand"),
                                   args, guard=_guard(), on_start=lambda pid: None,
-                                  timeout=KEEP_ALIVE_SECONDS)
+                                  timeout=KEEP_ALIVE_SECONDS, stop=stop)
         verdict = "failed" if ran.outcome == "renewed" and ran.exit_code != 0 else ran.outcome
         engine_ledger.append_event(run_dir, {
             "event": "keep_alive_ran", "at": _now(), "step": action.step,
@@ -416,7 +493,7 @@ def _renew(run_dir: Path, table: CommandTable, procedure: dict, inputs: dict,
     need = procedure["stops"][procedure_check.CLAIM_LOST]["need"]
     return _stop(run_dir, action.step, procedure_check.CLAIM_LOST, need,
                  f"The claim was not renewed before step {action.step}, the keep-alive "
-                 f"answered {verdict}: {text}.")
+                 f"answered {verdict}: {text}.", stop)
 
 
 def _graded(run_dir: Path, step: dict, visit: int, outcome: str, *, bound: bool = False) -> None:
@@ -440,8 +517,8 @@ def _graded(run_dir: Path, step: dict, visit: int, outcome: str, *, bound: bool 
                                          "to": step["on"][outcome]})
 
 
-def _visit(run_dir: Path, table: CommandTable, step: dict,
-           action: engine_core.RunCommand) -> None:
+def _visit(run_dir: Path, table: CommandTable, step: dict, action: engine_core.RunCommand,
+           stop: Callable[[], bool]) -> None:
     name, visit = action.step, action.visit
     engine_ledger.append_event(run_dir, {"event": "step_entered", "at": _now(), "step": name,
                                          "visit": visit, "stage": step["stage"]})
@@ -453,7 +530,7 @@ def _visit(run_dir: Path, table: CommandTable, step: dict,
 
     ran = engine_commands.run(table, action.command, action.subcommand, action.args,
                               guard=_guard(), on_start=started,
-                              timeout=table.wall_seconds(action.command))
+                              timeout=table.wall_seconds(action.command), stop=stop)
     try:
         _grade_command(run_dir, step, name, visit, ran)
     finally:  # forwarding a diagnostic never decides whether the step is graded
@@ -485,8 +562,8 @@ def _grade_command(run_dir: Path, step: dict, name: str, visit: int,
     _graded(run_dir, step, visit, ran.outcome)
 
 
-def _visit_session(run_dir: Path, root: str, step: dict,
-                   action: engine_core.StartSession) -> tuple[int, dict] | None:
+def _visit_session(run_dir: Path, root: str, step: dict, action: engine_core.StartSession,
+                   stop: Callable[[], bool], slots: int) -> tuple[int, dict] | None:
     """Run the step's session to its result; the `quota-wait` stop when no account can answer."""
     name, visit = action.step, action.visit
     engine_ledger.append_event(run_dir, {"event": "step_entered", "at": _now(), "step": name,
@@ -500,12 +577,22 @@ def _visit_session(run_dir: Path, root: str, step: dict,
     system = engine_ledger.store_session_file(run_dir, f"{name}.{visit}.system.md",
                                               role.body.encode("utf-8"))
     engine_ledger.store_session_file(run_dir, f"{name}.{visit}.prompt.md", prompt.encode("utf-8"))
-    engine_ledger.append_event(run_dir, {
-        "event": "session_starting", "at": _now(), "step": name, "visit": visit,
-        "session": session, "role": role.name,
-        "account": os.environ.get("CLAUDE_ACCOUNT") or "console"})
-    launched, reading, stopped, no_reply = _launch_until_answered(
-        run_dir, root, (name, visit, session), prompt, (role, schema, system))
+
+    def waiting() -> None:
+        engine_ledger.append_event(run_dir, {"event": "wait_started", "at": _now(),
+                                             "wait": engine_slots.WAIT, "until": None})
+
+    def waited() -> None:
+        engine_ledger.append_event(run_dir, {"event": "wait_ended", "at": _now(),
+                                             "wait": engine_slots.WAIT})
+
+    with engine_slots.hold(run_dir, slots, on_wait=waiting, on_waited=waited):
+        engine_ledger.append_event(run_dir, {
+            "event": "session_starting", "at": _now(), "step": name, "visit": visit,
+            "session": session, "role": role.name,
+            "account": os.environ.get("CLAUDE_ACCOUNT") or "console"})
+        launched, reading, stopped, no_reply = _launch_until_answered(
+            run_dir, root, (name, visit, session), prompt, (role, schema, system), stop)
     if stopped is not None:
         return stopped
     wall = (launched.wall_seconds if launched.timed_out or reading.wall_seconds is None
@@ -544,7 +631,7 @@ def _visit_session(run_dir: Path, root: str, step: dict,
 
 def _launch_until_answered(
         run_dir: Path, root: str, visit_of: tuple[str, int, str], prompt: str,
-        launch_of: tuple[engine_session.Role, Mapping, Path],
+        launch_of: tuple[engine_session.Role, Mapping, Path], stop: Callable[[], bool],
 ) -> tuple[engine_session.Launched, engine_session.Reading, tuple[int, dict] | None, bool]:
     """Launch the session, again with `--resume` after each usage limit, after the first other
     API error (once, after `API_RETRY_SECONDS`) and after the first miss (once, with `REASK_PROMPT`),
@@ -577,7 +664,7 @@ def _launch_until_answered(
                    detail: str) -> tuple:
         record(launched, reading)
         return launched, reading, _stop(run_dir, name, procedure_check.QUOTA_WAIT, QUOTA_NEED,
-                                        detail), False
+                                        detail, stop), False
 
     while True:
         started: list[int] = []
@@ -600,7 +687,7 @@ def _launch_until_answered(
             launched = engine_session.launch(
                 engine_session.launch_argv(role, schema, session, system, resume=attempt > 1),
                 root, text, on_start=on_start, env=env,
-                timeout=engine_session.bounds(role.name).wall_seconds)
+                timeout=engine_session.bounds(role.name).wall_seconds, stop=stop)
             answer = engine_session.read_answer(answer_path)
         reading = engine_session.read_result(launched.stdout)
         if answer.all_out and launched.exit_code == engine_session.ALL_OUT_EXIT:
@@ -627,7 +714,7 @@ def _launch_until_answered(
                 no_reply = True
                 break
             retried, attempt = True, attempt + 1
-            time.sleep(API_RETRY_SECONDS)
+            engine_stop.pause(API_RETRY_SECONDS, stop)
             continue
         if reading.api_failure != engine_session.USAGE_LIMIT:
             if engine_session.is_miss(reading) and _problem(schema, reading) is not None:

@@ -61,12 +61,16 @@ exactly `{"account": <name>}` (the account the session ran on) or `{"all_out": t
 the account launcher waits on its Claude child instead of replacing itself, so
 a session is a process tree and ending it means killing the group, which a
 SIGTERM to the engine (turned into `SystemExit` while the session runs) and any
-other exception both do. Its `timeout` is the wall bound, counted from the spawn
+other exception, `engine_stop.Stopped` from a polled `stop` included, both do; the
+kill reaps the launcher and closes the pipes without waiting for EOF, so a descendant
+outside the group that holds a pipe cannot hold the engine. Its `timeout` is the wall bound, counted from the spawn
 (so the time `on_start` takes is inside it, and the deadline is armed, as a `Watchdog` thread, before
 `on_start` runs, so a stalled `on_start` cannot keep the group past it): a session past it gets SIGTERM to
 its whole group, then `GRACE_SECONDS` for the group (not only the launcher) to
 be gone, and SIGKILL to the group if any member is still alive; the call returns
-with `timed_out` set within `timeout + GRACE_SECONDS + DRAIN_SECONDS`. A launcher that
+with `timed_out` set within `timeout + GRACE_SECONDS + DRAIN_SECONDS`. A `stop` that is true before
+the launcher starts, or turns true while it runs or by the time it ended, raises `Stopped` (after the
+group is killed, once it started). A launcher that
 cannot start gives exit 127 and the `OSError` text as its stderr. Its stderr is
 captured so the launcher's own error is never a second line on the engine's
 stderr; `diagnostic` gives the last line of it for the engine's one fault line. A given `env` is
@@ -99,6 +103,7 @@ from typing import Callable, Mapping, Sequence
 from agent_tools.canonical import (
     parse_rfc3339_utc, reject_duplicate_keys, reject_nonfinite_literal,
 )
+from agent_tools.delivery import engine_stop
 from agent_tools.delivery.engine_commands import Watchdog, argument
 from agent_tools.delivery.engine_ledger import TOKEN_COUNTS
 from agent_tools.delivery.procedure_check import PLACEHOLDER_RE, ROLES
@@ -461,11 +466,14 @@ def _end_overrun(process: subprocess.Popen) -> tuple[bytes, bytes]:
 
 def launch(argv: Sequence[str], cwd: str, prompt: str, *,
            on_start: Callable[[int], None], timeout: float | None = None,
-           env: Mapping[str, str] | None = None) -> Launched:
+           env: Mapping[str, str] | None = None,
+           stop: Callable[[], bool] | None = None) -> Launched:
     """Run one session to its end; `on_start(pid)` is called once, before the prompt is written.
 
     With a `timeout` the session is ended at `started + timeout` (see the module docstring)
     and the result has `timed_out` set.
+    A `stop` that is true before the launcher starts, or turns true while it runs or by the time
+    it ended, raises `Stopped` (after the group is killed, once it started).
     """
     started = time.monotonic()
     deferred: list[int] = []
@@ -476,6 +484,8 @@ def launch(argv: Sequence[str], cwd: str, prompt: str, *,
     process = None
     timed_out = False
     try:
+        if stop is not None and stop():
+            raise engine_stop.Stopped
         try:
             process = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.PIPE,
                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -499,21 +509,20 @@ def launch(argv: Sequence[str], cwd: str, prompt: str, *,
         if overran:
             timed_out = True
             stdout, stderr = _collect(process)
-        elif timeout is None:
-            stdout, stderr = process.communicate(prompt.encode("utf-8"))
         else:
-            remaining = started + timeout - time.monotonic()
+            remaining = None if timeout is None else started + timeout - time.monotonic()
             try:
-                if remaining <= 0:
+                if remaining is not None and remaining <= 0:
                     raise subprocess.TimeoutExpired(list(argv), 0)
-                stdout, stderr = process.communicate(prompt.encode("utf-8"), timeout=remaining)
+                stdout, stderr = engine_stop.communicate(
+                    process, prompt.encode("utf-8"), stop=stop, timeout=remaining,
+                    drain=DRAIN_SECONDS)
             except subprocess.TimeoutExpired:
                 timed_out = True
                 stdout, stderr = _end_overrun(process)
     except BaseException:
         if process is not None:
-            _kill_group(process.pid, signal.SIGKILL)
-            process.communicate()
+            engine_stop.end_group(process)
         raise
     finally:
         if previous is not None:
