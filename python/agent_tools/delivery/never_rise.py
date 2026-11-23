@@ -17,6 +17,8 @@ violations only persist. Each enforcer is a `rule` id and a `find` function
 over a `Snapshot` (the revision, every path, every tracked text file's line count and
 its committed bytes, and the committed bytes of each path an enforcer `reads`); it may
 emit only its own rule id, else the comparison raises `ValueError`.
+An enforcer may also declare `fix`, which the cleanup command runs and the
+never-rise check never calls.
 
 A `Snapshot` also carries `files` (path to blob oid for every regular text file,
 mode 100644 or 100755, an empty one included; a symlink, a submodule and a
@@ -210,6 +212,11 @@ class Snapshot(NamedTuple):
     paths: frozenset[str] = frozenset()
 
 
+class Fix(NamedTuple):
+    changed: Mapping[str, bytes]
+    fixed: int
+
+
 @dataclass(frozen=True)
 class Enforcer:
     rule: str
@@ -219,6 +226,7 @@ class Enforcer:
     exempts_carried: bool = False
     carries_from: Callable[[str], bool] | None = None
     reads: Callable[[str], bool] | None = None
+    fix: Callable[[Snapshot, Sequence[str]], Fix] | None = None
 
 
 class HistoryUnavailable(Exception):
