@@ -130,6 +130,7 @@ PLATFORM_LISTS: Mapping[str, frozenset[str]] = {
     "issue-setup": frozenset(),
     "look-approval": frozenset({"acs", "covers"}),
     "resolve-project": frozenset(),
+    "verified-tree": frozenset({"results"}),
 }
 
 HOLDS = ("run", "head", "live")

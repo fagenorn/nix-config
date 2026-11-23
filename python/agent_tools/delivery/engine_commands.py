@@ -63,6 +63,7 @@ PLATFORM_MODULES: Mapping[str, str] = MappingProxyType({
     "issue-setup": "delivery.issue_setup",
     "look-approval": "delivery.look_approval",
     "resolve-project": "project_contract.resolve_project",
+    "verified-tree": "verification.verified_tree",
 })
 POSITIONAL: frozenset[str] = frozenset({"diff-scope"})
 PLATFORM_WALL_SECONDS: Mapping[str, float] = MappingProxyType({
@@ -71,6 +72,7 @@ PLATFORM_WALL_SECONDS: Mapping[str, float] = MappingProxyType({
     "issue-setup": 1200,
     "look-approval": 300,
     "resolve-project": 300,
+    "verified-tree": 14400,
 })
 PROJECT_WALL_SECONDS = 3600
 PROJECT_DECLARATION = CommandDeclaration((), {})

@@ -15,6 +15,11 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
+from unittest import mock
+
+from agent_tools.verification import verified_tree
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = REPO_ROOT / "home/common/agent-skills/platform-manifest.json"
@@ -32,7 +37,9 @@ ABSENT = object()
 RECORD = ".agents/artifacts/plans/p.acceptance.md"
 
 
-class VerifiedTreeTest(unittest.TestCase):
+class ProjectCase(unittest.TestCase):
+    """A committed copy of the fixture project, its contract and git helpers."""
+
     def setUp(self):
         scratch = tempfile.TemporaryDirectory()
         self.addCleanup(scratch.cleanup)
@@ -72,6 +79,8 @@ class VerifiedTreeTest(unittest.TestCase):
         self.git("add", "-A")
         self.git("commit", "-q", "-m", message)
 
+
+class VerifiedTreeTest(ProjectCase):
     def run_tool(self, *args, cwd=None, env=None):
         return subprocess.run([sys.executable, "-m", "agent_tools.verification.verified_tree", *args],
                               cwd=cwd or self.repo, capture_output=True, text=True,
@@ -640,6 +649,136 @@ class VerifiedTreeTest(unittest.TestCase):
                 self.assertEqual(done.stderr, stderr)
                 self.assertFalse(self.record_path().exists())
                 self.assertFalse(self.plan_path().exists())
+
+
+class RunTest(ProjectCase):
+    """`verified-tree run`: every declared id once, in the worktree, in a verify slot."""
+
+    def setUp(self):
+        super().setUp()
+        self.log = self.scratch / "log"
+        self.slots = self.scratch / "slots"
+        self.env["VERIFY_SLOT_DIR"] = str(self.slots)
+        self.worktree = self.scratch / "linked"
+
+    def command(self, verification_id, extra=""):
+        """A contract command appending `<cwd> <id>` to the log, then running `extra`."""
+        code = (f"import os,sys;open({str(self.log)!r},'a').write(os.getcwd()+' {verification_id}'+chr(10));"
+                + extra)
+        return {"argv": [sys.executable, "-c", code], "cwd": ".", "env": []}
+
+    def declare(self, commands, conditions=ABSENT):
+        """Commit a contract declaring `commands` (id -> extra code), publish it, add the worktree."""
+        path = self.repo / ".agents" / "project.json"
+        contract = json.loads(path.read_text(encoding="utf-8"))
+        bindings = contract["bindings"]
+        bindings["commands"] = {name: self.command(name, extra) for name, extra in commands.items()}
+        bindings["workflow"]["verification"] = list(commands)
+        bindings["workflow"].pop("verification_conditions", None)
+        if conditions is not ABSENT:
+            bindings["workflow"]["verification_conditions"] = conditions
+        path.write_text(json.dumps(contract, indent=2) + "\n", encoding="utf-8")
+        self.commit_all("declare")
+        self.git("update-ref", "refs/remotes/origin/main", "HEAD")
+        self.git("worktree", "add", "-q", "-b", "work", str(self.worktree))
+
+    def run_verified(self):
+        return subprocess.run(
+            [sys.executable, "-m", "agent_tools.verification.verified_tree", "run",
+             "--worktree-path", str(self.worktree)],
+            cwd=self.repo, capture_output=True, text=True, check=False, env=self.env)
+
+    def answer(self, done, exit_code=0):
+        self.assertEqual(done.returncode, exit_code, done.stderr)
+        self.assertEqual(done.stdout.count("\n"), 1, done.stdout)
+        return json.loads(done.stdout)
+
+    def logged(self):
+        return self.log.read_text().splitlines() if self.log.exists() else []
+
+    def test_run_runs_every_declared_id_once_in_the_worktree_and_passes(self):
+        self.declare({"lint": "", "test": ""})
+        answer = self.answer(self.run_verified())
+        self.assertEqual(answer["verdict"], "passed")
+        self.assertIs(answer["clean"], True)
+        self.assertEqual(answer["head"], self.git("rev-parse", "HEAD", cwd=self.worktree))
+        self.assertEqual([r["id"] for r in answer["results"]], ["lint", "test"])
+        self.assertEqual([(r["status"], r["exit"]) for r in answer["results"]],
+                         [("pass", 0), ("pass", 0)])
+        where = str(self.worktree.resolve())
+        self.assertEqual(self.logged(), [f"{where} lint", f"{where} test"])
+
+    def test_a_failing_id_fails_the_run_and_the_others_still_run_once(self):
+        self.declare({"lint": "print('boom');sys.exit(3)", "test": ""})
+        answer = self.answer(self.run_verified())
+        lint, test = answer["results"]
+        self.assertEqual(answer["verdict"], "failed")
+        self.assertEqual((lint["status"], lint["exit"]), ("fail", 3))
+        self.assertIn("boom", lint["summary"])
+        self.assertEqual(test["status"], "pass")
+        where = str(self.worktree.resolve())
+        self.assertEqual(self.logged(), [f"{where} lint", f"{where} test"])
+
+    def test_an_id_whose_condition_matches_no_changed_path_is_skipped_with_its_reason(self):
+        reason = "no documentation changed"
+        self.declare({"lint": "", "test": ""},
+                     {"lint": {"when_changed": ["docs/**"], "skip_reason": reason}})
+        (self.worktree / "src").mkdir()
+        (self.worktree / "src" / "x.py").write_text("x = 1\n")
+        self.git("add", "-A", cwd=self.worktree)
+        self.git("commit", "-q", "-m", "change", cwd=self.worktree)
+        answer = self.answer(self.run_verified())
+        lint, test = answer["results"]
+        self.assertEqual((lint["id"], lint["status"], lint["reason"]), ("lint", "skipped", reason))
+        self.assertNotIn("exit", lint)
+        self.assertEqual((test["status"], answer["verdict"]), ("pass", "passed"))
+        self.assertEqual(self.logged(), [f"{self.worktree.resolve()} test"])
+
+    def test_a_dirty_tree_runs_nothing(self):
+        self.declare({"lint": "", "test": ""})
+        (self.worktree / "stray.txt").write_text("x\n")
+        answer = self.answer(self.run_verified())
+        self.assertEqual((answer["verdict"], answer["results"], answer["clean"]),
+                         ("dirty", [], False))
+        self.assertFalse(self.log.exists())
+
+    def test_a_command_that_leaves_the_tree_dirty_is_dirty(self):
+        self.declare({"lint": "", "test": "open('left-over.txt','w').write('x')"})
+        answer = self.answer(self.run_verified())
+        self.assertEqual((answer["verdict"], answer["clean"]), ("dirty", False))
+        self.assertEqual([r["status"] for r in answer["results"]], ["pass", "pass"])
+
+    def test_no_slot_is_retried_then_failed_with_no_slot(self):
+        self.declare({"lint": "sys.exit(75)", "test": ""})
+        env = {**HERMETIC_GIT, "HOME": self.env["HOME"], "VERIFY_SLOT_DIR": str(self.slots)}
+        out = StringIO()
+        with (mock.patch.dict(os.environ, env), mock.patch.object(verified_tree, "SLOT_ATTEMPTS", 2),
+              redirect_stdout(out), mock.patch("sys.stderr", StringIO())):
+            status = verified_tree.main(["run", "--worktree-path", str(self.worktree)])
+        answer = self.answer(subprocess.CompletedProcess([], status, out.getvalue(), ""))
+        lint, test = answer["results"]
+        self.assertEqual((lint["status"], lint["no_slot"]), ("fail", True))
+        self.assertEqual(lint["summary"], "no verify slot came free in 2 attempts")
+        self.assertEqual(test["status"], "pass")
+        where = str(self.worktree.resolve())
+        self.assertEqual(self.logged(), [f"{where} lint", f"{where} lint", f"{where} test"])
+
+    def test_a_path_outside_any_worktree_is_an_error(self):
+        empty = self.scratch / "empty"
+        empty.mkdir()
+        done = subprocess.run(
+            [sys.executable, "-m", "agent_tools.verification.verified_tree", "run",
+             "--worktree-path", str(empty)],
+            cwd=self.repo, capture_output=True, text=True, check=False, env=self.env)
+        answer = self.answer(done, 1)
+        self.assertEqual(answer["verdict"], "error")
+        self.assertTrue(answer["detail"])
+
+    def test_a_usage_error_is_an_error_verdict_too(self):
+        done = subprocess.run(
+            [sys.executable, "-m", "agent_tools.verification.verified_tree", "run"],
+            cwd=self.repo, capture_output=True, text=True, check=False, env=self.env)
+        self.assertEqual(self.answer(done, 1)["verdict"], "error")
 
 
 if __name__ == "__main__":

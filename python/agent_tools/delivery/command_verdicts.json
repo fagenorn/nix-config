@@ -110,7 +110,11 @@
   "skipped-test-lint": null,
   "sprint": null,
   "standards-lint": null,
-  "verified-tree": null,
+  "verified-tree": {
+    "subcommands": {
+      "run": ["passed", "failed", "dirty", "error"]
+    }
+  },
   "verify-pending": null,
   "verify-slot": null
 }
