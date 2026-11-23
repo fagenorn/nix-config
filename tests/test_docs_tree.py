@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from agent_tools.delivery.record_lint import record_violations
 from agent_tools.project_contract.adopt_inspection import (
     blob_at,
     parses_as_evidence_record,
@@ -1157,6 +1158,22 @@ class DocsTreeTest(unittest.TestCase):
                 self.assertEqual(len(found), 1, found)
                 if name is not None:
                     self.assertEqual(found[0].name, name)
+
+    def test_every_release_record_keeps_the_record_form(self):
+        paths = sorted((REPO_ROOT / "docs/areas/release/adr").glob("*.md"))
+
+        breaches = {}
+        for path in paths:
+            relative = path.relative_to(REPO_ROOT).as_posix()
+            found = record_violations(relative, path.read_bytes())
+            if found:
+                breaches[relative] = [violation.rule for violation in found]
+
+        self.assertEqual(
+            [path.name[:3] for path in paths],
+            ["002", "003", "005", "006", "007", "008", "010", "011", "012", "013", "015", "016"],
+        )
+        self.assertEqual(breaches, {})
 
     def test_no_tracked_file_cites_a_retired_release_record(self):
         numbers = ("001", "004", "009", "014")
