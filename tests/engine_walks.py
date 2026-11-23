@@ -159,7 +159,10 @@ def walk_edges(
     inputs: Mapping[str, object],
     outcomes: Mapping[str, tuple[str, ...]],
     schemas: Mapping[str, Mapping],
+    members: Mapping[str, tuple[Mapping[str, object], ...]] | None = None,
 ) -> Coverage:
+    """`members` gives a command step the result members its readers name, one alternative per route to walk."""
+    members = members or {}
     wanted = edges(procedure)
     found: dict[tuple[str, str], Walk] = {}
     after_bound: dict[tuple[str, str], Walk] = {}
@@ -170,8 +173,9 @@ def walk_edges(
         action = replayed.action
         if isinstance(action, (RunCommand, StartSession)):
             for outcome in outcomes[action.step]:
-                result = result_for(procedure, action.step, outcome, schemas)
-                queue.append(events + _reported(action.step, outcome, result))
+                for extra in members.get(action.step, ({},)) if isinstance(action, RunCommand) else ({},):
+                    result = {**result_for(procedure, action.step, outcome, schemas), **extra}
+                    queue.append(events + _reported(action.step, outcome, result))
             continue
         if isinstance(action, RunGroup):
             listed = [member.step for member in action.members]

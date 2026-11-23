@@ -12,6 +12,8 @@ DIR = Path(__file__).resolve().parents[1] / "home/common/verify-pending"
 STAMP = r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z"
 LIMIT = 1048576
 WAIT = 2
+FIX_CALL = ("cleanup-issue fix --project fagenorn/nix-config --repo fagenorn/nix-config "
+            "--branch main")
 NOTICE = ("verify-pending-kick: the verify-pending job is not loaded in this session "
           "(on darwin: nobody is logged in at the console); no pass started now, "
           "the switch request waits for the job's next run")
@@ -65,11 +67,14 @@ class Scripts(unittest.TestCase):
 
 
 class Pass(Scripts):
-    def script(self, owner_actions=True, verify_status=0, owner_status=0, verify_extra=""):
+    def script(self, owner_actions=True, verify_status=0, owner_status=0, verify_extra="",
+               cleanup_fix=True, fix_status=0):
         owner = str(self.stub("owner-actions", owner_status)) if owner_actions else ""
+        cleanup = str(self.stub("cleanup-issue", fix_status)) if cleanup_fix else ""
         verify = str(self.stub("verify-pending", verify_status, verify_extra))
         return self.render("pass.sh", {"@path@": "/usr/bin:/bin", "@caFile@": "/dev/null",
                                        "@verifyPending@": verify, "@ownerActions@": owner,
+                                       "@cleanupIssue@": cleanup,
                                        "@currentSystem@": str(self.current), "@switchWait@": str(WAIT)})
 
     def run_pass(self, *args, home=True, **script):
@@ -78,26 +83,41 @@ class Pass(Scripts):
     def lines(self):
         return self.log.read_text().splitlines()
 
-    def test_a_pass_logs_start_and_end_and_runs_both_commands(self):
+    def test_a_pass_logs_start_and_end_and_runs_every_command(self):
         done = self.run_pass("mbp")
         self.assertEqual((done.returncode, done.stdout, done.stderr), (0, "", ""))
-        self.assertEqual(self.calls_made(), ["verify-pending run --host mbp", "owner-actions refresh"])
+        self.assertEqual(self.calls_made(), ["verify-pending run --host mbp", "owner-actions refresh", FIX_CALL])
         lines = self.lines()
         self.assertRegex(lines[0], rf"^{STAMP} pass start host=mbp$")
-        self.assertEqual(lines[1:3], ["verify-pending output", "owner-actions output"])
-        self.assertRegex(lines[3], rf"^{STAMP} pass end host=mbp verify=0 owner_actions=0$")
-        self.assertEqual(len(lines), 4)
+        self.assertEqual(lines[1:4], ["verify-pending output", "owner-actions output", "cleanup-issue output"])
+        self.assertRegex(lines[4], rf"^{STAMP} pass end host=mbp verify=0 owner_actions=0 cleanup_fix=0$")
+        self.assertEqual(len(lines), 5)
+
+    def test_a_pass_runs_the_cleanup_fix_step_after_the_owner_refresh(self):
+        done = self.run_pass("eleven-m5")
+        self.assertEqual((done.returncode, done.stdout, done.stderr), (0, "", ""))
+        self.assertEqual(self.calls_made(), ["verify-pending run --host eleven-m5", "owner-actions refresh", FIX_CALL])
+        self.assertRegex(self.lines()[-1], rf"^{STAMP} pass end host=eleven-m5 verify=0 owner_actions=0 cleanup_fix=0$")
 
     def test_failing_children_never_fail_the_pass(self):
-        done = self.run_pass("anis-desktop", verify_status=1, owner_status=3)
+        done = self.run_pass("anis-desktop", verify_status=1, owner_status=3, fix_status=2)
         self.assertEqual(done.returncode, 0)
-        self.assertRegex(self.lines()[-1], rf"^{STAMP} pass end host=anis-desktop verify=1 owner_actions=3$")
+        self.assertRegex(self.lines()[-1],
+                         rf"^{STAMP} pass end host=anis-desktop verify=1 owner_actions=3 cleanup_fix=2$")
 
     def test_no_owner_actions_launcher_skips_the_refresh(self):
         done = self.run_pass("eleven-m5", owner_actions=False)
         self.assertEqual(done.returncode, 0)
-        self.assertEqual(self.calls_made(), ["verify-pending run --host eleven-m5"])
-        self.assertRegex(self.lines()[-1], rf"^{STAMP} pass end host=eleven-m5 verify=0 owner_actions=skipped$")
+        self.assertEqual(self.calls_made(), ["verify-pending run --host eleven-m5", FIX_CALL])
+        self.assertRegex(self.lines()[-1],
+                         rf"^{STAMP} pass end host=eleven-m5 verify=0 owner_actions=skipped cleanup_fix=0$")
+
+    def test_no_cleanup_launcher_skips_the_step(self):
+        done = self.run_pass("eleven-m5", cleanup_fix=False)
+        self.assertEqual(done.returncode, 0)
+        self.assertEqual(self.calls_made(), ["verify-pending run --host eleven-m5", "owner-actions refresh"])
+        self.assertRegex(self.lines()[-1],
+                         rf"^{STAMP} pass end host=eleven-m5 verify=0 owner_actions=0 cleanup_fix=skipped$")
 
     def test_a_log_over_the_limit_is_rotated_once(self):
         self.state.mkdir(parents=True)
@@ -141,7 +161,7 @@ class Pass(Scripts):
         lines = self.lines()
         self.assertRegex(lines[0], rf"^{STAMP} switch host=mbp target={re.escape(str(self.system_a))} current=yes$")
         self.assertRegex(lines[1], rf"^{STAMP} pass start host=mbp$")
-        self.assertEqual(self.calls_made(), ["verify-pending run --host mbp", "owner-actions refresh"])
+        self.assertEqual(self.calls_made(), ["verify-pending run --host mbp", "owner-actions refresh", FIX_CALL])
         self.assertEqual(sorted(p.name for p in self.state.iterdir()), ["runner.log"])
 
     def test_an_empty_request_runs_at_once_without_a_switch_line(self):
@@ -166,8 +186,8 @@ class Pass(Scripts):
         marker = self.root / "kicked"
         extra = f'if [ ! -e "{marker}" ]; then : > "{marker}"; printf "%s\\n" "{self.system_a}" > "{self.request}"; fi\n'
         self.assertEqual(self.run_pass("mbp", verify_extra=extra).returncode, 0)
-        self.assertEqual(self.calls_made(), ["verify-pending run --host mbp", "owner-actions refresh",
-                                             "verify-pending run --host mbp", "owner-actions refresh"])
+        self.assertEqual(self.calls_made(), ["verify-pending run --host mbp", "owner-actions refresh", FIX_CALL,
+                                             "verify-pending run --host mbp", "owner-actions refresh", FIX_CALL])
         starts = [line for line in self.lines() if " pass start " in line]
         self.assertEqual(len(starts), 2)
         self.assertTrue(any(line.endswith(" current=yes") for line in self.lines()))

@@ -11,6 +11,7 @@ import contextlib
 import fcntl
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -22,6 +23,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
+from agent_tools.claims import forge_claim
 from agent_tools.delivery import engine, engine_commands, engine_core, engine_ledger, engine_shell
 from agent_tools.delivery.engine_commands import command_text
 from agent_tools.delivery.engine_guard import Hook, judge, payload
@@ -968,6 +970,49 @@ class GuardDeliverTest(unittest.TestCase):
         self.assertTrue(good.allowed, good.reason)
 
 
+class InputsTest(unittest.TestCase):
+    def test_a_new_run_supplies_its_issue_repo_root_and_a_holder_naming_the_run(self):
+        project = EngineProject(self)
+        one_step = {"id": "a", "stage": "setup", "kind": "command", "command": "standin-record",
+                    "holds": "run",
+                    "in": ["run.holder", "run.issue", "run.repo", "run.repo_root"],
+                    "on": {"ok": "done", "failed": "needs-owner", "refused": "needs-owner"}}
+        procedures = project.procedures([one_step],
+                                        inputs=("holder", "issue", "repo", "repo_root"))
+        done = project.deliver(procedures)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        run = project.runs()[0]
+        document = json.loads((run / "run.json").read_text())
+        holder = f"{document['host']}/{run.name}"
+        inputs = document["inputs"]
+        self.assertEqual(inputs, {"holder": holder, "issue": 1512, "repo": "example/engine",
+                                  "repo_root": inputs["repo_root"]})
+        self.assertEqual(os.path.realpath(inputs["repo_root"]), os.path.realpath(project.root))
+        self.assertEqual(project.argvs("record"),
+                         [[holder, "1512", "example/engine", inputs["repo_root"]]])
+        self.assertEqual(forge_claim.HOLDER(holder), holder)
+
+    def test_a_child_run_reads_the_root_runs_holder(self):
+        project = EngineProject(self)
+        call = {"id": "c", "stage": "setup", "kind": "call", "procedure": "kid", "holds": "run",
+                "on": {"done": "done", "needs-owner": "needs-owner"}}
+        read = {"id": "r", "stage": "setup", "kind": "command", "command": "standin-record",
+                "holds": "run", "in": ["run.holder"],
+                "on": {"ok": "done", "failed": "needs-owner", "refused": "needs-owner"}}
+        kid = {"steps": [read], "inputs": ["holder", "issue"],
+               "stops": {"needs-owner": {"need": "owner-decision", "reenter": "r"}}}
+        procedures = project.procedures([call], inputs=("holder", "issue"),
+                                        children={"kid": kid})
+        done = project.deliver(procedures)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        documents = {run: json.loads((run / "run.json").read_text()) for run in project.runs()}
+        roots = [run for run, document in documents.items() if "parent" not in document]
+        self.assertEqual(len(roots), 1)
+        self.assertEqual(len(documents), 2)
+        root = roots[0]
+        self.assertEqual(project.argvs("record"), [[f"{documents[root]['host']}/{root.name}"]])
+
+
 class RefusalTest(unittest.TestCase):
     def assertRefused(self, project: EngineProject, done, word: str) -> None:
         self.assertEqual(done.returncode, 2, done.stdout + done.stderr)
@@ -1019,8 +1064,8 @@ class RefusalTest(unittest.TestCase):
 
         cases = {
             "an undeclared input": (
-                "repo", lambda p: p.procedures([step("a", "standin-record", "done")],
-                                               inputs=("issue", "repo"))),
+                "branch", lambda p: p.procedures([step("a", "standin-record", "done")],
+                                                 inputs=("issue", "branch"))),
             "a mutating step without a check": ("check", with_mutation),
             "a keep-alive with no claim-lost stop": ("missing_claim_lost", no_claim_lost),
             "a mutating decide step": ("marked mutates", mutating_decide),

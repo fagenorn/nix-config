@@ -23,7 +23,7 @@ ADR-console-052 gave the owner a Spend page, but the desk page, where the owner 
 
 ## Consequences
 
-- This amends ADR-console-002: the Sprints and Projects rules name the figure and its place. It amends ADR-console-052: the Spend page gains the item section for a `#sprint=` or `#run=` fragment.
+- The Sprints and Projects rules name the figure and its place. It amends ADR-console-052: the Spend page gains the item section for a `#sprint=` or `#run=` fragment.
 - The figures are ADR-console-049's estimates, so they are estimates, and the desk page shows none until the first spend poll ends.
 - The desk page gains one link target and no write: ADR-console-008's write set is untouched.
 - The page change changes what the owner sees, so before and after pictures at 1440 px and 480 px go to the owner on a question card, and the change merges only on the owner's answer.

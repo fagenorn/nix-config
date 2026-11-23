@@ -1,0 +1,29 @@
+{
+  "format": 1,
+  "keep_alive": {"command": "forge-claim", "subcommand": "renew", "in": ["run.repo", "run.issue", "run.holder"]},
+  "inputs": ["holder", "issue", "repo", "repo_root"],
+  "stops": {
+    "setup": {"need": "owner-decision", "reenter": "start"},
+    "review-blocked": {"need": "owner-decision", "reenter": "start"},
+    "claimed": {"need": "owner-decision", "reenter": "start"},
+    "claim": {"need": "retry", "reenter": "start"},
+    "claim-lost": {"need": "owner-decision", "reenter": "start"},
+    "dirty": {"need": "owner-decision", "reenter": "start"},
+    "look-not-on-engine": {"need": "nothing", "reenter": "start"},
+    "standard-not-on-engine": {"need": "nothing", "reenter": "lane"},
+    "needs-design": {"need": "owner-decision", "reenter": "lane"},
+    "no-lane": {"need": "retry", "reenter": "lane"}
+  },
+  "steps": [
+    {"id": "start", "stage": "setup", "kind": "call", "procedure": "setup", "holds": "live",
+     "on": {"done": "issue", "setup": "setup", "review-blocked": "review-blocked", "claimed": "claimed",
+            "claim": "claim", "claim-lost": "claim-lost", "dirty": "dirty",
+            "look-not-on-engine": "look-not-on-engine"}},
+    {"id": "issue", "stage": "setup", "kind": "command", "command": "issue-setup", "subcommand": "read",
+     "holds": "run", "in": ["run.repo", "run.issue"], "on": {"read": "lane", "error": "no-lane", "refused": "no-lane"}},
+    {"id": "lane", "stage": "setup", "kind": "agent", "role": "reviewer-lite", "prompt": "lane.md",
+     "reply": "lane.reply.json", "outcome_from": "lane", "holds": "run", "in": ["run.issue", "run.repo", "issue.text"],
+     "on": {"direct": "done", "standard": "standard-not-on-engine", "needs-design": "needs-design",
+            "no-reply": "no-lane", "out-of-bounds": "no-lane"}}
+  ]
+}

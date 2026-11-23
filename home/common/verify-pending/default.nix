@@ -24,10 +24,12 @@
 # `postActivation`. A request that lands mid-round earns one more round. A launchd `WatchPaths` on
 # `/run/current-system` never fires (spike S2), hence the kick (D1, D11).
 #
-# Each round appends `pass start host=H` and `pass end host=H verify=N owner_actions=N|skipped`
-# lines (preceded by `switch host=H target=T current=yes|timeout` for a switch) with UTC times to
+# Each round appends `pass start host=H` and
+# `pass end host=H verify=N owner_actions=N|skipped cleanup_fix=N|skipped` lines (preceded by
+# `switch host=H target=T current=yes|timeout` for a switch) with UTC times to
 # `~/.agents/state/verify-pending/runner.log`, rotated to `runner.log.1` above 1 MiB, then runs
-# `owner-actions refresh`, and the pass always exits 0; what runs unattended is decided by
+# `owner-actions refresh` and the cleanup command's fix-only run for this project, and the pass
+# always exits 0; what runs unattended is decided by
 # `verify-pending run` itself (see `agent_tools.verification.verify_exec`).
 #
 # A login Mac (issue 668) runs the darwin job as a launchd user agent in `gui/<uid>`, and gh reads
@@ -91,12 +93,21 @@ let
 
   pass = pkgs.writeShellScript "verify-pending-pass" (
     builtins.replaceStrings
-      [ "@path@" "@caFile@" "@verifyPending@" "@ownerActions@" "@currentSystem@" "@switchWait@" ]
+      [
+        "@path@"
+        "@caFile@"
+        "@verifyPending@"
+        "@ownerActions@"
+        "@cleanupIssue@"
+        "@currentSystem@"
+        "@switchWait@"
+      ]
       [
         path
         "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
         "${agentTools.launchers.verify-pending}"
         (if agentTools.launchers ? owner-actions then "${agentTools.launchers.owner-actions}" else "")
+        (if agentTools.launchers ? cleanup-issue then "${agentTools.launchers.cleanup-issue}" else "")
         "/run/current-system"
         "300"
       ]
