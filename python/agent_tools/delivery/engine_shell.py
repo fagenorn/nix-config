@@ -109,7 +109,9 @@ transition (either may be the one a kill left; a group member's lacks only its g
 grade being the core's) is first completed from the stored outcome; unless the
 walk is already `Done`, `engine_core.reentry` (given the current repository head) names the step to
 re-enter and a `run_continued` event records it; the loop then runs as for a new run. A mutating command
-step's `check` runs first on every visit that replays one a continue discarded (`RunCommand.recheck`),
+step's `check` runs first on every visit that replays one a continue discarded (`RunCommand.recheck`; a
+group member's likewise, and in the child runs of a call that replays one, the first visit of each mutating
+command),
 under the same guard, wall bound and stop polling as the command: the outcome `absent` runs the command,
 any other outcome stands for it, its document stored as the visit's result, and the keep-alive runs before
 that check as before any visit of the step. A `run_continued` carries no `head`; a `result_stored` carries
@@ -621,7 +623,23 @@ class _Quota(Exception):
         self.detail, self.step = detail, step
 
 
-def _walk(run_dir: Path, table: CommandTable, scope: _Scope) -> tuple[int, dict]:
+def _forced(action, steps: dict[str, dict], first: bool):
+    """`action` with the check owed to a child run of a rewound call: its first visit of each mutating command."""
+    if not first:
+        return action
+    if isinstance(action, engine_core.RunGroup):
+        return replace(action, members=tuple(_forced(member, steps, first) for member in action.members))
+    if action.visit != 1:
+        return action
+    if isinstance(action, engine_core.RunCommand):
+        return replace(action, recheck=action.recheck or steps[action.step].get("mutates") is True)
+    if isinstance(action, engine_core.RunCall):
+        return replace(action, recheck=True)
+    return action
+
+
+def _walk(run_dir: Path, table: CommandTable, scope: _Scope,
+          recheck: bool = False) -> tuple[int, dict]:
     run = engine_ledger.read_run(run_dir)
     name, inputs = run["procedure"], run["inputs"]
     procedure = _load(run_dir / "procedure" / f"{name}.json")
@@ -654,6 +672,7 @@ def _walk(run_dir: Path, table: CommandTable, scope: _Scope) -> tuple[int, dict]
                          f"The {name} procedure stopped at step {step} with "
                          f"{action.name}, which needs {action.need}.", stop)
         _refuse_when_ending(run_dir, action.step)
+        action = _forced(action, steps, recheck)
         if isinstance(action, engine_core.StartSession):
             try:
                 stopped = _visit_session(run_dir, table.root, steps[action.step], action, scope)
@@ -963,7 +982,7 @@ def _child(run_dir: Path, table: CommandTable, run: dict, step: dict,
             if not _names_child(run_dir, child_dir.name):
                 shutil.rmtree(child_dir, ignore_errors=True)
             raise
-        _, line = _walk(child_dir, table, scope)
+        _, line = _walk(child_dir, table, scope, action.recheck)
         if line["end"] == procedure_check.QUOTA_WAIT:
             raise _Quota(line["detail"])
         if line["end"] == engine_stop.STOPPED_BY_REQUEST:

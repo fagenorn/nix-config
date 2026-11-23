@@ -656,6 +656,27 @@ class ContinueTest(unittest.TestCase):
         self.assertEqual(next_action(doc, INPUTS, first), RunCommand(
             "m", 1, "diff-scope", None, (("s.title", "t1"),), False))
 
+    def test_a_mutating_group_member_is_rechecked_once_for_each_visit_a_rewind_discarded(self) -> None:
+        doc = fan()
+        step(doc, "lint").update(mutates=True, check={"command": "diff-scope"})
+        killed = D + G + pair("lint", "ok") + [{"type": "entered", "step": "claim"}]
+        owing = replace(LINT, visit=2, recheck=True)
+        self.assertEqual(next_action(doc, INPUTS, D + G), RunGroup("checks", 1, (LINT, CLAIM)))
+        again = next_action(doc, INPUTS, killed + [C("checks", 1)])
+        self.assertEqual(again, RunGroup("checks", 2, (owing, replace(CLAIM, visit=2))))
+        entered = killed + [C("checks", 1)] + G + [{"type": "entered", "step": "lint"}]
+        self.assertEqual(next_action(doc, INPUTS, entered).members[0], replace(LINT, visit=2))
+        rewound = killed + [C("draft", 1)] + D
+        self.assertEqual(next_action(doc, INPUTS, rewound), RunGroup("checks", 2, (owing, replace(CLAIM, visit=2))))
+
+    def test_a_call_a_rewind_discarded_owes_the_check_of_its_children(self) -> None:
+        events = D + G + MEMBERS_PASS
+        self.assertEqual(next_action(fan(), INPUTS, events + [{"type": "entered", "step": "fan"}]), FAN_CALL)
+        self.assertEqual(
+            next_action(fan(), INPUTS, events + [{"type": "entered", "step": "fan"}, C("fan", 1)]),
+            replace(FAN_CALL, visit=2, recheck=True),
+        )
+
     def test_a_done_run_has_no_reentry(self) -> None:
         with self.assertRaises(engine_core.CoreError):
             reentry(toy(), INPUTS, DONE_EVENTS, "h1")

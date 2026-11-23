@@ -79,8 +79,12 @@ Continuing
     `owed[step, args]` grows by those arrivals (keyed by the step and the
     arguments resolved at the arrival), shrinks by one at each later `entered`
     event of the same step and arguments and is never restored by a snapshot;
-    `RunCommand.recheck` is true exactly for a pending `command` step with
-    `mutates` true whose `owed` for its step and arguments is above zero.
+    `RunCommand.recheck` is true exactly for a pending `command` step, or a
+    waiting `command` member of a pending group, with `mutates` true whose
+    `owed` for its step is above zero; a group member entered in a discarded
+    group arrival is owed too. `RunCall.recheck` is true exactly for a pending
+    `call` step whose `owed` is above zero: the shell then checks the first
+    visit of every mutating command in the call's child runs.
     `reentry(procedure, inputs, events, head)` answers where a continue should
     re-enter: the earliest stale result by arrival order (`live` is always
     stale, `head` is stale when the recorded head is absent, `head` is None or
@@ -173,6 +177,7 @@ class RunCall:
     items: tuple[object, ...] | None
     parallel: int
     args: tuple[tuple[str, object], ...]
+    recheck: bool = False
 
 
 @dataclass(frozen=True)
@@ -253,6 +258,7 @@ class _Arrival:
     snapshot: tuple[dict, dict, dict, int]
     args: tuple[tuple[str, object], ...] = ()
     entered: bool = False
+    members: list[tuple[str, tuple[tuple[str, object], ...]]] = field(default_factory=list)
 
 
 @dataclass
@@ -268,6 +274,12 @@ class _Walk:
 
 def _owed_key(step: str, args: tuple[tuple[str, object], ...]) -> tuple[str, str]:
     return step, repr(args)
+
+
+def _owes(step: Mapping, owed: Mapping[tuple[str, str], int]) -> bool:
+    """Whether `step` is a mutating command that a rewind owes a check for."""
+    return step["kind"] == "command" and step.get("mutates") is True and any(
+        count > 0 and name == step["id"] for (name, _), count in owed.items())
 
 
 def _walk(procedure: Mapping, inputs: Mapping[str, object], events: Sequence[Mapping],
@@ -409,6 +421,9 @@ def _walk(procedure: Mapping, inputs: Mapping[str, object], events: Sequence[Map
             if later.entered:
                 key = _owed_key(later.step, later.args)
                 owed[key] = owed.get(key, 0) + 1
+            for member, args in later.members:
+                key = _owed_key(member, args)
+                owed[key] = owed.get(key, 0) + 1
         seen, kept, made, length = arrival.snapshot
         visits.clear()
         visits.update(seen)
@@ -468,8 +483,11 @@ def _walk(procedure: Mapping, inputs: Mapping[str, object], events: Sequence[Map
             if name == pending_id:
                 current.entered = True
                 key = _owed_key(current.step, current.args)
-                if owed.get(key, 0) > 0:
-                    owed[key] -= 1
+            else:
+                current.members.append((name, pending.waiting[name]))
+                key = _owed_key(name, pending.waiting[name])
+            if owed.get(key, 0) > 0:
+                owed[key] -= 1
             continue
         if name not in pending.entered:
             raise CoreError(f"outcome for {name!r} before its entered event")
@@ -496,17 +514,18 @@ def replay(procedure: Mapping, inputs: Mapping[str, object], events: Sequence[Ma
         step, visit = pending.step, walk.arrivals[-1].visit
         if step["kind"] == "group":
             members = tuple(
-                _run_step(steps[member["step"]], walk.total[member["step"]], pending.waiting[member["step"]])
+                _run_step(steps[member["step"]], walk.total[member["step"]], pending.waiting[member["step"]],
+                          _owes(steps[member["step"]], walk.owed))
                 for member in step["members"]
                 if member["step"] in pending.waiting
             )
             action: Action = RunGroup(step["id"], visit, members)
         elif step["kind"] == "call":
-            action = RunCall(step["id"], visit, step["procedure"], pending.items, step.get("parallel", 1), pending.args)
+            owes = any(count > 0 and name == step["id"] for (name, _), count in walk.owed.items())
+            action = RunCall(step["id"], visit, step["procedure"], pending.items, step.get("parallel", 1),
+                             pending.args, owes)
         else:
-            recheck = step["kind"] == "command" and step.get("mutates") is True and any(
-                count > 0 and name == step["id"] for (name, _), count in walk.owed.items())
-            action = _run_step(step, visit, pending.args, recheck)
+            action = _run_step(step, visit, pending.args, _owes(step, walk.owed))
     elif walk.position == "done":
         action = Done()
     else:
