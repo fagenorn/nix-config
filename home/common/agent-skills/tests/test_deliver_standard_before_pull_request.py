@@ -112,5 +112,90 @@ class VerifyBeforePullRequestTest(unittest.TestCase):
         self.assertEqual(lines[-2:], [MARKER, ""])
 
 
+UNTOUCHED_SENTENCE = "When untouched is true, run no verification command and return results []."
+
+
+class UntouchedSyncTest(unittest.TestCase):
+    """A sync that changes none of the pull request's files is not verified again locally."""
+
+    CARRY = program.LookCarryLandingTest
+    UNTOUCHED = {"head": program.D, "clean": True, "merge_only": True, "untouched": True, "results": []}
+    LOOK_UNTOUCHED = {"head": program.D, "clean": True, "merge_only": True, "ahead": False, "untouched": True,
+                      "results": []}
+    MOVED = {"head": program.D, "clean": True, "merge_only": True, "untouched": True, "results": []}
+
+    def approve(self, reply):
+        return program.LookCarryLandingTest().approve(
+            replies={"look-carry-verify": reply, "look-carry": self.CARRY.FILES_CARRIED})
+
+    def stops_with_problems(self, reply):
+        result, calls = self.approve(reply)
+        self.assertEqual(result["stage"], "look-carry", program.labels(calls))
+        self.assertIn("expected exactly one result, got 0", json.dumps(result["problems"]))
+
+    def test_a_sync_that_changes_none_of_the_pull_requests_files_runs_no_verification(self):
+        result, calls = self.approve(self.UNTOUCHED)
+        got = program.labels(calls)
+        self.assertEqual(result["stage"], "done", got)
+        self.assertIn("--match-head-commit " + program.D, program.prompt(calls, "merge"))
+        self.assertIn(UNTOUCHED_SENTENCE, program.prompt(calls, "look-carry-verify"))
+        after = got[got.index("look-carry-verify") + 1:]
+        self.assertFalse([l for l in after if l.startswith("verify") or l == "look-reverify"], after)
+        self.assertEqual([r.get("carried_from") for r in result["verify"]], [program.SHA])
+        carry = program.prompt(calls, "look-carry")
+        for flag in (" --before ", " --after "):
+            self.assertNotIn(flag, carry)
+
+    def test_a_sync_that_touches_a_pull_request_file_still_verifies(self):
+        self.stops_with_problems(dict(self.UNTOUCHED, untouched=False))
+
+    def test_untouched_without_merge_only_does_not_skip(self):
+        self.stops_with_problems(dict(self.UNTOUCHED, merge_only=False))
+
+    def test_a_dirty_untouched_reply_does_not_skip(self):
+        result, calls = self.approve(dict(self.UNTOUCHED, clean=False))
+        self.assertEqual(result["stage"], "look-carry", program.labels(calls))
+
+    def test_an_untouched_reply_with_results_uses_them(self):
+        reply = dict(self.UNTOUCHED, results=self.CARRY.OK)
+        result, calls = self.approve(reply)
+        self.assertEqual(result["stage"], "done", program.labels(calls))
+        fresh = [{"id": "build", "status": "pass", "summary": "ran again"}]
+        moved, _ = program.run(
+            patch={"setup": {"look": program.MARKED}, "look-pr": {"behind": True},
+                   "sync-1": {"merge_commit": program.D, "head": program.D},
+                   "look-reverify": dict(self.MOVED, results=fresh)})
+        self.assertEqual(moved["cont"]["verified"]["results"], fresh)
+
+    def test_an_approved_head_that_only_gained_untouched_merges_is_recorded_without_verification(self):
+        result, calls = program.LookResumeTest().approve(
+            head=program.D, patch=program.LOOK_MERGED, replies={"look-verify": self.LOOK_UNTOUCHED})
+        self.assertEqual(result["stage"], "done", program.labels(calls))
+        self.assertIn(UNTOUCHED_SENTENCE, program.prompt(calls, "look-verify"))
+        self.assertEqual([r.get("carried_from") for r in result["verify"]], [program.SHA])
+        self.assertIn("--match-head-commit " + program.D, program.prompt(calls, "merge"))
+
+    def test_a_moved_look_head_that_only_gained_untouched_merges_is_not_reverified(self):
+        result, calls = program.run(
+            patch={"setup": {"look": program.MARKED}, "look-pr": {"behind": True},
+                   "sync-1": {"merge_commit": program.D, "head": program.D}, "look-reverify": self.MOVED})
+        got = program.labels(calls)
+        self.assertEqual(result["stage"], "awaiting-look", got)
+        self.assertEqual(result["head"], program.D)
+        self.assertIn(UNTOUCHED_SENTENCE, program.prompt(calls, "look-reverify"))
+        self.assertFalse([l for l in got[got.index("look-reverify"):] if l.startswith("verify")], got)
+
+    def test_the_carried_verification_names_the_head_it_ran_at(self):
+        result, calls = program.run(
+            patch={"setup": {"look": program.MARKED}, "look-pr": {"behind": True},
+                   "sync-1": {"merge_commit": program.D, "head": program.D}, "look-reverify": self.MOVED})
+        verified = result["cont"]["verified"]
+        self.assertEqual(verified["head"], program.D)
+        self.assertTrue(verified["results"])
+        for r in verified["results"]:
+            self.assertEqual(r["carried_from"], program.SHA)
+        self.assertNotIn("pictures", verified)
+
+
 if __name__ == "__main__":
     unittest.main()
