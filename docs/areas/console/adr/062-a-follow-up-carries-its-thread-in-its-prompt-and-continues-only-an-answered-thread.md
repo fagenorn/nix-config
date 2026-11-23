@@ -15,7 +15,7 @@ ADR-console-058 gave the console a read-only question session and ADR-console-05
 
 **D3. The thread is bounded in bytes.** The prompt is one argument string, and Linux refuses to start a program whose single argument string exceeds `MAX_ARG_STRLEN`, 131072 bytes. `MAX_THREAD_BYTES` bounds the thread's text plus the new question in UTF-8 bytes below that, with room for the lead, the routes paragraph and the question mark; a follow-up past it is refused `THREAD_TOO_LONG` and the owner asks a new question. The oldest turns are never dropped to make a thread fit, since a silently shortened thread would answer from context the owner cannot see.
 
-**D4. Admission reads what the log still holds.** The folded questions a follow-up is checked against are rebuilt from the retained log by a retention pass that removed rows, inside the same ingest-lock section and beside the other folds, as a restart builds them. A follow-up to a thread whose first question retention removed is therefore refused `THREAD_UNKNOWN`, a thread's remaining questions group as a restart would group them, and a running console and a restarted one never disagree about a thread (ADR-console-009).
+**D4. Admission reads what the log still holds.** The folded questions a follow-up is checked against are rebuilt from the retained log by a retention pass that removed rows, inside the same ingest-lock section and beside the other folds, as a restart builds them. A follow-up to a thread whose first question retention removed is therefore refused `THREAD_UNKNOWN`, a thread's remaining questions group as a restart would group them, and a running console and a restarted one never disagree about a thread (ADR-console-001).
 
 ## Considered Options
 

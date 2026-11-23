@@ -9,7 +9,7 @@ ADR-console-019 lets a manager send a round of questions and refuses a second ro
 
 ## Decision
 
-**D1. A kept kind and schema 9.** A withdrawal is one `question.withdrawn` row with `sprint_id`, `goal`, `round`, `index` and `question`. The kind is a kept kind (ADR-console-009), because `questions.asked` is kept and a withdrawal the retention pass dropped would bring the question back as open after 90 days. Adding a kept kind is a schema step, as every earlier one was: the event log is at schema 9 and a store at schema 2 to 8 is migrated in place, keeping every event. An older build refuses a store migrated to schema 9, the same one-way step ADR-console-009 took before.
+**D1. A kept kind and schema 9.** A withdrawal is one `question.withdrawn` row with `sprint_id`, `goal`, `round`, `index` and `question`. The kind is a kept kind (ADR-console-001), because `questions.asked` is kept and a withdrawal the retention pass dropped would bring the question back as open after 90 days. Adding a kept kind is a schema step, as every earlier one was: the event log is at schema 9 and a store at schema 2 to 8 is migrated in place, keeping every event. An older build refuses a store migrated to schema 9, the same one-way step ADR-console-001 took before.
 
 **D2. A replacement is the replacing round's one row.** A question of a round may carry `"replaces"`, an object of the `round` and the `index` of an open question of the same sprint. It is logged on the replacing `questions.asked` row, and the sprint fold withdraws the named question while folding that row. The round and the withdrawal are one write, so no `question.withdrawn` row is appended for a replacement and the owner never sees both cards.
 
@@ -36,4 +36,4 @@ ADR-console-019 lets a manager send a round of questions and refuses a second ro
 - ADR-console-019's one open round and refusal of a malformed round are extended, not changed: a round that replaces nothing behaves as before.
 - A store at schema 9 is not readable by an older build, so a rollback of the console needs the store of the older schema.
 - A withdrawn question stays in the log for good, so what the manager took back is never lost to retention.
-- Related: ADR-console-008, ADR-console-009, ADR-console-015, ADR-console-019, ADR-console-027.
+- Related: ADR-console-001, ADR-console-008, ADR-console-015, ADR-console-019, ADR-console-027.

@@ -21,7 +21,9 @@ names is refused on the same terms, with the parent's inputs (plus `item` under
 `each`) as the inputs it may declare. The same checks run again on the run's
 staged copy, which is the copy the loop reads (`<run>/procedure/`); a mutating command step needs its `check`,
 which the checker requires. A new run checks `<procedures_dir>/deliver.json`; a continued run checks
-its own staged copy only.
+its own staged copy only. The engine supplies four inputs, each only to a procedure that declares it: `issue`
+(the issue number), `repo` (the tracker's repository slug), `repo_root` (the project root) and `holder`
+(`<host>/<run id>` of the root run, which a child run inherits); a declared one with no value in the project is refused.
 
 An agent step runs as one headless session (`engine_session`) in the project
 root: its role body, rendered prompt and a session record are stored under the
@@ -136,6 +138,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import secrets
 import shutil
 import socket
 import subprocess
@@ -168,7 +171,7 @@ KEEP_ALIVE_SECONDS = 1200
 API_RETRY_SECONDS = 30
 LOCK_NAME = "lock"
 ENTRY = "deliver"
-SUPPLIED_INPUTS = ("issue",)
+SUPPLIED_INPUTS = ("holder", "issue", "repo", "repo_root")
 RUNNABLE_KINDS = ("command", "agent", "decide", "group", "call")
 QUOTA_NEED = "retry"
 ABSENT = "absent"
@@ -433,6 +436,8 @@ def deliver(issue: int, procedures_dir: Path, *, clock: Callable[[], datetime] |
             return running
         raise Refused(f"the host's settings load no lifecycle guard hook, so no run starts: "
                       f"{guard.reason}")
+    supplied = {"issue": issue, "repo": snapshot["bindings"]["tracker"].get("repo_slug"),
+                "repo_root": snapshot["project"]["root"]}
     slots = _admitted()
     holder = {"pid": os.getpid(), "started": _now()}
     held: list[int] = []
@@ -465,12 +470,19 @@ def deliver(issue: int, procedures_dir: Path, *, clock: Callable[[], datetime] |
                 continued = True
             else:
                 procedure = _validate(procedures_dir, table)
-                inputs = {name: issue for name in procedure["inputs"]}
+                now = datetime.now(timezone.utc)
+                token = "".join(secrets.choice(engine_ledger.TOKEN_ALPHABET) for _ in range(4))
+                host = _host()
+                supplied["holder"] = f"{host}/{engine_ledger.make_run_id(issue, now, token)}"
+                inputs = {name: supplied[name] for name in procedure["inputs"]}
+                for name, value in inputs.items():
+                    if value is None:
+                        raise Refused(f"input {name} has no value in this project")
                 run_dir = engine_ledger.create_run(
                     project=project, issue=issue, procedure=ENTRY,
                     procedures_dir=procedures_dir,
                     platform_revision=platform_revision(os.environ),
-                    host=_host(), inputs=inputs, now=datetime.now(timezone.utc),
+                    host=host, inputs=inputs, now=now, token=token,
                     tracker=identity, before_publish=stage)
         finally:
             os.close(creation)

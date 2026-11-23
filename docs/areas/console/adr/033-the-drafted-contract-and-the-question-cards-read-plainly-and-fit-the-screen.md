@@ -41,14 +41,14 @@ The owner's rules for this sprint: everything that needs the owner is a counted 
 - There is one strip however many renders run: the page removes the strip it placed last before placing the next, because brief cards are kept between renders.
 - When the current card is a brief inside a closed row, the strip sits in that row's summary line, so it is always visible.
 - Folding or unfolding that row moves the strip at once, to the summary line while closed and to the card while open.
-- No button carries an Enter key hint any more. This amends ADR-console-002, where the primary named its key.
+- No button carries an Enter key hint any more. The primary named its key before.
 - A text card's strip says Enter `sends what you typed`, or with options `sends your choice or what you typed`. A card whose one option is the action says Enter `sends this answer`.
 
 **D6. Enter on a current text card**, from outside its field, sends the typed text when there is some. Otherwise it sends a pick when one is complete. Otherwise it focuses the field and sends nothing. Digits do nothing on a card without options.
 
 **D7. One register card layout.** Lead and row alike: the head line with the title `Register <name>`, then the ask, then the options or field, then the hint. Manager question rows keep their layout.
 
-**D8. Readable asks.** The register ask is 1.25rem on wide screens and at most 1rem under 480 px. This amends ADR-console-002's type scale for register asks only, and the lead question of other cards keeps 1.5rem.
+**D8. Readable asks.** The register ask is 1.25rem on wide screens and at most 1rem under 480 px. This changes the type scale for register asks only, and the lead question of other cards keeps 1.5rem.
 
 **D9. A single option is the action.** A `register` card with exactly one option and no text field shows no option list. Its one action button is labelled with the option and is pre-picked, so Enter sends it. `plan_questions` no longer appends `This is the only thing the adoption can do with this file.`, which amends ADR-console-029 D5. The retry card keeps its why line and its `Retry` option, and the apply card of #1073 has two options and is untouched.
 
@@ -65,4 +65,4 @@ The owner's rules for this sprint: everything that needs the owner is a counted 
 - #1073 (the apply card) landed first and #1078 (folder trust) is reconciled by whichever of the two lands second: a card of either follows D5 to D9 and adds no layout of its own.
 - Playwright measures of the 480 px fit skip in CI, which has no browser, so static CSS cases hold the 1.25rem and 1rem bounds and the no-wrap rule there.
 - The screenshots of the new layout are the sprint manager's, taken after merge. This delivery writes none.
-- Related: ADR-console-002, ADR-console-029, ADR-console-031.
+- Related: ADR-console-029, ADR-console-031.

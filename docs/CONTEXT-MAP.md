@@ -53,6 +53,7 @@
 | Enforcer | Delivery |
 | Engine | Delivery |
 | Excluded profile | Console |
+| Fixture project | Delivery |
 | Fleet preflight | Project contract |
 | Fleet registry | Project contract |
 | Folder trust | Console |
@@ -141,7 +142,6 @@
 | Verified tree | Verification |
 | Verify block | Verification |
 | Waiting since | Console |
-
 ## Relationships
 - **Delivery → Claims, Verification**: a delivery holds a **Claim** and lands under the **Land lock**; one that leaves evidence criteria holds its issue with a **Verify block**.
 - **Verification → Claims**: an **Owner prompt** is an **Owner-action marker**.
