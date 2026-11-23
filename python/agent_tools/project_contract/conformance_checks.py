@@ -456,16 +456,14 @@ LIFECYCLE_CLASSES = ("canonical_tracked", "tracked_projection",
  IGNORED_RUNTIME, ALLOWLISTED_BOOKKEEPING) = LIFECYCLE_CLASSES
 
 AGENTS_DIR = ".agents"
+# `.agents/artifacts/` holds no class: a working artifact lives until its
+# delivery merges and is never kept in the tree (#1418), so any file there is
+# unclassified.
 CANONICAL_AGENTS_PREFIXES = (
     "project.json", "instructions/", "skills/", "adapters/",
-    "extensions/", "knowledge/", "artifacts/",
+    "extensions/", "knowledge/",
 )
 RUNTIME_PREFIX = "runtime/"
-ARTIFACTS_PREFIX = "artifacts/"
-# The buckets `artifacts/` admits; any other second segment is unclassified.
-# `replays` holds committed replay records (#283's light-lane triage replay).
-ARTIFACTS_BUCKETS = ("specs", "plans", "evidence", "handoffs", "notes",
-                     "replays")
 # Closed and empty in v1: nothing outside .agents/ is admitted as
 # non-behavioral bookkeeping yet.
 BOOKKEEPING_ALLOWLIST: tuple[str, ...] = ()
@@ -483,11 +481,6 @@ def classify_agents_relative(relative: str) -> str | None:
     """The lifecycle class of a path relative to `<root>/.agents/`, or None."""
     if relative.startswith(RUNTIME_PREFIX):
         return IGNORED_RUNTIME
-    if relative.startswith(ARTIFACTS_PREFIX):
-        segments = relative.split("/")
-        if len(segments) > 1 and segments[1] in ARTIFACTS_BUCKETS:
-            return CANONICAL_TRACKED
-        return None
     for prefix in CANONICAL_AGENTS_PREFIXES:
         if relative == prefix or (prefix.endswith("/")
                                   and relative.startswith(prefix)):

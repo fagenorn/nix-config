@@ -141,9 +141,6 @@ class ContractAmendmentReachTest(BoundaryTestCase):
                   if op["targets"] == [CONTRACT]]
         self.assertEqual(len(writes), 1)
         expected = self.contract_of(root)
-        expected["bindings"]["paths"]["artifacts"] = {
-            "specs": ".agents/artifacts/specs",
-            "plans": ".agents/artifacts/plans"}
         expected["bindings"]["paths"]["rejections"] = [
             ".agents/knowledge/rejections"]
         self.assertEqual(expected["platform"], authored)
@@ -324,8 +321,8 @@ class UndecodablePathTest(BoundaryTestCase):
 
     def test_an_undecodable_path_is_classified_hashed_and_moved(self):
         root = nix_config_shape_repo(self.home)
-        moved = f".claude/specs/{self.UNDECODABLE}.md"
-        secret = f".claude/specs/secrets/{self.UNDECODABLE}.md"
+        moved = f".out-of-scope/{self.UNDECODABLE}.md"
+        secret = f".out-of-scope/secrets/{self.UNDECODABLE}.md"
         self.stage(root, moved, b"# an undecodable spec\n")
         self.stage(root, secret, b"API_TOKEN=nope\n")
         # Not `commit()`: `git add -A` would drop both index entries again,
@@ -336,10 +333,10 @@ class UndecodablePathTest(BoundaryTestCase):
                  if op["op"] == "git-mv" and op["sources"] == [moved]]
         self.assertEqual(len(moves), 1, doc["changes"])
         self.assertEqual(moves[0]["targets"],
-                         [f".agents/artifacts/specs/{self.UNDECODABLE}.md"])
+                         [f".agents/knowledge/rejections/{self.UNDECODABLE}.md"])
         # The group it belongs to is still fingerprinted over its members.
         self.assertTrue(
-            self.entry(doc, ".claude/specs")["fingerprint"].startswith(
+            self.entry(doc, ".out-of-scope")["fingerprint"].startswith(
                 "sha256:"))
         # And the secret-shaped rule still lifts it out, unread and unhashed.
         record = self.entry(doc, secret)

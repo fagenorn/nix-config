@@ -11,7 +11,6 @@
 | Hosts | [CONTEXT](./areas/hosts/CONTEXT.md) | Per-host agent runtime: Claude Code install, accounts, cache proxy, launchers | `home/common/claude-code/default.nix`, `home/common/claude-code/accounts/**`, `python/agent_tools/hosts/**`, `lib/agent-tools.nix`, `lib/agent-plugins.nix`, `home/common/agent-tools/**`, `patches/agent-plugins/**`, `home/linux/claude-local/**` |
 | Console | [CONTEXT](./areas/console/CONTEXT.md) | The local page and service saying whether the owner is needed | `python/agent_tools/console/**`, `home/common/console/**`, `hosts/common/darwin-console.nix`, `home/common/claude-code/console-session-start.sh` |
 | System | [CONTEXT](./areas/system/CONTEXT.md) | Decisions spanning areas | `*` |
-
 ## Terms
 | Term | Area |
 |---|---|
@@ -54,9 +53,11 @@
 | Enforcer | Delivery |
 | Engine | Delivery |
 | Excluded profile | Console |
+| Fixture project | Delivery |
 | Fleet preflight | Project contract |
 | Fleet registry | Project contract |
 | Folder trust | Console |
+| Fix change | Delivery |
 | Goal | Console |
 | Grader | Delivery |
 | Guest | Console |
@@ -141,7 +142,6 @@
 | Verified tree | Verification |
 | Verify block | Verification |
 | Waiting since | Console |
-
 ## Relationships
 - **Delivery → Claims, Verification**: a delivery holds a **Claim** and lands under the **Land lock**; one that leaves evidence criteria holds its issue with a **Verify block**.
 - **Verification → Claims**: an **Owner prompt** is an **Owner-action marker**.

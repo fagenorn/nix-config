@@ -30,9 +30,13 @@ The command `lint-time` reads those records back from the Conformance job logs:
 
 `file` lists the completed push runs of `conformance.yaml` on the branch, newest
 first by `(created_at, id)`, at most `SCAN` of them. For each run it takes the
-`Conformance` job of the latest attempt and reads that job's log. A run with no such
-job, a log the forge no longer holds (404 or 410) or no record line is skipped, and
-reading stops at the `RUNS` newest records. A malformed record is an error.
+`Conformance` job of the latest attempt and reads that job's log with `gh api`, asked
+again with `--allow-escape-sequences` only when gh's refusal names that flag. The CSI and
+OSC terminal escape sequences of a log are removed before it is parsed, for `file` and
+`observed` alike; a gh failure is still `gh_failed` and a malformed record still a
+malformed record. A run with no such job, a log the forge no longer holds (404 or
+410) or no record line is skipped, and reading stops at the `RUNS` newest records. A
+malformed record is an error.
 
 With fewer than `RUNS` records nothing is filed (`too_few`). Otherwise a lint's
 median is taken over the records that carry it, and the total's median over every
@@ -87,6 +91,8 @@ OWN_JOB = "Lint Time"
 RECORD_PREFIX = "lint-times v1 "
 LOG_STAMP = re.compile(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d+)?Z ")
 BOM = "\ufeff"
+ESCAPE_FLAG = "--allow-escape-sequences"
+ESCAPE_SEQUENCE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
 
 
 class LintTime(NamedTuple):
@@ -183,6 +189,11 @@ def parse_payload(text: str) -> Record:
     if milliseconds_of(payload["total_ms"], "total_ms") != record.total_ms:
         raise ValueError("total_ms is not the sum of the lints")
     return record
+
+
+def plain(text: str) -> str:
+    """`text` without its CSI and OSC terminal escape sequences, and nothing else changed."""
+    return ESCAPE_SEQUENCE.sub("", text)
 
 
 def parse_log(text: str) -> Record | None:
@@ -332,9 +343,16 @@ class GitHubLintTime(cleanup_issue.GitHubTracker):
         job_id = job.get("id")
         if not isinstance(job_id, int) or isinstance(job_id, bool):
             raise invalid(f"run {run_id}: job {name} has no id")
-        status, text = forge_api.run_gh(
-            ["api", f"repos/{self.slug}/actions/jobs/{job_id}/logs"], allow=(404, 410))
-        return None if status else text
+        path = f"repos/{self.slug}/actions/jobs/{job_id}/logs"
+        try:
+            status, text = forge_api.run_gh(["api", path], allow=(404, 410))
+        except forge_api.ForgeError as error:
+            # A log carries the step's own color codes, and a newer gh refuses them unless told
+            # to pass them; an older gh has no such flag, so it is asked for only after a refusal.
+            if ESCAPE_FLAG not in error.detail:
+                raise
+            status, text = forge_api.run_gh(["api", ESCAPE_FLAG, path], allow=(404, 410))
+        return None if status else plain(text)
 
     def records(self) -> list[Record]:
         found: list[Record] = []

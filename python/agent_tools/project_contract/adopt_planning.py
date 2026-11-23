@@ -42,7 +42,6 @@ from agent_tools.project_contract.adopt_inspection import (
     CANDIDATE_BASIS,
     CONTRACT_FILENAME,
     Candidates,
-    EVIDENCE_RECORD_DIR,
     GITIGNORE,
     Inventory,
     LEGACY_BINDING_CONFIGS,
@@ -64,7 +63,6 @@ from agent_tools.project_contract.adopt_inspection import (
     document_bytes,
     gate_entry,
     git_or_fail,
-    is_evidence_record_path,
     is_secret_path,
     matches_group,
     object_hash,
@@ -658,17 +656,6 @@ def final_contract(contract_source: dict | None, manifest: dict, found: Candidat
         environment, conformance=conformance, entries=entries)
 
 
-def evidence_record_members(found: Candidates) -> list[tuple[str, str]]:
-    """Every adoption evidence record in the inspected tree, as sorted
-    `(path, object_id)` pairs: the records a re-adoption supersedes, and
-    paths the link derivation treats as deleted, so a link to one is
-    unrewritable."""
-    return sorted(
-        (path, object_id) for info in found.groups.values()
-        for path, object_id in info["members"]
-        if is_evidence_record_path(path))
-
-
 def generated_targets(contract_source: dict | None) -> set[str]:
     """The `target` of every `generated_file` projection the contract names.
 
@@ -774,12 +761,11 @@ def build_operations(root: Path, found: Candidates, manifest: dict,
     """The typed operations either side of the adoption's own bookkeeping.
 
     Returned as `(head, tail, contents)` rather than one list because
-    the migration map and the evidence record sit between them and cannot be
-    built until the outcome is known — and the outcome is decided by whether
-    this list has anything in it. The apply order is the concatenation: the
-    contract amendment, the relocations sorted by old path, the runtime
-    sentinel and the `.gitignore` amendment, then the deletion of any
-    superseded evidence record and the two records, then the living-reference
+    the migration map sits between them and cannot be built until the
+    outcome is known — and the outcome is decided by whether this list has
+    anything in it. The apply order is the concatenation: the contract
+    amendment, the relocations sorted by old path, the runtime sentinel and
+    the `.gitignore` amendment, then the migration map, then the living-reference
     rewrite, the Markdown link rewrites sorted by target, the path-reference
     writes sorted by target, the bootstrap-source write when its bytes change,
     the `CLAUDE.md` write and the nested entry-file deletions sorted by path,
@@ -947,87 +933,36 @@ def build_operations(root: Path, found: Candidates, manifest: dict,
 
 
 def adoption_records(plan_id: str) -> dict:
-    """Where this adoption's own two committed records live."""
+    """Where this adoption's own committed record lives: the path-migration map."""
     digest = plan_id.split(":", 1)[1]
-    return {"migration_map": f"{MIGRATION_MAP_DIR}/{digest}.json",
-            "evidence_record": f"{EVIDENCE_RECORD_DIR}/{digest}.json"}
+    return {"migration_map": f"{MIGRATION_MAP_DIR}/{digest}.json"}
 
 
-def bookkeeping_operations(found: Candidates, plan_id: str, outcome: str,
-                           base_revision: str, platform_block: dict,
-                           decisions: dict,
-                           ready_gates: list[dict],
-                           link_rewrites: dict,
-                           path_references: list[dict],
-                           reference_policies: list[dict],
-                           reference_formatting: list[dict],
-                           conformance: ConformancePlan = NOT_PLANNED
+def bookkeeping_operations(found: Candidates, plan_id: str
                            ) -> tuple[list[dict], dict[str, bytes]]:
-    """The path-migration map and the adoption evidence record, preceded by
-    the deletion of every evidence record an earlier adoption committed.
+    """The path-migration map, the adoption's one bookkeeping write.
 
-    Both are named by the plan id and neither exists yet, so each is a
-    `write-file` whose `before` is null; the record carries the outcome, which
-    is why these two are built after routing rather than beside the moves.
-
-    `verify` discovers exactly one record (D34), so a re-adoption supersedes
-    its predecessor instead of committing a second one beside it: each prior
-    candidate is a `delete-file`, which therefore needs the D16
-    acknowledgement. Earlier migration maps stay, because they are the archive
+    It is named by the plan id and does not exist yet, so it is a `write-file`
+    whose `before` is null. Adoption writes no evidence record and so
+    supersedes none: the adoption commit, found by its fixed subject, is what
+    says a repository was adopted, and the plan document is what holds the
+    plan's outcome. Earlier migration maps stay, because they are the archive
     of paths that did move.
-
-    The record's `checks` omit the `conformance-plannable` row unless the
-    repository is planned for conformance, and the record carries the
-    `conformance` member only when the plan has one, so a repository without
-    the writes keeps its record's bytes.
 
     Returned with the same `{target: bytes}` map `build_operations` returns,
     for the same reason: `apply` writes the very bytes this hashed.
     """
     records = adoption_records(plan_id)
-    superseded = [(path, object_id)
-                  for path, object_id in evidence_record_members(found)
-                  if path != records["evidence_record"]]
     map_bytes = document_bytes({
         "schema_version": 1,
         "migration_id": plan_id,
         "moves": [{"old_path": old, "new_path": new}
                   for old, new in sorted(found.moves)],
     })
-    record = {
-        "schema_version": 1,
-        "plan_id": plan_id,
-        "outcome": outcome,
-        "base_revision": base_revision,
-        "platform": platform_block,
-        "decisions_accepted": decisions["recommended"] + decisions["answered"],
-        # One row per inspected group: what it was fingerprinted as, and the
-        # canonical home it ends up in (null when adoption leaves it alone).
-        "sources": [{"path": entry["path"], "before": entry["fingerprint"],
-                     "after": entry["target"]} for entry in found.entries],
-        "checks": [{"id": gate["id"], "status": gate["status"]}
-                   for gate in ready_gates
-                   if conformance.planned or gate["id"] != CONFORMANCE_GATE],
-        "link_rewrites": link_rewrites,
-        "path_references": path_references,
-        "reference_policies": reference_policies,
-        "reference_formatting": reference_formatting,
-        "path_migration_map": records["migration_map"],
-    }
-    if conformance.member is not None:
-        record["conformance"] = conformance.member
-    record_bytes = document_bytes(record)
     return [
-        operation("delete-file", [path], [], object_hash(object_id), None)
-        for path, object_id in superseded
-    ] + [
         operation("write-file", [records["migration_map"]],
                   [records["migration_map"]], None, sha256_hash(map_bytes)),
-        operation("write-file", [records["evidence_record"]],
-                  [records["evidence_record"]], None,
-                  sha256_hash(record_bytes)),
-    ], {records["migration_map"]: map_bytes,
-        records["evidence_record"]: record_bytes}
+    ], {records["migration_map"]: map_bytes}
 
 # --------------------------------------------------------------------------
 # Outcome routing (D10)

@@ -5,7 +5,7 @@
 
 ## Context
 
-A delivery run that has finished its work holds its issue with the `needs-verification` label until every acceptance criterion is ticked. When the only criteria still open are `[human]` reviews and the runner has posted no prompt, nothing on the page tells the owner: ADR-console-012 D7 raises an item only from a live runner prompt, so a held issue with none raises no item. #1091 sat in that state. This decision gives such an issue a card the owner can answer from the page, through the write path the other owner checks use.
+A delivery run that has finished its work holds its issue with the `needs-verification` label until every acceptance criterion is ticked. When the only criteria still open are `[human]` reviews and the runner has posted no prompt, nothing on the page tells the owner: ADR-console-012 raises an item only from a live runner prompt, so a held issue with none raises no item. #1091 sat in that state. This decision gives such an issue a card the owner can answer from the page, through the write path the other owner checks use.
 
 ## Decision
 
@@ -30,7 +30,7 @@ A delivery run that has finished its work holds its issue with the `needs-verifi
 - The read makes one more search, for the held issues, and parses their bodies. Past four pages of held issues the rest raise no card until the runner verifies some; the owner search and its owner cards are never lost to them.
 - The tick does not close the issue or touch its labels; the runner's hold still decides that.
 - GitHub has no conditional update of an issue body, so an issue edited by someone else between the read and the write may lose that edit; the version check narrows the exposure to the criterion line.
-- ADR-console-003's search and ADR-console-012 D7's rule of no item without a live prompt are amended.
+- ADR-console-003's search and ADR-console-012's rule of no item without a live prompt are amended.
 - An issue held before landings ticked its look marker costs one pull request read per poll until its box is ticked.
 - A held issue whose merged head keeps an earlier approval costs up to 50 reads per poll until its box is ticked.
 - Related: ADR-console-003, ADR-console-010, ADR-console-012, ADR-console-045, ADR-console-047.

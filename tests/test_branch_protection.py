@@ -109,17 +109,19 @@ CONFORMANCE_STEP = ["      - name: Run conformance",
 CONFORMANCE_CHECKOUT_REF = "          ref: ${{ github.event.pull_request.head.sha || github.sha }}"
 BUDGET_COMMAND_RE = re.compile(r"PYTHONPATH=python python3 -m agent_tools\.instruction_load check\b")
 BUDGET_INVOCATION = 'PYTHONPATH=python python3 -m agent_tools.instruction_load check "${args[@]}"'
+REQUIRED_CONTEXTS = ("Nix Eval", "Instruction Budget", "Agent Workflow Tests", "Conformance")
 EXPECTED_PROTECTION_PAYLOAD = {
     "required_status_checks": {
         "strict": True,
-        "checks": [{"context": "Nix Eval", "app_id": 15368},
-                   {"context": "Instruction Budget", "app_id": 15368},
-                   {"context": "Agent Workflow Tests", "app_id": 15368}],
+        "checks": [{"context": context, "app_id": 15368} for context in REQUIRED_CONTEXTS],
     },
     "enforce_admins": True,
     "required_pull_request_reviews": None,
     "restrictions": None,
 }
+INSTRUCTIONS = REPO_ROOT / "CLAUDE.md"
+PROTECTION_SENTENCE = "**`.github/branch-protection.json` makes "
+COUNT_WORDS = ("zero", "one", "two", "three", "four", "five", "six", "seven", "eight")
 
 
 def workflow_lines(path=WORKFLOW):
@@ -298,6 +300,31 @@ def trigger_branches(name, path=WORKFLOW):
             break
         out.append(line.strip()[2:].strip())
     return out
+
+
+def pull_request_trigger_problems(path=WORKFLOW):
+    """Why a required context's workflow would not report on a pull request to `main`.
+
+    A required context on a workflow that skips a pull request never reports, and that
+    pull request can never merge.
+    """
+    block = trigger_block("pull_request", path)
+    if block is None:
+        return ["no pull_request trigger"]
+    problems = []
+    branches = [item.strip("\"'") if item[:1] == item[-1:] and item[:1] in "\"'" else item
+                for item in trigger_branches("pull_request", path) or []]
+    if branches != ["main"]:
+        problems.append(f"branches are {branches}, not ['main']")
+    for line in block:
+        if line.startswith(("    paths", "    branches-ignore")):
+            problems.append(f"filter under pull_request: {line.strip()}")
+        if line.startswith("    types:"):
+            listed = re.findall(r"[a-z_]+", line.split(":", 1)[1])
+            missing = [t for t in ("opened", "synchronize", "reopened") if t not in listed]
+            if missing:
+                problems.append(f"types lacks {missing}")
+    return problems
 
 
 def job_if_expression(key, path=WORKFLOW):
@@ -786,8 +813,7 @@ class WorkflowShape(unittest.TestCase):
         longer forwards the arguments the step builds each leave every other assertion
         here green. Whether the step builds `--base` and `--raise-label` under the right
         event and label is BudgetWorkflowShape's behavioural test, not this one."""
-        self.assertEqual(["Nix Eval", "Instruction Budget", "Agent Workflow Tests"],
-                         required_contexts())
+        self.assertEqual(list(REQUIRED_CONTEXTS), required_contexts())
         jobs = required_jobs()
         nix_path, nix_key = jobs["Nix Eval"]
         nix_body = job_body(nix_key, nix_path)
@@ -803,6 +829,10 @@ class WorkflowShape(unittest.TestCase):
         suite_path, suite_key = jobs["Agent Workflow Tests"]
         self.assertEqual(WORKFLOW, suite_path)
         self.assertIn(SUITE_INVOCATION, job_body(suite_key, suite_path))
+        conformance_path, conformance_key = jobs["Conformance"]
+        self.assertEqual(CONFORMANCE_WORKFLOW, conformance_path)
+        self.assertEqual("conformance", conformance_key)
+        self.assertEqual([], conformance_job_problems(conformance_path))
 
     def test_the_budget_forwarding_rejects_mutations(self):
         body = job_body("instruction-budget", BUDGET_WORKFLOW)
@@ -937,6 +967,34 @@ class RequiredContexts(unittest.TestCase):
                 f"merges to main would block forever waiting for it",
             )
 
+    def test_every_required_context_runs_on_pull_requests_to_main(self):
+        contexts = required_contexts()
+        jobs = required_jobs()
+        self.assertIn("Conformance", contexts)
+        for context in contexts:
+            with self.subTest(context=context):
+                self.assertEqual([], pull_request_trigger_problems(jobs[context][0]))
+
+    def test_a_required_workflow_that_skips_pull_requests_is_caught(self):
+        lines = workflow_lines(CONFORMANCE_WORKFLOW)
+        header = lines.index("  pull_request:")
+        branches = lines.index("    branches:", header)
+        main = lines.index('      - "main"')
+        mutations = {
+            "no pull_request trigger": lines[:header] + lines[main + 1:],
+            "another branch": lines[:main] + ['      - "release"'] + lines[main + 1:],
+            "paths filter": lines[:header + 1] + ['    paths: ["**.nix"]'] + lines[header + 1:],
+            "branches-ignore": lines[:header + 1] + ["    branches-ignore: [main]"] + lines[header + 1:],
+            "types without synchronize": lines[:header + 1] + ["    types: [opened, reopened]"]
+            + lines[header + 1:],
+        }
+        self.assertLess(header, branches)
+        self.assertEqual([], pull_request_trigger_problems(CONFORMANCE_WORKFLOW))
+        for label, mutated in mutations.items():
+            with self.subTest(mutation=label):
+                with mock.patch(f"{__name__}.workflow_lines", lambda path=None, mutated=mutated: mutated):
+                    self.assertNotEqual([], pull_request_trigger_problems(CONFORMANCE_WORKFLOW))
+
     def test_job_names_refuses_a_name_twice_in_one_workflow(self):
         path = Path("twice.yaml")
         lines = ["jobs:", "  a:", "    name: Twin", "  b:", "    name: Twin"]
@@ -998,6 +1056,38 @@ class ProtectionPayload(unittest.TestCase):
         self.assertIsNone(data["restrictions"])
 
 
+def required_context_sentence_problems(text):
+    parts = text.split(PROTECTION_SENTENCE)
+    if len(parts) != 2:
+        return [f"the protection sentence occurs {len(parts) - 1} times, not once"]
+    span = parts[1].split("**", 1)[0]
+    problems = []
+    count_phrase = f"{COUNT_WORDS[len(REQUIRED_CONTEXTS)]} contexts required on `main`: "
+    if not span.startswith(count_phrase):
+        problems.append(f"the sentence does not continue with {count_phrase!r}")
+    problems += [f"`{context}` is not named" for context in REQUIRED_CONTEXTS if f"`{context}`" not in span]
+    return problems
+
+
+class ProjectInstructions(unittest.TestCase):
+    def test_the_instructions_name_every_required_context(self):
+        text = INSTRUCTIONS.read_text(encoding="utf-8")
+        self.assertEqual([], required_context_sentence_problems(text))
+
+    def test_a_stale_sentence_is_caught(self):
+        text = INSTRUCTIONS.read_text(encoding="utf-8")
+        mutations = {
+            "stale count": text.replace("four contexts", "three contexts"),
+            "unbackticked context": text.replace("`Conformance`", "Conformance"),
+            "sentence twice": text + PROTECTION_SENTENCE,
+            "sentence removed": text.replace(PROTECTION_SENTENCE, ""),
+        }
+        for label, mutated in mutations.items():
+            with self.subTest(mutation=label):
+                self.assertNotEqual(text, mutated)
+                self.assertNotEqual([], required_context_sentence_problems(mutated))
+
+
 class CleanupIssueWorkflowTest(unittest.TestCase):
     """The push-to-main job that files cleanup issues (ADR-delivery-017)."""
 
@@ -1013,7 +1103,8 @@ class CleanupIssueWorkflowTest(unittest.TestCase):
         self.assertEqual(["main"], trigger_branches("push", CLEANUP_WORKFLOW))
         self.assertIsNone(job_if_expression("cleanup-issue", CLEANUP_WORKFLOW))
         self.assertEqual(
-            {"contents": "read", "issues": "write"}, workflow_permissions(CLEANUP_WORKFLOW)
+            {"contents": "read", "issues": "write", "pull-requests": "read"},
+            workflow_permissions(CLEANUP_WORKFLOW),
         )
         overrides = {
             key: job_permission_lines(block)

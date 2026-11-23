@@ -6,7 +6,9 @@
 # naming the system being activated: the pass waits (bounded) until that system
 # is current before its round, and runs one more round when a request lands
 # while a round is running, because the service manager ignores a start of a
-# running job. A pass never fails: it exits 0 whatever its children do.
+# running job. Each round then runs the cleanup command's fix-only run for this
+# project, which opens a fix change the workflow token deferred. A pass never
+# fails: it exits 0 whatever its children do.
 # Placeholders (@...@) are substituted by home/common/verify-pending/default.nix.
 set -u
 if [ "$#" -ne 1 ]; then
@@ -58,7 +60,12 @@ while :; do
     "@ownerActions@" refresh
     owner=$?
   fi
-  echo "$(stamp) pass end host=$host verify=$verify owner_actions=$owner"
+  fix=skipped
+  if [ -x "@cleanupIssue@" ]; then
+    "@cleanupIssue@" fix --project fagenorn/nix-config --repo fagenorn/nix-config --branch main
+    fix=$?
+  fi
+  echo "$(stamp) pass end host=$host verify=$verify owner_actions=$owner cleanup_fix=$fix"
   [ -e "$request" ] || break
 done
 exit 0

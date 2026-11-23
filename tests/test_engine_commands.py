@@ -50,12 +50,21 @@ def table(**entries: dict) -> CommandTable:
 
 
 class TableTest(unittest.TestCase):
-    def test_a_platform_id_runs_as_its_sibling_module_with_its_subcommand_then_its_arguments(self):
-        invocation = table().invocation(
-            "forge-claim", "status", (("run.issue", 1512), ("run.repo", "o/r")))
+    def test_a_platform_id_takes_each_argument_as_the_flag_its_member_names(self):
+        invocation = table().invocation("forge-claim", "acquire", (
+            ("run.repo", "o/r"), ("run.issue", 7),
+            ("run.holder", "h/7-20261122T000000Z-abcd"),
+            ("preflight.branch", "issue-7-x"), ("preflight.worktree_path", "/w")))
         self.assertEqual(invocation, Invocation(
-            (*sibling_argv("claims.forge_claim"), "status", "1512", "o/r"), "/root"))
+            (*sibling_argv("claims.forge_claim"), "acquire", "--repo", "o/r", "--issue", "7",
+             "--holder", "h/7-20261122T000000Z-abcd", "--branch", "issue-7-x",
+             "--worktree-path", "/w"), "/root"))
         self.assertEqual(invocation.argv[0], sys.executable)
+
+    def test_diff_scope_keeps_its_positional_range(self):
+        self.assertEqual(
+            table().invocation("diff-scope", None, (("run.range", "a..b"),)).argv,
+            (*sibling_argv("delivery.diff_scope"), "a..b"))
 
     def test_a_project_id_runs_its_snapshot_argv_in_its_cwd(self):
         entry = project("json", "0", cwd="/somewhere")
@@ -368,7 +377,8 @@ class SpawnSiteTest(unittest.TestCase):
                     ("engine_guard.py", "_descendants", "subprocess.run"),
                     ("engine_guard.py", "judge", "subprocess.Popen"),
                     ("engine_session.py", "launch", "subprocess.Popen"),
-                    ("engine_shell.py", "read_head", "subprocess.run")]
+                    ("engine_shell.py", "read_head", "subprocess.run"),
+                    ("engine_stop.py", "process_started_at", "subprocess.run")]
         self.assertEqual(spawn_sites(sources), expected)
         self.assertEqual(unguarded_in(sources), {})
         plants = {

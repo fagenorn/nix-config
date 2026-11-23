@@ -130,32 +130,9 @@ DIAGNOSTIC_KEYWORDS = frozenset({"msg", "places", "delta", "seq_type"})
 
 # The kept wording tests (standard:P14). Adding an id here is a new decision with its own record.
 KEPT_AT_START = frozenset({
-    "tests/test_docs_tree.py::DocsTreeTest.test_adr_verification_008_records_the_boot_host_amendment",
-    "tests/test_docs_tree.py::DocsTreeTest.test_the_owner_port_peer_decision_is_recorded",
     "tests/test_docs_tree.py::DocsTreeTest.test_the_tailscale_serve_boundary_decision_is_recorded",
-    "tests/test_docs_tree.py::DocsTreeTest.test_the_console_approval_decision_is_recorded",
-    "tests/test_docs_tree.py::DocsTreeTest.test_the_merged_adoption_registration_decision_is_recorded",
-    "tests/test_docs_tree.py::DocsTreeTest.test_the_apply_card_decision_is_recorded",
-    "tests/test_docs_tree.py::DocsTreeTest.test_the_console_page_signin_decision_is_recorded",
-    "tests/test_docs_tree.py::DocsTreeTest.test_the_console_add_account_decision_is_recorded",
-    "tests/test_docs_tree.py::DocsTreeTest.test_the_register_project_decision_is_recorded",
-    "tests/test_docs_tree.py::DocsTreeTest.test_the_project_question_decision_is_recorded",
-    "tests/test_docs_tree.py::DocsTreeTest.test_the_plan_answer_decision_is_recorded",
-    "tests/test_docs_tree.py::DocsTreeTest.test_the_console_answer_decision_is_recorded",
-    "tests/test_docs_tree.py::DocsTreeTest.test_the_console_goal_decision_is_recorded",
-    "tests/test_docs_tree.py::DocsTreeTest.test_the_console_brief_decision_is_recorded",
-    "tests/test_docs_tree.py::DocsTreeTest.test_the_console_report_decision_is_recorded",
-    "tests/test_docs_tree.py::DocsTreeTest.test_the_console_message_decision_is_recorded",
-    "tests/test_docs_tree.py::DocsTreeTest.test_the_console_question_decision_is_recorded",
-    "tests/test_docs_tree.py::DocsTreeTest.test_adr_console_037_records_the_registration_details",
-    "tests/test_docs_tree.py::DocsTreeTest.test_adr_console_040_records_taking_back_and_replacing_a_question",
-    "tests/test_docs_tree.py::DocsTreeTest.test_the_notice_decision_is_recorded",
-    "tests/test_docs_tree.py::DocsTreeTest.test_the_owner_notice_decision_is_recorded",
-    "tests/test_docs_tree.py::DocsTreeTest.test_the_host_activation_decision_is_recorded",
     "tests/test_console_pictures.py::PictureDocsTest.test_adr_036_records_the_picture_store",
-    "tests/test_console_pictures.py::PictureDocsTest.test_adr_008_lists_the_picture_read",
     "tests/test_console_pictures.py::PictureDocsTest.test_adr_038_records_the_question_pictures",
-    "tests/test_console_guest_service.py::AccessWriteTest.test_adr_008_lists_the_access_list_writes",
     "tests/test_docs_tree.py::DocsTreeTest.test_the_guest_socket_amendment_is_recorded_as_adr_077",
 })
 # A sync merge that brings a kept test in from main adds it here, never above.

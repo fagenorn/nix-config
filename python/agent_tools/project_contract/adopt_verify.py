@@ -7,9 +7,9 @@ user-scope fleet registry (D18, D19).
 
 It reads one pinned revision and nothing else, as a `VerificationSource`:
 plain `verify` reads `HEAD` (the resolver runs on the working tree, the
-inventory comes from the index, and every record is read at the `HEAD` commit
-it pins), while `--register` reads nothing from the checkout's branches or
-files. It lists `origin`, then pins the remote default branch and, when the
+inventory comes from the index, and the adoption commit is read from the
+history of the `HEAD` commit it pins), while `--register` reads nothing from
+the checkout's branches or files. It lists `origin`, then pins the remote default branch and, when the
 contract there names another integration branch, that branch too, and exports
 each pinned commit into a temporary directory removed on every exit and runs
 every check there. A `SourceReader` passed as `remote_source`'s `reader`
@@ -38,18 +38,26 @@ selects its branch through it carries a `branch_override` object (`branch`,
 in the report and in its registry entry, and in no other run; a later
 registration of the project that did not need the operand drops it from the
 entry, another project's registration leaves it, and a repeated operand
-registration writes the same bytes. The report `schema_version` stays 2 and the
+registration writes the same bytes. The report `schema_version` is 3 and the
 registry `schema_version` 1, and no reader decides anything from the member.
 Every operand that the remote or the branch's contract does not confirm refuses
 `not_integrated` with `adopt.registration.integration_branch_unresolved`; a
-pinned commit with no adoption evidence record refuses `not_integrated` with
+pinned commit with no adoption commit refuses `not_integrated` with
 `adopt.registration.not_integrated`, and when the default contract did not
 resolve and no operand was given its message names `--integration-branch`.
 
+The adoption is a commit, found by its subject and by nothing in the tree: the
+newest commit reachable from the pinned revision whose subject is the one
+`adopt_apply.commit_message` derives, `chore(adopt): adopt <project id> at plan
+<digest prefix>` (D28), for the project id the contract resolves to. It is read
+with `git log` in the checkout, never from the working tree or an exported
+copy, so a committed file can neither make an adoption nor be demanded of one.
+A contract that resolves to no project id has no adoption commit.
+
 `--plan-id ID` (the adoption console's registration after a merge; accepted
 only with `--register`, at most once) names the plan whose adoption must be
-the one on the pinned commit: when no adoption evidence record there carries
-that `plan_id`, registration refuses `not_integrated` with
+the one on the pinned commit: when no commit reachable from it carries that
+plan's exact subject, registration refuses `not_integrated` with
 `adopt.registration.not_integrated` before anything is written, so an earlier
 valid adoption of the same project is never taken for the new one. The
 operand is checked by `require_integrated` and is never part of the report or
@@ -76,22 +84,18 @@ import tempfile
 from agent_tools.project_contract import agent_platform
 from agent_tools.project_contract.adopt_inspection import (
     AdoptError,
-    EVIDENCE_RECORD_DIR,
     GIT_TIMEOUT_SECONDS,
     REMOTE,
     VERIFY_RESULTS,
-    blob_at,
+    adoption_commit_at,
+    plan_id_digest,
     classify,
     commit_is_ancestor,
-    evidence_records_at,
     export_commit,
     fetch_pinned,
     git_or_fail,
     has_remote,
-    introducing_commit,
     is_agent_path,
-    parses_as_evidence_record,
-    parses_as_migration_map,
     refuse,
     remote_heads,
     resolver_error_code,
@@ -106,7 +110,7 @@ from agent_tools.project_contract.adopt_inspection import (
 # to the resolver's exit code and its parsed JSON, or an `AdoptError`.
 Resolver = Callable[..., tuple[int, object]]
 
-VERIFY_SCHEMA_VERSION = 2
+VERIFY_SCHEMA_VERSION = 3
 
 
 @dataclass(frozen=True)
@@ -350,36 +354,42 @@ def unresolved_integration_branch(message: str) -> AdoptError:
         "", message)
 
 
-def require_integrated(verification: Verification,
+def require_integrated(root: Path, verification: Verification,
                        plan_id: str | None = None) -> None:
     """Refuse `not_integrated` when the pinned commit carries no adoption.
 
     Called only under `--register`, before `registration_allowed`: a remote
-    revision with no adoption evidence record is not an integrated adoption
-    whatever else the report says (D7). When that revision is a default branch
-    whose contract does not resolve and no operand replaced it, the message
-    names `--integration-branch`, the one repair that reaches the adoption;
-    every other missing record keeps the plain message. With `plan_id`, a
-    revision whose evidence records all name other plans is no adoption of
-    that plan either, and refuses the same way.
+    revision with no adoption commit is not an integrated adoption whatever
+    else the report says (D7). When that revision is a default branch whose
+    contract does not resolve and no operand replaced it, the message names
+    `--integration-branch`, the one repair that reaches the adoption; every
+    other missing adoption keeps the plain message. With `plan_id`, a revision
+    whose adoption commits all belong to other plans is no adoption of that
+    plan either, and refuses the same way: the plan's own subject must be on
+    the pinned history, which `root` holds.
     """
-    if verification.evidence_candidates:
-        if plan_id is None or plan_id in verification.evidence_plan_ids:
+    report = verification.report
+    source = verification.source
+    if report["adoption_commit"] is not None:
+        if plan_id is None:
+            return
+        digest = plan_id_digest(plan_id)
+        if digest is not None and adoption_commit_at(
+                root, source.commit, report["project_id"], digest) is not None:
             return
         raise refuse(
             "not_integrated", "adopt.registration.not_integrated", "",
-            "the remote integration branch carries no adoption evidence "
-            "record of the named plan")
-    source = verification.source
+            "the remote integration branch carries no adoption commit of "
+            "the named plan")
     if not source.default_contract_resolved and source.override_default is None:
         raise refuse(
             "not_integrated", "adopt.registration.not_integrated", "",
             "the contract on the remote default branch does not resolve and "
-            "that branch carries no adoption evidence record; name the "
+            "that branch carries no adoption commit; name the "
             "integration branch with `--integration-branch`")
     raise refuse(
         "not_integrated", "adopt.registration.not_integrated", "",
-        "the remote integration branch carries no adoption evidence record")
+        "the remote integration branch carries no adoption commit")
 
 
 def registration_allowed(result: str) -> bool:
@@ -475,21 +485,14 @@ class Verification:
     rather than folded in, because the integration branch registration checks
     is contract policy the report has no business publishing. `source` is the
     pinned revision the report was read at, which registration walks ancestry
-    from, and `evidence_candidates` every adoption evidence record path found
-    in it, which `require_integrated` reads: an empty list is no adoption.
-    `evidence_plan_ids` is the `plan_id` of every candidate that parses as an
-    adoption record, which `require_integrated` matches against `--plan-id`.
+    from and `require_integrated` reads the adoption commit's history at.
     """
 
     def __init__(self, report: dict, resolve_payload: object,
-                 source: VerificationSource,
-                 evidence_candidates: list[str],
-                 evidence_plan_ids: list[object] | None = None) -> None:
+                 source: VerificationSource) -> None:
         self.report = report
         self.resolve_payload = resolve_payload
         self.source = source
-        self.evidence_candidates = evidence_candidates
-        self.evidence_plan_ids = evidence_plan_ids or []
 
 
 def verify_repository(root: Path, source: VerificationSource,
@@ -497,9 +500,7 @@ def verify_repository(root: Path, source: VerificationSource,
     """Run the ordered conformance checks and build the report.
 
     Every check runs where its inputs exist and is recorded as `not_run` where
-    they do not, so a report always carries one row per declared check: an
-    absent evidence record is a named failure with two consequences, never two
-    silent omissions.
+    they do not, so a report always carries one row per declared check.
     """
     checks: list[dict] = []
 
@@ -528,63 +529,20 @@ def verify_repository(root: Path, source: VerificationSource,
            ("no lifecycle class covers: " + ", ".join(unclassified))
            if unclassified else None)
 
-    record_path, map_path = None, None
-    candidates = evidence_records_at(root, source.commit)
-    # Other evidence files share the directory (gate bundles, trials): only a
-    # file that parses as an adoption record is a record to count. When none
-    # parses, every candidate stays in view so a lone malformed file still
-    # reports "does not parse" and several still report the ambiguity.
-    parsed = {path: found for path in candidates
-              if (found := parses_as_evidence_record(
-                  blob_at(root, source.commit, path))) is not None}
-    candidates = list(parsed) or candidates
-    if not candidates:
-        record("adoption-evidence-record", "failed",
-               "no adoption evidence record is committed under "
-               f"{EVIDENCE_RECORD_DIR}/")
-    elif len(candidates) > 1:
-        record("adoption-evidence-record", "failed",
-               "more than one adoption evidence record is committed: "
-               + ", ".join(candidates))
+    # History is always read in `root`: the export `--register` checks has no
+    # `.git`, and the pinned commit is reachable from the checkout's objects.
+    project_id = resolved_project_id(payload)
+    commit = (None if project_id is None
+              else adoption_commit_at(root, source.commit, project_id))
+    if project_id is None:
+        record("adoption-commit-derived", "failed",
+               "no project id resolves, so no adoption commit can be named")
+    elif commit is None:
+        record("adoption-commit-derived", "failed",
+               f"no commit reachable from {source.ref} has the adoption "
+               f"subject of {project_id}")
     else:
-        found = parses_as_evidence_record(
-            blob_at(root, source.commit, candidates[0]))
-        if found is None:
-            record("adoption-evidence-record", "failed",
-                   "the committed file does not parse as an adoption "
-                   f"evidence record: {candidates[0]}")
-        else:
-            record_path = candidates[0]
-            map_path = found["path_migration_map"]
-            record("adoption-evidence-record", "passed", None)
-
-    commit = None
-    if record_path is None:
-        record("adoption-commit-derived", "not_run",
-               "no adoption evidence record was discovered")
-    else:
-        commit = introducing_commit(root, source.commit, record_path)
-        record("adoption-commit-derived",
-               "failed" if commit is None else "passed",
-               None if commit is not None else
-               "git records no commit introducing the adoption evidence "
-               f"record: {record_path}")
-
-    if record_path is None:
-        record("path-migration-map", "not_run",
-               "no adoption evidence record was discovered")
-        map_path = None
-    elif not isinstance(map_path, str) or not map_path:
-        record("path-migration-map", "failed",
-               "the evidence record names no path migration map")
-        map_path = None
-    elif parses_as_migration_map(
-            blob_at(root, source.commit, map_path)) is None:
-        record("path-migration-map", "failed",
-               f"the path migration map is absent or does not parse: "
-               f"{map_path}")
-    else:
-        record("path-migration-map", "passed", None)
+        record("adoption-commit-derived", "passed", None)
 
     blockers = blocked_capabilities(payload) if resolves else []
     if any(entry["status"] != "passed" for entry in checks):
@@ -601,12 +559,10 @@ def verify_repository(root: Path, source: VerificationSource,
     report = {
         "schema_version": VERIFY_SCHEMA_VERSION,
         "result": result,
-        "project_id": resolved_project_id(payload),
+        "project_id": project_id,
         "root": str(root),
         "revision": {"ref": source.ref, "commit": source.commit},
         "adoption_commit": commit,
-        "evidence_record": record_path,
-        "migration_map": map_path,
         "checks": checks,
         "blockers": blockers,
         "registered": False,
@@ -614,8 +570,7 @@ def verify_repository(root: Path, source: VerificationSource,
     override = branch_override(source)
     if override is not None:
         report["branch_override"] = override
-    return Verification(report, payload, source, candidates,
-                        [found["plan_id"] for found in parsed.values()])
+    return Verification(report, payload, source)
 
 
 def register_project(root: Path, verification: Verification) -> None:

@@ -84,7 +84,7 @@ def git_repo(path: Path, *, contract: bool = True) -> Path:
 
 def reconcile_repository(parent: Path, *, contract: bool = False) -> Path:
     root = git_repo(parent / "reconcile", contract=contract)
-    for name, text in ((".claude/specs/a.md", "# spec a\n"), (".claude/plans/b.md", "# plan b\n")):
+    for name, text in ((".out-of-scope/a.md", "# rejected a\n"), (".out-of-scope/b.md", "# rejected b\n")):
         (root / name).parent.mkdir(parents=True, exist_ok=True)
         (root / name).write_text(text)
     git(root, "add", "-A")
@@ -99,8 +99,8 @@ def reconcile_repository(parent: Path, *, contract: bool = False) -> Path:
 def answer_repository(parent: Path) -> Path:
     root = register_check.adopted_repository(
         parent, "fixture/console-answer", ROOT / register_check.CONTRACT_SOURCE)
-    for name, text in ((".claude/odd.md", "# odd\n"), (".claude/specs/a.md", "# a\n"),
-                       ("tools/show.sh", "cat .claude/specs/a.md\n")):
+    for name, text in ((".claude/odd.md", "# odd\n"), (".out-of-scope/a.md", "# a\n"),
+                       ("tools/show.sh", "cat .out-of-scope/a.md\n")):
         (root / name).parent.mkdir(parents=True, exist_ok=True)
         (root / name).write_text(text)
     git(root, "add", "-A")
@@ -1470,9 +1470,9 @@ class PlanAnswerRealTest(Case):
                           "label": "Archive it under .agents/knowledge/archive/adopted/"}],
              "recommended": None, "why": None},
             {"id": "path-reference", "subject": "tools/show.sh:1:5",
-             "ask": "tools/show.sh line 1 names .claude/specs/a.md, which this plan moves. "
+             "ask": "tools/show.sh line 1 names .out-of-scope/a.md, which this plan moves. "
                     "Should it follow the move?",
-             "options": [{"value": "rewrite", "label": "Change it to .agents/artifacts/specs/a.md"},
+             "options": [{"value": "rewrite", "label": "Change it to .agents/knowledge/rejections/a.md"},
                          {"value": "retain", "label": "Leave it as it is"}],
              "recommended": None, "why": None}])
         self.assertEqual(reg["state"], "draft")
@@ -1488,10 +1488,10 @@ class PlanAnswerRealTest(Case):
         self.assertEqual(
             [i["headline"] for i in items],
             ["What should happen to .claude/odd.md? No rule covers this agent file.",
-             "tools/show.sh line 1 names .claude/specs/a.md, which this plan moves. "
+             "tools/show.sh line 1 names .out-of-scope/a.md, which this plan moves. "
              "Should it follow the move?"])
         self.assertEqual(items[1]["questions"][0]["options"],
-                         ["Change it to .agents/artifacts/specs/a.md", "Leave it as it is"])
+                         ["Change it to .agents/knowledge/rejections/a.md", "Leave it as it is"])
         self.assertEqual(shown["statement"]["inbox_items"], 2)
         self.assertEqual(shown["statement"]["headline"], "2 things need you")
 

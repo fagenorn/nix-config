@@ -28,7 +28,7 @@ On 16 November the console ran stale after a console change merged: nothing on t
 ## Consequences
 
 - A scoped exception to ADR-console-001 (every fact is a log row and the view is rebuilt from the log): the activation reading is a recomputable observation of this host, held in memory only and never logged, like the polled profile directories. After a restart the line is absent until the activation thread's start-time read, which recomputes it within one poll.
-- ADR-console-002's Projects and Sprints bullets are amended: the line precedes the running blocks at the head of the Work column, and it names a command and the checkout's path.
+- The desk page's Projects and Sprints bullets are amended: the line precedes the running blocks at the head of the Work column, and it names a command and the checkout's path.
 - A scoped exception to ADR-console-035's no-command, no-path rule, which governs the registration flow.
 - A host running an unmerged console change also shows the line until it is switched from the integration branch.
-- Related: ADR-console-001, ADR-console-002, ADR-console-035, ADR-console-037.
+- Related: ADR-console-001, ADR-console-035, ADR-console-037.

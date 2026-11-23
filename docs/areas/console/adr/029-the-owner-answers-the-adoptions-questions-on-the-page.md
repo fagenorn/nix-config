@@ -45,7 +45,7 @@ Neither appends a row, so the shown plan, its questions and the stored plan docu
 - `project-id` with a value: `<value> is already registered for another checkout, so it cannot be answered here: write the intended project id in .agents/project.json, then register the repository again.`
 - any other question, or one whose plan offers no answer: `This question cannot be answered here: answer it with adopt-project plan --answer in a terminal.`
 
-**D8. The page.** This amends ADR-console-028 D8. The page draws each item of D10 as the question card of ADR-console-002: kind `Question`, title `Register <name>`, numbered options, Enter with the five-second undo, no words of the owner's own and no tracker link. Its send posts the D3 body with the item's plan id. An item with no offered answer shows its why line; the item's refusal and a refused write show on its card; a sent answer reads `Answered, planning again`. The Work column shows the registration's one line and its change lines only (D10). The words are the view's.
+**D8. The page.** This amends ADR-console-028 D8. The page draws each item of D10 as a question card: kind `Question`, title `Register <name>`, numbered options, Enter with the five-second undo, no words of the owner's own and no tracker link. Its send posts the D3 body with the item's plan id. An item with no offered answer shows its why line; the item's refusal and a refused write show on its card; a sent answer reads `Answered, planning again`. The Work column shows the registration's one line and its change lines only (D10). The words are the view's.
 
 **D9. Authentication.** Answers pass only through the plan. The page names the plan id it shows. The console re-sends only the answers that plan returned plus the new one, and the new plan id covers them all (ADR-project-contract-004), so `adopt-project apply --plan-id` re-applies exactly what was answered.
 
@@ -57,4 +57,4 @@ Neither appends a row, so the shown plan, its questions and the stored plan docu
 - Tests sandbox HOME (one per case) and every repository.
 - No host check is added: an answer run only adds plan documents, which the ADR-console-028 check removes by repository root.
 - Every answer run stores one more plan document; the console deletes none.
-- Related: ADR-console-002, ADR-console-008, ADR-console-028, ADR-project-contract-004.
+- Related: ADR-console-008, ADR-console-028, ADR-project-contract-004.

@@ -39,7 +39,9 @@ A session that gave no usable structured answer is asked once more on the same s
 `REASK_PROMPT`. A miss is a reading with no reply that conforms to the schema
 (`engine_reply.reply_problem`) whose stdout is a `result` with a `subtype` in `MISS_SUBTYPES`:
 `success` with `is_error` not set, or the client's own `error_max_structured_output_retries`,
-flagged or not (`is_miss`). Any other reading without a usable reply is never resumed.
+flagged or not (`is_miss`). Any other reading without a usable reply is never resumed. A continued
+run resumes a session its predecessor left interrupted with `CONTINUE_PROMPT`, which asks it to finish
+the task it was given and then give only the structured answer.
 
 The role's `Bash` stays in `--tools` but is preapproved only as the reviewer's
 permitted read-only git inspection (`READ_ONLY_BASH`): under `dontAsk` any other
@@ -132,6 +134,10 @@ STRUCTURED_OUTPUT_EXHAUSTED = "error_max_structured_output_retries"
 MISS_SUBTYPES: tuple[str, ...] = ("success", STRUCTURED_OUTPUT_EXHAUSTED)
 REASK_PROMPT = (
     "Your last answer was not a valid structured answer. Reply again with only the structured "
+    "answer, a single call of the StructuredOutput tool whose members follow the schema, and no "
+    "other text.")
+CONTINUE_PROMPT = (
+    "Your session was interrupted. Finish the task you were given, then give only the structured "
     "answer, a single call of the StructuredOutput tool whose members follow the schema, and no "
     "other text.")
 ANSWER_ENV = "CLAUDE_ACCOUNT_ANSWER"
