@@ -42,17 +42,31 @@ bounds both promises: the rule has at most `count - n` violations, and none is
 in a listed file, measured by `cleanup-issue violations --repo-root <checkout>
 --rule <id>` at the merge commit.
 
-Run. `run` lists the open issues first. Any open cleanup issue answers
-`Outcome("open", <lowest issue number>, None)` and files nothing. Otherwise, with
-no rule above zero it answers `Outcome("clean", None, None)` and files nothing;
-else it files exactly one issue for the selected rule and answers
-`Outcome("filed", <issue number>, <rule id>)`. Before it creates an issue, `run`
-asks the tracker two questions: `trusted_writer` (an issue by an account that
-`trusted` would drop is invisible to the next run, so a filer that would not be
-trusted files nothing and `run` raises `Refusal`) and `current` (the revision is
-still the tip of the integration branch; a delayed run for an older commit
-answers `Outcome("stale", None, None)` and files nothing, so completed work is
-never filed again).
+Fix change. `fix_draft` renders a fix change for a rule whose enforcer has an autofix.
+For rule `R`, `count` violations, `fix.fixed` of them fixed and `k` changed files, the
+branch is `cleanup-fix-<R lowercased, each run of other characters one "-", trimmed>-<the
+first 12 characters of the revision>`, the title `Fix <fixed> of the <count> violations
+of rule <R> with its autofix`, and the body the marker line, a summary line naming the
+count, the revision and `k`, a `## Count` list (`- Before: <count>`, `- After: <count -
+fixed>`) and a `## Files` `text` block of the sorted changed paths, each through
+`never_rise.escape_path`.
+
+Run. `run` lists the open issues and the open changes first. Any open cleanup issue or
+fix change answers `Outcome("open", <lowest number>, None)` and opens and files nothing.
+Otherwise, with no rule above zero it answers `Outcome("clean", None, None)`; else it
+asks the tracker two questions: `trusted_writer` (an issue by an account that `trusted`
+would drop is invisible to the next run, so a filer that would not be trusted files
+nothing and `run` raises `Refusal`) and `current` (the revision is still the tip of the
+integration branch; a delayed run for an older commit answers `Outcome("stale", None,
+None)`, so completed work is never filed again). For the selected rule it then drafts
+the issue and, when the enforcer has an autofix, runs it on exactly the listed files
+(a changed file outside them raises `ValueError`). Changed files with a tracker whose
+pull requests start no checks answer `Outcome("deferred", None, <rule id>)`; otherwise
+`open_change` opens the fix change and answers `Outcome("opened", <pull number>, <rule
+id>)`, or `Outcome("taken", None, <rule id>)` when another writer holds its branch.
+Without changed files, `fix_only` answers `Outcome("unfixable", None, <rule id>)` and
+files nothing; else the issue is filed and the answer is `Outcome("filed", <issue
+number>, <rule id>)`.
 
 Tracker. `GitHubTracker(slug)` lists the open issues of `<owner>/<name>` through
 `agent_tools.system.forge_api.api_pages` and files through
@@ -114,7 +128,7 @@ from agent_tools.claims import forge_markers
 from agent_tools.delivery import (
     comment_lint, copied_test_lint, never_rise, node_lint, record_lint, ruff_lint,
     size_lint, skipped_test_lint)
-from agent_tools.delivery.never_rise import Enforcer, Snapshot, Violation
+from agent_tools.delivery.never_rise import Enforcer, Fix, Snapshot, Violation
 from agent_tools.system import forge_api
 
 COMMAND = "cleanup-issue"
@@ -231,6 +245,13 @@ class Issue(NamedTuple):
 class Tracker(Protocol):
     def open_issues(self) -> list[Issue]: ...
 
+    def open_changes(self) -> list[Issue]: ...
+
+    def starts_checks(self) -> bool: ...
+
+    def open_change(self, branch: str, revision: str, title: str, body: str,
+                    files: Mapping[str, bytes]) -> int | None: ...
+
     def trusted_writer(self) -> bool: ...
 
     def current(self, revision: str) -> bool: ...
@@ -242,6 +263,15 @@ class Draft(NamedTuple):
     rule: str
     count: int
     listed: tuple[Violation, ...]
+    title: str
+    body: str
+
+
+class FixDraft(NamedTuple):
+    rule: str
+    count: int
+    after: int
+    branch: str
     title: str
     body: str
 
@@ -332,10 +362,35 @@ def draft(rule: CleanupRule, violations: Sequence[Violation], revision: str) -> 
     return Draft(rule_id, count, listed, title, body)
 
 
-def run(tracker: Tracker, snapshot: Snapshot, rules: Sequence[CleanupRule] = RULES) -> Outcome:
-    open_numbers = open_cleanup(tracker.open_issues())
-    if open_numbers:
-        return Outcome("open", open_numbers[0], None)
+def fix_draft(rule: CleanupRule, count: int, fix: Fix, revision: str) -> FixDraft:
+    rule_id = rule.enforcer.rule
+    after = count - fix.fixed
+    slug = re.sub(r"[^a-z0-9]+", "-", rule_id.lower()).strip("-")
+    paths = "".join(f"{never_rise.escape_path(path)}\n" for path in sorted(fix.changed))
+    body = (f"<!-- agent:cleanup-fix v1 rule={rule_id} -->\n"
+            f"Rule {rule_id} has {count} violations at {revision}. This change holds only what the "
+            f"rule's autofix wrote to {len(fix.changed)} files.\n"
+            "\n"
+            "## Count\n"
+            "\n"
+            f"- Before: {count}\n"
+            f"- After: {after}\n"
+            "\n"
+            "## Files\n"
+            "\n"
+            "```text\n"
+            f"{paths}"
+            "```\n")
+    return FixDraft(rule_id, count, after, f"cleanup-fix-{slug}-{revision[:12]}",
+                    f"Fix {fix.fixed} of the {count} violations of rule {rule_id} with its autofix",
+                    body)
+
+
+def run(tracker: Tracker, snapshot: Snapshot, rules: Sequence[CleanupRule] = RULES,
+        fix_only: bool = False) -> Outcome:
+    held = sorted(open_cleanup(tracker.open_issues()) + open_fix_changes(tracker.open_changes()))
+    if held:
+        return Outcome("open", held[0], None)
     found = counts(snapshot, rules)
     rule = select(found, rules)
     if rule is None:
@@ -345,6 +400,20 @@ def run(tracker: Tracker, snapshot: Snapshot, rules: Sequence[CleanupRule] = RUL
     if not tracker.current(snapshot.revision):
         return Outcome("stale", None, None)
     issue = draft(rule, found[rule.enforcer.rule], snapshot.revision)
+    if rule.enforcer.fix is not None:
+        paths = tuple(dict.fromkeys(v.path for v in issue.listed))
+        result = rule.enforcer.fix(snapshot, paths)
+        if not set(result.changed) <= set(paths):
+            raise ValueError(f"the autofix of {issue.rule} changed files outside the listing")
+        if result.changed:
+            if not tracker.starts_checks():
+                return Outcome("deferred", None, issue.rule)
+            change = fix_draft(rule, issue.count, result, snapshot.revision)
+            number = tracker.open_change(change.branch, snapshot.revision, change.title,
+                                         change.body, result.changed)
+            return Outcome("taken" if number is None else "opened", number, issue.rule)
+    if fix_only:
+        return Outcome("unfixable", None, issue.rule)
     return Outcome("filed", tracker.create(issue.title, issue.body), issue.rule)
 
 
@@ -404,6 +473,16 @@ class GitHubTracker:
                     raise forge_api.ForgeError("payload_invalid", f"issue {number} has no text body")
                 issues.append(Issue(number, body or ""))
         return issues
+
+    def open_changes(self) -> list[Issue]:
+        return []
+
+    def starts_checks(self) -> bool:
+        return False
+
+    def open_change(self, branch: str, revision: str, title: str, body: str,
+                    files: Mapping[str, bytes]) -> int | None:
+        raise NotImplementedError("the forge opener is not wired yet")
 
     def create(self, title: str, body: str) -> int:
         return forge_api.create_issue(self.slug, title, body)

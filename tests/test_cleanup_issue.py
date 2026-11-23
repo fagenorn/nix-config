@@ -17,12 +17,14 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.delivery import cleanup_issue
+from agent_tools.delivery import cleanup_issue, never_rise
 from agent_tools.delivery.cleanup_issue import (
-    RULES, CleanupRule, Issue, Outcome, draft, is_cleanup, is_fix_change, listing, run)
-from agent_tools.delivery.never_rise import Enforcer, Snapshot, Violation
+    RULES, CleanupRule, FixDraft, Issue, Outcome, draft, fix_draft, is_cleanup, is_fix_change,
+    listing, run)
+from agent_tools.delivery.never_rise import Enforcer, Fix, Snapshot, Violation
 from agent_tools.system.forge_api import ForgeError
 from tests.test_never_rise import commit_all, fixture_env, git, repo, write
+from tests.test_ruff_lint import require_ruff
 
 TIER = "integration"
 
@@ -41,6 +43,25 @@ def suffix_enforcer(rule: str, suffix: str) -> Enforcer:
 R1 = CleanupRule(suffix_enforcer("FX1", ".one"), 5, "Fix FX1.")
 R2 = CleanupRule(suffix_enforcer("FX2", ".two"), 5, "Fix FX2.")
 R3 = CleanupRule(suffix_enforcer("FX3", ".three"), 5, "Fix FX3.")
+FIX_MARKER_FX4 = "<!-- agent:cleanup-fix v1 rule=FX4 -->"
+
+
+def fix_enforcer(rule: str, suffix: str, writes: bool = True) -> Enforcer:
+    seen: list[tuple[str, ...]] = []
+
+    def fix(snapshot: Snapshot, paths) -> Fix:
+        seen.append(tuple(paths))
+        if not writes:
+            return Fix({}, 0)
+        return Fix({path: f"fixed {path}\n".encode() for path in paths}, len(paths))
+    base = suffix_enforcer(rule, suffix)
+    enforcer = Enforcer(rule, base.find, fix=fix)
+    object.__setattr__(enforcer, "seen", seen)
+    return enforcer
+
+
+R4 = CleanupRule(fix_enforcer("FX4", ".four"), 5, "Fix FX4.")
+R5 = CleanupRule(fix_enforcer("FX4", ".four", writes=False), 5, "Fix FX4.")
 
 
 def snapshot_of(*paths: str) -> Snapshot:
@@ -49,11 +70,30 @@ def snapshot_of(*paths: str) -> Snapshot:
 
 class StubTracker:
     def __init__(self, open_issues: list[Issue] | None = None, writer: bool = True,
-                 current: bool = True):
+                 current: bool = True, changes: list[Issue] | None = None, checks: bool = True,
+                 taken: bool = False):
         self.open = list(open_issues or [])
         self.writer = writer
         self.is_current = current
+        self.changes = list(changes or [])
+        self.checks = checks
+        self.taken = taken
         self.created: list[tuple[str, str]] = []
+        self.opened: list[tuple[str, str, str, str, dict]] = []
+
+    def open_changes(self) -> list[Issue]:
+        return list(self.changes)
+
+    def starts_checks(self) -> bool:
+        return self.checks
+
+    def open_change(self, branch: str, revision: str, title: str, body: str, files) -> int | None:
+        if self.taken:
+            return None
+        self.opened.append((branch, revision, title, body, dict(files)))
+        number = 201 + len(self.opened) - 1
+        self.changes.append(Issue(number, body))
+        return number
 
     def trusted_writer(self) -> bool:
         return self.writer
@@ -245,6 +285,137 @@ class DraftTest(unittest.TestCase):
             " at the merge commit prints at most 1 lines and no line naming a listed file\n"))
         self.assertEqual((result.rule, result.count), ("FX1", 2))
         self.assertEqual(result.listed, (Violation("FX1", "a.one", 1),))
+
+
+class FixChangeRunTest(unittest.TestCase):
+    def test_a_fixable_ruff_rule_in_a_fixture_repository_opens_one_fix_change_and_files_no_issue(self):
+        require_ruff(self)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = repo(tmp)
+            write(root, "python/pyproject.toml", "[project]\n")
+            write(root, "python/m.py", "x = 1;\n")
+            commit_all(root)
+            snapshot = never_rise.read_snapshot(root, never_rise.resolve_commit(root, "HEAD", 60), 60)
+            tracker = StubTracker()
+
+            outcome = run(tracker, snapshot)
+
+        self.assertEqual(outcome, Outcome("opened", 201, "PY7"))
+        self.assertEqual(tracker.created, [])
+        self.assertEqual(len(tracker.opened), 1)
+        branch, revision, _, body, files = tracker.opened[0]
+        self.assertEqual(files, {"python/m.py": b"x = 1\n"})
+        self.assertEqual(revision, snapshot.revision)
+        self.assertEqual(branch, "cleanup-fix-py7-" + snapshot.revision[:12])
+        self.assertTrue(is_fix_change(body))
+        self.assertIn("- Before: 1", body)
+        self.assertIn("- After: 0", body)
+
+    def test_an_open_fix_change_or_cleanup_issue_opens_nothing_and_an_unchanging_autofix_files_an_issue(self):
+        snapshot = snapshot_of("a.four")
+        R4 = CleanupRule(fix_enforcer("FX4", ".four"), 5, "Fix FX4.")
+        with self.subTest("an open fix change"):
+            tracker = StubTracker(changes=[Issue(30, "<!-- agent:cleanup-fix v1 rule=FX4 -->")])
+            self.assertEqual(run(tracker, snapshot, (R4,)), Outcome("open", 30, None))
+            self.assertEqual((tracker.created, tracker.opened), ([], []))
+            self.assertEqual(R4.enforcer.seen, [])
+        with self.subTest("an open cleanup issue"):
+            tracker = StubTracker([Issue(7, MARKER_FX1)])
+            self.assertEqual(run(tracker, snapshot, (R4,)), Outcome("open", 7, None))
+            self.assertEqual((tracker.created, tracker.opened), ([], []))
+            self.assertEqual(R4.enforcer.seen, [])
+        with self.subTest("an autofix that changes nothing"):
+            tracker = StubTracker()
+            self.assertEqual(run(tracker, snapshot, (R5,)), Outcome("filed", 101, "FX4"))
+            self.assertEqual(tracker.opened, [])
+            self.assertEqual(tracker.created[0][1].splitlines()[0], "<!-- agent:cleanup v1 rule=FX4 -->")
+
+    def test_the_lowest_of_the_open_issues_and_fix_changes_is_named(self):
+        tracker = StubTracker([Issue(12, MARKER_FX1)], changes=[Issue(9, FIX_MARKER_FX4)])
+
+        self.assertEqual(run(tracker, snapshot_of("a.four"), (R4,)), Outcome("open", 9, None))
+
+    def test_the_wrong_marker_on_either_side_holds_nothing(self):
+        tracker = StubTracker([Issue(5, FIX_MARKER_FX4)], changes=[Issue(6, MARKER_FX1)])
+
+        self.assertEqual(run(tracker, snapshot_of("a.four"), (R4,)).action, "opened")
+
+    def test_a_writer_whose_pull_requests_start_no_checks_defers(self):
+        snapshot = snapshot_of("a.four")
+        tracker = StubTracker(checks=False)
+        self.assertEqual(run(tracker, snapshot, (R4,)), Outcome("deferred", None, "FX4"))
+        self.assertEqual((tracker.created, tracker.opened), ([], []))
+
+        tracker = StubTracker(checks=False)
+        self.assertEqual(run(tracker, snapshot, (R5,)), Outcome("filed", 101, "FX4"))
+
+    def test_a_ref_another_host_created_answers_taken(self):
+        tracker = StubTracker(taken=True)
+
+        self.assertEqual(run(tracker, snapshot_of("a.four"), (R4,)), Outcome("taken", None, "FX4"))
+        self.assertEqual(tracker.created, [])
+
+    def test_a_fix_only_run_files_nothing_for_an_unfixable_pick(self):
+        snapshot = snapshot_of("a.four", "a.one")
+        for rule, expected in ((R5, Outcome("unfixable", None, "FX4")),
+                               (R1, Outcome("unfixable", None, "FX1"))):
+            with self.subTest(rule=rule.enforcer.rule, fix=rule.enforcer.fix is not None):
+                tracker = StubTracker()
+                self.assertEqual(run(tracker, snapshot, (rule,), fix_only=True), expected)
+                self.assertEqual(tracker.created, [])
+        tracker = StubTracker()
+        self.assertEqual(run(tracker, snapshot, (R4,), fix_only=True), Outcome("opened", 201, "FX4"))
+
+    def test_the_autofix_sees_only_the_listed_files(self):
+        rule = CleanupRule(fix_enforcer("FX4", ".four"), 2, "x")
+        tracker = StubTracker()
+
+        run(tracker, snapshot_of("a.four", "b.four", "c.four"), (rule,))
+
+        self.assertEqual(rule.enforcer.seen, [("a.four", "b.four")])
+        self.assertEqual(set(tracker.opened[0][4]), {"a.four", "b.four"})
+
+    def test_a_fix_naming_a_file_outside_the_listing_is_refused(self):
+        rule = CleanupRule(
+            Enforcer("FX4", suffix_enforcer("FX4", ".four").find,
+                     fix=lambda snapshot, paths: Fix({"elsewhere.py": b"x"}, 1)), 5, "x")
+        tracker = StubTracker()
+
+        with self.assertRaises(ValueError):
+            run(tracker, snapshot_of("a.four"), (rule,))
+        self.assertEqual((tracker.created, tracker.opened), ([], []))
+
+    def test_an_untrusted_writer_or_a_stale_tip_runs_no_autofix(self):
+        snapshot = snapshot_of("a.four")
+        R4 = CleanupRule(fix_enforcer("FX4", ".four"), 5, "Fix FX4.")
+        with self.assertRaises(cleanup_issue.Refusal):
+            run(StubTracker(writer=False), snapshot, (R4,))
+        self.assertEqual(run(StubTracker(current=False), snapshot, (R4,)), Outcome("stale", None, None))
+        self.assertEqual(R4.enforcer.seen, [])
+
+
+class FixDraftTest(unittest.TestCase):
+    def test_the_fix_change_is_the_wire_format(self):
+        result = fix_draft(R4, 3, Fix({"b.four": b"x", "a.four": b"y"}, 2), REVISION)
+
+        self.assertEqual(result, FixDraft(
+            "FX4", 3, 1, "cleanup-fix-fx4-" + REVISION[:12],
+            "Fix 2 of the 3 violations of rule FX4 with its autofix",
+            "<!-- agent:cleanup-fix v1 rule=FX4 -->\n"
+            f"Rule FX4 has 3 violations at {REVISION}. This change holds only what the rule's"
+            " autofix wrote to 2 files.\n"
+            "\n"
+            "## Count\n"
+            "\n"
+            "- Before: 3\n"
+            "- After: 1\n"
+            "\n"
+            "## Files\n"
+            "\n"
+            "```text\n"
+            "a.four\n"
+            "b.four\n"
+            "```\n"))
 
 
 class RulesTest(unittest.TestCase):
