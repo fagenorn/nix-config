@@ -168,6 +168,8 @@ class LaneTest(Scenario):
         self.assertEqual(self.keys(run), ["applies"])
 
     def test_a_continued_standard_stop_reads_the_issue_again(self):
+        # The behaviour, not the stop's `reenter` value: the live `start` step is stale on every continue and is
+        # re-entered first, so only test_engine_check's structural assertion on the three stops pins `reenter`.
         run = StubbedRun(self, body=self.OVER_THE_RULE)
         self.stopped(run, run.deliver(), "standard-not-on-engine", "nothing")
 
