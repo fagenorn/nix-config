@@ -78,6 +78,7 @@ let
     "guard-policy" = "guard.guard_policy";
     "host-readiness" = "project_contract.host_readiness";
     "issue-branch" = "delivery.issue_branch";
+    "lint-time" = "delivery.lint_time";
     "look-approval" = "delivery.look_approval";
     "look-lint" = "delivery.look_lint";
     "node-lint" = "delivery.node_lint";
