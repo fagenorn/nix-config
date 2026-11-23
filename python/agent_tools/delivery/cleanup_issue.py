@@ -109,8 +109,8 @@ from typing import NamedTuple, Protocol
 from urllib.parse import quote
 
 from agent_tools.delivery import (
-    comment_lint, copied_test_lint, never_rise, record_lint, ruff_lint, size_lint,
-    skipped_test_lint)
+    comment_lint, copied_test_lint, instruction_surface_lint, never_rise, record_lint, ruff_lint,
+    size_lint, skipped_test_lint)
 from agent_tools.delivery.never_rise import Enforcer, Snapshot, Violation
 from agent_tools.system import forge_api
 
@@ -182,6 +182,10 @@ RECORD_GUIDANCE = {
                                   "heading, status line, list, quote, fence or second paragraph.",
 }
 
+SURFACE_GUIDANCE = ("Cut each listed instruction surface to at most its platform budget: keep what "
+                    "an agent must read on that route and move the rest to a document loaded only "
+                    "on the branch that needs it.")
+
 # The comment enforcers are built without the tracker repository, so B18 counts only the
 # shorthand references here; the never-rise check passes the contract's repository.
 RULES: tuple[CleanupRule, ...] = (
@@ -194,6 +198,7 @@ RULES: tuple[CleanupRule, ...] = (
       for enforcer in comment_lint.enforcers(None)),
     *(CleanupRule(enforcer, RECORD_BATCH, RECORD_GUIDANCE[enforcer.rule])
       for enforcer in record_lint.RECORD_ENFORCERS),
+    CleanupRule(instruction_surface_lint.ENFORCER, 1, SURFACE_GUIDANCE),
 )
 
 

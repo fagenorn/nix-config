@@ -17,7 +17,9 @@ from agent_tools import instruction_load
 from agent_tools.delivery import instruction_surface_lint, never_rise, rule_ids
 from agent_tools.delivery.never_rise import EnforcerFailed, Rise, Violation
 
-from .conformance_test_support import INTEGRATION_REF, REPO_ROOT, commit_all, fixture, git
+from .conformance_test_support import (
+    INTEGRATION_REF, REPO_ROOT, ReportAssertions, commit_all, fixture, git, make_root, run,
+)
 from .test_instruction_load import CORPUS_FILES, dict_snapshot, fixture_model
 
 TIER = "integration"
@@ -352,6 +354,57 @@ class SurfaceLintCommandTest(unittest.TestCase):
         self.assertIn('"instruction-surface-lint" = "delivery.instruction_surface_lint";',
                       COMMAND_TABLE.read_text(encoding="utf-8"))
         self.assertIsNone(json.loads(VERDICTS.read_text(encoding="utf-8"))["instruction-surface-lint"])
+
+
+class NeverRiseRegistrationTest(ReportAssertions, unittest.TestCase):
+    CHECK_ID = "verification.violations.never_rise"
+
+    def ci(self, root):
+        code, out, err = run("run", "--purpose", "ci", "--repo-root", str(root))
+        self.assertIn(code, (0, 1), err)
+        report = json.loads(out)
+        return code, report, {c["id"]: c for c in report["checks"]}
+
+    def summary(self, check):
+        return [check["status"], check["reason_code"], check["repair_id"], check["facts"]]
+
+    def instruction_base(self, root, files):
+        write_files(root, files)
+        write_files(root, {instruction_load.MODEL_PATH: model_bytes(fixture_model())})
+        commit_all(root, "instructions")
+        git(root, "update-ref", INTEGRATION_REF, "HEAD")
+        return git(root, "rev-parse", "HEAD").strip()
+
+    def test_a_grown_over_budget_surface_turns_ci_red_and_names_it(self):
+        size = B["always-loaded"] + 101
+        with fixture() as tmp:
+            root = make_root(tmp)
+            base = self.instruction_base(root, sized("always-loaded", B["always-loaded"] + 100))
+            write_files(root, {HOT: padded(CORPUS_FILES[HOT], size)})
+            commit_all(root, "grow")
+
+            code, report, by_id = self.ci(root)
+
+            self.assertEqual(code, 1)
+            self.assertEqual(report["outcome"], {"status": "failed", "primary_check_id": self.CHECK_ID})
+            self.assertEqual([c["id"] for c in report["checks"] if c["status"] == "failed"],
+                             [self.CHECK_ID])
+            self.assertEqual(self.summary(by_id[self.CHECK_ID]), [
+                "failed", "violation_count_rose", "violations.never_rise.reduce",
+                {"merge_base": base, "rule": "B25", "base_count": 1, "branch_count": 1,
+                 "violations": [f"B25 {PATHS['always-loaded']}:{size}"], "rules": ["B25"]}])
+            self.assert_validates(report)
+
+    def test_a_level_instruction_tree_passes_ci(self):
+        with fixture() as tmp:
+            root = make_root(tmp)
+            base = self.instruction_base(root, sized("always-loaded", B["always-loaded"] + 100))
+
+            code, _, by_id = self.ci(root)
+
+            self.assertEqual(code, 0)
+            self.assertEqual(self.summary(by_id[self.CHECK_ID]),
+                             ["passed", None, None, {"merge_base": base}])
 
 
 if __name__ == "__main__":
