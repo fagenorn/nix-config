@@ -1,20 +1,27 @@
-"""The engine's shell: `engine deliver` runs a procedure of command, agent and decide steps (#1512, #1514).
+"""The engine's shell: `engine deliver` runs or continues a procedure of command, agent, decide, group and call steps (#1512, #1514, #1517).
 
 `deliver(issue, procedures_dir)` is the imperative half over the pure core: it
-refuses what it cannot run before anything exists, creates the run directory,
-then loops (replay the run's events through `engine_core.replay`, act on the
-next action, record it) until the walk is `Done` or a `Stop`.
+refuses what it cannot run before anything is changed, creates the run directory
+(or finds the issue's open run), then loops (replay the run's events through `engine_core.replay`, act on the
+next action, record it) until the walk is `Done` or a `Stop`. `_walk` is that
+loop for any run directory: it reads the run's procedure name and inputs from
+its `run.json`, so the root run and every child run share it.
 
 Every refusal raises `Refused`, before a run directory exists and before any
 process starts: the project contract must resolve from the current directory; a
 held run lock answers `EXIT_RUNNING` first; the host's settings must name the lifecycle guard as the one
 unconditional Bash hook with no hook switch on (`engine_guard.locate`), checked after that answer;
-`<procedures_dir>/deliver.json` must pass `procedure_check.check_directory` against the platform
-declarations plus every project command, hold only `command`, `agent` and `decide` steps, a
-`mutates: true` step only as a `command` step, and no input but `issue`, and every agent step's role
-file must read (`engine_session.read_role`), and the host declaration must admit the engine route (else the
-refusal starts with its reason code), checked after the guard. The same checks run again on the run's
-staged copy, which is the copy the loop reads (`<run>/procedure/deliver.json`).
+the procedure must pass `procedure_check.check_directory` against the platform
+declarations plus every project command, hold only `command`, `agent`, `decide`, `group` and `call` steps,
+a `mutates: true` step only as a `command` step, no input the run does not supply, no `call` member
+of a group, no procedure that calls itself and no agent step whose role file does not read
+(`engine_session.read_role`), and the host declaration must admit the engine route (else the
+refusal starts with its reason code), checked after the guard; every child procedure a `call`
+names is refused on the same terms, with the parent's inputs (plus `item` under
+`each`) as the inputs it may declare. The same checks run again on the run's
+staged copy, which is the copy the loop reads (`<run>/procedure/`); a mutating command step needs its `check`,
+which the checker requires. A new run checks `<procedures_dir>/deliver.json`; a continued run checks
+its own staged copy only.
 
 An agent step runs as one headless session (`engine_session`) in the project
 root: its role body, rendered prompt and a session record are stored under the
@@ -54,7 +61,27 @@ visit); a usage limit never consumes that retry and an API error never opens a w
 leaves an open `usage-limit` wait open, so every `quota-wait` stop has one open. A second API error in the visit
 is the outcome `no-reply`: the stored result is `{}` and the step's `on` must map it, else the run is a `Fault`.
 
-Before each visit of a `mutates: true` command step, in a procedure naming a `keep_alive`,
+A `group` step runs its members beside each other, one thread each: each member
+records `step_entered`, `process_started`, its stored result and
+`outcome_graded`, and no `transition_taken`; the group's own grade is recorded
+once per visit from `Replay.graded`, before the shell acts on the next action,
+so a group of decide members, or one graded then exhausted in one replay, is
+recorded too. A `call` step runs its child procedure once per item of `each`
+(once with item `null` without `each`), each as a child run of its own: a run
+directory whose `run.json` names the parent, with the procedures copied from the
+parent's staged copy. At most `parallel` child walks run at once; children are
+admitted in list order, and admission stops at the first fault, while the
+children already admitted finish, and a worker that cannot start stops admission
+the same way. The parent records a `call` event for each child before that child
+walks (a child whose event cannot be recorded is removed unwalked), stores `{"items": [{"end", "item", "run"}, ...]}`
+and takes `engine_core.call_outcome` of the ends. A fault in any child faults
+the parent with no call outcome. `engine status` reads the root run, never a
+child. A group's and a call's wait runs under `engine_session.reaping`, so a SIGTERM ends
+every live session, admits no further child, starts no further step in any walk and exits
+143 once the running steps end.
+
+Before each visit of a `mutates: true` command step, and before each visit of a group with a
+`mutates: true` member (once for the group, recorded at the group's step), in a procedure naming a `keep_alive`,
 the shell runs it (`KEEP_ALIVE_SECONDS`), recording a `keep_alive_ran` per call. It renews
 only on the verdict `renewed` with exit 0; an `error` whose `transient` is the boolean
 `true` is called once more. Otherwise the run ends at `claim-lost` without entering the
@@ -70,8 +97,26 @@ sweeps expired run directories; a run that ends in done or a stop then appends o
 (`_record_history`) before its lock is released. Neither changes the call's code or result line.
 
 Single writer: under the issue's creation lock the shell takes `<run>/lock`, an exclusive `flock` held
-until `deliver` returns. A run whose lock is held makes the call exit `EXIT_RUNNING`; a run not done and
-not locked is refused (continuing a run is a later slice).
+until its walk ends, for the root run and for each child run (released on every path). The probe for a held
+run lock and every lock taking (a new run's, a continued run's renewal and a child run's) happen under the
+creation lock, so no probe reads a lock file between a lock and its write.
+A run whose lock is held makes the call exit `EXIT_RUNNING`.
+
+Continuing: the issue's runs that are not done are found under the creation lock. Two or more are
+refused, naming them. One is continued on its own procedure copy (`procedures_dir` is not read) with the
+inputs of its `run.json`: a visit whose result is stored with its outcome but lacks its grading or its
+transition (either may be the one a kill left; a group member's lacks only its grading, the group's own
+grade being the core's) is first completed from the stored outcome; unless the
+walk is already `Done`, `engine_core.reentry` (given the current repository head) names the step to
+re-enter and a `run_continued` event records it; the loop then runs as for a new run. A mutating command
+step's `check` runs first on every visit that replays one a continue discarded (`RunCommand.recheck`; a
+group member's likewise, and in the child runs of a call that replays one, the first visit of each mutating
+command),
+under the same guard, wall bound and stop polling as the command: the outcome `absent` runs the command,
+any other outcome stands for it, its document stored as the visit's result, and the keep-alive runs before
+that check as before any visit of the step. A `run_continued` carries no `head`; a `result_stored` carries
+the visit's graded `outcome` and, for a command step that holds `head`, the repository head only when it
+is the same before and after the step's process. None are open: a new run is created.
 
 A stop request (`engine stop`, `engine_stop`) is the file `<run>/stop-request` naming this lock's holder
 (`pid` and `started`). While a step's process runs (a command, an agent session or the keep-alive),
@@ -91,11 +136,16 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import shutil
 import socket
+import subprocess
 import sys
 import tempfile
+import threading
+import time
 import uuid
-from dataclasses import replace
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Mapping
@@ -119,8 +169,12 @@ API_RETRY_SECONDS = 30
 LOCK_NAME = "lock"
 ENTRY = "deliver"
 SUPPLIED_INPUTS = ("issue",)
-RUNNABLE_KINDS = ("command", "agent", "decide")
+RUNNABLE_KINDS = ("command", "agent", "decide", "group", "call")
 QUOTA_NEED = "retry"
+ABSENT = "absent"
+REPOSITORY_ENV = ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
+                  "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE",
+                  "GIT_PREFIX", "GIT_IMPLICIT_WORK_TREE")
 NO_TOKENS = {"input": 0, "cache_write": 0, "cache_read": 0, "output": 0}
 
 
@@ -159,7 +213,15 @@ def _load(path: Path) -> dict:
     return document
 
 
-def _refuse_unrunnable(procedure: dict) -> None:
+def _refuse_unrunnable(procedure: dict, directory: Path, supplied: tuple[str, ...] | frozenset[str],
+                       name: str, calling: tuple[str, ...] = (),
+                       validated: set[tuple[str, frozenset[str]]] | None = None) -> None:
+    """Refuse what the engine cannot run in `procedure` and in every child it calls.
+
+    A child already validated with the same supplied inputs is not validated again, so a procedure
+    reached by many call paths is read once; the cycle check runs before that skip.
+    """
+    validated = set() if validated is None else validated
     for item in procedure["steps"]:
         if item["kind"] not in RUNNABLE_KINDS:
             raise Refused(f"step {item['id']} is a {item['kind']} step, "
@@ -168,24 +230,79 @@ def _refuse_unrunnable(procedure: dict) -> None:
         if item.get("mutates") is True and item["kind"] != "command":
             raise Refused(f"step {item['id']} is a {item['kind']} step marked mutates, and the "
                           "engine renews the claim only before a command step")
-    for name in procedure["inputs"]:
-        if name not in SUPPLIED_INPUTS:
-            raise Refused(f"input {name} is not supplied by the engine")
+    for item in procedure["steps"]:
+        if item["kind"] == "agent":
+            try:
+                engine_session.read_role(engine_session.roles_dir(os.environ), item["role"])
+            except engine_session.RoleError as error:
+                raise Refused(str(error)) from error
+    for input_name in procedure["inputs"]:
+        if input_name not in supplied:
+            raise Refused(f"input {input_name} is not supplied by the engine")
+    kinds = {item["id"]: item["kind"] for item in procedure["steps"]}
+    for item in procedure["steps"]:
+        if item["kind"] == "group":
+            for member in item["members"]:
+                if kinds.get(member["step"]) == "call":
+                    raise Refused(f"group {item['id']} has the call step {member['step']} as a "
+                                  "member, which the engine does not run")
+    for item in procedure["steps"]:
+        if item["kind"] != "call":
+            continue
+        child = item["procedure"]
+        if child in (*calling, name):
+            raise Refused(f"procedure {child} calls itself through step {item['id']}, "
+                          "which the engine does not run")
+        given = frozenset(procedure["inputs"]) | ({"item"} if "each" in item else frozenset())
+        if (child, given) in validated:
+            continue
+        try:
+            document = _load(directory / f"{child}.json")
+        except (ValueError, OSError) as error:
+            raise Refused(str(error)) from error
+        _refuse_unrunnable(document, directory, given, child, (*calling, name), validated)
+        validated.add((child, given))
 
 
-def core_events(run_dir: Path, ledger: list[dict]) -> list[dict]:
-    """The core's events for a run's ledger events; every other ledger event is skipped."""
-    stored = {(e["step"], e["visit"]): e["result"]
-              for e in ledger if e["event"] == "result_stored"}
+def core_events(run_dir: Path, ledger: list[dict],
+                computed: frozenset[str] = frozenset()) -> list[dict]:
+    """The core's events for a run's ledger events; every other ledger event is skipped.
+
+    An `outcome_graded` of a step in `computed` (a group, graded by the core) is skipped.
+    """
+    heads = {(e["step"], e["visit"]): e for e in ledger if e["event"] == "result_stored"}
+    stored = {key: e["result"] for key, e in heads.items()}
     events: list[dict] = []
     for event in ledger:
         if event["event"] == "step_entered":
             events.append({"type": "entered", "step": event["step"]})
-        elif event["event"] == "outcome_graded":
+        elif event["event"] == "run_continued":
+            events.append({"type": "continued", "step": event.get("step"),
+                           "visit": event.get("visit")})
+        elif event["event"] == "outcome_graded" and event["step"] not in computed:
             relative = stored[(event["step"], event["visit"])]
-            events.append({"type": "outcome", "step": event["step"],
-                           "outcome": event["outcome"], "result": _load(run_dir / relative)})
+            outcome = {"type": "outcome", "step": event["step"],
+                       "outcome": event["outcome"], "result": _load(run_dir / relative)}
+            if "head" in heads[(event["step"], event["visit"])]:
+                outcome["head"] = heads[(event["step"], event["visit"])]["head"]
+            events.append(outcome)
     return events
+
+
+def read_head(root: str) -> str | None:
+    """The full commit id `HEAD` names in `root`, or None when it cannot be read.
+
+    The repository is the one `root` is in: a variable that selects another is not passed on.
+    """
+    environ = {key: value for key, value in os.environ.items() if key not in REPOSITORY_ENV}
+    try:
+        done = subprocess.run(["git", "rev-parse", "--verify", "--quiet", "HEAD"], cwd=root, env=environ,
+                              stdin=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                              stdout=subprocess.PIPE, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    head = done.stdout.strip()
+    return head if done.returncode == 0 and engine_ledger.HEAD_RE.fullmatch(head) else None
 
 
 def _resolve() -> tuple[dict, CommandTable]:
@@ -234,13 +351,7 @@ def _validate(directory: Path, table: CommandTable) -> dict:
         procedure = _load(directory / f"{ENTRY}.json")
     except (ValueError, OSError) as error:
         raise Refused(str(error)) from error
-    _refuse_unrunnable(procedure)
-    for item in procedure["steps"]:
-        if item["kind"] == "agent":
-            try:
-                engine_session.read_role(engine_session.roles_dir(os.environ), item["role"])
-            except engine_session.RoleError as error:
-                raise Refused(str(error)) from error
+    _refuse_unrunnable(procedure, directory, SUPPLIED_INPUTS, ENTRY)
     return procedure
 
 
@@ -293,6 +404,13 @@ def _running(runs: list[Path], issue: int) -> tuple[int, dict] | None:
     return None
 
 
+def _open_runs(runs: list[Path]) -> list[Path]:
+    return [existing for existing in runs
+            if not engine_ledger.fold(
+                engine_ledger.read_run(existing),
+                engine_ledger.replay(existing / "events.jsonl"), engine_ledger.process_alive).done]
+
+
 def deliver(issue: int, procedures_dir: Path, *, clock: Callable[[], datetime] | None = None,
             tracker: engine_housekeeping.Tracker | None = None) -> tuple[int, dict]:
     procedures_dir = Path(procedures_dir)
@@ -303,22 +421,22 @@ def deliver(issue: int, procedures_dir: Path, *, clock: Callable[[], datetime] |
     tracker_factory = ((lambda: tracker) if tracker is not None else
                        (lambda: engine_housekeeping.default_tracker(
                            snapshot["bindings"]["tracker"], snapshot["project"]["root"])))
-    try:
-        running = _running(engine_ledger.find_runs(engine_ledger.runs_root(), issue, project),
-                           issue)
-    except (engine_ledger.LedgerError, OSError, KeyError) as error:
-        raise Refused(str(error)) from error
-    if running is not None:
-        return running
     guard = _guard()
     if isinstance(guard, engine_guard.Unavailable):
+        # Refused before the runs root or any run is created; a held run lock answers first.
+        try:
+            running = _running(engine_ledger.find_runs(engine_ledger.runs_root(), issue, project),
+                               issue)
+        except (engine_ledger.LedgerError, OSError, KeyError) as error:
+            raise Refused(str(error)) from error
+        if running is not None:
+            return running
         raise Refused(f"the host's settings load no lifecycle guard hook, so no run starts: "
                       f"{guard.reason}")
     slots = _admitted()
-    procedure = _validate(procedures_dir, table)
-    inputs = {name: issue for name in procedure["inputs"]}
     holder = {"pid": os.getpid(), "started": _now()}
     held: list[int] = []
+    continued = False
 
     def stage(staged: Path) -> None:
         # The copy that runs is the copy checked; the lock is held before the run is visible.
@@ -335,19 +453,25 @@ def deliver(issue: int, procedures_dir: Path, *, clock: Callable[[], datetime] |
             running = _running(runs, issue)
             if running is not None:
                 return running
-            for existing in runs:
-                state = engine_ledger.fold(
-                    engine_ledger.read_run(existing),
-                    engine_ledger.replay(existing / "events.jsonl"), engine_ledger.process_alive)
-                if not state.done:
-                    raise Refused(f"run {existing.name} is not done, and continuing a run is a "
-                                  "later slice of the engine")
-            run_dir = engine_ledger.create_run(
-                project=project, issue=issue, procedure=ENTRY,
-                procedures_dir=procedures_dir,
-                platform_revision=platform_revision(os.environ),
-                host=_host(), inputs=inputs, now=datetime.now(timezone.utc),
-                tracker=identity, before_publish=stage)
+            open_runs = _open_runs(runs)
+            if len(open_runs) > 1:
+                raise Refused(f"runs {', '.join(run.name for run in open_runs)} of issue "
+                              f"{issue} are all open; the engine continues one run only")
+            if open_runs:
+                run_dir = open_runs[0]
+                procedure = _validate(run_dir / "procedure", table)
+                inputs = engine_ledger.read_run(run_dir)["inputs"]
+                held.append(_take_run_lock(run_dir, holder["started"]))
+                continued = True
+            else:
+                procedure = _validate(procedures_dir, table)
+                inputs = {name: issue for name in procedure["inputs"]}
+                run_dir = engine_ledger.create_run(
+                    project=project, issue=issue, procedure=ENTRY,
+                    procedures_dir=procedures_dir,
+                    platform_revision=platform_revision(os.environ),
+                    host=_host(), inputs=inputs, now=datetime.now(timezone.utc),
+                    tracker=identity, before_publish=stage)
         finally:
             os.close(creation)
     except (engine_ledger.LedgerError, OSError, KeyError) as error:
@@ -357,9 +481,11 @@ def deliver(issue: int, procedures_dir: Path, *, clock: Callable[[], datetime] |
         _release(held)
         raise
     try:
+        if continued:
+            _continue(run_dir, table, inputs)
         engine_housekeeping.housekeep(project=project, run=run_dir.name, clock=clock,
                                       tracker=tracker_factory, identity=identity)
-        code, line = _walk(run_dir, table, inputs, holder, slots)
+        code, line = _walk(run_dir, table, _Scope(run_dir, holder, slots))
         if code in (EXIT_DONE, EXIT_STOP):
             _record_history(run_dir, clock)
         return code, line
@@ -368,6 +494,44 @@ def deliver(issue: int, procedures_dir: Path, *, clock: Callable[[], datetime] |
         raise Fault(str(error)) from error
     finally:
         _release(held)
+
+
+def _computed(procedure: dict) -> frozenset[str]:
+    """The steps the core grades itself: the groups."""
+    return frozenset(item["id"] for item in procedure["steps"] if item["kind"] == "group")
+
+
+def _continue(run_dir: Path, table: CommandTable, inputs: dict) -> None:
+    """Record where the run's next walk re-enters; a stored but ungraded visit is graded first."""
+    procedure = _load(run_dir / "procedure" / f"{ENTRY}.json")
+    steps = {item["id"]: item for item in procedure["steps"]}
+    computed = _computed(procedure)
+    members = {member["step"] for name in computed for member in steps[name]["members"]}
+    ledger = engine_ledger.replay(run_dir / "events.jsonl")
+    for entry in [e for e in ledger if e["event"] == "step_entered" and e["step"] not in computed]:
+        name, visit = entry["step"], entry["visit"]
+        stored = [e for e in ledger if e["event"] == "result_stored"
+                  and (e["step"], e["visit"]) == (name, visit) and "outcome" in e]
+        here = [e for e in ledger if e["event"] in ("outcome_graded", "transition_taken")
+                and (e["step"], e["visit"]) == (name, visit)]
+        graded = any(e["event"] == "outcome_graded" for e in here)
+        moved = any(e["event"] == "transition_taken" for e in here) or name in members
+        if (stored or graded) and not (graded and moved):
+            outcome = next(e["outcome"] for e in here) if graded else stored[0]["outcome"]
+            _graded(run_dir, steps[name], visit, outcome, graded=graded, moved=moved,
+                    member=name in members, bound=outcome == procedure_check.OUT_OF_BOUNDS)
+            ledger = engine_ledger.replay(run_dir / "events.jsonl")
+    events = core_events(run_dir, ledger, computed)
+    action = engine_core.replay(procedure, inputs, events).action
+    if isinstance(action, engine_core.Done):
+        return
+    if isinstance(action, engine_core.Stop) and (not ledger or ledger[-1]["event"] != "stop_reached"):
+        return  # the owner never saw this stop: the walk reports it before anything is re-entered
+    point = engine_core.reentry(procedure, inputs, events, read_head(table.root))
+    event = {"event": "run_continued", "at": _now(), "step": point.step}
+    if point.visit is not None:
+        event["visit"] = point.visit
+    engine_ledger.append_event(run_dir, event)
 
 
 def _record_history(run_dir: Path, clock: Callable[[], datetime]) -> None:
@@ -400,18 +564,97 @@ def _release(held: list[int]) -> None:
         os.close(held.pop())
 
 
-def _walk(run_dir: Path, table: CommandTable, inputs: dict, holder: Mapping[str, object],
-          slots: int) -> tuple[int, dict]:
-    procedure = _load(run_dir / "procedure" / f"{ENTRY}.json")
+class _Admission:
+    """Hands out the indexes of a call's items in list order, none once a fault is noted or the engine ends."""
 
-    def stop() -> bool:
-        return engine_stop.requested(run_dir, holder)
+    def __init__(self, count: int) -> None:
+        self._count = count
+        self._next = 0
+        self._stopped = False
+        self._lock = threading.Lock()
 
+    def take(self) -> int | None:
+        with self._lock:
+            if self._stopped or self._next >= self._count or engine_session.ending():
+                return None
+            index = self._next
+            self._next += 1
+            return index
+
+    def fail(self) -> None:
+        with self._lock:
+            self._stopped = True
+
+
+def _record_grades(run_dir: Path, ledger: list[dict],
+                   graded: tuple[engine_core.Graded, ...]) -> None:
+    """Record each group grade the ledger lacks: its `outcome_graded`, then its `transition_taken`."""
+    recorded = {(e["step"], e["visit"]) for e in ledger if e["event"] == "outcome_graded"}
+    for grade in graded:
+        if (grade.step, grade.visit) in recorded:
+            continue
+        engine_ledger.append_event(run_dir, {"event": "outcome_graded", "at": _now(),
+                                             "step": grade.step, "visit": grade.visit,
+                                             "outcome": grade.outcome})
+        engine_ledger.append_event(run_dir, {"event": "transition_taken", "at": _now(),
+                                             "step": grade.step, "visit": grade.visit,
+                                             "outcome": grade.outcome, "to": grade.target})
+
+
+@dataclass(frozen=True)
+class _Scope:
+    """What every walk of a run shares: the root run's directory, which holds the stop request
+    and the agent slots, the lock holder the request names, and the slots the host admits."""
+
+    root: Path
+    holder: Mapping[str, object]
+    slots: int
+
+    def stop(self) -> bool:
+        return engine_stop.requested(self.root, self.holder)
+
+
+class _Quota(Exception):
+    """A group member's session or a child run ended at the `quota-wait` stop, which the group
+    or the call records once its members have ended; `step` is the member that hit it, else None."""
+
+    def __init__(self, detail: str, step: str | None = None) -> None:
+        super().__init__(detail)
+        self.detail, self.step = detail, step
+
+
+def _forced(action, steps: dict[str, dict], first: bool):
+    """`action` with the check owed to a child run of a rewound call: its first visit of each mutating command."""
+    if not first:
+        return action
+    if isinstance(action, engine_core.RunGroup):
+        return replace(action, members=tuple(_forced(member, steps, first) for member in action.members))
+    if action.visit != 1:
+        return action
+    if isinstance(action, engine_core.RunCommand):
+        return replace(action, recheck=action.recheck or steps[action.step].get("mutates") is True)
+    if isinstance(action, engine_core.RunCall):
+        return replace(action, recheck=True)
+    return action
+
+
+def _walk(run_dir: Path, table: CommandTable, scope: _Scope,
+          recheck: bool = False) -> tuple[int, dict]:
+    run = engine_ledger.read_run(run_dir)
+    name, inputs = run["procedure"], run["inputs"]
+    procedure = _load(run_dir / "procedure" / f"{name}.json")
+    stop = scope.stop
     steps = {item["id"]: item for item in procedure["steps"]}
+    computed = _computed(procedure)
     ran = 0
     while True:
         ledger = engine_ledger.replay(run_dir / "events.jsonl")
-        walk = engine_core.replay(procedure, inputs, core_events(run_dir, ledger))
+        try:
+            walk = engine_core.replay(procedure, inputs, core_events(run_dir, ledger, computed))
+        except engine_core.CoreError as error:
+            _record_grades(run_dir, ledger, error.graded)
+            raise
+        _record_grades(run_dir, ledger, walk.graded)
         _record_core_transitions(run_dir, ledger, walk)
         action = walk.action
         if isinstance(action, engine_core.Done):
@@ -420,49 +663,83 @@ def _walk(run_dir: Path, table: CommandTable, inputs: dict, holder: Mapping[str,
                     return _record_stop(run_dir, walk.transitions[-1].step, "", "", "", True)
                 engine_ledger.append_event(run_dir, {"event": "run_done", "at": _now()})
             return EXIT_DONE, {
-                "detail": f"The {ENTRY} procedure reached done after {ran} step "
+                "detail": f"The {name} procedure reached done after {ran} step "
                           f"{'visit' if ran == 1 else 'visits'}.",
                 "end": "done", "need": None, "run": run_dir.name}
         if isinstance(action, engine_core.Stop):
             step = walk.transitions[-1].step
             return _stop(run_dir, step, action.name, action.need,
-                         f"The {ENTRY} procedure stopped at step {step} with "
+                         f"The {name} procedure stopped at step {step} with "
                          f"{action.name}, which needs {action.need}.", stop)
+        _refuse_when_ending(run_dir, action.step)
+        action = _forced(action, steps, recheck)
         if isinstance(action, engine_core.StartSession):
             try:
-                stopped = _visit_session(run_dir, table.root, steps[action.step], action, stop,
-                                         slots)
+                stopped = _visit_session(run_dir, table.root, steps[action.step], action, scope)
             except engine_stop.Stopped:
                 return _stopped(run_dir, action.step)
             if stopped is not None:
                 return stopped
+            ran += 1
         elif isinstance(action, engine_core.RunCommand):
             try:
                 if steps[action.step].get("mutates") is True and "keep_alive" in procedure:
-                    lost = _renew(run_dir, table, procedure, inputs, action, stop)
+                    lost = _renew(run_dir, table, procedure, inputs, action.step, action.visit,
+                                  stop)
                     if lost is not None:
                         return lost
                 _visit(run_dir, table, steps[action.step], action, stop)
             except engine_stop.Stopped:
                 return _stopped(run_dir, action.step)
+            ran += 1
+        elif isinstance(action, engine_core.RunGroup):
+            try:
+                if "keep_alive" in procedure and any(
+                        steps[member["step"]].get("mutates") is True
+                        for member in steps[action.step]["members"]):
+                    lost = _renew(run_dir, table, procedure, inputs, action.step, action.visit,
+                                  stop)
+                    if lost is not None:
+                        return lost
+                _group(run_dir, table, steps, action, scope)
+            except engine_stop.Stopped:
+                return _stopped(run_dir, action.step)
+            except _Quota as quota:
+                return _quota_ended(run_dir, action.step, quota, stop)
+            ran += len(action.members)
+        elif isinstance(action, engine_core.RunCall):
+            try:
+                _call(run_dir, table, run, steps[action.step], action, scope)
+            except engine_stop.Stopped:
+                return _stopped(run_dir, action.step)
+            except _Quota as quota:
+                return _quota_ended(run_dir, action.step, quota, stop)
         else:
             raise Fault(f"step {action.step} needs {type(action).__name__}, "
                         "which the engine does not run yet")
-        ran += 1
+
+
+def _refuse_when_ending(run_dir: Path, step: str) -> None:
+    """A fault when the engine is ending: nothing is entered or dispatched after that."""
+    if engine_session.ending():
+        raise Fault(f"run {run_dir.name} stops before step {step}: the engine is ending")
 
 
 def _record_core_transitions(run_dir: Path, ledger: list[dict], walk: engine_core.Replay) -> None:
     """Append the `transition_taken` of each walk transition the ledger lacks, in order.
 
-    A command visit writes its own in `_visit`; the core resolves a `decide` step and an
-    exhausted entry with no command, so the ledger holds the rest of the walk's transitions here.
-    """
-    taken = sum(1 for event in ledger if event["event"] == "transition_taken")
-    for index, transition in enumerate(walk.transitions[taken:], start=taken):
-        visit = sum(1 for earlier in walk.transitions[:index + 1] if earlier.step == transition.step)
-        engine_ledger.append_event(run_dir, {
-            "event": "transition_taken", "at": _now(), "step": transition.step, "visit": visit,
-            "outcome": transition.outcome, "to": transition.target})
+    Keyed by step and the core's visit number, which a rewind never reuses; a command visit
+    writes its own in `_visit`, so this holds the `decide` and exhausted-entry transitions.
+    A group's grade is `_record_grades`'s, with its transition, and is left out."""
+    taken = {(event["step"], event["visit"]) for event in ledger
+             if event["event"] == "transition_taken"}
+    taken |= {(grade.step, grade.visit) for grade in walk.graded}
+    for transition in walk.transitions:
+        if (transition.step, transition.visit) not in taken:
+            engine_ledger.append_event(run_dir, {
+                "event": "transition_taken", "at": _now(), "step": transition.step,
+                "visit": transition.visit, "outcome": transition.outcome,
+                "to": transition.target})
 
 
 def _record_stop(run_dir: Path, step: str, name: str, need: str, detail: str,
@@ -512,8 +789,8 @@ def request_stop(run_dir: Path) -> dict | None:
 
 
 def _renew(run_dir: Path, table: CommandTable, procedure: dict, inputs: dict,
-           action: engine_core.RunCommand, stop: Callable[[], bool]) -> tuple[int, dict] | None:
-    """None when the claim is renewed before `action`'s step, else the `claim-lost` stop."""
+           step: str, visit: int, stop: Callable[[], bool]) -> tuple[int, dict] | None:
+    """None when the claim is renewed before visit `visit` of `step`, else the `claim-lost` stop."""
     keep_alive = procedure["keep_alive"]
     args = tuple((path, inputs[path.split(".", 1)[1]]) for path in keep_alive["in"])
     for attempt in (1, 2):
@@ -522,9 +799,10 @@ def _renew(run_dir: Path, table: CommandTable, procedure: dict, inputs: dict,
                                   timeout=KEEP_ALIVE_SECONDS, stop=stop)
         verdict = "failed" if ran.outcome == "renewed" and ran.exit_code != 0 else ran.outcome
         engine_ledger.append_event(run_dir, {
-            "event": "keep_alive_ran", "at": _now(), "step": action.step,
-            "visit": action.visit, "attempt": attempt, "verdict": verdict})
+            "event": "keep_alive_ran", "at": _now(), "step": step,
+            "visit": visit, "attempt": attempt, "verdict": verdict})
         if verdict == "renewed":
+            _refuse_when_ending(run_dir, step)  # the engine may have begun ending during the renewal
             return None
         if verdict != "error" or ran.result.get("transient") is not True:
             break
@@ -534,34 +812,46 @@ def _renew(run_dir: Path, table: CommandTable, procedure: dict, inputs: dict,
         text = " ".join(ran.stdout.decode("utf-8", "replace").split()
                         + ran.stderr.decode("utf-8", "replace").split()) or "no output"
     need = procedure["stops"][procedure_check.CLAIM_LOST]["need"]
-    return _stop(run_dir, action.step, procedure_check.CLAIM_LOST, need,
-                 f"The claim was not renewed before step {action.step}, the keep-alive "
+    return _stop(run_dir, step, procedure_check.CLAIM_LOST, need,
+                 f"The claim was not renewed before step {step}, the keep-alive "
                  f"answered {verdict}: {text}.", stop)
 
 
-def _graded(run_dir: Path, step: dict, visit: int, outcome: str, *, bound: bool = False) -> None:
+def _graded(run_dir: Path, step: dict, visit: int, outcome: str, *, bound: bool = False,
+            member: bool = False, graded: bool = False, moved: bool = False) -> None:
     """Record the grade of a visit and the transition it takes.
 
     A reply or a printed verdict (`bound=False`) must be mapped by the step's `on`, else it is a
     `Fault` before any event. The engine's own grade of a fired bound (`bound=True`) is always
     recorded, because `core_events` reads it from `outcome_graded`, and then faults when `on`
-    does not map it, with no `transition_taken`.
+    does not map it, with no `transition_taken`. A group member's grade (`member=True`) is its outcome
+    alone, which the group's `pass` entries judge; the group takes the transition. `graded` and `moved`
+    name the event a kill left, which a continue does not write again.
     """
     name = step["id"]
+    if member:
+        if outcome == engine_core.EXHAUSTED:
+            raise Fault(f"step {name} reported the reserved outcome {outcome}")
+        if not graded:
+            engine_ledger.append_event(run_dir, {"event": "outcome_graded", "at": _now(),
+                                                 "step": name, "visit": visit, "outcome": outcome})
+        return
     unmapped = outcome == engine_core.EXHAUSTED or outcome not in step["on"]
     if unmapped and not bound:
         raise Fault(f"step {name} has no mapping for the outcome {outcome}")
-    engine_ledger.append_event(run_dir, {"event": "outcome_graded", "at": _now(), "step": name,
-                                         "visit": visit, "outcome": outcome})
+    if not graded:
+        engine_ledger.append_event(run_dir, {"event": "outcome_graded", "at": _now(),
+                                             "step": name, "visit": visit, "outcome": outcome})
     if unmapped:
         raise Fault(f"step {name} has no mapping for the outcome {outcome}")
-    engine_ledger.append_event(run_dir, {"event": "transition_taken", "at": _now(),
-                                         "step": name, "visit": visit, "outcome": outcome,
-                                         "to": step["on"][outcome]})
+    if not moved:
+        engine_ledger.append_event(run_dir, {"event": "transition_taken", "at": _now(),
+                                             "step": name, "visit": visit, "outcome": outcome,
+                                             "to": step["on"][outcome]})
 
 
 def _visit(run_dir: Path, table: CommandTable, step: dict, action: engine_core.RunCommand,
-           stop: Callable[[], bool]) -> None:
+           stop: Callable[[], bool], member: bool = False) -> None:
     name, visit = action.step, action.visit
     engine_ledger.append_event(run_dir, {"event": "step_entered", "at": _now(), "step": name,
                                          "visit": visit, "stage": step["stage"]})
@@ -571,11 +861,22 @@ def _visit(run_dir: Path, table: CommandTable, step: dict, action: engine_core.R
                                              "step": name, "visit": visit, "pid": pid,
                                              "started": _now()})
 
-    ran = engine_commands.run(table, action.command, action.subcommand, action.args,
-                              guard=_guard(), on_start=started,
-                              timeout=table.wall_seconds(action.command), stop=stop)
+    before = read_head(table.root) if step["holds"] == "head" else None
+    ran = None
+    if action.recheck:
+        check = step["check"]
+        ran = engine_commands.run(table, check["command"], check.get("subcommand"), action.args,
+                                  guard=_guard(), on_start=started,
+                                  timeout=table.wall_seconds(check["command"]), stop=stop)
+        if ran.outcome == ABSENT and not ran.timed_out:
+            ran = None
+    if ran is None:
+        ran = engine_commands.run(table, action.command, action.subcommand, action.args,
+                                  guard=_guard(), on_start=started,
+                                  timeout=table.wall_seconds(action.command), stop=stop)
+    after = read_head(table.root) if step["holds"] == "head" else None
     try:
-        _grade_command(run_dir, step, name, visit, ran)
+        _grade_command(run_dir, step, name, visit, ran, before if before == after else None, member)
     finally:  # forwarding a diagnostic never decides whether the step is graded
         _forward(ran.stderr)
 
@@ -590,23 +891,185 @@ def _forward(diagnostic: bytes) -> None:
 
 
 def _grade_command(run_dir: Path, step: dict, name: str, visit: int,
-                   ran: engine_commands.Ran) -> None:
+                   ran: engine_commands.Ran, head: str | None, member: bool) -> None:
     if ran.timed_out:
         engine_ledger.store_result(run_dir, step=name, visit=visit, result={"bound": "wall-time"},
                                    at=_now(), wall_seconds=ran.wall_seconds, turns=0,
-                                   tokens=dict(NO_TOKENS), spend_usd=0)
-        _graded(run_dir, step, visit, procedure_check.OUT_OF_BOUNDS, bound=True)
+                                   tokens=dict(NO_TOKENS), spend_usd=0, head=head,
+                                   outcome=procedure_check.OUT_OF_BOUNDS)
+        _graded(run_dir, step, visit, procedure_check.OUT_OF_BOUNDS, bound=True, member=member)
         return
     engine_ledger.store_result(run_dir, step=name, visit=visit, result=ran.result, at=_now(),
                                wall_seconds=ran.wall_seconds, turns=0, tokens=dict(NO_TOKENS),
-                               spend_usd=0)
+                               spend_usd=0, head=head, outcome=ran.outcome)
     if ran.outcome == procedure_check.OUT_OF_BOUNDS:  # only the engine grades a fired bound
         raise Fault(f"step {name} has no mapping for the outcome {ran.outcome}")
-    _graded(run_dir, step, visit, ran.outcome)
+    _graded(run_dir, step, visit, ran.outcome, member=member)
+
+
+def _member(run_dir: Path, table: CommandTable, step: dict,
+            action: engine_core.RunCommand | engine_core.StartSession, scope: _Scope) -> None:
+    if isinstance(action, engine_core.StartSession):
+        stopped = _visit_session(run_dir, table.root, step, action, scope, member=True)
+        if stopped is not None:
+            raise _Quota(stopped[1]["detail"], step["id"])
+    else:
+        _visit(run_dir, table, step, action, scope.stop, member=True)
+
+
+def _group(run_dir: Path, table: CommandTable, steps: dict[str, dict],
+           action: engine_core.RunGroup, scope: _Scope) -> None:
+    """Run the members beside each other; the group's grade is recorded by `_record_grades`."""
+    engine_ledger.append_event(run_dir, {"event": "step_entered", "at": _now(),
+                                         "step": action.step, "visit": action.visit,
+                                         "stage": steps[action.step]["stage"]})
+    pool = ThreadPoolExecutor(max_workers=len(action.members))
+    futures = []
+    try:
+        with engine_session.reaping():
+            try:
+                try:
+                    for member in action.members:
+                        futures.append(pool.submit(_member, run_dir, table,
+                                                   steps[member.step], member, scope))
+                except RuntimeError as error:
+                    raise Fault(f"step {action.step} could not start a member: {error}") from error
+                pool.shutdown(wait=True)
+            except Exception:
+                pool.shutdown(wait=True)  # drain the started members, still under `reaping`
+                raise
+    finally:
+        pool.shutdown(wait=True)  # after a stop `reaping` has killed the sessions: this returns
+    for future in futures:
+        future.result()
+
+
+def _names_child(run_dir: Path, child: str) -> bool:
+    """Whether the run's readable events name `child`; true too when they cannot be read."""
+    try:
+        return any(event["event"] == "call" and event["child"] == child
+                   for event in engine_ledger.replay(run_dir / "events.jsonl"))
+    except engine_ledger.LedgerError:
+        return True
+
+
+def _child(run_dir: Path, table: CommandTable, run: dict, step: dict,
+           action: engine_core.RunCall, item: object, index: int, count: int,
+           scope: _Scope) -> dict:
+    """Create the child run for one item, record its `call` event, walk it, and keep its end."""
+    held: list[int] = []
+    try:
+        child = _load(run_dir / "procedure" / f"{action.procedure}.json")
+        inputs = {name: item if name == "item" and action.items is not None
+                  else run["inputs"][name] for name in child["inputs"]}
+        creation = _lock_creation(run["issue"])
+        try:
+            child_dir = engine_ledger.create_run(
+                project=run["project"], issue=run["issue"], procedure=action.procedure,
+                procedures_dir=run_dir / "procedure",
+                platform_revision=run["platform_revision"], host=run["host"], inputs=inputs,
+                now=datetime.now(timezone.utc), parent=run_dir.name, tracker=run.get("tracker"),
+                before_publish=lambda staged: held.append(_take_run_lock(staged, _now())))
+        finally:
+            os.close(creation)
+        try:
+            engine_ledger.append_event(run_dir, {
+                "event": "call", "at": _now(), "step": action.step, "visit": action.visit,
+                "child": child_dir.name, "index": index, "items": count})
+        except BaseException:
+            # Published but never named by the parent and never walked: leave no unnamed child.
+            # A write that failed only at its fsync did name it: that child stays.
+            if not _names_child(run_dir, child_dir.name):
+                shutil.rmtree(child_dir, ignore_errors=True)
+            raise
+        _, line = _walk(child_dir, table, scope, action.recheck)
+        if line["end"] == procedure_check.QUOTA_WAIT:
+            raise _Quota(line["detail"])
+        if line["end"] == engine_stop.STOPPED_BY_REQUEST:
+            raise engine_stop.Stopped
+        return {"end": line["end"], "item": item, "run": child_dir.name}
+    finally:
+        _release(held)
+
+
+def _call(run_dir: Path, table: CommandTable, run: dict, step: dict,
+          action: engine_core.RunCall, scope: _Scope) -> None:
+    """Run the child procedure once per item, `parallel` at a time, and record the call's outcome."""
+    started = time.monotonic()
+    engine_ledger.append_event(run_dir, {"event": "step_entered", "at": _now(),
+                                         "step": action.step, "visit": action.visit,
+                                         "stage": step["stage"]})
+    items = [None] if action.items is None else list(action.items)
+    admission = _Admission(len(items))
+    entries: dict[int, dict] = {}
+    errors: dict[int, Exception] = {}
+
+    def worker(ended: threading.Event) -> None:
+        try:
+            while (index := admission.take()) is not None:
+                try:
+                    entries[index] = _child(run_dir, table, run, step, action, items[index],
+                                            index, len(items), scope)
+                except Exception as error:
+                    errors[index] = error
+                    admission.fail()
+        finally:
+            ended.set()
+
+    finished = [threading.Event() for _ in range(min(action.parallel, len(items)))]
+    threads = [threading.Thread(target=worker, args=(ended,)) for ended in finished]
+    running: list[threading.Event] = []
+
+    def drain() -> None:
+        # An event, not `Thread.join`: before Python 3.13 a join a stop interrupted marks its thread
+        # ended though it still runs, so the join in `finally` would return at once.
+        for ended in running:
+            ended.wait()
+
+    try:
+        with engine_session.reaping():
+            try:
+                try:
+                    for thread, ended in zip(threads, finished):
+                        thread.start()
+                        running.append(ended)
+                except RuntimeError as error:
+                    raise Fault(f"step {action.step} could not start a child worker: "
+                                f"{error}") from error
+                drain()
+            except Exception:
+                admission.fail()
+                drain()  # the started workers finish, still under `reaping`
+                raise
+    except BaseException:
+        admission.fail()
+        raise
+    finally:
+        drain()  # after a stop `reaping` has killed the sessions: this returns
+    if errors:
+        raise errors[min(errors)]
+    if len(entries) != len(items):
+        raise Fault(f"step {action.step} stops before its items are all run: "
+                    "the engine is ending")
+    ends = [entries[index] for index in range(len(items))]
+    outcome = engine_core.call_outcome([entry["end"] for entry in ends])
+    engine_ledger.store_result(run_dir, step=action.step, visit=action.visit,
+                               result={"items": ends}, at=_now(),
+                               wall_seconds=time.monotonic() - started, turns=0,
+                               tokens=dict(NO_TOKENS), spend_usd=0, outcome=outcome)
+    _graded(run_dir, step, action.visit, outcome)
+
+
+def _quota_ended(run_dir: Path, step: str, quota: _Quota,
+                 stop: Callable[[], bool]) -> tuple[int, dict]:
+    """The `quota-wait` stop of a group or a call, recorded once its members or children have
+    ended, so it is the run's last event; a member's step names it, else the group's or call's."""
+    return _stop(run_dir, quota.step or step, procedure_check.QUOTA_WAIT, QUOTA_NEED,
+                 quota.detail, stop)
 
 
 def _visit_session(run_dir: Path, root: str, step: dict, action: engine_core.StartSession,
-                   stop: Callable[[], bool], slots: int) -> tuple[int, dict] | None:
+                   scope: _Scope, member: bool = False) -> tuple[int, dict] | None:
     """Run the step's session to its result; the `quota-wait` stop when no account can answer."""
     name, visit = action.step, action.visit
     engine_ledger.append_event(run_dir, {"event": "step_entered", "at": _now(), "step": name,
@@ -629,60 +1092,60 @@ def _visit_session(run_dir: Path, root: str, step: dict, action: engine_core.Sta
         engine_ledger.append_event(run_dir, {"event": "wait_ended", "at": _now(),
                                              "wait": engine_slots.WAIT})
 
-    with engine_slots.hold(run_dir, slots, on_wait=waiting, on_waited=waited):
+    with engine_slots.hold(scope.root, scope.slots, on_wait=waiting, on_waited=waited):
         engine_ledger.append_event(run_dir, {
             "event": "session_starting", "at": _now(), "step": name, "visit": visit,
             "session": session, "role": role.name,
             "account": os.environ.get("CLAUDE_ACCOUNT") or "console"})
         launched, reading, stopped, no_reply = _launch_until_answered(
-            run_dir, root, (name, visit, session), prompt, (role, schema, system), stop)
+            run_dir, root, (name, visit, session), prompt, (role, schema, system), scope.stop,
+            defer=member)
     if stopped is not None:
         return stopped
     wall = (launched.wall_seconds if launched.timed_out or reading.wall_seconds is None
             else reading.wall_seconds)
 
-    def store(result: dict) -> None:
+    def store(result: dict, outcome: str | None) -> None:
         engine_ledger.store_result(run_dir, step=name, visit=visit, result=result, at=_now(),
                                    wall_seconds=wall, turns=reading.turns, tokens=reading.tokens,
-                                   spend_usd=reading.spend_usd)
+                                   spend_usd=reading.spend_usd, outcome=outcome)
 
     bound = (engine_session.WALL_TIME if launched.timed_out
              else engine_session.CAP_SUBTYPES.get(reading.subtype))
     if bound is not None:
-        store({"bound": bound})
-        _graded(run_dir, step, visit, procedure_check.OUT_OF_BOUNDS, bound=True)
+        store({"bound": bound}, procedure_check.OUT_OF_BOUNDS)
+        _graded(run_dir, step, visit, procedure_check.OUT_OF_BOUNDS, bound=True, member=member)
         return None
     if no_reply:
-        store({})
-        _graded(run_dir, step, visit, procedure_check.NO_REPLY)
+        store({}, procedure_check.NO_REPLY)
+        _graded(run_dir, step, visit, procedure_check.NO_REPLY, member=member)
         return None
     reply = reading.reply
     if reply is None:
         reason = engine_session.diagnostic(launched.stderr)
         raise Fault(f"step {name} gave no structured reply, exit {launched.exit_code}"
                     + (f": {reason}" if reason else ""))
-    store(reply)
     problem = engine_reply.reply_problem(schema, reply)
+    outcome = reply.get(step["outcome_from"])
+    store(reply, outcome if problem is None and isinstance(outcome, str) else None)
     if problem is not None:
         raise Fault(f"step {name} gave a reply that breaks its schema: {problem}")
-    outcome = reply.get(step["outcome_from"])
     if not isinstance(outcome, str):
         raise Fault(f"step {name} has no mapping for the outcome {outcome}")
-    _graded(run_dir, step, visit, outcome)
+    _graded(run_dir, step, visit, outcome, member=member)
     return None
 
 
 def _launch_until_answered(
         run_dir: Path, root: str, visit_of: tuple[str, int, str], prompt: str,
         launch_of: tuple[engine_session.Role, Mapping, Path], stop: Callable[[], bool],
+        defer: bool = False,
 ) -> tuple[engine_session.Launched, engine_session.Reading, tuple[int, dict] | None, bool]:
-    """Launch the session, again with `--resume` after each usage limit, after the first other
-    API error (once, after `API_RETRY_SECONDS`) and after the first miss (once, with `REASK_PROMPT`),
-    until a launch that is none of these, or a second API error or miss, whose result is returned
-    with the visit's record stored and the wait ended; a miss's launch and its resume are summed in
-    the result's measurements. The third member is the `quota-wait` stop (record stored, wait open)
-    when no account can answer, the fourth is true for the second API error or miss, the outcome
-    `no-reply`."""
+    """Launch the session, again with `--resume` after a usage limit, a first API error (once, after
+    `API_RETRY_SECONDS`) or a first miss (once, with `REASK_PROMPT`); return the first launch that is
+    none of these, or follows a second error or miss, with its record stored and the wait ended (a
+    miss and its resume summed in the measurements), the `quota-wait` stop (wait open; unrecorded
+    with `defer`, for a group to record) and whether the outcome is `no-reply`."""
     name, visit, session = visit_of
     role, schema, system = launch_of
     attempt, limited, waiting, released, retried, no_reply = 1, set(), False, False, False, False
@@ -706,6 +1169,10 @@ def _launch_until_answered(
     def quota_stop(launched: engine_session.Launched, reading: engine_session.Reading,
                    detail: str) -> tuple:
         record(launched, reading)
+        if defer:
+            line = {"detail": detail, "end": procedure_check.QUOTA_WAIT, "need": QUOTA_NEED,
+                    "run": run_dir.name}
+            return launched, reading, (EXIT_STOP, line), False
         return launched, reading, _stop(run_dir, name, procedure_check.QUOTA_WAIT, QUOTA_NEED,
                                         detail, stop), False
 

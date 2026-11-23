@@ -1,16 +1,20 @@
-"""Fail the suite when a test pins a module docstring's wording (issue 1311, ADR-delivery-011).
+"""Fail the suite when a test pins a module docstring's wording (issue 1311, standard:P14).
 
 A module docstring is prose. A test that asserts the docstring contains, equals,
 starts or ends with given words fails on a rewording and stays green when the
-documented behaviour breaks. ADR-delivery-011 forbids such a test; this module
+documented behaviour breaks. Standard P14 forbids such a test; this module
 is the gate. It scans, with the standard library `ast`, the same sources as
 `tests/test_decision_record_wording.py` (every member of the
 `agent-workflow-tests` recipe plus `tests/*.py` and
 `home/common/agent-skills/tests/*.py`, never the two guard test files) and
 reports each such assertion as (test id, line). The tests of the scanner itself
 run on string fixtures; `SuiteDocstringTest` runs it on the real tree and checks
-the list of kept credential tests. What the scan does not see is in the
-Consequences of ADR-delivery-011.
+the list of kept credential tests. The scan does not see docstring text set in `setUp` or
+`setUpClass` or returned by a helper method, a docstring compared with a value computed from code,
+a walrus binding, a module's source file read as plain text, or a shell phrase test split across
+lines or without one of the tokens the scan looks for. `KEPT_DOCSTRING_TESTS` keeps, by name, the
+docstring tests on main when the scan landed whose source names a token, credential, secret,
+password or keychain; adding a test to it is a new decision with its own record.
 
 Scan rule for a `.py` source:
 
@@ -140,7 +144,7 @@ SHELL_COMPARE_PHRASE = re.compile(
 CALLABLE_FORM = {"assertRaises": 1, "assertWarns": 1, "assertRaisesRegex": 2, "assertWarnsRegex": 2}
 
 # The docstring tests that name a credential word and were on main when the scan
-# landed (ADR-delivery-011). Adding an id here is a new decision with its own record.
+# landed (standard:P14). Adding an id here is a new decision with its own record.
 KEPT_DOCSTRING_TESTS = frozenset({
     "tests/test_console_pictures.py::PictureCommandTest.test_the_docstring_states_the_picture_contract",
     "tests/test_console_pictures.py::PictureReportCommandTest.test_the_docstring_states_the_secret_check_for_a_brief_and_a_report",

@@ -487,9 +487,6 @@ class EngineStopTest(unittest.TestCase):
         status = json.loads(project_.status(1524).stdout)
         self.assertEqual(status["stop"], {"name": "stopped-by-request", "need": "retry"})
         self.assertIs(status["done"], False)
-        again = project_.deliver(procedures, issue=1524)
-        self.assertEqual(again.returncode, 2, again.stdout + again.stderr)
-        self.assertIn(run.name, again.stderr)
 
     def test_engine_stop_during_the_api_retry_pause_ends_the_run_within_seconds(self):
         project_ = EngineProject(self)
