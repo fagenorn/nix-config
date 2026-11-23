@@ -303,6 +303,21 @@ class LiveStandardsTest(unittest.TestCase):
         self.assertIn(len(re.findall(r"[.!?](?:\s|$)", prose)), (1, 2))
 
 
+    def test_the_bar_keeps_the_clauses_a_review_acts_on(self):
+        rules = sections(BAR.read_text())
+        wanted = {
+            "B13": ("check what fraction of it is signal rather than plumbing",),
+            "B14": ("watch which assertion turns red", "cut or rewritten"),
+            "B21": ("stops growing without a hand-set exception",),
+            "B22": ("which carries the records written before the rule",),
+            "B23": ("skips, disables, focuses away or excludes",),
+        }
+        for name, clauses in wanted.items():
+            for clause in clauses:
+                with self.subTest(rule=name, clause=clause):
+                    self.assertIn(clause, rules[name])
+
+
 class GlossaryTest(unittest.TestCase):
     def test_glossary_entries_drop_the_avoid_line(self):
         self.assertEqual(

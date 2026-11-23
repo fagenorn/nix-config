@@ -10,84 +10,96 @@ export const meta = {
   ],
 }
 
-// Args: repo_root (the checkout), batch_id (the caller-supplied id; the claim holder is
-// <host>/<batch_id>, so a relaunch with the same batch_id re-adopts its own claims), child_script
-// (the absolute path of the deliver-standard.js copy program-copies placed: this program has no filesystem access, D8), issues
-// (positive integers, distinct) or label (every open issue carrying it; exactly one of the two),
-// decisions ({"<issue>": owner answer}), conts ({"<issue>": a previous run's forwarded child
-// continuation}, only for listed issues, D9; the relaunch keeps of each cont's setup only what a resume reads, see slimCont), unattended (boolean, default false: true only for a run
-// no session watches, D12), review_sizing (boolean, default off: passed to every child and kept in the relaunch, #747), clerk_model (sonnet, the default, or haiku: the model of every clerk call except the setup step and the steps that emit a lifecycle verb (land-pr, land-open, land-lock, land-relock, land-merge, land-unlock), which stay on sonnet, #813;
-// passed to every child and kept in the relaunch when haiku, #803), amend ({"<issue>": a non-empty list of {file, find, replace} edits of
-// that issue's plan files}, only for an issue in conts, #811: sent with its cont to the first child call of the run, kept in the relaunch with that cont).
-// train (boolean, default false, #822: true lands up to TRAIN_MAX ready issues waiting behind a busy land queue, or ready by the end of a landing's lock wait (#936), through one car pull request, see Train landing below;
-// false or absent, every step and label is the serial landing's; kept in the relaunch when true, never passed to a child).
-// reasons ({"<issue>": the reason of its stopped row in the previous run}, #869: the relaunch writes it; a row this run leaves not-admitted, blocked or waiting shows it as "previous run: ...", and the relaunch carries the latest reason of each open issue).
-// The lead compares a relaunch with the args it ran with reasons aside.
-// Result: { stage: args|setup|done|breaker, batch_id, table, questions, owner_actions, relaunch }.
-// Every row that is not final and has something to say carries reason (#869): one line of at most REASON_MAX characters, the child's own stop reason
-// (its stage and the detail of its stop), else this program's stage and what the row carries. A detail the reason repeats is left out of the row.
-// A row whose child saw a verification check fail and pass on its one rerun carries flaky ([{id, summary}], #972), whatever its outcome: the lead files the flaky test. A row whose child's verification fix edited a file outside the branch's diff carries outside_fixes ([{file, why}]) the same way.
-// A row stopped at verify-unrelated (#972: its child's verification fix found no cause here for a failing test and edited nothing) is not relaunched: the
-// failure cannot change by itself, so it is reported in owner_actions with reason unrelated, the test, the evidence, the claim holder and the
-// child's cont (slimmed as a relaunch cont is); the owner repairs the test, then a relaunch with that cont in conts resumes it. The claim stays held.
-// A row stopped at plan-review with conflict (#988: {ac, rules, revises_left}, a criterion whose rules revise settled one classification
-// rule and broke another) is not relaunched either: it is reported in owner_actions with reason rules-conflict, the criterion, the rules,
-// the claim holder and the child's cont (slimmed). The owner decides how the criterion is classified; a relaunch with that cont and the
-// decision then runs the one rules revise left, or plans again when none is. A closed issue whose release failed stays a plain stopped
-// row instead, here and for verify-unrelated, so that a relaunch releases it.
-// #996: two more stops a relaunch cannot change are owner actions too, each with the claim holder and the child's cont (slimmed), the claim
-// held and the row left stopped: task-blocked (a task whose implementer returned blocked: task, notes, and detail, the child's reason, which
-// names the ways out; the owner relaunches with that cont in conts and decisions or amend for the issue) and codex-quota (a codex-unavailable
-// stop that carries retry_after, the usage limit's reset time or null: the owner relaunches with that cont once the limit has reset).
-// #1000: so is a fix-wave-review stop that carries oscillating ({file, rounds}: two fixes of one file in a row each drew a new finding
-// there): reported with reason fix-oscillating, the file, its rounds (the findings per round, each wave's notes and range), the claim
-// holder and the child's cont (slimmed), the claim held and the row left stopped. The owner decides the approach and relaunches with that
-// cont in conts and the decision: the cont keeps the marker, the child's first fix wave and its re-review get the decision as binding,
-// and a relaunch that brings none stops in the child before any agent and is this owner action again. A stop also marked diverging is the not-converging row below instead.
-// #1370: so is a fix-wave-review stop that carries round_cap ({rounds, findings}: the delivery's review rounds, one full and two scoped, left findings open):
-// reported with reason round-cap, the rounds, the findings left open (bounded), the claim holder and the child's cont (slimmed), the claim held and the row
-// left stopped. The owner decides, then relaunches with that cont in conts and a decision or amend; a relaunch that brings neither stops in the child before
-// any agent and is this owner action again. A stop also marked oscillating is the fix-oscillating action instead, and one marked diverging the not-converging row.
-// #1139: an issue marked as needing the owner's look (its facts carry look {verdict}, read by look-approval marked) is never landed by the batch: its ready
-// child (look {verdict, covers}) is resumed once in mode ship with the ready cont, after its slot is released (#1373: that resume waits for the pull request's checks, as a landing waits outside the slot), and stops at awaiting-look. That row is
-// {issue, outcome: awaiting-look, pr, head, reason}; it is reported in owner_actions with reason awaiting-look, the pr, the head, the pictures when
-// the child made any, the claim holder and the child's cont (slimmed), the claim held, and it is not relaunched: the owner's answer resumes it through
-// deliver-standard with that cont and this batch id. A re-adopted PR lands as it stands only when its facts read look unmarked; marked, or a marker
-// that could not be read, it goes through its child.
-// An already-fixed row is final and reported in owner_actions with its commit; the batch closes nothing.
-// A no-changes row (#923: every task of the child's plan ended with no commit, so there is nothing to land) is final too, once its claim
-// is released, and reported in owner_actions: the owner closes the issue. A release that failed leaves the row stopped for a relaunch.
-// A not-converging row (#940: the child stopped at fix-wave-review marked diverging, its fix waves spent across runs not closing the
-// findings in one file) is final and reported in owner_actions with the file, the waves, the worktree, the branch, the PR when one exists,
-// the findings left open, the claim holder and the child's cont (slimmed as a relaunch cont is): the owner decides the design, then the
-// owner or a finisher takes the work over, or a relaunch with that cont in conts resumes it. The worktree and the branch are left as they
-// are and the claim stays held: a released claim would leave nothing on the tracker, and a later batch would plan the issue afresh on
-// the diverged branch with its wave count at zero. A held claim fails closed: a later batch under another holder sees claimed-elsewhere,
-// and after 24h idle the status command posts a stale-claim owner action; a claim never lapses on its own, so the owner or the finisher
-// releases it with the holder the entry names. An issue closed meanwhile is settled as closed first, as any stop with a cont is.
-// A closed issue whose claim this batch holds is released (at intake, or by the settle step after a stop with a cont
-// that is not post-merge) and its row is final with released; a release that failed leaves the row stopped for a relaunch.
-// A questions row is {issue, outcome: 'questions', lane?, questions, marker}: marker is the box prompt's
-// comment id when an unattended run posted it, null when nothing was posted (a session-launched run
-// returns the questions to its session). A session-launched conflict or needs-label row carries
-// owner_ask: {reason, items} (what the marker would have held) and nothing is posted for it.
-// A conflict row is a merge with the integration branch that was not resolved (the resolution blocked, or one landing conflicted too often).
-// A sync-review row (#955) is a resolved merge whose review did not pass: a finding survived the one fix round, or the review, the fix or the
-// re-review was lost. Its reason names the finding and the unaccepted fix commit; it is open, and relaunched, exactly as a conflict row is. The batch
-// never reads or ends a decision prompt outside its land close-out: the child reads the answer itself.
-// The lead runs a non-null relaunch as a NEW run, never with resumeFromRunId (D1): the new run
-// re-reads the tracker (an owner reply, a closed blocker, a released lock) and every side effect
-// re-adopts. Only a run cut off before it returned is resumed with its own original args.
-// Every tracker effect goes through forge-claim (claims and the land lock, D2). A renew or acquire that
-// answers error with transient is re-called once, a folded landing step whole, and a row still transient at
-// acquire is re-queued once behind the issues waiting for a slot, then stops at acquire with transient: true (#740). Every policy
-// value comes from the project contract that setup resolves; this file carries no project
-// literal and defaults no policy value (D3).
-// #744: a standard-lane issue plans ahead: it is claimed under a PLAN slot, runs its child in mode plan, keeps that slot until a RUN slot
-// is free, then resumes the planned cont in mode ready. PLAN and RUN have MAX slots each and RUN hands a freed slot to a planned issue
-// before any other waiter, so at most MAX issues wait planned and each waits at most one delivery slot. A child on this path that stops
-// without a cont (and is not dead) makes the forwarded cont obsolete: it is dropped, so the relaunch plans afresh. A direct-lane or
-// readoptable issue, a re-adopted merged landing, or one whose cont already carries a reviewed plan or a PR, goes straight to RUN.
+// Args: repo_root (the checkout), batch_id (the claim holder is <host>/<batch_id>, so a relaunch with the same batch_id
+// re-adopts its own claims), child_script (the absolute path of the deliver-standard.js copy program-copies placed:
+// this program has no filesystem access, D8), issues (distinct positive integers) or label (every open issue carrying
+// it): exactly one of the two.
+
+// Optional args: decisions ({"<issue>": owner answer}); conts ({"<issue>": a previous run's forwarded child
+// continuation}, only for listed issues, D9; the relaunch keeps of each cont's setup only what a resume reads, see
+// slimCont); unattended (default false: true only for a run no session watches, D12); review_sizing (default off:
+// passed to every child and kept in the relaunch); clerk_model (sonnet, the default, or haiku: the model of every clerk
+// call except the setup step and the steps that emit a lifecycle verb, which stay on sonnet;
+
+// passed to every child and kept in the relaunch when haiku).
+
+// train (boolean, default false: true lands up to TRAIN_MAX ready issues waiting behind a busy land queue through one
+// car pull request, see Train landing below; kept in the relaunch when true, never passed to a child). amend
+// ({"<issue>": a non-empty list of {file, find, replace} edits of that issue's plan files}, only for an issue in conts:
+// sent with its cont to the first child call of the run, kept in the relaunch with that cont). reasons ({"<issue>": the
+// reason of its stopped row in the previous run}:
+
+// a row this run leaves not-admitted, blocked or waiting shows it as "previous run: ...", and the relaunch carries each
+// open issue's latest).
+
+// Result: { stage: args|setup|done|breaker, batch_id, table, questions, owner_actions, relaunch }. Every row that is
+// not final and has something to say carries reason: one line of at most REASON_MAX characters, the child's own stop
+// reason, else this program's stage and what the row carries. A row whose child saw a verification check fail and pass
+// on its one rerun carries flaky ([{id, summary}]), whatever its outcome: the lead files the flaky test. A row whose
+// child's verification fix edited a file outside the branch's diff carries outside_fixes ([{file, why}]) the same way.
+
+// A stop a relaunch cannot change is an owner action, reported with the claim holder and the child's cont (slimmed as a
+// relaunch cont is), the claim held and the row left stopped; the owner decides, then a relaunch with that cont in
+// conts resumes it. They are verify-unrelated (the verification fix found no cause here for a failing test and edited
+// nothing; reason unrelated, with the test and the evidence) and plan-review with conflict ({ac, rules, revises_left}:
+// a criterion whose rules revise settled one classification rule and broke another;
+
+// reason rules-conflict), whose relaunch runs the one rules revise left, or plans again.
+
+// Also task-blocked (a task whose implementer returned blocked: task, notes, and detail, which names the ways out),
+// codex-quota (a codex-unavailable stop that carries retry_after, the usage limit's reset time or null), a
+// fix-wave-review stop carrying oscillating ({file, rounds}; reason fix-oscillating) or round_cap ({rounds, findings};
+// reason round-cap): a relaunch that brings no decision or amend stops in the child before any agent and is the same
+// owner action again. A stop also marked diverging is the not-converging row below.
+
+// A closed issue whose release failed stays a plain stopped row, so that a relaunch releases it.
+
+// An issue marked as needing the owner's look (its facts carry look {verdict}, read by look-approval marked) is never
+// landed by the batch: its ready child is resumed once in mode ship with the ready cont, after its slot is released,
+// and stops at awaiting-look. That row is {issue, outcome: awaiting-look, pr, head, reason}, reported in owner_actions
+// with the pictures when the child made any, and not relaunched: the owner's answer resumes it through deliver-standard
+// with that cont and this batch id. A re-adopted PR lands as it stands only when its facts read look unmarked;
+
+// marked, or unread, it goes through its child.
+
+// An already-fixed row is final and reported in owner_actions with its commit; the batch closes nothing. A no-changes
+// row (every task of the child's plan ended with no commit) is final once its claim is released: the owner closes the
+// issue. A closed issue whose claim this batch holds is released (at intake, or by the settle step after a stop with a
+// cont that is not post-merge) and its row is final with released; a release that failed leaves the row stopped for a
+// relaunch.
+
+// A not-converging row (the child stopped at fix-wave-review marked diverging) is final and reported in owner_actions
+// with the file, the waves, the worktree, the branch, the PR when one exists, the findings left open, the claim holder
+// and the child's cont. The worktree, the branch and the claim stay: a released claim would leave nothing on the
+// tracker, and a later batch would plan the issue afresh with its wave count at zero. A claim never lapses on its own:
+
+// after 24h idle the status command posts a stale-claim owner action, and the owner or the finisher releases it with
+// the holder the entry names.
+
+// A questions row is {issue, outcome: 'questions', lane?, questions, marker}: marker is the box prompt's comment id
+// when an unattended run posted it, else null (a session-launched run returns the questions to its session, and its
+// conflict or needs-label row carries owner_ask: {reason, items} instead of a post). A conflict row is a merge with the
+// integration branch that was not resolved; a sync-review row is a resolved merge whose review did not pass. Both are
+// open and relaunched. The batch never reads or ends a decision prompt outside its land close-out:
+
+// the child reads the answer itself.
+
+// The lead runs a non-null relaunch as a NEW run, never with resumeFromRunId (D1): the new run re-reads the tracker (an
+// owner reply, a closed blocker, a released lock) and every side effect re-adopts. Only a run cut off before it
+// returned is resumed with its own original args. Every tracker effect goes through forge-claim (D2). A renew or
+// acquire that answers error with transient is re-called once, a folded landing step whole, and a row still transient
+// at acquire is re-queued once behind the issues waiting for a slot, then stops at acquire with transient: true.
+
+// Every policy value comes from the contract; none is defaulted (D3).
+
+// A standard-lane issue plans ahead: it is claimed under a PLAN slot, runs its child in mode plan, keeps that slot
+// until a RUN slot is free, then resumes the planned cont in mode ready. PLAN and RUN have MAX slots each and RUN hands
+// a freed slot to a planned issue before any other waiter, so at most MAX issues wait planned and each waits at most
+// one delivery slot. A child that stops without a cont makes the forwarded cont obsolete: it is dropped, so the
+// relaunch plans afresh.
+
+// A direct-lane or readoptable issue, a re-adopted merged landing, or one whose cont already carries a reviewed plan or
+// a PR, goes straight to RUN.
 
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
 const HOLDER_RE = /^[A-Za-z0-9][A-Za-z0-9.-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/
@@ -144,18 +156,18 @@ const UNATTENDED = args.unattended === true
 const REVIEW_SIZING = args.review_sizing === true
 const TRAIN = args.train === true
 const CLERK_MODEL = args.clerk_model === undefined ? 'sonnet' : args.clerk_model
-// #813: a setup step or one that emits a lifecycle verb must reproduce a wide schema or a guard-exact command, so it never takes the trial model.
+// a setup or lifecycle-verb step must reproduce a wide schema or a guard-exact command: it never takes the trial model.
 const DEFAULT_CLERK_MODEL = 'sonnet'
 const CONTS = args.conts || {}
 const AMEND = args.amend || {}
-const AMEND_APPLIED = new Set() // #811: issues whose child reported the amend applied (`amended`): it needs no relaunch
-const AMEND_SENT = new Set() // #811: an issue's amend reaches at most one child call of a run
+const AMEND_APPLIED = new Set() // issues whose child reported the amend applied: it needs no relaunch
+const AMEND_SENT = new Set() // an issue's amend reaches at most one child call of a run
 
-// #992: a StructuredOutput call sent beside another tool call is taken as the step's final answer before that call's result exists.
-// One sentence in the rules every step gets, the same line in deliver-standard.js.
+// A StructuredOutput call beside another tool call is taken as the final answer before that call's result exists. One
+// sentence in the rules every step gets, the same line in deliver-standard.js.
 const REPLY_ALONE = 'Call StructuredOutput alone in its own message, never beside another tool call, only after every other tool result has come back: the first accepted call is final and ends the step.'
-// #1019: a reviewer once detached the worktree to run a script at the commit under review, and the next run's setup stopped on the
-// detached HEAD. One sentence, the same line in deliver-standard.js, added in a landing's readReview() so no review step can miss it.
+// A reviewer that detaches the worktree to run a script at the commit under review leaves the next run's setup stopping
+// on the detached HEAD. The same line is in deliver-standard.js, added in readReview() so no review step misses it.
 const READ_ONLY = 'Never check out, switch, reset or stash in the worktree: read another commit with git show.'
 const BASE_RULES = `
 Hard rules for this step (they override anything else you remember):
@@ -166,7 +178,7 @@ Hard rules for this step (they override anything else you remember):
 - Global skills, agents and standards are shared by other projects: never write a project-specific literal (check names, branch names, recipe names, repository paths) into them.
 - Run git as git -C <worktree> and name every file by its absolute path; never prefix a command with cd <worktree> &&, except for a tool that must run inside the worktree and has no directory flag (a test runner or a build).
 - ${REPLY_ALONE}`
-// forge-claim retries a transport error itself (#740), up to 150 s in a hanging outage, above the Bash tool's 120 s default.
+// forge-claim retries a transport error itself, up to 150 s in a hanging outage, above the Bash tool's 120 s default.
 const FORGE_TIMEOUT = 'Give each forge-claim command a Bash timeout of 20 minutes (1200000 ms). Only a land acquire command that ends in --wait gets more: the flag takes no value, so write nothing after it, and the command itself waits for up to 50 minutes and then answers land-contended by itself, so give it a Bash timeout of 60 minutes (3600000 ms) and never run it in the background. The reason for both: forge-claim retries a forge outage itself before it prints its one JSON line.'
 
 // --- Setup: one agent resolves the contract; nothing is defaulted ---
@@ -198,12 +210,12 @@ const CHECKS = {
 }
 const missing = Object.keys(CHECKS).filter(f => !CHECKS[f](setup[f]))
 if (missing.length) return { stage: 'setup', result: setup, missing }
-// required_checks must be returned: null when the contract declares none, else a non-empty list of distinct non-empty strings (D11); an absent field is never defaulted.
+// required_checks: null when the contract declares none, else a non-empty list of distinct strings (D11).
 const RC = setup.required_checks
 if (RC === undefined || (RC !== null && !(Array.isArray(RC) && RC.length && RC.every(nonEmpty) && new Set(RC).size === RC.length))) {
   return { stage: 'setup', result: setup, invalid: 'required_checks' }
 }
-// #1371: the declared cheap guards a landing fix runs before its commit is pushed; returned as a list, [] when the contract declares none, each with its argv and cwd.
+// The declared cheap guards a landing fix runs before its commit is pushed: [] when none, each with its argv and cwd.
 const GUARD_OK = e => !!e && typeof e === 'object' && !Array.isArray(e) && nonEmpty(e.id) && Array.isArray(e.argv) && e.argv.length > 0 && e.argv.every(nonEmpty) && nonEmpty(e.cwd)
 if (!Array.isArray(setup.guards) || !setup.guards.every(GUARD_OK)) return { stage: 'setup', result: setup, invalid: 'guards' }
 const GUARDS = setup.guards.map(e => ({ id: e.id, argv: e.argv, cwd: e.cwd }))
@@ -212,7 +224,8 @@ const DECLARED = SETUP.required_checks || []
 const HOLDER = `${SETUP.host}/${BATCH}`
 if (!HOLDER_RE.test(HOLDER)) return { stage: 'setup', result: setup, invalid: 'holder', holder: HOLDER }
 const SLUG = SETUP.slug, INT = SETUP.integration_branch, MAX = SETUP.max_parallel
-// The land lock command, its return sentence and the conditional second release, one line each so deliver-standard.js carries them byte for byte (#716).
+// The land lock command, return sentence and second release, one line each, byte for byte as deliver-standard.js has
+// them.
 const LAND_ACQUIRE = (sha, wait) => `forge-claim land acquire --repo ${SLUG} --branch ${INT} --sha ${sha}${wait ? ' --wait' : ''}`
 const LOCK_RETURN = `Return its verdict (acquired, already_held, moved, land-contended, held_by, lost_to, or error on any other exit), lock_sha, by, detail, waited_s and waited_on from its output, and position and ahead when it prints them. ${FORGE_TIMEOUT}`
 const RELEASE_AGAIN = maybe => `When it prints not_held with lock_sha ${maybe}, run alone and exactly: forge-claim land release --repo ${SLUG} --branch ${INT} --sha ${maybe}, then return the verdict of that second release.\n`
@@ -249,7 +262,7 @@ const ask = async (pending, label) => {
   if (r === null || r === undefined) trip(label)
   return r
 }
-// A renew or acquire that ran out of forge-claim's transport retries is re-called once (#740).
+// A renew or acquire that ran out of forge-claim's transport retries is re-called once.
 const transientError = r => !!r && r.verdict === 'error' && r.transient === true
 const recall = async (make, pick = r => r) => { const r = await make(); return r && transientError(pick(r)) ? make() : r }
 
@@ -303,8 +316,9 @@ const landedOf = (n, f) => {
     && (m.number === own.pr || (Array.isArray(m.commits) && m.commits.some(c => own.commits.some(o => sameSha(c, o))))))
   return l ? l.number : null
 }
-// #752: a merged PR that merely mentions the issue (a spec PR saying Refs) is no duplicate and no landing; only one that closes the issue is a duplicate.
-// A forwarded cont names its own landing by its PR number or one of its done commits, and the landed read looks for exactly that on the cont's branch.
+// A merged PR that merely mentions the issue (a spec PR saying Refs) is no duplicate and no landing; only one that
+// closes it is. A forwarded cont names its own landing by its PR number or a done commit, and the landed read looks for
+// exactly that.
 const landedRead = n => {
   if (!ownOf(n)) return ''
   const s = (CONTS[n] || {}).setup
@@ -332,13 +346,11 @@ await parallel(ISSUES.map(n => async () => {
   FACTS[n] = await ask(agent(factsPrompt(n), { label: `facts-${n}`, phase: 'Intake', agentType: 'clerk', model: CLERK_MODEL, effort: 'medium', schema: FACTS_SCHEMA }), `facts-${n}`)
 }))
 
-// An issue's blockers are the union of the tracker's native dependencies and the body's "Blocked by" list: an edge added with
-// forge-issue link is in the first only (#944 was one, and #891 landed ahead of it). The native list is forge-issue read's own
-// answer, so a skipped read is a reply without verdict read, which stops the issue, and never an empty list; so does an entry
-// that is no <owner>/<name>#<n>. A native blocker's state is the read's own blocked_by_states entry (#964), so the clerk looks up
-// only the body-list blockers the native list lacks. A blocker is open unless a stated state says closed (a native entry the reply
-// gives no state is open), and open in either list is open. Another repository's issue is a blocker by its reference: open, it
-// blocks like an outside blocker, and it is never an in-batch one.
+// An issue's blockers are the union of the tracker's native dependencies and the body's "Blocked by" list: an edge
+// added with forge-issue link is in the first only. The native list is forge-issue read's own answer, so a skipped read
+// or an entry that is no <owner>/<name>#<n> stops the issue and is never an empty list. A native blocker's state is the
+// read's blocked_by_states entry; the clerk looks up only the other body-list blockers. A blocker is open unless a
+// stated state says closed, and another repository's issue blocks by its reference, never as an in-batch one.
 const NATIVE_REF = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+#[1-9][0-9]*$/
 const nativeRead = f => isObj(f.native) && f.native.verdict === 'read' && Array.isArray(f.native.blocked_by)
 // Why the native read cannot be trusted, else null.
@@ -363,18 +375,18 @@ const blockersOf = f => {
   }
   return Array.from(open, ([issue, isOpen]) => ({ issue, state: isOpen === false ? 'CLOSED' : 'OPEN' }))
 }
-// Eligibility is plain JS over the facts, first match wins; null means eligible.
-// A forwarded cont names a landing this batch started; its PR now reads as merged and the claim is still ours (or already released):
-// the merge happened after the cont was forwarded, so the issue is re-adopted for its close-out, never skipped as a duplicate or closed.
-// A landing is the cont's own merged PR (by its pr or a done commit), whether it closes the issue or only says Refs: a merged PR that
-// closes the issue but is not the cont's own is a duplicate, never a re-adoption.
+// Eligibility is plain JS over the facts, first match wins; null means eligible. A forwarded cont names a landing this
+// batch started: its PR now reads as merged and the claim is still ours (or released), so the issue is re-adopted for
+// its close-out, never skipped as a duplicate or closed. A landing is the cont's own merged PR (by its pr or a done
+// commit), closing the issue or only saying Refs; a merged PR that closes it but is not the cont's own is a duplicate,
+// never a re-adoption.
 const mergedReadopt = (n, f) => {
   const claim = f.claim || {}
   return !!(CONTS[n] && landedOf(n, f) !== null && (claim.verdict === 'free' || claim.by === HOLDER))
 }
 const eligibility = (n, f) => {
   const readopt = mergedReadopt(n, f)
-  // A closed issue whose claim lookup failed is not final: its claim may be this batch's, and only the release gives it back.
+  // A closed issue whose claim lookup failed is not final: the claim may be ours, and only a release gives it back.
   if (f.state === 'CLOSED' && !readopt) {
     if ((f.claim || { verdict: 'error' }).verdict === 'error') return { issue: n, outcome: 'stopped', detail: 'claim status' }
     return { issue: n, outcome: 'closed' }
@@ -385,7 +397,7 @@ const eligibility = (n, f) => {
   }
   const dup = closingOf(f)
   if (dup && !readopt) return { issue: n, outcome: 'duplicate', pr: dup }
-  // A failed claim lookup proves nothing about ownership: it falls through to the claim-error stop below, never to a final row.
+  // A failed claim lookup proves nothing about ownership: it falls to the claim-error stop below, never to a final row.
   const fixed = f.already_fixed
   if (isObj(fixed) && nonEmpty(fixed.commit) && !CONTS[n] && (f.claim || {}).by !== HOLDER && (f.claim || {}).verdict !== 'error') {
     return { issue: n, outcome: 'already-fixed', commit: fixed.commit, evidence: fixed.evidence }
@@ -401,8 +413,8 @@ const eligibility = (n, f) => {
   if (outside.length) {
     const numbers = outside.filter(Number.isInteger).sort((a, b) => a - b)
     const refs = outside.filter(b => !Number.isInteger(b)).sort()
-    // blocker stays the lowest number of this repository, and blocker_ref names another repository's blocker when there is none;
-    // blockers names every open outside blocker, so one run shows all an owner has to close.
+    // blocker is the lowest number of this repository, else blocker_ref names another repository's blocker; blockers
+    // lists every open outside blocker, so one run shows all an owner has to close.
     return { issue: n, outcome: 'blocked', ...(numbers.length ? { blocker: numbers[0] } : { blocker_ref: refs[0] }), blockers: [...numbers.map(b => `#${b}`), ...refs] }
   }
   // Only a questioned issue waits: no lane, no claim, no child until the owner answers.
@@ -422,15 +434,14 @@ for (const n of ISSUES) {
   else eligible.push(n)
 }
 
-// A closed issue whose claim this batch holds, or that reads free, gives the claim back at intake (#714).
-// A free claim is retried too: forge-claim ends the claim before it edits the marker and removes the label, so a release that failed
-// after that point leaves a free claim and unfinished cleanup, which only the release itself finishes (it answers not_held when none is owed).
-// A live claim of another holder is never touched.
+// A closed issue whose claim this batch holds, or that reads free, gives the claim back at intake. A free claim is
+// retried too: forge-claim ends the claim before it edits the marker and removes the label, so a failed release leaves
+// cleanup owed that only the release finishes (it answers not_held when none is owed). A live claim of another holder
+// is never touched.
 const releasable = f => { const c = (f && f.claim) || {}; return c.verdict === 'free' || ((c.verdict === 'held_by' || c.verdict === 'stale') && c.by === HOLDER) }
 await parallel(ISSUES.filter(n => rows[n] && rows[n].outcome === 'closed' && releasable(FACTS[n])).map(n => async () => {
   const rel = await ask(agent(releaseClosedPrompt(n), { label: `release-${n}`, phase: 'Intake', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: RELEASE_SCHEMA }), `release-${n}`)
   if (rel && (rel.verdict === 'released' || rel.verdict === 'not_held')) rows[n] = { ...rows[n], released: rel.verdict === 'released' }
-  // A failed release is not final: the row stays open so a relaunch retries it, as close-out keeps a failed release stopped.
   else rows[n] = { issue: n, outcome: 'stopped', stage: 'release', detail: rel ? (rel.detail || rel.verdict) : `release-${n} returned nothing` }
 }))
 
@@ -472,8 +483,9 @@ const ASK_SCHEMA = { type: 'object', properties: { verdict: { type: 'string', en
 const SETTLE_SCHEMA = { type: 'object', properties: { state: { type: 'string', enum: ['OPEN', 'CLOSED'] }, release: { type: ['string', 'null'] }, detail: { type: 'string' } }, required: ['state'] }
 const ENDED_SCHEMA = { type: 'object', properties: { verdict: { type: 'string' }, detail: { type: 'string' } }, required: ['verdict'] }
 
-// A FIFO semaphore of child slots on this host: plain JS, no timers. A slot handed on by leave() stays counted.
-// A waiter admitted with `first` (a planned issue) is handed a freed slot before every other waiter, so a finished plan waits at most one delivery slot.
+// A FIFO semaphore of child slots on this host: plain JS, no timers. A slot handed on by leave() stays counted. A
+// waiter admitted with `first` (a planned issue) gets a freed slot before every other waiter, so a finished plan waits
+// at most one slot.
 const semaphore = size => {
   let inUse = 0
   const firsts = []
@@ -486,18 +498,19 @@ const semaphore = size => {
 const RUN = semaphore(MAX)
 const PLAN = semaphore(MAX)
 
-// The owner's answer the batch itself carries: the relaunch's decisions only. A ticked decision prompt is read by the child.
+// The owner's answer the batch itself carries: the relaunch's decisions only; the child reads a ticked prompt.
 const answerOf = n => (DECISIONS && DECISIONS[String(n)]) || null
-// An applied amend leaves the relaunch once the cont it ends with records what the amended plan owes. A reviewed plan with no passed verification
-// still owes its final review and verify, which only a child resumed with the amend is sure to run: an accepted PR would land as it stands otherwise.
+// An applied amend leaves the relaunch once the cont it ends with records what the amended plan owes: a reviewed plan
+// with no passed verification still owes its final review and verify, which only a child resumed with the amend is sure
+// to run.
 const reviewOwed = c => isObj(c) && c.plan_reviewed === true && !c.verified
 const amended = (n, r) => { if (isObj(r) && r.amended === true) AMEND_APPLIED.add(String(n)); return r }
 // D12: a null child, or a stop that names dead agents, ends admission; a null field alone is an ordinary stop.
 const terminalChild = r => r === null || r === undefined ||
   (!['done', 'ready', 'planned'].includes(r.stage) && Array.isArray(r.dead_agents) && r.dead_agents.length > 0)
-// A stop the child raised after the merge (a re-adopted landing) still has close-out work its cont finishes; it is never settled (#714).
-// #790: a codex-unavailable child stop shows the Codex reviewer's reason in its row.
-// #869: and every child stop its reason: the child's own, else, for a stop that carries none (a setup or args stop), what its fields say.
+// A stop the child raised after the merge (a re-adopted landing) still has close-out work its cont finishes: never
+// settled. A codex-unavailable child stop shows the Codex reviewer's reason in its row, and every other child stop its
+// own reason, else, for a stop that carries none (a setup or args stop), what its fields say.
 const childReason = r => {
   if (nonEmpty(r.reason)) return r.reason
   const said = [r.details, r.error,
@@ -510,7 +523,7 @@ const childReason = r => {
   return said.length ? `${r.stage}: ${said.join('; ')}` : ''
 }
 const stopDetail = r => ({ ...(Array.isArray(r.lost_reviews) && r.lost_reviews.length ? { lost_reviews: r.lost_reviews } : {}), ...(r.stage === 'codex-unavailable' && typeof r.details === 'string' && r.details ? { detail: r.details } : {}), ...(childReason(r) ? { reason: childReason(r) } : {}) })
-// #869: why an open row is open, in one bounded line: the child's reason when it gave one, else the row's own stage and what it carries; '' when it carries nothing.
+// Why an open row is open, in one bounded line: the child's reason, else the row's own stage and what it carries.
 const REASON_MAX = 300
 const FINDINGS_MAX = 10
 const oneLine = s => { const t = String(s).replace(/\s+/g, ' ').trim(); return t.length > REASON_MAX ? `${t.slice(0, REASON_MAX - 3)}...` : t }
@@ -525,8 +538,9 @@ const rowReason = r => {
   if (!said.length && r.outcome !== 'stopped') return ''
   return oneLine([r.stage, said.join('; ')].filter(nonEmpty).join(': ') || 'no detail')
 }
-// #912: a thrown child call's reason is the error's first line and the child script, one line within REASON_MAX. A script path too long to leave
-// MSG_MIN characters for the message is cut from its front ("..." then its ending), so the file name stays.
+// A thrown child call's reason is the error's first line and the child script, within REASON_MAX. A script path too
+// long to leave MSG_MIN characters for the message is cut from its front ("..." then its ending), so the file name
+// stays.
 const THREW = 'child program could not be loaded or threw: '
 const MSG_MIN = 24
 const threwReason = e => {
@@ -544,14 +558,14 @@ const UNTRIED = ['not-admitted', 'blocked', 'waits-verification']
 const POST_MERGE = ['hold', 'close-out', 'code-unmet']
 const postMerge = r => !!r.pr || POST_MERGE.includes(r.stage)
 const READY = {}
-const FLAKY = {} // #972: by issue, the checks its child saw fail and pass on the one rerun
-const RULES_CONFLICT = {} // #988: by issue, the criterion and the rules a plan-review stop reported as conflicting
-const PARKED = {} // #996: by issue, the owner action of a stop a relaunch cannot change: a blocked task, a Codex usage limit
-const AWAITING = {} // #1139: by issue, the PR, head and cont of a marked issue's delivery that waits for the owner's look
-const UNRELATED = {} // #972: by issue, the failing test its child's verification fix found no cause for, with the evidence
-const OUTSIDE = {} // #972: by issue, the files outside the branch's diff its child's verification fix edited, each with its cause
+const FLAKY = {} // by issue, the checks its child saw fail and pass on the one rerun
+const RULES_CONFLICT = {} // by issue, the criterion and the rules a plan-review stop reported as conflicting
+const PARKED = {} // by issue, the owner action of a stop a relaunch cannot change: a blocked task, a Codex usage limit
+const AWAITING = {} // by issue, the PR, head and cont of a marked issue's delivery that waits for the owner's look
+const UNRELATED = {} // by issue, the failing test its child's verification fix found no cause for, with the evidence
+const OUTSIDE = {} // by issue, files its child's verification fix edited outside the branch's diff, each with its cause
 const readyOf = n => READY[n]
-// The child's whole input (D1): the batch args, the mode (plan or ready), the issue's cont, its lane, the owner's answer and the review_sizing (#747) and clerk_model (#803) settings, nothing else.
+// The child's whole input (D1): the batch args, mode, cont, lane, the owner's answer, review_sizing and clerk_model.
 const childArgs = (n, lane, mode) => {
   const a = { repo_root: REPO, issue: n, batch_id: BATCH, mode }
   if (CONTS[n]) a.cont = CONTS[n]
@@ -576,11 +590,11 @@ const enqueue = (branch, fn) => {
   return run
 }
 const LAND_OA = [] // owner-actions the landings posted
-const OSCILLATING = {} // #1000: by issue, what a fix-oscillating owner action carries
-const ROUND_CAPPED = {} // #1370: by issue, what a round-cap owner action carries
-const DIVERGING = {} // #940: by issue, what a not-converging row's owner action carries for whoever takes the work over
+const OSCILLATING = {} // by issue, what a fix-oscillating owner action carries
+const ROUND_CAPPED = {} // by issue, what a round-cap owner action carries
+const DIVERGING = {} // by issue, what a not-converging row's owner action carries for whoever takes the work over
 const SEV = { type: 'string', enum: ['critical', 'important', 'minor'] }
-// #992: incomplete is the verdict of a review that could not finish; readReview() in land() reads every reply of this schema.
+// incomplete is the verdict of a review that could not finish; readReview() in land() reads every reply of this schema.
 const FINDINGS = {
   type: 'object',
   properties: {
@@ -590,57 +604,55 @@ const FINDINGS = {
   required: ['verdict', 'findings'],
 }
 const FULL_SHA = /^[0-9a-f]{40}$/
-// #992: start_head and commit are full shas or absent (a blocked reply names none), so the harness refuses a placeholder and the agent corrects it.
+// start_head and commit are full shas or absent (a blocked reply names none), so the harness refuses a placeholder.
 const SHA_SCHEMA = { type: 'string', pattern: FULL_SHA.source }
 const IMPL = {
   type: 'object',
   properties: { status: { type: 'string', enum: ['done', 'blocked'] }, start_head: SHA_SCHEMA, commit: SHA_SCHEMA, tests: STRS, notes: { type: 'string' } },
   required: ['status', 'notes'],
 }
-// #986, #992: the sync review's schema; with followup it also returns descends. Named so that every FINDINGS schema of the program is one readReview() reads.
+// The sync review's schema; with followup it also returns descends. Every FINDINGS schema is one readReview() reads.
 const SYNC_REVIEW_SCHEMA = followup => (followup ? { ...FINDINGS, properties: { ...FINDINGS.properties, descends: { type: 'boolean' } }, required: [...FINDINGS.required, 'descends'] } : FINDINGS)
 const IMPL_RETURN = 'Return start_head (git rev-parse HEAD before you change anything) and commit (the full sha of HEAD after your last commit).'
-// #787: the same text as WHOLE in deliver-standard.js.
 const WHOLE = files => `run in full every test file among or covering ${files} (never a single test class) and any fast suite the project declares, not the declared verification; return tests: each command and its result`
-// #1371: the same text in deliver-standard.js; the push_tests payload is what a test reads, the sentence around it is for the agent.
+// The same text in deliver-standard.js; the push_tests payload is what a test reads.
 const PUSH_TESTS = (guards, onFailure = 'fix-and-rerun') => `If you made a commit, then before pushing, run in full every test file among or covering the files you changed (never a single test class), the test files of their direct callers and checkers, and the declared cheap guards (with none declared, any fast suite the project declares), not the declared verification, as this payload lists them: ${JSON.stringify({ push_tests: { when: 'committed', scopes: ['touched', 'callers', 'guards'], guards, on_failure: onFailure, report: 'tests' } })}. touched: every test file among or covering the files you changed; callers: for each function, constant, option, command or file name the commit changed, added or removed, git grep the tree and take the test files of every file that uses or checks it; guards: each entry's argv, run with <worktree>/<its cwd> as working directory. on_failure fix-and-rerun: fix a run that fails and run it again; report: change nothing and return status blocked with the failing command in notes; either way a failing or unrun commit is never pushed. Then return tests: each command and its result, one entry per command; a commit whose report records no test command is refused`
 const tested = f => !!f && Array.isArray(f.tests) && f.tests.some(t => typeof t === 'string' && t.trim() !== '')
 const UNTESTED = 'the fix report records no test command, so its commit is not pushed'
-// #941: what the resolution of a conflicted sync merge tests, the same text in deliver-standard.js: the files it resolved, not everything the merge brought in.
+// What a conflicted sync merge's resolution tests, the same text in deliver-standard.js: the files it resolved.
 const RESOLVE_SCOPE = 'the checks of the pull request cover everything else the merge brought in, so run no test for a file that merged cleanly'
-// The fix-commit scope, one line so deliver-standard.js carries it byte for byte: a fix agent once committed a lock file a tool had generated beside its fix.
+// The fix-commit scope, one line so deliver-standard.js carries it byte for byte.
 const COMMIT_SCOPE = 'Before committing, read git status in the worktree you commit in and stage by path only the files the fix itself changed or created; never run git add -A, git commit -a or git add on a directory (the dot included); a lock file, a generated file or an untracked file the fix did not need is left unstaged and named in notes.'
-// #907: the conflicted-sync wording, the same text in deliver-standard.js. The marker check runs before the merge is committed, when HEAD is still the
-// branch's own head: git diff --check HEAD compares the whole working tree with it, so it reads every line the merge brings in, in a file
-// resolved by hand as in one merged cleanly, staged or not (the plain form goes silent once a file is staged, --cached misses a later edit).
-// It also reports content the integration branch brought in (a setext or RST underline of seven =, a fixture with markers, whitespace), so the same
-// check runs against origin's head too: a line both report, by file and line number, is in neither parent, so it is a real leftover, wherever else
-// such a line stands. Removal is limited to those lines in hand-resolved files; markers_checked says both checks ran, whatever they reported.
+// The conflicted-sync wording, the same text in deliver-standard.js. The marker check runs before the merge commit,
+// while HEAD is the branch's own head: git diff --check HEAD reads every line the merge brings in, staged or not. It
+// also reports content the integration branch brought in (setext underlines, fixtures with markers), so the same check
+// runs against origin's head: a line both report, by file and line, is in neither parent, so a real leftover. Removal
+// is limited to those lines in hand-resolved files; markers_checked says both checks ran, whatever they reported.
 const MARKER_CHECK = (wt, int) => `run git -C ${wt} diff --check HEAD and git -C ${wt} diff --check origin/${int} before committing and remove each leftover conflict marker both report (same file and line) in a file you resolved by hand; every other line they report is content and stays`
 const MARKERS_UNCHECKED = ' The merge was not checked for leftover conflict markers: report any left in the files it changed.'
 const SYNC_FIX = (wt, mc, findings, after = '') => `A reviewer found defects in the conflict resolution of merge commit ${mc} (git -C ${wt} show --cc ${mc})${after}: ${JSON.stringify(findings)}. Fix each real defect on top of ${after ? 'that head' : 'the merge'} with a regression test (never redo or rewrite the merge), then commit; if a finding is wrong, commit nothing for it and say so with evidence in notes.`
 const SYNC_REREVIEW = (wt, mc, findings, fix, moved, after = '') => `Re-review these conflict-resolution findings against ${moved ? `the fix (git -C ${wt} diff ${fix.start_head}..${fix.commit}) made on top of` : 'the rebuttal (no new commit) of'} merge commit ${mc}${after}: ${JSON.stringify(findings)}; notes: ${fix.notes}. ${moved ? '' : `Check each rebuttal against the code yourself (git -C ${wt} show --cc ${mc}); a finding the evidence does not refute is still unresolved. `}Report any still unresolved and any new Important or Critical defect. Do not edit anything.`
-// #986: a resolution may carry plain commits on top of its merge commit (a fix its tests asked for once the merge was committed). The
-// program cannot read git, so the sync review proves the ancestry itself (DESCENDS) and reads the merge and the range from it to the head;
-// the fix round and the re-review name the same range (SYNC_AFTER). A head that does not descend from its merge commit never lands.
-// The same text in both programs, like the wording above.
+// A resolution may carry plain commits on top of its merge commit (a fix its tests asked for after the merge). The
+// program cannot read git, so the sync review proves the ancestry itself (DESCENDS) and reads the merge and the range
+// from it to the head; the fix round and the re-review name the same range (SYNC_AFTER). A head that does not descend
+// from its merge commit never lands. The same text is in both programs, like the wording above.
 const SYNC_AFTER = (wt, mc, head) => ` and the commits made on top of it up to the head ${head} (git -C ${wt} diff ${mc}..${head})`
 const DESCENDS = (wt, mc, head) => ` The resolution's head ${head} is not its merge commit: first run git -C ${wt} merge-base --is-ancestor ${mc} ${head} and git -C ${wt} rev-list --count --min-parents=2 ${mc}..${head}, and return descends true only when the first exits 0 and the second prints 0 (the head is the merge commit with plain commits on top of it), else descends false and no finding. When it descends, review those commits as well (git -C ${wt} diff ${mc}..${head}), above all for a test or check they weaken, skip or delete, and report any conflict marker git -C ${wt} diff --check ${mc} ${head} shows in them.`
 const RESOLVE_ORDER = 'Fix in the resolution itself what those tests show and commit the merge only once they pass. When a defect shows only after the merge is committed, never amend or redo the merge: fix it in a commit on top of it, run those tests again, and report the merge commit and the head as they are'
-// #986: a rerun covers every failed run of the head. Each check is its own workflow run, so a gate or aggregate check that failed only
-// because another check failed keeps its old failure unless its own run is rerun too; a gate that waits for the head's other runs then
-// goes green with them, so the reruns need no order.
+// A rerun covers every failed run of the head. Each check is its own workflow run, so a gate that failed only because
+// another check failed keeps its old failure unless its own run is rerun too; a gate that waits for the head's other
+// runs then goes green with them, so the reruns need no order.
 const RERUN_ALL = (unset, slug, sha) => `rerun the failed jobs once, with ${unset}gh run rerun <run-id> --repo ${slug} --failed for each failed run of the head: list them with ${unset}gh run list --repo ${slug} --commit ${sha} --json databaseId,workflowName,conclusion, keep the newest run of each workflowName (the highest databaseId; never an older run that one superseded) and rerun each of those whose conclusion is failure, cancelled or timed_out, not only the run of the check that broke first. Every check is its own run, so a gate or aggregate check that failed only because another check failed is rerun too, with the same command`
-// #986: the backstop for a gate that was not rerun, or was rerun before the checks it reports on finished: in the one poll that follows a
-// rerun, the checks step reruns such a gate and names its runs as stale. The program then polls once more and does not count that poll
-// as red; the poll after it carries no such instruction, so a check that is red there ends the landing as any second red poll does.
+// The backstop for a gate not rerun, or rerun before the checks it reports on finished: in the one poll after a rerun
+// the checks step reruns such a gate and names its runs as stale. The next poll is not counted red; the one after
+// carries no such instruction.
 const STALE_RERUN = (unset, slug) => `This poll follows a rerun of failed jobs at this head. When checks still fail once none is pending, decide whether every failing check is stale: a check that only reports on other checks (a gate or aggregate job) is stale when every check it reports on now passes at head and its own run finished before theirs did (compare updatedAt from ${unset}gh run view <run-id> --repo ${slug} --json updatedAt; it was not rerun, or it was rerun too early). Only when every failing check is stale, rerun each of their runs once with ${unset}gh run rerun <run-id> --repo ${slug} --failed (the run id is in the check's link), do not wait for them, and answer failed with failing and with stale: the run ids you reran. In every other case rerun nothing and return no stale.`
 const WITH_STALE = s => ({ ...s, properties: { ...s.properties, stale: { type: 'array', items: { type: 'integer' } } } })
 const staleOf = ck => (Array.isArray(ck.stale) ? ck.stale.filter(Number.isInteger) : [])
 const findingsOf = r => (r.findings || []).filter(f => f.severity !== 'minor')
-// #992: why a FINDINGS reply is no review, else ''. A verdict of incomplete, or a blocking finding naming neither a file nor a failing
-// input (what a reply sent beside a pending lookup holds), is a lost review, never a finding. Every review of this program reads a
-// diff, so none is exempt.
+// Why a FINDINGS reply is no review, else ''. A verdict of incomplete, or a blocking finding naming neither a file nor
+// a failing input (what a reply sent beside a pending lookup holds), is a lost review, never a finding. Every review of
+// this program reads a diff, so none is exempt.
 const AGAIN = '-again'
 const unusable = r => {
   if (!r) return ''
@@ -661,7 +673,6 @@ const LAND_CHECKS_SCHEMA = {
   required: ['state', 'head'],
 }
 const RECORD_SCHEMA = { type: 'object', properties: { ok: { type: 'boolean' }, head: { type: 'string' }, detail: { type: 'string' } }, required: ['ok'] }
-// One commit on top of a known head, as a step read it (#1019, #1022): what cleanMerges() judges.
 const AHEAD_ITEM = { type: 'object', properties: { commit: { type: 'string' }, parents: { type: 'array', items: { type: 'string' } }, on_integration: { type: 'boolean' }, tree: { type: 'string' }, clean_tree: { type: 'string' } }, required: ['commit', 'parents'] }
 const LAND_SYNC_SCHEMA = {
   type: 'object',
@@ -671,24 +682,22 @@ const LAND_SYNC_SCHEMA = {
 const PROVE_SCHEMA = { type: 'object', properties: { proven: { type: 'boolean' }, notes: { type: 'string' } }, required: ['proven'] }
 const LAND_MERGE_SCHEMA = { type: 'object', properties: { merged: { type: 'boolean' }, behind: { type: 'boolean' }, merge_commit: { type: 'string' }, notes: { type: 'string' } }, required: ['merged'] }
 const CLOSE_SCHEMA = { type: 'object', properties: { issue_state: { type: 'string' }, branch_deleted: { type: 'boolean' }, released: { type: 'boolean' }, decision_ended: { type: 'boolean' }, notes_posted: { type: 'boolean' }, notes: { type: 'string' } }, required: ['issue_state'] }
-// Resyncs a landing runs on a behind answer or a retaken lock. With no unconditional first resync, the third behind answer is still contention (#801).
+// Resyncs a landing runs on a behind answer or a retaken lock; the third behind answer is still contention.
 const MAX_SYNCS = 2
-// #870: the resyncs a landing runs because its merge was refused as not up to date (the integration branch moved outside the land lock).
-// Its own budget: MAX_SYNCS may already be spent before the first merge attempt.
+// The resyncs a landing runs because its merge was refused as not up to date (the integration branch moved outside the
+// land lock). Its own budget: MAX_SYNCS may already be spent before the first merge attempt.
 const MERGE_REFUSAL_RETRIES = 2
-// #818: the extra waits a landing spends on the land lock after its first acquire --wait answered land-contended at the CLI's own bound.
 const LAND_WAIT_RETRIES = 3
-// #1018: the retries are spent only by a wait that made no progress. A wait that ended first in line (position 1), or at a better
-// place than the wait before it, is made again for nothing: 2441 stopped first in line with nobody ahead after 200.8 minutes, and
-// its relaunch redid the whole landing. A reply with no position (the queue was not read) spends a retry, as every wait did before.
-// The ceiling bounds what progress alone cannot: a landing held the lock for 20 to 40 minutes and waits of 100 to 200 minutes were
-// normal with three ahead, so six hours is nine such landings; a wait is made again only when it can end within that, at the CLI's
-// bound of 50 minutes a call (LAND_WAIT_CALL_S, the least a wait that ran out counts for).
+// The retries are spent only by a wait that made no progress: a wait that ended first in line (position 1), or at a
+// better place than the wait before it, is not made again. A reply with no position (the queue was not read) spends a
+// retry. The ceiling bounds what progress alone cannot: landings held the lock 20 to 40 minutes and waits of 100 to 200
+// minutes were normal with three ahead, so six hours is nine such landings; a wait is made again only when it can end
+// within that, at the CLI's bound of 50 minutes a call (LAND_WAIT_CALL_S, the least a wait that ran out counts for).
 const LAND_WAIT_MAX_S = 6 * 3600
 const LAND_WAIT_CALL_S = 3000
-// One ceiling per landing and one count of retries per run of waits: waitBudget() is made once for a landing, and each run of waits
-// asks it for a function, which is asked with the lock reply of the wait that just ran out (null when the program asks for a first
-// wait itself) and answers whether to wait again. A wait that ran out counts as a whole call at least, whatever its reply says it
+// One ceiling per landing and one retry count per run of waits: waitBudget() is made once for a landing, and each run
+// of waits asks it for a function, asked with the lock reply of the wait that just ran out (null for a first wait) and
+// answering whether to wait again. A wait that ran out counts as a whole call at least, whatever its reply says it
 // waited, so no reply can lift the ceiling.
 const waitBudget = () => {
   let total = 0
@@ -703,69 +712,68 @@ const waitBudget = () => {
     }
   }
 }
-// #913: the conflicted sync merges one landing resolves, each outside the land lock; the next conflict goes to the owner.
-// #941: a conflict the probe found before the lock was asked for is one of them.
+// The conflicted sync merges one landing resolves, each outside the land lock; the next conflict goes to the owner. A
+// conflict the probe found before the lock was asked for is one of them.
 const MAX_CONFLICT_ROUNDS = 2
-// #913: a wait for the land lock of this many seconds or more is logged with the pull requests it waited on (forge-claim's waited_on).
+// a wait for the land lock of this many seconds or more is logged with the pull requests it waited on.
 const LOCK_WAIT_LOG_S = 300
 const logWait = (label, lock) => {
   if (!lock || !(lock.waited_s >= LOCK_WAIT_LOG_S)) return
   const on = Array.isArray(lock.waited_on) ? lock.waited_on : []
   log(`${label}: waited ${Math.round(lock.waited_s / 60)} min for the land lock of ${INT}${on.length ? ` behind PR ${on.map(p => `#${p}`).join(', ')}` : ''}`)
 }
-// #1001: a red check the branch itself caused is found and fixed outside the land lock, the same rules in deliver-standard.js.
-// Before the lock is asked for, a pull request that already existed is read once (OWN_RED): a check that already failed at the head
-// sends the landing to its fix step with no lock asked for. A pull request opened in the same step has no finished check, so it is
-// not read, and a green landing gains at most that one read. Under the lock, the fix step of a red poll at a head no sync has changed
-// under the lock releases the lock itself, once it knows the fix needs a commit (FIX_OFF_LOCK): the fix, its tests and its review
-// then run outside the lock, and the record step takes the lock again at the reviewed head, waiting (with no place kept among the
-// waiters: the branch was not ready). A failure with no cause in the code keeps the lock and reruns its jobs as before (#818, #986).
-// One fix round per landing either way (ciFails), so this never repeats, and a red check after a sync under the lock is fixed under it.
-// #1018: a check that failed at a head behind its base counts in that read only while another landing holds the lock (one land status
-// read): the branch is then brought up to date before the lock is asked for, and a failure that survives is fixed there too.
+// A red check the branch itself caused is found and fixed outside the land lock, the same rules in deliver-standard.js.
+// A PR that already existed is read once before the lock (OWN_RED): a check that already failed at the head sends the
+// landing to its fix step with no lock asked for. Under the lock, the fix step of a red poll at a head no sync has
+// changed releases the lock itself once the fix needs a commit (FIX_OFF_LOCK); the record step retakes it at the
+// reviewed head. One fix round per landing (ciFails).
+
+// A check that failed at a head behind its base is read only while another landing holds the lock.
 const OWN_RED = (wt, prRef, sha) => `Otherwise, and only when step 2 reused an open PR (a PR this step opened has no finished check, so skip this read), read the checks of the pushed head once before any lock command: ${UNSET}gh pr view ${prRef} --repo ${SLUG} --json headRefOid,statusCheckRollup, one read, never a watch and never a wait. A head that was just pushed can still show the checks of the head before it, so the read counts only when its headRefOid is ${sha}. Only when it is and a check there has failed (count only the newest run of each check name, the one with the latest startedAt, so a failed attempt whose re-run passed does not count; a check run whose conclusion is FAILURE or TIMED_OUT, or a status whose state is FAILURE or ERROR; a cancelled check does not count), see whether origin/${INT} is an ancestor of HEAD (git -C ${wt} merge-base --is-ancestor origin/${INT} HEAD succeeds). When it is not, the head is behind its base and gets new checks once it is synced, so the failure counts only while another landing holds the lock and this one would wait: read the lock once, run alone and exactly: forge-claim land status --repo ${SLUG} --branch ${INT} --sha ${sha} (a Bash timeout of 20 minutes), and it counts only on the verdict held_by with a lock_sha other than ${sha}. When the failure counts, run no other lock command and wait for no check: return own_red with head (the headRefOid you read), failing (the name of every failed check), details (their links) and behind (true when the head is behind its base, else false), and lock null and checks null, because a later step fixes the branch before the lock is asked for, after it brought a head that is behind up to date. In every other case (another head, a head behind its base while no other landing holds the lock, no failed check, checks still running, none reported, or a read failed) return own_red null and go on.`
 const OWN_RED_SCHEMA = { type: 'object', properties: { head: { type: 'string' }, failing: STRS, details: { type: 'string' }, behind: { type: 'boolean' } }, required: ['head', 'failing'] }
 // The program checks the head itself: a reply that names another head, or none, diverts nothing.
 const ownRed = (r, sha) => !!r && typeof r === 'object' && !Array.isArray(r) && sameSha(r.head, sha) && Array.isArray(r.failing) && r.failing.some(x => typeof x === 'string' && x !== '')
-// The diagnosis is the one part of the fix that stays under the lock, so it is bounded: reading only, and a release when in doubt.
+// The diagnosis is the one part of the fix that stays under the lock, so it is bounded: reading only.
 const FIX_OFF_LOCK = sha => `The landing lock of the branch ${INT} is held for this pull request at ${sha}, and other landings wait for it. So decide first, quickly and changing nothing, whether the fix needs a commit: read only the failed job log, the check details and the branch's diff, and run no build and no test before the release. When the cause is in this branch's changes, or you cannot tell, release the lock before you edit any file: run alone and exactly: forge-claim land release --repo ${SLUG} --branch ${INT} --sha ${sha}
 released and not_held are both fine (give it a Bash timeout of 20 minutes). Return lock_released true once it answered either; the program takes the lock again after the review (that costs this landing one wait; holding the lock costs every waiter). Only when the failure clearly has no cause in the code (no commit is needed), keep the lock: run no forge-claim command and return lock_released false.`
 const FIX_NO_LOCK = `The landing lock of the branch ${INT} is not held and was not asked for yet: run no forge-claim command.`
-// #941: the probe a landing runs before it asks for the land lock, the same text in deliver-standard.js. git merge-tree --write-tree (git 2.38
-// or later) merges in memory: it writes no commit and touches neither the worktree nor the index, and its exit status alone says whether
-// the merge is clean (0, a head that is already current included) or conflicts (1). It also exits 1, with nothing on stdout, when a ref
-// is missing, so a conflict is exit 1 with the merged tree's id as the first line of output; the program checks that id itself. Anything
-// else proves nothing, so it reads as not conflicted and the landing goes on as it did before the probe existed: the sync under the lock
-// then finds the conflict (#913).
+// The probe a landing runs before it asks for the land lock, the same text in deliver-standard.js. git merge-tree
+// --write-tree (git 2.38 or later) merges in memory and touches neither the worktree nor the index; exit 0 is a clean
+// merge and exit 1 a conflict, but exit 1 with nothing on stdout is also a missing ref, so the program checks the tree
+// id itself. Anything else proves nothing: it reads as not conflicted and the sync under the lock finds the conflict.
 const PROBE = (wt, int) => `before any lock command, probe whether ${int} merges cleanly into the pushed head, changing nothing: run git -C ${wt} fetch origin, then alone and exactly: git -C ${wt} merge-tree --write-tree --name-only --no-messages HEAD origin/${int}
 Only its exit status and the first line of its output count: exit 0 is a clean merge; exit 1 is a conflict only when the first line of its output is a tree id (40 hexadecimal characters), and the conflicting files follow that line. Exit 1 with any other output (a missing ref prints nothing there) and every other exit are errors, not conflicts. It commits nothing and touches neither the worktree nor the index; never run git merge in this step. Return it as probe: conflicted (true only for that conflict), tree (the first line of the output, exactly as printed, when exit is 1), files (the conflicting files) and, on an error, conflicted false with the error in detail.
 When probe's conflicted is true, run no lock command and wait for no check: return lock null and checks null, because a later step resolves the conflict before the lock is asked for.`
 const PROBE_SCHEMA = { type: 'object', properties: { conflicted: { type: 'boolean' }, tree: { type: 'string' }, files: STRS, detail: { type: 'string' } }, required: ['conflicted'] }
 // A probe reply that proves a conflict: exit 1 alone does not, the tree id does.
 const probeConflict = p => !!p && typeof p === 'object' && p.conflicted === true && typeof p.tree === 'string' && /^[0-9a-f]{40}$/.test(p.tree.trim())
-// A folded reply carries its nested steps; a nested object may be absent, so its schema is nullable (#716).
+// A folded reply carries its nested steps; a nested object may be absent, so its schema is nullable.
 const NULLABLE = s => ({ anyOf: [s, { type: 'null' }] })
 const withRenew = (s, extra = {}) => ({ ...s, properties: { ...s.properties, renew: RENEW_SCHEMA, ...extra }, required: ['renew'] })
 const complete = (r, schema) => !!r && schema.required.every(k => r[k] !== undefined && r[k] !== null)
 const HOLDING = v => v === 'acquired' || v === 'already_held' || v === 'moved'
 
-// FOLDS (#801): three consecutive-call pairs are one call each. The release of the land lock leads the close-out call; the first checks poll
-// rides in land-pr (so there is no first resync: the poll already answers behind); and the next poll rides in the record step that follows a head
-// change (a CI fix or a resync). Two pairs stay separate: land-checks then land-merge, because the state picks fix, sync, re-poll or merge; and
-// land-merge then the release, because a retaken lock resyncs first and an unmerged PR stops.
-// The landing of one ready issue (D10). The order is: renew, open or re-adopt the PR at the ready head,
-// take the land lock with --wait and wait for the first checks (one agent call, land-pr), the checks loop (a resync only on a behind answer or a retaken lock), renew, the one-shot
-// pre-merge acquire and the merge (one agent call, land-merge), close out with the lock release first in that call (#677, #716, #801). Every exit goes through the wrapper at the bottom: a landing that holds the
-// lock releases it exactly once, at the last sha it was held at (P8): in the close-out call, and the wrapper releases only what that call did not confirm. A failed landing keeps the
-// claim and its cont (D9). A conflicted sync merge ends that hold early and its reviewed resolution starts a new one (#913, at resync below).
-// The kinds a criterion row can carry. A note is the orchestrator's own observation: never held, listed in a close-out comment (#736).
-// This copy of the rule lives here because the program has no filesystem access and shares no module with deliver-standard.js.
+// FOLDS: three consecutive-call pairs are one call each: the land lock release leads the close-out call; the first
+// checks poll rides in land-pr (so there is no first resync); the next poll rides in the record step after a head
+// change. land-checks and land-merge stay separate, as the state picks fix, sync, re-poll or merge; so do land-merge
+// and the release, because a retaken lock resyncs first and an unmerged PR stops.
+
+// The landing of one ready issue (D10): renew, open or re-adopt the PR at the ready head, take the land lock with
+// --wait and wait for the first checks (land-pr), the checks loop, renew, the one-shot pre-merge acquire and the merge
+// (land-merge), close out with the lock release first in that call. Every exit goes through the wrapper at the bottom:
+// a landing that holds the lock releases it exactly once, at the last sha it was held at (P8). A failed landing keeps
+// the claim and its cont (D9).
+
+// The kinds a criterion row can carry. A note is the orchestrator's own observation: never held, listed in a close-out
+// comment. This copy of the rule lives here because the program has no filesystem access and shares no module with
+// deliver-standard.js.
 const ACCEPT_KINDS = ['code', 'evidence', 'human', 'note']
 const OPEN_KINDS = ['evidence', 'human']
 const isOpen = a => !!(a && OPEN_KINDS.includes(a.kind))
 const RENEW_FIRST_OF = (n, B) => `First renew the claim of issue #${n}: run alone and exactly forge-claim renew --repo ${SLUG} --issue ${n} --holder ${HOLDER} --branch ${B} and return its verdict (renewed, not_held, or error on any other exit), by, detail and transient (true only when its JSON line has transient true) as renew. When renew's verdict is not renewed, stop there: run nothing else and return only renew. ${FORGE_TIMEOUT}`
-// The PR step of a landing: push the branch and open or re-adopt its PR with the body at the accepted head. land-pr and a train's train-pr (#822) share it.
-// #1001: with opened, land-open already wrote the body for this head, so the step leaves a body that names it alone.
+// The PR step of a landing: push the branch and open or re-adopt its PR with the body at the accepted head; land-pr and
+// a train's train-pr share it. With opened, land-open already wrote the body for this head, so the step leaves a body
+// that names it.
 const PR_OPEN = (n, ready, expected, opened = false) => {
   const ACS = JSON.stringify(ready.acceptance)
   const closesLine = !ready.acceptance.some(isOpen) && INT === SETUP.default_branch ? `Closes #${n}` : `Refs #${n}`
@@ -775,29 +783,29 @@ const PR_OPEN = (n, ready, expected, opened = false) => {
 Body, plain prose, no single or double quotes, dollar signs, backticks or backslashes: sections Why, What changes, Acceptance (a table with one row per criterion: id, criterion, kind, and the test or command that shows it; criteria ${ACS}), Evidence (verification ${JSON.stringify(ready.verify || [])}${OUTSIDE[n] ? `; verification fixes outside the branch's diff, each with its cause: ${JSON.stringify(OUTSIDE[n])}` : ''}; ${(ready.tasks || []).length} tasks reviewed; the last line of the Evidence section is exactly: Accepted head: ${expected}), Merge danger; then the line ${closesLine} as the last line of the body, with no attribution or generated-by line. Never attach or link the plan or the spec.
 Return pr (number) and head (the full sha of the pushed head).`
 }
-// The wait and the grading of a checks poll (its steps 3 and 4), shared by a landing's poll and a train car's (#822); `wait` is the bound of the watch.
-// #1008: `empty` is a landing's wait on a head with no check reported yet (EMPTY_HEAD_WAIT); a train car's `wait` already says its own.
+// The wait and the grading of a checks poll, shared by a landing's poll and a train car's; `wait` is the bound of the
+// watch. `empty` is a landing's wait on a head with no check reported yet (EMPTY_HEAD_WAIT); a train car's `wait` says
+// its own.
 const CHECKS_TAIL = (prRef, wait, empty = '') => `3. Otherwise wait in this turn until every check on head has completed, required or not. List every check with gh pr checks ${prRef} --repo ${SLUG} --json name,bucket,link (never --required) and wait with gh pr checks ${prRef} --repo ${SLUG} --watch ${wait}. It can return early and a list can be partial: never treat a partial list as green, and read the list again before answering. Bucket pass has passed; fail or cancel has failed; pending is still running; skipping never started and is ignored. The required set is the checks the project declares, as JSON: ${JSON.stringify(DECLARED)} (an empty list declares none), plus the checks the forge requires: take those from gh api repos/${SLUG}/rules/branches/${INT} (its required_status_checks rules) and, whenever that reply lists no required status checks, from classic branch protection. A declared check with no run or status at head yet is pending: keep waiting, never treat it as absent or green. A head with no check reported at all is pending too, never passed: runs can register minutes after a push.${empty}
 4. Answer passed only when no check on head is pending, failing or cancelled, with required (the required names you used) and passed (every name passing at head; a passed answer naming none is read as pending). Answer failed with failing (every failing or cancelled name, required or not) and details when any check failed. Answer needs_label with label and failing when a check failed only because the PR lacks a label that only a human may apply (do not apply it yourself). Answer pending with pending (the names still running) only when the wait ran out and no check failed.`
-// #1008: a passed reply that names no passing check is a head no check has reported on yet (runs register up to minutes after a
-// push), so it is read as pending: a landing counts it against its pending waits and a train car is late, never green. The contract
-// cannot declare an empty required list (the resolver refuses one), so there is no opt-out: the rule holds for every project.
+// A passed reply that names no passing check is a head no check has reported on yet (runs register up to minutes after
+// a push), so it is read as pending: a landing counts it against its pending waits and a train car is late, never
+// green. The contract cannot declare an empty required list (the resolver refuses one), so there is no opt-out.
 const noCheckYet = ck => !!ck && ck.state === 'passed' && !(Array.isArray(ck.passed) ? ck.passed : []).some(nonEmpty)
-// #1008: a merge the forge refused for the base branch's policy, with the head up to date, usually means the checks were not in yet.
+// a merge refused for the base branch's policy, with the head up to date, usually means the checks were not in yet.
 const POLICY_REFUSAL = mg => !!mg && mg.merged === false && mg.behind !== true && /base branch policy/i.test(String(mg.notes || ''))
-// #1008: gh pr checks --watch returns at once while no check is reported, so three quick pending answers would spend the pending
-// waits before the runs register. A landing's poll therefore waits for them itself, TRAIN_NO_CHECKS_MIN minutes at most, with the
-// train's own wait idiom; the same text in deliver-standard.js. The lock was taken or moved by the same call or the one before, and
-// the watch that follows may already run 60 minutes, so these minutes change nothing for the lock. A function, since the constant
-// is declared with the train's below.
+// gh pr checks --watch returns at once while no check is reported, so three quick pending answers would spend the
+// pending waits before the runs register. A landing's poll therefore waits for them itself, TRAIN_NO_CHECKS_MIN minutes
+// at most, the same text in deliver-standard.js. The lock was taken or moved by the same call or the one before and the
+// watch that follows may already run 60 minutes, so these minutes change nothing for the lock. A function, since the
+// constant is declared with the train's below.
 const EMPTY_HEAD_WAIT = () => ` While no check is reported on head, do not answer yet: read the list again about once a minute, running alone timeout 60 tail -f /dev/null between two reads (this step's own wait, which ends by itself with exit 124), and answer pending only when none is reported ${TRAIN_NO_CHECKS_MIN} minutes after your first read of the list.`
-// What a refused merge answers, in land-merge and train-merge alike (#870, #822).
 const MERGE_REFUSED = 'Never retry with another form; on a guard refusal or a head mismatch return merged false with the exact message in notes, and behind true only when the refusal says the head branch is not up to date with the base branch, or the guard says the PR is behind its base, else false.'
-// The one merge form of a landing, at an exact head; a train merges its car with the same form (#822).
 const MERGE_CMD = (pr, sha) => `${UNSET}gh pr merge ${pr} --repo ${SLUG} --${SETUP.merge_strategy} --match-head-commit ${sha}${SETUP.delete_branch ? ' --delete-branch' : ''}`
-// #1371: a fix commit a landing made and has not pushed, or whose review or tests did not pass, stays in the worktree and is carried in the issue's cont as
-// untested: { stage, start_head, head } (the range deliver-standard.js retests and reviews on a relaunch, whose first retest is from the head the landing knew, never the start_head the reply names).
-// A range already pending keeps its start. Only an issue that holds a cont can carry it.
+// A fix commit a landing made and has not pushed, or whose review or tests did not pass, stays in the worktree and is
+// carried in the issue's cont as untested: { stage, start_head, head } (deliver-standard.js retests and reviews that
+// range on a relaunch, from the head the landing knew). A range already pending keeps its start. Only an issue that
+// holds a cont can carry it.
 const holdFix = (n, stage, known, fix) => {
   if (!fix || !nonEmpty(fix.commit) || !nonEmpty(known) || sameSha(fix.commit, known) || !isObj(CONTS[n])) return
   const kept = isObj(CONTS[n].untested) && nonEmpty(CONTS[n].untested.start_head) ? CONTS[n].untested.start_head : known
@@ -825,19 +833,19 @@ const land = async (n, ready, via = {}) => {
   let lockSha = null
   // A move of the lock whose answer may have been lost (P10): the sha it may now be held at, released after lockSha.
   let lockMaybe = null
-  // The poll a previous call carried for the next round: { label, reply } or null (#801).
+  // The poll a previous call carried for the next round: { label, reply } or null.
   let carried = null
   const PENDING_WAITS = 3
   const waits = waitBudget()
   const c = { sync: 0, syncReview: 0, checks: 0, record: 0, relock: 0, conflicts: 0, ciFails: 0, pending: 0, refused: 0, early: 0, policy: 0 }
-  // #992: labels of this landing's reviews that answered twice with no usable review; every row of the landing carries them.
+  // labels of this landing's reviews that answered twice with no usable review; every row of the landing carries them.
   const lost = []
   const silence = label => (lost.includes(label) ? 'answered twice with no usable review' : 'returned nothing')
   const out = (outcome, extra) => ({ issue: n, outcome, ...(pr ? { pr } : {}), ...(lost.length ? { lost_reviews: lost.slice() } : {}), ...(extra || {}) })
   const call = (prompt, label, opts) => ask(agent(prompt, { label, phase: 'Land', ...opts }), label)
-  // #992: every FINDINGS reply of a landing is read here. An unusable one (see unusable) runs the same step once more as <label>-again;
-  // a second is answered as null, so it reaches no findingsOf and spends no fix round. The step did answer, so the breaker is left
-  // alone: the row names it in lost_reviews and its reason says the review answered twice with no usable review.
+  // every FINDINGS reply of a landing is read here. An unusable one (see unusable) runs the same step once more as
+  // <label>-again; a second is answered as null, so it spends no fix round. The step did answer, so the breaker is left
+  // alone: the row names it in lost_reviews.
   const readReview = async (asked, label, opts) => {
     const prompt = `${asked}\n${READ_ONLY}`
     const first = await call(prompt, label, opts)
@@ -852,7 +860,7 @@ const land = async (n, ready, via = {}) => {
   }
   const clerk = { agentType: 'clerk', model: CLERK_MODEL, effort: 'low' }
   const lifecycleClerk = { ...clerk, model: DEFAULT_CLERK_MODEL }
-  // The checks poll steps, shared by the standalone poll and the poll land-pr carries (#801).
+  // The checks poll steps, shared by the standalone poll and the poll land-pr carries.
   const CHECKS_STEPS = prRef => `1. git -C ${W} fetch origin; if the local branch is ahead of origin/${B}, push it. head is git -C ${W} rev-parse HEAD (the full sha).
 2. If origin/${INT} is not an ancestor of HEAD (git -C ${W} merge-base --is-ancestor origin/${INT} HEAD fails), answer state behind at once with head.
 ${CHECKS_TAIL(prRef, '(Bash timeout up to 60 minutes; rerun while any is pending)', EMPTY_HEAD_WAIT())}`
@@ -866,8 +874,9 @@ ${CHECKS_TAIL(prRef, '(Bash timeout up to 60 minutes; rerun while any is pending
     return out('stopped', { stage: 'renew', detail: r.detail || r.verdict })
   }
 
-  // Releases the lock at lockSha. A release that is not confirmed (any verdict but released or not_held, a lost reply, a dead agent) leaves the
-  // lock marked held at that sha, so the next release tries the same sha again: a conflicted sync goes on without the lock either way (#913).
+  // Releases the lock at lockSha. A release that is not confirmed (any verdict but released or not_held, a lost reply,
+  // a dead agent) leaves the lock marked held at that sha, so the next release tries it again; a conflicted sync goes
+  // on without the lock either way.
   const unlock = async () => {
     if (!lockHeld) return
     lockHeld = false
@@ -897,16 +906,15 @@ ${RULES}`, `land-ask-${n}`, { ...clerk, schema: ASK_SCHEMA })
     return out(outcome, extra)
   }
 
-  // After a head change that passed its gate once the PR exists (D13): record it, then move the lock.
-  // #913: with retake, the lock was released for a conflicted sync and the same step takes it again at the reviewed head, waiting
-  // (acquire --wait; a wait that runs out at the CLI's bound is waited for again in a land-relock step, within the budget of waitBudget, as
-  // the first wait is). Like land-pr, the call is marked as possibly holding the lock first (P5); a refusal holds nothing. When the release
-  // before the resolution was not confirmed, the lock is still marked held at the earlier sha: the retake is then tracked as a move, so a
-  // lost answer releases the earlier sha first and the reviewed head after it (P10).
-  // #941: with early, the conflict was found by the probe before the lock was ever asked for: the same step, and the take is the landing's first.
-  // #1001: with fixed, the lock was released (first), or never asked for (unasked), while a red check of the branch was fixed.
-  // #1018: synced is unasked for a branch that was only brought up to date before the lock was asked for.
-  // #1371: publish is true for a fix commit the program has not pushed yet: its tests are recorded and its review passed, so the record step pushes it first.
+  // After a head change that passed its gate once the PR exists (D13): record it, then move the lock. With retake, the
+  // lock was released for a conflicted sync and this step takes it again at the reviewed head, waiting (a wait that
+  // runs out at the CLI's bound is waited for again in a land-relock step, within waitBudget); the call is marked as
+  // possibly holding the lock first (P5). When the release before the resolution was not confirmed, the lock is still
+  // marked held at the earlier sha, so the retake is a move. early:
+
+  // the probe found the conflict before the lock was asked for. fixed: the lock was released (first) or never asked for
+  // (unasked) while a red check was fixed. synced: unasked for a branch brought up to date before the lock was asked
+  // for. publish: a fix commit not pushed yet, its tests recorded and review passed, so this step pushes it first.
   const advance = async (retake = false, early = false, fixed = null, publish = false) => {
     c.record++
     const label = `land-record-${n}-${c.record}`
@@ -929,23 +937,24 @@ Then, only when ok is true and lock's verdict is acquired, already_held or moved
 ${CHECKS_STEPS(pr)}
 Return those fields as checks; otherwise return checks null.
 ${RULES}`, label, { ...lifecycleClerk, schema: { ...RECORD_SCHEMA, properties: { ...RECORD_SCHEMA.properties, lock: NULLABLE(LOCK_SCHEMA), checks: NULLABLE(LAND_CHECKS_SCHEMA) } } })
-    // #1371: a record step that read the PR at the pushed head confirms the push of the reviewed fix commit.
+    // a record step that read the PR at the pushed head confirms the push of the reviewed fix commit.
     if (publish && rec && rec.ok === true && sameSha(rec.head, expected)) releaseFix(n, expected)
     let lv = rec && rec.lock ? rec.lock.verdict : null
     if (rec) logWait(label, rec.lock)
     let reread = false
     let unread = false
-    // #816: a refusal naming this batch at the lock it already held is a move whose read-back lagged, not contention: read the lock once and go on when it is at expected.
+    // a refusal naming this batch at the lock it already held is a move whose read-back lagged: read the lock once.
     if (!retake && rec && rec.ok === true && rec.head === expected && (lv === 'lost_to' || lv === 'held_by') && rec.lock.by === HOLDER && rec.lock.lock_sha === lockSha) {
       const st = await call(`The lock move to ${expected} for PR #${pr} of issue #${n} of ${SLUG} answered ${lv} naming this batch at ${lockSha}, which may be a lagging read. Read the cross-host landing lock of the branch ${INT} once: run alone and exactly: forge-claim land status --repo ${SLUG} --branch ${INT} --sha ${expected}
 Return its verdict (free, held_by, stale, or error on any other exit), lock_sha, by and detail from its output. ${FORGE_TIMEOUT} Run nothing else.
 ${RULES}`, `land-status-${n}-${c.record}`, { ...clerk, schema: STATUS_SCHEMA })
       if (st && st.verdict === 'held_by' && st.lock_sha === expected) { lv = 'moved'; reread = true }
-      // A failed or lost read proves nothing about where the lock is: the move may have landed, so expected stays a release target.
+      // A failed or lost read proves nothing about the lock: the move may have landed, so expected stays releasable.
       else if (!st || st.verdict === 'error') unread = true
     }
-    // #913: the retake's wait ran out behind other landings, so another holder has the lock and nothing of this landing's is held: renew the
-    // claim and wait again. Each call is marked as possibly holding the lock at the reviewed head first (P5).
+    // the retake's wait ran out behind other landings, so another holder has the lock and nothing of this landing's is
+    // held: renew the claim and wait again, each call marked as possibly holding the lock at the reviewed head first
+    // (P5).
     let relocked = false
     const more = waits()
     let ranOut = rec ? rec.lock : null
@@ -975,7 +984,7 @@ ${RULES}`, rl, { ...lifecycleClerk, schema: withRenew({ type: 'object', properti
       lockMaybe = null
     } else if (!unread && (lv === 'land-contended' || lv === 'held_by' || lv === 'lost_to')) {
       lockMaybe = null
-      // A refused retake holds nothing: another landing has the lock, whatever the release before the resolution answered.
+      // A refused retake holds nothing: another landing has the lock.
       if (retake) lockHeld = false
     } else if (!unread && rec && rec.ok === false && !rec.lock) {
       lockMaybe = null
@@ -989,20 +998,17 @@ ${RULES}`, rl, { ...lifecycleClerk, schema: withRenew({ type: 'object', properti
     return null
   }
 
-  // One resync of the branch with the integration branch (D10); a row ends the landing, null continues.
-  // #913: the sync step runs under the lock and only merges cleanly. A merge that conflicts is aborted there, so the worktree is clean, and the
-  // lock is released before anything else: the resolution, its tests, its review and the fix round all run outside it, with other landings free
-  // to merge. Only a resolution the review passed (and the re-review, after a fix) reaches advance(true), which records it as the accepted head
-  // and takes the lock again, waiting; its checks poll then answers behind when the integration branch moved meanwhile, and the loop resyncs
-  // again: a clean merge under the lock, a conflicted one outside it once more, MAX_CONFLICT_ROUNDS times at most and within the sync budgets.
-  // Every row returned between the release and the retake holds no lock, and the pushed merge is not the accepted head, so a relaunch sends
-  // the issue through its child's review instead of landing it as it stands.
-  // #941: with early (the probe's reply), land-pr found the conflict before it asked for the lock, so no sync step runs and nothing is held
-  // or waited for: the resolution, its review and its fix round are the same steps, and advance(true) takes the lock for the first time
-  // at the reviewed head. That round counts as a conflict round, not as a resync on a behind answer (c.early keeps it out of MAX_SYNCS).
-  // #1018: with prelock, land-pr read a failed check at a head behind ${INT} while another landing held the lock: the same sync step
-  // (and, on a conflict, the same resolution and review) runs before the lock is asked for, the merge is pushed and nothing is
-  // recorded or taken here; body() does that once it has read the checks of the new head. It counts as the early round does.
+  // One resync of the branch with the integration branch (D10); a row ends the landing, null continues. The sync step
+  // runs under the lock and only merges cleanly. A merge that conflicts is aborted there, so the worktree is clean, and
+  // the lock is released first: the resolution, its tests, its review and the fix round run outside it. Only a
+  // resolution the review passed reaches advance(true), which records it as the accepted head and takes the lock again,
+  // waiting; its poll then answers behind if the base moved, and the loop resyncs, MAX_CONFLICT_ROUNDS times at most.
+
+  // Every row returned between the release and the retake holds no lock, and the pushed merge is not the accepted head,
+  // so a relaunch sends the issue through its child's review. With early (the probe's reply) no sync step runs and
+  // nothing is held or waited for; the round counts as a conflict round, not a resync (c.early keeps it out of
+  // MAX_SYNCS). With prelock, the same sync step runs before the lock is asked for, and body() records and locks once
+  // it has read the checks of the new head.
   const resync = async (early = null, prelock = false) => {
     c.sync++
     if (early || prelock) c.early++
@@ -1020,15 +1026,16 @@ ${RULES}`, label, { phase: 'Land', agentType: 'implementer', model: 'sonnet', sc
     if (sy.status === 'current') {
       const at = sy.head || sy.merge_commit || expected
       if (at === expected) return null
-      // #1022: a sync step that was interrupted after its push and ran again finds the branch current at its own merge. The same
-      // step reads the commits on top of the expected head as facts, and the landing goes on as after a clean sync only when they
-      // pass the clean-merge rule of readopt (cleanMerges), the remote branch is at that head, so nothing is pushed here, and a
-      // second step proves them again. The record step then reads the PR head itself before it moves the lock. Anything else is
-      // a head this landing did not make.
+      // A sync step that was interrupted after its push and ran again finds the branch current at its own merge. The
+      // same step reads the commits on top of the expected head as facts, and the landing goes on as after a clean sync
+      // only when they pass the clean-merge rule of readopt (cleanMerges) and the remote branch is at that head, so
+      // nothing is pushed here. The record step then reads the PR head itself before it moves the lock. Anything else
+      // is a head this landing did not make.
       const moved = () => out('stopped', { stage: 'head-moved', expected, head: at })
       if (!(sy.pushed === true && cleanMerges({ head: at, pr_head: expected, ahead: sy.ahead }))) return moved()
-      // The sync step may be the one that made those commits (a conflict it resolved itself would skip its review on its own word),
-      // so another step proves them with its own commands, as the push step of readopt does; only proven true goes on.
+      // The sync step may be the one that made those commits (a conflict it resolved itself would skip its review on
+      // its own word), so another step proves them with its own commands, as the push step of readopt does; only proven
+      // true goes on.
       const plabel = `land-sync-prove-${n}-${c.sync}`
       const pv = await call(`The sync step of issue #${n} of ${SLUG} found the branch ${B} in the worktree ${W} already at ${at}, on top of the head ${expected} this landing expected, and reported the commits between them as clean merges of ${INT}. Prove that with your own commands and change nothing: never merge, commit, push, reset, clean, restore or stash anything.
 1. ${PROVE_MERGES(W, sy.ahead)}
@@ -1066,19 +1073,19 @@ ${RULES}`, rlabel, { phase: 'Land', agentType: 'implementer', model: 'sonnet', s
         if (merge.status !== 'done') return out('conflict', { detail: merge.notes })
       }
     }
-    // #986: the head may be a commit on top of the merge, so a resolution that names no merge commit names nothing the review can
-    // read as the merge: it never lands, whether the sync step or the resolve step made it. (A clean merge names its head alone.)
+    // The head may be a commit on top of the merge, so a resolution that names no merge commit names nothing the review
+    // can read as the merge: it never lands, whichever step made it. (A clean merge names its head alone.)
     if (merge.conflicted === true && !nonEmpty(merge.merge_commit)) return out('stopped', { stage: 'land-sync', detail: 'the resolution named no merge commit' })
     let head = merge.head || merge.merge_commit
     if (!head) return out('stopped', { stage: 'land-sync', detail: 'the resync named no head' })
-    // The review reads the merge commit and the landing merges the head. They are one commit, or (#986) the head is the merge commit
-    // with plain commits on top of it: the review then proves that ancestry and reads the range between them too, and the fix round
-    // and the re-review start at the head. Any other head is refused below, on the review's own answer.
+    // The review reads the merge commit and the landing merges the head. They are one commit, or the head is the merge
+    // commit with plain commits on top: the review then proves that ancestry and reads the range between them too, and
+    // the fix round and the re-review start at the head. Any other head is refused below, on the review's own answer.
     const mc = merge.merge_commit || head
     const followup = !sameSha(head, mc)
-    // A merge that conflicted is reviewed whatever its resolution says of itself: the sync step saw the conflict. A head that is not the
-    // merge commit is reviewed too, even after a clean merge: nothing else would read the commits on top of it.
-    // #1371: true once a reviewed fix commit of the sync review is the head and no step has pushed it yet.
+    // A merge that conflicted is reviewed whatever its resolution says of itself: the sync step saw the conflict. A
+    // head that is not the merge commit is reviewed too, even after a clean merge: nothing else would read the commits
+    // on top of it. True once a reviewed fix commit of the sync review is the head and no step has pushed it yet.
     let unpushed = false
     if (aborted || merge.conflicted || followup) {
       const after = followup ? SYNC_AFTER(W, mc, head) : ''
@@ -1087,10 +1094,10 @@ ${RULES}`, rlabel, { phase: 'Land', agentType: 'implementer', model: 'sonnet', s
       const rv = await readReview(`Issue #${n} of ${SLUG}, worktree ${W}, branch ${B}.
 Review the conflict resolution in merge commit ${mc}: git -C ${W} show --cc ${mc} and the resolved files ${JSON.stringify(merge.resolved_files || [])}; the tests run: ${JSON.stringify(merge.tests || [])}. Report Important or Critical defects only: a dropped change from either side, a broken merge of intent, a resolved file whose tests were not run.${merge.markers_checked === true ? '' : MARKERS_UNCHECKED}${followup ? DESCENDS(W, mc, head) : ''} Do not edit anything.
 ${RULES}`, reviewLabel, { agentType: 'reviewer', schema: SYNC_REVIEW_SCHEMA(followup) })
-      // #955: from here on the merge is resolved, so a landing that ends is a sync-review row, never a conflict one: what is left is the
-      // review of the resolution. Its reason leads with what ended it, then the unaccepted fix commit, then the finding left
-      // open (its file and summary), so the cap of the table's reason cuts the summary last. Like every other open row it posts no owner
-      // action, keeps the claim and the cont, and a relaunch sends the issue through its child's review (no code reads either outcome).
+      // From here on the merge is resolved, so a landing that ends is a sync-review row, never a conflict one. Its
+      // reason leads with what ended it, then the unaccepted fix commit, then the finding left open (its file and
+      // summary), so the table's reason cap cuts the summary last. Like every other open row it posts no owner action,
+      // keeps the claim and the cont, and a relaunch sends the issue through its child's review.
       const syncStop = (what, finding, fix, extra) => {
         const commit = fix && nonEmpty(fix.commit) && !sameSha(fix.commit, head) ? `unaccepted fix commit ${fix.commit}` : ''
         const left = isObj(finding) && nonEmpty(finding.summary) ? `finding ${nonEmpty(finding.file) ? `${finding.file}: ` : ''}${finding.summary}` : ''
@@ -1101,22 +1108,23 @@ ${RULES}`, reviewLabel, { agentType: 'reviewer', schema: SYNC_REVIEW_SCHEMA(foll
       if (followup && rv.descends !== true) return out('stopped', { stage: 'land-sync', detail: `the resolution names the head ${head} and the merge commit ${mc}, and the head does not descend from it: only a reviewed merge commit lands` })
       const found = findingsOf(rv)
       if (found.length) {
-        // #907: one fix round per reviewed merge. It is no resync, so it spends neither MAX_SYNCS nor MERGE_REFUSAL_RETRIES, and like the
-        // resolution it runs outside the lock (#913). Only a fix the re-review passes is recorded: advance(true) below takes the lock at it
-        // and waits for its checks.
+        // One fix round per reviewed merge. It is no resync, so it spends neither MAX_SYNCS nor MERGE_REFUSAL_RETRIES,
+        // and like the resolution it runs outside the lock. Only a fix the re-review passes is recorded: advance(true)
+        // below takes the lock at it and waits for its checks.
         const fix = await call(`Issue #${n} of ${SLUG}, worktree ${W}, branch ${B}.
 ${SYNC_FIX(W, mc, found, after)} Do not push: the program pushes the commit once its report records its tests and its review passes. ${PUSH_TESTS(GUARDS)}. ${COMMIT_SCOPE} ${IMPL_RETURN}
 ${RULES}`, `land-sync-fix-${n}-${c.syncReview}`, { agentType: 'implementer', model: 'sonnet', schema: IMPL })
-        // As shipFix in deliver-standard.js: the fix starts at the reviewed merge, no commit is accepted only as a rebuttal with evidence, and a
-        // full reviewer re-reviews either. A sync-review row from here on names the fix reply: its commit is unaccepted and not pushed.
+        // As shipFix in deliver-standard.js: the fix starts at the reviewed merge, no commit is accepted only as a
+        // rebuttal with evidence, and a full reviewer re-reviews either. A sync-review row from here on names the fix
+        // reply: its commit is unaccepted and not pushed.
         const tried = fix ? { fix: { commit: fix.commit, notes: fix.notes } } : {}
         const moved = !!fix && !sameSha(fix.commit, head)
-        // #1371: a fix commit stays local until it is pushed: it is carried as untested from here, whatever stops the round.
+        // a fix commit stays local until it is pushed: it is carried as untested from here, whatever stops the round.
         holdFix(n, 'sync-fix', head, fix)
         if (!fix || fix.status !== 'done' || !fix.commit || !sameSha(fix.start_head, head) || (!moved && !nonEmpty(fix.notes))) {
           return syncStop('the sync fix round did not finish', found[0], fix, { review: rv, ...tried })
         }
-        // #1371: the commit is not pushed yet; with no test command recorded it is never pushed, reviewed, recorded, locked or merged in this run.
+        // the commit is not pushed yet; with no test command recorded it is never pushed or merged in this run.
         if (moved && !tested(fix)) return syncStop(UNTESTED, found[0], fix, { review: rv, ...tried })
         const rr = await readReview(`Issue #${n} of ${SLUG}, worktree ${W}, branch ${B}.
 ${SYNC_REREVIEW(W, mc, found, fix, moved, after)}
@@ -1127,7 +1135,7 @@ ${RULES}`, rereviewLabel, { agentType: 'reviewer', schema: FINDINGS })
         if (moved) { head = fix.commit; unpushed = true }
       }
     }
-    // #1371: with prelock no record step follows here, and body() polls the checks of the head on the remote, so a reviewed fix commit is pushed now.
+    // with prelock no record step follows, and body() polls the remote head, so a reviewed fix commit is pushed now.
     if (unpushed && pr && prelock) {
       const plabel = `land-push-${n}-${c.sync}`
       const pu = await call(`A sync fix of issue #${n} of ${SLUG} passed its re-review at ${head} and is not pushed yet. Push it: git -C ${W} fetch origin, confirm git -C ${W} rev-parse HEAD prints ${head}, then run git -C ${W} push origin ${B}, then read git -C ${W} rev-parse origin/${B}. Return ok true and head (that sha) when the push succeeded. When HEAD is another commit or the push fails, change nothing else and return ok false with the head you read and the error in detail.
@@ -1142,14 +1150,14 @@ ${RULES}`, plabel, { ...lifecycleClerk, schema: RECORD_SCHEMA })
     return null
   }
 
-  // The close-out of a merged PR: the tail of a landing, and the whole of a train member's whose PR the train's car merged (#822).
+  // The close-out of a merged PR: the tail of a landing, and the whole of a train member's whose PR the car merged.
   const finish = async () => {
-    // The merge is done: a failure from here on must leave a cont, or a re-adopted PR (which has none) could not be closed out.
+    // The merge is done: a failure from here on must leave a cont, or a re-adopted PR could not be closed out.
     markMerged(n, ready, pr)
 
     const openCriteria = ready.acceptance.filter(isOpen)
     const notes = ready.acceptance.filter(a => a && a.kind === 'note')
-    // The lock release rides first in the close-out call (#801); the wrapper releases only what that call did not confirm.
+    // The lock release rides first in the close-out call; the wrapper releases only what that call did not confirm.
     const folding = lockHeld
     const co = await call(`Issue #${n} of ${SLUG}: PR #${pr} is merged into ${INT}. Close out; skip any step an earlier attempt already finished. Each command in its own Bash call:
 ${folding ? RELEASE_FIRST(lockSha, lockMaybe && lockMaybe !== lockSha ? lockMaybe : null) : ''}1. Invoke the deliver-direct skill with the Skill tool and run its step 7 (Close out) for this checkout ${REPO}, worktree ${W}, branch ${B} and integration branch ${INT}: it is the single source for removing the worktree, fast-forwarding the checkout and deleting the local branch.
@@ -1174,23 +1182,27 @@ ${RULES}`, `close-out-${n}`, { ...lifecycleClerk, schema: folding ? { ...CLOSE_S
 
   const body = async () => {
     if (unknownKinds.length) return out('stopped', { stage: 'plan', detail: 'a ready criterion has a kind that is not code, evidence, human or note', bad_kinds: unknownKinds })
-    // The order (#677): the PR opens at the ready head, the land lock is taken waiting (the CLI waits
-    // within its bound; an answer of land-contended is waited for again in a land-lock step, within the budget of waitBudget, #818 and #1018) and the first checks are waited for in the same call
-    // (#801), so no check or merge happens outside the lock. A resync runs only on a behind answer or a
-    // retaken lock (and once before the lock, for a head that is red and behind while another landing holds the lock, #1018); one that changes the head pushes it and advance() moves the lock; lockSha changes only on a holding verdict, so the release below always
-    // names the last sha the lock was held at, even when a move fails.
-    // #1001: the PR is always pushed and opened before the lock is asked for: in this call, or earlier still, when the issue became ready
-    // behind another landing of the batch (landReady). A red check the branch caused is fixed outside the lock (fixRed).
-    // #941: before it asks for the lock, the same call probes whether the integration branch merges cleanly into the head (PROBE). Clean, or
-    // already current: nothing changes. Conflicted: the call runs no lock command, and the resolution, its review and its fix round run
-    // first, holding and waiting for nothing (resync(early)); the reviewed head is recorded and takes the lock in the record step, as after a
-    // #913 resolution. A conflict first seen under the lock keeps the #913 path, and both count toward MAX_CONFLICT_ROUNDS.
-    // #1001: a check that already failed at the head of a pull request that existed before the call (a relaunch, or one opened while
-    // the issue waited in the land queue, see openEarly) is read there too, before the lock: the call then runs no lock command and
-    // the fix step runs first, holding and waiting for nothing (fixRed below).
-    // The PR opened while this issue waited in the land queue: the pr call reuses it, so it must be there first.
+    // The order: the PR opens at the ready head, the land lock is taken waiting (an answer of land-contended is waited
+    // for again in a land-lock step, within waitBudget) and the first checks are waited for in the same call, so no
+    // check or merge happens outside the lock. A resync runs only on a behind answer or a retaken lock (and once before
+    // the lock, for a head that is red and behind while another landing holds it); one that changes the head pushes it
+    // and advance() moves the lock.
+
+    // lockSha changes only on a holding verdict, so the release below names the last sha the lock was held at, even
+    // when a move fails.
+
+    // The PR is always pushed and opened before the lock is asked for: in this call, or earlier, when the issue became
+    // ready behind another landing (landReady). A red check the branch caused, including one a PR that existed before
+    // the call already shows, is fixed outside the lock (fixRed): the call runs no lock command and the fix step runs
+    // first, holding nothing.
+
+    // Before it asks for the lock the call probes whether the integration branch merges cleanly into the head (PROBE).
+    // Conflicted: no lock command runs, the resolution, review and fix round run first (resync(early)), and the
+    // reviewed head takes the lock in the record step. A conflict first seen under the lock takes the same path; both
+    // count toward MAX_CONFLICT_ROUNDS.
     if (OPENING[n]) await OPENING[n]
-    // The pr call may take the lock (--wait) after opening the PR: mark the ready head as possibly held before it, so a lost reply still reaches the release (P5).
+    // mark the ready head as possibly held before the pr call, which may take the lock: a lost reply still reaches
+    // release.
     lockHeld = true
     lockSha = expected
     const prR = await recall(() => call(`${RENEW_FIRST}
@@ -1204,14 +1216,14 @@ ${CHECKS_STEPS('<the PR number>')}
 Return those fields as checks; otherwise return checks null.
 ${RULES}`, `land-pr-${n}`, { agentType: 'clerk', model: DEFAULT_CLERK_MODEL, effort: 'high', schema: withRenew(LAND_PR_SCHEMA, { probe: NULLABLE(PROBE_SCHEMA), own_red: NULLABLE(OWN_RED_SCHEMA), lock: NULLABLE(LOCK_SCHEMA), checks: NULLABLE(LAND_CHECKS_SCHEMA) }) }), r => r.renew)
     if (!prR) return out('stopped', { stage: 'pr', detail: `land-pr-${n} returned nothing` })
-    // #941: the probe found a conflict, so the step ran no lock command: nothing is held and nothing was waited for. A reply that names a
-    // lock verdict all the same, or no tree id, is read as before the probe existed (the sync under the lock finds the conflict, #913).
+    // The probe found a conflict, so the step ran no lock command: nothing is held and nothing was waited for. A reply
+    // that names a lock verdict all the same, or no tree id, is read as before the probe existed.
     const early = probeConflict(prR.probe) && !prR.lock ? prR.probe : null
-    // #1001: a check had already failed at the head, so the step ran no lock command either. A reply that names a lock verdict all the
-    // same is read as before (the first poll under the lock finds the red check).
+    // A check had already failed at the head, so the step ran no lock command either. A reply that names a lock verdict
+    // all the same is read as before (the first poll under the lock finds the red check).
     let preRed = !early && !prR.lock && ownRed(prR.own_red, expected) ? prR.own_red : null
     if (early || preRed) lockHeld = false
-    // A renew that ended ran nothing after it; a refused lock holds nothing (P5). Otherwise the lock stays marked held at expected (O2).
+    // A renew that ended ran nothing after it; a refused lock holds nothing (P5); else the lock stays held at expected.
     if (prR.renew && prR.renew.verdict !== 'renewed') lockHeld = false
     let v1 = prR.lock ? prR.lock.verdict : null
     logWait(`land-pr-${n}`, prR.lock)
@@ -1222,16 +1234,17 @@ ${RULES}`, `land-pr-${n}`, { agentType: 'clerk', model: DEFAULT_CLERK_MODEL, eff
     if (!complete(prR, LAND_PR_SCHEMA)) return out('stopped', { stage: 'pr', detail: `land-pr-${n} returned nothing` })
     pr = prR.pr
     if (prR.head !== expected) return out('stopped', { stage: 'head-moved', expected, head: prR.head })
-    // #818: land-contended is the wait running out at the CLI's bound behind other landings, so the claim is renewed and the same acquire
-    // waits again, within the budget of waitBudget (#1018: a wait that ended first in line or at a better place spends no retry).
-    // Each call is marked as possibly holding the lock first, as land-pr is (P5).
+    // land-contended is the wait running out at the CLI's bound behind other landings, so the claim is renewed and the
+    // same acquire waits again, within waitBudget (a wait that ended first in line or at a better place spends no
+    // retry). Each call is marked as possibly holding the lock first, as land-pr is (P5).
     let lockStep = `land-pr-${n}`
     if (early) {
-      // The resolution, its review and its fix round, then the record step that takes the lock at the reviewed head and carries its first poll.
+      // The resolution, its review and its fix round, then the record step that takes the lock at the reviewed head.
       log(`#${n}: ${INT} conflicts with the head; resolving before the land lock is asked for`)
       const r = await resync(early)
-      // A row that ends the landing before the record step took the lock: a step that answered conflicted may have taken the lock at the
-      // ready head all the same, against its prompt, so that head is marked possibly held and the wrapper releases it once (not_held normally).
+      // A row that ends the landing before the record step took the lock: a step that answered conflicted may have
+      // taken the lock at the ready head all the same, so that head is marked possibly held and the wrapper releases it
+      // once.
       if (r && c.record === 0) {
         lockHeld = true
         lockSha = ready.head
@@ -1239,18 +1252,17 @@ ${RULES}`, `land-pr-${n}`, { agentType: 'clerk', model: DEFAULT_CLERK_MODEL, eff
       }
       if (r) return r
     }
-    // #1018: the failed check was read at a head behind ${INT} while another landing held the lock, so this landing would wait, and
-    // the sync under the lock would then rerun that check with every other landing waiting behind it. The branch is brought up to
-    // date now, outside the lock (resync with prelock: the usual sync step, resolution and review), and the checks of the new head
-    // are waited for with no lock asked for. Still red: the fix step runs before the lock, as for any check that had failed at the
-    // head. Anything else: the head is recorded and takes the lock, waiting. A green head that is behind is never resynced early.
+    // The failed check was read at a head behind ${INT} while another landing held the lock, so this landing would
+    // wait, and the sync under the lock would then rerun that check with every other landing waiting behind it. The
+    // branch is brought up to date now, outside the lock (resync with prelock), and the checks of the new head are
+    // waited for with no lock asked for. Still red: the fix step runs before the lock. Anything else: the head is
+    // recorded and takes the lock, waiting. A green head that is behind is never resynced early.
     let synced = false
     // True while the head that sync made is pushed and not yet recorded as the accepted head.
     let unrecorded = false
     let resolvedEarly = false
     if (preRed && preRed.behind === true) {
       log(`#${n}: ${preRed.failing.filter(nonEmpty).join(', ')} had failed at a head behind ${INT} and the land lock is held; bringing the branch up to date before the lock is asked for`)
-      // As after the probe: a row that ends the landing here marks the ready head possibly held, and the wrapper releases it once.
       const unasked = row => {
         lockHeld = true
         lockSha = ready.head
@@ -1271,7 +1283,7 @@ ${RULES}`, label, { ...lifecycleClerk, schema: LAND_CHECKS_SCHEMA })
       if (!ck) return unasked(out('stopped', { stage: 'checks', detail: `${label} returned nothing` }))
       if (ck.head !== expected) return unasked(out('stopped', { stage: 'head-moved', expected, head: ck.head }))
       const names = (ck.failing || []).filter(nonEmpty)
-      // As in the loop below: behind (the base moved again) and needs_label are not a red poll, and the poll under the lock answers them.
+      // As in the loop below: behind and needs_label are not a red poll, and the poll under the lock answers them.
       if (ck.state !== 'behind' && ck.state !== 'needs_label' && (ck.state === 'failed' || names.length)) preRed = { head: expected, failing: names, details: ck.details }
       else {
         preRed = null
@@ -1281,7 +1293,6 @@ ${RULES}`, label, { ...lifecycleClerk, schema: LAND_CHECKS_SCHEMA })
         if (row) return row
       }
     }
-    // The waits of this landing so far, which number its land-lock steps: the retries below and the wait after a train lost the lock (#971).
     let lockWaits = 0
     // ranOut is the lock reply of the wait that just ran out; null when v1 was set here to ask for a first wait.
     const waitAgain = async (why = 'an earlier wait for it ran out behind other landings', ranOut = null) => {
@@ -1312,22 +1323,20 @@ ${RULES}`, label, { ...lifecycleClerk, schema: withRenew({ type: 'object', prope
       if (row) return row
     }
 
-    // A retried wait polled no checks: the loop polls them itself, and its first poll is the handover point (#986).
+    // A retried wait polled no checks: the loop polls them itself, and its first poll is the handover point.
     if (!early && !preRed && !synced) carried = lockStep === `land-pr-${n}` ? { label: lockStep, reply: prR.checks || null } : null
 
-    // #822: the first issue of a train hands over here, holding the lock at its ready head (the reviewed head, when it resolved a conflict
-    // before it asked for the lock, #941: the record step's poll is then the first), once its own first poll answers behind (a head that is
-    // current lands alone, as ever). The train answers merged (its car, which contains this head, is merged: only the close-out is left), a row
-    // that ends this landing, or nothing, and then the landing goes on below as if no train had run. The lock never moves meanwhile.
-    // #936: a landing that began alone asks via.join at this same point, in the same turn its lock wait ended: it answers a train when other
-    // issues of the batch became ready meanwhile, else nothing, and then no step is added and the landing goes on alone.
-    // #986: a wait that ended in a retry step (land-lock, or land-relock after the record step of a #941 resolution) carried no poll, so
-    // the first poll is the loop's own land-checks step. It is the same handover point: nothing has moved since the lock was taken (no
-    // sync, no record, no fix), a behind answer returns at once, and the long wait is exactly when other issues become ready. The
-    // handover is asked once per landing, at its first poll, whichever step carried it; the wait after a train lost the lock is not one.
+    // The first issue of a train hands over here, holding the lock at its ready head (the reviewed head, when it
+    // resolved a conflict before it asked for the lock), once its own first poll answers behind (a head that is current
+    // lands alone). The train answers merged (its car, which contains this head, is merged: only the close-out is
+    // left), a row that ends this landing, or nothing, and then the landing goes on below as if no train had run. The
+    // lock never moves meanwhile.
+
+    // A landing that began alone asks via.join at this same point; a wait that ended in a retry step carried no poll,
+    // so the first poll is the loop's own land-checks step, the same handover point. It is asked once per landing, at
+    // its first poll.
     let trained = false
     let asked = false
-    // Answers a row that ends the landing, 'again' when the lock was lost and waited for again (poll anew), or null (go on).
     const handOver = async reply => {
       if (asked) return null
       asked = true
@@ -1337,8 +1346,8 @@ ${RULES}`, label, { ...lifecycleClerk, schema: withRenew({ type: 'object', prope
       if (t && t.row) return out(t.row.outcome, t.row.extra)
       trained = !!(t && t.merged)
       if (t && t.lost) {
-        // #971: a refresh of the train found the lock taken over, so nothing is held any more. The landing waits for the lock again at
-        // the same head, as after a wait that ran out, and then polls its checks itself; the base has moved, so it resyncs as any landing.
+        // A refresh of the train found the lock taken over, so nothing is held any more. The landing waits for the lock
+        // again at the same head and then polls its checks itself; the base has moved, so it resyncs as any landing.
         log(`#${n}: the land lock was lost during the train; waiting for it again`)
         v1 = 'land-contended'
         carried = null
@@ -1347,16 +1356,17 @@ ${RULES}`, label, { ...lifecycleClerk, schema: withRenew({ type: 'object', prope
       }
       return null
     }
-    // True after a rerun of failed jobs at an unchanged head, until the poll that follows it answered (#986).
+    // True after a rerun of failed jobs at an unchanged head, until the poll that follows it answered.
     let reran = false
-    // The one fix round of a red check (ciFails bounds it); a row ends the landing, null goes on to the next poll.
-    // #1001: mode says where the lock is. held: under the lock, as before (a red check after a sync under the lock). first: the lock
-    // is held at a head no sync has changed under it, so the red check was the branch's own before the lock arrived: the fix step
-    // releases the lock itself once it knows the fix needs a commit (FIX_OFF_LOCK), a release it did not report is made here, and the
-    // review runs outside the lock too. unasked: the pr call read the red check and asked for no lock. In both, the reviewed fix is
-    // recorded and takes the lock in advance(true), waiting, and its reply carries the next poll. A fix step that only reran jobs
-    // keeps the lock (first) or takes it now, waiting (unasked), and the loop polls. The lock stays marked held at its last sha on
-    // the fix step's word alone, so a row that ends the landing releases it once more (not_held normally), as after a #941 probe.
+    // The one fix round of a red check (ciFails bounds it); a row ends the landing, null goes on to the next poll. mode
+    // says where the lock is. held: under the lock (a red check after a sync under it). first: the lock is held at a
+    // head no sync has changed, so the red check was the branch's own: the fix step releases the lock itself once the
+    // fix needs a commit (FIX_OFF_LOCK), a release it did not report is made here, and the review runs outside the lock
+    // too. unasked: the pr call read the red check and asked for no lock.
+
+    // In both, the reviewed fix is recorded and takes the lock in advance(true), waiting. A fix step that only reran
+    // jobs keeps the lock (first) or takes it now (unasked), and the loop polls. A row that ends the landing releases
+    // the lock once more (not_held normally).
     const fixRed = async (failingNames, details, mode) => {
       const offLock = mode !== 'held'
       const end = extra => {
@@ -1367,28 +1377,28 @@ ${RULES}`, label, { ...lifecycleClerk, schema: withRenew({ type: 'object', prope
 ${mode === 'first' ? `${FIX_OFF_LOCK(lockSha)}\n` : mode === 'unasked' ? `${FIX_NO_LOCK}\n` : ''}Work in the worktree ${W} on branch ${B}. Find the cause in this branch's changes, fix the failing checks with the smallest change and a regression test, and commit. Do not push: the program pushes the commit once its report records its tests and its review passes. ${PUSH_TESTS(GUARDS)}. Never weaken, skip or delete a test or check to make it pass. ${COMMIT_SCOPE} ${IMPL_RETURN}
 When the failure has no cause in the code (an infrastructure, cache or network error in a setup step), change and commit nothing: ${RERUN_ALL(UNSET, SLUG, expected)}, do not wait for them, and return status done with the head unchanged (commit equal to start_head, ${expected}) and the error you saw in notes; the program then polls the checks itself.
 ${RULES}`, `land-fix-${n}`, { agentType: 'implementer', model: 'sonnet', schema: mode === 'first' ? { ...IMPL, properties: { ...IMPL.properties, lock_released: { type: 'boolean' } } } : IMPL })
-      // #1371: a fix commit stays local until it is pushed: it is carried as untested from here, whatever ends the round.
+      // a fix commit stays local until it is pushed: it is carried as untested from here, whatever ends the round.
       holdFix(n, 'checks-fix', expected, fix)
       if (!fix || fix.status !== 'done' || !fix.commit) return end({ detail: 'the fix round did not finish' })
       const letGo = mode === 'first' && fix.lock_released === true
-      // #818: done at the unchanged head is a rerun of jobs that failed for no cause in the code. The loop polls again; ciFails still ends a second red poll as ci-failed.
-      // #986: that next poll alone may rerun a stale gate (STALE_RERUN).
+      // done at the unchanged head is a rerun of jobs that failed for no cause in the code. The loop polls again;
+      // ciFails still ends a second red poll as ci-failed. That next poll alone may rerun a stale gate (STALE_RERUN).
       if (sameSha(fix.commit, expected)) {
         reran = true
         if (mode === 'held' || (mode === 'first' && !letGo)) return null
-        // #1018: a head synced before the lock is not recorded yet: the record step records it and takes the lock, and the loop polls.
+        // a head synced before the lock is not recorded yet: the record step records it and takes the lock.
         if (mode === 'unasked' && unrecorded) {
           unrecorded = false
           const row = await advance(true, resolvedEarly, resolvedEarly ? null : 'synced')
           carried = null
           return row
         }
-        // No lock is held: it was never asked for, or the step released it against its prompt. Take it, waiting, then poll.
+        // No lock is held: it was never asked for, or the step released it against its prompt. Take it, waiting.
         v1 = 'land-contended'
         carried = null
         return await waitAgain(mode === 'unasked' ? 'the failed jobs of a red check were rerun before it was asked for' : 'the step that reran the failed jobs of a red check released it')
       }
-      // #1371: the commit is not pushed yet; with no test command recorded it is never pushed, reviewed, recorded, locked or merged in this run.
+      // the commit is not pushed yet; with no test command recorded it is never pushed or merged in this run.
       if (!tested(fix)) return end({ detail: UNTESTED })
       if (mode === 'first') {
         log(`#${n}: ${failingNames.join(', ') || 'a check'} failed at the head the lock was taken at; its fix is reviewed outside the land lock`)
@@ -1416,7 +1426,7 @@ ${RULES}`, `land-fix-review-${n}`, { agentType: 'reviewer', schema: FINDINGS })
       const label = `land-checks-${n}-${c.checks}`
       const fold = carried
       carried = null
-      // #986: the poll that follows a rerun of failed jobs, the only one that may answer stale; a poll whose wait ran out keeps it for the next.
+      // the poll after a rerun of failed jobs, the only one that may answer stale; a poll whose wait ran out keeps it.
       const stalePoll = reran && !fold
       const ck = fold ? fold.reply : await call(`Wait for every check of PR #${pr} of issue #${n} of ${SLUG} (worktree ${W}, branch ${B}) at the head, required or not.
 ${CHECKS_STEPS(pr)}
@@ -1443,15 +1453,15 @@ ${stalePoll ? `${STALE_RERUN(UNSET, SLUG)}\n` : ''}${RULES}`, label, { ...lifecy
       }
       if (state !== 'pending') reran = false
       if (state === 'failed') {
-        // #986: every failing check was a gate on an old result and the checks step reran it: not a red poll. Once per landing, since
-        // only the one poll after the one rerun is asked; the next poll counts whatever it shows.
+        // every failing check was a gate on an old result and the checks step reran it: not a red poll. Once per
+        // landing, since only the one poll after the one rerun is asked; the next poll counts whatever it shows.
         if (stalePoll && staleOf(ck).length) {
           log(`#${n}: ${label} reran ${staleOf(ck).length === 1 ? 'a stale gate run' : `${staleOf(ck).length} stale gate runs`} (${staleOf(ck).join(', ')}); polling once more`)
           continue
         }
         c.ciFails++
         if (c.ciFails >= 2) return out('ci-failed', { failing: failingNames, details: ck.details })
-        // #1001: no sync has changed the head under the lock, so the red check is the branch's own: its fix goes outside the lock.
+        // no sync has changed the head under the lock, so the red check is the branch's own: its fix goes outside it.
         const row = await fixRed(failingNames, ck.details, c.sync - c.early === 0 ? 'first' : 'held')
         if (row) return row
         continue
@@ -1472,7 +1482,7 @@ ${stalePoll ? `${STALE_RERUN(UNSET, SLUG)}\n` : ''}${RULES}`, label, { ...lifecy
       const missingNames = DECLARED.filter(d => !have.includes(d))
       if (missingNames.length) return out('stopped', { stage: 'checks', missing: missingNames })
 
-      // One call: renew, the pre-merge lock check (still held or moved merges; retaken after a loss rechecks first), then the merge (O3).
+      // One call: renew, the pre-merge lock check (a lock retaken after a loss rechecks first), then the merge (O3).
       const mg = await recall(() => call(`${RENEW_FIRST}
 Then re-check the cross-host landing lock of the branch ${INT} for PR #${pr}: run alone and exactly: ${LAND_ACQUIRE(expected, false)}
 ${LOCK_RETURN} Return it as lock.
@@ -1497,16 +1507,17 @@ ${RULES}`, `land-merge-${n}`, { ...lifecycleClerk, schema: withRenew(LAND_MERGE_
         continue
       }
       if (v2 !== 'already_held' && v2 !== 'moved') return out('land-contended', { detail: `the land lock was not held before the merge (${v2})` })
-      // #870: refused as not up to date, the lock still held at expected: resync on the refusal budget (a changed head moves the lock and
-      // waits for its checks in advance(), an unchanged one is polled again), then merge again; any other refusal stops.
+      // refused as not up to date, the lock still held at expected: resync on the refusal budget (a changed head moves
+      // the lock and waits for its checks in advance(), an unchanged one is polled again), then merge again; any other
+      // refusal stops.
       if (mg.merged === false && mg.behind === true && c.refused < MERGE_REFUSAL_RETRIES) {
         c.refused++
         const r = await resync()
         if (r) return r
         continue
       }
-      // #1008: refused by the base branch's policy and not behind: the checks are polled once more, and that poll picks the merge, the
-      // fix or the stop. A second such refusal stops, as every other refusal does.
+      // refused by the base branch's policy and not behind: the checks are polled once more, and that poll picks the
+      // merge, the fix or the stop. A second such refusal stops, as every other refusal does.
       if (POLICY_REFUSAL(mg) && c.policy < 1) {
         c.policy++
         log(`#${n}: the merge was refused by the policy of ${INT}; polling the checks once more`)
@@ -1520,7 +1531,7 @@ ${RULES}`, `land-merge-${n}`, { ...lifecycleClerk, schema: withRenew(LAND_MERGE_
 
   let result
   try {
-    // #822: a train member whose PR the car merged holds no lock and has only its close-out left.
+    // a train member whose PR the car merged holds no lock and has only its close-out left.
     if (Number.isInteger(via.mergedPr)) {
       pr = via.mergedPr
       result = await finish()
@@ -1529,81 +1540,71 @@ ${RULES}`, `land-merge-${n}`, { ...lifecycleClerk, schema: withRenew(LAND_MERGE_
     result = out('stopped', { stage: 'land', detail: String((e && e.message) || e) })
   }
   try { await unlock() } catch (e) { /* the row stands; a dead unlock agent already tripped the breaker */ }
-  // D9: a landing failure keeps the claim, and CONTS[n] already holds the ready result's cont (set when the child returned), so a relaunch re-adopts both.
+  // D9: a landing failure keeps the claim, and CONTS[n] already holds the ready cont, so a relaunch re-adopts both.
   return result
 }
 
-// --- Train landing (#822): only with the train arg; without it landReady is the serial enqueue and nothing below runs ---
-// A ready issue joins WAITING and enqueues one drain on the land queue. A drain takes up to TRAIN_MAX waiting issues. One issue, a merge
-// strategy other than merge, or a first issue whose head is current with the integration branch, lands serially through land(), unchanged.
-// #936: an issue a drain lands alone still forms a train when others became ready while it waited for the land lock. Its land-pr call
-// (or nothing later) is the wait: when that call returns holding the lock with a behind first poll, the handover point of a train's first
-// issue, the landing takes up to TRAIN_MAX - 1 issues waiting at that moment as the later members of a train and hands over exactly as below.
-// Nothing is waiting: no step is added. Past that point (a first poll that is not behind, a sync, a record) nothing joins. A wait that
-// ended in a retry step (land-lock, land-relock) carried no poll: the landing's own first poll is then that point (#986).
-// #941: a landing whose probe found a conflict resolved it before it asked for the lock, so its wait is the record step that takes the lock
-// at the reviewed head: that step's reply is the handover point in the same way, and the train runs with that head as H1.
-// Otherwise the first issue's land() takes the lock at its ready head H1 and hands over to the train (via.train), which:
-//   train-pr-<n>      opens the PR of every later member at its ready head (renew first; no lock, no checks);
-//   train-build-<t>   builds car i = integration branch + heads 1..i on scratch branches land-train/<batch>-<t>-<i>, one car PR each;
-//   train-checks-<t>-<i>  waits for every car's checks, in parallel and bounded; g is the longest green prefix. When the car after that
-//                     prefix is still pending with no failed check, the pending cars get one further, shorter wait
-//                     (train-checks-<t>-<i>-more), once per train, and g is read again;
-//   train-ready-<t>   renews the claims of members 1..g and reads their PR heads; a member that fails shrinks the train to those before it;
-//   train-merge-<t>   re-checks the lock at H1 (already_held only), merges car g at its exact head and reads the member PRs once;
-//   train-flip-<t>-<k>  reads the states again while a member PR still reads OPEN (the forge marks them merged itself, since the car's
-//                     history contains their heads), TRAIN_FLIP_CALLS times at most; it also reads the car once when the merge reply was lost
-//                     or the merge was refused as behind;
-//   close-out-<n>     per merged member, the landing's own close-out; the lock release rides in the first member's, as in a serial landing;
-//   train-sweep-<s>   closes the open cars and deletes the car branches, the scratch worktree and the merged members' remote branches.
-// Rows stay per issue, with the issue's own PR; the row of an issue whose commits the car merged also carries train and car_pr.
-// Invariants. The lock is the first landing's: taken once at H1, never moved by the train, released once by that landing (its close-out, or its
-// wrapper on any other exit). Nothing merges unless every car up to g is green at its exact head. A train never writes to an issue branch and
-// never reads a merge commit. An issue a train did not land never goes back to WAITING: it lands in the same drain through landOne, the
-// ordinary landing start, so the other issues its train dropped, and then the issues waiting when its own lock wait ends, ride a train behind
-// it (#971; the #936 rule and limits). The chain of trains ends by itself: only a later member is ever dropped, so each train's
-// leader leaves the pool (the dropped issues and WAITING, which only a child's ready return fills) for good, and the pool shrinks with every train. Any surprise before the merge step (a dead, thrown or malformed step, a conflict, a red or late car) sweeps and falls back to
-// land(), and so does a merge the forge or the guard refused as behind once a read shows the car still open (the first landing then resyncs
-// and moves the lock as any behind landing does); any other surprise in the merge step stops its members, because the car may be merged.
+// --- Train landing: only with the train arg; without it landReady is the serial enqueue and nothing below runs --- A
+// ready issue joins WAITING and enqueues one drain on the land queue. A drain takes up to TRAIN_MAX waiting issues. One
+// issue, a merge strategy other than merge, or a first issue whose head is current with the integration branch, lands
+// serially through land().
+
+// An issue a drain lands alone still forms a train when others became ready while it waited for the land lock: when its
+// land-pr call returns holding the lock with a behind first poll (the handover point), it takes up to TRAIN_MAX - 1
+// waiting issues as later members. A landing whose probe found a conflict resolved it first, so its record step's reply
+// is the handover point and the train runs with that head as H1.
+
+// The first issue's land() takes the lock at its ready head H1 and hands over to the train (via.train), whose steps
+// are: train-pr opens the PR of every later member (no lock, no checks); train-build builds car i = integration branch
+// + heads 1..i on scratch branches, one car PR each; train-checks waits for every car's checks, in parallel, g being
+// the longest green prefix; train-ready renews the claims of members 1..g, a failing member shrinking the train;
+// train-merge re-checks the lock at H1 (already_held only) and merges car g at its exact head;
+
+// train-flip reads the states again while a member PR still reads OPEN, TRAIN_FLIP_CALLS times at most; close-out-<n>
+// is the landing's own close-out per merged member; train-sweep closes the open cars and deletes the car branches, the
+// scratch worktree and the merged members' remote branches.
+
+// The lock is the first landing's: taken once at H1, never moved by the train, released once by that landing. Nothing
+// merges unless every car up to g is green at its exact head. A train never writes to an issue branch and never reads a
+// merge commit. An issue a train did not land lands in the same drain through landOne and never goes back to WAITING.
+// Any surprise before the merge step sweeps and falls back to land(), as does a merge refused as behind once a read
+// shows the car still open; any other surprise in the merge step stops its members, because the car may be merged.
 const TRAIN_MAX = 3
-// forge_land_lock.py lets another host take over a lock it watched unchanged for IDLE_AFTER, 45 minutes, and a train's lock never changes:
-// an acquire at the same sha answers already_held and restarts no waiter's watch. The one long wait of a train is its car checks:
-// TRAIN_CHECKS_WAIT_MIN, plus TRAIN_CHECKS_MORE_MIN once per train when a car is still pending with no failed check at the first cap
-// (#822: a late car is nearly finished CI). #971: the first two real trains needed about 31 minutes of checks, so the first wait is 40 and
-// the further wait stays the fallback. The two waits, 46 minutes, are longer than the idle bound, so every checks step refreshes the lock
-// (forge-claim land refresh, D11 of forge_land_lock.py: it changes a second ref the waiters read, which restarts their watch). Time is
-// the only stop of the wait: a watch is TRAIN_REFRESH_MIN at most and is run again while a check is pending, and the step refreshes
-// before its first watch and before a later one once TRAIN_REFRESH_SKIP_MIN have passed since the last refresh, so watches that return
-// early neither flood the forge nor starve the lock. The lock is then idle for at most 7 + 15 = 22 minutes plus a turn while a checks step
-// waits; before the first refresh for land-pr's behind poll, train-pr and train-build, and after the last for at most one watch,
-// train-ready and train-merge (about five minutes in all in the first real train, so some 27 at worst); and, when the train falls back
-// (late cars, or a merge refused as behind), for the sweep, the forge read and the first landing's resync, since the lock first moves only
-// when that resync pushes a new head. A refresh that answers not_held says the lock is lost: the step stops waiting, the train sweeps and
-// falls back, and its first landing waits for the lock again before it goes on (see the handover in land()). A loss seen only later is
-// not unsafe either, but costs more: train-merge's acquire answers something other than already_held, so nothing merges and the train's
-// rows end land-contended.
+// forge_land_lock.py lets another host take over a lock it watched unchanged for IDLE_AFTER, 45 minutes, and a train's
+// lock never changes: an acquire at the same sha answers already_held and restarts no waiter's watch. The one long wait
+// of a train is its car checks: TRAIN_CHECKS_WAIT_MIN, plus TRAIN_CHECKS_MORE_MIN once per train when a car is still
+// pending with no failed check. The two waits, 46 minutes, are longer than the idle bound, so every checks step
+// refreshes the lock (forge-claim land refresh changes a second ref the waiters read, which restarts their watch).
+
+// A watch is TRAIN_REFRESH_MIN at most and is run again while a check is pending; the step refreshes before its first
+// watch and before a later one once TRAIN_REFRESH_SKIP_MIN have passed, so watches that return early neither flood the
+// forge nor starve the lock. A refresh that answers not_held says the lock is lost: the step stops waiting, the train
+// sweeps and falls back, and its first landing waits for the lock again (see the handover in land()). A loss seen only
+// later costs more:
+
+// train-merge's acquire answers something other than already_held, so nothing merges and the train's rows end
+// land-contended.
 const LOCK_IDLE_MIN = 45
 const TRAIN_CHECKS_WAIT_MIN = 40
 const TRAIN_CHECKS_MORE_MIN = 6
 const TRAIN_REFRESH_MIN = 15
 const TRAIN_REFRESH_SKIP_MIN = 7
-// A repository may run no check at all: a watch that reports none after this many minutes of the step is taken at its word.
+// A repository may run no check at all: a watch that reports none after this many minutes is taken at its word.
 const TRAIN_NO_CHECKS_MIN = 5
 const LAND_REFRESH = sha => `forge-claim land refresh --repo ${SLUG} --branch ${INT} --sha ${sha}`
-// What a train checks step adds to a checks reply: its refreshes (#971).
 const TRAIN_CHECKS_SCHEMA = { ...LAND_CHECKS_SCHEMA, properties: { ...LAND_CHECKS_SCHEMA.properties, refresh: { type: 'object', properties: { last: { type: 'string' }, refreshed: { type: 'integer' } } } } }
 const lockLost = ck => isObj(ck) && isObj(ck.refresh) && ck.refresh.last === 'not_held'
-// The forge marks the member PRs merged by itself after the car merge, and that can lag. No step sleeps: the program asks a read-only
-// train-flip step again while a member still reads OPEN, this many times at most, and each call's own duration is the wait.
+// The forge marks the member PRs merged by itself after the car merge, and that can lag. No step sleeps: the program
+// asks a read-only train-flip step again while a member still reads OPEN, this many times at most.
 const TRAIN_FLIP_CALLS = 8
 const CAR_PREFIX = `land-train/${BATCH}-`
 const WAITING = []
 let trainNo = 0
 let sweepNo = 0
-// Cars of this batch may be open: an earlier run that died mid-train, or a train of this run not yet swept clean. An open car contains the
-// lock's sha, and forge-claim refuses to move a lock contained in a PR that is not the caller's. So a drain asks for a sweep before it lands
-// anything, and a train's exits sweep too. A sweep that fails or dies stops nothing: carsMaybe stays set, the drain lands anyway (a lock move
-// may then answer land-contended, as any refused move does) and the next drain asks again.
+// Cars of this batch may be open: an earlier run that died mid-train, or a train not yet swept clean. An open car
+// contains the lock's sha, and forge-claim refuses to move a lock contained in a PR that is not the caller's, so a
+// drain asks for a sweep before it lands anything, and a train's exits sweep too. A sweep that fails stops nothing:
+// carsMaybe stays set and the next drain asks again.
 let carsMaybe = true
 const TRAIN_LIFECYCLE = { agentType: 'clerk', model: DEFAULT_CLERK_MODEL, effort: 'low' }
 const trainCall = (prompt, label, opts) => ask(agent(prompt, { label, phase: 'Land', ...opts }), label)
@@ -1625,7 +1626,6 @@ const TRAIN_MERGE_SCHEMA = {
   required: ['merged'],
 }
 
-// Clears every car of this batch; `branches` are the remote branches of members whose PRs the train merged. It never throws.
 const trainSweep = async (branches = []) => {
   sweepNo++
   let sw = null
@@ -1642,13 +1642,12 @@ ${RULES_FOR(REPO, '<branch>')}`, `train-sweep-${sweepNo}`, { ...TRAIN_LIFECYCLE,
   if (carsMaybe) log(`train-sweep-${sweepNo}: cars of ${BATCH} may still be open${sw && sw.detail ? ` (${sw.detail})` : ''}`)
 }
 
-// One train over `cands` (two or three ready issues, in order): `train` is what the first candidate's landing calls at its handover, `tag`
-// marks that landing's row, and `rest`, run once that landing ended, resolves the row of every other candidate.
+// One train over `cands` (two or three ready issues, in order): `train` is what the first candidate's landing calls at
+// its handover, `tag` marks that landing's row, and `rest`, run once it ended, resolves the row of every other
+// candidate.
 const trainOf = (cands, joined) => {
   const t = ++trainNo
   const first = cands[0]
-  // The head the first landing holds the lock at when it hands over: its ready head, or the reviewed head of a conflict it resolved before
-  // it asked for the lock (#941). The later members ride at their ready heads.
   let H1 = first.ready.head
   const headOf = e => (e === first ? H1 : e.ready.head)
   const carName = i => `${CAR_PREFIX}${t}-${i}`
@@ -1669,7 +1668,6 @@ const trainOf = (cands, joined) => {
     if (r.head !== e.ready.head) return rowOf(e, 'stopped', r.pr, { stage: 'head-moved', expected: e.ready.head, head: r.head })
     return null
   }
-  // A member's entry of the train-ready reply: [outcome, extra] when it leaves the train, null when its claim is renewed and its PR open at the ready head.
   const readyFail = (m, got) => {
     if (!isObj(got) || got.issue !== m.e.n) return ['stopped', { stage: 'train-ready', detail: `train-ready-${t} returned no entry for issue #${m.e.n}` }]
     const rn = got.renew
@@ -1686,7 +1684,6 @@ const trainOf = (cands, joined) => {
     return DECLARED.every(d => (ck.passed || []).includes(d))
   }
 
-  // The first landing calls this holding the lock at H1, with its own PR open there. See via.train in land() for what the answers mean.
   const train = async (pr1, head1 = H1) => {
     H1 = head1
     let members = [{ e: first, pr: pr1 }]
@@ -1696,18 +1693,18 @@ const trainOf = (cands, joined) => {
       for (const m of members.slice(1)) settled[m.e.n] = rowOf(m.e, outcome, m.pr, extra)
       return { row: { outcome, extra } }
     }
-    // Nothing is merged (before the merge step, or a merge refused as behind): clear the cars and let the first landing go on; the other candidates land serially after it.
-    // `lost` (#971): a refresh found the lock gone, so the first landing waits for it again before it goes on.
+    // Nothing is merged (before the merge step, or a merge refused as behind): clear the cars and let the first landing
+    // go on, the others landing serially after it. `lost`: a refresh found the lock gone, so the first landing waits
+    // for it again first.
     const fallBack = async (why, lost = false) => {
       log(`train ${t}: ${why}; its issues land serially`)
       if (carsMaybe) await trainSweep()
       return lost ? { lost: true } : null
     }
     try {
-      // 2. The PRs of the later members, in parallel. The first that fails ends the train before it; those after it land serially.
       const rest = cands.slice(1)
       const prs = await parallel(rest.map(e => async () => {
-        // #1001: a PR being opened while the member waited in the land queue is reused by this step, so it must be there first.
+        // a PR opened while the member waited in the land queue is reused by this step, so it must be there first.
         if (OPENING[e.n]) await OPENING[e.n]
         return recall(() => trainCall(`${RENEW_FIRST_OF(e.n, e.ready.branch)}
 ${PR_OPEN(e.n, e.ready, e.ready.head, !!OPENING[e.n])}
@@ -1721,7 +1718,6 @@ ${RULES_FOR(e.ready.worktree, e.ready.branch)}`, `train-pr-${e.n}`, { agentType:
       }
       if (members.length < 2) return await fallBack('no second pull request opened')
 
-      // 3. The cars. Only a leading run of cars the reply names for the right member, with a full sha and a PR, is used.
       carsMaybe = true
       const plan = members.map((m, i) => ({ issue: m.e.n, head: headOf(m.e), car: carName(i + 1) }))
       const bd = await trainCall(`A landing train of ${SLUG} (the git repository at ${REPO}) lands ${members.length} ready branches into ${INT} with one merge. Build its cars: car i is ${INT} plus the heads of the members 1 to i, each car on its own scratch branch with its own pull request into ${INT}. Never write to a member's own branch, and never resolve a conflict.
@@ -1739,8 +1735,8 @@ ${RULES_FOR('<the scratch worktree>', '<car>')}`, `train-build-${t}`, { agentTyp
       }
       if (!cars.length) return await fallBack(bd ? `no car was built (${bd.notes || bd.status})` : `train-build-${t} returned nothing`)
 
-      // 4. Every car's checks, in parallel, each bounded by time alone, read-only on the car (gh alone: no fetch, no git), the lock
-      // refreshed as it waits and the refreshes reported (#971). 5. The longest green prefix.
+      // 4. Every car's checks, in parallel, each bounded by time alone, read-only on the car (gh alone: no fetch, no
+      // git), the lock refreshed as it waits and the refreshes reported. 5. The longest green prefix.
       const checks = (i, min, label) => async () => {
         const c = cars[i]
         const ck = await trainCall(`Wait for every check of the pull request #${c.pr} of ${SLUG} (the git repository at ${REPO}), car ${i + 1} of a landing train into ${INT}, at the car head ${c.head}, required or not. Change nothing but the lock refresh of step 3.
@@ -1749,11 +1745,9 @@ ${RULES_FOR('<the scratch worktree>', '<car>')}`, `train-build-${t}`, { agentTyp
 ${CHECKS_TAIL(c.pr, `(time is the only stop of this wait: read the clock with date +%s when this step begins and again before each watch. The train holds the land lock, which another host takes over after ${LOCK_IDLE_MIN} minutes without a refresh. Refresh it before the first watch, and before a later watch once ${TRAIN_REFRESH_SKIP_MIN} minutes or more have passed since the last refresh: run alone and exactly, with a Bash timeout of 5 minutes: ${LAND_REFRESH(H1)} When it prints the verdict not_held the lock is lost: stop waiting and answer state failed at once, with head ${c.head} and details lock lost. On any other answer go on. Give each watch a Bash timeout of ${Math.min(min, TRAIN_REFRESH_MIN)} minutes at most, and less when less time is left. A watch that returns while a check is still pending, or that reports no check ${DECLARED.length ? '(the declared checks are then pending)' : `in the first ${Math.min(min, TRAIN_NO_CHECKS_MIN)} minutes of this step (later too when the forge requires a check)`}, is run again once you have read the list again. Start a watch at most once a minute: when the last one started less than a minute ago, first run alone timeout 60 tail -f /dev/null, this step's own wait, which ends by itself with exit 124. Stop waiting when no check is pending any more, or ${min} minutes after this step began, whatever is still pending then)`)}
 Also return refresh: last (the verdict the last refresh printed, or error when it printed none) and refreshed (how many of your refreshes printed refreshed).
 ${RULES_FOR(REPO, carName(i + 1))}`, label, { ...TRAIN_LIFECYCLE, schema: TRAIN_CHECKS_SCHEMA })
-        // The program sees the refreshes: a step that reports none is logged, and one that lost the lock ends the train (below).
         if (ck && !(isObj(ck.refresh) && ck.refresh.refreshed >= 1)) log(`${label}: the step reported no refresh of the land lock${isObj(ck.refresh) && ck.refresh.last ? ` (the last answered ${ck.refresh.last})` : ''}`)
         return ck
       }
-      // A refresh answered not_held: another landing took the lock over, so no car of this train can merge. Stop waiting for all of them.
       const lostNow = () => (cks.some(lockLost) ? fallBack('the land lock was lost while the cars waited for their checks', true) : null)
       const cks = await parallel(cars.map((c, i) => checks(i, TRAIN_CHECKS_WAIT_MIN, `train-checks-${t}-${i + 1}`)))
       const prefix = () => { let k = 0; while (k < cars.length && green(cks[k], cars[k])) k++; return k }
@@ -1775,7 +1769,6 @@ ${RULES_FOR(REPO, carName(i + 1))}`, label, { ...TRAIN_LIFECYCLE, schema: TRAIN_
       if (g < members.length) log(`train ${t}: cars 1 to ${g} of ${members.length} are green; the other issues land serially`)
       members = members.slice(0, g)
 
-      // 6. Renew every member's claim and confirm its PR is open at its ready head. A member that fails shrinks the train to those before it.
       const rd = await recall(() => trainCall(`A landing train of ${SLUG} (the git repository at ${REPO}) is about to merge into ${INT}. Renew the claims of its members and read their pull requests. Change nothing else.
 The members, in order, as JSON: ${JSON.stringify(members.map(m => ({ issue: m.e.n, branch: m.e.ready.branch, pr: m.pr, head: headOf(m.e) })))}
 1. For each member in order, run alone and exactly: forge-claim renew --repo ${SLUG} --issue <issue> --holder ${HOLDER} --branch <branch> and keep its verdict (renewed, not_held, or error on any other exit), by, detail and transient (true only when its JSON line has transient true) as that member's renew. Renew every member, whatever an earlier one answered. ${FORGE_TIMEOUT}
@@ -1795,13 +1788,12 @@ ${RULES_FOR(REPO, '<branch>')}`, `train-ready-${t}`, { agentType: 'clerk', model
       }
       members = members.slice(0, keep)
 
-      // The one-shot pre-merge acquire at H1 must answer already_held: the lock never moved, and acquired means it was lost and retaken.
+      // The pre-merge acquire at H1 must answer already_held: acquired means the lock was lost and retaken.
       const last = cars[members.length - 1]
       const memberPrs = members.map(m => m.pr)
       const states = {} // the last state read of each member PR
       const note = prs => { for (const p of (Array.isArray(prs) ? prs : [])) if (isObj(p) && memberPrs.includes(p.pr)) states[p.pr] = p.state }
       let flips = 0
-      // One read-only look at the forge: the car's state and the states of `prs`. A dead or thrown read answers null and still counts.
       const flip = async prs => {
         flips++
         let fl = null
@@ -1833,7 +1825,7 @@ Return merged, behind, notes and prs: one {pr, state} per member pull request as
 ${RULES_FOR(REPO, carName(members.length))}`, `train-merge-${t}`, { ...TRAIN_LIFECYCLE, effort: 'high', schema: TRAIN_MERGE_SCHEMA })
       } catch (e) { lost = String((e && e.message) || e) }
       if (!mg || !mg.lock) {
-        // The reply is lost or names no lock verdict, so the car may be merged: one read of the forge decides, before every member stops on it.
+        // The reply is lost or names no lock verdict, so the car may be merged: one read of the forge decides.
         const fl = await flip(memberPrs)
         if (!fl || fl.car !== 'MERGED') return endAll('stopped', { stage: 'train-merge', detail: lost || `train-merge-${t} returned ${mg ? 'no lock verdict' : 'nothing'}` })
         log(`train ${t}: the merge reply was lost and the car reads MERGED; closing out`)
@@ -1841,26 +1833,26 @@ ${RULES_FOR(REPO, carName(members.length))}`, `train-merge-${t}`, { ...TRAIN_LIF
         const v = mg.lock.verdict
         if (v !== 'already_held') return endAll('land-contended', { detail: `the land lock was not held before the train merge (${v})` })
         if (mg.merged === false && mg.behind === true) {
-          // Refused as not up to date (the integration branch moved outside the land lock). One read of the forge confirms the reply: a car
-          // that reads OPEN is unmerged, so the train falls back and the first landing, still holding the lock at H1 with its behind poll,
-          // resyncs and lands as #870 does; one that reads MERGED is closed out; any other answer stops the members.
+          // Refused as not up to date. One read of the forge confirms the reply: a car that reads OPEN is unmerged, so
+          // the train falls back and the first landing, still holding the lock at H1 with its behind poll, resyncs; one
+          // that reads MERGED is closed out; any other answer stops the members.
           const fl = await flip(memberPrs)
           if (fl && fl.car === 'OPEN') return await fallBack(`the train merge was refused as behind (${mg.notes || 'no notes'})`)
           if (!fl || fl.car !== 'MERGED') return endAll('stopped', { stage: 'train-merge', detail: mg.notes })
           log(`train ${t}: the merge was reported refused as behind and the car reads MERGED; closing out`)
         } else {
-          // Any other unmerged car is not retried and not landed serially at once: the reply cannot prove the car stayed unmerged, and a relaunch re-reads the forge.
+          // Any other unmerged car is neither retried nor landed serially: the reply cannot prove it stayed unmerged.
           if (mg.merged !== true) return endAll('stopped', { stage: 'train-merge', detail: mg.notes })
           note(mg.prs)
         }
       }
 
-      // The car is merged, so every member's commits are in the integration branch: each keeps a cont naming its PR, as a merged landing does.
+      // The car is merged, so every member's commits are in the integration branch: each keeps a cont naming its PR.
       car = last
       for (const m of members) markMerged(m.e.n, m.e.ready, m.pr)
       const unmerged = () => memberPrs.filter(pr => states[pr] !== 'MERGED')
       while (unmerged().length && flips < TRAIN_FLIP_CALLS) await flip(unmerged())
-      // A member PR the forge has not marked merged within the bound is stopped without a close-out: nothing here closes or merges it by hand.
+      // A member PR the forge has not marked merged within the bound is stopped without a close-out.
       for (const m of members.slice(1)) {
         if (states[m.pr] === 'MERGED') closeOuts.push(m)
         else settled[m.e.n] = rowOf(m.e, 'stopped', m.pr, { stage: 'train-merged-open', train: t, car_pr: car.pr })
@@ -1881,8 +1873,9 @@ ${RULES_FOR(REPO, carName(members.length))}`, `train-merge-${t}`, { ...TRAIN_LIF
     if (carsMaybe) await trainSweep(SETUP.delete_branch ? [...(firstMerged ? [first] : []), ...closeOuts.map(m => m.e)].map(e => e.ready.branch) : [])
     for (const e of cands.slice(1)) if (settled[e.n]) e.resolve(settled[e.n])
     for (const m of closeOuts) m.e.resolve(tag(await land(m.e.n, m.e.ready, { mergedPr: m.pr })))
-    // Every other candidate lands serially, here and now, through the ordinary landing start: it never goes back to WAITING, and the
-    // candidates dropped with it, then the issues waiting when its lock wait ends, land with it as a train (#971).
+    // Every other candidate lands serially, here and now, through the ordinary landing start: it never goes back to
+    // WAITING, and the candidates dropped with it, then the issues waiting when its lock wait ends, land with it as a
+    // train.
     const dropped = cands.slice(1).filter(e => !settled[e.n] && !closeOuts.some(m => m.e === e))
     while (dropped.length) {
       const e = dropped.shift()
@@ -1894,7 +1887,6 @@ ${RULES_FOR(REPO, carName(members.length))}`, `train-merge-${t}`, { ...TRAIN_LIF
   }
   return { train, tag, rest }
 }
-// A train of issues that waited together. The first landing owns the lock: it takes it, the train runs inside it, and it releases it on every exit.
 const runTrain = async (cands, joined) => {
   const T = trainOf(cands, joined)
   cands[0].resolve(T.tag(await land(cands[0].n, cands[0].ready, { train: T.train })))
@@ -1902,10 +1894,10 @@ const runTrain = async (cands, joined) => {
 }
 
 const kindsOk = e => Array.isArray(e.ready.acceptance) && e.ready.acceptance.every(a => a && ACCEPT_KINDS.includes(a.kind))
-// #1001: the landings that are queued or running, and by issue the early opening of its PR (see landReady). The opening is optional:
-// it never throws and its reply is not read, because the issue's own pr step (land-pr, train-pr) renews, pushes and re-adopts the PR
-// by itself and reports whatever went wrong here; a dead opening step therefore trips no breaker. It is a push and one gh command
-// with the body given, so it runs at the low clerk effort; the pr step that follows leaves a body that already names the head alone.
+// The landings that are queued or running, and by issue the early opening of its PR (see landReady). The opening is
+// optional: it never throws and its reply is not read, because the issue's own pr step renews, pushes and re-adopts the
+// PR by itself, so a dead opening step trips no breaker. It is a push and one gh command, so it runs at the low clerk
+// effort.
 let LANDINGS = 0
 const OPENING = {}
 const openEarly = async (n, ready) => {
@@ -1916,12 +1908,11 @@ This issue waits behind another landing of its batch: take no lock and wait for 
 ${RULES_FOR(ready.worktree, ready.branch)}`, { label: `land-open-${n}`, phase: 'Land', agentType: 'clerk', model: DEFAULT_CLERK_MODEL, effort: 'low', schema: withRenew(LAND_PR_SCHEMA) })
   } catch (e) { /* the pr step of the landing opens it */ }
 }
-// The ordinary landing start of an issue that lands alone: one its drain took alone (#936) or one a train did not land (#971). Its landing
-// asks join once, when its lock wait ended with a behind first poll: the issues waiting then (they became ready during that wait) leave
-// WAITING and ride a train behind it, under the lock it already holds at its ready head (at its reviewed head, when it resolved a conflict
-// before it asked for the lock, #941). `siblings` are the issues the same train dropped with it and that have not landed yet: they join
-// first, within the same limit, so none of them waits behind a chain of other trains; the function answers the siblings it took, which
-// its train then resolves. `joined` collects the issues that left WAITING that way in this drain, for the drain's catch.
+// The ordinary landing start of an issue that lands alone. Its landing asks join once, when its lock wait ended with a
+// behind first poll: the issues waiting then leave WAITING and ride a train behind it, under the lock it already holds.
+// `siblings` are the issues the same train dropped with it that have not landed yet: they join first, so none waits
+// behind a chain of other trains; the function answers the siblings it took. `joined` collects the issues that left
+// WAITING that way in this drain.
 const landOne = async (e, joined, siblings = []) => {
   let T = null
   let took = []
@@ -1950,23 +1941,23 @@ const drain = async () => {
   if (!WAITING.length) return // an earlier drain took this entry
   if (carsMaybe) await trainSweep()
   const take = WAITING.splice(0, TRAIN_MAX)
-  const joined = [] // #936: the issues that left WAITING to join a landing of this drain
+  const joined = [] // the issues that left WAITING to join a landing of this drain
   try {
     const cands = SETUP.merge_strategy === 'merge' ? take.filter(kindsOk) : []
     const trains = cands.length >= 2
     if (trains) await runTrain(cands, joined)
-    // #936: every other issue lands alone, through landOne.
+    // every other issue lands alone, through landOne.
     for (const e of take) if (!(trains && cands.includes(e))) await landOne(e, joined)
   } catch (err) {
     // land() never throws and releases its own lock; a row already resolved keeps its value.
     for (const e of [...take, ...joined]) e.resolve({ issue: e.n, outcome: 'stopped', stage: 'land', detail: String((err && err.message) || err) })
   }
 }
-// The one way a ready issue reaches the land queue. Without train it is the serial enqueue, exactly as before #822.
-// #1001: an issue that becomes ready while another landing of the batch is not finished has to wait in the queue, so its branch is
-// pushed and its PR opened at once (land-open-<n>: the PR step of a landing with a renew, no lock and no check). Its checks then run
-// during that wait, and its own pr step, which reuses the PR, reads them before it asks for the lock. With an empty queue nothing is
-// added: the pr step opens the PR as before, still before it asks for the lock.
+// The one way a ready issue reaches the land queue. Without train it is the serial enqueue. An issue that becomes ready
+// while another landing of the batch is not finished waits in the queue, so its branch is pushed and its PR opened at
+// once (land-open-<n>: a landing's PR step with a renew, no lock and no check); its checks then run during that wait,
+// and its own pr step reads them before it asks for the lock. With an empty queue nothing is added: the pr step opens
+// the PR, still before it asks for the lock.
 const landReady = (n, ready) => {
   if (LANDINGS > 0 && kindsOk({ ready })) OPENING[n] = openEarly(n, ready)
   LANDINGS++
@@ -1977,29 +1968,29 @@ const landReady = (n, ready) => {
   return landed.finally(() => { LANDINGS-- })
 }
 
-// A readoptable issue: an earlier run of this batch already opened its PR, on the branch this batch derives for the issue (D13).
-// An open PR on another head branch is not readoptable: that issue goes to its child, whose own setup decides.
+// A readoptable issue: an earlier run of this batch already opened its PR, on the branch this batch derives for the
+// issue (D13). An open PR on another head branch is not readoptable: that issue goes to its child, whose own setup
+// decides.
 const readoptable = n => {
   const f = FACTS[n] || {}
   return !!(f.open_pr && f.branch && f.open_pr.head_branch === f.branch)
 }
-// A standard-lane issue plans ahead (#744 D3) unless it is re-adopted, a merged landing's close-out, or its cont already holds a reviewed plan or a PR.
+// A standard-lane issue plans ahead (D3) unless it is re-adopted, a merged landing, or its cont holds a reviewed plan.
 const plansAhead = (n, lane, readopt) => lane === 'standard' && !readopt && !mergedReadopt(n, FACTS[n]) &&
   !(isObj(CONTS[n]) && (CONTS[n].plan_reviewed === true || Number.isInteger(CONTS[n].pr)))
-// #1019: a worktree left on a detached HEAD at its branch's own tip, with a clean tree, lost nothing: readopt puts it back on the
-// branch (a switch, never a reset) and goes on. Any other detached HEAD is left as found and refused as before. The same line in
-// deliver-standard.js.
+// A worktree left on a detached HEAD at its branch's own tip, with a clean tree, lost nothing: readopt puts it back on
+// the branch (a switch, never a reset) and goes on. Any other detached HEAD is left as found and refused. The same line
+// in deliver-standard.js.
 const REATTACH = (branch, path) => `When HEAD in ${path} is detached (git -C ${path} symbolic-ref -q HEAD fails), put it back on ${branch} first, only when git -C ${path} rev-parse HEAD and git -C ${path} rev-parse refs/heads/${branch} print the same sha and git -C ${path} status --porcelain prints nothing: run git -C ${path} switch ${branch}, alone, and return reattached true. It is the one change this read may make; never reset, and leave any other detached HEAD as it is.`
-// #1019: a land-sync whose push was refused leaves its merge of the integration branch local, so the worktree is ahead of the PR head
-// and the relaunch stopped at readopt. The readopt clerk reads the commits on top of the PR head as facts (AHEAD_MAX at most) and the
-// program decides: they are pushed, and the landing goes on at the pushed head, only when the first-parent line from HEAD reaches the
-// PR head through two-parent merges alone, each with its second parent on the integration branch and with the tree a conflict-free
-// merge of its parents gives. The tree is what keeps a resolution made by hand out: it reaches a PR only through the sync review.
-// Anything else (a plain commit, a merge with another tree, a head behind or apart from the PR head, a missing fact) stops as before.
-// The push step reads the two safety facts of each merge again with its own commands before it pushes, so one clerk's word is not
-// the only proof; and nothing is pushed for a reply the landing could not use (readoptUsable).
+// A land-sync whose push was refused leaves its merge of the integration branch local, so the worktree is ahead of the
+// PR head. The readopt clerk reads the commits on top of the PR head as facts (AHEAD_MAX at most) and the program
+// decides: they are pushed, and the landing goes on at the pushed head, only when the first-parent line from HEAD
+// reaches the PR head through two-parent merges alone, each with its second parent on the integration branch and the
+// tree a conflict-free merge of its parents gives. The tree keeps a hand resolution out:
+
+// it reaches a PR only through the sync review. Anything else stops. The push step reads the two safety facts of each
+// merge again with its own commands, and nothing is pushed for a reply the landing could not use (readoptUsable).
 const AHEAD_MAX = 8
-// The facts of the commits on top of a known head, read by the readopt step (#1019) and by a sync step that finds its merge already made (#1022).
 const AHEAD_FACTS = (wt, from) => `ahead, one entry per output line of git -C ${wt} rev-list --first-parent --parents ${from}..HEAD, in that order (only the first ${AHEAD_MAX} lines when there are more, none when it prints nothing): commit (the first sha of the line), parents (its other shas, in order) and, only for a line with exactly two parents, on_integration (true only when git -C ${wt} merge-base --is-ancestor <second parent> origin/${INT} succeeds), tree (git -C ${wt} rev-parse <commit>^{tree}) and clean_tree (the first output line of git -C ${wt} merge-tree --write-tree <first parent> <second parent> when it exits 0; leave it out when it does not)`
 const FULL_SHA_RE = /^[0-9a-f]{40}$/
 const fullSha = v => typeof v === 'string' && FULL_SHA_RE.test(v)
@@ -2034,10 +2025,8 @@ const readoptPrompt = n => {
 5. Read the body's Acceptance table, one row per criterion (id, criterion, kind, and how it is shown). When the body has no Acceptance table, answer ok false with reason no-acceptance. Otherwise answer ok true (step 4's ok false answer when the heads differ) with worktree (its absolute path), branch ${B}, head (headRefOid, the full sha; HEAD in step 4's answer) and acceptance: one {id, text (the criterion), kind (${ACCEPT_KINDS.join(', ')}, as the table says)} per row.
 ${RULES_FOR('<the worktree path>', B)}`
 }
-// The proof of the merges cleanMerges() accepted, run again by a step other than the one that reported them (#1019 before a push,
-// #1022 before a landing goes on from them).
 const PROVE_MERGES = (W, ahead) => `Run git -C ${W} fetch origin, then prove each of these merges again, newest first, as JSON: ${JSON.stringify(ahead.map(c => ({ commit: c.commit, first: c.parents[0], second: c.parents[1] })))}. For each one: git -C ${W} rev-list --parents -n 1 <commit> must print exactly <commit> <first> <second>; git -C ${W} merge-base --is-ancestor <second> origin/${INT} must succeed; and git -C ${W} merge-tree --write-tree <first> <second> must exit 0 with the sha that git -C ${W} rev-parse <commit>^{tree} prints as its first output line.`
-// #1019: the push of the clean merges cleanMerges() accepted, one lifecycle command under the usual push rule; pushed only when the PR head is then HEAD.
+// the push of the clean merges cleanMerges() accepted, one lifecycle command; pushed only when the PR head is HEAD.
 const readoptPushPrompt = (n, ro) => {
   const f = FACTS[n], B = f.branch, pr = f.open_pr.number, W = ro.worktree
   return `The worktree ${W} of issue #${n} of ${SLUG} (the git repository at ${REPO}) is ahead of its open pull request #${pr} only by clean merges of ${INT} into the branch ${B}, which an earlier run made and could not push. Push them and change nothing else: never reset, clean, restore or stash anything, and never merge, commit or force.
@@ -2048,7 +2037,7 @@ const readoptPushPrompt = (n, ro) => {
 ${RULES_FOR(W, B)}`
 }
 
-// #1433: a declared live fault is delivered alone with lane live; one whose declaration cannot be read is left out the same way, never routed as an ordinary lane.
+// a declared live fault is delivered alone with lane live; an unreadable declaration is left out the same way.
 const LIVE_ROW = 'a declared live fault is delivered alone: run deliver-standard for it with lane live'
 const LIVE_UNREAD = d => 'its live-fault declaration could not be read (' + d + '): deliver it alone once the declaration reads'
 const deliverOne = async n => {
@@ -2056,7 +2045,7 @@ const deliverOne = async n => {
   const f = FACTS[n]
   const readopt = readoptable(n)
   let laneName
-  // The lane step; false when it ended the issue (its row is set). It reads the lane facts-n answered. A readoptable issue defers it until its PR is found unaccepted.
+  // The lane step; false when it ended the issue. A readoptable issue defers it until its PR is found unaccepted.
   const chooseLane = async () => {
     if (!LANES.includes(f.lane)) { rows[n] = { issue: n, outcome: 'stopped', detail: `facts-${n} returned no lane` }; return false }
     if (f.lane === 'needs-design') {
@@ -2067,27 +2056,27 @@ Run alone and exactly: forge-claim release --repo ${SLUG} --issue ${n} --holder 
 Return its verdict and any detail. ${FORGE_TIMEOUT} Run nothing else.
 ${RULES_FOR(REPO, f.branch)}`, { label: `release-${n}`, phase: 'Deliver', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: RELEASE_SCHEMA }), `release-${n}`)
       }
-      // #932: the row says why intake routed it away, in one bounded line.
+      // the row says why intake routed it away, in one bounded line.
       rows[n] = { issue: n, outcome: 'needs-design', lane: f.lane, ...(nonEmpty(f.why) && oneLine(f.why) ? { reason: oneLine(f.why) } : {}) }
       return false
     }
     laneName = f.lane
     return true
   }
-  // #1433: whatever else the issue holds (a saved continuation, an open PR on its branch), a declared or unreadable live fault is left out; only a landing already merged is closed out as before.
+  // A declared or unreadable live fault is left out whatever else the issue holds; only a merged landing is closed out.
   if (!mergedReadopt(n, f)) {
     const lf = f.live_fault
     const verdict = isObj(lf) ? lf.verdict : null
     if (verdict !== 'none' && verdict !== 'no-sprint') {
       const reason = verdict === 'declared' ? LIVE_ROW : LIVE_UNREAD((isObj(lf) && nonEmpty(lf.detail) && oneLine(lf.detail)) || 'no verdict')
-      // The row sends the issue to a run of its own, whose holder is not this batch's: a claim this batch still holds would stop that run, so it is given back first.
+      // The row sends the issue to a run of its own: a claim this batch still holds would stop that run, so release it.
       const cl = f.claim || {}
       if ((cl.verdict === 'held_by' || cl.verdict === 'stale') && cl.by === HOLDER) {
         const rel = await ask(agent(`Issue #${n} of ${SLUG} (the git repository at ${REPO}) is left out of this batch because it is a live fault, which is delivered alone. Release the batch claim.
 Run alone and exactly: forge-claim release --repo ${SLUG} --issue ${n} --holder ${HOLDER} --reason skipped
 Return its verdict (released on exit 0, not_held (exit 3) when the claim is already gone, or error on any other exit) and any detail. ${FORGE_TIMEOUT} Run nothing else.
 ${RULES_FOR(REPO, f.branch)}`, { label: `release-${n}`, phase: 'Deliver', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: RELEASE_SCHEMA }), `release-${n}`)
-        // A release that failed leaves the claim held, which would stop the alone run: the row stays open for a relaunch instead of final.
+        // A failed release leaves the claim held, which would stop the alone run: the row stays open for a relaunch.
         if (!rel || (rel.verdict !== 'released' && rel.verdict !== 'not_held')) {
           rows[n] = { issue: n, outcome: 'stopped', stage: 'release', detail: rel ? (rel.detail || rel.verdict) : `release-${n} returned nothing` }
           return
@@ -2101,7 +2090,6 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `release-${n}`, phase: 'Deliver', agentT
   else if (!readopt && !(await chooseLane())) return
   rows[n] = { issue: n, outcome: 'eligible', lane: laneName }
 
-  // A dependent waits for each in-batch blocker's final row before it asks for a slot: it holds no slot and no claim meanwhile.
   for (const blocker of inBatchBlockers(n)) {
     const b = await DONE[blocker]
     if (b.outcome === 'landed' || b.outcome === 'closed') continue
@@ -2112,7 +2100,6 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `release-${n}`, phase: 'Deliver', agentT
 
   // An issue is claimed only once it holds a child slot: a waiting issue holds no claim.
   if (breaker) { rows[n] = { issue: n, outcome: 'not-admitted' }; return }
-  // Every claim, release and lane step below names the branch: without a derived one nothing is claimed (never `--branch undefined`).
   if (!nonEmpty(f.branch)) { rows[n] = { issue: n, outcome: 'stopped', stage: 'branch', detail: nonEmpty(f.branch_error) ? f.branch_error : 'issue-branch derived no branch' }; return }
   const ahead = plansAhead(n, laneName, readopt)
   const FIRST = ahead ? PLAN : RUN
@@ -2121,14 +2108,14 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `release-${n}`, phase: 'Deliver', agentT
   const release = () => { if (held) { const sem = held; held = null; sem.leave() } }
   try {
     if (breaker) { rows[n] = { issue: n, outcome: 'not-admitted' }; return }
-    // The child's setup acquires again and answers already_held (its setup then renews the claim); this acquire is kept because it gates the readopt path (issue 745).
+    // the child's setup acquires again and answers already_held; this acquire gates the readopt path.
     const acquireStep = () => ask(agent(`You claim issue #${n} of ${SLUG} (the git repository at ${REPO}) for the batch holder ${HOLDER}.
 Run alone and exactly: forge-claim acquire --repo ${SLUG} --issue ${n} --holder ${HOLDER} --branch ${f.branch}
 Return its verdict (acquired, already_held, held_by, lost_to, or error on any other exit), by, comment_id and transient (true only when its JSON line has transient true) from its output. ${FORGE_TIMEOUT} Run nothing else.
 ${RULES_FOR(REPO, f.branch)}`, { label: `acquire-${n}`, phase: 'Deliver', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: ACQUIRE_SCHEMA }), `acquire-${n}`)
     let acq = await recall(acquireStep)
     if (transientError(acq)) {
-      // #740 D7: re-queued once, behind every issue waiting for a slot now: give the slot back and ask for one again.
+      // D7: re-queued once, behind every issue waiting for a slot now: give the slot back and ask for one again.
       release()
       await FIRST.admit()
       held = FIRST
@@ -2144,7 +2131,7 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `acquire-${n}`, phase: 'Deliver', agentT
       let ro = await ask(agent(readoptPrompt(n), { label: `readopt-${n}`, phase: 'Deliver', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: READOPT_SCHEMA }), `readopt-${n}`)
       if (ro === null || ro === undefined) { rows[n] = { issue: n, outcome: 'stopped', stage: 'readopt', detail: `readopt-${n} returned nothing` }; return }
       if (ro.reattached === true) log(`readopt-${n}: the worktree was on a detached HEAD at its branch tip with a clean tree; it is back on its branch`)
-      // #1019: a head ahead of the PR only by clean merges of the integration branch is pushed, and the readopt goes on at the pushed head.
+      // a head ahead of the PR only by clean merges of the integration branch is pushed, then the readopt goes on.
       if (ro.ok !== true && ro.reason === 'worktree' && nonEmpty(ro.worktree) && readoptUsable(ro) && cleanMerges(ro)) {
         const ps = await ask(agent(readoptPushPrompt(n, ro), { label: `readopt-push-${n}`, phase: 'Deliver', agentType: 'clerk', model: DEFAULT_CLERK_MODEL, effort: 'low', schema: READOPT_PUSH_SCHEMA }), `readopt-push-${n}`)
         if (ps && ps.pushed === true && ps.head === ro.head) {
@@ -2155,11 +2142,11 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `acquire-${n}`, phase: 'Deliver', agentT
           ro = { ...ro, detail: [ro.detail, `its clean merges of ${INT} were not pushed: ${why}`].filter(nonEmpty).join('; ') }
         }
       }
-      // #811: an accepted PR still goes through the child when an amend is pending for it: landing as it stands would drop the amend.
+      // an accepted PR still goes through the child when an amend is pending: landing as it stands would drop it.
       const amendPending = !!(CONTS[n] && AMEND[String(n)] && !AMEND_SENT.has(String(n)))
-      // #1139: nor does a PR land as it stands unless its issue's look marker was read and found absent (fail closed): a marked issue, or one whose marker was not read, goes through its child.
+      // nor does a PR land as it stands unless its look marker was read and found absent (fail closed).
       const lookPending = !(isObj(f.look) && f.look.verdict === 'unmarked')
-      // #1370: nor does a capped delivery: the review round cap is enforced in the child, so a cont holding round_cap goes through it, never to a landing with findings still open.
+      // nor does a capped delivery: a cont holding round_cap goes through its child, never to a landing.
       const capHeld = !!(CONTS[n] && isObj(CONTS[n].round_cap))
       if (ro.ok === true && !amendPending && !lookPending && !capHeld) {
         if (!readoptUsable(ro)) {
@@ -2173,14 +2160,15 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `acquire-${n}`, phase: 'Deliver', agentT
         return
       }
       if (ro.ok === true && lookPending && !amendPending) log(`readopt-${n}: the issue needs the owner's look (or its marker was not read); it goes through its child`)
-      // #1371: a worktree ahead of its PR by the fix commit an earlier landing kept local and unpushed goes through the child, whose cont carries
-      // that range as untested: its final review reads the commit and its retest records the tests before anything is pushed.
+      // a worktree ahead of its PR by the fix commit an earlier landing kept local goes through the child, whose cont
+      // carries that range as untested: its final review reads the commit and its retest records the tests before
+      // anything is pushed.
       const pendingFix = ro.ok !== true && ro.reason === 'worktree' && isObj(CONTS[n]) && isObj(CONTS[n].untested) && nonEmpty(ro.head) && sameSha(CONTS[n].untested.head, ro.head)
       if (ro.ok !== true && ro.reason !== 'unaccepted' && !pendingFix) {
         rows[n] = { issue: n, outcome: 'stopped', stage: 'readopt', detail: ro.reason || 'other', ...(ro.detail ? { note: ro.detail } : {}) }
         return
       }
-      // Unaccepted head (D13): the child's final review and verify re-run over the moved head, with the slot and claim kept.
+      // Unaccepted head (D13): the child's final review and verify re-run over the moved head.
       if (!CONTS[n]) {
         if (!(await chooseLane())) return
         rows[n] = { issue: n, outcome: 'eligible', lane: laneName }
@@ -2190,7 +2178,6 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `acquire-${n}`, phase: 'Deliver', agentT
     let r = null
     let lookShip = false
     let threw = ''
-    // #912: a thrown call logs its error whole and keeps its reason for the row; it reads laneName when called.
     const child = async mode => {
       try {
         return amended(n, await workflow({ scriptPath: CHILD }, childArgs(n, laneName, mode)))
@@ -2212,12 +2199,12 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `acquire-${n}`, phase: 'Deliver', agentT
           if (breaker) { rows[n] = { issue: n, outcome: 'not-admitted', stage: 'planned' }; return }
           r = await child('ready')
         }
-        // D9: a live stop with no cont makes the forwarded or planned cont obsolete (terminalChild(null) is true: a dead child keeps it).
+        // D9: a live stop with no cont makes the forwarded or planned cont obsolete; a dead child keeps it.
         if (!terminalChild(r) && !r.cont) delete CONTS[n]
       } else {
         r = await child('ready')
         if (r && r.stage === 'ineligible' && !terminalChild(r)) {
-          // The direct lane rejected the issue: its cont would repeat the rejected attempt, so drop it and rerun once in the standard lane (setup re-adopts the worktree and the claim).
+          // The direct lane rejected the issue: its cont would repeat the attempt, so rerun once in the standard lane.
           delete CONTS[n]
           laneName = 'standard'
           rows[n] = { issue: n, outcome: 'eligible', lane: laneName }
@@ -2229,7 +2216,7 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `acquire-${n}`, phase: 'Deliver', agentT
     } finally {
       release()
     }
-    // #1139: a marked issue's ready child is resumed once in ship mode: the push and the PR, the wait for its checks (#1373) and the stop at awaiting-look, outside the slot, as a landing waits for CI outside it.
+    // a marked issue's ready child is resumed once in ship mode and stops at awaiting-look, outside the slot.
     if (lookShip) {
       CONTS[n] = r.cont
       r = await child('ship')
@@ -2244,12 +2231,12 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `acquire-${n}`, phase: 'Deliver', agentT
     if (outside.length) { OUTSIDE[n] = outside; log(`#${n}: the verification fix edited outside the branch's diff: ${outside.map(x => `${x.file}: ${x.why}`).join('; ')}`) }
     if (terminalChild(r)) { rows[n] = { issue: n, outcome: 'stopped', stage: r.stage, dead_agents: r.dead_agents, ...stopDetail(r) }; return }
     if (r.stage === 'done') {
-      // A re-adopted merged landing: the child closed it out (claim released, worktree and branch removed). End the landing markers the merge resolved.
+      // A re-adopted merged landing: the child closed it out. End the landing markers the merge resolved.
       const ended = await ask(agent(`The landing of issue #${n} of ${SLUG} (the git repository at ${REPO}) is merged and closed out. End its landing owner-action markers, each alone and exactly: forge-claim owner-action end --repo ${SLUG} --issue ${n} --reason conflict and then forge-claim owner-action end --repo ${SLUG} --issue ${n} --reason needs-label. A verdict none is fine.
 Return its verdict and any detail. Run nothing else.
 ${RULES_FOR(REPO, f.branch)}`, { label: `recover-end-${n}`, phase: 'Deliver', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: ENDED_SCHEMA }), `recover-end-${n}`)
       if (ended === null || ended === undefined) { rows[n] = { issue: n, outcome: 'stopped', stage: 'recover-end', detail: `recover-end-${n} returned nothing`, ...(r.pr ? { pr: r.pr } : {}) }; return }
-      // The hold step may close the issue (its once-run passed, or every row moved to a child issue): read the state it left, never the criterion kinds.
+      // The hold step may close the issue: read the state it left, never the criterion kinds.
       const heldOpen = !(r.close_out && r.close_out.issue_state === 'CLOSED')
       rows[n] = { issue: n, outcome: heldOpen ? 'landed-held' : 'landed', ...(r.pr ? { pr: r.pr } : {}) }
       return
@@ -2266,7 +2253,7 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `recover-end-${n}`, phase: 'Deliver', ag
     }
     if (r.stage === 'claimed') { rows[n] = { issue: n, outcome: 'claim-lost', by: r.by }; return }
     if (r.stage === 'plan' && Array.isArray(r.needs_user) && r.needs_user.length) {
-      // D6, D12: only an unattended run posts the box prompt; a session-launched run hands the questions to its session, the claim stays held.
+      // D6, D12: only an unattended run posts the box prompt; a session-launched run returns the questions.
       let marker = null
       if (UNATTENDED) {
         const posted = await ask(agent(`The delivery of issue #${n} of ${SLUG} (the git repository at ${REPO}) needs the owner's answers. Post them as the decision box prompt, the claim stays held.
@@ -2285,7 +2272,7 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `ask-${n}`, phase: 'Deliver', agentType:
       return
     }
     if (r.stage === 'no-changes') {
-      // #923: nothing to land and nothing a relaunch could add. Give the claim back; the owner closes the issue.
+      // nothing to land and nothing a relaunch could add. Give the claim back; the owner closes the issue.
       const rel = await ask(agent(`Issue #${n} of ${SLUG} (the git repository at ${REPO}) was delivered with no file change: every task of its plan ended with no commit, so there is nothing to land. Release the batch claim.
 Run alone and exactly: forge-claim release --repo ${SLUG} --issue ${n} --holder ${HOLDER} --reason skipped
 Return its verdict (released on exit 0, not_held (exit 3) when the claim is already gone, or error on any other exit) and any detail. ${FORGE_TIMEOUT} Run nothing else.
@@ -2299,8 +2286,8 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `release-${n}`, phase: 'Deliver', agentT
     if (r.cont) {
       let closedMeanwhile = false
       if (r.stage !== 'planned' && !postMerge(r) && !mergedReadopt(n, f)) {
-        // A stop on an issue closed meanwhile: give the claim back and drop the cont; an open issue keeps both (#714).
-        // A re-adopted merged landing is never settled, whatever stage it stopped at: its close-out is still owed (#714).
+        // A stop on an issue closed meanwhile: give the claim back and drop the cont; an open issue keeps both. A
+        // re-adopted merged landing is never settled, whatever stage it stopped at: its close-out is still owed.
         const st = await ask(agent(`Issue #${n} of ${SLUG} (the git repository at ${REPO}) stopped with a continuation. Settle its claim.
 1. Read ${UNSET}gh issue view ${n} --repo ${SLUG} --json state and return state (OPEN or CLOSED).
 2. Only when state is CLOSED, run alone and exactly: forge-claim release --repo ${SLUG} --issue ${n} --holder ${HOLDER} --reason closed and return its verdict as release: released (exit 0), not_held (exit 3) when the claim is already gone, or error on any other exit; otherwise return release null. ${FORGE_TIMEOUT} Run nothing else.
@@ -2312,8 +2299,9 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `settle-${n}`, phase: 'Deliver', agentTy
           return
         }
         if (r.stage === 'fix-wave-review' && isObj(r.diverging) && isObj(r.cont) && !(st && st.state === 'CLOSED')) {
-          // #940: more fix waves are not expected to close this, so no relaunch. The worktree, the branch and the claim stay as they are
-          // (see the header); a closed issue whose release failed stays stopped instead, so that a relaunch releases it.
+          // more fix waves are not expected to close this, so no relaunch. The worktree, the branch and the claim stay
+          // as they are (see the header); a closed issue whose release failed stays stopped, so that a relaunch
+          // releases it.
           const s = isObj(r.cont.setup) ? r.cont.setup : {}
           const pr = [r.cont.pr, r.pr].find(v => isPosInt(v))
           const wt = [s.worktree_path, s.worktree].find(nonEmpty)
@@ -2322,7 +2310,7 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `settle-${n}`, phase: 'Deliver', agentTy
             ...(wt ? { worktree: oneLine(wt) } : {}), ...(nonEmpty(s.branch) ? { branch: oneLine(s.branch) } : {}),
             ...(pr ? { pr } : {}),
           }
-          // The child bounds the findings it carries (their count and each text); the same bounds are applied again here, in the entry and in its cont.
+          // The same findings bounds as the child's apply again here, in the entry and in its cont.
           const findings = (Array.isArray(r.cont.fix_findings) ? r.cont.fix_findings : []).filter(isObj).slice(0, FINDINGS_MAX)
             .map(x => Object.fromEntries(['severity', 'file', 'summary', 'failing_input'].filter(k => nonEmpty(x[k])).map(k => [k, oneLine(x[k])])))
           DIVERGING[n] = { ...taken, claim: 'held', holder: HOLDER, findings, cont: { ...r.cont, ...(findings.length ? { fix_findings: findings } : {}) } }
@@ -2331,7 +2319,7 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `settle-${n}`, phase: 'Deliver', agentTy
           return
         }
       }
-      // #996: neither a blocked task nor a Codex usage limit changes by a relaunch as it is; the same guard as the two below.
+      // neither a blocked task nor a Codex usage limit changes by a relaunch as it is; the same guard as the two below.
       if (!closedMeanwhile && r.stage === 'task' && isObj(r.cont.blocked) && Number.isInteger(r.cont.blocked.task) && r.cont.partial === r.cont.blocked.task) {
         PARKED[n] = { reason: 'task-blocked', task: r.cont.blocked.task, ...(nonEmpty(r.cont.blocked.notes) ? { notes: oneLine(r.cont.blocked.notes) } : {}), ...(childReason(r) ? { detail: oneLine(childReason(r)) } : {}), claim: 'held', holder: HOLDER, cont: r.cont }
       } else if (!closedMeanwhile && r.stage === 'codex-unavailable' && Object.prototype.hasOwnProperty.call(r, 'retry_after')) {
@@ -2345,7 +2333,7 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `settle-${n}`, phase: 'Deliver', agentTy
         OSCILLATING[n] = { file: oneLine(r.oscillating.file), rounds: hist, claim: 'held', holder: HOLDER, cont: r.cont }
       }
       if (!closedMeanwhile && r.stage === 'fix-wave-review' && isObj(r.round_cap) && isPosInt(r.round_cap.rounds) && isObj(r.cont)) {
-        // The child bounds the findings it carries; the same bounds are applied again here, in the entry and in its cont (as the not-converging row does).
+        // The same findings bounds as the child's apply again here, in the entry and in its cont.
         const findings = (Array.isArray(r.cont.fix_findings) ? r.cont.fix_findings : []).filter(isObj).slice(0, FINDINGS_MAX)
           .map(x => Object.fromEntries(['severity', 'file', 'summary', 'failing_input'].filter(k => nonEmpty(x[k])).map(k => [k, oneLine(x[k])])))
         ROUND_CAPPED[n] = { rounds: r.round_cap.rounds, findings, claim: 'held', holder: HOLDER, cont: { ...r.cont, ...(findings.length ? { fix_findings: findings } : {}) } }
@@ -2390,26 +2378,26 @@ const table = ISSUES.map(n => {
   const { detail, ...rest } = r
   return { ...(nonEmpty(detail) && !reason.includes(oneLine(detail)) ? r : rest), reason }
 })
-// A cycle only the owner can break: relaunching it returns the same blocked rows, so it is an owner action, not an open issue.
-// #972: a failure with no cause in the delivery cannot change by a relaunch either: an owner action, not an open issue.
+// A cycle only the owner can break: relaunching it returns the same blocked rows, so it is an owner action, not an open
+// issue. A failure with no cause in the delivery cannot change by a relaunch either.
 const unrelated = table.filter(r => r.outcome === 'stopped' && r.stage === 'verify-unrelated' && UNRELATED[r.issue]).map(r => r.issue)
-// #996: nor can a blocked task or a Codex usage limit.
+// nor can a blocked task or a Codex usage limit.
 const parked = table.filter(r => r.outcome === 'stopped' && PARKED[r.issue] && r.stage === (PARKED[r.issue].reason === 'task-blocked' ? 'task' : 'codex-unavailable')).map(r => r.issue)
-// #988: nor can a criterion the acceptance rules pull two ways: the owner decides its classification.
+// nor can a criterion the acceptance rules pull two ways: the owner decides its classification.
 const conflicted = table.filter(r => r.outcome === 'stopped' && r.stage === 'plan-review' && RULES_CONFLICT[r.issue]).map(r => r.issue)
-// #1000: nor can a file two fixes in a row each drew a new finding in: the owner decides the approach.
+// nor can a file two fixes in a row each drew a new finding in: the owner decides the approach.
 const oscillating = table.filter(r => r.outcome === 'stopped' && r.stage === 'fix-wave-review' && OSCILLATING[r.issue]).map(r => r.issue)
-// #1370: nor can a delivery whose review rounds are spent with findings still open: the owner decides.
+// nor can a delivery whose review rounds are spent with findings still open: the owner decides.
 const capped = table.filter(r => r.outcome === 'stopped' && r.stage === 'fix-wave-review' && ROUND_CAPPED[r.issue] && !OSCILLATING[r.issue]).map(r => r.issue)
-// #1139: nor can a marked issue's delivery waiting for the owner's look: the owner's answer resumes it.
+// nor can a marked issue's delivery waiting for the owner's look: the owner's answer resumes it.
 const awaiting = table.filter(r => r.outcome === 'awaiting-look' && AWAITING[r.issue]).map(r => r.issue)
 const open = table.filter(r => !FINAL.includes(r.outcome) && !awaiting.includes(r.issue) && !cycle.includes(r.issue) && !oscillating.includes(r.issue) && !capped.includes(r.issue) && !unrelated.includes(r.issue) && !conflicted.includes(r.issue) && !parked.includes(r.issue)).map(r => r.issue)
 const rowOf = n => table.find(r => r.issue === n)
-// The lead copies the relaunch into the next run's args, so a forwarded cont carries only what a resume reads from it. A resumed child's setup
-// step reads every contract field fresh and takes from cont.setup only the members below (the claim holder, the delivery's location and
-// base, the plan directory, and details, the fresh setup's facts a resume that plans again still shows its planner); the rest of a setup
-// (verification, knowledge, review, review_state, unset_env and the other contract fields, the read facts) is dropped here. Every other
-// member of a cont is read by the child and stays as it came. A cont from before this rule is accepted whole, and slimming one twice changes nothing.
+// The lead copies the relaunch into the next run's args, so a forwarded cont carries only what a resume reads from it.
+// A resumed child's setup step reads every contract field fresh and takes from cont.setup only the members below (the
+// claim holder, the delivery's location and base, the plan directory, and details); the rest of a setup is dropped
+// here. Every other member of a cont is read by the child and stays as it came. A cont from before this rule is
+// accepted whole, and slimming one twice changes nothing.
 const CONT_SETUP_KEPT = ['holder', 'branch', 'worktree', 'worktree_path', 'base_sha', 'plan_dir', 'details']
 const slimCont = c => {
   if (!isObj(c) || !isObj(c.setup)) return c
@@ -2419,10 +2407,10 @@ const slimCont = c => {
 }
 const relaunchArgs = () => {
   const a = { repo_root: REPO, batch_id: BATCH, child_script: CHILD, issues: open }
-  // An issue whose child asked again carries no answer at all: the old one answered the earlier questions, and the new prompt's own ticks are read by the child.
+  // An issue whose child asked again carries no answer: the old one answered the earlier questions.
   const decisions = { ...(DECISIONS || {}) }
   for (const n of open) if (rowOf(n).outcome === 'questions') delete decisions[String(n)]
-  // #996: the decision rerun is new on every run, so a relaunch that carried it would run a blocked task again unasked.
+  // the decision rerun is new on every run, so a relaunch that carried it would run a blocked task again unasked.
   for (const k of Object.keys(decisions)) if (decisions[k].trim() === 'rerun') delete decisions[k]
   if (DECISIONS !== undefined || Object.keys(decisions).length) a.decisions = decisions
   const conts = {}

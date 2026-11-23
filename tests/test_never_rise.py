@@ -9,7 +9,8 @@ repository selection or forced colour; and a failed git read is no verdict.
 
 The suite holds `standard:B17`, the 1,500-line size rule, by judging its enforcer
 `agent_tools.delivery.size_lint` against real git worlds, so the rule index lists
-this enforcer.
+this enforcer. `RecordHistoryTest` judges the record enforcers of
+`agent_tools.delivery.record_lint` against real git worlds.
 """
 
 import os
@@ -20,9 +21,11 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.delivery import never_rise, rule_ids, size_lint
+from agent_tools.delivery import never_rise, record_lint, rule_ids, size_lint
 from agent_tools.delivery.never_rise import (
     Enforcer, Rise, Snapshot, Violation)
+
+from .never_rise_world import (commit_all, fixture_env, git, mark_base, repo, write)
 
 TIER = "integration"
 
@@ -36,49 +39,10 @@ WORSE = Enforcer("FX3", lambda snap: [
 LONG = Enforcer("FX2", lambda snap: [
     Violation("FX2", p, n) for p, n in sorted(snap.line_counts.items()) if n > 3],
     per_file=True)
-
-
-def fixture_env(extra=None):
-    env = {k: v for k, v in os.environ.items() if k not in never_rise.SELECTION_VARIABLES}
-    env.update({
-        "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull,
-        "GIT_AUTHOR_NAME": "fixture", "GIT_COMMITTER_NAME": "fixture",
-        "GIT_AUTHOR_EMAIL": "fixture@example.invalid",
-        "GIT_COMMITTER_EMAIL": "fixture@example.invalid"})
-    env.update(extra or {})
-    return env
-
-
-def git(root, *args, env=None):
-    return subprocess.run(
-        ["git", "-C", str(root), *args], capture_output=True, text=True, timeout=60,
-        check=True, env=env or fixture_env()).stdout
-
-
-def repo(tmp):
-    root = Path(tmp) / "repo"
-    root.mkdir()
-    git(root, "init", "-q", "-b", "main")
-    return root
-
-
-def write(root, relative, text):
-    path = Path(root) / relative
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if isinstance(text, bytes):
-        path.write_bytes(text)
-    else:
-        path.write_text(text)
-
-
-def commit_all(root, message="commit"):
-    git(root, "add", "-A")
-    git(root, "commit", "-q", "-m", message)
-
-
-def mark_base(root):
-    git(root, "update-ref", "refs/remotes/origin/main", "HEAD")
-    return git(root, "rev-parse", "HEAD").strip()
+MEASURED = Enforcer("FX4", lambda snap: [
+    Violation("FX4", p, 1, len(snap.blobs[p]))
+    for p in sorted(snap.blobs) if p.endswith(".rec") and len(snap.blobs[p]) > 3],
+    per_file=True, reads=lambda path: path.endswith(".rec"))
 
 
 def lines(count, prefix="line"):
@@ -257,6 +221,99 @@ class NeverRiseTest(unittest.TestCase):
             self.assertEqual(
                 self.judge(root, [LONG]).rises,
                 (Rise("FX2", 1, 1, (Violation("FX2", "other.txt", 40),)),))
+
+    def test_a_per_file_rule_compares_the_measure_when_a_violation_carries_one(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = repo(tmp)
+            write(root, "a.rec", "abcdef\n")
+            commit_all(root)
+            mark_base(root)
+            write(root, "a.rec", "abcdefg\n")
+            commit_all(root)
+            verdict = self.judge(root, [MEASURED])
+            self.assertEqual(
+                verdict.rises, (Rise("FX4", 1, 1, (Violation("FX4", "a.rec", 1, 8),)),))
+
+    def test_a_measured_violation_that_holds_or_shrinks_passes(self):
+        for name, branch in (("holds", {"a.rec": "abcdef\n", "other.txt": "x\n"}),
+                             ("shrinks", {"a.rec": "abcde\n"})):
+            with self.subTest(name), tempfile.TemporaryDirectory() as tmp:
+                root = repo(tmp)
+                write(root, "a.rec", "abcdef\n")
+                commit_all(root)
+                mark_base(root)
+                for relative, text in branch.items():
+                    write(root, relative, text)
+                commit_all(root)
+                self.assertEqual(self.judge(root, [MEASURED]).rises, ())
+
+    def test_the_snapshot_holds_every_committed_blobs_bytes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = repo(tmp)
+            write(root, "a.txt", b"x\ny")
+            write(root, "bin.dat", b"a\0b")
+            write(root, "empty.txt", b"")
+            commit_all(root)
+            head = git(root, "rev-parse", "HEAD").strip()
+            write(root, "a.txt", b"changed\n")
+            snapshot = never_rise.read_snapshot(root, head, timeout=60)
+            self.assertEqual(
+                dict(snapshot.blobs),
+                {"a.txt": b"x\ny", "bin.dat": b"a\0b", "empty.txt": b""})
+            self.assertEqual(snapshot.line_counts, {"a.txt": 2})
+
+    def test_the_snapshot_keeps_only_the_blobs_asked_for_but_every_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = repo(tmp)
+            write(root, "a.rec", b"x\ny")
+            write(root, "bin.dat", b"a\0b")
+            write(root, "empty.txt", b"")
+            commit_all(root)
+            head = git(root, "rev-parse", "HEAD").strip()
+            snapshot = never_rise.read_snapshot(
+                root, head, timeout=60, keep=lambda path: path.endswith(".rec"))
+            self.assertEqual(dict(snapshot.blobs), {"a.rec": b"x\ny"})
+            self.assertEqual(snapshot.paths, {"a.rec", "bin.dat", "empty.txt"})
+            self.assertEqual(snapshot.line_counts, {"a.rec": 2})
+
+    def test_the_verdict_lists_the_added_paths_and_the_renames(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = repo(tmp)
+            write(root, "keep.txt", lines(5))
+            write(root, "old.txt", lines(40))
+            commit_all(root)
+            mark_base(root)
+            write(root, "new.txt", "x\n")
+            write(root, "empty.txt", b"")
+            git(root, "mv", "old.txt", "moved.txt")
+            write(root, "keep.txt", lines(5) + "one more\n")
+            commit_all(root)
+            reading = Enforcer("FX1", BAD.find, reads=lambda path: path.endswith(".txt"))
+            verdict = self.judge(root, [reading])
+            self.assertEqual(verdict.added, ("empty.txt", "moved.txt", "new.txt"))
+            self.assertEqual(dict(verdict.renamed), {"moved.txt": "old.txt"})
+            self.assertEqual(
+                dict(verdict.rename_blobs),
+                {"moved.txt": (lines(40).encode(), lines(40).encode())})
+
+    def test_a_rename_carries_a_violation_only_when_the_enforcer_allows_it(self):
+        base = Snapshot("a" * 40, {}, blobs={"a.rec": b"abcdef\n"})
+        branch = Snapshot("b" * 40, {}, blobs={"b.rec": b"abcdef\n"})
+        renamed = {"b.rec": "a.rec"}
+        rows = (
+            ("no carries", MEASURED, ()),
+            ("carries the pair", Enforcer(
+                "FX4", MEASURED.find, per_file=True,
+                carries=lambda old, new: old == new), ()),
+            ("refuses the pair", Enforcer(
+                "FX4", MEASURED.find, per_file=True,
+                carries=lambda old, new: False),
+             (Rise("FX4", 1, 1, (Violation("FX4", "b.rec", 1, 7),)),)),
+        )
+        for name, enforcer, expected in rows:
+            with self.subTest(name):
+                self.assertEqual(
+                    never_rise.compare(base, branch, renamed, [enforcer]), expected)
 
     def test_an_enforcer_emitting_another_rule_is_refused(self):
         snapshot = Snapshot("a" * 40, {"a": 1})
@@ -723,6 +780,106 @@ class SizeLintOutputTest(unittest.TestCase):
     def test_the_command_is_a_row_of_the_command_table(self):
         table = (REPO_ROOT / "lib/agent-tools.nix").read_text("utf-8")
         self.assertIn('"size-lint" = "delivery.size_lint";', table)
+
+
+class RecordHistoryTest(unittest.TestCase):
+    P = "docs/areas/a/adr/001-a.md"
+
+    def judge(self, root):
+        return never_rise.judge(root, "main", record_lint.RECORD_ENFORCERS, timeout=60)
+
+    def test_an_added_empty_record_breaches_the_form_and_is_listed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = repo(tmp)
+            write(root, "README.md", "x\n")
+            commit_all(root)
+            mark_base(root)
+            write(root, self.P, b"")
+            commit_all(root)
+            verdict = self.judge(root)
+            self.assertEqual(
+                verdict.rises, (Rise("B22", 0, 1, (Violation("B22", self.P, 1, 1),)),))
+            self.assertEqual(record_lint.added_records(verdict), [self.P])
+
+    def test_an_over_cap_guide_moved_into_a_record_rises_and_is_listed(self):
+        moved = "docs/areas/a/adr/002-b.md"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = repo(tmp)
+            write(root, "docs/guides/old.md", b"# Guide\n\n" + b"x" * 2000 + b"\n")
+            commit_all(root)
+            mark_base(root)
+            (root / "docs/areas/a/adr").mkdir(parents=True)
+            git(root, "mv", "docs/guides/old.md", moved)
+            write(root, moved, "# ADR-a-002 \u2014 B\n\n".encode() + b"x" * 2000 + b"\n")
+            commit_all(root)
+            verdict = self.judge(root)
+            self.assertEqual(dict(verdict.renamed), {moved: "docs/guides/old.md"})
+            self.assertEqual(verdict.rises, (Rise("B21", 0, 1, (Violation("B21", moved, 3, 2020),)),))
+            self.assertEqual(record_lint.added_records(verdict), [moved])
+
+    def test_a_guide_moved_into_a_record_is_listed_and_a_moved_record_is_not(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = repo(tmp)
+            write(root, "docs/guides/old.md",
+                  "# Old guide\n\n- **Status:** draft\nHow the cache warms up after a restart.\n")
+            write(root, self.P, "# ADR-a-001 \u2014 T\n\nOne paragraph about the queue backend choice.\n")
+            commit_all(root)
+            mark_base(root)
+            git(root, "mv", "docs/guides/old.md", "docs/areas/a/adr/002-b.md")
+            (root / "docs/areas/b/adr").mkdir(parents=True)
+            git(root, "mv", self.P, "docs/areas/b/adr/001-a.md")
+            commit_all(root)
+            verdict = self.judge(root)
+            self.assertEqual(
+                record_lint.added_records(verdict), ["docs/areas/a/adr/002-b.md"])
+            self.assertEqual(verdict.rises, (Rise("B22", 0, 1, (
+                Violation("B22", "docs/areas/a/adr/002-b.md", 3, 1),)),))
+
+    def test_a_renamed_over_cap_record_may_not_grow_through_its_header(self):
+        prose = "".join(f"Line {n} of the context about the queue backend.\n" for n in range(40))
+        old = "docs/areas/a/adr/001-x.md"
+        moved = "docs/areas/b/adr/002-x.md"
+        header = "# ADR-a-001 \u2014 X\n\n"
+        rows = {
+            "a padded header title": (
+                "# ADR-b-002 \u2014 X" + " padded" * 150 + "\n\n**Formerly:** ADR-a-001\n\n", True),
+            "a padded Formerly line": (
+                "# ADR-b-002 \u2014 X\n\n**Formerly:** ADR-a-001" + " " * 1000 + "\n\n", True),
+            "a well-formed migration": ("# ADR-b-002 \u2014 X\n\n**Formerly:** ADR-a-001\n\n", False),
+        }
+        for name, (new_head, rises) in rows.items():
+            with self.subTest(name), tempfile.TemporaryDirectory() as tmp:
+                root = repo(tmp)
+                write(root, old, header + prose)
+                commit_all(root)
+                mark_base(root)
+                (root / "docs/areas/b/adr").mkdir(parents=True)
+                git(root, "mv", old, moved)
+                write(root, moved, new_head + prose)
+                commit_all(root)
+                verdict = self.judge(root)
+                self.assertEqual(dict(verdict.renamed), {moved: old})
+                self.assertGreater(len((header + prose).encode()), 1500)
+                self.assertEqual(tuple(rise.rule for rise in verdict.rises),
+                                 ("B21",) if rises else ())
+                self.assertEqual(record_lint.added_records(verdict), [moved] if rises else [])
+
+    def test_a_similar_superseding_record_is_judged_and_listed_as_added(self):
+        prose = "".join(f"Line {n} of the context about the queue backend.\n" for n in range(8))
+        new = "docs/areas/a/adr/002-new.md"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = repo(tmp)
+            write(root, self.P, "# ADR-a-001 \u2014 Old\n\n- **Status:** accepted\n\n## Context\n\n" + prose)
+            commit_all(root)
+            mark_base(root)
+            git(root, "rm", "-q", self.P)
+            write(root, new, "# ADR-a-002 \u2014 New\n\n- **Status:** accepted\n\n" + prose
+                  + "Superseded by the new backend.\n")
+            commit_all(root)
+            verdict = self.judge(root)
+            self.assertEqual(dict(verdict.renamed), {new: self.P})
+            self.assertEqual(record_lint.added_records(verdict), [new])
+            self.assertEqual(verdict.rises, (Rise("B22", 1, 1, (Violation("B22", new, 3, 2),)),))
 
 
 if __name__ == "__main__":
