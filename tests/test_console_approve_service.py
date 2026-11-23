@@ -2265,7 +2265,7 @@ class PlanApproveRealTest(ApproveCase):
         source.write_text(json.dumps(contract), "utf-8")
         self.repo = register_check.adopted_repository(
             self.parent / "approve", "fixture/console-approve", source)
-        for name, text in ((".claude/odd.md", "# odd\n"), (".claude/specs/a.md", "# a\n")):
+        for name, text in ((".claude/odd.md", "# odd\n"), (".out-of-scope/a.md", "# a\n")):
             (self.repo / name).parent.mkdir(parents=True, exist_ok=True)
             (self.repo / name).write_text(text)
         git(self.repo, "add", "-A")

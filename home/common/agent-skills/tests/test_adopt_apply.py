@@ -88,7 +88,6 @@ from .test_adopt_project import (
     variable_code,
     write,
     write_depth_tree,
-    write_dissolved_tree,
     write_linked_tree,
     write_moved_tool,
     write_policy_tree,
@@ -98,11 +97,11 @@ from .test_adopt_project import (
 
 CONTRACT = ".agents/project.json"
 MOVED = {
-    ".claude/specs/x.md": ".agents/artifacts/specs/x.md",
-    ".claude/plans/y.md": ".agents/artifacts/plans/y.md",
-    ".claude/plans/y.tasks/t1.md": ".agents/artifacts/plans/y.tasks/t1.md",
     ".out-of-scope/z.md": ".agents/knowledge/rejections/z.md",
 }
+# The legacy record trees adoption leaves where they are (#1456).
+STAYED = (".claude/specs/x.md", ".claude/plans/y.md",
+          ".claude/plans/y.tasks/t1.md")
 
 
 def apply_repo(home: Path, *, verification: tuple[str, ...] = ("true",),
@@ -159,7 +158,7 @@ def apply_repo(home: Path, *, verification: tuple[str, ...] = ("true",),
     write(root, CONTRACT, json.dumps(without_platform, indent=2) + "\n")
     for standards in contract["bindings"]["paths"]["standards"]:
         write(root, f"{standards}/bar.md", "# the bar\n")
-    for old in MOVED:
+    for old in (*MOVED, *STAYED):
         write(root, old, f"# {old}\n")
     write(root, ".claude/skills.config.json", json.dumps(
         {"orchestration": {"agentBudgetMinutes": 180, "maxParallel": 2}},
@@ -409,6 +408,9 @@ class ApplySuccessTest(ApplyTestCase):
                               self.branch, "--", new).split()
                 self.assertEqual(len(history), 2, history)
                 self.assertEqual(history[1], self.base)
+        for path in STAYED:
+            with self.subTest(stayed=path):
+                self.assertIn(path, tracked)
 
     def test_the_commit_reports_renames_rather_than_add_plus_delete(self):
         status = git(self.root, "show", "--name-status", "-M",
@@ -437,6 +439,16 @@ class ApplySuccessTest(ApplyTestCase):
         self.assertNotIn("evidence_record", self.result)
         self.assertNotIn("evidence_record", self.document["handoff"])
 
+    def test_the_plan_and_the_applied_change_hold_no_path_under_the_artifacts_directory(self):
+        named = [p for op in self.document["changes"]
+                 for p in op["sources"] + op["targets"]]
+        changed = git(self.root, "diff", "--name-only", "--no-renames",
+                      f"{self.base}..{self.branch}").split()
+        self.assertEqual(
+            [p for p in named + changed
+             if p == ".agents/artifacts"
+             or p.startswith(".agents/artifacts/")], [])
+
     def test_the_committed_contract_declares_the_platform_and_new_homes(self):
         contract = json.loads(git(
             self.root, "show", f"{self.branch}:{CONTRACT}"))
@@ -446,8 +458,7 @@ class ApplySuccessTest(ApplyTestCase):
                          {"min_inclusive": version,
                           "max_exclusive": f"{major + 1}.0.0"})
         self.assertEqual(contract["bindings"]["paths"]["artifacts"],
-                         {"specs": ".agents/artifacts/specs",
-                          "plans": ".agents/artifacts/plans"})
+                         {"specs": ".claude/specs", "plans": ".claude/plans"})
         self.assertEqual(contract["bindings"]["paths"]["rejections"],
                          [".agents/knowledge/rejections"])
 
@@ -528,7 +539,7 @@ class ApplyRefusalTest(ApplyTestCase):
         the working tree carries an edit `git mv` would carry along."""
         root = apply_repo(self.home)
         plan_id = self.ready_plan(root)["plan"]["plan_id"]
-        write(root, ".claude/specs/x.md", "# edited, never committed\n")
+        write(root, ".out-of-scope/z.md", "# edited, never committed\n")
         self.refuse(root, plan_id, "dirty_worktree")
 
     def test_an_untracked_file_in_an_inspected_source_is_refused(self):
@@ -536,7 +547,7 @@ class ApplyRefusalTest(ApplyTestCase):
         staleness rather than dirt — either way nothing is touched."""
         root = apply_repo(self.home)
         plan_id = self.ready_plan(root)["plan"]["plan_id"]
-        write(root, ".claude/specs/untracked.md", "# not committed\n")
+        write(root, ".out-of-scope/untracked.md", "# not committed\n")
         self.refuse(root, plan_id, "plan_stale")
 
     def test_an_unrelated_unstaged_edit_is_not_a_dirty_worktree(self):
@@ -914,9 +925,8 @@ class LinkRewriteApplyTest(ApplyTestCase):
             self.assertEqual(git(root, "show", f"{branch}:{path}"), text)
         # Already-broken links, URLs and files no link change touches are
         # byte-identical, wherever they now live.
-        for old, new in ((".claude/plans/y.md", ".agents/artifacts/plans/y.md"),
-                         (".out-of-scope/z.md",
-                          ".agents/knowledge/rejections/z.md"),
+        for old, new in ((".out-of-scope/w.md",
+                          ".agents/knowledge/rejections/w.md"),
                          (".agents/instructions/bootstrap.md",
                           ".agents/instructions/bootstrap.md")):
             self.assertEqual(git(root, "show", f"{branch}:{new}"),
@@ -946,29 +956,6 @@ class LinkRewriteApplyTest(ApplyTestCase):
         self.succeed(root, document["plan"]["plan_id"])
         stored = self.stored_document(document["plan"]["plan_id"])
         self.assertEqual(stored["link_rewrites"], LINKED_SUMMARY)
-
-    def test_an_unrewritable_link_fails_the_commit_gate(self):
-        root = apply_repo(self.home)
-        write_dissolved_tree(root)
-        code, out, err = run("plan", "--repo-root", str(root), home=self.home)
-        self.assertEqual(code, 0, err or out)
-        document = json.loads(out)
-        self.assertEqual(document["plan"]["state"], "draft")
-        plan_id = document["plan"]["plan_id"]
-        # Forced past the ready gate (D11): only the commit gate stands
-        # between this plan and a commit that breaks `README.md`'s link.
-        stored = json.loads(self.stored_plan(plan_id).read_text("utf-8"))
-        stored["plan"]["state"] = "ready"
-        self.rewrite_stored_plan(plan_id, stored)
-        base = git(root, "rev-parse", "HEAD").strip()
-        self.assert_retained(root, plan_id, base,
-                             "adopt.gate.no-new-broken-link")
-        record = json.loads(self.state(
-            "adopt", "worktrees",
-            self.digest(plan_id) + ".failure.json").read_text("utf-8"))
-        self.assertEqual([gate["id"] for gate in record["gates"]
-                          if gate["status"] == "failed"],
-                         ["no-new-broken-link"])
 
 
 class PathReferenceApplyTest(ApplyTestCase):
@@ -1014,7 +1001,7 @@ class PathReferenceApplyTest(ApplyTestCase):
         self.assertEqual(git(root, "show", f"{branch}:{CHECK_LINKS}"),
                          git(root, "show", f"HEAD:{CHECK_LINKS}"))
         self.assertEqual(self.check(root, branch),
-                         (1, ".agents/artifacts/specs/x.md: missing.md\n"))
+                         (1, ".agents/knowledge/hints/h.md: missing.md\n"))
 
     def test_the_stored_plan_lists_the_answer_and_the_row(self):
         root = referenced_apply_repo(self.home)
@@ -1091,7 +1078,7 @@ class ReferencePolicyApplyTest(ApplyTestCase):
                                  git(root, "show", f"{branch}:{path}"))
         self.assertEqual(
             [path for path in self.branch_files(root, branch)
-             if path.startswith(".claude/notes")], [])
+             if path.startswith(".out-of-scope")], [])
 
     def test_the_outside_command_runs_on_the_adopt_commit_as_on_base(self):
         root, _, result = self.applied()
@@ -1111,7 +1098,7 @@ class ReferencePolicyApplyTest(ApplyTestCase):
                 f'"{addition}"' for addition in row["additions"])):
             with self.subTest(element=element):
                 self.assertIn(element, text)
-        self.assertEqual(len(row["additions"]), 3)
+        self.assertEqual(len(row["additions"]), 1)
 
     def test_the_settings_file_stays_in_place_with_a_null_destination(self):
         root, document, result = self.applied()

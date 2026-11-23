@@ -74,20 +74,20 @@ FORMATTER_TEXT = (
     '        handle.write("".join(x + "\\n" for x in out))\n')
 ANALYZER = "tests/test_analyzer.py"
 ANALYZER_SUBJECT = f"{ANALYZER}:1:34"
-ANALYZER_TEXT = 'ANALYZER_SPEC_PATH_UNDER_TEST = ".claude/specs/x.md"\n'
-ANALYZER_REWRITTEN = ANALYZER_TEXT.replace(".claude/specs",
-                                           ".agents/artifacts/specs")
+ANALYZER_TEXT = 'ANALYZER_SPEC_PATH_UNDER_TEST = ".out-of-scope/z.md"\n'
+ANALYZER_REWRITTEN = ANALYZER_TEXT.replace(".out-of-scope",
+                                           ".agents/knowledge/rejections")
 # #376 COR-001: a `generated_file` projection rendered from the analyzer.
 PROJECTED_ANALYZER = "generated/analyzer.txt"
 # #376 COR-PROJECTION-KIND: a `managed_import` naming the analyzer by path.
 IMPORTED_ANALYZER = "generated/analyzer-import.txt"
 ANALYZER_FORMATTED = ('ANALYZER_SPEC_PATH_UNDER_TEST = (\n'
-                      '    ".agents/artifacts/specs/x.md"\n'
+                      '    ".agents/knowledge/rejections/z.md"\n'
                       ')\n')
 CLEAN = "tests/clean.py"
 CLEAN_TEXT = "VALUE = 1   \n"
 # A moved file no link rewrite edits: its last operation is the `git-mv`.
-SHIFTED = ".agents/artifacts/plans/y.md"
+SHIFTED = ".agents/knowledge/rejections/w.md"
 FORMAT_COMMANDS = {
     "format": [sys.executable, FORMATTER],
     "broken": [sys.executable, FORMATTER, "--fail"],

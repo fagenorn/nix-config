@@ -600,7 +600,7 @@ class ConformanceAdoptionPlanTest(AdoptTestCase):
         self.assertEqual(op["after"], sha256_hash((json.dumps(expected, indent=2) + "\n").encode()))
 
     def test_a_path_reference_edit_and_the_declaration_share_one_write(self):
-        root = self.devenv_repo(yaml=DEVENV_YAML + "# notes: .claude/specs/x.md\n")
+        root = self.devenv_repo(yaml=DEVENV_YAML + "# notes: .out-of-scope/z.md\n")
         doc = self.ready_plan(root)
         rows = [row for row in doc["path_references"] if row["path"] == "devenv.yaml"]
         self.assertEqual(len(rows), 1, doc["path_references"])
@@ -610,7 +610,7 @@ class ConformanceAdoptionPlanTest(AdoptTestCase):
         self.assertEqual(doc["plan"]["state"], "ready", doc["plan"]["blockers"])
         (op,) = [op for op in doc["changes"] if "devenv.yaml" in op["sources"] + op["targets"]]
         self.assertEqual(op["op"], "write-file")
-        rewritten = DEVENV_YAML_DECLARED + "# notes: .agents/artifacts/specs/x.md\n"
+        rewritten = DEVENV_YAML_DECLARED + "# notes: .agents/knowledge/rejections/z.md\n"
         self.assertEqual(op["after"], sha256_hash(rewritten.encode()))
 
     def test_outstanding_conformance_work_is_never_routed_to_no_change(self):
