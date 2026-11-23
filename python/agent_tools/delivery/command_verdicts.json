@@ -44,6 +44,11 @@
   "forge-issue": null,
   "guard-policy": null,
   "host-readiness": null,
+  "independent-review": {
+    "subcommands": {
+      "code": ["pass", "findings", "none", "unavailable", "error"]
+    }
+  },
   "instruction-surface-lint": null,
   "issue-branch": null,
   "issue-setup": {
@@ -110,7 +115,11 @@
   "skipped-test-lint": null,
   "sprint": null,
   "standards-lint": null,
-  "verified-tree": null,
+  "verified-tree": {
+    "subcommands": {
+      "run": ["passed", "failed", "dirty", "error"]
+    }
+  },
   "verify-pending": null,
   "verify-slot": null
 }

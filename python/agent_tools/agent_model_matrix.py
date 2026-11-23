@@ -33,7 +33,7 @@ REVIEWER_LITE_LANE_REQUIREMENTS = {"risk-lane-mechanical-or-low", "bounded-task-
 EXPECTED_ROLE_TIERS = {
     "owner": ("opus", "high"),
     "ship-owner": ("opus", "high"),
-    "implementer": ("opus", "high"),
+    "implementer": ("sonnet", "high"),
     "reviewer": ("opus", "high"),
     "reviewer-lite": ("sonnet", "medium"),
     "explorer": ("sonnet", "medium"),

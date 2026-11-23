@@ -13,7 +13,7 @@ held run lock answers `EXIT_RUNNING` first; the host's settings must name the li
 unconditional Bash hook with no hook switch on (`engine_guard.locate`), checked after that answer;
 the procedure must pass `procedure_check.check_directory` against the platform
 declarations plus every project command, hold only `command`, `agent`, `decide`, `group` and `call` steps,
-a `mutates: true` step only as a `command` step, no input the run does not supply, no `call` member
+a `mutates: true` step only as a `command` or `agent` step, no input the run does not supply, no `call` member
 of a group, no procedure that calls itself and no agent step whose role file does not read
 (`engine_session.read_role`), and the host declaration must admit the engine route (else the
 refusal starts with its reason code), checked after the guard; every child procedure a `call`
@@ -96,7 +96,7 @@ child. A group's and a call's wait runs under `engine_session.reaping`, so a SIG
 every live session, admits no further child, starts no further step in any walk and exits
 143 once the running steps end.
 
-Before each visit of a `mutates: true` command step, and before each visit of a group with a
+Before each visit of a `mutates: true` command or agent step, and before each visit of a group with a
 `mutates: true` member (once for the group, recorded at the group's step), in a procedure naming a `keep_alive`,
 the shell runs it (`KEEP_ALIVE_SECONDS`), recording a `keep_alive_ran` per call. It renews
 only on the verdict `renewed` with exit 0; an `error` whose `transient` is the boolean
@@ -257,9 +257,9 @@ def _refuse_unrunnable(procedure: dict, directory: Path, supplied: tuple[str, ..
             raise Refused(f"step {item['id']} is a {item['kind']} step, "
                           "which the engine does not run yet")
     for item in procedure["steps"]:
-        if item.get("mutates") is True and item["kind"] != "command":
+        if item.get("mutates") is True and item["kind"] not in ("command", "agent"):
             raise Refused(f"step {item['id']} is a {item['kind']} step marked mutates, and the "
-                          "engine renews the claim only before a command step")
+                          "engine renews the claim only before a command or agent step")
     for item in procedure["steps"]:
         if item["kind"] == "agent":
             try:
@@ -818,6 +818,11 @@ def _walk(run_dir: Path, table: CommandTable, scope: _Scope,
         action = _forced(action, steps, recheck)
         if isinstance(action, engine_core.StartSession):
             try:
+                if steps[action.step].get("mutates") is True and "keep_alive" in procedure:
+                    lost = _renew(run_dir, table, procedure, inputs, action.step, action.visit,
+                                  stop)
+                    if lost is not None:
+                        return lost
                 stopped = _visit_session(
                     run_dir, table.root, steps[action.step], action, scope,
                     resumed=_resumed(run_dir, ledger, action.step, action.visit))

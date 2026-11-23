@@ -346,6 +346,51 @@ def decide_member() -> dict:
     return doc
 
 
+def absent_member_procedure(members: list[str]) -> dict:
+    """A decide `d` reading `.verdict` of each of `members`, behind a group `g` of those that are steps."""
+    steps = [{"id": "d", "stage": "final review", "kind": "decide", "grader": "probe", "holds": "run",
+              "in": [f"{name}.verdict" for name in members], "on": {"seen": "done"}}]
+    return {"format": 1, "inputs": [], "stops": {}, "steps": steps}
+
+
+class AbsentMemberTest(unittest.TestCase):
+    def read(self, procedure: dict, events: list) -> tuple:
+        calls: list[dict] = []
+
+        def record(values: dict) -> str:
+            calls.append(dict(values))
+            return "seen"
+
+        with mock.patch.dict(engine_graders.GRADERS, {"probe": Grader(("seen",), record)}):
+            return replay(procedure, {}, events).action, calls
+
+    def test_a_decide_after_a_group_reads_none_for_a_member_that_stored_no_such_member(self) -> None:
+        procedure = absent_member_procedure(["a", "b"])
+        procedure["steps"] = [
+            {"id": "g", "stage": "final review", "kind": "group", "holds": "run",
+             "members": [{"step": "a", "pass": ["ok"]}, {"step": "b", "pass": ["ok"]}],
+             "on": {"pass": "d", "blocked": "d"}},
+            {"id": "a", "stage": "final review", "kind": "agent", "holds": "run", "role": "reviewer",
+             "prompt": "p.md", "reply": "r.json", "outcome_from": "status", "in": [], "on": {}},
+            {"id": "b", "stage": "final review", "kind": "command", "holds": "run", "command": "c",
+             "in": [], "on": {}},
+        ] + procedure["steps"]
+        events = [{"type": "entered", "step": "g"}] + pair("a", "no-reply", {}) + pair(
+            "b", "ok", {"verdict": "ok"})
+        action, calls = self.read(procedure, events)
+        self.assertEqual(action, Done())
+        self.assertEqual(calls, [{"a.verdict": None, "b.verdict": "ok"}])
+
+    def test_a_decide_reading_an_absent_member_of_a_non_member_step_still_raises(self) -> None:
+        procedure = absent_member_procedure(["c"])
+        procedure["steps"][0]["in"] = ["c.missing"]
+        procedure["steps"].insert(0, {"id": "c", "stage": "final review", "kind": "command",
+                                      "holds": "run", "command": "c", "in": [], "on": {"ok": "d"}})
+        with self.assertRaises(engine_core.CoreError) as raised:
+            self.read(procedure, pair("c", "ok", {}))
+        self.assertIn("c.missing", str(raised.exception))
+
+
 class CallTest(unittest.TestCase):
     def test_a_call_over_a_list_returns_its_items_and_bound(self) -> None:
         self.assertEqual(next_action(fan(), INPUTS, D + G + MEMBERS_PASS), FAN_CALL)

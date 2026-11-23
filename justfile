@@ -158,6 +158,8 @@ agent-workflow-tests *args:
     tests/test_agent_tools_layout.py \
     tests/test_agent_tools_semver.py \
     tests/test_engine_check.py \
+    tests/test_engine_direct_procedures.py \
+    tests/test_engine_graders.py \
     tests/test_engine_ledger.py \
     tests/test_engine_core.py \
     tests/test_engine_commands.py \
@@ -176,6 +178,7 @@ agent-workflow-tests *args:
     tests/test_engine_slots.py \
     tests/test_engine_fixture.py \
     tests/test_engine_stubbed_run.py \
+    tests/test_independent_review.py \
     tests/test_issue_setup.py \
     tests/test_plan_amend.py \
     tests/test_verify_block.py \
