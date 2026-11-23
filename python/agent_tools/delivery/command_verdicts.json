@@ -40,6 +40,7 @@
   "issue-branch": null,
   "look-approval": null,
   "look-lint": null,
+  "node-lint": null,
   "owner-actions": null,
   "plan-amend": null,
   "pr-green": null,
