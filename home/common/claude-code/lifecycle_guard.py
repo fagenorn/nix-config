@@ -440,8 +440,10 @@ Each merge arm runs it right after the mergeability check, so before the
 feature arm's integration-base exemption and protection lookup and before the
 release arm's rollup predicate, with the matched PR number (the release arm
 receives it as `validate_release_merge`'s last parameter).
-1. The guard reads the PR's title, body, commits and linked issues, `gh pr view <n>
-   --repo <slug> --json title,body,commits,closingIssuesReferences`.
+1. The guard reads the PR's title, body and linked issues, `gh pr view <n>
+   --repo <slug> --json title,body,closingIssuesReferences`, then every commit,
+   `gh api --paginate --slurp repos/<slug>/pulls/<n>/commits?per_page=100` (pages
+   flattened in order, each commit's `commit.message`).
 2. The PR's issues are the number in an `issue-<n>-` head branch, every issue
    of this repository in `closingIssuesReferences` (the Development sidebar and
    `gh issue develop` links), plus every closing keyword GitHub honours
@@ -451,9 +453,10 @@ receives it as `validate_release_merge`'s last parameter).
    `--subject` (GitHub closes on the merge commit too, whose default body is the PR
    title) followed by `#<n>`, `<slug>#<n>` or
    `https://github.com/<slug>/issues/<n>` for this repository's slug; a
-   reference naming another repository is ignored. A PR of
-   `LOOK_COMMIT_LIMIT` (100) commits or more is refused as unreadable, since
-   the lookup returns no more than that many. No issue: the merge is
+   reference naming another repository is ignored. A PR whose commit list reaches
+   `LOOK_COMMIT_LIMIT` (250) commits, the most GitHub lists, is refused as `unsafe merge:
+   cannot read every commit of the PR: GitHub listed <n> commits, its limit, so a later
+   commit may settle an issue unseen`. No issue: the merge is
    judged exactly as before, with no further child.
 3. For each issue it reads `gh api repos/<slug>/issues/<n>` and
    `gh api --paginate --slurp repos/<slug>/issues/<n>/comments?per_page=100`
@@ -504,14 +507,16 @@ receives it as `validate_release_merge`'s last parameter).
    file, the three compares and, when more than one merge came in, each merge's compare with
    its first parent, and refuses when any of them lists a look file.
 Every lookup runs with the token variables scrubbed and the child timeout; a
-timed-out lookup is `PR body lookup timed out`, `issue <n> lookup timed out` or
-`issue <n> comment lookup timed out`, a non-zero one `PR body lookup failed`,
-`issue <n> lookup failed` or `issue <n> comment lookup failed` with the child's
-diagnostic, and output that is not the expected shape is refused as `unsafe
-merge: cannot read the PR body`, `cannot read issue <n>` or `cannot read the
-comments of issue <n>`; an issue or PR object with no `body` key, a PR object
-with no string `title`, no `commits` or `closingIssuesReferences` list, or an entry of either that
-is not readable, is unreadable, never an empty body or an empty list. Which issues are marked, and which approvals count
+timed-out lookup is `PR body lookup timed out`, `PR commit lookup timed out`,
+`issue <n> lookup timed out` or `issue <n> comment lookup timed out`, a non-zero one
+`PR body lookup failed`, `PR commit lookup failed`, `issue <n> lookup failed` or
+`issue <n> comment lookup failed` with the child's diagnostic, and output that is not
+the expected shape is refused as `unsafe merge: cannot read the PR body`, `cannot read
+the PR commits`, `cannot read issue <n>` or `cannot read the comments of issue <n>`; an
+issue or PR object with no `body` key, a PR object with no string `title`, no
+`closingIssuesReferences` list, or an entry of it that is not readable, is unreadable,
+never an empty body or an empty list; so is a commit page that is not a list of objects,
+or a commit with no object `commit` holding a string `message`. Which issues are marked, and which approvals count
 (the owner's or a member's, naming this issue, this PR and this head, the
 latest answer deciding), is `look-approval`'s contract; `--admin` is in no merge
 form, so it is refused by the grammar before any lookup.
@@ -1377,10 +1382,9 @@ LOOK_REFERENCE = re.compile(
     r"(?:https?://(?:www\.)?github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/issues/"
     r"|([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#|#)([1-9][0-9]*)\b",
     re.IGNORECASE)
-# `gh pr view --json commits` returns at most this many commits; a PR with this
-# many or more may hold a closing keyword the lookup did not return, so the look
-# gate refuses it (issue 1138).
-LOOK_COMMIT_LIMIT = 100
+# GitHub lists at most this many commits of a pull request; a list this long may
+# leave out a later commit holding a closing keyword, so the look gate refuses it.
+LOOK_COMMIT_LIMIT = 250
 # The look file set the kept-approval rule reads (issue 1211) and the bounds the carry
 # keeps; they equal `look_marker`'s `LOOK_FILES_PATH`, `CARRY_RUNS` and `READ_LIMIT`
 # (a test pins the equality, since the guard imports nothing from `agent_tools`).
@@ -6365,30 +6369,17 @@ def look_issue_numbers(head_ref, body, repository, linked=()):
 def look_pr_texts(pr, repository):
     """`(text, linked)` from the PR lookup's object, or `(None, None)` when unreadable.
 
-    `text` is the PR title, body and every commit message (headline and body) joined by
-    newlines; `linked` the numbers of `repository`'s issues in
-    `closingIssuesReferences`, other repositories' issues ignored. A missing or
-    mistyped field, an entry that is not readable, or `LOOK_COMMIT_LIMIT` commits
-    or more is unreadable.
+    `text` is the PR title and body joined by a newline; `linked` the numbers of
+    `repository`'s issues in `closingIssuesReferences`, other repositories' issues
+    ignored. A missing or mistyped field or an entry that is not readable is unreadable.
     """
     if not isinstance(pr, dict) or "body" not in pr or not isinstance(pr.get("title"), str):
         return None, None
-    body, commits, references = pr["body"], pr.get("commits"), pr.get("closingIssuesReferences")
+    body, references = pr["body"], pr.get("closingIssuesReferences")
     if not (body is None or isinstance(body, str)):
-        return None, None
-    if not isinstance(commits, list) or len(commits) >= LOOK_COMMIT_LIMIT:
         return None, None
     if not isinstance(references, list):
         return None, None
-    texts = [pr["title"], body or ""]
-    for commit in commits:
-        if not isinstance(commit, dict):
-            return None, None
-        for key in ("messageHeadline", "messageBody"):
-            text = commit.get(key)
-            if not isinstance(text, str):
-                return None, None
-            texts.append(text)
     linked = []
     for reference in references:
         url = reference.get("url") if isinstance(reference, dict) else None
@@ -6397,7 +6388,7 @@ def look_pr_texts(pr, repository):
             return None, None
         if found.group(1).lower() == repository.lower():
             linked.append(int(found.group(2)))
-    return "\n".join(texts), linked
+    return "\n".join([pr["title"], body or ""]), linked
 
 
 def look_json(context, argv, timed_out, failed, unreadable):
@@ -6455,6 +6446,39 @@ def look_issue_facts(context, number):
     return {"number": number, "body": issue.get("body"), "comments": comments}, None
 
 
+def look_pr_commits(context, number):
+    """`(messages, None)`, every commit message of the PR in order, or `(None, status)`.
+
+    Reads every page of the PR's commit list. A page that is not a list of objects, or
+    a commit with no object `commit` holding a string `message`, is unreadable, and so
+    is a list of `LOOK_COMMIT_LIMIT` commits or more, which may hide a later commit.
+    """
+    pages, status = look_json(
+        context,
+        ["api", "--paginate", "--slurp",
+         f"repos/{context.repository}/pulls/{number}/commits?per_page=100"],
+        "PR commit lookup timed out", "PR commit lookup failed", "cannot read the PR commits")
+    if status is not None:
+        return None, status
+    if not isinstance(pages, list) or not all(
+        isinstance(page, list)
+        and all(
+            isinstance(entry, dict)
+            and isinstance(entry.get("commit"), dict)
+            and isinstance(entry["commit"].get("message"), str)
+            for entry in page)
+        for page in pages
+    ):
+        return None, refuse("merge", "cannot read the PR commits")
+    messages = [entry["commit"]["message"] for page in pages for entry in page]
+    if len(messages) >= LOOK_COMMIT_LIMIT:
+        return None, refuse(
+            "merge",
+            f"cannot read every commit of the PR: GitHub listed {len(messages)} commits, "
+            "its limit, so a later commit may settle an issue unseen")
+    return messages, None
+
+
 def look_problem(context, number, pr_facts, head_commit, subject=None):
     """None when the look gate passes, else the status the merge returns (issue 1138).
 
@@ -6474,13 +6498,17 @@ def look_problem(context, number, pr_facts, head_commit, subject=None):
     repository = context.repository
     pr_body, status = look_json(
         context, ["pr", "view", number, "--repo", repository, "--json",
-         "title,body,commits,closingIssuesReferences"],
+         "title,body,closingIssuesReferences"],
         "PR body lookup timed out", "PR body lookup failed", "cannot read the PR body")
     if status is not None:
         return status
     texts, linked = look_pr_texts(pr_body, repository)
     if texts is None:
         return refuse("merge", "cannot read the PR body")
+    messages, status = look_pr_commits(context, number)
+    if status is not None:
+        return status
+    texts = "\n".join([texts, *messages])
     head_ref = pr_facts.get("headRefName")
     merge_commit = "\n".join(
         part for part in (head_ref, subject) if isinstance(part, str))

@@ -114,7 +114,7 @@ elif (
     and argv[0:2] == ["pr", "view"]
     and argv[3] == "--repo"
     and argv[5] == "--json"
-    and argv[6] == "title,body,commits,closingIssuesReferences"
+    and argv[6] == "title,body,closingIssuesReferences"
 ):
     stage, number, slug = "body", argv[2], argv[4]
 elif len(argv) == 2 and argv[0] == "api":
@@ -165,6 +165,16 @@ elif (
         stage = "comments"
         slug = parts[1] + "/" + parts[2]
         number = parts[4]
+    elif (
+        len(parts) == 6
+        and parts[0] == "repos"
+        and parts[3] == "pulls"
+        and parts[5] == "commits"
+        and argv[3].endswith("?per_page=100")
+    ):
+        stage = "commits"
+        slug = parts[1] + "/" + parts[2]
+        number = parts[4]
 if stage is None:
     print("unexpected fake-gh argv: " + repr(argv), file=sys.stderr)
     raise SystemExit(64)
@@ -200,7 +210,9 @@ if stage == "pr":
         '"status":"COMPLETED","conclusion":"SUCCESS"}]}'
     )
 elif stage == "body":
-    default = '{"title": "", "body": "", "commits": [], "closingIssuesReferences": []}'
+    default = '{"title": "", "body": "", "closingIssuesReferences": []}'
+elif stage == "commits":
+    default = "[[]]"
 elif stage == "issue":
     issue = json.loads(os.environ.get("FAKE_ISSUES", "{}")).get(number, {})
     default = json.dumps({"number": int(number), "body": issue.get("body", "")})
@@ -6285,17 +6297,24 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         }
 
     @staticmethod
-    def look_pr_json(body="", commits=(), linked=(), title="Page"):
-        """The PR lookup's answer: title, body, commit messages and linked issue numbers."""
+    def look_pr_json(body="", linked=(), title="Page"):
+        """The PR lookup's answer: title, body and linked issue numbers."""
         return json.dumps({
             "title": title,
             "body": body,
-            "commits": [{"messageHeadline": line, "messageBody": ""} for line in commits],
             "closingIssuesReferences": [
                 {"url": n if isinstance(n, str)
                  else f"https://github.com/fagenorn/nix-config/issues/{n}"}
                 for n in linked],
         })
+
+    @staticmethod
+    def look_commit_pages(commits):
+        """The commit listing's answer: the messages in pages of 100, one entry each."""
+        entries = [{"sha": f"{i:040x}", "commit": {"message": line}}
+                   for i, line in enumerate(commits)]
+        return json.dumps([entries[start:start + 100] for start in range(0, len(entries), 100)]
+                          or [[]])
 
     def look_env(self, issues, body="", branch="issue-1200-page", head=LOOK_HEAD,
                  base="main", slug="fagenorn/nix-config", number=1300, commits=(), linked=(),
@@ -6313,7 +6332,8 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             pr["headRefOid"] = head
         return {
             "FAKE_PR_JSON": json.dumps(pr),
-            "FAKE_BODY_JSON": self.look_pr_json(body, commits, linked, title),
+            "FAKE_BODY_JSON": self.look_pr_json(body, linked, title),
+            "FAKE_COMMITS_JSON": self.look_commit_pages(commits),
             "FAKE_ISSUES": json.dumps(issues),
         }
 
@@ -6326,6 +6346,47 @@ class ClaudePermissionGuardTest(unittest.TestCase):
     def assert_look_refusal(self, result, refusal=None):
         self.assertEqual(2, result.returncode, result.stderr)
         self.assertIn(refusal or self.LOOK_REFUSAL, result.stderr.splitlines())
+
+    def test_a_large_pull_request_reads_every_commit_page(self):
+        env = self.look_env(
+            self.LOOK_MARKED, branch="topic", body="Page change",
+            commits=["Routine change"] * 149 + ["Fix #1200 layout"] + ["Routine change"] * 44)
+        result = self.run_guard(self.LOOK_MERGE, self.look_repo(), env)
+        self.assert_look_refusal(result)
+
+    def test_a_pull_request_of_many_commits_settling_no_marked_issue_merges(self):
+        for count in (100, 194, 249):
+            with self.subTest(commits=count):
+                env = self.look_env(
+                    self.LOOK_MARKED, branch="topic", body="Page change",
+                    commits=["Routine change"] * count)
+                result = self.run_guard(self.LOOK_MERGE, self.look_repo(), env)
+                self.assertEqual(0, result.returncode, result.stderr)
+
+    def test_a_194_commit_pull_request_of_a_marked_issue_is_judged_like_a_small_one(self):
+        repo = self.look_repo()
+        for count in (1, 194):
+            with self.subTest(commits=count):
+                bare = self.look_env(self.LOOK_MARKED, commits=["Routine change"] * count)
+                approved = self.marked_with(
+                    self.look_comment(10), commits=["Routine change"] * count)
+                first = self.run_guard(self.LOOK_MERGE, repo, bare)
+                second = self.run_guard(self.LOOK_PINNED, repo, approved)
+                self.assert_look_refusal(first)
+                self.assertEqual(0, second.returncode, second.stderr)
+                self.assertEqual("", second.stderr)
+
+    def test_a_pull_request_past_the_commit_limit_is_refused_naming_its_count(self):
+        env = self.look_env(
+            self.LOOK_MARKED, branch="topic", body="Page change",
+            commits=["Routine change"] * 250)
+        result = self.run_guard(self.LOOK_MERGE, self.look_repo(), env)
+        self.assertEqual(2, result.returncode, result.stderr)
+        self.assertIn(
+            "lifecycle guard: unsafe merge: cannot read every commit of the PR: GitHub listed "
+            "250 commits, its limit, so a later commit may settle an issue unseen",
+            result.stderr.splitlines())
+        self.assertNotIn("PR body", result.stderr)
 
     def test_a_marked_issue_without_an_approval_refuses_the_merge(self):
         result = self.run_guard(self.LOOK_MERGE, self.look_repo(), self.look_env(self.LOOK_MARKED))
@@ -6395,6 +6456,7 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         broken.write_text("#!/bin/sh\necho '{'\n", encoding="utf-8")
         broken.chmod(0o755)
         marked = self.look_env(self.LOOK_MARKED)
+        unreadable_commits = "lifecycle guard: unsafe merge: cannot read the PR commits"
         cases = (
             ({"FAKE_ISSUE_MODE": "nonzero"}, None,
              "lifecycle guard: issue 1200 lookup failed:"),
@@ -6409,13 +6471,8 @@ class ClaudePermissionGuardTest(unittest.TestCase):
              "lifecycle guard: unsafe merge: cannot read issue 1200"),
             ({"FAKE_BODY_JSON": "{}"}, None,
              "lifecycle guard: unsafe merge: cannot read the PR body"),
-            ({"FAKE_BODY_JSON": '{"title": "", "body": "", "closingIssuesReferences": []}'}, None,
-             "lifecycle guard: unsafe merge: cannot read the PR body"),
             ({"FAKE_BODY_JSON": '{"title": "", "body": "", "commits": []}'}, None,
              "lifecycle guard: unsafe merge: cannot read the PR body"),
-            ({"FAKE_BODY_JSON":
-              '{"title": "", "body": "", "commits": [{}], "closingIssuesReferences": []}'},
-             None, "lifecycle guard: unsafe merge: cannot read the PR body"),
             ({"FAKE_BODY_JSON":
               '{"title": "", "body": "", "commits": [], "closingIssuesReferences": [{}]}'},
              None, "lifecycle guard: unsafe merge: cannot read the PR body"),
@@ -6424,8 +6481,16 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             ({"FAKE_BODY_JSON":
               '{"title": null, "body": "", "commits": [], "closingIssuesReferences": []}'},
              None, "lifecycle guard: unsafe merge: cannot read the PR body"),
-            ({"FAKE_BODY_JSON": self.look_pr_json(commits=["x"] * 100)}, None,
-             "lifecycle guard: unsafe merge: cannot read the PR body"),
+            ({"FAKE_COMMITS_MODE": "nonzero"}, None, "lifecycle guard: PR commit lookup failed:"),
+            ({"FAKE_COMMITS_MODE": "timeout"},
+             ("--gh-bin", str(self.fake_gh), "--child-timeout-seconds", "0.5"),
+             "lifecycle guard: PR commit lookup timed out"),
+            ({"FAKE_COMMITS_MODE": "invalid"}, None, unreadable_commits),
+            ({"FAKE_COMMITS_JSON": "[{}]"}, None, unreadable_commits),
+            ({"FAKE_COMMITS_JSON": "[[1]]"}, None, unreadable_commits),
+            ({"FAKE_COMMITS_JSON": '[[{"sha": "x"}]]'}, None, unreadable_commits),
+            ({"FAKE_COMMITS_JSON": '[[{"commit": {"message": null}}]]'}, None,
+             unreadable_commits),
             ({}, ("--gh-bin", str(self.fake_gh), "--look-bin", str(broken)),
              "lifecycle guard: look check failed:"),
         )
