@@ -1,0 +1,18 @@
+{
+  "format": 1,
+  "keep_alive": {"command": "forge-claim", "subcommand": "renew", "in": ["run.repo", "run.issue", "run.holder"]},
+  "inputs": ["holder", "issue", "repo", "repo_root"],
+  "stops": {
+    "setup": {"need": "owner-decision", "reenter": "preflight"},
+    "claim-lost": {"need": "owner-decision", "reenter": "preflight"},
+    "verify": {"need": "owner-decision", "reenter": "checks"}
+  },
+  "steps": [
+    {"id": "preflight", "stage": "verifying", "kind": "command", "command": "issue-setup", "subcommand": "preflight", "holds": "live",
+     "in": ["run.repo_root", "run.issue"],
+     "on": {"clear": "checks", "closed": "setup", "parked": "setup", "duplicate": "setup", "open-pr": "setup", "error": "setup", "refused": "setup"}},
+    {"id": "checks", "stage": "verifying", "kind": "command", "command": "verified-tree", "subcommand": "run", "holds": "live",
+     "in": ["preflight.worktree_path"],
+     "on": {"passed": "done", "failed": "verify", "dirty": "verify", "error": "verify", "refused": "verify", "out-of-bounds": "verify"}}
+  ]
+}

@@ -691,7 +691,7 @@ never taken from it: a failed row names the checkout path when its key never res
 keeps that root, so a granted retry clears the card it answers. Any other exception is `console:
 trust_check_failed <Type>` and 500 `checking failed`.
 
-Folder trust at start (#1183, ADR-console-034 D9): when the service is given `trust_at_start`,
+Folder trust at start (#1183, ADR-console-034): when the service is given `trust_at_start`,
 `start()` starts `TRUST_START_THREAD`, which reads the registry once with `read_fleet` and runs
 `_grant_trust` with cause `console-start` for every registered project in every target
 (`~/.claude.json` when given a `trust_home`, and every profile), one row per project, in registry
@@ -700,7 +700,7 @@ result is a Check again card like any other. It stops between projects once `clo
 `close` joins it. An unreadable registry grants nothing (`console: trust_start_registry_unreadable`);
 a failing project is `console: trust_start_failed <project> <Type>` and the sweep goes on.
 
-`POST /api/adoption-register` (#1055, ADR-console-028 D10) is the Retry of a refused registration
+`POST /api/adoption-register` (#1055, ADR-console-028) is the Retry of a refused registration
 of a merged adoption. It runs the same checks with `MAX_ADOPTION_REGISTER_BYTES` (4096) and
 `approve.parse_approve_request`: 400 `bad registration retry`. The service refuses, each as 409
 with the text, one stderr line `console: adoption_register_refused <reason>`, appending and
@@ -1071,7 +1071,7 @@ hold any text, is never printed; any other exception is `console: live_fault_wit
 the owner withdraws a declaration of an ended sprint too. It nudges nobody and sends no message; a refusal
 appends and publishes nothing.
 
-Owner notice nudges (#1120, ADR-console-053, D6): with a nudger, `post_owner_notice` records, still under the
+Owner notice nudges (#1120, ADR-console-044): with a nudger, `post_owner_notice` records, still under the
 lock, in `_notice_due[sprint_id]` the new row's seq for each sprint of the project with `sprints.takes_notices`
 and `_reachable` (every `_nudgeable` condition but the unread message), and reserves in `_nudging` and
 dispatches `_dispatch_notice_nudge` after the lock each of them not already reserved; a reserved sprint keeps
@@ -1152,7 +1152,7 @@ prompt after a restart before its hook's next wait, takes no answer); 500 `permi
 (`prompt_card.prompts`) at construction and on every append, and the view lists the open ones through
 `prompt_items`. `/api/hooks` and the lifecycle guard are not touched.
 
-Owner notices (#1120, ADR-console-053): `POST /api/owner-notice` (`{"project_id", "text"}`, at most
+Owner notices (#1120, ADR-console-044): `POST /api/owner-notice` (`{"project_id", "text"}`, at most
 `MAX_OWNER_NOTICE_BYTES` 4096) and `POST /api/owner-notice-withdraw` (`{"project_id", "notice"}`, at most
 `MAX_OWNER_NOTICE_WITHDRAW_BYTES` 4096) are page writes: both pass `_page_write`'s guard before any body is
 read (no or a foreign `Origin` is 403 `origin refused`, a missing or wrong token 403 `token refused`,
@@ -1408,7 +1408,7 @@ not (`checks_error`) records that head and target with one such line, as `open` 
 `console: adoption_poll_loop_failed <Type>: <message>` and the loop goes on. The console merges only
 on the owner's Merge (`POST /api/adoption-merge`, ADR-console-088).
 
-The same round ends with the merged registration (#1055, ADR-console-028 D10, ADR-project-contract-005):
+The same round ends with the merged registration (#1055, ADR-console-028, ADR-project-contract-005):
 `register_merged()` runs `Adopter.register(root, cancel=..., integration_branch=<the recorded pull
 request base>, plan_id=<the adoption's plan id>)`, the bounded child, for each `opened`
 adoption whose pull request reads `merged` and whose registration is absent or `waiting`
@@ -1441,7 +1441,7 @@ None, and `movement.merged` keeps the last good reading of the pull requests: th
 its wait for the quiet window from the last time anything moved, then goes quiet. The fold also
 receives the issues whose run is in a session not ended (`live`) and those of them in a lock step (`IssueStage.locking`,
 #1184); a holding pull request's issues count only when live (a run that died holding the lock leaves its pull request
-holding until a waiter takes it over, ADR-console-061 D1); a lock step counts only in a good read that saw a pull request hold a lock, and a failed
+holding until a waiter takes it over, ADR-console-050); a lock step counts only in a good read that saw a pull request hold a lock, and a failed
 read refreshes no lock time, a journal lock step's included, so a lock wait ages out with the rest
 of the kept reading. The merged reading
 is kept per project in memory only (a restart reads at once), published, and never appended to the
@@ -4049,7 +4049,7 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         """Write views as they publish; `delivered` hears each version once written.
 
         Only the owner's stream passes it: a guest view never carries the evidence card, so a frame
-        written to a colleague shows the owner nothing (ADR-console-071 D4).
+        written to a colleague shows the owner nothing (ADR-console-071).
         """
         console = self.server.console
         self.close_connection = True
@@ -5179,7 +5179,7 @@ class ConsoleService:
                 shown_root=None if self._registration is None else self._registration["root"]),
             release_items=release_card.inbox_entries(
                 release_card.live(self._release_cards, self._now())),
-            prompt_items=prompt_card.inbox_entries(self._open_prompts(), self._sprints),
+            prompt_items=prompt_card.inbox_entries(self._open_prompts(), self._sprints, {p: s.root for p, s in self._states.items()}),
             retry_items=approve.retry_entries(self._adoptions, self._enrolling),
             apply_items=apply_items,
             trust_items=folder_trust.items(self._trust_failures),
@@ -8286,7 +8286,7 @@ class ConsoleService:
         return chosen
 
     def _relays_in_bypass(self, sprint_id: str) -> bool:
-        """Under the ingest lock: whether the sprint's newest logged mode (ADR-console-060 D4) is bypass, so its relay must come from a bypassing sender (ADR-console-068)."""
+        """Under the ingest lock: whether the sprint's newest logged mode (ADR-console-060) is bypass, so its relay must come from a bypassing sender (ADR-console-068)."""
         sprint = self._sprints.get(sprint_id)
         return (sprint is not None and sprint.permission is not None
                 and sprint.permission.mode == permission.BYPASS)
@@ -9186,7 +9186,7 @@ class ConsoleService:
     def _run_wait(self, sprint: sprints.SprintState, session: sessions.SessionState | None,
                   now_ms: int) -> bool:
         """Under the ingest lock: whether a run of the session still in progress reads a wait of
-        ADR-console-050 or ADR-console-061 inside the quiet window (#1381)."""
+        ADR-console-050 inside the quiet window (#1381)."""
         if session is None or self._run_moved(session) is None:
             return False
         issues = {issue.issue for (sid, _), state in self._deliveries.items()
@@ -9877,7 +9877,7 @@ class ConsoleService:
             comment = answer.with_retries(
                 record, clock=self._monotonic, sleep=self._write_sleep, on_retry=on_retry)
             # The tracker offers no way to make the read and the post one step, so the pull request is
-            # read once more before the answer is declared recorded (ADR-console-074 D10).
+            # read once more before the answer is declared recorded (ADR-console-074).
             state, found = answer.with_retries(
                 lambda: self._look_reader(slug, look.pr), clock=self._monotonic,
                 sleep=self._write_sleep, on_retry=on_retry)

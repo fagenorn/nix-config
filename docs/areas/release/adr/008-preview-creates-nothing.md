@@ -1,17 +1,3 @@
-# ADR-release-008 — Preview creates nothing and run re-derives the previewed plan
+# ADR-release-008 — Preview writes nothing but the land lock, and run re-derives the previewed plan
 
-- **Status:** accepted; amended by ADR-release-014
-- **Decided in:** #128 D6, D17, D18; #69
-
-## Context
-
-An operator confirms irreversible actions from a preview. If the preview wrote state, or if `run` trusted the preview rather than the world, a confirmation could outlive the plan it was given for.
-
-## Decision
-
-`preview` is diagnosis and never mutates: it creates no directory, transaction or lock and calls no adapter, and it reports an unrunnable plan in its own document. `run` re-derives the plan exactly as `preview` does and writes nothing until it passes. Each confirmation token binds the plan digest, the action, its next attempt and the next acquisition ordinal, so a retry, a re-acquisition or a changed input yields a new token. A token outside the recomputed set refuses `confirmation_stale` and a missing one `confirmation_required`, all-or-nothing.
-
-## Consequences
-
-- A confirmation is valid for one plan only; an operator re-previews after anything changes.
-- `run` repeats the verification reads that `preview` made, so a red or unfinished CI reserves no version.
+An operator confirms irreversible actions from a preview, so a preview that wrote state, or a run that trusted it over the world, would let a confirmation outlive its plan. `preview` creates no directory, transaction or store lock and calls no adapter; `run` re-derives the plan as `preview` does and writes nothing until it passes. Each confirmation token binds the plan digest, the action, its next attempt and the next acquisition ordinal; a token outside the recomputed set refuses `confirmation_stale` and a missing one `confirmation_required`, all or nothing. The one exception: `preview` of a profile with a post-release sync takes the integration land lock the run will hold (ADR-release-011) with one one-shot acquire, only when the plan is runnable and the merge not yet satisfied; any answer but `already_held` or `acquired` (and `no_open_pr` for a resumed release) makes the document unrunnable with the refusal `run` would raise, it never releases the lock, and the digest and tokens do not depend on the answer. Rejected: a preview that writes release state, and a lock-free preview, after which the first run found the lock free, took it and refused `land_lock_lost`, costing one CI wait of the required checks every release.

@@ -190,7 +190,37 @@ def scanned_files(archived_dirs: tuple[str, ...] = ()) -> list[tuple[str, list[s
 
 
 RETIRED_DELIVERY_RECORDS = (2, 9, 10, 11)
-RETIRED_CONSOLE_RECORDS = (2, 9, 25)
+RETIRED_CONSOLE_RECORDS = (2, 9, 25, 39, 40, 41, 53, 55, 56, 57, 61, 64, 69)
+LATER_THAN_076 = re.compile(r"^docs/areas/console/adr/(?:07[7-9]|0[89]\d|[1-9]\d\d)-")
+SUB_DECISION_027_TO_051 = re.compile(
+    r"\bADR-console-(0(?:2[7-9]|[34]\d|5[01]))(?:'s)? \(?(?:D\d|Consequences)")
+SUB_DECISION_052_TO_076 = re.compile(
+    r"\bADR-console-(0(?:5[2-9]|6\d|7[0-6]))(?:'s)? \(?(?:D\d|Consequences)")
+
+
+def console_records(numbers) -> list[Path]:
+    return sorted(
+        p for p in (REPO_ROOT / "docs/areas/console/adr").glob("[0-9][0-9][0-9]-*.md")
+        if int(p.name[:3]) in numbers)
+
+
+def console_form_findings(numbers) -> list[tuple[str, str, int]]:
+    return [
+        (p.name, v.rule, v.line)
+        for p in console_records(numbers)
+        for v in record_violations(f"docs/areas/console/adr/{p.name}", p.read_bytes())
+    ]
+
+
+def sub_decision_hits(
+        numbers, pattern=SUB_DECISION_027_TO_051, later=LATER_THAN_076) -> list[str]:
+    return [
+        f"{path}:{number}"
+        for path, lines in tracked_text(())
+        if not later.match(path)
+        for number, line in enumerate(lines, start=1)
+        if any(int(m.group(1)) in numbers for m in pattern.finditer(line))
+    ]
 
 
 class DocsTreeTest(unittest.TestCase):
@@ -543,6 +573,100 @@ class DocsTreeTest(unittest.TestCase):
             [1, 3, 4, 5, 6, 8, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 26])
         self.assertEqual(found, [])
 
+    def test_the_console_registration_records_are_cut_and_cited_whole(self):
+        numbers = (28, 29, 30, 31, 33, 34, 35, 37)
+        self.assertEqual(
+            [int(p.name[:3]) for p in console_records(numbers)], [28, 29, 30, 31, 33, 34, 35, 37])
+        self.assertEqual(console_form_findings(numbers), [])
+        self.assertEqual(sub_decision_hits(numbers), [])
+
+    def test_the_console_sprint_reading_records_are_cut_and_cited_whole(self):
+        numbers = (42, 48, 50, 51)
+        self.assertEqual([int(p.name[:3]) for p in console_records(numbers)], [42, 48, 50, 51])
+        self.assertEqual(console_form_findings(numbers), [])
+        self.assertEqual(sub_decision_hits(numbers), [])
+
+    def test_the_console_picture_records_are_cut_and_cited_whole(self):
+        numbers = (36, 38, 45, 47)
+        self.assertEqual([int(p.name[:3]) for p in console_records(numbers)], [36, 38, 45, 47])
+        self.assertEqual(console_form_findings(numbers), [])
+        self.assertEqual(sub_decision_hits(numbers), [])
+
+    def test_the_console_manager_records_are_cut_and_cited_whole(self):
+        numbers = (27, 32, 43, 44, 46, 49)
+        self.assertEqual([int(p.name[:3]) for p in console_records(numbers)], [27, 32, 43, 44, 46, 49])
+        self.assertEqual(console_form_findings(numbers), [])
+        self.assertEqual(sub_decision_hits(numbers), [])
+
+    def test_the_console_spend_record_is_cut_and_cited_whole(self):
+        numbers = (52,)
+        self.assertEqual([int(p.name[:3]) for p in console_records(numbers)], [52])
+        self.assertEqual(console_form_findings(numbers), [])
+        self.assertEqual(sub_decision_hits(numbers, SUB_DECISION_052_TO_076, LATER_THAN_076), [])
+
+    def test_the_console_manager_and_guest_records_are_cut_and_cited_whole(self):
+        numbers = (60, 63, 66, 68, 75, 76)
+        self.assertEqual(
+            [int(p.name[:3]) for p in console_records(numbers)], [60, 63, 66, 68, 75, 76])
+        self.assertEqual(console_form_findings(numbers), [])
+        self.assertEqual(sub_decision_hits(numbers, SUB_DECISION_052_TO_076, LATER_THAN_076), [])
+
+    def test_the_console_question_records_are_cut_and_cited_whole(self):
+        numbers = (58, 59, 62, 65, 67)
+        self.assertEqual([int(p.name[:3]) for p in console_records(numbers)], [58, 59, 62, 65, 67])
+        self.assertEqual(console_form_findings(numbers), [])
+        self.assertEqual(sub_decision_hits(numbers, SUB_DECISION_052_TO_076, LATER_THAN_076), [])
+
+    def test_the_console_card_and_registration_records_are_cut_and_cited_whole(self):
+        numbers = (54, 70, 71, 72, 73, 74)
+        self.assertEqual(
+            [int(p.name[:3]) for p in console_records(numbers)], [54, 70, 71, 72, 73, 74])
+        self.assertEqual(console_form_findings(numbers), [])
+        self.assertEqual(sub_decision_hits(numbers, SUB_DECISION_052_TO_076, LATER_THAN_076), [])
+
+    def test_the_console_records_052_to_076_are_the_kept_ones(self):
+        records = [
+            p for p in sorted((REPO_ROOT / "docs/areas/console/adr").glob("[0-9][0-9][0-9]-*.md"))
+            if 52 <= int(p.name[:3]) <= 76]
+        found = [
+            (p.name, v.rule, v.line)
+            for p in records
+            for v in record_violations(f"docs/areas/console/adr/{p.name}", p.read_bytes())
+        ]
+        self.assertEqual(
+            [int(p.name[:3]) for p in records],
+            [52, 54, 58, 59, 60, 62, 63, 65, 66, 67, 68, 70, 71, 72, 73, 74, 75, 76])
+        self.assertEqual(found, [])
+
+    def test_the_console_records_027_to_051_are_the_kept_ones(self):
+        records = [
+            p for p in sorted((REPO_ROOT / "docs/areas/console/adr").glob("[0-9][0-9][0-9]-*.md"))
+            if 27 <= int(p.name[:3]) <= 51]
+        found = [
+            (p.name, v.rule, v.line)
+            for p in records
+            for v in record_violations(f"docs/areas/console/adr/{p.name}", p.read_bytes())
+        ]
+        self.assertEqual(
+            [int(p.name[:3]) for p in records],
+            [27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51])
+        self.assertEqual(found, [])
+
+    def test_the_sub_decision_pattern_finds_a_cited_sub_decision(self):
+        self.assertIsNotNone(SUB_DECISION_027_TO_051.search("ADR-console-0" + "28 D10"))
+        self.assertIsNotNone(SUB_DECISION_027_TO_051.search("ADR-console-0" + "34's Consequences"))
+        self.assertIsNotNone(SUB_DECISION_027_TO_051.search("ADR-console-0" + "30 (D5"))
+        self.assertIsNone(SUB_DECISION_027_TO_051.search("ADR-console-0" + "52 D1"))
+        self.assertIsNone(SUB_DECISION_027_TO_051.search("ADR-console-0" + "28 was"))
+        self.assertIsNotNone(SUB_DECISION_052_TO_076.search("ADR-console-0" + "60 D6"))
+        self.assertIsNotNone(SUB_DECISION_052_TO_076.search("ADR-console-0" + "54's Consequences"))
+        self.assertIsNotNone(SUB_DECISION_052_TO_076.search("ADR-console-0" + "74 (D10"))
+        self.assertIsNone(SUB_DECISION_052_TO_076.search("ADR-console-0" + "77 D1"))
+        self.assertIsNone(SUB_DECISION_052_TO_076.search("ADR-console-0" + "51 D1"))
+        self.assertIsNone(SUB_DECISION_052_TO_076.search("ADR-console-0" + "60 was"))
+        self.assertIsNotNone(LATER_THAN_076.match("docs/areas/console/adr/0" + "77-x.md"))
+        self.assertIsNone(LATER_THAN_076.match("docs/areas/console/adr/0" + "76-x.md"))
+
     def test_the_retired_console_records_are_gone_and_cited_nowhere(self):
         for n in RETIRED_CONSOLE_RECORDS:
             with self.subTest(number=n):
@@ -662,24 +786,17 @@ class DocsTreeTest(unittest.TestCase):
         context = (REPO_ROOT / "docs/areas/console/CONTEXT.md").read_text().splitlines()
         console = next(row for row in context if row.startswith("The per-host loopback service"))
         self.assertIn("ADR-console-076", console)
-    def test_the_tailscale_serve_boundary_decision_is_recorded(self):
+    def test_the_guest_door_and_owner_port_records_name_no_private_host_data(self):
         adr_dir = REPO_ROOT / "docs/areas/console/adr"
-        found = sorted(adr_dir.glob("066-*.md"))
-        self.assertEqual(len(found), 1, found)
-        path = "docs/areas/console/adr/" + found[0].name
-        text = (REPO_ROOT / path).read_text()
-        self.assertTrue(text.splitlines()[0].startswith("# ADR-console-066 \u2014 "))
-        self.assertIn("- **Status:** accepted", text)
-        for needle in (
-            "#1235", "ADR-console-008", "Tailscale-User-Login", "X-Forwarded-For",
-            "mirrored", "guest port", "guest token", "Funnel",
-            "Confirming a release", "spend", "project registration", "the access list",
-            "every manager route",
-            "tailscale.exe", "serve --bg --https=443", "serve status", "--https=443 off",
-            "<host>.<tailnet>.ts.net", "<colleague-login>",
-        ):
-            self.assertIn(needle, text)
-        self.assertEqual(tailnet_names_other_than_placeholder(text), [])
+        for pattern in ("066-*.md", "076-*.md"):
+            with self.subTest(pattern=pattern):
+                found = sorted(adr_dir.glob(pattern))
+                self.assertEqual(len(found), 1, found)
+                raw = found[0].read_text()
+                self.assertEqual(tailnet_names_other_than_placeholder(raw), [])
+                self.assertEqual(logins_in(raw), [])
+                self.assertEqual(
+                    re.findall(r"\buid[ =:]*\d+|/(?:Users|home)/[\w.-]+", raw), [])
         context = self.doc("docs/areas/console/CONTEXT.md")
         for term in ("**Console**:", "**Guest**:"):
             entry = context.split(term, 1)[1].split("_Avoid_", 1)[0]
@@ -710,7 +827,7 @@ class DocsTreeTest(unittest.TestCase):
             with self.subTest(d2=needle):
                 self.assertIn(needle, d2)
         d4 = text.split("**D4.", 1)[1].split("**D5.", 1)[0]
-        for needle in ("first bullet of ADR-console-066 D2", "superseded", "stand unchanged",
+        for needle in ("first bullet of ADR-console-0" "66 D2", "superseded", "stand unchanged",
                        "19 Nov", "exactly `localhost`", "exactly one `X-Forwarded-Host`",
                        "no port form", "the login check stays as it is", "mode 0600", "wider",
                        "fail closed"):
@@ -723,11 +840,6 @@ class DocsTreeTest(unittest.TestCase):
         console = context.split("**Console**:", 1)[1].split("_Avoid_", 1)[0]
         self.assertIn("ADR-console-077", console)
         self.assertNotIn("guest port", console)
-        status = next(row for row in (adr_dir / "066-a-named-colleague-reaches-the-console-only-"
-                                      "through-tailscale-serve-on-a-guest-port.md"
-                                      ).read_text().splitlines() if row.startswith("- **Status:**"))
-        self.assertTrue(status.startswith(
-            "- **Status:** accepted; amended by ADR-console-077, ADR-console-086"), status)
 
     def test_the_tailnet_name_source_is_recorded_as_adr_078(self):
         adr_dir = REPO_ROOT / "docs/areas/console/adr"
@@ -891,17 +1003,12 @@ class DocsTreeTest(unittest.TestCase):
         adr_dir = REPO_ROOT / "docs/areas/console/adr"
         pinned = {
             "050": None,
-            "056": None,
-            "057": None,
             "059": "059-a-project-question-is-spent-under-its-project-threaded-in-the-log-and-can-fill-a-goal.md",
-            "061": None,
             "062": "062-a-follow-up-carries-its-thread-in-its-prompt-and-continues-only-an-answered-thread.md",
-            "064": None,
             "065": "065-a-question-session-reads-the-projects-history-tracker-and-live-state-and-answers-plainly.md",
             "066": None,
             "067": None,
             "068": None,
-            "069": None,
             "070": None,
             "073": None,
             "075": None,
@@ -913,22 +1020,52 @@ class DocsTreeTest(unittest.TestCase):
                 if name is not None:
                     self.assertEqual(found[0].name, name)
 
-    def test_adr_console_040_records_taking_back_and_replacing_a_question(self):
+    def test_every_release_record_keeps_the_record_form(self):
+        paths = sorted((REPO_ROOT / "docs/areas/release/adr").glob("*.md"))
+
+        breaches = {}
+        for path in paths:
+            relative = path.relative_to(REPO_ROOT).as_posix()
+            found = record_violations(relative, path.read_bytes())
+            if found:
+                breaches[relative] = [violation.rule for violation in found]
+
+        self.assertEqual(
+            [path.name[:3] for path in paths],
+            ["002", "003", "005", "006", "007", "008", "010", "011", "012", "013", "015", "016"],
+        )
+        self.assertEqual(breaches, {})
+
+    def test_no_tracked_file_cites_a_retired_release_record(self):
+        numbers = ("001", "004", "009", "014")
+        # Built at run time so this file holds no retired citation itself.
+        pattern = "ADR-release-(" + "|".join(numbers) + ")([^0-9]|$)"
+
+        result = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "grep", "-n", "-E", pattern],
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertEqual(result.stdout, "")
+        for number in numbers:
+            with self.subTest(number):
+                found = sorted((REPO_ROOT / "docs/areas/release/adr").glob(f"{number}-*.md"))
+                self.assertEqual(found, [])
+
+    def test_the_question_round_names_taking_back_and_replacing_a_question(self):
         context = self.doc("docs/areas/console/CONTEXT.md")
         entry = context.split("**Question round**:", 1)[1].split("_Avoid_:", 1)[0]
         self.assertIn("A manager takes back its own open question with `sprint withdraw-question`, "
                       "or replaces it by naming it in a new round, and the owner then sees only "
                       "the new card; an answer to a question taken back is refused "
-                      "(ADR-console-040).", entry)
+                      "(ADR-console-019).", entry)
     def test_the_notice_decision_is_recorded(self):
         context = self.doc("docs/areas/console/CONTEXT.md")
         self.assertIn("**Notice**:", context)
         notice = context.split("**Notice**:", 1)[1].split("_Avoid_:", 1)[0]
         self.assertIn("ADR-console-044", notice)
-    def test_the_owner_notice_decision_is_recorded(self):
-        context = self.doc("docs/areas/console/CONTEXT.md")
-        notice = context.split("**Notice**:", 1)[1].split("_Avoid_:", 1)[0]
-        self.assertIn("ADR-console-053", notice)
 
     def test_no_tracked_file_cites_a_retired_guard_record(self):
         # The pattern is built at run time, so this file holds no retired citation itself.

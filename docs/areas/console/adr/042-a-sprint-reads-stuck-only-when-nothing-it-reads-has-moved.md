@@ -1,27 +1,3 @@
 # ADR-console-042 — A sprint reads stuck only when nothing it reads has moved
 
-- **Status:** accepted; amended by ADR-console-050, ADR-console-057, ADR-console-064, ADR-console-069
-- **Decided in:** #1109, #1229
-
-## Context
-
-A running sprint's state line and its ball each read whether the sprint had moved, and they read it from different signals. The ball counted a working manager session; the state line did not. Only runs on issues the report named, and only those that moved after the report, counted as movement, and a new report cleared what had been seen before it. So a sprint read "nothing running, may be stuck" or "quiet for N min — may be stuck" while its manager was working, three times by 16 Nov. This decision gives the state line, the ball, the "last seen" prefix of the now-sentence and the digest one reading of movement.
-
-## Decision
-
-**D1. One reading.** The state line, the ball, the "last seen" prefix and the digest read one movement reading of a sprint: it is moving, or it has been quiet for so many milliseconds. The state line reads quiet, and the ball reads nobody, exactly when the sprint is not moving, and the prefix follows the ball. The precedence of the owner, drafting, waiting, quota, stopping and ended rules (#1086) is unchanged; only what counts as moving changes. The word "stalled" is still never written (ADR-console-005, ADR-console-014).
-
-**D2. The signals.** A sprint is moving when a listed session of the sprint is working, or when the latest of the goal's stated time, the brief's approval, the report and the sprint's runs is less than fifteen minutes old, the window of ADR-console-005. A session's output and a running check also move it (ADR-console-057). A reading with no clock, which the digest takes, always reads moving: the digest reads no clock, so a change to quiet makes no digest sentence (ADR-console-014).
-
-**D3. A run is the sprint's.** A run belongs to the sprint when it is its manager session's, or when it carries an issue of the sprint's report or of the report's inbox. It counts whenever it moved, before or after the report, and a new report keeps the movement already seen. Stage observations are unchanged: only reported issues, only runs that moved after the report, cleared by the next report.
-
-**D4. A failed launch.** When the manager failed to start and no session of the sprint is listed, only the goal's stated time leaves the signals, because it stood in for a manager about to be listed and a failed launch says none will be. An approval, a report or a run inside the window keeps the sprint moving whatever its order against the failure. With none of them the sprint is not moving at once, and the ball reads nothing running, as #1086 decided: a failed launch beats the freshness of the goal. The state then reads drafting, since no brief was approved. A failed first launch with no brief is the owner's card, so its ball reads waiting on you and its line the failed start (ADR-console-064).
-
-**D5. A manager that cannot hear the console.** When the manager session's own transcript shows that a message from another session was held and not delivered (the client's `Held peer message ... not delivered` line, which waits for a person to approve it at the terminal) and no peer message was delivered after it, the sprint's now-sentence reads "the manager cannot hear the console", with what the owner can do (bring it back or drop the sprint), and the ball is the owner's. It replaces the terminal-permission sentence, never an answer waiting at the terminal. A real permission prompt, and a held message followed by a delivered one, read as before. The flag moves nothing: it is not a movement signal and adds no state to D1's reading.
-
-## Consequences
-
-- ADR-console-014's sentence on movement, "Movement is the latest of the approval, the report and a run that carries one of the report's issues", is amended by D2 and D3; its status line names this decision.
-- The state line never reads quiet under fifteen minutes, and the ball reads nothing running sooner only for a failed launch with no approval, report or run behind it.
-- A run of the manager session on an issue it has not reported yet now counts as movement.
-- Related: ADR-console-005, ADR-console-014.
+Context: the ball and the state line read movement from different signals, so a working sprint read "may be stuck" (#1109, #1229). Decision: one movement reading feeds the state line, the ball, the "last seen" prefix, the digest and the sprint's run lines, which are ADR-console-005's. A sprint moves when a listed session works or when the latest of the goal, the approval, the report, its runs and the later signals is under fifteen minutes old (ADR-console-005): the waits are ADR-console-050's, and a listed session's newest transcript write (its subagents' included) or at least one second of CPU used by its descendants between two readings moves it too, except a manager's within five minutes of its idle nudge (#1185). A run counts whenever it moved. A failed launch drops the goal's time, and a failed first start's card, line and ball are ADR-console-015's. A held peer message reads "the manager cannot hear the console". Rejected: a signal per surface, clearing movement at each report, and counting the session process's own CPU, which an idle session burns.

@@ -7,12 +7,15 @@ and a stubbed launcher (`tests/engine_stubbed_world.py`), and reads what the run
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import unittest
 from pathlib import Path
 
 from agent_tools.claims import forge_markers
-from tests.engine_stubbed_world import APPLIES, DIRECT, StubbedRun
+from agent_tools.delivery import engine_session
+from tests.engine_fixture import FixtureProject
+from tests.engine_stubbed_world import APPLIES, CLEAN_LITE, IMPLEMENTED, ROLES, StubbedRun
 from tests.guard_policy_world import install_platform_manifest_in_environ
 
 TIER = "integration"  # every case builds a repository and runs the engine as a child process
@@ -26,8 +29,40 @@ SETUP_WALK = [("contract", "ok"), ("review", "clear"), ("preflight", "clear"), (
               ("applies", "applies"), ("acquire", "acquired"), ("worktree", "made"), ("look", "unmarked")]
 
 
+FINDING = {"severity": "important", "file": "fixture/farewell.py:2", "failing_input": "farewell('')",
+           "summary": "s"}
+UNNAMED_LITE = dict(CLEAN_LITE, verdict="findings",
+                    findings=[{"severity": "important", "file": "", "failing_input": "", "summary": "s"}])
+CLEAN_FULL = {key: value for key, value in CLEAN_LITE.items() if key != "escalate"}
+CLEAN_REREVIEW = {"verdict": "pass", "findings": []}
+SHA = "a" * 40
+CODEX_LIMIT = {"stdout": json.dumps({"status": 1, "error": "You've hit your usage limit."}), "exit": 1}
+
+
 def lane(name: str) -> dict:
-    return {"verdict": APPLIES, "lane": {"lane": name, "why": "w"}}
+    return {"applies": APPLIES, "lane": {"lane": name, "why": "w"}}
+
+
+def lite_findings(**members) -> dict:
+    return dict(CLEAN_LITE, verdict="findings", findings=[FINDING], **members)
+
+
+def full_findings() -> dict:
+    return dict(CLEAN_FULL, verdict="findings", findings=[FINDING])
+
+
+def committing(path: str, text: str, **reply) -> dict:
+    """A fix reply that commits `text` to `path`: the stub reports the commit it made."""
+    return {"reply": {"status": "done", "notes": "n", "tests": [], **reply},
+            "commit": {"path": path, "text": text}}
+
+
+def implementing(path: str, text: str, **members) -> dict:
+    return {"reply": {**IMPLEMENTED["reply"], **members}, "commit": {"path": path, "text": text}}
+
+
+def model_of(launch: dict) -> str:
+    return launch["argv"][launch["argv"].index("--model") + 1]
 
 
 class Scenario(unittest.TestCase):
@@ -43,12 +78,39 @@ class Scenario(unittest.TestCase):
         self.assertEqual((line["end"], line["need"]), (end, need), line)
         return line
 
-    def child(self, run: StubbedRun) -> Path:
-        return run.children(run.runs()[0])[0]
+    def child(self, run: StubbedRun, procedure: str, last: bool = False) -> Path:
+        """The child run of the root that runs `procedure` (the latest one with `last`)."""
+        named = [child for child in run.children(run.runs()[0])
+                 if json.loads((child / "run.json").read_text("utf-8"))["procedure"] == procedure]
+        return named[-1] if last else named[0]
+
+    def stored(self, run_dir: Path, step: str, visit: int = 1) -> dict:
+        """The result the step's visit stored, read from the file its `result_stored` event names."""
+        event = next(e for e in StubbedRun.events(run_dir)
+                     if e["event"] == "result_stored" and (e["step"], e["visit"]) == (step, visit))
+        return json.loads((run_dir / event["result"]).read_text("utf-8"))
+
+    def keys(self, run: StubbedRun) -> list[str]:
+        return [launch["key"] for launch in run.launches()]
+
+    def launch(self, run: StubbedRun, step: str) -> dict:
+        return next(launch for launch in run.launches() if launch["key"] == step)
+
+    def branch_commits(self, run: StubbedRun) -> list[str]:
+        return run.world.git(run.worktree_path, "log", "--format=%H", f"origin/main..{run.branch}").split()
+
+    def finish(self, run: StubbedRun, end: str, need: str | None = None) -> dict:
+        """Run the delivery and check its end; an end that is a stop is checked with its need."""
+        done = run.deliver()
+        if need is None:
+            self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+            self.assertEqual(run.line(done)["end"], end)
+            return run.line(done)
+        return self.stopped(run, done, end, need)
 
 
 class StubbedRunTest(Scenario):
-    def test_a_stubbed_delivery_ends_with_the_claim_held_by_the_run_the_worktree_on_the_branch_and_lane_direct(self):
+    def test_a_stubbed_delivery_reaches_the_end_of_verify_with_the_stubs_commit_on_a_clean_branch(self):
         run = StubbedRun(self)
 
         done = run.deliver()
@@ -65,10 +127,27 @@ class StubbedRunTest(Scenario):
         self.assertEqual(run.transitions(setup), SETUP_WALK)
         renewals = [e for e in run.events(setup) if e["event"] == "keep_alive_ran"]
         self.assertEqual([(e["step"], e["verdict"]) for e in renewals], [("worktree", "renewed")])
-        self.assertEqual(run.transitions(root), [("start", "done"), ("issue", "read"), ("lane", "direct")])
+        self.assertEqual(run.transitions(root), [("start", "done"), ("issue", "read"), ("lane", "direct"),
+                                                 ("direct-lane", "done"), ("verification", "done")])
+        direct = self.child(run, "direct")
+        transitions = run.transitions(direct)
+        for edge in (("implement", "done"), ("implemented", "lite"), ("lite-group", "pass"),
+                     ("lite-tally", "clean")):
+            self.assertIn(edge, transitions)
+        renewed = [e for e in run.events(direct) if e["event"] == "keep_alive_ran" and e["step"] == "implement"]
+        self.assertEqual([e["verdict"] for e in renewed], ["renewed"])
+        commit = self.stored(direct, "implement")["commit"]
+        self.assertEqual(self.branch_commits(run), [commit])
+        self.assertEqual(run.world.git(run.worktree_path, "log", "-1", "--format=%s").strip(), "stub change")
+        self.assertEqual(run.world.git(run.worktree_path, "status", "--porcelain"), "")
+        checks = self.stored(self.child(run, "verify"), "checks")
+        self.assertEqual((checks["verdict"], checks["clean"]), ("passed", True))
+        self.assertEqual([r["id"] for r in checks["results"]], FixtureProject.VERIFICATION)
+        self.assertEqual([r["status"] for r in checks["results"]], ["pass", "pass"])
         launches = run.launches()
         self.assertIn(run.title, launches[1]["prompt"])
-        self.assertEqual([launch["key"] for launch in launches], ["verdict", "lane"])
+        self.assertEqual(model_of(self.launch(run, "implement")), "sonnet")
+        self.assertEqual(self.keys(run), ["applies", "lane", "implement", "lite-review"])
 
 
 class LaneTest(Scenario):
@@ -90,8 +169,8 @@ class LaneTest(Scenario):
 
         self.stopped(run, run.deliver(), "look-not-on-engine", "nothing")
 
-        self.assertEqual(run.transitions(self.child(run))[-1], ("look", "marked"))
-        self.assertEqual([launch["key"] for launch in run.launches()], ["verdict"])
+        self.assertEqual(run.transitions(self.child(run, "setup"))[-1], ("look", "marked"))
+        self.assertEqual(self.keys(run), ["applies"])
 
     def test_a_continued_run_reattaches_a_worktree_left_on_a_clean_detached_head_at_the_tip(self):
         run = StubbedRun(self, body=LOOK_BODY)
@@ -115,7 +194,7 @@ class RefusalTest(Scenario):
 
         self.stopped(run, run.deliver(), "setup", "owner-decision")
 
-        self.assertEqual(run.transitions(self.child(run))[-1], ("preflight", "closed"))
+        self.assertEqual(run.transitions(self.child(run, "setup"))[-1], ("preflight", "closed"))
         self.nothing_started(run)
         self.assertEqual(run.launches(), [])
 
@@ -125,17 +204,17 @@ class RefusalTest(Scenario):
 
         self.stopped(run, run.deliver(), "setup", "owner-decision")
 
-        self.assertEqual(run.transitions(self.child(run))[-1], ("preflight", "open-pr"))
+        self.assertEqual(run.transitions(self.child(run, "setup"))[-1], ("preflight", "open-pr"))
         self.nothing_started(run)
 
     def test_setup_refuses_an_issue_that_no_longer_applies_comments_the_evidence_and_makes_no_worktree(self):
         evidence = "greet() already returns the greeting at origin/main."
         gone = {"verdict": "no-longer-applies", "details": "d", "evidence": evidence}
-        run = StubbedRun(self, replies={"verdict": gone, "lane": DIRECT})
+        run = StubbedRun(self, replies={"applies": gone})
 
         self.stopped(run, run.deliver(), "setup", "owner-decision")
 
-        transitions = run.transitions(self.child(run))
+        transitions = run.transitions(self.child(run, "setup"))
         self.assertIn(("applies", "no-longer-applies"), transitions)
         self.assertEqual(transitions[transitions.index(("applies", "no-longer-applies")) + 1],
                          ("note", "posted"))
@@ -149,7 +228,7 @@ class RefusalTest(Scenario):
 
         self.stopped(run, run.deliver(), "setup", "owner-decision")
 
-        transitions = run.transitions(self.child(run))
+        transitions = run.transitions(self.child(run, "setup"))
         self.assertEqual(transitions[-1], ("existing", "mismatch"))
         self.assertNotIn("acquire", [step for step, _ in transitions])
         self.assertEqual(run.claims(), [])
@@ -169,7 +248,7 @@ class ClaimTest(Scenario):
 
         self.stopped(run, run.deliver(), "claimed", "owner-decision")
 
-        self.assertEqual(run.transitions(self.child(run))[-1], ("acquire", "held_by"))
+        self.assertEqual(run.transitions(self.child(run, "setup"))[-1], ("acquire", "held_by"))
         self.assertEqual([claim.fields["holder"] for claim in run.claims()], [other])
         self.assertFalse(run.worktree_path.exists())
 
@@ -181,7 +260,7 @@ class ClaimTest(Scenario):
 
         self.stopped(run, run.deliver(), "dirty", "owner-decision")
 
-        transitions = run.transitions(self.child(run))
+        transitions = run.transitions(self.child(run, "setup"))
         self.assertEqual(transitions[transitions.index(("existing", "dirty")) + 1:][-1:],
                          [("worktree", "dirty")])
         self.assertTrue((run.worktree_path / "scratch.txt").exists())
@@ -196,7 +275,7 @@ class ClaimTest(Scenario):
 
         self.stopped(run, run.deliver(), "claim", "retry")
 
-        transitions = run.transitions(self.child(run))
+        transitions = run.transitions(self.child(run, "setup"))
         self.assertIn(("existing", "absent"), transitions)
         self.assertEqual(transitions[-1], ("worktree", "error"))
         first = run.claims()
@@ -210,7 +289,7 @@ class ClaimTest(Scenario):
         self.assertEqual(len(run.runs()), 1)
         root = run.runs()[0]
         self.assertEqual([e["event"] for e in run.events(root)].count("run_continued"), 1)
-        second = run.transitions(run.children(root)[-1])
+        second = run.transitions(self.child(run, "setup", last=True))
         self.assertIn(("acquire", "already_held"), second)
         self.assertTrue(("worktree", "made") in second or ("worktree", "adopted") in second, second)
         claims = run.claims()
@@ -218,17 +297,156 @@ class ClaimTest(Scenario):
         self.assertEqual(self.branch_here(run, run.worktree_path), run.branch)
 
 
+class ReviewRouteTest(Scenario):
+    def reviewer_model(self, run: StubbedRun, name: str = "reviewer") -> str:
+        return engine_session.read_role(ROLES, name).model
+
+    def test_a_change_marked_sensitive_is_reviewed_under_the_full_reviewer(self):
+        implemented = dict(IMPLEMENTED, reply=dict(IMPLEMENTED["reply"], sensitive=True))
+        run = StubbedRun(self, replies={"implement": implemented, "full-review": CLEAN_FULL})
+
+        self.finish(run, "done")
+
+        transitions = run.transitions(self.child(run, "direct"))
+        for edge in (("implemented", "full"), ("full-group", "pass"), ("full-tally", "clean")):
+            self.assertIn(edge, transitions)
+        self.assertIn("full-review", self.keys(run))
+        self.assertNotIn("lite-review", self.keys(run))
+        self.assertEqual(model_of(self.launch(run, "full-review")), self.reviewer_model(run))
+
+    def test_an_escalate_reply_is_followed_by_the_full_reviewer(self):
+        run = StubbedRun(self, replies={"lite-review": dict(CLEAN_LITE, escalate=True),
+                                        "escalated": CLEAN_FULL})
+
+        self.finish(run, "done")
+
+        transitions = run.transitions(self.child(run, "direct"))
+        for edge in (("lite-tally", "escalate"), ("escalated", "pass"), ("escalated-tally", "clean")):
+            self.assertIn(edge, transitions)
+        keys = self.keys(run)
+        self.assertLess(keys.index("lite-review"), keys.index("escalated"))
+        self.assertEqual(model_of(self.launch(run, "escalated")), self.reviewer_model(run))
+
+    def test_findings_left_after_the_one_fix_round_stop_direct_review(self):
+        run = StubbedRun(self, replies={
+            "lite-review": lite_findings(),
+            "lite-fix": committing("fixture/second.py", "SECOND = 2\n"),
+            "lite-rereview": {"verdict": "findings", "findings": [FINDING]}})
+
+        self.finish(run, "direct-review", "owner-decision")
+
+        self.assertEqual(self.keys(run).count("lite-fix"), 1)
+        self.assertEqual(run.transitions(self.child(run, "direct"))[-1], ("lite-settled", "findings"))
+        self.assertEqual(len(self.branch_commits(run)), 2)
+
+    def test_an_ineligible_reply_stops_with_no_review_started(self):
+        refused = {"status": "blocked", "start_head": SHA, "commit": SHA, "notes": "n", "acceptance": [],
+                   "sensitive": False, "ineligible": True, "tests": []}
+        run = StubbedRun(self, replies={"implement": refused})
+
+        self.finish(run, "ineligible", "owner-decision")
+
+        self.assertEqual(self.keys(run), ["applies", "lane", "implement"])
+        steps = [step for step, _ in run.transitions(self.child(run, "direct"))]
+        self.assertNotIn("lite-group", steps)
+        self.assertNotIn("full-group", steps)
+        self.assertEqual(self.branch_commits(run), [])
+
+    def test_a_configured_independent_review_that_is_unavailable_stops_codex_unavailable(self):
+        run = StubbedRun(self, review_code=[CODEX_LIMIT])
+
+        self.finish(run, "codex-unavailable", "retry")
+
+        self.assertEqual(len(run.companion_launches()), 2)
+        self.assertIn("lite-review", self.keys(run))
+
+    def test_a_project_that_configures_no_independent_review_runs_the_review_alone(self):
+        run = StubbedRun(self)
+
+        self.finish(run, "done")
+
+        independent = self.stored(self.child(run, "direct"), "lite-independent")
+        self.assertEqual((independent["verdict"], independent["findings"]), ("none", []))
+        standin = shutil.which("codex-companion", path=run.env["PATH"])
+        self.assertFalse(standin and Path(standin).is_relative_to(run.world.tmp), standin)
+        self.assertEqual(run.companion_launches(), [])
+        self.assertEqual(self.keys(run).count("lite-review"), 1)
+
+    def test_an_unusable_review_is_asked_once_more_and_its_second_reply_is_used(self):
+        run = StubbedRun(self, replies={"lite-review": UNNAMED_LITE, "lite-review.2": CLEAN_LITE})
+
+        self.finish(run, "done")
+
+        self.assertEqual(self.keys(run), ["applies", "lane", "implement", "lite-review", "lite-review"])
+        tallies = [edge for edge in run.transitions(self.child(run, "direct")) if edge[0] == "lite-tally"]
+        self.assertEqual(tallies, [("lite-tally", "unusable"), ("lite-tally", "clean")])
+
+    def test_a_second_unusable_review_stops_direct_review(self):
+        run = StubbedRun(self, replies={"lite-review": UNNAMED_LITE})
+
+        self.finish(run, "direct-review", "owner-decision")
+
+        self.assertEqual(self.keys(run).count("lite-review"), 2)
+        self.assertNotIn("lite-fix", self.keys(run))
+
+    def test_a_fix_that_reports_no_commit_stops_direct_fix(self):
+        unfixed = {"status": "done", "start_head": SHA, "commit": "", "notes": "n", "tests": []}
+        run = StubbedRun(self, replies={"lite-review": lite_findings(), "lite-fix": unfixed})
+
+        self.finish(run, "direct-fix", "owner-decision")
+
+        self.assertIn(("lite-fixed", "not-done"), run.transitions(self.child(run, "direct")))
+        self.assertNotIn("lite-rereview", self.keys(run))
+
+
+class VerifyTest(Scenario):
+    def test_a_failing_verification_id_stops_verify(self):
+        broken = implementing("fixture/greet.py", 'def greet(name: str) -> str:\n    return f"Hi, {name}."\n')
+        run = StubbedRun(self, replies={"implement": broken})
+
+        self.finish(run, "verify", "owner-decision")
+
+        checks = self.stored(self.child(run, "verify"), "checks")
+        self.assertEqual(checks["verdict"], "failed")
+        self.assertEqual({r["id"]: r["status"] for r in checks["results"]}, {"lint": "pass", "test": "fail"})
+
+    def test_an_id_whose_condition_matches_no_changed_path_is_recorded_skipped_with_its_reason(self):
+        conditions = {"lint": {"when_changed": ["docs/**"], "skip_reason": "no documentation changed"}}
+        run = StubbedRun(self, conditions=conditions)
+
+        self.finish(run, "done")
+
+        results = self.stored(self.child(run, "verify"), "checks")["results"]
+        self.assertEqual([r["id"] for r in results], FixtureProject.VERIFICATION)
+        lint, test = results
+        self.assertEqual((lint["status"], lint["reason"]), ("skipped", "no documentation changed"))
+        self.assertEqual(test["status"], "pass")
+
+
 class CoverageTest(Scenario):
-    def test_every_step_of_setup_and_deliver_is_visited_by_a_stubbed_run(self):
+    def scenarios(self):
         gone = {"verdict": "no-longer-applies", "details": "d", "evidence": "already done at origin/main."}
+        sensitive = dict(IMPLEMENTED, reply=dict(IMPLEMENTED["reply"], sensitive=True))
+        fix = committing("fixture/second.py", "SECOND = 2\n")
+        return (
+            None,
+            {"applies": gone},
+            {"lite-review": lite_findings(), "lite-fix": fix, "lite-rereview": CLEAN_REREVIEW},
+            {"lite-review": dict(CLEAN_LITE, escalate=True), "escalated": full_findings(),
+             "escalated-fix": fix, "escalated-rereview": CLEAN_REREVIEW},
+            {"implement": sensitive, "full-review": full_findings(), "full-fix": fix,
+             "full-rereview": CLEAN_REREVIEW})
+
+    def test_every_step_of_the_shipped_procedures_is_visited_by_a_stubbed_run(self):
         visited: set[str] = set()
-        for replies in (None, {"verdict": gone, "lane": DIRECT}):
+        for replies in self.scenarios():
             run = StubbedRun(self, replies=replies)
             run.deliver()
             for directory in run.runs() + [c for r in run.runs() for c in run.children(r)]:
-                visited |= {step for step, _ in run.transitions(directory)}
+                visited |= {e["step"] for e in run.events(directory)
+                            if e["event"] in ("step_entered", "transition_taken")}
 
-        declared = {step["id"] for name in ("setup", "deliver")
+        declared = {step["id"] for name in ("setup", "deliver", "direct", "verify")
                     for step in json.loads((PROCEDURES / f"{name}.json").read_text("utf-8"))["steps"]}
         self.assertEqual(visited, declared)
 

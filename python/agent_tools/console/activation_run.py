@@ -7,7 +7,7 @@ its outcome. It never decides whether a run may start; the service does.
 
 Own clone. The run builds from a clone of its own, `state_dir / TREE_DIR`, never from the checkout
 and never with a worktree registration or a prune: nothing is written to the checkout
-(ADR-console-043 D2). A tree that is not a git repository is removed and cloned again with
+(ADR-console-043). A tree that is not a git repository is removed and cloned again with
 `git clone --no-checkout <root>`; then every run fetches the checkout's `refs/remotes/origin/*` into
 `refs/remotes/source/*`, checks out the commit detached and forced, and cleans the tree. The tree's
 git output goes to the log, so a failure there is read from the same file as the command's output.

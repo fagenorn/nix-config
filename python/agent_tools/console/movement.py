@@ -23,7 +23,7 @@ as `cancelled()` is true and raises `ForgeError("cancelled")`. A pull request is
 in a state of `RUNNING_CHECKS` (queued, in progress or pending) or a `StatusContext` counted in a state
 of `RUNNING_STATUSES`, however many other contexts it has, since the counts cover every context and not
 a first page of them. A check in `WAITING` is held on a person (a deployment environment's reviewer),
-not running CI, so it does not count (ADR-console-050 D6); a null `statusCheckRollup` or no commit is not running. A pull's `issues` are
+not running CI, so it does not count (ADR-console-050); a null `statusCheckRollup` or no commit is not running. A pull's `issues` are
 `deliveries.branch_issue(pattern, headRefName)` (when not None) united with `body_issues(body)`, which
 matches `(?<![\\w/])#(\\d+)\\b`, so `owner/repo#6` and `abc#6` name nothing. `committed_ms` is the head
 commit's `committedDate` in epoch milliseconds, None with no commit. An answer of another shape raises
@@ -47,10 +47,10 @@ The fold. `lock_held` is `any(p.holding for p in pulls)` for a read and the prev
 `pulls` is None. In a good read each issue of a read pull with `holding` that is in `live` (the issues whose delivery run is in a session not ended; None
 gates nothing), and each issue of `locking` (the issues whose journal sits at a lock step) when that read's
 `lock_held` is true, is seen: a run that died holding the lock leaves its pull request holding, so its issues
-are seen no more and the sprint ages out to may be stuck (ADR-console-061 D1); its `locks` time
+are seen no more and the sprint ages out to may be stuck (ADR-console-050); its `locks` time
 becomes `max(now_ms, kept)`; an issue not seen keeps its time, never refreshed; `locks` is ascending by
 issue. A failed read sees nothing and keeps `locks` unchanged whatever `locking` holds, so a lock time ages
-out after the quiet window like every signal (ADR-console-050 D5), a journal lock step's included. `merged` keys pull requests by number and returns them ascending by number. With `pulls` None
+out after the quiet window like every signal (ADR-console-050), a journal lock step's included. `merged` keys pull requests by number and returns them ascending by number. With `pulls` None
 (a failed read) the result keeps `previous.pulls` and `previous.read_ms` unchanged. With `pulls` given,
 `read_ms = now_ms`, and each read pull becomes a `PullMovement` with its read `issues` and
 `committed_ms` (the larger of it and the previous pull's, so a rewritten head never moves it back,
@@ -80,16 +80,16 @@ a session with a sprint, at `sessions_ms` (the time the caller started the read)
 `output_ms` is the larger of the read and the last one, never moving back. A reading of a manager session carries `replies`, the `(sprint, idle-nudge time)` of
 the sprints it manages that were nudged: an output or a CPU reading for such a sprint that falls from the
 nudge to `NUDGE_REPLY_MS` (five minutes) after it is the manager's reply, so it is never folded and the
-last qualifying time stays (a reply never erases earlier movement; ADR-console-057 D6). `check_ms` is that time
+last qualifying time stays (a reply never erases earlier movement; ADR-console-042). `check_ms` is that time
 when the CPU used since the last reading, summed per process key `(pid, start)` (a process new since
 then counts all of its CPU), is at least `CHECK_CPU_MS` (one second: a watcher loop idling at a few
 milliseconds per poll must not read as a running check), and with no earlier table to compare (the
 first reading, or after a None) it moves nothing. Times are kept per association, not per session:
 an association the reading does not carry is kept exactly, so a session that moved on to another
-sprint never refreshes the times of the one it left (ADR-console-050 D1). Sessions fold whether
+sprint never refreshes the times of the one it left (ADR-console-050). Sessions fold whether
 `pulls` is None or not.
 
-Held peer messages (#1229, ADR-console-042 D5). `session_held` reads a
+Held peer messages (#1229, ADR-console-042). `session_held` reads a
 session's own transcript (`<projects>/<slug>/<session_id>.jsonl`, never its subagents') and is true
 when its last peer-message record is a held one: a `system` line whose content starts `Held peer
 message` and says `not delivered` (the client holds a message whose sender's permission mode class

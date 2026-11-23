@@ -165,7 +165,7 @@ class HeldLockTest(LockCase):
 
 
 class PreviewLockTest(LockCase):
-    """Issue 1376 (ADR-release-014): `preview` takes the land lock the run will hold."""
+    """Issue 1376 (ADR-release-008): `preview` takes the land lock the run will hold."""
 
     def test_a_run_right_after_a_preview_of_a_free_lock_merges(self):
         self.world.land_lock_ready(lock=None)
