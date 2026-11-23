@@ -198,7 +198,7 @@ def scanned_files(archived_dirs: tuple[str, ...] = ()) -> list[tuple[str, list[s
     return [(path, lines) for path, lines in tracked_text(archived_dirs) if path != ADOPTION_MAP]
 
 
-RETIRED_DELIVERY_RECORDS = (10, 11)
+RETIRED_DELIVERY_RECORDS = (2, 9, 10, 11)
 
 
 class DocsTreeTest(unittest.TestCase):
