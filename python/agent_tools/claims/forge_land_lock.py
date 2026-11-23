@@ -28,6 +28,13 @@ ones (`GET pulls?state=open&base=<branch>&sort=updated`, at most 5 pages of 100,
 sha), and a same-repository one headed at the lock holds it, whatever closed pull requests share
 that head or contain it; the closed listing is read only when none is found. A fork's pull
 request is never taken from this listing, and an open one beyond those pages is not seen.
+Every fork already has the default branch's commits, so a fork's pull request opened at the
+default tip would otherwise hold a lock there, or keep a stale one looking held, without pushing a
+commit. The open listing goes before the closed one for two reasons: a waiter polls behind a live
+holder every `POLL` seconds while a stale lock is classified once and then taken, so the repeated
+path gets the shorter chain; and a closed pull request must never decide a lock that an open one
+with the same head holds, as when a sync pull request is closed and opened again from the same
+commit.
 A release pull request (issue 875) is one whose head is the locked branch itself, in the same
 repository, at the lock: `_on_branch` counts it whatever its base, so every caller derives it as
 the holder with no flag. The commit lookup lists it while it is open; when no listing above
