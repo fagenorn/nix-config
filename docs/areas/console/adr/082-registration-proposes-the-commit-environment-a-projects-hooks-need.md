@@ -5,7 +5,7 @@
 
 ## Context
 
-ADR-project-contract-008 lets a contract name the command its adoption commit runs through, but D4 left the console's drafted contract without a field for it. A checkout whose commit hooks need its development environment therefore still failed at the adoption commit, and the owner had to write the contract by hand to get past it. Registration can see the signs of that need and propose the command.
+ADR-project-contract-008 lets a contract name the command its adoption commit runs through, but left the console's drafted contract without a field for it. A checkout whose commit hooks need its development environment therefore still failed at the adoption commit, and the owner had to write the contract by hand to get past it. Registration can see the signs of that need and propose the command.
 
 ## Decision
 
@@ -17,13 +17,13 @@ Amended in place by #1485: the drafted contract is project schema 3, whose commi
 
 **D3. The field `commit-environment` is not drafted.** It was a main line of a draft that recognised an environment (an eighth main line, ADR-console-033 D1). It is now the one field of a reconcile proposal (ADR-console-083), shown as `commits run in its development shell: devenv shell (found in its files)`, whose line leaves the trailing `--` off the command while the value keeps it, and whose Change offers `none` or a typed command. The ready Apply card states the field's line as its first line. To change it before Apply, the owner chooses `Not now`, which shows the proposal and its Change control again.
 
-**D4. The drafted contract carries neither the command nor the binding.** Schema 3 makes `commit-environment` a platform command and the binding a platform constant, so a draft authors neither and the resolver refuses a contract that does. A reconcile proposal still hands its command to the adopter's `--commit-environment`, never to a draft file. This amends ADR-project-contract-008 D4.
+**D4. The drafted contract carries neither the command nor the binding.** Schema 3 makes `commit-environment` a platform command and the binding a platform constant, so a draft authors neither and the resolver refuses a contract that does. A reconcile proposal still hands its command to the adopter's `--commit-environment`, never to a draft file. This amends ADR-project-contract-008.
 
-**D5. Apply commits through it.** Apply is unchanged from ADR-project-contract-008 D2-D7: it commits through the named command in the worktree.
+**D5. Apply commits through it.** Apply is unchanged from ADR-project-contract-008: it commits through the named command in the worktree.
 
 ## Consequences
 
 - An existing contract is changed only by the reconcile proposal of ADR-console-083.
 - The command must be on the console service's `PATH`.
-- Amends ADR-console-031 (D2's table), ADR-console-033 (D1's lines) and ADR-project-contract-008 (D4).
+- Amends ADR-console-031 (D2's table), ADR-console-033 (D1's lines) and ADR-project-contract-008.
 - The behaviour is pinned in `tests/test_console_contract_draft.py` (a draft holds no commit environment) and `tests/test_console_commit_failure.py` (the reconcile proposal).
