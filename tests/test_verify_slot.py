@@ -618,6 +618,19 @@ class VerifySlotTest(SlotHarness, unittest.TestCase):
                   if line.startswith("verify-slot: cannot record this run in ")]
         self.assertEqual(len(failed), 1)
 
+    def test_a_history_path_that_is_a_hard_link_is_never_written_through(self):
+        victim = Path(self.home) / "victim.txt"
+        victim.write_text("victim-original")
+        self.slots.mkdir()
+        os.link(victim, self.slots / "history.jsonl")
+        self.release("a")
+        code, err = self.finish(self.start("a", code=3))
+        self.assertEqual(code, 3)
+        self.assertEqual(victim.read_text(), "victim-original")
+        failed = [line for line in err.splitlines()
+                  if line.startswith("verify-slot: cannot record this run in ")]
+        self.assertEqual(len(failed), 1)
+
     def test_a_history_path_that_is_a_fifo_does_not_hold_the_run_up(self):
         self.slots.mkdir()
         os.mkfifo(self.slots / "history.jsonl")

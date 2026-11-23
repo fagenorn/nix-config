@@ -16,9 +16,10 @@ the slot and repository lock given back, or null when no slot was taken. Both ar
 decimal. `exit` is the code the run returns.
 
 The file is created with mode 0666, so every account of the host appends to it; it is opened
-without following a symlink or blocking, and a path that is not a regular file is refused, for the
-append and the read alike. It is appended without a lock, by one `O_APPEND` write per run, is never
-pruned, and is lost when the host clears its temporary directory at boot.
+without following a symlink or blocking, and a path that is not a regular file with a single link
+(a hard link planted by another account) is refused, for the append and the read alike. It is
+appended without a lock, by one `O_APPEND` write per run, is never pruned, and is lost when the
+host clears its temporary directory at boot.
 
 `verify-slot report` reads the file back. A line is readable when it is a JSON object with exactly
 the types above (`held_seconds` a number or null, the numbers finite and not below 0); any other
@@ -71,10 +72,14 @@ def entry(repository: str | None, argv: Sequence[str], started: datetime, waited
 
 
 def _regular(descriptor: int, path: Path) -> int:
-    """`descriptor` when it is a regular file; otherwise close it and raise `OSError`."""
+    """`descriptor` when it is a regular file with one link; otherwise close it and raise `OSError`.
+
+    A second link is another account's hard link to a file that is not ours to append to.
+    """
     try:
-        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-            raise OSError(errno.EINVAL, "not a regular file", str(path))
+        status = os.fstat(descriptor)
+        if not stat.S_ISREG(status.st_mode) or status.st_nlink != 1:
+            raise OSError(errno.EINVAL, "not a regular file with one link", str(path))
     except BaseException:
         os.close(descriptor)
         raise
@@ -85,7 +90,7 @@ def _open_history(path: Path) -> int:
     """Open the history file for appending, creating it with mode 0666 when it does not exist.
 
     The file sits in a directory every account can write to, so the open never follows a symlink,
-    never blocks on a FIFO and refuses anything that is not a regular file.
+    never blocks on a FIFO and refuses anything that is not a regular file with a single link.
     """
     flags = os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK
     try:
