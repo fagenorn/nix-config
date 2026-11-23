@@ -19,9 +19,11 @@ from agent_tools.delivery import issue_setup
 from agent_tools.project_contract import resolve_project
 
 from .forge_world import ForgeWorld
-from .guard_policy_world import GuardPolicyWorld
+from .guard_policy_world import GuardPolicyWorld, install_platform_manifest_in_environ
 
 TIER = "integration"
+
+setUpModule = install_platform_manifest_in_environ
 
 SLUG = "example/setup"
 BRANCH = "issue-7-x"

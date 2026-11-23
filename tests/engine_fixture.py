@@ -22,6 +22,9 @@ SOURCE = REPO_ROOT / "tests/fixtures/engine-fixture-project"
 ADOPT = [sys.executable, "-m", "agent_tools.project_contract.adopt_project"]
 MAX_PLANS = 3
 TIMEOUT = 300
+# The adoption commit takes its author from the environment: a CI runner guesses none from its account.
+IDENTITY = {"GIT_AUTHOR_NAME": "fixture", "GIT_AUTHOR_EMAIL": "fixture@example.invalid",
+            "GIT_COMMITTER_NAME": "fixture", "GIT_COMMITTER_EMAIL": "fixture@example.invalid"}
 
 
 class FixtureProject:
@@ -87,7 +90,7 @@ class FixtureProject:
 
     def _run(self, *args: str) -> tuple[int, dict | None, str]:
         done = subprocess.run([*ADOPT, *args], capture_output=True, text=True, timeout=TIMEOUT,
-                              env=self.world.env, cwd=self.root)
+                              env={**self.world.env, **IDENTITY}, cwd=self.root)
         try:
             document = json.loads(done.stdout)
         except ValueError:

@@ -16,6 +16,16 @@ setUpModule = install_platform_manifest_in_environ
 
 
 class FixtureTest(unittest.TestCase):
+    def test_the_adoption_commits_on_a_host_that_guesses_no_git_identity(self):
+        # A CI runner resolves no author from its account: git is told to take one from config only.
+        refusing = {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "user.useConfigOnly",
+                    "GIT_CONFIG_VALUE_0": "true"}
+        with mock.patch.dict("os.environ", refusing):
+            world = GuardPolicyWorld(self)
+            fixture = FixtureProject(self, world)
+
+        self.assertRegex(fixture.adoption["commit"], r"^[0-9a-f]{40}$")
+
     def test_the_fixture_is_adopted_by_the_adoption_command_and_declares_its_checks(self):
         world = GuardPolicyWorld(self)
 
