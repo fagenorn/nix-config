@@ -1301,13 +1301,10 @@ def _launch_until_answered(
         defer: bool = False, resumed: _Resumed | None = None,
 ) -> tuple[engine_session.Launched, engine_session.Reading, tuple[int, dict] | None, bool]:
     """Launch the session, again with `--resume` after a usage limit, a first API error (once, after
-    `API_RETRY_SECONDS`) or a first miss (once, with `REASK_PROMPT`); return the first launch that is
-    none of these, or follows a second error or miss, with its record stored and the wait ended (a
-    miss and its resume summed in the measurements), the `quota-wait` stop (wait open; unrecorded
-    with `defer`, for a group to record) and whether the outcome is `no-reply`. With `resumed` the
-    first launch is its attempt (`--resume` only when a process of the visit had started, else
-    `--session-id`), every later one resumes, and a miss is `no-reply` with no re-ask; each record
-    is `<step>.<visit>.continue-<attempt>.json`."""
+    `API_RETRY_SECONDS`) or a first miss (once, with `REASK_PROMPT`); return the first launch that is none of these,
+    or follows a second error or miss, with its record stored and the wait ended (a miss and its resume summed in
+    the measurements), the `quota-wait` stop (wait open; unrecorded with `defer`) and whether the outcome is
+    `no-reply`. With `resumed` the first launch is its attempt, each later one resumes and a miss is `no-reply`."""
     name, visit, session = visit_of
     role, schema, system = launch_of
     attempt, limited, waiting, released, retried, no_reply = (
