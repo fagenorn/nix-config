@@ -1,6 +1,6 @@
 # Retire the deploy watch
 
-This is the migration `bindings-deploy.retire`, from project schema 1 to 2, decided in [ADR-project-contract-001](../areas/project-contract/adr/001-schema-2-drops-the-deploy-watch.md).
+This is the migration `bindings-deploy.retire`, from project schema 1 to 2 (issue 579).
 
 The migration `bindings-deploy.retire`, per project root R:
 

@@ -88,7 +88,6 @@ from .test_adopt_project import (
     variable_code,
     write,
     write_depth_tree,
-    write_dissolved_tree,
     write_linked_tree,
     write_moved_tool,
     write_policy_tree,
@@ -98,11 +97,11 @@ from .test_adopt_project import (
 
 CONTRACT = ".agents/project.json"
 MOVED = {
-    ".claude/specs/x.md": ".agents/artifacts/specs/x.md",
-    ".claude/plans/y.md": ".agents/artifacts/plans/y.md",
-    ".claude/plans/y.tasks/t1.md": ".agents/artifacts/plans/y.tasks/t1.md",
     ".out-of-scope/z.md": ".agents/knowledge/rejections/z.md",
 }
+# The legacy record trees adoption leaves where they are.
+STAYED = (".claude/specs/x.md", ".claude/plans/y.md",
+          ".claude/plans/y.tasks/t1.md")
 
 
 def apply_repo(home: Path, *, verification: tuple[str, ...] = ("true",),
@@ -159,7 +158,7 @@ def apply_repo(home: Path, *, verification: tuple[str, ...] = ("true",),
     write(root, CONTRACT, json.dumps(without_platform, indent=2) + "\n")
     for standards in contract["bindings"]["paths"]["standards"]:
         write(root, f"{standards}/bar.md", "# the bar\n")
-    for old in MOVED:
+    for old in (*MOVED, *STAYED):
         write(root, old, f"# {old}\n")
     write(root, ".claude/skills.config.json", json.dumps(
         {"orchestration": {"agentBudgetMinutes": 180, "maxParallel": 2}},
@@ -178,7 +177,7 @@ def readoption_repo(home: Path) -> tuple[Path, dict]:
     drifted, so that it plans a second `ready` reconcile.
 
     Returns the checkout and the first `apply`'s result, whose
-    `evidence_record` is the committed record a re-adoption has to supersede.
+    `migration_map` is the first adoption's record, which the second leaves be.
     """
     root = apply_repo(home)
     code, out, err = run("plan", "--repo-root", str(root), home=home)
@@ -245,6 +244,9 @@ class ApplyTestCase(unittest.TestCase):
 
     def stored_plan(self, plan_id: str) -> Path:
         return self.state("adopt", "plans", self.digest(plan_id) + ".json")
+
+    def stored_document(self, plan_id: str) -> dict:
+        return json.loads(self.stored_plan(plan_id).read_text("utf-8"))
 
     def worktree(self, plan_id: str) -> Path:
         return self.state("adopt", "worktrees", self.digest(plan_id))
@@ -349,18 +351,15 @@ class ApplySuccessTest(ApplyTestCase):
         self.result = self.succeed(self.root, self.plan_id)
         self.branch = self.result["branch"]
 
-    def test_the_result_names_the_branch_commit_plan_and_two_records(self):
+    def test_the_result_names_the_branch_commit_plan_and_the_map(self):
         self.assertEqual(sorted(self.result),
-                         ["branch", "commit", "evidence_record",
-                          "integration_branch", "migration_map", "plan_id"])
+                         ["branch", "commit", "integration_branch",
+                          "migration_map", "plan_id"])
         self.assertEqual(
             self.result["integration_branch"],
             fixture_contract()["bindings"]["vcs"]["integration_branch"])
         self.assertEqual(self.result["plan_id"], self.plan_id)
         self.assertEqual(self.branch, f"adopt-{self.digest(self.plan_id)[:12]}")
-        self.assertEqual(
-            self.result["evidence_record"],
-            self.document["handoff"]["evidence_record"])
         self.assertEqual(
             self.result["migration_map"],
             self.document["handoff"]["migration_map"])
@@ -392,8 +391,10 @@ class ApplySuccessTest(ApplyTestCase):
             subject,
             "chore(adopt): adopt fixture/target at plan "
             f"{self.digest(self.plan_id)[:12]}")
+        self.assertEqual(subject, adopt_inspection.adoption_subject(
+            "fixture/target", self.digest(self.plan_id)))
         self.assertIn(self.document["handoff"]["migration_map"], message)
-        self.assertIn(self.document["handoff"]["evidence_record"], message)
+        self.assertNotIn("adoption evidence record", message)
         self.assertNotIn("Co-Authored-By", message)
         self.assertNotIn("Co-authored-by", message)
 
@@ -407,6 +408,9 @@ class ApplySuccessTest(ApplyTestCase):
                               self.branch, "--", new).split()
                 self.assertEqual(len(history), 2, history)
                 self.assertEqual(history[1], self.base)
+        for path in STAYED:
+            with self.subTest(stayed=path):
+                self.assertIn(path, tracked)
 
     def test_the_commit_reports_renames_rather_than_add_plus_delete(self):
         status = git(self.root, "show", "--name-status", "-M",
@@ -426,15 +430,24 @@ class ApplySuccessTest(ApplyTestCase):
             [{"old_path": old, "new_path": MOVED[old]}
              for old in sorted(MOVED)])
 
-    def test_the_evidence_record_is_committed_and_names_the_map(self):
-        record = json.loads(git(
-            self.root, "show",
-            f"{self.branch}:{self.result['evidence_record']}"))
-        self.assertEqual(record["plan_id"], self.plan_id)
-        self.assertEqual(record["outcome"], "reconcile")
-        self.assertEqual(record["base_revision"], self.base)
-        self.assertEqual(record["path_migration_map"],
-                         self.result["migration_map"])
+    def test_the_applied_change_writes_no_evidence_record(self):
+        changed = git(self.root, "diff", "--name-only", "--no-renames",
+                      f"{self.base}..{self.branch}").split()
+        self.assertEqual(
+            [p for p in changed
+             if p.startswith(".agents/artifacts/evidence/")], [])
+        self.assertNotIn("evidence_record", self.result)
+        self.assertNotIn("evidence_record", self.document["handoff"])
+
+    def test_the_plan_and_the_applied_change_hold_no_path_under_the_artifacts_directory(self):
+        named = [p for op in self.document["changes"]
+                 for p in op["sources"] + op["targets"]]
+        changed = git(self.root, "diff", "--name-only", "--no-renames",
+                      f"{self.base}..{self.branch}").split()
+        self.assertEqual(
+            [p for p in named + changed
+             if p == ".agents/artifacts"
+             or p.startswith(".agents/artifacts/")], [])
 
     def test_the_committed_contract_declares_the_platform_and_new_homes(self):
         contract = json.loads(git(
@@ -445,8 +458,7 @@ class ApplySuccessTest(ApplyTestCase):
                          {"min_inclusive": version,
                           "max_exclusive": f"{major + 1}.0.0"})
         self.assertEqual(contract["bindings"]["paths"]["artifacts"],
-                         {"specs": ".agents/artifacts/specs",
-                          "plans": ".agents/artifacts/plans"})
+                         {"specs": ".claude/specs", "plans": ".claude/plans"})
         self.assertEqual(contract["bindings"]["paths"]["rejections"],
                          [".agents/knowledge/rejections"])
 
@@ -527,7 +539,7 @@ class ApplyRefusalTest(ApplyTestCase):
         the working tree carries an edit `git mv` would carry along."""
         root = apply_repo(self.home)
         plan_id = self.ready_plan(root)["plan"]["plan_id"]
-        write(root, ".claude/specs/x.md", "# edited, never committed\n")
+        write(root, ".out-of-scope/z.md", "# edited, never committed\n")
         self.refuse(root, plan_id, "dirty_worktree")
 
     def test_an_untracked_file_in_an_inspected_source_is_refused(self):
@@ -535,7 +547,7 @@ class ApplyRefusalTest(ApplyTestCase):
         staleness rather than dirt — either way nothing is touched."""
         root = apply_repo(self.home)
         plan_id = self.ready_plan(root)["plan"]["plan_id"]
-        write(root, ".claude/specs/untracked.md", "# not committed\n")
+        write(root, ".out-of-scope/untracked.md", "# not committed\n")
         self.refuse(root, plan_id, "plan_stale")
 
     def test_an_unrelated_unstaged_edit_is_not_a_dirty_worktree(self):
@@ -846,12 +858,10 @@ class AnsweredCandidateApplyTest(ApplyTestCase):
             root, "show", f"{result['branch']}:{result['migration_map']}"))
         self.assertIn({"old_path": ODD, "new_path": ARCHIVED},
                       moves["moves"])
-        record = json.loads(git(
-            root, "show", f"{result['branch']}:{result['evidence_record']}"))
+        stored = self.stored_document(plan_id)
         self.assertIn({"id": "candidate-class", "subject": ODD,
                        "value": "archive-history"},
-                      record["decisions_accepted"])
-        stored = json.loads(self.stored_plan(plan_id).read_text("utf-8"))
+                      stored["decisions"]["answered"])
         self.assertEqual(
             {gate["status"] for gate in stored["verification"]["commit_gates"]},
             {"passed"})
@@ -880,12 +890,11 @@ class AnsweredCandidateApplyTest(ApplyTestCase):
 
 
 class ReadoptionTest(ApplyTestCase):
-    """A second adoption supersedes the first one's evidence record.
+    """A second adoption writes and supersedes no evidence record.
 
-    `verify` accepts exactly one committed record (D34), and every appliable
-    plan writes a new one named by its own id, so a re-adoption that left the
-    prior record behind would make its checkout permanently non-conformant.
-    The supersession is a `delete-file`, and so needs the D16 acknowledgement.
+    The adoption commit, found by its fixed subject, is what says a repository
+    was adopted, so a re-adoption has nothing of the first one to delete and
+    needs no deletion acknowledgement.
     """
 
     def setUp(self) -> None:
@@ -894,23 +903,14 @@ class ReadoptionTest(ApplyTestCase):
         self.document = self.ready_plan(self.root)
         self.plan_id = self.document["plan"]["plan_id"]
 
-    def test_the_prior_record_is_a_destructive_deletion_to_acknowledge(self):
+    def test_a_readoption_plans_no_deletion_and_applies_unacknowledged(self):
         self.assertEqual(self.document["plan"]["outcome"], "reconcile")
         self.assertEqual(
-            [(op["sources"], op["targets"], op["approval_class"])
-             for op in self.document["changes"] if op["op"] == "delete-file"],
-            [([self.first["evidence_record"]], [], "destructive")])
-        self.refuse(self.root, self.plan_id, "unacknowledged_deletion")
-
-    def test_the_readoption_commit_leaves_exactly_one_evidence_record(self):
-        result = self.succeed(self.root, self.plan_id,
-                              "--acknowledge-deletions")
-        records = [path for path in self.branch_files(self.root,
-                                                      result["branch"])
-                   if path.startswith(".agents/artifacts/evidence/")]
-        self.assertEqual(records, [result["evidence_record"]])
-        self.assertNotEqual(result["evidence_record"],
-                            self.first["evidence_record"])
+            [op for op in self.document["changes"]
+             if op["op"] == "delete-file"], [])
+        result = self.succeed(self.root, self.plan_id)
+        self.assertNotEqual(result["migration_map"],
+                            self.first["migration_map"])
 
 
 class LinkRewriteApplyTest(ApplyTestCase):
@@ -925,9 +925,8 @@ class LinkRewriteApplyTest(ApplyTestCase):
             self.assertEqual(git(root, "show", f"{branch}:{path}"), text)
         # Already-broken links, URLs and files no link change touches are
         # byte-identical, wherever they now live.
-        for old, new in ((".claude/plans/y.md", ".agents/artifacts/plans/y.md"),
-                         (".out-of-scope/z.md",
-                          ".agents/knowledge/rejections/z.md"),
+        for old, new in ((".out-of-scope/w.md",
+                          ".agents/knowledge/rejections/w.md"),
                          (".agents/instructions/bootstrap.md",
                           ".agents/instructions/bootstrap.md")):
             self.assertEqual(git(root, "show", f"{branch}:{new}"),
@@ -950,37 +949,13 @@ class LinkRewriteApplyTest(ApplyTestCase):
                     self.assertIsNotNone(adopt_links.resolve(
                         new, new_link.target, after_tree), new_link.target)
 
-    def test_the_evidence_record_carries_the_summary(self):
+    def test_the_stored_plan_carries_the_summary(self):
         root = linked_apply_repo(self.home)
         document = self.ready_plan(root)
         self.assertEqual(document["link_rewrites"], LINKED_SUMMARY)
-        result = self.succeed(root, document["plan"]["plan_id"])
-        record = json.loads(git(
-            root, "show", f"{result['branch']}:{result['evidence_record']}"))
-        self.assertEqual(record["link_rewrites"], LINKED_SUMMARY)
-
-    def test_an_unrewritable_link_fails_the_commit_gate(self):
-        root = apply_repo(self.home)
-        write_dissolved_tree(root)
-        code, out, err = run("plan", "--repo-root", str(root), home=self.home)
-        self.assertEqual(code, 0, err or out)
-        document = json.loads(out)
-        self.assertEqual(document["plan"]["state"], "draft")
-        plan_id = document["plan"]["plan_id"]
-        # Forced past the ready gate (D11): only the commit gate stands
-        # between this plan and a commit that breaks `README.md`'s link.
-        stored = json.loads(self.stored_plan(plan_id).read_text("utf-8"))
-        stored["plan"]["state"] = "ready"
-        self.rewrite_stored_plan(plan_id, stored)
-        base = git(root, "rev-parse", "HEAD").strip()
-        self.assert_retained(root, plan_id, base,
-                             "adopt.gate.no-new-broken-link")
-        record = json.loads(self.state(
-            "adopt", "worktrees",
-            self.digest(plan_id) + ".failure.json").read_text("utf-8"))
-        self.assertEqual([gate["id"] for gate in record["gates"]
-                          if gate["status"] == "failed"],
-                         ["no-new-broken-link"])
+        self.succeed(root, document["plan"]["plan_id"])
+        stored = self.stored_document(document["plan"]["plan_id"])
+        self.assertEqual(stored["link_rewrites"], LINKED_SUMMARY)
 
 
 class PathReferenceApplyTest(ApplyTestCase):
@@ -1026,21 +1001,18 @@ class PathReferenceApplyTest(ApplyTestCase):
         self.assertEqual(git(root, "show", f"{branch}:{CHECK_LINKS}"),
                          git(root, "show", f"HEAD:{CHECK_LINKS}"))
         self.assertEqual(self.check(root, branch),
-                         (1, ".agents/artifacts/specs/x.md: missing.md\n"))
+                         (1, ".agents/knowledge/hints/h.md: missing.md\n"))
 
-    def test_the_evidence_record_lists_the_answer_and_the_row(self):
+    def test_the_stored_plan_lists_the_answer_and_the_row(self):
         root = referenced_apply_repo(self.home)
         document = self.answered_plan(root, "extend")
-        result = self.succeed(root, document["plan"]["plan_id"])
-        record = json.loads(git(
-            root, "show", f"{result['branch']}:{result['evidence_record']}"))
+        self.succeed(root, document["plan"]["plan_id"])
+        stored = self.stored_document(document["plan"]["plan_id"])
         self.assertIn({"id": "path-reference", "subject": REFERENCE_SUBJECT,
-                       "value": "extend"}, record["decisions_accepted"])
-        self.assertEqual(record["path_references"],
+                       "value": "extend"}, stored["decisions"]["answered"])
+        self.assertEqual(stored["path_references"],
                          [{**REFERENCE_ROW, "answer": "extend",
                            "decided_by": "occurrence"}])
-        self.assertEqual(record["path_references"],
-                         document["path_references"])
 
 
 class MovedFileReferenceApplyTest(ApplyTestCase):
@@ -1106,7 +1078,7 @@ class ReferencePolicyApplyTest(ApplyTestCase):
                                  git(root, "show", f"{branch}:{path}"))
         self.assertEqual(
             [path for path in self.branch_files(root, branch)
-             if path.startswith(".claude/notes")], [])
+             if path.startswith(".out-of-scope")], [])
 
     def test_the_outside_command_runs_on_the_adopt_commit_as_on_base(self):
         root, _, result = self.applied()
@@ -1126,7 +1098,7 @@ class ReferencePolicyApplyTest(ApplyTestCase):
                 f'"{addition}"' for addition in row["additions"])):
             with self.subTest(element=element):
                 self.assertIn(element, text)
-        self.assertEqual(len(row["additions"]), 3)
+        self.assertEqual(len(row["additions"]), 1)
 
     def test_the_settings_file_stays_in_place_with_a_null_destination(self):
         root, document, result = self.applied()
@@ -1136,12 +1108,11 @@ class ReferencePolicyApplyTest(ApplyTestCase):
         self.assertEqual(
             [op for op in document["changes"]
              if SETTINGS in op["sources"] + op["targets"]], [])
-        record = json.loads(git(
-            root, "show", f"{branch}:{result['evidence_record']}"))
-        (source,) = [row for row in record["sources"]
+        stored = self.stored_document(result["plan_id"])
+        (source,) = [row for row in stored["evidence"]
                      if row["path"] == SETTINGS]
-        self.assertIsNone(source["after"])
-        self.assertIsNotNone(source["before"])
+        self.assertIsNone(source["target"])
+        self.assertIsNotNone(source["fingerprint"])
 
     def test_retained_and_unnamed_files_keep_their_bytes(self):
         root, _, result = self.applied()
@@ -1157,25 +1128,23 @@ class ReferencePolicyApplyTest(ApplyTestCase):
             git(root, "show", f"{branch}:{POLICY_NEW}/record.json"),
             POLICY_CODE[f"{POLICY_DIR}/record.json"])
 
-    def test_the_evidence_record_lists_the_policy_answers_and_rows(self):
+    def test_the_stored_plan_lists_the_policy_answers_and_rows(self):
         root, document, result = self.applied()
-        record = json.loads(git(
-            root, "show", f"{result['branch']}:{result['evidence_record']}"))
+        stored = self.stored_document(result["plan_id"])
         for question, subject, value in POLICY_READY_ANSWERS:
             with self.subTest(subject=subject):
                 self.assertIn(
                     {"id": question, "subject": subject, "value": value},
-                    record["decisions_accepted"])
-        self.assertEqual(record["reference_policies"],
+                    stored["decisions"]["answered"])
+        self.assertEqual(stored["reference_policies"],
                          document["reference_policies"])
-        self.assertEqual(record["path_references"],
+        self.assertEqual(stored["path_references"],
                          document["path_references"])
         self.assertEqual(
             [(row["class"], row["answer"], row["open"])
-             for row in record["reference_policies"]],
+             for row in stored["reference_policies"]],
             [(".json", "retain", 0), (".nix", "rewrite", 0),
              (".py", "rewrite", 0)])
-        self.assertEqual(record["plan_id"], document["plan"]["plan_id"])
 
 
 class VariablePolicyApplyTest(ApplyTestCase):
@@ -1205,16 +1174,15 @@ class VariablePolicyApplyTest(ApplyTestCase):
         self.assertEqual(
             git(root, "show", f"{branch}:{COLLECT}.sh"),
             code[f"{COLLECT}.sh"].replace(JOBS_DIR, JOBS_NEW))
-        record = json.loads(git(
-            root, "show", f"{branch}:{result['evidence_record']}"))
+        stored = self.stored_document(result["plan_id"])
         for question, subject, value in VARIABLE_REWRITE_ANSWERS:
             with self.subTest(subject=subject):
                 self.assertIn(
                     {"id": question, "subject": subject, "value": value},
-                    record["decisions_accepted"])
-        self.assertEqual(record["reference_policies"],
+                    stored["decisions"]["answered"])
+        self.assertEqual(stored["reference_policies"],
                          document["reference_policies"])
-        self.assertEqual(record["path_references"],
+        self.assertEqual(stored["path_references"],
                          document["path_references"])
 
     def test_retain_keeps_the_base_blob(self):
@@ -1268,15 +1236,14 @@ class DepthPolicyApplyTest(ApplyTestCase):
                 text = git(root, "show", f"{branch}:{row['target']}")
                 self.assertEqual(text, DEPTH_CODE[row["path"]].replace(
                     row["literal"], row["replacement"]))
-        record = json.loads(git(
-            root, "show", f"{branch}:{result['evidence_record']}"))
+        stored = self.stored_document(result["plan_id"])
         for question, subject, value in DEPTH_REWRITE_ANSWERS:
             with self.subTest(subject=subject):
                 self.assertIn(
                     {"id": question, "subject": subject, "value": value},
-                    record["decisions_accepted"])
-        self.assertEqual(record["path_references"], rows)
-        self.assertEqual(record["reference_policies"],
+                    stored["decisions"]["answered"])
+        self.assertEqual(stored["path_references"], rows)
+        self.assertEqual(stored["reference_policies"],
                          document["reference_policies"])
 
     def test_retain_keeps_the_base_blobs(self):
