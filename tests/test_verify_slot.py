@@ -14,10 +14,13 @@ import sys
 import tempfile
 import time
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from agent_tools.delivery import verify_slot
-from agent_tools.delivery.verify_slot import NO_SLOT_EXIT, NO_SLOT_LINE, SLOT_DIR_ENV, WAITING_LINE
+from agent_tools.canonical import parse_rfc3339_utc
+from agent_tools.delivery import verify_history, verify_slot
+from agent_tools.delivery.verify_slot import (
+    NO_SLOT_EXIT, NO_SLOT_LINE, REPORT_SKIPPED_LINE, SLOT_DIR_ENV, WAITING_LINE)
 from .process_liveness import process_alive
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -51,7 +54,9 @@ def wait_for(path, timeout=20):
     return False
 
 
-class VerifySlotTest(unittest.TestCase):
+class SlotHarness:
+    """The scratch slot directory and the run helpers both test classes share."""
+
     def setUp(self):
         scratch = tempfile.TemporaryDirectory()
         self.addCleanup(scratch.cleanup)
@@ -115,6 +120,12 @@ class VerifySlotTest(unittest.TestCase):
         _, err = proc.communicate(timeout=timeout)
         return proc.returncode, err
 
+    def history(self):
+        text = (self.slots / "history.jsonl").read_text()
+        return [json.loads(line) for line in text.splitlines()]
+
+
+class VerifySlotTest(SlotHarness, unittest.TestCase):
     def test_a_second_run_from_the_same_repository_waits_until_the_first_ends(self):
         self.declare(verify_slots=2)
         one = self.repository("alpha-one", "git@github.com:example/alpha.git")
@@ -547,6 +558,237 @@ class VerifySlotTest(unittest.TestCase):
                     target.rmdir()
                 else:
                     target.unlink()
+
+
+    def test_a_run_that_waited_then_held_a_slot_records_both_durations(self):
+        alpha = self.repository("alpha", "git@github.com:example/alpha.git")
+        beta = self.repository("beta", "git@github.com:example/beta.git")
+        first = self.start("a", cwd=alpha)
+        self.assertTrue(wait_for(self.mark("a", "start")))
+        second = self.start("b", code=4, cwd=beta)
+        time.sleep(1.0)
+        self.release("a")
+        self.assertTrue(wait_for(self.mark("b", "start")))
+        time.sleep(0.5)
+        self.release("b")
+        codes = (self.finish(first)[0], self.finish(second)[0])
+        self.assertEqual(codes, (0, 4))
+        entries = {entry["repository"]: entry for entry in self.history()}
+        self.assertEqual(len(self.history()), 2)
+        for entry in entries.values():
+            self.assertEqual(set(entry), {"command", "exit", "held_seconds", "repository",
+                                          "started", "waited_seconds"})
+        command = " ".join(" ".join([sys.executable, "-c", CHILD]).split()[:3])
+        beta_entry, alpha_entry = entries["example/beta"], entries["example/alpha"]
+        self.assertEqual(beta_entry["exit"], 4)
+        self.assertGreaterEqual(beta_entry["waited_seconds"], 0.8)
+        self.assertGreaterEqual(beta_entry["held_seconds"], 0.4)
+        self.assertEqual(beta_entry["command"], command)
+        self.assertEqual(alpha_entry["exit"], 0)
+        self.assertLess(alpha_entry["waited_seconds"], 0.5)
+        self.assertGreaterEqual(alpha_entry["held_seconds"], 1.0)
+        now = datetime.now(timezone.utc)
+        for entry in entries.values():
+            self.assertTrue(entry["started"].endswith("Z"))
+            started = parse_rfc3339_utc(entry["started"])
+            self.assertLessEqual(now - timedelta(seconds=120), started)
+            self.assertLessEqual(started, now)
+
+    def test_a_run_whose_record_cannot_be_appended_still_returns_the_commands_exit(self):
+        (self.slots / "history.jsonl").mkdir(parents=True)
+        self.release("a")
+        code, err = self.finish(self.start("a", code=3))
+        self.assertEqual(code, 3)
+        failed = [line for line in err.splitlines()
+                  if line.startswith("verify-slot: cannot record this run in ")]
+        self.assertEqual(len(failed), 1)
+        self.release("b")
+        self.assertEqual(self.finish(self.start("b", "--wait-limit", "1"))[0], 0)
+
+    def test_a_history_path_that_is_a_symlink_is_never_written_through(self):
+        victim = Path(self.home) / "victim.txt"
+        victim.write_text("victim-original")
+        self.slots.mkdir()
+        (self.slots / "history.jsonl").symlink_to(victim)
+        self.release("a")
+        code, err = self.finish(self.start("a", code=3))
+        self.assertEqual(code, 3)
+        self.assertEqual(victim.read_text(), "victim-original")
+        failed = [line for line in err.splitlines()
+                  if line.startswith("verify-slot: cannot record this run in ")]
+        self.assertEqual(len(failed), 1)
+
+    def test_a_history_path_that_is_a_hard_link_is_never_written_through(self):
+        victim = Path(self.home) / "victim.txt"
+        victim.write_text("victim-original")
+        self.slots.mkdir()
+        os.link(victim, self.slots / "history.jsonl")
+        self.release("a")
+        code, err = self.finish(self.start("a", code=3))
+        self.assertEqual(code, 3)
+        self.assertEqual(victim.read_text(), "victim-original")
+        failed = [line for line in err.splitlines()
+                  if line.startswith("verify-slot: cannot record this run in ")]
+        self.assertEqual(len(failed), 1)
+
+    def test_a_history_path_that_is_a_fifo_does_not_hold_the_run_up(self):
+        self.slots.mkdir()
+        os.mkfifo(self.slots / "history.jsonl")
+        self.release("a")
+        code, err = self.finish(self.start("a", code=3), timeout=10)
+        self.assertEqual(code, 3)
+        failed = [line for line in err.splitlines()
+                  if line.startswith("verify-slot: cannot record this run in ")]
+        self.assertEqual(len(failed), 1)
+
+    def test_a_run_that_gets_no_slot_records_its_wait_and_no_hold(self):
+        first = self.start("a")
+        self.assertTrue(wait_for(self.mark("a", "start")))
+        self.release("b")
+        code, _ = self.finish(self.start("b", "--wait-limit", "1"))
+        self.release("a")
+        self.finish(first)
+        self.assertEqual(code, NO_SLOT_EXIT)
+        entries = {entry["exit"]: entry for entry in self.history()}
+        self.assertIsNone(entries[75]["held_seconds"])
+        self.assertGreaterEqual(entries[75]["waited_seconds"], 1.0)
+        self.assertIsInstance(entries[0]["held_seconds"], float)
+
+    def test_a_setup_error_records_nothing(self):
+        self.declare(verify_slots=0)
+        self.assertEqual(self.finish(self.start("a"))[0], 2)
+        self.assertFalse((self.slots / "history.jsonl").exists())
+
+    def test_the_history_file_is_shared_by_every_account(self):
+        other = Path(self.home) / "other-account"
+        other.mkdir()
+        self.release("a")
+        self.release("b")
+        self.finish(self.start("a"))
+        self.finish(self.start("b", home=str(other)))
+        self.assertEqual(stat.S_IMODE(os.stat(self.slots / "history.jsonl").st_mode), 0o666)
+        self.assertEqual(len(self.history()), 2)
+
+
+class VerifySlotReportTest(SlotHarness, unittest.TestCase):
+    def write_history(self, *records, raw=()):
+        self.slots.mkdir(exist_ok=True)
+        lines = [json.dumps(record, separators=(",", ":")) for record in records] + list(raw)
+        (self.slots / "history.jsonl").write_text("".join(line + "\n" for line in lines))
+
+    def rec(self, repository, held, waited, hours_ago=1, code=0):
+        started = datetime.now(timezone.utc) - timedelta(hours=hours_ago)
+        return {"command": "just test", "exit": code, "held_seconds": held, "repository": repository,
+                "started": started.strftime("%Y-%m-%dT%H:%M:%SZ"), "waited_seconds": waited}
+
+    def report(self, *opts):
+        result = subprocess.run(
+            [sys.executable, "-m", "agent_tools.delivery.verify_slot", "report", *opts],
+            env=self.env(), cwd=self.home, capture_output=True, text=True, timeout=20)
+        return result.returncode, result.stdout.splitlines(), result.stderr
+
+    def alpha_records(self):
+        return [self.rec("example/alpha", 100 * n, 10 * n) for n in range(1, 11)] + [
+            self.rec("example/alpha", 99999, 99999, hours_ago=30)]
+
+    def test_the_report_gives_each_repositorys_medians_and_p90s_and_marks_the_one_over_budget(self):
+        self.declare(verify_budget_seconds=600)
+        beta = [self.rec("example/beta", held, waited)
+                for held, waited in ((700, 5), (800, 15), (900, 25))]
+        self.write_history(*self.alpha_records(), *beta,
+                           self.rec("example/beta", None, 600, code=75), raw=["not json"])
+        code, lines, err = self.report()
+        self.assertEqual(code, 0)
+        self.assertEqual(lines, [
+            "example/alpha runs=10 held_median=550s held_p90=900s held_total=5500s"
+            " waited_median=55s waited_p90=90s",
+            "example/beta runs=4 held_median=800s held_p90=900s held_total=2400s"
+            " waited_median=20s waited_p90=600s over budget 600s"])
+        self.assertIn(REPORT_SKIPPED_LINE.format(count=1, path=self.slots / "history.jsonl"),
+                      err.splitlines())
+
+    def test_the_report_window_is_the_last_n_hours(self):
+        self.write_history(*self.alpha_records())
+        self.assertTrue(self.report("--hours", "48")[1][0].startswith("example/alpha runs=11 "))
+        self.assertTrue(self.report()[1][0].startswith("example/alpha runs=10 "))
+        self.assertEqual(self.report("--hours", "0")[0], 2)
+
+    def test_a_line_with_an_integer_too_large_for_a_float_is_skipped(self):
+        huge = '{"command":"x","exit":0,"held_seconds":5,"repository":null,' \
+            '"started":"2026-11-23T00:00:00Z","waited_seconds":1' + "0" * 400 + "}"
+        self.write_history(self.rec("example/beta", 30, 2), raw=[huge])
+        code, lines, err = self.report()
+        self.assertEqual(code, 0)
+        self.assertEqual(len(lines), 1)
+        self.assertIn(REPORT_SKIPPED_LINE.format(count=1, path=self.slots / "history.jsonl"),
+                      err.splitlines())
+
+    def test_a_window_reaching_before_the_calendar_reports_every_run(self):
+        self.write_history(*self.alpha_records())
+        code, lines, _ = self.report("--hours", "100000000")
+        self.assertEqual(code, 0)
+        self.assertTrue(lines[0].startswith("example/alpha runs=11 "))
+
+    def test_a_median_hold_at_the_budget_is_not_marked(self):
+        self.declare(verify_budget_seconds=600)
+        self.write_history(*[self.rec("example/beta", held, 1) for held in (500, 600, 700)])
+        self.assertEqual(self.report()[1], [
+            "example/beta runs=3 held_median=600s held_p90=700s held_total=1800s"
+            " waited_median=1s waited_p90=1s"])
+
+    def test_with_no_budget_declared_nothing_is_marked(self):
+        self.declare()
+        self.write_history(*[self.rec("example/beta", 900, 1) for _ in range(3)])
+        self.assertEqual(self.report()[1], [
+            "example/beta runs=3 held_median=900s held_p90=900s held_total=2700s"
+            " waited_median=1s waited_p90=1s"])
+
+    def test_runs_outside_a_repository_and_runs_that_held_nothing_are_reported(self):
+        self.write_history(self.rec(None, 30, 2), self.rec("example/gamma", None, 600, code=75))
+        self.assertEqual(self.report()[1], [
+            "(no repository) runs=1 held_median=30s held_p90=30s held_total=30s"
+            " waited_median=2s waited_p90=2s",
+            "example/gamma runs=1 held_median=- held_p90=- held_total=0s"
+            " waited_median=600s waited_p90=600s"])
+
+    def test_p90_is_the_nearest_rank(self):
+        self.assertEqual(verify_history.nearest_rank_p90(list(range(1, 11))), 9)
+        self.assertEqual(verify_history.nearest_rank_p90([5]), 5)
+        self.assertEqual(verify_history.nearest_rank_p90([3, 1, 2]), 3)
+        self.assertEqual(verify_history.nearest_rank_p90(list(range(1, 21))), 18)
+
+    def test_an_invalid_declaration_fails_the_report(self):
+        self.declare(verify_budget_seconds=0)
+        self.write_history(self.rec("example/beta", 1, 1))
+        code, lines, err = self.report()
+        self.assertEqual(code, 2)
+        self.assertEqual(lines, [])
+        self.assertTrue(err.strip())
+
+    def test_the_report_reads_what_a_run_recorded_and_creates_nothing(self):
+        code, lines, _ = self.report()
+        self.assertEqual((code, lines), (0, []))
+        self.assertFalse(self.slots.exists())
+        alpha = self.repository("alpha", "git@github.com:example/alpha.git")
+        self.release("a")
+        self.finish(self.start("a", cwd=alpha))
+        lines = self.report()[1]
+        self.assertEqual(len(lines), 1)
+        self.assertRegex(lines[0], r"^example/alpha runs=1 held_median=\d+s held_p90=\d+s"
+                         r" held_total=\d+s waited_median=\d+s waited_p90=\d+s$")
+
+    def test_a_report_over_a_history_path_that_is_a_fifo_fails_instead_of_hanging(self):
+        self.slots.mkdir()
+        os.mkfifo(self.slots / "history.jsonl")
+        code, lines, err = self.report()
+        self.assertEqual((code, lines), (2, []))
+        self.assertTrue(err.strip())
+
+    def test_report_takes_no_command(self):
+        result = subprocess.run(
+            [sys.executable, "-m", "agent_tools.delivery.verify_slot", "report", "--", "true"],
+            env=self.env(), cwd=self.home, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 2)
 
 
 if __name__ == "__main__":
