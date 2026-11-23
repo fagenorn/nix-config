@@ -65,6 +65,10 @@ refusal is the outcome `refused` (issue 1515).
 
 An outcome the step's `on` does not map is a `Fault` (a fired bound is graded first). A run ends with `run_done` or `stop_reached`.
 
+Once the run exists and before its first step, `engine_housekeeping.housekeep` prunes the history and
+sweeps expired run directories; a run that ends in done or a stop then appends one history line
+(`_record_history`) before its lock is released. Neither changes the call's code or result line.
+
 Single writer: under the issue's creation lock the shell takes `<run>/lock`, an exclusive `flock` held
 until `deliver` returns. A run whose lock is held makes the call exit `EXIT_RUNNING`; a run not done and
 not locked is refused (continuing a run is a later slice).
@@ -98,10 +102,11 @@ from typing import Callable, Mapping
 
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
 from agent_tools.delivery import (
-    engine_commands, engine_core, engine_guard, engine_ledger, engine_reply, engine_session,
-    engine_slots, engine_stop, host_admission, procedure_check,
+    engine_commands, engine_core, engine_guard, engine_housekeeping, engine_ledger, engine_reply,
+    engine_session, engine_slots, engine_stop, host_admission, procedure_check,
 )
 from agent_tools.delivery.engine_commands import CommandTable, UnknownCommand
+from agent_tools.delivery.engine_ledger import creation_lock_path
 from agent_tools.project_contract import resolve_project
 
 EXIT_DONE = 0
@@ -239,10 +244,6 @@ def _validate(directory: Path, table: CommandTable) -> dict:
     return procedure
 
 
-def creation_lock_path(root: Path, issue: int) -> Path:
-    return Path(root) / f".{issue}.deliver.lock"
-
-
 def lock_holder(run_dir: Path) -> dict | None:
     """The `{"pid", "started"}` of the process holding `run_dir/lock`, or None (never creates it)."""
     try:
@@ -253,9 +254,12 @@ def lock_holder(run_dir: Path) -> dict | None:
         try:
             fcntl.flock(descriptor, fcntl.LOCK_SH | fcntl.LOCK_NB)
         except BlockingIOError:
-            with os.fdopen(os.dup(descriptor), encoding="utf-8") as handle:
-                document = json.load(handle)
-            return {"pid": document["pid"], "started": document["started"]}
+            try:  # a holder that wrote no document (a housekeeping sweep) is no deliver process
+                with os.fdopen(os.dup(descriptor), encoding="utf-8") as handle:
+                    document = json.load(handle)
+                return {"pid": document["pid"], "started": document["started"]}
+            except (ValueError, KeyError, TypeError):
+                return None
         return None
     finally:
         os.close(descriptor)
@@ -289,10 +293,16 @@ def _running(runs: list[Path], issue: int) -> tuple[int, dict] | None:
     return None
 
 
-def deliver(issue: int, procedures_dir: Path) -> tuple[int, dict]:
+def deliver(issue: int, procedures_dir: Path, *, clock: Callable[[], datetime] | None = None,
+            tracker: engine_housekeeping.Tracker | None = None) -> tuple[int, dict]:
     procedures_dir = Path(procedures_dir)
     snapshot, table = _resolve()
     project = snapshot["project"]["id"]
+    clock = clock or (lambda: datetime.now(timezone.utc))
+    identity = engine_housekeeping.tracker_identity(snapshot["bindings"]["tracker"])
+    tracker_factory = ((lambda: tracker) if tracker is not None else
+                       (lambda: engine_housekeeping.default_tracker(
+                           snapshot["bindings"]["tracker"], snapshot["project"]["root"])))
     try:
         running = _running(engine_ledger.find_runs(engine_ledger.runs_root(), issue, project),
                            issue)
@@ -337,7 +347,7 @@ def deliver(issue: int, procedures_dir: Path) -> tuple[int, dict]:
                 procedures_dir=procedures_dir,
                 platform_revision=platform_revision(os.environ),
                 host=_host(), inputs=inputs, now=datetime.now(timezone.utc),
-                before_publish=stage)
+                tracker=identity, before_publish=stage)
         finally:
             os.close(creation)
     except (engine_ledger.LedgerError, OSError, KeyError) as error:
@@ -347,12 +357,30 @@ def deliver(issue: int, procedures_dir: Path) -> tuple[int, dict]:
         _release(held)
         raise
     try:
-        return _walk(run_dir, table, inputs, holder, slots)
+        engine_housekeeping.housekeep(project=project, run=run_dir.name, clock=clock,
+                                      tracker=tracker_factory, identity=identity)
+        code, line = _walk(run_dir, table, inputs, holder, slots)
+        if code in (EXIT_DONE, EXIT_STOP):
+            _record_history(run_dir, clock)
+        return code, line
     except (engine_ledger.LedgerError, engine_core.CoreError, UnknownCommand,
             OSError, ValueError, KeyError) as error:
         raise Fault(str(error)) from error
     finally:
         _release(held)
+
+
+def _record_history(run_dir: Path, clock: Callable[[], datetime]) -> None:
+    """Append the run's history line; a failure is one stderr line, never the delivery's result."""
+    try:
+        state = engine_ledger.fold(engine_ledger.read_run(run_dir),
+                                   engine_ledger.replay(run_dir / "events.jsonl"),
+                                   lambda pid, started: False)
+        engine_housekeeping.append_history(engine_housekeeping.history_line(state, clock()),
+                                           engine_housekeeping.history_path())
+    except Exception as error:
+        sys.stderr.write(f"engine: the history line of run {run_dir.name} was not recorded: "
+                         f"{type(error).__name__}: {' '.join(str(error).split())}\n")
 
 
 def _lock_creation(issue: int) -> int:
@@ -384,6 +412,7 @@ def _walk(run_dir: Path, table: CommandTable, inputs: dict, holder: Mapping[str,
     while True:
         ledger = engine_ledger.replay(run_dir / "events.jsonl")
         walk = engine_core.replay(procedure, inputs, core_events(run_dir, ledger))
+        _record_core_transitions(run_dir, ledger, walk)
         action = walk.action
         if isinstance(action, engine_core.Done):
             with engine_stop.publication(run_dir):  # a request is honored or published after
@@ -420,6 +449,20 @@ def _walk(run_dir: Path, table: CommandTable, inputs: dict, holder: Mapping[str,
             raise Fault(f"step {action.step} needs {type(action).__name__}, "
                         "which the engine does not run yet")
         ran += 1
+
+
+def _record_core_transitions(run_dir: Path, ledger: list[dict], walk: engine_core.Replay) -> None:
+    """Append the `transition_taken` of each walk transition the ledger lacks, in order.
+
+    A command visit writes its own in `_visit`; the core resolves a `decide` step and an
+    exhausted entry with no command, so the ledger holds the rest of the walk's transitions here.
+    """
+    taken = sum(1 for event in ledger if event["event"] == "transition_taken")
+    for index, transition in enumerate(walk.transitions[taken:], start=taken):
+        visit = sum(1 for earlier in walk.transitions[:index + 1] if earlier.step == transition.step)
+        engine_ledger.append_event(run_dir, {
+            "event": "transition_taken", "at": _now(), "step": transition.step, "visit": visit,
+            "outcome": transition.outcome, "to": transition.target})
 
 
 def _record_stop(run_dir: Path, step: str, name: str, need: str, detail: str,
