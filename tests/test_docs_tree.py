@@ -190,7 +190,7 @@ def scanned_files(archived_dirs: tuple[str, ...] = ()) -> list[tuple[str, list[s
 
 
 RETIRED_DELIVERY_RECORDS = (2, 9, 10, 11)
-RETIRED_CONSOLE_RECORDS = (2, 9, 25, 39, 41)
+RETIRED_CONSOLE_RECORDS = (2, 9, 25, 39, 40, 41)
 LATER_CONSOLE_RECORD = re.compile(r"^docs/areas/console/adr/(?:05[2-9]|0[6-9]\d|[1-9]\d\d)-")
 SUB_DECISION_027_TO_051 = re.compile(
     r"\bADR-console-(0(?:2[7-9]|[34]\d|5[01]))(?:'s)? \(?(?:D\d|Consequences)")
@@ -589,6 +589,26 @@ class DocsTreeTest(unittest.TestCase):
         self.assertEqual(console_form_findings(numbers), [])
         self.assertEqual(sub_decision_hits(numbers), [])
 
+    def test_the_console_manager_records_are_cut_and_cited_whole(self):
+        numbers = (27, 32, 43, 44, 46, 49)
+        self.assertEqual([int(p.name[:3]) for p in console_records(numbers)], [27, 32, 43, 44, 46, 49])
+        self.assertEqual(console_form_findings(numbers), [])
+        self.assertEqual(sub_decision_hits(numbers), [])
+
+    def test_the_console_records_027_to_051_are_the_kept_ones(self):
+        records = [
+            p for p in sorted((REPO_ROOT / "docs/areas/console/adr").glob("[0-9][0-9][0-9]-*.md"))
+            if 27 <= int(p.name[:3]) <= 51]
+        found = [
+            (p.name, v.rule, v.line)
+            for p in records
+            for v in record_violations(f"docs/areas/console/adr/{p.name}", p.read_bytes())
+        ]
+        self.assertEqual(
+            [int(p.name[:3]) for p in records],
+            [27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51])
+        self.assertEqual(found, [])
+
     def test_the_sub_decision_pattern_finds_a_cited_sub_decision(self):
         self.assertIsNotNone(SUB_DECISION_027_TO_051.search("ADR-console-0" + "28 D10"))
         self.assertIsNotNone(SUB_DECISION_027_TO_051.search("ADR-console-0" + "34's Consequences"))
@@ -954,13 +974,13 @@ class DocsTreeTest(unittest.TestCase):
                 if name is not None:
                     self.assertEqual(found[0].name, name)
 
-    def test_adr_console_040_records_taking_back_and_replacing_a_question(self):
+    def test_the_question_round_names_taking_back_and_replacing_a_question(self):
         context = self.doc("docs/areas/console/CONTEXT.md")
         entry = context.split("**Question round**:", 1)[1].split("_Avoid_:", 1)[0]
         self.assertIn("A manager takes back its own open question with `sprint withdraw-question`, "
                       "or replaces it by naming it in a new round, and the owner then sees only "
                       "the new card; an answer to a question taken back is refused "
-                      "(ADR-console-040).", entry)
+                      "(ADR-console-019).", entry)
     def test_the_notice_decision_is_recorded(self):
         context = self.doc("docs/areas/console/CONTEXT.md")
         self.assertIn("**Notice**:", context)
