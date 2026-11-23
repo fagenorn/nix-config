@@ -308,7 +308,7 @@ jobs:
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@v4
       - name: Run conformance
-        run: nix shell .#agent-platform --command conformance run --purpose ci
+        run: nix shell .#agent-platform --command conformance run --purpose ci --lint-times
 """
 
 
