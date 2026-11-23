@@ -18,14 +18,6 @@ than the merge (a commit status names no app, so it never satisfies a bound chec
 `contexts` list never loosens one); not met otherwise (and when nothing is required); not yet when
 no pull request has merged; and it exits 2 on a forge error.
 
-`protection-matches-tree --repo R --base B [--absent-label L ...]` (`verify_checks.protection_matches_tree`,
-issue 1483) is met when the live `(context, app_id)` requirements of B's protection, read as
-`required-checks` reads them, equal those of `.github/branch-protection.json` in the repository
-root (the block's commit) and no label of R has a name equal to an L, compared case-insensitively.
-It is not met otherwise, and the report names `missing` (in the tree, not live), `extra` (live, not
-in the tree) and `labels_present`; it exits 2 on a forge error or an unreadable or malformed tree
-file. It only reads.
-
 `keepalive-end-turn-cap` is documented in `agent_tools.hosts.keepalive_pings`.
 
 `fleet-preflight` (`verify_checks.fleet_preflight_check`, issue 1451) runs this checkout's own
@@ -488,54 +480,6 @@ def _required_checks(repo: str, base: str) -> list[Requirement]:
         if isinstance(context, str) and context not in named:
             found.add((context, None))
     return sorted(found, key=lambda item: (item[0], item[1] is not None, item[1] or 0))
-
-
-def _tree_requirements(root: Path) -> set[Requirement]:
-    """The `(context, app_id)` pairs of `<root>/.github/branch-protection.json`, an absent, null or
-    -1 `app_id` read as any app, as `_required_checks` reads the live ones."""
-    try:
-        tree = json.loads((root / ".github" / "branch-protection.json").read_text())
-    except (OSError, ValueError) as error:
-        raise _invalid(f"branch-protection.json is unreadable: {error}") from error
-    block = tree.get("required_status_checks") if isinstance(tree, dict) else None
-    entries = block.get("checks") if isinstance(block, dict) else None
-    if not isinstance(entries, list):
-        raise _invalid("branch-protection.json has no required_status_checks.checks list")
-    found: set[Requirement] = set()
-    for entry in entries:
-        if not isinstance(entry, dict) or not isinstance(entry.get("context"), str):
-            raise _invalid("branch-protection.json check has no context")
-        app_id = entry.get("app_id")
-        if app_id is not None and not _is_int(app_id):
-            raise _invalid("branch-protection.json app_id is not an integer or null")
-        found.add((entry["context"], None if app_id == -1 else app_id))
-    return found
-
-
-def _label_names(repo: str) -> list[str]:
-    names = []
-    for page in forge_api.api_pages(f"repos/{repo}/labels?per_page=100"):
-        if not isinstance(page, list):
-            raise _invalid("label page is not a list")
-        for label in page:
-            if not isinstance(label, dict) or not isinstance(label.get("name"), str):
-                raise _invalid("label has no name")
-            names.append(label["name"])
-    return names
-
-
-def protection_matches_tree(repo: str, base: str, root: Path,
-                            absent_labels: Sequence[str]) -> tuple[int, dict]:
-    """Met when the live required checks equal the tree's and no label is named in `absent_labels`."""
-    wanted = _tree_requirements(root)
-    live = set(_required_checks(repo, base))
-    gone = {name.casefold() for name in absent_labels}
-    present = sorted(name for name in _label_names(repo) if name.casefold() in gone)
-    order = lambda item: (item[0], item[1] is not None, item[1] or 0)  # noqa: E731
-    missing, extra = sorted(wanted - live, key=order), sorted(live - wanted, key=order)
-    report = {"met": not (missing or extra or present), "missing": [list(r) for r in missing],
-              "extra": [list(r) for r in extra], "labels_present": present}
-    return (0 if report["met"] else 1), report
 
 
 def _context_met(requirement: Requirement, runs: Sequence[object], statuses: Sequence[object],
@@ -3251,11 +3195,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     required.add_argument("--repo", type=_repo, required=True)
     required.add_argument("--base", required=True)
     required.add_argument("--since", type=_rfc3339, required=True)
-    tree = checks.add_parser("protection-matches-tree",
-                             help="issue 1483: live protection and labels agree with the tree")
-    tree.add_argument("--repo", type=_repo, required=True)
-    tree.add_argument("--base", required=True)
-    tree.add_argument("--absent-label", action="append", default=[])
     hook = checks.add_parser(
         "managed-pre-push-hook",
         help="issue 672: the managed pre-push hook refuses an agent default-branch push")
@@ -3537,9 +3476,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.check == "suite-regressions":
             code, report = suite_regressions(args.repo, args.workflow, args.job, args.branch,
                                              args.merge, args.n)
-        elif args.check == "protection-matches-tree":
-            code, report = protection_matches_tree(args.repo, args.base, Path.cwd(),
-                                                   args.absent_label)
         else:
             code, report = required_checks(args.repo, args.base, args.since)
     except forge_api.ForgeError as error:

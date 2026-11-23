@@ -1,4 +1,4 @@
 #!/bin/sh
 # Verify check for issue 1483: the live required checks equal .github/branch-protection.json and
 # a named label is absent. Reads the forge only; runs from the repository root at the block's commit.
-PYTHONPATH=python exec python3 -m agent_tools.verification.verify_checks protection-matches-tree "$@"
+PYTHONPATH=python exec python3 -m agent_tools.verification.protection_tree "$@"

@@ -195,6 +195,7 @@ agent-workflow-tests *args:
     tests/test_verify_checks.py \
     tests/test_cleanup_fix_check.py \
     tests/test_suite_test_failures.py \
+    tests/test_protection_tree.py \
     tests/test_issue_branch.py \
     tests/test_program_copies.py \
     tests/test_keepalive_end_turn_cap.py \
