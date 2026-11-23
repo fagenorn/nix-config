@@ -33,7 +33,7 @@ account launcher, graded by its structured reply unless a bound fires, its files
 run's `sessions/`; a step with no valid structured answer is asked once more on the same session and
 then ends `no-reply`; every step runs within the platform's bounds, and a fired bound is the
 outcome `out-of-bounds`; default: the package's `procedures` directory) for the issue, in the project the
-current directory belongs to, to `done` or a stop, and prints one line of compact sorted-key
+current directory belongs to, to `done` or a stop, or continues the issue's open run on its own procedure copy, and prints one line of compact sorted-key
 JSON when it ends (`engine_shell` is the contract). Once its run exists it drops the history
 lines older than 180 days and deletes the run directories of issues closed more than 14 days
 ago, never changing its own exit; a run that ends in `done` or a stop appends one line to
@@ -48,7 +48,8 @@ ago, never changing its own exit; a run that ends in `done` or a stop appends on
 - exit 1, stdout empty and one stderr line: a fault during the run;
 - exit 2, stdout empty and one stderr line: a usage error, a host whose settings load no
   lifecycle guard hook, a host declaration that does not admit the engine route (printed with its
-  reason code first), or a refusal before any run exists, which creates no run directory.
+  reason code first), or a refusal before any run is created or continued (two open runs of the
+  issue included), which creates no run directory.
 
 `engine stop <issue> [--project <slug>]` asks the run of the issue that is running on this host
 to stop: it writes the run's `stop-request` file naming the lock holder, signals no process,

@@ -165,6 +165,7 @@ agent-workflow-tests *args:
     tests/test_engine_session.py \
     tests/test_engine_session_limits.py \
     tests/test_engine_keep_alive.py \
+    tests/test_engine_continue.py \
     tests/test_engine_housekeeping.py \
     tests/test_engine_stop.py \
     tests/test_engine_caps.py \
