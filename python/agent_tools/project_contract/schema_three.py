@@ -141,9 +141,8 @@ def _within(pointer: str, ancestor: str) -> bool:
 def authored(pointer: str) -> bool:
     """Whether a contract may author `pointer`: the ownership `refusals` enforces, as a question.
 
-    True exactly when `pointer` is an `AUTHORED` member or below one, is no platform value (equal to,
-    below or above a constant, derived value, retired member or container) and, under
-    `/bindings/commands/<id>`, is no platform command id or `COMMAND_CONSTANTS` member.
+    True when `pointer` is in `AUTHORED`, touches no platform value (a constant, derived value, retired
+    member or container) and is, under `/bindings/commands`, no platform command or constant member.
     """
     if not any(_within(pointer, member) for member in AUTHORED):
         return False
