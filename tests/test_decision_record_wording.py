@@ -132,8 +132,6 @@ DIAGNOSTIC_KEYWORDS = frozenset({"msg", "places", "delta", "seq_type"})
 KEPT_AT_START = frozenset({
     "tests/test_docs_tree.py::DocsTreeTest.test_adr_verification_008_records_the_boot_host_amendment",
     "tests/test_docs_tree.py::DocsTreeTest.test_the_tailscale_serve_boundary_decision_is_recorded",
-    "tests/test_console_pictures.py::PictureDocsTest.test_adr_036_records_the_picture_store",
-    "tests/test_console_pictures.py::PictureDocsTest.test_adr_038_records_the_question_pictures",
     "tests/test_docs_tree.py::DocsTreeTest.test_the_guest_socket_amendment_is_recorded_as_adr_077",
 })
 # A sync merge that brings a kept test in from main adds it here, never above.
