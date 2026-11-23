@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import ast
 import unittest
+from pathlib import Path
 
+from agent_tools.delivery import lane_rule
 from agent_tools.delivery.engine_graders import GRADERS
 
 TIER = "fast"
@@ -130,6 +133,72 @@ class GraderTest(unittest.TestCase):
     def test_a_minor_independent_finding_does_not_block(self):
         results = full(ind_verdict="findings", ind_findings=[MINOR])
         self.assertEqual(GRADERS["direct-full-tally"].grade(results), "clean")
+
+
+PATHS = {"guard": ["home/x/lifecycle_guard.py"], "release": ["rel/"], "secrets": ["secrets/"]}
+DIRECT_REASON = "named files {f} of at most 3, acceptance criteria {n} of at most 3, no look marker, no lane path"
+THREE = ["a/one.py", "a/two.py", "three.js"]
+FOUR = ["a/1.py", "a/2.py", "a/3.py", "a/4.py"]
+
+
+def issue_body(files, n):
+    return ("Change " + ", ".join(f"`{f}`" for f in files) + ".\n\n## Acceptance criteria\n\n"
+            + "".join(f"- [ ] [code] c{i}\n" for i in range(n)))
+
+
+class LaneRuleTest(unittest.TestCase):
+    def lane(self, body, *, marked=False, lane_paths=PATHS, given=None):
+        chosen = lane_rule.choose(body, marked=marked, lane_paths=lane_paths, given=given)
+        return chosen.lane, chosen.reason
+
+    def test_the_rule_table(self):
+        rows = [
+            (THREE, 3, False, ("direct", DIRECT_REASON.format(f=3, n=3))),
+            (FOUR, 3, False, ("standard", "named files 4, over the 3 of the direct lane")),
+            (THREE, 4, False, ("standard", "acceptance criteria 4, over the 3 of the direct lane")),
+            (THREE, 3, True, ("standard", "a look marker holds the merge for the owner's look")),
+            (["lifecycle_guard.py"], 1,
+             False, ("standard", "names lifecycle_guard.py, under the guard lane paths")),
+            (["rel/x.py"], 1, False, ("standard", "names rel/x.py, under the release lane paths")),
+            (["secrets/secrets.yaml"], 1,
+             False, ("standard", "names secrets/secrets.yaml, under the secrets lane paths")),
+        ]
+        for files, n, marked, expected in rows:
+            with self.subTest(files=files, n=n, marked=marked):
+                self.assertEqual(self.lane(issue_body(files, n), marked=marked), expected)
+
+    def test_no_criteria_or_no_lane_paths_is_standard(self):
+        self.assertEqual(self.lane(issue_body(["a/one.py"], 0)), ("standard", "no acceptance criteria"))
+        for paths in (None, {}, {"x": "secrets/"}, {"x": [1]}):
+            with self.subTest(paths=paths):
+                self.assertEqual(self.lane(issue_body(["a/one.py"], 1), lane_paths=paths),
+                                 ("standard", "the repository declares no lane paths"))
+
+    def test_a_given_lane_wins(self):
+        self.assertEqual(self.lane(issue_body(FOUR, 3), given="direct"),
+                         ("direct", "the caller gave the lane"))
+        self.assertEqual(self.lane(issue_body(THREE, 3), given="standard"),
+                         ("standard", "the caller gave the lane"))
+
+    def test_named_paths_read_code_spans_and_slashed_bare_files(self):
+        body = ("See `a/b.py` and a/b.py. Also https://x.org/r/blob/main/c.py, and/or `issue.text` "
+                "`--repo` `lane`\n- [ ] [code] `d/`\n")
+        self.assertEqual(lane_rule.named_paths(body), ("a/b.py", "issue.text", "d"))
+
+    def test_criteria_count_only_the_acceptance_section(self):
+        body = ("## Demo\n- [ ] x\n## Acceptance criteria\n- [ ] a\n- [x] b\n* [ ] c\n"
+                "## Blocked by\n- [ ] d\n")
+        self.assertEqual(lane_rule.criteria(body), 3)
+
+    def test_the_rule_module_imports_nothing_of_the_delivery_package(self):
+        tree = ast.parse(Path(lane_rule.__file__).read_text())
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                self.assertEqual(node.level, 0, "a relative import")
+                self.assertFalse((node.module or "").startswith("agent_tools.delivery"), node.module)
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    self.assertFalse(alias.name.startswith("agent_tools.delivery"), alias.name)
 
 
 if __name__ == "__main__":

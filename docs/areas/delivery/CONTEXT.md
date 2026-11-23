@@ -51,6 +51,12 @@ A standard no enforcer cites, applied by a reviewer (issue 1412).
 The route an issue takes to merge: the direct lane for a small concrete change, the standard lane for a specced and planned one, the live-fault lane for a declared live fault. A live-fault declaration selects the third.
 _Avoid_: track, tier
 
+**Lane rule**:
+The fixed rule of issue 1675 that chooses a lane. An issue goes direct when its body names at most 3 files and has 1 to 3 acceptance criteria, carries no look marker and names no lane path. A lane the caller gives wins, and a live-fault declaration keeps the live lane. `issue-setup lane` prints it.
+
+**Lane paths**:
+The paths a repository declares in `.github/lane-paths.json` (its guard, release and secrets areas) that keep an issue naming them out of the direct lane. With none declared, every issue goes standard.
+
 **Lint-time issue**:
 An issue the `lint-time` command files when the median total lint time of the last 20 completed Conformance runs on the integration branch is over 60 seconds, naming the slowest lint by its own median: at most one open per project, counted apart from the cleanup issue. Its body carries the marker `<!-- agent:lint-time v1 -->`, which alone identifies it when a trusted author wrote it (ADR-delivery-020).
 

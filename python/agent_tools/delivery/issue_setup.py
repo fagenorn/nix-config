@@ -32,6 +32,13 @@ comment: `{verdict: "posted", comment_id}`.
 
 `read --repo <owner/name> --issue <n>` prints `{verdict: "read", text}`, `text` being
 `issue_text(issue, comments)`: the title, the body and every comment in order.
+
+`lane --repo-root <path> --repo <owner/name> --issue <n>` prints `{verdict, reason}`, `verdict`
+`direct` or `standard`: the lane rule (`lane_rule`) applied to the issue body, the look marker
+read by `look_marker`, and the repository's `.github/lane-paths.json`. That file is
+`{"version": 1, "sets": {<name>: [<entry>, ...]}}`: each name matches `[a-z0-9][a-z0-9-]*`,
+each set is a non-empty list of path entries (a directory ends in `/`; no leading `/`, no `.`
+or `..` segment). A missing or malformed file declares no lane paths, so every issue is standard.
 """
 
 from __future__ import annotations
@@ -39,16 +46,19 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 
-from agent_tools.delivery import issue_branch
+from agent_tools.delivery import issue_branch, lane_rule, look_marker
 from agent_tools.project_contract import resolve_project
 from agent_tools.system import forge_api
 
 GIT_TIMEOUT = 120
 STATUS_LINES = 40
+LANE_PATHS = ".github/lane-paths.json"
 PARKED_LABELS = ("needs-verification", "parked")
 PR_FIELDS = "number,state,headRefName,closingIssuesReferences"
 # The variables that select another repository than the one `-C` names (a copy of the engine's list).
@@ -167,6 +177,38 @@ def read(args: argparse.Namespace) -> dict:
                                                        _comments(args.repo, args.issue))}
     except forge_api.ForgeError as error:
         raise _forge_failure(error) from None
+
+
+def lane_paths(repo_root: str) -> dict[str, list[str]] | None:
+    """The repository's declared lane path sets, or None when the file is absent or malformed."""
+    try:
+        data = json.loads(Path(repo_root, LANE_PATHS).read_text())
+    except (OSError, ValueError):
+        return None
+    sets = data.get("sets") if isinstance(data, dict) else None
+    if (set(data) != {"version", "sets"} or type(data["version"]) is not int or data["version"] != 1
+            or not isinstance(sets, dict) or not sets):
+        return None
+    for name, entries in sets.items():
+        if (re.fullmatch(r"[a-z0-9][a-z0-9-]*", name) is None or not isinstance(entries, list)
+                or not entries or not all(_entry(e) for e in entries)):
+            return None
+    return sets
+
+
+def _entry(entry: object) -> bool:
+    return (isinstance(entry, str) and re.fullmatch(lane_rule.SHAPE, entry) is not None
+            and not entry.startswith("/") and not {".", ".."} & set(entry.split("/")))
+
+
+def lane(args: argparse.Namespace) -> dict:
+    try:
+        body = _issue(args.repo, args.issue).get("body")
+    except forge_api.ForgeError as error:
+        raise _forge_failure(error) from None
+    chosen = lane_rule.choose(body, marked=look_marker.read_look(body).marked,
+                              lane_paths=lane_paths(args.repo_root))
+    return {"verdict": chosen.lane, "reason": chosen.reason}
 
 
 def note(args: argparse.Namespace) -> dict:
@@ -320,11 +362,15 @@ def build_parser() -> argparse.ArgumentParser:
     sub = commands.add_parser("read")
     sub.add_argument("--repo", required=True)
     sub.add_argument("--issue", required=True, type=number)
+    sub = commands.add_parser("lane")
+    sub.add_argument("--repo-root", required=True)
+    sub.add_argument("--repo", required=True)
+    sub.add_argument("--issue", required=True, type=number)
     return parser
 
 
 COMMANDS = {"preflight": preflight, "worktree": worktree, "worktree-check": worktree_check,
-            "note": note, "read": read}
+            "note": note, "read": read, "lane": lane}
 
 
 def main(argv: list[str] | None = None) -> int:
