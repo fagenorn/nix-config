@@ -46,6 +46,40 @@
   "host-readiness": null,
   "instruction-surface-lint": null,
   "issue-branch": null,
+  "issue-setup": {
+    "subcommands": {
+      "note": [
+        "posted",
+        "error"
+      ],
+      "preflight": [
+        "clear",
+        "closed",
+        "parked",
+        "duplicate",
+        "open-pr",
+        "error"
+      ],
+      "read": [
+        "read",
+        "error"
+      ],
+      "worktree": [
+        "made",
+        "adopted",
+        "dirty",
+        "mismatch",
+        "error"
+      ],
+      "worktree-check": [
+        "absent",
+        "adopted",
+        "dirty",
+        "mismatch",
+        "error"
+      ]
+    }
+  },
   "lint-time": null,
   "look-approval": {
     "subcommands": {

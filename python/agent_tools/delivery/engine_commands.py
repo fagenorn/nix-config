@@ -60,6 +60,7 @@ from agent_tools.system.siblings import sibling_argv
 PLATFORM_MODULES: Mapping[str, str] = MappingProxyType({
     "diff-scope": "delivery.diff_scope",
     "forge-claim": "claims.forge_claim",
+    "issue-setup": "delivery.issue_setup",
     "look-approval": "delivery.look_approval",
     "resolve-project": "project_contract.resolve_project",
 })
@@ -67,6 +68,7 @@ POSITIONAL: frozenset[str] = frozenset({"diff-scope"})
 PLATFORM_WALL_SECONDS: Mapping[str, float] = MappingProxyType({
     "diff-scope": 300,
     "forge-claim": 1200,
+    "issue-setup": 1200,
     "look-approval": 300,
     "resolve-project": 300,
 })
