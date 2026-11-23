@@ -56,7 +56,7 @@ visit); a usage limit never consumes that retry and an API error never opens a w
 leaves an open `usage-limit` wait open, so every `quota-wait` stop has one open. A second API error in the visit
 is the outcome `no-reply`: the stored result is `{}` and the step's `on` must map it, else the run is a `Fault`.
 
-A visit a killed engine left interrupted is continued in the same visit (issue 1523), after the stale-result
+A visit a killed engine left interrupted is continued in the same visit, after the stale-result
 rule and `engine_core.reentry` have run first: its `step_entered` and `session_starting` stand, no `run_continued`
 is appended and no new visit starts. The session recorded for the visit is launched again under the next attempt
 (2 plus its `session_resuming` events), with `session_resuming` before every launch: `--resume <session>` with
