@@ -56,11 +56,11 @@ def _read(body: str) -> dict[str, bool]:  # each distinct normalized path, with 
         bare = [t.rstrip(".:!?") for t in SEPARATORS.split(SPAN.sub(" ", line))]
         tokens = [(m.group(2).strip(), True) for m in SPAN.finditer(line)] + [(t, False) for t in bare]
         for token, span in tokens:
-            counts = ("/" in token or _extended(token)) if span else (
-                "/" in token and _extended(token))
-            if token and counts and _shaped(token):
-                path = re.sub(r"^(\./)+", "", token)
-                found.setdefault(path.removesuffix("/"), not token.endswith("/") and _extended(path))
+            path = re.sub(r"^(\./)+", "", token)
+            counts = ("/" in path or _extended(path)) if span else (
+                "/" in path and _extended(path))
+            if path and counts and _shaped(path):
+                found.setdefault(path.removesuffix("/"), not path.endswith("/") and _extended(path))
     return found
 
 

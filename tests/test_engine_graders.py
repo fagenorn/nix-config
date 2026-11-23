@@ -184,6 +184,10 @@ class LaneRuleTest(unittest.TestCase):
         body = ("See `a/b.py` and a/b.py. Also https://x.org/r/blob/main/c.py, and/or `issue.text` "
                 "`--repo` `lane`\n- [ ] [code] `d/`\n")
         self.assertEqual(lane_rule.named_paths(body), ("a/b.py", "issue.text", "d"))
+        self.assertEqual(lane_rule.named_paths("Edit `./secrets/secrets.yaml` and ./a/b.py, not ../c/d.py or `./`"),
+                         ("secrets/secrets.yaml", "a/b.py"))
+        self.assertEqual(lane_rule.choose("Edit `./secrets/secrets.yaml`\n\n## Acceptance criteria\n- [ ] x\n",
+                                          marked=False, lane_paths={"secrets": ["secrets/"]}).lane, "standard")
 
     def test_criteria_count_only_the_acceptance_section(self):
         body = ("## Demo\n- [ ] x\n## Acceptance criteria\n- [ ] a\n- [x] b\n* [ ] c\n"

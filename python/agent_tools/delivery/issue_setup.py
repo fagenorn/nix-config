@@ -185,7 +185,9 @@ def lane_paths(repo_root: str) -> dict[str, list[str]] | None:
         data = json.loads(Path(repo_root, LANE_PATHS).read_text())
     except (OSError, ValueError):
         return None
-    sets = data.get("sets") if isinstance(data, dict) else None
+    if not isinstance(data, dict):
+        return None
+    sets = data.get("sets")
     if (set(data) != {"version", "sets"} or type(data["version"]) is not int or data["version"] != 1
             or not isinstance(sets, dict) or not sets):
         return None

@@ -298,7 +298,8 @@ class ForgeCommandTest(unittest.TestCase):
                "extra key": file(extra=1), "empty sets": file(sets={}),
                "set name": file(sets={"A": ["x/"]}), "absolute": file(sets={"a": ["/abs"]}),
                "dotdot": file(sets={"a": ["a/../b"]}), "space": file(sets={"a": ["a b"]}),
-               "empty set": file(sets={"a": []}), "not json": "not json"}
+               "empty set": file(sets={"a": []}), "not json": "not json",
+               "null": "null", "number": "1", "list of keys": '["version", "sets"]', "nested list": "[[1]]"}
         for name, text in bad.items():
             with self.subTest(name):
                 self.assertIsNone(read(text))
