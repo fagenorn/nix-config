@@ -12,6 +12,7 @@ a landing makes from the state file, against the bare `origin` the state names, 
   api repos/S/pulls?state=<open|closed|all>&base=...&head=...
   api repos/S/branches/<b>/protection      GitHub's plan-gated 403, as `gh` reports it
   api repos/S/branches/<b>
+  api graphql (the closingIssuesReferences query of a pull request: its body's `Closes #<n>` lines)
 
 The state is `{"slug", "bare", "git", "next", "pulls", "rollup", "events"}`, read and written under
 an exclusive lock. A merge lands only the head named by `--match-head-commit` and only with
@@ -20,11 +21,15 @@ issue. Each event of `events` fires once, on the first read of `statusCheckRollu
 request and after that read's answer is computed: `move-head` adds a commit on top of the head
 branch, `steal-lock` moves the land lock of `main` (in the tracker fake's ref store) to the sha of a
 second open pull request. A token variable in the environment is refused with exit 65.
+
+The tracker fake answers a read of the issue from one fixed response; once the tracker fake's store
+holds the issue closed, this front lays that state over the read's `state` and `state_reason`.
 """
 
 import fcntl
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -252,6 +257,13 @@ def handle(state: dict, argv: list[str]) -> bool:
     if argv[:2] == ["pr", "merge"] and len(argv) > 2 and flags.get("--repo") == state["slug"]:
         merge(state, argv[2], flags)
         return True
+    if argv[:2] == ["api", "graphql"] and "closingIssuesReferences" in " ".join(argv):
+        number = next((a[len("number="):] for a in argv if a.startswith("number=")), "")
+        pull = next((p for p in state["pulls"] if str(p["number"]) == number), None)
+        closes = re.findall(r"^Closes #(\d+)", pull["body"], re.MULTILINE) if pull else []
+        print(json.dumps({"data": {"repository": {"pullRequest": {"closingIssuesReferences": {
+            "nodes": [{"number": int(n)} for n in closes]}}}}}))
+        return True
     if len(argv) == 2 and argv[0] == "api":
         answer = api(state, argv[1])
         if answer is None:
@@ -259,6 +271,26 @@ def handle(state: dict, argv: list[str]) -> bool:
         print(json.dumps(answer))
         return True
     return False
+
+
+def issue_read(state: dict, forge: str, argv: list[str]) -> bool:
+    """Answer a read of the tracker's issue with the store's closed state laid over the fixed answer."""
+    if len(argv) != 2 or argv[0] != "api" or not argv[1].startswith(f"repos/{state['slug']}/issues/"):
+        return False
+    number = argv[1].rsplit("/", 1)[1]
+    store = json.loads((Path(os.environ["FORGE_WORLD"]) / "store.json").read_text("utf-8"))
+    held = store.get("issue_state")
+    if not number.isdigit() or held is None or int(number) != store["issue"] or held["state"] != "closed":
+        return False
+    done = subprocess.run([forge, *argv], capture_output=True, text=True, check=False)
+    if done.returncode != 0:
+        sys.stdout.write(done.stdout)
+        sys.stderr.write(done.stderr)
+        sys.exit(done.returncode)
+    answer = json.loads(done.stdout)
+    answer.update(state="closed", state_reason=held["state_reason"])
+    print(json.dumps(answer))
+    return True
 
 
 def main() -> None:
@@ -276,7 +308,7 @@ def main() -> None:
                 scratch_file = Path(f"{state_path}.tmp")
                 scratch_file.write_text(json.dumps(state), encoding="utf-8")
                 os.replace(scratch_file, state_path)
-    if not handled:
+    if not handled and not issue_read(state, forge, argv):
         os.execv(forge, [forge, *argv])
 
 

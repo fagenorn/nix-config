@@ -40,7 +40,7 @@ def compact(value: object) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n"
 
 
-SHIPPED_OK = compact({"procedures": ["deliver", "direct", "setup", "toy", "toy-child", "verify"], "verdict": "ok"})
+SHIPPED_OK = compact({"procedures": ["close-out", "deliver", "direct", "land", "setup", "toy", "toy-child", "verify"], "verdict": "ok"})
 
 
 def load(directory: Path, name: str) -> dict:
@@ -1231,7 +1231,7 @@ class ShippedProcedureTest(unittest.TestCase):
             for name in load(PROCEDURES, procedure)["stops"]:
                 self.assertEqual(mapped[name], name)
         self.assertEqual(step(deliver, "direct-lane")["on"]["done"], "verification")
-        self.assertEqual(step(deliver, "verification")["on"]["done"], "done")
+        self.assertEqual(step(deliver, "verification")["on"]["done"], "landing")
         for name in ("ineligible", "task", "direct-review", "direct-fix", "codex-unavailable", "verify"):
             self.assertIn(name, deliver["stops"])
         self.assertEqual(deliver["stops"]["needs-design"]["need"], "owner-decision")

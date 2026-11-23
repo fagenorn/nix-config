@@ -1,0 +1,35 @@
+{
+  "format": 1,
+  "inputs": ["holder", "issue", "repo", "repo_root"],
+  "stops": {
+    "land": {"need": "owner-decision", "reenter": "renew"},
+    "claim-lost": {"need": "owner-decision", "reenter": "renew"},
+    "claim": {"need": "retry", "reenter": "renew"},
+    "head-moved": {"need": "owner-decision", "reenter": "renew"},
+    "checks-not-green": {"need": "owner-decision", "reenter": "renew"},
+    "land-contended": {"need": "retry", "reenter": "renew"},
+    "merge-not-landed": {"need": "owner-decision", "reenter": "renew"},
+    "unreleased-lock": {"need": "owner-decision", "reenter": "renew"}
+  },
+  "steps": [
+    {"id": "renew", "stage": "landing", "kind": "command", "command": "forge-claim", "subcommand": "renew", "holds": "live", "in": ["run.repo", "run.issue", "run.holder"], "on": {"renewed": "prepare", "not_held": "claim-lost", "error": "claim", "refused": "claim"}},
+    {"id": "prepare", "stage": "landing", "kind": "command", "command": "landing", "subcommand": "prepare", "holds": "live", "in": ["run.repo_root", "run.issue", "run.repo"], "on": {"ready": "push", "unverified": "land", "error": "land", "refused": "land"}},
+    {"id": "push", "stage": "landing", "kind": "command", "command": "git-push", "holds": "run", "in": ["run.repo_root", "prepare.branch"], "on": {"ok": "pushed", "failed": "pushed", "refused": "land"}},
+    {"id": "pushed", "stage": "landing", "kind": "command", "command": "landing", "subcommand": "pushed", "holds": "live", "in": ["run.repo_root", "prepare.branch", "prepare.head"], "on": {"pushed": "find-pull", "head-moved": "head-moved", "absent": "land", "error": "land", "refused": "land"}},
+    {"id": "find-pull", "stage": "landing", "kind": "command", "command": "landing", "subcommand": "pull", "holds": "live", "in": ["run.repo", "prepare.branch", "prepare.integration_branch"], "on": {"open": "opened", "absent": "create", "error": "land", "refused": "land"}},
+    {"id": "create", "stage": "landing", "kind": "command", "command": "pr-create", "holds": "run", "in": ["run.repo", "prepare.integration_branch", "prepare.branch", "prepare.title", "prepare.body"], "on": {"ok": "opened", "failed": "opened", "refused": "land"}},
+    {"id": "opened", "stage": "landing", "kind": "command", "command": "landing", "subcommand": "pull", "holds": "live", "in": ["run.repo", "prepare.branch", "prepare.integration_branch"], "on": {"open": "lock", "absent": "land", "error": "land", "refused": "land"}},
+    {"id": "lock", "stage": "landing", "kind": "command", "command": "landing", "subcommand": "lock", "holds": "live", "wait": "lock", "in": ["run.repo", "prepare.integration_branch", "prepare.head"], "on": {"held": "checks", "contended": "land-contended", "no-pull": "land", "error": "land", "refused": "land", "out-of-bounds": "land"}},
+    {"id": "checks", "stage": "landing", "kind": "command", "command": "landing", "subcommand": "checks", "holds": "live", "wait": "checks", "in": ["run.repo_root", "run.repo", "opened.pr", "prepare.head"], "on": {"green": "head", "red": "unlock-checks", "pending": "unlock-checks", "moved": "unlock-moved", "error": "unlock-failed", "refused": "unlock-failed", "out-of-bounds": "unlock-checks"}},
+    {"id": "head", "stage": "landing", "kind": "command", "command": "landing", "subcommand": "pushed", "holds": "live", "in": ["run.repo_root", "prepare.branch", "prepare.head"], "on": {"pushed": "recheck", "head-moved": "unlock-moved", "absent": "unlock-failed", "error": "unlock-failed", "refused": "unlock-failed"}},
+    {"id": "recheck", "stage": "landing", "kind": "command", "command": "landing", "subcommand": "held", "holds": "live", "in": ["run.repo", "prepare.integration_branch", "prepare.head"], "on": {"held": "merge", "retaken": "unlock-contended", "contended": "unlock-contended", "no-pull": "unlock-failed", "error": "unlock-failed", "refused": "unlock-failed"}},
+    {"id": "merge", "stage": "landing", "kind": "command", "command": "pr-merge", "holds": "run", "in": ["opened.pr", "run.repo", "prepare.head"], "on": {"ok": "merged", "failed": "merged", "refused": "unlock-merge"}},
+    {"id": "merged", "stage": "landing", "kind": "command", "command": "landing", "subcommand": "merged", "holds": "live", "in": ["run.repo", "opened.pr", "prepare.head"], "on": {"merged": "unlock", "open": "unlock-merge", "error": "unlock-merge", "refused": "unlock-merge"}},
+    {"id": "unlock", "stage": "landing", "kind": "command", "command": "landing", "subcommand": "unlock", "holds": "live", "in": ["run.repo", "prepare.integration_branch", "prepare.head"], "on": {"released": "done", "unreleased": "unreleased-lock", "refused": "unreleased-lock"}},
+    {"id": "unlock-checks", "stage": "landing", "kind": "command", "command": "landing", "subcommand": "unlock", "holds": "live", "in": ["run.repo", "prepare.integration_branch", "prepare.head"], "on": {"released": "checks-not-green", "unreleased": "unreleased-lock", "refused": "unreleased-lock"}},
+    {"id": "unlock-contended", "stage": "landing", "kind": "command", "command": "landing", "subcommand": "unlock", "holds": "live", "in": ["run.repo", "prepare.integration_branch", "prepare.head"], "on": {"released": "land-contended", "unreleased": "unreleased-lock", "refused": "unreleased-lock"}},
+    {"id": "unlock-moved", "stage": "landing", "kind": "command", "command": "landing", "subcommand": "unlock", "holds": "live", "in": ["run.repo", "prepare.integration_branch", "prepare.head"], "on": {"released": "head-moved", "unreleased": "unreleased-lock", "refused": "unreleased-lock"}},
+    {"id": "unlock-merge", "stage": "landing", "kind": "command", "command": "landing", "subcommand": "unlock", "holds": "live", "in": ["run.repo", "prepare.integration_branch", "prepare.head"], "on": {"released": "merge-not-landed", "unreleased": "unreleased-lock", "refused": "unreleased-lock"}},
+    {"id": "unlock-failed", "stage": "landing", "kind": "command", "command": "landing", "subcommand": "unlock", "holds": "live", "in": ["run.repo", "prepare.integration_branch", "prepare.head"], "on": {"released": "land", "unreleased": "unreleased-lock", "refused": "unreleased-lock"}}
+  ]
+}

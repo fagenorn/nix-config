@@ -18,7 +18,15 @@
     "direct-review": {"need": "owner-decision", "reenter": "direct-lane"},
     "direct-fix": {"need": "owner-decision", "reenter": "direct-lane"},
     "codex-unavailable": {"need": "retry", "reenter": "direct-lane"},
-    "verify": {"need": "owner-decision", "reenter": "verification"}
+    "verify": {"need": "owner-decision", "reenter": "verification"},
+    "land": {"need": "owner-decision", "reenter": "landing"},
+    "head-moved": {"need": "owner-decision", "reenter": "landing"},
+    "checks": {"need": "owner-decision", "reenter": "landing"},
+    "land-contended": {"need": "retry", "reenter": "landing"},
+    "merge": {"need": "owner-decision", "reenter": "landing"},
+    "unreleased-lock": {"need": "owner-decision", "reenter": "landing"},
+    "close-out": {"need": "owner-decision", "reenter": "closing"},
+    "hold": {"need": "owner-decision", "reenter": "closing"}
   },
   "steps": [
     {"id": "start", "stage": "setup", "kind": "call", "procedure": "setup", "holds": "live",
@@ -36,6 +44,12 @@
             "task": "task", "direct-review": "direct-review", "direct-fix": "direct-fix",
             "codex-unavailable": "codex-unavailable"}},
     {"id": "verification", "stage": "verifying", "kind": "call", "procedure": "verify", "holds": "live",
-     "on": {"done": "done", "setup": "setup", "claim-lost": "claim-lost", "verify": "verify"}}
+     "on": {"done": "landing", "setup": "setup", "claim-lost": "claim-lost", "verify": "verify"}},
+    {"id": "landing", "stage": "landing", "kind": "call", "procedure": "land", "holds": "live",
+     "on": {"done": "closing", "land": "land", "claim-lost": "claim-lost", "claim": "claim",
+            "head-moved": "head-moved", "checks-not-green": "checks", "land-contended": "land-contended",
+            "merge-not-landed": "merge", "unreleased-lock": "unreleased-lock"}},
+    {"id": "closing", "stage": "closing out", "kind": "call", "procedure": "close-out", "holds": "live",
+     "on": {"done": "done", "close-out": "close-out", "hold": "hold"}}
   ]
 }

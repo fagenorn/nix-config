@@ -66,7 +66,7 @@ IMPLEMENTED = {
                "text": 'def farewell(name: str) -> str:\n    return f"Goodbye, {name}."\n'}}
 DEFAULT_REPLIES = {"applies": APPLIES, "lane": DIRECT, "implement": IMPLEMENTED, "lite-review": CLEAN_LITE}
 DEFAULT_BODY = ("Add a greet() function to the fixture module.\n\n"
-                "## Acceptance criteria\n\n- [ ] greet() returns the greeting\n")
+                "## Acceptance criteria\n\n- [ ] [code] greet() returns the greeting\n")
 PULL_FIELDS = "number,state,headRefName,closingIssuesReferences"
 DROPPED_ENV = ("AGENT_PLATFORM_ROOT", "GITHUB_TOKEN", "GH_TOKEN", "CLAUDE_ACCOUNT")
 

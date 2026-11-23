@@ -18,7 +18,7 @@ from agent_tools.project_contract import resolve_project
 from tests.engine_fixture import FixtureProject
 from tests.engine_guards import payloads
 from tests.engine_stubbed_world import APPLIES, CLEAN_LITE, IMPLEMENTED, ROLES, StubbedRun
-from tests.guard_policy_world import install_platform_manifest_in_environ
+from tests.guard_policy_world import REAL_GIT, install_platform_manifest_in_environ
 
 TIER = "integration"  # every case builds a repository and runs the engine as a child process
 
@@ -92,6 +92,14 @@ class Scenario(unittest.TestCase):
                      if e["event"] == "result_stored" and (e["step"], e["visit"]) == (step, visit))
         return json.loads((run_dir / event["result"]).read_text("utf-8"))
 
+    def live_owner_actions(self, run: StubbedRun) -> list:
+        markers = [m for m in (forge_markers.parse(c) for c in run.forge.stored()) if m is not None]
+        return forge_markers.contest(markers, "owner-action", {})
+
+    def released_claims(self, run: StubbedRun) -> list:
+        markers = (forge_markers.parse(comment) for comment in run.forge.stored())
+        return [m for m in markers if m is not None and m.kind == "claim" and "released" in m.fields]
+
     def keys(self, run: StubbedRun) -> list[str]:
         return [launch["key"] for launch in run.launches()]
 
@@ -112,7 +120,7 @@ class Scenario(unittest.TestCase):
 
 
 class StubbedRunTest(Scenario):
-    def test_a_stubbed_delivery_reaches_the_end_of_verify_with_the_stubs_commit_on_a_clean_branch(self):
+    def test_a_stubbed_delivery_lands_a_merged_pull_request_and_closes_the_issue(self):
         run = StubbedRun(self)
 
         done = run.deliver()
@@ -120,17 +128,13 @@ class StubbedRunTest(Scenario):
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         self.assertEqual(run.line(done)["end"], "done")
         root = run.runs()[0]
-        holder = f"{json.loads((root / 'run.json').read_text())['host']}/{root.name}"
-        claims = run.claims()
-        self.assertEqual(len(claims), 1)
-        self.assertEqual((claims[0].fields["holder"], claims[0].fields["branch"]), (holder, run.branch))
-        self.assertEqual(self.branch_here(run, run.worktree_path), run.branch)
         setup = run.children(root)[0]
         self.assertEqual(run.transitions(setup), SETUP_WALK)
         renewals = [e for e in run.events(setup) if e["event"] == "keep_alive_ran"]
         self.assertEqual([(e["step"], e["verdict"]) for e in renewals], [("worktree", "renewed")])
         self.assertEqual(run.transitions(root), [("start", "done"), ("issue", "read"), ("lane", "direct"),
-                                                 ("direct-lane", "done"), ("verification", "done")])
+                                                 ("direct-lane", "done"), ("verification", "done"),
+                                                 ("landing", "done"), ("closing", "done")])
         direct = self.child(run, "direct")
         transitions = run.transitions(direct)
         for edge in (("implement", "done"), ("implemented", "lite"), ("lite-group", "pass"),
@@ -139,9 +143,6 @@ class StubbedRunTest(Scenario):
         renewed = [e for e in run.events(direct) if e["event"] == "keep_alive_ran" and e["step"] == "implement"]
         self.assertEqual([e["verdict"] for e in renewed], ["renewed"])
         commit = self.stored(direct, "implement")["commit"]
-        self.assertEqual(self.branch_commits(run), [commit])
-        self.assertEqual(run.world.git(run.worktree_path, "log", "-1", "--format=%s").strip(), "stub change")
-        self.assertEqual(run.world.git(run.worktree_path, "status", "--porcelain"), "")
         checks = self.stored(self.child(run, "verify"), "checks")
         self.assertEqual((checks["verdict"], checks["clean"]), ("passed", True))
         self.assertEqual([r["id"] for r in checks["results"]], FixtureProject.VERIFICATION)
@@ -150,6 +151,23 @@ class StubbedRunTest(Scenario):
         self.assertIn(run.title, launches[1]["prompt"])
         self.assertEqual(model_of(self.launch(run, "implement")), "sonnet")
         self.assertEqual(self.keys(run), ["applies", "lane", "implement", "lite-review"])
+        pulls = run.pulls()
+        self.assertEqual(len(pulls), 1)
+        self.assertEqual(pulls[0]["state"], "MERGED")
+        self.assertTrue(pulls[0]["body"].startswith("Closes #41."), pulls[0]["body"])
+        merge = pulls[0]["mergeCommit"]["oid"]
+        self.assertEqual(run.origin_tip("main"), merge)
+        contains = subprocess.run([REAL_GIT, "-C", run.bare, "merge-base", "--is-ancestor", commit, merge],
+                                  check=False)
+        self.assertEqual(contains.returncode, 0)
+        self.assertEqual(run.forge.issue()["state"], "closed")
+        self.assertEqual(run.claims(), [])
+        self.assertEqual(self.live_owner_actions(run), [])
+        self.assertEqual(run.lock_refs(), {})
+        self.assertFalse(run.worktree_path.exists())
+        self.assertEqual(self.branches(run), "")
+        self.assertIsNone(run.origin_tip(run.branch))
+        self.assertEqual(run.world.git(run.fixture.root, "rev-parse", "main").strip(), run.origin_tip("main"))
 
 
 class LaneTest(Scenario):
@@ -294,9 +312,8 @@ class ClaimTest(Scenario):
         second = run.transitions(self.child(run, "setup", last=True))
         self.assertIn(("acquire", "already_held"), second)
         self.assertTrue(("worktree", "made") in second or ("worktree", "adopted") in second, second)
-        claims = run.claims()
-        self.assertEqual([claim.comment_id for claim in claims], [first[0].comment_id])
-        self.assertEqual(self.branch_here(run, run.worktree_path), run.branch)
+        self.assertEqual(run.claims(), [])
+        self.assertEqual([claim.comment_id for claim in self.released_claims(run)], [first[0].comment_id])
 
 
 class ReviewRouteTest(Scenario):
@@ -425,30 +442,180 @@ class VerifyTest(Scenario):
         self.assertEqual(test["status"], "pass")
 
 
-class CoverageTest(Scenario):
+RED = [{"__typename": "CheckRun", "name": "Fixture Checks", "status": "COMPLETED",
+        "conclusion": "FAILURE", "startedAt": "2026-11-06T10:00:00Z", "workflowName": "Fixture"}]
+UNNAMED = [{"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "SUCCESS"}]
+
+
+class Landing(Scenario):
+    def land_transitions(self, run: StubbedRun) -> list[tuple[str, str]]:
+        return run.transitions(self.child(run, "land"))
+
+    def prepared_head(self, run: StubbedRun) -> str:
+        return self.stored(self.child(run, "land"), "prepare")["head"]
+
+    def entered(self, run: StubbedRun) -> set[str]:
+        return {e["step"] for e in run.events(self.child(run, "land")) if e["event"] == "step_entered"}
+
+
+class LandGuardTest(Landing):
+    def test_the_real_guard_allowed_the_push_the_pull_request_and_the_merge(self):
+        run = StubbedRun(self)
+
+        self.finish(run, "done")
+
+        head = self.prepared_head(run)
+        commands = [line["payload"]["tool_input"]["command"] for line in payloads(run.guard_log)]
+        root = run.fixture.root
+        for text in (
+                f"git -C {root} push origin {run.branch}",
+                (f"gh pr create --repo example/fixture --base main --head {run.branch} "
+                 '--title "Add a greeting" --body "Closes #41. Delivered by the engine."'),
+                f"gh pr merge 1 --repo example/fixture --merge --match-head-commit {head} --delete-branch"):
+            with self.subTest(text):
+                self.assertEqual(commands.count(text), 1, commands)
+        outcomes = dict(self.land_transitions(run))
+        for step in ("push", "create", "merge"):
+            self.assertEqual(outcomes[step], "ok", step)
+
+    def test_without_declared_required_checks_the_merge_is_refused_and_nothing_merges(self):
+        run = StubbedRun(self, required_checks=())
+        before = run.origin_tip("main")
+
+        self.finish(run, "merge", "owner-decision")
+
+        land = self.child(run, "land")
+        merge = self.stored(land, "merge")
+        self.assertEqual(merge["verdict"], "refused")
+        self.assertIn("protection lookup failed", merge["reason"])
+        self.assertIn(("unlock-merge", "released"), run.transitions(land))
+        self.assertEqual([p["state"] for p in run.pulls()], ["OPEN"])
+        self.assertEqual(run.origin_tip("main"), before)
+        self.assertEqual(run.forge.issue()["state"], "open")
+
+
+class LandStopTest(Landing):
+    def test_a_head_that_moves_after_the_lock_stops_head_moved_with_the_lock_released(self):
+        run = StubbedRun(self, forge_events=("move-head",))
+
+        self.finish(run, "head-moved", "owner-decision")
+
+        transitions = self.land_transitions(run)
+        for edge in (("lock", "held"), ("checks", "green"), ("head", "head-moved"),
+                     ("unlock-moved", "released")):
+            self.assertIn(edge, transitions)
+        self.assertEqual(run.lock_refs(), {})
+        self.assertEqual([p["state"] for p in run.pulls()], ["OPEN"])
+        self.assertFalse({"recheck", "merge"} & self.entered(run))
+
+    def test_a_red_required_check_stops_checks_with_the_lock_released(self):
+        run = StubbedRun(self, rollup=RED)
+
+        self.finish(run, "checks", "owner-decision")
+
+        self.assertIn(("unlock-checks", "released"), self.land_transitions(run))
+        self.assertEqual(run.lock_refs(), {})
+        self.assertEqual([p["state"] for p in run.pulls()], ["OPEN"])
+
+    def test_a_lock_taken_by_another_pull_request_stops_land_contended(self):
+        run = StubbedRun(self, forge_events=("steal-lock",))
+
+        self.finish(run, "land-contended", "retry")
+
+        transitions = self.land_transitions(run)
+        for edge in (("head", "pushed"), ("recheck", "contended"), ("unlock-contended", "released")):
+            self.assertIn(edge, transitions)
+        self.assertEqual(run.pulls()[0]["state"], "OPEN")
+        self.assertNotIn("merge", self.entered(run))
+        self.assertEqual(run.lock_refs(), {"refs/agent-locks/land/main": run.stolen_sha})
+
+    def test_a_failed_release_stops_unreleased_lock(self):
+        run = StubbedRun(self, lock_release_fails=True)
+
+        self.finish(run, "unreleased-lock", "owner-decision")
+
+        self.assertIn(("unlock", "unreleased"), self.land_transitions(run))
+        self.assertEqual(run.pulls()[0]["state"], "MERGED")
+        self.assertEqual(run.lock_refs(), {"refs/agent-locks/land/main": self.prepared_head(run)})
+
+    def test_an_unreadable_rollup_stops_land_with_the_lock_released(self):
+        run = StubbedRun(self, rollup=UNNAMED)
+
+        self.finish(run, "land", "owner-decision")
+
+        self.assertIn(("unlock-failed", "released"), self.land_transitions(run))
+        self.assertEqual(run.lock_refs(), {})
+
+
+class LandWaitTest(Landing):
+    def test_the_land_run_records_a_started_and_ended_wait_for_the_lock_and_the_checks(self):
+        run = StubbedRun(self)
+
+        self.finish(run, "done")
+
+        events = run.events(self.child(run, "land"))
+
+        def at(kind: str, **match) -> list[int]:
+            return [i for i, e in enumerate(events)
+                    if e["event"] == kind and all(e.get(k) == v for k, v in match.items())]
+
+        spans = {}
+        for step in ("lock", "checks"):
+            started, ended = at("wait_started", wait=step), at("wait_ended", wait=step)
+            self.assertEqual((len(started), len(ended)), (1, 1), step)
+            entered, stored = at("step_entered", step=step)[0], at("result_stored", step=step)[0]
+            self.assertTrue(entered < started[0] < ended[0] < stored, step)
+            spans[step] = (started[0], ended[0])
+        self.assertLess(spans["lock"][1], spans["checks"][0])
+
+
+class CloseOutTest(Landing):
+    def test_an_issue_with_a_criterion_no_test_shows_merges_with_refs_and_stops_hold(self):
+        body = ("Add a greet() function.\n\n## Acceptance criteria\n\n- [ ] [code] greet() returns the greeting\n"
+                "- [ ] [evidence] the owner has seen the greeting\n")
+        run = StubbedRun(self, body=body)
+
+        self.finish(run, "hold", "owner-decision")
+
+        pulls = run.pulls()
+        self.assertEqual(pulls[0]["state"], "MERGED")
+        self.assertTrue(pulls[0]["body"].startswith("Refs #41."), pulls[0]["body"])
+        self.assertEqual(run.forge.issue()["state"], "open")
+        self.assertEqual(run.claims(), [])
+        self.assertFalse(run.worktree_path.exists())
+        self.assertEqual(self.branches(run), "")
+
+
+class CoverageTest(Landing):
     def scenarios(self):
         gone = {"verdict": "no-longer-applies", "details": "d", "evidence": "already done at origin/main."}
         sensitive = dict(IMPLEMENTED, reply=dict(IMPLEMENTED["reply"], sensitive=True))
         fix = committing("fixture/second.py", "SECOND = 2\n")
         return (
-            None,
-            {"applies": gone},
-            {"lite-review": lite_findings(), "lite-fix": fix, "lite-rereview": CLEAN_REREVIEW},
-            {"lite-review": dict(CLEAN_LITE, escalate=True), "escalated": full_findings(),
-             "escalated-fix": fix, "escalated-rereview": CLEAN_REREVIEW},
-            {"implement": sensitive, "full-review": full_findings(), "full-fix": fix,
-             "full-rereview": CLEAN_REREVIEW})
+            {},
+            {"replies": {"applies": gone}},
+            {"replies": {"lite-review": lite_findings(), "lite-fix": fix, "lite-rereview": CLEAN_REREVIEW}},
+            {"replies": {"lite-review": dict(CLEAN_LITE, escalate=True), "escalated": full_findings(),
+                         "escalated-fix": fix, "escalated-rereview": CLEAN_REREVIEW}},
+            {"replies": {"implement": sensitive, "full-review": full_findings(), "full-fix": fix,
+                         "full-rereview": CLEAN_REREVIEW}},
+            {"rollup": RED},
+            {"rollup": UNNAMED},
+            {"forge_events": ("move-head",)},
+            {"forge_events": ("steal-lock",)},
+            {"required_checks": ()},
+            {"lock_release_fails": True})
 
     def test_every_step_of_the_shipped_procedures_is_visited_by_a_stubbed_run(self):
         visited: set[str] = set()
-        for replies in self.scenarios():
-            run = StubbedRun(self, replies=replies)
+        for scenario in self.scenarios():
+            run = StubbedRun(self, **scenario)
             run.deliver()
             for directory in run.runs() + [c for r in run.runs() for c in run.children(r)]:
                 visited |= {e["step"] for e in run.events(directory)
                             if e["event"] in ("step_entered", "transition_taken")}
 
-        declared = {step["id"] for name in ("setup", "deliver", "direct", "verify")
+        declared = {step["id"] for name in ("setup", "deliver", "direct", "verify", "land", "close-out")
                     for step in json.loads((PROCEDURES / f"{name}.json").read_text("utf-8"))["steps"]}
         self.assertEqual(visited, declared)
 
