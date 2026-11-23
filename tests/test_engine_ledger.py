@@ -23,7 +23,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.delivery import engine, engine_ledger
+from agent_tools.delivery import engine, engine_ledger, engine_shell
 from agent_tools.delivery.engine_ledger import EVENT_MEMBERS, RUN_ID_RE, LedgerError
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -430,7 +430,8 @@ def state(name: str, probe, *, extra: bytes = b"", lines: list[bytes] | None = N
 
 
 def expected(**members) -> dict:
-    return {"run": RUN["run"], "project": RUN["project"], "issue": RUN["issue"], **members}
+    return {"run": RUN["run"], "project": RUN["project"], "issue": RUN["issue"],
+            "engine": None, "engine_alive": False, "fanout": None, **members}
 
 
 class FoldTableTest(unittest.TestCase):
@@ -510,6 +511,76 @@ class FoldTableTest(unittest.TestCase):
         self.assertEqual(folded.as_json(), expected(
             stage="building", step="draft", wait=None, stop=STOP, done=False,
             last_event="2026-11-21T16:05:00Z", process=ORPHAN_PROCESS, alive=True))
+
+
+HOLDER = {"pid": 4242, "started": "2026-11-21T16:00:00Z"}
+T0 = "2026-11-21T16:00:00Z"
+
+
+def fan_out_events(*, then_entered: bool = False) -> list[dict]:
+    raw = [
+        {"at": T0, "event": "step_entered", "step": "tasks", "visit": 1, "stage": "building"},
+        {"at": T0, "event": "call", "step": "tasks", "visit": 1,
+         "child": "1511-20261121T160000Z-ab12", "index": 0, "items": 3},
+        {"at": T0, "event": "call", "step": "tasks", "visit": 1,
+         "child": "1511-20261121T160001Z-cd34", "index": 1, "items": 3},
+    ]
+    if then_entered:
+        raw.append({"at": T0, "event": "step_entered", "step": "review", "visit": 1,
+                    "stage": "final review"})
+    return [engine_ledger.validate_event(event) for event in raw]
+
+
+class HolderFoldTest(unittest.TestCase):
+    def test_the_fold_reports_the_engine_holder_and_the_newest_fan_out(self):
+        got = engine_ledger.fold(RUN, fan_out_events(), live, holder=HOLDER).as_json()
+        self.assertEqual(got["engine"], HOLDER)
+        self.assertIs(got["engine_alive"], True)
+        self.assertEqual(got["fanout"], {"task": 2, "tasks": 3})
+
+    def test_a_step_entered_after_a_fan_out_clears_it(self):
+        got = engine_ledger.fold(RUN, fan_out_events(then_entered=True), live, holder=HOLDER)
+        self.assertIsNone(got.as_json()["fanout"])
+
+    def test_no_holder_reports_no_engine_and_calls_no_probe(self):
+        got = engine_ledger.fold(RUN, fan_out_events(), never).as_json()
+        self.assertIsNone(got["engine"])
+        self.assertIs(got["engine_alive"], False)
+
+    def test_a_dead_holder_reads_engine_not_alive(self):
+        got = engine_ledger.fold(RUN, fan_out_events(), dead, holder=HOLDER).as_json()
+        self.assertIs(got["engine_alive"], False)
+        self.assertEqual(got["engine"], HOLDER)
+
+
+class ReadHolderTest(unittest.TestCase):
+    def test_read_holder_reads_the_lock_document_without_locking(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            self.assertIsNone(engine_ledger.read_holder(run_dir))
+            self.assertFalse((run_dir / "lock").exists())
+            (run_dir / "lock").write_text('{"pid":4242,"started":"2026-11-21T16:00:00Z"}')
+            with mock.patch("fcntl.flock", side_effect=AssertionError("locked")):
+                self.assertEqual(engine_ledger.read_holder(run_dir), HOLDER)
+                for text in ("", '{"pid":true,"started":"2026-11-21T16:00:00Z"}',
+                             '{"pid":0,"started":"2026-11-21T16:00:00Z"}',
+                             '{"pid":1,"started":"x"}', "{not json"):
+                    with self.subTest(text=text):
+                        (run_dir / "lock").write_text(text)
+                        self.assertIsNone(engine_ledger.read_holder(run_dir))
+
+    def test_the_holder_file_is_the_engines_lock(self):
+        self.assertEqual(engine_ledger.HOLDER_FILE, engine_shell.LOCK_NAME)
+
+    def test_parse_event_line_refuses_what_replay_refuses(self):
+        with self.assertRaises(LedgerError):
+            engine_ledger.parse_event_line(
+                b'{"at":"2026-11-21T16:00:00Z","event":"run_done","event":"run_done"}')
+        self.assertEqual(
+            engine_ledger.parse_event_line(b'{"at":"2026-11-21T16:00:00Z","event":"run_done"}'),
+            {"at": T0, "event": "run_done"})
+        with self.assertRaises(LedgerError):
+            engine_ledger.parse_event_line(b'{"at":"\xff","event":"run_done"}')
 
 
 class ReplayTest(unittest.TestCase):
@@ -628,13 +699,25 @@ class StatusTest(unittest.TestCase):
             expected = compact(engine_ledger.fold(
                 engine_ledger.read_run(run_dir),
                 engine_ledger.replay(run_dir / "events.jsonl"),
-                engine_ledger.process_alive).as_json())
+                engine_ledger.process_alive,
+                engine_ledger.read_holder(run_dir)).as_json())
             self.assertEqual((result.returncode, result.stderr), (0, ""))
             self.assertEqual(result.stdout, expected)
             printed = json.loads(result.stdout)
             self.assertEqual((printed["stage"], printed["step"]), ("setup", "scope"))
             self.assertEqual(printed["stop"], STOP)
             self.assertEqual(tree_digest(Path(tmp) / ".agents"), before)
+
+    def test_status_reports_the_lock_holder(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = home_with(tmp, RUN_FIXTURE)
+            holder = {"pid": os.getpid(), "started": "2026-11-21T16:00:00Z"}
+            (root / RUN_ID / "lock").write_text(json.dumps(holder))
+            code, out, err = main_status(tmp, "status", "1511")
+            self.assertEqual((code, err), (0, ""))
+            printed = json.loads(out)
+            self.assertEqual(printed["engine"], holder)
+            self.assertIs(printed["engine_alive"], True)
 
     def test_status_with_no_run_prints_null_and_creates_nothing(self):
         with tempfile.TemporaryDirectory() as tmp:

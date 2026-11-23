@@ -7,7 +7,8 @@ Layout, under `~/.agents/state/engine/runs/<run id>/` (mode 0700):
                         when the run was created with one
     procedure/          a byte copy of the entry procedure directory's `*.json`, `*.md`, `SHA256SUMS`
     events.jsonl        one compact JSON event per line, appended and fsynced
-    lock  the deliver process's exclusive flock and its {"pid","started"}
+    lock  the deliver process's exclusive flock and its {"pid","started"}; `read_holder` reads the
+                        document and takes no lock
     slots/slot-<i>.lock the run's agent slots, each an exclusive flock held while a session runs
                         (`engine_slots`)
     stop-request   a pending stop request for the lock holder it names (engine_stop)
@@ -549,13 +550,42 @@ def replay(events_path: Path) -> list[dict]:
     events = []
     for number, part in enumerate(data.split(b"\n")[:-1], start=1):
         try:
-            loaded = json.loads(part.decode("utf-8"),
-                                object_pairs_hook=reject_duplicate_keys,
-                                parse_constant=reject_nonfinite_literal)
-            events.append(validate_event(loaded))
-        except (ValueError, LedgerError) as error:
+            events.append(parse_event_line(part))
+        except LedgerError as error:
             raise LedgerError(f"{events_path.name} line {number}: {error}") from error
     return events
+
+
+def parse_event_line(line: bytes) -> dict:
+    """The validated event of one complete line, without its newline; `LedgerError` on any defect."""
+    try:
+        loaded = json.loads(line.decode("utf-8"), object_pairs_hook=reject_duplicate_keys,
+                            parse_constant=reject_nonfinite_literal)
+    except ValueError as error:
+        raise LedgerError(str(error)) from error
+    return validate_event(loaded)
+
+
+HOLDER_FILE = "lock"
+
+
+def read_holder(run_dir: Path) -> dict | None:
+    """The `{"pid","started"}` the deliver process wrote in the run's `lock`, read with no flock.
+
+    None when the file is absent, unreadable, not strict JSON or not that shape (a housekeeping
+    holder leaves it empty).
+    """
+    try:
+        loaded = json.loads((Path(run_dir) / HOLDER_FILE).read_bytes().decode("utf-8"),
+                            object_pairs_hook=reject_duplicate_keys,
+                            parse_constant=reject_nonfinite_literal)
+        pid, started = loaded["pid"], loaded["started"]
+        if type(pid) is not int or pid < 1 or not isinstance(started, str):
+            return None
+        parse_rfc3339_utc(started)
+    except (OSError, ValueError, RecursionError, LedgerError, KeyError, TypeError):
+        return None
+    return {"pid": pid, "started": started}
 
 
 @dataclass(frozen=True)
@@ -574,22 +604,28 @@ class RunState:
     process: dict | None
     alive: bool
     steps: tuple[dict, ...] = field(default=(), hash=False)
+    engine: dict | None = None
+    engine_alive: bool = False
+    fanout: dict | None = None
 
     def as_json(self) -> dict:
         return {"run": self.run, "project": self.project, "issue": self.issue,
                 "stage": self.stage, "step": self.step, "wait": self.wait,
                 "stop": self.stop, "done": self.done, "last_event": self.last_event,
-                "process": self.process, "alive": self.alive}
+                "process": self.process, "alive": self.alive, "engine": self.engine,
+                "engine_alive": self.engine_alive, "fanout": self.fanout}
 
 
 def fold(run: Mapping[str, object], events: Sequence[Mapping[str, object]],
-         alive: Callable[[int, str], bool]) -> RunState:
+         alive: Callable[[int, str], bool],
+         holder: Mapping[str, object] | None = None) -> RunState:
     """Derive a run's state from its events in one pass; no file, clock or process.
 
     `process` is the last recorded process whose step visit has no stored result, `alive` the probe's answer
     for it, whatever the stop or done state (reading those first is the caller's); `steps` is one per visit.
+    `engine` is the deliver process from the run's `lock`, which the caller passes as `holder`.
     """
-    stage = step = last_event = None
+    stage = step = last_event = fanout = None
     wait = stop = None
     open_processes: dict[tuple[str, int], dict] = {}
     done = False
@@ -620,6 +656,9 @@ def fold(run: Mapping[str, object], events: Sequence[Mapping[str, object]],
             current = visit
         if kind == "step_entered":
             stage, step = event["stage"], event["step"]
+            fanout = None
+        elif kind == "call":
+            fanout = {"task": event["index"] + 1, "tasks": event["items"]}
         elif kind in ("session_starting", "session_answered") and visit in entries:
             entries[visit]["account"] = event["account"]  # the last launch's answer wins
         elif kind == "outcome_graded" and visit in entries:
@@ -656,10 +695,14 @@ def fold(run: Mapping[str, object], events: Sequence[Mapping[str, object]],
                                       tokens=dict(event["tokens"]), spend_usd=event["spend_usd"])
     process = list(open_processes.values())[-1] if open_processes else None
     running = alive(process["pid"], process["started"]) if process is not None else False
+    engine = ({"pid": holder["pid"], "started": holder["started"]}
+              if holder is not None else None)
+    engine_running = alive(engine["pid"], engine["started"]) if engine else False  # type: ignore[arg-type]
     return RunState(run=run["run"], project=run["project"], issue=run["issue"],  # type: ignore[arg-type]
                     stage=stage, step=step, wait=wait, stop=stop, done=done,
                     last_event=last_event, process=process, alive=running,
-                    steps=tuple(entries.values()))
+                    steps=tuple(entries.values()), engine=engine,
+                    engine_alive=engine_running, fanout=fanout)
 
 
 def process_alive(pid: int, started: str) -> bool:
