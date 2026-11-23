@@ -191,6 +191,7 @@ agent-workflow-tests *args:
     tests/test_platform_package_hosts.py \
     tests/test_fleet_preflight_recipes.py \
     tests/test_darwin_user_agent_reload.py \
+    tests/test_omlx_restart.py \
     tests/test_darwin_path_order.py \
     tests/test_pinned_file.py \
     tests/test_github_runners.py \
