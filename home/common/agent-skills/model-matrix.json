@@ -22,7 +22,7 @@
       ]
     },
     "implementer": {
-      "model": "opus",
+      "model": "sonnet",
       "effort": "high",
       "eligible": [
         "non-mechanical implementation",

@@ -34,7 +34,8 @@ account launcher, graded by its structured reply unless a bound fires, its files
 run's `sessions/`; a step with no valid structured answer is asked once more on the same session and
 then ends `no-reply`; every step runs within the platform's bounds, and a fired bound is the
 outcome `out-of-bounds`; default: the package's `procedures` directory) for the issue, in the project the
-current directory belongs to, to `done` or a stop, or continues the issue's open run on its own procedure copy, and prints one line of compact sorted-key
+current directory belongs to, to `done` or a stop, or continues the issue's open run on its own procedure copy (a copy in a format the engine does not read
+ends that run `superseded`, need `nothing`, and the same call starts a new run from `<dir>`), and prints one line of compact sorted-key
 JSON when it ends (`engine_shell` is the contract). Once its run exists it drops the history
 lines older than 180 days and deletes the run directories of issues closed more than 14 days
 ago, never changing its own exit; a run that ends in `done` or a stop appends one line to

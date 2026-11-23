@@ -158,6 +158,8 @@ agent-workflow-tests *args:
     tests/test_agent_tools_layout.py \
     tests/test_agent_tools_semver.py \
     tests/test_engine_check.py \
+    tests/test_engine_direct_procedures.py \
+    tests/test_engine_graders.py \
     tests/test_engine_ledger.py \
     tests/test_engine_core.py \
     tests/test_engine_commands.py \
@@ -168,6 +170,7 @@ agent-workflow-tests *args:
     tests/test_engine_reaping.py \
     tests/test_engine_keep_alive.py \
     tests/test_engine_continue.py \
+    tests/test_engine_resume.py \
     tests/test_engine_housekeeping.py \
     tests/test_engine_stop.py \
     tests/test_engine_caps.py \
@@ -175,6 +178,7 @@ agent-workflow-tests *args:
     tests/test_engine_slots.py \
     tests/test_engine_fixture.py \
     tests/test_engine_stubbed_run.py \
+    tests/test_independent_review.py \
     tests/test_issue_setup.py \
     tests/test_plan_amend.py \
     tests/test_verify_block.py \
@@ -334,6 +338,7 @@ agent-workflow-tests *args:
     tests/test_console_live_fault_check.py \
     tests/test_pr_green.py \
     tests/test_console_page.py \
+    tests/test_console_long_permission_card.py \
     tests/test_console_controls.py \
     tests/test_console_goal_box.py \
     tests/test_console_service.py \
@@ -356,6 +361,7 @@ agent-workflow-tests *args:
     tests/test_console_notices.py \
     tests/test_console_reports.py \
     tests/test_console_screenshots.py \
+    tests/test_console_permission_shots.py \
     tests/test_console_sprint_command.py \
     tests/test_console_pictures.py \
     tests/test_console_manager.py \
@@ -410,7 +416,7 @@ agent-instruction-budget *args:
 verify host *args:
   PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.verification.verify_pending run --host {{host}} {{args}}
 
-# Shoot the console's sprint states against a fixture console, 114 PNGs into out (default ~/tmp/clarity-screenshots) (#1086).
+# Shoot the console's sprint states against a fixture console, 116 PNGs into out (default ~/tmp/clarity-screenshots) (#1086).
 console-screenshots out="":
   #!/usr/bin/env bash
   set -euo pipefail
@@ -475,7 +481,7 @@ show-claude-settings: build
 # `just` shows only the LAST comment line of a block in `just --list`, so each recipe
 # keeps its one-line summary immediately above it.
 
-# Apply .github/branch-protection.json to `main`, making its contexts (`Nix Eval`, `Instruction Budget`, `Agent Workflow Tests`) required checks.
+# Apply .github/branch-protection.json to `main`, making its contexts required checks.
 protect-main:
   gh api --method PUT repos/{owner}/{repo}/branches/main/protection \
     --input .github/branch-protection.json
