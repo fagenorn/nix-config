@@ -245,6 +245,7 @@ agent-workflow-tests *args:
     tests/test_never_rise.py \
     tests/test_comment_lint.py \
     tests/test_cleanup_issue.py \
+    tests/test_lint_time.py \
     tests/test_ruff_lint.py \
     tests/test_suppressions.py \
     tests/test_decision_record_wording.py \
