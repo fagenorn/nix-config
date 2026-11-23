@@ -14,8 +14,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
-from contextlib import redirect_stdout
+from contextlib import ExitStack, redirect_stdout
 from io import StringIO
 from unittest import mock
 
@@ -762,6 +763,38 @@ class RunTest(ProjectCase):
         self.assertEqual(test["status"], "pass")
         where = str(self.worktree.resolve())
         self.assertEqual(self.logged(), [f"{where} lint", f"{where} lint", f"{where} test"])
+
+    def run_in_process(self, **patches):
+        """`main(["run", ...])` in this process under `patches` of module constants: (answer, seconds)."""
+        env = {**HERMETIC_GIT, "HOME": self.env["HOME"], "VERIFY_SLOT_DIR": str(self.slots)}
+        out = StringIO()
+        began = time.monotonic()
+        with ExitStack() as stack:
+            stack.enter_context(mock.patch.dict(os.environ, env))
+            for name, value in patches.items():
+                stack.enter_context(mock.patch.object(verified_tree, name, value))
+            stack.enter_context(redirect_stdout(out))
+            stack.enter_context(mock.patch("sys.stderr", StringIO()))
+            status = verified_tree.main(["run", "--worktree-path", str(self.worktree)])
+        seconds = time.monotonic() - began
+        return self.answer(subprocess.CompletedProcess([], status, out.getvalue(), "")), seconds
+
+    def test_a_timed_out_command_that_ignores_sigterm_is_still_failed_as_timed_out(self):
+        ignore = "import signal,time;signal.signal(signal.SIGTERM,signal.SIG_IGN);time.sleep(30)"
+        self.declare({"lint": ignore, "test": ""})
+        answer, seconds = self.run_in_process(COMMAND_TIMEOUT_SECONDS=1, TERMINATE_GRACE_SECONDS=1)
+        lint, test = answer["results"]
+        self.assertEqual((lint["status"], lint["summary"]), ("fail", "timed out after 1 s"))
+        self.assertEqual(test["status"], "pass")
+        self.assertLess(seconds, 20)
+
+    def test_a_descendant_holding_the_output_does_not_turn_a_passing_command_into_a_timeout(self):
+        leave = "import subprocess;subprocess.Popen(['sleep','30']);sys.exit(0)"
+        self.declare({"lint": leave, "test": ""})
+        answer, seconds = self.run_in_process(COMMAND_TIMEOUT_SECONDS=10)
+        lint, _ = answer["results"]
+        self.assertEqual((lint["status"], lint["exit"]), ("pass", 0))
+        self.assertLess(seconds, 20)
 
     def test_a_path_outside_any_worktree_is_an_error(self):
         empty = self.scratch / "empty"

@@ -85,7 +85,11 @@ prints anything) runs nothing: verdict `dirty`, `results` empty. Each run id run
 captured: stdout carries only the one line, and each command's captured output goes to stderr
 after it ends. Exit 75 retries, `SLOT_ATTEMPTS` runs in all, then `fail` with `no_slot` and
 summary `no verify slot came free in <SLOT_ATTEMPTS> attempts`; a run past
-`COMMAND_TIMEOUT_SECONDS` is terminated and is `fail` with summary `timed out after <N> s`;
+`COMMAND_TIMEOUT_SECONDS` is terminated and is `fail` with summary `timed out after <N> s`
+(`verify-slot` runs in its own session: the timeout sends SIGTERM to that whole process group,
+then SIGKILL to it after `TERMINATE_GRACE_SECONDS`, so a command that ignores SIGTERM or leaves
+descendants cannot outlive it; output is captured in a file, never a pipe, so a descendant
+that outlives the command and keeps its stdout open delays nothing);
 any other exit is the command's own (0 `pass`, else `fail` whose summary is the last
 `SUMMARY_LINES` non-blank output lines). Every id runs even after an earlier one failed. The
 verdict is `failed` when any result is `fail`, else `dirty` when the tree is not clean after
@@ -135,6 +139,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -462,27 +467,44 @@ def _output_summary(output: str) -> str:
     return "\n".join(lines[-SUMMARY_LINES:])
 
 
+def _signal_group(child: subprocess.Popen, number: int) -> None:
+    """Send `number` to the whole process group `child` leads (it was started in its own session)."""
+    try:
+        os.killpg(child.pid, number)
+    except ProcessLookupError:
+        pass
+
+
 def _slotted(argv: Sequence[str], cwd: str) -> tuple[int | None, str]:
-    """One `verify-slot run` of `argv` in `cwd`: (exit code, output), or (None, output) on timeout."""
+    """One `verify-slot run` of `argv` in `cwd`: (exit code, output), or (None, output) on timeout.
+
+    verify-slot leads its own session so a timeout reaches the command and its descendants, which
+    verify-slot's SIGKILL cannot forward. Output goes to a file, never a pipe, so a descendant
+    that outlives the command and holds its stdout cannot delay the exit code or hang a read.
+    """
     command = [*sibling_argv("delivery.verify_slot"), "run", "--wait-limit",
                str(SLOT_WAIT_SECONDS), "--", *argv]
-    try:
-        child = subprocess.Popen(command, cwd=cwd, stdin=subprocess.DEVNULL,
-                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    except OSError as error:
-        return NOT_STARTED_EXIT, f"cannot start {argv[0]}: {error}"
-    try:
-        output, _ = child.communicate(timeout=COMMAND_TIMEOUT_SECONDS)
-        code: int | None = child.returncode
-    except subprocess.TimeoutExpired:
-        child.terminate()  # verify-slot forwards it to the command and gives the slot back
+    with tempfile.TemporaryFile() as captured:
         try:
-            output, _ = child.communicate(timeout=TERMINATE_GRACE_SECONDS)
+            child = subprocess.Popen(command, cwd=cwd, stdin=subprocess.DEVNULL,
+                                     stdout=captured, stderr=subprocess.STDOUT,
+                                     start_new_session=True)
+        except OSError as error:
+            return NOT_STARTED_EXIT, f"cannot start {argv[0]}: {error}"
+        code: int | None
+        try:
+            code = child.wait(timeout=COMMAND_TIMEOUT_SECONDS)
         except subprocess.TimeoutExpired:
-            child.kill()
-            output, _ = child.communicate()
-        code = None
-    return code, os.fsdecode(output or b"")
+            _signal_group(child, signal.SIGTERM)  # verify-slot also forwards it and gives the slot back
+            try:
+                child.wait(timeout=TERMINATE_GRACE_SECONDS)
+            except subprocess.TimeoutExpired:
+                pass
+            _signal_group(child, signal.SIGKILL)  # whatever still holds the group, verify-slot included
+            child.wait()
+            code = None
+        captured.seek(0)
+        return code, os.fsdecode(captured.read())
 
 
 def _run_command(verification_id: str, command: Mapping) -> dict:
