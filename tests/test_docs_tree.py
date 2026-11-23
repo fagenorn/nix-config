@@ -200,7 +200,7 @@ def scanned_files(archived_dirs: tuple[str, ...] = ()) -> list[tuple[str, list[s
 
 
 RETIRED_DELIVERY_RECORDS = (2, 9, 10, 11)
-CUT_CONSOLE_RECORDS = (3, 4, 5, 6, 8, 10, 11, 12, 13, 14)
+CUT_CONSOLE_RECORDS = (3, 4, 5, 6, 8, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 26)
 
 
 class DocsTreeTest(unittest.TestCase):
