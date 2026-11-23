@@ -395,7 +395,7 @@ class RemoveEffectTest(Case):
 
 
 class ColleagueAccountOwnerTest(Case):
-    """The owner signs out or removes a colleague's account from the page (#1345, ADR-console-087 D3)."""
+    """The owner signs out or removes a colleague's account from the page (#1345, ADR-console-087)."""
 
     COLLEAGUE = "colleague@example.invalid"
 

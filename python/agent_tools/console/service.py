@@ -113,7 +113,7 @@ guest_refused <door_wider|not_permitted|unreadable>`. A guest request is admitte
 `guest.admit` in this order, each refusal `403` `text/plain`, one line, `Connection: close`, with
 nothing appended (the one thing a guest-door request may publish is the reading below): sharing
 off, then a tailnet name this console cannot read (`guest.NAME_UNREAD_TEXT`: the name is read from
-this host's Tailscale, ADR-console-078), a `Host` that is not exactly one `localhost` or an `X-Forwarded-Host` that is not exactly one and the read name (no port form; ADR-console-077 D4), then not exactly one `Tailscale-User-Login` header of a listed colleague.
+this host's Tailscale, ADR-console-078), a `Host` that is not exactly one `localhost` or an `X-Forwarded-Host` that is not exactly one and the read name (no port form; ADR-console-077), then not exactly one `Tailscale-User-Login` header of a listed colleague.
 One request is judged by one `guest.Snapshot` (the switch, the list and the read name, with the scoped views
 and picture ids derived under them): the handler reads `ConsoleService.guest_snapshot` once, in `parse_request`,
 and the recorded reading, the decision, the state read and the picture check all use that snapshot; the
@@ -462,7 +462,7 @@ the answer is an empty `204`. The mark is dropped on every way out, and the stor
 written again then. Any other exception is `console:
 account_remove_failed <Type>` (never its message) and 500 `removing the account failed`. A running
 session of the owner's own profile is not stopped. For a colleague's profile (one in `_owners_now()`
-at the first block, #1345, ADR-console-087 D5) the same block also reserves, as a `_MoveReservation`,
+at the first block, #1345, ADR-console-087) the same block also reserves, as a `_MoveReservation`,
 every started manager on it with no stop and no end, and refuses `<profile> is still being read; try
 again in a moment` (nothing marked, signed out, stopped or launched) when such a sprint is launching,
 nudged or stopping, and, for a sign-out and a removal alike, when a started manager on it has a stop pending or a
@@ -495,7 +495,7 @@ profile, else `account_remove.SIGNOUT_UNAVAILABLE` or `NOT_COLLEAGUE`) runs the 
 sign-out alone and appends one `signin.acted` row of action `signout`, outcome `signed_out` or
 `failed`; a stop that failed is `account_remove.MoveFailed("stop_failed")` after that row.
 
-`POST /api/account-signout` (#1345, ADR-console-087 D3) is the owner's sign-out of a colleague's
+`POST /api/account-signout` (#1345, ADR-console-087) is the owner's sign-out of a colleague's
 account alone, the account staying in the pool and his. After the page-write guard the body is JSON
 read with `MAX_REMOVE_BYTES` and `account_remove.parse_signout_request` (exactly one member,
 `profile`, a non-empty string; else 400 `bad sign-out`), then `sign_out_account(profile)` runs with
@@ -1548,7 +1548,7 @@ at that moment (`_read_profiles`, never the last poll's) with the sign-ins and e
 folded from the log's session rows (`manager.profile_use`, kept after a session leaves; ADR-console-023,
 #1011) and the excluded profiles folded from the log's `profile.exclusion` rows (`exclusion.excluded_profiles`,
 #1028), which `capacity_view` leaves out of the room, and the pinned profile (#1029), which it
-answers first while it has room, with the sprint's starter and `_waiting_logins()` so that a colleague's account serves his own sprints first (#1344, ADR-console-087 D1), and `Wait` appends `manager.waiting`. Otherwise the launcher is called outside the lock, and then,
+answers first while it has room, with the sprint's starter and `_waiting_logins()` so that a colleague's account serves his own sprints first (#1344, ADR-console-087), and `Wait` appends `manager.waiting`. Otherwise the launcher is called outside the lock, and then,
 under it, a sprint that was withdrawn meanwhile has its secret and settings file removed again and
 no row appended, and otherwise, unless the service is stopping, `manager.started {sprint_id, profile, session_name}`
 or `manager.failed {sprint_id, reason}` is appended (the reason of a `LaunchFailed`, else `<Type>:
@@ -7699,7 +7699,7 @@ class ConsoleService:
         """Under the ingest lock: the logins with an open sprint whose manager waits for a profile (#1344).
 
         A colleague's account is kept for them: another starter's sprint does not take it while
-        one of the owner's waits (ADR-console-087 D1).
+        one of the owner's waits (ADR-console-087).
         """
         return frozenset(
             sprint.started_by for sprint in self._sprints.values()
@@ -10608,7 +10608,7 @@ class ConsoleService:
                 self._tailnet_addresses = addresses
             if (name is not None and self._guest_reading_name is not None
                     and name != self._guest_reading_name):
-                self._guest_reading = None  # judged under a name that has gone (ADR-console-079 D3)
+                self._guest_reading = None  # judged under a name that has gone (ADR-console-079)
             self._publish()
 
     def activate(self, commit: str) -> None:

@@ -437,7 +437,7 @@ class GuestAccountRefusalTest(GuestAccountCase):
         self.nothing_started()
 
     def test_the_owner_is_refused_a_sign_in_of_a_profile_a_colleague_added(self):
-        """#1361, ADR-console-087 D3: the owner's start for his account starts no run and writes no row."""
+        """#1361, ADR-console-087: the owner's start for his account starts no run and writes no row."""
         svc = self.begin()
         self.assertEqual(self.add()[0], 200)
         self.cancelled()

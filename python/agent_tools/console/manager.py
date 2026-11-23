@@ -25,7 +25,7 @@ profile used most recently (as an instant; a never-used one ranks below every us
 the smallest name) answers; with none signed in, None (P2). The entries are the accounts only (the
 service lists the named profiles, #1016), so the unprofiled client directory is never chosen. A
 name in `last_use` that is not an entry is ignored.
-A colleague's account (#1344, ADR-console-087 D1; an entry whose `owner` is the login that added it,
+A colleague's account (#1344, ADR-console-087; an entry whose `owner` is the login that added it,
 which `capacity_view` carries) serves his own sprints first and anyone's when it has room.
 `starter` is the login that started the sprint (None for the owner's) and `waiting` the logins that
 have a sprint waiting for a profile. After the pin, which outranks both, an account is dropped from
