@@ -7313,7 +7313,7 @@ class WaitByPlaceTest(unittest.TestCase):
         def budget(path):
             text = path.read_text(encoding="utf-8")
             start = text.index("const LAND_WAIT_RETRIES = ")
-            return text[start:text.index("\n}\n", text.index("const waitBudget = ", start)) + 3]
+            return "\n".join(l for l in text[start:text.index("\n}\n", text.index("const waitBudget = ", start)) + 3].split("\n") if not l.lstrip().startswith("//"))
         self.assertIn("return spent <= LAND_WAIT_RETRIES && total + LAND_WAIT_CALL_S <= LAND_WAIT_MAX_S", budget(PROGRAM))
         self.assertEqual(budget(PROGRAM), budget(PROGRAM.with_name("deliver-standard.js")))
 
