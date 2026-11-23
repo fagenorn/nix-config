@@ -118,6 +118,7 @@ agent-workflow-tests *args:
     home/common/agent-skills/tests/test_eval_sandboxes.py \
     home/common/agent-skills/tests/test_agent_model_matrix.py \
     home/common/agent-skills/tests/test_instruction_load.py \
+    home/common/agent-skills/tests/test_instruction_surface_lint.py \
     home/common/agent-skills/tests/test_skill_lint.py \
     home/common/agent-skills/tests/test_agnostic_lint.py \
     home/common/agent-skills/tests/test_diff_scope.py \
