@@ -91,8 +91,8 @@ class MembersTest(unittest.TestCase):
             Member("context-map-lint",
                    (*sibling_argv("delivery.context_map_lint"), "--repo-root", str(root),
                     "--context-map", str(root / "docs" / "CONTEXT-MAP.md"))),
-            Member("instruction-budget",
-                   (*sibling_argv("instruction_load"), "check", "--root", str(root))),
+            Member("skill-lint",
+                   (*sibling_argv("skill_lint"), "check", "--root", str(root))),
         ))
 
     def test_test_members_are_the_build_then_the_suite(self):
@@ -289,7 +289,7 @@ class LintEntryPointTest(JustCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             result.stdout.splitlines()[-1],
-            "lint: passed: agnostic-lint, context-map-lint, instruction-budget")
+            "lint: passed: agnostic-lint, context-map-lint, skill-lint")
 
     def test_a_context_map_violation_fails_lint_naming_context_map_lint(self):
         map_path = self.scratch / "docs" / "CONTEXT-MAP.md"
@@ -304,7 +304,7 @@ class LintEntryPointTest(JustCase):
         self.assertIn("lint: context-map-lint failed (exit 1)", stderr)
         self.assertEqual(stderr[-1], "lint: failed: context-map-lint")
         self.assertFalse([l for l in stderr if l.startswith("lint: agnostic-lint failed")
-                          or l.startswith("lint: instruction-budget failed")])
+                          or l.startswith("lint: skill-lint failed")])
 
 
 class RecipeTest(JustCase):
