@@ -101,6 +101,8 @@ class StopwatchTest(unittest.TestCase):
         cases = {
             "two records": payload_line() + "\n" + payload_line(),
             "total off by one": payload_line(total_ms=4),
+            "float total": payload_line(total_ms=3.0),
+            "bool total": payload_line(lints=[dict(entry, base_ms=0, branch_ms=1)], total_ms=True),
             "bool base": payload_line(lints=[dict(entry, base_ms=True)], total_ms=3),
             "negative branch": payload_line(lints=[dict(entry, branch_ms=-1)], total_ms=0),
             "duplicate lint": payload_line(lints=[entry, entry], total_ms=6),

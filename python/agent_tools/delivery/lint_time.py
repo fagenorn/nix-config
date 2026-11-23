@@ -129,7 +129,7 @@ def parse_payload(text: str) -> Record:
     if len({lint.lint for lint in lints}) != len(lints):
         raise ValueError("a lint is repeated")
     record = Record(lints)
-    if payload["total_ms"] != record.total_ms or isinstance(payload["total_ms"], bool):
+    if milliseconds_of(payload["total_ms"], "total_ms") != record.total_ms:
         raise ValueError("total_ms is not the sum of the lints")
     return record
 
