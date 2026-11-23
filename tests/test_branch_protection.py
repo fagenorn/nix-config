@@ -119,6 +119,9 @@ EXPECTED_PROTECTION_PAYLOAD = {
     "required_pull_request_reviews": None,
     "restrictions": None,
 }
+INSTRUCTIONS = REPO_ROOT / "CLAUDE.md"
+PROTECTION_SENTENCE = "**`.github/branch-protection.json` makes "
+COUNT_WORDS = ("zero", "one", "two", "three", "four", "five", "six", "seven", "eight")
 
 
 def workflow_lines(path=WORKFLOW):
@@ -1051,6 +1054,38 @@ class ProtectionPayload(unittest.TestCase):
         # solo and unattended merge, which is the opposite of the issue's ask.
         self.assertIsNone(data["required_pull_request_reviews"])
         self.assertIsNone(data["restrictions"])
+
+
+def required_context_sentence_problems(text):
+    parts = text.split(PROTECTION_SENTENCE)
+    if len(parts) != 2:
+        return [f"the protection sentence occurs {len(parts) - 1} times, not once"]
+    span = parts[1].split("**", 1)[0]
+    problems = []
+    count_phrase = f"{COUNT_WORDS[len(REQUIRED_CONTEXTS)]} contexts required on `main`: "
+    if not span.startswith(count_phrase):
+        problems.append(f"the sentence does not continue with {count_phrase!r}")
+    problems += [f"`{context}` is not named" for context in REQUIRED_CONTEXTS if f"`{context}`" not in span]
+    return problems
+
+
+class ProjectInstructions(unittest.TestCase):
+    def test_the_instructions_name_every_required_context(self):
+        text = INSTRUCTIONS.read_text(encoding="utf-8")
+        self.assertEqual([], required_context_sentence_problems(text))
+
+    def test_a_stale_sentence_is_caught(self):
+        text = INSTRUCTIONS.read_text(encoding="utf-8")
+        mutations = {
+            "stale count": text.replace("four contexts", "three contexts"),
+            "unbackticked context": text.replace("`Conformance`", "Conformance"),
+            "sentence twice": text + PROTECTION_SENTENCE,
+            "sentence removed": text.replace(PROTECTION_SENTENCE, ""),
+        }
+        for label, mutated in mutations.items():
+            with self.subTest(mutation=label):
+                self.assertNotEqual(text, mutated)
+                self.assertNotEqual([], required_context_sentence_problems(mutated))
 
 
 class CleanupIssueWorkflowTest(unittest.TestCase):
