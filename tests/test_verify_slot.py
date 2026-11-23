@@ -14,8 +14,10 @@ import sys
 import tempfile
 import time
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from agent_tools.canonical import parse_rfc3339_utc
 from agent_tools.delivery import verify_slot
 from agent_tools.delivery.verify_slot import NO_SLOT_EXIT, NO_SLOT_LINE, SLOT_DIR_ENV, WAITING_LINE
 from .process_liveness import process_alive
@@ -114,6 +116,10 @@ class VerifySlotTest(unittest.TestCase):
     def finish(self, proc, timeout=30):
         _, err = proc.communicate(timeout=timeout)
         return proc.returncode, err
+
+    def history(self):
+        text = (self.slots / "history.jsonl").read_text()
+        return [json.loads(line) for line in text.splitlines()]
 
     def test_a_second_run_from_the_same_repository_waits_until_the_first_ends(self):
         self.declare(verify_slots=2)
@@ -547,6 +553,80 @@ class VerifySlotTest(unittest.TestCase):
                     target.rmdir()
                 else:
                     target.unlink()
+
+
+    def test_a_run_that_waited_then_held_a_slot_records_both_durations(self):
+        alpha = self.repository("alpha", "git@github.com:example/alpha.git")
+        beta = self.repository("beta", "git@github.com:example/beta.git")
+        first = self.start("a", cwd=alpha)
+        self.assertTrue(wait_for(self.mark("a", "start")))
+        second = self.start("b", code=4, cwd=beta)
+        time.sleep(1.0)
+        self.release("a")
+        self.assertTrue(wait_for(self.mark("b", "start")))
+        time.sleep(0.5)
+        self.release("b")
+        codes = (self.finish(first)[0], self.finish(second)[0])
+        self.assertEqual(codes, (0, 4))
+        entries = {entry["repository"]: entry for entry in self.history()}
+        self.assertEqual(len(self.history()), 2)
+        for entry in entries.values():
+            self.assertEqual(set(entry), {"command", "exit", "held_seconds", "repository",
+                                          "started", "waited_seconds"})
+        command = " ".join(" ".join([sys.executable, "-c", CHILD]).split()[:3])
+        beta_entry, alpha_entry = entries["example/beta"], entries["example/alpha"]
+        self.assertEqual(beta_entry["exit"], 4)
+        self.assertGreaterEqual(beta_entry["waited_seconds"], 0.8)
+        self.assertGreaterEqual(beta_entry["held_seconds"], 0.4)
+        self.assertEqual(beta_entry["command"], command)
+        self.assertEqual(alpha_entry["exit"], 0)
+        self.assertLess(alpha_entry["waited_seconds"], 0.5)
+        self.assertGreaterEqual(alpha_entry["held_seconds"], 1.0)
+        now = datetime.now(timezone.utc)
+        for entry in entries.values():
+            self.assertTrue(entry["started"].endswith("Z"))
+            started = parse_rfc3339_utc(entry["started"])
+            self.assertLessEqual(now - timedelta(seconds=120), started)
+            self.assertLessEqual(started, now)
+
+    def test_a_run_whose_record_cannot_be_appended_still_returns_the_commands_exit(self):
+        (self.slots / "history.jsonl").mkdir(parents=True)
+        self.release("a")
+        code, err = self.finish(self.start("a", code=3))
+        self.assertEqual(code, 3)
+        failed = [line for line in err.splitlines()
+                  if line.startswith("verify-slot: cannot record this run in ")]
+        self.assertEqual(len(failed), 1)
+        self.release("b")
+        self.assertEqual(self.finish(self.start("b", "--wait-limit", "1"))[0], 0)
+
+    def test_a_run_that_gets_no_slot_records_its_wait_and_no_hold(self):
+        first = self.start("a")
+        self.assertTrue(wait_for(self.mark("a", "start")))
+        self.release("b")
+        code, _ = self.finish(self.start("b", "--wait-limit", "1"))
+        self.release("a")
+        self.finish(first)
+        self.assertEqual(code, NO_SLOT_EXIT)
+        entries = {entry["exit"]: entry for entry in self.history()}
+        self.assertIsNone(entries[75]["held_seconds"])
+        self.assertGreaterEqual(entries[75]["waited_seconds"], 1.0)
+        self.assertIsInstance(entries[0]["held_seconds"], float)
+
+    def test_a_setup_error_records_nothing(self):
+        self.declare(verify_slots=0)
+        self.assertEqual(self.finish(self.start("a"))[0], 2)
+        self.assertFalse((self.slots / "history.jsonl").exists())
+
+    def test_the_history_file_is_shared_by_every_account(self):
+        other = Path(self.home) / "other-account"
+        other.mkdir()
+        self.release("a")
+        self.release("b")
+        self.finish(self.start("a"))
+        self.finish(self.start("b", home=str(other)))
+        self.assertEqual(stat.S_IMODE(os.stat(self.slots / "history.jsonl").st_mode), 0o666)
+        self.assertEqual(len(self.history()), 2)
 
 
 if __name__ == "__main__":

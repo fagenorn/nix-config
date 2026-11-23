@@ -60,6 +60,12 @@ with a slot free. Live runs take the repository lock like ordinary ones. The loc
 a slot file and no count includes it, and it is held like a slot (a descriptor the command does
 not inherit), so a SIGKILLed holder frees its repository at once.
 
+History. Every run that got past setup appends one line to `history.jsonl` in the slot directory
+(see `agent_tools.delivery.verify_history`), after it gave its slot and repository lock back:
+a run that took a slot, one that reached `--wait-limit` and one signalled while it waited. A run
+that held no slot records `held_seconds: null`. A setup or usage error records nothing. A failed
+append prints `HISTORY_FAILED_LINE` once and leaves the exit code alone.
+
 Count (D1). It is the `verify_slots` member of the host declaration
 (`agent_tools.delivery.host_admission`), `DEFAULT_VERIFY_SLOTS` (1) when the declaration
 file is absent. A declaration entry that exists and is invalid, or is not a file, is a setup
@@ -76,7 +82,8 @@ live waiter prints `DEFERRING_LINE` once; a run that gave a slot back because an
 has its repository prints `SAME_REPOSITORY_LINE` once. A run that waited and then took a slot
 prints `WAITED_LINE` once, before the command starts. A run that took a slot at once prints
 nothing of its own. A run that reaches `--wait-limit` prints `NO_SLOT_LINE` and runs
-nothing. A command that cannot start prints `verify-slot: cannot start <argv0>: <error>`.
+nothing. A command that cannot start prints `verify-slot: cannot start <argv0>: <error>`. A run
+whose history line cannot be appended prints `HISTORY_FAILED_LINE` once.
 
 Exit codes (D8). The command's own code when it ran; a command ended by signal `s` gives
 `128 + s`. 2 for a usage or setup error (no `--`, no command after it, a bad `--wait-limit`,
@@ -96,6 +103,7 @@ import argparse
 import fcntl
 import hashlib
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 import signal
 import stat
@@ -103,7 +111,7 @@ import subprocess
 import sys
 import time
 
-from agent_tools.delivery import host_admission
+from agent_tools.delivery import host_admission, verify_history
 from agent_tools.project_contract.derived_values import normalize_remote_url
 
 NO_SLOT_LINE = "verify-slot: no verify slot came free within {limit}s; nothing ran"
@@ -111,6 +119,7 @@ WAITING_LINE = "verify-slot: all {count} verify slots of this host are taken; wa
 WAITED_LINE = "verify-slot: waited {seconds:.1f}s for a verify slot"
 DEFERRING_LINE = "verify-slot: a live-fault verify run is waiting for a slot; this run waits behind it"
 SAME_REPOSITORY_LINE = "verify-slot: a verify run of this repository holds a verify slot; waiting"
+HISTORY_FAILED_LINE = "verify-slot: cannot record this run in {path}: {error}"
 GROUP_LOCK = "repo-{digest}.lock"
 GIT_TIMEOUT_SECONDS = 10
 LIVE_MARKER = "live-waiting.lock"
@@ -411,6 +420,16 @@ def _run_child(argv: list[str], run: _Run) -> int:
     return 128 - code if code < 0 else code
 
 
+def _record(directory: Path, group: str | None, argv: list[str], started: datetime,
+            waited: float, held: float | None, code: int) -> None:
+    """Append this run's history line; a failure is reported and never changes the exit code."""
+    path = verify_history.history_path(directory)
+    try:
+        verify_history.append(path, verify_history.entry(group, argv, started, waited, held, code))
+    except (OSError, ValueError) as error:
+        _say(HISTORY_FAILED_LINE.format(path=path, error=error))
+
+
 def run_command(argv: list[str], wait_limit: int | None, live: bool = False) -> int:
     home = os.environ.get("HOME")
     if not home:
@@ -428,19 +447,31 @@ def run_command(argv: list[str], wait_limit: int | None, live: bool = False) -> 
     run = _Run()
     previous = {number: signal.signal(number, run.handle) for number in _HANDLED_SIGNALS}
     held = None
+    acquired = False
+    code = USAGE_EXIT
+    started = datetime.now(timezone.utc)
+    begin = taken = time.monotonic()
+    waited, held_seconds = 0.0, None
     try:
         try:
             held, code = _acquire(directory, count, wait_limit, run, live, group)
         except OSError as error:
             raise SlotError(f"cannot take a slot in {directory}: {error}") from None
+        acquired = True
+        taken = time.monotonic()
+        waited = taken - begin
         if held is None:
             return code
-        return _run_child(argv, run)
+        code = _run_child(argv, run)
+        return code
     finally:
         if held is not None:
             _close_all(*held)
+            held_seconds = time.monotonic() - taken
         for number, handler in previous.items():
             signal.signal(number, handler)
+        if acquired:
+            _record(directory, group, argv, started, waited, held_seconds, code)
 
 
 def build_parser() -> argparse.ArgumentParser:
