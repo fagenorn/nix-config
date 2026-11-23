@@ -10,6 +10,8 @@ from agent_tools.verification import protection_tree
 
 from tests.test_verify_checks import CHECKS, ROOT, committed_mode, forge, run_from_root
 
+TIER = "fast"
+
 
 class ProtectionMatchesTreeTest(unittest.TestCase):
     PROT = "repos/o/r/branches/main/protection/required_status_checks"
