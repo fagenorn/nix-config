@@ -72,6 +72,7 @@ from pathlib import Path
 
 from agent_tools.delivery.issue_setup import REPOSITORY_ENV
 from agent_tools.project_contract import resolve_project
+from agent_tools.project_contract.agent_platform import PLATFORM_COMMANDS
 from agent_tools.system.siblings import sibling_argv
 
 OPERATION = "diff-review"
@@ -82,6 +83,7 @@ ATTEMPT_SECONDS = 1700
 GIT_TIMEOUT = 120
 MEASURE_TIMEOUT = 300
 COMPANION = "codex-companion"
+REVIEWER = PLATFORM_COMMANDS["codex-diff-review"]["argv"][-2]   # the one definition of the flag
 EXPECTED_SHAPE = f"expected {COMPANION} task [--fresh] --reviewer {OPERATION}"
 HEADINGS = ("Critical", "Important", "Minor")
 FILE_TOKEN = re.compile(r"[A-Za-z0-9_./-]+:[0-9]+")
@@ -159,9 +161,9 @@ def classify(argv: Sequence[str]) -> str | None:
     if len(argv) < 2 or argv[1] != "task":
         return "subcommand is not task"
     rest = list(argv[2:])
-    if rest.count("--reviewer") != 1 or rest[rest.index("--reviewer") + 1:][:1] != [OPERATION]:
-        return f"missing or mismatched --reviewer {OPERATION}"
-    rest.remove("--reviewer")
+    if rest.count(REVIEWER) != 1 or rest[rest.index(REVIEWER) + 1:][:1] != [OPERATION]:
+        return f"missing or mismatched {REVIEWER} {OPERATION}"
+    rest.remove(REVIEWER)
     rest.remove(OPERATION)
     extra = [token for token in rest if token != "--fresh"]
     if extra or rest.count("--fresh") > 1:

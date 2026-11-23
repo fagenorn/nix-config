@@ -1,4 +1,4 @@
-"""The shipped `direct` and `verify` procedures: their shape, their prompts and their review bounds (#1529)."""
+"""The shipped `direct` and `verify` procedures: their shape, their prompts and their review bounds."""
 
 from __future__ import annotations
 

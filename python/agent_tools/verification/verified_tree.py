@@ -477,7 +477,6 @@ def _signal_group(child: subprocess.Popen, number: int) -> None:
 
 def _slotted(argv: Sequence[str], cwd: str) -> tuple[int | None, str]:
     """One `verify-slot run` of `argv` in `cwd`: (exit code, output), or (None, output) on timeout.
-
     verify-slot leads its own session so a timeout reaches the command and its descendants, which
     verify-slot's SIGKILL cannot forward. Output goes to a file, never a pipe, so a descendant
     that outlives the command and holds its stdout cannot delay the exit code or hang a read.
