@@ -19,6 +19,7 @@ import unittest
 from agent_tools.claims import forge_markers
 from agent_tools.delivery import look_marker
 
+from .guard_fake_gh import FAKE_GH_SCRIPT
 from .guard_policy_world import GuardPolicyWorld
 
 
@@ -58,175 +59,6 @@ EXPECTED_ALLOW = [
     "Bash(artifact-budget:*)", "Bash(~/.agents/bin/artifact-budget:*)",
     "Bash(forge-issue:*)", "Bash(~/.agents/bin/forge-issue:*)", "Agent",
 ]
-
-# Stand-in for `gh`. Answers the lookups the guard makes for any slug and
-# any protected branch, so the merge path can be exercised in every fixture
-# repository: the PR, its protection, and (issue 1138) the PR body, an issue and
-# an issue's comments, the last two from FAKE_ISSUES (a JSON object of issue
-# number -> {"body", "comments"}; an absent number answers an empty issue).
-# FAKE_<STAGE>_MODE injects failures; FAKE_<STAGE>_JSON overrides
-# the payload. Mode `http_error` replays a failed `gh api` read as gh reports
-# it (issue 552): exit 1, the response body on stdout (FAKE_<STAGE>_JSON, else
-# GitHub's plan-gated protection answer) and `gh: <message> (HTTP <status>)` on
-# stderr, or `gh: HTTP 403` when the body holds no string message and status.
-FAKE_GH_SCRIPT = '''
-import base64
-import json
-import os
-import sys
-import time
-
-PLAN_GATED_BODY = (
-    '{"message":"Upgrade to GitHub Pro or make this repository public to enable this '
-    'feature.","documentation_url":"https://docs.github.com/rest/branches/'
-    'branch-protection#get-branch-protection","status":"403"}'
-)
-
-# The guard must scrub the gh-recognised token variables from its lookups (an
-# ambient token, which gh would prefer, may be narrower than the keyring
-# credential). Refusing to answer when one is visible makes every merge-path
-# test double as that assertion.
-for name in ("GITHUB_TOKEN", "GH_TOKEN"):
-    if name in os.environ:
-        print("fake gh saw " + name + " in its environment", file=sys.stderr)
-        raise SystemExit(64)
-
-argv = sys.argv[1:]
-log = os.environ.get("FAKE_GH_LOG")
-if log:
-    with open(log, "a", encoding="utf-8") as stream:
-        stream.write(json.dumps(argv) + "\\n")
-stage = None
-number = ""
-slug = ""
-branch = ""
-key = ""
-if (
-    len(argv) == 7
-    and argv[0:2] == ["pr", "view"]
-    and argv[3] == "--repo"
-    and argv[5] == "--json"
-    and argv[6] == "state,baseRefName,headRefName,headRefOid,mergeStateStatus,url,statusCheckRollup"
-):
-    stage, number, slug, branch = "pr", argv[2], argv[4], "main"
-elif (
-    len(argv) == 7
-    and argv[0:2] == ["pr", "view"]
-    and argv[3] == "--repo"
-    and argv[5] == "--json"
-    and argv[6] == "title,body,commits,closingIssuesReferences"
-):
-    stage, number, slug = "body", argv[2], argv[4]
-elif len(argv) == 2 and argv[0] == "api":
-    parts = argv[1].split("/")
-    if (
-        len(parts) == 6
-        and parts[0] == "repos"
-        and parts[3] == "branches"
-        and parts[5] == "protection"
-    ):
-        stage = "protection"
-        slug = parts[1] + "/" + parts[2]
-        branch = parts[4]
-    elif len(parts) == 5 and parts[0] == "repos" and parts[3] == "issues":
-        stage = "issue"
-        slug = parts[1] + "/" + parts[2]
-        number = parts[4]
-    elif len(parts) == 5 and parts[0] == "repos" and parts[3] == "branches":
-        stage = "branch"
-        slug = parts[1] + "/" + parts[2]
-        branch = parts[4]
-    elif (
-        len(parts) == 6
-        and parts[0] == "repos"
-        and parts[3] == "contents"
-        and parts[4] == ".github"
-        and "?ref=" in parts[5]
-    ):
-        stage = "contents"
-        slug = parts[1] + "/" + parts[2]
-        key = parts[5].split("?ref=")[1]
-    elif len(parts) == 5 and parts[0] == "repos" and parts[3] == "compare":
-        stage = "compare"
-        slug = parts[1] + "/" + parts[2]
-        key = parts[4]
-elif (
-    len(argv) == 4
-    and argv[0:3] == ["api", "--paginate", "--slurp"]
-):
-    parts = argv[3].split("?")[0].split("/")
-    if (
-        len(parts) == 6
-        and parts[0] == "repos"
-        and parts[3] == "issues"
-        and parts[5] == "comments"
-        and argv[3].endswith("?per_page=100")
-    ):
-        stage = "comments"
-        slug = parts[1] + "/" + parts[2]
-        number = parts[4]
-if stage is None:
-    print("unexpected fake-gh argv: " + repr(argv), file=sys.stderr)
-    raise SystemExit(64)
-
-mode = os.environ.get("FAKE_" + stage.upper() + "_MODE", "ok")
-if mode == "nonzero":
-    print("fake " + stage + " failure", file=sys.stderr)
-    raise SystemExit(9)
-if mode == "timeout":
-    time.sleep(2)
-if mode == "invalid":
-    print("{")
-    raise SystemExit(0)
-if mode == "http_error":
-    body = os.environ.get("FAKE_" + stage.upper() + "_JSON", PLAN_GATED_BODY)
-    try:
-        answer = json.loads(body)
-        line = "gh: " + answer["message"] + " (HTTP " + answer["status"] + ")"
-    except (ValueError, KeyError, TypeError):
-        line = "gh: HTTP 403"
-    print(body)
-    print(line, file=sys.stderr)
-    raise SystemExit(1)
-
-if stage == "pr":
-    default = (
-        '{"state":"OPEN","baseRefName":"' + branch + '",'
-        '"headRefName":"issue-' + number + '-topic",'
-        '"headRefOid":"d4d9acc0505c73305b3e0ced029db43100bc0e8a",'
-        '"mergeStateStatus":"CLEAN",'
-        '"url":"https://github.com/' + slug + "/pull/" + number + '",'
-        '"statusCheckRollup":[{"__typename":"CheckRun",'
-        '"status":"COMPLETED","conclusion":"SUCCESS"}]}'
-    )
-elif stage == "body":
-    default = '{"title": "", "body": "", "commits": [], "closingIssuesReferences": []}'
-elif stage == "issue":
-    issue = json.loads(os.environ.get("FAKE_ISSUES", "{}")).get(number, {})
-    default = json.dumps({"number": int(number), "body": issue.get("body", "")})
-elif stage == "comments":
-    issue = json.loads(os.environ.get("FAKE_ISSUES", "{}")).get(number, {})
-    default = json.dumps([issue.get("comments", [])])
-elif stage == "branch":
-    default = json.dumps({"name": branch, "commit": {"sha": os.environ.get("FAKE_BASE_SHA", "b" * 40)}})
-elif stage in ("contents", "compare"):
-    table = json.loads(os.environ.get("FAKE_LOOK_FILES" if stage == "contents" else "FAKE_COMPARES", "{}"))
-    if key not in table:
-        print('{"message":"Not Found","status":"404"}')
-        print("gh: Not Found (HTTP 404)", file=sys.stderr)
-        raise SystemExit(1)
-    if stage == "contents":
-        raw = base64.b64encode(table[key].encode()).decode()
-        default = json.dumps({"type": "file", "encoding": "base64", "content": raw})
-    else:
-        default = json.dumps(table[key])
-else:
-    default = (
-        '{"required_status_checks":{"contexts":["Nix Eval"]},'
-        '"enforce_admins":{"enabled":true}}'
-    )
-print(os.environ.get("FAKE_" + stage.upper() + "_JSON", default))
-'''
 
 # Stand-in for the row check (`guard-policy derive`). Answers from a JSON object
 # of slug -> row: FAKE_DERIVE_ROWS names one, else the class default (Nodo's row).
@@ -6285,17 +6117,24 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         }
 
     @staticmethod
-    def look_pr_json(body="", commits=(), linked=(), title="Page"):
-        """The PR lookup's answer: title, body, commit messages and linked issue numbers."""
+    def look_pr_json(body="", linked=(), title="Page"):
+        """The PR lookup's answer: title, body and linked issue numbers."""
         return json.dumps({
             "title": title,
             "body": body,
-            "commits": [{"messageHeadline": line, "messageBody": ""} for line in commits],
             "closingIssuesReferences": [
                 {"url": n if isinstance(n, str)
                  else f"https://github.com/fagenorn/nix-config/issues/{n}"}
                 for n in linked],
         })
+
+    @staticmethod
+    def look_commit_pages(commits):
+        """The commit listing's answer: the messages in pages of 100, one entry each."""
+        entries = [{"sha": f"{i:040x}", "commit": {"message": line}}
+                   for i, line in enumerate(commits)]
+        return json.dumps([entries[start:start + 100] for start in range(0, len(entries), 100)]
+                          or [[]])
 
     def look_env(self, issues, body="", branch="issue-1200-page", head=LOOK_HEAD,
                  base="main", slug="fagenorn/nix-config", number=1300, commits=(), linked=(),
@@ -6313,7 +6152,8 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             pr["headRefOid"] = head
         return {
             "FAKE_PR_JSON": json.dumps(pr),
-            "FAKE_BODY_JSON": self.look_pr_json(body, commits, linked, title),
+            "FAKE_BODY_JSON": self.look_pr_json(body, linked, title),
+            "FAKE_COMMITS_JSON": self.look_commit_pages(commits),
             "FAKE_ISSUES": json.dumps(issues),
         }
 
@@ -6326,6 +6166,47 @@ class ClaudePermissionGuardTest(unittest.TestCase):
     def assert_look_refusal(self, result, refusal=None):
         self.assertEqual(2, result.returncode, result.stderr)
         self.assertIn(refusal or self.LOOK_REFUSAL, result.stderr.splitlines())
+
+    def test_a_large_pull_request_reads_every_commit_page(self):
+        env = self.look_env(
+            self.LOOK_MARKED, branch="topic", body="Page change",
+            commits=["Routine change"] * 149 + ["Fix #1200 layout"] + ["Routine change"] * 44)
+        result = self.run_guard(self.LOOK_MERGE, self.look_repo(), env)
+        self.assert_look_refusal(result)
+
+    def test_a_pull_request_of_many_commits_settling_no_marked_issue_merges(self):
+        for count in (100, 194, 249):
+            with self.subTest(commits=count):
+                env = self.look_env(
+                    self.LOOK_MARKED, branch="topic", body="Page change",
+                    commits=["Routine change"] * count)
+                result = self.run_guard(self.LOOK_MERGE, self.look_repo(), env)
+                self.assertEqual(0, result.returncode, result.stderr)
+
+    def test_a_194_commit_pull_request_of_a_marked_issue_is_judged_like_a_small_one(self):
+        repo = self.look_repo()
+        for count in (1, 194):
+            with self.subTest(commits=count):
+                bare = self.look_env(self.LOOK_MARKED, commits=["Routine change"] * count)
+                approved = self.marked_with(
+                    self.look_comment(10), commits=["Routine change"] * count)
+                first = self.run_guard(self.LOOK_MERGE, repo, bare)
+                second = self.run_guard(self.LOOK_PINNED, repo, approved)
+                self.assert_look_refusal(first)
+                self.assertEqual(0, second.returncode, second.stderr)
+                self.assertEqual("", second.stderr)
+
+    def test_a_pull_request_past_the_commit_limit_is_refused_naming_its_count(self):
+        env = self.look_env(
+            self.LOOK_MARKED, branch="topic", body="Page change",
+            commits=["Routine change"] * 250)
+        result = self.run_guard(self.LOOK_MERGE, self.look_repo(), env)
+        self.assertEqual(2, result.returncode, result.stderr)
+        self.assertIn(
+            "lifecycle guard: unsafe merge: cannot read every commit of the PR: GitHub listed "
+            "250 commits, its limit, so a later commit may settle an issue unseen",
+            result.stderr.splitlines())
+        self.assertNotIn("PR body", result.stderr)
 
     def test_a_marked_issue_without_an_approval_refuses_the_merge(self):
         result = self.run_guard(self.LOOK_MERGE, self.look_repo(), self.look_env(self.LOOK_MARKED))
@@ -6395,6 +6276,7 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         broken.write_text("#!/bin/sh\necho '{'\n", encoding="utf-8")
         broken.chmod(0o755)
         marked = self.look_env(self.LOOK_MARKED)
+        unreadable_commits = "lifecycle guard: unsafe merge: cannot read the PR commits"
         cases = (
             ({"FAKE_ISSUE_MODE": "nonzero"}, None,
              "lifecycle guard: issue 1200 lookup failed:"),
@@ -6409,13 +6291,8 @@ class ClaudePermissionGuardTest(unittest.TestCase):
              "lifecycle guard: unsafe merge: cannot read issue 1200"),
             ({"FAKE_BODY_JSON": "{}"}, None,
              "lifecycle guard: unsafe merge: cannot read the PR body"),
-            ({"FAKE_BODY_JSON": '{"title": "", "body": "", "closingIssuesReferences": []}'}, None,
-             "lifecycle guard: unsafe merge: cannot read the PR body"),
             ({"FAKE_BODY_JSON": '{"title": "", "body": "", "commits": []}'}, None,
              "lifecycle guard: unsafe merge: cannot read the PR body"),
-            ({"FAKE_BODY_JSON":
-              '{"title": "", "body": "", "commits": [{}], "closingIssuesReferences": []}'},
-             None, "lifecycle guard: unsafe merge: cannot read the PR body"),
             ({"FAKE_BODY_JSON":
               '{"title": "", "body": "", "commits": [], "closingIssuesReferences": [{}]}'},
              None, "lifecycle guard: unsafe merge: cannot read the PR body"),
@@ -6424,8 +6301,16 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             ({"FAKE_BODY_JSON":
               '{"title": null, "body": "", "commits": [], "closingIssuesReferences": []}'},
              None, "lifecycle guard: unsafe merge: cannot read the PR body"),
-            ({"FAKE_BODY_JSON": self.look_pr_json(commits=["x"] * 100)}, None,
-             "lifecycle guard: unsafe merge: cannot read the PR body"),
+            ({"FAKE_COMMITS_MODE": "nonzero"}, None, "lifecycle guard: PR commit lookup failed:"),
+            ({"FAKE_COMMITS_MODE": "timeout"},
+             ("--gh-bin", str(self.fake_gh), "--child-timeout-seconds", "0.5"),
+             "lifecycle guard: PR commit lookup timed out"),
+            ({"FAKE_COMMITS_MODE": "invalid"}, None, unreadable_commits),
+            ({"FAKE_COMMITS_JSON": "[{}]"}, None, unreadable_commits),
+            ({"FAKE_COMMITS_JSON": "[[1]]"}, None, unreadable_commits),
+            ({"FAKE_COMMITS_JSON": '[[{"sha": "x"}]]'}, None, unreadable_commits),
+            ({"FAKE_COMMITS_JSON": '[[{"commit": {"message": null}}]]'}, None,
+             unreadable_commits),
             ({}, ("--gh-bin", str(self.fake_gh), "--look-bin", str(broken)),
              "lifecycle guard: look check failed:"),
         )

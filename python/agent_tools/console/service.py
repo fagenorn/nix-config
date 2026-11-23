@@ -1071,7 +1071,7 @@ hold any text, is never printed; any other exception is `console: live_fault_wit
 the owner withdraws a declaration of an ended sprint too. It nudges nobody and sends no message; a refusal
 appends and publishes nothing.
 
-Owner notice nudges (#1120, ADR-console-053, D6): with a nudger, `post_owner_notice` records, still under the
+Owner notice nudges (#1120, ADR-console-044): with a nudger, `post_owner_notice` records, still under the
 lock, in `_notice_due[sprint_id]` the new row's seq for each sprint of the project with `sprints.takes_notices`
 and `_reachable` (every `_nudgeable` condition but the unread message), and reserves in `_nudging` and
 dispatches `_dispatch_notice_nudge` after the lock each of them not already reserved; a reserved sprint keeps
@@ -1152,7 +1152,7 @@ prompt after a restart before its hook's next wait, takes no answer); 500 `permi
 (`prompt_card.prompts`) at construction and on every append, and the view lists the open ones through
 `prompt_items`. `/api/hooks` and the lifecycle guard are not touched.
 
-Owner notices (#1120, ADR-console-053): `POST /api/owner-notice` (`{"project_id", "text"}`, at most
+Owner notices (#1120, ADR-console-044): `POST /api/owner-notice` (`{"project_id", "text"}`, at most
 `MAX_OWNER_NOTICE_BYTES` 4096) and `POST /api/owner-notice-withdraw` (`{"project_id", "notice"}`, at most
 `MAX_OWNER_NOTICE_WITHDRAW_BYTES` 4096) are page writes: both pass `_page_write`'s guard before any body is
 read (no or a foreign `Origin` is 403 `origin refused`, a missing or wrong token 403 `token refused`,
@@ -1441,7 +1441,7 @@ None, and `movement.merged` keeps the last good reading of the pull requests: th
 its wait for the quiet window from the last time anything moved, then goes quiet. The fold also
 receives the issues whose run is in a session not ended (`live`) and those of them in a lock step (`IssueStage.locking`,
 #1184); a holding pull request's issues count only when live (a run that died holding the lock leaves its pull request
-holding until a waiter takes it over, ADR-console-061 D1); a lock step counts only in a good read that saw a pull request hold a lock, and a failed
+holding until a waiter takes it over, ADR-console-050); a lock step counts only in a good read that saw a pull request hold a lock, and a failed
 read refreshes no lock time, a journal lock step's included, so a lock wait ages out with the rest
 of the kept reading. The merged reading
 is kept per project in memory only (a restart reads at once), published, and never appended to the
@@ -4053,7 +4053,7 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         """Write views as they publish; `delivered` hears each version once written.
 
         Only the owner's stream passes it: a guest view never carries the evidence card, so a frame
-        written to a colleague shows the owner nothing (ADR-console-071 D4).
+        written to a colleague shows the owner nothing (ADR-console-071).
         """
         console = self.server.console
         self.close_connection = True
@@ -8294,7 +8294,7 @@ class ConsoleService:
         return chosen
 
     def _relays_in_bypass(self, sprint_id: str) -> bool:
-        """Under the ingest lock: whether the sprint's newest logged mode (ADR-console-060 D4) is bypass, so its relay must come from a bypassing sender (ADR-console-068)."""
+        """Under the ingest lock: whether the sprint's newest logged mode (ADR-console-060) is bypass, so its relay must come from a bypassing sender (ADR-console-068)."""
         sprint = self._sprints.get(sprint_id)
         return (sprint is not None and sprint.permission is not None
                 and sprint.permission.mode == permission.BYPASS)
@@ -9194,7 +9194,7 @@ class ConsoleService:
     def _run_wait(self, sprint: sprints.SprintState, session: sessions.SessionState | None,
                   now_ms: int) -> bool:
         """Under the ingest lock: whether a run of the session still in progress reads a wait of
-        ADR-console-050 or ADR-console-061 inside the quiet window (#1381)."""
+        ADR-console-050 inside the quiet window (#1381)."""
         if session is None or self._run_moved(session) is None:
             return False
         issues = {issue.issue for (sid, _), state in self._deliveries.items()
@@ -9885,7 +9885,7 @@ class ConsoleService:
             comment = answer.with_retries(
                 record, clock=self._monotonic, sleep=self._write_sleep, on_retry=on_retry)
             # The tracker offers no way to make the read and the post one step, so the pull request is
-            # read once more before the answer is declared recorded (ADR-console-074 D10).
+            # read once more before the answer is declared recorded (ADR-console-074).
             state, found = answer.with_retries(
                 lambda: self._look_reader(slug, look.pr), clock=self._monotonic,
                 sleep=self._write_sleep, on_retry=on_retry)

@@ -112,6 +112,7 @@ AUTHORED = (
     "/bindings/vcs/integration_branch",
     "/bindings/commands",
     "/bindings/workflow/verification_conditions",
+    "/bindings/workflow/verification_before_pull_request",
     "/bindings/workflow/orchestration/stall_minutes",
     "/capabilities",
     "/projections",
