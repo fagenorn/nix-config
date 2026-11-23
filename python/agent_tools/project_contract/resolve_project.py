@@ -309,14 +309,16 @@ PATHS_LIST_MEMBERS = (
 PATHS_MEMBERS = ("artifacts",) + PATHS_LIST_MEMBERS
 COMMAND_MEMBERS = ("argv", "cwd", "env")
 WORKFLOW_MEMBERS = ("verification", "orchestration", "review")
-# The workflow members an author may leave out: `light_lane` (#279) and
-# `verification_conditions` (issue 437). For each, `null` and absent both mean
-# none (every declared verification id runs), and the resolver never inserts
-# either member itself. `light_lane` is accepted on a schema-2 contract, and no
-# tool reads it; schema 3 does not have it (`schema_three.RETIRED`).
-WORKFLOW_OPTIONAL_MEMBERS = ("light_lane", "verification_conditions")
+# The workflow members an author may leave out: `light_lane` (#279),
+# `verification_conditions` (issue 437) and `verification_before_pull_request`.
+# For each, `null` and absent both mean none, and the resolver never inserts any
+# of them itself. `light_lane` is accepted on a schema-2 contract, and no tool
+# reads it; schema 3 does not have it (`schema_three.RETIRED`).
+WORKFLOW_OPTIONAL_MEMBERS = (
+    "light_lane", "verification_conditions", "verification_before_pull_request")
 # What a schema-3 contract may leave out: `light_lane` is retired.
-SCHEMA_THREE_WORKFLOW_OPTIONAL_MEMBERS = ("verification_conditions",)
+SCHEMA_THREE_WORKFLOW_OPTIONAL_MEMBERS = (
+    "verification_conditions", "verification_before_pull_request")
 # #310: the one orchestration member an author may leave out; never defaulted.
 ORCHESTRATION_OPTIONAL_MEMBERS = ("stall_minutes",)
 LIGHT_LANE_MEMBERS = ("mode", "budget_minutes", "risk_paths")
@@ -1014,6 +1016,26 @@ def validate_workflow(workflow: dict, commands: dict | None,
             for index, entry in enumerate(light_lane["risk_paths"]):
                 check_contract_glob(entry, f"{pointer}/risk_paths/{index}", violations)
     validate_verification_conditions(workflow, violations)
+    validate_verification_before_pull_request(workflow, commands, violations)
+
+
+def validate_verification_before_pull_request(
+        workflow: dict, commands: dict | None, violations: list[dict]) -> None:
+    """The optional `bindings.workflow.verification_before_pull_request` member (issue 1683 D3, D5).
+
+    Its ids are checked against the effective commands in every schema, because
+    schema 3 never authors `verification` but does author this list.
+    """
+    pointer = "/bindings/workflow/verification_before_pull_request"
+    value = workflow.get("verification_before_pull_request")
+    if value is None or not check_list(value, pointer, "workflow", violations):
+        return
+    if not value:
+        violations.append(violation(
+            pointer, "must be a non-empty list of command ids",
+            "contract.workflow.empty_command_list"))
+    for index, entry in enumerate(value):
+        check_command_id(entry, f"{pointer}/{index}", commands, violations)
 
 
 def validate_verification_conditions(workflow: dict, violations: list[dict]) -> None:
@@ -2553,3 +2575,4 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+# suppress-standard:B17 the contract's validators share this module's check helpers and violation shape, and a split module would import it back
