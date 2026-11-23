@@ -43,7 +43,11 @@ let
   # package puts no tool on a user's PATH.
   tools = pkgs.buildEnv {
     name = "agent-platform-tools";
-    paths = [ pkgs.ruff ];
+    paths = [
+      pkgs.ruff
+      pkgs.nodejs
+      pkgs.eslint
+    ];
     pathsToLink = [ "/bin" ];
   };
 
@@ -74,8 +78,10 @@ let
     "guard-policy" = "guard.guard_policy";
     "host-readiness" = "project_contract.host_readiness";
     "issue-branch" = "delivery.issue_branch";
+    "lint-time" = "delivery.lint_time";
     "look-approval" = "delivery.look_approval";
     "look-lint" = "delivery.look_lint";
+    "node-lint" = "delivery.node_lint";
     "owner-actions" = "claims.owner_actions";
     "plan-amend" = "delivery.plan_amend";
     "program-copies" = "delivery.program_copies";

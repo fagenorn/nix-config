@@ -73,6 +73,7 @@
 | Limit reading | Console |
 | Limit sensing | Hosts |
 | Limit stop | Console |
+| Lint-time issue | Delivery |
 | Live fault | Console |
 | Live-fault lane | Delivery |
 | Look approval | Delivery |
@@ -142,7 +143,6 @@
 | Waiting since | Console |
 
 ## Relationships
-
 - **Delivery → Claims, Verification**: a delivery holds a **Claim** and lands under the **Land lock**; one that leaves evidence criteria holds its issue with a **Verify block**.
 - **Verification → Claims**: an **Owner prompt** is an **Owner-action marker**.
 - **Release → Guard**: the forge adapter passes each mutation through the guard. **Guard → Project contract**: a **Derived row** comes from a resolved **Project contract** and the **Fleet registry**. **Project contract → every area**: each command reads the **ResolvedProject**.
