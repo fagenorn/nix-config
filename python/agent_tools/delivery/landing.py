@@ -28,6 +28,23 @@ headed at `<b>` and keeps those into `<i>`: `open` (`pr`, `head`, `url` of the o
 state is `MERGED`; `merge_commit` is the merge commit's sha) or `open` (it is not merged).
 `head` is the pull request's own head sha, for the caller to compare with `<sha>`.
 
+`lock --repo <owner/name> --integration-branch <i> --head <sha>` takes the land lock of `<i>` at
+`<sha>`, waiting its turn (`forge-claim land acquire --wait`): `held` (the lock's verdict is
+`acquired`, `already_held` or `moved`), `contended` (another pull request holds it past the wait),
+`no-pull` (no open pull request into `<i>` is headed at `<sha>`, so no lock was taken) or `error`.
+The lock's own answer is the `lock` member. `held` with the same flags reads the lock once and
+never waits: `held` (`already_held` or `moved`), `retaken` (`acquired`: the lock was lost and taken
+again, which is never `held`), `contended`, `no-pull` or `error`. `unlock` with the same flags
+releases it: `released` (the lock is free or another pull request's) or `unreleased` (any failure,
+`detail`; the lock may still be at `<sha>`); it never answers `error`.
+
+`checks --repo-root <path> --repo <owner/name> --pr <n> --head <sha>` reads the pull request's check
+rollup every `CHECK_POLL_SECONDS` for at most `CHECK_BOUND_SECONDS`: `green`, `red` (`failing`, the
+names), `pending`, `moved` (the rollup was read at another head, `remote`) or `error`. A `CheckRun`
+is green when it is `COMPLETED` with conclusion `SUCCESS`, `SKIPPED` or `NEUTRAL`, a `StatusContext`
+when its state is `SUCCESS`. With required checks declared in the contract each must be named by an
+entry and every entry naming it green; with none declared every entry counts and one is needed.
+
 `criteria_close(body)` and `placement(repo_root, issue)` are the policy the engine's later
 steps import: whether the issue's criteria let a pull request close it, and the branch, the
 worktree path, the integration branch and the tracker slug of the issue.
@@ -41,16 +58,27 @@ import os
 import re
 import subprocess
 import sys
+import time
 from contextlib import contextmanager
 from collections.abc import Iterator, Mapping
 from pathlib import Path
 
+from agent_tools.claims import forge_land_lock
 from agent_tools.delivery import issue_branch
 from agent_tools.project_contract import resolve_project
 from agent_tools.system import forge_api
 from agent_tools.verification import verified_tree
 
 GIT_TIMEOUT = 120
+CHECK_POLL_SECONDS = 30
+CHECK_BOUND_SECONDS = 3000
+CHECK_FIELDS = "headRefOid,statusCheckRollup"
+GREEN_CONCLUSIONS = ("SUCCESS", "SKIPPED", "NEUTRAL")
+UNSETTLED_STATES = ("PENDING", "EXPECTED")
+LOCK_HELD = ("already_held", "moved")
+# The poll's clock and sleep, module level so a test can move time (as forge_land_lock does).
+monotonic = time.monotonic
+sleep = time.sleep
 PULL_FIELDS = "number,headRefOid,baseRefName,url"
 MERGE_FIELDS = "state,headRefOid,mergeCommit"
 CRITERIA_HEADING = re.compile(r"^##\s+acceptance criteria\s*$", re.IGNORECASE)
@@ -224,6 +252,106 @@ def merged(args: argparse.Namespace) -> dict:
     return {"verdict": "merged", "merge_commit": oid, "head": head}
 
 
+def _land_lock(action: str, args: argparse.Namespace, *, wait: bool) -> tuple[int, dict]:
+    """`forge_land_lock.run` on arguments built here; a forge failure is a `Failure`."""
+    request = argparse.Namespace(action=action, repo=args.repo, branch=args.integration_branch,
+                                 sha=args.head, wait=wait, release=False, follow_head=False)
+    try:
+        status, answer = forge_land_lock.run(request)
+    except forge_api.ForgeError as error:
+        raise Failure(error.code, error.detail, error.transient) from None
+    if not isinstance(answer, dict) or not isinstance(answer.get("verdict"), str):
+        raise Failure("payload_invalid", "the land lock answered no verdict")
+    return status, answer
+
+
+def _lock_reading(status: int, answer: dict, held: Mapping[str, str]) -> dict:
+    """The verdict of an acquire answer: `held` maps the lock verdicts that are not contention."""
+    if status == 2 and answer.get("error") == "no_open_pr":
+        return {"verdict": "no-pull", "lock": answer}
+    if status == 2:
+        raise Failure("usage", answer.get("detail"))
+    if status == 0 and answer["verdict"] in held:
+        return {"verdict": held[answer["verdict"]], "lock": answer}
+    if status == 3:
+        return {"verdict": "contended", "lock": answer}
+    raise Failure("payload_invalid", f"the land lock answered exit {status}: {answer['verdict']}")
+
+
+def lock(args: argparse.Namespace) -> dict:
+    status, answer = _land_lock("acquire", args, wait=True)
+    return _lock_reading(status, answer, {"acquired": "held", "already_held": "held", "moved": "held"})
+
+
+def held(args: argparse.Namespace) -> dict:
+    status, answer = _land_lock("acquire", args, wait=False)
+    return _lock_reading(status, answer, {"acquired": "retaken", "already_held": "held", "moved": "held"})
+
+
+def unlock(args: argparse.Namespace) -> dict:
+    try:
+        status, answer = _land_lock("release", args, wait=False)
+    except Failure as failure:
+        return {"verdict": "unreleased", "detail": f"{failure.code}: {failure.detail}"}
+    if (status, answer["verdict"]) in ((0, "released"), (3, "not_held")):
+        return {"verdict": "released", "lock": answer}
+    return {"verdict": "unreleased", "detail": f"the land lock answered exit {status}: {answer['verdict']}"}
+
+
+def _entry_name(entry: object) -> str | None:
+    if not isinstance(entry, dict):
+        return None
+    name = entry.get("name") if entry.get("__typename") == "CheckRun" else entry.get("context")
+    return name if isinstance(name, str) else None
+
+
+def _entry_state(entry: dict) -> str:
+    """`green`, `red` (settled and not green) or `pending` (still running or unknown)."""
+    if entry.get("__typename") == "CheckRun":
+        if entry.get("status") != "COMPLETED":
+            return "pending"
+        return "green" if entry.get("conclusion") in GREEN_CONCLUSIONS else "red"
+    state = entry.get("state")
+    if state == "SUCCESS":
+        return "green"
+    return "pending" if state in UNSETTLED_STATES or not isinstance(state, str) else "red"
+
+
+def _rollup_reading(rollup: object, declared: list[str]) -> tuple[str, list[str]]:
+    """(`green`, `red` or `pending`, the names of the failing checks) of one rollup read."""
+    if not isinstance(rollup, list) or not all(_entry_name(entry) for entry in rollup):
+        raise Failure("payload_invalid", "the check rollup is not a list of named checks")
+    groups: dict[str, list[str]] = {}
+    for entry in rollup:
+        groups.setdefault(_entry_name(entry), []).append(_entry_state(entry))
+    if declared:
+        groups = {name: groups.get(name, ["pending"]) for name in declared}
+    failing = sorted(name for name, states in groups.items() if "red" in states)
+    if failing:
+        return "red", failing
+    settled = bool(groups) and all(state == "green" for states in groups.values() for state in states)
+    return ("green" if settled else "pending"), []
+
+
+def checks(args: argparse.Namespace) -> dict:
+    declared = _resolve(args.repo_root)["bindings"]["vcs"]["merge"].get("required_checks") or []
+    started = monotonic()
+    while True:
+        view = _forge(["pr", "view", str(args.pr), "--repo", args.repo, "--json", CHECK_FIELDS])
+        if not isinstance(view, dict) or not isinstance(view.get("headRefOid"), str):
+            raise Failure("payload_invalid", "the pull request has no head")
+        if view["headRefOid"] != args.head:
+            return {"verdict": "moved", "remote": view["headRefOid"]}
+        verdict, failing = _rollup_reading(view.get("statusCheckRollup"), declared)
+        if verdict == "red":
+            return {"verdict": "red", "failing": failing}
+        if verdict == "green":
+            return {"verdict": "green"}
+        if monotonic() - started >= CHECK_BOUND_SECONDS:
+            return {"verdict": "pending"}
+        sleep(CHECK_POLL_SECONDS)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = _Parser(prog="landing", description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True, parser_class=_Parser)
@@ -249,10 +377,21 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_argument("--repo", required=True)
     sub.add_argument("--pr", required=True, type=number)
     sub.add_argument("--head", required=True)
+    for name in ("lock", "held", "unlock"):
+        sub = commands.add_parser(name)
+        sub.add_argument("--repo", required=True)
+        sub.add_argument("--integration-branch", required=True)
+        sub.add_argument("--head", required=True)
+    sub = commands.add_parser("checks")
+    sub.add_argument("--repo-root", required=True)
+    sub.add_argument("--repo", required=True)
+    sub.add_argument("--pr", required=True, type=number)
+    sub.add_argument("--head", required=True)
     return parser
 
 
-COMMANDS = {"prepare": prepare, "pushed": pushed, "pull": pull, "merged": merged}
+COMMANDS = {"prepare": prepare, "pushed": pushed, "pull": pull, "merged": merged, "lock": lock,
+            "checks": checks, "held": held, "unlock": unlock}
 
 
 def main(argv: list[str] | None = None) -> int:

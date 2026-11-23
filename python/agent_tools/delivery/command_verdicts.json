@@ -96,7 +96,11 @@
       "prepare": ["ready", "unverified", "error"],
       "pushed": ["pushed", "head-moved", "absent", "error"],
       "pull": ["open", "absent", "error"],
-      "merged": ["merged", "open", "error"]
+      "merged": ["merged", "open", "error"],
+      "lock": ["held", "contended", "no-pull", "error"],
+      "checks": ["green", "red", "pending", "moved", "error"],
+      "held": ["held", "retaken", "contended", "no-pull", "error"],
+      "unlock": ["released", "unreleased"]
     }
   },
   "lint-time": null,
