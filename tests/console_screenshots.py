@@ -39,7 +39,7 @@ Contract:
   once and Refuse under "1 thing needs you"; on a console that does not know the route (the base answers 405) the seed
   is the `PermissionRequest` hook row only, which is the before picture; `permission-long` is the same sprint holding a
   long heredoc command (a python3 script that rewrites test names, a `cat` into `/tmp` and a `git diff` into `review/diff.txt`),
-  so the card shows its summary of what it reads, runs and writes above the folded text, and the base console the raw text (#1621);
+  so the card shows its summary of what it reads, runs and writes above the folded text, and the base console the raw text;
   `waiting-until` is the `stuck` sprint whose report states a wait until a time two hours
   ahead (#1380), so its line reads "waiting until" with that time, and `paused` the same sprint whose
   report states a pause with `PAUSE_REASON`, so its line reads "paused: " and the reason (a base console

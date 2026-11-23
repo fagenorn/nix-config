@@ -1,8 +1,8 @@
-"""A long command's permission card shows its summary and folds the full text (#1621, ADR-console-104)."""
+"""A long command's permission card shows its summary and folds the full text (ADR-console-104)."""
 
 import unittest
 
-from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures
 from .test_console_page import PERMISSION_ITEM, START, frame, full, nodes, of_class, permission_cards, render
 
 TIER = "fast"  # the page harness under node and the standard library

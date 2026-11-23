@@ -1,4 +1,4 @@
-"""What a long command's text names, for the permission card (#1621, ADR-console-105).
+"""What a long command's text names, for the permission card (ADR-console-105).
 
 A permission card shows a held command verbatim. A long command (a here-document, a chain) buries what
 matters: what it runs, what it writes, and what reaches outside the project. `summarize` is the pure

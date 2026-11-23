@@ -1,4 +1,4 @@
-"""The picture run's held permission prompts (#1424, #1621): the constants and the signed posts that hold a manager's prompt open while a shot is taken."""
+"""The picture run's held permission prompts (#1424): the constants and the signed posts that hold a manager's prompt open while a shot is taken."""
 from __future__ import annotations
 
 import http.client

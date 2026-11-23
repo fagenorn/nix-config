@@ -1,4 +1,4 @@
-"""The picture run's held permission prompts (#1424, #1621).
+"""The picture run's held permission prompts (#1424).
 
 Run: just agent-workflow-tests
 """
@@ -14,7 +14,7 @@ from unittest import mock
 
 from . import console_screenshot_permissions as perms
 from . import console_screenshots as shots
-from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures
 
 TIER = "integration"  # the real picture-run capture serves a console per width
 

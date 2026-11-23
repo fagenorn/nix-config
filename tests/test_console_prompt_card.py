@@ -339,7 +339,7 @@ class PromptCardTest(unittest.TestCase):
 
 
 class CommandSummaryTest(unittest.TestCase):
-    """What a long command's text names: programs, writes, outside paths, interpreter scripts (#1621)."""
+    """What a long command's text names: programs, writes, outside paths, interpreter scripts."""
 
     ROOT = "/srv/p00"
     PAD = "\n# " + "> /etc/shadow " * 20
