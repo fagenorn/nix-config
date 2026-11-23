@@ -1932,7 +1932,7 @@ tracker, movement, retention, digest and spend threads and the folder-trust star
 
 `POST /api/project-question` (#1176, ADR-console-058) carries one JSON body of `project_id` and
 `question`, and optionally a non-empty string `thread_id` (#1178, ADR-console-062), an optional
-`request_key` of 32 lowercase hex digits that the console asks once per project (ADR-console-089 D9) and an
+`request_key` of 32 lowercase hex digits that the console asks once per project (ADR-console-089) and an
 optional boolean `deep` (#1274, ADR-console-101)
 (`MAX_PROJECT_QUESTION_BYTES`, 16384, the checks of the goal route): a body
 `project_question.parse_ask` does not accept (a non-boolean `deep` included) is 400 `bad question`; `project_question.Refused` is
@@ -5672,7 +5672,7 @@ class ConsoleService:
         makes it a follow-up (#1178, ADR-console-062): it is checked against the project's folded
         questions after the question's own checks and before the profile choice, and its thread's
         turns go to the job. A `request_key` already on a folded question of the project returns
-        that question's id, or a receipt of one, and appends, counts and dispatches nothing (ADR-console-089 D9); the
+        that question's id, or a receipt of one, and appends, counts and dispatches nothing (ADR-console-089); the
         check precedes the follow-up check, so a re-sent follow-up is not refused. Refusals are
         `project_question.Refused` and append and count nothing. A credential-shaped text is
         refused first, before every other check and before the request-key replay (#1272). A `deep`
@@ -5833,7 +5833,7 @@ class ConsoleService:
         That section also rechecks that `project_id` still holds `root`: a checkout path taken by another
         project since the question was admitted would put the next owner's activations after the cutoff,
         so the gathering raises and the question is a failed answer. A question asked before the first
-        spend poll reads the spend view first through the console's own poll (#1357, ADR-console-090),
+        spend poll reads the spend view first through the console's own poll (#1357, ADR-console-089),
         and spend stays null only when that read failed. A `deep` question also reads its project's own
         delivery transcripts, aggregated (`transcript_digest.project_runs`, #1274, ADR-console-101), from the
         later of the spend window's first day and the day the project began to hold `root`, outside the lock,

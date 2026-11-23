@@ -190,7 +190,7 @@ def scanned_files(archived_dirs: tuple[str, ...] = ()) -> list[tuple[str, list[s
 
 
 RETIRED_DELIVERY_RECORDS = (2, 9, 10, 11)
-RETIRED_CONSOLE_RECORDS = (2, 9, 25, 39, 40, 41, 53, 55, 56, 57, 61, 64, 69, 81, 82)
+RETIRED_CONSOLE_RECORDS = (2, 9, 25, 39, 40, 41, 53, 55, 56, 57, 61, 64, 69, 81, 82, 90)
 LATER_THAN_076 = re.compile(r"^docs/areas/console/adr/(?:07[7-9]|0[89]\d|[1-9]\d\d)-")
 SUB_DECISION_027_TO_051 = re.compile(
     r"\bADR-console-(0(?:2[7-9]|[34]\d|5[01]))(?:'s)? \(?(?:D\d|Consequences)")
@@ -638,6 +638,13 @@ class DocsTreeTest(unittest.TestCase):
     def test_the_console_registration_and_adoption_records_083_to_088_are_cut_and_cited_whole(self):
         numbers = (83, 84, 88)
         self.assertEqual([int(p.name[:3]) for p in console_records(numbers)], [83, 84, 88])
+        self.assertEqual(console_form_findings(numbers), [])
+        self.assertEqual(
+            sub_decision_hits(numbers, SUB_DECISION_077_TO_098, LATER_THAN_098), [])
+
+    def test_the_console_question_session_records_089_and_093_are_cut_and_cited_whole(self):
+        numbers = (89, 93)
+        self.assertEqual([int(p.name[:3]) for p in console_records(numbers)], [89, 93])
         self.assertEqual(console_form_findings(numbers), [])
         self.assertEqual(
             sub_decision_hits(numbers, SUB_DECISION_077_TO_098, LATER_THAN_098), [])
