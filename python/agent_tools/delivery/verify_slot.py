@@ -501,7 +501,10 @@ def report_command(hours: int) -> int:
         records, skipped = verify_history.read(path)
     except OSError as error:
         raise SlotError(f"cannot read {path}: {error}") from None
-    since = datetime.now(timezone.utc) - timedelta(hours=hours)
+    try:
+        since = datetime.now(timezone.utc) - timedelta(hours=hours)
+    except OverflowError:
+        since = datetime.min.replace(tzinfo=timezone.utc)
     for summary in verify_history.summarize(records, since):
         print(verify_history.report_line(summary, budget))
     if skipped:

@@ -672,6 +672,22 @@ class VerifySlotTest(unittest.TestCase):
         self.assertTrue(self.report()[1][0].startswith("example/alpha runs=10 "))
         self.assertEqual(self.report("--hours", "0")[0], 2)
 
+    def test_a_line_with_an_integer_too_large_for_a_float_is_skipped(self):
+        huge = '{"command":"x","exit":0,"held_seconds":5,"repository":null,' \
+            '"started":"2026-11-23T00:00:00Z","waited_seconds":1' + "0" * 400 + "}"
+        self.write_history(self.rec("example/beta", 30, 2), raw=[huge])
+        code, lines, err = self.report()
+        self.assertEqual(code, 0)
+        self.assertEqual(len(lines), 1)
+        self.assertIn(REPORT_SKIPPED_LINE.format(count=1, path=self.slots / "history.jsonl"),
+                      err.splitlines())
+
+    def test_a_window_reaching_before_the_calendar_reports_every_run(self):
+        self.write_history(*self.alpha_records())
+        code, lines, _ = self.report("--hours", "100000000")
+        self.assertEqual(code, 0)
+        self.assertTrue(lines[0].startswith("example/alpha runs=11 "))
+
     def test_a_median_hold_at_the_budget_is_not_marked(self):
         self.declare(verify_budget_seconds=600)
         self.write_history(*[self.rec("example/beta", held, 1) for held in (500, 600, 700)])

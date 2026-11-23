@@ -122,7 +122,7 @@ def _readable(line: bytes) -> dict | None:
               and type(record["exit"]) is int
               and _is_seconds(record["waited_seconds"])
               and (record["held_seconds"] is None or _is_seconds(record["held_seconds"])))
-    except (ValueError, KeyError, RecursionError):
+    except (ValueError, KeyError, RecursionError, OverflowError):
         return None
     return record if ok else None
 
