@@ -89,6 +89,12 @@ that check as before any visit of the step. A `run_continued` carries no `head`;
 the visit's graded `outcome` and, for a command step that holds `head`, the repository head only when it
 is the same before and after the step's process. None are open: a new run is created.
 
+The leftover rule comes after the procedure rule and before every other rule, for a continued and a
+superseded run: the process group of the run's last `process_started` whose visit stored no result is
+ended (`engine_stop.end_leftover`) when its pid is alive with the recorded start time (`same_process`),
+before any visit is graded and before anything is appended, so no session of the interrupted engine runs
+beside the new one. A process that does not match is left alone.
+
 A continued run whose procedure copy declares a `format` the engine does not read is superseded: it gets
 one `stop_reached` named `superseded` (need `nothing`) at its last entered step (`deliver` when it entered
 none) and one history line, and the same call then creates a new run from `--procedures` and runs it; the
@@ -421,6 +427,7 @@ def deliver(issue: int, procedures_dir: Path, *, clock: Callable[[], datetime] |
                               f"{issue} are all open; the engine continues one run only")
             if open_runs and _superseded(open_runs[0]):
                 held.append(_take_run_lock(open_runs[0], holder["started"]))
+                _end_leftover(open_runs[0])
                 _supersede(open_runs[0], clock)
                 _release(held)
                 open_runs = []
@@ -463,8 +470,18 @@ def deliver(issue: int, procedures_dir: Path, *, clock: Callable[[], datetime] |
         _release(held)
 
 
+def _end_leftover(run_dir: Path) -> None:
+    """End the process group a killed engine left running for the run's interrupted visit."""
+    state = engine_ledger.fold(engine_ledger.read_run(run_dir),
+                               engine_ledger.replay(run_dir / "events.jsonl"),
+                               engine_stop.same_process)
+    if state.process is not None and state.alive:
+        engine_stop.end_leftover(state.process["pid"])
+
+
 def _continue(run_dir: Path, table: CommandTable, inputs: dict) -> None:
     """Record where the run's next walk re-enters; a stored but ungraded visit is graded first."""
+    _end_leftover(run_dir)
     procedure = _load(run_dir / "procedure" / f"{ENTRY}.json")
     steps = {item["id"]: item for item in procedure["steps"]}
     ledger = engine_ledger.replay(run_dir / "events.jsonl")
