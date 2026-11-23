@@ -20,7 +20,7 @@ stored result holds when a stopped run continues), `in` (distinct paths,
 `<step id>.<member>` or `run.<input>`), `on` (outcome -> target; required on every step except a group
 member, forbidden on one), `max_visits` (integer >= 1; its presence makes the
 step bounded) and `mutates` (bool). Kind members: `command`: `command`,
-optional `subcommand`, its arguments being its `in` paths, and optional `check`
+optional `subcommand`, optional `wait` (one of `WAITS`), its arguments being its `in` paths, and optional `check`
 (an object with `command` and optional `subcommand`: the command that reads
 whether the step's effect already happened; a command step with `mutates` true
 requires one and no other step carries one); `agent`: `role`,
@@ -139,8 +139,9 @@ PLATFORM_LISTS: Mapping[str, frozenset[str]] = {
 HOLDS = ("run", "head", "live")
 COMMON_REQUIRED = ("id", "stage", "kind", "holds")
 COMMON_OPTIONAL = ("in", "on", "max_visits", "mutates")
+WAITS = ("usage-limit", "host-slot", "lock", "checks")
 KIND_MEMBERS = {
-    "command": (("command",), ("subcommand", "check")),
+    "command": (("command",), ("subcommand", "check", "wait")),
     "agent": (("role", "prompt", "reply", "outcome_from"), ()),
     "decide": (("grader",), ()),
     "group": (("members",), ()),
@@ -396,6 +397,8 @@ def _kind_members(item: dict, kind: str, label: str | None, found: _Findings) ->
             invalid("command must be a command id.")
         if "subcommand" in item and not (isinstance(item["subcommand"], str) and NAME_RE.fullmatch(item["subcommand"])):
             invalid(f"subcommand must match {NAME_RE.pattern}.")
+        if "wait" in item and item["wait"] not in WAITS:
+            invalid(f"wait must be one of {', '.join(WAITS)}.")
         _check_member(item, label, found)
     elif kind == "agent":
         if "role" in item and not _is_text(item["role"]):

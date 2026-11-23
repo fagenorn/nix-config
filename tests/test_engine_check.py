@@ -24,6 +24,7 @@ from typing import Callable
 from unittest import mock
 
 from agent_tools.delivery import engine, engine_reply, procedure_check
+from agent_tools.delivery.engine_commands import LIFECYCLE_ARGV
 from agent_tools.delivery.procedure_check import CommandDeclaration, load_commands
 from tests.engine_walks import reply_schemas, step_outcomes, walk_edges
 from tests.guard_policy_world import install_platform_manifest_in_environ
@@ -782,6 +783,28 @@ class RefusedOutcomeTest(unittest.TestCase):
         self.assertEqual(code2, 0, out2)
 
 
+class WaitMemberTest(unittest.TestCase):
+    def refusals(self, change: Callable[[dict], None]) -> list[tuple[str, str]]:
+        code, out, _ = run_check("--procedures", str(broken_copy(editing("toy", change))))
+        if code == 0:
+            return []
+        return [(r["defect"], r["step"]) for r in json.loads(out)["refusals"]]
+
+    def test_a_command_step_may_declare_a_wait_of_the_closed_set(self):
+        for wait in procedure_check.WAITS:
+            with self.subTest(wait):
+                self.assertEqual(self.refusals(
+                    lambda toy: step(toy, "scope").update(wait=wait)), [])
+
+    def test_a_wait_outside_the_closed_set_is_an_invalid_field(self):
+        self.assertEqual(self.refusals(lambda toy: step(toy, "scope").update(wait="forever")),
+                         [("invalid_field", "scope")])
+
+    def test_an_agent_step_that_declares_a_wait_is_an_undefined_field(self):
+        self.assertEqual(self.refusals(lambda toy: step(toy, "draft").update(wait="lock")),
+                         [("undefined_field", "draft")])
+
+
 class RefusalTableTest(unittest.TestCase):
     def test_each_case_is_refused_by_step_and_defect(self):
         for case in CASES:
@@ -1208,7 +1231,7 @@ class ShippedProcedureTest(unittest.TestCase):
 class DeclarationTest(unittest.TestCase):
     def test_the_declarations_name_every_command_table_row(self):
         self.assertIn("engine", table_rows())
-        self.assertEqual(set(load_commands()), set(table_rows()))
+        self.assertEqual(set(load_commands()), set(table_rows()) | set(LIFECYCLE_ARGV))
 
     def test_the_toy_commands_declare_their_verdicts(self):
         commands = load_commands()

@@ -28,6 +28,10 @@ the process starts, polls it while the process runs (`engine_stop.communicate`) 
 `Stopped` once it is true, also when the process has already ended. `Ran.stdout`/`stderr` are what
 it printed (stderr is empty untimed).
 
+Four lifecycle ids (`LIFECYCLE_ARGV`) are rows of fixed words with numbered slots: a procedure supplies only
+slot values, each one argv word, so the spelling is always the one the guard accepts; the guard judges them
+like any command.
+
 The platform command table holds each platform id's wall bound (`PLATFORM_WALL_SECONDS`) and the one
 bound of every project command (`PROJECT_WALL_SECONDS`); the engine times every step run by it and
 captures its stderr. The module runs processes, so the pure engine core never imports it.
@@ -43,6 +47,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import signal
 import subprocess
@@ -66,6 +71,16 @@ PLATFORM_MODULES: Mapping[str, str] = MappingProxyType({
     "resolve-project": "project_contract.resolve_project",
     "verified-tree": "verification.verified_tree",
 })
+LIFECYCLE_ARGV: Mapping[str, tuple[str, ...]] = MappingProxyType({
+    "git-push": ("git", "-C", "{0}", "push", "origin", "{1}"),
+    "pr-create": ("gh", "pr", "create", "--repo", "{0}", "--base", "{1}", "--head", "{2}",
+                  "--title", "{3}", "--body", "{4}"),
+    "pr-merge": ("gh", "pr", "merge", "{0}", "--repo", "{1}", "--merge", "--match-head-commit",
+                 "{2}", "--delete-branch"),
+    "branch-delete": ("git", "-C", "{0}", "branch", "-d", "{1}"),
+})
+LIFECYCLE_WALL_SECONDS = 600
+SLOT_RE = re.compile(r"^\{(\d+)\}$")
 POSITIONAL: frozenset[str] = frozenset({"diff-scope"})
 PLATFORM_WALL_SECONDS: Mapping[str, float] = MappingProxyType({
     "diff-scope": 300,
@@ -159,6 +174,11 @@ class CommandTable:
                 (*sibling_argv(self.platform[command]),
                  *([subcommand] if subcommand else []), *words),
                 self.root)
+        if command in LIFECYCLE_ARGV:
+            if subcommand is not None:
+                raise UnknownCommand(f"{command}: a lifecycle command takes no subcommand")
+            return Invocation(tuple(self._slot(command, word, args)
+                                    for word in LIFECYCLE_ARGV[command]), self.root)
         if command in self.project and subcommand is None:
             entry = self.project[command]
             return Invocation((*entry["argv"], *words), entry["cwd"])
@@ -166,10 +186,21 @@ class CommandTable:
             raise UnknownCommand(f"{command}: a project command takes no subcommand")
         raise UnknownCommand(f"{command}: not a platform or project command")
 
+    @staticmethod
+    def _slot(command: str, word: str, args: Sequence[tuple[str, object]]) -> str:
+        slot = SLOT_RE.match(word)
+        if slot is None:
+            return word
+        if int(slot[1]) >= len(args):
+            raise UnknownCommand(f"{command}: slot {slot[1]} has no argument")
+        return argument(args[int(slot[1])][1])
+
     def wall_seconds(self, command: str) -> float:
-        """The wall bound of a command step: its platform row, else the project bound."""
+        """The wall bound of a command step: its platform row, the lifecycle bound, else the project's."""
         if command in self.platform:
             return PLATFORM_WALL_SECONDS[command]
+        if command in LIFECYCLE_ARGV:
+            return LIFECYCLE_WALL_SECONDS
         if command in self.project:
             return PROJECT_WALL_SECONDS
         raise UnknownCommand(f"{command}: not a platform or project command")

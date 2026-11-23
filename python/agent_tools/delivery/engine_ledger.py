@@ -70,7 +70,7 @@ from agent_tools.canonical import (
     reject_nonfinite_literal,
 )
 from agent_tools.delivery.procedure_check import (
-    INPUT_RE, NAME_RE, NEEDS, ROLES, STAGES, _inside)
+    INPUT_RE, NAME_RE, NEEDS, ROLES, STAGES, WAITS, _inside)
 
 RUN_ID_RE = re.compile(r"^([1-9][0-9]*)-([0-9]{8}T[0-9]{6}Z)-([a-z0-9]{4})$")
 TOKEN_RE = re.compile(r"^[a-z0-9]{4}$")
@@ -78,7 +78,6 @@ RUN_MEMBERS = ("host", "inputs", "issue", "platform_revision", "procedure", "pro
                "run", "sequence", "started")
 PARENT_MEMBER = "parent"
 OPTIONAL_RUN_MEMBERS = ("tracker", PARENT_MEMBER)
-WAITS = ("usage-limit", "host-slot", "lock")
 TOKEN_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789"
 TOKEN_COUNTS = frozenset(("input", "cache_write", "cache_read", "output"))
 

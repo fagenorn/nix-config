@@ -4,6 +4,9 @@
   "agent-model-matrix": null,
   "artifact-budget": null,
   "attempt-budget": null,
+  "branch-delete": {
+    "verdicts": []
+  },
   "bypass-proof": null,
   "cache-proxy": null,
   "cleanup-issue": null,
@@ -42,6 +45,9 @@
     }
   },
   "forge-issue": null,
+  "git-push": {
+    "verdicts": []
+  },
   "guard-policy": null,
   "host-readiness": null,
   "independent-review": {
@@ -99,7 +105,13 @@
   "node-lint": null,
   "owner-actions": null,
   "plan-amend": null,
+  "pr-create": {
+    "verdicts": []
+  },
   "pr-green": null,
+  "pr-merge": {
+    "verdicts": []
+  },
   "program-copies": null,
   "promotion": null,
   "release": null,

@@ -28,7 +28,7 @@ its own staged copy only. The engine supplies four inputs, each only to a proced
 An agent step runs as one headless session (`engine_session`) in the project
 root: its role body, rendered prompt and a session record are stored under the
 run's `sessions/`, the session holds one of the engine route's agent slots (`engine_slots`) from before
-`session_starting` to the end of its last launch, waiting with `wait_started` and `wait_ended` (`host-slot`)
+`session_starting` to the end of its last launch, waiting with `wait_started` and `wait_ended` (`host-slot`; a command step's declared `wait` brackets its process the same way)
 when none is free, `session_starting` is on disk before the process is spawned,
 and a session that ends normally is graded only by the `outcome_from` member of its
 structured reply, so neither the prose nor the exit code selects an outcome. A reading with no
@@ -1005,6 +1005,10 @@ def _visit(run_dir: Path, table: CommandTable, step: dict, action: engine_core.R
     name, visit = action.step, action.visit
     engine_ledger.append_event(run_dir, {"event": "step_entered", "at": _now(), "step": name,
                                          "visit": visit, "stage": step["stage"]})
+    wait = step.get("wait")
+    if wait:
+        engine_ledger.append_event(run_dir, {"event": "wait_started", "at": _now(),
+                                             "wait": wait, "until": None})
 
     def started(pid: int) -> None:
         engine_ledger.append_event(run_dir, {"event": "process_started", "at": _now(),
@@ -1024,6 +1028,8 @@ def _visit(run_dir: Path, table: CommandTable, step: dict, action: engine_core.R
         ran = engine_commands.run(table, action.command, action.subcommand, action.args,
                                   guard=_guard(), on_start=started,
                                   timeout=table.wall_seconds(action.command), stop=stop)
+    if wait:
+        engine_ledger.append_event(run_dir, {"event": "wait_ended", "at": _now(), "wait": wait})
     after = read_head(table.root) if step["holds"] == "head" else None
     try:
         _grade_command(run_dir, step, name, visit, ran, before if before == after else None, member)
