@@ -87,6 +87,7 @@ OWN_JOB = "Lint Time"
 RECORD_PREFIX = "lint-times v1 "
 LOG_STAMP = re.compile(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d+)?Z ")
 BOM = "\ufeff"
+ESCAPE_FLAG = "--allow-escape-sequences"
 
 
 class LintTime(NamedTuple):
@@ -332,8 +333,15 @@ class GitHubLintTime(cleanup_issue.GitHubTracker):
         job_id = job.get("id")
         if not isinstance(job_id, int) or isinstance(job_id, bool):
             raise invalid(f"run {run_id}: job {name} has no id")
-        status, text = forge_api.run_gh(
-            ["api", f"repos/{self.slug}/actions/jobs/{job_id}/logs"], allow=(404, 410))
+        path = f"repos/{self.slug}/actions/jobs/{job_id}/logs"
+        try:
+            status, text = forge_api.run_gh(["api", path], allow=(404, 410))
+        except forge_api.ForgeError as error:
+            # A log carries the step's own color codes, and a newer gh refuses them unless told
+            # to pass them; an older gh has no such flag, so it is asked for only after a refusal.
+            if ESCAPE_FLAG not in error.detail:
+                raise
+            status, text = forge_api.run_gh(["api", ESCAPE_FLAG, path], allow=(404, 410))
         return None if status else text
 
     def records(self) -> list[Record]:

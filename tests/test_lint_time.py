@@ -298,6 +298,24 @@ class GitHubLintTimeTest(unittest.TestCase):
         self.assertEqual(len(asked), 21)
         self.assertNotIn(f"repos/{SLUG}/actions/jobs/1003/logs", asked)
 
+    def test_a_log_gh_refuses_for_terminal_escape_sequences_is_read_with_the_flag(self):
+        runs = [{"id": 1, "created_at": "2026-11-01T00:00:00Z"}]
+        jobs = {1: [{"id": 1001, "name": "Conformance"}]}
+        api_get, stub, _ = forge(runs, jobs, {1001: (0, log_of(1))})
+        refusal = ("the response contains terminal escape sequences; "
+                   "pass --allow-escape-sequences to output it anyway")
+
+        def run_gh(argv, allow=()):
+            if "--allow-escape-sequences" not in argv:
+                raise lint_time.forge_api.ForgeError("gh_failed", refusal)
+            return stub([a for a in argv if a != "--allow-escape-sequences"], allow)
+
+        with mock.patch.object(lint_time.forge_api, "api_get", api_get), \
+                mock.patch.object(lint_time.forge_api, "run_gh", run_gh):
+            records = lint_time.GitHubLintTime(SLUG, "main").records()
+
+        self.assertEqual([r.total_ms for r in records], [1000])
+
     def test_a_gone_log_is_skipped(self):
         runs = [{"id": n, "created_at": f"2026-11-{n:02d}T00:00:00Z"} for n in (1, 2)]
         jobs = {n: [{"id": 1000 + n, "name": "Conformance"}] for n in (1, 2)}
