@@ -577,6 +577,12 @@ class DocsTreeTest(unittest.TestCase):
         self.assertEqual(console_form_findings(numbers), [])
         self.assertEqual(sub_decision_hits(numbers), [])
 
+    def test_the_console_sprint_reading_records_are_cut_and_cited_whole(self):
+        numbers = (42, 48, 50, 51)
+        self.assertEqual([int(p.name[:3]) for p in console_records(numbers)], [42, 48, 50, 51])
+        self.assertEqual(console_form_findings(numbers), [])
+        self.assertEqual(sub_decision_hits(numbers), [])
+
     def test_the_sub_decision_pattern_finds_a_cited_sub_decision(self):
         self.assertIsNotNone(SUB_DECISION_027_TO_051.search("ADR-console-0" + "28 D10"))
         self.assertIsNotNone(SUB_DECISION_027_TO_051.search("ADR-console-0" + "34's Consequences"))

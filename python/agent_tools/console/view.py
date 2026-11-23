@@ -1331,7 +1331,7 @@ def _effective_stages(state: SprintState) -> list[tuple[int, str, str]]:
 
 def owner_check(item: Mapping) -> bool:
     """Whether a tracker item is a verification owner prompt or a held-issue review card
-    (ADR-console-051 D1, ADR-console-054)."""
+    (ADR-console-051, ADR-console-054)."""
     return item.get("reason") in verify_owner.REASONS or item.get("reason") == inbox.REVIEW_REASON
 
 
@@ -1599,7 +1599,7 @@ def run_reading(run: DeliveryState, now_ms: int | None,
     """A run's reading. Without `waits` it is the journal's alone. With them its base is the newest
     of the journal and the run's session output and running check, and its latest also takes the
     wait signals; the wait is named only with a clock when the base is `QUIET_AFTER_MS` old and a
-    wait is not (ADR-console-050 D3, ADR-console-069)."""
+    wait is not (ADR-console-050, ADR-console-069)."""
     signals = [run.moved_ms]
     if waits is not None:
         signals += [ms for ms in (waits.output_ms, waits.check_ms) if ms is not None]
@@ -1621,7 +1621,7 @@ def run_reading(run: DeliveryState, now_ms: int | None,
 def run_sprint(run: DeliveryState, sprints: Iterable[SprintState],
                manager_ids: Mapping[str, Collection[str]]) -> SprintState | None:
     """The sprint a run belongs to: the first of `sprints` (newest stated first) that has not ended
-    and either names one of the run's issues or lists the run's session (ADR-console-042 D3)."""
+    and either names one of the run's issues or lists the run's session (ADR-console-042)."""
     numbers = {i.issue for i in run.issues}
     return next((s for s in sprints
                  if ended_at(s) is None

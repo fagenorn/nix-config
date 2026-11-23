@@ -235,7 +235,7 @@ FAILED_TEXT = "could not start a manager"
 WAITING_TEXT = "waiting on quota until"
 MISSING_TEXT = "the manager is not running"
 
-# The plain words a failed launch is shown with (ADR-console-042 D1: never "stalled", which
+# The plain words a failed launch is shown with (ADR-console-042: never "stalled", which
 # "installed" holds, so the missing-program text avoids that word).
 UNTRUSTED_TEXT = "this account does not trust the project's folder"
 NOT_INSTALLED_TEXT = "a program the manager needs is missing on this host"
