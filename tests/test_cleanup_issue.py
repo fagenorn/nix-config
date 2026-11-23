@@ -19,7 +19,7 @@ from unittest import mock
 
 from agent_tools.delivery import cleanup_issue
 from agent_tools.delivery.cleanup_issue import (
-    RULES, CleanupRule, Issue, Outcome, draft, is_cleanup, listing, run)
+    RULES, CleanupRule, Issue, Outcome, draft, is_cleanup, is_fix_change, listing, run)
 from agent_tools.delivery.never_rise import Enforcer, Snapshot, Violation
 from agent_tools.system.forge_api import ForgeError
 from tests.test_never_rise import commit_all, fixture_env, git, repo, write
@@ -176,6 +176,17 @@ class MarkerTest(unittest.TestCase):
         self.assertFalse(is_cleanup("see <!-- agent:cleanup v1 rule=B17 --> here"))
         self.assertFalse(is_cleanup("<!-- agent:cleanup v2 rule=B17 -->"))
         self.assertFalse(is_cleanup("<!-- agent:claim v1 issue=3 -->"))
+
+    def test_the_fix_marker_counts_only_as_a_whole_line(self):
+        self.assertTrue(is_fix_change("x\n<!-- agent:cleanup-fix v1 rule=PY7 -->\r\n"))
+        self.assertFalse(is_fix_change("see <!-- agent:cleanup-fix v1 rule=PY7 --> here"))
+        self.assertFalse(is_fix_change("<!-- agent:cleanup-fix v2 rule=PY7 -->"))
+        self.assertFalse(is_fix_change("<!-- agent:cleanup v1 rule=PY7 -->"))
+        self.assertFalse(is_cleanup("<!-- agent:cleanup-fix v1 rule=PY7 -->"))
+
+    def test_an_extra_field_or_a_repeated_key_is_no_cleanup_marker(self):
+        self.assertFalse(is_cleanup("<!-- agent:cleanup v1 rule=B17 extra=1 -->"))
+        self.assertFalse(is_cleanup("<!-- agent:cleanup v1 rule=B17 rule=B18 -->"))
 
 
 def at(path: str, *lines: int) -> list[Violation]:

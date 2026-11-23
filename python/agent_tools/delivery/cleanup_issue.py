@@ -27,10 +27,12 @@ the batch, and the listing stops at the first file that does not fit. A file is
 never cut, so a file listed is a file cleared.
 
 Marker. A cleanup issue carries the line `<!-- agent:cleanup v1 rule=<id> -->`
-in its body. `is_cleanup` is true when any line of the body, after trailing
-spaces, tabs and carriage returns are dropped, is exactly that marker; the same
-text inside a longer line, another version or another kind is no marker, so a
-hand-filed issue is never taken for a cleanup issue.
+in its body, and a fix change the line `<!-- agent:cleanup-fix v1 rule=<id> -->`;
+`forge_markers.body_markers` parses both. `is_cleanup` and `is_fix_change` are
+true when any line of the body, after trailing spaces, tabs and carriage returns
+are dropped, is exactly that marker with the one field `rule`; the same text
+inside a longer line, another version, another kind or with another field is no
+marker, so a hand-filed issue is never taken for a cleanup issue.
 
 Body. `draft` renders the title `Clear <n> of the <count> violations of rule
 <id>` and a body of the marker line, a summary line naming the count and the
@@ -108,6 +110,7 @@ from pathlib import Path
 from typing import NamedTuple, Protocol
 from urllib.parse import quote
 
+from agent_tools.claims import forge_markers
 from agent_tools.delivery import (
     comment_lint, copied_test_lint, never_rise, node_lint, record_lint, ruff_lint,
     size_lint, skipped_test_lint)
@@ -118,6 +121,9 @@ COMMAND = "cleanup-issue"
 SLUG = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 FILER = "github-actions[bot]"
 TRUSTED: tuple[str, ...] = ("OWNER", "MEMBER")
+CLEANUP_KIND = "cleanup"
+FIX_KIND = "cleanup-fix"
+# The wire form of the cleanup marker, kept for reference; `forge_markers.body_markers` parses it.
 MARKER = re.compile(r"<!-- agent:cleanup v1 rule=(?P<rule>[A-Za-z0-9._:/@+-]+) -->")
 B17_GUIDANCE = ("Split each listed file so that no file is over 1,500 lines, without changing "
                 "behaviour. Move code with its history (B9) and keep every test.")
@@ -254,12 +260,24 @@ def counts(snapshot: Snapshot, rules: Sequence[CleanupRule] = RULES) -> dict[str
     return found
 
 
+def _has_rule_marker(body: str, kind: str) -> bool:
+    return any(set(fields) == {"rule"} for fields in forge_markers.body_markers(body, kind))
+
+
 def is_cleanup(body: str) -> bool:
-    return any(MARKER.fullmatch(line.rstrip(" \r\t")) for line in body.splitlines())
+    return _has_rule_marker(body, CLEANUP_KIND)
+
+
+def is_fix_change(body: str) -> bool:
+    return _has_rule_marker(body, FIX_KIND)
 
 
 def open_cleanup(issues: Iterable[Issue]) -> list[int]:
     return sorted(issue.number for issue in issues if is_cleanup(issue.body))
+
+
+def open_fix_changes(changes: Iterable[Issue]) -> list[int]:
+    return sorted(change.number for change in changes if is_fix_change(change.body))
 
 
 def select(found: Mapping[str, Sequence[Violation]],
@@ -331,9 +349,7 @@ def run(tracker: Tracker, snapshot: Snapshot, rules: Sequence[CleanupRule] = RUL
 
 
 def trusted(item: Mapping) -> bool:
-    user = item.get("user")
-    login = user.get("login") if isinstance(user, dict) else None
-    return login == FILER or item.get("author_association") in TRUSTED
+    return forge_markers.trusted_author(item, (FILER,), TRUSTED)
 
 
 class GitHubTracker:
