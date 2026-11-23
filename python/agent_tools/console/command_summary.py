@@ -486,8 +486,9 @@ class _Reader:
         return texts
 
     def command(self, items, feeders=()):
-        """Fold one simple command; return whether its standard input reaches a program other than a data reader. `feeders` are the earlier
-        (items, reaches) commands of its pipeline."""
+        """Fold one simple command; return whether its standard input reaches a program other than a data reader.
+
+        `feeders` are the earlier (items, reaches) commands of its pipeline."""
         words = [item for item in items if item.kind == "word"]
         first = 0
         while first < len(words) and (words[first].word.value == "!"

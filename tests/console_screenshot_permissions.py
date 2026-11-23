@@ -1,4 +1,5 @@
-"""The picture run's held permission prompts (#1424): the constants and the signed posts that hold a manager's prompt open while a shot is taken."""
+"""The picture run's held permission prompts: the constants and the signed posts that hold a manager's prompt open
+while a shot is taken."""
 from __future__ import annotations
 
 import http.client
@@ -39,7 +40,9 @@ HELD_PROMPTS = {"permission-card": (PERMISSION_COMMAND, PERMISSION_WORDS),
 
 
 def _permission_post(service: ConsoleService, fixture: Fixture, body: Mapping) -> tuple[int, dict]:
-    """One POST of `body`, signed as the manager's hook signs it (a fresh nonce, the sprint's secret never sent), to the permission route by its literal path: its status and JSON."""
+    """One POST of `body`, signed as the manager's hook signs it (a fresh nonce, the sprint's secret never sent).
+
+    It goes to the permission route by its literal path; the result is its status and JSON."""
     sprint_id = fixture.prompting
     body = {**body, "sprint_id": sprint_id, "nonce": secrets.token_hex(16)}
     body["auth"] = prompt_card.request_auth(read_secret(fixture.secrets, sprint_id),
@@ -58,8 +61,8 @@ def _permission_post(service: ConsoleService, fixture: Fixture, body: Mapping) -
 def hold_permission(service: ConsoleService, fixture: Fixture, state: str = "permission-card") -> int | None:
     """The manager's held Bash prompt of `state` (a `HELD_PROMPTS` key): its id, or None on a console without the route.
 
-    A console that does not know the route (the base commit answers 405, another 404) gets the `PermissionRequest` hook row
-    alone, which is what its manager's hook produces there.
+    A console that does not know the route (the base commit answers 405, another 404) gets the `PermissionRequest`
+    hook row alone, which is what its manager's hook produces there.
     """
     command, words = HELD_PROMPTS[state]
     status, answer = _permission_post(service, fixture, {

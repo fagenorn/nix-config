@@ -1,4 +1,4 @@
-"""The picture run's held permission prompts (#1424).
+"""The picture run's held permission prompts.
 
 Run: just agent-workflow-tests
 """
