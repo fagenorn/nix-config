@@ -53,7 +53,7 @@ class FixtureProject:
         self.worktree_prefix: str = vcs["worktree"]["prefix"]
 
     def _draft(self) -> dict:
-        draft = self.world.contract(self.slug, self.slug)
+        draft = self.world.contract(self.slug, self.slug, publication_free=True)
         commands = draft["bindings"]["commands"]
         commands["lint"] = {"argv": [sys.executable, "-m", "py_compile", "fixture/greet.py"],
                             "cwd": ".", "env": []}

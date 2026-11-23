@@ -28,6 +28,9 @@ class FixtureTest(unittest.TestCase):
         self.assertEqual(snapshot["project"]["id"], "example/fixture")
         for capability in ("review.code", "review.plan"):
             self.assertNotEqual(snapshot["capabilities"][capability]["state"], "blocked")
+        # A publication-free release holds no host adapter, so the adoption's capability gate
+        # passes on a Linux runner that has no codesign, security or launchctl.
+        self.assertEqual(snapshot["capabilities"]["release"]["state"], "unsupported")
         self.assertEqual(world.git(fixture.root, "rev-parse", "main"),
                          world.git(fixture.root, "rev-parse", "origin/main"))
         subprocess.run(["git", "-C", str(fixture.root), "merge-base", "--is-ancestor",
