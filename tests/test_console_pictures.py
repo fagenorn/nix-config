@@ -1568,12 +1568,10 @@ class PictureDocsTest(unittest.TestCase):
             "# ADR-console-036 — The console keeps a manager's pictures and serves them only to the page")
         for needle in ("#1089", "POST /api/picture", "X-Console-Sprint", "X-Console-Secret",
                        "image/png", "2 MiB", "413", "SHA-256", "0600", "0700", "picture.stored",
-                       "`pictures`", "one day", "ADR-console-009", "ADR-console-013",
+                       "`pictures`", "one day", "ADR-console-013",
                        "ADR-console-019"):
             with self.subTest(needle):
                 self.assertIn(needle, text)
-        self.assertIn("ADR-console-036", self.doc(
-            "docs/areas/console/adr/009-events-are-kept-for-90-days.md"))
         context = self.doc("docs/areas/console/CONTEXT.md")
         self.assertIn("**Picture**:", context)
         self.assertIn("ADR-console-036", context)
@@ -1588,7 +1586,7 @@ class PictureDocsTest(unittest.TestCase):
             "size in a viewer")
         text = self.doc(name)
         for needle in ("#1090", "8", "140", "before", "after", "X-Console-Token", "object URL",
-                       "blob:", "Escape", "inert", "480", "ADR-console-002", "ADR-console-019",
+                       "blob:", "Escape", "inert", "480", "ADR-console-019",
                        "ADR-console-033", "ADR-console-036", "#1091"):
             with self.subTest(needle):
                 self.assertIn(needle, text)
@@ -1599,9 +1597,6 @@ class PictureDocsTest(unittest.TestCase):
             with self.subTest(path):
                 lines = (ROOT / adr / path).read_text().splitlines()
                 self.assertEqual(next(r for r in lines if r.startswith("- **Status:**")), amended)
-        lines = (ROOT / adr / "002-the-desk-page-design-rules.md").read_text().splitlines()
-        status = next(r for r in lines if r.startswith("- **Status:**"))
-        self.assertTrue(status.endswith("ADR-console-035, ADR-console-038, ADR-console-052, ADR-console-056, ADR-console-064, ADR-console-086"), status)
         context = (ROOT / "docs/areas/console/CONTEXT.md").read_text()
         for term in ("**Question round**:", "**Picture**:"):
             entry = context[context.index(term):].split("\n\n")[0]

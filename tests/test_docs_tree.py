@@ -200,7 +200,7 @@ def scanned_files(archived_dirs: tuple[str, ...] = ()) -> list[tuple[str, list[s
 
 
 RETIRED_DELIVERY_RECORDS = (2, 9, 10, 11)
-CUT_CONSOLE_RECORDS = (3, 4, 5, 6, 8, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 26)
+RETIRED_CONSOLE_RECORDS = (2, 9, 25)
 
 
 class DocsTreeTest(unittest.TestCase):
@@ -505,15 +505,45 @@ class DocsTreeTest(unittest.TestCase):
     def test_the_console_records_001_to_026_keep_the_record_form(self):
         records = [
             p for p in sorted((REPO_ROOT / "docs/areas/console/adr").glob("[0-9][0-9][0-9]-*.md"))
-            if int(p.name[:3]) in CUT_CONSOLE_RECORDS
+            if 1 <= int(p.name[:3]) <= 26
         ]
         found = [
             (p.name, v.rule, v.line)
             for p in records
             for v in record_violations(f"docs/areas/console/adr/{p.name}", p.read_bytes())
         ]
-        self.assertEqual(len(records), len(CUT_CONSOLE_RECORDS))
+        self.assertEqual(
+            [int(p.name[:3]) for p in records],
+            [1, 3, 4, 5, 6, 8, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 26])
         self.assertEqual(found, [])
+
+    def test_the_retired_console_records_are_gone_and_cited_nowhere(self):
+        for n in RETIRED_CONSOLE_RECORDS:
+            with self.subTest(number=n):
+                pattern = re.compile(rf"\bADR-console-{n:03d}(?!\d)|console/adr/{n:03d}-")
+                files = sorted(
+                    p.name for p in (REPO_ROOT / "docs/areas/console/adr").glob(f"{n:03d}-*.md"))
+                hits = [
+                    f"{path}:{number}"
+                    for path, lines in tracked_text(())
+                    for number, line in enumerate(lines, start=1)
+                    if pattern.search(line)
+                ]
+                self.assertEqual(files, [])
+                self.assertEqual(hits, [])
+
+    def test_no_tracked_file_cites_a_sub_decision_of_a_cut_console_record(self):
+        pattern = re.compile(r"\bADR-console-0(?:0[1-9]|1\d|2[0-6])(?:'s)? \(?(?:D\d|Consequences)")
+        self.assertIsNotNone(pattern.search("ADR-console-0" + "26 (D6 and its Consequences)"))
+        self.assertIsNotNone(pattern.search("ADR-console-0" + "23 D1"))
+        self.assertIsNotNone(pattern.search("ADR-console-0" + "17's Consequences"))
+        hits = [
+            f"{path}:{number}"
+            for path, lines in tracked_text(())
+            for number, line in enumerate(lines, start=1)
+            if pattern.search(line)
+        ]
+        self.assertEqual(hits, [])
 
     def test_the_retired_delivery_records_are_gone_and_cited_nowhere(self):
         for n in RETIRED_DELIVERY_RECORDS:
@@ -763,12 +793,6 @@ class DocsTreeTest(unittest.TestCase):
         numbers = [int(n) for n in re.findall(r"ADR-console-(\d+)",
                                               adrs[0].read_text().splitlines()[0])]
         self.assertEqual(numbers, [80])
-        for older in ("024-the-owner-signs-a-profile-in-from-the-page.md",
-                      "025-the-owner-adds-an-account-from-the-page.md"):
-            status = next(row for row in (adr_dir / older).read_text().splitlines()
-                          if row.startswith("- **Status:**"))
-            amenders = [int(n) for n in re.findall(r"ADR-console-(\d+)", status)]
-            self.assertIn(80, amenders)
 
     def test_the_register_project_decision_is_recorded(self):
         self.assertIn("| Registration | Console |", self.doc("docs/CONTEXT-MAP.md"))
