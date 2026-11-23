@@ -1,4 +1,4 @@
-"""The Node enforcers: Workflow programs parse and pass ESLint's recommended set (#1467).
+"""The Node enforcers: Workflow programs parse and pass ESLint's recommended set.
 
 Rules NODE11 (parses), NODE12 (no unused binding), NODE13 (names declared once and
 used as their kind), NODE14 (no likely bug) and NODE15 (a suppression names its rule

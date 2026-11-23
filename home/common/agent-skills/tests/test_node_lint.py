@@ -1,4 +1,4 @@
-"""The Node adapter's contract (#1467): the adapter that judges Workflow programs
+"""The Node adapter's contract: the adapter that judges Workflow programs
 with `node --check` and ESLint, run from the platform's pinned tools directory.
 
 The suite holds `standard:NODE11`, `standard:NODE12`, `standard:NODE13`,
