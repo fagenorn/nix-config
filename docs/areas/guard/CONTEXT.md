@@ -17,11 +17,11 @@ The derived-only user file the policy compiler writes from the fleet registry: o
 _Avoid_: policy file
 
 **Derived row**:
-A project's entry in the compiled policy, earned only when every derivation step holds. The guard relies on its branches and checks only after the row check confirms it; its production rules only refuse and are read unconfirmed (ADR-guard-011).
+A project's entry in the compiled policy, earned only when every derivation step holds. The guard relies on its branches and checks only after the row check confirms it; its production rules only refuse and are read unconfirmed (ADR-guard-009).
 _Avoid_: generated row
 
 **Approved release path**:
-The one declared way to change production: the release profile a project contract's production section names, run through the release command. A production refusal names it. For a production rule the contract names as its console activation, the approved path is the console's Activate instead, and the refusal names it (ADR-system-004). See ADR-guard-009 and ADR-guard-011.
+The one declared way to change production: the release profile a project contract's production section names, run through the release command. A production refusal names it. For a production rule the contract names as its console activation, the approved path is the console's Activate instead, and the refusal names it (ADR-system-004). See ADR-guard-009.
 
 **Detaching word**:
 A word such as `nohup`, `setsid` or `disown` that the guard refuses in every repository, pointing at the Bash tool's background option instead.
@@ -34,13 +34,13 @@ _Avoid_: git command
 The rule that relaxes the protection demand for one answer only: a repository whose plan cannot report branch protection at all. The guard accepts that answer and nothing looser.
 
 **Production rule**:
-A rule of the project contract that names a command id, key file glob or MCP tool that changes production. The guard refuses the command in the project's checkout, a write to the key file in that checkout and a call to the MCP tool anywhere, in every permission mode, read from the project's derived row. It names the id, never the binary inside a script, alias or `just` recipe. A project that declares none declares no production. See ADR-guard-009, ADR-guard-011 and ADR-guard-012.
+A rule of the project contract that names a command id, key file glob or MCP tool that changes production. The guard refuses the command in the project's checkout, a write to the key file in that checkout and a call to the MCP tool anywhere, in every permission mode, read from the project's derived row. It names the id, never the binary inside a script, alias or `just` recipe. A project that declares none declares no production. See ADR-guard-009.
 
 **Raise label**:
 The label that raises a repository's instruction budget for one change. Only the owner applies it, and the guard refuses an agent adding it.
 
 **Read-only route**:
-A declared way to reach production that only reads, such as a project's documented read-only check. The guard admits it in every permission mode. See ADR-guard-009 and ADR-guard-011.
+A declared way to reach production that only reads, such as a project's documented read-only check. The guard admits it in every permission mode. See ADR-guard-009.
 
 **Row check**:
 The live confirmation that a derived row still matches the repository it names, made once per invocation by reading the remote and the contract on its registered branch.
