@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from agent_tools.delivery.record_lint import record_violations
 from agent_tools.project_contract.adopt_inspection import (
     blob_at,
     parses_as_evidence_record,
@@ -261,6 +262,17 @@ class DocsTreeTest(unittest.TestCase):
             text=True, capture_output=True,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_every_hosts_record_keeps_the_record_form(self):
+        paths = sorted((REPO_ROOT / "docs/areas/hosts/adr").glob("*.md"))
+        self.assertTrue(paths)
+        breaches = {}
+        for path in paths:
+            relative = path.relative_to(REPO_ROOT).as_posix()
+            found = record_violations(relative, path.read_bytes())
+            if found:
+                breaches[relative] = [violation.text() for violation in found]
+        self.assertEqual(breaches, {})
 
     def test_no_living_file_names_a_working_artifact_outside_a_pinned_link(self):
         archived = archived_files()
@@ -825,8 +837,7 @@ class DocsTreeTest(unittest.TestCase):
                       "docs/areas/console/adr/008-only-the-page-writes-with-a-token-and-its-origin.md",
                       "docs/areas/console/adr/024-the-owner-signs-a-profile-in-from-the-page.md",
                       "docs/areas/console/CONTEXT.md",
-                      "docs/areas/hosts/CONTEXT.md",
-                      "docs/areas/hosts/adr/005-account-profiles-link-shared-config.md"):
+                      "docs/areas/hosts/CONTEXT.md"):
             self.assertIn("ADR-console-025", self.doc(older))
         self.assertIn("claude-account add", self.doc("docs/areas/hosts/CONTEXT.md"))
         self.assertIn("POST /api/account-add", self.doc(
