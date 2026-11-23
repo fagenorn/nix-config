@@ -1,6 +1,6 @@
 # ADR-project-contract-018 — Adoption locks the platform revision and requires Conformance
 
-- **Status:** accepted; D11 amended in place by #1485
+- **Status:** accepted; D11 amended in place by #1485; D12, D17 and D20 amended in place by #1456
 - **Decided in:** #1454 (per #1413, #1415, #1430)
 
 ## Context
@@ -31,7 +31,7 @@ Adoption stopped at the contract: it moved files, rewrote links and generated pr
 
 **D11. Forge names (P8).** The request targets the authored schema-2 `bindings.tracker.repo_slug`, or for a schema-3 contract the slug derived from the checkout's origin remote (tracker kind `github`) and `bindings.vcs.integration_branch` of the contract the plan writes.
 
-**D12. Plan member and identity (P9).** The plan gains `plan.conformance` only when the writes are plannable, and it is the plan id's last input only then; the evidence record gains the `conformance` member and the gate row only for a repository the writes are planned for, so every existing plan id, document shape and evidence-record hash is unchanged.
+**D12. Plan member and identity (P9).** The plan gains `plan.conformance` only when the writes are plannable, and it is the plan id's last input only then, so every existing plan id and document shape is unchanged. Adoption commits no evidence record (#1418), so no record repeats the member.
 
 **D13. The origin must be the forge target (P13).** The planned `repo_slug` must equal the remote slug of the checkout, which is where apply's branch is pushed. Apply's re-check reads both effective URLs of `origin` (fetch and push) and requires each to name that repository on `github.com`. Planning fails the gate on a mismatch and apply re-checks it before its first forge request (`adopt.required_check.origin_mismatch`, no `gh` call).
 
@@ -41,13 +41,13 @@ Adoption stopped at the contract: it moved files, rewrote links and generated pr
 
 **D16. The commit's conformance bytes are proved before the forge write (P16).** After the commit, each conformance `write-file` target's committed blob must hash to its operation's `after`, the amended contract's committed blob must hash to its operation's `after`, `devenv.yaml` (which an approved reference formatter may reformat) must still carry the planned declaration, and the resolver's `check-projections` must pass in the clean worktree with the workflow it renders being the blob the commit holds; a failure is `adopt.commit.conformance_unproved`, retains the worktree and makes no forge request.
 
-**D17. Outstanding conformance work routes (P12).** A repository the writes are planned for has conformance work outstanding unless its base commit holds exactly one evidence record whose `conformance` member equals the one planned now and the plan writes none of the three files; outstanding work counts as pending work in outcome routing, so a repair is never routed to `no_change`.
+**D17. Outstanding conformance work routes (P12).** A repository the writes are planned for has conformance work outstanding unless the plan writes none of the three files and adds no workflow entry, and the history of its base commit holds an adoption commit (one whose subject is the fixed adoption subject); outstanding work counts as pending work in outcome routing, so a repair is never routed to `no_change`.
 
 **D18. One write per file (P15).** When an answered path-reference rewrite also edits a conformance target, the conformance edit is applied to the rewritten text and the file keeps its one `write-file` operation.
 
 **D19. The requirement outlives a closed adoption (P17).** Once apply has succeeded, `Conformance` is required on the integration branch before the adoption branch is pushed or merged: until the adoption pull request merges, every other pull request to that branch is blocked, and when the push fails, the pull request is closed or abandoned (ADR-console-030 D5, D7), or the adoption's own Conformance run fails, the requirement stays. Adoption never removes or narrows protection (D3), so the owner removes `Conformance` from the branch's required checks, or merges a fresh adoption.
 
-**D20. A pending record makes a repeated apply a reconciliation.** The pending record is `<worktrees>/<digest>.required-check.json` with `{plan_id, branch, commit, repo, integration_branch, result}`. Applying the same plan id while it exists skips planning, the worktree and the commit: the branch must still be the recorded commit (`adopt.required_check.pending_mismatch`), then the origin check, the state read and the settlement of D9 run, so a request that landed is never repeated and one that did not is made again. `--discard-retained` does not remove it, and the `discard` verb (the console's Cancel included) refuses `adopt.required_check.pending` while it exists, so the branch and the record are kept or removed together. The record must belong to the plan (its plan id, branch `adopt-<digest[:12]>`, repository and integration branch are the plan's, and its commit carries the plan's evidence record), else `pending_mismatch`. A record whose branch was deleted by hand, as `rollback_failed` instructs, is stale: apply and `discard` drop it and go on. Apply and `discard` of one plan hold one lock; a second holder is refused `adopt.required_check.pending`.
+**D20. A pending record makes a repeated apply a reconciliation.** The pending record is `<worktrees>/<digest>.required-check.json` with `{plan_id, branch, commit, repo, integration_branch, result}`. Applying the same plan id while it exists skips planning, the worktree and the commit: the branch must still be the recorded commit (`adopt.required_check.pending_mismatch`), then the origin check, the state read and the settlement of D9 run, so a request that landed is never repeated and one that did not is made again. `--discard-retained` does not remove it, and the `discard` verb (the console's Cancel included) refuses `adopt.required_check.pending` while it exists, so the branch and the record are kept or removed together. The record must belong to the plan (its plan id, branch `adopt-<digest[:12]>`, repository and integration branch are the plan's, and its commit's subject is the plan's adoption subject), else `pending_mismatch`. A record whose branch was deleted by hand, as `rollback_failed` instructs, is stale: apply and `discard` drop it and go on. Apply and `discard` of one plan hold one lock; a second holder is refused `adopt.required_check.pending`.
 
 ## Consequences
 

@@ -97,14 +97,6 @@ VERIFY_CHECKS = (
     "adoption-commit-derived",
 )
 
-# The adoption evidence record's members, per the spec. A committed file under
-# the evidence directory is the adoption record only if it carries all of them
-# (D34): the record is discovered rather than named, so its shape is the only
-# thing that identifies it.
-EVIDENCE_RECORD_MEMBERS = ("schema_version", "plan_id", "outcome",
-                           "base_revision", "platform", "decisions_accepted",
-                           "sources", "checks", "path_migration_map")
-
 # The path-migration record's members, per #72 and D36. The record the
 # evidence names has to be one of these, not merely a file that parses.
 MIGRATION_MAP_MEMBERS = ("schema_version", "migration_id", "moves")
@@ -178,7 +170,6 @@ RUNTIME_SENTINEL_BYTES = b"*\n"
 RUNTIME_IGNORE_PATTERN = ".agents/runtime/"
 GITIGNORE = ".gitignore"
 MIGRATION_MAP_DIR = ".agents/knowledge/archive/path-migrations"
-EVIDENCE_RECORD_DIR = ".agents/artifacts/evidence"
 
 # The one closed list of ignored paths the inspection may look at. A bare
 # ignored-tree walk is never performed: the outer half of the defence in depth
@@ -714,7 +705,7 @@ def split_nul(data: bytes) -> list[str]:
 # ignored paths, two metadata-only trees, registered worktree names, and
 # untracked files overlapping an inspected source or a planned destination.
 # Beside them sit the queries `verify` reads a pinned revision with (its tree
-# inventory, its blobs and evidence records, and their ancestry) and the
+# inventory, its blobs and adoption commits, and their ancestry) and the
 # operations `--register` reaches `origin` through: `has_remote`,
 # `remote_heads`'s one listing, `fetch_pinned`'s pinned fetch, `pin_listed`'s
 # pin of a listed commit and `export_commit`'s `git archive` export. Only
@@ -986,50 +977,6 @@ def blob_at(root: Path, revision: str, relative: str) -> bytes | None:
     return out if code == 0 else None
 
 
-def evidence_records_at(root: Path, revision: str) -> list[str]:
-    """Every `.agents/artifacts/evidence/*.json` path in the tree at `revision`.
-
-    Listed from the commit named by `revision`, not walked on disk, and one
-    level deep exactly as the glob reads: a nested file is not one of the
-    candidates D34 counts.
-    """
-    out = git_or_fail(root, "ls-tree", "-r", "--name-only", "-z", revision,
-                      "--", EVIDENCE_RECORD_DIR)
-    return sorted(path for path in split_nul(out)
-                  if is_evidence_record_path(path))
-
-
-def is_evidence_record_path(relative: str) -> bool:
-    """Whether `relative` is one of the candidates D34 counts.
-
-    The path predicate both sides share. `verify` narrows these paths to the
-    ones that parse as an adoption record (#586); a re-adoption plan still
-    supersedes every one of them.
-    """
-    prefix = EVIDENCE_RECORD_DIR + "/"
-    return (relative.startswith(prefix) and relative.endswith(".json")
-            and "/" not in relative[len(prefix):])
-
-
-def parses_as_evidence_record(data: bytes | None) -> dict | None:
-    """The record `data` holds, or None when it is not one.
-
-    Membership is the whole test: an adoption record is identified by carrying
-    every member the spec fixes, because nothing else in the repository names
-    it.
-    """
-    if data is None:
-        return None
-    try:
-        source = json.loads(data)
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        return None
-    if not isinstance(source, dict) or any(
-            member not in source for member in EVIDENCE_RECORD_MEMBERS):
-        return None
-    return source
-
-
 def parses_as_migration_map(data: bytes | None) -> dict | None:
     """The path-migration map `data` holds, or None when it is not one."""
     if data is None:
@@ -1290,7 +1237,7 @@ def overlap_targets(found: Candidates) -> list[str]:
             targets.add(group)
         if info["target"]:
             targets.add(info["target"])
-    targets.update((MIGRATION_MAP_DIR, EVIDENCE_RECORD_DIR))
+    targets.add(MIGRATION_MAP_DIR)
     return sorted(targets)
 
 

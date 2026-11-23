@@ -94,7 +94,7 @@ Resolver = Callable[..., tuple[int, object]]
 PLAN_ID_PATTERN = re.compile(r"(?:sha256:)?([0-9a-f]{64})")
 
 STORED_PLAN_MEMBERS = ("changes", "handoff", "plan", "verification")
-STORED_HANDOFF_MEMBERS = ("evidence_record", "migration_map", "repo_root")
+STORED_HANDOFF_MEMBERS = ("migration_map", "repo_root")
 STORED_PLAN_BLOCK_MEMBERS = ("base_revision", "plan_id", "project_id", "state")
 
 # What each operation kind names. `sources` and `targets` are dispatched over
@@ -825,8 +825,7 @@ def commit_message(project_id: str, digest: str, records: dict) -> str:
     """D28's fixed message: a pure function of the plan, with no trailer."""
     return (f"{adoption_subject(project_id, digest)}\n"
             "\n"
-            f"path migration map: {records['migration_map']}\n"
-            f"adoption evidence record: {records['evidence_record']}\n")
+            f"path migration map: {records['migration_map']}\n")
 
 
 COMMIT_OUTPUT_BYTES = 16384

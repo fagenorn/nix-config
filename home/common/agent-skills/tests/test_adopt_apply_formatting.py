@@ -319,23 +319,21 @@ class ReferenceFormattingApplyTest(ApplyTestCase):
             git(root, "ls-tree", result["branch"], ARCHIVED_LINK).split()[0],
             "120000")
 
-    def test_the_evidence_record_lists_the_format_answer_and_rows(self):
+    def test_the_stored_plan_lists_the_format_answer_and_rows(self):
         root = formatting_repo(self.home)
         answers = (REWRITE_ANALYZER, ("reference-format", ".py", "format"))
         document = self.planned(root, *answers)
         result = self.succeed(root, document["plan"]["plan_id"])
-        record = json.loads(git(
-            root, "show", f"{result['branch']}:{result['evidence_record']}"))
+        stored = json.loads(self.stored_plan(result["plan_id"]).read_text("utf-8"))
         for question, subject, value in answers:
             with self.subTest(subject=subject):
                 self.assertIn(
                     {"id": question, "subject": subject, "value": value},
-                    record["decisions_accepted"])
+                    stored["decisions"]["answered"])
         for member in ("reference_formatting", "reference_policies",
                        "path_references"):
             with self.subTest(member=member):
-                self.assertEqual(record[member], document[member])
-        self.assertEqual(record["plan_id"], document["plan"]["plan_id"])
+                self.assertEqual(stored[member], document[member])
 
 
 if __name__ == "__main__":

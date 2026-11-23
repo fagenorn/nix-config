@@ -41,7 +41,7 @@ PID_C = "sha256:" + "c" * 64
 BRANCH = "adopt-bbbbbbbbbbbb"
 COMMIT = "c" * 40
 APPLIED = {"branch": BRANCH, "commit": COMMIT, "plan_id": PID_B, "migration_map": "m",
-           "evidence_record": "e", "integration_branch": "develop"}
+           "integration_branch": "develop"}
 GATE = {"error": {
     "code": "verification_failed", "repair_id": "adopt.gate.cold-clone-resolves",
     "violations": [{"pointer": "/verification/commit_gates/cold-clone-resolves",

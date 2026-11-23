@@ -155,8 +155,7 @@ which regenerates `.github/workflows/conformance.yaml`; a tracked
 `.github/branch-protection.json` also gains the `Conformance` check. The plan
 publishes the lock entry, the workflow and the required check on the integration
 branch as `plan.conformance` (a member only a plan that makes the writes has),
-which is the thirteenth input of `plan_id` and which the evidence record
-repeats. The ready gate `conformance-plannable` keeps the plan `draft` with the
+which is the thirteenth input of `plan_id`. The ready gate `conformance-plannable` keeps the plan `draft` with the
 `adopt.conformance.*` repair id of the first cause when the repository cannot
 take them: no installed revision, an unnamed tracker, an `origin` that is not
 the tracker's slug, a projection of another kind holding the workflow's id or
@@ -164,7 +163,7 @@ target, a lock or `devenv.yaml` that cannot be edited, a kept lock entry that is
 not the installed revision, a protection file that cannot take the check, or a
 contract the resolver refuses with the workflow's entry in it. A repository
 without a `devenv.lock`, and the platform's own tree, are planned exactly as
-before, in plan id, operations and evidence record. Conformance work still to do
+before, in plan id and operations. Conformance work still to do
 counts as pending work, so such a repository is never routed `no_change`, and
 a path reference an answer edits in `devenv.yaml` shares the declaration's one
 write.
@@ -190,7 +189,7 @@ worktree only after proving that the commit changes exactly the paths the plan
 declared, that no Markdown file in it has more non-resolving relative links
 than its pre-move counterpart, and that the ref carries it. It never pushes,
 never merges and never writes the fleet registry. A green run prints
-`{branch, commit, plan_id, migration_map, evidence_record,
+`{branch, commit, plan_id, migration_map,
 integration_branch}`, the last read from the resolver's view of the worktree
 (null when it names none); a retained attempt's record is at
 `adopt_apply.failure_record_path(<digest>)`.
@@ -486,8 +485,7 @@ def compose_plan(root: Path, manifest: dict, answered: list[dict],
 
     links = adopt_links.derive_link_rewrites(
         root, inventory.base_revision, found.moves,
-        [path for path, _ in adopt_planning.evidence_record_members(found)]
-        + list(conversion.nested),
+        list(conversion.nested),
         adopt_planning.generated_targets(contract_source)
         | set(conversion.paths))
     base_text = adopt_entries.entry_base_text(conversion, links)
@@ -656,7 +654,7 @@ def compose_plan(root: Path, manifest: dict, answered: list[dict],
     # What counts as work left to do (routing rules 5 and 6). A projection
     # regeneration is an idempotent safety re-run that a conformant checkout
     # would perform to no effect, so counting it as work would make `no_change`
-    # unreachable; the two adoption records are excluded for the same reason,
+    # unreachable; the adoption's migration map is excluded for the same reason,
     # by being built only after this decision.
     substantive = [op for op in head + tail
                    if op["op"] != "regenerate-projection"]
@@ -676,16 +674,13 @@ def compose_plan(root: Path, manifest: dict, answered: list[dict],
         blockers = adopt_planning.blockers_for(ready_gates)
         records = adopt_planning.adoption_records(plan_id)
         bookkeeping, written = adopt_planning.bookkeeping_operations(
-            found, plan_id, outcome, inventory.base_revision, platform_block,
-            decisions, ready_gates, links.summary, path_references,
-            reference_policies, reference_formatting, conformance)
+            found, plan_id)
         contents.update(written)
         changes = head + bookkeeping + tail
         adopt_planning.check_markdown_writes(
             changes, adopt_entries.markdown_write_targets(links, conversion, source),
             frozenset(conversion.nested))
         adopt_planning.check_reference_writes(changes, set(reference_files))
-        evidence_record = records["evidence_record"]
         migration_map = records["migration_map"]
         items = adopt_planning.open_items(found)
     else:
@@ -696,7 +691,6 @@ def compose_plan(root: Path, manifest: dict, answered: list[dict],
         contents = {}
         ready_gates = [adopt_inspection.gate_entry(gate, "not_run", None)
                        for gate in adopt_inspection.READY_GATES]
-        evidence_record = None
         migration_map = None
 
     # Both values are produced by an exhaustive dispatch above, so this is
@@ -741,7 +735,6 @@ def compose_plan(root: Path, manifest: dict, answered: list[dict],
             "plan_path": str(plan_path),
             "next_command": adopt_planning.next_command_for(
                 state, outcome, root, plan_id, forward_migration, repair_id),
-            "evidence_record": evidence_record,
             "migration_map": migration_map,
         },
     }
@@ -1157,8 +1150,7 @@ def apply_stored_plan(args: argparse.Namespace, manifest: dict, digest: str,
               "message": "a pre-commit gate did not pass"} for gate in failed])
 
     branch_name = adopt_verify.integration_branch(run.resolve_payload)
-    records = {"migration_map": document["handoff"]["migration_map"],
-               "evidence_record": document["handoff"]["evidence_record"]}
+    records = {"migration_map": document["handoff"]["migration_map"]}
     signed = adopt_apply.signing_requested(run.resolve_payload)
     if signed is None:
         adopt_apply.retain_failure(digest, document, worktree, branch,

@@ -377,8 +377,7 @@ class RegistrationTest(VerifyTestCase):
         code, out, err = run("plan", "--repo-root", str(root), home=self.home)
         self.assertEqual(code, 0, err or out)
         plan_id = json.loads(out)["plan"]["plan_id"]
-        code, out, err = run("apply", "--plan-id", plan_id,
-                             "--acknowledge-deletions", home=self.home)
+        code, out, err = run("apply", "--plan-id", plan_id, home=self.home)
         self.assertEqual(code, 0, err or out)
         second = json.loads(out)
         git(root, "merge", "--ff-only", "--quiet", second["branch"])

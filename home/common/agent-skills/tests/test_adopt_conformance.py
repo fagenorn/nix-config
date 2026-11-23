@@ -475,14 +475,12 @@ class ConformanceAdoptionPlanTest(AdoptTestCase):
         self.assertEqual(doc["plan"]["state"], "draft")
         self.assertEqual(self.gates(doc), [conformance_failure(doc, "adopt.conformance.pin_incompatible")])
 
-    def test_the_evidence_record_repeats_the_conformance_member(self):
+    def test_the_plan_repeats_the_conformance_member(self):
         root = self.devenv_repo()
-        with mock.patch.object(adopt_project.subprocess, "run", _resolver_in_process), \
-                mock.patch.dict(os.environ, {"HOME": str(self.home)}):
-            composed = adopt_project.compose_plan(root, json.loads(MANIFEST.read_text("utf-8")), [])
-        record = json.loads(composed.contents[composed.document["handoff"]["evidence_record"]])
-        self.assertEqual(record["conformance"], CONFORMANCE_MEMBER)
-        self.assertIn({"id": CONFORMANCE_GATE, "status": "passed"}, record["checks"])
+        doc = self.ready_plan(root)
+        self.assertEqual(doc["plan"]["conformance"], CONFORMANCE_MEMBER)
+        self.assertEqual(self.gates(doc), [{"id": CONFORMANCE_GATE, "status": "passed",
+                                            "repair_id": None}])
 
     def test_the_running_revision_enters_the_plan_id(self):
         root = self.devenv_repo()
@@ -623,30 +621,30 @@ class ConformanceAdoptionPlanTest(AdoptTestCase):
             self.assertEqual(doc["plan"]["outcome"], "reconcile")
             self.assertEqual(doc["plan"]["state"], "draft")
             self.assertEqual(self.gates(doc), [conformance_failure(doc, "adopt.conformance.lock_unreadable")])
+        def settled_tree(**adoption) -> Path:
+            root = adopted_repo(self.home, **adoption)
+            write_devenv(root, lock=locked_lock_text(), yaml=DEVENV_YAML_DECLARED)
+            edit_contract(root, lambda contract: contract["projections"].append(
+                dict(adopt_conformance.PROJECTION_ENTRY)))
+            proc = run_module("agent_tools.project_contract.resolve_project",
+                              ("write-projections", "--repo-root", str(root)),
+                              env={**os.environ, "HOME": str(self.home)})
+            self.assertEqual(proc.returncode, 0, proc.stdout)
+            commit(root, "the settled tree")
+            return root
+
         self.fresh_home()
-        root = adopted_repo(self.home)
-        write_devenv(root, lock=locked_lock_text(), yaml=DEVENV_YAML_DECLARED)
-        edit_contract(root, lambda contract: contract["projections"].append(
-            dict(adopt_conformance.PROJECTION_ENTRY)))
-        proc = run_module("agent_tools.project_contract.resolve_project",
-                          ("write-projections", "--repo-root", str(root)),
-                          env={**os.environ, "HOME": str(self.home)})
-        self.assertEqual(proc.returncode, 0, proc.stdout)
-        commit(root, "the settled tree")
-        with self.subTest("the record names no conformance work"):
-            doc = self.ready_plan(root)
+        with self.subTest("a settled tree with no adoption commit is outstanding"):
+            doc = self.ready_plan(settled_tree(adoption=False))
             self.assertEqual(doc["plan"]["outcome"], "reconcile")
             self.assertEqual(doc["plan"]["state"], "ready", doc["plan"]["blockers"])
             self.assertEqual(doc["plan"]["conformance"], CONFORMANCE_MEMBER)
             written = self.targets(doc)
             for path in ("devenv.lock", "devenv.yaml", ".github/branch-protection.json"):
                 self.assertNotIn(path, written)
-        with self.subTest("the record carries the member"):
-            record = next((root / ".agents/artifacts/evidence").glob("*.json"))
-            document = json.loads(record.read_text("utf-8"))
-            document["conformance"] = CONFORMANCE_MEMBER
-            record.write_text(json.dumps(document) + "\n", encoding="utf-8")
-            commit(root, "record the conformance work")
+        self.fresh_home()
+        root = settled_tree()
+        with self.subTest("a settled tree with an adoption commit is no_change"):
             doc = self.ready_plan(root)
             self.assertEqual(doc["plan"]["outcome"], "no_change")
         for label, record in (("no installed revision", None),

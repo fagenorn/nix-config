@@ -62,7 +62,7 @@ TOP_LEVEL_MEMBERS = ["changes", "decisions", "evidence", "handoff",
 PLAN_MEMBERS = ["available_migration", "base_revision", "blockers",
                 "input_digest", "outcome", "plan_id", "platform",
                 "project_id", "state"]
-HANDOFF_MEMBERS = ["evidence_record", "migration_map", "next_command",
+HANDOFF_MEMBERS = ["migration_map", "next_command",
                    "plan_path", "repo_root", "state"]
 
 
@@ -2074,46 +2074,19 @@ class TypedOperationTest(AdoptTestCase):
         self.assertIsNone(op["before"])
         self.assertEqual(op["after"], sha256_hash(b"*\n"))
 
-    def test_the_migration_map_and_evidence_record_are_named_by_plan_id(self):
+    def test_the_migration_map_is_named_by_plan_id_and_is_the_only_bookkeeping_write(self):
         doc = self.ready_plan(nix_config_shape_repo(self.home))
         digest = doc["plan"]["plan_id"].split(":", 1)[1]
         self.assertEqual(
             doc["handoff"]["migration_map"],
             f".agents/knowledge/archive/path-migrations/{digest}.json")
-        self.assertEqual(doc["handoff"]["evidence_record"],
-                         f".agents/artifacts/evidence/{digest}.json")
         self.only_write(doc, doc["handoff"]["migration_map"])
-        self.only_write(doc, doc["handoff"]["evidence_record"])
-
-    def test_the_evidence_record_carries_this_plans_own_outcome(self):
-        """The record is only ever a hash in the plan, so its content is
-        rebuilt here from D34's members and compared against that hash."""
-        doc = self.ready_plan(bootstrap_repo(self.home))
-        self.assertEqual(doc["plan"]["outcome"], "bootstrap")
-        record = {
-            "schema_version": 1,
-            "plan_id": doc["plan"]["plan_id"],
-            "outcome": doc["plan"]["outcome"],
-            "base_revision": doc["plan"]["base_revision"],
-            "platform": doc["plan"]["platform"],
-            "decisions_accepted": (doc["decisions"]["recommended"]
-                                   + doc["decisions"]["answered"]),
-            "sources": [{"path": entry["path"], "before": entry["fingerprint"],
-                         "after": entry["target"]}
-                        for entry in doc["evidence"]],
-            "checks": [{"id": gate["id"], "status": gate["status"]}
-                       for gate in doc["verification"]["ready_gates"]
-                       if gate["id"] != "conformance-plannable"],
-            "link_rewrites": doc["link_rewrites"],
-            "path_references": doc["path_references"],
-            "reference_policies": doc["reference_policies"],
-            "reference_formatting": doc["reference_formatting"],
-            "path_migration_map": doc["handoff"]["migration_map"],
-        }
-        expected = json.dumps(record, sort_keys=True, indent=2,
-                              ensure_ascii=False) + "\n"
-        op = self.only_write(doc, doc["handoff"]["evidence_record"])
-        self.assertEqual(op["after"], sha256_hash(expected.encode("utf-8")))
+        self.assertEqual(
+            [target for op in doc["changes"] for target in op["targets"]
+             if target.startswith((".agents/artifacts/",
+                                   ".agents/knowledge/archive/path-migrations/"))
+             and op["op"] == "write-file"],
+            [doc["handoff"]["migration_map"]])
 
     def test_projections_are_regenerated_last(self):
         doc = self.ready_plan(nix_config_shape_repo(self.home))
