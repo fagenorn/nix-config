@@ -257,7 +257,7 @@ class ReconciledCopyTest(ApproveCase):
         self.assertEqual(git(first, "log", "--format=%s"), "legacy\none\n")
         self.assertEqual(git(first, "branch", "--show-current").strip(), "main")
         self.assertTrue((first / ".agents/project.json").is_file())
-        self.assertEqual((first / ".claude/specs/a.md").read_text(), "# spec a\n")
+        self.assertEqual((first / ".out-of-scope/a.md").read_text(), "# rejected a\n")
         self.assertEqual(git(first, "status", "--porcelain"), "")
         git(first, "commit", "-q", "--allow-empty", "-m", "x")
         git(first, "push", "-q", "origin", "main")

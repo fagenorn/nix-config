@@ -63,6 +63,7 @@ class EngineProject:
         self.record = self.tmp / "record.log"
         self.guard_log = self.tmp / "guard.log"
         self.release = self.tmp / "release"
+        self.stamps = self.tmp / "stamps.log"
         self.renewals = self.tmp / "renewals.log"
         self.answers = self.tmp / "answers.json"
         self.hold = self.tmp / "hold.pid"
@@ -133,6 +134,12 @@ class EngineProject:
             "standin-says-out-of-bounds": entry("verdict", "out-of-bounds", "0"),
             "standin-block": entry("block", str(self.release)),
             "release": entry("json", "0"),
+            "standin-stamp": entry("stamp", str(self.stamps), "1.0", "0"),
+            "standin-stamp-fail": entry("stamp", str(self.stamps), "1.0", "1"),
+            "standin-items": entry("json", "0", "approve", "approve", "approve"),
+            "standin-items-mixed": entry("json", "0", "approve", "nope", "approve"),
+            "standin-items-hold": entry("json", "0", "hold", "maybe", "approve"),
+            "standin-items-object": entry("emit", "0", '{"argv":["approve",{"id":2}]}'),
             "count-a": entry("record", str(self.tmp / "a.log")),
             "count-b": entry("record", str(self.tmp / "b.log")),
             "count-c": entry("record", str(self.tmp / "c.log")),
@@ -176,18 +183,25 @@ class EngineProject:
         return [json.loads(line) for line in self.renewals.read_text(encoding="utf-8").splitlines()]
 
     def procedures(self, steps: list[dict], *, inputs=("issue",), stops=None,
-                   keep_alive: dict | None = None) -> Path:
+                   keep_alive: dict | None = None,
+                   children: dict[str, dict] | None = None) -> Path:
         directory = Path(tempfile.mkdtemp(dir=self.tmp))
-        default = {"needs-owner": {"need": "owner-decision", "reenter": steps[0]["id"]}}
-        if keep_alive:
-            default["claim-lost"] = {"need": "owner-decision", "reenter": steps[0]["id"]}
-        document = {"format": 1,
-                    "inputs": list(inputs),
-                    "stops": stops or default,
-                    "steps": steps}
-        if keep_alive:
-            document["keep_alive"] = keep_alive
-        (directory / "deliver.json").write_text(json.dumps(document), encoding="utf-8")
+
+        def write(name: str, steps: list[dict], inputs, stops) -> None:
+            default = {"needs-owner": {"need": "owner-decision", "reenter": steps[0]["id"]}}
+            if keep_alive:
+                default["claim-lost"] = {"need": "owner-decision", "reenter": steps[0]["id"]}
+            document = {"format": 1,
+                        "inputs": list(inputs),
+                        "stops": stops or default,
+                        "steps": steps}
+            if keep_alive:
+                document["keep_alive"] = keep_alive
+            (directory / f"{name}.json").write_text(json.dumps(document), encoding="utf-8")
+
+        write("deliver", steps, inputs, stops)
+        for name, child in (children or {}).items():
+            write(name, child["steps"], child["inputs"], child["stops"])
         return directory
 
     def command(self, *words: str, cwd: Path | None = None, **kwargs):
@@ -1010,7 +1024,7 @@ class RefusalTest(unittest.TestCase):
             "a mutating step without a check": ("check", with_mutation),
             "a keep-alive with no claim-lost stop": ("missing_claim_lost", no_claim_lost),
             "a mutating decide step": ("marked mutates", mutating_decide),
-            "a group step": ("group", shipped),
+            "the shipped toy, whose agent step is marked mutates": ("marked mutates", shipped),
             "no deliver.json": ("deliver.json", empty),
         }
         for name, (word, build) in cases.items():

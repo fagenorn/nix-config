@@ -19,7 +19,7 @@ import sys
 import tempfile
 import threading
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -80,6 +80,8 @@ EXAMPLES = {
     "wait_ended": {"event": "wait_ended", "at": AT, "wait": "usage-limit"},
     "stop_reached": {"event": "stop_reached", "at": AT, "step": "scope",
                      "stop": "needs-owner", "need": "owner-decision"},
+    "call": {"event": "call", "at": AT, "step": "children", "visit": 1,
+             "child": "1511-20261121T160232Z-c3d4", "index": 0, "items": 3},
     "keep_alive_ran": {"event": "keep_alive_ran", "at": AT, "step": "draft", "visit": 1,
                        "attempt": 1, "verdict": "renewed"},
     "run_continued": {"event": "run_continued", "at": AT},
@@ -164,6 +166,50 @@ class RunCreationTest(unittest.TestCase):
                 self.assertEqual(list(Path(tmp).iterdir()), [])
 
 
+class ChildRunTest(unittest.TestCase):
+    def test_find_runs_returns_only_root_runs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root_run = new_run(tmp)
+            new_run(tmp, token="c3d4", now=NOW + timedelta(seconds=1), parent=root_run.name)
+            self.assertEqual(engine_ledger.find_runs(Path(tmp), 1511, None), [root_run])
+            self.assertEqual(engine_ledger.find_run(Path(tmp), 1511, None), root_run)
+
+    def test_a_child_run_json_names_its_parent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root_run = new_run(tmp)
+            child = new_run(tmp, token="c3d4", now=NOW + timedelta(seconds=1),
+                            parent=root_run.name)
+            self.assertEqual(json.loads((child / "run.json").read_text())["parent"],
+                             root_run.name)
+            self.assertEqual(engine_ledger.read_run(child)["parent"], root_run.name)
+            self.assertNotIn("parent", engine_ledger.read_run(root_run))
+            self.assertEqual(engine_ledger.read_run(root_run)["sequence"], 1)
+            self.assertEqual(engine_ledger.read_run(child)["sequence"], 2)
+            later = new_run(tmp, token="e5f6", now=NOW + timedelta(seconds=2))
+            self.assertEqual(engine_ledger.read_run(later)["sequence"], 3)
+            self.assertEqual(engine_ledger.find_runs(Path(tmp), 1511, None),
+                             [root_run, later])
+
+    def test_a_parent_that_is_no_run_id_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(LedgerError):
+                new_run(tmp, parent="nope")
+            self.assertEqual(list(Path(tmp).iterdir()), [])
+
+    def test_a_run_json_whose_parent_is_no_run_id_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root_run = new_run(tmp)
+            child = new_run(tmp, token="c3d4", now=NOW + timedelta(seconds=1),
+                            parent=root_run.name)
+            copy = Path(tmp) / "copy" / child.name
+            shutil.copytree(child, copy)
+            document = json.loads((copy / "run.json").read_text())
+            document["parent"] = "nope"
+            (copy / "run.json").write_text(compact(document), encoding="utf-8")
+            with self.assertRaises(LedgerError):
+                engine_ledger.read_run(copy)
+
+
 class EventShapeTest(unittest.TestCase):
     def test_each_event_type_round_trips_and_a_wrong_shape_is_refused(self):
         self.assertEqual(set(EVENT_MEMBERS), set(EXAMPLES))
@@ -181,6 +227,11 @@ class EventShapeTest(unittest.TestCase):
                {**EXAMPLES["step_entered"], "stage": "nowhere"},
                {**EXAMPLES["wait_started"], "wait": "coffee"},
                {**EXAMPLES["result_stored"], "result": "results/other.1.json"},
+               {**EXAMPLES["call"], "index": -1},
+               {**EXAMPLES["call"], "items": 0},
+               {**EXAMPLES["call"], "index": 3, "items": 3},
+               {**EXAMPLES["call"], "child": "nope"},
+               {**EXAMPLES["call"], "index": True},
                {**EXAMPLES["keep_alive_ran"], "attempt": 0},
                {**EXAMPLES["keep_alive_ran"], "attempt": True},
                {**EXAMPLES["keep_alive_ran"], "verdict": ""},

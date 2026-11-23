@@ -420,6 +420,14 @@ class ConformanceAdoptionPlanTest(AdoptTestCase):
             self.assertNotIn(path, touched)
         self.assertEqual(doc["plan"]["plan_id"], documented_plan_id(doc))
         self.assertEqual([gate["status"] for gate in self.gates(doc)], ["passed"])
+        with self.subTest("a tracked artifact is no cause without a lock"):
+            self.fresh_home()
+            root = nix_config_shape_repo(self.home)
+            write(root, ".agents/artifacts/notes/kept-by-a-fixture.md", "# kept\n")
+            commit(root, "track an artifact")
+            doc = self.ready_plan(root)
+            self.assertEqual(doc["plan"]["state"], "ready", doc["plan"]["blockers"])
+            self.assertEqual([gate["status"] for gate in self.gates(doc)], ["passed"])
 
     def test_the_platforms_own_tree_plans_none_of_the_three_writes(self):
         root = self.devenv_repo()
@@ -475,14 +483,48 @@ class ConformanceAdoptionPlanTest(AdoptTestCase):
         self.assertEqual(doc["plan"]["state"], "draft")
         self.assertEqual(self.gates(doc), [conformance_failure(doc, "adopt.conformance.pin_incompatible")])
 
-    def test_the_evidence_record_repeats_the_conformance_member(self):
+    def test_a_tracked_artifact_keeps_the_plan_draft(self):
         root = self.devenv_repo()
-        with mock.patch.object(adopt_project.subprocess, "run", _resolver_in_process), \
-                mock.patch.dict(os.environ, {"HOME": str(self.home)}):
-            composed = adopt_project.compose_plan(root, json.loads(MANIFEST.read_text("utf-8")), [])
-        record = json.loads(composed.contents[composed.document["handoff"]["evidence_record"]])
-        self.assertEqual(record["conformance"], CONFORMANCE_MEMBER)
-        self.assertIn({"id": CONFORMANCE_GATE, "status": "passed"}, record["checks"])
+        write(root, ".agents/artifacts/notes/kept-by-a-fixture.md", "# kept\n")
+        commit(root, "track an artifact")
+        code, doc, err = self.plan(root)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(doc["plan"]["state"], "draft")
+        self.assertEqual(self.gates(doc), [conformance_failure(doc, "adopt.conformance.tracked_artifact")])
+        self.assertNotIn("conformance", doc["plan"])
+
+    def test_a_differing_pin_is_judged_by_its_pin_not_by_tracked_artifacts(self):
+        stale = json.loads(locked_lock_text())
+        stale["nodes"]["agent-platform"] = locked_platform_node({**FIXTURE_REVISION, "rev": "1e" * 20})
+        root = self.devenv_repo(lock=json.dumps(stale, indent=2, sort_keys=True), yaml=DEVENV_YAML_DECLARED)
+        write(root, ".agents/artifacts/notes/kept-by-a-fixture.md", "# kept\n")
+        commit(root, "track an artifact")
+        doc = self.ready_plan(root)
+        self.assertEqual(self.gates(doc), [conformance_failure(doc, "adopt.conformance.pin_incompatible")])
+        # The same term keeps a settled tree settled when the host's revision differs.
+        self.fresh_home()
+        root = adopted_repo(self.home)
+        write_devenv(root, lock=locked_lock_text(), yaml=DEVENV_YAML_DECLARED)
+        edit_contract(root, lambda contract: contract["projections"].append(
+            dict(adopt_conformance.PROJECTION_ENTRY)))
+        proc = run_module("agent_tools.project_contract.resolve_project",
+                          ("write-projections", "--repo-root", str(root)),
+                          env={**os.environ, "HOME": str(self.home)})
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        write(root, ".agents/artifacts/notes/kept-by-a-fixture.md", "# kept\n")
+        commit(root, "the settled tree")
+        other = make_home()
+        install_platform_revision(other, {**FIXTURE_REVISION, "rev": "1e" * 20})
+        code, doc, err = self.plan(root, home=other)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(doc["plan"]["outcome"], "no_change", doc["plan"])
+
+    def test_the_plan_repeats_the_conformance_member(self):
+        root = self.devenv_repo()
+        doc = self.ready_plan(root)
+        self.assertEqual(doc["plan"]["conformance"], CONFORMANCE_MEMBER)
+        self.assertEqual(self.gates(doc), [{"id": CONFORMANCE_GATE, "status": "passed",
+                                            "repair_id": None}])
 
     def test_the_running_revision_enters_the_plan_id(self):
         root = self.devenv_repo()
@@ -602,7 +644,7 @@ class ConformanceAdoptionPlanTest(AdoptTestCase):
         self.assertEqual(op["after"], sha256_hash((json.dumps(expected, indent=2) + "\n").encode()))
 
     def test_a_path_reference_edit_and_the_declaration_share_one_write(self):
-        root = self.devenv_repo(yaml=DEVENV_YAML + "# notes: .claude/specs/x.md\n")
+        root = self.devenv_repo(yaml=DEVENV_YAML + "# notes: .out-of-scope/z.md\n")
         doc = self.ready_plan(root)
         rows = [row for row in doc["path_references"] if row["path"] == "devenv.yaml"]
         self.assertEqual(len(rows), 1, doc["path_references"])
@@ -612,7 +654,7 @@ class ConformanceAdoptionPlanTest(AdoptTestCase):
         self.assertEqual(doc["plan"]["state"], "ready", doc["plan"]["blockers"])
         (op,) = [op for op in doc["changes"] if "devenv.yaml" in op["sources"] + op["targets"]]
         self.assertEqual(op["op"], "write-file")
-        rewritten = DEVENV_YAML_DECLARED + "# notes: .agents/artifacts/specs/x.md\n"
+        rewritten = DEVENV_YAML_DECLARED + "# notes: .agents/knowledge/rejections/z.md\n"
         self.assertEqual(op["after"], sha256_hash(rewritten.encode()))
 
     def test_outstanding_conformance_work_is_never_routed_to_no_change(self):
@@ -623,30 +665,30 @@ class ConformanceAdoptionPlanTest(AdoptTestCase):
             self.assertEqual(doc["plan"]["outcome"], "reconcile")
             self.assertEqual(doc["plan"]["state"], "draft")
             self.assertEqual(self.gates(doc), [conformance_failure(doc, "adopt.conformance.lock_unreadable")])
+        def settled_tree(**adoption) -> Path:
+            root = adopted_repo(self.home, **adoption)
+            write_devenv(root, lock=locked_lock_text(), yaml=DEVENV_YAML_DECLARED)
+            edit_contract(root, lambda contract: contract["projections"].append(
+                dict(adopt_conformance.PROJECTION_ENTRY)))
+            proc = run_module("agent_tools.project_contract.resolve_project",
+                              ("write-projections", "--repo-root", str(root)),
+                              env={**os.environ, "HOME": str(self.home)})
+            self.assertEqual(proc.returncode, 0, proc.stdout)
+            commit(root, "the settled tree")
+            return root
+
         self.fresh_home()
-        root = adopted_repo(self.home)
-        write_devenv(root, lock=locked_lock_text(), yaml=DEVENV_YAML_DECLARED)
-        edit_contract(root, lambda contract: contract["projections"].append(
-            dict(adopt_conformance.PROJECTION_ENTRY)))
-        proc = run_module("agent_tools.project_contract.resolve_project",
-                          ("write-projections", "--repo-root", str(root)),
-                          env={**os.environ, "HOME": str(self.home)})
-        self.assertEqual(proc.returncode, 0, proc.stdout)
-        commit(root, "the settled tree")
-        with self.subTest("the record names no conformance work"):
-            doc = self.ready_plan(root)
+        with self.subTest("a settled tree with no adoption commit is outstanding"):
+            doc = self.ready_plan(settled_tree(adoption=False))
             self.assertEqual(doc["plan"]["outcome"], "reconcile")
             self.assertEqual(doc["plan"]["state"], "ready", doc["plan"]["blockers"])
             self.assertEqual(doc["plan"]["conformance"], CONFORMANCE_MEMBER)
             written = self.targets(doc)
             for path in ("devenv.lock", "devenv.yaml", ".github/branch-protection.json"):
                 self.assertNotIn(path, written)
-        with self.subTest("the record carries the member"):
-            record = next((root / ".agents/artifacts/evidence").glob("*.json"))
-            document = json.loads(record.read_text("utf-8"))
-            document["conformance"] = CONFORMANCE_MEMBER
-            record.write_text(json.dumps(document) + "\n", encoding="utf-8")
-            commit(root, "record the conformance work")
+        self.fresh_home()
+        root = settled_tree()
+        with self.subTest("a settled tree with an adoption commit is no_change"):
             doc = self.ready_plan(root)
             self.assertEqual(doc["plan"]["outcome"], "no_change")
         for label, record in (("no installed revision", None),

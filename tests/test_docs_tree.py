@@ -9,11 +9,6 @@ import unittest
 from pathlib import Path
 
 from agent_tools.delivery.record_lint import record_violations
-from agent_tools.project_contract.adopt_inspection import (
-    blob_at,
-    parses_as_evidence_record,
-    parses_as_migration_map,
-)
 from agent_tools.project_contract.adopt_links import links
 
 
@@ -76,11 +71,6 @@ PINNED_LINK_RE = re.compile(r"https://github\.com/fagenorn/nix-config/blob/([0-9
 URL_BEFORE_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s\"'`()<>]*\Z")
 PATH_TAIL_RE = re.compile(PATH_CHAR + "*")
 TEST_TREES = ("tests/", "home/common/agent-skills/tests/")
-# The adoption evidence record and its path-migration map stay in the tree until adoption retires them;
-# the record's path is concatenated so this constant does not match the working-artifact pattern.
-ADOPTION_DIGEST = "a179c33800774cf8a81e2b9d0e19e9405c572d64e72b716f24b7ee39674cc1dc"
-ADOPTION_RECORD = ".agents/" + "artifacts/evidence/" + ADOPTION_DIGEST + ".json"
-ADOPTION_MAP = ".agents/knowledge/archive/path-migrations/" + ADOPTION_DIGEST + ".json"
 
 MD_LINK_RE = re.compile(r"\[[^\]]*\]\(([^)\s]+)\)")
 REMOVED_ARCHITECTURE_RE = re.compile(
@@ -195,8 +185,8 @@ def index_destinations(text: str) -> list[str]:
 
 
 def scanned_files(archived_dirs: tuple[str, ...] = ()) -> list[tuple[str, list[str]]]:
-    """Every tracked text file the working-artifact scan reads: all of them but the path-migration map."""
-    return [(path, lines) for path, lines in tracked_text(archived_dirs) if path != ADOPTION_MAP]
+    """Every tracked text file the working-artifact scan reads."""
+    return tracked_text(archived_dirs)
 
 
 RETIRED_DELIVERY_RECORDS = (2, 9, 10, 11)
@@ -231,14 +221,7 @@ class DocsTreeTest(unittest.TestCase):
             check=True, capture_output=True,
         )
         paths = [p for p in listing.stdout.decode("utf-8").split("\0") if p]
-        self.assertEqual(paths, [ADOPTION_RECORD])
-
-    def test_the_adoption_records_survive_the_deletion(self):
-        # The staged blobs are read directly: building a tree object would write into the developer's repository.
-        record = parses_as_evidence_record(blob_at(REPO_ROOT, "", ADOPTION_RECORD))
-        self.assertIsNotNone(record)
-        self.assertEqual(record["path_migration_map"], ADOPTION_MAP)
-        self.assertIsNotNone(parses_as_migration_map(blob_at(REPO_ROOT, "", ADOPTION_MAP)))
+        self.assertEqual(paths, [])
 
     def test_the_index_has_no_archive_or_spikes_entry(self):
         text = (REPO_ROOT / "docs/README.md").read_text(encoding="utf-8")
@@ -267,6 +250,58 @@ class DocsTreeTest(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_project_contract_records_001_to_009_keep_the_record_form(self):
+        paths = sorted((REPO_ROOT / "docs/areas/project-contract/adr").glob("00[1-9]-*.md"))
+        self.assertTrue(paths)
+        breaches = {}
+        for path in paths:
+            relative = path.relative_to(REPO_ROOT).as_posix()
+            found = [violation.text() for violation in
+                     record_violations(relative, path.read_bytes())]
+            if found:
+                breaches[relative] = found
+        self.assertEqual(breaches, {})
+
+    def test_no_tracked_file_cites_a_retired_project_contract_record(self):
+        # The patterns are built here so this file holds no citation they match.
+        numbers = ("001", "002", "003", "006", "009")
+        retired = ("ADR-project-contract-(" + "|".join(numbers) + ")([^0-9]|$)"
+                   + "|project-contract/adr/(" + "|".join(numbers) + ")-")
+        sub = "ADR-project-contract-" + "00[1-9] D[0-9]"
+        for pattern in (retired, sub):
+            result = subprocess.run(
+                ["git", "-C", str(REPO_ROOT), "grep", "-n", "-E", pattern],
+                capture_output=True, text=True,
+            )
+            self.assertEqual(result.returncode, 1, result.stdout)
+            self.assertEqual(result.stdout, "")
+        for number in numbers:
+            found = sorted((REPO_ROOT / "docs/areas/project-contract/adr").glob(f"{number}-*.md"))
+            self.assertEqual(found, [])
+
+    def test_every_hosts_record_keeps_the_record_form(self):
+        paths = sorted((REPO_ROOT / "docs/areas/hosts/adr").glob("*.md"))
+        self.assertTrue(paths)
+        breaches = {}
+        for path in paths:
+            relative = path.relative_to(REPO_ROOT).as_posix()
+            found = record_violations(relative, path.read_bytes())
+            if found:
+                breaches[relative] = [violation.text() for violation in found]
+        self.assertEqual(breaches, {})
+
+    def test_no_tracked_file_cites_a_retired_hosts_record(self):
+        numbers = ("001", "002", "003", "004")
+        pattern = "ADR-hosts-(" + "|".join(numbers) + ")([^0-9]|$)"
+        result = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "grep", "-n", "-E", pattern],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertEqual(result.stdout, "")
+        for number in numbers:
+            self.assertEqual(sorted((REPO_ROOT / "docs/areas/hosts/adr").glob(f"{number}-*.md")), [])
+
     def test_every_guard_record_keeps_the_record_form(self):
         paths = sorted((REPO_ROOT / "docs/areas/guard/adr").glob("*.md"))
         self.assertTrue(paths)
@@ -282,13 +317,6 @@ class DocsTreeTest(unittest.TestCase):
         archived = archived_files()
         hits = [hit for path, lines in scanned_files() for hit in working_artifact_hits(path, lines, archived)]
         self.assertEqual(hits, [])
-
-    def test_the_scan_reads_the_adoption_record_and_exempts_only_the_path_migration_map(self):
-        names = [path for path, _ in scanned_files()]
-        self.assertIn(ADOPTION_RECORD, names)
-        self.assertNotIn(ADOPTION_MAP, names)
-        added = [("see " + ".agents/" + "artifacts/specs/new.md")]
-        self.assertEqual(working_artifact_hits(ADOPTION_RECORD, added, frozenset()), [ADOPTION_RECORD + ":1"])
 
     def test_the_working_artifact_scan_admits_only_pinned_links_and_synthetic_test_paths(self):
         archived_doc = "docs/" + "archive/x.md"
@@ -334,8 +362,6 @@ class DocsTreeTest(unittest.TestCase):
                 adr, ["[x](../../../" + "archive/x.md \"History\")"], [adr + ":1"]),
             "uppercase archive descendant": (adr, ["see `docs/" + "archive/README.md`"], [adr + ":1"]),
             "other artifacts directory": (adr, ["see `.agents/" + "artifacts/notes/a.md`"], [adr + ":1"]),
-            "the adoption record": (
-                ADOPTION_RECORD, ["see `" + spec + "`"], [ADOPTION_RECORD + ":1"]),
             "module path": ("python/agent_tools/m.py", ["# see " + spec], ["python/agent_tools/m.py:1"]),
         }
         for label, (path, lines, expected) in cases.items():
@@ -889,11 +915,7 @@ class DocsTreeTest(unittest.TestCase):
         context = self.doc("docs/areas/console/CONTEXT.md")
         notice = context.split("**Notice**:", 1)[1].split("_Avoid_:", 1)[0]
         self.assertIn("ADR-console-053", notice)
-    def test_the_host_activation_decision_is_recorded(self):
-        for context in ("console", "guard", "project-contract"):
-            with self.subTest(context):
-                self.assertIn("ADR-system-004", self.doc(f"docs/areas/{context}/CONTEXT.md"))
-        self.assertNotIn("naming `just switch`", self.doc("docs/areas/console/CONTEXT.md"))
+
     def test_no_tracked_file_cites_a_retired_guard_record(self):
         # The pattern is built at run time, so this file holds no retired citation itself.
         numbers = ("005", "011", "012")

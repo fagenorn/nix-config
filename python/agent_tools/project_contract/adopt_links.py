@@ -35,7 +35,7 @@ Prose mentions of moved paths, inline HTML and root-relative targets are never
 rewritten, and a path literal in a non-Markdown file is left to the
 `path-reference` question.
 
-`link_rewrites`, in the plan document and the adoption evidence record, carries
+`link_rewrites`, in the plan document, carries
 the `inbound` and `outbound` link counts and sorted files, the `unrewritable`
 `path`/`target` entries and an `already_broken` count.
 

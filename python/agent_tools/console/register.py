@@ -54,8 +54,8 @@ contract`, `writes <paths>` (the non-contract files other than the adoption's ow
 the adoption` (when the plan writes any record), `deletes <paths>`, `rewrites N link(s)` and `rewrites
 N path reference(s)` (the references answered `rewrite` or `extend`). `<paths>` names up to three
 paths, as `a`, `a and b`, `a, b and c`, and from four on `a, b, c and N more` (#1057). The adoption's
-own records, the two files the plan's `handoff` names as `migration_map` and `evidence_record` (any
-other file, even beside them, stays named), are never named: a plan that writes any ends its `writes`
+own record, the file the plan's `handoff` names as `migration_map` (any other file, even beside it,
+stays named), is never named: a plan that writes any ends its `writes`
 line with `, and records the adoption`, or is the line `records the adoption` when it writes nothing
 else, and `NAMED` counts only the named files (#1060). It is a
 pure function of the document. `summary(root, plan, report=None, draft=None)` is the row payload
@@ -405,7 +405,7 @@ def plan_lines(document: Mapping) -> list[str]:
     generated = sum(len(op["targets"]) for op in changes if op["op"] == "regenerate-projection")
     written = [path for op in writes if CONTRACT not in op["targets"] for path in op["targets"]]
     handoff = document.get("handoff") or {}
-    records = {handoff.get("migration_map"), handoff.get("evidence_record")} - {None}
+    records = {handoff.get("migration_map")} - {None}
     other = [path for path in written if path not in records]
     recorded = len(other) != len(written)
     deleted = [path for op in changes if op["op"] == "delete-file" for path in op["sources"]]
