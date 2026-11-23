@@ -11,6 +11,7 @@ Every call prints one JSON object on one stdout line with `command` (`look-appro
     look-approval tick --repo <owner/name> --issue <n> --pr <n> --head <sha> [--merge-commit <sha>]
     look-approval marked --repo <owner/name> --issue <n>
     look-approval carry --repo <owner/name> --issue <n> --pr <n> --from <sha> --head <sha> [--before <path>] [--after <path>] [--picture <path> ...]
+    look-approval carry --repo <owner/name> --issue <n> --pr <n> --from <sha> --head <sha> --own-files
     look-approval judge            (no options; reads stdin; no network)
 
 1. `post` writes `look_marker.approval_body(...)` with `forge_markers.post`, then reads the issue's
@@ -98,7 +99,7 @@ Every call prints one JSON object on one stdout line with `command` (`look-appro
    environment. A refusal (exit 1) adds, after `covers` and each only when non-empty, `candidates`
    (`[{"issue", "head", "answer"}, ...]`, the carry candidates of the failing issues) and then
    `need` (the paths a further carry run must read). An admit is unchanged.
-9. `carry` (issues 1566, 1597) records the carry line that lets the owner's approval of `--from` stand
+9. `carry` (issues 1566, 1597, 1679) records the carry line that lets the owner's approval of `--from` stand
    at `--head` when only merges of the integration branch came in. `--from` and `--head` are 40
    lowercase hex and different. Each `--before`, `--after` and `--picture` (a picture with no role)
    is a file read whole and every picture flag is optional (the ids are `look_marker.picture_id`, the
@@ -134,6 +135,19 @@ Every call prints one JSON object on one stdout line with `command` (`look-appro
    names the smallest such trusted live line, and no such line is `untrusted`. A forge error is the
    `status` forge error, `look_marker.Unreadable` being `payload_invalid`. `carry` never posts a
    `look` marker.
+   With `--own-files` (issue 1679; a flag with no value, a usage error with any of `--before`,
+   `--after` and `--picture`, before any `gh` call) the rule is `own-files` and `pictures` is null:
+   no rule is derived from the approval and no pictures or set file is read, so an approval with a
+   pictures digest and one without are carried alike (a `fix` answer is never a candidate). The
+   verdicts are decided as above up to `source-differs`, then `moved`, then `needed` with `not-merges`
+   (`settle_merges`, unchanged), then `needed` with `own-files-touched` when
+   `look_marker.settle_own_files` decides false (a merge changed a name `B...A` lists, or a compare
+   could not be read whole), then `carried` with the comment id of the candidate's `own_line` when it
+   has one, else of the line written (`rule=own-files`, no `pictures` field). The three readers of a
+   carried approval, `look-approval judge` (the guard), `status` and `tick` (through
+   `look_marker.merged_under_look`), all decide an own-files line with `look_marker.own_files_untouched`
+   through `look_marker.kept`, so the writer and every reader agree. Without the flag `carry` reads
+   only the line of its own rule: an own-files line short-circuits nothing.
 """
 import argparse
 import json
@@ -201,6 +215,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_argument("--from", dest="from_head", required=True)
     for flag in ("--before", "--after", "--picture"):
         sub.add_argument(flag, action="append", default=[])
+    sub.add_argument("--own-files", action="store_true")
     verbs.add_parser("judge")
     return parser
 
@@ -398,7 +413,7 @@ def carry(args: argparse.Namespace) -> int:
     state["from"] = candidate.head
     if candidate.head != args.from_head:
         return needed("source-differs")
-    rule = lm.carry_rule(comments, candidate)
+    rule = lm.OWN_FILES_RULE if args.own_files else lm.carry_rule(comments, candidate)
     if rule is None:
         return needed("pictures-unreadable")
     state["rule"] = rule
@@ -417,22 +432,27 @@ def carry(args: argparse.Namespace) -> int:
         base = _base_tip(args, pull)
         if not lm.settle_merges(args.from_head, args.head, base, read):
             return needed("not-merges")
-        if rule == lm.LOOK_FILES_RULE:
+        if rule == lm.OWN_FILES_RULE:
+            if not lm.settle_own_files(args.from_head, args.head, base, read):
+                return needed("own-files-touched")
+        elif rule == lm.LOOK_FILES_RULE:
             if read(lm.contents_path(base)) is None:
                 return needed("no-look-files")
             if not lm.settle_look_files(args.from_head, args.head, base, read):
                 return needed("look-files-differ")
     except lm.Unreadable as error:
         raise forge_api.ForgeError("payload_invalid", str(error)) from None
-    if candidate.line is not None:
-        return finish("carried", comment_id=candidate.line)
+    existing = candidate.own_line if rule == lm.OWN_FILES_RULE else candidate.line
+    if existing is not None:
+        return finish("carried", comment_id=existing)
     pictures = args.digest if rule == lm.PICTURES_RULE else None
-    fields = lm.carry_fields(args.issue, args.pr, args.from_head, args.head, pictures)
+    named = lm.OWN_FILES_RULE if rule == lm.OWN_FILES_RULE else None
+    fields = lm.carry_fields(args.issue, args.pr, args.from_head, args.head, pictures, named)
     result = forge_markers.write(args.repo, args.issue, lm.CARRY_KIND, fields,
                                  lm.carry_sentence(args.pr, args.from_head, args.head, rule), match=fields,
                                  associations=lm.TRUSTED,
                                  accept=lambda m: lm.carry_matches(m.fields, args.issue, args.pr, args.from_head,
-                                                                   args.head, pictures))
+                                                                   args.head, pictures, named))
     if result.won:
         trusted = any(m.comment_id == result.own_id
                       for m in forge_markers.list_markers(args.repo, args.issue, lm.TRUSTED))
@@ -518,6 +538,8 @@ def _carry_usage(args: argparse.Namespace) -> None:
             raise UsageError(f"{name} {value!r} is not 40 lowercase hex")
     if args.from_head == args.head:
         raise UsageError("from and head are the same sha")
+    if args.own_files and (args.before or args.after or args.picture):
+        raise UsageError("--own-files takes no --before, --after or --picture")
     ids: list[tuple[str | None, str]] = []
     for role, paths in (("before", args.before), ("after", args.after), (None, args.picture)):
         for path in paths:
