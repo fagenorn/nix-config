@@ -117,7 +117,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from agent_tools.console import folder_trust, register, service, write_guard
-from agent_tools.project_contract import agent_platform
+from agent_tools.project_contract import adopt_inspection, agent_platform
 from agent_tools.system import siblings
 
 CONTRACT_SOURCE = Path("home/common/agent-skills/tests/fixtures/project-contract-schema-2.json")
@@ -195,13 +195,6 @@ def _adoption_records(root: Path) -> None:
     migration_map = f".agents/knowledge/archive/path-migrations/{DIGEST}.json"
     _write(root, migration_map, json.dumps({
         "schema_version": 1, "migration_id": f"sha256:{DIGEST}", "moves": []}) + "\n")
-    _write(root, f".agents/artifacts/evidence/{DIGEST}.json", json.dumps({
-        "schema_version": 1, "plan_id": f"sha256:{DIGEST}", "outcome": "no_change",
-        "base_revision": _git(root, "rev-parse", "HEAD").strip(),
-        "platform": {"platform_version": "1.0.0", "project_schema_versions": [1],
-                     "resolved_schema_version": 1},
-        "decisions_accepted": [], "sources": [], "checks": [],
-        "path_migration_map": migration_map}) + "\n")
 
 
 def adopted_repository(parent: Path, project_id: str, contract_source: Path, *,
@@ -221,7 +214,7 @@ def adopted_repository(parent: Path, project_id: str, contract_source: Path, *,
         _write(root, f"{standards}/bar.md", "# the bar\n")
     _commit(root, "fixture")
     _adoption_records(root)
-    _commit(root, "adopt")
+    _commit(root, adopt_inspection.adoption_subject(project_id, DIGEST))
     bare = parent / "origin.git"
     _git(parent, "init", "--quiet", "--bare", "-b", "main", str(bare))
     _git(root, "remote", "add", "origin", str(bare))
