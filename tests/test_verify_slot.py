@@ -18,8 +18,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from agent_tools.canonical import parse_rfc3339_utc
-from agent_tools.delivery import verify_slot
-from agent_tools.delivery.verify_slot import NO_SLOT_EXIT, NO_SLOT_LINE, SLOT_DIR_ENV, WAITING_LINE
+from agent_tools.delivery import verify_history, verify_slot
+from agent_tools.delivery.verify_slot import (
+    NO_SLOT_EXIT, NO_SLOT_LINE, REPORT_SKIPPED_LINE, SLOT_DIR_ENV, WAITING_LINE)
 from .process_liveness import process_alive
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -627,6 +628,103 @@ class VerifySlotTest(unittest.TestCase):
         self.finish(self.start("b", home=str(other)))
         self.assertEqual(stat.S_IMODE(os.stat(self.slots / "history.jsonl").st_mode), 0o666)
         self.assertEqual(len(self.history()), 2)
+
+
+    def write_history(self, *records, raw=()):
+        self.slots.mkdir(exist_ok=True)
+        lines = [json.dumps(record, separators=(",", ":")) for record in records] + list(raw)
+        (self.slots / "history.jsonl").write_text("".join(line + "\n" for line in lines))
+
+    def rec(self, repository, held, waited, hours_ago=1, code=0):
+        started = datetime.now(timezone.utc) - timedelta(hours=hours_ago)
+        return {"command": "just test", "exit": code, "held_seconds": held, "repository": repository,
+                "started": started.strftime("%Y-%m-%dT%H:%M:%SZ"), "waited_seconds": waited}
+
+    def report(self, *opts):
+        result = subprocess.run(
+            [sys.executable, "-m", "agent_tools.delivery.verify_slot", "report", *opts],
+            env=self.env(), cwd=self.home, capture_output=True, text=True)
+        return result.returncode, result.stdout.splitlines(), result.stderr
+
+    def alpha_records(self):
+        return [self.rec("example/alpha", 100 * n, 10 * n) for n in range(1, 11)] + [
+            self.rec("example/alpha", 99999, 99999, hours_ago=30)]
+
+    def test_the_report_gives_each_repositorys_medians_and_p90s_and_marks_the_one_over_budget(self):
+        self.declare(verify_budget_seconds=600)
+        beta = [self.rec("example/beta", held, waited)
+                for held, waited in ((700, 5), (800, 15), (900, 25))]
+        self.write_history(*self.alpha_records(), *beta,
+                           self.rec("example/beta", None, 600, code=75), raw=["not json"])
+        code, lines, err = self.report()
+        self.assertEqual(code, 0)
+        self.assertEqual(lines, [
+            "example/alpha runs=10 held_median=550s held_p90=900s held_total=5500s"
+            " waited_median=55s waited_p90=90s",
+            "example/beta runs=4 held_median=800s held_p90=900s held_total=2400s"
+            " waited_median=20s waited_p90=600s over budget 600s"])
+        self.assertIn(REPORT_SKIPPED_LINE.format(count=1, path=self.slots / "history.jsonl"),
+                      err.splitlines())
+
+    def test_the_report_window_is_the_last_n_hours(self):
+        self.write_history(*self.alpha_records())
+        self.assertTrue(self.report("--hours", "48")[1][0].startswith("example/alpha runs=11 "))
+        self.assertTrue(self.report()[1][0].startswith("example/alpha runs=10 "))
+        self.assertEqual(self.report("--hours", "0")[0], 2)
+
+    def test_a_median_hold_at_the_budget_is_not_marked(self):
+        self.declare(verify_budget_seconds=600)
+        self.write_history(*[self.rec("example/beta", held, 1) for held in (500, 600, 700)])
+        self.assertEqual(self.report()[1], [
+            "example/beta runs=3 held_median=600s held_p90=700s held_total=1800s"
+            " waited_median=1s waited_p90=1s"])
+
+    def test_with_no_budget_declared_nothing_is_marked(self):
+        self.declare()
+        self.write_history(*[self.rec("example/beta", 900, 1) for _ in range(3)])
+        self.assertEqual(self.report()[1], [
+            "example/beta runs=3 held_median=900s held_p90=900s held_total=2700s"
+            " waited_median=1s waited_p90=1s"])
+
+    def test_runs_outside_a_repository_and_runs_that_held_nothing_are_reported(self):
+        self.write_history(self.rec(None, 30, 2), self.rec("example/gamma", None, 600, code=75))
+        self.assertEqual(self.report()[1], [
+            "(no repository) runs=1 held_median=30s held_p90=30s held_total=30s"
+            " waited_median=2s waited_p90=2s",
+            "example/gamma runs=1 held_median=- held_p90=- held_total=0s"
+            " waited_median=600s waited_p90=600s"])
+
+    def test_p90_is_the_nearest_rank(self):
+        self.assertEqual(verify_history.nearest_rank_p90(list(range(1, 11))), 9)
+        self.assertEqual(verify_history.nearest_rank_p90([5]), 5)
+        self.assertEqual(verify_history.nearest_rank_p90([3, 1, 2]), 3)
+        self.assertEqual(verify_history.nearest_rank_p90(list(range(1, 21))), 18)
+
+    def test_an_invalid_declaration_fails_the_report(self):
+        self.declare(verify_budget_seconds=0)
+        self.write_history(self.rec("example/beta", 1, 1))
+        code, lines, err = self.report()
+        self.assertEqual(code, 2)
+        self.assertEqual(lines, [])
+        self.assertTrue(err.strip())
+
+    def test_the_report_reads_what_a_run_recorded_and_creates_nothing(self):
+        code, lines, _ = self.report()
+        self.assertEqual((code, lines), (0, []))
+        self.assertFalse(self.slots.exists())
+        alpha = self.repository("alpha", "git@github.com:example/alpha.git")
+        self.release("a")
+        self.finish(self.start("a", cwd=alpha))
+        lines = self.report()[1]
+        self.assertEqual(len(lines), 1)
+        self.assertRegex(lines[0], r"^example/alpha runs=1 held_median=\d+s held_p90=\d+s"
+                         r" held_total=\d+s waited_median=\d+s waited_p90=\d+s$")
+
+    def test_report_takes_no_command(self):
+        result = subprocess.run(
+            [sys.executable, "-m", "agent_tools.delivery.verify_slot", "report", "--", "true"],
+            env=self.env(), cwd=self.home, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 2)
 
 
 if __name__ == "__main__":

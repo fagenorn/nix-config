@@ -1,6 +1,7 @@
 """`verify-slot`: run one command while holding one of this host's verify slots (issue 1383).
 
     verify-slot run [--wait-limit SECONDS] [--live] -- ARGV...
+    verify-slot report [--hours N]
 
 A verify run is heavy, and several runs may start on one host at once. `run` admits at most
 the host's declared count of them at a time: it takes one slot, runs `ARGV` with this
@@ -66,6 +67,17 @@ a run that took a slot, one that reached `--wait-limit` and one signalled while 
 that held no slot records `held_seconds: null`. A setup or usage error records nothing. A failed
 append prints `HISTORY_FAILED_LINE` once and leaves the exit code alone.
 
+Report. `verify-slot report [--hours N]` reads `history.jsonl` and prints one stdout line per
+repository whose runs started in the last N hours (`DEFAULT_REPORT_HOURS`, 24; a positive
+integer): the runs, the median, 90th percentile and total of the hold, and the median and 90th
+percentile of the wait, in whole seconds (`agent_tools.delivery.verify_history` has the exact
+line). A repository whose hold median is strictly above the `verify_budget_seconds` member of the
+host declaration is marked ` over budget <budget>s`; with no declaration file or no such member
+nothing is marked. A line of the history that cannot be read is skipped, and `REPORT_SKIPPED_LINE`
+goes once to stderr when any was. The report creates no file and no directory, and an absent
+history prints nothing. It exits 0, or 2 for a usage error (`--`, a bad `--hours`), an invalid
+declaration or a history that cannot be read.
+
 Count (D1). It is the `verify_slots` member of the host declaration
 (`agent_tools.delivery.host_admission`), `DEFAULT_VERIFY_SLOTS` (1) when the declaration
 file is absent. A declaration entry that exists and is invalid, or is not a file, is a setup
@@ -103,7 +115,7 @@ import argparse
 import fcntl
 import hashlib
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import signal
 import stat
@@ -120,11 +132,13 @@ WAITED_LINE = "verify-slot: waited {seconds:.1f}s for a verify slot"
 DEFERRING_LINE = "verify-slot: a live-fault verify run is waiting for a slot; this run waits behind it"
 SAME_REPOSITORY_LINE = "verify-slot: a verify run of this repository holds a verify slot; waiting"
 HISTORY_FAILED_LINE = "verify-slot: cannot record this run in {path}: {error}"
+REPORT_SKIPPED_LINE = "verify-slot: skipped {count} unreadable lines of {path}"
 GROUP_LOCK = "repo-{digest}.lock"
 GIT_TIMEOUT_SECONDS = 10
 LIVE_MARKER = "live-waiting.lock"
 LIVE_PROBE = "live-probe.lock"
 NO_SLOT_EXIT = 75
+DEFAULT_REPORT_HOURS = 24
 POLL_SECONDS = 0.2
 REGISTER_RETRY_SECONDS = 0.005
 PROBE_RETRY_SECONDS = 0.005
@@ -474,6 +488,27 @@ def run_command(argv: list[str], wait_limit: int | None, live: bool = False) -> 
             _record(directory, group, argv, started, waited, held_seconds, code)
 
 
+def report_command(hours: int) -> int:
+    """Print each repository's hold and wait figures for the last `hours` hours."""
+    try:
+        budget = host_admission.verify_budget_seconds(host_admission.load_declaration())
+    except host_admission.DeclarationError as error:
+        if error.reason_code != "declaration_missing":
+            raise SlotError(f"the host declaration is invalid: {error}") from None
+        budget = None
+    path = verify_history.history_path(slot_dir())
+    try:
+        records, skipped = verify_history.read(path)
+    except OSError as error:
+        raise SlotError(f"cannot read {path}: {error}") from None
+    since = datetime.now(timezone.utc) - timedelta(hours=hours)
+    for summary in verify_history.summarize(records, since):
+        print(verify_history.report_line(summary, budget))
+    if skipped:
+        _say(REPORT_SKIPPED_LINE.format(count=skipped, path=path))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="verify-slot", description="Run a command while holding one of this host's verify slots.")
@@ -484,6 +519,10 @@ def build_parser() -> argparse.ArgumentParser:
                      help="give up with exit 75 when no slot comes free within this many seconds")
     run.add_argument("--live", action="store_true",
                      help="wait ahead of every ordinary run, never stopping a run in progress")
+    report = commands.add_parser("report", help="print each repository's hold and wait figures",
+                                 usage="verify-slot report [--hours N]")
+    report.add_argument("--hours", type=int, default=DEFAULT_REPORT_HOURS, metavar="N",
+                        help="report the runs that started in the last N hours (default 24)")
     return parser
 
 
@@ -498,11 +537,19 @@ def main(argv: list[str] | None = None) -> int:
         found_separator = False
     parser = build_parser()
     args = parser.parse_args(arguments)
-    if args.wait_limit is not None and args.wait_limit < 1:
-        parser.error("--wait-limit must be a positive integer")
-    if not found_separator or not command:
-        parser.error("run needs `--` followed by the command to run")
+    if args.command == "report":
+        if found_separator:
+            parser.error("report takes no command")
+        if args.hours < 1:
+            parser.error("--hours must be a positive integer")
+    else:
+        if args.wait_limit is not None and args.wait_limit < 1:
+            parser.error("--wait-limit must be a positive integer")
+        if not found_separator or not command:
+            parser.error("run needs `--` followed by the command to run")
     try:
+        if args.command == "report":
+            return report_command(args.hours)
         return run_command(command, args.wait_limit, args.live)
     except SlotError as error:
         _say(f"verify-slot: {error}")

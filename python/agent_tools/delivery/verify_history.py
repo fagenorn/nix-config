@@ -18,17 +18,36 @@ decimal. `exit` is the code the run returns.
 The file is created with mode 0666, so every account of the host appends to it. It is appended
 without a lock, by one `O_APPEND` write per run, is never pruned, and is lost when the host clears
 its temporary directory at boot.
+
+`verify-slot report` reads the file back. A line is readable when it is a JSON object with exactly
+the types above (`held_seconds` a number or null, the numbers finite and not below 0); any other
+line, a torn last one included, is skipped and counted. Over the runs that started in the window,
+per repository (`NO_REPOSITORY` for null), it gives `runs`, the median and the nearest-rank 90th
+percentile (the value at rank `ceil(0.9 * n)` of the sorted values) of the wait over every run,
+and of the hold over the runs that held a slot, plus the sum of those holds. Its line is
+
+    <label> runs=N held_median=Ns held_p90=Ns held_total=Ns waited_median=Ns waited_p90=Ns
+
+with each figure rounded to whole seconds, the hold medians `-` and the total `0s` when no run held
+a slot, and ` over budget <budget>s` appended when the hold median is strictly above the budget.
 """
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections import defaultdict
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime
 import json
+import math
 import os
 from pathlib import Path
+import statistics
+
+from agent_tools import canonical
 
 HISTORY_FILE = "history.jsonl"
 COMMAND_WORDS = 3
+NO_REPOSITORY = "(no repository)"
 
 
 def history_path(directory: Path) -> Path:
@@ -72,3 +91,86 @@ def append(path: Path, line: Mapping) -> None:
             raise OSError(f"short write to {path}")
     finally:
         os.close(descriptor)
+
+
+@dataclass(frozen=True)
+class Summary:
+    """One repository's figures over the report window; hold figures are None without a hold."""
+    repository: str | None
+    runs: int
+    held_median: float | None
+    held_p90: float | None
+    held_total: float
+    waited_median: float
+    waited_p90: float
+
+
+def _is_seconds(value: object) -> bool:
+    return (isinstance(value, (int, float)) and not isinstance(value, bool)
+            and math.isfinite(value) and value >= 0)
+
+
+def _readable(line: bytes) -> dict | None:
+    """The record `line` holds, or None when it is not a readable record."""
+    try:
+        record = json.loads(line.decode("utf-8"), parse_constant=canonical.reject_nonfinite_literal)
+        if not isinstance(record, dict):
+            return None
+        canonical.parse_rfc3339_utc(record["started"])
+        ok = (isinstance(record["repository"], (str, type(None)))
+              and isinstance(record["command"], str)
+              and type(record["exit"]) is int
+              and _is_seconds(record["waited_seconds"])
+              and (record["held_seconds"] is None or _is_seconds(record["held_seconds"])))
+    except (ValueError, KeyError, RecursionError):
+        return None
+    return record if ok else None
+
+
+def read(path: Path) -> tuple[list[dict], int]:
+    """The readable records of `path` and the count of unreadable lines; absent is `([], 0)`."""
+    try:
+        data = path.read_bytes()
+    except FileNotFoundError:
+        return [], 0
+    pieces = data.split(b"\n")
+    if pieces and pieces[-1] == b"":
+        pieces.pop()
+    records = [_readable(piece) for piece in pieces]
+    return [record for record in records if record is not None], records.count(None)
+
+
+def nearest_rank_p90(values: Sequence[float]) -> float:
+    """The 90th percentile of the non-empty `values` by the nearest-rank method."""
+    return sorted(values)[math.ceil(0.9 * len(values)) - 1]
+
+
+def summarize(records: Iterable[Mapping], since: datetime) -> list[Summary]:
+    """Per-repository figures over the records that started at or after `since`, by label."""
+    groups: dict[str | None, list[Mapping]] = defaultdict(list)
+    for record in records:
+        if canonical.parse_rfc3339_utc(record["started"]) >= since:
+            groups[record["repository"]].append(record)
+    summaries = []
+    for repository, runs in groups.items():
+        waits = [record["waited_seconds"] for record in runs]
+        holds = [record["held_seconds"] for record in runs if record["held_seconds"] is not None]
+        summaries.append(Summary(
+            repository, len(runs),
+            statistics.median(holds) if holds else None,
+            nearest_rank_p90(holds) if holds else None,
+            float(sum(holds)), statistics.median(waits), nearest_rank_p90(waits)))
+    return sorted(summaries, key=lambda summary: summary.repository or NO_REPOSITORY)
+
+
+def report_line(summary: Summary, budget: int | None) -> str:
+    """The report line of `summary`, marked when its hold median is strictly above `budget`."""
+    def seconds(value: float | None) -> str:
+        return "-" if value is None else f"{round(value)}s"
+    line = (f"{summary.repository or NO_REPOSITORY} runs={summary.runs}"
+            f" held_median={seconds(summary.held_median)} held_p90={seconds(summary.held_p90)}"
+            f" held_total={seconds(summary.held_total)} waited_median={seconds(summary.waited_median)}"
+            f" waited_p90={seconds(summary.waited_p90)}")
+    if budget is not None and summary.held_median is not None and summary.held_median > budget:
+        line += f" over budget {budget}s"
+    return line
