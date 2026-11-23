@@ -13727,6 +13727,16 @@ class LookCarryLandingTest(unittest.TestCase):
                 result, calls = self.approve(replies={"look-carry": reply})
                 self.stops_unasked(result, calls)
 
+    def test_a_status_that_stays_needed_after_the_carry_stops_instead_of_carrying_again(self):
+        """One carry runs per head: when look-status still answers needed at the carried head, the delivery stops."""
+        result, calls = self.approve(replies={"look-status": {"verdict": "needed", "kept_from": None}, "look-carry": self.CARRIED})
+        got = labels(calls)
+        self.assertEqual(result["stage"], "look-carry")
+        self.assertEqual(result["head"], D)
+        self.assertEqual(got.count("look-carry-verify"), 1, got)
+        self.assertEqual(got.count("look-carry"), 1, got)
+        self.assertNotIn("merge", got)
+
     def test_a_kept_approval_runs_no_carry(self):
         result, calls = self.approve(patch=dict(self.NEEDED, **{"look-status": {"verdict": "approved", "kept_from": SHA}}))
         self.assertEqual(result["stage"], "done")

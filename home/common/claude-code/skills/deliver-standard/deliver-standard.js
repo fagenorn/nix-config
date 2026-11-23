@@ -3043,6 +3043,8 @@ let fixedOut = false
 let lockSyncs = 0
 // True while every head change since the approved head was a clean sync merge: no conflict, no fix, no commit on top.
 let cleanSince = true
+// The head a verified carry already ran for after leaving the queue: a second needed at it stops, never carries again.
+let carriedAt = null
 let relocks = 0
 const waits = waitBudget()
 let retakes = 0
@@ -3759,6 +3761,7 @@ ${lockHeld ? LEASE_BEAT(lockSha) : ''}Read whether the owner's look approval of 
 It prints one JSON line. Return its verdict, kept_from and any detail. Run nothing else.
 ${RULES}`, { label: 'look-status', phase: 'Ship', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: LOOK_STATUS_SCHEMA })
         if (!complete(ls, LOOK_STATUS_SCHEMA) || (ls.verdict !== 'approved' && ls.verdict !== 'needed')) return stop('look-status', { pr: PR, head, result: ls })
+        if (ls.verdict === 'needed' && carriedAt && sameSha(carriedAt, head)) return stop('look-carry', { pr: PR, head, details: `look-approval status still answers needed at ${head} after its carry`, result: ls })
         if (ls.verdict === 'needed') {
           // With only clean syncs since the approved head the own-files rule runs under the lease; the verified carry
           // and its verification run outside the queue, so the lease is released first and retaken after it.
@@ -3770,6 +3773,7 @@ ${RULES}`, { label: 'look-status', phase: 'Ship', agentType: 'clerk', model: CLE
             lockOut = true
             fixedOut = true
             log(`left the land queue for the verified carry of ${head}`)
+            carriedAt = head
             const row = await carryLook(PR, head)
             if (row) return row
             continue
