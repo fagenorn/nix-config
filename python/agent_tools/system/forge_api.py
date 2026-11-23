@@ -99,9 +99,9 @@ def _run_cancellable(command: list[str], timeout: float, env: dict[str, str],
 
 def run_gh(argv: list[str], allow: Iterable[int] = (),
            cancelled: Callable[[], bool] | None = None, cli: str = "gh") -> tuple[int, str]:
-    """Run `gh` (or the GitHub CLI wrapper `cli`) without any token variable. Returns (0, stdout), or (status, stdout) when the
-    call failed with an HTTP status in `allow`; every other failure is a ForgeError. A true
-    `cancelled()` ends the call at once with `ForgeError("cancelled")`."""
+    """Run `gh` (or the GitHub CLI wrapper `cli`) without any token variable. Returns (0, stdout), or
+    (status, stdout) when the call failed with an HTTP status in `allow`; every other failure is a
+    ForgeError. A true `cancelled()` ends the call at once with `ForgeError("cancelled")`."""
     env = {k: v for k, v in os.environ.items() if k not in ("GITHUB_TOKEN", "GH_TOKEN")}
     timeout = TIMEOUT
     bound = _DEADLINE.get()
