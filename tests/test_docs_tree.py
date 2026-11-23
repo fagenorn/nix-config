@@ -275,6 +275,23 @@ class DocsTreeTest(unittest.TestCase):
                 breaches[relative] = found
         self.assertEqual(breaches, {})
 
+    def test_no_tracked_file_cites_a_retired_project_contract_record(self):
+        # The patterns are built here so this file holds no citation they match.
+        numbers = ("001", "002", "003", "006", "009")
+        retired = ("ADR-project-contract-(" + "|".join(numbers) + ")([^0-9]|$)"
+                   + "|project-contract/adr/(" + "|".join(numbers) + ")-")
+        sub = "ADR-project-contract-" + "00[1-9] D[0-9]"
+        for pattern in (retired, sub):
+            result = subprocess.run(
+                ["git", "-C", str(REPO_ROOT), "grep", "-n", "-E", pattern],
+                capture_output=True, text=True,
+            )
+            self.assertEqual(result.returncode, 1, result.stdout)
+            self.assertEqual(result.stdout, "")
+        for number in numbers:
+            found = sorted((REPO_ROOT / "docs/areas/project-contract/adr").glob(f"{number}-*.md"))
+            self.assertEqual(found, [])
+
     def test_no_living_file_names_a_working_artifact_outside_a_pinned_link(self):
         archived = archived_files()
         hits = [hit for path, lines in scanned_files() for hit in working_artifact_hits(path, lines, archived)]
