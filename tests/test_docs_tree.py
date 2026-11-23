@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from agent_tools.delivery.record_lint import record_violations
 from agent_tools.project_contract.adopt_inspection import (
     blob_at,
     parses_as_evidence_record,
@@ -475,6 +476,19 @@ class DocsTreeTest(unittest.TestCase):
             if "ADR-delivery-005" in line
         ]
         self.assertEqual(hits, [])
+
+    def test_the_delivery_records_001_to_011_keep_the_record_form(self):
+        records = [
+            p for p in sorted((REPO_ROOT / "docs/areas/delivery/adr").glob("[0-9][0-9][0-9]-*.md"))
+            if 1 <= int(p.name[:3]) <= 11
+        ]
+        found = [
+            (p.name, v.rule, v.line)
+            for p in records
+            for v in record_violations(f"docs/areas/delivery/adr/{p.name}", p.read_bytes())
+        ]
+        self.assertTrue(records)
+        self.assertEqual(found, [])
 
     def test_the_retired_delivery_records_are_gone_and_cited_nowhere(self):
         for n in RETIRED_DELIVERY_RECORDS:
