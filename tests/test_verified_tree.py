@@ -709,6 +709,30 @@ class RunTest(ProjectCase):
         where = str(self.worktree.resolve())
         self.assertEqual(self.logged(), [f"{where} lint", f"{where} test"])
 
+    def recorded(self):
+        """The record file's text in the worktree's own git directory, or None when absent."""
+        path = Path(self.git("rev-parse", "--absolute-git-dir", cwd=self.worktree)) / "verified-tree.json"
+        return path.read_text(encoding="utf-8") if path.exists() else None
+
+    def test_a_passed_run_records_its_tree_and_check_answers_verified(self):
+        self.declare({"lint": "", "test": ""})
+        answer = self.answer(self.run_verified())
+        self.assertEqual(answer["verdict"], "passed")
+        self.assertEqual(json.loads(self.recorded()),
+                         {"schema": "verified-tree/v1", "tree": answer["tree"],
+                          "verification": ["lint", "test"]})
+        done = subprocess.run(
+            [sys.executable, "-m", "agent_tools.verification.verified_tree", "check"],
+            cwd=self.worktree, capture_output=True, text=True, check=False, env=self.env)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        checked = json.loads(done.stdout)
+        self.assertEqual((checked["status"], checked["tree"]), ("verified", answer["tree"]))
+
+    def test_a_failed_run_records_nothing(self):
+        self.declare({"lint": "sys.exit(3)", "test": ""})
+        self.assertEqual(self.answer(self.run_verified())["verdict"], "failed")
+        self.assertIsNone(self.recorded())
+
     def test_a_failing_id_fails_the_run_and_the_others_still_run_once(self):
         self.declare({"lint": "print('boom');sys.exit(3)", "test": ""})
         answer = self.answer(self.run_verified())

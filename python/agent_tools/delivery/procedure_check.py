@@ -131,6 +131,7 @@ PLATFORM_LISTS: Mapping[str, frozenset[str]] = {
     "forge-claim": frozenset(),
     "independent-review": frozenset({"findings"}),
     "issue-setup": frozenset(),
+    "landing": frozenset(),
     "look-approval": frozenset({"acs", "covers"}),
     "resolve-project": frozenset(),
     "verified-tree": frozenset({"results"}),

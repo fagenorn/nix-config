@@ -94,6 +94,10 @@ any other exit is the command's own (0 `pass`, else `fail` whose summary is the 
 `SUMMARY_LINES` non-blank output lines). Every id runs even after an earlier one failed. The
 verdict is `failed` when any result is `fail`, else `dirty` when the tree is not clean after
 the runs, else `passed`; `clean` reports the after state and `tree` the tree that was run.
+A `passed` run writes the record below for the tree it ran, its `verification` the ids whose
+status is `pass` (a run that passed no id writes none, the record's list being non-empty), so
+`check` then answers `verified` for that tree; a `failed` or `dirty` run, a usage error and an
+error verdict write nothing and leave an earlier record as it was.
 A usage error, a path that is not a git worktree, a resolver refusal or a missing
 `origin/<integration_branch>` when some id is conditional prints `{"detail": "<text>",
 "verdict": "error"}` and exits 1.
@@ -551,10 +555,14 @@ def run(worktree: Path) -> tuple[int, dict]:
             else:
                 results.append(_run_command(verification_id, commands[verification_id]))
         clean = _clean(root)
+        verdict = ("failed" if any(entry["status"] == "fail" for entry in results)
+                   else "passed" if clean else "dirty")
+        passed = [entry["id"] for entry in results if entry["status"] == "pass"]
+        if verdict == "passed" and passed:
+            _write_atomically(record_path(root), {"schema": SCHEMA, "tree": tree,
+                                                  "verification": passed})
     except (VerifiedTreeError, OSError) as error:
         return 1, {"detail": str(error), "verdict": "error"}
-    verdict = ("failed" if any(entry["status"] == "fail" for entry in results)
-               else "passed" if clean else "dirty")
     return 0, {"clean": clean, "head": head, "results": results, "tree": tree,
                "verdict": verdict}
 

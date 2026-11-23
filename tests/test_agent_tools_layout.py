@@ -58,6 +58,7 @@ ALLOWED_IMPORTS: dict[str, frozenset[str]] = {
         "agent_tools.project_contract.attempt_history",  # attempt_budget
         "agent_tools.project_contract.derived_values",  # verify_slot
         "agent_tools.project_contract.resolve_project",  # issue_branch, engine_shell
+        "agent_tools.verification.verified_tree",  # landing
     }),
     "guard": frozenset({
         "agent_tools.project_contract.adopt_inspection",  # guard_policy, contract_export

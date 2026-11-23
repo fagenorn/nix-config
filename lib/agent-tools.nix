@@ -81,6 +81,7 @@ let
     "instruction-surface-lint" = "delivery.instruction_surface_lint";
     "issue-branch" = "delivery.issue_branch";
     "issue-setup" = "delivery.issue_setup";
+    "landing" = "delivery.landing";
     "lint-time" = "delivery.lint_time";
     "look-approval" = "delivery.look_approval";
     "look-lint" = "delivery.look_lint";

@@ -91,6 +91,14 @@
       ]
     }
   },
+  "landing": {
+    "subcommands": {
+      "prepare": ["ready", "unverified", "error"],
+      "pushed": ["pushed", "head-moved", "absent", "error"],
+      "pull": ["open", "absent", "error"],
+      "merged": ["merged", "open", "error"]
+    }
+  },
   "lint-time": null,
   "look-approval": {
     "subcommands": {
