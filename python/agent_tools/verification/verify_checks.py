@@ -349,23 +349,6 @@ line; a malformed payload is a `payload_invalid` forge error. A bad `--repo`, an
 `--job` or `--branch`, a `--merge` that is not 40 lowercase hex characters, or an `--n` that is not a
 positive integer is a usage error (2).
 
-`suite-test-failures --repo R --workflow W --job J --branch B --merge SHA --n N --test NAME`
-(`verify_checks.suite_test_failures`, issue 1659) is met when no counted run of the first N from the merge's
-run on has a failed attempt of job J whose log names the test NAME as failed. The after runs are those of
-`suite-regressions` (the merge's run is the earliest push run listed at `--merge`, none: 75; fewer than N
-counted: 75), no before run is read, and only the log of a `failure` attempt is read. A log line names the
-test when, after the leading BOM and the line's timestamp are dropped, it reads `ERROR: NAME (` or `FAIL: NAME (`
-with NAME exactly the test (a name that only starts with it, or a subtest suffix after the parenthesis, is
-matched on the name alone); every line counts, including those between `suite-runner: begin` and `suite-runner:
-end`, and a log that names the test is a failure with or without a complete summary. A failed attempt that does
-not name the test is cleared only when its log has a complete summary (the test ran to its end); without one
-the run is listed in `unattributed` and is never passed, unless another failed attempt of that run names the
-test, which settles the run as a failure. Exit 0 when neither `failures` nor `unattributed` is set, 1 when one
-is, 75 as above, 2 on a forge error. The report is `{"merge_run", "after", "test", "failures": [run ids],
-"unattributed": [run ids]}`, one JSON line, each run id at most once and in after order. A bad `--repo`, an
-empty `--workflow`, `--job`, `--branch` or `--test`, a `--merge` that is not 40 lowercase hex characters, or
-an `--n` that is not a positive integer is a usage error (2).
-
 `suite-wall-time --limit SECONDS` (`verify_checks.suite_wall_time`, issue 1314) runs `just
 agent-workflow-tests` at the repository root and is met (0) only when the suite exits 0 in strictly under
 SECONDS of wall time; a suite that exits non-zero is not met (1, verdict `failed`) and so is one that takes
@@ -748,7 +731,6 @@ SUITE_ROW = re.compile(r"^suite-runner:\s+[0-9.]+s wall\s+[0-9.]+s cpu (passed|f
 SUITE_SUMMARY = re.compile(
     r"^suite-runner: summary members=(\d+) passed=(\d+) failed=(\d+) jobs=\d+ wall=[0-9.]+s cpu=[0-9.]+s$")
 SUITE_BEGIN = re.compile(r"^suite-runner: begin (.+)$")
-TEST_FAILURE = re.compile(r"^(?:ERROR|FAIL): (\S+) \(")
 LOG_STAMP = re.compile(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d+)?Z ")
 
 
@@ -830,12 +812,16 @@ def _suite_log(repo: str, job_id: int) -> str:
     return text
 
 
-def _runs_from_merge(repo: str, listing: str, job: str, merge: str, n: int
-                     ) -> tuple[tuple[int, str] | None, list[tuple[int, list[tuple[int, str]]]]]:
-    """((merge run id, created_at) or None, the first n counted runs from it on as (run id, attempts))."""
+def suite_regressions(repo: str, workflow: str, job: str, branch: str, merge: str,
+                      n: int) -> tuple[int, dict]:
+    """Met when no member passing in the N push runs before `merge` failed in the N runs from it on."""
+    listing = f"repos/{repo}/actions/workflows/{workflow}/runs?branch={branch}&event=push"
+    report: dict = {"merge_run": None, "before": [], "before_skipped": [], "after": [],
+                    "regressions": {}, "unattributed": []}
     at_merge = _suite_runs(forge_api.api_get(f"{listing}&head_sha={merge}&per_page=100"))
     if not at_merge:
-        return None, []
+        return 75, report
+    report["merge_run"] = at_merge[0][1]
     start = at_merge[0][3]
     after: list[tuple[int, list[tuple[int, str]]]] = []
     pages = _counted_pages(forge_api.api_pages(f"{listing}&created=>={start}&per_page=100"),
@@ -848,20 +834,6 @@ def _runs_from_merge(repo: str, listing: str, job: str, merge: str, n: int
             after.append((run[1], counted))
             if len(after) == n:
                 break
-    return (at_merge[0][1], start), after
-
-
-def suite_regressions(repo: str, workflow: str, job: str, branch: str, merge: str,
-                      n: int) -> tuple[int, dict]:
-    """Met when no member passing in the N push runs before `merge` failed in the N runs from it on."""
-    listing = f"repos/{repo}/actions/workflows/{workflow}/runs?branch={branch}&event=push"
-    report: dict = {"merge_run": None, "before": [], "before_skipped": [], "after": [],
-                    "regressions": {}, "unattributed": []}
-    merge_run, after = _runs_from_merge(repo, listing, job, merge, n)
-    if merge_run is None:
-        return 75, report
-    report["merge_run"] = merge_run[0]
-    start = merge_run[1]
     report["after"] = [run_id for run_id, _ in after]
     if len(after) < n:
         return 75, report
@@ -902,36 +874,6 @@ def suite_regressions(repo: str, workflow: str, job: str, branch: str, merge: st
                     if run_id not in seen:
                         seen.append(run_id)
     return (1 if report["regressions"] or report["unattributed"] else 0), report
-
-
-def suite_test_failures(repo: str, workflow: str, job: str, branch: str, merge: str, n: int,
-                        test: str) -> tuple[int, dict]:
-    """Met when no counted run from the merge's run on has a failed attempt of `job` that names `test`."""
-    listing = f"repos/{repo}/actions/workflows/{workflow}/runs?branch={branch}&event=push"
-    report: dict = {"merge_run": None, "after": [], "test": test, "failures": [], "unattributed": []}
-    merge_run, after = _runs_from_merge(repo, listing, job, merge, n)
-    if merge_run is None:
-        return 75, report
-    report["merge_run"] = merge_run[0]
-    report["after"] = [run_id for run_id, _ in after]
-    if len(after) < n:
-        return 75, report
-    for run_id, counted in after:
-        silent = False
-        for job_id, conclusion in counted:
-            if conclusion != "failure":
-                continue
-            log = _suite_log(repo, job_id)
-            names = (TEST_FAILURE.match(LOG_STAMP.sub("", line, count=1))
-                     for line in log.removeprefix("\ufeff").splitlines())
-            if any(found and found[1] == test for found in names):
-                report["failures"].append(run_id)
-                break
-            silent = silent or suite_results(log) is None
-        else:
-            if silent:
-                report["unattributed"].append(run_id)
-    return (1 if report["failures"] or report["unattributed"] else 0), report
 
 
 def self_hosted_runner(repo: str, runner: str, labels: Sequence[str]) -> tuple[int, dict]:
@@ -3373,16 +3315,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     regress.add_argument("--branch", type=_nonempty, required=True)
     regress.add_argument("--merge", type=_merge_sha, required=True)
     regress.add_argument("--n", type=_issue_number, required=True)  # a positive integer
-    failed = checks.add_parser(
-        "suite-test-failures",
-        help="issue 1659: no push run from the merge's run on names --test as failed")
-    failed.add_argument("--repo", type=_repo, required=True)
-    failed.add_argument("--workflow", type=_nonempty, required=True)
-    failed.add_argument("--job", type=_nonempty, required=True)
-    failed.add_argument("--branch", type=_nonempty, required=True)
-    failed.add_argument("--merge", type=_merge_sha, required=True)
-    failed.add_argument("--n", type=_issue_number, required=True)  # a positive integer
-    failed.add_argument("--test", type=_nonempty, required=True)
     wall = checks.add_parser(
         "suite-wall-time",
         help="issue 1314: a full agent workflow suite run at this commit passes in under --limit seconds")
@@ -3544,9 +3476,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.check == "suite-regressions":
             code, report = suite_regressions(args.repo, args.workflow, args.job, args.branch,
                                              args.merge, args.n)
-        elif args.check == "suite-test-failures":
-            code, report = suite_test_failures(args.repo, args.workflow, args.job, args.branch,
-                                               args.merge, args.n, args.test)
         else:
             code, report = required_checks(args.repo, args.base, args.since)
     except forge_api.ForgeError as error:
