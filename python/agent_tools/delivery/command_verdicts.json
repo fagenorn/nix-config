@@ -10,6 +10,15 @@
   "bypass-proof": null,
   "cache-proxy": null,
   "cleanup-issue": null,
+  "closing": {
+    "subcommands": {
+      "read": ["merged", "unmerged", "error"],
+      "worktree": ["removed", "dirty", "error"],
+      "forward": ["forwarded", "skipped", "error"],
+      "branch": ["gone", "kept", "error"],
+      "issue": ["closed", "open-criteria", "error"]
+    }
+  },
   "comment-lint": null,
   "conformance": null,
   "console": null,
@@ -29,6 +38,11 @@
         "already_held",
         "held_by",
         "lost_to",
+        "error"
+      ],
+      "release": [
+        "released",
+        "not_held",
         "error"
       ],
       "renew": [

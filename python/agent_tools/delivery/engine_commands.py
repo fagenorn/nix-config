@@ -63,6 +63,7 @@ from agent_tools.delivery.procedure_check import CommandDeclaration
 from agent_tools.system.siblings import sibling_argv
 
 PLATFORM_MODULES: Mapping[str, str] = MappingProxyType({
+    "closing": "delivery.closing",
     "diff-scope": "delivery.diff_scope",
     "forge-claim": "claims.forge_claim",
     "independent-review": "delivery.independent_review",
@@ -84,6 +85,7 @@ LIFECYCLE_WALL_SECONDS = 600
 SLOT_RE = re.compile(r"^\{(\d+)\}$")
 POSITIONAL: frozenset[str] = frozenset({"diff-scope"})
 PLATFORM_WALL_SECONDS: Mapping[str, float] = MappingProxyType({
+    "closing": 1200,
     "diff-scope": 300,
     "forge-claim": 1200,
     "independent-review": 3600,

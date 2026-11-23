@@ -434,7 +434,7 @@ CASES = [
     Case("command_without_declared_verdicts", editing("toy", _undeclared_command),
          [("toy", "scope", "undeclared_verdicts")]),
     Case("subcommand_without_declared_verdicts",
-         editing("toy-child", _set(lambda toy: step(toy, "claim"), "subcommand", "release")),
+         editing("toy-child", _set(lambda toy: step(toy, "claim"), "subcommand", "land")),
          [("toy-child", "claim", "undeclared_verdicts")]),
     Case("unknown_role",
          editing("toy", _set(lambda toy: step(toy, "review-b"), "role", "auditor")),
@@ -781,6 +781,30 @@ class RefusedOutcomeTest(unittest.TestCase):
         self.assertIn("'probe'", refusals[0]["detail"])
         code2, out2, _ = run_check("--procedures", str(with_probe(["ok"])))
         self.assertEqual(code2, 0, out2)
+
+
+def _releasing_claim(mapped: dict) -> Callable[[dict], None]:
+    def change(toy: dict) -> None:
+        claim = step(toy, "claim")
+        for member in ("mutates", "check"):
+            claim.pop(member)
+        claim.update(subcommand="release", on=mapped)
+    return change
+
+
+class ClaimReleaseTest(unittest.TestCase):
+    OUTCOMES = {"released": "done", "not_held": "done", "error": "child-stop", "refused": "child-stop"}
+
+    def test_forge_claim_release_is_a_declared_step_with_three_verdicts(self):
+        code, out, _ = run_check("--procedures", str(broken_copy(
+            editing("toy-child", _releasing_claim(self.OUTCOMES)))))
+        self.assertEqual(code, 0, out)
+        short = {key: value for key, value in self.OUTCOMES.items() if key != "not_held"}
+        code, out, _ = run_check("--procedures", str(broken_copy(
+            editing("toy-child", _releasing_claim(short)))))
+        self.assertEqual(code, 1, out)
+        self.assertEqual([(r["procedure"], r["step"], r["defect"]) for r in json.loads(out)["refusals"]],
+                         [("toy-child", "claim", "unmapped_outcome")])
 
 
 class WaitMemberTest(unittest.TestCase):
@@ -1237,6 +1261,7 @@ class DeclarationTest(unittest.TestCase):
         commands = load_commands()
         self.assertEqual(commands["forge-claim"], CommandDeclaration(None, {
             "acquire": ("acquired", "already_held", "held_by", "lost_to", "error"),
+            "release": ("released", "not_held", "error"),
             "renew": ("renewed", "not_held", "error"),
             "status": ("free", "held_by", "stale", "error")}))
         self.assertEqual(commands["diff-scope"].outcomes(None), ("ok", "failed"))

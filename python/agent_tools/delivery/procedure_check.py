@@ -127,6 +127,7 @@ PLACEHOLDER_RE = re.compile(r"\{\{\s*([^{}]*?)\s*\}\}")
 
 # The members of each platform command's JSON output that are lists; every other member is not one.
 PLATFORM_LISTS: Mapping[str, frozenset[str]] = {
+    "closing": frozenset(),
     "diff-scope": frozenset({"files"}),
     "forge-claim": frozenset(),
     "independent-review": frozenset({"findings"}),
