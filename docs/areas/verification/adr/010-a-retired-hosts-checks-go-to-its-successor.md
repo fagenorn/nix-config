@@ -20,5 +20,5 @@ A writing pass ends with reason `host_retired` every live runner prompt of the b
 - A returning host is restored by removing its entry from the map; the block grammar and the lint are unchanged.
 - `host_retired` is a new line reason and a new end reason.
 - A stale prompt's identity now includes its host, so an ended prompt naming the retired host never blocks the successor's.
-- Related: ADR-verification-003 (the unattended gate), ADR-verification-005, ADR-verification-008.
+- Related: ADR-verification-003 (the unattended gate), ADR-verification-008.
 - Amends ADR-verification-009 (D1: a stale prompt's identity includes its host; a retired host's live prompts end without an answer).

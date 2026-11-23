@@ -501,6 +501,19 @@ class DocsTreeTest(unittest.TestCase):
     def doc(self, path):
         return " ".join((REPO_ROOT / path).read_text().split())
 
+    def test_no_tracked_file_cites_a_deleted_verification_record(self):
+        numbers = ("001", "005", "006", "007")
+        # The pattern is built at run time so this file holds no deleted citation itself.
+        pattern = "ADR-verification-(" + "|".join(numbers) + ")([^0-9]|$)"
+        result = subprocess.run(["git", "-C", str(REPO_ROOT), "grep", "-n", "-E", pattern],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertEqual(result.stdout, "")
+        for number in numbers:
+            with self.subTest(number):
+                self.assertEqual(
+                    sorted((REPO_ROOT / "docs/areas/verification/adr").glob(f"{number}-*.md")), [])
+
     def test_adr_verification_008_records_the_boot_host_amendment(self):
         path = "docs/areas/verification/adr/008-macs-verify-only-while-logged-in.md"
         raw = (REPO_ROOT / path).read_text()
