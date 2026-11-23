@@ -264,7 +264,7 @@ def parse_findings(raw: str) -> list[dict]:
         text = line.strip()
         if heading is None or not text:
             continue
-        if text.startswith(("- ", "* ")):
+        if line.startswith(("- ", "* ")):
             findings.append({"failing_input": "", "file": "", "severity": heading.lower(),
                              "summary": text[2:].strip()})
         elif findings and findings[-1]["severity"] == heading.lower() and text != "None.":

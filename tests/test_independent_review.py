@@ -198,6 +198,16 @@ class SliceTest(ReviewCase):
         self.assertTrue(reply["raw_summary"].startswith("scope: full"), reply["raw_summary"])
 
 
+class ParseFindingsTest(unittest.TestCase):
+    def test_an_indented_sub_bullet_continues_its_finding_instead_of_opening_one(self):
+        raw = ("## Critical\nNone.\n## Important\n- I1 src/a.py:3 add() drops the carry.\n"
+               "  - evidence: tests/t.py:9 asserts nothing\n## Minor\nNone.\n")
+
+        self.assertEqual(independent_review.parse_findings(raw), [{
+            "failing_input": "", "file": "src/a.py:3", "severity": "important",
+            "summary": "I1 src/a.py:3 add() drops the carry. - evidence: tests/t.py:9 asserts nothing"}])
+
+
 class ContractTest(unittest.TestCase):
     def test_the_tail_matches_the_codex_collaboration_skill(self):
         found = re.search(r"--model (\S+) --effort (\S+)", SKILL.read_text(encoding="utf-8"))
