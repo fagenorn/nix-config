@@ -137,8 +137,9 @@ Every call prints one JSON object on one stdout line with `command` (`look-appro
    `look` marker.
    With `--own-files` (issue 1679; a flag with no value, a usage error with any of `--before`,
    `--after` and `--picture`, before any `gh` call) the rule is `own-files` and `pictures` is null:
-   no rule is derived from the approval and no pictures or set file is read, so an approval with a
-   pictures digest and one without are carried alike (a `fix` answer is never a candidate). The
+   no pictures or set file is read, so an approval with a pictures digest and one without are
+   carried alike (a `fix` answer is never a candidate); an approval whose `pictures` field is not a
+   digest has no `own_line` for any reader, so it is `needed` with `pictures-unreadable`. The
    verdicts are decided as above up to `source-differs`, then `moved`, then `needed` with `not-merges`
    (`settle_merges`, unchanged), then `needed` with `own-files-touched` when
    `look_marker.settle_own_files` decides false (a merge changed a name `B...A` lists, or a compare
@@ -413,7 +414,9 @@ def carry(args: argparse.Namespace) -> int:
     state["from"] = candidate.head
     if candidate.head != args.from_head:
         return needed("source-differs")
-    rule = lm.OWN_FILES_RULE if args.own_files else lm.carry_rule(comments, candidate)
+    rule = lm.carry_rule(comments, candidate)
+    if rule is not None and args.own_files:
+        rule = lm.OWN_FILES_RULE
     if rule is None:
         return needed("pictures-unreadable")
     state["rule"] = rule

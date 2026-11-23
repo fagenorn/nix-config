@@ -887,6 +887,16 @@ class CarryVerbTest(unittest.TestCase):
                          (0, "needed", "own-files-touched", "own-files", None))
         self.assertEqual(self.posted(), [])
 
+    def test_carry_own_files_refuses_a_malformed_pictures_field(self):
+        bad = comment(5, forge_markers.render(lm.KIND, {"issue": "7", "pr": "12", "head": A,
+                                                         "answer": "approved", "message": "m5",
+                                                         "pictures": "nothex"}, "x"))
+        self.seed([bad])
+        code, out = self.own_files_run()
+        self.assertEqual((code, out["verdict"], out["reason"], out["rule"], out["comment_id"]),
+                         (0, "needed", "pictures-unreadable", None, None))
+        self.assertEqual(self.posted(), [])
+
     def test_carry_own_files_refuses_a_non_merge_commit(self):
         self.seed([self.pics(5)], self.merges([(A, [FORK]), (HEAD, [A])]))
         code, out = self.own_files_run()
