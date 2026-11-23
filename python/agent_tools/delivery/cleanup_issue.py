@@ -109,8 +109,8 @@ from typing import NamedTuple, Protocol
 from urllib.parse import quote
 
 from agent_tools.delivery import (
-    comment_lint, copied_test_lint, never_rise, node_lint, record_lint, ruff_lint,
-    size_lint, skipped_test_lint)
+    comment_lint, copied_test_lint, instruction_surface_lint, never_rise, node_lint, record_lint,
+    ruff_lint, size_lint, skipped_test_lint)
 from agent_tools.delivery.never_rise import Enforcer, Snapshot, Violation
 from agent_tools.system import forge_api
 
@@ -182,6 +182,11 @@ RECORD_GUIDANCE = {
                                   "heading, status line, list, quote, fence or second paragraph.",
 }
 
+SURFACE_GUIDANCE = ("Cut each listed instruction surface to at most its platform budget: keep what "
+                    "an agent must read on that route and move the rest to a document loaded only "
+                    "on the branch that needs it.")
+
+
 NODE_BATCH = 10
 NODE_GUIDANCE = {
     node_lint.PARSE_RULE: "Make each listed program parse as the runtime loads it: fix the syntax "
@@ -208,6 +213,7 @@ RULES: tuple[CleanupRule, ...] = (
       for enforcer in comment_lint.enforcers(None)),
     *(CleanupRule(enforcer, RECORD_BATCH, RECORD_GUIDANCE[enforcer.rule])
       for enforcer in record_lint.RECORD_ENFORCERS),
+    CleanupRule(instruction_surface_lint.ENFORCER, 1, SURFACE_GUIDANCE),
     *(CleanupRule(enforcer, NODE_BATCH, NODE_GUIDANCE[enforcer.rule])
       for enforcer in node_lint.enforcers()),
 )

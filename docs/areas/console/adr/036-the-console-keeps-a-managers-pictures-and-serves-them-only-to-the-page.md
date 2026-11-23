@@ -15,9 +15,9 @@ A manager that builds or checks a page has a screenshot of its work, and the own
 
 **D3. The store.** Pictures live in `pictures` beside the event log, a directory of mode `0700`. A picture is the file `pictures/<id>`, `id` being the SHA-256 of its bytes in lowercase hex, mode `0600`, written once through a temporary file and moved into place. Sending the same bytes again writes nothing, keeps the file where it is and renews its age.
 
-**D4. The row.** Each accepted send, a resend included, appends one `picture.stored` row `{"picture": <id>, "sprint_id": <id>}` of the sprint's project. The kind is not kept (ADR-console-009): it leaves with the other rows after 90 days.
+**D4. The row.** Each accepted send, a resend included, appends one `picture.stored` row `{"picture": <id>, "sprint_id": <id>}` of the sprint's project. The kind is not kept (ADR-console-001): it leaves with the other rows after 90 days.
 
-**D5. References and the sweep.** A row references a picture when its payload `pictures` is a list holding the id; the `picture.stored` row does not reference its own picture. Each retention pass, the one at construction included (ADR-console-009), removes every entry of `pictures` that no row references once it is more than one day old, by the file's modification time. A resend renews that time, so a picture a manager keeps sending lives on. A failing sweep is one stderr line and does not stop the console.
+**D5. References and the sweep.** A row references a picture when its payload `pictures` is a list holding the id; the `picture.stored` row does not reference its own picture. Each retention pass, the one at construction included (ADR-console-001), removes every entry of `pictures` that no row references once it is more than one day old, by the file's modification time. A resend renews that time, so a picture a manager keeps sending lives on. A failing sweep is one stderr line and does not stop the console.
 
 **D6. The write.** `POST /api/picture` is a manager write like the brief, guarded by the sprint's secret and not by the page token (ADR-console-013, ADR-console-019). The body is the PNG with `Content-Type: image/png`; the sprint and its secret travel in the headers `X-Console-Sprint` and `X-Console-Secret`, each exactly once. The checks run in this order and each leaves no file and no row: any `Origin` (the console's own included) is `403` `origin refused`; another media type is `415` `png only`; a length that is not digits is `411`; one over the limit is `413`; a missing, repeated or malformed header, or a body shorter than its length, is `400` `bad picture`; a sprint that is not open is `409`; a wrong secret is `403` `secret refused`; a body that is not a PNG is `400` with its reason. Success is `200` `application/json` `{"picture":"<id>"}`. Neither the secret nor the bytes appear in a stderr line or an answer.
 
@@ -28,6 +28,6 @@ A manager that builds or checks a page has a screenshot of its work, and the own
 - A manager can hand the console a screenshot and name it by the id the answer returns; the page can read it with its token, the question card draws pictures from object URLs, and the content security policy's `img-src` is `data: blob:` (ADR-console-038).
 - A picture no row names disappears a day after it was last sent; a row that names it keeps it as long as the row is kept.
 - The store is bounded by what managers send in a day plus what rows reference, each at most 2 MiB.
-- ADR-console-008 lists the route among the manager's writes and ADR-console-009 is amended by the sweep.
+- ADR-console-008 lists the route among the manager's writes and ADR-console-001 is amended by the sweep.
 - An owner check's pictures are stored and referenced by the inbox row's picture entries (ADR-console-045).
-- Related: ADR-console-008, ADR-console-009, ADR-console-013, ADR-console-019.
+- Related: ADR-console-001, ADR-console-008, ADR-console-013, ADR-console-019.

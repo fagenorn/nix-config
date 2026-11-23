@@ -5,7 +5,7 @@
 
 ## Context
 
-ADR-console-028 plans a repository's adoption from the page, and ADR-console-029 lets the owner answer the plan's questions there. Both stop at a repository with no `.agents/project.json`: the plan amends that file, so without one it could never reach `ready`, and the owner had to write a contract by hand in a terminal first. #1067 has the console draft the contract from what the repository says, ask only what it cannot read, and hand the result to the plan as a file the adoption writes (ADR-project-contract-006). Project policy is never silently defaulted: every value the console set is shown and can be changed before the plan is applied.
+ADR-console-028 plans a repository's adoption from the page, and ADR-console-029 lets the owner answer the plan's questions there. Both stop at a repository with no `.agents/project.json`: the plan amends that file, so without one it could never reach `ready`, and the owner had to write a contract by hand in a terminal first. #1067 has the console draft the contract from what the repository says, ask only what it cannot read, and hand the result to the plan as a file the adoption writes (ADR-project-contract-004). Project policy is never silently defaulted: every value the console set is shown and can be changed before the plan is applied.
 
 ## Decision
 
@@ -19,7 +19,7 @@ ADR-console-028 plans a repository's adoption from the page, and ADR-console-029
 
 **D5. The answers.** Answers and changes travel through `POST /api/plan-answer` with the question id `contract-draft` and the field as subject: no new page write (ADR-console-008). A command that cannot be split is refused with `the command could not be read: close every quote and do not end it with a backslash`, and JSON that cannot be parsed with `type it as JSON, or choose one of the offered answers`, each as a `409` with its plain text that appends nothing and runs nothing.
 
-**D6. The plan.** Once no field is open, the console writes the draft to a file in its own state directory, outside the checkout, runs `adopt-project plan --contract-draft` (ADR-project-contract-006) and removes the file. The plan's change lines then include `writes the project contract`, and the plan's id covers the draft.
+**D6. The plan.** Once no field is open, the console writes the draft to a file in its own state directory, outside the checkout, runs `adopt-project plan --contract-draft` (ADR-project-contract-004) and removes the file. The plan's change lines then include `writes the project contract`, and the plan's id covers the draft.
 
 **D7. A refusal.** When the plan's resolver refuses the draft, the field it concerns reopens as a card with `The plan refused the <label>: <message>`, never a code, a pointer or a repair id (#1057). A refusal that concerns only a derived value or the project id (`adopt.draft.id_taken`, or a violation at the pointers a fact stands for) reopens no card: the registration is a failed row with its retry card, on the registration run and on the answer of the last question alike, and the failure is logged.
 
@@ -29,5 +29,5 @@ ADR-console-028 plans a repository's adoption from the page, and ADR-console-029
 
 - The owner takes a repository with no contract from nothing to a `ready` plan with no terminal; approving a ready plan is ADR-console-030.
 - Tests sandbox HOME, every repository and the remote: a throwaway bare remote reached through `insteadOf`, with `GIT_ALLOW_PROTOCOL=file` so a missed rewrite fails instead of reaching a network host.
-- The page's two new controls (a Change control and a text field on a card) belong to ADR-console-002's desk rules.
-- Related: ADR-console-002, ADR-console-008, ADR-console-028, ADR-console-029, ADR-console-030, ADR-project-contract-004, ADR-project-contract-005, ADR-project-contract-006.
+- The page's two new controls (a Change control and a text field on a card) belong to the desk page's rules.
+- Related: ADR-console-008, ADR-console-028, ADR-console-029, ADR-console-030, ADR-project-contract-004, ADR-project-contract-005.

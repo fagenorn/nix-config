@@ -21,7 +21,7 @@ The owner can state a goal and read the desk, but cannot ask the console a plain
 
 **D6. The hook's admission rule.** The hook admits Read, Grep and Glob, and a Bash command only when it is made of plain words with U+0020 spaces as the only separator and equals one declared read-only argv exactly. Separators are checked before any split, so a bare `just` that would run a project's default recipe, a newline or any metacharacter is refused; a command naming a lifecycle verb is refused whatever the routes hold. ADR-console-065 changes this: the hook also admits the plain git reads and the gh reads of the project's own GitHub repository, pinned by `--repo`.
 
-**D7. The routes.** Routes come from `production.read_only.commands` (ADR-guard-009, ADR-guard-011), only those whose `cwd` is the resolved snapshot's `project.root`; the cwd is compared there, never with the registry root, which may be a symlink. With none, the console appends `Production cannot be read for this project: its contract declares no read-only command that runs from its root.` to the answer itself. A contract that cannot be resolved is a `failed` answer naming the resolver's error, and no session starts. ADR-console-065 changes this: a route runs inside `devenv shell --` when the root holds a `devenv.nix` that is a regular file.
+**D7. The routes.** Routes come from `production.read_only.commands` (ADR-guard-009), only those whose `cwd` is the resolved snapshot's `project.root`; the cwd is compared there, never with the registry root, which may be a symlink. With none, the console appends `Production cannot be read for this project: its contract declares no read-only command that runs from its root.` to the answer itself. A contract that cannot be resolved is a `failed` answer naming the resolver's error, and no session starts. ADR-console-065 changes this: a route runs inside `devenv shell --` when the root holds a `devenv.nix` that is a regular file.
 
 **D8. The answer.** The prompt fixes the shape: Answer, Read, Ran, Could not find out, Question for you. A step that needs money or a credential is put in Question for you, never attempted. ADR-console-065 changes this: the answer leads with the direct answer in plain business terms.
 
@@ -31,11 +31,11 @@ The owner can state a goal and read the desk, but cannot ask the console a plain
 
 ## Consequences
 
-- The desk page asks and shows a project's questions from its Ask box (#1177, ADR-console-002).
+- The desk page asks and shows a project's questions from its Ask box (#1177).
 - Reads are not confined to the project root: Read, Grep and Glob can read any file the account's user can.
 - With no user settings, neither the user-wide lifecycle guard nor the console's session hooks run in the session, so lifecycle verbs are refused by the deny rules, `dontAsk` and the question hook, and the session never shows on the console as a session.
 - A declared read-only command whose `cwd` is not the project's root is not offered, so the answer says production cannot be read.
 - A console stop cancels a running session and waits for every accepted question before the log closes, recording `the console stopped before the session answered`; a question asked while it stops is refused with `the console is stopping`.
 - An account removal can be refused as busy for as long as a question runs under that profile, up to the 300 s cap.
 - If a profile's default model were ever `sonnet` or smaller, the question session would not be smaller than the manager's, and nothing would report it.
-- Related: ADR-console-001, ADR-console-008, ADR-console-011, ADR-console-015, ADR-console-023, ADR-guard-009, ADR-guard-011.
+- Related: ADR-console-001, ADR-console-008, ADR-console-011, ADR-console-015, ADR-console-023, ADR-guard-009.

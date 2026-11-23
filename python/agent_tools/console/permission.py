@@ -7,7 +7,7 @@ D6) it never returns `BYPASS`: wherever the rule below chooses bypass it returns
 reason `WAKE_BLOCKED`, "waking a bypass manager is not yet possible". The rule that chooses
 bypass, which is unchanged and still decides every other reason, is `BYPASS` only when nothing the
 manager runs could reach production unguarded, else `AUTO`: (ADR-project-contract-007
-declares the three production statuses, ADR-guard-011 D3 says a loaded row's `production` member
+declares the three production statuses, ADR-guard-009 says a loaded row's `production` member
 is enforced without the row check):
 
 - the project's resolved contract declares `production.status == "none"`: BYPASS, "no production";

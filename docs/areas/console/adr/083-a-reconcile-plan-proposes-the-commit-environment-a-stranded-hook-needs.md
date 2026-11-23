@@ -5,7 +5,7 @@
 
 ## Context
 
-ADR-console-082 proposes the commit environment only for a checkout with no contract. A checkout that is already adopted, and whose installed commit hook calls a runner that only the development shell provides, planned `reconcile` with no environment and failed at the adoption commit with `exec: prek: not found`. ADR-project-contract-009 gives the adopter `--commit-environment`, which adds the command to an existing contract.
+ADR-console-082 proposes the commit environment only for a checkout with no contract. A checkout that is already adopted, and whose installed commit hook calls a runner that only the development shell provides, planned `reconcile` with no environment and failed at the adoption commit with `exec: prek: not found`. ADR-project-contract-008 gives the adopter `--commit-environment`, which adds the command to an existing contract.
 
 ## Decision
 
@@ -15,7 +15,7 @@ ADR-console-082 proposes the commit environment only for a checkout with no cont
 
 **D3. The row carries a one-field draft.** The row holds the `commit-environment` record as its draft, the Apply card states its line first, and `Not now` and Change work as in ADR-console-082 D3. The answer `none` plans as today, and a changed command is planned again through the adopter, never through a draft file.
 
-**D4. The adopter decides whether the contract already names one.** A contract that already names a commit environment is kept (ADR-project-contract-009 D2), and the console then drops the proposal, because the plan carries no `commit_environment` member.
+**D4. The adopter decides whether the contract already names one.** A contract that already names a commit environment is kept (ADR-project-contract-008), and the console then drops the proposal, because the plan carries no `commit_environment` member.
 
 **D5. The drafted path keeps ADR-console-082 D1.** A checkout with no contract is proposed its command exactly as before.
 

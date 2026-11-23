@@ -9,7 +9,7 @@ The console runs several sprints of one project at once, each with a manager of 
 
 ## Decision
 
-**D1. Two kept kinds and schema 10.** A notice is one `notice.posted` row and its withdrawal one `notice.withdrawn` row. Both are kept kinds (ADR-console-009), because a notice dropped by the retention pass would change what a sprint folds to. Adding a kept kind is a schema step: the event log is at schema 10, and a store at schema 2 to 9 is migrated in place, keeping every event. An older build refuses a store migrated to schema 10, the same one-way step ADR-console-009 took before.
+**D1. Two kept kinds and schema 10.** A notice is one `notice.posted` row and its withdrawal one `notice.withdrawn` row. Both are kept kinds (ADR-console-001), because a notice dropped by the retention pass would change what a sprint folds to. Adding a kept kind is a schema step: the event log is at schema 10, and a store at schema 2 to 9 is migrated in place, keeping every event. An older build refuses a store migrated to schema 10, the same one-way step ADR-console-001 took before.
 
 **D2. Three kinds and their bounds.** A notice is an object of a `kind` and a `text`: `claim` adds `what` and `until`, `heads-up` adds nothing, `hand-off` adds `to`. `text` is at most 280 characters, `what` at most 200 and `until` at most 140, each one line; a sprint has at most 5 open notices. Every bound is checked in one place, `sprints.checked_notice` for the notice and `postable_notice` for the sprint, and a bad notice is refused with the first bad member named, in a fixed refusal text that never echoes a key or a value the manager sent (ADR-console-019).
 
@@ -34,4 +34,4 @@ The console runs several sprints of one project at once, each with a manager of 
 - A store at schema 10 is not readable by an older build, so a rollback of the console needs the store of the older schema.
 - A notice stays in the log for good, so a claim a sprint made is never lost to retention; what the manager lists is only the open ones.
 - A claim is advice. Two managers can claim the same path, and the owner reads that from the list, not from a refusal.
-- Related: ADR-console-008, ADR-console-009, ADR-console-013, ADR-console-015, ADR-console-019.
+- Related: ADR-console-001, ADR-console-008, ADR-console-013, ADR-console-015, ADR-console-019.

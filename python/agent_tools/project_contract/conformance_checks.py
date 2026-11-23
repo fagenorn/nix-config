@@ -22,8 +22,8 @@ from pathlib import Path, PurePosixPath
 import subprocess
 
 from agent_tools.delivery import (
-    comment_lint, context_map_lint, copied_test_lint, host_admission, never_rise, node_lint,
-    record_lint, ruff_lint, size_lint, skipped_test_lint, standards_lint,
+    comment_lint, context_map_lint, copied_test_lint, host_admission, instruction_surface_lint,
+    never_rise, node_lint, record_lint, ruff_lint, size_lint, skipped_test_lint, standards_lint,
 )
 from agent_tools.project_contract import agent_platform
 from agent_tools.release import release_adapter, release_profile
@@ -456,16 +456,14 @@ LIFECYCLE_CLASSES = ("canonical_tracked", "tracked_projection",
  IGNORED_RUNTIME, ALLOWLISTED_BOOKKEEPING) = LIFECYCLE_CLASSES
 
 AGENTS_DIR = ".agents"
+# `.agents/artifacts/` holds no class: a working artifact lives until its
+# delivery merges and is never kept in the tree (#1418), so any file there is
+# unclassified.
 CANONICAL_AGENTS_PREFIXES = (
     "project.json", "instructions/", "skills/", "adapters/",
-    "extensions/", "knowledge/", "artifacts/",
+    "extensions/", "knowledge/",
 )
 RUNTIME_PREFIX = "runtime/"
-ARTIFACTS_PREFIX = "artifacts/"
-# The buckets `artifacts/` admits; any other second segment is unclassified.
-# `replays` holds committed replay records (#283's light-lane triage replay).
-ARTIFACTS_BUCKETS = ("specs", "plans", "evidence", "handoffs", "notes",
-                     "replays")
 # Closed and empty in v1: nothing outside .agents/ is admitted as
 # non-behavioral bookkeeping yet.
 BOOKKEEPING_ALLOWLIST: tuple[str, ...] = ()
@@ -483,11 +481,6 @@ def classify_agents_relative(relative: str) -> str | None:
     """The lifecycle class of a path relative to `<root>/.agents/`, or None."""
     if relative.startswith(RUNTIME_PREFIX):
         return IGNORED_RUNTIME
-    if relative.startswith(ARTIFACTS_PREFIX):
-        segments = relative.split("/")
-        if len(segments) > 1 and segments[1] in ARTIFACTS_BUCKETS:
-            return CANONICAL_TRACKED
-        return None
     for prefix in CANONICAL_AGENTS_PREFIXES:
         if relative == prefix or (prefix.endswith("/")
                                   and relative.startswith(prefix)):
@@ -780,12 +773,14 @@ def check_standards_lint(context: "Context") -> "Outcome":
 def never_rise_enforcers(contract: dict, revisions: tuple[str, ...] = ()
                          ) -> tuple[never_rise.Enforcer, ...]:
     """The size rule, the test rules, the ruff rules, the comment rules judged against the
-    contract's own tracker repository when it authors one, the record rules, then the Node
-    rules, which keep covering the programs of either of the two `revisions` on both."""
+    contract's own tracker repository when it authors one, the record rules, the instruction
+    surface rule, then the Node rules, which keep covering the programs of either of the two
+    `revisions` on both."""
     repository = contract["bindings"].get("tracker", {}).get("repo_slug") or None
     return (size_lint.ENFORCER, skipped_test_lint.ENFORCER, copied_test_lint.ENFORCER,
             *ruff_lint.ENFORCERS, *comment_lint.enforcers(repository),
-            *record_lint.RECORD_ENFORCERS, *node_lint.enforcers(also=revisions))
+            *record_lint.RECORD_ENFORCERS, instruction_surface_lint.ENFORCER,
+            *node_lint.enforcers(also=revisions))
 
 
 def check_never_rise(context: "Context") -> "Outcome":
@@ -811,9 +806,11 @@ def check_never_rise(context: "Context") -> "Outcome":
     """
     branch = context.contract["bindings"]["vcs"]["integration_branch"]
     pair = never_rise.revisions(context.root, branch, CHILD_TIMEOUT_SECONDS)
+    enforcers = never_rise_enforcers(context.contract, pair or ())
+    if context.stopwatch is not None:
+        enforcers = context.stopwatch.timed(enforcers)
     try:
-        verdict = (never_rise.judge(context.root, branch,
-                                    never_rise_enforcers(context.contract, pair),
+        verdict = (never_rise.judge(context.root, branch, enforcers,
                                     CHILD_TIMEOUT_SECONDS) if pair is not None else None)
     except never_rise.EnforcerFailed as error:
         return Outcome("failed", "enforcer_failed", "violations.enforcer.repair", {

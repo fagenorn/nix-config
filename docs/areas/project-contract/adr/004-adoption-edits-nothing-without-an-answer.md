@@ -1,18 +1,3 @@
-# ADR-project-contract-004 — Adoption edits a path literal only on an explicit answer
+# ADR-project-contract-004 — Adoption edits nothing without an answer
 
-- **Status:** accepted
-- **Decided in:** issues 350, 372, 376, 380
-
-## Context
-
-A relocation leaves path literals in tracked tooling files pointing at the old place. Whether a literal should follow the move depends on what the file means by it, which a scan of the text cannot tell, and an edit committed in the adoption commit is hard to take back.
-
-## Decision
-
-`adopt-project plan` asks about every occurrence of such a literal and offers `extend`, `rewrite` and `retain`, each only where it applies. A policy for a file class may be answered once, and its table value is a recommendation that is printed and never applied: nothing is edited without an answer. Every answer enters `decisions.answered` and so `plan_id`, and `apply` re-applies them from the stored plan, so the plan id authenticates them.
-
-## Consequences
-
-- An unanswered occurrence keeps the plan `draft` through `no-open-decisions`.
-- A policy answer decides only the occurrences that have no answer of their own.
-- The `git grep` prefilter scans a file only when it holds the first path segment of a move source as written, so a regular-expression spelling that escapes an interior dot of that segment (`foo\.bar` for `foo.bar`) is not found.
+A relocation leaves path literals in tracked tooling files pointing at the old place, and whether one should follow the move depends on what its file means by it, which a scan of the text cannot tell; an edit landed in the adoption commit is hard to take back. So `adopt-project plan` writes nothing in the checkout and edits a literal only on an explicit answer: it asks about every occurrence, offering `extend`, `rewrite` or `retain` where each applies, a policy answered once for a file class decides only the occurrences with no answer of their own, and a policy table value is a recommendation that is printed and never applied. Every answer is an input of `plan_id`, so `apply` re-applies from the stored plan exactly what was answered. A checkout with no contract is planned the same way: its drafted contract, read from a file outside the checkout, is the first file the adoption writes, and every resolver check runs on those bytes in a scratch copy of the base tree. Rejected: applying the table's recommendation unasked, which edits a file on a guess, and writing a drafted contract into the checkout before planning, which changes the checkout the plan is meant to leave alone.

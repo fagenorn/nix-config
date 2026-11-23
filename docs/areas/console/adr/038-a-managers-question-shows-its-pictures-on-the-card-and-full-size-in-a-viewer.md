@@ -21,8 +21,8 @@ A manager that asks the owner a question about something it built or checked has
 
 ## Consequences
 
-- ADR-console-019's questions may carry pictures and ADR-console-036's pictures are shown to the owner; both are amended by this decision. ADR-console-002's rule that the page is one self-contained document holds: the viewer is markup in the page, and the policy gains only `blob:` for images.
+- ADR-console-019's questions may carry pictures and ADR-console-036's pictures are shown to the owner; both are amended by this decision. The rule that the page is one self-contained document holds: the viewer is markup in the page, and the policy gains only `blob:` for images.
 - ADR-console-033's rules that a card fits the screen and reads plainly extend to the gallery at 480 pixels.
 - A manager's contract names `pictures` in its round; a round that carries none is unchanged.
 - The viewer's modal focus is the page's first use of `inert`; the page tests check the property and the key handling, and a browser check confirms native focus and activation.
-- Related: ADR-console-002, ADR-console-019, ADR-console-033, ADR-console-036.
+- Related: ADR-console-019, ADR-console-033, ADR-console-036.

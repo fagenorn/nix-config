@@ -20,6 +20,18 @@ def _toy_tally(results: Mapping[str, object]) -> str:
     return "accept" if all(value == "approve" for value in results.values()) else "revise"
 
 
+def _review_capability(results: Mapping[str, object]) -> str:
+    capabilities = results.get("contract.capabilities")
+    if not isinstance(capabilities, Mapping):
+        return "clear"
+    for name in ("review.code", "review.plan"):
+        entry = capabilities.get(name)
+        if isinstance(entry, Mapping) and entry.get("state") == "blocked":
+            return "blocked"
+    return "clear"
+
+
 GRADERS: Mapping[str, Grader] = {
     "toy-tally": Grader(("accept", "revise"), _toy_tally),
+    "review-capability": Grader(("clear", "blocked"), _review_capability),
 }

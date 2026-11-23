@@ -71,6 +71,7 @@ from agent_tools.project_contract.adopt_inspection import (
     contained_path,
     contained_relative,
     gate_entry,
+    adoption_subject,
     blob_at,
     git_or_fail,
     is_agent_path,
@@ -93,7 +94,7 @@ Resolver = Callable[..., tuple[int, object]]
 PLAN_ID_PATTERN = re.compile(r"(?:sha256:)?([0-9a-f]{64})")
 
 STORED_PLAN_MEMBERS = ("changes", "handoff", "plan", "verification")
-STORED_HANDOFF_MEMBERS = ("evidence_record", "migration_map", "repo_root")
+STORED_HANDOFF_MEMBERS = ("migration_map", "repo_root")
 STORED_PLAN_BLOCK_MEMBERS = ("base_revision", "plan_id", "project_id", "state")
 
 # What each operation kind names. `sources` and `targets` are dispatched over
@@ -822,10 +823,9 @@ def run_commit_gates(run: GateRun) -> list[dict]:
 
 def commit_message(project_id: str, digest: str, records: dict) -> str:
     """D28's fixed message: a pure function of the plan, with no trailer."""
-    return (f"chore(adopt): adopt {project_id} at plan {digest[:12]}\n"
+    return (f"{adoption_subject(project_id, digest)}\n"
             "\n"
-            f"path migration map: {records['migration_map']}\n"
-            f"adoption evidence record: {records['evidence_record']}\n")
+            f"path migration map: {records['migration_map']}\n")
 
 
 COMMIT_OUTPUT_BYTES = 16384
