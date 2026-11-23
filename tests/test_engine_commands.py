@@ -367,7 +367,8 @@ class SpawnSiteTest(unittest.TestCase):
         expected = [("engine_commands.py", "run", "subprocess.Popen"),
                     ("engine_guard.py", "_descendants", "subprocess.run"),
                     ("engine_guard.py", "judge", "subprocess.Popen"),
-                    ("engine_session.py", "launch", "subprocess.Popen")]
+                    ("engine_session.py", "launch", "subprocess.Popen"),
+                    ("engine_shell.py", "read_head", "subprocess.run")]
         self.assertEqual(spawn_sites(sources), expected)
         self.assertEqual(unguarded_in(sources), {})
         plants = {
