@@ -154,8 +154,10 @@ class VerifySlotTest(unittest.TestCase):
 
     def test_runs_outside_a_repository_are_each_their_own_group(self):
         self.declare(verify_slots=2)
-        first = self.start("a")
-        second = self.start("b")
+        plain = Path(self.home) / "not-a-repository"
+        plain.mkdir()
+        first = self.start("a", cwd=plain)
+        second = self.start("b", cwd=plain)
         self.assertTrue(wait_for(self.mark("a", "start")))
         self.assertTrue(wait_for(self.mark("b", "start")))
         self.release("a")
@@ -163,7 +165,7 @@ class VerifySlotTest(unittest.TestCase):
         for proc in (first, second):
             code, err = self.finish(proc)
             self.assertEqual(code, 0)
-            self.assertIsNone(WAITED_PATTERN.search(err))
+            self.assertNotIn(verify_slot.SAME_REPOSITORY_LINE, err)
 
     def test_a_same_repository_waiter_leaves_the_free_slot_to_another_repository(self):
         self.declare(verify_slots=2)
