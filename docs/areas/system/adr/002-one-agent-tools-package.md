@@ -1,18 +1,3 @@
 # ADR-system-002 — Agent-workflow Python is one standard-library package with one install route
 
-- **Status:** accepted; amended by ADR-system-005
-- **Decided in:** [the agent-tools package design](https://github.com/fagenorn/nix-config/blob/6b06a4e277ab8885d02cca9cec38e85a6de5dc55/.agents/artifacts/specs/2026-09-24-agent-tools-package-design.md)
-
-## Context
-
-The agent-workflow helpers were some two dozen loose Python files that Nix linked one by one into `~/.agents/bin`. Because they were not a package they could not import each other, so each spec invented its own loader and copied knowledge between modules.
-
-## Decision
-
-Every helper is a module of the one standard-library package `agent_tools` under `python/`. Each command is that module plus exactly one row in the command table of `lib/agent-tools.nix`, which is the only install route. A row becomes a `~/.agents/bin/<command>` launcher that unsets the `NIX_PYTHON*` variables and runs `python3 -I -m agent_tools.<module>` from one Nix-built environment, so nothing on `PYTHONPATH` or in the working directory can shadow the store copy.
-
-## Consequences
-
-- The builder import-checks every module, so a broken import fails `just build`.
-- The installed-layout check pins the system closure to one `agent_tools` build and every launcher to one environment; a helper added outside the table is not installed.
-- The package is standard-library only, so a module that needs a third-party dependency cannot join it without revisiting this decision.
+The agent-workflow helpers were some two dozen loose Python files that Nix linked one by one into `~/.agents/bin`; not being a package, they could not import each other, so each spec invented its own loader and copied knowledge between modules. Every helper is a module of the one standard-library package `agent_tools` under `python/`, and a command is that module plus exactly one row of the command table in `lib/agent-tools.nix`, its only install route: the row becomes a launcher of the platform package (ADR-system-005) that runs `python3 -I -m agent_tools.<area>.<module>` from one Nix-built environment, so nothing on `PYTHONPATH` or in the working directory shadows the store copy. The price is that a module needing a third-party dependency cannot join the package without revisiting this record. Rejected: keeping the loose files with a loader per spec, which is what failed; wrapping each command with `buildPythonApplication` or a flat directory on `PYTHONPATH`, either of which lets a caller's `PYTHONPATH` shadow the store copy; and adopting a third-party dependency such as `jsonschema` now, which would change the commands' error text and exit behaviour.

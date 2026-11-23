@@ -155,8 +155,7 @@ which regenerates `.github/workflows/conformance.yaml`; a tracked
 `.github/branch-protection.json` also gains the `Conformance` check. The plan
 publishes the lock entry, the workflow and the required check on the integration
 branch as `plan.conformance` (a member only a plan that makes the writes has),
-which is the thirteenth input of `plan_id` and which the evidence record
-repeats. The ready gate `conformance-plannable` keeps the plan `draft` with the
+which is the thirteenth input of `plan_id`. The ready gate `conformance-plannable` keeps the plan `draft` with the
 `adopt.conformance.*` repair id of the first cause when the repository cannot
 take them: no installed revision, an unnamed tracker, an `origin` that is not
 the tracker's slug, a projection of another kind holding the workflow's id or
@@ -164,7 +163,7 @@ target, a lock or `devenv.yaml` that cannot be edited, a kept lock entry that is
 not the installed revision, a protection file that cannot take the check, or a
 contract the resolver refuses with the workflow's entry in it. A repository
 without a `devenv.lock`, and the platform's own tree, are planned exactly as
-before, in plan id, operations and evidence record. Conformance work still to do
+before, in plan id and operations. Conformance work still to do
 counts as pending work, so such a repository is never routed `no_change`, and
 a path reference an answer edits in `devenv.yaml` shares the declaration's one
 write.
@@ -190,7 +189,7 @@ worktree only after proving that the commit changes exactly the paths the plan
 declared, that no Markdown file in it has more non-resolving relative links
 than its pre-move counterpart, and that the ref carries it. It never pushes,
 never merges and never writes the fleet registry. A green run prints
-`{branch, commit, plan_id, migration_map, evidence_record,
+`{branch, commit, plan_id, migration_map,
 integration_branch}`, the last read from the resolver's view of the worktree
 (null when it names none); a retained attempt's record is at
 `adopt_apply.failure_record_path(<digest>)`.
@@ -220,10 +219,11 @@ required checks or merges a fresh adoption.
 
 `verify` answers the conformance question read-only against one pinned
 revision — the contract resolves, every projection is in sync, no agent path is
-unclassified, and exactly one adoption evidence record is discoverable in it
-with the migration map it names (D34). Plain `verify` reads `HEAD`: the
-resolver runs on the working tree, the inventory comes from the index, and
-records are read at the `HEAD` commit it pins (D10). All three answers are
+unclassified, and the history of the revision carries an adoption commit, the
+newest commit with the subject `adopt_apply.commit_message` derives for the
+project (D28). Plain `verify` reads `HEAD`: the resolver runs on the working
+tree, the inventory comes from the index, and the adoption commit is read from
+the history of the `HEAD` commit it pins (D10). All three answers are
 reports on exit 0. `--register` is the one write to the user-scope fleet
 registry, and it reads nothing from the checkout's branches or files: it lists
 `origin`, fetches the remote default branch and, when the contract there names
@@ -235,13 +235,14 @@ check there. When the default branch's contract does not resolve,
 `--integration-branch NAME` (accepted once, and only with `--register`) names
 the integration branch to read instead; `adopt_verify.remote_source` states
 its conditions, and the report then carries a `branch_override` member. It
-refuses `not_integrated` when that commit carries no evidence record or the
-adoption commit derived from it is not its ancestor (D19). What it stores is
+refuses `not_integrated` when that commit's history carries no adoption commit
+or the adoption commit is not its ancestor (D19). What it stores is
 `{project_id, root}` with the real root (#148 D18), plus the `branch_override`
 member when the operand selected the branch. `--plan-id ID` (accepted once,
 and only with `--register`) refuses `not_integrated` before any write when no
-evidence record on the pinned commit carries that plan id, so the adoption of
-one plan is never mistaken for an earlier adoption of the same project.
+commit in the pinned history carries that plan's adoption subject, so the
+adoption of one plan is never mistaken for an earlier adoption of the same
+project.
 
 `plan` converts hand-written root entry files (`adopt_entries`, ADR-021): with
 a contract or draft, their authored text joins `.agents/instructions/bootstrap.md`
@@ -484,8 +485,7 @@ def compose_plan(root: Path, manifest: dict, answered: list[dict],
 
     links = adopt_links.derive_link_rewrites(
         root, inventory.base_revision, found.moves,
-        [path for path, _ in adopt_planning.evidence_record_members(found)]
-        + list(conversion.nested),
+        list(conversion.nested),
         adopt_planning.generated_targets(contract_source)
         | set(conversion.paths))
     base_text = adopt_entries.entry_base_text(conversion, links)
@@ -654,7 +654,7 @@ def compose_plan(root: Path, manifest: dict, answered: list[dict],
     # What counts as work left to do (routing rules 5 and 6). A projection
     # regeneration is an idempotent safety re-run that a conformant checkout
     # would perform to no effect, so counting it as work would make `no_change`
-    # unreachable; the two adoption records are excluded for the same reason,
+    # unreachable; the adoption's migration map is excluded for the same reason,
     # by being built only after this decision.
     substantive = [op for op in head + tail
                    if op["op"] != "regenerate-projection"]
@@ -674,16 +674,13 @@ def compose_plan(root: Path, manifest: dict, answered: list[dict],
         blockers = adopt_planning.blockers_for(ready_gates)
         records = adopt_planning.adoption_records(plan_id)
         bookkeeping, written = adopt_planning.bookkeeping_operations(
-            found, plan_id, outcome, inventory.base_revision, platform_block,
-            decisions, ready_gates, links.summary, path_references,
-            reference_policies, reference_formatting, conformance)
+            found, plan_id)
         contents.update(written)
         changes = head + bookkeeping + tail
         adopt_planning.check_markdown_writes(
             changes, adopt_entries.markdown_write_targets(links, conversion, source),
             frozenset(conversion.nested))
         adopt_planning.check_reference_writes(changes, set(reference_files))
-        evidence_record = records["evidence_record"]
         migration_map = records["migration_map"]
         items = adopt_planning.open_items(found)
     else:
@@ -694,7 +691,6 @@ def compose_plan(root: Path, manifest: dict, answered: list[dict],
         contents = {}
         ready_gates = [adopt_inspection.gate_entry(gate, "not_run", None)
                        for gate in adopt_inspection.READY_GATES]
-        evidence_record = None
         migration_map = None
 
     # Both values are produced by an exhaustive dispatch above, so this is
@@ -739,7 +735,6 @@ def compose_plan(root: Path, manifest: dict, answered: list[dict],
             "plan_path": str(plan_path),
             "next_command": adopt_planning.next_command_for(
                 state, outcome, root, plan_id, forward_migration, repair_id),
-            "evidence_record": evidence_record,
             "migration_map": migration_map,
         },
     }
@@ -1155,8 +1150,7 @@ def apply_stored_plan(args: argparse.Namespace, manifest: dict, digest: str,
               "message": "a pre-commit gate did not pass"} for gate in failed])
 
     branch_name = adopt_verify.integration_branch(run.resolve_payload)
-    records = {"migration_map": document["handoff"]["migration_map"],
-               "evidence_record": document["handoff"]["evidence_record"]}
+    records = {"migration_map": document["handoff"]["migration_map"]}
     signed = adopt_apply.signing_requested(run.resolve_payload)
     if signed is None:
         adopt_apply.retain_failure(digest, document, worktree, branch,
@@ -1336,7 +1330,7 @@ def command_verify(args: argparse.Namespace) -> int:
             verification = adopt_verify.verify_repository(
                 root, source, run_resolver)
         adopt_verify.require_integrated(
-            verification, args.plan_id[0] if args.plan_id else None)
+            root, verification, args.plan_id[0] if args.plan_id else None)
         if adopt_verify.registration_allowed(verification.report["result"]):
             adopt_verify.register_project(root, verification)
     emit_json(verification.report)
@@ -1420,7 +1414,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="with --register, the plan whose adoption the "
                              "integration branch on origin must carry: "
                              "registration refuses not_integrated when no "
-                             "evidence record there names it")
+                             "commit there carries that plan's adoption "
+                             "subject")
     migrate = subparsers.add_parser(
         "migrate", help="execute one manifest migration on a checkout, "
                         "validated by the resolver")

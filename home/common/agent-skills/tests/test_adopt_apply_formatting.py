@@ -74,20 +74,20 @@ FORMATTER_TEXT = (
     '        handle.write("".join(x + "\\n" for x in out))\n')
 ANALYZER = "tests/test_analyzer.py"
 ANALYZER_SUBJECT = f"{ANALYZER}:1:34"
-ANALYZER_TEXT = 'ANALYZER_SPEC_PATH_UNDER_TEST = ".claude/specs/x.md"\n'
-ANALYZER_REWRITTEN = ANALYZER_TEXT.replace(".claude/specs",
-                                           ".agents/artifacts/specs")
+ANALYZER_TEXT = 'ANALYZER_SPEC_PATH_UNDER_TEST = ".out-of-scope/z.md"\n'
+ANALYZER_REWRITTEN = ANALYZER_TEXT.replace(".out-of-scope",
+                                           ".agents/knowledge/rejections")
 # #376 COR-001: a `generated_file` projection rendered from the analyzer.
 PROJECTED_ANALYZER = "generated/analyzer.txt"
 # #376 COR-PROJECTION-KIND: a `managed_import` naming the analyzer by path.
 IMPORTED_ANALYZER = "generated/analyzer-import.txt"
 ANALYZER_FORMATTED = ('ANALYZER_SPEC_PATH_UNDER_TEST = (\n'
-                      '    ".agents/artifacts/specs/x.md"\n'
+                      '    ".agents/knowledge/rejections/z.md"\n'
                       ')\n')
 CLEAN = "tests/clean.py"
 CLEAN_TEXT = "VALUE = 1   \n"
 # A moved file no link rewrite edits: its last operation is the `git-mv`.
-SHIFTED = ".agents/artifacts/plans/y.md"
+SHIFTED = ".agents/knowledge/rejections/w.md"
 FORMAT_COMMANDS = {
     "format": [sys.executable, FORMATTER],
     "broken": [sys.executable, FORMATTER, "--fail"],
@@ -319,23 +319,21 @@ class ReferenceFormattingApplyTest(ApplyTestCase):
             git(root, "ls-tree", result["branch"], ARCHIVED_LINK).split()[0],
             "120000")
 
-    def test_the_evidence_record_lists_the_format_answer_and_rows(self):
+    def test_the_stored_plan_lists_the_format_answer_and_rows(self):
         root = formatting_repo(self.home)
         answers = (REWRITE_ANALYZER, ("reference-format", ".py", "format"))
         document = self.planned(root, *answers)
         result = self.succeed(root, document["plan"]["plan_id"])
-        record = json.loads(git(
-            root, "show", f"{result['branch']}:{result['evidence_record']}"))
+        stored = json.loads(self.stored_plan(result["plan_id"]).read_text("utf-8"))
         for question, subject, value in answers:
             with self.subTest(subject=subject):
                 self.assertIn(
                     {"id": question, "subject": subject, "value": value},
-                    record["decisions_accepted"])
+                    stored["decisions"]["answered"])
         for member in ("reference_formatting", "reference_policies",
                        "path_references"):
             with self.subTest(member=member):
-                self.assertEqual(record[member], document[member])
-        self.assertEqual(record["plan_id"], document["plan"]["plan_id"])
+                self.assertEqual(stored[member], document[member])
 
 
 if __name__ == "__main__":
