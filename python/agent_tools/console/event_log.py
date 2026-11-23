@@ -102,7 +102,7 @@ Two kinds are kept in part (#1193): `ACTIVATION_STARTED` (`activation.started`) 
 `ACTIVATION_FINISHED` (`activation.finished`) are not in `KEPT_KINDS`, but the retention pass leaves
 the newest row of each kind in place whatever its age, because the console folds them into the last
 activation's state at construction and a failed activation must still show its reason and next step
-while its commit stays pending (ADR-system-004 D9).
+while its commit stays pending (#1193).
 
 Two rows record a manager's permit (#1377, ADR-console-094): `PERMIT_JUDGED` (`permit.judged`, one per
 decided verdict on a merge or rerun command: payload `sprint_id`, `session_id`, `repo` (the

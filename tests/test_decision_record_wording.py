@@ -151,7 +151,6 @@ KEPT_AT_START = frozenset({
     "tests/test_docs_tree.py::DocsTreeTest.test_adr_console_040_records_taking_back_and_replacing_a_question",
     "tests/test_docs_tree.py::DocsTreeTest.test_the_notice_decision_is_recorded",
     "tests/test_docs_tree.py::DocsTreeTest.test_the_owner_notice_decision_is_recorded",
-    "tests/test_docs_tree.py::DocsTreeTest.test_the_host_activation_decision_is_recorded",
     "tests/test_console_pictures.py::PictureDocsTest.test_adr_036_records_the_picture_store",
     "tests/test_console_pictures.py::PictureDocsTest.test_adr_008_lists_the_picture_read",
     "tests/test_console_pictures.py::PictureDocsTest.test_adr_038_records_the_question_pictures",
