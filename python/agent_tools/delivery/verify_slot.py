@@ -47,6 +47,19 @@ that the holders of all `slot-*.lock` files, itself included, number at most the
 count, and gives its slot back and waits otherwise. A count lowered while a higher-numbered
 slot is still held therefore never admits a run beside that holder.
 
+Repositories. `verify-slot run` never admits two holders of one repository at once, since
+two suites of one project share resources such as a single test database (issue 1677). The
+repository is the `origin` remote of the working directory, normalized to `owner/repo` and
+lowercased; a run outside a repository, or in one without `origin`, is its own group and is
+excluded by no other run. A holder takes an exclusive non-blocking `flock` on `repo-<digest>.lock`
+(`GROUP_LOCK`) in the slot directory only after it took its slot and passed the count recheck,
+and gives the slot back and waits while another holder has it. The lock is taken after the slot
+so a waiter holds neither and a live waiter still goes first (ADR-delivery-016 D6): ordinary
+runs of other repositories therefore defer to a live run that waits on its own repository even
+with a slot free. Live runs take the repository lock like ordinary ones. The lock file is not
+a slot file and no count includes it, and it is held like a slot (a descriptor the command does
+not inherit), so a SIGKILLed holder frees its repository at once.
+
 Count (D1). It is the `verify_slots` member of the host declaration
 (`agent_tools.delivery.host_admission`), `DEFAULT_VERIFY_SLOTS` (1) when the declaration
 file is absent. A declaration entry that exists and is invalid, or is not a file, is a setup
@@ -59,7 +72,8 @@ taken.
 
 stderr lines of its own (stdout is the command's alone). A run that finds every slot taken
 prints `WAITING_LINE` once when it starts to wait; an ordinary run that gave a slot back to a
-live waiter prints `DEFERRING_LINE` once. A run that waited and then took a slot
+live waiter prints `DEFERRING_LINE` once; a run that gave a slot back because another holder
+has its repository prints `SAME_REPOSITORY_LINE` once. A run that waited and then took a slot
 prints `WAITED_LINE` once, before the command starts. A run that took a slot at once prints
 nothing of its own. A run that reaches `--wait-limit` prints `NO_SLOT_LINE` and runs
 nothing. A command that cannot start prints `verify-slot: cannot start <argv0>: <error>`.
@@ -80,6 +94,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import hashlib
 import os
 from pathlib import Path
 import signal
@@ -89,11 +104,15 @@ import sys
 import time
 
 from agent_tools.delivery import host_admission
+from agent_tools.project_contract.derived_values import normalize_remote_url
 
 NO_SLOT_LINE = "verify-slot: no verify slot came free within {limit}s; nothing ran"
 WAITING_LINE = "verify-slot: all {count} verify slots of this host are taken; waiting"
 WAITED_LINE = "verify-slot: waited {seconds:.1f}s for a verify slot"
 DEFERRING_LINE = "verify-slot: a live-fault verify run is waiting for a slot; this run waits behind it"
+SAME_REPOSITORY_LINE = "verify-slot: a verify run of this repository holds a verify slot; waiting"
+GROUP_LOCK = "repo-{digest}.lock"
+GIT_TIMEOUT_SECONDS = 10
 LIVE_MARKER = "live-waiting.lock"
 LIVE_PROBE = "live-probe.lock"
 NO_SLOT_EXIT = 75
@@ -106,6 +125,8 @@ SLOT_DIR_ENV = "VERIFY_SLOT_DIR"
 USAGE_EXIT = 2
 CANNOT_START_EXIT = 127
 
+_WAIT_LINES = {"taken": WAITING_LINE, "deferred": DEFERRING_LINE,
+               "same_repository": SAME_REPOSITORY_LINE}
 _HANDLED_SIGNALS = (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)
 
 
@@ -163,6 +184,25 @@ def _open_slot(path: Path) -> int:
         return os.open(path, os.O_RDWR)
     finally:
         os.umask(old)
+
+
+def repository_group(cwd: Path) -> str | None:
+    """The repository `cwd` belongs to: its normalized, lowercased `origin` remote, else None."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(cwd), "remote", "get-url", "origin"], stdin=subprocess.DEVNULL,
+            capture_output=True, text=True, timeout=GIT_TIMEOUT_SECONDS)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    url = result.stdout.strip()
+    if result.returncode != 0 or not url:
+        return None
+    return (normalize_remote_url(url) or url).lower()
+
+
+def group_lock_name(group: str) -> str:
+    """The name of the lock file in the slot directory that one repository's holders share."""
+    return GROUP_LOCK.format(digest=hashlib.sha256(group.encode("utf-8")).hexdigest()[:16])
 
 
 def _say(line: str) -> None:
@@ -254,13 +294,15 @@ def _holders_beside(directory: Path, own: Path) -> int:
     return sum(1 for path in sorted(directory.glob("slot-*.lock")) if path != own and _held(path))
 
 
-def _try_slots(directory: Path, count: int, live: bool) -> tuple[int | None, bool]:
-    """`(descriptor, False)` on a slot kept, else `(None, deferred)` with nothing taken.
+def _try_slots(directory: Path, count: int, live: bool,
+               group: str | None) -> tuple[tuple[int, int | None] | None, str | None]:
+    """`((slot, group lock or None), None)` on a slot kept, else `(None, reason)` with nothing taken.
 
     A taken slot is kept only while the holders of all slot files, this one included, number at
-    most `count`: a count lowered beneath a still-held higher slot is honoured. An ordinary run
-    also gives it back while a live waiter holds the marker (`deferred` is then true); a live
-    run skips that check.
+    most `count`: a count lowered beneath a still-held higher slot is honoured (`taken`). Then,
+    when `group` is set, it also takes the repository lock, and gives the slot back while another
+    holder has it (`same_repository`). An ordinary run lastly gives both back while a live waiter
+    holds the marker (`deferred`); a live run skips that check.
     """
     for index in range(count):
         path = directory / f"slot-{index}.lock"
@@ -275,30 +317,48 @@ def _try_slots(directory: Path, count: int, live: bool) -> tuple[int | None, boo
             raise
         if 1 + _holders_beside(directory, path) > count:
             os.close(descriptor)
-            return None, False
+            return None, "taken"
+        held_group = None
+        if group is not None:
+            try:
+                held_group = _open_slot(directory / group_lock_name(group))
+                fcntl.flock(held_group, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                _close_all(descriptor, held_group)
+                return None, "same_repository"
+            except BaseException:
+                _close_all(descriptor, held_group)
+                raise
         if not live:
             try:
                 waiting = _live_waiting(directory)
             except BaseException:
-                os.close(descriptor)
+                _close_all(descriptor, held_group)
                 raise
             if waiting is not False:
-                os.close(descriptor)
-                return None, waiting is True
-        return descriptor, False
-    return None, False
+                _close_all(descriptor, held_group)
+                return None, "deferred" if waiting is True else "taken"
+        return (descriptor, held_group), None
+    return None, "taken"
 
 
-def _acquire(directory: Path, count: int, wait_limit: int | None, run: _Run,
-             live: bool) -> tuple[int | None, int | None]:
-    """`(descriptor, None)` on a taken slot, else `(None, exit code)` with nothing to run.
+def _close_all(*descriptors: int | None) -> None:
+    for descriptor in descriptors:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def _acquire(directory: Path, count: int, wait_limit: int | None, run: _Run, live: bool,
+             group: str | None) -> tuple[tuple[int, int | None] | None, int | None]:
+    """`(held, None)` on a taken slot, else `(None, exit code)` with nothing to run.
 
     A live run holds the marker for as long as it waits and drops it on every exit.
     """
     marker = None
     try:
         start = time.monotonic()
-        waiting = said_waiting = said_deferring = False
+        waiting = False
+        said: set[str] = set()
         while True:
             if run.received is not None:
                 return None, 128 + run.received
@@ -315,18 +375,15 @@ def _acquire(directory: Path, count: int, wait_limit: int | None, run: _Run,
                         pause = max(0.0, min(pause, start + wait_limit - time.monotonic()))
                     time.sleep(pause)
                     continue
-            descriptor, deferred = _try_slots(directory, count, live)
-            if descriptor is not None:
+            held, reason = _try_slots(directory, count, live, group)
+            if held is not None:
                 if waiting:
                     _say(WAITED_LINE.format(seconds=time.monotonic() - start))
-                return descriptor, None
+                return held, None
             waiting = True
-            if deferred and not said_deferring:
-                said_deferring = True
-                _say(DEFERRING_LINE)
-            elif not deferred and not said_waiting:
-                said_waiting = True
-                _say(WAITING_LINE.format(count=count))
+            if reason not in said:
+                said.add(reason)
+                _say(_WAIT_LINES[reason].format(count=count))
             pause = POLL_SECONDS
             if wait_limit is not None:
                 pause = max(0.0, min(pause, start + wait_limit - time.monotonic()))
@@ -358,6 +415,10 @@ def run_command(argv: list[str], wait_limit: int | None, live: bool = False) -> 
     home = os.environ.get("HOME")
     if not home:
         raise SlotError("HOME is unset or empty")
+    try:
+        group = repository_group(Path.cwd())
+    except OSError:
+        group = None
     count = slot_count()
     directory = slot_dir()
     try:
@@ -366,18 +427,18 @@ def run_command(argv: list[str], wait_limit: int | None, live: bool = False) -> 
         raise SlotError(f"cannot create {directory}: {error}") from None
     run = _Run()
     previous = {number: signal.signal(number, run.handle) for number in _HANDLED_SIGNALS}
-    descriptor = None
+    held = None
     try:
         try:
-            descriptor, code = _acquire(directory, count, wait_limit, run, live)
+            held, code = _acquire(directory, count, wait_limit, run, live, group)
         except OSError as error:
             raise SlotError(f"cannot take a slot in {directory}: {error}") from None
-        if descriptor is None:
+        if held is None:
             return code
         return _run_child(argv, run)
     finally:
-        if descriptor is not None:
-            os.close(descriptor)
+        if held is not None:
+            _close_all(*held)
         for number, handler in previous.items():
             signal.signal(number, handler)
 
