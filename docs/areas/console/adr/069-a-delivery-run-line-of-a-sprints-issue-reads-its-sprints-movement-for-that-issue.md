@@ -1,15 +1,12 @@
 # ADR-console-069 — A delivery run line of a sprint's issue reads its sprint's movement for that issue
 
-- **Status:** accepted
-- **Decided in:** #1212
-
 ## Context
 
 A delivery run line read only the run journal, so a run of a sprint's issue read "quiet for 45 min" while its sprint line read "waiting its turn to merge" for the same issue: the sprint line counted CI, commits, the land lock and session output (ADR-console-042, ADR-console-050, ADR-console-057, ADR-console-061), and the run line counted none of them (ADR-console-005). The two lines contradicted each other about one issue.
 
 ## Decision
 
-**D1. Which run lines.** A run line reads its sprint's movement when the run belongs to a running sprint: the run carries an issue of the sprint's report or of its inbox, or the run is in the sprint's manager session (ADR-console-042 D3). A run belongs to the first such sprint, the sprint stated newest first. A run of an ended sprint, and a run of no sprint, keep the journal reading of ADR-console-005.
+**D1. Which run lines.** A run line reads its sprint's movement when the run belongs to a running sprint: the run carries an issue of the sprint's report or of its inbox, or the run is in the sprint's manager session (ADR-console-042 D3). A run belongs to the first such sprint, the sprint stated newest first. A run of an ended sprint, and a run of no sprint, keep the journal reading of ADR-console-005. Superseded for an engine run, whose line reads its run ledger (`agent_tools.console.engine_runs`), never a sprint's movement.
 
 **D2. The reading.** The run's movement is the latest of its journal, the sprint's wait signals of the run's own issues (CI on its pull request, a commit on it or on its branch, a land lock wait or hold, a release step), and the output and a running check of its own session, the run's. A reply to the manager's idle nudge is left out, as ADR-console-057 D6. The line reads quiet when that latest time is fifteen minutes old. A signal of another issue or of another session does not count, so quiet means that nothing of the issue has moved.
 
@@ -22,4 +19,3 @@ A delivery run line read only the run journal, so a run of a sprint's issue read
 - This amends ADR-console-005 and ADR-console-042 D1: a run line no longer reads the journal alone, and the state line, the ball and a sprint's run lines now read one movement.
 - A sprint waiting its turn to merge for 45 minutes shows no "quiet" on its run line: it ends with "waiting its turn to merge".
 - A run whose session ended moves only by its journal and its issues' waits.
-- Related: ADR-console-005, ADR-console-042, ADR-console-048, ADR-console-050, ADR-console-057, ADR-console-061.
