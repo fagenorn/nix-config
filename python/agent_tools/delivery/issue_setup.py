@@ -220,10 +220,10 @@ def _judge_worktree(args: argparse.Namespace) -> tuple[str, str]:
     ref = f"refs/heads/{args.branch}"
     entries = _worktrees(args.repo_root)
     here = next((e for e in entries if e["real"] == wanted), None)
+    elsewhere = next((e for e in entries if e.get("branch") == ref and e["real"] != wanted), None)
+    if elsewhere is not None:
+        return "mismatch", f"{args.branch} is checked out at {elsewhere['worktree']}"
     if here is None:
-        elsewhere = next((e for e in entries if e.get("branch") == ref), None)
-        if elsewhere is not None:
-            return "mismatch", f"{args.branch} is checked out at {elsewhere['worktree']}"
         return "absent", "no worktree at the path"
     path = here["worktree"]
     clean = not _git(path, "status", "--porcelain").stdout.strip()

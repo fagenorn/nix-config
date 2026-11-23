@@ -145,6 +145,18 @@ class WorktreeTest(unittest.TestCase):
         holders = [b.splitlines()[0] for b in blocks if f"branch refs/heads/{BRANCH}" in b]
         self.assertEqual(holders, [f"worktree {os.path.realpath(elsewhere)}"])
 
+    def test_a_clean_detached_head_at_the_tip_is_mismatch_while_the_branch_is_checked_out_elsewhere(self):
+        elsewhere = self.root.parent / "elsewhere"
+        self.git("worktree", "add", "-b", BRANCH, str(elsewhere), "origin/main")
+        self.git("worktree", "add", "--detach", str(self.path), BRANCH)
+        for sub in ("worktree-check", "worktree"):
+            with self.subTest(sub=sub):
+                code, report = self.call(sub)
+                self.assertEqual((code, report["verdict"]), (0, "mismatch"), report)
+                self.assertIn("elsewhere", report["detail"])
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.git("symbolic-ref", "-q", "HEAD", root=self.path)
+
     def test_worktree_check_reports_a_clean_detached_head_at_the_tip_as_adopted_and_leaves_it_detached(self):
         self.make()
         self.git("checkout", "--detach", root=self.path)
