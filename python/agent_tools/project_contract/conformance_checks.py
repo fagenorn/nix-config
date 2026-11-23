@@ -797,9 +797,11 @@ def check_never_rise(context: "Context") -> "Outcome":
     rule, path, line and reason within the fact string bound (`Suppression.text`).
     """
     branch = context.contract["bindings"]["vcs"]["integration_branch"]
+    enforcers = never_rise_enforcers(context.contract)
+    if context.stopwatch is not None:
+        enforcers = context.stopwatch.timed(enforcers)
     try:
-        verdict = never_rise.judge(context.root, branch,
-                                   never_rise_enforcers(context.contract),
+        verdict = never_rise.judge(context.root, branch, enforcers,
                                    CHILD_TIMEOUT_SECONDS)
     except never_rise.EnforcerFailed as error:
         return Outcome("failed", "enforcer_failed", "violations.enforcer.repair", {

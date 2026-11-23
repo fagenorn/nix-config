@@ -102,7 +102,7 @@ EXPECTED_WORKFLOW_PERMISSIONS = {"contents": "read"}
 # The one command the Conformance job exists to run, and the whole of its step: the
 # non-blank lines of the step are exactly these, so no `shell:`, `env:`,
 # `working-directory:` or `if:` can ride on it.
-CONFORMANCE_INVOCATION = "nix shell .#agent-platform --command conformance run --purpose ci"
+CONFORMANCE_INVOCATION = "nix shell .#agent-platform --command conformance run --purpose ci --lint-times"
 CONFORMANCE_STEP = ["      - name: Run conformance",
                     f"        run: {CONFORMANCE_INVOCATION}"]
 CONFORMANCE_CHECKOUT_REF = "          ref: ${{ github.event.pull_request.head.sha || github.sha }}"
