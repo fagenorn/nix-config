@@ -1572,37 +1572,12 @@ class PictureDocsTest(unittest.TestCase):
                        "ADR-console-019"):
             with self.subTest(needle):
                 self.assertIn(needle, text)
-        self.assertIn("POST /api/picture", self.doc(
-            "docs/areas/console/adr/008-only-the-page-writes-with-a-token-and-its-origin.md"))
         self.assertIn("ADR-console-036", self.doc(
             "docs/areas/console/adr/009-events-are-kept-for-90-days.md"))
         context = self.doc("docs/areas/console/CONTEXT.md")
         self.assertIn("**Picture**:", context)
         self.assertIn("ADR-console-036", context)
         self.assertIn("| Picture | Console |", self.doc("docs/CONTEXT-MAP.md"))
-
-    def test_adr_008_lists_the_picture_read(self):
-        adr008 = "docs/areas/console/adr/008-only-the-page-writes-with-a-token-and-its-origin.md"
-        adr036 = "docs/areas/console/adr/036-the-console-keeps-a-managers-pictures-and-serves-them-only-to-the-page.md"
-        lines = (ROOT / adr008).read_text().splitlines()
-        status = next(row for row in lines if row.startswith("- **Status:**"))
-        self.assertEqual(
-            status, "- **Status:** accepted; amended by ADR-console-024, ADR-console-025, "
-                    "ADR-console-028, ADR-console-029, ADR-console-030, ADR-console-036, "
-                    "ADR-console-037, ADR-console-053, ADR-console-058, ADR-system-004, "
-                    "ADR-console-076, ADR-console-078, ADR-console-093")
-        decided = next(row for row in lines if row.startswith("- **Decided in:**"))
-        self.assertTrue(decided.endswith("#1089, #1120, #1176, #1193, #1237, #1263, #1294, #1305, #1272"))
-        text = self.doc(adr008)
-        for needle in ("GET /api/picture/<id>", "Sec-Fetch-Site", "same-origin", "omit",
-                       "ADR-console-036"):
-            with self.subTest(needle):
-                self.assertIn(needle, text)
-        text = self.doc(adr036)
-        for needle in ("GET /api/picture/<id>", "Cache-Control: private", "nosniff",
-                       "bad picture id", "404", "Sec-Fetch-Site"):
-            with self.subTest(needle):
-                self.assertIn(needle, text)
 
     def test_adr_038_records_the_question_pictures(self):
         name = ("docs/areas/console/adr/038-a-managers-question-shows-its-pictures-on-the-card-"

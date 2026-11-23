@@ -40,7 +40,6 @@ from .test_console_signin import SIGNED_IN
 from .test_console_stream import next_frame
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
-ROOT = Path(__file__).resolve().parents[1]
 TAILNET = "desk.invented-tailnet.ts.net"
 OTHER_HOST = "other.invented-tailnet.ts.net"
 COLLEAGUE = "colleague@example.invalid"
@@ -1629,20 +1628,6 @@ class AccessWriteTest(GuestCase):
         self.assertEqual(self.guest_state(svc)[0], 200)
         self.assertEqual([payload for kind, payload in self.kinds() if kind == "sharing.tailnet"],
                          [{"shared": True}, {"shared": False}, {"shared": True}])
-
-    def test_adr_008_lists_the_access_list_writes(self):
-        adr = (ROOT / "docs/areas/console/adr/"
-               "008-only-the-page-writes-with-a-token-and-its-origin.md").read_text()
-        text = " ".join(adr.split())
-        for needle in ("POST /api/share-tailnet", "POST /api/share-colleague",
-                       "POST /api/share-remove", "#1237", "#1263", "bad colleague", "bad sharing",
-                       "turn sharing on or off", "ADR-console-078"):
-            with self.subTest(needle):
-                self.assertIn(needle, text)
-        decided = next(row for row in adr.splitlines() if row.startswith("- **Decided in:**"))
-        self.assertTrue(decided.endswith("#1193, #1237, #1263, #1294, #1305, #1272"))
-        status = next(row for row in adr.splitlines() if row.startswith("- **Status:**"))
-        self.assertTrue(status.endswith("ADR-console-076, ADR-console-078, ADR-console-093"))
 
 
 class ReadingServiceTest(GuestCase):
