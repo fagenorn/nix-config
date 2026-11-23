@@ -266,6 +266,29 @@ class DocsTreeTest(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_every_hosts_record_keeps_the_record_form(self):
+        paths = sorted((REPO_ROOT / "docs/areas/hosts/adr").glob("*.md"))
+        self.assertTrue(paths)
+        breaches = {}
+        for path in paths:
+            relative = path.relative_to(REPO_ROOT).as_posix()
+            found = record_violations(relative, path.read_bytes())
+            if found:
+                breaches[relative] = [violation.text() for violation in found]
+        self.assertEqual(breaches, {})
+
+    def test_no_tracked_file_cites_a_retired_hosts_record(self):
+        numbers = ("001", "002", "003", "004")
+        pattern = "ADR-hosts-(" + "|".join(numbers) + ")([^0-9]|$)"
+        result = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "grep", "-n", "-E", pattern],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertEqual(result.stdout, "")
+        for number in numbers:
+            self.assertEqual(sorted((REPO_ROOT / "docs/areas/hosts/adr").glob(f"{number}-*.md")), [])
+
     def test_every_guard_record_keeps_the_record_form(self):
         paths = sorted((REPO_ROOT / "docs/areas/guard/adr").glob("*.md"))
         self.assertTrue(paths)
@@ -868,8 +891,7 @@ class DocsTreeTest(unittest.TestCase):
                       "docs/areas/console/adr/008-only-the-page-writes-with-a-token-and-its-origin.md",
                       "docs/areas/console/adr/024-the-owner-signs-a-profile-in-from-the-page.md",
                       "docs/areas/console/CONTEXT.md",
-                      "docs/areas/hosts/CONTEXT.md",
-                      "docs/areas/hosts/adr/005-account-profiles-link-shared-config.md"):
+                      "docs/areas/hosts/CONTEXT.md"):
             self.assertIn("ADR-console-025", self.doc(older))
         self.assertIn("claude-account add", self.doc("docs/areas/hosts/CONTEXT.md"))
         self.assertIn("POST /api/account-add", self.doc(
