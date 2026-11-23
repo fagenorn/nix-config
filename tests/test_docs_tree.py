@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from agent_tools.delivery.record_lint import record_violations
 from agent_tools.project_contract.adopt_inspection import (
     blob_at,
     parses_as_evidence_record,
@@ -261,6 +262,18 @@ class DocsTreeTest(unittest.TestCase):
             text=True, capture_output=True,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_project_contract_records_001_to_009_keep_the_record_form(self):
+        paths = sorted((REPO_ROOT / "docs/areas/project-contract/adr").glob("00[1-9]-*.md"))
+        self.assertTrue(paths)
+        breaches = {}
+        for path in paths:
+            relative = path.relative_to(REPO_ROOT).as_posix()
+            found = [violation.text() for violation in
+                     record_violations(relative, path.read_bytes())]
+            if found:
+                breaches[relative] = found
+        self.assertEqual(breaches, {})
 
     def test_no_living_file_names_a_working_artifact_outside_a_pinned_link(self):
         archived = archived_files()
@@ -1265,9 +1278,7 @@ class DocsTreeTest(unittest.TestCase):
                       "docs/areas/console/adr/008-only-the-page-writes-with-a-token-and-its-"
                       "origin.md",
                       "docs/areas/guard/adr/011-the-guard-refuses-a-projects-production-commands-"
-                      "outside-its-release-path.md",
-                      "docs/areas/project-contract/adr/007-a-contract-declares-its-production-"
-                      "rules-or-that-it-has-none.md"):
+                      "outside-its-release-path.md"):
             line = next(row for row in (REPO_ROOT / older).read_text().splitlines()
                         if row.startswith("- **Status:**"))
             with self.subTest(older):
