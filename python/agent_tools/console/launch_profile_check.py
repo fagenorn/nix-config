@@ -30,7 +30,7 @@ answer is malformed`, `the launcher's mod is not found`, `the launcher's console
 found`, `the online launch exited <rc>`, `the offline launch exited <rc>`, `the launch did not reach the
 client`, `the launch did not use the console's profile`, `the launch with the console stopped did not use
 a named profile`); 75 not yet, with `{"status": ...}` alone: `no_profiles` (no named profile), `one_profile` (the only named profile is the console's, so no fallback can differ from it), `not_running`
-(no 200 answer), `no_profile_chosen` (the answer `{"profile": null}`, ADR-console-023 D2), `not_installed`
+(no 200 answer), `no_profile_chosen` (the answer `{"profile": null}`, ADR-console-023), `not_installed`
 (no `claude`, or no `claude-account` on `PATH`); 2 a bad argument.
 
 The `run`, `fetch`, `which` and `environ` of `main` are seams for tests.

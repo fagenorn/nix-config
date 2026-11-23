@@ -5,7 +5,7 @@
 
 ## Context
 
-The owner's first real answer from a project's question session was raw text in the narrow Work column: the question showed twice, once on the thread's line and once on its row, the session's question back sat above the answer in grey, and the main column stayed empty (#1226). ADR-console-002 put the thread's questions and answers inside the Work column's "Questions (n)" fold and ADR-console-065 D8 fixed the answer's plain-words shape; this ADR moves the reading to where it can be read and gives the answer a form the page can draw.
+The owner's first real answer from a project's question session was raw text in the narrow Work column: the question showed twice, once on the thread's line and once on its row, the session's question back sat above the answer in grey, and the main column stayed empty (#1226). The desk page put the thread's questions and answers inside the Work column's "Questions (n)" fold and ADR-console-065 D8 fixed the answer's plain-words shape; this ADR moves the reading to where it can be read and gives the answer a form the page can draw.
 
 ## Decision
 
@@ -32,4 +32,4 @@ The owner's first real answer from a project's question session was raw text in 
 - A session that uses other markup, such as a heading, a table or a link, shows it as text.
 - A back part with one list line or more than five has no buttons; the owner answers in the follow-up box.
 - Choices disappear once a follow-up is outstanding or the thread moves on, so an older call-out is text only.
-- Related: ADR-console-002, ADR-console-058, ADR-console-062, ADR-console-065.
+- Related: ADR-console-058, ADR-console-062, ADR-console-065.

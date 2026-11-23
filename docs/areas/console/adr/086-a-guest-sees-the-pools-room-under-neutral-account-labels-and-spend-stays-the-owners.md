@@ -25,6 +25,6 @@ ADR-console-066 D3 left accounts, capacity and spend to the owner, so a listed c
 
 ## Consequences
 
-- Amends ADR-console-066 D3 (the guest page shows the pool and the account of each running sprint) and ADR-console-002's Guest page rule (the side column opens with the pool).
+- Amends ADR-console-066 D3 (the guest page shows the pool and the account of each running sprint) and the desk page's Guest page rule (the side column opens with the pool).
 - Account controls, sign-in and Add account stay the owner's.
 - The service numbers every profile before it publishes a guest view, so a row never lacks a number.
