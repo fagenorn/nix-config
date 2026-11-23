@@ -367,7 +367,9 @@ class LookGateWorld:
                           check=False).returncode != 0
         reply = {"pr": number, "head": head, "probe": {"conflicted": False}, "behind": behind,
                  "renew": {"verdict": "renewed"}}
-        if message["label"] == "pr" or message["label"].startswith("land-pr-"):
+        if message["label"] == "pr":
+            reply.update(green={"state": "passed", "head": head, "behind": behind, "required": ["ci"], "passed": ["ci"]})
+        elif message["label"].startswith("land-pr-"):
             reply.update(lock={"verdict": "already_held", "lock_sha": head},
                          checks={"state": "passed", "head": head, "required": ["ci"], "passed": ["ci"]})
         return reply
@@ -457,7 +459,9 @@ class LookGateWorld:
     def _lock(self, message, match):
         issue = self.issue_of(message)
         head = self.head_of(issue)
-        return {"renew": {"verdict": "renewed"}, "lock": {"verdict": "acquired", "lock_sha": head}}
+        behind = self.git("merge-base", "--is-ancestor", "origin/main", "HEAD", cwd=self.worktree_of(issue),
+                          check=False).returncode != 0
+        return {"renew": {"verdict": "renewed"}, "lock": {"verdict": "acquired", "lock_sha": head}, "behind": behind}
 
     def _checks(self, message, match):
         issue = self.issue_of(message)
@@ -493,13 +497,13 @@ class LookGateWorld:
             (r"^sync-\d+$", self._sync),
             (r"^(look-push|land-push-.*)$", self._push),
             (r"^look-head$", self._look_head),
-            (r"^look-checks-\d+$", self._look_checks),
+            (r"^(look|green)-checks-\d+$", self._look_checks),
             (r"^look-post$", self._look_post),
             (r"^look-(read|status)$", self._look_read),
             (r"^look-carry-verify$", self._look_carry_verify),
             (r"^(merge|land-merge-\d+)$", self._merge),
             (r"^land-unlock", const({"verdict": "released"})),
-            (r"^land-(re)?lock-", self._lock),
+            (r"^land-(take$|(re)?lock-)", self._lock),
             (r"^(land-)?checks-", self._checks),
             (r"^acquire(-|$)", const({"verdict": "acquired", "comment_id": 7})),
             (r"^renew-", const({"verdict": "renewed", "comment_id": 7})),

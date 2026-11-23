@@ -63,7 +63,7 @@ chunking (folding a list in pieces equals folding it whole), and `RunFold.issues
   no plan graded the issue), with `notes_posted` true when the plan has notes and not false
   otherwise. Any other result leaves the issue as the label left it.
 - An issue is `locking` exactly when the latest staged step applied to it is a lock step (`classify`
-  gives `Step.lock`: the label fullmatches `OWNER_LOCK_LABELS`, `pr|land-lock-\\d+|land-relock-\\d+|checks-\\d+`, or
+  gives `Step.lock`: the label fullmatches `OWNER_LOCK_LABELS`, `pr|land-take|land-lock-\\d+|land-relock-\\d+|checks-\\d+`, or
   with a batch `BATCH_LOCK_LABELS`, `land-pr-\\d+|land-lock-\\d+-\\d+|land-relock-\\d+-\\d+|land-record-\\d+-\\d+`; the
   `checks-<n>` and `land-record-<n>-<m>` steps are lock steps because a conflict or CI fix retakes the lock inside them) and no
   `result` of that step's agent has been read. Any later step with a stage sets `locking` to its
@@ -309,7 +309,8 @@ OWNER_LABELS: tuple[tuple[str | None, str], ...] = (
         r"|look-fix|look-fix-review|renew-look-fix|look-verify|look-reverify|fix-retest"),
     (
         LANDING,
-        r"pr|hold|hold-draft|merge|close-out|live-green|land-unlock|fix-ci|fix-ci-review|land-lock-\d+|land-relock-\d+|land-push-\d+|checks-\d+"
+        r"pr|hold|hold-draft|merge|close-out|live-green|land-unlock|fix-ci|fix-ci-review|land-take|land-lock-\d+|land-relock-\d+|land-push-\d+"
+        r"|green-checks-\d+|checks-\d+"
         r"|look-pr|look-push|look-checks-\d+|look-head|look-post|look-read|look-stale|look-status|look-carry-verify|look-carry"
         r"|sync-\d+|sync-resolve-\d+|sync-review-\d+|fix-sync-\d+|fix-sync-review-\d+",
     ),
@@ -332,7 +333,7 @@ BATCH_LABELS: tuple[tuple[str | None, str], ...] = (
 
 
 # The labels that wait for the land lock, one pattern per table; an owner label stands for its own issue.
-OWNER_LOCK_LABELS = r"pr|land-lock-\d+|land-relock-\d+|checks-\d+"
+OWNER_LOCK_LABELS = r"pr|land-take|land-lock-\d+|land-relock-\d+|checks-\d+"
 BATCH_LOCK_LABELS = r"land-pr-\d+|land-lock-\d+-\d+|land-relock-\d+-\d+|land-record-\d+-\d+"
 
 

@@ -226,7 +226,8 @@ if (!HOLDER_RE.test(HOLDER)) return { stage: 'setup', result: setup, invalid: 'h
 const SLUG = SETUP.slug, INT = SETUP.integration_branch, MAX = SETUP.max_parallel
 // The land lock command, return sentence and second release, one line each, byte for byte as deliver-standard.js has
 // them.
-const LAND_ACQUIRE = (sha, wait) => `forge-claim land acquire --repo ${SLUG} --branch ${INT} --sha ${sha}${wait ? ' --wait' : ''}`
+const LAND_ACQUIRE = (sha, wait, lease = false) => `forge-claim land acquire --repo ${SLUG} --branch ${INT} --sha ${sha}${wait ? ' --wait' : ''}${lease ? ' --lease' : ''}`
+const LEASE_HOLD = (sha, seconds) => `forge-claim land hold --repo ${SLUG} --branch ${INT} --sha ${sha}${seconds ? ` --seconds ${seconds}` : ''}`
 const LOCK_RETURN = `Return its verdict (acquired, already_held, moved, land-contended, held_by, lost_to, or error on any other exit), lock_sha, by, detail, waited_s and waited_on from its output, and position and ahead when it prints them. ${FORGE_TIMEOUT}`
 const RELEASE_AGAIN = maybe => `When it prints not_held with lock_sha ${maybe}, run alone and exactly: forge-claim land release --repo ${SLUG} --branch ${INT} --sha ${maybe}, then return the verdict of that second release.\n`
 const RELEASE_FIRST = (sha, maybe) => `First, before anything below, release the cross-host landing lock of the branch ${INT}: run alone and exactly: forge-claim land release --repo ${SLUG} --branch ${INT} --sha ${sha}

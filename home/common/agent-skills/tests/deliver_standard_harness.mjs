@@ -82,7 +82,9 @@ const DEFAULTS = [
   // #1371: the retest of a push-bound fix reports the tree clean once its tests ran, unless a scenario says otherwise.
   [/^fix-retest$/, { ...DONE, clean: true }],
   [/^land-unlock$/, { verdict: 'released' }],
-  [/^land-(re)?lock-/, { renew: { verdict: 'renewed' }, lock: { verdict: 'acquired', lock_sha: SHA } }],
+  // The lease is taken once the head is green; the take and each wait for it say whether the base moved past it.
+  [/^land-(take$|(re)?lock-)/, { renew: { verdict: 'renewed' }, lock: { verdict: 'acquired', lock_sha: SHA }, behind: false }],
+  [/^green-checks-/, prompt => ({ state: 'passed', head: (/at the head ([0-9a-f]{40})/.exec(prompt) || [])[1] || SHA, behind: false, required: ['ci'], passed: ['ci'], renew: { verdict: 'renewed' } })],
   [/^renew-/, { verdict: 'renewed', comment_id: 7 }],
   [/^acquire$/, { verdict: 'acquired', comment_id: 7 }],
   [/^setup$/, prompt => (HOLDER_ID(prompt) ? { ...SETUP, ...holderOf(SETUP.host, prompt), ...FOLDED_SETUP } : SETUP)],
@@ -121,7 +123,7 @@ const DEFAULTS = [
   [/^fix-\d+-2$/, { ...DONE, start_head: 'f1c0de', commit: 'f2c0de' }],
   [/^impl-/, (prompt, label) => { const n = +label.split('-')[1]; return { ...DONE, start_head: n === 1 ? SHA : TASK_COMMIT(n - 1), commit: TASK_COMMIT(n), renew: { verdict: 'renewed' } } }],
   [/^(impl|fix)-|^fix-wave$/, DONE],
-  [/^pr$/, { pr: 42, head: SHA, renew: { verdict: 'renewed' }, lock: { verdict: 'already_held', lock_sha: SHA }, checks: { state: 'passed', head: SHA, required: ['ci'], passed: ['ci'] } }],
+  [/^pr$/, { pr: 42, head: SHA, renew: { verdict: 'renewed' }, green: { state: 'passed', head: SHA, behind: false, required: ['ci'], passed: ['ci'] } }],
   [/^checks-/, { state: 'passed', head: SHA, required: ['ci'], passed: ['ci'], renew: { verdict: 'renewed' }, lock: { verdict: 'already_held', lock_sha: SHA } }],
   [/^merge$/, { merged: true, merge_commit: SHA, notes: 'merged', renew: { verdict: 'renewed' }, lock: { verdict: 'already_held', lock_sha: SHA } }],
   [/^hold-draft$/, prompt => ({ complete: true, merge: SHA, posted: [], written: unverified(prompt) })],
@@ -132,7 +134,7 @@ const DEFAULTS = [
   [/^close-out$/, prompt => ({ issue_state: 'CLOSED', branch_deleted: true, released: true, decision_ended: true, notes: 'ok', ...(prompt.includes('look-approval tick') ? { look_tick: { verdict: 'ticked', ticked: 1 } } : {}) })],
 ]
 // Folded labels: the nested steps their reply carries, each defaulted when an explicit reply leaves it out.
-const NESTED = [[/^(owner-answer|verify)$/, ['renew']], [/^setup$/, ['holder', 'acquire', 'claim', 'answer', 'renew']], [/^pr$/, ['renew', 'lock', 'checks']], [/^merge$/, ['renew', 'lock']], [/^land-push-/, ['renew']], [/^look-(pr|push|head)$/, ['renew']], [/^look-checks-/, ['renew']], [/^land-(re)?lock-/, ['renew', 'lock']], [/^checks-/, ['renew', 'lock']], [/^(impl-\d+|direct-impl)$/, ['renew']], [/^hold$/, ['release']]]
+const NESTED = [[/^(owner-answer|verify)$/, ['renew']], [/^setup$/, ['holder', 'acquire', 'claim', 'answer', 'renew']], [/^pr$/, ['renew', 'green']], [/^merge$/, ['renew', 'lock']], [/^land-push-/, ['renew']], [/^look-(pr|push|head)$/, ['renew']], [/^look-checks-/, ['renew']], [/^land-(take$|(re)?lock-)/, ['renew', 'lock', 'behind']], [/^green-checks-/, ['renew']], [/^checks-/, ['renew', 'lock']], [/^(impl-\d+|direct-impl)$/, ['renew']], [/^hold$/, ['release']]]
 const defaultOf = (label, prompt, over = {}) => {
   const hit = DEFAULTS.find(([re]) => re.test(label))
   if (!hit) throw new Error(`no stub reply for agent label ${label}`)
