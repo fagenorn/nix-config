@@ -4,7 +4,8 @@
     "checks": [
       {"context": "Nix Eval", "app_id": 15368},
       {"context": "Instruction Budget", "app_id": 15368},
-      {"context": "Agent Workflow Tests", "app_id": 15368}
+      {"context": "Agent Workflow Tests", "app_id": 15368},
+      {"context": "Conformance", "app_id": 15368}
     ]
   },
   "enforce_admins": true,
