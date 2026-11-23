@@ -1,4 +1,4 @@
-"""Contract tests for group and call steps in `engine deliver` (#1517).
+"""Contract tests for group and call steps in `engine deliver`.
 
 A group runs its members beside each other; a call runs a child procedure as runs of their
 own, one per item of its `each` list. Commands are the stand-ins of
@@ -791,7 +791,7 @@ class GroupSessionTest(unittest.TestCase):
 
 
 class GroupQuotaTest(unittest.TestCase):
-    """A member's `quota-wait` and an engine stop inside a group (#1517 with #1524, #1525)."""
+    """A member's `quota-wait` and an engine stop inside a group."""
 
     def deliver_with(self, out: dict[str, str], *, publish: bool = False):
         """Deliver REVIEWS in process; each member's launch is `fake`: the members named in
@@ -857,8 +857,8 @@ class GroupQuotaTest(unittest.TestCase):
 
 
 class ScopeTest(unittest.TestCase):
-    """What a group's members and a call's child runs share with the root run (#1517 with
-    #1522, #1524, #1525): its stop request, its agent slots, its tracker."""
+    """What a group's members and a call's child runs share with the root run: its stop request,
+    its agent slots, its tracker."""
 
     def setUp(self) -> None:
         self.project = EngineProject(self)

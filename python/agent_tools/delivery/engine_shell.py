@@ -1014,13 +1014,11 @@ def _launch_until_answered(
         launch_of: tuple[engine_session.Role, Mapping, Path], stop: Callable[[], bool],
         defer: bool = False,
 ) -> tuple[engine_session.Launched, engine_session.Reading, tuple[int, dict] | None, bool]:
-    """Launch the session, again with `--resume` after each usage limit, after the first other
-    API error (once, after `API_RETRY_SECONDS`) and after the first miss (once, with `REASK_PROMPT`),
-    until a launch that is none of these, or a second API error or miss, whose result is returned
-    with the visit's record stored and the wait ended; a miss's launch and its resume are summed in
-    the result's measurements. The third member is the `quota-wait` stop (record stored, wait open)
-    when no account can answer, the fourth is true for the second API error or miss, the outcome
-    `no-reply`. With `defer` the stop is returned unrecorded, for a group member's group to record."""
+    """Launch the session, again with `--resume` after a usage limit, a first API error (once, after
+    `API_RETRY_SECONDS`) or a first miss (once, with `REASK_PROMPT`); return the first launch that is
+    none of these, or follows a second error or miss, with its record stored and the wait ended (a
+    miss and its resume summed in the measurements), the `quota-wait` stop (wait open; unrecorded
+    with `defer`, for a group to record) and whether the outcome is `no-reply`."""
     name, visit, session = visit_of
     role, schema, system = launch_of
     attempt, limited, waiting, released, retried, no_reply = 1, set(), False, False, False, False

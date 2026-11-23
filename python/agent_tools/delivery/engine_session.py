@@ -419,12 +419,10 @@ _wakeup_read: int | None = None
 
 
 def _sigterm_taken() -> bool:
-    """True once the interpreter has taken a SIGTERM, though no Python handler has run yet.
+    """True once the interpreter has taken a SIGTERM that `_terminate` has not yet run for.
 
-    The interpreter writes the number of every signal it takes to the wakeup descriptor `reaping`
-    installs, from whichever thread took it; the main thread runs `_terminate` only when it is next
-    scheduled, which under load can come after a walk has started its next step. The caller holds
-    `_registry`.
+    The interpreter writes each signal number it takes to the wakeup descriptor `reaping`
+    installs, from any thread; the caller holds `_registry`.
     """
     if _wakeup_read is None:
         return False
@@ -465,10 +463,8 @@ def _reap() -> None:
 def reaping():
     """Turn SIGTERM into `SystemExit` while the main thread waits, and reap every live session.
 
-    A stop that is not an `Exception` leaving the block in the main thread closes the registry
-    and kills every registered session's process group before it propagates; an `Exception`
-    closes nothing, and off the main thread the manager does nothing. The handler it replaced
-    is restored on every exit path.
+    A stop that is not an `Exception` leaving the block in the main thread closes the registry and
+    kills every session's process group before it propagates; the replaced handler is restored.
     """
     global _wakeup_read
     try:

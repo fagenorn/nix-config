@@ -222,7 +222,7 @@ class KeepAliveTest(unittest.TestCase):
 
 
 class GroupKeepAliveTest(unittest.TestCase):
-    """A group with a `mutates` member renews the claim once before its members start (#1517)."""
+    """A group with a `mutates` member renews the claim once before its members start."""
 
     def group(self, *, mutating: bool) -> list[dict]:
         steps = GROUP("standin-stamp")
