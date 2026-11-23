@@ -143,6 +143,7 @@ agent-workflow-tests *args:
     home/common/agent-skills/tests/test_adopt_apply_formatting.py \
     home/common/agent-skills/tests/test_adopt_entries.py \
     home/common/agent-skills/tests/test_adopt_conformance.py \
+    home/common/agent-skills/tests/test_adopt_schema_three_draft.py \
     home/common/agent-skills/tests/test_adopt_conformance_apply.py \
     home/common/agent-skills/tests/test_adopt_verify.py \
     home/common/agent-skills/tests/test_adopt_links.py \
@@ -164,6 +165,7 @@ agent-workflow-tests *args:
     tests/test_engine_continue.py \
     tests/test_engine_stop.py \
     tests/test_engine_caps.py \
+    tests/test_engine_slots.py \
     tests/test_plan_amend.py \
     tests/test_verify_block.py \
     tests/test_verify_pending.py \
@@ -242,6 +244,8 @@ agent-workflow-tests *args:
     tests/test_standards_lint.py \
     tests/test_citation_lint.py \
     tests/test_never_rise.py \
+    tests/test_comment_lint.py \
+    tests/test_cleanup_issue.py \
     tests/test_ruff_lint.py \
     tests/test_suppressions.py \
     tests/test_decision_record_wording.py \
@@ -262,6 +266,7 @@ agent-workflow-tests *args:
     tests/test_console_prompt_card.py \
     tests/test_console_prompt_card_service.py \
     tests/test_console_view.py \
+    tests/test_console_draft_facts.py \
     tests/test_console_failed_start.py \
     tests/test_console_activation.py \
     tests/test_console_activation_check.py \
@@ -285,7 +290,9 @@ agent-workflow-tests *args:
     tests/test_console_checkout_remote.py \
     tests/test_console_register.py \
     tests/test_console_register_service.py \
+    tests/test_console_register_draft_service.py \
     tests/test_console_register_check.py \
+    tests/test_console_draft_register_check.py \
     tests/test_console_approve.py \
     tests/test_console_approve_service.py \
     tests/test_console_approve_waits.py \

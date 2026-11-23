@@ -24,7 +24,7 @@ from collections.abc import Mapping
 from pathlib import Path, PurePosixPath
 
 from agent_tools.project_contract import (adopt_entries, adopt_links, adopt_references,
-                                          agent_platform)
+                                          agent_platform, schema_three)
 from agent_tools.project_contract.adopt_entries import NO_CONVERSION, EntryConversion
 from agent_tools.project_contract.adopt_conformance import (
     ConformancePlan,
@@ -585,7 +585,7 @@ def amended_contract(source: dict, interval: dict, found: Candidates,
                 isinstance(entry, dict) and entry.get("kind") == "conformance_workflow"
                 for entry in projections):
             projections.append(dict(PROJECTION_ENTRY))
-    if "platform" not in amended:
+    if "platform" not in amended and not schema_three.declares(amended):
         amended["platform"] = interval
     if environment is not None:
         command_id, argv = environment

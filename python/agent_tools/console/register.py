@@ -146,8 +146,8 @@ and `CANCEL_DISCARD_FAILED` are the service's refusals. `view_entry` carries `ca
 (false for a running entry, the `cancel` argument for a done one).
 
 Drafting row (ADR-console-031). `drafting(root, fields, answered=())` is the row of a repository with no
-project contract: `result` and `state` `drafting`, `project_id` the draft's project-id value (None
-when it has none), `headline` `What the console read from <name>: it has no project contract yet`,
+project contract: `result` and `state` `drafting`, `project_id` the value of the draft's project-identity
+fact when it was read from the remote (None otherwise), `headline` `What the console read from <name>: it has no project contract yet`,
 `note` `The draft has <N> open question(s).` (singular for one), `plan_id`
 `contract_draft.draft_id(root, fields)` (so it changes with any value), `questions`
 `contract_draft.questions(fields)`, `answered` as given and `draft` the fields. It names no repair id
@@ -165,7 +165,7 @@ also unless `draft` is None or a list of dicts whose keys are exactly `FIELD_KEY
 `ENDED` payload over `DEFAULTS` with `at` added (a saved draft is read back through
 `contract_draft.refresh`, and a `drafting` row's questions from it, so an earlier console's wording
 never shows, ADR-console-033 D2; a row whose draft held a retired field its plan may rest on, or whose last
-card was that field, reads back as a `drafting` row, with the plan id it was saved under, whose project id card plans again, #1445), else `state`: the view's `registration` member, folded by the service.
+card was that field, reads back as a `drafting` row, with the plan id it was saved under, whose integration branch card plans again, #1445), else `state`: the view's `registration` member, folded by the service.
 `fold(events, state=None)` is the `Fold` `(latest, before, roots)`: `before` the registrations shown
 before the current one, oldest first, one per root (an ended row naming another root pushes the
 current one and drops the new root's older entry), `roots` each registered project's root; a
@@ -181,7 +181,7 @@ while a run is under way, with `plan_id`, `state` and `refusal` None and `questi
 latest with status `done`, its `plan_id`, `state` and `questions`, and `refusal` the text of the
 given `{"plan_id", "text", "id", "subject"}` only when its `plan_id` is the latest's, and `refused`
 its `{"id", "subject"}` under the same match (the question the refused answer was for), and `draft`
-`contract_draft.shown(draft)` when the latest row holds a draft list (None for the running entry and
+`contract_draft.shown(draft)` (an entry is a `fact`, with no Change, for a derived value) when the latest row holds a draft list (None for the running entry and
 for any other row), and `draft_more` `contract_draft.more_line(draft)` under the same condition (the
 counted line for the shown settings outside the main ones; None otherwise, including when no such
 setting is shown); else None (D4). The keys `adoption` and `approve` are None in the `running` entry
@@ -494,7 +494,8 @@ def _row(root: str, project_id: str | None, result: str, outcome: str | None, he
 
 def drafting(root: str, fields: list[dict], answered: Sequence[Mapping] = ()) -> dict:
     """The row of a repository with no contract: the draft the console made and its open fields."""
-    project_id = next((f["value"] for f in fields if f["field"] == "project-id"), None)
+    project_id = next((f["value"] for f in fields
+                       if f["field"] == "project-identity" and f["source"] == "remote"), None)
     questions = contract_draft.questions(fields)
     return _row(root, project_id, "drafting", None,
                 f"What the console read from {name_of(root)}: it has no project contract yet", [],
