@@ -35,12 +35,12 @@ REAL_WALK = engine_shell._walk
 
 def GROUP(b_command: str) -> list[dict]:
     return [
-        {"id": "checks", "stage": "final review", "kind": "group",
+        {"id": "checks", "stage": "final review", "kind": "group", "holds": "run",
          "members": [{"step": "a", "pass": ["ok"]}, {"step": "b", "pass": ["ok"]}],
          "on": {"pass": "done", "blocked": "needs-owner"}},
-        {"id": "a", "stage": "final review", "kind": "command", "command": "standin-stamp",
+        {"id": "a", "stage": "final review", "kind": "command", "holds": "run", "command": "standin-stamp",
          "in": ["run.issue"]},
-        {"id": "b", "stage": "final review", "kind": "command", "command": b_command,
+        {"id": "b", "stage": "final review", "kind": "command", "holds": "run", "command": b_command,
          "in": ["run.issue"]},
     ]
 
@@ -61,9 +61,9 @@ def child(steps: list[dict], inputs=("issue", "item")) -> dict:
 
 def FAN(items_command: str, parallel: int) -> list[dict]:
     return [
-        {"id": "list", "stage": "setup", "kind": "command", "command": items_command,
+        {"id": "list", "stage": "setup", "kind": "command", "holds": "run", "command": items_command,
          "on": {"ok": "fan", "failed": "needs-owner", "refused": "needs-owner"}},
-        {"id": "fan", "stage": "landing", "kind": "call", "procedure": "fan-child",
+        {"id": "fan", "stage": "landing", "kind": "call", "holds": "run", "procedure": "fan-child",
          "in": ["list.argv"], "each": "list.argv", "parallel": parallel,
          "on": {"done": "done", "child-stop": "needs-owner"}},
     ]
@@ -71,9 +71,9 @@ def FAN(items_command: str, parallel: int) -> list[dict]:
 
 def fan_children(work: str = "standin-stamp") -> dict[str, dict]:
     return {"fan-child": child([
-        {"id": "work", "stage": "building", "kind": "command", "command": work,
+        {"id": "work", "stage": "building", "kind": "command", "holds": "run", "command": work,
          "in": ["run.item"], "on": {"ok": "judge", "failed": "child-stop", "refused": "child-stop"}},
-        {"id": "judge", "stage": "building", "kind": "decide", "grader": "toy-tally",
+        {"id": "judge", "stage": "building", "kind": "decide", "holds": "run", "grader": "toy-tally",
          "in": ["run.item"], "on": {"accept": "done", "revise": "child-stop"}}])}
 
 
@@ -139,11 +139,11 @@ def graded(events: list[dict], name: str) -> list[dict]:
 
 def REVIEWS(pass_b=("drafted",)) -> list[dict]:
     def member(id: str, role: str) -> dict:
-        return {"id": id, "stage": "final review", "kind": "agent", "role": role,
+        return {"id": id, "stage": "final review", "kind": "agent", "holds": "run", "role": role,
                 "prompt": "draft.md", "reply": "draft.reply.json", "outcome_from": "status",
                 "in": ["run.issue"]}
     return [
-        {"id": "reviews", "stage": "final review", "kind": "group",
+        {"id": "reviews", "stage": "final review", "kind": "group", "holds": "run",
          "members": [{"step": "ra", "pass": ["drafted"]}, {"step": "rb", "pass": list(pass_b)}],
          "on": {"pass": "done", "blocked": "needs-owner"}},
         member("ra", "reviewer"), member("rb", "reviewer-lite")]
@@ -256,10 +256,10 @@ class GroupTest(unittest.TestCase):
     def test_a_group_of_decide_members_records_its_grade(self):
         project = EngineProject(self)
         procedures = project.procedures([
-            {"id": "checks", "stage": "final review", "kind": "group",
+            {"id": "checks", "stage": "final review", "kind": "group", "holds": "run",
              "members": [{"step": "j", "pass": ["accept"]}],
              "on": {"pass": "done", "blocked": "needs-owner"}},
-            {"id": "j", "stage": "final review", "kind": "decide", "grader": "toy-tally",
+            {"id": "j", "stage": "final review", "kind": "decide", "holds": "run", "grader": "toy-tally",
              "in": ["run.issue"]}])
         done = project.deliver(procedures, issue=1517)
         self.assertEqual(done.returncode, 3, done.stdout + done.stderr)
@@ -277,7 +277,7 @@ class GroupTest(unittest.TestCase):
     def test_a_group_whose_declared_input_has_no_value_starts_no_member(self):
         project = EngineProject(self)
         steps = [
-            {"id": "prepare", "stage": "setup", "kind": "command", "command": "standin-json",
+            {"id": "prepare", "stage": "setup", "kind": "command", "holds": "run", "command": "standin-json",
              "in": ["run.issue"], "on": {"ok": "checks", "failed": "needs-owner", "refused": "needs-owner"}},
             *GROUP("standin-stamp")]
         steps[1]["in"] = ["prepare.ticket"]
@@ -293,7 +293,7 @@ class GroupTest(unittest.TestCase):
         steps = GROUP("standin-stamp")
         steps[0]["on"] = {"pass": "fan", "blocked": "needs-owner"}
         steps[1]["command"] = "standin-items-object"
-        steps.append({"id": "fan", "stage": "landing", "kind": "call", "procedure": "fan-child",
+        steps.append({"id": "fan", "stage": "landing", "kind": "call", "holds": "run", "procedure": "fan-child",
                       "in": ["a.argv"], "each": "a.argv",
                       "on": {"done": "done", "child-stop": "needs-owner"}})
         done = project.deliver(project.procedures(steps, children=fan_children()), issue=1517)
@@ -376,7 +376,7 @@ class CallTest(unittest.TestCase):
     def test_a_call_without_each_runs_one_child(self):
         project = EngineProject(self)
         procedures = project.procedures(
-            [{"id": "once", "stage": "landing", "kind": "call", "procedure": "solo",
+            [{"id": "once", "stage": "landing", "kind": "call", "holds": "run", "procedure": "solo",
               "on": {"done": "done", "child-stop": "needs-owner"}}],
             children={"solo": child([step("work", "standin-json", "done", failed="child-stop")],
                                     inputs=("issue",))})
@@ -555,7 +555,7 @@ class CallTest(unittest.TestCase):
 class PassThroughTest(unittest.TestCase):
     def test_a_call_without_each_passes_the_parents_item_to_its_child(self):
         project = EngineProject(self)
-        inner = {"id": "inner", "stage": "landing", "kind": "call", "procedure": "grand",
+        inner = {"id": "inner", "stage": "landing", "kind": "call", "holds": "run", "procedure": "grand",
                  "on": {"done": "done", "child-stop": "child-stop"}}
         children = {"fan-child": child([inner]),
                     "grand": child([step("work", "standin-json", "done", failed="child-stop")])}
@@ -573,8 +573,9 @@ class ChildKeepAliveTest(unittest.TestCase):
         project.answer({"stdout": '{"verdict":"renewed"}', "exit": 0})
         steps = FAN("standin-items", 1)
         steps[1]["on"]["claim-lost"] = "needs-owner"
-        work = {"id": "work", "stage": "building", "kind": "command", "command": "standin-stamp",
-                "in": ["run.item"], "mutates": True, "on": {"ok": "done", "failed": "child-stop", "refused": "child-stop"}}
+        work = {"id": "work", "stage": "building", "kind": "command", "holds": "run", "command": "standin-stamp",
+                "in": ["run.item"], "mutates": True, "check": {"command": "standin-stamp"},
+                "on": {"ok": "done", "failed": "child-stop", "refused": "child-stop"}}
         document = child([work])
         document["stops"]["claim-lost"] = {"need": "retry", "reenter": "work"}
         done = project.deliver(
@@ -596,7 +597,7 @@ class PreflightTest(unittest.TestCase):
         levels = 20
 
         def calls(target: str, last: str) -> list[dict]:
-            return [{"id": name, "stage": "landing", "kind": "call", "procedure": target,
+            return [{"id": name, "stage": "landing", "kind": "call", "holds": "run", "procedure": target,
                      "on": {"done": "done", "child-stop": other}}
                     for name, other in (("first", "second"), ("second", last))]
 
@@ -625,7 +626,7 @@ class RefusalTest(unittest.TestCase):
     def test_a_call_the_engine_cannot_run_is_refused(self):
         solo = child([step("work", "standin-json", "done", failed="child-stop")],
                      inputs=("issue",))
-        call = {"id": "once", "stage": "landing", "kind": "call", "procedure": "solo",
+        call = {"id": "once", "stage": "landing", "kind": "call", "holds": "run", "procedure": "solo",
                 "on": {"done": "done", "child-stop": "needs-owner"}}
 
         def undeclared(project: EngineProject) -> Path:
@@ -635,27 +636,27 @@ class RefusalTest(unittest.TestCase):
 
         def itself(project: EngineProject) -> Path:
             return project.procedures([{
-                "id": "loop", "stage": "landing", "kind": "call", "procedure": "deliver",
+                "id": "loop", "stage": "landing", "kind": "call", "holds": "run", "procedure": "deliver",
                 "on": {"done": "done", "needs-owner": "needs-owner"}}])
 
         def member(project: EngineProject) -> Path:
             return project.procedures([
-                {"id": "checks", "stage": "final review", "kind": "group",
+                {"id": "checks", "stage": "final review", "kind": "group", "holds": "run",
                  "members": [{"step": "c", "pass": ["done"]}],
                  "on": {"pass": "done", "blocked": "needs-owner"}},
-                {"id": "c", "stage": "final review", "kind": "call", "procedure": "solo"}],
+                {"id": "c", "stage": "final review", "kind": "call", "holds": "run", "procedure": "solo"}],
                 children={"solo": solo})
 
         def mutating(project: EngineProject) -> Path:
             return project.procedures([call], children={"solo": child([
-                {"id": "j", "stage": "building", "kind": "decide", "grader": "toy-tally",
+                {"id": "j", "stage": "building", "kind": "decide", "holds": "run", "grader": "toy-tally",
                  "in": ["run.issue"], "mutates": True,
                  "on": {"accept": "done", "revise": "child-stop"}}], inputs=("issue",))})
 
         def unread_role(project: EngineProject) -> Path:
             copy_roles(project, "implementer")
             directory = project.procedures([call], children={"solo": child([
-                {"id": "look", "stage": "building", "kind": "agent", "role": "reviewer",
+                {"id": "look", "stage": "building", "kind": "agent", "holds": "run", "role": "reviewer",
                  "prompt": "draft.md", "reply": "draft.reply.json", "outcome_from": "status",
                  "in": ["run.issue"],
                  "on": {"drafted": "done", "stuck": "child-stop", "no-reply": "child-stop",
@@ -691,7 +692,7 @@ class ChildSessionTest(unittest.TestCase):
         log = install_stub(project, RESULT_NORMAL)
         directory = project.procedures(FAN("standin-items-mixed", 2), children={
             "fan-child": child([
-                {"id": "look", "stage": "building", "kind": "agent", "role": "reviewer",
+                {"id": "look", "stage": "building", "kind": "agent", "holds": "run", "role": "reviewer",
                  "prompt": "item.md", "reply": "draft.reply.json", "outcome_from": "status",
                  "in": ["run.item"],
                  "on": {"drafted": "done", "stuck": "child-stop", "no-reply": "child-stop",
@@ -869,7 +870,7 @@ class ScopeTest(unittest.TestCase):
         """Deliver a call of three one-session child runs in process, one at a time."""
         directory = self.project.procedures(FAN("standin-items", 1), children={
             "fan-child": child([
-                {"id": "look", "stage": "building", "kind": "agent", "role": "reviewer",
+                {"id": "look", "stage": "building", "kind": "agent", "holds": "run", "role": "reviewer",
                  "prompt": "item.md", "reply": "draft.reply.json", "outcome_from": "status",
                  "in": ["run.item"],
                  "on": {"drafted": "done", "stuck": "child-stop", "no-reply": "child-stop",
@@ -1036,7 +1037,7 @@ class SigtermTest(unittest.TestCase):
 
     def test_a_sigterm_during_a_call_admits_no_further_child(self):
         project, engine, _ = self.call_during_work([
-            {"id": "work", "stage": "building", "kind": "command", "command": "standin-block",
+            {"id": "work", "stage": "building", "kind": "command", "holds": "run", "command": "standin-block",
              "in": ["run.item"], "on": {"ok": "done", "failed": "child-stop", "refused": "child-stop"}}])
 
         self.assertEqual(engine.returncode, 143)
@@ -1046,9 +1047,9 @@ class SigtermTest(unittest.TestCase):
 
     def test_a_sigterm_during_a_call_starts_no_later_step_of_the_running_child(self):
         project, engine, kid = self.call_during_work([
-            {"id": "work", "stage": "building", "kind": "command", "command": "standin-block",
+            {"id": "work", "stage": "building", "kind": "command", "holds": "run", "command": "standin-block",
              "in": ["run.item"], "on": {"ok": "after", "failed": "child-stop", "refused": "child-stop"}},
-            {"id": "after", "stage": "building", "kind": "command", "command": "standin-stamp",
+            {"id": "after", "stage": "building", "kind": "command", "holds": "run", "command": "standin-stamp",
              "in": ["run.item"], "on": {"ok": "done", "failed": "child-stop", "refused": "child-stop"}}])
 
         self.assertEqual(engine.returncode, 143)

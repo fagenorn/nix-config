@@ -228,6 +228,7 @@ class GroupKeepAliveTest(unittest.TestCase):
         steps = GROUP("standin-stamp")
         if mutating:
             steps[1]["mutates"] = True
+            steps[1]["check"] = {"command": "standin-stamp"}
         return steps
 
     def test_a_group_with_a_mutating_member_renews_once_before_either_member_starts(self):
