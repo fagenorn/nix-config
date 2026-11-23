@@ -91,7 +91,7 @@ copied into the output. The lifecycle guard reads its trusted members
 (`authorized_owners`, `integration_bases` and the three tools) from the base
 policy only and takes a row's two branches, its required checks and its
 production rules from this file, reading the production rules without the row
-check (ADR-guard-011). Every value the resolver accepts is one the guard loads,
+check (ADR-guard-009). Every value the resolver accepts is one the guard loads,
 so no name check applies to them. The only repository writes are the remote-tracking refs of the
 branches fetched and the fetched objects. The write is atomic
 (`agent_platform.write_atomically`), so a reader sees the old file or the new
