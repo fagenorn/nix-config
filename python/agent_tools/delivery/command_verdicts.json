@@ -11,6 +11,7 @@
   "conformance": null,
   "console": null,
   "context-map-lint": null,
+  "copied-test-lint": null,
   "diff-scope": {
     "verdicts": []
   },
@@ -50,6 +51,7 @@
   "ruff-lint": null,
   "size-lint": null,
   "skill-lint": null,
+  "skipped-test-lint": null,
   "sprint": null,
   "standards-lint": null,
   "verified-tree": null,

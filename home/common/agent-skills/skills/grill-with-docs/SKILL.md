@@ -11,9 +11,9 @@ Select the context map only from the retained `bindings.paths.context` list, in 
 
 ## The interview
 
-Interview the user relentlessly about every aspect of the spec (run it on the spec, not the plan) until you share one understanding. Model the design as a tree of decisions; the **frontier** is every question whose prerequisites are settled. Ask the whole frontier as one numbered round of `❓ question / ➡️ recommended answer` pairs; a question depending on another open question waits for a later round. Recompute the frontier after each round; done when it is empty.
+Interview the user relentlessly about every aspect of the spec (not the plan) until you share one understanding. Model the design as a tree of decisions; the **frontier** is every question whose prerequisites are settled. Ask the whole frontier as one numbered round of `❓ question / ➡️ recommended answer` pairs; a question depending on another open question waits for a later round. Recompute the frontier after each round; done when it is empty.
 
-When every question in a round carries a ➡️ recommendation, say once, at the first such round, that the user may reply with only the numbers they'd change: anything not named adopts its recommendation and is recorded as their decision. Three kinds of question never ride on silence: anything that redraws the destination or scope, anything hard to reverse, and anything that spends money or hands out a credential. Mark those and wait for an answer in words, however many rounds it takes.
+When every question in a round carries a ➡️ recommendation, say once, at the first such round, the user may reply with only the numbers they'd change: anything not named adopts its recommendation as their decision. Three kinds never ride on silence: anything that redraws the destination or scope, is hard to reverse, or spends money or hands out a credential. Mark those and wait for an answer in words, however many rounds it takes.
 
 A question a bounded read-only lookup in the code or docs can answer is explored, not asked:
 
@@ -24,28 +24,23 @@ Only questions downstream of a lookup wait for it. If the lookup turns open-ende
 
 ## Domain docs
 
-Read existing documentation while exploring, long documents by section (`doc-grounded-questions` step 4). Areas, glossaries and decision records live only where the selected map and its passed area paths name them; with no selected map, use only the passed context paths and never create or discover a map. Create files lazily, and only where the selected map and its area paths authorize them, or in a passed writable context path when there is no map; an empty or unsupported path set has no write route. Read [CONTEXT-FORMAT.md](./CONTEXT-FORMAT.md) before creating any doc file.
+Read existing documentation while exploring, long documents by section (`doc-grounded-questions` step 4). Areas, glossaries and decision records live only where the selected map and its passed area paths name them; with no selected map, use only the passed context paths and never create or discover a map. Create files lazily, only where the selected map and its area paths authorize them, or in a passed writable context path with no map; an empty or unsupported path set has no write route. Read [CONTEXT-FORMAT.md](./CONTEXT-FORMAT.md) before creating any doc file.
 
 During the session:
 
-- **Challenge against the glossary**: a term used against its glossary definition is called out at once.
+- **Challenge against the glossary**: call out at once a term used against its definition.
 - **Sharpen fuzzy language**: propose a precise canonical term for a vague or overloaded one.
 - **Probe with concrete scenarios** that force precision at the boundaries between concepts.
-- **Cross-reference the code**: surface any contradiction between what the user states and what the code does.
-- **Update the glossary inline**: when a term resolves, write it into the owning area's glossary and add its row to the map's Terms table, in CONTEXT-FORMAT.md's format. Only terms meaningful to a domain expert.
+- **Cross-reference the code**: surface any contradiction between what the user states and the code.
+- **Update the glossary inline**: write each resolved domain-expert term into the owning area's glossary and the map's Terms table, in CONTEXT-FORMAT.md's format.
 
-Two same-commit obligations: **delete on resolve** (an ambiguity marker goes when the ambiguity closes; the resolution lives in the winning definition and its `_Avoid_:` line, or in an ADR) and **net-neutral writes** (a file the lint reports over budget is consolidated or split: consolidate first, tightening entries past two sentences and merging near-duplicate terms; split only when the area covers two things).
+Two same-commit obligations: **delete on resolve** (an ambiguity marker goes when it closes; the resolution lives in the winning definition and its `_Avoid_:` line, or in an ADR) and **net-neutral writes** (a file the lint reports over budget is consolidated first, tightening entries past two sentences and merging near-duplicate terms, and split only when the area covers two things).
 
-**Splitting an area** is four edits in one commit:
-
-1. Create the new area file with front-matter (`area:`, `budget:`), a short purpose, and the moving terms copied verbatim.
-2. Delete those terms from the old file.
-3. Add a row to the map's `## Areas` table (name, link, one-line gist, `governs:` globs) and narrow the old area's globs.
-4. Repoint the moved terms' rows in `## Terms` and add any new cross-area edge to `## Relationships`.
+**Splitting an area** is four edits in one commit, listed in [CONTEXT-FORMAT.md](./CONTEXT-FORMAT.md).
 
 Then run `~/.agents/bin/context-map-lint --repo-root <absolute checkout root> --context-map <selected map path>` and fix what it reports. When the retained snapshot's `bindings.commands` has a `context-map-lint` entry, append `--repo-lint-cwd <its cwd> --repo-lint` then each word of its `argv` as a separate argument; with no entry, no flag.
 
-Offer an ADR only when it passes the gate in [ADR-FORMAT.md](./ADR-FORMAT.md); write it per that file.
+A decision record is written only in design and grilling, never by a delivery agent, and only when it is hard to reverse, surprising without context, a real trade-off and names its rejected alternative. Else how it works goes to the code, its tests and module docstring; a rule for every change to a standard with an id; a word's meaning to the glossary; a one-off choice or a bug's story to the issue and commit message. Write it per [ADR-FORMAT.md](./ADR-FORMAT.md).
 
 ## Final spec measurement
 
