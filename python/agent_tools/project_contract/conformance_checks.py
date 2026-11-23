@@ -22,7 +22,8 @@ from pathlib import Path, PurePosixPath
 import subprocess
 
 from agent_tools.delivery import (
-    context_map_lint, host_admission, never_rise, node_lint, size_lint, standards_lint,
+    comment_lint, context_map_lint, copied_test_lint, host_admission, never_rise, node_lint,
+    record_lint, ruff_lint, size_lint, skipped_test_lint, standards_lint,
 )
 from agent_tools.project_contract import agent_platform
 from agent_tools.release import release_adapter, release_profile
@@ -776,12 +777,15 @@ def check_standards_lint(context: "Context") -> "Outcome":
     return Outcome("passed")
 
 
-NEVER_RISE_ENFORCERS = (size_lint.ENFORCER,)
-
-
-def _node_tools() -> "node_lint.NodeTools":
-    """The platform's pinned Node tools, read only when a program needs them."""
-    return node_lint.NodeTools(*agent_platform.node_tools())
+def never_rise_enforcers(contract: dict, revisions: tuple[str, ...] = ()
+                         ) -> tuple[never_rise.Enforcer, ...]:
+    """The size rule, the test rules, the ruff rules, the comment rules judged against the
+    contract's own tracker repository when it authors one, the record rules, then the Node
+    rules, which keep covering the programs of either of the two `revisions` on both."""
+    repository = contract["bindings"].get("tracker", {}).get("repo_slug") or None
+    return (size_lint.ENFORCER, skipped_test_lint.ENFORCER, copied_test_lint.ENFORCER,
+            *ruff_lint.ENFORCERS, *comment_lint.enforcers(repository),
+            *record_lint.RECORD_ENFORCERS, *node_lint.enforcers(also=revisions))
 
 
 def check_never_rise(context: "Context") -> "Outcome":
@@ -790,39 +794,48 @@ def check_never_rise(context: "Context") -> "Outcome":
 
     It starts only read-only, bounded git children, which read committed
     history and never the working tree; the authored contract supplies the
-    branch. No readable merge base is a failed check, never a pass. A reasoned
+    branch. No readable merge base is a failed check, never a pass, and an
+    enforcer that cannot judge is a failed check, never a pass. A reasoned
     suppression the branch adds is listed in the facts, passed or failed, and
     never fails the check (ADR-project-contract-019). Each listed line holds its
     rule, path, line and reason within the fact string bound (`Suppression.text`).
-    The Node enforcers judge the Workflow programs of either revision on both; a
-    failure of an enforcer's tool is `enforcer_failed`, never a pass, and
-    publishes only the tool and a closed-set reason.
+
+    The record enforcers judge both sides. The facts list each record the
+    branch adds, for the reviewer to judge against the gate: at most
+    `MAX_FACT_LIST` paths, with the true count beside them. The membership is
+    `record_lint.added_records`'s: each path `git diff-tree -r -M
+    --diff-filter=AR --name-status <merge_base> HEAD` names as added or as a
+    rename target that `record_lint.is_record_path` accepts, less each
+    rename whose source is a record path and whose pair
+    `record_lint.is_record_migration` accepts (a migration).
     """
     branch = context.contract["bindings"]["vcs"]["integration_branch"]
     pair = never_rise.revisions(context.root, branch, CHILD_TIMEOUT_SECONDS)
-    verdict = None
-    if pair is not None:
-        enforcers = NEVER_RISE_ENFORCERS + node_lint.enforcers(
-            context.root, CHILD_TIMEOUT_SECONDS, _node_tools, also=pair)
-        try:
-            verdict = never_rise.judge(context.root, branch, enforcers, CHILD_TIMEOUT_SECONDS)
-        except never_rise.EnforcerFailure as error:
-            return Outcome("failed", "enforcer_failed", "platform.enforcers.install",
-                           {"tool": bound_fact(error.tool), "reason": error.reason})
+    try:
+        verdict = (never_rise.judge(context.root, branch,
+                                    never_rise_enforcers(context.contract, pair),
+                                    CHILD_TIMEOUT_SECONDS) if pair is not None else None)
+    except never_rise.EnforcerFailed as error:
+        return Outcome("failed", "enforcer_failed", "violations.enforcer.repair", {
+            "enforcer": bound_fact(error.enforcer),
+            "reason": bound_fact(error.reason)})
     if verdict is None:
         return Outcome("failed", "history_unavailable", "violations.history.fetch",
                        {"integration_branch": bound_fact(branch)})
-    listed = verdict.suppressions
-    extra = ({"suppressions": bound_facts([s.text(MAX_FACT_STRING) for s in listed]),
-              "suppression_count": len(listed)} if listed else {})
+    added = record_lint.added_records(verdict)
+    listed = ({"added_records": bound_facts(added), "added_record_count": len(added)}
+              if added else {})
+    suppressed = verdict.suppressions
+    extra = ({"suppressions": bound_facts([s.text(MAX_FACT_STRING) for s in suppressed]),
+              "suppression_count": len(suppressed)} if suppressed else {})
     if not verdict.rises:
-        return Outcome("passed", facts={"merge_base": verdict.merge_base, **extra})
+        return Outcome("passed", facts={"merge_base": verdict.merge_base, **listed, **extra})
     first = verdict.rises[0]
     return Outcome("failed", "violation_count_rose", "violations.never_rise.reduce", {
         "merge_base": verdict.merge_base, "rule": first.rule,
         "base_count": first.base_count, "branch_count": first.branch_count,
         "violations": [bound_fact(v.text()) for v in first.new[:MAX_FACT_LIST]],
-        "rules": bound_facts([r.rule for r in verdict.rises]), **extra})
+        "rules": bound_facts([r.rule for r in verdict.rises]), **listed, **extra})
 
 
 # --------------------------------------------------------------------------

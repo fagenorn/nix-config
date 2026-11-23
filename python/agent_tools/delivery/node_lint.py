@@ -33,14 +33,18 @@ warning that quotes the comment, and `directive_violation` decides whether the c
 is NODE15: a disable naming no rule or giving no reason holding a letter or digit, and
 every configuring comment, is. An enable comment is not.
 
-Tools. `node` and `eslint` are the store paths of the platform package's record
-(`agent_tools.project_contract.agent_platform.node_tools`), run with no inherited
-environment (`HOME` a temporary directory, `LANG` `C`), so no inherited setting changes
-what they read. Every line either tool reports is clamped into the source before
-anything is combined. A tool that cannot start, times out, exits unexpectedly or
-prints output that is incomplete or malformed raises
-`agent_tools.delivery.never_rise.EnforcerFailure`; a failed git read raises
-`HistoryUnreadable`.
+Tools. The package pins `node` and `eslint` beside Ruff and every launcher exports
+their directory as `AGENT_PLATFORM_TOOLS`; the adapter runs each by its command name on a
+`PATH` that is that directory alone, never the inherited one, with `HOME` a temporary
+directory and `LANG` `C` besides, so no inherited setting changes what they read. Every
+line either tool reports is clamped into the source before anything is combined. Once a
+program is judged, a tools directory that is unset, relative or without an executable
+`node` and `eslint` is `tools_unavailable`; a tool that cannot start, runs too long or
+exits unexpectedly is `node_failed` or `eslint_failed`; output that is incomplete or
+malformed is `node_output_unreadable` or `eslint_output_unreadable`; a scratch directory
+that cannot be written is `scratch_unwritable`. Each raises
+`agent_tools.delivery.never_rise.EnforcerFailed(COMMAND, reason)`. A failed git read
+raises `HistoryUnavailable`.
 
 The command `node-lint --repo-root <absolute directory> [--revision <rev>]` prints
 the counted violations at the revision (default `HEAD`: `never_rise.counted` of each
@@ -48,13 +52,14 @@ enforcer, kept plus marked), one line each on stdout as
 `agent_tools.delivery.never_rise.Violation.text` defines, sorted by path then line. It
 exits 1 when it printed any and 0 when none. It exits 2 with `node-lint: <reason>` on
 stderr for a relative or missing root, a root below the repository's top level, an
-unresolvable revision, a failed git read, or a tool failure
-(`node-lint: <tool>: <detail>`).
+unresolvable revision, a failed git read, or a closed failure.
 """
 
 import argparse
 import json
+import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -63,10 +68,13 @@ from pathlib import Path
 from typing import NamedTuple
 
 from agent_tools.delivery import never_rise
-from agent_tools.delivery.never_rise import Enforcer, EnforcerFailure, Snapshot, Violation
-from agent_tools.project_contract import agent_platform
+from agent_tools.delivery.never_rise import (
+    Enforcer, EnforcerFailed, HistoryUnavailable, Snapshot, Violation)
 
 COMMAND = "node-lint"
+TOOLS_ENV = "AGENT_PLATFORM_TOOLS"
+NODE = "node"
+ESLINT = "eslint"
 PARSE_RULE = "NODE11"
 UNUSED_RULE = "NODE12"
 NAMES_RULE = "NODE13"
@@ -119,13 +127,6 @@ NO_EFFECT = "' has no effect because you have 'noInlineConfig' setting in "
 JUSTIFICATION = re.compile(r"\s-{2,}\s")
 DIRECTIVE_LABEL = re.compile(
     r"^(eslint(?:-env|-enable|-disable(?:(?:-next)?-line)?)?|exported|globals?)(?:\s|$)")
-DETAIL_LIMIT = 300
-
-
-class NodeTools(NamedTuple):
-    node: str
-    eslint: str
-
 
 class Wrapped(NamedTuple):
     text: str
@@ -168,25 +169,34 @@ def directive_violation(comment: str) -> bool:
     return True
 
 
-def _failure(tool: str, reason: str, detail: str) -> EnforcerFailure:
-    return EnforcerFailure(tool, reason, detail[:DETAIL_LIMIT])
+def _failure(reason: str) -> EnforcerFailed:
+    return EnforcerFailed(COMMAND, reason)
 
 
-def _run(tool: str, argv: list[str], tmp: Path, timeout: float | None) -> subprocess.CompletedProcess:
+def tools_directory() -> str:
+    """The pinned tools directory when it is absolute and holds an executable `node` and `eslint`."""
+    directory = os.environ.get(TOOLS_ENV)
+    if (directory and os.path.isabs(directory)
+            and all(shutil.which(name, path=directory) for name in (NODE, ESLINT))):
+        return directory
+    raise _failure("tools_unavailable")
+
+
+def _run(tool: str, argv: list[str], tools: str, tmp: Path,
+         timeout: float | None) -> subprocess.CompletedProcess:
     try:
-        return subprocess.run(argv, cwd=tmp, env={"HOME": str(tmp), "LANG": "C"},
-                              capture_output=True, text=True, timeout=timeout)
-    except OSError as error:
-        raise _failure(tool, "not_started", str(error)) from error
-    except subprocess.TimeoutExpired as error:
-        raise _failure(tool, "timed_out", f"no result within {timeout} seconds") from error
+        return subprocess.run(
+            argv, cwd=tmp, env={"PATH": tools, "HOME": str(tmp), "LANG": "C"},
+            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired):
+        raise _failure(f"{tool}_failed") from None
 
 
 def _syntax_line(proc: subprocess.CompletedProcess) -> int:
     lines = proc.stderr.splitlines()
     located = next((m for m in map(NODE_ERROR_LINE.search, lines) if m), None)
     if located is None or not any(line.startswith("SyntaxError: ") for line in lines):
-        raise _failure("node", "unreadable_output", proc.stderr)
+        raise _failure("node_output_unreadable")
     return int(located.group(1))
 
 
@@ -197,12 +207,12 @@ def _is_line(value: object) -> bool:
 def _messages(proc: subprocess.CompletedProcess, names: Sequence[str]) -> dict[str, list[dict]]:
     """The validated messages of an ESLint run, keyed by the requested file name."""
     if proc.returncode not in (0, 1):
-        raise _failure("eslint", "unexpected_exit", f"exit {proc.returncode}: {proc.stderr}")
+        raise _failure("eslint_failed")
     try:
         results = json.loads(proc.stdout)
-    except ValueError as error:
-        raise _failure("eslint", "unreadable_output", "stdout is not JSON") from error
-    unreadable = _failure("eslint", "unreadable_output", "the result list is incomplete or malformed")
+    except ValueError:
+        raise _failure("eslint_output_unreadable") from None
+    unreadable = _failure("eslint_output_unreadable")
     if not isinstance(results, list):
         raise unreadable
     by_name: dict[str, list[dict]] = {}
@@ -232,10 +242,11 @@ def _config(linter_options: dict, rules: dict) -> str:
     return "export default " + json.dumps(config) + ";\n"
 
 
-def lint_files(files: Mapping[str, str], tools: NodeTools, timeout: float | None) -> list[Violation]:
+def lint_files(files: Mapping[str, str], timeout: float | None) -> list[Violation]:
     """The violations of Workflow programs, `files` mapping each path to its text."""
     if not files:
         return []
+    tools = tools_directory()
     paths = sorted(files)
     names = [CJS.format(i) for i in range(len(paths))]
     wrapped = [wrap(files[path]) for path in paths]
@@ -246,28 +257,31 @@ def lint_files(files: Mapping[str, str], tools: NodeTools, timeout: float | None
 
     found: list[Violation] = []
     parse_lines: set[tuple[int, int]] = set()
-    with tempfile.TemporaryDirectory() as directory:
-        tmp = Path(directory)
-        for name, program in zip(names, wrapped):
-            (tmp / name).write_text(program.text, encoding="utf-8")
-        for index, name in enumerate(names):
-            proc = _run("node", [tools.node, "--check", name], tmp, timeout)
-            if proc.returncode == 1:
-                parse_lines.add((index, clamp(index, _syntax_line(proc))))
-            elif proc.returncode != 0:
-                raise _failure("node", "unexpected_exit", f"exit {proc.returncode}: {proc.stderr}")
-        (tmp / CONFIG).write_text(
-            _config({"reportUnusedDisableDirectives": "off"},
-                    {name: "error" for name in ESLINT_RULES}), encoding="utf-8")
-        (tmp / INLINE_CONFIG).write_text(
-            _config({"reportUnusedDisableDirectives": "off", "noInlineConfig": True}, {}),
-            encoding="utf-8")
-        flags = ["--format", "json", "--no-warn-ignored"]
-        checked = _messages(
-            _run("eslint", [tools.eslint, "--config", CONFIG, *flags, *names], tmp, timeout), names)
-        inline = _messages(
-            _run("eslint", [tools.eslint, "--config", INLINE_CONFIG, *flags, *names], tmp, timeout),
-            names)
+    try:
+        with tempfile.TemporaryDirectory() as directory:
+            tmp = Path(directory)
+            for name, program in zip(names, wrapped):
+                (tmp / name).write_text(program.text, encoding="utf-8")
+            for index, name in enumerate(names):
+                proc = _run(NODE, [NODE, "--check", name], tools, tmp, timeout)
+                if proc.returncode == 1:
+                    parse_lines.add((index, clamp(index, _syntax_line(proc))))
+                elif proc.returncode != 0:
+                    raise _failure("node_failed")
+            (tmp / CONFIG).write_text(
+                _config({"reportUnusedDisableDirectives": "off"},
+                        {name: "error" for name in ESLINT_RULES}), encoding="utf-8")
+            (tmp / INLINE_CONFIG).write_text(
+                _config({"reportUnusedDisableDirectives": "off", "noInlineConfig": True}, {}),
+                encoding="utf-8")
+            flags = ["--format", "json", "--no-warn-ignored"]
+            checked = _messages(
+                _run(ESLINT, [ESLINT, "--config", CONFIG, *flags, *names], tools, tmp, timeout), names)
+            inline = _messages(
+                _run(ESLINT, [ESLINT, "--config", INLINE_CONFIG, *flags, *names], tools, tmp, timeout),
+                names)
+    except OSError:
+        raise _failure("scratch_unwritable") from None
     for index, name in enumerate(names):
         path = paths[index]
         for message in checked[name]:
@@ -294,39 +308,46 @@ def lint_files(files: Mapping[str, str], tools: NodeTools, timeout: float | None
     return sorted(found, key=lambda v: (v.path, v.line, v.rule))
 
 
-def enforcers(root: Path, timeout: float | None, tools: Callable[[], NodeTools],
-              also: Sequence[str] = ()) -> tuple[Enforcer, ...]:
-    """One count enforcer per rule, all sharing one tool run per revision."""
-    texts: dict[str, dict[str, str]] = {}
-    results: dict[str, list[Violation]] = {}
+def enforcers(also: Sequence[str] = ()) -> tuple[Enforcer, ...]:
+    """One count enforcer per rule, all sharing one tool run per revision.
 
-    def texts_at(revision: str) -> dict[str, str]:
-        if revision not in texts:
-            blobs = never_rise.read_blobs(root, revision, lambda p: p.endswith(".js"), timeout)
-            if blobs is None:
-                raise never_rise.HistoryUnreadable()
-            texts[revision] = {p: b.decode("utf-8", errors="replace") for p, b in blobs.items()}
-        return texts[revision]
+    A revision is judged on the programs it holds that are programs at it or at any
+    revision of `also`.
+    """
+    programs: dict[tuple[str, str], set[str]] = {}
+    results: dict[tuple[str, str], list[Violation]] = {}
 
-    def selected(revision: str) -> set[str]:
-        return {p for p, t in texts_at(revision).items() if is_program(p, t)}
+    def texts_of(snapshot: Snapshot) -> dict[str, str]:
+        return {path: snapshot.contents[path].decode("utf-8", errors="replace")
+                for path in snapshot.files if path.endswith(".js") and path in snapshot.contents}
 
-    def violations(revision: str) -> list[Violation]:
-        if revision not in results:
-            here = texts_at(revision)
-            covered = (selected(revision).union(*(selected(other) for other in also))) & here.keys()
-            if not covered:
-                results[revision] = []
-            else:
-                try:
-                    resolved = tools()
-                except ValueError as error:
-                    raise _failure("node-tools", "record_unavailable", str(error)) from error
-                results[revision] = lint_files({p: here[p] for p in covered}, resolved, timeout)
-        return results[revision]
+    def programs_at(snapshot: Snapshot) -> set[str]:
+        return {path for path, text in texts_of(snapshot).items() if is_program(path, text)}
+
+    def programs_of(root: Path | None, revision: str, timeout: float | None) -> set[str]:
+        key = (str(root), revision)
+        if key not in programs:
+            if root is None:
+                raise ValueError("the snapshot was not read from a repository")
+            other = never_rise.read_snapshot(root, revision, timeout)
+            if other is None:
+                raise HistoryUnavailable()
+            programs[key] = programs_at(other)
+        return programs[key]
+
+    def violations(snapshot: Snapshot) -> list[Violation]:
+        key = (str(snapshot.root), snapshot.revision)
+        if key not in results:
+            here = texts_of(snapshot)
+            chosen = programs_at(snapshot).union(
+                *(programs_of(snapshot.root, other, snapshot.timeout) for other in also))
+            covered = chosen & here.keys()
+            results[key] = (lint_files({path: here[path] for path in covered}, snapshot.timeout)
+                            if covered else [])
+        return results[key]
 
     def finder(rule: str) -> Callable[[Snapshot], list[Violation]]:
-        return lambda snapshot: [v for v in violations(snapshot.revision) if v.rule == rule]
+        return lambda snapshot: [v for v in violations(snapshot) if v.rule == rule]
 
     return tuple(Enforcer(rule, finder(rule)) for rule in RULES)
 
@@ -336,31 +357,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--repo-root", required=True)
     parser.add_argument("--revision", default="HEAD")
     args = parser.parse_args(argv)
-    root = Path(args.repo_root)
-    if not root.is_absolute():
-        print(f"{COMMAND}: --repo-root must be absolute: {root}", file=sys.stderr)
-        return 2
-    if not root.is_dir():
-        print(f"{COMMAND}: not a directory: {root}", file=sys.stderr)
-        return 2
-    if never_rise.in_subdirectory(root, timeout=None):
-        print(f"{COMMAND}: --repo-root is not the repository top level: {root}", file=sys.stderr)
-        return 2
-    sha = never_rise.resolve_commit(root, args.revision, timeout=None)
-    snapshot = never_rise.read_snapshot(root, sha, timeout=None) if sha else None
+    snapshot = never_rise.command_snapshot(COMMAND, args.repo_root, args.revision)
     if snapshot is None:
-        print(f"{COMMAND}: cannot read {args.revision} in {root}", file=sys.stderr)
         return 2
     found: list[Violation] = []
     try:
-        for enforcer in enforcers(root, None, lambda: NodeTools(*agent_platform.node_tools())):
+        for enforcer in enforcers():
             kept, marked = never_rise.counted(enforcer, snapshot)
             found.extend(kept + marked)
-    except never_rise.HistoryUnreadable:
-        print(f"{COMMAND}: cannot read {args.revision} in {root}", file=sys.stderr)
+    except EnforcerFailed as failure:
+        print(f"{COMMAND}: {failure.reason}", file=sys.stderr)
         return 2
-    except EnforcerFailure as error:
-        print(f"{COMMAND}: {error.tool}: {error.detail}", file=sys.stderr)
+    except HistoryUnavailable:
+        print(f"{COMMAND}: cannot read {args.revision} in {args.repo_root}", file=sys.stderr)
         return 2
     found.sort(key=lambda v: (v.path, v.line))
     for violation in found:

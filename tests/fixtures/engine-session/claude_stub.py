@@ -15,6 +15,11 @@ to 10 s until the child has written `<hold>.ready`, writes `"<own pid> <child
 pid>"` to `<hold>` and sleeps 60 s before it behaves as above. The stub keeps
 the default SIGTERM action, so it exits on TERM while its child does not.
 
+When `<exit>` is `"hang"` the stub's code is 1 and, after it has read stdin, it starts a 120 s
+grandchild that stays in the stub's own process group, adds `"hang": {"child": <grandchild pid>,
+"pid": <its pid>}` to the usual record, writes the log line flushed and the answer file as usual,
+then sleeps 120 s, returns 1 and prints nothing on stdout.
+
 `announced` is true when some `$HOME/.agents/state/engine/runs/*/events.jsonl`
 holds a `session_starting` event whose `session` is the argv word after
 `--session-id`, or a `session_resuming` event whose `session` is the argv word
@@ -26,8 +31,8 @@ Each log record also holds `answer_file` (true when `CLAUDE_ACCOUNT_ANSWER` is s
 When `<canned>` names a file ending in `.answers.json`, it holds a JSON list of entries
 `{"stdout": <absolute path>, "exit": <int>, "account": <str|null>, "all_out": <optional
 {"resumes_at": str|null}>}`: invocation `n` (the lines already in `<log>`) uses entry
-`min(n, len - 1)` and ignores `<exit>`. When `CLAUDE_ACCOUNT_ANSWER` is set, an `all_out`
-entry writes `{"all_out":true,"resumes_at":...}` there and prints nothing, and an entry with an
+`min(n, len - 1)` and ignores `<exit>`; an entry whose `exit` is `"hang"` behaves as `<exit>`
+`"hang"`. When `CLAUDE_ACCOUNT_ANSWER` is set, an `all_out` entry writes `{"all_out":true,"resumes_at":...}` there and prints nothing, and an entry with an
 account writes `{"account":<account>}`. In the legacy mode the same variable gets
 `{"account":"stub"}`.
 """
@@ -85,22 +90,29 @@ def hold_with_child(hold: str) -> None:
 
 
 def main(argv: list[str]) -> int:
-    log, canned, resumed, code, diagnostic, hold, words = (
-        argv[0], argv[1], argv[2], int(argv[3]), argv[4], argv[5], argv[6:])
+    log, canned, resumed, exit_arg, diagnostic, hold, words = (
+        argv[0], argv[1], argv[2], argv[3], argv[4], argv[5], argv[6:])
+    hang = exit_arg == "hang"
+    code = 1 if hang else int(exit_arg)
     answer_path = os.environ.get("CLAUDE_ACCOUNT_ANSWER")
     entry = None
     if canned.endswith(".answers.json"):
         with open(canned, encoding="utf-8") as handle:
             entries = json.load(handle)
         entry = entries[min(invocations(log), len(entries) - 1)]
-        canned, code = entry["stdout"], entry["exit"]
+        hang = entry["exit"] == "hang"
+        canned, code = entry["stdout"], 1 if hang else entry["exit"]
     record = {"announced": announced(words), "answer_file": answer_path is not None,
               "account_env": os.environ.get("CLAUDE_ACCOUNT"), "argv": words,
               "config_dir": os.environ.get("CLAUDE_CONFIG_DIR"), "cwd": os.getcwd(),
               "host_settings": os.environ.get("CLAUDE_ACCOUNT_HOST_SETTINGS"),
               "stdin": sys.stdin.read()}
+    if hang:
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+        record["hang"] = {"child": child.pid, "pid": os.getpid()}
     with open(log, "a", encoding="utf-8") as handle:
         handle.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
+        handle.flush()
     answer, all_out = None, entry is not None and "all_out" in entry
     if answer_path is not None:
         if entry is None:
@@ -112,6 +124,9 @@ def main(argv: list[str]) -> int:
     if answer is not None:
         with open(answer_path, "w", encoding="utf-8") as handle:
             json.dump(answer, handle)
+    if hang:
+        time.sleep(120)
+        return code
     if hold != "-":
         hold_with_child(hold)
     if not all_out:

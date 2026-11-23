@@ -14,7 +14,7 @@ import unittest
 
 from .conformance_test_support import (
     HERMETIC_ENV, MANIFEST, REPO_ROOT, ReportAssertions, doctor, fixture, load_module,
-    make_root, node_tools_env, run,
+    make_root, run,
 )
 
 
@@ -217,8 +217,7 @@ class AcceptanceDemoTest(ReportAssertions, unittest.TestCase):
     """D22: the demo the issue names, against this repository's committed root."""
 
     def test_doctor_on_this_repository_reports_every_registered_check(self):
-        with fixture() as tmp:
-            report, by_id = doctor(self, REPO_ROOT, "--offline", env=node_tools_env(tmp))
+        report, by_id = doctor(self, REPO_ROOT, "--offline")
         self.assertEqual([c["id"] for c in report["checks"]],
                          sorted(REGISTERED_CHECK_IDS))
         self.assertEqual(report["subject"]["project_id"], "fagenorn/nix-config")

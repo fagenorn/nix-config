@@ -244,6 +244,22 @@ class ReviveServiceTest(ReviveCase):
             "mode": "auto",
             "reason": "production rules declared but not in the guard's policy"})
 
+    def test_a_wake_writes_the_projects_root_into_the_settings(self):
+        written = []
+
+        def nudger(sent):
+            written.append(path.read_text())
+            self.nudger(sent)
+
+        svc = self.begin(full_listing=lambda profile, cwd: frozenset({"other"}), nudger=nudger)
+        sid = self.on_track(svc)
+        path = self.env_only(svc, sid)
+        self.tick(svc, 0)
+        self.gone(svc)
+        self.tick(svc, 120)
+        self.assertEqual(len(self.revives()), 1)
+        self.assertEqual(json.loads(written[0])["env"][manager.ROOT_ENV], "/srv/p01")
+
     def test_a_wake_of_a_session_the_full_listing_shows_writes_the_settings_file_again(self):
         self.assert_wake_rewrites_settings(frozenset({"s-1"}))
 

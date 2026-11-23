@@ -306,15 +306,15 @@ REPAIRS = {
     "platform.standards.install": {
         "module": "conformance", "safety_class": "user_action",
         "operation": None},
-    # No engine command edits code, fetches history or installs the platform's
-    # tools, so these repairs are the reader's own call.
+    # No engine command edits code, fetches history or installs a tool, so all
+    # three repairs are the reader's own call.
     "violations.never_rise.reduce": {
         "module": "conformance", "safety_class": "user_action",
         "operation": None},
     "violations.history.fetch": {
         "module": "conformance", "safety_class": "user_action",
         "operation": None},
-    "platform.enforcers.install": {
+    "violations.enforcer.repair": {
         "module": "conformance", "safety_class": "user_action",
         "operation": None},
 }
@@ -431,7 +431,7 @@ REGISTRY: tuple[Check, ...] = (
           ("repository.contract.valid",),
           (("violation_count_rose", "violations.never_rise.reduce"),
            ("history_unavailable", "violations.history.fetch"),
-           ("enforcer_failed", "platform.enforcers.install")),
+           ("enforcer_failed", "violations.enforcer.repair")),
           "check_never_rise"),
     Check("repository.residue.nested_ledger", "repository", "residue", "optional",
           ("repository.contract.valid",), NESTED_LEDGER_FINDINGS,

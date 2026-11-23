@@ -1,5 +1,5 @@
-"""The Node adapter's contract (#1467): the pinned tools record, and the adapter
-that judges Workflow programs with `node --check` and ESLint.
+"""The Node adapter's contract (#1467): the adapter that judges Workflow programs
+with `node --check` and ESLint, run from the platform's pinned tools directory.
 
 The suite holds `standard:NODE11`, `standard:NODE12`, `standard:NODE13`,
 `standard:NODE14` and `standard:NODE15` by judging their enforcer,
@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -19,94 +20,56 @@ from pathlib import Path
 from unittest import mock
 
 from agent_tools.delivery import never_rise, node_lint, rule_ids
-from agent_tools.delivery.never_rise import Violation
-from agent_tools.project_contract import agent_platform
+from agent_tools.delivery.never_rise import EnforcerFailed, HistoryUnavailable, Violation
 
 from .conformance_test_support import (
     HERMETIC_ENV, INTEGRATION_REF, REAL_GIT, REPO_ROOT, ReportAssertions, commit_all, doctor,
-    fixture, git, make_root, node_tools_env, pinned_node_tools, platform_env, run,
+    fixture, git, make_root, run,
 )
 
-TIER = "integration"  # git worlds, nix-built node and eslint, the conformance engine
+TIER = "integration"  # git worlds, the pinned node and eslint, the conformance engine
 
-VALID = {"schema_version": 1, "node": "/abs/node", "eslint": "/abs/eslint"}
-
-
-def write_record(path: Path, text: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
+TOOLS = os.environ.get(node_lint.TOOLS_ENV)
 
 
-class NodeToolsRecordTest(unittest.TestCase):
-    """The record the platform package pins node and eslint in."""
+def pinned(name: str) -> str:
+    """The pinned tool `name` in the platform's tools directory; the case fails without one."""
+    found = shutil.which(name, path=TOOLS) if TOOLS else None
+    if found is None:
+        raise AssertionError("run through just agent-workflow-tests, which sets AGENT_PLATFORM_TOOLS")
+    return found
 
-    def test_the_record_under_the_platform_root_names_the_two_tools(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            base = Path(tmp)
-            (base / "home").mkdir()
-            write_record(base / "root" / "node-tools.json", json.dumps(VALID))
-            env = {"AGENT_PLATFORM_ROOT": str(base / "root"), "HOME": str(base / "home")}
-            with mock.patch.dict(os.environ, env):
-                self.assertEqual(agent_platform.node_tools(), ("/abs/node", "/abs/eslint"))
 
-    def test_with_no_root_the_record_is_read_from_home_share(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            home = Path(tmp) / "home"
-            expected = home / ".agents" / "share" / "node-tools.json"
-            write_record(expected, json.dumps(VALID))
-            with mock.patch.dict(os.environ, {"HOME": str(home)}):
-                os.environ.pop("AGENT_PLATFORM_ROOT", None)
-                self.assertEqual(agent_platform.node_tools(), ("/abs/node", "/abs/eslint"))
-                self.assertEqual(agent_platform.node_tools_path(), expected)
+def tools_dir(case: unittest.TestCase, **replacing: str) -> str:
+    """A tools directory linking every pinned tool, `replacing` a tool with a script body."""
+    directory = Path(tempfile.mkdtemp(prefix="node-lint-tools-"))
+    case.addCleanup(shutil.rmtree, directory, True)
+    for entry in Path(TOOLS or "/nonexistent").iterdir():
+        (directory / entry.name).symlink_to(entry)
+    for name, script in replacing.items():
+        (directory / name).unlink()
+        (directory / name).write_text("#!/bin/sh\n" + script, encoding="utf-8")
+        (directory / name).chmod(0o755)
+    return str(directory)
 
-    def test_a_non_empty_root_never_falls_back_to_home(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            base = Path(tmp)
-            (base / "root").mkdir()
-            write_record(base / "home" / ".agents" / "share" / "node-tools.json", json.dumps(VALID))
-            env = {"AGENT_PLATFORM_ROOT": str(base / "root"), "HOME": str(base / "home")}
-            with mock.patch.dict(os.environ, env):
-                with self.assertRaises(agent_platform.NodeToolsError):
-                    agent_platform.node_tools()
 
-    def test_a_missing_or_malformed_record_is_refused(self) -> None:
-        cases = {
-            "no file": None,
-            "not json": "not json",
-            "not an object": "[]",
-            "member missing": json.dumps({"schema_version": 1, "node": "/n"}),
-            "extra member": json.dumps({**VALID, "extra": 1}),
-            "schema version 2": json.dumps({**VALID, "schema_version": 2}),
-            "schema version bool": json.dumps({**VALID, "schema_version": True}),
-            "relative node": json.dumps({**VALID, "node": "node"}),
-            "empty eslint": json.dumps({**VALID, "eslint": ""}),
-        }
-        for name, text in cases.items():
-            with self.subTest(name), tempfile.TemporaryDirectory() as tmp:
-                root = Path(tmp) / "root"
-                root.mkdir()
-                if text is not None:
-                    write_record(root / "node-tools.json", text)
-                with mock.patch.dict(os.environ, {"AGENT_PLATFORM_ROOT": str(root)}):
-                    with self.assertRaises(agent_platform.NodeToolsError) as caught:
-                        agent_platform.node_tools()
-                self.assertIn("node-tools.json", str(caught.exception))
+def tools_env(directory: str | None) -> dict:
+    """The conformance run's environment with the tools directory set to `directory`, or unset."""
+    environment = {k: v for k, v in HERMETIC_ENV.items() if k != node_lint.TOOLS_ENV}
+    if directory:
+        environment[node_lint.TOOLS_ENV] = directory
+    return environment
+
+
+def using(directory: str | None):
+    """The environment with `node_lint.TOOLS_ENV` set to `directory`, or unset."""
+    environment = {k: v for k, v in os.environ.items() if k != node_lint.TOOLS_ENV}
+    if directory:
+        environment[node_lint.TOOLS_ENV] = directory
+    return mock.patch.dict(os.environ, environment, clear=True)
 
 
 META = "export const meta = { name: 'fixture' }\n"
-
-
-def pinned_tools() -> node_lint.NodeTools:
-    record = pinned_node_tools()
-    return node_lint.NodeTools(record["node"], record["eslint"])
-
-
-def shim(tmp: Path, name: str, script: str) -> str:
-    """An executable `<tmp>/<name>` running `script` with shell builtins only."""
-    path = tmp / name
-    path.write_text("#!/bin/sh\n" + script, encoding="utf-8")
-    path.chmod(0o755)
-    return str(path)
 
 
 def make_repo(tmp: Path, files: dict[str, str]) -> tuple[Path, str]:
@@ -122,9 +85,10 @@ def make_repo(tmp: Path, files: dict[str, str]) -> tuple[Path, str]:
     return root, git(root, "rev-parse", "HEAD").strip()
 
 
-def run_command(root: Path, home: str, *args: str) -> subprocess.CompletedProcess:
-    env = {"HOME": home, "LANG": "C", "PYTHONPATH": HERMETIC_ENV["PYTHONPATH"],
-           "PATH": os.pathsep.join(["/usr/bin", "/bin", str(Path(REAL_GIT).parent)])}
+def run_command(root: Path, tools: str | None, *args: str) -> subprocess.CompletedProcess:
+    env = {"HOME": str(root.parent), "LANG": "C", "PYTHONPATH": HERMETIC_ENV["PYTHONPATH"],
+           "PATH": os.pathsep.join(["/usr/bin", "/bin", str(Path(REAL_GIT).parent)]),
+           **({node_lint.TOOLS_ENV: tools} if tools else {})}
     return subprocess.run(
         [sys.executable, "-m", "agent_tools.delivery.node_lint", "--repo-root", str(root), *args],
         env=env, capture_output=True, text=True, timeout=120)
@@ -136,27 +100,24 @@ class NodeLintCommandTest(unittest.TestCase):
     def test_an_unused_variable_in_a_program_prints_one_node12_line(self) -> None:
         with fixture() as tmp:
             root, _ = make_repo(tmp, {"prog/one.js": META + "const unused = 1\n"})
-            home = platform_env(tmp, node_tools=pinned_node_tools())["HOME"]
-            proc = run_command(root, home)
+            proc = run_command(root, TOOLS)
         self.assertEqual((proc.returncode, proc.stdout), (1, "NODE12 prog/one.js:2\n"), proc.stderr)
 
     def test_a_clean_program_exits_zero(self) -> None:
         with fixture() as tmp:
             root, _ = make_repo(tmp, {"prog/one.js": META})
-            home = platform_env(tmp, node_tools=pinned_node_tools())["HOME"]
-            proc = run_command(root, home)
+            proc = run_command(root, TOOLS)
         self.assertEqual((proc.returncode, proc.stdout), (0, ""), proc.stderr)
 
-    def test_a_program_with_no_tool_record_is_a_usage_error(self) -> None:
+    def test_a_program_with_no_tools_directory_is_a_usage_error(self) -> None:
         with fixture() as tmp:
             root, _ = make_repo(tmp, {"prog/one.js": META})
-            proc = run_command(root, platform_env(tmp)["HOME"])
-        self.assertEqual(proc.returncode, 2)
-        self.assertTrue(proc.stderr.startswith("node-lint: node-tools:"), proc.stderr)
+            proc = run_command(root, None)
+        self.assertEqual((proc.returncode, proc.stdout, proc.stderr),
+                         (2, "", "node-lint: tools_unavailable\n"))
 
     def test_a_relative_root_is_a_usage_error(self) -> None:
-        with fixture() as tmp:
-            proc = run_command(Path("rel"), platform_env(tmp)["HOME"])
+        proc = run_command(Path("rel"), TOOLS)
         self.assertEqual(proc.returncode, 2)
 
 
@@ -193,7 +154,8 @@ class NodeLintCasesTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         files = {f"case/{name}.js": text for name, text in cls.CASES.items()}
-        cls.found = node_lint.lint_files(files, pinned_tools(), 120)
+        with using(TOOLS):
+            cls.found = node_lint.lint_files(files, 120)
 
     def violations(self, name: str) -> list[tuple[str, int]]:
         path = f"case/{name}.js"
@@ -261,128 +223,114 @@ class NodeEnforcerTest(unittest.TestCase):
         return snapshot
 
     def test_a_program_selected_at_another_revision_stays_covered(self) -> None:
-        with fixture() as tmp:
+        with fixture() as tmp, using(TOOLS):
             root, first = make_repo(tmp, {"src/p.js": META})
             (root / "src/p.js").write_text("export const = { name: 'fixture' }\n", encoding="utf-8")
             commit_all(root, "break the meta line")
             second = git(root, "rev-parse", "HEAD").strip()
-            tools = pinned_tools
 
             def node11(also: tuple[str, ...]) -> never_rise.Enforcer:
-                return [e for e in node_lint.enforcers(root, 60, tools, also)
-                        if e.rule == "NODE11"][0]
+                return [e for e in node_lint.enforcers(also) if e.rule == "NODE11"][0]
 
             snapshot = self.snapshot(root, second)
             self.assertEqual(node11((first, second)).find(snapshot), [Violation("NODE11", "src/p.js", 1)])
             self.assertEqual(node11(()).find(snapshot), [])
 
-    def test_a_revision_with_no_program_never_resolves_the_tools(self) -> None:
-        def tools() -> node_lint.NodeTools:
-            raise AssertionError("the tools were resolved")
-
-        with fixture() as tmp:
+    def test_a_revision_with_no_program_never_needs_the_tools(self) -> None:
+        with fixture() as tmp, using(None):
             root, head = make_repo(tmp, {"lib/x.js": "const unused = 1\n"})
-            for enforcer in node_lint.enforcers(root, 60, tools):
+            for enforcer in node_lint.enforcers():
                 self.assertEqual(never_rise.counted(enforcer, self.snapshot(root, head)), ([], []))
 
     def test_the_five_enforcers_share_one_run_per_revision(self) -> None:
-        with fixture() as tmp:
+        with fixture() as tmp, using(TOOLS):
             root, head = make_repo(tmp, {"p.js": self.UNUSED})
             snapshot = self.snapshot(root, head)
             with mock.patch.object(node_lint, "lint_files", wraps=node_lint.lint_files) as spy:
-                found = {e.rule: e.find(snapshot)
-                         for e in node_lint.enforcers(root, 60, pinned_tools)}
+                found = {e.rule: e.find(snapshot) for e in node_lint.enforcers()}
         self.assertEqual(spy.call_count, 1)
         self.assertEqual(sorted(found), list(node_lint.RULES))
         self.assertEqual(found["NODE12"], [Violation("NODE12", "p.js", 2)])
 
-    def test_a_tool_that_cannot_start_is_an_enforcer_failure(self) -> None:
-        def tools() -> node_lint.NodeTools:
-            return node_lint.NodeTools("/nonexistent/node", "/nonexistent/eslint")
+    def test_a_tools_directory_that_is_unusable_is_a_closed_failure(self) -> None:
+        without_node = tempfile.mkdtemp(prefix="node-lint-tools-")
+        self.addCleanup(shutil.rmtree, without_node, True)
+        for name, directory in (("unset", None), ("relative", "tools"), ("empty", without_node)):
+            with self.subTest(name), fixture() as tmp, using(directory):
+                root, head = make_repo(tmp, {"p.js": META})
+                with self.assertRaises(EnforcerFailed) as caught:
+                    node_lint.enforcers()[0].find(self.snapshot(root, head))
+                self.assertEqual((caught.exception.enforcer, caught.exception.reason),
+                                 ("node-lint", "tools_unavailable"))
 
-        with fixture() as tmp:
-            root, head = make_repo(tmp, {"p.js": META})
-            enforcer = node_lint.enforcers(root, 60, tools)[0]
-            with self.assertRaises(never_rise.EnforcerFailure) as caught:
-                enforcer.find(self.snapshot(root, head))
-        self.assertEqual((caught.exception.tool, caught.exception.reason), ("node", "not_started"))
+    def test_a_tool_that_cannot_run_or_runs_too_long_is_a_closed_failure(self) -> None:
+        cases = {
+            "node": ("exit 3\n", "node_failed"),
+            "eslint": ("exit 2\n", "eslint_failed"),
+        }
+        for tool, (script, reason) in cases.items():
+            with self.subTest(tool), using(tools_dir(self, **{tool: script})):
+                with self.assertRaises(EnforcerFailed) as caught:
+                    node_lint.lint_files({"p.js": META}, 60)
+                self.assertEqual(caught.exception.reason, reason)
+        with using(tools_dir(self, eslint="while :; do :; done\n")):
+            with self.assertRaises(EnforcerFailed) as caught:
+                node_lint.lint_files({"p.js": META}, 1)
+        self.assertEqual(caught.exception.reason, "eslint_failed")
 
-    def test_a_tools_callable_that_raises_is_an_enforcer_failure(self) -> None:
-        def tools() -> node_lint.NodeTools:
-            raise ValueError("x")
-
-        with fixture() as tmp:
-            root, head = make_repo(tmp, {"p.js": META})
-            enforcer = node_lint.enforcers(root, 60, tools)[0]
-            with self.assertRaises(never_rise.EnforcerFailure) as caught:
-                enforcer.find(self.snapshot(root, head))
-        self.assertEqual((caught.exception.tool, caught.exception.reason, caught.exception.detail),
-                         ("node-tools", "record_unavailable", "x"))
-
-    def test_a_failed_blob_read_is_history_unreadable(self) -> None:
-        with fixture() as tmp:
+    def test_a_failed_git_read_of_another_revision_is_history_unavailable(self) -> None:
+        with fixture() as tmp, using(TOOLS):
             root, head = make_repo(tmp, {"p.js": META})
             snapshot = self.snapshot(root, head)
-            enforcer = node_lint.enforcers(root, 60, pinned_tools)[0]
-            with mock.patch.object(never_rise, "read_blobs", return_value=None):
-                with self.assertRaises(never_rise.HistoryUnreadable):
-                    enforcer.find(snapshot)
+            with self.assertRaises(HistoryUnavailable):
+                node_lint.enforcers(("0" * 40,))[0].find(snapshot)
 
-    def test_the_tools_run_with_only_home_and_lang(self) -> None:
+    def test_the_tools_run_with_only_path_home_and_lang(self) -> None:
         polluted = {"NODE_OPTIONS": "--require /nonexistent", "ESLINT_USE_FLAT_CONFIG": "false"}
-        with mock.patch.dict(os.environ, polluted), \
+        with using(TOOLS), mock.patch.dict(os.environ, polluted), \
                 mock.patch.object(node_lint.subprocess, "run", wraps=subprocess.run) as spy:
-            found = node_lint.lint_files({"p.js": self.UNUSED}, pinned_tools(), 60)
+            found = node_lint.lint_files({"p.js": self.UNUSED}, 60)
         self.assertEqual([(v.rule, v.line) for v in found], [("NODE12", 2)])
         self.assertTrue(spy.call_args_list)
         for call in spy.call_args_list:
-            self.assertEqual(set(call.kwargs["env"]), {"HOME", "LANG"})
+            self.assertEqual(set(call.kwargs["env"]), {"PATH", "HOME", "LANG"})
+            self.assertEqual(call.kwargs["env"]["PATH"], TOOLS)
+            self.assertIn(call.args[0][0], ("node", "eslint"))
 
 
 class NodeToolOutputTest(unittest.TestCase):
     """Incomplete or malformed tool output fails closed."""
 
-    def fails(self, tools: node_lint.NodeTools, tool: str, reason: str) -> None:
-        with self.assertRaises(never_rise.EnforcerFailure) as caught:
-            node_lint.lint_files({"p.js": "export const meta = {}\n"}, tools, 60)
-        self.assertEqual((caught.exception.tool, caught.exception.reason), (tool, reason))
+    def fails(self, directory: str, reason: str) -> None:
+        with using(directory), self.assertRaises(EnforcerFailed) as caught:
+            node_lint.lint_files({"p.js": "export const meta = {}\n"}, 60)
+        self.assertEqual((caught.exception.enforcer, caught.exception.reason), ("node-lint", reason))
 
-    def with_eslint(self, script: str) -> node_lint.NodeTools:
-        tmp = Path(tempfile.mkdtemp(prefix="node-lint-shim-"))
-        self.addCleanup(__import__("shutil").rmtree, tmp, True)
-        return node_lint.NodeTools(pinned_tools().node, shim(tmp, "eslint", script))
+    def test_an_eslint_result_list_missing_a_file_is_a_closed_failure(self) -> None:
+        self.fails(tools_dir(self, eslint="printf '[]'\n"), "eslint_output_unreadable")
 
-    def test_an_eslint_result_list_missing_a_file_is_an_enforcer_failure(self) -> None:
-        self.fails(self.with_eslint("printf '[]'\n"), "eslint", "unreadable_output")
+    def test_an_eslint_result_without_a_file_path_is_a_closed_failure(self) -> None:
+        self.fails(tools_dir(self, eslint="printf '[{\"messages\": []}]'\nexit 1\n"),
+                   "eslint_output_unreadable")
 
-    def test_an_eslint_result_without_a_file_path_is_an_enforcer_failure(self) -> None:
-        self.fails(self.with_eslint("printf '[{\"messages\": []}]'\nexit 1\n"),
-                   "eslint", "unreadable_output")
-
-    def test_a_message_without_a_line_is_an_enforcer_failure(self) -> None:
+    def test_a_message_without_a_line_is_a_closed_failure(self) -> None:
         script = ("printf '[{\"filePath\": \"p0.cjs\", \"messages\": "
                   "[{\"ruleId\": \"no-undef\", \"message\": \"x\"}]}]'\nexit 1\n")
-        self.fails(self.with_eslint(script), "eslint", "unreadable_output")
+        self.fails(tools_dir(self, eslint=script), "eslint_output_unreadable")
 
-    def test_an_unexpected_eslint_exit_is_an_enforcer_failure(self) -> None:
-        self.fails(self.with_eslint("exit 2\n"), "eslint", "unexpected_exit")
-
-    def test_a_node_syntax_exit_without_a_diagnostic_is_an_enforcer_failure(self) -> None:
-        tmp = Path(tempfile.mkdtemp(prefix="node-lint-shim-"))
-        self.addCleanup(__import__("shutil").rmtree, tmp, True)
-        node = shim(tmp, "node", "printf 'garbage' >&2\nexit 1\n")
-        self.fails(node_lint.NodeTools(node, pinned_tools().eslint), "node", "unreadable_output")
+    def test_a_node_syntax_exit_without_a_diagnostic_is_a_closed_failure(self) -> None:
+        self.fails(tools_dir(self, node="printf 'garbage' >&2\nexit 1\n"), "node_output_unreadable")
 
 
 class NodeRuleMappingTest(unittest.TestCase):
     """The mapping is the pinned ESLint's recommended set, under the shard's rule ids."""
 
     def test_the_mapping_is_the_recommended_set_of_the_pinned_eslint(self) -> None:
-        tools = pinned_tools()
-        recommended = (Path(tools.eslint).parents[1] / "lib/node_modules/eslint/node_modules"
+        eslint = os.path.realpath(pinned("eslint"))
+        recommended = (Path(eslint).parents[1] / "lib/node_modules/eslint/node_modules"
                        / "@eslint/js/src/configs/eslint-recommended.js")
         out = subprocess.run(
-            [tools.node, "-e",
+            [pinned("node"), "-e",
              "console.log(JSON.stringify(Object.keys(require(process.argv[1]).rules)))",
              str(recommended)],
             capture_output=True, text=True, timeout=60, check=True, env={}).stdout
@@ -426,7 +374,7 @@ class NodeNeverRiseTest(ReportAssertions, unittest.TestCase):
 
     def rose(self, tmp: Path, base_text: str, branch_text: str) -> dict:
         root, _ = self.branch(tmp, base_text, branch_text)
-        code, report, by_id = self.ci(root, node_tools_env(tmp))
+        code, report, by_id = self.ci(root, tools_env(TOOLS))
         self.assertEqual(code, 1)
         self.assert_validates(report)
         return by_id[self.CHECK_ID]
@@ -434,7 +382,7 @@ class NodeNeverRiseTest(ReportAssertions, unittest.TestCase):
     def test_a_branch_that_adds_an_unused_variable_to_a_program_turns_ci_red_naming_node12_and_the_line(self) -> None:
         with fixture() as tmp:
             root, base = self.branch(tmp, META, META + "const unused = 1\n")
-            code, report, by_id = self.ci(root, node_tools_env(tmp))
+            code, report, by_id = self.ci(root, tools_env(TOOLS))
             self.assertEqual(code, 1)
             self.assertEqual(
                 self.summary(by_id[self.CHECK_ID]),
@@ -446,7 +394,7 @@ class NodeNeverRiseTest(ReportAssertions, unittest.TestCase):
     def test_a_branch_that_removes_a_finding_passes_ci(self) -> None:
         with fixture() as tmp:
             root, base = self.branch(tmp, META + "const unused = 1\n", META)
-            code, _, by_id = self.ci(root, node_tools_env(tmp))
+            code, _, by_id = self.ci(root, tools_env(TOOLS))
             self.assertEqual(code, 0)
             self.assertEqual(self.summary(by_id[self.CHECK_ID]),
                              ["passed", None, None, {"merge_base": base}])
@@ -457,7 +405,7 @@ class NodeNeverRiseTest(ReportAssertions, unittest.TestCase):
             root, _ = self.branch(tmp, text, text)
             (root / "README.txt").write_text("notes\n", encoding="utf-8")
             commit_all(root, "readme")
-            code, _, by_id = self.ci(root, node_tools_env(tmp))
+            code, _, by_id = self.ci(root, tools_env(TOOLS))
             self.assertEqual(code, 0)
             self.assertEqual(by_id[self.CHECK_ID]["status"], "passed")
 
@@ -475,7 +423,7 @@ class NodeNeverRiseTest(ReportAssertions, unittest.TestCase):
                 tmp, META + "const unused = 1\n",
                 META + "// eslint-disable-next-line no-unused-vars -- kept for the fixture\n"
                 "const unused = 1\n")
-            code, _, _ = self.ci(root, node_tools_env(tmp))
+            code, _, _ = self.ci(root, tools_env(TOOLS))
             self.assertEqual(code, 0)
 
     def test_a_branch_that_breaks_the_parse_turns_ci_red_naming_node11(self) -> None:
@@ -492,30 +440,26 @@ class NodeNeverRiseTest(ReportAssertions, unittest.TestCase):
                 [facts["rule"], facts["base_count"], facts["branch_count"], facts["violations"]],
                 ["NODE11", 0, 1, ["NODE11 src/p.js:1"]])
 
-    def test_a_program_with_no_tool_record_is_a_failed_check(self) -> None:
+    def test_a_program_with_no_tools_directory_is_a_failed_check(self) -> None:
         with fixture() as tmp:
             root, _ = self.branch(tmp, META, META)
-            code, report, by_id = self.ci(root, HERMETIC_ENV)
+            code, report, by_id = self.ci(root, tools_env(None))
             self.assertEqual(code, 1)
             self.assertEqual(
                 self.summary(by_id[self.CHECK_ID]),
-                ["failed", "enforcer_failed", "platform.enforcers.install",
-                 {"tool": "node-tools", "reason": "record_unavailable"}])
-            self.assertNotIn("node-tools.json", json.dumps(by_id[self.CHECK_ID]))
+                ["failed", "enforcer_failed", "violations.enforcer.repair",
+                 {"enforcer": "node-lint", "reason": "tools_unavailable"}])
             self.assert_validates(report)
 
     def test_an_eslint_that_returns_no_result_is_a_failed_check(self) -> None:
         with fixture() as tmp:
             root, _ = self.branch(tmp, META, META)
-            eslint = shim(tmp, "eslint", "printf '[]'\n")
-            env = platform_env(tmp, node_tools={
-                "schema_version": 1, "node": pinned_node_tools()["node"], "eslint": eslint})
-            code, _, by_id = self.ci(root, env)
+            code, _, by_id = self.ci(root, tools_env(tools_dir(self, eslint="printf '[]'\n")))
             self.assertEqual(code, 1)
             self.assertEqual(
                 self.summary(by_id[self.CHECK_ID]),
-                ["failed", "enforcer_failed", "platform.enforcers.install",
-                 {"tool": "eslint", "reason": "unreadable_output"}])
+                ["failed", "enforcer_failed", "violations.enforcer.repair",
+                 {"enforcer": "node-lint", "reason": "eslint_output_unreadable"}])
 
 
 RECORDER = """\
@@ -535,32 +479,32 @@ class ThisRepositoryNodeTest(unittest.TestCase):
     PROGRAMS = ("home/common/claude-code/skills/deliver-standard/deliver-standard.js",
                 "home/common/claude-code/skills/deliver-standard/deliver-batch.js")
 
-    def recording(self, tmp: Path, name: str, pinned: str) -> str:
-        path = tmp / name
-        path.write_text(f"#!{sys.executable} -I\nPINNED = {pinned!r}\n" + RECORDER,
-                        encoding="utf-8")
-        path.chmod(0o755)
-        return str(path)
+    def recording_tools(self, tmp: Path) -> str:
+        """A tools directory whose `node` and `eslint` record their arguments, then run the pinned ones."""
+        directory = Path(tools_dir(self))
+        for name in ("node", "eslint"):
+            path = directory / name
+            path.unlink()
+            path.write_text(f"#!{sys.executable} -I\nPINNED = {pinned(name)!r}\n" + RECORDER,
+                            encoding="utf-8")
+            path.chmod(0o755)
+        return str(directory)
 
-    def calls(self, tmp: Path, name: str) -> list[dict]:
-        log = tmp / f"{name}.jsonl"
+    def calls(self, directory: str, name: str) -> list[dict]:
+        log = Path(directory) / f"{name}.jsonl"
         return [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
 
     def test_doctor_on_this_repository_lints_both_programs_with_both_tools(self) -> None:
         with fixture() as tmp:
-            pinned = pinned_node_tools()
-            env = platform_env(tmp, node_tools={
-                "schema_version": 1,
-                "node": self.recording(tmp, "node", pinned["node"]),
-                "eslint": self.recording(tmp, "eslint", pinned["eslint"])})
+            directory = self.recording_tools(tmp)
             expected = {
                 hashlib.sha256(node_lint.wrap(git(REPO_ROOT, "show", f"HEAD:{path}")).text
                                .encode()).hexdigest()
                 for path in self.PROGRAMS}
-            _, by_id = doctor(self, REPO_ROOT, "--offline", env=env)
+            _, by_id = doctor(self, REPO_ROOT, "--offline", env=tools_env(directory))
             self.assertEqual(by_id["verification.violations.never_rise"]["status"], "passed")
             seen = lambda name, flag: {  # noqa: E731
-                d for call in self.calls(tmp, name) if flag(call["argv"]) for d in call["digests"]}
+                d for call in self.calls(directory, name) if flag(call["argv"]) for d in call["digests"]}
             self.assertLessEqual(expected, seen(
                 "node", lambda argv: argv[:1] == ["--check"]))
             self.assertLessEqual(expected, seen(

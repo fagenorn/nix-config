@@ -1,4 +1,4 @@
-# ADR-project-contract-020 — Node programs are judged by node --check and ESLint through one adapter
+# ADR-project-contract-023 — Node programs are judged by node --check and ESLint through one adapter
 
 - **Status:** accepted
 - **Decided in:** #1467 (per #1415, #1414, #1437)
@@ -19,11 +19,11 @@ The never-rise check (ADR-project-contract-017) holds every registered enforcer'
 
 **D5. ESLint's native suppression is kept and judged by `NODE15`.** ESLint applies its own disable comments. A second run with inline configuration refused lists every inline configuration comment; each is a `NODE15` violation at its line unless it is `eslint-enable`, or an `eslint-disable`, `eslint-disable-line` or `eslint-disable-next-line` that names at least one rule and has a reason after ` -- ` holding a letter or a digit. `eslint`, `eslint-env`, `global`, `globals` and `exported` comments always count, because configuration lives outside the program. The platform's own `suppress-standard:` marker keeps working (ADR-project-contract-019).
 
-**D6. Node and ESLint are pinned by the platform package and run by their store paths.** The platform package carries a record of the two tools' absolute store paths, read under the platform root, else under `$HOME/.agents/share`, as the manifest is, never from `PATH`. The adapter runs both by those paths, because the never-rise counts must come from the ESLint the platform pins, and the CI suite's shell holds no ESLint at all. That departs from rule P3 of `docs/standards/agent-helpers.md`, so P3 names the exception, as P8 does for the lifecycle guard. The tools run with the environment `HOME` (a temporary directory) and `LANG` only, so `NODE_OPTIONS` and `ESLINT_USE_FLAT_CONFIG` cannot reach them.
+**D6. Node and ESLint are pinned by the platform package and run by their command names.** The package's tools directory (ADR-project-contract-020 D1) holds the pinned Node and ESLint beside Ruff, and every launcher exports it as `AGENT_PLATFORM_TOOLS`. The adapter runs `node` and `eslint` by those names on a `PATH` that is that directory alone, which is how standard P3 of `docs/standards/agent-helpers.md` applies to a pinned tool, so P3 needs no exception. It never searches the inherited `PATH`, because the never-rise counts must come from the ESLint the platform pins and the CI suite's shell holds no ESLint at all. The tools run with the environment `PATH`, `HOME` (a temporary directory) and `LANG` only, so `NODE_OPTIONS` and `ESLINT_USE_FLAT_CONFIG` cannot reach them.
 
-**D7. Lazy and fail closed, with stable failure facts.** The record is read only when a revision holds a program, so a project with none needs no tools. A record that cannot be read, a tool that cannot start, times out, exits outside its expected codes or prints unusable output fails the check with `enforcer_failed` and the repair `platform.enforcers.install`, never a pass. Its facts are the tool and a reason from a closed set; the detail, which can name a home or store path, goes only to the standalone command's stderr. A failed blob read is no tool failure: the check keeps `history_unavailable` and its fetch repair.
+**D7. Lazy and fail closed, with stable failure facts.** The tools directory is read only when a revision holds a program, so a project with none needs no tools. A tools directory that is unset, relative or without an executable `node` and `eslint`, a tool that cannot start, times out, exits outside its expected codes or prints unusable output raises `EnforcerFailed` (ADR-project-contract-020 D8): the check fails with `enforcer_failed` and the repair `violations.enforcer.repair`, never a pass. Its facts are the enforcer and a reason from a closed set, which the standalone command prints on stderr. A failed git read is no tool failure: the check keeps `history_unavailable` and its fetch repair.
 
-**D8. The tests use the packaged tools.** The suite reads the tools from the platform package it tests, built from this repository, so a green local run shows the tools the platform ships. No CI file changes; the `Conformance` job gets the tools through the platform package it already runs.
+**D8. The tests use the packaged tools.** The suite recipe exports the tools directory of the platform package it tests, built from this repository, so a green local run shows the tools the platform ships. No CI file changes; the `Conformance` job gets the tools through the platform package it already runs.
 
 **D9. `node-lint` is a registered command, not the gate**, as `size-lint` is (ADR-project-contract-017 D9): the gate is the never-rise check, because the existing findings make a plain run exit 1.
 
@@ -36,4 +36,5 @@ The never-rise check (ADR-project-contract-017) holds every registered enforcer'
 - An ESLint upgrade that adds a recommended rule fails `test_the_mapping_is_the_recommended_set_of_the_pinned_eslint` until the rule is mapped.
 - Rejected: an ESLint configuration file in the repository, because the programs and their tree stay unedited.
 - Rejected: linting the programs as written, because they do not parse.
-- Rejected: running the tools by name on `PATH`, because the CI suite's shell has no ESLint and a host's would not be the pinned one.
+- Rejected: running the tools by name on the inherited `PATH`, because the CI suite's shell has no ESLint and a host's would not be the pinned one.
+- Rejected: running the tools by absolute store paths from a record the package writes, because P3 runs an external executable by its command name and the tools directory already carries the pin.

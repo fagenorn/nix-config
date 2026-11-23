@@ -12,7 +12,9 @@ tool the fixture did not place. HERMETIC_ENV points PATH at a stub bin holding
 one exit-0 script per tool the contract names, except `git`, which is a link to
 the real one (the never-rise check reads real history); a case that needs a
 different tool outcome builds its own bin with make_stub_bin and overrides
-PATH.
+PATH. The platform's pinned tools directory, `AGENT_PLATFORM_TOOLS`, passes
+through as `git` does when the suite's environment has it, so the never-rise
+check can run its pinned Ruff; no other inherited variable passes.
 
 HERMETIC_ENV's HOME also holds the platform installation the resolver ladder
 binds first — the committed manifest, host declaration and standards
@@ -25,7 +27,6 @@ PYTHONPATH is the recipe's, made absolute.
 from __future__ import annotations
 
 import contextlib
-import functools
 import json
 import os
 import shutil
@@ -87,6 +88,8 @@ HERMETIC_ENV = {
     # package under test (parent D8). Outside a recipe this raises at import.
     "PYTHONPATH": os.pathsep.join(os.path.abspath(entry) for entry
                                   in os.environ["PYTHONPATH"].split(os.pathsep)),
+    **({"AGENT_PLATFORM_TOOLS": os.environ["AGENT_PLATFORM_TOOLS"]}
+       if "AGENT_PLATFORM_TOOLS" in os.environ else {}),
 }
 
 
@@ -239,51 +242,19 @@ class Rebinding:
         setattr(owner, name, value)
 
 
-def install_node_tools(home: Path, record: object) -> None:
-    """Write `record` as JSON to the pinned Node tools record under `home`."""
-    target = home / ".agents" / "share" / "node-tools.json"
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(json.dumps(record), encoding="utf-8")
-
-
-@functools.cache
-def pinned_node_tools() -> dict:
-    """The record the platform package itself carries on this system.
-
-    The package is built from this repository, so the fixture tools are the
-    packaged ones (S05). It raises, never skips, when nix fails.
-    """
-    built = subprocess.run(
-        ["nix", "--extra-experimental-features", "nix-command flakes", "build",
-         "--no-link", "--print-out-paths", f"{REPO_ROOT}#agent-platform"],
-        capture_output=True, text=True, timeout=1200, check=True)
-    out = built.stdout.split()[0]
-    return json.loads(
-        (Path(out) / "share" / "agent-platform" / "node-tools.json").read_text(encoding="utf-8"))
-
-
 def platform_env(tmp: Path, manifest: object = COMMITTED, *,
                  declaration: object = COMMITTED,
-                 standards: object = COMMITTED,
-                 node_tools: object = None) -> dict:
+                 standards: object = COMMITTED) -> dict:
     """HERMETIC_ENV with `HOME` at a platform installation built under `tmp`.
 
     `manifest`, `declaration` and `standards` are `install_home`'s override
     hooks, unchanged: `COMMITTED` copies the repository's manifest (or host
     declaration), `None` installs none, any other value is written in its
-    place. `node_tools`, when not None, is the Node tools record installed
-    beside them.
+    place.
     """
     home = install_home(tmp / "home", manifest,
                         declaration=declaration, standards=standards)
-    if node_tools is not None:
-        install_node_tools(home, node_tools)
     return {**HERMETIC_ENV, "HOME": str(home)}
-
-
-def node_tools_env(tmp: Path) -> dict:
-    """`platform_env` with the pinned Node tools record installed."""
-    return platform_env(tmp, node_tools=pinned_node_tools())
 
 
 class PlatformHome:

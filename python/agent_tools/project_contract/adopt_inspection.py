@@ -35,6 +35,9 @@ import subprocess
 import tarfile
 import types
 
+from agent_tools.delivery import hint_phases
+from agent_tools.project_contract import derived_values
+
 # --------------------------------------------------------------------------
 # Closed sets
 #
@@ -65,6 +68,7 @@ ACTIONS = (
     "archive-history",
     "delete-exact-duplicate",
     "needs-decision",
+    "convert-to-source",
 )
 OUTCOMES = ("bootstrap", "reconcile", "no_change", "migration_required",
             "repair_required")
@@ -206,6 +210,18 @@ LEGACY_BINDING_CONFIGS = (".claude/skills.config.json",)
 NATIVE_AGENT_PATHS = (".claude", ".codex", "AGENTS.md", "CLAUDE.md",
                       ".mcp.json")
 
+# The bootstrap source and the two mandatory entry projections (ADR-021): a
+# hand-written root entry file converts into the source, and these rows then
+# render the files back out of it.
+BOOTSTRAP_SOURCE = ".agents/instructions/bootstrap.md"
+ENTRY_FILES = ("AGENTS.md", "CLAUDE.md")
+ENTRY_PROJECTIONS = (
+    {"id": "codex.entry", "agent": "codex", "kind": "generated_file",
+     "target": "AGENTS.md", "source": BOOTSTRAP_SOURCE},
+    {"id": "claude.entry", "agent": "claude", "kind": "managed_import",
+     "target": "CLAUDE.md", "source": BOOTSTRAP_SOURCE},
+)
+
 # The closed classification table, first match wins. Each row is
 # `(group, match, lifecycle_class, action, target)`: `match` is `exact` for one
 # path and `prefix` for a directory tree, and `target` is the destination group
@@ -236,7 +252,8 @@ CLASSIFICATION_RULES = (
     (".claude/settings.json", "exact", "legacy-native-store",
      "retain-product", None),
     (".claude/skills", "prefix", "legacy-native-store", "retain-product", None),
-    (".claude/hints", "prefix", "legacy-native-store", "retain-product", None),
+    (".claude/hints", "prefix", "canonical-tracked", "move-canonical",
+     hint_phases.HINT_DIR),
     (".claude/rules", "prefix", "legacy-native-store", "retain-product", None),
     (".codex", "prefix", "legacy-native-store", "retain-product", None),
     (".mcp.json", "exact", "legacy-native-store", "retain-product", None),
@@ -321,7 +338,8 @@ def action_relocates(action: str) -> bool:
     if action in ("move-canonical", "archive-history"):
         return True
     if action in ("generate-projection", "retain-product",
-                  "delete-exact-duplicate", "needs-decision"):
+                  "delete-exact-duplicate", "needs-decision",
+                  "convert-to-source"):
         return False
     raise ValueError(f"unknown adoption action: {action!r}")
 
@@ -760,19 +778,23 @@ def has_remote(root: Path) -> bool:
 
 
 def seed_origin(root: Path, destination: Path) -> None:
-    """Give the scratch export at `destination` the `origin` url of the checkout at `root`.
+    """Give the scratch export at `destination` the authored `origin` url of the checkout at `root`.
 
     A resolver run on an export of a pinned commit finds no git config, and a
     schema-3 contract's project id and tracker slug are the `owner/repo` of that
     remote (ADR-project-contract-014). The export gets a minimal `.git/config`
-    holding the checkout's `origin` fetch url, so it derives the identity the
-    checkout has. An export that already carries a `.git`, a missing remote, a
-    url that cannot be written as one plain config value and a write that fails
-    leave the export as it is: the derivation then refuses, never guesses.
+    holding the first authored `url` of the checkout's `origin`, never the one
+    `url.*.insteadOf` rewrites, which is what the resolver reads. An export that
+    already carries a `.git`, a missing remote, an unreadable config, a url that
+    cannot be written as one plain config value and a write that fails leave the
+    export as it is: the derivation then refuses, never guesses.
     """
-    code, out = run_git(root, "remote", "get-url", REMOTE)
-    url = out.decode("utf-8", "replace").strip()
-    if code != 0 or not url or any(char in url for char in "\"\\#;\r\n\t"):
+    try:
+        url = derived_values.origin_url(
+            derived_values.read_text(derived_values.git_config_path(root)))
+    except (derived_values.Underivable, OSError, UnicodeDecodeError):
+        return
+    if not url or any(char in url for char in "\"\\#;\r\n\t"):
         return
     git_dir = destination / ".git"
     try:
@@ -1233,7 +1255,8 @@ def overlap_targets(found: Candidates) -> list[str]:
     targets = {".agents"}
     for group, info in found.groups.items():
         if (action_relocates(info["action"])
-                or info["action"] == "generate-projection"):
+                or info["action"] in ("generate-projection",
+                                      "convert-to-source")):
             targets.add(group)
         if info["target"]:
             targets.add(info["target"])

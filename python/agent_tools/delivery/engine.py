@@ -34,16 +34,31 @@ run's `sessions/`; a step with no valid structured answer is asked once more on 
 then ends `no-reply`; every step runs within the platform's bounds, and a fired bound is the
 outcome `out-of-bounds`; default: the package's `procedures` directory) for the issue, in the project the
 current directory belongs to, to `done` or a stop, and prints one line of compact sorted-key
-JSON when it ends (`engine_shell` is the contract):
+JSON when it ends (`engine_shell` is the contract). Once its run exists it drops the history
+lines older than 180 days and deletes the run directories of issues closed more than 14 days
+ago, never changing its own exit; a run that ends in `done` or a stop appends one line to
+`~/.agents/state/engine/history.jsonl`:
 
 - exit 0: `{"detail", "end": "done", "need": null, "run"}`;
 - exit 3: `{"detail", "end": <stop name>, "need": <stop need>, "run"}`; the end may be the
-  engine's own stop `quota-wait` (need `retry`), when every account is out of usage;
+  engine's own stop `quota-wait` (need `retry`), when every account is out of usage, or
+  `stopped-by-request` (need `retry`), when `engine stop` ended the step in progress;
 - exit 4: `{"detail", "end": null, "need": null, "process": {"pid", "started"}, "run"}`,
   another deliver of the issue holds its run's lock; nothing is written;
 - exit 1, stdout empty and one stderr line: a fault during the run;
 - exit 2, stdout empty and one stderr line: a usage error, a host whose settings load no
-  lifecycle guard hook, or a refusal before any run exists, which creates no run directory.
+  lifecycle guard hook, a host declaration that does not admit the engine route (printed with its
+  reason code first), or a refusal before any run exists, which creates no run directory.
+
+`engine stop <issue> [--project <slug>]` asks the run of the issue that is running on this host
+to stop: it writes the run's `stop-request` file naming the lock holder, signals no process,
+appends no event, waits for nothing, and prints one line of compact sorted-key JSON. The running
+`engine deliver` ends its current step's process group and exits 3 at `stopped-by-request`:
+
+- exit 0: `{"detail", "issue", "process": {"pid", "started"}, "requested": true, "run"}`;
+- exit 1: `{"detail", "issue", "process": null, "requested": false, "run": <newest run or null>}`,
+  no run of the issue is running; nothing is written;
+- exit 2, stdout empty and one stderr line: a usage error, or the ledger errors `status` gives.
 """
 
 from __future__ import annotations
@@ -99,6 +114,10 @@ def build_parser() -> argparse.ArgumentParser:
         "status", help="print the state a run's recorded events fold to")
     status_parser.add_argument("issue", type=_issue_number)
     status_parser.add_argument("--project")
+    stop_parser = commands.add_parser(
+        "stop", help="ask the run of an issue that is running on this host to stop")
+    stop_parser.add_argument("issue", type=_issue_number)
+    stop_parser.add_argument("--project")
     deliver_parser = commands.add_parser(
         "deliver", help="run a procedure of command, agent and decide steps to done or a stop")
     deliver_parser.add_argument("issue", type=_issue_number)
@@ -113,18 +132,46 @@ def _usage(message: str) -> int:
 
 def _status(issue: int, project: str | None) -> int:
     try:
-        run_dir = engine_ledger.find_run(engine_ledger.runs_root(), issue, project)
-        if run_dir is None:
-            sys.stdout.write(compact({"issue": issue, "run": None}))
-            return 1
-        state = engine_ledger.fold(
-            engine_ledger.read_run(run_dir),
-            engine_ledger.replay(run_dir / "events.jsonl"),
-            engine_ledger.process_alive)
+        while True:
+            run_dir = engine_ledger.find_run(engine_ledger.runs_root(), issue, project)
+            if run_dir is None:
+                sys.stdout.write(compact({"issue": issue, "run": None}))
+                return 1
+            try:
+                state = engine_ledger.fold(
+                    engine_ledger.read_run(run_dir),
+                    engine_ledger.replay(run_dir / "events.jsonl"),
+                    engine_ledger.process_alive)
+            except (engine_ledger.LedgerError, OSError):
+                if run_dir.exists():
+                    raise
+                continue  # a housekeeping sweep renamed the run away: look again
+            break
     except (engine_ledger.LedgerError, OSError, KeyError) as error:
         return _usage(str(error))
     sys.stdout.write(compact(state.as_json()))
     return 0
+
+
+def _stop_run(issue: int, project: str | None) -> int:
+    try:
+        runs = engine_ledger.find_runs(engine_ledger.runs_root(), issue, project)
+        for run_dir in runs:
+            holder = engine_shell.request_stop(run_dir)
+            if holder is not None:
+                sys.stdout.write(compact({
+                    "detail": f"Asked the {engine_shell.ENTRY} procedure of issue {issue} "
+                              "to stop at the end of its current step's process.",
+                    "issue": issue, "process": {"pid": holder["pid"], "started": holder["started"]},
+                    "requested": True, "run": run_dir.name}))
+                return 0
+    except (engine_ledger.LedgerError, OSError, KeyError, ValueError) as error:
+        return _usage(str(error))
+    sys.stdout.write(compact({
+        "detail": f"No run of issue {issue} is running on this host, so nothing was asked.",
+        "issue": issue, "process": None, "requested": False,
+        "run": runs[-1].name if runs else None}))
+    return 1
 
 
 def _deliver(issue: int, procedures: Path) -> int:
@@ -146,6 +193,8 @@ def main(argv: list[str] | None = None) -> int:
         return _usage(str(error))
     if args.command == "status":
         return _status(args.issue, args.project)
+    if args.command == "stop":
+        return _stop_run(args.issue, args.project)
     if args.command == "deliver":
         return _deliver(args.issue, args.procedures)
     if not args.procedures.is_dir():
