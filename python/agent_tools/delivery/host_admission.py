@@ -9,9 +9,11 @@ The declaration is authored host policy installed at exactly
 `$HOME/.agents/share/host-declaration.json` (D2). It declares, per route,
 whether the route is supported and, when it is, the agent slots one root
 session may hold at once. It also states, optionally, the host's verify slot
-count (`verify_slots`), which `agent_tools.delivery.verify_slot` reads. Nothing
-else is declared: admission reasons over declared `agent_slots` only, never CPU,
-memory or load.
+count (`verify_slots`), which `agent_tools.delivery.verify_slot` reads, and
+`verify_budget_seconds`, the hold in seconds a repository's median verify run
+should stay within, which `verify-slot report` reads. Nothing else is
+declared: admission reasons over declared `agent_slots` only, never CPU, memory
+or load.
 The `engine` route has no role sets: it counts one slot per live engine
 session, so a supported engine route is valid with one slot or more.
 """
@@ -61,7 +63,7 @@ UNSUPPORTED_ALTERNATIVE = "/deliver-standard <issue>"
 DEFAULT_VERIFY_SLOTS = 1
 
 _DECLARATION_MEMBERS = frozenset({"schema_version", "routes"})
-_OPTIONAL_DECLARATION_MEMBERS = frozenset({"verify_slots"})
+_OPTIONAL_DECLARATION_MEMBERS = frozenset({"verify_slots", "verify_budget_seconds"})
 _SUPPORTED_MEMBERS = frozenset({"support", "agent_slots"})
 _UNSUPPORTED_MEMBERS = frozenset({"support"})
 
@@ -108,7 +110,8 @@ def validate_declaration(value: object) -> dict:
     """Return `value` when it is a valid declaration; raise `DeclarationError`.
 
     Exact members at every level (D2): the top is `{schema_version, routes}`
-    plus the optional `verify_slots`, a plain int >= 1;
+    plus the optional `verify_slots` and `verify_budget_seconds`, each a plain
+    int >= 1;
     `schema_version` is a plain int equal to 1; `routes` is a non-empty object
     whose keys match the route grammar and are not `direct`; a supported route
     is exactly `{"support": "supported", "agent_slots": <int >= floor>}` and an
@@ -123,6 +126,10 @@ def validate_declaration(value: object) -> dict:
         count = value["verify_slots"]
         if type(count) is not int or count < 1:
             raise _invalid("verify_slots")
+    if "verify_budget_seconds" in value:
+        budget = value["verify_budget_seconds"]
+        if type(budget) is not int or budget < 1:
+            raise _invalid("verify_budget_seconds")
     version = value["schema_version"]
     if type(version) is not int or version != DECLARATION_SCHEMA_VERSION:
         raise _invalid("schema_version")
@@ -194,6 +201,11 @@ def verify_slots(declaration: dict) -> int:
     `declaration` is one `validate_declaration` already accepted.
     """
     return declaration.get("verify_slots", DEFAULT_VERIFY_SLOTS)
+
+
+def verify_budget_seconds(declaration: dict) -> int | None:
+    """The host's verify hold budget in seconds, or `None` when undeclared."""
+    return declaration.get("verify_budget_seconds")
 
 
 def route_slots(declaration: dict, route: str) -> int:

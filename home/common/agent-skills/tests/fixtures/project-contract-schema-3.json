@@ -29,7 +29,10 @@
         "lint": {
           "pre_commit": true
         }
-      }
+      },
+      "verification_before_pull_request": [
+        "lint"
+      ]
     }
   },
   "capabilities": {
