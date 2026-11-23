@@ -726,17 +726,6 @@ push after a switch already uses the new path. Test fixtures that push to a
 local remote run git with `GIT_CONFIG_GLOBAL=/dev/null`, because on a switched
 host the managed hook judges every push an agent session's test makes.
 
-The raise label
----------------
-
-The hook also refuses an agent adding the `instruction-budget-raise` label
-(#294): in a command that mentions that label, case-insensitively, a `gh`
-invocation in any position whose `--add-label` value contains it is blocked, in
-every repository and before any other verb is judged, and an unparseable
-command, `eval`/`sh -c` source or a quoted `$(…)`/backtick substitution that
-mentions the label blocks too, while other labels, `--remove-label` and quoted
-mentions pass.
-
 Production rules
 ----------------
 
@@ -1181,19 +1170,12 @@ GUARDED_VERBS = (
     # refuses it because the grammar spells `create`.
     (("gh", "release", "new"), "release"),
 )
-# The raise label is the user's Instruction Budget raise decision. The refusal
-# is a mistake-catcher for agents, not enforcement (#294).
-RAISE_LABEL = "instruction-budget-raise"
-RAISE_LABEL_REFUSAL = (
-    "only the user applies this label (Instruction Budget raise control)"
-)
 OPERATION_LABELS = {
     "merge": "merge",
     "pr-create": "PR creation",
     "branch": "branch deletion",
     "push": "push",
     "release": "release creation",
-    "label": "instruction-budget-raise label edit",
 }
 # Words that keep the command position open: shell keywords that introduce a
 # command, and wrappers that hand the rest of the words to another command.
@@ -1854,44 +1836,6 @@ def verb_occurs_in_order(words, verb_words):
             position += 1
             if position == len(verb_words):
                 return True
-    return False
-
-
-def mentions_raise_label(texts):
-    """True when any of `texts` contains the raise label, ignoring case."""
-    return any(RAISE_LABEL in text.lower() for text in texts)
-
-
-def adds_raise_label(tokens):
-    """True when a `gh` invocation in `tokens` adds the raise label.
-
-    Looks at every `gh` word, in any position: its words run to the end of
-    `tokens` (the whole command's tokenised segments), skipping operator
-    tokens, so a substitution, group or pipeline before the label
-    (`gh pr edit $(… | …) --add-label …`) cannot hide it. A label value is
-    the word after `--add-label` or the rest of a `--add-label=` word. No
-    subcommand parsing and no comma splitting: a value that contains the label
-    anywhere counts.
-    """
-    for index, (value, is_operator) in enumerate(tokens):
-        if is_operator or os.path.basename(value) != "gh":
-            continue
-        words = [
-            word for word, word_is_operator in tokens[index + 1:]
-            if not word_is_operator
-        ]
-        labels = [
-            words[position + 1]
-            for position, word in enumerate(words[:-1])
-            if word == "--add-label"
-        ]
-        labels.extend(
-            word[len("--add-label="):]
-            for word in words
-            if word.startswith("--add-label=")
-        )
-        if any(RAISE_LABEL in label.lower() for label in labels):
-            return True
     return False
 
 
@@ -2828,7 +2772,7 @@ def git_option_operands(tokens, index):
 
 
 def unvalidatable(
-    segment, reason, mentions_label=False, assigned=frozenset(), fed=False,
+    segment, reason, assigned=frozenset(), fed=False,
 ):
     """Every guarded verb found in `segment`'s raw text, all refused for `reason`.
 
@@ -2837,8 +2781,7 @@ def unvalidatable(
     one space are a substring of the text or of the text with its quotes and
     backslashes deleted (issue 400 D17, the base `336d9e05` check): a word such
     as `${CMD:-git` or `-df` has no word equal to the verb's, yet the shell runs
-    the verb. When `mentions_label` is set, the raise-label edit is refused too.
-    `fed` is set when the segment may read a pipe or redirection (see
+    the verb. `fed` is set when the segment may read a pipe or redirection (see
     `guarded_operations`).
     """
     readings = [raw_words(segment), raw_words(segment, glued=True)]
@@ -2851,8 +2794,6 @@ def unvalidatable(
     ]
     if transmit_in_raw_text(segment, assigned, fed=fed):
         found.append(("transmit", segment, reason, None))
-    if mentions_label:
-        found.append(("label", segment, reason, None))
     return found
 
 
@@ -2877,20 +2818,11 @@ def guarded_operations(command):
     continues past a substitution or grouping, read on through the rest of the
     command.
 
-    The `label` operation is mention-gated: it is considered only when the
-    command's tokens mention the raise label, always carries a problem, and is
-    refused for any `gh` invocation, in any position, whose `--add-label` value
-    contains it. That check runs over every tokenised segment at once, because
-    a separator inside a substitution splits a `gh` word from its label. A
-    word that mentions the label inside a `$(…)` or backtick substitution is
-    refused too, because a quoted substitution still runs.
     """
     parsed = split_segments_with_runs(command)
     if parsed is None:
         return unvalidatable(
-            command, "the command could not be parsed",
-            mentions_raise_label([command]),
-        )
+            command, "the command could not be parsed")
     segments, runs = parsed
     found = []
     stream = []
@@ -2913,22 +2845,19 @@ def guarded_operations(command):
         tokens = tokenize_segment(segment)
         if tokens is None:
             found.extend(unvalidatable(
-                segment, "the segment could not be tokenised",
-                mentions_raise_label([segment]), assigned | hashed,
+                segment, "the segment could not be tokenised", assigned | hashed,
                 redirected or any(pipe_in(run) for run in runs[:position]),
             ))
             continue
         # A segment may read a pipe when a `|` comes before it anywhere, or
         # the command holds a redirection (`<f`, `<<<x`, `<<EOF`).
         fed = redirected or any(pipe_in(run) for run in runs[:position])
-        # Every tokenised segment joins the label stream, evaluator segments
-        # included: `gh pr edit $(sh -c '…'; true) --add-label …` puts the
-        # `gh` word in an evaluator segment and its label in the next one.
+        # Every tokenised segment joins the stream, evaluator segments
+        # included, for the checks over the whole command below.
         stream.extend(tokens)
         stream.append((";", True))
         flags, split_string = command_position_flags(tokens)
         values = [value for value, _ in tokens]
-        mentions = mentions_raise_label(values)
         # An env -S or evaluator segment is judged on its whole text, and its
         # words are still recognised below with that reason as their problem:
         # a git or gh run in it may continue into a later segment
@@ -2944,7 +2873,7 @@ def guarded_operations(command):
             raw_reason = EVALUATOR_REASON
         if raw_reason is not None:
             found.extend(unvalidatable(
-                segment, raw_reason, mentions, assigned | hashed, fed))
+                segment, raw_reason, assigned | hashed, fed))
         if raw_reason == EVALUATOR_REASON and transmit_in_raw_text(
                 command, assigned | hashed):
             # An evaluator with no command text of its own reads its source
@@ -3042,24 +2971,6 @@ def guarded_operations(command):
             if problem is None and raw_reason is not None:
                 problem, directory = raw_reason, None
             found.append((operation, segment, problem, directory))
-    # Judged over every tokenised segment at once: a separator inside a
-    # substitution (`gh pr edit $(gh pr view | jq …) --add-label …`) splits
-    # the `gh` word from its label, so a per-segment check would miss it.
-    if mentions_raise_label([value for value, _ in stream]) and adds_raise_label(stream):
-        found.append(("label", command, RAISE_LABEL_REFUSAL, None))
-    # A substitution inside a double-quoted word (`x="$(gh pr edit … )"`) runs,
-    # but the tokeniser keeps it as one word, so the guard cannot see its `gh`.
-    # A word that mentions the label and carries a substitution fails closed.
-    if any(
-        not is_operator and mentions_raise_label([value])
-        and ("$(" in value or "`" in value)
-        for value, is_operator in stream
-    ):
-        found.append((
-            "label", command,
-            "a command substitution inside a quoted word cannot be validated",
-            None,
-        ))
     # The same holds for a git word the quoted substitution runs (issue 655 D2):
     # `echo "$(git p origin t)"` reaches the remote with `alias.p=push`.
     if any(
@@ -6948,15 +6859,11 @@ def main():
         return block(refusal)
 
     operations = guarded_operations(command)
-    for operation, _segment, problem, _directory in operations:
-        if operation == "label":
-            return block(f"unsafe {OPERATION_LABELS[operation]}: {problem}")
-
     # Issue 418: a command holding a lifecycle verb is admitted only in the
     # allowlist grammar, so the only directory change left is its one leading cd.
     lifecycle = [
         operation for operation, *_ in operations
-        if operation not in ("label", "transmit")
+        if operation != "transmit"
     ]
     shell_dir = shell_problem = None
     if lifecycle:
