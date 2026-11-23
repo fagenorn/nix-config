@@ -99,7 +99,7 @@ CONTRACT = ".agents/project.json"
 MOVED = {
     ".out-of-scope/z.md": ".agents/knowledge/rejections/z.md",
 }
-# The legacy record trees adoption leaves where they are (#1456).
+# The legacy record trees adoption leaves where they are.
 STAYED = (".claude/specs/x.md", ".claude/plans/y.md",
           ".claude/plans/y.tasks/t1.md")
 

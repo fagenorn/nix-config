@@ -2020,7 +2020,7 @@ class TypedOperationTest(AdoptTestCase):
         self.assertEqual([p[0] for p in pairs], sorted(p[0] for p in pairs))
         self.assertIn((".out-of-scope/z.md",
                        ".agents/knowledge/rejections/z.md"), pairs)
-        # The legacy record trees stay where they are (#1456).
+        # The legacy record trees stay where they are.
         self.assertEqual(
             [pair for pair in pairs if pair[0].startswith(".claude/")], [])
         self.assertEqual(
@@ -2125,7 +2125,7 @@ class TypedOperationTest(AdoptTestCase):
 
 class RecordTreeClassificationTest(AdoptTestCase):
     """#340 AC1: the record trees are classified centrally; adoption leaves
-    the legacy ones in place (#1456)."""
+    the legacy ones in place."""
 
     def test_the_five_record_trees_plan_to_ready_and_stay_in_place(self):
         doc = self.ready_plan(record_trees_repo(self.home))

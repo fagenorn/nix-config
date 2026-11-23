@@ -1,6 +1,6 @@
 # ADR-console-030 — The owner approves a ready adoption on the page and the console opens its pull request
 
-- **Status:** accepted; amended by ADR-console-028 D10, ADR-console-034, ADR-console-035, ADR-console-037, ADR-console-088; D2 amended in place by #1456
+- **Status:** accepted; amended by ADR-console-028 D10, ADR-console-034, ADR-console-035, ADR-console-037, ADR-console-088
 - **Decided in:** #1054, #1073
 
 ## Context
@@ -22,7 +22,7 @@ Success is an empty `204` once the run is dispatched. Each refusal is also one s
 **D2. The run.** The run is dispatched on a tracked thread of its own and never on the request path.
 
 - Apply runs as the bounded child `adopt-project apply --plan-id <id>`, 1800 seconds (its gates run the contract's verification commands in full), under ADR-console-028 D3's other bounds (no shell, its own process group, `stdin` from the null device, cancelled when the console closes). Apply works in its own worktree outside the target repository and leaves the target's checkout, HEAD and current branch as they were.
-- Deletions are acknowledged (`--acknowledge-deletions`) only when the shown row's lines hold a line starting `deletes `: the owner approves exactly what the page showed, and a stored plan that gained a deletion since is refused by apply. The only deletions a plan makes are the nested entry files it joins to the bootstrap source (ADR-project-contract-021 D9); adoption writes no evidence record, so a re-adoption supersedes none and deletes nothing for it (#1456).
+- Deletions are acknowledged (`--acknowledge-deletions`) only when the shown row's lines hold a line starting `deletes `: the owner approves exactly what the page showed, and a stored plan that gained a deletion since is refused by apply. The only deletions are the nested entry files joined to the bootstrap source (ADR-project-contract-021 D9).
 - The pull request's base is the integration branch the resolver read from the applied worktree, returned by apply as the `integration_branch` member of its result; the console reads no contract file.
 - The push sends exactly `<commit>:refs/heads/adopt-<12 hex>` to `origin`, where `<commit>` is the full hash apply recorded in the `applied` row: the local branch is never read, so a branch that moved after a failed push cannot publish content the apply gates did not run on, and the page's commit is what the pull request holds. It has `--no-follow-tags` so that no tag rides along whatever `push.followTags` says, within 120 seconds, with prompts off (`GIT_TERMINAL_PROMPT=0`), in its own group, never forced. A branch that is not `adopt-<12 hex>`, or a commit that is not 40 lowercase hex digits, is refused before any process starts.
 - The pull request is made through `gh api` (a cancellable runner of the console's own, because `forge_api.run_gh` cannot be cancelled), each call bounded at 30 seconds. It is titled `Adopt <name> onto the agent platform` and its body is the plan's headline and change lines. At most one pull request exists per adoption: before opening, the run looks for an open pull request of the same head and base (`find_pull_request`), and after a failed open it looks once more, so a pull request the forge created before its answer was lost is found on the retry and not opened twice.
