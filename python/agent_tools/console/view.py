@@ -752,7 +752,7 @@ landed gives none) whose rule is `OVERLAP_UNSETTLED`, in `claim_overlaps` order,
 `sprints` are the reading's two sprint ids, the earlier-started first, `files` its files and `text`
 is `OVERLAP_UNSETTLED_TEXT` over the two sprints' titles in that order and the files joined with
 `", "`. A settled overlap gives no entry. An overlap entry is never an inbox item and changes no
-`inbox`, count, headline, sentence or `stale` (#1347, ADR-console-091).
+`inbox`, count, headline, sentence or `stale` (#1347, ADR-console-085).
 Every sprint entry, running or finished, carries `live_faults`: the sprint's standing live-fault
 declarations (`open_faults`, so never a withdrawn one) in id order, `[]` when none. `text` is
 `LIVE_FAULT_TEXT` over the issue, `observed`, `when` and `proven`; `at` is the declaration's own time,

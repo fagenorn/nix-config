@@ -1,4 +1,4 @@
-"""The permit judge: which Bash commands a manager's session may run (#1377, #1401, ADR-console-094, ADR-console-098).
+"""The permit judge: which Bash commands a manager's session may run (#1377, #1401, ADR-console-094).
 
 A manager's session may run exactly three commands, and `judge(command, grant, forge)` decides each
 one without touching the network, the clock or a file beyond the injected `Forge` readers and
@@ -13,11 +13,11 @@ The three shapes (D3), judged only over the literal-word grammar of `words`:
    spelled exactly (`--confirm` may repeat, every other flag at most once), each value a word that does
    not begin with `-`. This is a grant, not a check: the release command itself refuses a candidate the
    owner has not approved on the console (ADR-release-016), so the permit reads no forge and checks no
-   approval (ADR-console-098).
+   approval (ADR-console-094).
 
 Each of the three shapes may follow one credential-scrub prefix, exactly a spelling of
 `SCRUB_PREFIXES`, which equals the lifecycle guard's (#1592, ADR-console-102); `strip_scrub` removes it
-once, and only the merge and the rerun are read through it: the release run takes none (ADR-console-098).
+once, and only the merge and the rerun are read through it: the release run takes none (ADR-console-094).
 
 `words(command)` is a small scanner, not `shlex` (which accepts expansions and comments the shell
 would act on). It splits on spaces and tabs only. A word is a plain run of `[A-Za-z0-9_./:@%+=,-]`

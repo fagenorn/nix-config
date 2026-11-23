@@ -190,7 +190,7 @@ def scanned_files(archived_dirs: tuple[str, ...] = ()) -> list[tuple[str, list[s
 
 
 RETIRED_DELIVERY_RECORDS = (2, 9, 10, 11)
-RETIRED_CONSOLE_RECORDS = (2, 9, 25, 39, 40, 41, 53, 55, 56, 57, 61, 64, 69, 81, 82, 90)
+RETIRED_CONSOLE_RECORDS = (2, 9, 25, 39, 40, 41, 53, 55, 56, 57, 61, 64, 69, 81, 82, 90, 91, 95, 96, 98)
 LATER_THAN_076 = re.compile(r"^docs/areas/console/adr/(?:07[7-9]|0[89]\d|[1-9]\d\d)-")
 SUB_DECISION_027_TO_051 = re.compile(
     r"\bADR-console-(0(?:2[7-9]|[34]\d|5[01]))(?:'s)? \(?(?:D\d|Consequences)")
@@ -649,6 +649,13 @@ class DocsTreeTest(unittest.TestCase):
         self.assertEqual(
             sub_decision_hits(numbers, SUB_DECISION_077_TO_098, LATER_THAN_098), [])
 
+    def test_the_console_notice_card_permit_and_release_records_are_cut_and_cited_whole(self):
+        numbers = (85, 92, 94, 97)
+        self.assertEqual([int(p.name[:3]) for p in console_records(numbers)], [85, 92, 94, 97])
+        self.assertEqual(console_form_findings(numbers), [])
+        self.assertEqual(
+            sub_decision_hits(numbers, SUB_DECISION_077_TO_098, LATER_THAN_098), [])
+
     def test_the_console_records_052_to_076_are_the_kept_ones(self):
         records = [
             p for p in sorted((REPO_ROOT / "docs/areas/console/adr").glob("[0-9][0-9][0-9]-*.md"))
@@ -661,6 +668,20 @@ class DocsTreeTest(unittest.TestCase):
         self.assertEqual(
             [int(p.name[:3]) for p in records],
             [52, 54, 58, 59, 60, 62, 63, 65, 66, 67, 68, 70, 71, 72, 73, 74, 75, 76])
+        self.assertEqual(found, [])
+
+    def test_the_console_records_077_to_098_are_the_kept_ones(self):
+        records = [
+            p for p in sorted((REPO_ROOT / "docs/areas/console/adr").glob("[0-9][0-9][0-9]-*.md"))
+            if 77 <= int(p.name[:3]) <= 98]
+        found = [
+            (p.name, v.rule, v.line)
+            for p in records
+            for v in record_violations(f"docs/areas/console/adr/{p.name}", p.read_bytes())
+        ]
+        self.assertEqual(
+            [int(p.name[:3]) for p in records],
+            [77, 78, 79, 80, 83, 84, 85, 86, 87, 88, 89, 92, 93, 94, 97])
         self.assertEqual(found, [])
 
     def test_the_console_records_027_to_051_are_the_kept_ones(self):

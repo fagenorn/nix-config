@@ -1089,7 +1089,7 @@ nothing folds it. A notice nudge is never retried after its own attempt, counts 
 `last_nudge_at` and delivers no message; one that cannot be dispatched is the same row with route null and the
 reason `the nudge could not start: <Type>: <message>`, and the post still answers 204.
 
-Permit (#1377, #1401, ADR-console-094, ADR-console-098): `POST /api/permit` is a manager write dispatched beside `/api/notices`
+Permit (#1377, #1401, ADR-console-094): `POST /api/permit` is a manager write dispatched beside `/api/notices`
 through `_checked_length(MAX_PERMIT_BYTES)` (16384). Its body is `sprints.parse_permit_request`'s
 `{"sprint_id", "secret", "phase": "judge" | "landed", "session_id", "tool_use_id", "command"}`, else 400 `bad permit`;
 a `sprints.SecretRefused` is 403 `secret refused`, any other `sprints.Refused` 409 with its reason, any
@@ -1649,7 +1649,7 @@ message with no `delivered_at` whose `at` is at least `sprints.RENUDGE_AFTER_MS`
 `self._clock()` and a `last_nudge_at` that is None or as old, and dispatches each after the lock
 (row times are compared as epoch milliseconds).
 
-Unread after a relay (#1379, ADR-console-096): a sprint `renudge()` did not reserve by that rule is
+Unread after a relay (#1379, ADR-console-016): a sprint `renudge()` did not reserve by that rule is
 asked `sprints.unread_step(sprint, now)`. `RELAY_AGAIN` reserves it and dispatches the ordinary message
 nudge (so a manager listed meanwhile gets a relay and a gone one a wake); `WAKE_UNREAD` reserves it and
 dispatches `_dispatch_unread_wake` after the lock. `_unread_wake` decides the step again under the lock
@@ -1789,7 +1789,7 @@ and room by `manager.has_room` (reads `ok` or `reset`, not signed out, not exclu
 still be scanned and not being removed. Otherwise the reservation ends, nothing is appended and the
 sprint is marked in `_move_cancelled` until the manager's account has room: no later poll decides a
 move again. The started manager row stays, and the sprint waits to wake its session after the reset
-(#1279). A listed manager waiting on quota is moved too (#1378, ADR-console-095): when it is idle
+(#1279). A listed manager waiting on quota is moved too (#1378, ADR-console-020): when it is idle
 or at its limit, the sprint is open, not stalled, with no open no-progress item and work to do, fewer than
 `revive.LIMIT` counted revivals sit in the window, a launcher and a stopper exist, the move was not
 cancelled and `_move_target` finds an account with room, `revive()` reserves a `_ListedMoveReservation`
@@ -8586,7 +8586,7 @@ class ConsoleService:
             self._dispatch_notice_nudge(sprint_id)
 
     def _unread_wake(self, sprint_id: str) -> None:
-        """Stop the manager's listed session and wake it in place for a message it left unread; the reservation ends here (ADR-console-096)."""
+        """Stop the manager's listed session and wake it in place for a message it left unread; the reservation ends here (ADR-console-016)."""
         heard: set[int] = set()
         with self._ingest:
             found = self._nudgeable(sprint_id)
