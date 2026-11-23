@@ -4921,6 +4921,22 @@ class LostLeaseTest(unittest.TestCase):
         self.assertNotIn("land-unlock", names)
         self.assertTrue([line for line in out["logs"] if "land lease" in line and "lost" in line], out["logs"])
 
+    def test_a_take_that_leaves_behind_out_polls_the_checks_before_the_merge(self):
+        """A held lease whose reply does not say behind false (the harness fills a missing key, so null stands for it) is not read as up to date: the checks are polled first."""
+        held = {"renew": {"verdict": "renewed"}, "lock": {"verdict": "acquired", "lock_sha": SHA}, "behind": None}
+        out = run_out(replies={"land-take": held})
+        names = labels(out["calls"])
+        self.assertEqual(out["result"]["stage"], "done")
+        self.assertEqual(names[names.index("land-take"):], ["land-take", "checks-1", "merge", "hold", "close-out"])
+
+    def test_a_relock_after_a_lost_merge_recheck_that_leaves_behind_out_polls_the_checks_first(self):
+        lost = {"lock": {"verdict": "held_by", "lock_sha": self.E, "pr": 77}, "merged": False}
+        held = {"renew": {"verdict": "renewed"}, "lock": {"verdict": "acquired", "lock_sha": SHA}, "behind": None}
+        out = run_out(replies={"merge": [lost, self.MERGED], "land-relock-1": held})
+        names = labels(out["calls"])
+        self.assertEqual(out["result"]["stage"], "done")
+        self.assertEqual(names[names.index("land-take"):], ["land-take", "merge", "land-relock-1", "checks-2", "merge", "hold", "close-out"])
+
     def test_a_lease_lost_during_the_checks_wait_waits_again(self):
         lost = {"state": "lost", "lock_sha": self.E}
         out = run_out(replies={"checks-2": lost, "checks-3": green_read(self.D)}, patch=self.BEHIND)

@@ -3291,10 +3291,12 @@ ${RULES}`, { label, phase: 'Ship', agentType: 'clerk', model: DEFAULT_CLERK_MODE
     if (refusal(v)) lockHeld = false
     const lost = renewed(lk.renew, label)
     if (lost) return { row: lost }
-    return { v, lock: lk.lock || null, behind: lk.behind === true }
+    return { v, lock: lk.lock || null, behind: typeof lk.behind === 'boolean' ? lk.behind : null }
   }
-  // The read the first round goes on with once the lease is held: the green read, or behind if the base moved past it.
+  // The read the first round goes on with once the lease is held: the green read, or behind if the base moved past it;
+  // a reply that never said behind false carries none, so the round polls the checks.
   let readAt = null
+  const readOf = (r, read) => (r.behind === true ? { state: 'behind', head: expected } : r.behind === false ? read : null)
   const takeLease = async green => {
     // land-contended is the wait running out at the CLI's bound behind other landings, so the claim is renewed and the
     // same acquire waits again, within the budget of waitBudget (a wait that ended first in line or at a better place
@@ -3307,7 +3309,7 @@ ${RULES}`, { label, phase: 'Ship', agentType: 'clerk', model: DEFAULT_CLERK_MODE
       if (r.row) return r.row
     }
     if (!HOLDING.includes(r.v)) return stop(refusal(r.v) ? 'land-contended' : 'land-lock', { pr: PR, lock: r.v })
-    readAt = r.behind ? { state: 'behind', head: expected } : green
+    readAt = readOf(r, green)
     return null
   }
   // The lease was lost (a one-shot acquire answered held_by or lost_to, or a beat answered not_held): the delivery
@@ -3755,7 +3757,7 @@ ${RULES}`, { label: 'merge', phase: 'Ship', agentType: 'clerk', model: DEFAULT_C
         log(`the land lease of ${INT} was lost to PR #${mg.lock.pr || '?'}; waiting for it again at the back of the queue`)
         const r = await relockLost(pre)
         if (r.row) return r.row
-        readAt = r.behind ? { state: 'behind', head: expected } : ck
+        readAt = readOf(r, ck)
         continue
       }
       if (!HOLDING.includes(pre)) return stop('land-contended', { pr: PR, lock: pre })
