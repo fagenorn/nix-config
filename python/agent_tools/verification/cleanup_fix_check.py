@@ -15,7 +15,7 @@ import json
 import re
 import sys
 from collections.abc import Sequence
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 from agent_tools.claims.forge_markers import body_markers, trusted_author
 from agent_tools.system import forge_api
