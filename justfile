@@ -210,6 +210,7 @@ agent-workflow-tests *args:
     tests/test_forge_owner_action.py \
     tests/test_owner_actions.py \
     tests/test_forge_land_lock.py \
+    tests/test_landing_reading.py \
     tests/test_verified_tree.py \
     tests/test_transaction_core.py \
     tests/test_transaction_custody.py \
