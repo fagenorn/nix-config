@@ -934,14 +934,20 @@ class ScopeTest(unittest.TestCase):
     def test_the_sessions_of_group_members_and_of_child_runs_hold_the_slots_of_the_root_run(self):
         held: list[tuple[str, int, bool]] = []
         both = threading.Barrier(2, timeout=30)
+        counted = threading.Barrier(2, timeout=30)
 
         def launch(argv, cwd, prompt, *, on_start, timeout=None, env=None, stop=None):
             on_start(os.getpid())
-            if argv[-1].endswith(("ra.1.system.md", "rb.1.system.md")):
+            member = argv[-1].endswith(("ra.1.system.md", "rb.1.system.md"))
+            if member:
                 both.wait()  # both members are in their launch at once
+                if argv[-1].endswith("rb.1.system.md"):
+                    time.sleep(0.5)  # the other member would finish first on a slow host
             (root,) = roots(self.project)
             held.append((argv[-1].rsplit("/", 1)[-1], held_slots(root),
                          any((kid / "slots").exists() for kid in children_of(self.project))))
+            if member:
+                counted.wait()  # neither member ends, and frees its slot, before both have counted
             self.answer(env, {"account": "stub"})
             return engine_session.Launched(0, canned_result(), b"", 0.1)
 
