@@ -249,6 +249,9 @@ agent-workflow-tests *args:
     tests/test_comment_lint.py \
     tests/test_cleanup_issue.py \
     tests/test_ruff_lint.py \
+    tests/test_suite_source.py \
+    tests/test_skipped_test_lint.py \
+    tests/test_copied_test_lint.py \
     tests/test_suppressions.py \
     tests/test_decision_record_wording.py \
     tests/test_module_docstring_wording.py \
