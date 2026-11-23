@@ -421,6 +421,25 @@ class MutatingContinueTest(unittest.TestCase):
         self.assertEqual(json.loads((project.runs()[0] / "results/m.2.json").read_text()),
                          {"argv": ["1512"]})
 
+    def test_a_call_continued_after_a_kill_checks_a_childs_change_before_it_can_repeat_it(self):
+        project = EngineProject(self)
+        fan = {"id": "fan", "stage": "landing", "kind": "call", "holds": "run",
+               "procedure": "fan-child", "on": {"done": "done", "child-stop": "needs-owner"}}
+        m = step("m", "standin-effect", "done", failed="child-stop", mutates=True)
+        m["check"] = {"command": "standin-effect-check"}
+        child = {"steps": [m], "inputs": ["issue"],
+                 "stops": {"child-stop": {"need": "retry", "reenter": "m"}}}
+        procedures = project.procedures([fan], children={"fan-child": child})
+        (project.tmp / "kill-after").write_text("1512", encoding="utf-8")
+        first = project.deliver(procedures)
+        self.assertEqual(first.returncode, -signal.SIGKILL, first.stdout + first.stderr)
+        self.assertEqual(project.argvs("effect"), [["1512"]])
+        second = project.deliver(procedures)
+        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+        self.assertEqual(json.loads(second.stdout)["end"], "done")
+        self.assertEqual(project.argvs("effect"), [["1512"]])
+        self.assertEqual(project.argvs("checks"), [["1512"]])
+
     def test_a_first_visit_of_a_mutating_step_runs_no_check(self):
         project = EngineProject(self)
         done = project.deliver(mutating(project))

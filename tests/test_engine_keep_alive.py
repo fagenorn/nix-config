@@ -15,6 +15,7 @@ from unittest import mock
 from agent_tools.delivery import engine_shell
 from tests.engine_guards import standin_guard
 from tests.test_engine_deliver import ANY_SENTENCE, EngineProject, step
+from tests.test_engine_fanout import GROUP, stamps
 
 TIER = "integration"  # every case runs `engine deliver` against the stand-in command
 
@@ -218,6 +219,56 @@ class KeepAliveTest(unittest.TestCase):
         self.assertEqual([e["verdict"] for e in kept], ["refused"])
         self.assertFalse(project.record.exists())
         self.assertEqual([e for e in events if e["event"] == "step_entered"], [])
+
+
+class GroupKeepAliveTest(unittest.TestCase):
+    """A group with a `mutates` member renews the claim once before its members start."""
+
+    def group(self, *, mutating: bool) -> list[dict]:
+        steps = GROUP("standin-stamp")
+        if mutating:
+            steps[1]["mutates"] = True
+            steps[1]["check"] = {"command": "standin-stamp"}
+        return steps
+
+    def test_a_group_with_a_mutating_member_renews_once_before_either_member_starts(self):
+        project = EngineProject(self)
+        project.answer(RENEWED)
+        done = project.deliver(project.procedures(self.group(mutating=True), keep_alive=KEEP_ALIVE),
+                               issue=1517)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        events = project.events(project.runs()[0])
+        self.assertEqual(guarded(events)[:2], [("keep_alive_ran", "checks", 1),
+                                               ("step_entered", "checks", 1)])
+        self.assertEqual(sorted(guarded(events)[2:]), [("step_entered", "a", 1),
+                                                       ("step_entered", "b", 1)])
+        self.assertEqual([e["event"] for e in events].index("keep_alive_ran"), 0)
+        self.assertEqual(len(project.renewal_calls()), 1)
+        self.assertEqual(len(stamps(project)), 2)
+
+    def test_a_group_with_a_mutating_member_ends_in_claim_lost_when_the_claim_is_not_renewed(self):
+        project = EngineProject(self)
+        project.answer({"stdout": '{"by":"other/holder","verdict":"not_held"}', "exit": 0}, RENEWED)
+        done = project.deliver(project.procedures(self.group(mutating=True), keep_alive=KEEP_ALIVE),
+                               issue=1517)
+        self.assertEqual(done.returncode, 3, done.stdout + done.stderr)
+        line = json.loads(done.stdout)
+        self.assertEqual(line["end"], "claim-lost")
+        self.assertIn("not_held", line["detail"])
+        self.assertIn("checks", line["detail"])
+        events = project.events(project.runs()[0])
+        self.assertEqual(guarded(events), [("keep_alive_ran", "checks", 1)])
+        self.assertEqual(events[-1]["event"], "stop_reached")
+        self.assertEqual(len(project.renewal_calls()), 1)
+        self.assertFalse(project.stamps.exists())
+
+    def test_a_group_with_no_mutating_member_renews_nothing(self):
+        project = EngineProject(self)
+        done = project.deliver(project.procedures(self.group(mutating=False), keep_alive=KEEP_ALIVE),
+                               issue=1517)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(guarded(project.events(project.runs()[0]))[0], ("step_entered", "checks", 1))
+        self.assertEqual(project.renewal_calls(), [])
 
 
 class ShapeTest(unittest.TestCase):
