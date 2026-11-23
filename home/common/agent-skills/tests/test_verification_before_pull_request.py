@@ -1,4 +1,4 @@
-"""Issue 1683: the optional `bindings.workflow.verification_before_pull_request` member (D3, D5, D8)."""
+"""The optional `bindings.workflow.verification_before_pull_request` member of the contract."""
 
 from __future__ import annotations
 

@@ -1021,7 +1021,7 @@ def validate_workflow(workflow: dict, commands: dict | None,
 
 def validate_verification_before_pull_request(
         workflow: dict, commands: dict | None, violations: list[dict]) -> None:
-    """The optional `bindings.workflow.verification_before_pull_request` member (issue 1683 D3, D5).
+    """The optional `bindings.workflow.verification_before_pull_request` member.
 
     Its ids are checked against the effective commands in every schema, because
     schema 3 never authors `verification` but does author this list.
