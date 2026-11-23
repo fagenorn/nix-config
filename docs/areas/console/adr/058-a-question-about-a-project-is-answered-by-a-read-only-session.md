@@ -31,7 +31,7 @@ The owner can state a goal and read the desk, but cannot ask the console a plain
 
 ## Consequences
 
-- The desk page asks and shows a project's questions from its Ask box (#1177, ADR-console-002).
+- The desk page asks and shows a project's questions from its Ask box (#1177).
 - Reads are not confined to the project root: Read, Grep and Glob can read any file the account's user can.
 - With no user settings, neither the user-wide lifecycle guard nor the console's session hooks run in the session, so lifecycle verbs are refused by the deny rules, `dontAsk` and the question hook, and the session never shows on the console as a session.
 - A declared read-only command whose `cwd` is not the project's root is not offered, so the answer says production cannot be read.

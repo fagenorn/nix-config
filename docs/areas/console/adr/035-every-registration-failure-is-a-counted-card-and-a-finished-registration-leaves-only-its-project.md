@@ -36,5 +36,5 @@ The first screenshots of the registration flow (ADR-console-028, ADR-console-030
 - A registration that fails is one counted card the owner answers in place, and the Work column holds one short line while it asks.
 - Tests check every failure card and Work line against the pattern `--plan-id|sha256:|[0-9a-f]{12,}|(?:^|[\s("'])/\S`.
 - The host check `console-register` answers the Register card it finds and meets the project in the listing, because the view no longer shows a registered result.
-- ADR-console-002, ADR-console-028, ADR-console-030 and ADR-console-034 are amended where they named a command, a path or a hash.
-- Related: ADR-console-002, ADR-console-028, ADR-console-029, ADR-console-030, ADR-console-033, ADR-console-034.
+- ADR-console-028, ADR-console-030 and ADR-console-034 are amended where they named a command, a path or a hash.
+- Related: ADR-console-028, ADR-console-029, ADR-console-030, ADR-console-033, ADR-console-034.

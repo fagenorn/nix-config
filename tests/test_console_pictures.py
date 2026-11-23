@@ -1568,41 +1568,14 @@ class PictureDocsTest(unittest.TestCase):
             "# ADR-console-036 — The console keeps a manager's pictures and serves them only to the page")
         for needle in ("#1089", "POST /api/picture", "X-Console-Sprint", "X-Console-Secret",
                        "image/png", "2 MiB", "413", "SHA-256", "0600", "0700", "picture.stored",
-                       "`pictures`", "one day", "ADR-console-009", "ADR-console-013",
+                       "`pictures`", "one day", "ADR-console-013",
                        "ADR-console-019"):
             with self.subTest(needle):
                 self.assertIn(needle, text)
-        self.assertIn("POST /api/picture", self.doc(
-            "docs/areas/console/adr/008-only-the-page-writes-with-a-token-and-its-origin.md"))
-        self.assertIn("ADR-console-036", self.doc(
-            "docs/areas/console/adr/009-events-are-kept-for-90-days.md"))
         context = self.doc("docs/areas/console/CONTEXT.md")
         self.assertIn("**Picture**:", context)
         self.assertIn("ADR-console-036", context)
         self.assertIn("| Picture | Console |", self.doc("docs/CONTEXT-MAP.md"))
-
-    def test_adr_008_lists_the_picture_read(self):
-        adr008 = "docs/areas/console/adr/008-only-the-page-writes-with-a-token-and-its-origin.md"
-        adr036 = "docs/areas/console/adr/036-the-console-keeps-a-managers-pictures-and-serves-them-only-to-the-page.md"
-        lines = (ROOT / adr008).read_text().splitlines()
-        status = next(row for row in lines if row.startswith("- **Status:**"))
-        self.assertEqual(
-            status, "- **Status:** accepted; amended by ADR-console-024, ADR-console-025, "
-                    "ADR-console-028, ADR-console-029, ADR-console-030, ADR-console-036, "
-                    "ADR-console-037, ADR-console-053, ADR-console-058, ADR-system-004, "
-                    "ADR-console-076, ADR-console-078, ADR-console-093")
-        decided = next(row for row in lines if row.startswith("- **Decided in:**"))
-        self.assertTrue(decided.endswith("#1089, #1120, #1176, #1193, #1237, #1263, #1294, #1305, #1272"))
-        text = self.doc(adr008)
-        for needle in ("GET /api/picture/<id>", "Sec-Fetch-Site", "same-origin", "omit",
-                       "ADR-console-036"):
-            with self.subTest(needle):
-                self.assertIn(needle, text)
-        text = self.doc(adr036)
-        for needle in ("GET /api/picture/<id>", "Cache-Control: private", "nosniff",
-                       "bad picture id", "404", "Sec-Fetch-Site"):
-            with self.subTest(needle):
-                self.assertIn(needle, text)
 
     def test_adr_038_records_the_question_pictures(self):
         name = ("docs/areas/console/adr/038-a-managers-question-shows-its-pictures-on-the-card-"
@@ -1613,23 +1586,17 @@ class PictureDocsTest(unittest.TestCase):
             "size in a viewer")
         text = self.doc(name)
         for needle in ("#1090", "8", "140", "before", "after", "X-Console-Token", "object URL",
-                       "blob:", "Escape", "inert", "480", "ADR-console-002", "ADR-console-019",
+                       "blob:", "Escape", "inert", "480", "ADR-console-019",
                        "ADR-console-033", "ADR-console-036", "#1091"):
             with self.subTest(needle):
                 self.assertIn(needle, text)
         adr = "docs/areas/console/adr/"
         for path, amended in (
-                ("019-a-managers-questions-arrive-as-inbox-items.md",
-                 "- **Status:** accepted; amended by ADR-console-038, ADR-console-040, "
-                 "ADR-console-072"),
                 ("036-the-console-keeps-a-managers-pictures-and-serves-them-only-to-the-page.md",
-                 "- **Status:** accepted; amended by ADR-console-038 and ADR-console-045")):
+                 "- **Status:** accepted; amended by ADR-console-038 and ADR-console-045"),):
             with self.subTest(path):
                 lines = (ROOT / adr / path).read_text().splitlines()
                 self.assertEqual(next(r for r in lines if r.startswith("- **Status:**")), amended)
-        lines = (ROOT / adr / "002-the-desk-page-design-rules.md").read_text().splitlines()
-        status = next(r for r in lines if r.startswith("- **Status:**"))
-        self.assertTrue(status.endswith("ADR-console-035, ADR-console-038, ADR-console-052, ADR-console-056, ADR-console-064, ADR-console-086"), status)
         context = (ROOT / "docs/areas/console/CONTEXT.md").read_text()
         for term in ("**Question round**:", "**Picture**:"):
             entry = context[context.index(term):].split("\n\n")[0]

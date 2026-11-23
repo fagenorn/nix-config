@@ -1103,7 +1103,8 @@ class CleanupIssueWorkflowTest(unittest.TestCase):
         self.assertEqual(["main"], trigger_branches("push", CLEANUP_WORKFLOW))
         self.assertIsNone(job_if_expression("cleanup-issue", CLEANUP_WORKFLOW))
         self.assertEqual(
-            {"contents": "read", "issues": "write"}, workflow_permissions(CLEANUP_WORKFLOW)
+            {"contents": "read", "issues": "write", "pull-requests": "read"},
+            workflow_permissions(CLEANUP_WORKFLOW),
         )
         overrides = {
             key: job_permission_lines(block)

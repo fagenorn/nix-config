@@ -42,6 +42,18 @@ file or directory would hold after case and Unicode folding),
 `scratch_inside_repository` or `scratch_unwritable`. A failed git read is
 `HistoryUnavailable`. The command bounds every child by `--timeout`.
 
+Autofix. The `FIXABLE` rules (`PY6`, `PY7`, `PY9`, `PY10`, `PY11`, `PY12`) declare
+`fix(snapshot, paths)`, which the cleanup command runs and the never-rise check never
+calls. Ruff runs with `--fix --no-unsafe-fixes --isolated`, so only safe fixes apply and
+no configuration can turn unsafe ones on, and selects only the codes `codes(rule)`
+names (the rule's own, less the longer codes of another rule). It reads the committed
+bytes of the listed files alone, fixes copies in a fresh scratch directory and never
+writes the repository. `Fix.changed` maps each listed file whose bytes changed to its new
+bytes and `Fix.fixed` is the rule's findings in the listed files before the fix less the
+diagnostics Ruff still reports. It fails closed with the reasons of `findings`, and
+`unmapped_code` for a remaining diagnostic of another rule; a path that is no covered
+file raises `ValueError`, and no path runs nothing.
+
 The command `ruff-lint --repo-root <absolute directory> [--revision <rev>]
 [--timeout SECONDS]` prints every finding at the revision (default `HEAD`), one
 line each on stdout, `<rule> <path>:<line>` as
@@ -65,12 +77,12 @@ import sys
 import tempfile
 import tokenize
 import unicodedata
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from pathlib import Path, PurePosixPath
 
 from agent_tools.delivery import never_rise
 from agent_tools.delivery.never_rise import (
-    Enforcer, EnforcerFailed, HistoryUnavailable, Snapshot, Violation)
+    Enforcer, EnforcerFailed, Fix, HistoryUnavailable, Snapshot, Violation)
 
 COMMAND = "ruff-lint"
 TOOLS_ENV = "AGENT_PLATFORM_TOOLS"
@@ -85,6 +97,7 @@ RULE_OF_CODE: dict[str, str] = {
     "E4": "PY6", "F4": "PY6", "E7": "PY7", "E9": "PY8", "F722": "PY8", SYNTAX_ERROR: "PY8",
     "F5": "PY9", "F6": "PY10", "F7": "PY10", "F9": "PY10", "F8": "PY11", "ERA001": "PY12"}
 RULES = ("PY6", "PY7", "PY8", "PY9", "PY10", "PY11", "PY12", "PY13")
+FIXABLE = ("PY6", "PY7", "PY9", "PY10", "PY11", "PY12")
 PYTHON_SUFFIXES = frozenset({".py", ".pyi"})
 MARKER = "pyproject.toml"
 MEMO_SIZE = 4
@@ -191,10 +204,19 @@ def _check_paths(paths: list[str]) -> None:
                 raise EnforcerFailed(COMMAND, "path_collision")
 
 
-def _run_ruff(tools: str, scratch: Path, batch: list[str], timeout: float | None) -> list[Violation]:
-    argv = [RUFF, "check", "--isolated", "--no-cache", "--exit-zero", "--target-version",
-            TARGET_VERSION, "--select", ",".join(SELECTION), "--output-format", "json",
-            "--", *batch]
+def codes(rule: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """The Ruff codes to select for a rule, and the longer codes of other rules to ignore."""
+    select = tuple(key for key, mapped in RULE_OF_CODE.items() if mapped == rule and key != SYNTAX_ERROR)
+    ignore = tuple(
+        key for key, mapped in RULE_OF_CODE.items()
+        if mapped != rule and any(key.startswith(chosen) and len(key) > len(chosen) for chosen in select))
+    return select, ignore
+
+
+def _run_ruff(tools: str, scratch: Path, batch: list[str], timeout: float | None,
+              options: Sequence[str]) -> list[Violation]:
+    argv = [RUFF, "check", "--isolated", "--no-cache", "--exit-zero", *options,
+            "--output-format", "json", "--", *batch]
     try:
         done = subprocess.run(
             argv, cwd=scratch, env={"PATH": tools}, stdin=subprocess.DEVNULL,
@@ -229,6 +251,14 @@ def _run_ruff(tools: str, scratch: Path, batch: list[str], timeout: float | None
     return found
 
 
+def _materialise(scratch: Path, contents: dict[str, bytes]) -> None:
+    for path, data in contents.items():
+        target = scratch / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with open(target, "xb") as handle:
+            handle.write(data)
+
+
 def findings(snapshot: Snapshot) -> tuple[Violation, ...]:
     """Every violation of every rule at the snapshot, sorted by path, line and rule."""
     paths = covered(snapshot.files)
@@ -248,13 +278,11 @@ def findings(snapshot: Snapshot) -> tuple[Violation, ...]:
         parent = _scratch_parent(root)
         with tempfile.TemporaryDirectory(prefix="ruff-lint-", dir=parent) as tmp:
             scratch = Path(tmp).resolve()
-            for path, data in contents.items():
-                target = scratch / path
-                target.parent.mkdir(parents=True, exist_ok=True)
-                with open(target, "xb") as handle:
-                    handle.write(data)
+            _materialise(scratch, contents)
+            options = ("--target-version", TARGET_VERSION, "--select", ",".join(SELECTION))
             for start in range(0, len(paths), BATCH):
-                found.extend(_run_ruff(tools, scratch, paths[start:start + BATCH], snapshot.timeout))
+                found.extend(
+                    _run_ruff(tools, scratch, paths[start:start + BATCH], snapshot.timeout, options))
     except OSError:
         raise EnforcerFailed(COMMAND, "scratch_unwritable") from None
     for path, data in contents.items():
@@ -270,8 +298,49 @@ def _of_rule(rule: str, snapshot: Snapshot) -> list[Violation]:
     return [violation for violation in findings(snapshot) if violation.rule == rule]
 
 
+def fix(rule: str, snapshot: Snapshot, paths: Sequence[str]) -> Fix:
+    """Ruff's safe fixes of one rule's findings in the listed files, as new bytes of the changed ones."""
+    if not paths:
+        return Fix({}, 0)
+    listed = list(paths)
+    _check_paths(listed)
+    if any(path not in covered(snapshot.files) for path in listed):
+        raise ValueError("not a covered Python file of the snapshot")
+    tools = ruff_directory()
+    if tools is None:
+        raise EnforcerFailed(COMMAND, "ruff_unavailable")
+    before = sum(1 for v in findings(snapshot) if v.rule == rule and v.path in listed)
+    contents = never_rise.read_files(snapshot, listed)
+    root = snapshot.root.resolve() if snapshot.root is not None else None
+    select, ignore = codes(rule)
+    options = ["--fix", "--no-unsafe-fixes", "--target-version", TARGET_VERSION,
+               "--select", ",".join(select)]
+    if ignore:
+        options += ["--ignore", ",".join(ignore)]
+    remaining: list[Violation] = []
+    changed: dict[str, bytes] = {}
+    try:
+        with tempfile.TemporaryDirectory(prefix="ruff-fix-", dir=_scratch_parent(root)) as tmp:
+            scratch = Path(tmp).resolve()
+            _materialise(scratch, contents)
+            for start in range(0, len(listed), BATCH):
+                remaining.extend(
+                    _run_ruff(tools, scratch, listed[start:start + BATCH], snapshot.timeout, options))
+            if any(violation.rule != rule for violation in remaining):
+                raise EnforcerFailed(COMMAND, "unmapped_code")
+            for path, data in contents.items():
+                after = (scratch / path).read_bytes()
+                if after != data:
+                    changed[path] = after
+    except OSError:
+        raise EnforcerFailed(COMMAND, "scratch_unwritable") from None
+    return Fix(changed, before - len(remaining))
+
+
 ENFORCERS: tuple[Enforcer, ...] = tuple(
-    Enforcer(rule, functools.partial(_of_rule, rule)) for rule in RULES)
+    Enforcer(rule, functools.partial(_of_rule, rule),
+             fix=functools.partial(fix, rule) if rule in FIXABLE else None)
+    for rule in RULES)
 
 
 def _timeout(text: str) -> float | None:
