@@ -1,0 +1,5 @@
+#!/bin/sh
+# Verify check: no counted push run of --workflow on --branch from the merge's run on names --test as
+# failed or errored in a failed attempt of --job. Reads the forge only. verify-pending runs it from
+# the repository root at the commit the block names. Exit 0 met, 1 not met, 75 not yet, 2 usage or forge error.
+PYTHONPATH=python exec python3 -m agent_tools.verification.suite_test_failures "$@"
