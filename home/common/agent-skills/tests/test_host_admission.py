@@ -12,6 +12,7 @@ from agent_tools.delivery import host_admission
 
 REPO = Path(__file__).resolve().parents[4]
 COMMITTED_DECLARATION = REPO / "home/common/agent-skills/host-declaration.json"
+HOST_DECLARATIONS = REPO / "home/common/agent-skills/host-declarations"
 
 
 def declaration(**routes):
@@ -31,6 +32,23 @@ class HostAdmissionTest(unittest.TestCase):
         self.assertEqual(host_admission.validate_declaration(committed), committed)
         self.assertEqual(host_admission.verify_slots(committed), 1)
         self.assertEqual(host_admission.route_slots(committed, host_admission.ENGINE_ROUTE), 8)
+
+    def test_the_eleven_m5_declaration_is_the_shared_one_with_two_verify_slots(self):
+        eleven = json.loads((HOST_DECLARATIONS / "eleven-m5.json").read_text(encoding="utf-8"))
+        shared = json.loads(COMMITTED_DECLARATION.read_text(encoding="utf-8"))
+        self.assertEqual(host_admission.validate_declaration(eleven), eleven)
+        self.assertEqual(host_admission.verify_slots(eleven), 2)
+        self.assertEqual({k: v for k, v in eleven.items() if k != "verify_slots"}, shared)
+
+    def test_every_host_declaration_names_a_flake_host_and_validates(self):
+        flake = (REPO / "flake.nix").read_text(encoding="utf-8")
+        files = sorted(HOST_DECLARATIONS.glob("*.json"))
+        self.assertTrue(files)
+        for path in files:
+            with self.subTest(path.name):
+                self.assertIn(f'hostname = "{path.stem}";', flake)
+                value = json.loads(path.read_text(encoding="utf-8"))
+                self.assertEqual(host_admission.validate_declaration(value), value)
 
     def test_the_engine_route_counts_one_slot_per_live_session(self):
         one = declaration(engine={"support": "supported", "agent_slots": 1})
