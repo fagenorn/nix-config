@@ -13,6 +13,11 @@ own id and deletes its own comment when it is not the winner. Safety assumes a l
 reflects every comment created before the listing started. A caller that names trusted
 associations makes markers by any other author invisible to its contest.
 
+Body markers: the same grammar on any whole line of an issue or pull request body is a
+body marker; `body_markers` returns the fields of each such line of one kind (a repeated key or
+any other line yields nothing), and `trusted_author` is the author test its callers
+parameterise with the logins and associations they trust.
+
 D9, ending is append-only: a marker is ended by posting an `end` marker (`of=<id>`,
 `reason=<reason>`) naming its id, and nothing edits or deletes an `end` marker. A marker is live
 when it is not itself an `end` marker, carries no `released` field and no `end` marker in the
@@ -54,6 +59,25 @@ UPDATE_REFS = ("mutation($repositoryId: ID!, $name: GitRefname!, $before: GitObj
 CLOSING_ISSUES = ("query($owner: String!, $name: String!, $number: Int!) { "
                   "repository(owner: $owner, name: $name) { pullRequest(number: $number) { "
                   "closingIssuesReferences(first: 5) { nodes { number } } } } }")
+
+
+def body_markers(body: str, kind: str) -> list[dict[str, str]]:
+    found = []
+    for line in body.splitlines():
+        match = MARKER.fullmatch(line.rstrip(" \r\t"))
+        if match is None or match["kind"] != kind:
+            continue
+        pairs = [(field["key"], field["value"]) for field in FIELD.finditer(match["fields"])]
+        fields = dict(pairs)
+        if len(fields) == len(pairs):
+            found.append(fields)
+    return found
+
+
+def trusted_author(item: Mapping, logins: Collection[str], associations: Collection[str]) -> bool:
+    user = item.get("user")
+    login = user.get("login") if isinstance(user, dict) else None
+    return login in logins or item.get("author_association") in associations
 
 
 @dataclass(frozen=True)

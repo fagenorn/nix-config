@@ -1,6 +1,8 @@
 # Keeps one cleanup issue open for the never-rise violations already on main
-# (ADR-delivery-017). It reads the pushed commit and may write issues and
-# nothing else; tests/test_branch_protection.py pins this file's shape. One
+# (ADR-delivery-017). It reads the pushed commit, may write issues and read pull requests, and
+# nothing else; a rule whose autofix changes files is deferred here, because a pull request this
+# token opens starts no checks, and the hosts' verify-pending pass opens it (ADR-delivery-021).
+# tests/test_branch_protection.py pins this file's shape. One
 # concurrency group that cancels nothing and queues up to 100 waiting runs
 # (queue: max) runs pushes one after another, so two pushes never both find no
 # open cleanup issue. forge_api drops token variables, so the token is stored
@@ -25,6 +27,7 @@ concurrency:
 permissions:
   contents: read
   issues: write
+  pull-requests: read
 
 jobs:
   cleanup-issue:
