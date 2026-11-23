@@ -1589,13 +1589,13 @@ class ContractDraftTest(AdoptTestCase):
                         for v in violations), violations)
                 self.assertEqual(self.stored_plans(), before)
 
-    def test_a_draft_of_a_schema_adoption_does_not_target_is_refused(self):
+    def test_a_draft_below_the_adoption_schema_is_refused(self):
         root = bootstrap_repo(self.home)
-        draft = drafted_contract()
-        draft["schema_version"] = 3
         before = self.stored_plans()
-        code, doc, err = self.plan(root, "--contract-draft",
-                                   self.draft_file(draft))
+        with mock.patch.object(adopt_planning, "current_schema",
+                               return_value=3):
+            code, doc, err = self.plan(root, "--contract-draft",
+                                       self.draft_file(drafted_contract()))
         self.assertEqual(code, 2, err)
         self.assertEqual(doc["error"]["repair_id"], "adopt.draft.invalid")
         self.assertEqual([v["pointer"] for v in doc["error"]["violations"]],

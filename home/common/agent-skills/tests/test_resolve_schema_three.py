@@ -498,6 +498,40 @@ class ExportedSourceTest(SchemaThreeCase):
                 self.assertFalse((destination / ".git").exists())
 
 
+class SchemaThreeAuthoredTest(unittest.TestCase):
+    """`schema_three.authored` is the question `refusals` answers: may a contract author this member."""
+
+    @staticmethod
+    def leaves(node: object, prefix: str = "") -> list[str]:
+        if not isinstance(node, dict):
+            return [prefix]
+        return [leaf for key, child in node.items()
+                for leaf in SchemaThreeAuthoredTest.leaves(child, f"{prefix}/{key}")]
+
+    def test_the_authored_members_are_neither_constant_derived_nor_retired(self):
+        owned = (*schema_three.CONSTANTS, *schema_three.DERIVED, *schema_three.RETIRED,
+                 *schema_three.CONSTANT_CONTAINERS, *schema_three.DERIVED_CONTAINERS)
+        for member in schema_three.AUTHORED:
+            for other in owned:
+                self.assertFalse(
+                    member == other or member.startswith(other + "/") or other.startswith(member + "/"),
+                    (member, other))
+        for leaf in self.leaves(schema_three_contract()):
+            if leaf != "/schema_version":
+                self.assertTrue(schema_three.authored(leaf), leaf)
+
+    def test_a_platform_command_or_constant_member_is_not_authored(self):
+        for pointer in ("/bindings/commands/lint", "/bindings/commands/lint/argv"):
+            self.assertTrue(schema_three.authored(pointer), pointer)
+        for pointer in ("/bindings/commands/commit-environment", "/bindings/commands/codex-plan-review",
+                        "/bindings/commands/lint/cwd", "/bindings/commands/lint/env",
+                        "/bindings/vcs/default_branch", "/project/id", "/bindings/workflow/light_lane"):
+            self.assertFalse(schema_three.authored(pointer), pointer)
+            contract = schema_three_contract()
+            set_pointer(contract, pointer, {"argv": ["x"]} if "/commands/" in pointer else "x")
+            self.assertIn(pointer, [v["pointer"] for v in schema_three.refusals(contract)])
+
+
 class SchemaThreeFillTest(unittest.TestCase):
     def test_fill_leaves_its_input_unchanged(self):
         source = schema_three_contract()

@@ -1,6 +1,6 @@
 # ADR-project-contract-013 — Project schema 3 leaves the platform constants out of the contract
 
-- **Status:** accepted; D6 amended by #1469, D8 added by #1469
+- **Status:** accepted; D6 amended by #1469 and amended in place by #1485, D8 added by #1469
 - **Decided in:** #1453 (per #1430)
 
 ## Context
@@ -19,7 +19,7 @@ Every registered project's schema-2 contract spells out the same values: the bra
 
 **D5. Verification commands are required.** The verification list is a constant, so a contract must author `lint` and `test`. One that does not, including one with no `bindings.commands`, is refused `contract.commands.member_missing` at `/bindings/commands/<id>`, never at the constant `/bindings/workflow/verification/<n>`. A `bindings.commands` that is not an object keeps its schema-2 shape error.
 
-**D6. Adoption target.** Adoption targets the highest supported schema that a required migration reaches, one whose source schema the platform no longer reads. A migration from a schema the platform still reads is offered: it does not move the target while a required migration exists. A plan on its source schema keeps its outcome and names the step. With no required migration the target is the highest supported schema some migration reaches, else the highest supported schema. Under platform 2.x adoption keeps writing schema 2 and offers the migration to 3. A schema-3 contract or draft is refused until the target moves (amended by #1469).
+**D6. Adoption target.** Adoption targets the highest supported schema that a required migration reaches, one whose source schema the platform no longer reads. A migration from a schema the platform still reads is offered: it does not move the target while a required migration exists. A plan on its source schema keeps its outcome and names the step. With no required migration the target is the highest supported schema some migration reaches, else the highest supported schema. Under platform 2.x adoption keeps writing schema 2 and offers the migration to 3. A draft may declare the target or a later supported schema, and a draft below it is refused; the console drafts schema 3 (#1485). An existing schema-3 contract is still routed by the target (amended by #1469, #1485).
 
 **D7. Optional homes are always filled.** `paths.architecture` and `paths.operations` are filled even when the file or directory is absent. The authored `knowledge.architecture` capability still gates readiness.
 
@@ -35,7 +35,7 @@ It deletes the tracked files under `.agents/artifacts/` (#1418). It refuses when
 
 - No repository is on schema 3 until the migration slice.
 - The migration deletes the tracked adoption evidence record under `.agents/artifacts/`, and `adopt-project verify` still reads it from there until #1456 retires that reader. A repository that commits the migration before #1456 lands is reported not conformant by `verify`, and `verify --register` refuses it. Run the migration on a repository only after #1456 is merged; #1482 (this repository) waits for it too.
-- Adoption writes schema 2 and offers the migration to 3. It refuses a schema-3 contract or draft until a required migration reaches 3.
+- Adoption writes schema 2 and offers the migration to 3. It plans a schema-3 draft, resolved strictly with the checkout's origin (#1485), and routes an existing schema-3 contract by the target.
 - The four values of #1458 are derived from the repository (ADR-project-contract-014); the attempt budget of #1466 stays as decided here until that issue.
 - Rejected: a manifest member for the constants, for the reason ADR-010 rejected one for the commands: the values are code the resolver and its tests must agree on, and a manifest is data a host can leave stale.
 - Rejected: refusing an authored platform id in schema 2, because the registered projects' schema-2 contracts author these ids today and would stop resolving.
