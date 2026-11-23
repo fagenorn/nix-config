@@ -4624,7 +4624,7 @@ class LandLockTest(unittest.TestCase):
         fix = "f" * 40
         cases = {
             # A red poll under the lease at an unsynced head: a policy refusal polls once more.
-            "checks": {"replies": {"merge": [MergeRefusedBehindTest.POLICY], "checks-2": RED, "checks-3": dict(RED, head=fix)},
+            "checks": {"replies": {"merge": [MergeRefusedBehindTest.POLICY], "checks-2": RED, "green-checks-1": red_read(dict(RED, head=fix))},
                        "patch": {"fix-ci": {"start_head": SHA, "commit": fix}}},
             "checks-pending": {"replies": {f"checks-{k}": {"state": "pending", "head": SHA, "pending": ["e2e"]}
                                            for k in (2, 3, 4)},
@@ -4760,237 +4760,31 @@ class LandWaitRetryTest(unittest.TestCase):
         self.assertEqual(self.waits(calls), [])
 
 
-class GreenFirstTest(unittest.TestCase):
-    """The land lease is asked for only once the head is read green, and the checks wait under it beats the lease."""
-
-    D = "d" * 40
-    BEHIND = {"land-take": {"behind": True}, "sync-1": {"merge_commit": "d" * 40}}
-    HOLD = f"forge-claim land hold --repo owner/repo --branch dev --sha {SHA}"
-
-    def synced(self, **replies):
-        """The default run whose take answers behind: one clean sync to D, its checks (checks-2) read at D."""
-        return run_out(replies={"checks-2": green_read(self.D), **replies}, patch=self.BEHIND)
-
-    def test_the_lease_is_asked_for_only_after_the_head_is_green(self):
-        out = run_out(replies={"land-take": {"lock": {"verdict": "acquired", "lock_sha": SHA}, "behind": False}},
-                      patch={"pr": {"green": green_read(SHA)}})
-        calls = out["calls"]
-        names = labels(calls)
-        self.assertEqual(out["result"]["stage"], "done")
-        self.assertEqual(names[names.index("pr"):][:3], ["pr", "land-take", "merge"])
-        self.assertNotIn("forge-claim land", prompt(calls, "pr"))
-        self.assertIn(f"forge-claim land acquire --repo owner/repo --branch dev --sha {SHA} --wait --lease\n", prompt(calls, "land-take"))
-        acquire = [line for line in prompt(calls, "merge").splitlines() if "forge-claim land acquire" in line]
-        self.assertEqual(len(acquire), 1)
-        self.assertTrue(acquire[0].endswith(f"--sha {SHA} --lease"), acquire)
-
-    def test_a_pending_green_read_polls_without_the_lock_and_stops_after_three(self):
-        pending = green_read(state="pending", pending=["e2e"])
-        out = run_out(replies={"green-checks-1": pending, "green-checks-2": pending}, patch={"pr": {"green": pending}})
-        names = labels(out["calls"])
-        self.assertEqual(out["result"]["stage"], "checks-pending")
-        self.assertEqual(names[names.index("pr"):], ["pr", "green-checks-1", "green-checks-2"])
-        self.assertFalse([c["label"] for c in out["calls"] if "forge-claim land" in c["prompt"]])
-        self.assertNotIn("land-unlock", names)
-
-    def test_a_red_head_is_fixed_before_the_lease_is_asked_for(self):
-        out = run_out(replies={"green-checks-1": green_read(FIX)},
-                      patch={"pr": {"green": red_read(RED)}, "fix-ci": {"start_head": SHA, "commit": FIX}})
-        names = labels(out["calls"])
-        self.assertEqual(out["result"]["stage"], "done")
-        self.assertLess(names.index("fix-ci"), names.index("land-take"))
-        self.assertIn("The landing lock of the branch dev is not held and was not asked for yet: run no forge-claim command.",
-                      prompt(out["calls"], "fix-ci"))
-        before = out["calls"][:names.index("land-take")]
-        self.assertFalse([c["label"] for c in before if "forge-claim land" in c["prompt"]])
-
-    def test_a_behind_green_head_syncs_once_and_reruns_its_checks_once(self):
-        out = self.synced()
-        calls = out["calls"]
-        names = labels(calls)
-        self.assertEqual(out["result"]["stage"], "done")
-        self.assertEqual(names[names.index("land-take"):names.index("merge") + 1], ["land-take", "sync-1", "land-push-2", "checks-2", "merge"])
-        self.assertEqual([n for n in names if n.startswith("sync-")], ["sync-1"])
-        self.assertEqual([n for n in names if n.startswith("checks-")], ["checks-2"])
-        beat = f"First run alone and exactly: {self.HOLD}; whatever it answers, go on.\n"
-        self.assertIn(beat + "The branch is behind dev.", prompt(calls, "sync-1"))
-        self.assertIn(beat, prompt(calls, "land-push-2"))
-        self.assertIn(beat.replace(SHA, self.D), prompt(calls, "merge"))
-
-    def test_every_merge_follows_a_passed_poll_of_an_up_to_date_head(self):
-        # (label, head) of each read that passed with the base not past the head.
-        runs = (
-            (run_out(replies={"land-take": {"lock": {"verdict": "acquired", "lock_sha": SHA}, "behind": False}}), [("pr", SHA)], "land-take", False),
-            (self.synced(), [("checks-2", self.D)], "land-take", True),
-        )
-        for out, reads, take, behind in runs:
-            with self.subTest(reads=reads):
-                names = labels(out["calls"])
-                for position, call in enumerate(out["calls"]):
-                    if call["label"] != "merge":
-                        continue
-                    head = re.search(r"--match-head-commit ([0-9a-f]{40})", call["prompt"]).group(1)
-                    earlier = [(label, h) for label, h in reads if h == head and names.index(label) < position]
-                    self.assertTrue(earlier, f"merge at {head} follows no passed read at it: {names}")
-                    # The green read of the pr call counts only when the take after it found the head up to date.
-                    if earlier[-1][0] == "pr":
-                        self.assertNotIn("sync-1", names[names.index("pr"):position])
-
-    def test_every_stop_after_the_lease_releases_it_once(self):
-        pending = green_read(state="pending", pending=["e2e"])
-        cases = {
-            "checks-pending": ({"replies": {"green-checks-1": pending, "green-checks-2": pending}, "patch": {"pr": {"green": pending}}}, 0, None),
-            "sync": ({"patch": {"land-take": {"behind": True}, "sync-1": {"status": "blocked", "notes": "dirty tree"}}}, 1, SHA),
-            "merge": ({"replies": {"merge": None}}, 1, SHA),
-        }
-        for stage, (scenario, unlocks, sha) in cases.items():
-            with self.subTest(stage=stage):
-                out = run_out(**scenario)
-                names = labels(out["calls"])
-                self.assertEqual(out["result"]["stage"], stage)
-                self.assertEqual(names.count("land-unlock"), unlocks)
-                if sha:
-                    self.assertIn(f"forge-claim land release --repo owner/repo --branch dev --sha {sha}\n", prompt(out["calls"], "land-unlock"))
-                    self.assertLess(names.index("land-take"), names.index("land-unlock"))
-                else:
-                    self.assertNotIn("land-take", names)
-
-    def test_the_checks_wait_under_the_lease_beats_instead_of_watching(self):
-        out = self.synced()
-        checks = prompt(out["calls"], "checks-2")
-        self.assertIn(f"forge-claim land hold --repo owner/repo --branch dev --sha {self.D} --seconds 120", checks)
-        self.assertNotIn("gh pr checks 42 --repo owner/repo --watch", checks)
-        self.assertIn("at most 25 times", checks)
-        self.assertIn("When hold prints not_held the lease is lost: stop waiting at once and return state lost", checks)
-        self.assertIn("lost", schema_of(out["calls"], "checks-2")["properties"]["state"]["enum"])
-
-
-class LeaveQueueTest(unittest.TestCase):
-    """A red check at the up-to-date head leaves the queue; a second red stops naming it."""
-
-    D = "d" * 40
-    BEHIND = {"land-take": {"behind": True}, "sync-1": {"merge_commit": "d" * 40}, "fix-ci": {"start_head": "d" * 40, "commit": FIX}}
-    LEFT = "left the land queue: ci failed at the up-to-date head "
-
-    @staticmethod
-    def red(head):
-        return {"state": "failed", "head": head, "failing": ["ci"], "details": "FAIL test_cache"}
-
-    def test_a_red_check_at_the_up_to_date_head_releases_the_lease_before_the_fix(self):
-        out = run_out(replies={"checks-2": self.red(self.D), "checks-3": green_read(FIX)}, patch=self.BEHIND)
-        calls = out["calls"]
-        names = labels(calls)
-        self.assertEqual(out["result"]["stage"], "done")
-        self.assertLess(names.index("land-unlock"), names.index("fix-ci"))
-        self.assertIn(f"forge-claim land release --repo owner/repo --branch dev --sha {self.D}\n", prompt(calls, "land-unlock"))
-        self.assertIn("The land lock was released before this fix; run no forge-claim command.", prompt(calls, "fix-ci"))
-        self.assertNotIn("lock_released", schema_of(calls, "fix-ci")["properties"])
-        self.assertIn(self.LEFT + self.D, out["logs"])
-        retake = prompt(calls, "checks-3")
-        self.assertIn(f"--sha {FIX} --wait --lease\n", retake)
-        self.assertIn("it was released while a failing check of the branch was fixed", retake)
-        self.assertEqual(names.count("land-unlock"), 1)
-
-    def test_a_second_red_at_the_up_to_date_head_stops_naming_it(self):
-        out = run_out(replies={"checks-2": self.red(self.D), "checks-3": self.red(FIX)}, patch=self.BEHIND)
-        names = labels(out["calls"])
-        result = out["result"]
-        self.assertEqual(result["stage"], "checks")
-        self.assertTrue(result["details"].startswith(self.LEFT), result["details"])
-        self.assertEqual(result["details"], self.LEFT + FIX)
-        self.assertEqual(names.count("land-unlock"), 2)
-        self.assertEqual(names[names.index("checks-3") + 1:], ["land-unlock"])
-
-
-class LostLeaseTest(unittest.TestCase):
-    """A lease another landing took over is waited for again at the back, within the wait budget."""
-
-    D = "d" * 40
-    BEHIND = {"land-take": {"behind": True}, "sync-1": {"merge_commit": "d" * 40}}
-    E = "e" * 40
-    MERGED = {"merged": True, "merge_commit": SHA, "notes": "merged", "lock": {"verdict": "already_held", "lock_sha": SHA}}
-
-    def test_a_holder_that_lost_its_lease_waits_again_at_the_back(self):
-        lost = {"lock": {"verdict": "held_by", "lock_sha": self.E, "pr": 77}, "merged": False}
-        out = run_out(replies={"merge": [lost, self.MERGED]})
-        calls = out["calls"]
-        names = labels(calls)
-        self.assertEqual(out["result"]["stage"], "done")
-        self.assertEqual(names[names.index("land-take"):], ["land-take", "merge", "land-relock-1", "merge", "hold", "close-out"])
-        self.assertIn(f"forge-claim land acquire --repo owner/repo --branch dev --sha {SHA} --wait --lease\n", prompt(calls, "land-relock-1"))
-        self.assertNotIn("land-unlock", names)
-        self.assertTrue([line for line in out["logs"] if "land lease" in line and "lost" in line], out["logs"])
-
-    def test_a_take_that_leaves_behind_out_polls_the_checks_before_the_merge(self):
-        """A held lease whose reply does not say behind false (the harness fills a missing key, so null stands for it) is not read as up to date: the checks are polled first."""
-        held = {"renew": {"verdict": "renewed"}, "lock": {"verdict": "acquired", "lock_sha": SHA}, "behind": None}
-        out = run_out(replies={"land-take": held})
-        names = labels(out["calls"])
-        self.assertEqual(out["result"]["stage"], "done")
-        self.assertEqual(names[names.index("land-take"):], ["land-take", "checks-1", "merge", "hold", "close-out"])
-
-    def test_a_relock_after_a_lost_merge_recheck_that_leaves_behind_out_polls_the_checks_first(self):
-        lost = {"lock": {"verdict": "held_by", "lock_sha": self.E, "pr": 77}, "merged": False}
-        held = {"renew": {"verdict": "renewed"}, "lock": {"verdict": "acquired", "lock_sha": SHA}, "behind": None}
-        out = run_out(replies={"merge": [lost, self.MERGED], "land-relock-1": held})
-        names = labels(out["calls"])
-        self.assertEqual(out["result"]["stage"], "done")
-        self.assertEqual(names[names.index("land-take"):], ["land-take", "merge", "land-relock-1", "checks-2", "merge", "hold", "close-out"])
-
-    def test_a_lease_lost_during_the_checks_wait_waits_again(self):
-        lost = {"state": "lost", "lock_sha": self.E}
-        out = run_out(replies={"checks-2": lost, "checks-3": green_read(self.D)}, patch=self.BEHIND)
-        names = labels(out["calls"])
-        self.assertEqual(out["result"]["stage"], "done")
-        self.assertEqual(names[names.index("land-take"):], ["land-take", "sync-1", "land-push-2", "checks-2", "land-relock-1", "checks-3",
-                                                             "merge", "hold", "close-out"])
-        self.assertIn(f"forge-claim land acquire --repo owner/repo --branch dev --sha {self.D} --wait --lease\n", prompt(out["calls"], "land-relock-1"))
-
-    def test_a_move_refused_while_the_lease_is_held_waits_again(self):
-        refused = {"lock": {"verdict": "lost_to", "lock_sha": self.E, "pr": 77}}
-        out = run_out(replies={"checks-2": refused, "checks-3": green_read(self.D)}, patch=self.BEHIND)
-        names = labels(out["calls"])
-        self.assertEqual(out["result"]["stage"], "done")
-        self.assertEqual(names[names.index("land-take"):], ["land-take", "sync-1", "land-push-2", "checks-2", "land-relock-1", "checks-3",
-                                                             "merge", "hold", "close-out"])
-        self.assertNotIn("land-unlock", names)
-
-    def test_a_lost_lease_past_the_wait_budget_stops_land_contended(self):
-        retries = int(re.search(r"^const LAND_WAIT_RETRIES = (\d+)$", PROGRAM.read_text(encoding="utf-8"), re.M).group(1))
-        waiting = {"lock": {"verdict": "land-contended", "lock_sha": self.E, "waited_s": 3000, "position": 3, "ahead": [7, 8]}}
-        out = run_out(replies={"checks-2": {"state": "lost", "lock_sha": self.E}, **{f"land-relock-{k}": waiting for k in range(1, 12)}},
-                      patch=self.BEHIND)
-        names = labels(out["calls"])
-        self.assertEqual(out["result"]["stage"], "land-contended")
-        # Each wait ran out at place 3 behind two others and spent a retry: the first wait and then the retries.
-        self.assertEqual(len([n for n in names if n.startswith("land-relock-")]), retries + 1)
-        self.assertNotIn("merge", names)
-        self.assertNotIn("land-unlock", names)
-
-
 class ConflictedSyncOutsideLockTest(unittest.TestCase):
-    """#913: a sync merge that conflicts is aborted under the land lock and resolved, tested, reviewed and fixed outside it; the
-    accepted head takes the lock again, waiting, and a clean merge never leaves it."""
+    """#913: a sync merge that conflicts is aborted under the land lease and resolved, tested, reviewed and fixed outside it; the
+    accepted head is read green before it takes the lease again, and a clean merge never leaves it."""
 
     BEHIND = {"land-take": {"behind": True}}
+    # The first take finds the base moved past the head; the next, after the resolution, finds it current.
+    TAKES = [{"behind": True}, {}]
     RELEASE = "forge-claim land release --repo owner/repo --branch dev --sha "
     M2 = "e" * 40
 
     def ship(self, replies=None, **patch):
-        return run_out(replies=dict({"checks-2": {"state": "passed", "passed": ["ci"], "head": MERGE}}, **(replies or {})),
-                       patch={**self.BEHIND, "sync-1": ABORTED, "sync-resolve-1": {"merge_commit": MERGE}, **patch})
+        return run_out(replies={"land-take": self.TAKES, **(replies or {})},
+                       patch={"sync-1": ABORTED, "sync-resolve-1": {"merge_commit": MERGE}, **patch})
 
     @staticmethod
     def shipped(out):
         names = labels(out["calls"])
         return names[names.index("pr"):]
 
-    def test_a_conflict_is_aborted_released_resolved_and_the_lock_taken_again(self):
+    def test_a_conflict_is_aborted_released_resolved_and_the_lease_taken_again_once_green(self):
         out = self.ship()
         result, calls = out["result"], out["calls"]
         self.assertEqual(result["stage"], "done")
         self.assertEqual(self.shipped(out), ["pr", "land-take", "sync-1", "land-unlock", "sync-resolve-1", "sync-review-1", "land-push-2",
-                                             "checks-2", "merge", "hold", "close-out"])
+                                             "green-checks-1", "land-take", "merge", "hold", "close-out"])
         sync = prompt(calls, "sync-1")
         self.assertIn("If it conflicts, do not resolve it: run git merge --abort inside /r/.wt/w-issue-9-x", sync)
         self.assertIn("confirm no merge is left in progress", sync)
@@ -5000,11 +4794,12 @@ class ConflictedSyncOutsideLockTest(unittest.TestCase):
         resolve = prompt(calls, "sync-resolve-1")
         for text in ("the landing lock is not held while you work", "rev-parse -q --verify MERGE_HEAD", "merge origin/dev", "Do not push."):
             self.assertIn(text, resolve)
-        # The accepted head is pushed, then the lock is taken at it with --wait and its checks are polled in the same call.
+        # The accepted head is pushed and read green with no lock command; only then is the lease taken at it, waiting.
         self.assertIn(f"at the head {MERGE}", prompt(calls, "land-push-2"))
-        checks = prompt(calls, "checks-2")
-        self.assertIn(f"forge-claim land acquire --repo owner/repo --branch dev --sha {MERGE} --wait --lease\n", checks)
-        self.assertIn("merge-base --is-ancestor origin/dev HEAD", checks)
+        self.assertNotIn("land acquire --repo", prompt(calls, "green-checks-1"))
+        take = prompt(calls, "land-take")
+        self.assertIn(f"forge-claim land acquire --repo owner/repo --branch dev --sha {MERGE} --wait --lease\n", take)
+        self.assertIn("merge-base --is-ancestor origin/dev HEAD", take)
         merge = prompt(calls, "merge")
         self.assertIn(f"--sha {MERGE} --lease\n", merge)
         self.assertIn("Only when lock's verdict is already_held or moved", merge)
@@ -5016,15 +4811,15 @@ class ConflictedSyncOutsideLockTest(unittest.TestCase):
     DESCENDS = {"verdict": "pass", "findings": [], "descends": True}
 
     def followed(self, review, replies=None, **patch):
-        return run_out(replies=dict({"checks-2": {"state": "passed", "passed": ["ci"], "head": self.M2}, "sync-review-1": review}, **(replies or {})),
-                       patch={**self.BEHIND, "sync-1": ABORTED, "sync-resolve-1": self.FOLLOWED, **patch})
+        return run_out(replies={"land-take": self.TAKES, "sync-review-1": review, **(replies or {})},
+                       patch={"sync-1": ABORTED, "sync-resolve-1": self.FOLLOWED, **patch})
 
     def test_a_resolution_with_commits_on_top_of_its_merge_commit_is_reviewed_over_both_and_ships_at_its_head(self):
         out = self.followed(self.DESCENDS)
         result, calls = out["result"], out["calls"]
         self.assertEqual(result["stage"], "done")
         self.assertEqual(self.shipped(out), ["pr", "land-take", "sync-1", "land-unlock", "sync-resolve-1", "sync-review-1", "land-push-2",
-                                             "checks-2", "merge", "hold", "close-out"])
+                                             "green-checks-1", "land-take", "merge", "hold", "close-out"])
         review = prompt(calls, "sync-review-1")
         wt = "/r/.wt/w-issue-9-x"
         for needle in (f"git -C {wt} show --cc {MERGE}", f"git -C {wt} merge-base --is-ancestor {MERGE} {self.M2}",
@@ -5033,9 +4828,10 @@ class ConflictedSyncOutsideLockTest(unittest.TestCase):
             with self.subTest(needle=needle):
                 self.assertIn(needle, review)
         self.assertIn("descends", schema_of(calls, "sync-review-1")["required"])
-        # Everything downstream is at the head: the push, the lock, the merge and the release.
+        # Everything downstream is at the head: the push, the green read, the lease, the merge and the release.
         self.assertIn(f"at the head {self.M2}", prompt(calls, "land-push-2"))
-        self.assertIn(f"forge-claim land acquire --repo owner/repo --branch dev --sha {self.M2} --wait --lease\n", prompt(calls, "checks-2"))
+        self.assertIn(f"at the head {self.M2}", prompt(calls, "green-checks-1"))
+        self.assertIn(f"forge-claim land acquire --repo owner/repo --branch dev --sha {self.M2} --wait --lease\n", prompt(calls, "land-take"))
         self.assertIn(f"--match-head-commit {self.M2}", prompt(calls, "merge"))
         self.assertIn(f"{self.RELEASE}{self.M2}", prompt(calls, "hold"))
 
@@ -5078,14 +4874,14 @@ class ConflictedSyncOutsideLockTest(unittest.TestCase):
 
     def test_the_fix_wave_of_a_resolution_with_follow_up_commits_starts_at_its_head_and_names_the_range(self):
         fixed = "9" * 40
-        out = self.followed(dict(FINDING, descends=True), replies={"checks-2": {"state": "passed", "passed": ["ci"], "head": fixed}},
-                            **{"fix-sync-1": {"start_head": self.M2, "commit": fixed}})
+        out = self.followed(dict(FINDING, descends=True), **{"fix-sync-1": {"start_head": self.M2, "commit": fixed}})
         calls = out["calls"]
         self.assertEqual(out["result"]["stage"], "done")
         rng = f"merge commit {MERGE} (git -C /r/.wt/w-issue-9-x show --cc {MERGE}) and the commits made on top of it up to the head {self.M2}"
         self.assertIn(rng, prompt(calls, "fix-sync-1"))
         self.assertIn(f"diff {self.M2}..{fixed}", prompt(calls, "fix-sync-review-1"))
         self.assertIn(f"--match-head-commit {fixed}", prompt(calls, "merge"))
+        self.assertIn(f"at the head {fixed}", prompt(calls, "green-checks-1"))
         # A fix that started at the merge commit, beneath the follow-up commits, is not a fix of the reviewed head.
         out = self.followed(dict(FINDING, descends=True), **{"fix-sync-1": {"start_head": MERGE, "commit": fixed}})
         self.assertEqual(out["result"]["stage"], "sync-fix")
@@ -5112,46 +4908,45 @@ class ConflictedSyncOutsideLockTest(unittest.TestCase):
         self.assertIn(f"Move the cross-host landing lock of the branch dev for PR #42 to the head {MERGE}", prompt(calls, "checks-2"))
         self.assertNotIn(" --wait --lease\n", prompt(calls, "checks-2"))
 
-    def test_behind_again_after_the_retake_a_clean_merge_stays_under_the_lock(self):
-        out = self.ship(replies={"checks-2": {"state": "behind", "head": MERGE, "lock": {"verdict": "acquired", "lock_sha": MERGE}},
-                                 "checks-3": {"state": "passed", "passed": ["ci"], "head": self.M2}},
-                        **{"sync-2": {"merge_commit": self.M2}})
+    def test_behind_again_after_the_second_take_a_clean_merge_stays_under_the_lock(self):
+        out = self.ship(replies={"land-take": [{"behind": True}, {"behind": True}, {}],
+                                 "checks-4": {"state": "passed", "passed": ["ci"], "head": self.M2}}, **{"sync-2": {"merge_commit": self.M2}})
         self.assertEqual(out["result"]["stage"], "done")
-        self.assertEqual(self.shipped(out), ["pr", "land-take", "sync-1", "land-unlock", "sync-resolve-1", "sync-review-1", "land-push-2", "checks-2",
-                                             "sync-2", "land-push-3", "checks-3", "merge", "hold", "close-out"])
-        again = prompt(out["calls"], "checks-3")
+        self.assertEqual(self.shipped(out), ["pr", "land-take", "sync-1", "land-unlock", "sync-resolve-1", "sync-review-1", "land-push-2",
+                                             "green-checks-1", "land-take", "sync-2", "land-push-4", "checks-4", "merge", "hold", "close-out"])
+        again = prompt(out["calls"], "checks-4")
         self.assertIn(f"--sha {self.M2} --lease\n", again)
         self.assertNotIn(" --wait --lease\n", again)
         self.assertIn(f"--match-head-commit {self.M2}", prompt(out["calls"], "merge"))
 
     def test_behind_again_with_a_second_conflict_is_resolved_outside_the_lock_again(self):
         second = {"sync-2": ABORTED, "sync-resolve-2": {"merge_commit": self.M2}}
-        out = self.ship(replies={"checks-2": {"state": "behind", "head": MERGE}, "checks-3": {"state": "passed", "passed": ["ci"], "head": self.M2}}, **second)
+        out = self.ship(replies={"land-take": [{"behind": True}, {"behind": True}, {}]}, **second)
         self.assertEqual(out["result"]["stage"], "done")
         self.assertEqual(self.shipped(out), [
-            "pr", "land-take", "sync-1", "land-unlock", "sync-resolve-1", "sync-review-1", "land-push-2", "checks-2",
-            "sync-2", "land-unlock", "sync-resolve-2", "sync-review-2", "land-push-3", "checks-3", "merge", "hold", "close-out"])
+            "pr", "land-take", "sync-1", "land-unlock", "sync-resolve-1", "sync-review-1", "land-push-2", "green-checks-1", "land-take",
+            "sync-2", "land-unlock", "sync-resolve-2", "sync-review-2", "land-push-4", "green-checks-2", "land-take", "merge", "hold", "close-out"])
         # Each hold is released once, at the head it was held at.
         unlocks = [c["prompt"] for c in out["calls"] if c["label"] == "land-unlock"]
         self.assertEqual([self.RELEASE + sha + "\n" in text for sha, text in zip((SHA, MERGE), unlocks)], [True, True])
-        self.assertIn(f"--sha {self.M2} --wait --lease\n", prompt(out["calls"], "checks-3"))
+        self.assertIn(f"--sha {self.M2} --wait --lease\n", prompt(out["calls"], "land-take"))
         # Behind once more: the sync bound ends the delivery with its own reason, and the third hold is released.
-        out = self.ship(replies={"checks-2": {"state": "behind", "head": MERGE}, "checks-3": {"state": "behind", "head": self.M2}}, **second)
+        out = self.ship(replies={"land-take": [{"behind": True}, {"behind": True}, {"behind": True}]}, **second)
         self.assertEqual((out["result"]["stage"], out["result"]["syncs"]), ("sync-contention", 2))
         names = labels(out["calls"])
         self.assertNotIn("merge", names)
         self.assertEqual(names.count("land-unlock"), 3)
         self.assertIn(f"{self.RELEASE}{self.M2}\n", prompt(out["calls"], "land-unlock"))
 
-    def test_a_refused_retake_never_merges_and_holds_nothing(self):
+    def test_a_refused_take_after_a_resolution_never_merges_and_holds_nothing(self):
         for verdict in ("land-contended", "held_by", "lost_to"):
             with self.subTest(verdict=verdict):
-                out = self.ship(replies={"checks-2": {"lock": {"verdict": verdict, "lock_sha": self.M2}},
-                                         **{f"land-relock-{k}": {"lock": {"verdict": "land-contended"}} for k in (1, 2, 3)}})
+                out = self.ship(replies={"land-take": [{"behind": True}, {"lock": {"verdict": verdict, "lock_sha": self.M2}}],
+                                         **{f"land-lock-{k}": {"lock": {"verdict": "land-contended"}} for k in (1, 2, 3)}})
                 result, names = out["result"], labels(out["calls"])
                 # Only a wait that ran out is waited for again, as often as a first wait is (LAND_WAIT_RETRIES).
-                self.assertEqual([name for name in names if name.startswith("land-relock-")],
-                                 [f"land-relock-{k}" for k in (1, 2, 3)] if verdict == "land-contended" else [])
+                self.assertEqual([name for name in names if name.startswith("land-lock-")],
+                                 [f"land-lock-{k}" for k in (1, 2, 3)] if verdict == "land-contended" else [])
                 self.assertEqual((result["stage"], result["lock"]), ("land-contended", verdict))
                 self.assertNotIn("merge", names)
                 # The only release is the one before the resolution.
@@ -5159,23 +4954,22 @@ class ConflictedSyncOutsideLockTest(unittest.TestCase):
                 self.assertLess(names.index("land-unlock"), names.index("sync-resolve-1"))
                 self.assertNotIn("lock_unreleased", result)
 
-    def test_a_retake_that_answers_acquired_still_merges_only_on_the_pre_merge_check(self):
-        retaken = {"state": "passed", "passed": ["ci"], "head": MERGE, "lock": {"verdict": "acquired", "lock_sha": MERGE, "waited_s": 1740, "waited_on": [2257]}}
-        out = self.ship(replies={"checks-2": retaken})
+    def test_a_take_after_a_resolution_that_answers_acquired_still_merges_only_on_the_pre_merge_check(self):
+        retaken = {"lock": {"verdict": "acquired", "lock_sha": MERGE, "waited_s": 1740, "waited_on": [2257]}}
+        out = self.ship(replies={"land-take": [{"behind": True}, retaken]})
         self.assertEqual(out["result"]["stage"], "done")
-        self.assertIn("checks-2: waited 29 min for the land lock of dev behind PR #2257", out["logs"])
-        out = self.ship(replies={"checks-2": retaken, "merge": {"merged": False, "notes": "held_by", "lock": {"verdict": "held_by"}}})
+        self.assertIn("land-take: waited 29 min for the land lock of dev behind PR #2257", out["logs"])
+        out = self.ship(replies={"land-take": [{"behind": True}, retaken], "merge": {"merged": False, "notes": "held_by", "lock": {"verdict": "held_by"}}})
         self.assertEqual(out["result"]["stage"], "land-contended")
         self.assertNotIn("hold", labels(out["calls"]))
 
-    def test_a_lost_retake_releases_what_it_may_hold(self):
-        out = self.ship(replies={"checks-2": None})
-        self.assertEqual(out["result"]["stage"], "land-contended")
+    def test_a_lost_take_after_a_resolution_releases_what_it_may_hold(self):
+        out = self.ship(replies={"land-take": [{"behind": True}, None]})
+        self.assertEqual(out["result"]["stage"], "land-lock")
         names = labels(out["calls"])
         self.assertEqual(names.count("land-unlock"), 2)
-        # The waiting acquire may have taken the lock at the accepted head: the release names it as the second sha.
-        last = prompt(out["calls"], "land-unlock")
-        self.assertIn(f"When it prints not_held with lock_sha {MERGE}, run alone and exactly: {self.RELEASE}{MERGE}", last)
+        # The waiting acquire may have taken the lock at the accepted head: the stop releases it there.
+        self.assertIn(f"{self.RELEASE}{MERGE}\n", prompt(out["calls"], "land-unlock"))
         self.assertNotIn("merge", names)
 
     def test_every_stop_outside_the_lock_releases_once_and_accepts_nothing(self):
@@ -5210,54 +5004,50 @@ class ConflictedSyncOutsideLockTest(unittest.TestCase):
         self.assertEqual(out["result"]["lock_unreleased"]["sha"], SHA)
 
     def test_a_sync_step_that_resolved_the_conflict_itself_is_released_and_reviewed(self):
-        out = run_out(replies={"checks-2": {"state": "passed", "passed": ["ci"], "head": MERGE}},
-                      patch=dict(self.BEHIND, **{"sync-1": {"conflicted": True, "merge_commit": MERGE}}))
+        out = run_out(replies={"land-take": self.TAKES}, patch={"sync-1": {"conflicted": True, "merge_commit": MERGE}})
         self.assertEqual(out["result"]["stage"], "done")
-        self.assertEqual(self.shipped(out), ["pr", "land-take", "sync-1", "land-unlock", "sync-review-1", "land-push-2", "checks-2",
-                                             "merge", "hold", "close-out"])
-        self.assertIn(f"--sha {MERGE} --wait --lease\n", prompt(out["calls"], "checks-2"))
+        self.assertEqual(self.shipped(out), ["pr", "land-take", "sync-1", "land-unlock", "sync-review-1", "land-push-2", "green-checks-1",
+                                             "land-take", "merge", "hold", "close-out"])
+        self.assertIn(f"--sha {MERGE} --wait --lease\n", prompt(out["calls"], "land-take"))
 
     def test_a_resolution_that_says_it_merged_cleanly_is_reviewed_all_the_same(self):
         clean = {"sync-resolve-1": {"conflicted": False, "merge_commit": MERGE}}
         out = self.ship(**clean)
         self.assertEqual(out["result"]["stage"], "done")
-        self.assertEqual(self.shipped(out), ["pr", "land-take", "sync-1", "land-unlock", "sync-resolve-1", "sync-review-1", "land-push-2", "checks-2",
-                                             "merge", "hold", "close-out"])
+        self.assertEqual(self.shipped(out), ["pr", "land-take", "sync-1", "land-unlock", "sync-resolve-1", "sync-review-1", "land-push-2",
+                                             "green-checks-1", "land-take", "merge", "hold", "close-out"])
         self.assertIn(f"merge commit {MERGE}", prompt(out["calls"], "sync-review-1"))
-        self.assertIn(f"--sha {MERGE} --wait --lease\n", prompt(out["calls"], "checks-2"))
+        self.assertIn(f"--sha {MERGE} --wait --lease\n", prompt(out["calls"], "land-take"))
         out = self.ship(replies={"sync-review-1": FINDING, "fix-sync-review-1": FINDING},
                         **clean, **{"fix-sync-1": {"start_head": MERGE, "commit": FIX}})
         self.assertEqual(out["result"]["stage"], "sync-review")
         self.assertNotIn("merge", labels(out["calls"]))
 
-    def test_a_retake_whose_wait_ran_out_waits_again_like_a_first_wait(self):
+    def test_a_take_after_a_resolution_whose_wait_ran_out_waits_again_like_a_first_wait(self):
         out_of_time = {"lock": {"verdict": "land-contended", "lock_sha": self.M2, "waited_s": 3600, "waited_on": [7]}}
-        out = self.ship(replies={"checks-2": out_of_time, "checks-3": {"state": "passed", "passed": ["ci"], "head": MERGE},
-                                 "land-relock-1": {"lock": {"verdict": "land-contended"}},
-                                 "land-relock-2": {"lock": {"verdict": "acquired", "lock_sha": MERGE, "waited_s": 900, "waited_on": [7, 9]}}})
+        takes = {"land-take": [{"behind": True}, out_of_time]}
+        out = self.ship(replies={**takes, "land-lock-1": {"lock": {"verdict": "land-contended"}},
+                                 "land-lock-2": {"lock": {"verdict": "acquired", "lock_sha": MERGE, "waited_s": 900, "waited_on": [7, 9]}}})
         result, calls = out["result"], out["calls"]
         self.assertEqual(result["stage"], "done")
-        # A retried wait polled no checks: the next round polls them, under the lock, before the merge.
-        self.assertEqual(self.shipped(out), ["pr", "land-take", "sync-1", "land-unlock", "sync-resolve-1", "sync-review-1", "land-push-2", "checks-2",
-                                             "land-relock-1", "land-relock-2", "checks-3", "merge", "hold", "close-out"])
-        again = next(c for c in calls if c["label"] == "land-relock-2")
+        self.assertEqual(self.shipped(out), ["pr", "land-take", "sync-1", "land-unlock", "sync-resolve-1", "sync-review-1", "land-push-2",
+                                             "green-checks-1", "land-take", "land-lock-1", "land-lock-2", "merge", "hold", "close-out"])
+        again = next(c for c in calls if c["label"] == "land-lock-2")
         self.assertEqual((again["agentType"], again["model"]), ("clerk", "sonnet"))
         self.assertIn("forge-claim renew --repo owner/repo --issue 9", again["prompt"])
         self.assertIn(f"forge-claim land acquire --repo owner/repo --branch dev --sha {MERGE} --wait --lease\n", again["prompt"])
-        self.assertNotIn("land acquire --repo", prompt(calls, "checks-3"))
         self.assertIn(f"{self.RELEASE}{MERGE}", prompt(calls, "hold"))
         self.assertEqual([line for line in out["logs"] if "waited" in line],
-                         ["checks-2: waited 60 min for the land lock of dev behind PR #7",
-                          "land-relock-2: waited 15 min for the land lock of dev behind PR #7, #9"])
+                         ["land-take: waited 60 min for the land lock of dev behind PR #7",
+                          "land-lock-2: waited 15 min for the land lock of dev behind PR #7, #9"])
         # A lost claim ends the wait; a lost reply may hold the lock at the accepted head, which the stop's release covers.
-        out = self.ship(replies={"checks-2": out_of_time, "land-relock-1": {"renew": {"verdict": "not_held", "by": "h2/b1"}, "lock": None}})
-        self.assertEqual((out["result"]["stage"], out["result"]["at"]), ("claim-lost", "land-relock-1"))
+        out = self.ship(replies={**takes, "land-lock-1": {"renew": {"verdict": "not_held", "by": "h2/b1"}, "lock": None}})
+        self.assertEqual((out["result"]["stage"], out["result"]["at"]), ("claim-lost", "land-lock-1"))
         self.assertEqual(labels(out["calls"]).count("land-unlock"), 1)
-        out = self.ship(replies={"checks-2": out_of_time, "land-relock-1": None})
+        out = self.ship(replies={**takes, "land-lock-1": None})
         self.assertEqual(out["result"]["stage"], "land-lock")
         self.assertEqual(labels(out["calls"]).count("land-unlock"), 2)
-        self.assertIn(f"When it prints not_held with lock_sha {MERGE}, run alone and exactly: {self.RELEASE}{MERGE}",
-                      prompt(out["calls"], "land-unlock"))
+        self.assertIn(f"{self.RELEASE}{MERGE}\n", prompt(out["calls"], "land-unlock"))
         self.assertNotIn("merge", labels(out["calls"]))
 
     def test_a_long_first_wait_is_logged_with_its_holders(self):
@@ -5458,17 +5248,14 @@ class ResolveBeforeLockTest(unittest.TestCase):
         self.assertNotIn("land-unlock", labels(out["calls"]))
 
     def test_a_conflict_after_the_acquire_takes_the_913_path(self):
-        out = self.ship(replies={"checks-3": green_read(self.M2)},
-                        **{"land-take": {"behind": True}, "sync-2": ABORTED, "sync-resolve-2": {"merge_commit": self.M2}})
+        out = self.ship(replies={"land-take": [{"behind": True}, {}]},
+                        **{"sync-2": ABORTED, "sync-resolve-2": {"merge_commit": self.M2}})
         self.assertEqual(out["result"]["stage"], "done")
         self.assertEqual(self.shipped(out), self.RESOLVED + ["sync-2", "land-unlock", "sync-resolve-2", "sync-review-2", "land-push-3",
-                                                             "checks-3", "merge", "hold", "close-out"])
-        # The hold taken at the accepted head is released before the second resolution; the retake waits at the second accepted head.
+                                                             "green-checks-2", "land-take", "merge", "hold", "close-out"])
+        # The hold taken at the accepted head is released before the second resolution; the lease is taken at the second accepted head once green.
         self.assertIn(f"{self.RELEASE}{MERGE}\n", prompt(out["calls"], "land-unlock"))
-        retake = prompt(out["calls"], "checks-3")
-        self.assertIn(f"Take the cross-host landing lock of the branch dev for PR #42 again, at the head {self.M2}; "
-                      "it was released while a conflict was resolved", retake)
-        self.assertIn(f"--sha {self.M2} --wait --lease\n", retake)
+        self.assertIn(f"--sha {self.M2} --wait --lease\n", prompt(out["calls"], "land-take"))
     def test_the_round_before_the_lock_spends_no_sync_contention(self):
         clean = {"checks-3": {"state": "behind", "head": self.M2}, "checks-4": green_read(self.M3)}
         merges = {"land-take": {"behind": True}, "sync-2": {"merge_commit": self.M2}, "sync-3": {"merge_commit": self.M3}}
@@ -5633,15 +5420,14 @@ class ShipFixWaveTest(unittest.TestCase):
         self.assertNotIn("fix-ci", labels(calls))
 
     def test_sync_review_finding_gets_one_fix_wave_then_merges(self):
-        result, calls = run(replies={"sync-review-1": FINDING,
-                                     "checks-2": {"state": "passed", "passed": ["ci"], "head": FIX, "required": ["ci-tests"]}},
-                            patch={"land-take": {"behind": True},
-                                   "sync-1": ABORTED, "sync-resolve-1": {"conflicted": True, "merge_commit": MERGE, "resolved_files": ["a.py"]},
+        result, calls = run(replies={"sync-review-1": FINDING, "land-take": [{"behind": True}, {}]},
+                            patch={"sync-1": ABORTED, "sync-resolve-1": {"conflicted": True, "merge_commit": MERGE, "resolved_files": ["a.py"]},
                                    "fix-sync-1": {"start_head": MERGE, "commit": FIX}})
         self.assertEqual(result["stage"], "done")
         names = labels(calls)
-        self.assertEqual(names[names.index("sync-1"):names.index("checks-2")],
-                         ["sync-1", "land-unlock", "sync-resolve-1", "sync-review-1", "fix-sync-1", "fix-sync-review-1", "land-push-2"])
+        self.assertEqual(names[names.index("sync-1"):names.index("merge")],
+                         ["sync-1", "land-unlock", "sync-resolve-1", "sync-review-1", "fix-sync-1", "fix-sync-review-1", "land-push-2",
+                          "green-checks-1", "land-take"])
         fix = prompt(calls, "fix-sync-1")
         self.assertIn(MERGE, fix)
         self.assertIn("dropped the new call site", fix)
@@ -5689,12 +5475,10 @@ class ShipFixWaveTest(unittest.TestCase):
         self.assertIn("fix-ci-review", labels(calls))
 
     def sync_rebuttal(self, review=None, **fix):
-        replies = {"sync-review-1": FINDING,
-                   "checks-2": {"state": "passed", "passed": ["ci"], "head": MERGE, "required": ["ci-tests"]}}
+        replies = {"sync-review-1": FINDING, "land-take": [{"behind": True}, {}]}
         replies.update(review or {})
         return run(replies=replies,
-                   patch={"land-take": {"behind": True},
-                          "sync-1": ABORTED, "sync-resolve-1": {"conflicted": True, "merge_commit": MERGE},
+                   patch={"sync-1": ABORTED, "sync-resolve-1": {"conflicted": True, "merge_commit": MERGE},
                           "fix-sync-1": dict({"start_head": MERGE, "commit": MERGE, "notes": "the call site is on line 12"}, **fix)})
 
     def test_a_sync_rebuttal_with_evidence_and_no_commit_is_adjudicated_by_the_reviewer(self):
@@ -8497,7 +8281,7 @@ class FinalReviewedResumeTest(unittest.TestCase):
                 self.assertNotIn("since_reviewed", prompt(calls, "setup"))
 
     def test_an_accepted_conflicted_merge_keeps_the_skip(self):
-        stopped = self.sync_stop({"checks-2": {"lock": {"verdict": "already_held", "lock_sha": MERGE}}}, {})
+        stopped = self.sync_stop({"green-checks-1": None}, {})
         self.assertEqual(stopped["stage"], "checks")
         self.assertEqual(stopped["cont"]["final_reviewed"], {"head": TIP, "accepted": [MERGE]})
         result, calls = run(args=dict(ARGS, cont=stopped["cont"]),
@@ -10064,10 +9848,9 @@ SCENARIOS = (
     {"patch": {"land-take": {"lock": {"verdict": "land-contended", "lock_sha": "b" * 40}}}},
     # A head whose checks are still running is polled with no lock before the lease is asked for.
     {"patch": {"pr": {"green": green_read(state="pending", pending=["e2e"])}}},
-    # #913: a retake whose wait ran out is waited for again in a land-relock step.
-    {"replies": {"checks-2": {"lock": {"verdict": "land-contended"}}, "checks-3": {"state": "passed", "passed": ["ci"], "head": MERGE}},
-     "patch": {"land-take": {"behind": True}, "sync-1": ABORTED, "sync-resolve-1": {"merge_commit": MERGE},
-               "land-relock-1": {"lock": {"verdict": "acquired", "lock_sha": MERGE}}}},
+    # A lease lost during the checks wait is waited for again in a land-relock step.
+    {"replies": {"checks-2": {"state": "lost", "lock_sha": "e" * 40}, "checks-3": green_read(MERGE)},
+     "patch": {"land-take": {"behind": True}, "sync-1": {"merge_commit": MERGE}}},
     {"args": DIRECT, "replies": {"direct-review": BAD}},
     {"args": DIRECT, "replies": {"direct-review": {"verdict": "pass", "findings": [], "escalate": True}}},
     # #1139: a marked issue stops at awaiting look; a head behind its base is synced and pushed first.
@@ -12023,7 +11806,7 @@ class CodexQuotaStopTest(unittest.TestCase):
 
 class OwnRedOutsideLockTest(unittest.TestCase):
     """#1001: a red check the branch itself caused is fixed outside the land lock. Under the lock, the fix step of a red poll at a
-    head no sync has changed releases the lock before it edits, and the reviewed fix takes it again, waiting; a pull request that
+    head no sync has changed releases the lock before it edits, and the reviewed fix is read green before it takes it again; a pull request that
     already existed is read once before the lock is asked for, and a check that had already failed there is fixed with no lock."""
 
     RELEASE = f"forge-claim land release --repo owner/repo --branch dev --sha {SHA}\n"
@@ -12044,22 +11827,20 @@ class OwnRedOutsideLockTest(unittest.TestCase):
                        patch=patch)
 
     def test_a_red_first_poll_releases_the_lock_for_the_fix_and_ships_the_reviewed_head(self):
-        out = self.under_lease(RED, {"checks-3": self.GREEN}, **{"fix-ci": dict(self.FIXED, lock_released=True)})
+        out = self.under_lease(RED, **{"fix-ci": dict(self.FIXED, lock_released=True)})
         result, calls = out["result"], out["calls"]
         self.assertEqual(result["stage"], "done")
-        # No step is added: the fix step releases the lock itself, and the next checks call takes it again.
-        self.assertEqual(self.shipped(out), ["pr", "land-take", "merge", "checks-2", "fix-ci", "fix-ci-review", "land-push-3", "checks-3",
-                                             "merge", "hold", "close-out"])
+        # No step is added: the fix step releases the lock itself, and the fix head is read green before the lease is asked for.
+        self.assertEqual(self.shipped(out), ["pr", "land-take", "merge", "checks-2", "fix-ci", "fix-ci-review", "land-push-3", "green-checks-1",
+                                             "land-take", "merge", "hold", "close-out"])
         fix = prompt(calls, "fix-ci")
         self.assertIn(f"The landing lock of the branch dev is held for this pull request at {SHA}", fix)
         self.assertIn(f"release the lock before you edit any file: run alone and exactly: {self.RELEASE}", fix)
         self.assertIn("keep the lock: run no forge-claim command and return lock_released false", fix)
         self.assertLess(fix.index(self.RELEASE), fix.index("Find the cause in this branch's changes"))
         self.assertEqual(schema_of(calls, "fix-ci")["properties"]["lock_released"], {"type": "boolean"})
-        checks = prompt(calls, "checks-3")
-        self.assertIn(f"Take the cross-host landing lock of the branch dev for PR #42 again, at the head {FIX}; "
-                      "it was released while a failing check of the branch was fixed", checks)
-        self.assertIn(f"forge-claim land acquire --repo owner/repo --branch dev --sha {FIX} --wait --lease\n", checks)
+        self.assertNotIn("land acquire --repo", prompt(calls, "green-checks-1"))
+        self.assertIn(f"forge-claim land acquire --repo owner/repo --branch dev --sha {FIX} --wait --lease\n", prompt(calls, "land-take"))
         merge = prompt(calls, "merge")
         self.assertIn(f"--sha {FIX} --lease\n", merge)
         self.assertIn(f"--match-head-commit {FIX}", merge)
@@ -12068,10 +11849,10 @@ class OwnRedOutsideLockTest(unittest.TestCase):
         self.assertIn("ci-tests failed at the head the lock was taken at; its fix is reviewed outside the land lock", out["logs"])
 
     def test_a_release_the_fix_step_did_not_report_is_made_before_the_review(self):
-        out = self.under_lease(RED, {"checks-3": self.GREEN}, **{"fix-ci": dict(self.FIXED, lock_released=False)})
+        out = self.under_lease(RED, **{"fix-ci": dict(self.FIXED, lock_released=False)})
         self.assertEqual(out["result"]["stage"], "done")
         self.assertEqual(self.shipped(out), ["pr", "land-take", "merge", "checks-2", "fix-ci", "land-unlock", "fix-ci-review", "land-push-3",
-                                             "checks-3", "merge", "hold", "close-out"])
+                                             "green-checks-1", "land-take", "merge", "hold", "close-out"])
         self.assertIn(self.RELEASE, prompt(out["calls"], "land-unlock"))
 
     def test_a_flaky_red_is_rerun_under_the_lock_as_before(self):
@@ -12082,19 +11863,19 @@ class OwnRedOutsideLockTest(unittest.TestCase):
         self.assertNotIn("forge-claim land acquire", prompt(out["calls"], "checks-3"))
         self.assertEqual([line for line in out["logs"] if "outside the land lock" in line], [])
 
-    def test_a_rerun_that_released_the_lock_against_its_prompt_takes_it_again(self):
-        out = self.under_lease(RED, {"checks-3": {"state": "passed", "passed": ["ci"], "head": SHA, "required": ["ci-tests"]}},
-                               **{"fix-ci": dict(self.RERAN, lock_released=True)})
+    def test_a_rerun_that_released_the_lock_against_its_prompt_is_read_green_before_it_takes_it_again(self):
+        out = self.under_lease(RED, **{"fix-ci": dict(self.RERAN, lock_released=True)})
         self.assertEqual(out["result"]["stage"], "done")
-        self.assertEqual(self.shipped(out), ["pr", "land-take", "merge", "checks-2", "fix-ci", "land-push-3", "checks-3", "merge", "hold", "close-out"])
-        self.assertIn(f"--sha {SHA} --wait --lease\n", prompt(out["calls"], "checks-3"))
+        self.assertEqual(self.shipped(out), ["pr", "land-take", "merge", "checks-2", "fix-ci", "green-checks-1", "land-take", "merge", "hold",
+                                             "close-out"])
+        self.assertIn(f"--sha {SHA} --wait --lease\n", prompt(out["calls"], "land-take"))
 
     def test_the_fix_outside_the_lock_happens_once_per_delivery(self):
-        out = self.under_lease(RED, {"checks-3": dict(RED, head=FIX)}, **{"fix-ci": self.FIXED})
+        out = self.under_lease(RED, {"green-checks-1": red_read(dict(RED, head=FIX))}, **{"fix-ci": self.FIXED})
         self.assertEqual(out["result"]["stage"], "checks")
-        self.assertEqual(self.shipped(out), ["pr", "land-take", "merge", "checks-2", "fix-ci", "fix-ci-review", "land-push-3", "checks-3",
+        self.assertEqual(self.shipped(out), ["pr", "land-take", "merge", "checks-2", "fix-ci", "fix-ci-review", "land-push-3", "green-checks-1",
                                              "land-unlock"])
-        self.assertIn(f"--sha {FIX}\n", prompt(out["calls"], "land-unlock"))
+        self.assertIn(f"--sha {SHA}\n", prompt(out["calls"], "land-unlock"))
 
     def test_a_fix_the_review_rejects_releases_the_verified_head_once_more_and_never_ships(self):
         out = self.under_lease(RED, {"fix-ci-review": FINDING}, **{"fix-ci": self.FIXED})
@@ -12103,17 +11884,16 @@ class OwnRedOutsideLockTest(unittest.TestCase):
         self.assertIn(self.RELEASE, prompt(out["calls"], "land-unlock"))
 
     def test_a_red_check_after_a_sync_under_the_lock_leaves_the_queue_before_its_fix(self):
-        out = run_out(replies={"checks-2": RED, "checks-3": self.GREEN},
-                      patch={"land-take": {"behind": True}, "fix-ci": self.FIXED})
+        out = run_out(replies={"checks-2": RED, "land-take": [{"behind": True}, {}]}, patch={"fix-ci": self.FIXED})
         calls = out["calls"]
         self.assertEqual(out["result"]["stage"], "done")
         self.assertEqual(self.shipped(out), ["pr", "land-take", "sync-1", "checks-2", "land-unlock", "fix-ci", "fix-ci-review", "land-push-3",
-                                             "checks-3", "merge", "hold", "close-out"])
+                                             "green-checks-1", "land-take", "merge", "hold", "close-out"])
         self.assertIn("The land lock was released before this fix; run no forge-claim command.", prompt(calls, "fix-ci"))
         self.assertNotIn("forge-claim land", prompt(calls, "fix-ci"))
         self.assertNotIn("lock_released", schema_of(calls, "fix-ci")["properties"])
-        self.assertIn(f"Take the cross-host landing lock of the branch dev for PR #42 again, at the head {FIX}", prompt(calls, "checks-3"))
-        self.assertIn(f"--sha {FIX} --wait --lease\n", prompt(calls, "checks-3"))
+        self.assertNotIn("forge-claim land", prompt(calls, "green-checks-1"))
+        self.assertIn(f"--sha {FIX} --wait --lease\n", prompt(calls, "land-take"))
 
     def test_the_pr_call_reads_a_reused_pull_request_once_before_the_lock(self):
         _, calls = run()
@@ -12194,22 +11974,22 @@ class OwnRedOutsideLockTest(unittest.TestCase):
         # A red answer that names no stale run is a second red poll, as ever.
         red = run_out(replies={"green-checks-1": red_read(dict(RED, head=SHA))}, patch={"pr": self.PRE_RED, "fix-ci": self.RERAN})
         self.assertEqual(red["result"]["stage"], "checks")
-    def test_a_stale_gate_after_a_rerun_that_released_the_lock_is_asked_in_the_retake_round(self):
-        passed = {"state": "passed", "passed": ["ci"], "head": SHA, "required": ["ci-tests"]}
-        out = self.under_lease(RED, {"checks-3": self.STALE, "checks-4": passed}, **{"fix-ci": dict(self.RERAN, lock_released=True)})
+    def test_a_stale_gate_after_a_rerun_that_released_the_lock_is_asked_in_the_green_read(self):
+        out = self.under_lease(RED, {"green-checks-1": red_read(self.STALE), "green-checks-2": green_read(SHA)},
+                               **{"fix-ci": dict(self.RERAN, lock_released=True)})
         calls = out["calls"]
         self.assertEqual(out["result"]["stage"], "done")
-        self.assertEqual(self.shipped(out), ["pr", "land-take", "merge", "checks-2", "fix-ci", "land-push-3", "checks-3", "checks-4",
+        self.assertEqual(self.shipped(out), ["pr", "land-take", "merge", "checks-2", "fix-ci", "green-checks-1", "green-checks-2", "land-take",
                                              "merge", "hold", "close-out"])
-        self.assertIn(f"--sha {SHA} --wait --lease\n", prompt(calls, "checks-3"))
-        self.assertIn(self.STALE_ASK, prompt(calls, "checks-3"))
-        self.assertIn("stale", schema_of(calls, "checks-3")["properties"])
-        self.assertNotIn(self.STALE_ASK, prompt(calls, "checks-4"))
+        self.assertNotIn("forge-claim land", prompt(calls, "green-checks-1"))
+        self.assertIn(self.STALE_ASK, prompt(calls, "green-checks-1"))
+        self.assertIn("stale", schema_of(calls, "green-checks-1")["properties"])
+        self.assertNotIn(self.STALE_ASK, prompt(calls, "green-checks-2"))
 
-    def test_a_round_that_moves_the_lock_to_a_fix_commit_asks_no_stale_question(self):
-        out = self.under_lease(RED, {"checks-3": self.GREEN}, **{"fix-ci": self.FIXED})
-        self.assertNotIn(self.STALE_ASK, prompt(out["calls"], "checks-3"))
-        self.assertNotIn("stale", schema_of(out["calls"], "checks-3")["properties"])
+    def test_the_green_read_of_a_fix_commit_asks_no_stale_question(self):
+        out = self.under_lease(RED, **{"fix-ci": self.FIXED})
+        self.assertNotIn(self.STALE_ASK, prompt(out["calls"], "green-checks-1"))
+        self.assertNotIn("stale", schema_of(out["calls"], "green-checks-1")["properties"])
 
     def test_a_red_read_after_a_conflict_resolved_before_the_lock_is_fixed_with_no_lock(self):
         """The accepted head is read and its red check fixed with no lock; only the fixed head takes it."""
@@ -12224,11 +12004,11 @@ class OwnRedOutsideLockTest(unittest.TestCase):
         self.assertIn(f"--sha {FIX} --wait --lease\n", prompt(calls, "land-take"))
         releases = [sha for c in calls for sha in re.findall(r"forge-claim land release --repo owner/repo --branch dev --sha ([0-9a-f]+)", c["prompt"])]
         self.assertEqual(releases, [FIX])
-    def test_a_reported_release_that_left_the_lock_held_is_a_move_and_ships(self):
+    def test_a_reported_release_that_left_the_lock_held_is_taken_again_at_the_fix_head(self):
         for verdict in ("moved", "already_held", "acquired"):
             with self.subTest(verdict=verdict):
-                out = self.under_lease(RED, {"checks-3": dict(self.GREEN, lock={"verdict": verdict, "lock_sha": FIX})},
-                                       **{"fix-ci": dict(self.FIXED, lock_released=True)})
+                taken = {"lock": {"verdict": verdict, "lock_sha": FIX}}
+                out = self.under_lease(RED, {"land-take": [{}, taken]}, **{"fix-ci": dict(self.FIXED, lock_released=True)})
                 self.assertEqual(out["result"]["stage"], "done")
                 self.assertNotIn("land-unlock", labels(out["calls"]))
                 self.assertIn(f"forge-claim land release --repo owner/repo --branch dev --sha {FIX}", prompt(out["calls"], "hold"))
@@ -12306,15 +12086,15 @@ class WaitByPlaceTest(unittest.TestCase):
                 self.assertEqual(result["stage"], "land-contended")
                 self.assertEqual(len([label for label in labels(calls) if label.startswith("land-lock-")]), 6)
 
-    def test_a_retake_judges_each_wait_by_its_own_reply_and_shares_the_ceiling(self):
+    def test_a_take_after_a_resolution_judges_each_wait_by_its_own_reply_and_shares_the_ceiling(self):
         ship = ConflictedSyncOutsideLockTest().ship
-        relocks = lambda out: [label for label in labels(out["calls"]) if label.startswith("land-relock-")]  # noqa: E731
-        # The checks call's wait ended first in line; the waits after it end at place 3 and spend the retries.
-        out = ship(replies={"checks-2": self.ran_out(1), **{f"land-relock-{k}": self.ran_out(3) for k in range(1, 10)}})
-        self.assertEqual((out["result"]["stage"], relocks(out)), ("land-contended", [f"land-relock-{k}" for k in range(1, 5)]))
-        # First in line for ever: seven waits of 50 minutes in all, the checks call's included.
-        out = ship(replies={"checks-2": self.ran_out(1), **{f"land-relock-{k}": self.ran_out(1) for k in range(1, 10)}})
-        self.assertEqual((out["result"]["stage"], relocks(out)), ("land-contended", [f"land-relock-{k}" for k in range(1, 7)]))
+        relocks = lambda out: [label for label in labels(out["calls"]) if label.startswith("land-lock-")]  # noqa: E731
+        # The take's wait ended first in line; the waits after it end at place 3 and spend the retries.
+        out = ship(replies={"land-take": [{"behind": True}, self.ran_out(1)], **{f"land-lock-{k}": self.ran_out(3) for k in range(1, 10)}})
+        self.assertEqual((out["result"]["stage"], relocks(out)), ("land-contended", [f"land-lock-{k}" for k in range(1, 5)]))
+        # First in line for ever: seven waits of 50 minutes in all, the take's included.
+        out = ship(replies={"land-take": [{"behind": True}, self.ran_out(1)], **{f"land-lock-{k}": self.ran_out(1) for k in range(1, 10)}})
+        self.assertEqual((out["result"]["stage"], relocks(out)), ("land-contended", [f"land-lock-{k}" for k in range(1, 7)]))
 
     def test_the_lock_replies_carry_the_place(self):
         _, calls = run(patch={"land-take": self.ran_out(1)})
@@ -12391,13 +12171,14 @@ class BehindRedBeforeLockTest(unittest.TestCase):
     def test_a_red_check_under_the_lock_after_a_green_sync_before_it_is_still_the_branchs_own(self):
         """No sync has changed the head under the lock, so the fix step releases the lock before it edits (#1001)."""
         out = run_out(replies={"green-checks-1": self.GREEN, "merge": [MergeRefusedBehindTest.POLICY, MergeRefusedBehindTest.MERGED],
-                               "checks-3": dict(RED, head=MERGE), "checks-4": dict(self.GREEN, head=FIX)},
+                               "checks-3": dict(RED, head=MERGE), "green-checks-2": green_read(FIX)},
                       patch={"pr": self.PRE, "sync-1": self.SYNCED, "fix-ci": {"start_head": MERGE, "commit": FIX, "lock_released": True}})
         self.assertEqual(out["result"]["stage"], "done")
         fix = prompt(out["calls"], "fix-ci")
         self.assertIn(f"The landing lock of the branch dev is held for this pull request at {MERGE}", fix)
         self.assertIn("lock_released", schema_of(out["calls"], "fix-ci")["properties"])
-        self.assertIn("it was released while a failing check of the branch was fixed", prompt(out["calls"], "checks-4"))
+        self.assertNotIn("forge-claim land", prompt(out["calls"], "green-checks-2"))
+        self.assertIn(f"--sha {FIX} --wait --lease\n", prompt(out["calls"], "land-take"))
     def test_a_red_read_that_is_still_behind_syncs_again_before_any_fix(self):
         behind = red_read({"state": "failed", "head": MERGE, "failing": ["shard-3"], "behind": True})
         out = run_out(replies={"green-checks-1": behind, "green-checks-2": self.GREEN},
@@ -13550,432 +13331,6 @@ class LookResumeTest(unittest.TestCase):
 
     def test_the_scenario_look_cont_is_a_real_stop_cont(self):
         self.assertEqual(LOOK_CONT, self.look_cont())
-
-
-class LookCarryLandingTest(unittest.TestCase):
-    """#1566: a landing resync that moves the head asks look-approval carry, after verifying the new head, before it asks the owner again."""
-
-    PICS = [{"kind": "before", "path": "/r/pics/before.png"}, {"kind": "after", "path": "/r/pics/after.png"}]
-    NEEDED = dict(LookResumeTest.MOVED, **{"look-status": {"verdict": "needed", "kept_from": None},
-                                           "checks-3": {"state": "passed", "head": D, "required": ["ci"], "passed": ["ci"]},
-                                           "look-checks-1": {"state": "passed", "head": D, "behind": False, "required": ["ci"], "passed": ["ci"]}})
-    # The verified carry leaves the land queue first (the harness default of the own-files rule is touched), so the
-    # landing retakes the lease and reads the status again: needed, then the approval the carry recorded.
-    AFTER_CARRY = [{"verdict": "needed", "kept_from": None}, {"verdict": "approved", "kept_from": SHA}]
-    CARRIED = {"verdict": "carried", "from": SHA, "reason": None, "rule": "pictures", "comment_id": 501}
-    FILES_CARRIED = dict(CARRIED, rule="look-files")
-    OK = [{"id": "build", "status": "pass", "summary": "ok"}]
-    BARE = {"head": D, "clean": True, "merge_only": True, "results": OK}
-
-    def approve(self, patch=None, replies=None, cont=None):
-        if cont is None:
-            first, _ = run(patch={"setup": {"look": MARKED}})
-            cont = first["cont"]
-        if patch is None and not (replies and "look-status" in replies):
-            replies = dict({"look-status": self.AFTER_CARRY}, **(replies or {}))
-        return run(args=dict(ARGS, cont=cont, look={"answer": "approve", "head": SHA}), patch=self.NEEDED if patch is None else patch, replies=replies)
-
-    def stops_unasked(self, result, calls, stage="look-carry"):
-        got = labels(calls)
-        self.assertEqual(result["stage"], stage)
-        self.assertNotIn("merge", got)
-        self.assertFalse([l for l in got if l.startswith("look-checks-")], got)
-        self.assertIn("land-unlock", got)
-
-    def test_a_head_that_only_merged_the_integration_branch_lands_on_a_carry_line(self):
-        """The verified carry runs outside the land queue (D12): a land-unlock comes before its verification.
-
-        The landing then retakes the lease at the back, reads the recorded approval and merges.
-        """
-        result, calls = self.approve(replies={"look-carry": self.CARRIED})
-        got = labels(calls)
-        self.assertEqual(result["stage"], "done")
-        order = ["look-status", "look-carry-own", "land-unlock", "look-carry-verify", "look-carry", "checks-3", "look-status", "merge"]
-        self.assertEqual([l for l in got if l in order], order)
-        self.assertIn("land acquire --repo owner/repo --branch dev --sha " + D + " --wait --lease\n", prompt(calls, "checks-3"))
-        verify = prompt(calls, "look-carry-verify")
-        self.assertIn("merge-base --is-ancestor " + SHA + " " + D, verify)
-        self.assertIn("rev-list --no-merges " + SHA + ".." + D + " ^origin/dev", verify)
-        self.assertIn("merge-tree --write-tree", verify)
-        self.assertIn("Run the project's declared verification once on the worktree head", verify)
-        self.assertIn("look-approval carry --repo owner/repo --issue 9 --pr 42 --from " + SHA + " --head " + D
-                      + " --before /r/pics/before.png --after /r/pics/after.png", prompt(calls, "look-carry"))
-        self.assertIn("--match-head-commit " + D, prompt(calls, "merge"))
-        self.assertIn("look-approval tick --repo owner/repo --issue 9 --pr 42 --head " + D, prompt(calls, "close-out"))
-        for call in calls:
-            self.assertNotIn("look-approval post", call["prompt"])
-
-    def test_a_head_with_no_pictures_carries_by_the_look_file_rule(self):
-        """The carry leaves the land queue first (D12), then the landing retakes the lease and merges."""
-        result, calls = self.approve(replies={"look-carry-verify": self.BARE, "look-carry": self.FILES_CARRIED})
-        self.assertEqual(result["stage"], "done", labels(calls))
-        carry = prompt(calls, "look-carry")
-        self.assertIn("look-approval carry --repo owner/repo --issue 9 --pr 42 --from " + SHA + " --head " + D + "\n", carry)
-        for flag in (" --before ", " --after ", " --picture "):
-            self.assertNotIn(flag, carry)
-        self.assertIn("--match-head-commit " + D, prompt(calls, "merge"))
-        for call in calls:
-            self.assertNotIn("look-approval post", call["prompt"])
-
-    def test_a_changed_look_file_diff_stops_for_a_new_look(self):
-        needed = {"verdict": "needed", "from": SHA, "reason": "look-files-differ", "rule": "look-files", "comment_id": None}
-        result, calls = self.approve(replies={"look-carry-verify": self.BARE, "look-carry": needed})
-        got = labels(calls)
-        self.assertEqual(result["stage"], "awaiting-look")
-        self.assertEqual(result["head"], D)
-        self.assertEqual(result["reason"], "the approval of " + SHA + " does not carry to " + D + ": look-files-differ; " + AWAIT_REASON)
-        self.assertLess(got.index("look-carry"), got.index("look-checks-1"))
-        self.assertNotIn("merge", got)
-        self.assertIn("land-unlock", got)
-
-    def test_a_carried_reply_must_name_its_rule(self):
-        cases = (("no rule", {}, {k: v for k, v in self.CARRIED.items() if k != "rule"}),
-                 ("another rule", {}, dict(self.CARRIED, rule="other")),
-                 ("pictures rule with no pictures", {"look-carry-verify": self.BARE}, dict(self.CARRIED, rule="pictures")))
-        for name, extra, reply in cases:
-            with self.subTest(case=name):
-                result, calls = self.approve(replies=dict(extra, **{"look-carry": reply}))
-                self.stops_unasked(result, calls)
-
-    def test_a_changed_picture_stops_for_a_new_look(self):
-        result, calls = self.approve()
-        got = labels(calls)
-        self.assertEqual(result["stage"], "awaiting-look")
-        self.assertEqual(result["head"], D)
-        self.assertEqual(result["reason"], "the approval of " + SHA + " does not carry to " + D + ": pictures-differ; " + AWAIT_REASON)
-        self.assertEqual(result["pictures"], self.PICS)
-        self.assertLess(got.index("look-carry"), got.index("look-checks-1"))
-        self.assertNotIn("merge", got)
-        self.assertIn("land-unlock", got)
-        self.assertEqual(result["cont"]["look"], {"pr": 42, "head": D})
-
-    def test_a_non_merge_commit_stops_for_a_new_look_at_the_new_head(self):
-        theirs = [{"kind": "before", "path": "/r/pics/a-before.png"}, {"kind": "after", "path": "/r/pics/a-after.png"}]
-        mine = [{"kind": "before", "path": "/r/pics/h-before.png"}, {"kind": "after", "path": "/r/pics/h-after.png"}]
-        first, _ = run(patch={"setup": {"look": MARKED}, "verify": {"pictures": theirs}})
-        reply = {"head": D, "clean": True, "merge_only": False, "results": self.OK, "pictures": mine}
-        result, calls = self.approve(cont=first["cont"], replies={"look-carry-verify": reply})
-        got = labels(calls)
-        self.assertEqual(result["stage"], "awaiting-look")
-        self.assertEqual(result["head"], D)
-        self.assertEqual(result["pictures"], mine)
-        self.assertEqual(result["cont"]["verified"]["head"], D)
-        self.assertEqual(result["cont"]["verified"]["pictures"], mine)
-        self.assertTrue(result["reason"].endswith("it adds commits that are not clean merges of dev; " + AWAIT_REASON), result["reason"])
-        self.assertNotIn("look-carry", got)
-        self.assertIn("look-checks-1", got)
-
-    def test_a_worktree_that_cannot_reach_the_new_head_asks_for_the_owners_look(self):
-        stale = {"head": F, "clean": True, "merge_only": False, "results": []}
-        result, calls = self.approve(replies={"look-carry-verify": stale})
-        got = labels(calls)
-        self.assertEqual(result["stage"], "awaiting-look")
-        self.assertEqual(result["head"], D)
-        for label in ("look-carry", "merge"):
-            self.assertNotIn(label, got)
-        self.assertIn("look-checks-1", got)
-        self.assertIn("land-unlock", got)
-
-    def test_a_carry_whose_verification_fails_stops_without_asking(self):
-        failed = {"head": D, "clean": True, "merge_only": True, "results": [{"id": "build", "status": "fail", "summary": "boom"}]}
-        result, calls = self.approve(replies={"look-carry-verify": failed})
-        self.stops_unasked(result, calls)
-        self.assertNotIn("look-carry", labels(calls))
-
-    def test_an_unusable_verification_reply_stops_without_asking(self):
-        for name, reply in (("none", None), ("another head", {"head": F, "clean": True, "merge_only": True, "results": self.OK})):
-            with self.subTest(reply=name):
-                result, calls = self.approve(replies={"look-carry-verify": reply})
-                self.stops_unasked(result, calls)
-                self.assertNotIn("look-carry", labels(calls))
-
-    def test_a_picture_path_with_a_space_reaches_the_command_as_one_quoted_argument(self):
-        """The carry leaves the land queue first (D12), then the landing retakes the lease and merges."""
-        spaced = {"head": D, "clean": True, "merge_only": True, "results": self.OK,
-                  "pictures": [{"kind": "before", "path": "/r/my pics/b.png"}, {"kind": "after", "path": "/r/my pics/it's a.png"}]}
-        result, calls = self.approve(replies={"look-carry-verify": spaced, "look-carry": self.CARRIED})
-        self.assertEqual(result["stage"], "done")
-        self.assertIn(" --head " + D + " --before '/r/my pics/b.png' --after '/r/my pics/it'\\''s a.png'\n", prompt(calls, "look-carry"))
-
-    def test_a_picture_path_that_is_not_absolute_or_spans_lines_carries_nothing(self):
-        for path in ("pics/a.png", "/r/pics/a\nb.png", "/"):
-            with self.subTest(path=path):
-                odd = {"head": D, "clean": True, "merge_only": True, "results": self.OK, "pictures": [{"kind": "after", "path": path}]}
-                result, calls = self.approve(replies={"look-carry-verify": odd})
-                self.assertEqual(result["stage"], "awaiting-look")
-                self.assertNotIn("look-carry", labels(calls))
-
-    def test_an_approval_recorded_between_the_status_and_the_carry_lands_the_head(self):
-        """The carry leaves the land queue first (D12), then the landing retakes the lease and merges."""
-        own = [{"verdict": "needed", "kept_from": None}, {"verdict": "approved", "kept_from": None}]
-        result, calls = self.approve(replies={"look-status": own, "look-carry": {"verdict": "approved", "from": None, "reason": None, "comment_id": None}})
-        self.assertEqual(result["stage"], "done", labels(calls))
-        self.assertIn("--match-head-commit " + D, prompt(calls, "merge"))
-        stopped, _ = self.approve(replies={"look-status": own, "look-carry": {"verdict": "approved", "from": None, "reason": None, "comment_id": None}, "merge": None})
-        self.assertEqual(stopped["cont"]["look"], {"pr": 42, "head": D, "approved": D})
-
-    def test_an_unusable_carry_reply_stops_without_asking(self):
-        replies = (({"verdict": "moved"}), ({"verdict": "error", "detail": "x"}), None, ({"verdict": "carried"}),
-                   {"verdict": "carried", "from": SHA, "rule": "pictures", "comment_id": None},
-                   {"verdict": "carried", "from": None, "rule": "pictures", "comment_id": 501},
-                   {"verdict": "carried", "from": SHA[:7], "rule": "pictures", "comment_id": 501},
-                   {"verdict": "carried", "from": F, "rule": "pictures", "comment_id": 501},
-                   {"verdict": "carried", "from": SHA, "rule": "pictures", "comment_id": 0}, {"verdict": "needed"},
-                   {"verdict": "needed", "reason": "whatever"}, {"verdict": "needed", "reason": "no-pictures"})
-        for reply in replies:
-            with self.subTest(reply=reply):
-                result, calls = self.approve(replies={"look-carry": reply})
-                self.stops_unasked(result, calls)
-
-    def test_a_status_that_stays_needed_after_the_carry_stops_instead_of_carrying_again(self):
-        """One carry runs per head: when look-status still answers needed at the carried head, the delivery stops."""
-        result, calls = self.approve(replies={"look-status": {"verdict": "needed", "kept_from": None}, "look-carry": self.CARRIED})
-        got = labels(calls)
-        self.assertEqual(result["stage"], "look-carry")
-        self.assertEqual(result["head"], D)
-        self.assertEqual(got.count("look-carry-verify"), 1, got)
-        self.assertEqual(got.count("look-carry"), 1, got)
-        self.assertNotIn("merge", got)
-
-    def test_a_kept_approval_runs_no_carry(self):
-        result, calls = self.approve(patch=dict(self.NEEDED, **{"look-status": {"verdict": "approved", "kept_from": SHA}}))
-        self.assertEqual(result["stage"], "done")
-        self.assertNotIn("look-carry-verify", labels(calls))
-        self.assertNotIn("look-carry", labels(calls))
-
-    def test_a_stop_after_a_carry_keeps_the_owners_head_for_the_resume(self):
-        """The carry leaves the land queue first (D12), so the second landing's carry follows a land-unlock too."""
-        stopped, _ = self.approve(replies={"look-carry": self.CARRIED, "merge": None})
-        self.assertEqual(stopped["stage"], "merge")
-        self.assertEqual(stopped["cont"]["look"], {"pr": 42, "head": D, "approved": D, "owner": SHA})
-        stale = {"merged": False, "behind": True, "notes": "Head branch is not up to date with the base branch", "renew": {"verdict": "renewed"},
-                 "lock": {"verdict": "already_held", "lock_sha": D}}
-        replies = {"look-status": self.AFTER_CARRY, "look-carry": self.CARRIED,
-                   "merge": [stale, {"merged": True, "merge_commit": F, "notes": "merged", "renew": {"verdict": "renewed"},
-                                     "lock": {"verdict": "already_held", "lock_sha": F}}]}
-        patch = dict(LookResumeTest.MOVED, **{"checks-3": {"state": "behind", "head": D}, "sync-2": {"merge_commit": F, "head": F},
-                                              "checks-4": {"state": "passed", "head": F, "required": ["ci"], "passed": ["ci"]},
-                                              "checks-5": {"state": "passed", "head": F, "required": ["ci"], "passed": ["ci"]}})
-        result, calls = run(args=dict(ARGS, cont=stopped["cont"]), patch=patch, replies=replies)
-        self.assertEqual(result["stage"], "done", labels(calls))
-        self.assertIn("--from " + SHA + " --head " + F, prompt(calls, "look-carry"))
-        self.assertNotIn("--from " + D, prompt(calls, "look-carry"))
-
-    def test_a_second_resync_carries_from_the_owners_head(self):
-        """The second resync's verified carry leaves the land queue first (D12); the landing retakes the lease at F."""
-        stale = {"merged": False, "behind": True, "notes": "Head branch is not up to date with the base branch", "renew": {"verdict": "renewed"},
-                 "lock": {"verdict": "already_held", "lock_sha": D}}
-        replies = {"look-status": [{"verdict": "approved", "kept_from": SHA}] + self.AFTER_CARRY,
-                   "merge": [stale, {"merged": True, "merge_commit": F, "notes": "merged", "renew": {"verdict": "renewed"},
-                                     "lock": {"verdict": "already_held", "lock_sha": F}}],
-                   "look-carry": self.CARRIED}
-        patch = dict(LookResumeTest.MOVED, **{"checks-3": {"state": "behind", "head": D}, "sync-2": {"merge_commit": F, "head": F},
-                                              "checks-4": {"state": "passed", "head": F, "required": ["ci"], "passed": ["ci"]},
-                                              "checks-5": {"state": "passed", "head": F, "required": ["ci"], "passed": ["ci"]}})
-        result, calls = self.approve(patch=patch, replies=replies)
-        self.assertEqual(result["stage"], "done", labels(calls))
-        verify = prompt(calls, "look-carry-verify")
-        self.assertIn("rev-list --no-merges " + SHA + ".." + F, verify)
-        self.assertNotIn(D + ".." + F, verify)
-        self.assertIn("--from " + SHA + " --head " + F, prompt(calls, "look-carry"))
-        self.assertIn("--match-head-commit " + F, prompt(calls, "merge"))
-
-
-VERIFY_TEXT = "Run the project's declared verification once on the worktree head"
-
-
-def acquires(call):
-    return "forge-claim land acquire" in call["prompt"] and call["label"] != "merge"
-
-
-def verified_under_the_lock(calls):
-    """Labels of a verification that ran between a lock acquire and the next land-unlock."""
-    held, bad = False, []
-    for call in calls:
-        if call["label"] == "land-unlock":
-            held = False
-        elif acquires(call):
-            held = True
-        elif call["label"] in ("look-carry-verify", "look-reverify") and held:
-            bad.append(call["label"])
-    return bad
-
-
-class OwnFilesCarryTest(unittest.TestCase):
-    """A clean sync that touched no own file carries the approval with no local verification (D11).
-
-    Any other head change leaves the land queue before the verified carry (D12).
-    """
-
-    OWN = {"verdict": "carried", "from": SHA, "reason": None, "rule": "own-files", "comment_id": 502}
-    TOUCHED = {"verdict": "needed", "from": SHA, "reason": "own-files-touched", "rule": "own-files", "comment_id": None}
-    CARRIED = LookCarryLandingTest.CARRIED
-    APPROVED = {"verdict": "approved", "kept_from": None}
-    SYNCED = dict(LookResumeTest.MOVED, **{"checks-3": LookResumeTest.MOVED["checks-2"]})
-
-    def approve(self, replies=None, patch=None):
-        first, _ = run(patch={"setup": {"look": MARKED}})
-        return run(args=dict(ARGS, cont=first["cont"], look={"answer": "approve", "head": SHA}),
-                   patch=self.SYNCED if patch is None else patch, replies=replies)
-
-    def test_a_clean_sync_that_touches_no_own_file_lands_with_no_local_verification(self):
-        result, calls = self.approve(replies={"look-carry-own": self.OWN, "merge": {"merged": True, "merge_commit": D, "notes": "merged"}})
-        got = labels(calls)
-        self.assertEqual(result["stage"], "done", got)
-        for label in ("look-carry-verify", "look-reverify", "look-carry"):
-            self.assertNotIn(label, got)
-        for call in calls[got.index("pr") + 1:]:
-            self.assertNotIn(VERIFY_TEXT, call["prompt"])
-            self.assertNotIn("look-approval post", call["prompt"])
-        self.assertIn("look-approval carry --repo owner/repo --issue 9 --pr 42 --from " + SHA + " --head " + D + " --own-files",
-                      prompt(calls, "look-carry-own"))
-        self.assertIn("First run alone and exactly: forge-claim land hold --repo owner/repo --branch dev --sha " + D
-                      + "; whatever it answers, go on.\nThen run alone and exactly: look-approval carry", prompt(calls, "look-carry-own"))
-        between = got[got.index("sync-1"):got.index("merge")]
-        self.assertEqual([l for l in between if l.startswith("checks-")], ["checks-2"])
-        self.assertIn("--match-head-commit " + D, prompt(calls, "merge"))
-        self.assertLess(got.index("look-status"), got.index("look-carry-own"))
-        self.assertLess(got.index("look-carry-own"), got.index("merge"))
-        self.assertNotIn("land-unlock", got)
-
-    def test_an_own_file_touched_by_the_sync_leaves_the_queue_before_the_verified_carry(self):
-        replies = {"look-carry-own": self.TOUCHED, "look-carry": self.CARRIED, "look-status": [{"verdict": "needed", "kept_from": None}, self.APPROVED]}
-        result, calls = self.approve(replies=replies)
-        got = labels(calls)
-        self.assertEqual(result["stage"], "done", got)
-        order = ["look-carry-own", "land-unlock", "look-carry-verify", "look-carry", "checks-3", "look-status", "merge"]
-        self.assertEqual([l for l in got[got.index("look-carry-own"):] if l in order], order)
-        self.assertIn("forge-claim land release --repo owner/repo --branch dev --sha " + D, prompt(calls, "land-unlock"))
-        self.assertIn("land acquire --repo owner/repo --branch dev --sha " + D + " --wait --lease\n", prompt(calls, "checks-3"))
-        self.assertEqual(verified_under_the_lock(calls), [])
-        self.assertEqual(got.count("look-carry-verify"), 1)
-        self.assertIn("--match-head-commit " + D, prompt(calls, "merge"))
-        for call in calls:
-            self.assertNotIn("look-approval post", call["prompt"])
-
-    def test_a_conflicted_sync_never_asks_the_own_files_rule(self):
-        patch = dict(self.SYNCED, **{"sync-1": {"status": "conflicted", "conflicted": True, "notes": "a.py"},
-                                    "sync-resolve-1": {"merge_commit": D, "head": D}})
-        replies = {"look-carry": self.CARRIED, "look-status": [{"verdict": "needed", "kept_from": None}, self.APPROVED]}
-        result, calls = self.approve(replies=replies, patch=patch)
-        got = labels(calls)
-        self.assertEqual(result["stage"], "done", got)
-        self.assertNotIn("look-carry-own", got)
-        verify = got.index("look-carry-verify")
-        self.assertEqual(got[verify - 1], "land-unlock")
-        last = max(i for i, l in enumerate(got[:verify]) if l == "land-unlock")
-        self.assertFalse([c["label"] for c in calls[last:verify] if acquires(c)])
-        self.assertEqual(verified_under_the_lock(calls), [])
-
-    def test_a_carried_reply_naming_another_rule_or_head_stops(self):
-        cases = (("another rule", dict(self.OWN, rule="pictures")), ("another head", dict(self.OWN, **{"from": F})),
-                 ("no comment", dict(self.OWN, comment_id=0)), ("no rule", {k: v for k, v in self.OWN.items() if k != "rule"}),
-                 ("moved", {"verdict": "moved"}), ("none", None), ("unknown reason", dict(self.TOUCHED, reason="whatever")))
-        for name, reply in cases:
-            with self.subTest(case=name):
-                result, calls = self.approve(replies={"look-carry-own": reply})
-                got = labels(calls)
-                self.assertEqual(result["stage"], "look-carry")
-                self.assertEqual(got.count("land-unlock"), 1)
-                self.assertNotIn("merge", got)
-                self.assertNotIn("look-carry-verify", got)
-
-    def test_a_fallback_that_needs_a_new_look_stops_holding_nothing(self):
-        needed = {"verdict": "needed", "from": SHA, "reason": "pictures-differ", "rule": "pictures", "comment_id": None}
-        result, calls = self.approve(replies={"look-carry-own": self.TOUCHED, "look-carry": needed,
-                                              "look-checks-1": {"state": "passed", "head": D, "behind": False, "required": ["ci"], "passed": ["ci"]}})
-        got = labels(calls)
-        self.assertEqual(result["stage"], "awaiting-look")
-        self.assertEqual(got.count("land-unlock"), 1)
-        self.assertLess(got.index("land-unlock"), got.index("look-carry-verify"))
-        self.assertFalse([l for l in got if l.startswith("land-relock-")], got)
-        self.assertNotIn("merge", got)
-
-
-class LandQueueDemoTest(unittest.TestCase):
-    """The demo (D20): two green approved pull requests queue; the second lands after one sync and one rerun."""
-
-    S1, S2, M1 = "1" * 40, "2" * 40, "e" * 40
-    CI, SYNC, MERGE = 520, 60, 30
-
-    class FakeClock:
-        def __init__(self):
-            self.now = 0
-
-        def advance(self, seconds):
-            self.now += seconds
-
-    class FakeForge:
-        """The forge a run is computed from: the tip, each pull request's head and own files, the runs per head."""
-
-        def __init__(self, clock, pulls):
-            self.clock, self.pulls, self.merged, self.runs = clock, pulls, [], {}
-            self.tip, self.tip_files = "0" * 40, set()
-            self.base = {n: self.tip for n in pulls}
-
-        def runs_at(self, head):
-            return self.runs.get(head, 0)
-
-        def replies(self, pr, sync_commit):
-            """The static replies of one run of pull request pr, computed from the state before it."""
-            head, own, since = self.pulls[pr]["head"], self.pulls[pr]["own"], self.pulls[pr]["registered"]
-            behind = self.tip != self.base[pr]
-            replies = {"pr": {"pr": pr, "head": head, "green": green_read(head)},
-                       "look-head": {"head": head, "state": "OPEN"},
-                       "land-take": {"lock": {"verdict": "acquired", "lock_sha": head, "waited_s": self.clock.now - since}, "behind": behind},
-                       "look-status": {"verdict": "needed", "kept_from": None}}
-            if behind:
-                replies["sync-1"] = {"status": "done", "conflicted": False, "merge_commit": sync_commit, "head": sync_commit}
-                replies["checks-2"] = {"state": "passed", "head": sync_commit, "required": ["ci"], "passed": ["ci"]}
-                touched = bool(own & self.tip_files)
-                replies["look-carry-own"] = ({"verdict": "needed", "from": head, "reason": "own-files-touched", "rule": "own-files", "comment_id": None} if touched
-                                              else {"verdict": "carried", "from": head, "reason": None, "rule": "own-files", "comment_id": 502})
-            landing = sync_commit if behind else head
-            replies["merge"] = {"merged": True, "merge_commit": landing, "notes": "merged",
-                                "lock": {"verdict": "already_held", "lock_sha": landing}}
-            return replies, landing
-
-        def record(self, pr, calls, landing):
-            """The run's effects: each CI run at the head it answered, and the merge that moves the tip."""
-            got = labels(calls)
-            self.runs[landing] = self.runs.get(landing, 0) + len([l for l in got if l.startswith("checks-")])
-            if "merge" in got:
-                self.merged.append(pr)
-                self.tip, self.tip_files = landing, set(self.pulls[pr]["own"])
-
-    def land(self, forge, pr, sync_commit):
-        head = forge.pulls[pr]["head"]
-        first, _ = run(patch={"setup": {"look": MARKED, "head": head}, "verify": {"head": head}, "look-pr": {"pr": pr, "head": head}})
-        replies, landing = forge.replies(pr, sync_commit)
-        result, calls = run(args=dict(ARGS, cont=first["cont"], look={"answer": "approve", "head": head}),
-                            patch={"setup": {"look": MARKED, "head": head}}, replies=replies)
-        got = labels(calls)
-        forge.clock.advance(self.SYNC * got.count("sync-1") + self.CI * len([l for l in got if l.startswith("checks-")]) + self.MERGE * ("merge" in got))
-        forge.record(pr, calls, landing)
-        return result, calls
-
-    def test_two_green_approved_pull_requests_queue_and_the_second_lands_after_one_sync_and_one_rerun(self):
-        clock = self.FakeClock()
-        forge = self.FakeForge(clock, {41: {"head": self.S1, "own": {"a.py"}, "registered": 0}, 42: {"head": self.S2, "own": {"b.py"}, "registered": 5}})
-        one, calls_one = self.land(forge, 41, self.M1)
-        self.assertEqual(one["stage"], "done", labels(calls_one))
-        self.assertEqual(clock.now, self.MERGE)
-        two, calls = self.land(forge, 42, D)
-        got = labels(calls)
-        self.assertEqual(two["stage"], "done", got)
-        self.assertEqual(forge.merged, [41, 42])
-        self.assertEqual(forge.runs_at(D), 1)
-        self.assertEqual(forge.runs_at(self.S2), 0)
-        self.assertEqual([l for l in got if l.startswith("sync-")], ["sync-1"])
-        self.assertEqual([l for l in got if l.startswith("checks-")], ["checks-2"])
-        for label in ("look-carry-verify", "look-reverify"):
-            self.assertNotIn(label, got)
-        for call in calls[got.index("pr") + 1:]:
-            self.assertNotIn(VERIFY_TEXT, call["prompt"])
-            self.assertNotIn("look-approval post", call["prompt"])
-        self.assertIn("--wait --lease", prompt(calls, "land-take"))
-        self.assertIn("--match-head-commit " + D, prompt(calls, "merge"))
-        self.assertEqual(clock.now, self.MERGE + self.SYNC + self.CI + self.MERGE)
 
 
 class LookMovedHeadTest(unittest.TestCase):

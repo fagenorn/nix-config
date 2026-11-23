@@ -124,8 +124,9 @@ carried by a trusted live `look-carry` line that names the own-files rule:
 then `Carried the owner's look approval of head <from[:7]> of pull request <pr> to head <to[:7]>:
 only merges of the integration branch came in and they changed none of the pull request's own files.`
 The rule reads no pictures and no set file. `own_files_untouched` keeps the approval when
-`merges_only` holds and no name `A...H` lists (a renamed file counts both names) is a name `B...A` lists;
-it reads only the three compares `merges_only` reads, and a listing it cannot read, a truncated one
+`merges_only` holds, no name `A...H` lists (a renamed file counts both names) is a name `B...A` lists, and
+every name `B...H` lists is a name `B...A` lists (a merge that itself edits a file neither side touched
+adds it to the pull request's own change); it reads only the three compares `merges_only` reads, and a listing it cannot read, a truncated one
 included, keeps nothing. `carry_candidate` fills `Candidate.own_line` with the smallest trusted live
 own-files line naming exactly the issue, the pull request, the candidate head and the asked head, for an
 `approved` latest marker with no `pictures` field or a digest (never a `fix` answer or a malformed
@@ -807,17 +808,20 @@ def merges_only(approved_head: str, head: str, carry: Carry) -> Kept:
 def own_files_untouched(approved_head: str, head: str, carry: Carry) -> Kept:
     """Whether only merges came in and none changed a file the pull request itself changed (issue 1679).
 
-    Reads only `B...A`, `A...H` and `B...H`. A listing that cannot be read, a truncated one included,
-    keeps nothing; a renamed file counts under both of its names.
+    Reads only `B...A`, `A...H` and `B...H`. The pull request's own files are the names `B...A` lists;
+    no merge may have changed one (`A...H`), and `B...H` may list no name `B...A` does not, so a merge
+    that itself edits a file nobody touched is refused. A listing that cannot be read, a truncated one
+    included, keeps nothing; a renamed file counts under both of its names.
     """
     found = merges_only(approved_head, head, carry)
     if not found.kept:
         return found
     own = compare_files(carry.reads[compare_path(carry.base, approved_head)])
     merged = compare_files(carry.reads[compare_path(approved_head, head)])
-    if own is None or merged is None:
+    whole = compare_files(carry.reads[compare_path(carry.base, head)])
+    if own is None or merged is None or whole is None:
         return Kept(False)
-    return Kept(not set(own) & set(merged))
+    return Kept(not set(own) & set(merged) and set(whole) <= set(own))
 
 
 def _look_diff(compare: Any, globs: tuple[str, ...]) -> dict[str, tuple[Any, ...]] | None:

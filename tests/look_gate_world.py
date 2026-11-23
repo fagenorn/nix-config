@@ -503,7 +503,7 @@ class LookGateWorld:
             (r"^look-carry-verify$", self._look_carry_verify),
             (r"^(merge|land-merge-\d+)$", self._merge),
             (r"^land-unlock", const({"verdict": "released"})),
-            (r"^land-(take$|(re)?lock-)", self._lock),
+            (r"^land-(take(-\d+)?$|(re)?lock-)", self._lock),
             (r"^(land-)?checks-", self._checks),
             (r"^acquire(-|$)", const({"verdict": "acquired", "comment_id": 7})),
             (r"^renew-", const({"verdict": "renewed", "comment_id": 7})),

@@ -97,8 +97,7 @@ with nothing pending, because the host's revision can reach the commit before th
 the reading names a changed console file; else ACTIVATION_TOOLING_TEXT when every other path starts
 with a member of AGENT_TOOLING (`python/`, `home/common/agent-`, `home/common/claude-code/`,
 `home/common/codex/`, `patches/agent-plugins/`, `lib/agent-`); else ACTIVATION_CONFIGURATION_TEXT.
-Every text shows the commit as its first 12 characters. The member is on every view. It is a line beside the statement,
-not an inbox item: it is not counted in `inbox_items` and never changes the headline, the sentence
+Every text shows the commit as its first 12 characters. The member is on every view. It is a line beside the statement, not an inbox item: it is not counted in `inbox_items` and never changes the headline, the sentence
 or `stale`.
 
 `spend` is the `spend.spend_view` the caller passes (members defined in `spend.py`), null when none;
@@ -320,8 +319,7 @@ true when the page may offer Cancel registration (`register.cancellable`, no run
 
 The top-level `pin` member (#1029) is the pin note `pin.note` gives, copied, from the `pin`
 argument, and null with no pin. The top-level `pin_launches` member is the sorted list of profiles
-under which a new session or manager started while the owner's pin of that profile was in force,
-from the `pin_launches` argument (`pin.pin_launches` over the retained log; an empty list when none
+under which a new session or manager started while the owner's pin of that profile was in force, from the `pin_launches` argument (`pin.pin_launches` over the retained log; an empty list when none
 is given).
 
 The top-level `profile_sessions` member (#1030) maps each profile of the capacity view to the number of
@@ -390,8 +388,7 @@ words.") says what the page offers.
 
 Each open question of a done registration's plan (#1066, ADR-console-029 D10; `registration.status`
 is `done` and `registration.questions` is not empty) is one entry of `inbox.open` too, after the
-manager questions and before every tracker item, in the plan's order, and counts in `inbox_items`
-and the headline; a running registration, one with no question and none at all add nothing. Its
+manager questions and before every tracker item, in the plan's order, and counts in `inbox_items` and the headline; a running registration, one with no question and none at all add nothing. Its
 entry is
 
     {"type": "inbox_item", "reason": "register", "key": "register/<plan id>/<index>",
@@ -675,8 +672,7 @@ wait, `NOW_QUOTA_TEXT`; a stated pause (`sprints.stated_hold`, #1380), `NOW_PAUS
 whose signal is inside the window (`NOW_LOCK_POSITION_TEXT`, the place in the queue, in place of `NOW_LOCK_TEXT` when the sprint's smallest
 `ProjectMovement.positions` is known, #1679); no report, `NOW_STARTING_TEXT`; else a shown merge refusal
 (`sprints.merge_refused`), `NOW_REFUSED_TEXT` with its reason; else the stage phrase,
-`NOW_STAGE_TEXT`: the leading stage, its issue count, the total and the report's whole milestone
-(just the milestone when the report names no issue); either prefixed by `NOW_QUIET_TEXT` when the
+`NOW_STAGE_TEXT`: the leading stage, its issue count, the total and the report's whole milestone (just the milestone when the report names no issue); either prefixed by `NOW_QUIET_TEXT` when the
 ball is `nobody`. The
 leading stage is the non-final, non-queued stage the most issues hold (a tie goes to the later in
 `REPORT_STAGES`); with none, `queued`; with none, `landed` when any landed, else the most common
@@ -685,8 +681,7 @@ shortened (the page holds it to two lines).
 `ended_at` is `sprints.ended_at` for every route to done (a stop, a closing, or a latest report of
 phase `done`), so the `done` state and `ended_at` never disagree; `stoppable` is true exactly when
 the sprint has no stop request, is not stopped and has not ended; `stop_text` is `STOP_FAILED_TEXT`
-over `stop_reason` while that is set and the sprint is not stopped, else null; `closing` lists the
-closing report's issue numbers by stage, ascending, and `counts_text` is `closing_text` of their
+over `stop_reason` while that is set and the sprint is not stopped, else null; `closing` lists the closing report's issue numbers by stage, ascending, and `counts_text` is `closing_text` of their
 counts.
 A sprint is finished when it has ended and `now_ms` (not None) is at least `FINISHED_AFTER_MS` past
 `ended_at`. Finished sprints leave `sprints` for the project's `finished_sprints` (same order;
@@ -701,13 +696,11 @@ the rules, so the view and the service's retry agree) over the sprint, whether i
 session of its own (below) and `now_ms`; `manager_until` is the `until` of a `waiting` manager, else
 null. `permission_text` (always present) is the mode the manager's settings file was last written
 with and its reason (`SprintState.permission`, ADR-console-060), null when the sprint has none
-logged. `derive_view(..., managers=False)` is a host that cannot start managers: every sprint is
-`unavailable` with `UNAVAILABLE_TEXT` and no retry, and the view's top-level `managers` is the flag
+logged. `derive_view(..., managers=False)` is a host that cannot start managers: every sprint is `unavailable` with `UNAVAILABLE_TEXT` and no retry, and the view's top-level `managers` is the flag
 (default true).
 A listed session of the sprint's project whose name is `manager.session_name(project_id,
 sprint_id)` is one of that sprint's `sessions` (ordered and shaped as in the line), not of the
-project's `outside_sprints`, and is counted in none of its numbers or its summary; inside a sprint
-a session waiting for an answer or a permission reads "waiting for an answer" or "waiting for a
+project's `outside_sprints`, and is counted in none of its numbers or its summary; inside a sprint a session waiting for an answer or a permission reads "waiting for an answer" or "waiting for a
 permission".
 `messages` are the `SHOWN_MESSAGES` (10) newest of the sprint's messages (`SprintState.messages`)
 and every older one whose reply is `new`, oldest first (so a reply to an old message is never
@@ -756,8 +749,7 @@ is `OVERLAP_UNSETTLED_TEXT` over the two sprints' titles in that order and the f
 `inbox`, count, headline, sentence or `stale` (#1347, ADR-console-091).
 Every sprint entry, running or finished, carries `live_faults`: the sprint's standing live-fault
 declarations (`open_faults`, so never a withdrawn one) in id order, `[]` when none. `text` is
-`LIVE_FAULT_TEXT` over the issue, `observed`, `when` and `proven`; `at` is the declaration's own time,
-unchanged. A live fault is never an inbox item and changes no `inbox`, count, headline, sentence or
+`LIVE_FAULT_TEXT` over the issue, `observed`, `when` and `proven`; `at` is the declaration's own time, unchanged. A live fault is never an inbox item and changes no `inbox`, count, headline, sentence or
 `stale` (#1432).
 Every entry carries `owner`, false for a sprint's notice. The project's open owner notices
 (`owner_notices`, a map from project id to its folded owner notices, default none; only

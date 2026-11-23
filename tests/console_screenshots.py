@@ -19,12 +19,10 @@ Contract:
   `fault.declared` row is seeded as a literal kind, so the module needs nothing the base commit
   lacks): the sprint line carries the declaration and the owner's Withdraw, and on a base console
   that ignores the row the same sprint shows neither, which is the before picture (#1432);
-  `waiting-its-turn` is a sprint whose only movement is the land lock held by a pull request of
-  another issue (99), served through a stand-in forge that answers `movement.read_pulls` with that
-  holder, the sprint's own pull request (7, issue 12) and a `land-wait` registration for it, with a
-  live delivery run of issue 12 in its `pr` step (a run that is not live is no holder of the
-  sprint's), whose run line reads "waiting its turn to merge, position 1", not quiet; a base
-  console ignores the registration and reads "waiting its turn to merge", the before picture (#1679);
+  `waiting-its-turn` is a sprint whose only movement is the land lock held by a pull request of another issue,
+  with the sprint's own pull request registered behind it (`console_land_queue`) and a live delivery run of issue 12
+  in its `pr` step (a run that is not live is no holder of the sprint's), whose run line reads "waiting its turn to
+  merge, position 1", not quiet; a base console reads "waiting its turn to merge", the before picture (#1679);
   `manager-cannot-hear` is a running sprint whose manager session (listed, named for the sprint)
   has a transcript whose last peer-message record is one the client held and did not deliver
   (#1229), read once through the movement poll, so its line reads that the manager cannot hear
@@ -284,12 +282,12 @@ from agent_tools.console import account_add, approve, capacity, contract_draft, 
 from agent_tools.console.activation import Activation
 from agent_tools.console.answer import FORGE_DOWN
 from agent_tools.console.event_log import SHARING_COLLEAGUE, SHARING_TAILNET, EventLog
-from agent_tools.console import movement
 from agent_tools.console.movement import LocalReading
 from agent_tools.console.service import ConsoleService
 from agent_tools.console.sprints import TELL_MINUTE_TEXT, Question, SprintState, create_secret, read_secret
 from agent_tools.system.forge_api import ForgeError
 
+from .console_land_queue import land_queue_reader
 from .console_test_support import hook_body, write_registry
 
 STATES = ("live-several", "waiting-on-you", "stuck", "tell-box-open", "message-sent",
@@ -3031,24 +3029,6 @@ def _tailnet_kwargs(guest_dir: Path | None, readable: bool, service: list) -> di
     return kwargs
 
 
-def _land_queue_answers(waiting: tuple[int, ...]):
-    """A stand-in for the two forge calls of `movement.read_pulls`: pull request 8 (issue 99) holds
-    the land lock of `main`; pull request 7 (the issues of `waiting`) is registered behind it
-    (#1679)."""
-    def pull(number: int, issues: tuple[int, ...], oid: str) -> dict:
-        return {"number": number, "headRefName": f"work-{number}", "baseRefName": "main",
-                "headRefOid": oid, "isCrossRepository": False,
-                "body": " ".join(f"#{issue}" for issue in issues), "commits": {"nodes": []}}
-
-    holder, mine = "8" * 40, "7" * 40
-    pulls = {"data": {"repository": {"pullRequests": {"nodes": [
-        pull(7, waiting, mine), pull(8, (99,), holder)]}}}}
-    refs = [{"ref": ref, "object": {"sha": sha, "type": "commit"}} for ref, sha in (
-        ("refs/agent-locks/land/main", holder),
-        ("refs/agent-locks/land-wait/main/1000-7-1060", mine))]
-    return lambda argv: pulls if argv[1] == "graphql" else refs
-
-
 def start_service(fixture: Fixture, now_s: float, launches: list | None = None, *,
                   guest_dir: Path | None = None, tailnet_readable: bool = True) -> ConsoleService:
     def launcher(launch: manager.Launch) -> None:
@@ -3059,8 +3039,7 @@ def start_service(fixture: Fixture, now_s: float, launches: list | None = None, 
     if fixture.holding or fixture.deaf:
         forge = {"local_reader": lambda root, pattern: LocalReading((), False)}
     if fixture.holding:
-        forge["pull_reader"] = lambda slug, pattern, *, cancelled: movement.read_pulls(
-            slug, pattern, call=_land_queue_answers(fixture.holding), cancelled=cancelled)
+        forge["pull_reader"] = land_queue_reader(fixture.holding)
     if fixture.activating:
         forge["activation_reader"] = _activation_reader(fixture.activating)
     if fixture.registering:

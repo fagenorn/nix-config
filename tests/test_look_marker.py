@@ -1068,6 +1068,13 @@ class OwnFilesLineTest(unittest.TestCase):
         refused = lm.judge(1300, H, facts, lm.Carry(B, reads))
         self.assertEqual((refused.admit, refused.issue, refused.need), (False, 1200, ()))
 
+    def test_judge_refuses_when_a_merge_itself_edits_a_file_neither_side_touched(self):
+        facts = [lm.IssueFacts(1200, BODY, (pics_approval(10), own_files_comment(11)))]
+        reads = merges_world([(H, [A, X])])
+        reads[lm.compare_path(B, H)] = cmp([PAGE, DOC], commits=[(A, [FORK]), (H, [A, X])])
+        refused = lm.judge(1300, H, facts, lm.Carry(B, reads))
+        self.assertEqual((refused.admit, refused.issue, refused.need), (False, 1200, ()))
+
     def test_a_pictureless_approval_is_kept_by_its_own_files_line_before_any_set_file_read(self):
         comments = [approval(10, A), own_files_comment(11)]
         found = lm.carry_candidate(comments, 1200, 1300, H)

@@ -264,9 +264,8 @@ states a wait or a pause that holds (#1380), `BALL_WAITING` or `BALL_PAUSED`, wo
 `NOW_CI_TEXT`, `NOW_COMMITTING_TEXT`, `NOW_RELEASE_TEXT` (#1110) and `NOW_LOCK_TEXT` (#1184), which reads `NOW_LOCK_POSITION_TEXT` when the sprint's place in the queue is known, #1679)) or
 the stage phrase (`NOW_STAGE_TEXT`, prefixed by `NOW_QUIET_TEXT` when nobody has the ball), never the report's status
 line and never shortened. A sprint's check line (#1111) reads `CHECK_LINE_TEXT`. The now-sentence of a report whose status marks a refused merge
-(`refused_reason`) is `NOW_REFUSED_TEXT` in place of the stage phrase, shown by `merge_refused`
-until a later report without the marker or a closing clears it (no run observation clears it: the
-status names no issue); it is the one now-sentence that may equal the status line.
+(`refused_reason`) is `NOW_REFUSED_TEXT` in place of the stage phrase, shown by `merge_refused` until a later report
+without the marker or a closing clears it (no run observation clears it: the status names no issue); it is the one now-sentence that may equal the status line.
 
 Messages (#889) are what the owner says to a sprint, each one a `Message` kept in `message_id` order
 on `SprintState.messages`. Four rows carry them, the first three kept (`event_log.SPRINT_MESSAGED`,

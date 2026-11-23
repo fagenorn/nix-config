@@ -2858,8 +2858,7 @@ class ScreenshotFixtureTest(unittest.TestCase):
                                 for d in s["deliveries"] if d["run_id"] == "wf_l1")
                     self.assertEqual(
                         (lone["quiet"], lone["moved_text"], lone["wait_text"]),
-                        (False, "waiting its turn to merge, position 1",
-                         "waiting its turn to merge, position 1"))
+                        (False, "waiting its turn to merge, position 1", "waiting its turn to merge, position 1"))
                 elif state in ("goal-open", "goal-near", "goal-over"):
                     other = shots.build_fixture(Path(tmp) / "other", "tell-box-open", now_s)
                     again = shots.start_service(other, now_s)

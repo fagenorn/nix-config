@@ -311,7 +311,7 @@ OWNER_LABELS: tuple[tuple[str | None, str], ...] = (
         LANDING,
         r"pr|hold|hold-draft|merge|close-out|live-green|land-unlock|fix-ci|fix-ci-review|land-take|land-lock-\d+|land-relock-\d+|land-push-\d+"
         r"|green-checks-\d+|checks-\d+"
-        r"|look-pr|look-push|look-checks-\d+|look-head|look-post|look-read|look-stale|look-status|look-carry-verify|look-carry"
+        r"|look-pr|look-push|look-checks-\d+|look-head|look-post|look-read|look-stale|look-status|look-carry-verify|look-carry|look-carry-own"
         r"|sync-\d+|sync-resolve-\d+|sync-review-\d+|fix-sync-\d+|fix-sync-review-\d+",
     ),
 )

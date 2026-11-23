@@ -2,7 +2,7 @@
 // Usage: node deliver_batch_harness.mjs <program.js> with a scenario JSON on stdin (one-shot), or import { makeRunner } and call makeRunner(programText)(scenario), which resolves to the exact text one-shot mode prints (program_server.mjs does, once per program); a program throw rejects it, as it escapes the one-shot run:
 //   { "args": {...}, "replies": {"<label>": reply | [reply per call]}, "patch": {"<label>": {...}},
 //     "children": {"<issue>": child result | [one per call] | "throw"}, "turns": {"<issue>:<mode>": n}, "delays": {"<label>": n} }
-// A label with no reply gets its default (DEFAULTS); a patch is merged over that default. A facts reply without `look` reads unmarked and one without `live_fault` reads no-sprint (NESTED). A reply
+// A label with no reply gets its default (DEFAULTS); a patch is merged over that default (a take's patch, over its first call only). A facts reply without `look` reads unmarked and one without `live_fault` reads no-sprint (NESTED). A reply
 // of null is returned as null (a dead agent). Prints { result, calls, events (each agent's `call <label>` and `reply <label>`, in order), logs (each log() line), max_active, max_planning, child_events, child_returns }:
 // calls lists agents ({kind: 'agent', label, prompt, schema, agentType, model, effort, facts_pending}) and children
 // ({kind: 'workflow', label: 'child-<issue>', script, args}) in start order. A children entry applies to every child
@@ -144,7 +144,9 @@ export function makeRunner(programText) {
       }
       const hit = DEFAULTS.find(([re]) => re.test(label))
       if (!hit) throw new Error(`no stub reply for agent label ${label}`)
-      return structuredClone({ ...hit[1](label, prompt, ac), ...((scenario.patch || {})[label] || {}) })
+      // A patch of a take applies to its first call: the take after a sync, a resolution or a fix finds the base current.
+      const patch = /^land-take-\d+$/.test(label) && n > 1 ? {} : (scenario.patch || {})[label] || {}
+      return structuredClone({ ...hit[1](label, prompt, ac), ...patch })
     }
 
     let active = 0

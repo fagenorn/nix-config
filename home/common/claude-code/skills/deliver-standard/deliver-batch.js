@@ -688,7 +688,7 @@ const LAND_SYNC_SCHEMA = {
 const PROVE_SCHEMA = { type: 'object', properties: { proven: { type: 'boolean' }, notes: { type: 'string' } }, required: ['proven'] }
 const LAND_MERGE_SCHEMA = { type: 'object', properties: { merged: { type: 'boolean' }, behind: { type: 'boolean' }, merge_commit: { type: 'string' }, notes: { type: 'string' } }, required: ['merged'] }
 const CLOSE_SCHEMA = { type: 'object', properties: { issue_state: { type: 'string' }, branch_deleted: { type: 'boolean' }, released: { type: 'boolean' }, decision_ended: { type: 'boolean' }, notes_posted: { type: 'boolean' }, notes: { type: 'string' } }, required: ['issue_state'] }
-// Resyncs a landing runs on a behind answer or a retaken lock; the third behind answer is still contention.
+// Resyncs a landing runs on a behind answer or a lock taken again; the third behind answer is still contention.
 const MAX_SYNCS = 2
 // The resyncs a landing runs because its merge was refused as not up to date (the integration branch moved outside the
 // land lock). Its own budget: MAX_SYNCS may already be spent before the first merge attempt.
@@ -734,7 +734,8 @@ const logWait = (label, lock) => {
 // per landing (ciFails).
 
 // Under the lock, a red poll at a head no sync has changed releases the lock itself once the fix needs a commit
-// (FIX_OFF_LOCK); one at a head a sync brought up to date leaves the queue first (FIX_LEFT_QUEUE). Both retake it.
+// (FIX_OFF_LOCK); one at a head a sync brought up to date leaves the queue first (FIX_LEFT_QUEUE). Both are read green
+// again before the lock is taken.
 
 // A check that failed at a head behind its base counts too: the branch is synced before the lock is asked for.
 const OWN_RED = (wt, prRef, sha) => `Otherwise, and only when step 2 reused an open PR (a PR this step opened has no finished check, so skip this read), read the checks of the pushed head once before any lock command: ${UNSET}gh pr view ${prRef} --repo ${SLUG} --json headRefOid,statusCheckRollup, one read, never a watch and never a wait. A head that was just pushed can still show the checks of the head before it, so the read counts only when its headRefOid is ${sha}. Only when it is and a check there has failed (count only the newest run of each check name, the one with the latest startedAt, so a failed attempt whose re-run passed does not count; a check run whose conclusion is FAILURE or TIMED_OUT, or a status whose state is FAILURE or ERROR; a cancelled check does not count), see whether origin/${INT} is an ancestor of HEAD (git -C ${wt} merge-base --is-ancestor origin/${INT} HEAD succeeds). When it is not, the head is behind its base and gets new checks once it is synced; the failure counts all the same, because no lock is held yet. When the failure counts, wait for no check: return own_red with head (the headRefOid you read), failing (the name of every failed check), details (their links) and behind (true when the head is behind its base, else false), and checks null, because a later step fixes the branch before the lock is asked for, after it brought a head that is behind up to date. In every other case (another head, no failed check, checks still running, none reported, or a read failed) return own_red null and go on.`
@@ -767,7 +768,7 @@ const HOLDING = v => v === 'acquired' || v === 'already_held' || v === 'moved'
 // FOLDS: three consecutive-call pairs are one call each: the land lock release leads the close-out call; the first
 // checks poll rides in land-pr (read before the lock is asked for); the next poll rides in the record step after a
 // head change under the lock. land-checks and land-merge stay separate, as the state picks fix, sync, re-poll or
-// merge; so do land-merge and the release, because a retaken lock resyncs first and an unmerged PR stops.
+// merge; so do land-merge and the release, because a lock taken again resyncs first and an unmerged PR stops.
 
 // The landing of one ready issue (D10): renew, open or re-adopt the PR at the ready head and wait for its checks
 // (land-pr), take the land lock with --wait once they passed (land-take, D7), the checks loop, renew, the one-shot
@@ -857,7 +858,7 @@ const land = async (n, ready, via = {}) => {
   let carried = null
   const PENDING_WAITS = 3
   const waits = waitBudget()
-  const c = { sync: 0, syncReview: 0, checks: 0, record: 0, relock: 0, conflicts: 0, ciFails: 0, pending: 0, refused: 0, early: 0, policy: 0 }
+  const c = { sync: 0, syncReview: 0, checks: 0, record: 0, conflicts: 0, ciFails: 0, pending: 0, refused: 0, early: 0, policy: 0 }
   // labels of this landing's reviews that answered twice with no usable review; every row of the landing carries them.
   const lost = []
   const silence = label => (lost.includes(label) ? 'answered twice with no usable review' : 'returned nothing')
@@ -985,35 +986,23 @@ ${RULES}`, `land-ask-${n}`, { ...clerk, schema: ASK_SCHEMA })
     return out(outcome, extra)
   }
 
-  // After a head change that passed its gate once the PR exists (D13): record it, then move the lock. With retake, the
-  // lock was released (for a conflicted sync or a red check) and this step takes it again at the reviewed head, waiting
-  // (a wait that runs out at the CLI's bound is waited for again in a land-relock step, within waitBudget); the call is
-  // marked as possibly holding the lock first (P5). When a release was not confirmed, the lock is still marked held at
-  // the earlier sha, so the retake is a move. A move or a retake is followed by the checks wait under the lock.
-
-  // early: the probe found the conflict before the lock was asked for. fixed: the lock was released (first, left) or
-  // never asked for (unasked) while a red check was fixed. publish: a fix commit not pushed yet, its tests recorded and
-  // review passed, so this step pushes it first. With early or unasked the lock is not asked for yet: the step only
-  // records the head, and the loop polls it and takes the lock once it is green.
-  const advance = async (retake = false, early = false, fixed = null, publish = false) => {
+  // After a head change that passed its gate once the PR exists (D13): record it, then move the lock. lockless: no lock
+  // is held (the probe found a conflict, or a conflicted sync or a red check released it), so the step only records the
+  // head, and the loop polls it and takes the lock once it is green. publish: a fix commit not pushed yet, its tests
+  // recorded and review passed, so this step pushes it first. A move is followed by the checks wait under the lock.
+  const advance = async (lockless = false, publish = false) => {
     c.record++
     const label = `land-record-${n}-${c.record}`
-    const lockless = early || fixed === 'unasked'
-    const fresh = !lockless && retake && !lockHeld
-    if (fresh) {
-      lockHeld = true
-      lockSha = expected
-      lockMaybe = null
     // The move may land and its answer be lost: the release then also tries expected (P10).
-    } else if (!lockless && expected !== lockSha) lockMaybe = expected
+    if (!lockless && expected !== lockSha) lockMaybe = expected
     const rec = await call(`The head of PR #${pr} of issue #${n} of ${SLUG} changed to ${expected} and passed its gate. Record it in the PR body.
 ${publish ? `First push that head, which is a reviewed fix commit not pushed yet: git -C ${W} fetch origin, confirm git -C ${W} rev-parse HEAD prints ${expected}, then run git -C ${W} push origin ${B}. When HEAD is another commit or the push fails, change nothing else and return ok false with the head you read.\n` : ''}1. Run gh pr view ${pr} --repo ${SLUG} --json body,headRefOid and confirm headRefOid is ${expected}. If it is not, change nothing and return ok false with the head it shows.
 2. Make a fresh directory with mktemp -d and write the body to a file in it, rewriting only the Accepted head line (the last line of the Evidence section) to exactly this text, everything else unchanged:
 Accepted head: ${expected}
 3. Run gh pr edit ${pr} --repo ${SLUG} --body-file <that file>. When the line already reads exactly so, change nothing.
 Return ok true and head (the headRefOid you read).
-${lockless ? '' : `Only when ok is true, ${fixed ? `take the cross-host landing lock of the branch ${INT} again, at the head ${expected}; it was released while a failing check of the branch was fixed` : retake ? `take the cross-host landing lock of the branch ${INT} again, at the head ${expected}; it was released while a conflict was resolved` : `move the cross-host landing lock of the branch ${INT} to the head ${expected}`}: run alone and exactly: ${LAND_ACQUIRE(expected, retake, LEASE)}
-${LOCK_RETURN}${retake && LEASE ? ` ${LEASE_WAIT_TIMEOUT}` : ''} Return it as lock; otherwise return lock null.
+${lockless ? '' : `Only when ok is true, move the cross-host landing lock of the branch ${INT} to the head ${expected}: run alone and exactly: ${LAND_ACQUIRE(expected, false, LEASE)}
+${LOCK_RETURN} Return it as lock; otherwise return lock null.
 Then, only when ok is true and lock's verdict is acquired, already_held or moved, wait for every check of PR #${pr} at the head, required or not:
 ${CHECKS_STEPS(pr, expected)}
 Return those fields as checks; otherwise return checks null.
@@ -1030,7 +1019,7 @@ Return those fields as checks; otherwise return checks null.
     let reread = false
     let unread = false
     // a refusal naming this batch at the lock it already held is a move whose read-back lagged: read the lock once.
-    if (!retake && rec && rec.ok === true && rec.head === expected && (lv === 'lost_to' || lv === 'held_by') && rec.lock.by === HOLDER && rec.lock.lock_sha === lockSha) {
+    if (rec && rec.ok === true && rec.head === expected && (lv === 'lost_to' || lv === 'held_by') && rec.lock.by === HOLDER && rec.lock.lock_sha === lockSha) {
       const st = await call(`The lock move to ${expected} for PR #${pr} of issue #${n} of ${SLUG} answered ${lv} naming this batch at ${lockSha}, which may be a lagging read. Read the cross-host landing lock of the branch ${INT} once: run alone and exactly: forge-claim land status --repo ${SLUG} --branch ${INT} --sha ${expected}
 Return its verdict (free, held_by, stale, or error on any other exit), lock_sha, by and detail from its output. ${FORGE_TIMEOUT} Run nothing else.
 ${RULES}`, `land-status-${n}-${c.record}`, { ...clerk, schema: STATUS_SCHEMA })
@@ -1038,66 +1027,33 @@ ${RULES}`, `land-status-${n}-${c.record}`, { ...clerk, schema: STATUS_SCHEMA })
       // A failed or lost read proves nothing about the lock: the move may have landed, so expected stays releasable.
       else if (!st || st.verdict === 'error') unread = true
     }
-    // the retake's wait ran out behind other landings, so another holder has the lock and nothing of this landing's is
-    // held: renew the claim and wait again, each call marked as possibly holding the lock at the reviewed head first
-    // (P5).
-    let relocked = false
-    const more = waits()
-    let ranOut = rec ? rec.lock : null
-    for (; retake && rec && rec.ok === true && rec.head === expected && lv === 'land-contended' && more(ranOut);) {
-      c.relock++
-      const rl = `land-relock-${n}-${c.relock}`
-      lockHeld = true
-      lockSha = expected
-      lockMaybe = null
-      const lk = await recall(() => call(`${RENEW_FIRST}
-Then take the cross-host landing lock of the branch ${INT} again for PR #${pr} of issue #${n} of ${SLUG} at the reviewed head ${expected}; an earlier wait for it ran out behind other landings. Run alone and exactly: ${LAND_ACQUIRE(expected, true, LEASE)}
-${LOCK_RETURN}${LEASE ? ` ${LEASE_WAIT_TIMEOUT}` : ''} Return it as lock. Run nothing else.
-${RULES}`, rl, { ...lifecycleClerk, schema: withRenew({ type: 'object', properties: {} }, { lock: NULLABLE(LOCK_SCHEMA) }) }), r => r.renew)
-      if (!lk) return out('stopped', { stage: 'land-lock', detail: `${rl} returned nothing` })
-      if (lk.renew && lk.renew.verdict !== 'renewed') lockHeld = false
-      lv = lk.lock ? lk.lock.verdict : null
-      ranOut = lk.lock || null
-      logWait(rl, lk.lock)
-      if (lv === 'land-contended' || lv === 'held_by' || lv === 'lost_to') lockHeld = false
-      const lost = renewed(lk.renew, rl)
-      if (lost) return lost
-      relocked = true
-    }
     if (HOLDING(lv)) {
       lockHeld = true
       lockSha = expected
       lockMaybe = null
-    } else if (!unread && (lv === 'land-contended' || lv === 'held_by' || lv === 'lost_to')) {
-      lockMaybe = null
-      // A refused retake holds nothing: another landing has the lock.
-      if (retake) lockHeld = false
-    } else if (!unread && rec && rec.ok === false && !rec.lock) {
-      lockMaybe = null
-      // A retake that never ran holds nothing new; a lock still marked held at the earlier sha stays so.
-      if (fresh) lockHeld = false
-    }
+    } else if (!unread && ((lv === 'land-contended' || lv === 'held_by' || lv === 'lost_to') || (rec && rec.ok === false && !rec.lock))) lockMaybe = null
     if (!rec || rec.ok !== true || rec.head !== expected) return out('stopped', { stage: 'land-record', detail: rec ? rec.detail : `${label} returned nothing`, head: rec ? rec.head : undefined })
     recorded = expected
     // D10: a one-shot move that answers held_by or lost_to while the lock is held found it lost: wait again at the
     // back.
-    if (LEASE && !retake && !unread && (lv === 'held_by' || lv === 'lost_to')) {
+    if (LEASE && !unread && (lv === 'held_by' || lv === 'lost_to')) {
       const row = await relock('another landing took the land lock over')
       return row || await afterHold(null)
     }
-    if (!HOLDING(lv)) return out('land-contended', { detail: early || fixed === 'unasked' || fixed === 'synced' ? `the land lock was not taken at the reviewed head ${expected} (${lv})` : retake ? `the land lock was not taken again at the reviewed head ${expected} (${lv})` : `the lock did not move to ${expected}` })
+    if (!HOLDING(lv)) return out('land-contended', { detail: `the lock did not move to ${expected}` })
     // The record step polled no checks when the lock was only confirmed by the status read: the loop polls them itself.
-    carried = reread || relocked ? null : { label, reply: rec.checks || null }
+    carried = reread ? null : { label, reply: rec.checks || null }
     return null
   }
 
   // One resync of the branch with the integration branch (D10); a row ends the landing, null continues. The sync step
   // runs under the lock and only merges cleanly. A merge that conflicts is aborted there, so the worktree is clean, and
   // the lock is released first: the resolution, its tests, its review and the fix round run outside it. Only a
-  // resolution the review passed reaches advance(true), which records it as the accepted head and takes the lock again,
-  // waiting; its poll then answers behind if the base moved, and the loop resyncs, MAX_CONFLICT_ROUNDS times at most.
+  // resolution the review passed reaches advance(), which records it as the accepted head; the loop then reads it green
+  // and takes the lock again, waiting, and the take answers behind if the base moved. The loop resyncs,
+  // MAX_CONFLICT_ROUNDS times at most.
 
-  // Every row returned between the release and the retake holds no lock, and the pushed merge is not the accepted head,
+  // Every row returned between the release and the take holds no lock, and the pushed merge is not the accepted head,
   // so a relaunch sends the issue through its child's review. With early (the probe's reply) no sync step runs and
   // nothing is held or waited for; the round counts as a conflict round, not a resync (c.early keeps it out of
   // MAX_SYNCS). With prelock, the same sync step runs before the lock is asked for, and body() records and locks once
@@ -1138,13 +1094,13 @@ ${RULES}`, plabel, { ...lifecycleClerk, schema: PROVE_SCHEMA })
       if (!pv || pv.proven !== true) return moved()
       log(`${label}: the branch was already at ${at}, ${sy.ahead.length === 1 ? 'a clean merge' : `${sy.ahead.length} clean merges`} of ${INT} on top of ${expected} that an earlier run of this step pushed; going on from it`)
       expected = at
-      if (pr && !prelock) return await advance(false, !!early)
+      if (pr && !prelock) return await advance(!!early)
       return null
     }
     if (!aborted && sy.status !== 'done') return out('stopped', { stage: 'land-sync', detail: sy.notes })
     // The reply that names the merge to land: the sync step's own, or the resolution's.
     let merge = sy
-    // True once the lock was released for a conflict: the reviewed head then takes it again in advance(true).
+    // True once the lock was released for a conflict: the reviewed head is then recorded and takes it again once green.
     let outside = false
     // A sync step that resolved the conflict itself, against its prompt, is released and reviewed like any resolution.
     if (aborted || sy.conflicted) {
@@ -1202,7 +1158,7 @@ ${RULES}`, reviewLabel, { agentType: 'reviewer', schema: SYNC_REVIEW_SCHEMA(foll
       const found = findingsOf(rv)
       if (found.length) {
         // One fix round per reviewed merge. It is no resync, so it spends neither MAX_SYNCS nor MERGE_REFUSAL_RETRIES,
-        // and like the resolution it runs outside the lock. Only a fix the re-review passes is recorded: advance(true)
+        // and like the resolution it runs outside the lock. Only a fix the re-review passes is recorded: advance()
         // below takes the lock at it and waits for its checks.
         const fix = await call(`Issue #${n} of ${SLUG}, worktree ${W}, branch ${B}.
 ${SYNC_FIX(W, mc, found, after)} Do not push: the program pushes the commit once its report records its tests and its review passes. ${PUSH_TESTS(GUARDS)}. ${COMMIT_SCOPE} ${IMPL_RETURN}
@@ -1238,7 +1194,7 @@ ${RULES}`, plabel, { ...lifecycleClerk, schema: RECORD_SCHEMA })
     }
     if (head !== expected || outside) {
       expected = head
-      if (pr && !prelock) return await advance(outside, !!early, null, unpushed)
+      if (pr && !prelock) return await advance(!!early || (outside && !lockHeld), unpushed)
     }
     return null
   }
@@ -1359,9 +1315,9 @@ ${RULES}`, `land-pr-${n}`, { agentType: 'clerk', model: DEFAULT_CLERK_MODEL, eff
     // not report is made here, and the review runs outside the lock too. left: the lock was released first, at a head
     // a sync brought up to date. unasked: the lock was not asked for yet.
 
-    // In every mode the reviewed fix is recorded in advance(): unasked only records it, the poll that follows takes the
-    // lock once green; first and left retake it, waiting. A fix step that only reran jobs keeps the lock (first) or
-    // takes it now (left); unasked polls again. A row that ends the landing releases the lock once more (first).
+    // In every mode the reviewed fix is recorded in advance() with the lock released: the poll that follows takes the
+    // lock once green. A fix step that only reran jobs keeps the lock (first); after a release it is read green first.
+    // A row that ends the landing releases the lock once more (first).
     const fixRed = async (failingNames, details, mode) => {
       const end = extra => {
         if (mode === 'first') lockHeld = true
@@ -1380,27 +1336,28 @@ ${RULES}`, `land-fix-${n}`, { agentType: 'implementer', model: 'sonnet', schema:
       if (sameSha(fix.commit, expected)) {
         reran = true
         if (mode === 'unasked' || (mode === 'first' && !letGo)) return null
-        // The lock was released (left) or the step released it against its prompt: take it again, waiting, and poll
-        // under it.
+        // The lock was released (left) or the step released it against its prompt: the rerun head is read green with
+        // nothing held before it asks for the lock again.
         carried = null
         lockHeld = false
-        v1 = 'land-contended'
-        lastLock = null
-        const row = await waitAgain(mode === 'left' ? 'the failed jobs of a red check were rerun after it left the queue' : 'the step that reran the failed jobs of a red check released it')
-        return row || await afterHold(null)
+        return null
       }
       // the commit is not pushed yet; with no test command recorded it is never pushed or merged in this run.
       if (!tested(fix)) return end({ detail: UNTESTED })
       if (mode === 'first') {
         log(`#${n}: ${failingNames.join(', ') || 'a check'} failed at the head the lock was taken at; its fix is reviewed outside the land lock`)
-        if (!letGo) await unlock()
+        // The reviewed head is read green with nothing held, so a release the fix step reports is taken as made.
+        if (letGo) lockHeld = false
+        else await unlock()
       }
       const rv = await readReview(`Issue #${n} of ${SLUG}, worktree ${W}, branch ${B}.
 Review this fix for failing checks: git -C ${W} diff ${fix.start_head || expected}..${fix.commit}; the failure it answers: ${JSON.stringify(failingNames)}; the notes: ${fix.notes}. Report Important or Critical defects only, above all a weakened, skipped or deleted test or check. Do not edit anything.
 ${RULES}`, `land-fix-review-${n}`, { agentType: 'reviewer', schema: FINDINGS })
       if (!rv || findingsOf(rv).length) return end({ review: rv })
       expected = fix.commit
-      return await advance(true, false, mode, true)
+      // The lock is released, so the fix head is recorded and read green before it asks for the lock; one whose release
+      // is still unconfirmed takes it again in the record step.
+      return await advance(!lockHeld, true)
     }
     for (; !trained;) {
       const fold = carried
@@ -1486,7 +1443,7 @@ ${stalePoll ? `${STALE_RERUN(UNSET, SLUG)}\n` : ''}${RULES}`, label, { ...lifecy
       // taken, waiting (D7). The take says whether the base moved past the head; the green read stands when it did not.
       if (preLock) {
         if (!sameSha(recorded, expected)) {
-          const row = await advance(false, true)
+          const row = await advance(true)
           if (row) return row
         }
         const lockedOut = await askLock(`land-take-${n}`, 'its head is green')

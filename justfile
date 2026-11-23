@@ -210,6 +210,7 @@ agent-workflow-tests *args:
     tests/test_forge_owner_action.py \
     tests/test_owner_actions.py \
     tests/test_forge_land_lock.py \
+    tests/test_forge_land_lease.py \
     tests/test_landing_reading.py \
     tests/test_verified_tree.py \
     tests/test_transaction_core.py \
@@ -284,6 +285,7 @@ agent-workflow-tests *args:
     tests/test_console_prompt_card.py \
     tests/test_console_prompt_card_service.py \
     tests/test_console_view.py \
+    tests/test_console_view_lock_place.py \
     tests/test_console_draft_facts.py \
     tests/test_console_failed_start.py \
     tests/test_console_activation.py \
@@ -391,7 +393,9 @@ agent-workflow-tests *args:
     tests/test_system_packages.py \
     home/common/agent-skills/tests/test_program_harness.py \
     home/common/agent-skills/tests/test_deliver_standard_program.py \
+    home/common/agent-skills/tests/test_deliver_standard_landing.py \
     home/common/agent-skills/tests/test_deliver_batch_program.py \
+    home/common/agent-skills/tests/test_deliver_batch_landing.py \
     home/common/agent-skills/evals/tests/test-run-eval-tree.sh
 
 # Validate every explicit pipeline dispatch and print the representative trace.
