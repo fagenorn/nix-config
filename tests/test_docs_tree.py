@@ -1158,6 +1158,24 @@ class DocsTreeTest(unittest.TestCase):
                 if name is not None:
                     self.assertEqual(found[0].name, name)
 
+    def test_no_tracked_file_cites_a_retired_release_record(self):
+        numbers = ("001", "004", "009", "014")
+        # Built at run time so this file holds no retired citation itself.
+        pattern = "ADR-release-(" + "|".join(numbers) + ")([^0-9]|$)"
+
+        result = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "grep", "-n", "-E", pattern],
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertEqual(result.stdout, "")
+        for number in numbers:
+            with self.subTest(number):
+                found = sorted((REPO_ROOT / "docs/areas/release/adr").glob(f"{number}-*.md"))
+                self.assertEqual(found, [])
+
     def test_adr_console_040_records_taking_back_and_replacing_a_question(self):
         path = ("docs/areas/console/adr/"
                 "040-a-manager-takes-back-or-replaces-its-own-open-question.md")
