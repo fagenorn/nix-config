@@ -165,7 +165,7 @@ def prompt_body(block_key, check):
 def three_nodes():
     return [issue_node(7, [comment_node(C1, decision_body())], blocking=2),
             issue_node(8, [comment_node(C2, bullet_body("conflict", ["Merge conflict in flake.lock"]))]),
-            pr_node(9, [comment_node(C3, bullet_body("needs-label", ["needs the instruction-budget-raise label"]))])]
+            pr_node(9, [comment_node(C3, bullet_body("needs-label", ["needs the agent:human-required label"]))])]
 
 
 class MarkerTableTest(unittest.TestCase):
@@ -178,7 +178,7 @@ class MarkerTableTest(unittest.TestCase):
                 {"question": QUESTIONS[1]["question"], "options": QUESTIONS[1]["options"], "chosen": None,
                  "recommended": None}]),
             expected(8, C2, "conflict", held_work=1, items=["Merge conflict in flake.lock"]),
-            expected(9, C3, "needs-label", held_work=1, items=["needs the instruction-budget-raise label"]),
+            expected(9, C3, "needs-label", held_work=1, items=["needs the agent:human-required label"]),
         ]
         self.assertEqual(len(items), 3)
         for item, want in zip(items, table):

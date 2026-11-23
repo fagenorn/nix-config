@@ -12,7 +12,10 @@ defaults to `ci.yaml`.
 """
 
 import json
+import os
 import re
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path, PurePosixPath
 from unittest import mock
@@ -1090,6 +1093,35 @@ class LintTimeWorkflowTest(unittest.TestCase):
     def test_the_job_is_not_a_required_context(self):
         self.assertNotIn("Lint Time", required_contexts())
         self.assertEqual(LINT_TIME_WORKFLOW, required_jobs()["Lint Time"][0])
+
+
+def tracked_files_naming(root, needle):
+    """The sorted tracked paths under root whose bytes contain needle, ignoring case."""
+    listing = subprocess.run(["git", "-C", str(root), "ls-files", "-z"], check=True, capture_output=True).stdout
+    wanted = needle.lower().encode()
+    found = []
+    for name in listing.decode().split("\0"):
+        path = Path(root) / name
+        if name and path.is_file() and not path.is_symlink() and wanted in path.read_bytes().lower():
+            found.append(name)
+    return sorted(found)
+
+
+class RetiredLabelTest(unittest.TestCase):
+    def test_no_tracked_file_names_the_retired_label(self):
+        needle = "-".join(("instruction", "budget", "raise"))
+        found = tracked_files_naming(REPO_ROOT, needle)
+        self.assertEqual(found, [])
+
+    def test_the_search_finds_a_planted_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            env = {**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null"}
+            subprocess.run(["git", "init", "-q", str(root)], check=True, env=env)
+            (root / "a.txt").write_bytes(b"mentions RETIRED-NAME here\n")
+            (root / "b.txt").write_bytes(b"clean\n")
+            subprocess.run(["git", "-C", str(root), "add", "a.txt", "b.txt"], check=True, env=env)
+            self.assertEqual(tracked_files_naming(root, "retired-name"), ["a.txt"])
 
 
 if __name__ == "__main__":
