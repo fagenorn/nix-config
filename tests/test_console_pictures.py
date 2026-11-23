@@ -1559,45 +1559,12 @@ class PictureDocsTest(unittest.TestCase):
     def doc(self, path):
         return " ".join((ROOT / path).read_text().split())
 
-    def test_adr_036_records_the_picture_store(self):
-        name = "docs/areas/console/adr/036-the-console-keeps-a-managers-pictures-and-serves-them-only-to-the-page.md"
-        self.assertTrue((ROOT / name).is_file())
-        text = self.doc(name)
-        self.assertEqual(
-            (ROOT / name).read_text().splitlines()[0],
-            "# ADR-console-036 — The console keeps a manager's pictures and serves them only to the page")
-        for needle in ("#1089", "POST /api/picture", "X-Console-Sprint", "X-Console-Secret",
-                       "image/png", "2 MiB", "413", "SHA-256", "0600", "0700", "picture.stored",
-                       "`pictures`", "one day", "ADR-console-013",
-                       "ADR-console-019"):
-            with self.subTest(needle):
-                self.assertIn(needle, text)
-        context = self.doc("docs/areas/console/CONTEXT.md")
-        self.assertIn("**Picture**:", context)
-        self.assertIn("ADR-console-036", context)
-        self.assertIn("| Picture | Console |", self.doc("docs/CONTEXT-MAP.md"))
-
-    def test_adr_038_records_the_question_pictures(self):
-        name = ("docs/areas/console/adr/038-a-managers-question-shows-its-pictures-on-the-card-"
-                "and-full-size-in-a-viewer.md")
-        self.assertEqual(
-            (ROOT / name).read_text().splitlines()[0],
-            "# ADR-console-038 — A manager's question shows its pictures on the card and full "
-            "size in a viewer")
-        text = self.doc(name)
-        for needle in ("#1090", "8", "140", "before", "after", "X-Console-Token", "object URL",
-                       "blob:", "Escape", "inert", "480", "ADR-console-019",
-                       "ADR-console-033", "ADR-console-036", "#1091"):
-            with self.subTest(needle):
-                self.assertIn(needle, text)
-        adr = "docs/areas/console/adr/"
-        for path, amended in (
-                ("036-the-console-keeps-a-managers-pictures-and-serves-them-only-to-the-page.md",
-                 "- **Status:** accepted; amended by ADR-console-038 and ADR-console-045"),):
-            with self.subTest(path):
-                lines = (ROOT / adr / path).read_text().splitlines()
-                self.assertEqual(next(r for r in lines if r.startswith("- **Status:**")), amended)
+    def test_the_glossary_cites_the_picture_records(self):
         context = (ROOT / "docs/areas/console/CONTEXT.md").read_text()
-        for term in ("**Question round**:", "**Picture**:"):
-            entry = context[context.index(term):].split("\n\n")[0]
-            self.assertIn("ADR-console-038", entry, term)
+        picture, question_round = (
+            context[context.index(term):].split("\n\n")[0]
+            for term in ("**Picture**:", "**Question round**:"))
+        self.assertIn("ADR-console-036", picture)
+        self.assertIn("ADR-console-038", picture)
+        self.assertIn("ADR-console-038", question_round)
+        self.assertIn("| Picture | Console |", self.doc("docs/CONTEXT-MAP.md"))

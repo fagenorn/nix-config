@@ -9,7 +9,7 @@ append.
 
 Rows. Three kinds record an adoption approved on the page, `STEP` (`event_log.ADOPTION_STEP`),
 `PULL` (`event_log.ADOPTION_PULL`) and `REGISTRATION` (`event_log.ADOPTION_REGISTRATION`, #1055,
-ADR-console-028 D10); none is in `KEPT_KINDS`. `step_row(payload)` returns `(STEP,
+ADR-console-028); none is in `KEPT_KINDS`. `step_row(payload)` returns `(STEP,
 None, dict(payload))` and raises `ValueError` unless the members are exactly `STEP_MEMBERS` (`by`,
 `plan_id`, `root`, `project_id`, `step`, `branch`, `commit`, `base`, `pull_request`, `reason`, `note`,
 `kept`, `evidence`), `by` is `owner`, `plan_id` and `root` are non-empty strings, `step` is one of `STEPS`
