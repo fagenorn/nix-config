@@ -24,7 +24,8 @@ tree. A clean detached HEAD at the branch tip is switched back to the branch (`a
 It never resets, cleans, restores, stashes or deletes.
 
 `worktree-check` takes the same flags and makes the same judgement with no fetch and no
-change, a detached HEAD never switched: `absent`, `adopted`, `dirty` or `mismatch`.
+change: `absent`, `adopted`, `dirty` or `mismatch`. A clean detached HEAD at the branch tip is
+`absent` there, so a recheck runs `worktree`, which reattaches it.
 
 `note --repo <owner/name> --issue <n> --evidence <text>` posts `<text>` as one issue
 comment: `{verdict: "posted", comment_id}`.
@@ -215,7 +216,11 @@ def _rev(root: str, ref: str) -> str | None:
 
 
 def _judge_worktree(args: argparse.Namespace) -> tuple[str, str]:
-    """(verdict, detail) of the worktree at the path, from what git holds now; no change."""
+    """(verdict, detail) of the worktree at the path, from what git holds now; no change.
+
+    The verdict is internal `detached` for a clean detached HEAD at the branch tip: `worktree`
+    reattaches it as `adopted`, `worktree-check` reports it `absent` so a recheck runs `worktree`.
+    """
     wanted = os.path.realpath(args.worktree_path)
     ref = f"refs/heads/{args.branch}"
     entries = _worktrees(args.repo_root)
@@ -231,7 +236,7 @@ def _judge_worktree(args: argparse.Namespace) -> tuple[str, str]:
         return ("adopted", "the worktree is on the branch") if clean else ("dirty", "the worktree has changes")
     if "detached" in here:
         if clean and here.get("HEAD") == _rev(args.repo_root, ref):
-            return "adopted", "a clean detached HEAD at the branch tip"
+            return "detached", "a clean detached HEAD at the branch tip"
         return "mismatch", "the worktree is on a detached HEAD that is not the branch tip"
     return "mismatch", f"the worktree is on {here.get('branch', 'another branch')}"
 
@@ -259,6 +264,8 @@ def _integration(args: argparse.Namespace) -> str:
 
 def worktree_check(args: argparse.Namespace) -> dict:
     verdict, detail = _judge_worktree(args)
+    if verdict == "detached":
+        verdict, detail = "absent", "the worktree is detached at the branch tip and worktree reattaches it"
     return _report(args, verdict, detail, _integration(args))
 
 
@@ -283,10 +290,9 @@ def worktree(args: argparse.Namespace) -> dict:
             _git(args.repo_root, "worktree", "add", "--no-track", "-b", branch, path, f"origin/{integration}")
             return _report(args, "made", "the branch was made from the integration branch", integration, base)
         verdict, detail = "adopted", "the existing branch was checked out"
-    elif verdict == "adopted":
-        here = next(e for e in _worktrees(args.repo_root) if e["real"] == os.path.realpath(args.worktree_path))
-        if "detached" in here:
-            _git(args.worktree_path, "switch", args.branch)
+    elif verdict == "detached":
+        _git(args.worktree_path, "switch", args.branch)
+        verdict = "adopted"
     return _report(args, verdict, detail, integration)
 
 

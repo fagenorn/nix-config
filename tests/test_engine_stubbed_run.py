@@ -93,6 +93,16 @@ class LaneTest(Scenario):
         self.assertEqual(run.transitions(self.child(run))[-1], ("look", "marked"))
         self.assertEqual([launch["key"] for launch in run.launches()], ["verdict"])
 
+    def test_a_continued_run_reattaches_a_worktree_left_on_a_clean_detached_head_at_the_tip(self):
+        run = StubbedRun(self, body=LOOK_BODY)
+        self.stopped(run, run.deliver(), "look-not-on-engine", "nothing")
+        run.world.git(run.worktree_path, "checkout", "--detach")
+        self.assertEqual(self.branch_here(run, run.worktree_path), "")
+
+        self.stopped(run, run.deliver(), "look-not-on-engine", "nothing")
+
+        self.assertEqual(self.branch_here(run, run.worktree_path), run.branch)
+
 
 class RefusalTest(Scenario):
     def nothing_started(self, run: StubbedRun) -> None:

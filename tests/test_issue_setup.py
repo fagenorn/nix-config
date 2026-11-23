@@ -157,13 +157,17 @@ class WorktreeTest(unittest.TestCase):
         with self.assertRaises(subprocess.CalledProcessError):
             self.git("symbolic-ref", "-q", "HEAD", root=self.path)
 
-    def test_worktree_check_reports_a_clean_detached_head_at_the_tip_as_adopted_and_leaves_it_detached(self):
+    def test_worktree_check_reports_a_clean_detached_head_at_the_tip_as_absent_and_leaves_it_detached(self):
         self.make()
         self.git("checkout", "--detach", root=self.path)
         code, report = self.call("worktree-check")
-        self.assertEqual((code, report["verdict"]), (0, "adopted"))
+        self.assertEqual((code, report["verdict"]), (0, "absent"))
         with self.assertRaises(subprocess.CalledProcessError):
             self.git("symbolic-ref", "-q", "HEAD", root=self.path)
+        code, report = self.call("worktree")
+        self.assertEqual((code, report["verdict"]), (0, "adopted"))
+        self.assertEqual(self.git("branch", "--show-current", root=self.path).strip(), BRANCH)
+        self.git("checkout", "--detach", root=self.path)
         self.git("commit", "--allow-empty", "-m", "x", root=self.path)
         code, report = self.call("worktree-check")
         self.assertEqual((code, report["verdict"]), (0, "mismatch"))
