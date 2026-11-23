@@ -4049,7 +4049,7 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         """Write views as they publish; `delivered` hears each version once written.
 
         Only the owner's stream passes it: a guest view never carries the evidence card, so a frame
-        written to a colleague shows the owner nothing (ADR-console-071 D4).
+        written to a colleague shows the owner nothing (ADR-console-071).
         """
         console = self.server.console
         self.close_connection = True
@@ -9877,7 +9877,7 @@ class ConsoleService:
             comment = answer.with_retries(
                 record, clock=self._monotonic, sleep=self._write_sleep, on_retry=on_retry)
             # The tracker offers no way to make the read and the post one step, so the pull request is
-            # read once more before the answer is declared recorded (ADR-console-074 D10).
+            # read once more before the answer is declared recorded (ADR-console-074).
             state, found = answer.with_retries(
                 lambda: self._look_reader(slug, look.pr), clock=self._monotonic,
                 sleep=self._write_sleep, on_retry=on_retry)

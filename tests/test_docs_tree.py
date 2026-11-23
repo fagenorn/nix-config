@@ -191,7 +191,6 @@ def scanned_files(archived_dirs: tuple[str, ...] = ()) -> list[tuple[str, list[s
 
 RETIRED_DELIVERY_RECORDS = (2, 9, 10, 11)
 RETIRED_CONSOLE_RECORDS = (2, 9, 25, 39, 40, 41, 53, 55, 56, 57, 61, 64, 69)
-LATER_CONSOLE_RECORD = re.compile(r"^docs/areas/console/adr/(?:05[2-9]|0[6-9]\d|[1-9]\d\d)-")
 LATER_THAN_076 = re.compile(r"^docs/areas/console/adr/(?:07[7-9]|0[89]\d|[1-9]\d\d)-")
 SUB_DECISION_027_TO_051 = re.compile(
     r"\bADR-console-(0(?:2[7-9]|[34]\d|5[01]))(?:'s)? \(?(?:D\d|Consequences)")
@@ -214,7 +213,7 @@ def console_form_findings(numbers) -> list[tuple[str, str, int]]:
 
 
 def sub_decision_hits(
-        numbers, pattern=SUB_DECISION_027_TO_051, later=LATER_CONSOLE_RECORD) -> list[str]:
+        numbers, pattern=SUB_DECISION_027_TO_051, later=LATER_THAN_076) -> list[str]:
     return [
         f"{path}:{number}"
         for path, lines in tracked_text(())
@@ -618,6 +617,27 @@ class DocsTreeTest(unittest.TestCase):
         self.assertEqual(console_form_findings(numbers), [])
         self.assertEqual(sub_decision_hits(numbers, SUB_DECISION_052_TO_076, LATER_THAN_076), [])
 
+    def test_the_console_card_and_registration_records_are_cut_and_cited_whole(self):
+        numbers = (54, 70, 71, 72, 73, 74)
+        self.assertEqual(
+            [int(p.name[:3]) for p in console_records(numbers)], [54, 70, 71, 72, 73, 74])
+        self.assertEqual(console_form_findings(numbers), [])
+        self.assertEqual(sub_decision_hits(numbers, SUB_DECISION_052_TO_076, LATER_THAN_076), [])
+
+    def test_the_console_records_052_to_076_are_the_kept_ones(self):
+        records = [
+            p for p in sorted((REPO_ROOT / "docs/areas/console/adr").glob("[0-9][0-9][0-9]-*.md"))
+            if 52 <= int(p.name[:3]) <= 76]
+        found = [
+            (p.name, v.rule, v.line)
+            for p in records
+            for v in record_violations(f"docs/areas/console/adr/{p.name}", p.read_bytes())
+        ]
+        self.assertEqual(
+            [int(p.name[:3]) for p in records],
+            [52, 54, 58, 59, 60, 62, 63, 65, 66, 67, 68, 70, 71, 72, 73, 74, 75, 76])
+        self.assertEqual(found, [])
+
     def test_the_console_records_027_to_051_are_the_kept_ones(self):
         records = [
             p for p in sorted((REPO_ROOT / "docs/areas/console/adr").glob("[0-9][0-9][0-9]-*.md"))
@@ -638,8 +658,6 @@ class DocsTreeTest(unittest.TestCase):
         self.assertIsNotNone(SUB_DECISION_027_TO_051.search("ADR-console-0" + "30 (D5"))
         self.assertIsNone(SUB_DECISION_027_TO_051.search("ADR-console-0" + "52 D1"))
         self.assertIsNone(SUB_DECISION_027_TO_051.search("ADR-console-0" + "28 was"))
-        self.assertIsNotNone(LATER_CONSOLE_RECORD.match("docs/areas/console/adr/0" + "52-x.md"))
-        self.assertIsNone(LATER_CONSOLE_RECORD.match("docs/areas/console/adr/0" + "51-x.md"))
         self.assertIsNotNone(SUB_DECISION_052_TO_076.search("ADR-console-0" + "60 D6"))
         self.assertIsNotNone(SUB_DECISION_052_TO_076.search("ADR-console-0" + "54's Consequences"))
         self.assertIsNotNone(SUB_DECISION_052_TO_076.search("ADR-console-0" + "74 (D10"))

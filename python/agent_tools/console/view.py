@@ -93,7 +93,7 @@ pending change is `pending` (the reading's commit, `activate` true); otherwise n
 is the one rule the service's admission of Activate shares: a reading with a pending change, or a
 `failed` run whose commit is the reading's and that finished less than OUTCOME_MS before `now_ms`, even
 with nothing pending, because the host's revision can reach the commit before the switch fails
-(ADR-system-004); a day later, with the host at that commit, the line goes (ADR-console-073 D5). The pending text is ACTIVATION_TEXT when
+(ADR-system-004); a day later, with the host at that commit, the line goes (ADR-console-073). The pending text is ACTIVATION_TEXT when
 the reading names a changed console file; else ACTIVATION_TOOLING_TEXT when every other path starts
 with a member of AGENT_TOOLING (`python/`, `home/common/agent-`, `home/common/claude-code/`,
 `home/common/codex/`, `patches/agent-plugins/`, `lib/agent-`); else ACTIVATION_CONFIGURATION_TEXT.
