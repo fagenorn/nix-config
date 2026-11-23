@@ -512,6 +512,12 @@ class ThisRepositoryNodeTest(unittest.TestCase):
             self.assertLessEqual(expected, seen(
                 "eslint", lambda argv: node_lint.INLINE_CONFIG in argv))
 
+    def test_doctor_on_a_runner_that_takes_over_a_minute_still_completes(self) -> None:
+        slowed = {name: f'/bin/sleep 10\nexec {pinned(name)} "$@"\n' for name in ("node", "eslint")}
+        directory = tools_dir(self, **slowed)
+        _, by_id = doctor(self, REPO_ROOT, "--offline", env=tools_env(directory))
+        self.assertEqual(by_id["verification.violations.never_rise"]["status"], "passed")
+
 
 if __name__ == "__main__":
     unittest.main()
