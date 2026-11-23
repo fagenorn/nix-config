@@ -12,7 +12,7 @@ A verification run is heavy, and several delivery runs can start on one host at 
 - D1. The number of verify slots a host offers lives in the host declaration, with a default of one.
 - D2. A slot held by a dead process is given back.
 - D3. A run in progress is never preempted.
-- D4. The count is the optional top-level declaration member `verify_slots`. Its value is a plain integer of at least 1; a boolean, 0, a float or a string makes the declaration invalid. An absent member is 1, and so is a missing declaration file. An invalid declaration is refused: `verify-slot` exits 2 and runs nothing. The committed declaration stays without the member, so every host gets 1.
+- D4. The count is the optional top-level declaration member `verify_slots`. Its value is a plain integer of at least 1; a boolean, 0, a float or a string makes the declaration invalid. An absent member is 1, and so is a missing declaration file. An invalid declaration is refused: `verify-slot` exits 2 and runs nothing.
 - D5. A slot is an exclusive non-blocking `flock` on `slot-<i>.lock` for `i` in `0..count-1`, in one directory that belongs to the host and not to an account: `/tmp/agent-verify-slots`, or the directory `VERIFY_SLOT_DIR` names (a seam for tests). The directory has mode 1777 and the files mode 0666, so every local account of a shared host draws on the same slots; a slot directory under `$HOME` would give each account its own and admit one run per account. There is no lease, expiry or pid check: a live holder keeps its slot however long it runs (D3), and the kernel releases the lock of a dead holder (D2). Admission counts the live holders of every `slot-*.lock` file, not only the first `count`: a run that took a slot gives it back and waits when the holders, itself included, outnumber the declared count, so a count lowered while a higher-numbered slot is held never admits a run beside that holder. The wait limit is checked before each further try, so a slot freed after the limit is not taken.
 - D6. The holder is the `verify-slot` process itself, and its child never inherits the lock descriptor. A `verify-slot` killed by SIGKILL gives its slot back at once, even while its child still runs. SIGTERM, SIGHUP and SIGINT are forwarded to the child; the holder waits for it, releases the slot and exits 128 plus the signal.
 - D7. A slot is taken per verification command, not once per verify step. Each command is its own Bash call, and holding a slot across calls would need a detached process, which the lifecycle guard refuses.
@@ -33,6 +33,6 @@ A verification run is heavy, and several delivery runs can start on one host at 
 
 - A SIGKILLed `verify-slot` frees its slot while its child may still run, so that child is briefly uncounted.
 - There is no FIFO order: a waiter that polls at the right moment can overtake an older one.
-- A host that wants more than one slot needs its own declaration source; none does today.
+- A host that wants more than one slot needs its own declaration source.
 - Until issue 1578 lands, a deliver-direct verify is not counted against the slot and can run beside a slotted one.
 - The slot count complements ADR-delivery-006's per-run job count: that bounds the jobs of one run, this bounds the runs of one host.
