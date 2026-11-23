@@ -1,0 +1,3 @@
+{"at":"2026-11-21T16:00:00Z","event":"step_entered","stage":"building","step":"tasks","visit":1}
+{"at":"2026-11-21T16:00:01Z","child":"41-20261121T160001Z-c0a1","event":"call","index":0,"items":3,"step":"tasks","visit":1}
+{"at":"2026-11-21T16:00:02Z","child":"41-20261121T160002Z-c0a2","event":"call","index":1,"items":3,"step":"tasks","visit":1}
