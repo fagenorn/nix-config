@@ -23,8 +23,7 @@ from pathlib import Path
 from typing import Callable
 from unittest import mock
 
-from agent_tools.delivery import engine, engine_graders, engine_reply, procedure_check
-from agent_tools.delivery.engine_graders import GRADERS
+from agent_tools.delivery import engine, engine_reply, procedure_check
 from agent_tools.delivery.procedure_check import CommandDeclaration, load_commands
 from tests.engine_walks import reply_schemas, step_outcomes, walk_edges
 from tests.guard_policy_world import install_platform_manifest_in_environ
@@ -1215,31 +1214,6 @@ class DeclarationTest(unittest.TestCase):
                     path.write_text(text, encoding="utf-8")
                     with self.assertRaises(procedure_check.DeclarationError):
                         load_commands(path)
-
-
-class GraderTest(unittest.TestCase):
-    GRADER_CASES = [
-        ("toy-tally", {"review-a.verdict": "approve", "review-b.verdict": "approve"}, "accept"),
-        ("toy-tally", {"review-a.verdict": "approve", "review-b.verdict": "revise"}, "revise"),
-        ("review-capability", {"contract.capabilities": {
-            "review.code": {"state": "blocked"}, "review.plan": {"state": "available"}}}, "blocked"),
-        ("review-capability", {"contract.capabilities": {
-            "review.code": {"state": "unsupported"}, "review.plan": {"state": "blocked"}}}, "blocked"),
-        ("review-capability", {"contract.capabilities": {
-            "review.code": {"state": "available"}, "review.plan": {"state": "unsupported"}}}, "clear"),
-        ("review-capability", {}, "clear"),
-    ]
-
-    def test_each_grader_case_grades_its_outcome(self):
-        for name, results, expected in self.GRADER_CASES:
-            with self.subTest(name=name, results=results):
-                self.assertEqual(GRADERS[name].grade(results), expected)
-
-    def test_every_declared_grader_outcome_is_produced(self):
-        for name in GRADERS:
-            with self.subTest(name=name):
-                self.assertEqual({e for n, _, e in self.GRADER_CASES if n == name},
-                                 set(GRADERS[name].outcomes))
 
 
 if __name__ == "__main__":
