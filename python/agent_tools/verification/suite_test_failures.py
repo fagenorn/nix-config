@@ -1,4 +1,4 @@
-"""The `suite-test-failures` verify check (issue 1659).
+"""The `suite-test-failures` verify check.
 
 `suite-test-failures --repo R --workflow W --job J --branch B --merge SHA --n N --test NAME`
 (`suite_test_failures`), run through the wrapper `home/common/verify-pending/checks/suite-test-failures`

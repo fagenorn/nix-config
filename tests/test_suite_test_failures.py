@@ -1,4 +1,4 @@
-"""`agent_tools.verification.suite_test_failures`: the suite-test-failures verify check (issue 1659)."""
+"""`agent_tools.verification.suite_test_failures`: the suite-test-failures verify check."""
 import contextlib
 import io
 import os
