@@ -21,9 +21,10 @@ from unittest import mock
 from agent_tools.delivery import engine_ledger, engine_stop
 from tests.process_liveness import process_alive
 from tests.test_engine_continue import gated
-from tests.test_engine_deliver import EngineProject, run_continued, start_deliver, step
+from tests.test_engine_deliver import EngineProject, run_continued, shape, start_deliver, step
 from tests.test_engine_session import (
-    RESULT_NORMAL, copy_roles, install_answers, one_step,
+    RESULT_MISSING, RESULT_NORMAL, after, agent_step, copy_roles, install_answers, one_step,
+    write_procedures,
 )
 from tests.test_engine_stop import gone, reap
 
@@ -253,6 +254,220 @@ class StartTimeTest(unittest.TestCase):
         while process_alive(pid):
             self.assertLess(time.monotonic(), deadline, f"process {pid} is still alive")
             time.sleep(0.05)
+
+
+class ResumeTest(unittest.TestCase):
+    def setUp(self):
+        self.project = EngineProject(self)
+        self.project.env.pop("CLAUDE_ACCOUNT", None)
+        copy_roles(self.project, "implementer")
+
+    def hang(self) -> dict:
+        return {"stdout": str(RESULT_NORMAL), "exit": "hang", "account": "p1"}
+
+    def normal(self) -> dict:
+        return {"stdout": str(RESULT_NORMAL), "exit": 0, "account": "p1"}
+
+    def kill_during_hang(self, procedures: Path, log: Path, lines: int) -> None:
+        running = start_deliver(self, self.project, procedures)
+        wait_until(self, lambda: log.exists() and len(log.read_text().splitlines()) >= lines
+                   and '"hang"' in log.read_text().splitlines()[lines - 1])
+        hung = json.loads(log.read_text().splitlines()[lines - 1])["hang"]
+        self.addCleanup(reap, hung["pid"])
+        self.addCleanup(reap, hung["child"])
+        running.kill()
+        running.wait(10)
+
+    def records(self, log: Path) -> list[dict]:
+        return [json.loads(line) for line in log.read_text().splitlines()]
+
+    def cut(self, run: Path, event: str, *, drop: tuple[str, ...] = ()) -> int:
+        """Cut the ledger right after the first `event` line and delete the named files."""
+        lines = (run / "events.jsonl").read_text().splitlines(keepends=True)
+        cut = next(i for i, line in enumerate(lines) if json.loads(line)["event"] == event) + 1
+        (run / "events.jsonl").write_text("".join(lines[:cut]), encoding="utf-8")
+        for name in drop:
+            (run / name).unlink()
+        return cut
+
+    def delivered_once(self) -> tuple[Path, Path, Path, str]:
+        log = install_answers(self.project, [self.normal(), self.normal()])
+        procedures = one_step(self.project)
+        first = self.project.deliver(procedures)
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        (run,) = self.project.runs()
+        return procedures, log, run, after(self.records(log)[0]["argv"], "--session-id")
+
+    def entered(self, run: Path) -> list[int]:
+        return [e["visit"] for e in self.project.events(run)
+                if e["event"] == "step_entered" and e["step"] == "draft"]
+
+    def test_a_run_killed_during_an_agent_step_resumes_its_recorded_session_once(self):
+        log = install_answers(self.project, [self.hang(), self.normal()])
+        procedures = one_step(self.project)
+        self.kill_during_hang(procedures, log, 1)
+        done = self.project.deliver(procedures)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(json.loads(done.stdout)["end"], "done")
+        (run,) = self.project.runs()
+        records = self.records(log)
+        self.assertEqual(len(records), 2)
+        session = after(records[0]["argv"], "--session-id")
+        self.assertEqual(after(records[1]["argv"], "--resume"), session)
+        self.assertNotIn("--session-id", records[1]["argv"])
+        self.assertTrue(records[1]["announced"])
+        self.assertEqual(records[1]["stdin"],
+                         (run / "sessions/draft.1.continue-2.prompt.md").read_text())
+        events = self.project.events(run)
+        self.assertEqual(self.entered(run), [1])
+        self.assertEqual([e["session"] for e in events if e["event"] == "session_starting"],
+                         [session])
+        self.assertEqual(run_continued(events), [])
+        self.assertEqual([(e["step"], e["visit"], e["session"], e["attempt"])
+                          for e in events if e["event"] == "session_resuming"],
+                         [("draft", 1, session, 2)])
+        self.assertEqual(len([e for e in events if e["event"] == "result_stored"
+                              and (e["step"], e["visit"]) == ("draft", 1)]), 1)
+        self.assertTrue((run / "results/draft.1.json").exists())
+        self.assertFalse((run / "results/draft.2.json").exists())
+        self.assertTrue((run / "sessions/draft.1.continue-2.json").exists())
+
+    def test_a_session_recorded_but_never_started_is_launched_with_its_recorded_id(self):
+        procedures, log, run, session = self.delivered_once()
+        cut = self.cut(run, "session_starting",
+                       drop=("results/draft.1.json", "sessions/draft.1.json"))
+        done = self.project.deliver(procedures)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        records = self.records(log)
+        self.assertEqual(len(records), 2)
+        self.assertEqual(after(records[1]["argv"], "--session-id"), session)
+        self.assertNotIn("--resume", records[1]["argv"])
+        self.assertEqual(records[1]["stdin"], (run / "sessions/draft.1.prompt.md").read_text())
+        events = self.project.events(run)[cut:]
+        self.assertEqual(shape(events)[0], ("session_resuming", "draft", 1))
+        self.assertFalse([e for e in events if e["event"] in ("step_entered", "run_continued")])
+
+    def test_a_miss_on_the_continued_resume_is_no_reply_with_no_second_ask(self):
+        log = install_answers(self.project, [
+            self.hang(), {"stdout": str(RESULT_MISSING), "exit": 0, "account": "p1"}])
+        procedures = one_step(self.project)
+        self.kill_during_hang(procedures, log, 1)
+        done = self.project.deliver(procedures)
+        self.assertEqual(done.returncode, 3, done.stdout + done.stderr)
+        self.assertEqual(json.loads(done.stdout)["end"], "step-failed")
+        (run,) = self.project.runs()
+        self.assertEqual(len(self.records(log)), 2)
+        self.assertEqual([e["outcome"] for e in self.project.events(run)
+                          if e["event"] == "outcome_graded" and e["step"] == "draft"
+                          and e["visit"] == 1], ["no-reply"])
+        self.assertTrue((run / "sessions/draft.1.continue-2.json").exists())
+        self.assertFalse((run / "sessions/draft.1.resume.json").exists())
+
+    def test_a_second_interruption_resumes_again_under_the_next_attempt(self):
+        log = install_answers(self.project, [self.hang(), self.hang(), self.normal()])
+        procedures = one_step(self.project)
+        self.kill_during_hang(procedures, log, 1)
+        self.kill_during_hang(procedures, log, 2)
+        done = self.project.deliver(procedures)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        (run,) = self.project.runs()
+        records = self.records(log)
+        self.assertEqual(len(records), 3)
+        session = after(records[0]["argv"], "--session-id")
+        self.assertEqual([after(r["argv"], "--resume") for r in records[1:]], [session, session])
+        events = self.project.events(run)
+        self.assertEqual([e["attempt"] for e in events if e["event"] == "session_resuming"],
+                         [2, 3])
+        for attempt in (2, 3):
+            self.assertTrue((run / f"sessions/draft.1.continue-{attempt}.prompt.md").exists())
+        self.assertEqual(self.entered(run), [1])
+
+    def test_a_stale_earlier_result_still_rewinds_before_the_interrupted_session(self):
+        log = install_answers(self.project, [self.hang(), self.normal()])
+        procedures = write_procedures(self.project, [
+            step("a", "count-a", "draft", holds="live"),
+            agent_step("draft", "implementer", {"drafted": "done", "stuck": "needs-owner"})])
+        self.kill_during_hang(procedures, log, 1)
+        done = self.project.deliver(procedures)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        (run,) = self.project.runs()
+        self.assertEqual(self.project.calls("a"), 2)
+        records = self.records(log)
+        self.assertNotEqual(after(records[1]["argv"], "--session-id"),
+                            after(records[0]["argv"], "--session-id"))
+        self.assertEqual(self.entered(run), [1, 2])
+
+    def test_an_entered_visit_with_no_recorded_session_is_entered_again_under_a_new_visit(self):
+        procedures, log, run, _ = self.delivered_once()
+        self.cut(run, "step_entered", drop=("results/draft.1.json", "sessions/draft.1.json",
+                                            "sessions/draft.1.system.md",
+                                            "sessions/draft.1.prompt.md"))
+        done = self.project.deliver(procedures)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        records = self.records(log)
+        self.assertIn("--session-id", records[1]["argv"])
+        self.assertNotIn("--resume", records[1]["argv"])
+        self.assertEqual(self.entered(run), [1, 2])
+        self.assertEqual(len(run_continued(self.project.events(run))), 1)
+
+    def test_a_visit_whose_result_is_stored_without_an_outcome_is_entered_again_under_a_new_visit(self):
+        procedures, log, run, session = self.delivered_once()
+        self.cut(run, "result_stored")
+        lines = (run / "events.jsonl").read_text().splitlines()
+        stored = json.loads(lines[-1])
+        del stored["outcome"]
+        lines[-1] = json.dumps(stored, sort_keys=True, separators=(",", ":"))
+        (run / "events.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        done = self.project.deliver(procedures)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        records = self.records(log)
+        self.assertEqual(len(records), 2)
+        self.assertNotEqual(after(records[1]["argv"], "--session-id"), session)
+        self.assertNotIn("--resume", records[1]["argv"])
+        self.assertEqual(self.entered(run), [1, 2])
+        self.assertEqual(len(run_continued(self.project.events(run))), 1)
+        self.assertTrue((run / "results/draft.2.json").exists())
+
+    def test_a_visit_that_stopped_at_quota_wait_is_entered_again_under_a_new_visit(self):
+        empty = self.project.tmp / "empty.json"
+        empty.write_bytes(b"")
+        all_out = {"stdout": str(empty), "exit": 75, "account": None,
+                   "all_out": {"resumes_at": "2026-11-24T12:00:00Z"}}
+        log = install_answers(self.project, [all_out, self.normal()])
+        procedures = one_step(self.project)
+        first = self.project.deliver(procedures)
+        self.assertEqual(first.returncode, 3, first.stdout + first.stderr)
+        self.assertEqual(json.loads(first.stdout)["end"], "quota-wait")
+        session = after(self.records(log)[0]["argv"], "--session-id")
+        done = self.project.deliver(procedures)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        (run,) = self.project.runs()
+        records = self.records(log)
+        self.assertEqual(len(records), 2)
+        self.assertNotEqual(after(records[1]["argv"], "--session-id"), session)
+        self.assertNotIn("--resume", records[1]["argv"])
+        self.assertEqual(self.entered(run), [1, 2])
+        events = self.project.events(run)
+        (continued,) = run_continued(events)
+        at = events.index(continued)
+        self.assertLess(max(i for i, e in enumerate(events) if e["event"] == "wait_started"), at)
+        self.assertLess(max(i for i, e in enumerate(events)
+                            if e["event"] == "stop_reached" and e["stop"] == "quota-wait"), at)
+        self.assertFalse([e for e in events if e["event"] == "session_resuming"])
+
+    def test_a_visit_that_stopped_by_request_is_entered_again_under_a_new_visit(self):
+        procedures, log, run, session = self.delivered_once()
+        self.cut(run, "session_starting", drop=("results/draft.1.json", "sessions/draft.1.json"))
+        engine_ledger.append_event(run, {
+            "event": "stop_reached", "at": rfc(datetime.now(timezone.utc)), "step": "draft",
+            "stop": "stopped-by-request", "need": "retry"})
+        done = self.project.deliver(procedures)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        records = self.records(log)
+        self.assertNotEqual(after(records[1]["argv"], "--session-id"), session)
+        self.assertNotIn("--resume", records[1]["argv"])
+        self.assertEqual(self.entered(run), [1, 2])
+        self.assertEqual(len(run_continued(self.project.events(run))), 1)
 
 
 if __name__ == "__main__":

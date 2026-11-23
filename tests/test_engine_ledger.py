@@ -338,6 +338,18 @@ class SessionFileTest(unittest.TestCase):
             self.assertEqual(sorted(p.name for p in (run / "sessions").iterdir()),
                              ["draft.1.json", "draft.1.resume.json", "draft.1.resume.prompt.md"])
 
+    def test_continue_session_files_are_numbered_and_stored_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run = new_run(tmp)
+            for name in ("draft.1.continue-2.json", "draft.1.continue-2.prompt.md"):
+                with self.subTest(name=name):
+                    self.assertEqual(engine_ledger.store_session_file(run, name, b"x"),
+                                     run / "sessions" / name)
+            for name in ("draft.1.continue-2.json", "draft.1.continue.json",
+                         "draft.1.continue-0.json", "draft.1.continue-2.txt"):
+                with self.subTest(name=name), self.assertRaises(LedgerError):
+                    engine_ledger.store_session_file(run, name, b"x")
+
     def test_creating_sessions_fsyncs_the_run_directory(self):
         synced: list[Path] = []
         real = engine_ledger._fsync_path

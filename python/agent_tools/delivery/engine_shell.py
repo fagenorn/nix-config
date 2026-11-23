@@ -28,7 +28,7 @@ structured reply, so neither the prose nor the exit code selects an outcome. A r
 usable reply (none, or one that breaks the schema) is a miss when `engine_session.is_miss` accepts
 its stdout: the same session is then resumed once (`session_resuming`, `--resume <session>`,
 `REASK_PROMPT`) and a second miss grades `no-reply` with `{}` stored, its measurements the sums of
-both launches. Any other reading with no usable reply is a `Fault`, and so is a session denied a
+both launches (in a continued visit a miss is `no-reply` at once, see "Continuing"). Any other reading with no usable reply is a `Fault`, and so is a session denied a
 shell command, whose reply may rest on a check it never ran. Before each launch, the resumes included,
 the host's settings are read again and a lifecycle guard hook that is gone is a `Fault`. A session ended
 by a bound is graded `out-of-bounds` before any fault is considered: the bounds are a turn or spend cap
@@ -55,6 +55,17 @@ Any other API error is retried once in the visit, after `API_RETRY_SECONDS`, the
 visit); a usage limit never consumes that retry and an API error never opens a wait, and a retried API error
 leaves an open `usage-limit` wait open, so every `quota-wait` stop has one open. A second API error in the visit
 is the outcome `no-reply`: the stored result is `{}` and the step's `on` must map it, else the run is a `Fault`.
+
+A visit a killed engine left interrupted is continued in the same visit (issue 1523), after the stale-result
+rule and `engine_core.reentry` have run first: its `step_entered` and `session_starting` stand, no `run_continued`
+is appended and no new visit starts. The session recorded for the visit is launched again under the next attempt
+(2 plus its `session_resuming` events), with `session_resuming` before every launch: `--resume <session>` with
+`engine_session.CONTINUE_PROMPT` when a process of the visit had started, else `--session-id <session>` with the
+stored `prompt.md`. The launch's prompt is stored as `sessions/<step>.<visit>.continue-<attempt>.prompt.md` when
+absent, and each record as `.continue-<attempt>.json`. The continued launches are not re-asked, so a miss is
+`no-reply`; every later launch of the visit resumes. A visit with a stored result (with or without its outcome) or
+a recorded stop after its entry (`quota-wait`, `stopped-by-request`) is not resumed but rewound to a new visit as
+before, its `run_continued` clearing the stop and closing an open usage-limit wait.
 
 Before each visit of a `mutates: true` command step, in a procedure naming a `keep_alive`,
 the shell runs it (`KEEP_ALIVE_SECONDS`), recording a `keep_alive_ran` per call. It renews
@@ -125,7 +136,7 @@ import subprocess
 import sys
 import tempfile
 import uuid
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Mapping
@@ -506,10 +517,45 @@ def _continue(run_dir: Path, table: CommandTable, inputs: dict) -> None:
     if isinstance(action, engine_core.Stop) and (not ledger or ledger[-1]["event"] != "stop_reached"):
         return  # the owner never saw this stop: the walk reports it before anything is re-entered
     point = engine_core.reentry(procedure, inputs, events, read_head(table.root))
+    if (isinstance(action, engine_core.StartSession)
+            and (action.step, action.visit) == (point.step, point.visit)
+            and _resumed(run_dir, ledger, action.step, action.visit) is not None):
+        return  # the interrupted visit resumes its own session: no rewind, no new visit
     event = {"event": "run_continued", "at": _now(), "step": point.step}
     if point.visit is not None:
         event["visit"] = point.visit
     engine_ledger.append_event(run_dir, event)
+
+
+@dataclass(frozen=True)
+class _Resumed:
+    """How a continued run launches the session its predecessor left interrupted in a visit."""
+    session: str
+    system: Path
+    text: str
+    attempt: int
+    resume: bool
+
+
+def _resumed(run_dir: Path, ledger: list[dict], name: str, visit: int) -> _Resumed | None:
+    """The interrupted visit's session to launch again, or None when the visit is to be entered
+    (again): it was never entered or never recorded a session, stored a result (graded or not), or
+    ended at a recorded stop after its entry."""
+    here = [e for e in ledger if e.get("step") == name and e.get("visit") == visit]
+    entered = [i for i, e in enumerate(ledger) if e["event"] == "step_entered"
+               and (e["step"], e["visit"]) == (name, visit)]
+    starting = [e for e in here if e["event"] == "session_starting"]
+    if not entered or not starting or any(e["event"] == "result_stored" for e in here):
+        return None
+    if any(e["event"] == "stop_reached" for e in ledger[entered[-1]:]):
+        return None
+    attempt = 2 + sum(1 for e in here if e["event"] == "session_resuming")
+    started = any(e["event"] == "process_started" for e in here)
+    text = (engine_session.CONTINUE_PROMPT if started else
+            (run_dir / "sessions" / f"{name}.{visit}.prompt.md").read_text(encoding="utf-8"))
+    return _Resumed(session=starting[-1]["session"],
+                    system=run_dir / "sessions" / f"{name}.{visit}.system.md",
+                    text=text, attempt=attempt, resume=started)
 
 
 def _record_history(run_dir: Path, clock: Callable[[], datetime]) -> None:
@@ -572,8 +618,9 @@ def _walk(run_dir: Path, table: CommandTable, inputs: dict, holder: Mapping[str,
                          f"{action.name}, which needs {action.need}.", stop)
         if isinstance(action, engine_core.StartSession):
             try:
-                stopped = _visit_session(run_dir, table.root, steps[action.step], action, stop,
-                                         slots)
+                stopped = _visit_session(
+                    run_dir, table.root, steps[action.step], action, stop, slots,
+                    resumed=_resumed(run_dir, ledger, action.step, action.visit))
             except engine_stop.Stopped:
                 return _stopped(run_dir, action.step)
             if stopped is not None:
@@ -765,20 +812,33 @@ def _grade_command(run_dir: Path, step: dict, name: str, visit: int,
 
 
 def _visit_session(run_dir: Path, root: str, step: dict, action: engine_core.StartSession,
-                   stop: Callable[[], bool], slots: int) -> tuple[int, dict] | None:
-    """Run the step's session to its result; the `quota-wait` stop when no account can answer."""
+                   stop: Callable[[], bool], slots: int,
+                   resumed: _Resumed | None = None) -> tuple[int, dict] | None:
+    """Run the step's session to its result; the `quota-wait` stop when no account can answer.
+
+    With `resumed` the visit is already entered and its session recorded: neither is recorded
+    again, and the session is launched under `resumed.attempt`."""
     name, visit = action.step, action.visit
-    engine_ledger.append_event(run_dir, {"event": "step_entered", "at": _now(), "step": name,
-                                         "visit": visit, "stage": step["stage"]})
     role = engine_session.read_role(engine_session.roles_dir(os.environ), step["role"])
     staged = run_dir / "procedure"
     schema = _load(staged / action.reply)
-    prompt = engine_session.render_prompt(
-        (staged / action.prompt).read_text(encoding="utf-8"), action.args)
-    session = str(uuid.uuid4())
-    system = engine_ledger.store_session_file(run_dir, f"{name}.{visit}.system.md",
-                                              role.body.encode("utf-8"))
-    engine_ledger.store_session_file(run_dir, f"{name}.{visit}.prompt.md", prompt.encode("utf-8"))
+    if resumed is None:
+        engine_ledger.append_event(run_dir, {"event": "step_entered", "at": _now(), "step": name,
+                                             "visit": visit, "stage": step["stage"]})
+        prompt = engine_session.render_prompt(
+            (staged / action.prompt).read_text(encoding="utf-8"), action.args)
+        session = str(uuid.uuid4())
+        system = engine_ledger.store_session_file(run_dir, f"{name}.{visit}.system.md",
+                                                  role.body.encode("utf-8"))
+        engine_ledger.store_session_file(run_dir, f"{name}.{visit}.prompt.md",
+                                         prompt.encode("utf-8"))
+    else:
+        session, system, prompt = resumed.session, resumed.system, resumed.text
+        if not (run_dir / "sessions" / f"{name}.{visit}.continue-{resumed.attempt}.prompt.md"
+                ).exists():
+            engine_ledger.store_session_file(
+                run_dir, f"{name}.{visit}.continue-{resumed.attempt}.prompt.md",
+                resumed.text.encode("utf-8"))
 
     def waiting() -> None:
         engine_ledger.append_event(run_dir, {"event": "wait_started", "at": _now(),
@@ -789,12 +849,14 @@ def _visit_session(run_dir: Path, root: str, step: dict, action: engine_core.Sta
                                              "wait": engine_slots.WAIT})
 
     with engine_slots.hold(run_dir, slots, on_wait=waiting, on_waited=waited):
-        engine_ledger.append_event(run_dir, {
-            "event": "session_starting", "at": _now(), "step": name, "visit": visit,
-            "session": session, "role": role.name,
-            "account": os.environ.get("CLAUDE_ACCOUNT") or "console"})
+        if resumed is None:
+            engine_ledger.append_event(run_dir, {
+                "event": "session_starting", "at": _now(), "step": name, "visit": visit,
+                "session": session, "role": role.name,
+                "account": os.environ.get("CLAUDE_ACCOUNT") or "console"})
         launched, reading, stopped, no_reply = _launch_until_answered(
-            run_dir, root, (name, visit, session), prompt, (role, schema, system), stop)
+            run_dir, root, (name, visit, session), prompt, (role, schema, system), stop,
+            resumed=resumed)
     if stopped is not None:
         return stopped
     wall = (launched.wall_seconds if launched.timed_out or reading.wall_seconds is None
@@ -834,6 +896,7 @@ def _visit_session(run_dir: Path, root: str, step: dict, action: engine_core.Sta
 def _launch_until_answered(
         run_dir: Path, root: str, visit_of: tuple[str, int, str], prompt: str,
         launch_of: tuple[engine_session.Role, Mapping, Path], stop: Callable[[], bool],
+        resumed: _Resumed | None = None,
 ) -> tuple[engine_session.Launched, engine_session.Reading, tuple[int, dict] | None, bool]:
     """Launch the session, again with `--resume` after each usage limit, after the first other
     API error (once, after `API_RETRY_SECONDS`) and after the first miss (once, with `REASK_PROMPT`),
@@ -841,11 +904,14 @@ def _launch_until_answered(
     with the visit's record stored and the wait ended; a miss's launch and its resume are summed in
     the result's measurements. The third member is the `quota-wait` stop (record stored, wait open)
     when no account can answer, the fourth is true for the second API error or miss, the outcome
-    `no-reply`."""
+    `no-reply`. With `resumed` the first launch is its attempt (`--resume` only when a process of the
+    visit had started, else `--session-id`), every later one resumes, and a miss is `no-reply` with no
+    re-ask; each record is `<step>.<visit>.continue-<attempt>.json`."""
     name, visit, session = visit_of
     role, schema, system = launch_of
-    attempt, limited, waiting, released, retried, no_reply = 1, set(), False, False, False, False
-    missed, text = False, prompt
+    attempt, limited, waiting, released, retried, no_reply = (
+        1 if resumed is None else resumed.attempt), set(), False, False, False, False
+    missed, text = resumed is not None, prompt
     missed_once: tuple[engine_session.Launched, engine_session.Reading] | None = None
 
     def event(kind: str, **members: object) -> None:
@@ -860,6 +926,7 @@ def _launch_until_answered(
 
     def record(launched: engine_session.Launched, reading: engine_session.Reading) -> None:
         _store_record(run_dir, name, visit, session, launched, reading, schema,
+                      f".continue-{attempt}" if resumed is not None else
                       ".resume" if missed else "")
 
     def quota_stop(launched: engine_session.Launched, reading: engine_session.Reading,
@@ -887,7 +954,9 @@ def _launch_until_answered(
             if released:
                 env.pop("CLAUDE_ACCOUNT", None)
             launched = engine_session.launch(
-                engine_session.launch_argv(role, schema, session, system, resume=attempt > 1),
+                engine_session.launch_argv(role, schema, session, system,
+                                      resume=attempt > 1 and (resumed is None or resumed.resume
+                                                              or attempt > resumed.attempt)),
                 root, text, on_start=on_start, env=env,
                 timeout=engine_session.bounds(role.name).wall_seconds, stop=stop)
             answer = engine_session.read_answer(answer_path)
