@@ -603,7 +603,7 @@ REVIEW_REPLY = {"type": "object",
 ROLE_NAMES = ("planner", "implementer", "reviewer", "reviewer-lite")
 
 
-def install_stub(project: EngineProject, canned: Path | bytes, exit: int = 0,
+def install_stub(project: EngineProject, canned: Path | bytes, exit: int | str = 0,
                  diagnostic: str | None = None, resumed: Path | bytes | None = None,
                  hold: Path | None = None) -> Path:
     """Put the stand-in launcher first on the project's PATH; return the log it appends to.

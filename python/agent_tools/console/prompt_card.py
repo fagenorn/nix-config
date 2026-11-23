@@ -35,13 +35,15 @@ unknown, so a card never reappears). `POLL_SECONDS` is the hook's wait between p
 
 Entries (`inbox_entries`). One `inbox_item` of reason `permission` per open prompt whose sprint is
 known, keyed `permission/<id>`, with the sprint's title, the `HEADLINE`, `words` (the first line
-of the manager's own description, cut to `MAX_WORDS_CHARS`, else `NO_WORDS`) and the command
-verbatim. A long command's entry also carries `summary`, what `command_summary` reads from its text
-against the project's root in `roots` (None for a short command).
+of the manager's own description, cut to `MAX_WORDS_CHARS`, else `NO_WORDS`, which now only
+renders an asked row recorded before #1622) and the command verbatim. A long command's entry also
+carries `summary`, what `command_summary` reads from its text against the project's root in
+`roots` (None for a short command).
 
 Wire. `parse_ask` reads the hook's body: strict JSON (a repeated key and NaN are refused),
 `phase` `ask` with exactly `{sprint_id, phase, session_id, command, nonce, auth}` and an optional
-`description`, or `wait` and `close` with exactly `{sprint_id, phase, session_id, prompt, nonce,
+`description` (phase `ask` with no reason is answered `UNEXPLAINED` by `ask_refusal`, which refuses
+first and then asks for a reason, and the hook relays `NO_REASON_TEXT`), or `wait` and `close` with exactly `{sprint_id, phase, session_id, prompt, nonce,
 auth}`; `nonce` is `NONCE` (32 lowercase hexadecimal characters) and `auth` `AUTH` (64). The body
 carries no secret (see Proof). `parse_answer` reads the owner's `{prompt, answer}`. Any other shape is `ValueError`.
 `wire_state` is the state the hook is told: `ENDED` for a prompt closed with reason `ended` (the console
@@ -93,6 +95,7 @@ ANSWERS = (ALLOW, REFUSE)
 OPEN = "open"
 ALLOWED = "allowed"
 REFUSED = "refused"
+UNEXPLAINED = "unexplained"
 CLOSED = "closed"
 ENDED = "ended"
 CLOSE_REASONS = ("expired", ENDED)
@@ -108,6 +111,10 @@ MAX_WORDS_CHARS = 200
 
 HEADLINE = "The manager of {title} asks to run a command"
 NO_WORDS = "It did not say why."
+NO_REASON_TEXT = (
+    "This command needs the owner's permission, and the owner decides from what you say it is for, "
+    "but the call has no description: give the Bash call a description that says in plain words why "
+    "you run this command, then run it again.")
 NOT_OPEN = "This permission prompt is no longer open, so it takes no answer."
 SANDBOX_TEXT = (
     "A request to run a command outside the sandbox is refused: the console shows the owner only "
@@ -251,6 +258,13 @@ def active(sprint: SprintState) -> bool:
     return sprint.state == sprint_module.STARTING and sprint_module.takes_notices(sprint)
 
 
+def ask_refusal(sprint: SprintState, session_id: str, description: str | None) -> str | None:
+    """The state a prompt is refused with and recorded under no card: `REFUSED` first, then `UNEXPLAINED`."""
+    if not active(sprint) or session_id != sprint.manager_session:
+        return REFUSED
+    return None if has_reason(description) else UNEXPLAINED
+
+
 def open_prompts(prompts: Mapping[int, Prompt], now_ms: int,
                  sprints: Mapping[str, SprintState], sessions: Mapping[str, SessionState],
                  contact: Mapping[int, int]) -> list[Prompt]:
@@ -273,6 +287,11 @@ def open_prompts(prompts: Mapping[int, Prompt], now_ms: int,
             continue
         found.append(prompt)
     return found
+
+
+def has_reason(description: str | None) -> bool:
+    """True only for a str holding a non-whitespace character."""
+    return isinstance(description, str) and bool(description.strip())
 
 
 def words(description: str | None) -> str:

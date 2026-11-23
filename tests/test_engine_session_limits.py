@@ -13,7 +13,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.delivery import engine_session, engine_shell
+from agent_tools.delivery import engine_session, engine_shell, engine_stop
 from tests.test_engine_deliver import EngineProject, shape
 from tests.test_engine_session import (
     REVIEW_REPLY, RESULT_API_ERROR, RESULT_LIMIT, RESULT_NORMAL, ROLE_NAMES, after, agent_step,
@@ -239,6 +239,17 @@ class DeliverLimitTest(unittest.TestCase):
         self.assertEqual(len(self.log(log)), 2)
 
 
+def waited(sleeps: list[tuple[float, int]]) -> list[tuple[float, int]]:
+    """`sleeps` with consecutive entries of one invocation count merged, their seconds summed."""
+    merged: list[tuple[float, int]] = []
+    for seconds, invocations in sleeps:
+        if merged and merged[-1][1] == invocations:
+            merged[-1] = (merged[-1][0] + seconds, invocations)
+        else:
+            merged.append((seconds, invocations))
+    return merged
+
+
 class DeliverApiErrorTest(unittest.TestCase):
     NO_REPLY_ON = {"drafted": "done", "stuck": "needs-owner", "no-reply": "needs-owner"}
 
@@ -281,7 +292,7 @@ class DeliverApiErrorTest(unittest.TestCase):
         # Only the engine's own clock is replaced: patching `time.sleep` itself would also record
         # the polling `subprocess` does while it reaps a launcher that is slow to exit.
         clock = mock.Mock(wraps=time, sleep=record)
-        with self.project.inside(), mock.patch.object(engine_shell, "time", clock):
+        with self.project.inside(), mock.patch.object(engine_stop, "time", clock):
             code, line = engine_shell.deliver(1521, procedures)
         return code, line, sleeps
 
@@ -289,7 +300,7 @@ class DeliverApiErrorTest(unittest.TestCase):
         log = install_answers(self.project, [self.api_error(), self.normal()])
         code, line, sleeps = self.deliver(log, one_step(self.project))
         self.assertEqual(code, 0, line)
-        self.assertEqual(sleeps, [(30, 1)])
+        self.assertEqual(waited(sleeps), [(30, 1)])
         records = self.log(log)
         self.assertEqual(len(records), 2)
         first, second = (record["argv"] for record in records)
@@ -315,7 +326,7 @@ class DeliverApiErrorTest(unittest.TestCase):
         with mock.patch.object(engine_session, "launch", side_effect=slow_to_exit):
             code, line, sleeps = self.deliver(log, one_step(self.project))
         self.assertEqual(code, 0, line)
-        self.assertEqual(sleeps, [(30, 1)])
+        self.assertEqual(waited(sleeps), [(30, 1)])
 
     def test_a_second_api_error_is_the_outcome_no_reply(self):
         log = install_answers(self.project, [self.api_error(), self.api_error(), self.normal()])
@@ -323,7 +334,7 @@ class DeliverApiErrorTest(unittest.TestCase):
         self.assertEqual(code, 3, line)
         self.assertEqual(line["end"], "needs-owner")
         self.assertEqual(len(self.log(log)), 2)
-        self.assertEqual(sleeps, [(30, 1)])
+        self.assertEqual(waited(sleeps), [(30, 1)])
         run = self.run_dir()
         events = self.project.events(run)
         self.assertEqual(
@@ -354,7 +365,7 @@ class DeliverApiErrorTest(unittest.TestCase):
         code, line, sleeps = self.deliver(log, one_step(self.project))
         self.assertEqual(code, 0, line)
         self.assertEqual(len(self.log(log)), 3)
-        self.assertEqual(sleeps, [(30, 1)])
+        self.assertEqual(waited(sleeps), [(30, 1)])
         (graded,) = self.events("outcome_graded")
         self.assertEqual(graded["outcome"], "drafted")
         self.assertEqual(len(self.events("wait_started")), 1)
@@ -367,7 +378,7 @@ class DeliverApiErrorTest(unittest.TestCase):
         self.assertEqual(code, 3, line)
         self.assertEqual(line["end"], "quota-wait")
         self.assertEqual(len(self.log(log)), 3)
-        self.assertEqual(sleeps, [(30, 2)])
+        self.assertEqual(waited(sleeps), [(30, 2)])
         self.assertEqual(len(self.events("wait_started")), 1)
         self.assertEqual(self.events("wait_ended"), [])
         status = json.loads(self.project.status(1521).stdout)

@@ -65,6 +65,7 @@ class EngineProject:
         self.release = self.tmp / "release"
         self.renewals = self.tmp / "renewals.log"
         self.answers = self.tmp / "answers.json"
+        self.hold = self.tmp / "hold.pid"
         self.root = self.world.project("example/engine", "example/engine", register=False,
                                        mutate=self.add_standins)
         self.bin = self.tmp / "bin"
@@ -76,8 +77,23 @@ class EngineProject:
         self.env = {key: value for key, value in self.world.env.items()
                     if key != "AGENT_PLATFORM_ROOT"}
         self.env["PATH"] = f"{self.bin}{os.pathsep}{self.world.env['PATH']}"
+        shutil.copy(REPO_ROOT / "home/common/agent-skills/host-declaration.json",
+                    self.declaration_path)
         write_settings(self.world.home, str(standin_guard(
             self.tmp, "allow-guard", "allow", str(self.guard_log))))
+
+    @property
+    def declaration_path(self) -> Path:
+        return self.world.home / ".agents/share/host-declaration.json"
+
+    def declare(self, value: object) -> None:
+        """Replace the host declaration: `None` removes it, a string is written as is."""
+        if value is None:
+            self.declaration_path.unlink(missing_ok=True)
+        elif isinstance(value, str):
+            self.declaration_path.write_text(value, encoding="utf-8")
+        else:
+            self.declaration_path.write_text(json.dumps(value), encoding="utf-8")
 
     def use_guard(self, command: Path | str, timeout: object = 30, **extra) -> None:
         write_settings(self.world.home, str(command), timeout, extra=extra or None)
@@ -118,6 +134,7 @@ class EngineProject:
             "standin-block": entry("block", str(self.release)),
             "release": entry("json", "0"),
             "standin-keep-alive": entry("answers", str(self.renewals), str(self.answers)),
+            "standin-hold": entry("hold", str(self.hold), "0"),
         })
         land = ["gh", "pr", "merge", "7", "--repo", "example/engine", "--merge"]
         contract["bindings"]["commands"].update(

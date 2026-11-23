@@ -105,9 +105,9 @@ lint:
 test:
   PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.delivery.verification_command test
 
-# Verify durable workflow lifecycle and skill contracts, min(8, CPUs - 2) test files at a time, longest first (SUITE_RUNNER_JOBS or --jobs N sets the cap; --jobs 1 runs them serially with live output).
+# Verify durable workflow lifecycle and skill contracts, min(8, CPUs - 2) test files at a time, longest first (SUITE_RUNNER_JOBS or --jobs N sets the cap; --jobs 1 runs them serially with live output). The suite gets the platform package's pinned tools.
 agent-workflow-tests *args:
-  PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.delivery.suite_runner {{args}} \
+  tools="$(nix build --no-link --print-out-paths '{{justfile_directory()}}#agent-platform.tools')" && test -n "$tools" && AGENT_PLATFORM_TOOLS="$tools/bin" PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.delivery.suite_runner {{args}} \
     home/common/agent-skills/tests/test_host_admission.py \
     home/common/agent-skills/tests/test_inprocess_cli.py \
     home/common/agent-skills/tests/test_workflow_skill_contracts.py \
@@ -135,10 +135,13 @@ agent-workflow-tests *args:
     home/common/agent-skills/tests/test_conformance_checks.py \
     home/common/agent-skills/tests/test_conformance_suppressions.py \
     home/common/agent-skills/tests/test_conformance_registry.py \
+    home/common/agent-skills/tests/test_conformance_ruff.py \
     home/common/agent-skills/tests/test_adopt_project.py \
     home/common/agent-skills/tests/test_adopt_migrate.py \
     home/common/agent-skills/tests/test_adopt_project_boundaries.py \
     home/common/agent-skills/tests/test_adopt_apply.py \
+    home/common/agent-skills/tests/test_adopt_apply_formatting.py \
+    home/common/agent-skills/tests/test_adopt_entries.py \
     home/common/agent-skills/tests/test_adopt_conformance.py \
     home/common/agent-skills/tests/test_adopt_conformance_apply.py \
     home/common/agent-skills/tests/test_adopt_verify.py \
@@ -158,7 +161,9 @@ agent-workflow-tests *args:
     tests/test_engine_session.py \
     tests/test_engine_session_limits.py \
     tests/test_engine_keep_alive.py \
+    tests/test_engine_stop.py \
     tests/test_engine_caps.py \
+    tests/test_engine_slots.py \
     tests/test_plan_amend.py \
     tests/test_verify_block.py \
     tests/test_verify_pending.py \
@@ -237,6 +242,9 @@ agent-workflow-tests *args:
     tests/test_standards_lint.py \
     tests/test_citation_lint.py \
     tests/test_never_rise.py \
+    tests/test_comment_lint.py \
+    tests/test_cleanup_issue.py \
+    tests/test_ruff_lint.py \
     tests/test_suppressions.py \
     tests/test_decision_record_wording.py \
     tests/test_module_docstring_wording.py \

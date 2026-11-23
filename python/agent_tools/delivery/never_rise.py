@@ -14,8 +14,21 @@ failed git read is no verdict (`None`), never a pass.
 Both sides are judged by the enforcers passed in, so a rule introduced by the
 branch itself is measured on the base by the same code and passes while its
 violations only persist. Each enforcer is a `rule` id and a `find` function
-over a `Snapshot` (the revision and every tracked text file's line count); it
-may emit only its own rule id, else the comparison raises `ValueError`.
+over a `Snapshot` (the revision, every tracked text file's line count and its
+committed bytes); it may emit only its own rule id, else the comparison raises
+`ValueError`.
+
+A `Snapshot` also carries `files` (path to blob oid for every regular text file,
+mode 100644 or 100755, an empty one included; a symlink, a submodule and a
+binary file are no file), the `root` of the repository and the `timeout` its
+reads use. `read_files(snapshot, paths)` returns the committed bytes of those
+paths, never the working tree's, through one `cat-file --batch`; it raises
+`ValueError` for a snapshot built by hand or a path that is no file of it, and
+`HistoryUnavailable` when the git read fails or answers something malformed.
+`judge` turns `HistoryUnavailable` from an enforcer into no verdict (`None`),
+like every other failed git read. An enforcer that cannot judge for a reason of
+its own raises `EnforcerFailed(enforcer, reason)`; `compare` and `judge` let it
+propagate, so such an enforcer is never a pass and never a verdict.
 
 The comparison, per enforcer in the order given. A count rule (the default)
 compares the project total: it rises when the branch has more violations than
@@ -59,9 +72,11 @@ end, the reason to what remains, so no field costs another its place.
 Output line, one per violation: `Violation.text()` is the rule id, one space,
 the repository-relative path escaped, a colon and the 1-based line. The escape
 doubles a backslash, writes a newline, carriage return and tab as `\\n`, `\\r`
-and `\\t`, any other C0 character and DEL as `\\xNN`, and the Unicode line
-separators U+0085, U+2028 and U+2029 as `\\uNNNN`, so a path never splits one
-violation across two physical lines.
+and `\\t`, any other C0 character and DEL as `\\xNN`, a byte of the name that
+is no UTF-8 (read back as a surrogate U+DC80 to U+DCFF) as the `\\xNN` of that
+byte, and the Unicode line separators U+0085, U+2028 and U+2029 as `\\uNNNN`, so
+a path never splits one violation across two physical lines and is always valid
+UTF-8.
 
 Every git child is read-only, never fetches and is bounded by the caller's
 `timeout`: it drops the variables that select a repository other than the one
@@ -75,15 +90,22 @@ A file is text or binary by its committed bytes alone: a NUL among its first
 8,000 bytes makes it binary, as git decides it for `grep -I`, whatever a
 `diff` or `binary` attribute says, so no attribute hides a file from an
 enforcer.
+
+`command_snapshot(command, repo_root, revision)` is the preamble the registered
+never-rise commands share: it prints `<command>: <reason>` on stderr and returns
+`None` for a relative root, a root that is not a directory, a root below the
+repository's top level, or a revision it cannot resolve or read.
 """
 
 import os
-import subprocess
 import re
+import subprocess
+import sys
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import NamedTuple
 
 from agent_tools.delivery import rule_ids
@@ -110,6 +132,8 @@ def escape_path(path: str) -> str:
             pieces.append(escape)
         elif character < " " or character == "\x7f":
             pieces.append(f"\\x{ord(character):02x}")
+        elif "\udc80" <= character <= "\udcff":
+            pieces.append(f"\\x{ord(character) - 0xDC00:02x}")
         elif character in UNICODE_LINE_SEPARATORS:
             pieces.append(f"\\u{ord(character):04x}")
         else:
@@ -160,7 +184,11 @@ class Hunk(NamedTuple):
 class Snapshot(NamedTuple):
     revision: str
     line_counts: Mapping[str, int]
+    files: Mapping[str, str] = MappingProxyType({})
+    root: Path | None = None
+    timeout: float | None = None
     suppressions: tuple[Suppression, ...] = ()
+    contents: Mapping[str, bytes] = MappingProxyType({})
 
 
 @dataclass(frozen=True)
@@ -168,6 +196,19 @@ class Enforcer:
     rule: str
     find: Callable[[Snapshot], list[Violation]]
     per_file: bool = False
+
+
+class HistoryUnavailable(Exception):
+    """A git read of committed history failed or answered something malformed."""
+
+
+class EnforcerFailed(Exception):
+    """An enforcer could not judge; the check fails closed instead of passing."""
+
+    def __init__(self, enforcer: str, reason: str) -> None:
+        super().__init__(f"{enforcer}: {reason}")
+        self.enforcer = enforcer
+        self.reason = reason
 
 
 class Rise(NamedTuple):
@@ -225,54 +266,114 @@ def in_subdirectory(root: Path, timeout: float | None) -> bool:
 
 
 BINARY_PROBE_BYTES = 8000
+REGULAR_MODES = frozenset({"100644", "100755"})
+
+
+def _read_blobs(root: Path, oids: Sequence[str], timeout: float | None) -> list[bytes] | None:
+    """The bytes of each blob, in order, from one `cat-file --batch`; None when malformed."""
+    if not oids:
+        return []
+    out = _git(root, ["cat-file", "--batch"], timeout,
+               stdin="".join(f"{oid}\n" for oid in oids).encode("ascii"))
+    if out is None:
+        return None
+    contents: list[bytes] = []
+    position = 0
+    for oid in oids:
+        end = out.find(b"\n", position)
+        header = out[position:end].split(b" ") if end >= 0 else []
+        if (len(header) != 3 or header[0].decode("ascii", "replace") != oid
+                or header[1] != b"blob" or not header[2].isdigit()):
+            return None
+        start = end + 1
+        size = int(header[2])
+        if out[start + size:start + size + 1] != b"\n":
+            return None
+        contents.append(out[start:start + size])
+        position = start + size + 1
+    if position != len(out):
+        return None
+    return contents
 
 
 def read_snapshot(root: Path, revision: str, timeout: float | None) -> Snapshot | None:
-    """Every text file's line count at a revision.
+    """Every text file's line count, committed bytes and regular text file at a revision.
 
     Lines are counted as `git grep -c` counts them: the newline-terminated lines
-    plus an unterminated last line, empty files not listed. A file with a NUL in
-    its first `BINARY_PROBE_BYTES` bytes is binary and not listed; a submodule is
-    no file. A blob that cannot be read is no snapshot.
+    plus an unterminated last line, empty files not counted. A file with a NUL in
+    its first `BINARY_PROBE_BYTES` bytes is binary and in neither mapping; a
+    submodule is no file; a symlink is counted but is no regular file, so it is
+    not in `files`. A blob that cannot be read is no snapshot.
     """
     listing = _git(root, ["ls-tree", "-r", "-z", "--full-tree", revision], timeout)
     if listing is None:
         return None
-    paths: dict[str, str] = {}
+    paths: dict[str, tuple[str, str]] = {}
     for entry in listing.split(b"\0"):
         if not entry:
             continue
         meta, _, name = entry.partition(b"\t")
-        _, kind, oid = meta.decode("ascii").split(" ")
+        mode, kind, oid = meta.decode("ascii").split(" ")
         if kind == "blob":
-            paths[os.fsdecode(name)] = oid
-    if not paths:
-        return Snapshot(revision, {})
-    out = _git(root, ["cat-file", "--batch"], timeout,
-               stdin="".join(f"{oid}\n" for oid in paths.values()).encode("ascii"))
-    if out is None:
+            paths[os.fsdecode(name)] = (mode, oid)
+    contents = _read_blobs(root, [oid for _, oid in paths.values()], timeout)
+    if contents is None:
         return None
     counts: dict[str, int] = {}
+    texts: dict[str, bytes] = {}
+    files: dict[str, str] = {}
     found: list[Suppression] = []
-    position = 0
-    for path in paths:
-        end = out.find(b"\n", position)
-        header = out[position:end].split(b" ") if end >= 0 else []
-        if len(header) != 3 or header[1] != b"blob":
-            return None
-        start = end + 1
-        stop = start + int(header[2])
-        content = out[start:stop]
-        position = stop + 1
-        if content and b"\0" not in content[:BINARY_PROBE_BYTES]:
+    for (path, (mode, oid)), content in zip(paths.items(), contents):
+        if b"\0" in content[:BINARY_PROBE_BYTES]:
+            continue
+        if content:
             counts[path] = content.count(b"\n") + (0 if content.endswith(b"\n") else 1)
+            texts[path] = content
             if rule_ids.SUPPRESS.encode() in content:
                 found.extend(
                     Suppression(m.rule, path, m.line, m.reason)
                     for m in rule_ids.markers(content.decode("utf-8", errors="replace"),
                                               rule_ids.is_python(path)))
+        if mode in REGULAR_MODES:
+            files[path] = oid
     found.sort(key=lambda s: (s.path, s.line))
-    return Snapshot(revision, counts, tuple(found))
+    return Snapshot(revision, counts, MappingProxyType(files), root, timeout, tuple(found),
+                    MappingProxyType(texts))
+
+
+def read_files(snapshot: Snapshot, paths: Sequence[str]) -> dict[str, bytes]:
+    """The committed bytes of each path of a snapshot, never the working tree's."""
+    if not paths:
+        return {}
+    if snapshot.root is None:
+        raise ValueError("the snapshot was not read from a repository")
+    missing = [path for path in paths if path not in snapshot.files]
+    if missing:
+        raise ValueError(f"not a regular text file of the snapshot: {missing[0]}")
+    contents = _read_blobs(
+        snapshot.root, [snapshot.files[path] for path in paths], snapshot.timeout)
+    if contents is None:
+        raise HistoryUnavailable()
+    return dict(zip(paths, contents))
+
+
+def command_snapshot(command: str, repo_root: str, revision: str) -> Snapshot | None:
+    """The snapshot a never-rise command judges, or None after one stderr line `<command>: <reason>`."""
+    root = Path(repo_root)
+    if not root.is_absolute():
+        reason = f"--repo-root must be absolute: {root}"
+    elif not root.is_dir():
+        reason = f"not a directory: {root}"
+    elif in_subdirectory(root, timeout=None):
+        reason = f"--repo-root is not the repository top level: {root}"
+    else:
+        sha = resolve_commit(root, revision, timeout=None)
+        snapshot = read_snapshot(root, sha, timeout=None) if sha else None
+        if snapshot is not None:
+            return snapshot
+        reason = f"cannot read {revision} in {root}"
+    print(f"{command}: {reason}", file=sys.stderr)
+    return None
 
 
 def renames(root: Path, base: str, head: str, timeout: float | None) -> dict[str, str] | None:
@@ -364,7 +465,7 @@ def holding(line: int, hunks: Sequence[Hunk]) -> int | None:
     return None
 
 
-def _found(enforcer: Enforcer, snapshot: Snapshot) -> list[Violation]:
+def violations(enforcer: Enforcer, snapshot: Snapshot) -> list[Violation]:
     found = enforcer.find(snapshot)
     for violation in found:
         if violation.rule != enforcer.rule:
@@ -375,7 +476,7 @@ def _found(enforcer: Enforcer, snapshot: Snapshot) -> list[Violation]:
 
 def counted(enforcer: Enforcer, snapshot: Snapshot) -> tuple[list[Violation], list[Violation]]:
     """The findings left after reasoned suppressions, and the violations of bare markers."""
-    found = _found(enforcer, snapshot)
+    found = violations(enforcer, snapshot)
     suppressed = {(s.path, s.line) for s in snapshot.suppressions
                   if s.reasoned and s.rule == enforcer.rule}
     on_finding = {(v.path, v.line) for v in found}
@@ -490,6 +591,10 @@ def judge(root: Path, integration_branch: str, enforcers: Sequence[Enforcer],
     changes = line_changes(root, base, head, timeout)
     if base_snapshot is None or branch_snapshot is None or renamed is None or changes is None:
         return None
+    try:
+        rises = compare(base_snapshot, branch_snapshot, renamed, enforcers)
+    except HistoryUnavailable:
+        return None
     return Verdict(
-        base, head, compare(base_snapshot, branch_snapshot, renamed, enforcers),
+        base, head, rises,
         added_suppressions(base_snapshot, branch_snapshot, renamed, changes))

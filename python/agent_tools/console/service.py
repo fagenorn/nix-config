@@ -1135,8 +1135,8 @@ the methods below with it. Success is 200 `{"prompt": <int|null>, "state": <str>
 nonce, which the hook checks before it honours the reply, so whatever else listens on the port neither learns the secret
 nor has a decision honoured. The `state` of a prompt the console closed
 (`prompt.closed`, reason `ended`) is `ended`, not `closed` (`prompt_card.wire_state`), so the hook can say why. Each holds the ingest lock for its check, append and fold. `ask_prompt`
-checks the secret first, then answers `(None, prompt_card.REFUSED)` and appends nothing unless the sprint is
-`prompt_card.active` and `session_id` is its manager session; else it appends one `prompt.asked` row, folds it,
+checks the secret first, then answers `(None, <state>)` and appends nothing when `prompt_card.ask_refusal` names one
+(`refused` for a sprint that is not `prompt_card.active` or a session that is not its manager's, then `unexplained` for a prompt with no reason, #1622); else it appends one `prompt.asked` row, folds it,
 remembers the console's time as the prompt's contact (`_prompt_contact`, memory only), publishes and answers
 `(seq, open)`. It never closes another prompt: the prompts of one session are held side by side. `prompt_state`
 refuses (`sprints.Refused`) a prompt that is unfolded or of another sprint or session, renews the contact of an
@@ -5414,8 +5414,8 @@ class ConsoleService:
         """Hold one prompt of the sprint's manager as a card; see the module docstring."""
         with self._ingest:
             sprint = self._manager_sprint(sprint_id, secret)
-            if not prompt_card.active(sprint) or session_id != sprint.manager_session:
-                return None, prompt_card.REFUSED
+            if (refusal := prompt_card.ask_refusal(sprint, session_id, description)) is not None:
+                return None, refusal
             (appended,) = self.log.append([prompt_card.asked_row(
                 sprint.project_id, sprint_id, session_id, command, description)])
             self._prompt_contact[appended.seq] = int(self._clock() * 1000)
