@@ -29,7 +29,7 @@ ADR-console-015 had no launcher on macOS, because `systemd-run`, which keeps a m
 
 ## Consequences
 
-- The unavailable notice (ADR-console-015, ADR-console-064) remains only for platforms other than Linux and macOS. Registration and project questions still say unavailable on macOS.
+- The unavailable notice (ADR-console-015) remains only for platforms other than Linux and macOS. Registration and project questions still say unavailable on macOS.
 - The launcher's two launches are shown before merge by the `console-launch-profile` check on eleven-m5. The evidence after activation is the `console-manager-start` check there, which reads not yet until the console there runs as its launchd job (#1290), and the `console-page-account` check, which adds and removes a throwaway profile through the page. The page's Sign in on a Mac is an owner check, because a sign-in needs the owner's login.
 - Every page check reads only the Mac console's own log rows (`--after-seq`, D8), so rows recorded on another host never meet it.
 - This amends ADR-console-015, ADR-console-016, ADR-console-006, ADR-console-018, ADR-console-022, ADR-console-024 and ADR-console-026 in the clauses that said no manager starts on macOS.

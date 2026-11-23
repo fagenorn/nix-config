@@ -190,10 +190,13 @@ def scanned_files(archived_dirs: tuple[str, ...] = ()) -> list[tuple[str, list[s
 
 
 RETIRED_DELIVERY_RECORDS = (2, 9, 10, 11)
-RETIRED_CONSOLE_RECORDS = (2, 9, 25, 39, 40, 41)
+RETIRED_CONSOLE_RECORDS = (2, 9, 25, 39, 40, 41, 53, 55, 56, 57, 61, 64, 69)
 LATER_CONSOLE_RECORD = re.compile(r"^docs/areas/console/adr/(?:05[2-9]|0[6-9]\d|[1-9]\d\d)-")
+LATER_THAN_076 = re.compile(r"^docs/areas/console/adr/(?:07[7-9]|0[89]\d|[1-9]\d\d)-")
 SUB_DECISION_027_TO_051 = re.compile(
     r"\bADR-console-(0(?:2[7-9]|[34]\d|5[01]))(?:'s)? \(?(?:D\d|Consequences)")
+SUB_DECISION_052_TO_076 = re.compile(
+    r"\bADR-console-(0(?:5[2-9]|6\d|7[0-6]))(?:'s)? \(?(?:D\d|Consequences)")
 
 
 def console_records(numbers) -> list[Path]:
@@ -210,13 +213,14 @@ def console_form_findings(numbers) -> list[tuple[str, str, int]]:
     ]
 
 
-def sub_decision_hits(numbers) -> list[str]:
+def sub_decision_hits(
+        numbers, pattern=SUB_DECISION_027_TO_051, later=LATER_CONSOLE_RECORD) -> list[str]:
     return [
         f"{path}:{number}"
         for path, lines in tracked_text(())
-        if not LATER_CONSOLE_RECORD.match(path)
+        if not later.match(path)
         for number, line in enumerate(lines, start=1)
-        if any(int(m.group(1)) in numbers for m in SUB_DECISION_027_TO_051.finditer(line))
+        if any(int(m.group(1)) in numbers for m in pattern.finditer(line))
     ]
 
 
@@ -595,6 +599,12 @@ class DocsTreeTest(unittest.TestCase):
         self.assertEqual(console_form_findings(numbers), [])
         self.assertEqual(sub_decision_hits(numbers), [])
 
+    def test_the_console_spend_record_is_cut_and_cited_whole(self):
+        numbers = (52,)
+        self.assertEqual([int(p.name[:3]) for p in console_records(numbers)], [52])
+        self.assertEqual(console_form_findings(numbers), [])
+        self.assertEqual(sub_decision_hits(numbers, SUB_DECISION_052_TO_076, LATER_THAN_076), [])
+
     def test_the_console_records_027_to_051_are_the_kept_ones(self):
         records = [
             p for p in sorted((REPO_ROOT / "docs/areas/console/adr").glob("[0-9][0-9][0-9]-*.md"))
@@ -617,6 +627,14 @@ class DocsTreeTest(unittest.TestCase):
         self.assertIsNone(SUB_DECISION_027_TO_051.search("ADR-console-0" + "28 was"))
         self.assertIsNotNone(LATER_CONSOLE_RECORD.match("docs/areas/console/adr/0" + "52-x.md"))
         self.assertIsNone(LATER_CONSOLE_RECORD.match("docs/areas/console/adr/0" + "51-x.md"))
+        self.assertIsNotNone(SUB_DECISION_052_TO_076.search("ADR-console-0" + "60 D6"))
+        self.assertIsNotNone(SUB_DECISION_052_TO_076.search("ADR-console-0" + "54's Consequences"))
+        self.assertIsNotNone(SUB_DECISION_052_TO_076.search("ADR-console-0" + "74 (D10"))
+        self.assertIsNone(SUB_DECISION_052_TO_076.search("ADR-console-0" + "77 D1"))
+        self.assertIsNone(SUB_DECISION_052_TO_076.search("ADR-console-0" + "51 D1"))
+        self.assertIsNone(SUB_DECISION_052_TO_076.search("ADR-console-0" + "60 was"))
+        self.assertIsNotNone(LATER_THAN_076.match("docs/areas/console/adr/0" + "77-x.md"))
+        self.assertIsNone(LATER_THAN_076.match("docs/areas/console/adr/0" + "76-x.md"))
 
     def test_the_retired_console_records_are_gone_and_cited_nowhere(self):
         for n in RETIRED_CONSOLE_RECORDS:
@@ -966,17 +984,12 @@ class DocsTreeTest(unittest.TestCase):
         adr_dir = REPO_ROOT / "docs/areas/console/adr"
         pinned = {
             "050": None,
-            "056": None,
-            "057": None,
             "059": "059-a-project-question-is-spent-under-its-project-threaded-in-the-log-and-can-fill-a-goal.md",
-            "061": None,
             "062": "062-a-follow-up-carries-its-thread-in-its-prompt-and-continues-only-an-answered-thread.md",
-            "064": None,
             "065": "065-a-question-session-reads-the-projects-history-tracker-and-live-state-and-answers-plainly.md",
             "066": None,
             "067": None,
             "068": None,
-            "069": None,
             "070": None,
             "073": None,
             "075": None,
@@ -1000,10 +1013,6 @@ class DocsTreeTest(unittest.TestCase):
         self.assertIn("**Notice**:", context)
         notice = context.split("**Notice**:", 1)[1].split("_Avoid_:", 1)[0]
         self.assertIn("ADR-console-044", notice)
-    def test_the_owner_notice_decision_is_recorded(self):
-        context = self.doc("docs/areas/console/CONTEXT.md")
-        notice = context.split("**Notice**:", 1)[1].split("_Avoid_:", 1)[0]
-        self.assertIn("ADR-console-053", notice)
 
     def test_no_tracked_file_cites_a_retired_guard_record(self):
         # The pattern is built at run time, so this file holds no retired citation itself.
