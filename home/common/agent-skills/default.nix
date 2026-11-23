@@ -49,12 +49,11 @@ in
     # The revision the platform package was built from; adoption's lock entry reads it.
     ".agents/share/platform-revision.json".source = "${agentTools}/share/agent-platform/platform-revision.json";
 
-    # The host declaration: authored host policy -- per route, whether it is
-    # supported and how many agent slots one root session may hold -- read by
+    # The host declaration: authored host policy (per route, whether it is
+    # supported and how many agent slots one root session may hold), read by
     # the conformance check through `agent_tools.delivery.host_admission`.
-    # A host with a file under host-declarations/ named for its hostname
-    # installs that file instead; it is the shared declaration plus its
-    # `verify_slots`.
+    # A file under host-declarations/ named for the hostname replaces the
+    # shared one: the shared declaration plus its `verify_slots`.
     ".agents/share/host-declaration.json".source = hostDeclaration;
 
     # Claude accepts Home Manager's recursive file links, so its view of the
