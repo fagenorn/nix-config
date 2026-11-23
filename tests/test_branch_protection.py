@@ -109,12 +109,11 @@ CONFORMANCE_STEP = ["      - name: Run conformance",
 CONFORMANCE_CHECKOUT_REF = "          ref: ${{ github.event.pull_request.head.sha || github.sha }}"
 BUDGET_COMMAND_RE = re.compile(r"PYTHONPATH=python python3 -m agent_tools\.instruction_load check\b")
 BUDGET_INVOCATION = 'PYTHONPATH=python python3 -m agent_tools.instruction_load check "${args[@]}"'
+REQUIRED_CONTEXTS = ("Nix Eval", "Instruction Budget", "Agent Workflow Tests", "Conformance")
 EXPECTED_PROTECTION_PAYLOAD = {
     "required_status_checks": {
         "strict": True,
-        "checks": [{"context": "Nix Eval", "app_id": 15368},
-                   {"context": "Instruction Budget", "app_id": 15368},
-                   {"context": "Agent Workflow Tests", "app_id": 15368}],
+        "checks": [{"context": context, "app_id": 15368} for context in REQUIRED_CONTEXTS],
     },
     "enforce_admins": True,
     "required_pull_request_reviews": None,
@@ -298,6 +297,31 @@ def trigger_branches(name, path=WORKFLOW):
             break
         out.append(line.strip()[2:].strip())
     return out
+
+
+def pull_request_trigger_problems(path=WORKFLOW):
+    """Why a required context's workflow would not report on a pull request to `main`.
+
+    A required context on a workflow that skips a pull request never reports, and that
+    pull request can never merge.
+    """
+    block = trigger_block("pull_request", path)
+    if block is None:
+        return ["no pull_request trigger"]
+    problems = []
+    branches = [item.strip("\"'") if item[:1] == item[-1:] and item[:1] in "\"'" else item
+                for item in trigger_branches("pull_request", path) or []]
+    if branches != ["main"]:
+        problems.append(f"branches are {branches}, not ['main']")
+    for line in block:
+        if line.startswith(("    paths", "    branches-ignore")):
+            problems.append(f"filter under pull_request: {line.strip()}")
+        if line.startswith("    types:"):
+            listed = re.findall(r"[a-z_]+", line.split(":", 1)[1])
+            missing = [t for t in ("opened", "synchronize", "reopened") if t not in listed]
+            if missing:
+                problems.append(f"types lacks {missing}")
+    return problems
 
 
 def job_if_expression(key, path=WORKFLOW):
@@ -786,8 +810,7 @@ class WorkflowShape(unittest.TestCase):
         longer forwards the arguments the step builds each leave every other assertion
         here green. Whether the step builds `--base` and `--raise-label` under the right
         event and label is BudgetWorkflowShape's behavioural test, not this one."""
-        self.assertEqual(["Nix Eval", "Instruction Budget", "Agent Workflow Tests"],
-                         required_contexts())
+        self.assertEqual(list(REQUIRED_CONTEXTS), required_contexts())
         jobs = required_jobs()
         nix_path, nix_key = jobs["Nix Eval"]
         nix_body = job_body(nix_key, nix_path)
@@ -803,6 +826,10 @@ class WorkflowShape(unittest.TestCase):
         suite_path, suite_key = jobs["Agent Workflow Tests"]
         self.assertEqual(WORKFLOW, suite_path)
         self.assertIn(SUITE_INVOCATION, job_body(suite_key, suite_path))
+        conformance_path, conformance_key = jobs["Conformance"]
+        self.assertEqual(CONFORMANCE_WORKFLOW, conformance_path)
+        self.assertEqual("conformance", conformance_key)
+        self.assertEqual([], conformance_job_problems(conformance_path))
 
     def test_the_budget_forwarding_rejects_mutations(self):
         body = job_body("instruction-budget", BUDGET_WORKFLOW)
@@ -936,6 +963,34 @@ class RequiredContexts(unittest.TestCase):
                 f"`name:` in any workflow under {WORKFLOWS.name} (found {sorted(jobs)}); "
                 f"merges to main would block forever waiting for it",
             )
+
+    def test_every_required_context_runs_on_pull_requests_to_main(self):
+        contexts = required_contexts()
+        jobs = required_jobs()
+        self.assertIn("Conformance", contexts)
+        for context in contexts:
+            with self.subTest(context=context):
+                self.assertEqual([], pull_request_trigger_problems(jobs[context][0]))
+
+    def test_a_required_workflow_that_skips_pull_requests_is_caught(self):
+        lines = workflow_lines(CONFORMANCE_WORKFLOW)
+        header = lines.index("  pull_request:")
+        branches = lines.index("    branches:", header)
+        main = lines.index('      - "main"')
+        mutations = {
+            "no pull_request trigger": lines[:header] + lines[main + 1:],
+            "another branch": lines[:main] + ['      - "release"'] + lines[main + 1:],
+            "paths filter": lines[:header + 1] + ['    paths: ["**.nix"]'] + lines[header + 1:],
+            "branches-ignore": lines[:header + 1] + ["    branches-ignore: [main]"] + lines[header + 1:],
+            "types without synchronize": lines[:header + 1] + ["    types: [opened, reopened]"]
+            + lines[header + 1:],
+        }
+        self.assertLess(header, branches)
+        self.assertEqual([], pull_request_trigger_problems(CONFORMANCE_WORKFLOW))
+        for label, mutated in mutations.items():
+            with self.subTest(mutation=label):
+                with mock.patch(f"{__name__}.workflow_lines", lambda path=None, mutated=mutated: mutated):
+                    self.assertNotEqual([], pull_request_trigger_problems(CONFORMANCE_WORKFLOW))
 
     def test_job_names_refuses_a_name_twice_in_one_workflow(self):
         path = Path("twice.yaml")
