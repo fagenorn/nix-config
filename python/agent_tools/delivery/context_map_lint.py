@@ -11,6 +11,9 @@ unique in their directory, every ADR citation under docs/ resolves, no retired
 four-digit id survives, and the docs root stays clean. Repos on a legacy layout
 have no docs/areas/, so none of that applies to them.
 
+The decision-record rules (size and form) are the never-rise check's, in
+`agent_tools.delivery.record_lint`; this command neither prints nor fails on them.
+
 A repository that owns its context-map lint, with its own rules and budgets,
 declares it as the `context-map-lint` entry of its project contract's
 `commands`. The caller that resolved the contract passes that entry's argv

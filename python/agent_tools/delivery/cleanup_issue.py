@@ -108,7 +108,7 @@ from pathlib import Path
 from typing import NamedTuple, Protocol
 from urllib.parse import quote
 
-from agent_tools.delivery import comment_lint, never_rise, ruff_lint, size_lint
+from agent_tools.delivery import comment_lint, never_rise, record_lint, ruff_lint, size_lint
 from agent_tools.delivery.never_rise import Enforcer, Snapshot, Violation
 from agent_tools.system import forge_api
 
@@ -161,6 +161,16 @@ COMMENT_GUIDANCE = {
                               "the comment that holds it.",
 }
 
+RECORD_BATCH = 5
+RECORD_GUIDANCE = {
+    record_lint.RECORD_SIZE_RULE: "Cut each listed decision record to at most 1,500 bytes, "
+                                  "keeping the decision and the alternative it rejected and "
+                                  "dropping the narration.",
+    record_lint.RECORD_FORM_RULE: "Rewrite each listed decision record as its title header, an "
+                                  "optional `**Formerly:**` line and one paragraph: no section "
+                                  "heading, status line, list, quote, fence or second paragraph.",
+}
+
 # The comment enforcers are built without the tracker repository, so B18 counts only the
 # shorthand references here; the never-rise check passes the contract's repository.
 RULES: tuple[CleanupRule, ...] = (
@@ -169,6 +179,8 @@ RULES: tuple[CleanupRule, ...] = (
       for enforcer in ruff_lint.ENFORCERS),
     *(CleanupRule(enforcer, COMMENT_BATCH, COMMENT_GUIDANCE[enforcer.rule])
       for enforcer in comment_lint.enforcers(None)),
+    *(CleanupRule(enforcer, RECORD_BATCH, RECORD_GUIDANCE[enforcer.rule])
+      for enforcer in record_lint.RECORD_ENFORCERS),
 )
 
 
