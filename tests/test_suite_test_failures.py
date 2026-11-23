@@ -14,6 +14,8 @@ from agent_tools.verification import suite_test_failures
 
 from tests.test_verify_checks import CHECKS, ROOT, SuiteWorld, committed_mode, forge, run_from_root
 
+TIER = "fast"
+
 
 def failure_log(*lines, summary=True):
     """A BOM-led, stamped job log of `lines`, closed by a one-failed-member summary unless `summary` is false."""
