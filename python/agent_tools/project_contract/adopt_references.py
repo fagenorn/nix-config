@@ -35,7 +35,9 @@ path or lies under it, so `.claude/` counts when `.claude/specs` moves. A moved
 file, or a directory whose members all moved by the same relative tails under
 one new directory, has a single successor; a path that survives or dissolves
 maps to the successors of its wholly moved subtrees, carried only for an empty,
-`/` or `/**` tail.
+`/` or `/**` tail. The prefilter matches that first segment as written, so a
+spelling that escapes an interior dot of it with a backslash, as a regular
+expression would, is not found.
 
 An occurrence that no answer decides (its own, or its policy's, below) opens a
 `path-reference` question unless its policy's question is open, or its quoted

@@ -127,7 +127,7 @@ and it gains no interval. Its project id is the slug of the checkout's origin.
 A plan without the flag is unchanged, in its document and its `plan_id`.
 
 `plan --commit-environment COMMAND` adds the command the adoption commit runs
-through to a contract that names none (#1333, ADR-project-contract-009).
+through to a contract that names none (#1333, ADR-project-contract-008).
 COMMAND is read as shell words. Whether the contract names one is decided by
 the binding `bindings.vcs.commit.environment` alone, the only member `apply`
 reads, never by a command id. When it is absent in a contract of the current
@@ -1224,7 +1224,7 @@ def apply_stored_plan(args: argparse.Namespace, manifest: dict, digest: str,
     adopt_apply.prove_branch_carries_commit(
         root, worktree, branch, base_revision, commit,
         untracked_allowed=environment is not None)
-    # ADR-project-contract-008 D6: an environment declared to generate files
+    # ADR-project-contract-008: an environment declared to generate files
     # leaves untracked ones the proof allowed, which an unforced removal
     # refuses; every tracked change was already refused above.
     code, _ = adopt_inspection.run_git(

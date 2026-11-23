@@ -266,6 +266,35 @@ class DocsTreeTest(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_project_contract_records_001_to_009_keep_the_record_form(self):
+        paths = sorted((REPO_ROOT / "docs/areas/project-contract/adr").glob("00[1-9]-*.md"))
+        self.assertTrue(paths)
+        breaches = {}
+        for path in paths:
+            relative = path.relative_to(REPO_ROOT).as_posix()
+            found = [violation.text() for violation in
+                     record_violations(relative, path.read_bytes())]
+            if found:
+                breaches[relative] = found
+        self.assertEqual(breaches, {})
+
+    def test_no_tracked_file_cites_a_retired_project_contract_record(self):
+        # The patterns are built here so this file holds no citation they match.
+        numbers = ("001", "002", "003", "006", "009")
+        retired = ("ADR-project-contract-(" + "|".join(numbers) + ")([^0-9]|$)"
+                   + "|project-contract/adr/(" + "|".join(numbers) + ")-")
+        sub = "ADR-project-contract-" + "00[1-9] D[0-9]"
+        for pattern in (retired, sub):
+            result = subprocess.run(
+                ["git", "-C", str(REPO_ROOT), "grep", "-n", "-E", pattern],
+                capture_output=True, text=True,
+            )
+            self.assertEqual(result.returncode, 1, result.stdout)
+            self.assertEqual(result.stdout, "")
+        for number in numbers:
+            found = sorted((REPO_ROOT / "docs/areas/project-contract/adr").glob(f"{number}-*.md"))
+            self.assertEqual(found, [])
+
     def test_every_hosts_record_keeps_the_record_form(self):
         paths = sorted((REPO_ROOT / "docs/areas/hosts/adr").glob("*.md"))
         self.assertTrue(paths)
@@ -1328,9 +1357,7 @@ class DocsTreeTest(unittest.TestCase):
         for older in ("docs/areas/console/adr/043-a-merged-console-change-not-active-on-this-"
                       "host-is-one-line-in-the-work-column.md",
                       "docs/areas/console/adr/008-only-the-page-writes-with-a-token-and-its-"
-                      "origin.md",
-                      "docs/areas/project-contract/adr/007-a-contract-declares-its-production-"
-                      "rules-or-that-it-has-none.md"):
+                      "origin.md"):
             line = next(row for row in (REPO_ROOT / older).read_text().splitlines()
                         if row.startswith("- **Status:**"))
             with self.subTest(older):
