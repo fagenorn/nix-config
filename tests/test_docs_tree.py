@@ -1020,6 +1020,40 @@ class DocsTreeTest(unittest.TestCase):
                 if name is not None:
                     self.assertEqual(found[0].name, name)
 
+    def test_every_release_record_keeps_the_record_form(self):
+        paths = sorted((REPO_ROOT / "docs/areas/release/adr").glob("*.md"))
+
+        breaches = {}
+        for path in paths:
+            relative = path.relative_to(REPO_ROOT).as_posix()
+            found = record_violations(relative, path.read_bytes())
+            if found:
+                breaches[relative] = [violation.rule for violation in found]
+
+        self.assertEqual(
+            [path.name[:3] for path in paths],
+            ["002", "003", "005", "006", "007", "008", "010", "011", "012", "013", "015", "016"],
+        )
+        self.assertEqual(breaches, {})
+
+    def test_no_tracked_file_cites_a_retired_release_record(self):
+        numbers = ("001", "004", "009", "014")
+        # Built at run time so this file holds no retired citation itself.
+        pattern = "ADR-release-(" + "|".join(numbers) + ")([^0-9]|$)"
+
+        result = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "grep", "-n", "-E", pattern],
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertEqual(result.stdout, "")
+        for number in numbers:
+            with self.subTest(number):
+                found = sorted((REPO_ROOT / "docs/areas/release/adr").glob(f"{number}-*.md"))
+                self.assertEqual(found, [])
+
     def test_the_question_round_names_taking_back_and_replacing_a_question(self):
         context = self.doc("docs/areas/console/CONTEXT.md")
         entry = context.split("**Question round**:", 1)[1].split("_Avoid_:", 1)[0]

@@ -4,7 +4,7 @@ and preview (#128 spec §1, §2, §4, §7; D1, D4, D6, D13, D18, D19, D25, D26).
 `Driver` compiles one release profile of a project and reads the release store under the
 main checkout's git common dir. `status` creates nothing. `preview` creates no directory, no
 transaction and no store lock and calls no adapter, but for a profile with a sync it takes the
-land lock of the integration branch (issue 1376, ADR-release-014). `preview` makes the three
+land lock of the integration branch (issue 1376, ADR-release-008). `preview` makes the three
 read-only GitHub reads of `release_verification`, plus, for a profile that consumes `merge`,
 the three `observe_merge` reads before them (issue 554 D3) and the land lock's one-shot
 acquire after them. A problem the caller must repair is a
@@ -148,7 +148,7 @@ integration branch through a pull request headed by that branch, so its caller h
 lock of the integration branch at the candidate commit from before the first preview. `run`
 never acquires it for the caller and never waits: it makes one one-shot check through
 `release_lock` and proceeds only on `already_held`. `preview` of a profile with a sync takes
-the lock the run will hold (issue 1376, ADR-release-014): once `observe_merge` has left the
+the lock the run will hold (issue 1376, ADR-release-008): once `observe_merge` has left the
 plan runnable and the merge is not satisfied it makes one one-shot `acquire` at the candidate
 commit, through the same router as `run`, so a free lock is taken and the run's check then
 finds it held. It keeps `already_held` and `acquired`, and a resumed release also keeps
