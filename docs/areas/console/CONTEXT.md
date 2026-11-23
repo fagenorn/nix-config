@@ -194,5 +194,5 @@ A ready adoption plan the owner approved on the page by choosing `Apply it` on i
 _Avoid_: auto-adoption, auto-merge
 
 **Merged adoption**:
-An approved adoption whose pull request the owner merged: the console registers its project once origin's integration branch carries the adoption, says so in the digest, and asks the owner to Retry on a question card when the registration is refused (ADR-console-028 D10).
+An approved adoption whose pull request the owner merged: the console registers its project once origin's integration branch carries the adoption, says so in the digest, and asks the owner to Retry on a question card when the registration is refused (ADR-console-028).
 _Avoid_: auto-registration

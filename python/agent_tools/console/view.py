@@ -388,7 +388,7 @@ none): the page refuses such an option until the owner has written words with it
 `QUESTION_SENTENCE` ("Choose an option with its number and press Enter, or answer in your own
 words.") says what the page offers.
 
-Each open question of a done registration's plan (#1066, ADR-console-029 D10; `registration.status`
+Each open question of a done registration's plan (#1066, ADR-console-029; `registration.status`
 is `done` and `registration.questions` is not empty) is one entry of `inbox.open` too, after the
 manager questions and before every tracker item, in the plan's order, and counts in `inbox_items`
 and the headline; a running registration, one with no question and none at all add nothing. Its
@@ -416,7 +416,7 @@ the page offers; `REGISTER_TYPE_SENTENCE` ("Type the answer on its card and pres
 when no register item offers options but one takes a typed answer; `REGISTER_STEP_SENTENCE` ("Each one says what to do next.") stands when no plan
 question offers an answer and nothing else is open.
 
-Each retry item a caller passes (`retry_items`; #1055, ADR-console-028 D10) is one entry of
+Each retry item a caller passes (`retry_items`; #1055, ADR-console-028) is one entry of
 `inbox.open` too: a registration the remote refused after its adoption merged, offering the one
 option `Retry`. It is copied as given and not filtered by the registered projects (the project is
 not registered yet), sits after the manager questions and before the plan questions, in the order
