@@ -93,7 +93,7 @@ pending change is `pending` (the reading's commit, `activate` true); otherwise n
 is the one rule the service's admission of Activate shares: a reading with a pending change, or a
 `failed` run whose commit is the reading's and that finished less than OUTCOME_MS before `now_ms`, even
 with nothing pending, because the host's revision can reach the commit before the switch fails
-(ADR-system-004); a day later, with the host at that commit, the line goes (ADR-console-073 D5). The pending text is ACTIVATION_TEXT when
+(ADR-system-004); a day later, with the host at that commit, the line goes (ADR-console-073). The pending text is ACTIVATION_TEXT when
 the reading names a changed console file; else ACTIVATION_TOOLING_TEXT when every other path starts
 with a member of AGENT_TOOLING (`python/`, `home/common/agent-`, `home/common/claude-code/`,
 `home/common/codex/`, `patches/agent-plugins/`, `lib/agent-`); else ACTIVATION_CONFIGURATION_TEXT.
@@ -570,7 +570,7 @@ characters of its id.
 session, from the delivery states `derive_view` is given: the states whose `session_id` equals the
 session's id, newest `moved_ms` first, then `run_id`; each run's issues are ordered by number.
 `quiet` and `moved_text` come from `moved_text(now_ms - latest)` where `latest` is the run's
-reading (#1212, ADR-console-069): the journal's `moved_ms` alone for a run outside a running
+reading (#1212, ADR-console-005): the journal's `moved_ms` alone for a run outside a running
 sprint. A run belongs to the first of the project's shown sprints (newest stated first) that has
 not ended and either names one of the run's issue numbers (`sprint_issue_numbers`) or lists the
 run's session (a session of its `sessions`, or its `manager_session`); it then also reads the
@@ -772,7 +772,7 @@ when the project has no question, else `{"label": QUESTIONS_LABEL, "count", "thr
 thread per `project_question.threads` group, newest first by the last question's `seq`, `count`
 their number. A thread is `{"id", "questions", "follow_up"}`: `id` is its first question's
 `thread_id` (its own id when it has none), `questions` its question entries ascending by `seq`, and
-`follow_up` true exactly when its last question is answered (#1178, ADR-console-059 D4).
+`follow_up` true exactly when its last question is answered (#1178, ADR-console-059).
 A question entry is `{"id", "question", "asked_at",
 "state": "working" | "answered" | "timed_out" | "failed", "state_text", "answered_at": <time> |
 null, "answer": <str> | null, "read_text", "ran_text", "unknown_text", "back_text",
@@ -793,7 +793,7 @@ over the integer mean tokens and mean dollars of the project's newest `DEEP_ESTI
 questions that are not working and spent above 0 tokens, or `ASK_DEEP_NO_ESTIMATE_TEXT` when none did
 (`DEEP_TIMEOUT_SECONDS // 60` minutes), and null otherwise.
 A question is never an inbox item; it changes no count, headline, sentence, `stale`, `quiet` or
-order (#1177, #1178, ADR-console-059 D3, D4).
+order (#1177, #1178, ADR-console-059).
 `encode_view` writes sorted keys, compact separators, non-ASCII kept, NaN
 refused, no newline.
 """
@@ -1599,7 +1599,7 @@ def run_reading(run: DeliveryState, now_ms: int | None,
     """A run's reading. Without `waits` it is the journal's alone. With them its base is the newest
     of the journal and the run's session output and running check, and its latest also takes the
     wait signals; the wait is named only with a clock when the base is `QUIET_AFTER_MS` old and a
-    wait is not (ADR-console-050, ADR-console-069)."""
+    wait is not (ADR-console-050, ADR-console-005)."""
     signals = [run.moved_ms]
     if waits is not None:
         signals += [ms for ms in (waits.output_ms, waits.check_ms) if ms is not None]
