@@ -2,8 +2,8 @@
 
 Resolve-project projects the `conformance_workflow` kind through `render`: a pure function of the
 integration branch, the schema version and the form. The platform's own tree runs the platform
-from the tree itself; every other tree runs it from the revision its `devenv.lock` pins as
-`agent-platform` (ADR-project-contract-018).
+from the tree itself, with `--lint-times`; every other tree runs it from the revision its
+`devenv.lock` pins as `agent-platform` (ADR-project-contract-018), without it.
 """
 
 from __future__ import annotations
@@ -52,7 +52,7 @@ jobs:
       - name: Run conformance
 {run}"""
 RUN_OWN_TREE = (
-    "        run: nix shell .#agent-platform --command conformance run --purpose ci\n")
+    "        run: nix shell .#agent-platform --command conformance run --purpose ci --lint-times\n")
 # A single backslash before each `(` is inside the YAML block scalar, where jq
 # reads it as string interpolation.
 RUN_LOCKED = (

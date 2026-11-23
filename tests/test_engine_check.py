@@ -117,6 +117,23 @@ def _reenter_nowhere(toy: dict) -> None:
     toy["stops"]["needs-owner"]["reenter"] = "nope"
 
 
+def _stop_reenters_a_repair_step_that_returns_to_scope(toy: dict) -> None:
+    toy["stops"]["needs-owner"]["reenter"] = "repair"
+    toy["steps"].append({"id": "repair", "stage": "setup", "kind": "command",
+                         "command": "diff-scope", "holds": "run", "in": ["run.range"],
+                         "on": {"ok": "scope", "failed": "done"}})
+
+
+def _exhausted_scope_hands_over_to_the_repair_a_stop_enters(toy: dict) -> None:
+    toy["stops"]["needs-owner"]["reenter"] = "repair"
+    toy["steps"].append({"id": "repair", "stage": "setup", "kind": "command",
+                         "command": "diff-scope", "holds": "run", "in": ["run.range"],
+                         "max_visits": 2,
+                         "on": {"ok": "scope", "failed": "done", "refused": "done", "exhausted": "done"}})
+    step(toy, "scope")["on"]["exhausted"] = "repair"
+    step(toy, "children")["on"]["exhausted"] = "done"
+
+
 def _undeclared_command(toy: dict) -> None:
     step(toy, "scope")["command"] = next(
         key for key, declaration in sorted(procedure_check.load_commands().items())
@@ -142,7 +159,8 @@ def _outcome_not_required(schema: dict) -> None:
 
 def _add_orphan(toy: dict) -> None:
     toy["steps"].append({"id": "orphan", "stage": "building", "kind": "command",
-                         "command": "diff-scope", "in": ["draft.summary"],
+                         "command": "diff-scope", "holds": "run",
+                         "in": ["draft.summary"],
                          "on": {"ok": "done", "failed": "done", "refused": "done"}})
 
 
@@ -223,7 +241,7 @@ def _write_bytes(name: str, data: bytes) -> Callable[[Path], None]:
 def _two_exhausted_steps_hand_over(child: dict) -> None:
     child["steps"] = [
         {"id": own, "stage": "building", "kind": "command", "command": "diff-scope",
-         "in": ["run.item"], "max_visits": 1,
+         "holds": "run", "in": ["run.item"], "max_visits": 1,
          "on": {"ok": own, "failed": "done", "refused": "done", "exhausted": other}}
         for own, other in (("a", "b"), ("b", "a"))]
     for stop in child["stops"].values():
@@ -236,7 +254,7 @@ def _exhausted_and_ordinary_edges_loop(child: dict) -> None:
         if exhausted is not None:
             on["exhausted"] = exhausted
         item = {"id": own, "stage": "building", "kind": "command", "command": "diff-scope",
-                "in": ["run.item"], "on": on}
+                "holds": "run", "in": ["run.item"], "on": on}
         if bound:
             item["max_visits"] = 1
         return item
@@ -253,7 +271,7 @@ def _no_claim_lost_stop(toy: dict) -> None:
 def _recovery(child: dict) -> None:
     child["steps"].append(
         {"id": "recover", "stage": "building", "kind": "command", "command": "diff-scope",
-         "in": ["run.item"],
+         "holds": "run", "in": ["run.item"],
          "on": {"ok": "done", "failed": "child-stop", "refused": "child-stop"}})
     child["stops"]["claim-lost"]["reenter"] = "recover"
 
@@ -261,6 +279,7 @@ def _recovery(child: dict) -> None:
 def _recovery_without_a_mutating_step(child: dict) -> None:
     _recovery(child)
     del step(child, "claim")["mutates"]
+    del step(child, "claim")["check"]
 
 
 def _recovery_without_a_keep_alive(child: dict) -> None:
@@ -273,10 +292,11 @@ def _recovery_reading(path: str) -> Callable[[dict], None]:
     def edit(child: dict) -> None:
         def command(name: str, reads: str, on: dict, **more: object) -> dict:
             return {"id": name, "stage": "building", "kind": "command", "command": "diff-scope",
-                    "in": [reads], "on": on, **more}
+                    "holds": "run", "in": [reads], "on": on, **more}
         done = {"ok": "done", "failed": "child-stop", "refused": "child-stop"}
         child["steps"] = [command("a", "run.item", {"ok": "b", "failed": "child-stop", "refused": "child-stop"}),
-                          command("b", "run.item", done, mutates=True), command("r", path, done)]
+                          command("b", "run.item", done, mutates=True,
+                                                  check={"command": "diff-scope"}), command("r", path, done)]
         child["stops"]["child-stop"]["reenter"] = "a"
         child["stops"]["claim-lost"]["reenter"] = "r"
     return edit
@@ -434,6 +454,13 @@ CASES = [
     Case("exhausted_unmapped_on_a_cycle",
          editing("toy", _without(lambda toy: step(toy, "review")["on"], "exhausted")),
          [("toy", "review", "unmapped_outcome")]),
+    Case("exhausted_unmapped_on_a_cycle_a_stop_closes",
+         editing("toy", _stop_reenters_a_repair_step_that_returns_to_scope),
+         [("toy", "scope", "unmapped_outcome"), ("toy", "repair", "unmapped_outcome"),
+          ("toy", "children", "unmapped_outcome")]),
+    Case("exhausted_target_reenters_a_loop_a_stop_closes",
+         editing("toy", _exhausted_scope_hands_over_to_the_repair_a_stop_enters),
+         [("toy", "scope", "unbounded_cycle")]),
     Case("group_blocked_unmapped",
          editing("toy", _without(lambda toy: step(toy, "review")["on"], "blocked")),
          [("toy", "review", "unmapped_outcome")]),
@@ -452,7 +479,7 @@ CASES = [
          [("toy", "review", "unknown_outcome")]),
     Case("input_not_produced_on_every_route",
          editing("toy", _set(lambda toy: step(toy, "scope")["on"], "failed", "children")),
-         [("toy", "children", "unproduced_input")]),
+         [("toy", "children", "unmapped_outcome"), ("toy", "children", "unproduced_input")]),
     Case("input_produced_only_later",
          editing("toy", _set(lambda toy: step(toy, "scope"), "in", ["run.range", "draft.summary"])),
          [("toy", "scope", "unproduced_input")]),
@@ -493,6 +520,30 @@ CASES = [
           ("toy", "review-b", "unproduced_input")]),
     Case("reply_enum_value_named_exhausted", _editing_draft_reply(_exhausted_reply_value),
          [("toy", "draft", "invalid_reply")]),
+    Case("step_without_holds",
+         editing("toy", _without(lambda toy: step(toy, "scope"), "holds")),
+         [("toy", "scope", "invalid_field")]),
+    Case("holds_outside_the_three_values",
+         editing("toy", _set(lambda toy: step(toy, "scope"), "holds", "forever")),
+         [("toy", "scope", "invalid_field")]),
+    Case("group_member_without_holds",
+         editing("toy", _without(lambda toy: step(toy, "review-a"), "holds")),
+         [("toy", "review-a", "invalid_field")]),
+    Case("mutating_command_without_check",
+         editing("toy-child", _without(lambda toy: step(toy, "claim"), "check")),
+         [("toy-child", "claim", "invalid_field")]),
+    Case("check_on_a_step_that_does_not_mutate",
+         editing("toy", _set(lambda toy: step(toy, "scope"), "check", {"command": "diff-scope"})),
+         [("toy", "scope", "invalid_field")]),
+    Case("check_that_is_not_an_object",
+         editing("toy-child", _set(lambda toy: step(toy, "claim"), "check", "forge-claim")),
+         [("toy-child", "claim", "invalid_field")]),
+    Case("check_with_an_undefined_member",
+         editing("toy-child", _set(lambda toy: step(toy, "claim")["check"], "timeout", 5)),
+         [("toy-child", "claim", "undefined_field")]),
+    Case("check_with_an_unknown_command",
+         editing("toy-child", _set(lambda toy: step(toy, "claim")["check"], "command", "nope")),
+         [("toy-child", "claim", "unknown_command")]),
     Case("agent_step_without_no_reply", editing("toy", _drop_on("draft", "no-reply")),
          [("toy", "draft", "unmapped_outcome")]),
     Case("reply_enum_value_named_no_reply", _editing_draft_reply(_no_reply_reply_value),
@@ -623,6 +674,15 @@ class ToyProcedureTest(unittest.TestCase):
             with self.subTest(stage=stage):
                 directory = broken_copy(
                     editing("toy", _set(lambda toy: step(toy, "draft"), "stage", stage)))
+                code, out, _ = run_check("--procedures", str(directory))
+                self.assertEqual((code, out), (0, compact(
+                    {"procedures": ["toy", "toy-child"], "verdict": "ok"})))
+
+    def test_each_holds_value_is_accepted(self):
+        for value in ("run", "head", "live"):
+            with self.subTest(value=value):
+                directory = broken_copy(
+                    editing("toy", _set(lambda toy: step(toy, "scope"), "holds", value)))
                 code, out, _ = run_check("--procedures", str(directory))
                 self.assertEqual((code, out), (0, compact(
                     {"procedures": ["toy", "toy-child"], "verdict": "ok"})))

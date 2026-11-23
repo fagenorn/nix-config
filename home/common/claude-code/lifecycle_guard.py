@@ -11,9 +11,9 @@ fixtures.
 Standard library only: it imports nothing from the repository's helper package,
 `agent_tools`.
 
-The decisions behind the rules below are the records in `docs/areas/guard/adr/`
-(ADR-guard-001 to ADR-guard-012), and the compiler that writes the compiled
-policy is documented in `python/agent_tools/guard/guard_policy.py`.
+The decisions behind the rules below are the records in `docs/areas/guard/adr/`,
+and the compiler that writes the compiled policy is documented in
+`python/agent_tools/guard/guard_policy.py`.
 
 Segments, tokens and verbs
 --------------------------
@@ -741,7 +741,7 @@ Production rules
 ----------------
 
 A project's declared production commands are refused outside its release path
-(issue 1149, ADR-guard-011). The rules are a derived row's optional `production`
+(issue 1149, ADR-guard-009). The rules are a derived row's optional `production`
 member, which the compiler copies from the project's contract: `changes`, the
 commands that change its production, `read_only`, the routes that only read it,
 and `release_profile`. A command `{id, argv}` is matched as the verb
@@ -767,7 +767,7 @@ segments do not show: a pipeline, a shell with no `-c` (it reads a file or stdin
 a `<`, `{` or `(` outside every quote, or a file a segment redirects to that the
 shell's text names (`cmd='just switch'; eval "$cmd"`, `echo 'just switch' | { true;
 sh; }`, `echo 'just switch' > f && bash f`). Any other segment is read as a command
-(issue 1192, ADR-guard-011 D10), so words in one quoted argument, a comment or an
+(issue 1192), so words in one quoted argument, a comment or an
 exactly-read heredoc body beside an evaluator are a mention and pass. In raw text a verb counts when
 its words occur in order in either raw reading, or its words joined by one
 space are a substring of the command or of the command with its quotes and

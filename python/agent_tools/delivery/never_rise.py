@@ -47,7 +47,10 @@ never rises, whatever its measure: a move that only adds bytes the rule does not
 judge (a header, a pointer line) cannot turn the rule red. An enforcer's
 `carries_from`, when set, names the source paths a rename may be carried from:
 a rename from any other path is judged as a new file, as no move of a file the
-rule never judged can be a migration. A move git does not pair is a new file.
+rule never judged can be a migration. A move git does not pair is a new file. A
+per-file rule whose violation paths name no file (`follows_renames=False`)
+matches each branch violation with the base violation of the same path only, so
+a file git moves onto such a path carries, exempts and charges nothing.
 
 A `Verdict` also lists the blob paths the head adds over the base (`added`, a
 rename target included), the renames git pairs (`renamed`, new path to old
@@ -219,6 +222,7 @@ class Enforcer:
     exempts_carried: bool = False
     carries_from: Callable[[str], bool] | None = None
     reads: Callable[[str], bool] | None = None
+    follows_renames: bool = True
 
 
 class HistoryUnavailable(Exception):
@@ -573,10 +577,11 @@ def compare(base: Snapshot, branch: Snapshot, renamed: Mapping[str, str],
         new: list[Violation] = []
         if enforcer.per_file:
             base_measure = {v.path: v.magnitude() for v in kept_before}
+            moved = renamed if enforcer.follows_renames else MappingProxyType({})
             new = [v for v in kept_after
                    if not (enforcer.exempts_carried
-                           and _carried_source(enforcer, base, branch, renamed, v.path) is not None)
-                   and _base_measure(enforcer, base, branch, renamed, base_measure, v)
+                           and _carried_source(enforcer, base, branch, moved, v.path) is not None)
+                   and _base_measure(enforcer, base, branch, moved, base_measure, v)
                    < v.magnitude()]
             if len(marked_after) > len(marked_before):
                 new += _added(marked_after, marked_before)
