@@ -168,6 +168,7 @@ agent-workflow-tests *args:
     tests/test_engine_reaping.py \
     tests/test_engine_keep_alive.py \
     tests/test_engine_continue.py \
+    tests/test_engine_resume.py \
     tests/test_engine_housekeeping.py \
     tests/test_engine_stop.py \
     tests/test_engine_caps.py \
@@ -476,7 +477,7 @@ show-claude-settings: build
 # `just` shows only the LAST comment line of a block in `just --list`, so each recipe
 # keeps its one-line summary immediately above it.
 
-# Apply .github/branch-protection.json to `main`, making its contexts (`Nix Eval`, `Instruction Budget`, `Agent Workflow Tests`) required checks.
+# Apply .github/branch-protection.json to `main`, making its contexts required checks.
 protect-main:
   gh api --method PUT repos/{owner}/{repo}/branches/main/protection \
     --input .github/branch-protection.json
