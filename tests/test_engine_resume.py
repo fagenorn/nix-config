@@ -247,7 +247,12 @@ class StartTimeTest(unittest.TestCase):
         began = time.monotonic()
         engine_stop.end_leftover(pid)
         self.assertLess(time.monotonic() - began, 2 * engine_stop.LEFTOVER_GRACE_SECONDS + 2)
-        gone(self, pid, group=True)
+        # The leader may linger as a zombie until init reaps it, and killpg then raises
+        # PermissionError on macOS, so poll the zombie-aware liveness rather than the group.
+        deadline = time.monotonic() + 5
+        while process_alive(pid):
+            self.assertLess(time.monotonic(), deadline, f"process {pid} is still alive")
+            time.sleep(0.05)
 
 
 if __name__ == "__main__":
