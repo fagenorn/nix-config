@@ -64,8 +64,9 @@ is appended and no new visit starts. The session recorded for the visit is launc
 stored `prompt.md`. The launch's prompt is stored as `sessions/<step>.<visit>.continue-<attempt>.prompt.md` when
 absent, and each record as `.continue-<attempt>.json`. The continued launches are not re-asked, so a miss is
 `no-reply`; every later launch of the visit resumes. A visit with a stored result (with or without its outcome) or
-a recorded stop after its entry (`quota-wait`, `stopped-by-request`) is not resumed but rewound to a new visit as
-before, its `run_continued` clearing the stop and closing an open usage-limit wait. A resumed visit
+a recorded stop after its entry (`quota-wait`, `stopped-by-request`) or a launch that ended with its record stored (a
+`Fault` such as no structured reply or a denied shell command; each record names its `attempt`) is not resumed but
+rewound to a new visit as before, its `run_continued` clearing the stop and closing an open usage-limit wait. A resumed visit
 appends no `run_continued`, so the continuing call closes every wait the killed engine left open with a
 `wait_ended` of its kind (a usage-limit or `host-slot` wait) before the visit launches.
 
@@ -557,7 +558,9 @@ class _Resumed:
 def _resumed(run_dir: Path, ledger: list[dict], name: str, visit: int) -> _Resumed | None:
     """The interrupted visit's session to launch again, or None when the visit is to be entered
     (again): it was never entered or never recorded a session, stored a result (graded or not), or
-    ended at a recorded stop after its entry."""
+    ended at a recorded stop after its entry, or whose last launch ended with its record stored (a
+    `Fault` writes nothing to the ledger, so the record's `attempt` is what tells a launch that ended
+    from one a killed engine cut short)."""
     here = [e for e in ledger if e.get("step") == name and e.get("visit") == visit]
     entered = [i for i, e in enumerate(ledger) if e["event"] == "step_entered"
                and (e["step"], e["visit"]) == (name, visit)]
@@ -566,13 +569,26 @@ def _resumed(run_dir: Path, ledger: list[dict], name: str, visit: int) -> _Resum
         return None
     if any(e["event"] == "stop_reached" for e in ledger[entered[-1]:]):
         return None
-    attempt = 2 + sum(1 for e in here if e["event"] == "session_resuming")
+    launched = [e["attempt"] for e in here if e["event"] == "session_resuming"]
+    if any(_recorded_attempt(path) == max(launched, default=1)
+           for path in (run_dir / "sessions").glob(f"{name}.{visit}.*json")):
+        return None
+    attempt = 2 + len(launched)
     started = any(e["event"] == "process_started" for e in here)
     text = (engine_session.CONTINUE_PROMPT if started else
             (run_dir / "sessions" / f"{name}.{visit}.prompt.md").read_text(encoding="utf-8"))
     return _Resumed(session=starting[-1]["session"],
                     system=run_dir / "sessions" / f"{name}.{visit}.system.md",
                     text=text, attempt=attempt, resume=started)
+
+
+def _recorded_attempt(path: Path) -> object:
+    """The launch attempt a stored session record names, None for a file that is no such record."""
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return document.get("attempt") if isinstance(document, dict) else None
 
 
 def _record_history(run_dir: Path, clock: Callable[[], datetime]) -> None:
@@ -942,7 +958,7 @@ def _launch_until_answered(
         waiting = True
 
     def record(launched: engine_session.Launched, reading: engine_session.Reading) -> None:
-        _store_record(run_dir, name, visit, session, launched, reading, schema,
+        _store_record(run_dir, (name, visit, session, attempt), launched, reading, schema,
                       f".continue-{attempt}" if resumed is not None else
                       ".resume" if missed else "")
 
@@ -1045,10 +1061,11 @@ def _problem(schema: Mapping, reading: engine_session.Reading) -> str | None:
             else engine_reply.reply_problem(schema, reading.reply))
 
 
-def _store_record(run_dir: Path, name: str, visit: int, session: str,
+def _store_record(run_dir: Path, visit_of: tuple[str, int, str, int],
                   launched: engine_session.Launched, reading: engine_session.Reading,
                   schema: Mapping, suffix: str) -> None:
-    record = {"denials": reading.denials, "exit_code": launched.exit_code,
+    name, visit, session, attempt = visit_of
+    record = {"attempt": attempt, "denials": reading.denials, "exit_code": launched.exit_code,
               "problem": _problem(schema, reading), "prose": reading.prose, "session": session,
               "subtype": reading.subtype}
     engine_ledger.store_session_file(

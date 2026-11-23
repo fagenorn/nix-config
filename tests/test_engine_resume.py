@@ -23,8 +23,8 @@ from tests.process_liveness import process_alive
 from tests.test_engine_continue import gated
 from tests.test_engine_deliver import EngineProject, run_continued, shape, start_deliver, step
 from tests.test_engine_session import (
-    RESULT_LIMIT, RESULT_MISSING, RESULT_NORMAL, after, agent_step, copy_roles, install_answers, one_step,
-    write_procedures,
+    RESULT_LIMIT, RESULT_MISSING, RESULT_NORMAL, after, agent_step, canned_result, copy_roles,
+    install_answers, one_step, write_procedures,
 )
 from tests.test_engine_stop import gone, reap
 
@@ -404,6 +404,35 @@ class ResumeTest(unittest.TestCase):
         for attempt in (2, 3):
             self.assertTrue((run / f"sessions/draft.1.continue-{attempt}.prompt.md").exists())
         self.assertEqual(self.entered(run), [1])
+
+    def faulted_then_normal(self, first: dict) -> None:
+        log = install_answers(self.project, [first, self.normal()])
+        procedures = one_step(self.project)
+        faulted = self.project.deliver(procedures)
+        self.assertEqual(faulted.returncode, 1, faulted.stdout + faulted.stderr)
+        session = after(self.records(log)[0]["argv"], "--session-id")
+        done = self.project.deliver(procedures)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        (run,) = self.project.runs()
+        records = self.records(log)
+        self.assertEqual(len(records), 2)
+        self.assertIn("--session-id", records[1]["argv"])
+        self.assertNotIn("--resume", records[1]["argv"])
+        self.assertNotEqual(after(records[1]["argv"], "--session-id"), session)
+        self.assertEqual(self.entered(run), [1, 2])
+        self.assertEqual(len(run_continued(self.project.events(run))), 1)
+        self.assertFalse([e for e in self.project.events(run) if e["event"] == "session_resuming"])
+
+    def test_a_visit_that_faulted_with_no_structured_reply_is_entered_again_under_a_new_visit(self):
+        empty = self.project.tmp / "empty.json"
+        empty.write_bytes(b"")
+        self.faulted_then_normal({"stdout": str(empty), "exit": 1, "account": "p1"})
+
+    def test_a_visit_that_faulted_on_a_denied_shell_command_is_entered_again_under_a_new_visit(self):
+        denial = {"tool_name": "Bash", "tool_use_id": "t", "tool_input": {"command": "rm -rf x"}}
+        denied = self.project.tmp / "denied.json"
+        denied.write_bytes(canned_result(permission_denials=[denial]))
+        self.faulted_then_normal({"stdout": str(denied), "exit": 0, "account": "p1"})
 
     def test_a_stale_earlier_result_still_rewinds_before_the_interrupted_session(self):
         log = install_answers(self.project, [self.hang(), self.normal()])

@@ -874,7 +874,7 @@ class DeliverSessionTest(unittest.TestCase):
                          {"input": 11, "cache_write": 22, "cache_read": 33, "output": 44})
         self.assertEqual(stored["spend_usd"], 0.4321)
         self.assertEqual(json.loads((run / "sessions/draft.1.json").read_text(encoding="utf-8")), {
-            "denials": [{"tool_name": "Write", "tool_use_id": "toolu_01",
+            "attempt": 1, "denials": [{"tool_name": "Write", "tool_use_id": "toolu_01",
                          "tool_input": {"file_path": "/etc/hosts"}}],
             "exit_code": 0, "prose": "Status: stuck. I could not draft it.",
             "problem": None, "session": self.starting()["session"], "subtype": "success"})
