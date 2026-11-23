@@ -21,6 +21,13 @@
   "folder-trust": null,
   "forge-claim": {
     "subcommands": {
+      "acquire": [
+        "acquired",
+        "already_held",
+        "held_by",
+        "lost_to",
+        "error"
+      ],
       "renew": [
         "renewed",
         "not_held",
@@ -39,8 +46,50 @@
   "host-readiness": null,
   "instruction-surface-lint": null,
   "issue-branch": null,
+  "issue-setup": {
+    "subcommands": {
+      "note": [
+        "posted",
+        "error"
+      ],
+      "preflight": [
+        "clear",
+        "closed",
+        "parked",
+        "duplicate",
+        "open-pr",
+        "error"
+      ],
+      "read": [
+        "read",
+        "error"
+      ],
+      "worktree": [
+        "made",
+        "adopted",
+        "dirty",
+        "mismatch",
+        "error"
+      ],
+      "worktree-check": [
+        "absent",
+        "adopted",
+        "dirty",
+        "mismatch",
+        "error"
+      ]
+    }
+  },
   "lint-time": null,
-  "look-approval": null,
+  "look-approval": {
+    "subcommands": {
+      "marked": [
+        "marked",
+        "unmarked",
+        "error"
+      ]
+    }
+  },
   "look-lint": null,
   "node-lint": null,
   "owner-actions": null,
@@ -50,7 +99,11 @@
   "promotion": null,
   "release": null,
   "release-card": null,
-  "resolve-project": null,
+  "resolve-project": {
+    "subcommands": {
+      "resolve": []
+    }
+  },
   "ruff-lint": null,
   "size-lint": null,
   "skill-lint": null,
