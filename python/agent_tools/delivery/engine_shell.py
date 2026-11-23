@@ -89,6 +89,13 @@ that check as before any visit of the step. A `run_continued` carries no `head`;
 the visit's graded `outcome` and, for a command step that holds `head`, the repository head only when it
 is the same before and after the step's process. None are open: a new run is created.
 
+A continued run whose procedure copy declares a `format` the engine does not read is superseded: it gets
+one `stop_reached` named `superseded` (need `nothing`) at its last entered step (`deliver` when it entered
+none) and one history line, and the same call then creates a new run from `--procedures` and runs it; the
+line printed is the new run's. A superseded run is never open, so it is never continued. A copy that differs
+only in content (its `SHA256SUMS` no longer matching) is continued, and a copy that does not parse as a JSON
+object is refused as before, with nothing written.
+
 A stop request (`engine stop`, `engine_stop`) is the file `<run>/stop-request` naming this lock's holder
 (`pid` and `started`). While a step's process runs (a command, an agent session or the keep-alive),
 the shell polls it; a request for this holder ends that process's group, appends `stop_reached` named
@@ -337,10 +344,33 @@ def _running(runs: list[Path], issue: int) -> tuple[int, dict] | None:
 
 
 def _open_runs(runs: list[Path]) -> list[Path]:
-    return [existing for existing in runs
-            if not engine_ledger.fold(
-                engine_ledger.read_run(existing),
-                engine_ledger.replay(existing / "events.jsonl"), engine_ledger.process_alive).done]
+    open_runs = []
+    for existing in runs:
+        state = engine_ledger.fold(engine_ledger.read_run(existing),
+                                   engine_ledger.replay(existing / "events.jsonl"),
+                                   engine_ledger.process_alive)
+        if not state.done and (state.stop or {}).get("name") != procedure_check.SUPERSEDED:
+            open_runs.append(existing)
+    return open_runs
+
+
+def _superseded(run_dir: Path) -> bool:
+    """Whether the run's procedure copy is in a format the engine does not read; a copy that does
+    not parse is not (it is refused later, by `_validate`)."""
+    try:
+        document = _load(run_dir / "procedure" / "deliver.json")
+    except (ValueError, OSError):
+        return False
+    return not procedure_check.readable_format(document.get("format"))
+
+
+def _supersede(run_dir: Path, clock: Callable[[], datetime]) -> None:
+    """End a run whose copy is unreadable: one stop at its last entered step, one history line."""
+    ledger = engine_ledger.replay(run_dir / "events.jsonl")
+    step = next((e["step"] for e in reversed(ledger) if e["event"] == "step_entered"), ENTRY)
+    with engine_stop.publication(run_dir):
+        _record_stop(run_dir, step, procedure_check.SUPERSEDED, "nothing", "", False)
+    _record_history(run_dir, clock)
 
 
 def deliver(issue: int, procedures_dir: Path, *, clock: Callable[[], datetime] | None = None,
@@ -389,6 +419,11 @@ def deliver(issue: int, procedures_dir: Path, *, clock: Callable[[], datetime] |
             if len(open_runs) > 1:
                 raise Refused(f"runs {', '.join(run.name for run in open_runs)} of issue "
                               f"{issue} are all open; the engine continues one run only")
+            if open_runs and _superseded(open_runs[0]):
+                held.append(_take_run_lock(open_runs[0], holder["started"]))
+                _supersede(open_runs[0], clock)
+                _release(held)
+                open_runs = []
             if open_runs:
                 run_dir = open_runs[0]
                 procedure = _validate(run_dir / "procedure", table)
