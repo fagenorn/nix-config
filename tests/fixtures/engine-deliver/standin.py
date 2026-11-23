@@ -9,6 +9,11 @@ prints at most one compact JSON line.
   record <log> rest...           appends {"argv", "cwd", "pid"} to <log>, prints it, exits 0
   block <release> rest...        waits for <release> to exist (exits 1 after 120 s),
                                  then prints {"argv": rest} and exits 0
+  stamp <log> <seconds> <exit> rest...
+                                 records start = time.time(), sleeps <seconds>, appends one
+                                 line {"argv": rest, "end", "pid", "start"} to <log> in a
+                                 single write, prints {"argv": rest}, exits <exit>
+  emit <exit> <document>         prints <document> verbatim as its one line, exits <exit>
   gate <log> <flag> rest...      appends {"argv": rest} to <log>, prints it, exits 0 when
                                  <flag> exists, else 1 (no verdict in the document)
   effect <log> <kill-before> <kill-after> rest...
@@ -79,6 +84,22 @@ def main(argv: list[str]) -> int:
             time.sleep(0.05)
         emit({"argv": rest})
         return 0
+    if mode == "stamp":
+        log, seconds, code, rest = words[0], float(words[1]), int(words[2]), words[3:]
+        start = time.time()
+        time.sleep(seconds)
+        line = json.dumps({"argv": rest, "end": time.time(), "pid": os.getpid(), "start": start},
+                          sort_keys=True, separators=(",", ":")) + "\n"
+        descriptor = os.open(log, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        try:
+            os.write(descriptor, line.encode("utf-8"))
+        finally:
+            os.close(descriptor)
+        emit({"argv": rest})
+        return code
+    if mode == "emit":
+        print(words[1], flush=True)
+        return int(words[0])
     if mode == "gate":
         log, flag, rest = words[0], words[1], words[2:]
         with open(log, "a", encoding="utf-8") as handle:

@@ -35,6 +35,11 @@ When `<canned>` names a file ending in `.answers.json`, it holds a JSON list of 
 `"hang"`. When `CLAUDE_ACCOUNT_ANSWER` is set, an `all_out` entry writes `{"all_out":true,"resumes_at":...}` there and prints nothing, and an entry with an
 account writes `{"account":<account>}`. In the legacy mode the same variable gets
 `{"account":"stub"}`.
+
+`CLAUDE_STUB_HOLD` (seconds, default 0) is slept after the log line is appended and before
+stdout is written. With `CLAUDE_STUB_STAMPS` naming a file, the stub appends one line
+`{"end", "pid", "start"}` (`time.time()` before and after the hold, `os.getpid()`) to it in a
+single write before printing. Without them it behaves as before.
 """
 
 import glob
@@ -129,6 +134,14 @@ def main(argv: list[str]) -> int:
         return code
     if hold != "-":
         hold_with_child(hold)
+    began = time.time()
+    time.sleep(float(os.environ.get("CLAUDE_STUB_HOLD", "0")))
+    stamps = os.environ.get("CLAUDE_STUB_STAMPS")
+    if stamps:
+        line = json.dumps({"end": time.time(), "pid": os.getpid(), "start": began},
+                          sort_keys=True, separators=(",", ":")) + "\n"
+        with open(stamps, "a", encoding="utf-8") as handle:
+            handle.write(line)
     if not all_out:
         chosen = resumed if entry is None and "--resume" in words and resumed != "-" else canned
         with open(chosen, "rb") as handle:
