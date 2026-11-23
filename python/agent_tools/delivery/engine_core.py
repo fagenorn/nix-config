@@ -41,7 +41,7 @@ Visits
     the count of every arrival of the step in the run, rewound ones included,
     so a number is never reused. Every entry of a step counts a visit. Entry `max_visits + 1` (`max_visits`
     defaults to 1) takes `on["exhausted"]` with no action and records
-    `Transition(step, "exhausted", target)`. A `decide` step grades
+    `Transition(step, "exhausted", target, visit)` (every transition names the visit it left). A `decide` step grades
     `{path: value for path in in}` with `engine_graders.GRADERS[step["grader"]]`
     and follows the returned outcome; no event is involved.
 
@@ -136,6 +136,7 @@ class Transition:
     step: str
     outcome: str
     target: str
+    visit: int = field(default=0, compare=False)  # the step's visit number the transition left
 
 
 @dataclass(frozen=True)
@@ -192,11 +193,11 @@ def _walk(procedure: Mapping, inputs: Mapping[str, object], events: Sequence[Map
             raise CoreError(f"no value for {path!r}")
         return table[member]
 
-    def follow(step: Mapping, outcome: str) -> str:
+    def follow(step: Mapping, outcome: str, visit: int) -> str:
         target = step["on"].get(outcome) if isinstance(outcome, str) else None
         if target is None:
             raise CoreError(f"step {step['id']!r} does not map outcome {outcome!r}")
-        transitions.append(Transition(step["id"], outcome, target))
+        transitions.append(Transition(step["id"], outcome, target, visit))
         return target
 
     def settle(where: str) -> tuple[str, dict | None, tuple[tuple[str, object], ...]]:
@@ -206,19 +207,19 @@ def _walk(procedure: Mapping, inputs: Mapping[str, object], events: Sequence[Map
             bound = step.get("max_visits", 1)
             if visits[where] > bound + 1:
                 raise CoreError(f"step {where!r} entered {visits[where]} times, past its exhausted entry")
+            total[where] = total.get(where, 0) + 1
             if visits[where] > bound:
-                where = follow(step, EXHAUSTED)
+                where = follow(step, EXHAUSTED, total[where])
                 continue
             if step["kind"] not in CORE_KINDS:
                 raise CoreError(f"step {where!r} is a {step['kind']!r} step, which the core does not run yet")
-            total[where] = total.get(where, 0) + 1
             snapshot = (dict(visits), dict(results), dict(produced), len(transitions))
             if step["kind"] == "decide":
                 arrivals.append(_Arrival(where, total[where], snapshot))
                 grader = engine_graders.GRADERS[step["grader"]]
                 graded = grader.grade({path: value(path) for path in step.get("in", [])})
                 results[where] = {"verdict": graded}
-                where = follow(step, graded)
+                where = follow(step, graded, total[where])
             else:
                 args = tuple((path, value(path)) for path in step.get("in", []))
                 arrivals.append(_Arrival(where, total[where], snapshot, args))
@@ -293,7 +294,7 @@ def _walk(procedure: Mapping, inputs: Mapping[str, object], events: Sequence[Map
             raise CoreError(f"result of {pending['id']!r} is not an object")
         results[pending["id"]] = result
         produced[pending["id"]] = (len(arrivals) - 1, current.visit, event.get("head"))
-        position, pending, args = settle(follow(pending, outcome))
+        position, pending, args = settle(follow(pending, outcome, current.visit))
 
     return _Walk(position, pending, args, transitions, arrivals, produced, owed)
 

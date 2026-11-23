@@ -360,10 +360,21 @@ class ContinueTest(unittest.TestCase):
     def test_a_rewind_to_a_stop_reenter_restores_its_visit_bound(self) -> None:
         events = pair("scope", "ok") + pair("draft", "stuck") * 2
         self.assertEqual(reentry(toy(), INPUTS, events, None), Reentry("draft", 2, ()))
-        self.assertEqual(next_action(toy(), INPUTS, events + [C("draft", 2)]), DRAFT(3))
+        self.assertEqual(next_action(toy(), INPUTS, events + [C("draft", 2)]), DRAFT(4))
         result = replay(toy(), INPUTS, events + [C("draft", 2)] + pair("draft", "stuck"))
         self.assertEqual(result.action, STOP)
         self.assertEqual(result.transitions[-1], Transition("draft", "exhausted", "needs-owner"))
+
+    def test_a_transition_names_the_visit_it_left_and_a_rewind_never_reuses_a_number(self) -> None:
+        events = pair("scope", "ok") + pair("draft", "stuck") * 2
+        walked = replay(toy(), INPUTS, events)
+        self.assertEqual([(t.step, t.outcome, t.visit) for t in walked.transitions],
+                         [("scope", "ok", 1), ("draft", "stuck", 1), ("draft", "stuck", 2),
+                          ("draft", "exhausted", 3)])
+        again = replay(toy(), INPUTS, events + [C("draft", 2)] + pair("draft", "stuck"))
+        self.assertEqual([(t.step, t.outcome, t.visit) for t in again.transitions],
+                         [("scope", "ok", 1), ("draft", "stuck", 1), ("draft", "stuck", 4),
+                          ("draft", "exhausted", 5)])
 
     def test_a_stop_reentering_a_graded_decide_rewinds_it_at_its_visit(self) -> None:
         events = pair("scope", "ok", {"verdict": "revise"})

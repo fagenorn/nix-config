@@ -544,15 +544,20 @@ def _walk(run_dir: Path, table: CommandTable, inputs: dict, holder: Mapping[str,
 def _record_core_transitions(run_dir: Path, ledger: list[dict], walk: engine_core.Replay) -> None:
     """Append the `transition_taken` of each walk transition the ledger lacks, in order.
 
+    A transition is keyed by its step and the core's visit number, which a rewind never reuses,
+    so a continue that rewinds the walk does not hide a later transition behind an earlier one.
+
     A command visit writes its own in `_visit`; the core resolves a `decide` step and an
     exhausted entry with no command, so the ledger holds the rest of the walk's transitions here.
     """
-    taken = sum(1 for event in ledger if event["event"] == "transition_taken")
-    for index, transition in enumerate(walk.transitions[taken:], start=taken):
-        visit = sum(1 for earlier in walk.transitions[:index + 1] if earlier.step == transition.step)
-        engine_ledger.append_event(run_dir, {
-            "event": "transition_taken", "at": _now(), "step": transition.step, "visit": visit,
-            "outcome": transition.outcome, "to": transition.target})
+    taken = {(event["step"], event["visit"]) for event in ledger
+             if event["event"] == "transition_taken"}
+    for transition in walk.transitions:
+        if (transition.step, transition.visit) not in taken:
+            engine_ledger.append_event(run_dir, {
+                "event": "transition_taken", "at": _now(), "step": transition.step,
+                "visit": transition.visit, "outcome": transition.outcome,
+                "to": transition.target})
 
 
 def _record_stop(run_dir: Path, step: str, name: str, need: str, detail: str,

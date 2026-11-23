@@ -217,6 +217,25 @@ class ContinueTest(unittest.TestCase):
             ("transition_taken", "b", 1), ("run_done", None, None)])
         self.assertEqual((after[0]["outcome"], after[0]["to"]), ("failed", "b"))
 
+    def test_a_decision_graded_again_after_a_continue_leaves_its_transition_under_a_new_visit(self):
+        project = EngineProject(self)
+        decision = {"id": "t", "stage": "setup", "kind": "decide", "grader": "toy-tally",
+                    "holds": "run", "in": ["run.issue"],
+                    "on": {"accept": "done", "revise": "needs-owner"}}
+        procedures = project.procedures(
+            [step("r", "standin-json", "t"), decision],
+            stops={"needs-owner": {"need": "owner-decision", "reenter": "t"}})
+        run = self.first_stop(project, procedures)
+        second = project.deliver(procedures)
+        self.assertEqual(second.returncode, 3, second.stdout + second.stderr)
+        events = project.events(run)
+        self.assertEqual(
+            [(e["event"], e["step"], e["visit"]) for e in events
+             if e["event"] in ("transition_taken", "run_continued")],
+            [("transition_taken", "r", 1), ("transition_taken", "t", 1),
+             ("run_continued", "t", 1), ("transition_taken", "t", 2)])
+        self.assertEqual([e["event"] for e in events[-2:]], ["transition_taken", "stop_reached"])
+
     def test_a_stop_reached_by_the_opening_decision_is_reported_after_a_kill_left_no_event(self):
         project = EngineProject(self)
         decision = {"id": "d", "stage": "setup", "kind": "decide", "grader": "toy-tally",
