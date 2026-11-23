@@ -578,7 +578,7 @@ CI_STEP_CLASSES = {
     ("instruction-budget.yaml", "instruction-budget", BUDGET): ("lint", "instruction-budget"),
     ("conformance.yaml", "conformance", CHECKOUT): SETUP,
     ("conformance.yaml", "conformance", INSTALL): SETUP,
-    ("conformance.yaml", "conformance", "nix shell .#agent-platform --command conformance run --purpose ci"):
+    ("conformance.yaml", "conformance", "nix shell .#agent-platform --command conformance run --purpose ci --lint-times"):
         ("not-lint", "runs the conformance engine against the checkout"),
 }
 

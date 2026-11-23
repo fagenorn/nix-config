@@ -878,7 +878,7 @@ DEFAULT = object()
 T0 = datetime(2026, 11, 1, tzinfo=timezone.utc)
 T1 = T0 + timedelta(days=30)
 DONE_DETAIL = "The deliver procedure reached done after 1 step visit."
-GATE = {"id": "gate", "stage": "setup", "kind": "decide", "grader": "toy-tally",
+GATE = {"id": "gate", "stage": "setup", "kind": "decide", "grader": "toy-tally", "holds": "run",
         "on": {"accept": "draft", "revise": "needs-owner"}}
 
 
@@ -1203,17 +1203,23 @@ class DeliverHousekeepingTest(unittest.TestCase):
         fcntl.flock(descriptor, fcntl.LOCK_EX)
         tracker = FakeTracker({603: T1 - timedelta(days=20), 604: T1 - timedelta(days=20)})
         with self.subTest("late refusal"):
+            engine_ledger.create_run(
+                project="example/engine", issue=602, procedure="deliver", procedures_dir=stopped,
+                platform_revision="source", host="test", inputs={"issue": 602}, now=T0,
+                root=runs_dir(project))
             before = path.read_bytes()
-            with self.assertRaises(engine_shell.Refused):
+            with self.assertRaises(engine_shell.Refused):  # two open runs: only one is continued
                 deliver(project, 602, stopped, at=T1, tracker=tracker)
             self.assertEqual(path.read_bytes(), before)
         with self.subTest("running"):
-            entries = sorted(os.listdir(runs_dir(project)))
+            def run_directories():  # the creation locks are dot files the probe itself takes
+                return sorted(name for name in os.listdir(runs_dir(project))
+                              if not name.startswith("."))
+            entries = run_directories()
             before = path.read_bytes()
             self.assertEqual(deliver(project, 604, procedures, at=T1, tracker=tracker)[0],
                              engine_shell.EXIT_RUNNING)
-            self.assertEqual(sorted(os.listdir(runs_dir(project))), entries)
-            self.assertNotIn(".604.deliver.lock", entries)
+            self.assertEqual(run_directories(), entries)
             self.assertEqual(path.read_bytes(), before)
         self.assertEqual(tracker.asked, [])
         self.assertEqual(len(run_of(project, 603)), 1)
@@ -1222,21 +1228,19 @@ class DeliverHousekeepingTest(unittest.TestCase):
         project = EngineProject(self)
         procedures = project.procedures([step("a", "standin-record", "done")])
         seen = []
-        validate, lock = engine_shell._validate, engine_shell._lock_creation
+        validate = engine_shell._validate
 
         def checked(directory, table):
             seen.append(("validate", Path(directory)))
-            return validate(directory, table)
-
-        def locked(issue):
-            seen.append(("edit",))
-            edited = json.loads((procedures / "deliver.json").read_text())
-            edited["steps"][0]["on"]["ok"] = "b"
-            edited["steps"].append(step("b", "no-such-command", "done"))
-            (procedures / "deliver.json").write_text(json.dumps(edited), encoding="utf-8")
-            return lock(issue)
-        with mock.patch.object(engine_shell, "_validate", checked), \
-                mock.patch.object(engine_shell, "_lock_creation", locked):
+            checked_procedure = validate(directory, table)
+            if Path(directory) == procedures:
+                seen.append(("edit",))
+                edited = json.loads((procedures / "deliver.json").read_text())
+                edited["steps"][0]["on"]["ok"] = "b"
+                edited["steps"].append(step("b", "no-such-command", "done"))
+                (procedures / "deliver.json").write_text(json.dumps(edited), encoding="utf-8")
+            return checked_procedure
+        with mock.patch.object(engine_shell, "_validate", checked):
             with self.assertRaises(engine_shell.Refused) as caught:
                 deliver(project, 1512, procedures, at=T0, tracker=FakeTracker({}))
         self.assertIn("unknown_command", str(caught.exception))

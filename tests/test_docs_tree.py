@@ -266,6 +266,17 @@ class DocsTreeTest(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_every_guard_record_keeps_the_record_form(self):
+        paths = sorted((REPO_ROOT / "docs/areas/guard/adr").glob("*.md"))
+        self.assertTrue(paths)
+        breaches = {}
+        for path in paths:
+            relative = path.relative_to(REPO_ROOT).as_posix()
+            found = record_violations(relative, path.read_bytes())
+            if found:
+                breaches[relative] = [violation.rule for violation in found]
+        self.assertEqual(breaches, {})
+
     def test_no_living_file_names_a_working_artifact_outside_a_pinned_link(self):
         archived = archived_files()
         hits = [hit for path, lines in scanned_files() for hit in working_artifact_hits(path, lines, archived)]
@@ -943,7 +954,7 @@ class DocsTreeTest(unittest.TestCase):
                        "--setting-sources", "--tools", "300", "production.read_only.commands",
                        "project_question_hook",
                        "Production cannot be read for this project", "ADR-console-008",
-                       "ADR-console-011", "ADR-console-023", "ADR-guard-011"):
+                       "ADR-console-011", "ADR-console-023", "ADR-guard-009"):
             self.assertIn(needle, adr)
         adr008 = self.doc(
             "docs/areas/console/adr/008-only-the-page-writes-with-a-token-and-its-origin.md")
@@ -1296,8 +1307,6 @@ class DocsTreeTest(unittest.TestCase):
                       "host-is-one-line-in-the-work-column.md",
                       "docs/areas/console/adr/008-only-the-page-writes-with-a-token-and-its-"
                       "origin.md",
-                      "docs/areas/guard/adr/011-the-guard-refuses-a-projects-production-commands-"
-                      "outside-its-release-path.md",
                       "docs/areas/project-contract/adr/007-a-contract-declares-its-production-"
                       "rules-or-that-it-has-none.md"):
             line = next(row for row in (REPO_ROOT / older).read_text().splitlines()
@@ -1308,6 +1317,20 @@ class DocsTreeTest(unittest.TestCase):
             with self.subTest(context):
                 self.assertIn("ADR-system-004", self.doc(f"docs/areas/{context}/CONTEXT.md"))
         self.assertNotIn("naming `just switch`", self.doc("docs/areas/console/CONTEXT.md"))
+
+    def test_no_tracked_file_cites_a_retired_guard_record(self):
+        # The pattern is built at run time, so this file holds no retired citation itself.
+        numbers = ("005", "011", "012")
+        pattern = "ADR-guard-(" + "|".join(numbers) + ")([^0-9]|$)"
+        result = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "grep", "-n", "-E", pattern],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertEqual(result.stdout, "")
+        for number in numbers:
+            with self.subTest(number):
+                self.assertEqual(sorted((REPO_ROOT / "docs/areas/guard/adr").glob(f"{number}-*.md")), [])
 
 
 if __name__ == "__main__":

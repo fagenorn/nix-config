@@ -2108,7 +2108,7 @@ class ClaudePermissionGuardTest(unittest.TestCase):
                 self.assertEqual(0, result.returncode, (command, result.stderr))
 
     def test_a_production_command_counts_only_where_it_runs_not_where_it_is_mentioned(self):
-        """Issue 1192, ADR-guard-011 D10: words inside one quoted argument, a comment or an
+        """Issue 1192: words inside one quoted argument, a comment or an
         exactly-read heredoc body are a mention, wherever the rest of the command reads a
         shell, while shell code, an executed substitution and unparseable text still count."""
         guard_args = self.production_args({NODO: NODO_ROW, PROD: PROD_ROW})
