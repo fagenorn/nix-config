@@ -5,8 +5,9 @@
   "stops": {"child-stop": {"need": "retry", "reenter": "claim"},
             "claim-lost": {"need": "retry", "reenter": "claim"}},
   "steps": [
-    {"id": "claim", "stage": "building", "kind": "command", "command": "forge-claim", "subcommand": "status",
+    {"id": "claim", "stage": "building", "kind": "command", "holds": "live", "command": "forge-claim", "subcommand": "status",
      "in": ["run.repo", "run.issue", "run.holder"], "mutates": true,
+     "check": {"command": "forge-claim", "subcommand": "status"},
      "on": {"free": "done", "held_by": "done", "stale": "child-stop", "error": "child-stop",
              "refused": "child-stop"}}
   ]

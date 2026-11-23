@@ -185,7 +185,8 @@ class Context:
 
     `root_arg` is `--repo-root` verbatim — None when the flag was omitted, so
     the resolver's ancestor walk runs — while `root` starts at the caller's
-    directory and is replaced by the discovered root (D28).
+    directory and is replaced by the discovered root (D28). `stopwatch` times the
+    never-rise lints when `--lint-times` is given.
     """
 
     root: Path
@@ -198,6 +199,7 @@ class Context:
     contract: dict | None = None
     bindings: dict | None = None
     capabilities: dict | None = None
+    stopwatch: object | None = None
 
 
 REPAIRS = {

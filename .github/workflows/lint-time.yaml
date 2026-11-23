@@ -1,0 +1,38 @@
+# Files one lint-time issue when the lints of the Conformance runs on main take too long
+# (ADR-delivery-020). It reads the Conformance runs and their job logs (actions: read) and may
+# write issues and nothing else; tests/test_branch_protection.py pins this file's shape. One
+# concurrency group that cancels nothing and queues up to 100 waiting runs (queue: max) runs
+# pushes one after another, so two pushes never both find no open lint-time issue. forge_api
+# drops token variables, so the token is stored for gh before the command runs. The command
+# exits 0 whatever it reads, and the job is no required context, so a slow run fails no change.
+name: Lint Time
+
+on:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: lint-time
+  cancel-in-progress: false
+  queue: max
+
+permissions:
+  actions: read
+  contents: read
+  issues: write
+
+jobs:
+  lint-time:
+    name: Lint Time
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Store the workflow token for gh
+        env:
+          TOKEN: ${{ github.token }}
+        run: printf '%s\n' "$TOKEN" | gh auth login --with-token --insecure-storage
+      - name: Read the lint times
+        run: PYTHONPATH=python python3 -m agent_tools.delivery.lint_time file --repo "$GITHUB_REPOSITORY" --branch "$GITHUB_REF_NAME"

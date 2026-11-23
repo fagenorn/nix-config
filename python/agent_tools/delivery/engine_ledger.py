@@ -24,8 +24,11 @@ of the issue, child runs included, but `find_runs` and `find_run` return root ru
 `run.json` has no `parent`). A run is assembled in `<root>/.<run id>.tmp` and renamed into place, so a run
 directory is either complete or absent.
 
-Every event has `event` (its type) and `at` (RFC3339 UTC); `EVENT_MEMBERS` lists, per type, exactly the
-other members it carries; a `call` event records that a step started the child run `child` for item `index`
+Every event has `event` (its type) and `at` (RFC3339 UTC); `EVENT_MEMBERS` lists, per type, the
+other members it always carries and `EVENT_OPTIONAL` the ones it may carry besides. `result_stored` carries the
+visit's graded `outcome` and, for a step that reports one, the worktree `head`. `run_continued` names the `step`
+a continued run re-enters and, when it rewinds, the `visit` it rewinds to; a recorded one without them is still
+read, but `append_event` writes none without a `step`. A `call` event records that a step started the child run `child` for item `index`
 of `items`. An agent step visit that hits a usage limit or an API error, or gives no valid
 answer, is launched again in the same visit: `session_resuming` records each such launch (its `attempt`, 2 or
 more) and `session_answered` the account the launcher answered for a launch whose process started.
@@ -93,6 +96,17 @@ EVENT_MEMBERS: Mapping[str, frozenset[str]] = {
     "run_continued": frozenset(),
     "run_done": frozenset(),
 }
+# Members an event may carry besides `EVENT_MEMBERS`.
+EVENT_OPTIONAL: Mapping[str, frozenset[str]] = {
+    "result_stored": frozenset(("head", "outcome")),
+    "run_continued": frozenset(("step", "visit")),
+}
+# Members `append_event` requires beyond what a reader requires, so a ledger
+# written before them stays readable.
+APPEND_REQUIRED: Mapping[str, frozenset[str]] = {
+    "run_continued": frozenset(("step",)),
+}
+HEAD_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 
 
 class LedgerError(Exception):
@@ -366,6 +380,9 @@ def _check_member(event: Mapping[str, object], key: str) -> None:
         if not isinstance(value, dict) or set(value) != TOKEN_COUNTS \
                 or not all(_is_int(count) and count >= 0 for count in value.values()):
             raise LedgerError("tokens must hold exactly the four non-negative counts")
+    elif key == "head":
+        if not isinstance(value, str) or not HEAD_RE.fullmatch(value):
+            raise LedgerError("head is not a full lowercase hex commit id")
     elif key == "stage":
         if value not in STAGES:
             raise LedgerError("stage is not a stage")
@@ -392,8 +409,12 @@ def validate_event(event: object) -> dict:
     kind = event.get("event")
     if not isinstance(kind, str) or kind not in EVENT_MEMBERS:
         raise LedgerError("unknown event type")
-    if set(event) != EVENT_MEMBERS[kind] | {"event", "at"}:
+    required = EVENT_MEMBERS[kind] | {"event", "at"}
+    allowed = required | EVENT_OPTIONAL.get(kind, frozenset())
+    if not required <= set(event) <= allowed:
         raise LedgerError(f"{kind} does not have exactly its members")
+    if kind == "run_continued" and "visit" in event and "step" not in event:
+        raise LedgerError("run_continued names a visit without a step")
     # `step` and `visit` are checked before `result`, which is derived from them.
     for key in sorted(event, key=lambda name: name == "result"):
         _check_member(event, key)
@@ -442,6 +463,8 @@ def _append_line(events_path: Path, line: bytes) -> None:
 def append_event(run_dir: Path, event: Mapping[str, object]) -> None:
     run_dir = Path(run_dir)
     checked = validate_event(event)
+    if not APPEND_REQUIRED.get(checked["event"], frozenset()) <= set(checked):
+        raise LedgerError(f"{checked['event']} is appended with its required members")
     if checked["event"] == "result_stored" and not (run_dir / str(checked["result"])).is_file():
         raise LedgerError("result_stored names a result file that is not stored")
     _append_line(run_dir / "events.jsonl", _compact(checked).encode("utf-8"))
@@ -469,13 +492,18 @@ def _write_result(path: Path, document: object) -> None:
 
 def store_result(run_dir: Path, *, step: str, visit: int, result: object, at: str,
                  wall_seconds: float, turns: int, tokens: Mapping[str, int],
-                 spend_usd: float) -> Path:
-    """Write the step visit's result file, then append its `result_stored` event."""
+                 spend_usd: float, head: str | None = None,
+                 outcome: str | None = None) -> Path:
+    """Write the step visit's result file, then append its `result_stored` event.
+
+    `head` and `outcome` are in the event only when given."""
     run_dir = Path(run_dir)
     relative = f"results/{step}.{visit}.json"
+    optional = {key: value for key, value in (("head", head), ("outcome", outcome))
+                if value is not None}
     event = validate_event({"event": "result_stored", "at": at, "step": step, "visit": visit,
                             "result": relative, "wall_seconds": wall_seconds, "turns": turns,
-                            "tokens": dict(tokens), "spend_usd": spend_usd})
+                            "tokens": dict(tokens), "spend_usd": spend_usd, **optional})
     path = run_dir / relative
     if os.path.lexists(path):
         raise LedgerError(f"{relative} is already stored")
