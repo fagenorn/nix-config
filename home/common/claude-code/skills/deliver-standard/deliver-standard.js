@@ -3106,6 +3106,8 @@ const carriedTo = head => ({ head, clean: true, results: verify.results.map(r =>
 // reviewed one.
 const carryLook = async (pr, H, since = ownerHead, how = 'the landing', outside = false) => {
   const S = ownerHead
+  // The results carry from the head they were verified at, so the untouched diff starts there.
+  const from = verify && SHA_RE.test(verify.head) ? verify.head : since
   // With the verified head not the owner's, the check reaches back to whichever of the two is earlier.
   const merges = sameSha(since, S) ? `merge_only is true only when git -C ${W} merge-base --is-ancestor ${S} ${H} succeeds, ${onlyMerges(S, H)}; else false.`
     : `merge_only is true only when git -C ${W} merge-base --is-ancestor ${S} ${H} succeeds and one of these holds: (a) git -C ${W} merge-base --is-ancestor ${since} ${S} succeeds (the verified head is at or before the owner's head, so the check reaches back to it), and ${onlyMerges(since, H)}; (b) otherwise, git -C ${W} merge-base --is-ancestor ${S} ${since} succeeds (the verified head is past the owner's head: the worktree already holds the merge, or ${S} is an earlier kept head), and ${onlyMerges(S, H)}; else false.`
@@ -3113,7 +3115,7 @@ const carryLook = async (pr, H, since = ownerHead, how = 'the landing', outside 
 The owner approved head ${S} of PR #${pr}; ${how} brought it to ${H}. Run only git commands and the declared verification, in this order:
 1. git -C ${W} fetch origin. When git -C ${W} rev-parse HEAD is not ${H} and git -C ${W} merge-base --is-ancestor HEAD ${H} succeeds, run git -C ${W} merge --ff-only ${H}; never any other merge, reset, checkout or push. When HEAD is then not ${H}, run nothing more and return head (git -C ${W} rev-parse HEAD), clean, results [] and merge_only false.
 2. ${merges}
-3. ${UNTOUCHED(since, H)} Otherwise, whatever merge_only is: ${verifyBody}`, { label: 'look-carry-verify', phase: 'Ship', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: LOOK_CARRY_VERIFY })
+3. ${UNTOUCHED(from, H)} Otherwise, whatever merge_only is: ${verifyBody}`, { label: 'look-carry-verify', phase: 'Ship', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: LOOK_CARRY_VERIFY })
   // A worktree that could not be brought to H (a force-push replaced the head with one the worktree does not contain)
   // answers with its own head, merge_only false and no results: H was never verified, so the owner is asked for a look
   // at it.
@@ -3122,7 +3124,7 @@ The owner approved head ${S} of PR #${pr}; ${how} brought it to ${H}. Run only g
     return lookWaitStop(pr, H)
   }
   if (!complete(lv, LOOK_CARRY_VERIFY) || !SHA_RE.test(lv.head) || !sameSha(lv.head, H)) return stop('look-carry', { pr: pr, head: H, details: `the verification of ${H} returned no usable reply for it`, result: lv })
-  const skipped = skipsVerify(lv, since)
+  const skipped = skipsVerify(lv, from)
   if (skipped) {
     log(`look-carry-verify: the sync to ${H} changes none of the pull request's files; the verification at ${verify.head} carries to it`)
     verify = carriedTo(fuller(H, lv.head))

@@ -167,6 +167,26 @@ class UntouchedSyncTest(unittest.TestCase):
                    "look-reverify": dict(self.MOVED, results=fresh)})
         self.assertEqual(moved["cont"]["verified"]["results"], fresh)
 
+    def test_a_second_landing_carry_measures_the_untouched_diff_from_the_verified_head(self):
+        stale = {"merged": False, "behind": True, "notes": "Head branch is not up to date with the base branch",
+                 "renew": {"verdict": "renewed"}, "lock": {"verdict": "already_held", "lock_sha": program.D}}
+        landed = {"merged": True, "merge_commit": program.F, "notes": "merged", "renew": {"verdict": "renewed"},
+                  "lock": {"verdict": "already_held", "lock_sha": program.F}}
+        second = dict(self.UNTOUCHED, head=program.F)
+        patch = dict(self.CARRY.NEEDED, **{"checks-3": {"state": "behind", "head": program.D},
+                                           "sync-2": {"merge_commit": program.F, "head": program.F},
+                                           "checks-4": {"state": "passed", "head": program.F, "required": ["ci"],
+                                                        "passed": ["ci"]}})
+        replies = {"look-status": [{"verdict": "needed", "kept_from": None}] * 2,
+                   "look-carry-verify": [self.CARRY.BARE, second], "merge": [stale, landed],
+                   "look-carry": [self.CARRY.FILES_CARRIED] * 2}
+        result, calls = self.CARRY().approve(patch=patch, replies=replies)
+        self.assertEqual(result["stage"], "done", program.labels(calls))
+        prompts = [c["prompt"] for c in calls if c.get("label") == "look-carry-verify"]
+        self.assertEqual(len(prompts), 2)
+        self.assertIn("--name-only " + program.D + " " + program.F + " ", prompts[1])
+        self.assertNotIn("--name-only " + program.SHA + " " + program.F + " ", prompts[1])
+
     def test_an_approved_head_that_only_gained_untouched_merges_is_recorded_without_verification(self):
         result, calls = program.LookResumeTest().approve(
             head=program.D, patch=program.LOOK_MERGED, replies={"look-verify": self.LOOK_UNTOUCHED})
