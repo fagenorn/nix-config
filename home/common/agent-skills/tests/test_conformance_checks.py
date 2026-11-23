@@ -21,7 +21,7 @@ from agent_tools.delivery import context_map_lint, standards_lint
 from agent_tools.project_contract import resolve_project
 
 from .conformance_test_support import (
-    CLEAN_MAP, HERMETIC_ENV, INTEGRATION_REF, REPO_ROOT, ReportAssertions,
+    CLEAN_AREA, CLEAN_MAP, HERMETIC_ENV, INTEGRATION_REF, REPO_ROOT, ReportAssertions,
     commit_all, doctor, fixture, git, load_module, make_root, platform_env, run,
     write_clean_map,
 )

@@ -34,7 +34,10 @@ run's `sessions/`; a step with no valid structured answer is asked once more on 
 then ends `no-reply`; every step runs within the platform's bounds, and a fired bound is the
 outcome `out-of-bounds`; default: the package's `procedures` directory) for the issue, in the project the
 current directory belongs to, to `done` or a stop, and prints one line of compact sorted-key
-JSON when it ends (`engine_shell` is the contract):
+JSON when it ends (`engine_shell` is the contract). Once its run exists it drops the history
+lines older than 180 days and deletes the run directories of issues closed more than 14 days
+ago, never changing its own exit; a run that ends in `done` or a stop appends one line to
+`~/.agents/state/engine/history.jsonl`:
 
 - exit 0: `{"detail", "end": "done", "need": null, "run"}`;
 - exit 3: `{"detail", "end": <stop name>, "need": <stop need>, "run"}`; the end may be the
@@ -129,14 +132,21 @@ def _usage(message: str) -> int:
 
 def _status(issue: int, project: str | None) -> int:
     try:
-        run_dir = engine_ledger.find_run(engine_ledger.runs_root(), issue, project)
-        if run_dir is None:
-            sys.stdout.write(compact({"issue": issue, "run": None}))
-            return 1
-        state = engine_ledger.fold(
-            engine_ledger.read_run(run_dir),
-            engine_ledger.replay(run_dir / "events.jsonl"),
-            engine_ledger.process_alive)
+        while True:
+            run_dir = engine_ledger.find_run(engine_ledger.runs_root(), issue, project)
+            if run_dir is None:
+                sys.stdout.write(compact({"issue": issue, "run": None}))
+                return 1
+            try:
+                state = engine_ledger.fold(
+                    engine_ledger.read_run(run_dir),
+                    engine_ledger.replay(run_dir / "events.jsonl"),
+                    engine_ledger.process_alive)
+            except (engine_ledger.LedgerError, OSError):
+                if run_dir.exists():
+                    raise
+                continue  # a housekeeping sweep renamed the run away: look again
+            break
     except (engine_ledger.LedgerError, OSError, KeyError) as error:
         return _usage(str(error))
     sys.stdout.write(compact(state.as_json()))

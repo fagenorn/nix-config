@@ -74,6 +74,7 @@ ALLOWED_IMPORTS: dict[str, frozenset[str]] = {
         "agent_tools.delivery.context_map_lint",  # conformance_checks
         "agent_tools.delivery.standards_lint",  # conformance_checks
         "agent_tools.delivery.never_rise",  # conformance_checks
+        "agent_tools.delivery.record_lint",  # conformance_checks
         "agent_tools.delivery.size_lint",  # conformance_checks
         "agent_tools.delivery.comment_lint",  # conformance_checks
         "agent_tools.delivery.ruff_lint",  # conformance_checks

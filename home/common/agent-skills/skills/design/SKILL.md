@@ -54,6 +54,8 @@ Sections: **Problem** (from the user's perspective) · **Solution** · **Decisio
 
 Only non-obvious decisions earn a row (scope, interface, behavioral, test-seam, irreversible, user-preference); merge related ones into one row.
 
+A decision record is written only in design and grilling, never by a delivery agent, and only when it is hard to reverse, surprising without context, a real trade-off and names its rejected alternative. Else how it works goes to the code, its tests and module docstring; a rule for every change to a standard with an id; a word's meaning to the glossary; a one-off choice or a bug's story to the issue and commit message. Write it per `grill-with-docs`'s ADR-FORMAT.md.
+
 Then reread the spec once and fix placeholders, contradictions, ambiguity and scope that needs decomposing. No reviewer dispatch.
 
 ## Artifact budget
