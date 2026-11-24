@@ -145,7 +145,7 @@ class GuardPolicyWorld:
         # A test declares production rules through `mutate` (#1149): the `release` mutations below would strand a copied `release_profile`.
         contract.pop("production", None)
         contract["project"] = {"id": project_id, "name": project_id.split("/")[-1]}
-        # The copied checkout configures Codex review for this repository; a test project starts with none and a test opts in.
+        # This checkout configures Codex review; a test project starts without it and a test opts in.
         for capability in ("review.plan", "review.code"):
             contract["capabilities"][capability]["support"] = "unsupported"
         contract["bindings"]["vcs"]["integration_branch"] = integration_branch
