@@ -6,6 +6,8 @@ import unittest
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures
 from .test_console_page import PAGE, Q0, START, frame, full, has_class, nodes, question, render
 
+TIER = "fast"
+
 
 ACTION_COMMAND = "curl -sS -X POST http://127.0.0.1:27999/api/plan-approve --data '<b>x</b>'"
 ACTION_LINE = ("Choosing \"Run it once\" lets the manager run exactly this command once, "

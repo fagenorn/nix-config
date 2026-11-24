@@ -7,6 +7,8 @@ from agent_tools.console.event_log import Event
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures
 from .test_console_sprints import QUESTION, SID, answer_row, asked, at, question_state
 
+TIER = "fast"
+
 
 ACTION_COMMAND = "curl -sS -X POST http://127.0.0.1:27999/api/plan-approve --data @/tmp/approve.json"
 ACTION = {**QUESTION, "owner_only": True, "action": {"command": ACTION_COMMAND, "approve": "sqlite"}}

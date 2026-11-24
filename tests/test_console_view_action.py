@@ -8,6 +8,8 @@ from agent_tools.console import sprints as sprints_module
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures
 from .test_console_view import A, asked, derive_view, started, state
 
+TIER = "fast"
+
 
 class ActionViewTest(unittest.TestCase):
     def test_an_action_card_shows_its_whole_command_and_opens_with_nothing_picked(self):

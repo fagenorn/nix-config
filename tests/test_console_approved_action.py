@@ -8,6 +8,8 @@ from agent_tools.console import permit, service, sprints
 from .test_console_manager_service import PermitCase
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures
 
+TIER = "fast"
+
 ACTION_COMMAND = "curl -sS -X POST http://127.0.0.1:27999/api/plan-approve --data @/tmp/approve.json"
 T0 = 1_795_000_000.0
 

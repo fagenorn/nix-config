@@ -8,6 +8,8 @@ from .test_console_sprint_command import CONTRACT, run_sprint
 from .test_console_writes import Case
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures
 
+TIER = "fast"
+
 
 class SprintActionTest(Case):
     open, goal, files, sent, page, port, asking, asked_rows = (

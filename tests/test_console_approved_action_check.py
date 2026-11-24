@@ -12,6 +12,8 @@ from agent_tools.verification import console_approved_action
 
 from tests.test_verify_checks import CHECKS, ROOT, committed_mode, run_from_root
 
+TIER = "fast"
+
 
 class ConsoleApprovedActionTest(unittest.TestCase):
     """`console-approved-action`: a manager ran an action the owner approved, from its own session."""
