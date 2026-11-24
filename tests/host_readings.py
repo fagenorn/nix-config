@@ -295,6 +295,17 @@ PARTS: dict[str, Part] = {
   runners = builtins.attrNames c.services.github-runners;
   omlxPlist = c.environment.launchDaemons."org.nixos.omlx.plist".text;
   jetsamElsewhere = builtins.filter (n: n != "org.nixos.omlx.plist" && builtins.length (builtins.split "JetsamProperties" c.environment.launchDaemons.${n}.text) > 1) (builtins.attrNames c.environment.launchDaemons);
+  watch = let d = c.launchd.daemons.omlx-memory-watch; in {
+    inherit (d) command;
+    inherit (d.serviceConfig) UserName StartInterval RunAtLoad KeepAlive;
+    home = d.serviceConfig.EnvironmentVariables.HOME;
+  };
+  trim = let d = c.launchd.daemons.fseventsd-trim; in {
+    inherit (d) command;
+    inherit (d.serviceConfig) UserName StartInterval KeepAlive;
+  };
+  owner = u.home.username;
+  sopsSecrets = builtins.attrNames u.sops.secrets;
 }""", ("eleven-m5",)),
 }
 

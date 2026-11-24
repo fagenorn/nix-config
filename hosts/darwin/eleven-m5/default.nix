@@ -50,6 +50,7 @@ in
     ./omlx.nix
     ./docker.nix
     ./github-runners.nix
+    ./memory-watch.nix
   ];
 
   # Nobody is logged in at the screen as the owner and automatic login stays off, so launchd
