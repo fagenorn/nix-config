@@ -137,6 +137,7 @@ class PriorityTest(Scratch):
             "held": (record(100, 100, 5, 0), 0),
             "above_declared": (record(200, 190, 5, 0), 0),
             "refused": (record(40, 100, 5, 0, "EPERM"), 1),
+            "refused_read": (record(None, 190, 5, 0, "EPERM"), 1),
             "put_back_each_sample": (record(40, 100, 5, 4), 1),
             "put_back_once": (record(100, 100, 5, 1), 1),
             "first_read": (record(40, 100, 1, 0), 75),
@@ -154,7 +155,8 @@ class PriorityTest(Scratch):
                 if name == "put_back_each_sample":
                     self.assertEqual(answer["verdict"], "not_met")
                     self.assertEqual(answer["omlx_priority_resets"], 4)
-                if name == "refused":
+                if name in ("refused", "refused_read"):
+                    self.assertEqual(answer["verdict"], "not_met")
                     self.assertEqual(answer["omlx_priority_error"], "EPERM")
 
 

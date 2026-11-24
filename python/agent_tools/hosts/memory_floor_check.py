@@ -96,7 +96,8 @@ def priority(args: argparse.Namespace) -> tuple[int, dict]:
         return NOT_YET, {"verdict": "not_yet"}
     figures = {key: record[key] for key in (
         "omlx_kernel_priority", "declared_priority", "omlx_priority_resets", "omlx_priority_error")}
-    met = figures["omlx_kernel_priority"] >= figures["declared_priority"] and figures["omlx_priority_resets"] == 0
+    kernel = figures["omlx_kernel_priority"]
+    met = kernel is not None and kernel >= figures["declared_priority"] and figures["omlx_priority_resets"] == 0
     return (MET if met else NOT_MET), {"verdict": "met" if met else "not_met", **figures}
 
 
