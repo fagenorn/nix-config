@@ -135,6 +135,7 @@ class PriorityTest(Scratch):
 
         rows = {
             "held": (record(100, 100, 5, 0), 0),
+            "above_declared": (record(200, 190, 5, 0), 0),
             "refused": (record(40, 100, 5, 0, "EPERM"), 1),
             "put_back_each_sample": (record(40, 100, 5, 4), 1),
             "put_back_once": (record(100, 100, 5, 1), 1),

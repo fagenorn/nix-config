@@ -96,7 +96,7 @@ owner's capacity number: whether it holds is a question for the lead.
 | `slowSampleSeconds` | 10 | `memory-floor`'s sampling interval otherwise. | The owner's choice. |
 | `runBoundGiB` | 24 | The footprint over which one workload is ended whatever memory is free: over `verifyRunGiB` and `ciJobGiB`, at most `othersBudgetGiB`. | Leaves a verification run or CI job its allowance several times over, and stops one workload from taking the whole others budget. |
 | `othersBudgetGiB` | 46 | What the model and the floor leave for the rows above. | Computed: `totalGiB` - `omlxCeilingGiB` - `omlxOverCeilingGiB` - `floorGiB`. |
-| `omlxJetsamPriority` | 100 | oMLX's jetsam priority; the kernel ends lower numbers first. Applied by `memory-floor` to the running pid. | `launchctl print system/org.nixos.omlx` showed `jetsam priority = 40`, the same as Colima, the console, `verify-pending` and the runners, while the plist carried 100. |
+| `omlxJetsamPriority` | 190 | oMLX's jetsam priority; the kernel ends the lowest band first. 180 is its default band (`JETSAM_PRIORITY_DEFAULT`), where unmanaged processes such as the agents' test workers run. `memory-floor` raises the running pid to 190 and never lowers a higher value. | The xnu `kern_memorystatus.h` and `kern_memorystatus.c` sources linked in "The memory floor", and the 24 Nov `jetsam_priority ... from=180` line of `/var/log/memory-floor.log`. |
 | `fseventsdRestartMinutes` | 60 | The shortest time between two `fseventsd-trim` restarts. | See "What makes fseventsd grow". |
 
 `verifyRunGiB`, `ciJobGiB` and `macosGiB` are provisional: nobody has measured
@@ -117,7 +117,9 @@ Read on 2026-11-24, with nothing restarted:
 - Colima: `~/.colima/default/colima.yaml` has `memory: 8`.
 - Jetsam priority: `launchctl print system/<label>` showed `jetsam priority =
   40` for oMLX, Colima, the console, `verify-pending` and the runners before
-  this change, and 180 for `com.apple.fseventsd`.
+  this change, and 180 for `com.apple.fseventsd`. Those 40s are launchd's own
+  band for the job, not the kernel's value: the helper read 180 from the
+  kernel for the running oMLX.
 - The 19 Nov kill: `/Library/Logs/DiagnosticReports/JetsamEvent-2026-11-19-002938.ips`
   lists oMLX at 174.82 GiB, then `dotnet` at 11.2 GiB, the VM at 7.63 GiB,
   `JarBird.Gateway.Tests` at 5.42 GiB and another `dotnet` at 4.34 GiB. Test
@@ -127,8 +129,9 @@ Read on 2026-11-24, with nothing restarted:
 it only on samples with a model loaded and the footprint read. Each finished day
 is one line of `~/.omlx/memory/memory-peaks.jsonl`: `peak_others_gib` against
 `others_budget_gib` says whether the others budget held, and
-`omlx_jetsam_priority` against `declared_jetsam_priority` says whether launchd
-applied the declared priority. `~/.omlx/memory/memory-watch.json` holds today's
+`omlx_jetsam_priority` against `declared_jetsam_priority` says whether the
+kernel held oMLX at or above the declared priority.
+`~/.omlx/memory/memory-watch.json` holds today's
 values so far.
 
 ### When you add a workload
@@ -194,15 +197,29 @@ system/org.nixos.omlx` shows `jetsam priority = 40` and `jetsamproperties
 category = daemon` while the plist carried 100, and launchd takes a daemon's
 priority from the category in the sealed
 `/System/Library/LaunchDaemons/com.apple.jetsamproperties.Mac.plist`, whose
-entries are Apple's labels. So the plist no longer carries the key, and
-`memory-floor` sets `omlxJetsamPriority` on the running pid with
+entries are Apple's labels. That 40 is launchd's own band for the job, not the
+kernel's value for the running process. So the plist no longer carries the key,
+and `memory-floor` sets `omlxJetsamPriority` on the running pid with
 `memorystatus_control`, which needs root. It sets it on the first sample and
 after each relaunch, so a changed `omlxJetsamPriority` needs a restart of
 `memory-floor` only, and oMLX gets it without a restart.
 
+The kernel ends the lowest band first, and a process nobody manages sits in its
+default band, 180 (`JETSAM_PRIORITY_DEFAULT`), as the agents' test workers do.
+`memory-floor` therefore only raises: it sets the priority when the kernel's
+value is below `omlxJetsamPriority` and never lowers a higher one, which it logs
+once per pid as `jetsam_priority_kept`. `memory-floor` refuses a declared value
+outside 181 to 210, the highest band the kernel accepts. Each set logs the
+value before it, the declared one and the value read back right after it
+(`jetsam_priority ... from=180 to=190 after=190`). Sources:
+[the bands](https://github.com/apple-oss-distributions/xnu/blob/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/bsd/sys/kern_memorystatus.h#L45-L84),
+[the order jetsam ends them in](https://github.com/apple-oss-distributions/xnu/blob/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/bsd/kern/kern_memorystatus.c#L6497-L6551)
+and [the set validation](https://github.com/apple-oss-distributions/xnu/blob/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/bsd/kern/kern_memorystatus.c#L3080-L3101).
+
 The record keeps the priority it read at the start of each sample, before any
-set, and counts how often it found the value changed again after a successful
-set (`omlx_priority_resets`). A read right after a set would prove nothing. The
+set, and counts how often it found the value below the declared one again after
+a successful set (`omlx_priority_resets`). The read-back in the log line shows
+the set took; the record's value is what the kernel held between samples. The
 sampler puts the record's value in `omlx_jetsam_priority`, so the day line shows
 whether the kernel kept it, and queues `jetsam_priority_unset` when the call
 failed or the resets are above zero.
@@ -243,9 +260,9 @@ size to `/var/db/memory-watch/fseventsd.json`, and the watcher puts the largest
 in the day line as `peak_fseventsd_gib`. A restart is safe: launchd runs it with
 `KeepAlive`, so it comes straight back, and its clients rescan.
 
-Its jetsam priority, 180, is above oMLX's 100, so under memory pressure the
-kernel ends oMLX before it. That is why a growing fseventsd costs the model
-first.
+Its jetsam priority, 180, is the kernel's default band and below oMLX's 190, so
+under memory pressure the kernel ends fseventsd before oMLX. That is why a
+growing fseventsd is ended before the model is.
 
 What was read, re-read on 2026-11-24 with the same read-only commands
 (`launchctl print system/com.apple.fseventsd`, `sudo -n /usr/bin/footprint -p
