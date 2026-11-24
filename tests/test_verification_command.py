@@ -524,6 +524,15 @@ SUITE_TIMING_COMPARE = (
     'PYTHONPATH=python python3 -m agent_tools.delivery.suite_timing compare '
     '--head suite-timing/head/suite-timing.json --base suite-timing/base/suite-timing.json '
     '--base-label "$BASE_REF" >> "$GITHUB_STEP_SUMMARY"')
+BASE_PLATFORM_READ = "\n".join([
+    'base="git+file://$GITHUB_WORKSPACE?rev=${{ github.event.pull_request.base.sha || github.event.before }}"',
+    'nix build "$base#agent-platform" --out-link "$RUNNER_TEMP/base-platform"',
+    '"$RUNNER_TEMP/base-platform/bin/resolve-project" platform-status --repo-root . '
+    '>"$RUNNER_TEMP/base-status.json" 2>"$RUNNER_TEMP/base-warnings.txt" '
+    '|| { cat "$RUNNER_TEMP/base-status.json"; exit 1; }',
+    "sed 's/^/::warning::/' \"$RUNNER_TEMP/base-warnings.txt\"",
+    "jq -e '.compatibility.compatible' \"$RUNNER_TEMP/base-status.json\"",
+])
 CHECKOUT, INSTALL = "actions/checkout@v4", "DeterminateSystems/nix-installer-action@v4"
 SETUP = ("not-lint", "runner setup")
 
@@ -568,6 +577,8 @@ CI_STEP_CLASSES = {
     ("conformance.yaml", "conformance", INSTALL): SETUP,
     ("conformance.yaml", "conformance", "nix shell .#agent-platform --command conformance run --purpose ci --lint-times"):
         ("not-lint", "runs the conformance engine against the checkout"),
+    ("conformance.yaml", "conformance", BASE_PLATFORM_READ):
+        ("not-lint", "reads the head contract with the base platform"),
 }
 
 

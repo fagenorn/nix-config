@@ -100,10 +100,23 @@ REQUIRED_PAYLOAD_KEYS = {
 EXPECTED_WORKFLOW_PERMISSIONS = {"contents": "read"}
 # The one command the Conformance job exists to run, and the whole of its step: the
 # non-blank lines of the step are exactly these, so no `shell:`, `env:`,
-# `working-directory:` or `if:` can ride on it.
+# `working-directory:` or `if:` can ride on it. The second step reads the head's contract
+# with the platform built at the base, and is pinned the same way.
 CONFORMANCE_INVOCATION = "nix shell .#agent-platform --command conformance run --purpose ci --lint-times"
 CONFORMANCE_STEP = ["      - name: Run conformance",
                     f"        run: {CONFORMANCE_INVOCATION}"]
+BASE_PLATFORM_STEP_NAME = "Read the contract with the base platform"
+BASE_PLATFORM_STEP = [
+    f"      - name: {BASE_PLATFORM_STEP_NAME}",
+    "        run: |",
+    '          base="git+file://$GITHUB_WORKSPACE?rev=${{ github.event.pull_request.base.sha || github.event.before }}"',
+    '          nix build "$base#agent-platform" --out-link "$RUNNER_TEMP/base-platform"',
+    '          "$RUNNER_TEMP/base-platform/bin/resolve-project" platform-status --repo-root . '
+    '>"$RUNNER_TEMP/base-status.json" 2>"$RUNNER_TEMP/base-warnings.txt" '
+    '|| { cat "$RUNNER_TEMP/base-status.json"; exit 1; }',
+    "          sed 's/^/::warning::/' \"$RUNNER_TEMP/base-warnings.txt\"",
+    "          jq -e '.compatibility.compatible' \"$RUNNER_TEMP/base-status.json\"",
+]
 CONFORMANCE_CHECKOUT_REF = "          ref: ${{ github.event.pull_request.head.sha || github.sha }}"
 REQUIRED_CONTEXTS = ("Nix Eval", "Agent Workflow Tests", "Conformance")
 EXPECTED_PROTECTION_PAYLOAD = {
@@ -349,8 +362,8 @@ def step_blocks(key, path=WORKFLOW):
 def conformance_job_problems(path=CONFORMANCE_WORKFLOW):
     """Why the Conformance job could report green without running its command, or [].
 
-    Beyond the keys `green_without_work` finds, the job must keep its three steps, the
-    exact command step, the runner's default shell (a `defaults:` block anywhere would
+    Beyond the keys `green_without_work` finds, the job must keep its four steps, the
+    exact command step, the exact base platform step, the runner's default shell (a `defaults:` block anywhere would
     swap the interpreter that reads the command line) and its one job name. The
     never-rise check needs the merge base and the branch head, so the checkout keeps
     full history and the pull request's head commit.
@@ -359,10 +372,12 @@ def conformance_job_problems(path=CONFORMANCE_WORKFLOW):
     if job_names(path) != {"Conformance": "conformance"}:
         problems.append(f"job names are {job_names(path)}, not Conformance only")
     steps = step_blocks("conformance", path)
-    if list(steps) != ["Checkout", "Install Nix", "Run conformance"]:
+    if list(steps) != ["Checkout", "Install Nix", "Run conformance", BASE_PLATFORM_STEP_NAME]:
         problems.append(f"steps are {list(steps)}")
     elif [line for line in steps["Run conformance"] if line.strip()] != CONFORMANCE_STEP:
         problems.append(f"the command step is {steps['Run conformance']}")
+    elif [line for line in steps[BASE_PLATFORM_STEP_NAME] if line.strip()] != BASE_PLATFORM_STEP:
+        problems.append(f"the base platform step is {steps[BASE_PLATFORM_STEP_NAME]}")
     else:
         if "          fetch-depth: 0" not in steps["Checkout"]:
             problems.append("the checkout does not fetch the full history")
@@ -749,6 +764,13 @@ class WorkflowShape(unittest.TestCase):
 
 
 class ConformanceWorkflowShape(unittest.TestCase):
+    def test_the_conformance_job_reads_the_contract_with_the_base_platform(self):
+        steps = step_blocks("conformance", CONFORMANCE_WORKFLOW)
+        self.assertEqual(
+            ["Checkout", "Install Nix", "Run conformance", BASE_PLATFORM_STEP_NAME], list(steps))
+        self.assertEqual(
+            BASE_PLATFORM_STEP, [line for line in steps[BASE_PLATFORM_STEP_NAME] if line.strip()])
+
     def test_the_conformance_job_runs_the_command_and_cannot_report_green_without_it(self):
         self.assertEqual([], conformance_job_problems())
 
@@ -758,6 +780,8 @@ class ConformanceWorkflowShape(unittest.TestCase):
         run = f"        run: {CONFORMANCE_INVOCATION}"
         step = "      - name: Run conformance"
         shell = "        shell: python {0}"
+        base_name = BASE_PLATFORM_STEP[0]
+        base_check = BASE_PLATFORM_STEP[-1]
         mutations = {
             "job if": (name, [name, "    if: false"]),
             "needs": (name, [name, "    needs: other"]),
@@ -770,6 +794,8 @@ class ConformanceWorkflowShape(unittest.TestCase):
             "job defaults": (name, [name, "    defaults:", "      run:", shell]),
             "shallow checkout": ("          fetch-depth: 0", []),
             "merge-commit checkout": (CONFORMANCE_CHECKOUT_REF, []),
+            "base step if": (base_name, [base_name, "        if: false"]),
+            "base check weakened": (base_check, ["          true"]),
         }
         for label, (anchor, replacement) in mutations.items():
             with self.subTest(mutation=label):
@@ -777,6 +803,11 @@ class ConformanceWorkflowShape(unittest.TestCase):
                 mutated = lines[:index] + replacement + lines[index + 1:]
                 with mock.patch(f"{__name__}.workflow_lines", lambda path=None: mutated):
                     self.assertNotEqual([], conformance_job_problems())
+        with self.subTest(mutation="base step dropped"):
+            index = lines.index(base_name)
+            mutated = lines[:index] + lines[index + len(BASE_PLATFORM_STEP):]
+            with mock.patch(f"{__name__}.workflow_lines", lambda path=None: mutated):
+                self.assertNotEqual([], conformance_job_problems())
 
     def test_pull_request_and_push_to_main_are_its_triggers(self):
         for trigger in ("pull_request", "push"):
