@@ -19,7 +19,7 @@ from agent_tools.delivery import issue_setup
 from agent_tools.project_contract import resolve_project
 
 from .forge_world import ForgeWorld
-from .guard_policy_world import GuardPolicyWorld, install_platform_manifest_in_environ
+from .guard_policy_world import REPO_ROOT, GuardPolicyWorld, install_platform_manifest_in_environ
 
 TIER = "integration"
 
@@ -32,6 +32,7 @@ MERGED = {"number": 9, "state": "MERGED", "headRefName": "x", "closingIssuesRefe
 MENTION = {"number": 9, "state": "MERGED", "headRefName": "x", "closingIssuesReferences": []}
 ELSEWHERE = {"number": 11, "state": "OPEN", "headRefName": "other", "closingIssuesReferences": []}
 OWN = {"number": 11, "state": "OPEN", "headRefName": BRANCH, "closingIssuesReferences": []}
+LANE_BODY = "Fix `a/b.py`.\n\n## Acceptance criteria\n\n- [ ] [code] x\n"
 ISSUE_READ = ["api", f"repos/{SLUG}/issues/7"]
 OPEN_PULLS = ["api", "--paginate", "--slurp", f"repos/{SLUG}/pulls?state=open&per_page=100"]
 COMMENTS = ["api", "--paginate", "--slurp", f"repos/{SLUG}/issues/7/comments?per_page=100"]
@@ -251,9 +252,79 @@ class ForgeCommandTest(unittest.TestCase):
         self.forge.comment_store(SLUG, 7, [{"id": 1, "body": "c1", "created_at": "2026-11-06T10:00:00Z",
                                             "updated_at": "2026-11-06T10:00:00Z"}], labels=[])
         self.forge.respond_json("gh", ISSUE_READ, {"number": 7, "title": "T", "body": "B"})
-        code, report = run_setup(self.env, "read", "--repo", SLUG, "--issue", "7")
+        code, report = run_setup(self.env, "read", "--repo-root", str(self.root), "--repo", SLUG,
+                                 "--issue", "7")
         self.assertEqual((code, report["verdict"]), (0, "read"), report)
         self.assertTrue(report["text"].endswith("## Comment 1\n\nc1"), report["text"])
+        self.assertEqual(report["body"], "B")
+        self.assertIs(report["marked"], False)
+        self.assertIsNone(report["lane_paths"])
+
+    def test_read_reports_the_marker_and_the_lane_paths(self):
+        marker = "- [ ] [human] before merge: the text \u2014 measured: the owner, on the pull request\n"
+        target = self.root / ".github" / "lane-paths.json"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps({"version": 1, "sets": {"secrets": ["secrets/"]}}))
+        self.forge.comment_store(SLUG, 7, [], labels=[])
+        self.forge.respond_json("gh", ISSUE_READ, {"number": 7, "title": "T", "body": LANE_BODY + marker})
+        code, report = run_setup(self.env, "read", "--repo-root", str(self.root), "--repo", SLUG,
+                                 "--issue", "7")
+        self.assertEqual((code, report["verdict"]), (0, "read"), report)
+        self.assertIs(report["marked"], True)
+        self.assertEqual(report["lane_paths"], {"secrets": ["secrets/"]})
+
+    def lane(self, body, lane_paths=None):
+        if lane_paths is not None:
+            target = self.root / ".github" / "lane-paths.json"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(json.dumps(lane_paths))
+        self.forge.respond_json("gh", ISSUE_READ, {"number": 7, "title": "T", "body": body})
+        code, report = run_setup(self.env, "lane", "--repo-root", str(self.root), "--repo", SLUG,
+                                 "--issue", "7")
+        return code, report.get("verdict"), report.get("reason")
+
+    def test_lane_prints_the_rules_lane_and_reason(self):
+        paths = {"version": 1, "sets": {"secrets": ["secrets/"]}}
+        self.assertEqual(self.lane(LANE_BODY, paths),
+                         (0, "direct", "named files 1 of at most 3, acceptance criteria 1 of at most 3, "
+                                       "no look marker, no lane path"))
+
+    def test_lane_without_a_lane_paths_file_is_standard(self):
+        self.assertEqual(self.lane(LANE_BODY), (0, "standard", "the repository declares no lane paths"))
+
+    def test_lane_reads_the_look_marker(self):
+        marker = "- [ ] [human] before merge: the text \u2014 measured: the owner, on the pull request\n"
+        paths = {"version": 1, "sets": {"secrets": ["secrets/"]}}
+        self.assertEqual(self.lane(LANE_BODY + marker, paths),
+                         (0, "standard", "a look marker holds the merge for the owner's look"))
+
+    def test_lane_paths_refuses_a_malformed_file(self):
+        def read(text=None):
+            root = self.world.tmp / "lane-root"
+            shutil.rmtree(root, ignore_errors=True)
+            (root / ".github").mkdir(parents=True)
+            if text is not None:
+                (root / ".github" / "lane-paths.json").write_text(text)
+            return issue_setup.lane_paths(str(root))
+
+        def file(version=1, sets=None, **extra):
+            return json.dumps({"version": version, "sets": {"a": ["x/"]} if sets is None else sets, **extra})
+
+        self.assertEqual(read(file()), {"a": ["x/"]})
+        bad = {"no file": None, "version 2": file(2), "version true": file(True),
+               "extra key": file(extra=1), "empty sets": file(sets={}),
+               "set name": file(sets={"A": ["x/"]}), "absolute": file(sets={"a": ["/abs"]}),
+               "dotdot": file(sets={"a": ["a/../b"]}), "space": file(sets={"a": ["a b"]}),
+               "empty set": file(sets={"a": []}), "not json": "not json",
+               "null": "null", "number": "1", "list of keys": '["version", "sets"]', "nested list": "[[1]]"}
+        for name, text in bad.items():
+            with self.subTest(name):
+                self.assertIsNone(read(text))
+
+    def test_the_shipped_lane_paths_file_declares_guard_release_and_secrets(self):
+        paths = issue_setup.lane_paths(str(REPO_ROOT))
+        self.assertEqual(sorted(paths), ["guard", "release", "secrets"])
+        self.assertIn("secrets/", paths["secrets"])
 
     def test_note_posts_the_evidence_as_one_comment(self):
         self.forge.comment_store(SLUG, 7, labels=[])
@@ -265,6 +336,10 @@ class ForgeCommandTest(unittest.TestCase):
 
     def test_a_missing_flag_is_a_usage_error(self):
         code, report = run_setup(self.env, "read", "--repo", SLUG)
+        self.assertEqual((code, report["verdict"], report["error"]), (2, "error", "usage"))
+        code, report = run_setup(self.env, "read", "--repo", SLUG, "--issue", "7")
+        self.assertEqual((code, report["verdict"], report["error"]), (2, "error", "usage"))
+        code, report = run_setup(self.env, "lane", "--repo", SLUG, "--issue", "7")
         self.assertEqual((code, report["verdict"], report["error"]), (2, "error", "usage"))
 
 
