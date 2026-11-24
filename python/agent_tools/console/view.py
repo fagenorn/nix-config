@@ -646,8 +646,8 @@ wait. An engine run of the sprint's issues (`engine_runs.sprint_engine`) moves i
 once and with no window; a run reading not running, stopped or done adds nothing at once, and the run's session ids
 (`RunState.sessions`) are left out of the session signals while a manager's own session counts as before. For an issue an engine
 run carries (`SprintEngine.issues`) the forge's pulls, the branches, the land locks and the queue places are not read, the run's
-open wait event being its wait (#1531); the release reading is read whatever the issues. `movement.engine` is the sprint's engine
-reading (#1531). The state's `quiet`, the ball's `nobody` and the now-sentence's `last seen` prefix are all this one reading, and
+open wait event being its wait; the release reading is read whatever the issues. `movement.engine` is the sprint's engine
+reading. The state's `quiet`, the ball's `nobody` and the now-sentence's `last seen` prefix are all this one reading, and
 none decides movement itself.
 The state is the first that holds: `stopped_at` is set, `stopped` ("stopped by you"); `stop_at` is
 set, `stopping` ("stopping"); the sprint has a closing, `done`; the brief is not approved,
@@ -1484,7 +1484,7 @@ def wait_signals(state: SprintState, movement: ProjectMovement | None,
     window of an idle nudge (`NUDGE_REPLY_MS` from `idle_nudged_at`) is left out. `issues` replaces
     the sprint's issues with the given ones (a run's own, #1212) and `session_id` keeps only the
     associations of that session; both default to the whole sprint. `engine` is the reading of the
-    sprint's engine runs (#1531): it rides on the result and its session ids are left out of the
+    sprint's engine runs: it rides on the result and its session ids are left out of the
     session signals, a manager's own session counting as before."""
     if movement is None:
         return WaitSignals(engine=engine)
@@ -1549,7 +1549,7 @@ def sprint_quiet_for(state: SprintState, now_ms: int | None, listed: Collection[
     is no sign of life); a run, a report, an approval or a wait signal inside the window still
     moves the sprint whatever its order against the failure. With no signal left, the sprint reads
     quiet at once, for the time since the goal was stated. A moving engine run of its issues moves it
-    at once whatever its age (#1531)."""
+    at once whatever its age."""
     if now_ms is None or WORKING in listed or waits.engine.moves:
         return None
     brief, report = state.brief, state.report
@@ -1578,7 +1578,7 @@ def sprint_wait(state: SprintState, now_ms: int | None, listed: Collection[str],
     no clock, or when something else moves it, or when it is quiet whatever
     the waits say, it is None. Else the first of CI, a committing delivery, a release step and the
     land lock whose signal is inside `QUIET_AFTER_MS` or whose engine wait is open, then the engine's
-    usage limit and free host slot (#1531)."""
+    usage limit and free host slot."""
     base = WaitSignals(output_ms=waits.output_ms, check_ms=waits.check_ms,
                        engine=replace(waits.engine, waits=frozenset()))
     if (now_ms is None or sprint_quiet_for(state, now_ms, listed, base) is None

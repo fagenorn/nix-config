@@ -34,7 +34,7 @@ Exits, one JSON line with sorted keys.
   or older than `OLD_MS` (the console's own wait signals, read as published and never inferred from
   the now-sentence, which a moving session hides), a `movement.engine` object whose `moving` is
   false and whose `waits` is empty (an engine run of the sprint's issues that moves it or waits is
-  not session output, #1531), no `sessions[]` entry in state `working`, and no delivery entry with a
+  not session output), no `sessions[]` entry in state `working`, and no delivery entry with a
   `journal_at` (the run journal's own last movement, ADR-console-005) missing or younger than
   `OLD_MS`; `reading_at`, which adds the run session's output and running check (the evidence
   itself) and the run's wait signals, which `movement.waits` already judges, is not read.

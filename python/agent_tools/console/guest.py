@@ -71,7 +71,7 @@ hold only those projects: `states`, `records`, `health`, `movement`, `owner_noti
 `pending` keep the members of a listed project; `sessions` keep only those whose repository is a
 kept project's root (so no unmanaged entry, no other repository); `deliveries` keep only those of a
 kept session; `engine_runs` keeps the runs of a listed project, and `engine_lines` is reset so a guest
-sees no engine run line (#1528) while its sprint reads their movement (#1531). `PASSED_INPUTS` pass as given and every `OWNER_ONLY_INPUTS` key is reset to its listed
+sees no engine run line while its sprint reads their movement. `PASSED_INPUTS` pass as given and every `OWNER_ONLY_INPUTS` key is reset to its listed
 empty value whether or not it was given. The input set is closed: a key of none of the three sets
 is refused with `ValueError("unscoped view input <name>")`, so a view input added later must be
 classified before a guest can see it. `scrub(view, pool, sprint_accounts)` then drops what the inputs

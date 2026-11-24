@@ -1,4 +1,4 @@
-"""A sprint reads its engine runs' movement and waits from their events (#1531).
+"""A sprint reads its engine runs' movement and waits from their events.
 
 Run: just agent-workflow-tests
 """

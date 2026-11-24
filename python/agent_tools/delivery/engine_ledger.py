@@ -631,8 +631,7 @@ def fold(run: Mapping[str, object], events: Sequence[Mapping[str, object]],
     """Derive a run's state from its events in one pass; no file, clock or process.
 
     `process` is the last one with no stored result, `alive` its probe's answer, whatever the stop or done state;
-    `steps` is one per visit; `engine` is the deliver process of the run's `lock`, passed as `holder`;
-    `sessions` are the run's session ids in first-seen order.
+    `steps` is one per visit; `engine` is the `lock`'s deliver process (`holder`); `sessions` are in first-seen order.
     """
     stage = step = last_event = fanout = None
     wait = stop = None

@@ -6,7 +6,7 @@ The engine writes each run as a directory under the runs root: `run.json` (never
 `os.scandir`, which may be absent, and keeps the names that match the run id form and are directories.
 It reads each `run.json` once per name and shows no run whose document has a `parent`; it reads such a child
 run's session events only, and names them among the sessions of the root run it descends from, because a
-call step's sessions live in the child's ledger (#1531). Per (project, issue) it reads only the root run with
+call step's sessions live in the child's ledger. Per (project, issue) it reads only the root run with
 the greatest (`sequence`, name), which is the order the engine's `find_runs` uses.
 
 `events.jsonl` is read by byte offset. Per run the reader keeps the inode, the offset just past the last
@@ -30,7 +30,7 @@ fold of its own, so `engine status` and this view agree. The rules the readings 
 - P8. A stop reads `stopped at <name, hyphens as spaces>, needs <need words>`; a need but `nothing` counts in the heading.
 - P9. A sprint reads `sprint_engine` of its issues: a run that reads moving or waiting moves it at once whatever its
   age, a run in any other reading moves nothing, a shown run carries its issue, and the sessions of every run of its
-  issues are its engine sessions (#1531).
+  issues are its engine sessions.
 
 No line says a run is quiet or stuck: a live engine is moving, whatever the time since its last event.
 """
