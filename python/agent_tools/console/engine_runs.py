@@ -19,13 +19,16 @@ fold of its own, so `engine status` and this view agree. The rules the readings 
 
 - P1. The engine is the process in the run's `lock`, read with a plain open; it is not the fold's step process.
 - P2. A live engine ends any step past its bound, so a live engine is moving and no step bound is read.
-- P3. Waits are keyed by the ledger's `WAITS`; the `lock` wait keeps the sprint wording.
+- P3. Waits are keyed by the ledger's `WAITS`; the `ci` and `lock` waits keep the sprint wording.
 - P4. The reading is the first that holds of: done, stopped, not running (no live engine), waiting, moving.
 - P5. Engine run states live in memory and are not logged; a restart reads each ledger once from its start.
 - P6. The newest root run of each (project, issue) is shown once it entered a step; a done run or one stopped
   with need `nothing` leaves the page a day after its last event.
 - P7. A fan-out reads `building task n of m` from the newest `call` event since the last step entered.
 - P8. A stop reads `stopped at <name, hyphens as spaces>, needs <need words>`; a need but `nothing` counts in the heading.
+- P9. A sprint reads `sprint_engine` of its issues: a run that reads moving or waiting moves it at once whatever its
+  age, a run in any other reading moves nothing, a shown run carries its issue, and the sessions of every run of its
+  issues are its engine sessions (#1531).
 
 No line says a run is quiet or stuck: a live engine is moving, whatever the time since its last event.
 """
@@ -33,7 +36,7 @@ No line says a run is quiet or stuck: a live engine is moving, whatever the time
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO, Callable, Iterable
+from typing import BinaryIO, Callable, Collection, Iterable
 
 from agent_tools.canonical import parse_rfc3339_utc
 from agent_tools.console import sprints
@@ -43,7 +46,7 @@ from agent_tools.delivery.engine_ledger import LedgerError, RunState
 READINGS = ("moving", "waiting", "stopped", "not_running", "done")
 WAIT_TEXT = {"usage-limit": "waiting out a usage limit",
              "host-slot": "waiting for a free session slot on this host",
-             "lock": sprints.NOW_LOCK_TEXT}
+             "lock": sprints.NOW_LOCK_TEXT, "ci": sprints.NOW_CI_TEXT}
 NEED_TEXT = {"owner-decision": "your decision", "owner-look": "your look", "retry": "a retry",
              "nothing": "nothing"}
 NOT_RUNNING_TEXT = "the engine is not running"
@@ -69,6 +72,11 @@ def reading(state: RunState) -> str:
     return "waiting" if state.wait else "moving"
 
 
+def wait_text(state: RunState) -> str | None:
+    """The open wait in words while the run reads waiting, else None."""
+    return WAIT_TEXT[state.wait["wait"]] if reading(state) == "waiting" else None  # type: ignore[index]
+
+
 def line_text(state: RunState) -> str:
     """The run's one line; the run has a stage."""
     kind = reading(state)
@@ -80,7 +88,7 @@ def line_text(state: RunState) -> str:
     if kind == "not_running":
         return f"{stage_text(state)}, {NOT_RUNNING_TEXT}"
     if kind == "waiting":
-        return f"{stage_text(state)}, {WAIT_TEXT[state.wait['wait']]}"  # type: ignore[index]
+        return f"{stage_text(state)}, {wait_text(state)}"
     return f"{stage_text(state)}, moving"
 
 
@@ -114,6 +122,56 @@ def project_lines(states: Iterable[RunState], now_ms: int | None) -> dict[str, l
     for entries in lines.values():
         entries.sort(key=lambda entry: (entry["issue"], entry["run_id"]))
     return lines
+
+
+@dataclass(frozen=True)
+class SprintEngine:
+    """What the engine runs of a sprint's issues say about the sprint: moving, open waits, sessions, issues shown."""
+
+    moving: bool = False
+    waits: frozenset[str] = frozenset()
+    sessions: frozenset[str] = frozenset()
+    issues: frozenset[int] = frozenset()
+
+    @property
+    def moves(self) -> bool:
+        return self.moving or bool(self.waits)
+
+    @property
+    def texts(self) -> frozenset[str]:
+        return frozenset(WAIT_TEXT[wait] for wait in self.waits)
+
+    @property
+    def later(self) -> str | None:
+        """The wait that ends by itself, a usage limit before a free host slot."""
+        for wait in ("usage-limit", "host-slot"):
+            if wait in self.waits:
+                return WAIT_TEXT[wait]
+        return None
+
+    def as_json(self) -> dict:
+        return {"moving": self.moving, "waits": sorted(self.waits)}
+
+
+NO_ENGINE = SprintEngine()
+
+
+def sprint_engine(states: Iterable[RunState], project: str, issues: Collection[int],
+                  now_ms: int | None) -> SprintEngine:
+    """The reading of the runs of `project` whose issue is in `issues`; see P9."""
+    moving, waits, sessions, shown = False, set(), set(), set()
+    for state in states:
+        if state.project != project or state.issue not in issues:
+            continue
+        sessions.update(state.sessions)
+        if engine_entry(state, now_ms) is None:
+            continue
+        shown.add(state.issue)
+        kind = reading(state)
+        moving = moving or kind == "moving"
+        if kind == "waiting":
+            waits.add(state.wait["wait"])  # type: ignore[index]
+    return SprintEngine(moving, frozenset(waits), frozenset(sessions), frozenset(shown))
 
 
 @dataclass(frozen=True)

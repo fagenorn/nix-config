@@ -79,7 +79,7 @@ RUN_MEMBERS = ("host", "inputs", "issue", "platform_revision", "procedure", "pro
                "run", "sequence", "started")
 PARENT_MEMBER = "parent"
 OPTIONAL_RUN_MEMBERS = ("tracker", PARENT_MEMBER)
-WAITS = ("usage-limit", "host-slot", "lock")
+WAITS = ("usage-limit", "host-slot", "lock", "ci")
 TOKEN_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789"
 TOKEN_COUNTS = frozenset(("input", "cache_write", "cache_read", "output"))
 
@@ -615,6 +615,7 @@ class RunState:
     engine: dict | None = None
     engine_alive: bool = False
     fanout: dict | None = None
+    sessions: tuple[str, ...] = field(default=(), hash=False)
 
     def as_json(self) -> dict:
         return {"run": self.run, "project": self.project, "issue": self.issue,
@@ -630,7 +631,8 @@ def fold(run: Mapping[str, object], events: Sequence[Mapping[str, object]],
     """Derive a run's state from its events in one pass; no file, clock or process.
 
     `process` is the last one with no stored result, `alive` its probe's answer, whatever the stop or done state;
-    `steps` is one per visit; `engine` is the deliver process of the run's `lock`, passed as `holder`.
+    `steps` is one per visit; `engine` is the deliver process of the run's `lock`, passed as `holder`;
+    `sessions` are the run's session ids in first-seen order.
     """
     stage = step = last_event = fanout = None
     wait = stop = None
@@ -640,6 +642,7 @@ def fold(run: Mapping[str, object], events: Sequence[Mapping[str, object]],
     graded: set[tuple[str, int]] = set()
     current: tuple[str, int] | None = None
     open_waits: list[tuple[dict, str]] = []
+    sessions: list[str] = []
 
     def close_waits(at: str, kind: str | None) -> None:
         """Close the first open wait of `kind`, or every open wait when `kind` is None."""
@@ -661,6 +664,8 @@ def fold(run: Mapping[str, object], events: Sequence[Mapping[str, object]],
                               "wall_seconds": None, "waits": [], "tokens": None,
                               "spend_usd": None, "account": None}
             current = visit
+        if kind in ("session_starting", "session_resuming", "session_answered") and event["session"] not in sessions:
+            sessions.append(event["session"])
         if kind == "step_entered":
             stage, step = event["stage"], event["step"]
             fanout = None
@@ -709,7 +714,8 @@ def fold(run: Mapping[str, object], events: Sequence[Mapping[str, object]],
                     stage=stage, step=step, wait=wait, stop=stop, done=done,
                     last_event=last_event, process=process, alive=running,
                     steps=tuple(entries.values()), engine=engine,
-                    engine_alive=engine_running, fanout=fanout)
+                    engine_alive=engine_running, fanout=fanout,
+                    sessions=tuple(sessions))
 
 
 def process_alive(pid: int, started: str) -> bool:
