@@ -1,10 +1,11 @@
-"""Apply the eleven-m5 oMLX patches, merge the host-owned settings and sync steering presets.
+"""Apply the eleven-m5 oMLX patches, merge the host-owned settings and remove retired preset directories.
 
 oMLX reads both settings files only at start, so a changed declared key is a restart reason,
 recorded one line per reason in `.restart-needed`.
 """
 
 import argparse
+import fnmatch
 import json
 from pathlib import Path
 import os
@@ -131,81 +132,46 @@ def write_object(path, value):
             temporary.unlink(missing_ok=True)
 
 
-STEERING_MARKER = ".omlx-steering-preset"
-DOWNLOAD_MARKER = ".omlx-download-complete"
+LEGACY_PRESET_MARKER = ".omlx-*-preset"
 
 
-def steering_plan(models_dir, presets):
-    """Validate the declared presets and list stale preset directories to remove."""
-    for name, preset in presets.items():
-        if "/" in name or name.startswith(".") or "/" in preset.get("base", "/"):
-            raise ValueError(f"invalid steering preset directory {name!r}")
-        if not preset.get("neurons"):
-            raise ValueError(f"steering preset {name} lists no neurons")
-        existing = models_dir / name
-        if existing.exists() and not (existing / STEERING_MARKER).exists():
-            raise ValueError(f"{existing} exists and is not a steering preset directory")
-    stale = []
-    if models_dir.is_dir():
-        for directory in sorted(models_dir.iterdir()):
-            if (directory / STEERING_MARKER).exists() and directory.name not in presets:
-                for entry in directory.iterdir():
-                    if not (entry.is_symlink() or entry.name in (STEERING_MARKER, "steering.json")):
-                        raise ValueError(f"stale steering preset {directory} holds {entry.name}")
-                stale.append(directory)
-    return stale
+def legacy_presets(models_dir):
+    """List the retired preset directories under models_dir.
+
+    A preset directory is a real directory holding a file named like LEGACY_PRESET_MARKER.
+    Only symlinks, marker files and .json files may be inside; anything else fails the run."""
+    if not models_dir.is_dir():
+        return []
+    found = []
+    for directory in sorted(models_dir.iterdir()):
+        if directory.is_symlink() or not directory.is_dir():
+            continue
+        entries = sorted(directory.iterdir())
+        if not any(
+            entry.is_file() and not entry.is_symlink() and fnmatch.fnmatch(entry.name, LEGACY_PRESET_MARKER)
+            for entry in entries
+        ):
+            continue
+        for entry in entries:
+            regular = entry.is_file() and not entry.is_symlink()
+            allowed = entry.is_symlink() or (
+                regular and (fnmatch.fnmatch(entry.name, LEGACY_PRESET_MARKER) or entry.name.endswith(".json"))
+            )
+            if not allowed:
+                raise ValueError(f"legacy preset {directory} holds {entry.name}")
+        found.append(directory)
+    return found
 
 
-def sync_steering(models_dir, presets, stale, on_change):
-    """Mirror each preset's downloaded base model as symlinks beside its steering.json.
-
-    A preset whose base has not finished downloading is left for the next run
-    (the downloader runs this command again once it has)."""
-    changed, pending = [], []
-    for directory in stale:
+def remove_legacy_presets(directories):
+    """Unlink each directory's entries (never a symlink's target), remove it, return the names."""
+    removed = []
+    for directory in directories:
         for entry in directory.iterdir():
             entry.unlink()
-            on_change(directory.name)
         directory.rmdir()
-        on_change(directory.name)
-        changed.append(directory.name)
-    for name, preset in sorted(presets.items()):
-        base = models_dir / preset["base"]
-        if not (base / DOWNLOAD_MARKER).exists():
-            pending.append(name)
-            continue
-        directory = models_dir / name
-        dirty = not directory.exists()
-        directory.mkdir(exist_ok=True)
-        if dirty:
-            on_change(name)
-        (directory / STEERING_MARKER).touch()
-        wanted = {entry.name: entry for entry in base.iterdir() if not entry.name.startswith(".")}
-        for entry in directory.iterdir():
-            if entry.is_symlink() and wanted.get(entry.name) != Path(os.readlink(entry)):
-                entry.unlink()
-                on_change(name)
-                dirty = True
-        for link_name, target in wanted.items():
-            link = directory / link_name
-            if not link.is_symlink():
-                link.symlink_to(target)
-                on_change(name)
-                dirty = True
-        spec = {"neurons": preset["neurons"]}
-        steering = directory / "steering.json"
-        try:
-            current = read_object(steering)
-        except ValueError:
-            current = None
-        if current != spec:
-            # Atomic, since a running server may load the preset meanwhile.
-            write_object(steering, spec)
-            on_change(name)
-            dirty = True
-        if dirty:
-            changed.append(name)
-    return changed, pending
+        removed.append(directory.name)
+    return removed
 
 
 def configure(args):
@@ -215,8 +181,7 @@ def configure(args):
     server = read_object(server_file, {})
     wanted_models = desired_models(models, read_object(args.model_settings))
     wanted_server = merge_owned(server, read_object(args.server_settings))
-    presets = read_object(args.steering) if args.steering else {}
-    stale = steering_plan(args.state_dir / "models", presets)
+    legacy = legacy_presets(args.state_dir / "models")
     # Check every patch and settings input before the first source mutation.
     pending = patch_plan(args.patch_bin, args.site_packages, args.patch)
     args.state_dir.mkdir(parents=True, exist_ok=True)
@@ -250,16 +215,13 @@ def configure(args):
             else:
                 record(f"{path.name} created")
             changed_files.append(path.name)
-    changed_presets, pending_presets = sync_steering(
-        args.state_dir / "models", presets, stale, lambda name: record(f"steering preset {name} changed")
-    )
+    removed_presets = remove_legacy_presets(legacy)
     return {
         "restart_reasons": reasons,
-        "changed": bool(pending or changed_files or changed_presets),
+        "changed": bool(pending or changed_files or removed_presets),
         "applied_patches": [patch.name for _, patch in pending],
         "changed_settings": changed_files,
-        "changed_steering": changed_presets,
-        "pending_steering": pending_presets,
+        "removed_presets": removed_presets,
     }
 
 
@@ -271,7 +233,6 @@ def main():
     parser.add_argument("--patch", type=Path, action="append", required=True)
     parser.add_argument("--model-settings", type=Path, required=True)
     parser.add_argument("--server-settings", type=Path, required=True)
-    parser.add_argument("--steering", type=Path)
     args = parser.parse_args()
     try:
         result = configure(args)
