@@ -167,17 +167,22 @@ def hook_body(name, **overrides):
 
 
 class Launches:
-    """A `launcher` stand-in: records each launch; `fail` is consumed per call (a str is a failure)."""
+    """A `launcher` stand-in: records each launch; `fail` is consumed per call (a str is a failure).
 
-    def __init__(self, fail=None):
+    `ids` is consumed per successful call and is what the launch printed (None once it runs out).
+    """
+
+    def __init__(self, fail=None, ids=None):
         self.calls = []
         self.fail = list(fail or [])
+        self.ids = list(ids or [])
 
     def __call__(self, launch):
         self.calls.append(launch)
         reason = self.fail.pop(0) if self.fail else None
         if reason is not None:
             raise console_manager.LaunchFailed(reason)
+        return self.ids.pop(0) if self.ids else None
 
 
 def goal_of(prompt: str) -> str:
