@@ -168,7 +168,6 @@ from agent_tools.console.deliveries import (
 from agent_tools.console.event_log import PROJECT_QUESTION_ASKED, Event
 from agent_tools.console.sprints import MANAGER_SESSION_NAME
 from agent_tools.delivery import engine_ledger
-from agent_tools.delivery.procedure_check import STAGES
 from agent_tools.hosts import model_pricing
 
 UNATTRIBUTED = "unattributed"
@@ -582,7 +581,7 @@ class SpendReader:
             if not isinstance(step, str) or not isinstance(visit, int) or isinstance(visit, bool):
                 continue
             if event == "step_entered":
-                if record.get("stage") in STAGES:
+                if record.get("stage") in engine_ledger.STAGES:
                     steps[(step, visit)] = record["stage"]
             elif event in ("session_starting", "session_resuming"):
                 session = record.get("session")
