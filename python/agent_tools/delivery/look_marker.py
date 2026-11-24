@@ -136,6 +136,12 @@ returns its answer when it keeps or needs reads, so `judge` (the guard's carry r
 line naming `rule=own-files` with a `pictures` field carries nothing. `settle_own_files` drives it alone,
 for `look-approval carry --own-files`.
 
+Manager-pictured approvals. The pictures of an approval may be the manager's, so a delivery with
+none of its own cannot re-render them. Such a carry holds under the own-files rule when, besides, `A...H` lists no
+file of any look file set at the base and none of `PICTURE_TOOL_FILES`, the inputs the pictures were rendered from.
+`own_file_changed` and `picture_input_changed` name the file that makes it refuse, for the reason `look-approval
+carry` gives.
+
 This module reads no network of its own, runs no subprocess and reads no clock; `settle` and
 `merged_under_look` read only through the `read` callable they are given.
 """
@@ -161,6 +167,7 @@ ANSWERS: tuple[str, ...] = ("approved", "changes", "fix")
 CARRIED: tuple[str, ...] = ("approved", "fix")
 ROLES: tuple[str, ...] = ("before", "after")
 LOOK_FILES_PATH = ".github/look-files.json"
+PICTURE_TOOL_FILES = ("tests/console_screenshots.py",)
 COMPARE_FILE_LIMIT = 300
 CHAIN_LIMIT = 10
 CARRY_RUNS = 3
@@ -397,13 +404,15 @@ def carry_fields(issue: int, pr: int, approved_head: str, head: str, pictures: s
     return {**fields, "pictures": _digest(pictures)}
 
 
-def carry_sentence(pr: int, approved_head: str, head: str, rule: str = PICTURES_RULE) -> str:
+def carry_sentence(pr: int, approved_head: str, head: str, rule: str = PICTURES_RULE, inputs: bool = False) -> str:
     rules = (PICTURES_RULE, LOOK_FILES_RULE, OWN_FILES_RULE)
     if rule not in rules:
         raise ValueError(f"rule {rule!r} is not one of {rules}")
     what = {PICTURES_RULE: "the re-rendered pictures are unchanged",
             LOOK_FILES_RULE: "the pull request's change to the look files is unchanged",
             OWN_FILES_RULE: "they changed none of the pull request's own files"}[rule]
+    if inputs and rule == OWN_FILES_RULE:
+        what += ", none of the look files and not the picture tool, so the pictures it was shown still stand"
     return (f"Carried the owner's look approval of head {approved_head[:7]} of pull request {pr} "
             f"to head {head[:7]}: only merges of the integration branch came in and {what}.")
 
@@ -822,6 +831,41 @@ def own_files_untouched(approved_head: str, head: str, carry: Carry) -> Kept:
     if own is None or merged is None or whole is None:
         return Kept(False)
     return Kept(not set(own) & set(merged) and set(whole) <= set(own))
+
+
+def own_file_changed(approved_head: str, head: str, carry: Carry) -> str | None:
+    """The first name that makes `own_files_untouched` refuse, from the reads it uses; None when none is named.
+
+    A name a merge changed that `B...A` also lists, else a name `B...H` lists that `B...A` does not. A listing
+    that cannot be read whole names nothing.
+    """
+    paths = (compare_path(carry.base, approved_head), compare_path(approved_head, head),
+             compare_path(carry.base, head))
+    own, merged, whole = (compare_files(carry.reads.get(p)) for p in paths)
+    if own is None or merged is None or whole is None:
+        return None
+    named = sorted(set(own) & set(merged)) or sorted(set(whole) - set(own))
+    return named[0] if named else None
+
+
+def picture_input_changed(approved_head: str, head: str, carry: Carry) -> str | None:
+    """The first name `A...H` lists that a picture was rendered from, else None.
+
+    The inputs are the files of every look file set at the base and `PICTURE_TOOL_FILES`, whoever took
+    the pictures. An unreadable set file or listing raises `Unreadable`.
+    """
+    contents = contents_path(carry.base)
+    sets = read_look_files(carry.reads.get(contents))
+    if sets is None:
+        raise Unreadable(contents)
+    names = compare_files(carry.reads.get(compare_path(approved_head, head)))
+    if names is None:
+        raise Unreadable(compare_path(approved_head, head))
+    globs = tuple(g for group in sets.values() for g in group)
+    for name in names:
+        if name in PICTURE_TOOL_FILES or any(glob_match(g, name) for g in globs):
+            return name
+    return None
 
 
 def _look_diff(compare: Any, globs: tuple[str, ...]) -> dict[str, tuple[Any, ...]] | None:

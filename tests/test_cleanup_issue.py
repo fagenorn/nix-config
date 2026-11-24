@@ -30,6 +30,7 @@ from tests.test_ruff_lint import require_ruff
 TIER = "integration"
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+PLATFORM_ROOT = str(REPO_ROOT / "home/common/agent-skills")
 REVISION = "a" * 40
 MARKER_FX1 = "<!-- agent:cleanup v1 rule=FX1 -->"
 
@@ -289,6 +290,11 @@ class DraftTest(unittest.TestCase):
 
 
 class FixChangeRunTest(unittest.TestCase):
+    def setUp(self):
+        patch = mock.patch.dict(os.environ, {"AGENT_PLATFORM_ROOT": PLATFORM_ROOT})
+        patch.start()
+        self.addCleanup(patch.stop)
+
     def test_a_fixable_ruff_rule_in_a_fixture_repository_opens_one_fix_change_and_files_no_issue(self):
         require_ruff(self)
         with tempfile.TemporaryDirectory() as tmp:
@@ -435,7 +441,7 @@ class RulesTest(unittest.TestCase):
 
 NODE_ZEROS = "".join(f"NODE{n} 0\n" for n in range(11, 16))
 COUNTS_OF_ONE_FILE = ("B17 1\nB23 0\nB24 0\n" + "".join(f"PY{n} 0\n" for n in range(6, 14))
-                      + "".join(f"B{n} 0\n" for n in range(18, 23)) + "B25 0\n" + NODE_ZEROS)
+                      + "".join(f"B{n} 0\n" for n in range(18, 23)) + "B25 0\nB26 0\n" + NODE_ZEROS)
 BOT = {"user": {"login": "github-actions[bot]"}, "author_association": "NONE"}
 MARK = "<!-- agent:cleanup v1 rule=B17 -->"
 LISTING = "repos/octo/widgets/issues?state=open&per_page=100"
@@ -490,6 +496,7 @@ class ForgeWorld:
                                   return_value=77) as create_pull, \
                 mock.patch.object(cleanup_issue.agent_platform, "read_registry",
                                   return_value=registry or []), \
+                mock.patch.dict(os.environ, {"AGENT_PLATFORM_ROOT": PLATFORM_ROOT}), \
                 contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             if isinstance(pages, Exception):
                 api_pages.side_effect = pages
@@ -754,7 +761,7 @@ class CommandTest(ForgeWorld, unittest.TestCase):
 
         self.assertEqual(self.call(["counts", "--repo-root", str(root)])[:2],
                          (0, "B17 0\nB23 0\nB24 0\n" + "".join(f"PY{n} 0\n" for n in range(6, 14))
-                          + "".join(f"B{n} 0\n" for n in range(18, 23)) + "B25 0\n" + NODE_ZEROS))
+                          + "".join(f"B{n} 0\n" for n in range(18, 23)) + "B25 0\nB26 0\n" + NODE_ZEROS))
         listed = ["violations", "--repo-root", str(root), "--rule", "B17"]
         self.assertEqual(self.call(listed)[:2], (0, ""))
 
@@ -993,6 +1000,7 @@ class EntryTest(unittest.TestCase):
         self.env = fixture_env({
             "PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}",
             "PYTHONPATH": str(REPO_ROOT / "python"),
+            "AGENT_PLATFORM_ROOT": PLATFORM_ROOT,
             "GH_PAGES": str(self.pages), "GH_LOG": str(self.log)})
 
     def program(self, *argv):

@@ -146,7 +146,7 @@ from urllib.parse import quote
 from agent_tools.claims import forge_markers
 from agent_tools.delivery import (
     comment_lint, copied_test_lint, instruction_surface_lint, never_rise, node_lint, record_lint,
-    ruff_lint, size_lint, skipped_test_lint)
+    ruff_lint, size_lint, skipped_test_lint, standards_lint)
 from agent_tools.delivery.never_rise import Enforcer, Fix, Snapshot, Violation
 from agent_tools.project_contract import agent_platform
 from agent_tools.system import forge_api
@@ -229,6 +229,10 @@ SURFACE_GUIDANCE = ("Cut each listed instruction surface to at most its platform
                     "an agent must read on that route and move the rest to a document loaded only "
                     "on the branch that needs it.")
 
+ROUTED_SET_BATCH = 100
+ROUTED_SET_GUIDANCE = ("Bring each listed path's routed set to at most 24 KB: split or trim the shards "
+                       "its globs route to it, narrow a shard's or an area's `governs` globs, or move "
+                       "decision records the path does not need into a narrower area.")
 
 NODE_BATCH = 10
 NODE_GUIDANCE = {
@@ -257,6 +261,7 @@ RULES: tuple[CleanupRule, ...] = (
     *(CleanupRule(enforcer, RECORD_BATCH, RECORD_GUIDANCE[enforcer.rule])
       for enforcer in record_lint.RECORD_ENFORCERS),
     CleanupRule(instruction_surface_lint.ENFORCER, 1, SURFACE_GUIDANCE),
+    CleanupRule(standards_lint.ROUTED_SET_ENFORCER, ROUTED_SET_BATCH, ROUTED_SET_GUIDANCE),
     *(CleanupRule(enforcer, NODE_BATCH, NODE_GUIDANCE[enforcer.rule])
       for enforcer in node_lint.enforcers()),
 )
