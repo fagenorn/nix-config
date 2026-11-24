@@ -20,10 +20,17 @@ memory stays under the floor for the declared samples (and any workload over the
 records each kill. The daemon runs as root and polices the agent uid, so it writes no path that uid
 can write: its only writes are its record (through `omlx_memory_watch.write_record`, which replaces a
 symlink rather than following it) and its lines on stdout, which launchd sends to the daemon's log.
+
+launchd ignores this daemon's `JetsamProperties` for oMLX, so the kernel jetsam priority is set
+here, on the running pid, through `memorystatus_control`: a relaunched oMLX gets the declared
+priority on the next sample. The record keeps the value read at the start of each sample (before
+any set) and counts the samples that found it changed again after a set succeeded, so a value that
+does not hold shows; a read-back right after a set would prove nothing.
 """
 
 import argparse
 import ctypes
+import errno
 import fnmatch
 import json
 import os
@@ -54,6 +61,11 @@ RECENT = 50
 FOOTPRINT_OFFSET = 72
 CWD_OFFSET = 152
 PROC_PIDVNODEPATHINFO = 9
+LIBSYSTEM = "/usr/lib/libSystem.B.dylib"
+GET_PRIORITY_LIST = 1
+SET_PRIORITY_PROPERTIES = 2
+ENTRY = struct.Struct("<iiQiI")  # memorystatus_priority_entry_t: pid, priority, user_data, limit, state
+PROPERTIES = struct.Struct("<i4xQ")  # memorystatus_priority_properties_t: priority, user_data
 
 
 @dataclass(frozen=True)
@@ -245,6 +257,22 @@ class Loop:
     previous: int | None = None
     no_workload_open: bool = False
     priority_failed_pid: int | None = None
+    priority_pid: int | None = None
+    priority_reads: int = 0
+    priority_resets: int = 0
+    priority_set: bool = False
+
+
+def kernel_priority(pid: int, control: Callable[[int, int, int, bytearray], int]) -> int | None:
+    buffer = bytearray(ENTRY.size)
+    if control(GET_PRIORITY_LIST, pid, 0, buffer) < ENTRY.size:
+        return None
+    entry_pid, priority, *_ = ENTRY.unpack(buffer)
+    return priority if entry_pid == pid else None
+
+
+def set_kernel_priority(pid: int, priority: int, control: Callable[[int, int, int, bytearray], int]) -> None:
+    control(SET_PRIORITY_PROPERTIES, pid, 0, bytearray(PROPERTIES.pack(priority, 0)))
 
 
 def read_available(vm_stat: str, sysctl: str) -> int:
@@ -283,14 +311,14 @@ def _complain(error: ReadingError) -> None:
     print(f"{PROG}: {error}", file=sys.stderr)
 
 
-def _candidates(io: Io, owners: Owners) -> list[Workload] | None:
-    """The workloads now, largest first; None (after naming the cause) when a protection input is unreadable."""
+def _candidates(io: Io, owners: Owners) -> tuple[list[Workload], int | None] | None:
+    """The workloads now, largest first, and the oMLX pid; None (after naming the cause) when a protection input is unreadable."""
     try:
         services, omlx_pid, table = io.services(), io.omlx_pid(), io.table()
     except ReadingError as error:
         _complain(error)
         return None
-    return workloads(table, owners, protected_pids(table, omlx_pid, services))
+    return workloads(table, owners, protected_pids(table, omlx_pid, services)), omlx_pid
 
 
 def enforce_once(
@@ -333,17 +361,17 @@ def enforce_once(
         out(kill_line(entry))
         return readable
 
-    found = _candidates(io, owners)
-    unreadable = found is None
-    for workload in found or ():
+    first = _candidates(io, owners)
+    unreadable = first is None
+    for workload in first[0] if first else ():
         if workload.size > limits.run_bound_bytes and not end(workload, "run_bound"):
             unreadable = True
             break
     while not unreadable and loop.streak >= limits.floor_samples:
-        found = _candidates(io, owners)
-        if found is None:
+        again = _candidates(io, owners)
+        if again is None:
             break
-        remaining = [w for w in found if w.root_pid not in attempted]
+        remaining = [w for w in again[0] if w.root_pid not in attempted]
         if not remaining:
             if not loop.no_workload_open:
                 loop.no_workload_open = True
@@ -353,10 +381,46 @@ def enforce_once(
                 )
             break
         unreadable = not end(remaining[0], "floor")
+    if first is not None:
+        _prioritize(limits, io, loop, record, first[1], out)
     interval = next_interval(limits, available, loop.previous, loop.streak)
     loop.previous = available
     _stamp(limits, io, loop, record, available, interval)
     return interval
+
+
+def _prioritize(
+    limits: Limits, io: Io, loop: Loop, record: dict, pid: int | None, out: Callable[[str], None]
+) -> None:
+    """Read oMLX's kernel jetsam priority and set it to the declared one when it differs."""
+    declared = limits.jetsam_priority
+    if pid != loop.priority_pid:
+        loop.priority_pid = pid
+        loop.priority_reads = loop.priority_resets = 0
+        loop.priority_set = False
+    current, error = None, None
+    if pid is not None:
+        loop.priority_reads += 1
+        try:
+            current = io.priority_get(pid)
+            if current is not None and current != declared:
+                io.priority_set(pid, declared)
+                if loop.priority_set:
+                    loop.priority_resets += 1
+                loop.priority_set = True
+                out(
+                    f"{io.now().isoformat(timespec='seconds')} jetsam_priority pid={pid}"
+                    f" from={current} to={declared} resets={loop.priority_resets}\n"
+                )
+        except OSError as failure:
+            error = errno.errorcode.get(failure.errno or 0, type(failure).__name__)
+            if loop.priority_failed_pid != pid:
+                loop.priority_failed_pid = pid
+                out(f"{io.now().isoformat(timespec='seconds')} jetsam_priority_failed pid={pid} error={error}\n")
+    record.update(
+        omlx_pid=pid, omlx_kernel_priority=current, omlx_priority_reads=loop.priority_reads,
+        omlx_priority_resets=loop.priority_resets, declared_priority=declared, omlx_priority_error=error,
+    )
 
 
 def _stamp(limits: Limits, io: Io, loop: Loop, record: dict, available: int | None, interval: float) -> None:
@@ -414,6 +478,23 @@ def _libproc_readers(path: str) -> tuple[Callable[[int], int], Callable[[int], s
     return footprint, cwd
 
 
+def _memorystatus_control(path: str) -> Callable[[int, int, int, bytearray], int]:
+    lib = ctypes.CDLL(path, use_errno=True)
+    call = lib.memorystatus_control
+    call.argtypes = [ctypes.c_uint32, ctypes.c_int32, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_size_t]
+    call.restype = ctypes.c_int
+
+    def control(command: int, pid: int, flags: int, buffer: bytearray) -> int:
+        raw = (ctypes.c_char * len(buffer)).from_buffer(buffer)
+        result = call(command, pid, flags, ctypes.addressof(raw), len(buffer))
+        if result == -1:
+            code = ctypes.get_errno()
+            raise OSError(code, os.strerror(code))
+        return result
+
+    return control
+
+
 def build_io(args, owners: Owners) -> Io:
     footprint, cwd = _libproc_readers(args.libproc)
     relevant = {owners.agent_uid, *(uid for uid, _ in owners.runners)}
@@ -456,11 +537,12 @@ def build_io(args, owners: Owners) -> Io:
             return True
         return True
 
+    control = _memorystatus_control(LIBSYSTEM)
     return Io(
         available, table, services, omlx_pid, os.kill, alive, time.sleep, time.monotonic,
         lambda: datetime.now().astimezone(),
-        lambda pid: None,  # the jetsam priority is read and set by the priority step
-        lambda pid, priority: None,
+        lambda pid: kernel_priority(pid, control),
+        lambda pid, priority: set_kernel_priority(pid, priority, control),
     )
 
 
