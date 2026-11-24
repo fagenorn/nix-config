@@ -1,4 +1,4 @@
-"""No Codex review copy declares `--effort xhigh` (#1753)."""
+"""No Codex review copy declares `--effort xhigh`: the review runs at effort high."""
 
 from pathlib import Path
 import unittest
