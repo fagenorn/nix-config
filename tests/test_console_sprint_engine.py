@@ -151,6 +151,23 @@ class SprintEngineWaitTest(unittest.TestCase):
                 got = shown(engine_runs=[engine_state(fixture, LIVE)])
                 self.assertEqual((got["ball"], got["now_text"]), ("manager", text))
 
+    def test_a_usage_limit_sprint_block_carries_the_end_time_its_run_line_shows(self):
+        run = engine_state("sprint-usage-limit.jsonl", LIVE)
+        got = shown(engine_runs=[run])
+        self.assertEqual(got["now_until"], "2026-11-12T12:00:00Z")
+        self.assertEqual(got["now_until"], line(BASE, NOW, sessions=[idle_session], engine_runs=[run])
+                         ["entries"][0]["engine_runs"][0]["wait_until"])
+
+    def test_a_wait_with_no_end_time_leaves_the_sprint_block_without_one(self):
+        for fixture in ("sprint-host-slot.jsonl", "sprint-ci.jsonl", "sprint-lock.jsonl"):
+            with self.subTest(fixture):
+                self.assertIsNone(shown(engine_runs=[engine_state(fixture, LIVE)])["now_until"])
+
+    def test_a_limit_beside_a_ci_wait_names_the_ci_wait_and_no_end_time(self):
+        runs = [engine_state("sprint-usage-limit.jsonl", LIVE, issue=4), engine_state("sprint-ci.jsonl", LIVE, issue=5)]
+        got = shown(engine_runs=runs)
+        self.assertEqual((got["now_text"], got["now_until"]), (NOW_CI_TEXT, None))
+
     def test_engine_waits_follow_ci_commit_release_and_lock_in_that_order(self):
         release = moving(release_ms=NOW - MIN)
         for label, fixtures, movement, text in (

@@ -139,6 +139,7 @@ class SprintEngine:
     waits: frozenset[str] = frozenset()
     sessions: frozenset[str] = frozenset()
     issues: frozenset[int] = frozenset()
+    limit_until: str | None = None
 
     @property
     def moves(self) -> bool:
@@ -156,6 +157,11 @@ class SprintEngine:
                 return WAIT_TEXT[wait]
         return None
 
+    @property
+    def later_until(self) -> str | None:
+        """The end time of the usage limit `later` names, the earliest of the runs' own; None when it has none."""
+        return self.limit_until if "usage-limit" in self.waits else None
+
     def as_json(self) -> dict:
         return {"moving": self.moving, "waits": sorted(self.waits)}
 
@@ -166,7 +172,7 @@ NO_ENGINE = SprintEngine()
 def sprint_engine(states: Iterable[RunState], project: str, issues: Collection[int],
                   now_ms: int | None) -> SprintEngine:
     """The reading of the runs of `project` whose issue is in `issues`; see P9."""
-    moving, waits, sessions, shown = False, set(), set(), set()
+    moving, waits, sessions, shown, limits = False, set(), set(), set(), []
     for state in states:
         if state.project != project or state.issue not in issues:
             continue
@@ -178,7 +184,10 @@ def sprint_engine(states: Iterable[RunState], project: str, issues: Collection[i
         moving = moving or kind == "moving"
         if kind == "waiting":
             waits.add(state.wait["wait"])  # type: ignore[index]
-    return SprintEngine(moving, frozenset(waits), frozenset(sessions), frozenset(shown))
+            if state.wait["wait"] == "usage-limit" and state.wait["until"] is not None:  # type: ignore[index]
+                limits.append(state.wait["until"])  # type: ignore[index]
+    return SprintEngine(moving, frozenset(waits), frozenset(sessions), frozenset(shown),
+                        min(limits, key=lambda until: parse_rfc3339_utc(until), default=None))
 
 
 @dataclass(frozen=True)

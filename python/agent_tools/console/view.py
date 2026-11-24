@@ -679,7 +679,7 @@ the sprint (`sprint_wait`), the first of `NOW_CI_TEXT`, `NOW_COMMITTING_TEXT`, `
 signal is inside the window (`NOW_LOCK_POSITION_TEXT`, the place in the queue, in place of `NOW_LOCK_TEXT` when the sprint's
 smallest `ProjectMovement.positions` is known), where an open engine wait of CI or the lock counts as fresh in the same place
 with the same words, then a usage limit and a free session slot on this host in the words of the run line
-(`engine_runs.wait_text`); no report, `NOW_STARTING_TEXT`; else a shown merge refusal (`sprints.merge_refused`),
+(`engine_runs.wait_text`), a usage limit with `now_until` the earliest end time its runs' lines show (`SprintEngine.later_until`); no report, `NOW_STARTING_TEXT`; else a shown merge refusal (`sprints.merge_refused`),
 `NOW_REFUSED_TEXT` with its reason; else the stage phrase, `NOW_STAGE_TEXT`: the leading stage, its issue count, the total and
 the report's whole milestone (just the milestone when the report names no issue); either prefixed by `NOW_QUIET_TEXT` when the
 ball is `nobody`. The leading stage is the non-final, non-queued stage the most issues hold (a tie goes to the later in
@@ -1909,7 +1909,8 @@ def _sprint_entry(state: SprintState, now_ms: int | None, managers: bool, sessio
         "ball_text": None if ball is None else BALL_TEXT[ball],
         "now_text": now_text,
         "now_until": (hold[1] if hold is not None and hold[0] == WAIT_UNTIL
-                      and now_text == NOW_WAIT_TEXT else None),
+                      and now_text == NOW_WAIT_TEXT
+                      else engine.later_until if now_text == engine.later else None),
         "stated_at": state.stated_at,
         "started_by": state.started_by,
         "age_text": age_text(elapsed),
