@@ -8,16 +8,22 @@ both kernel structs.
 Run: just agent-workflow-tests
 """
 
+import contextlib
+import dataclasses
 import errno
+import io
 import unittest
 
 from agent_tools.hosts.memory_floor import (
     ENTRY,
     GET_PRIORITY_LIST,
+    JETSAM_PRIORITY_DEFAULT,
+    JETSAM_PRIORITY_MAX,
     PROPERTIES,
     SET_PRIORITY_PROPERTIES,
     Io,
     Loop,
+    build_parser,
     enforce_once,
     kernel_priority,
     set_kernel_priority,
@@ -58,7 +64,8 @@ class FakeControl:
 
 
 class PriorityDaemon:
-    def __init__(self, priorities, pid=PID, refuse=False):
+    def __init__(self, priorities, pid=PID, refuse=False, limits=LIMITS):
+        self.limits = limits
         self.control = FakeControl(priorities, refuse)
         self.pid = pid
         self.fake = FakeIo([100], {})
@@ -72,74 +79,94 @@ class PriorityDaemon:
 
     def sample(self, times=1):
         for _ in range(times):
-            enforce_once(LIMITS, OWNERS, self.io, self.loop, self.record, self.lines.append)
+            enforce_once(self.limits, OWNERS, self.io, self.loop, self.record, self.lines.append)
 
 
 class PriorityTest(unittest.TestCase):
-    def test_a_differing_kernel_priority_is_set_to_the_declared_one(self):
-        daemon = PriorityDaemon({PID: 40})
+    def test_a_kernel_priority_above_the_declared_one_is_never_lowered(self):
+        daemon = PriorityDaemon({PID: 180}, limits=dataclasses.replace(LIMITS, jetsam_priority=100))
+        daemon.sample(2)
+        daemon.pid = NEXT_PID
+        daemon.control.put_back(NEXT_PID, 200)
+        daemon.sample()
+        self.assertEqual(daemon.control.sets(), [])
+        self.assertEqual(daemon.control.priorities[PID], 180)
+        self.assertEqual(
+            daemon.lines,
+            [
+                "2026-11-24T12:33:05+00:00 jetsam_priority_kept pid=55731 kernel=180 declared=100"
+                " reason=kernel_above_declared\n",
+                "2026-11-24T12:33:05+00:00 jetsam_priority_kept pid=55800 kernel=200 declared=100"
+                " reason=kernel_above_declared\n",
+            ],
+        )
+        self.assertEqual(daemon.record["omlx_kernel_priority"], 200)
+        self.assertEqual(daemon.record["omlx_priority_resets"], 0)
+
+    def test_a_kernel_priority_under_the_declared_one_is_raised_and_logged_before_and_after(self):
+        daemon = PriorityDaemon({PID: 180})
         daemon.sample()
         self.assertEqual(
-            daemon.control.sets(), [(SET_PRIORITY_PROPERTIES, PID, PROPERTIES.pack(100, 0))]
+            daemon.control.sets(), [(SET_PRIORITY_PROPERTIES, PID, PROPERTIES.pack(190, 0))]
         )
         record = daemon.record
         self.assertEqual(record["omlx_pid"], PID)
-        self.assertEqual(record["omlx_kernel_priority"], 40)
+        self.assertEqual(record["omlx_kernel_priority"], 180)
         self.assertEqual(record["omlx_priority_reads"], 1)
         self.assertEqual(record["omlx_priority_resets"], 0)
-        self.assertEqual(record["declared_priority"], 100)
+        self.assertEqual(record["declared_priority"], 190)
         self.assertIsNone(record["omlx_priority_error"])
         self.assertEqual(
             daemon.lines,
-            ["2026-11-24T12:33:05+00:00 jetsam_priority pid=55731 from=40 to=100 resets=0\n"],
+            ["2026-11-24T12:33:05+00:00 jetsam_priority pid=55731 from=180 to=190 after=190 resets=0\n"],
         )
         daemon.sample()
         self.assertEqual(len(daemon.control.sets()), 1)
-        self.assertEqual(record["omlx_kernel_priority"], 100)
+        self.assertEqual(record["omlx_kernel_priority"], 190)
         self.assertEqual(record["omlx_priority_reads"], 2)
         self.assertEqual(record["omlx_priority_resets"], 0)
 
     def test_a_priority_put_back_between_samples_counts_each_reset(self):
-        daemon = PriorityDaemon({PID: 40})
+        daemon = PriorityDaemon({PID: 180})
         for _ in range(2):
             daemon.sample()
-            daemon.control.put_back(PID, 40)
+            daemon.control.put_back(PID, 180)
         daemon.sample()
         record = daemon.record
         self.assertEqual(len(daemon.control.sets()), 3)
-        self.assertEqual(record["omlx_kernel_priority"], 40)
+        self.assertEqual(record["omlx_kernel_priority"], 180)
         self.assertEqual(record["omlx_priority_reads"], 3)
         self.assertEqual(record["omlx_priority_resets"], 2)
-        self.assertTrue(daemon.lines[-1].endswith("from=40 to=100 resets=2\n"))
+        self.assertTrue(daemon.lines[-1].endswith("from=180 to=190 after=190 resets=2\n"))
         daemon.pid = NEXT_PID
-        daemon.control.put_back(NEXT_PID, 40)
+        daemon.control.put_back(NEXT_PID, 180)
         daemon.sample()
         self.assertEqual(record["omlx_pid"], NEXT_PID)
         self.assertEqual(record["omlx_priority_reads"], 1)
         self.assertEqual(record["omlx_priority_resets"], 0)
 
     def test_an_equal_kernel_priority_is_left_alone(self):
-        daemon = PriorityDaemon({PID: 100})
+        daemon = PriorityDaemon({PID: 190})
         daemon.sample()
         self.assertEqual(daemon.control.sets(), [])
         self.assertEqual(daemon.lines, [])
-        self.assertEqual(daemon.record["omlx_kernel_priority"], 100)
+        self.assertEqual(daemon.record["omlx_kernel_priority"], 190)
 
     def test_a_refused_set_is_logged_once_per_pid(self):
-        daemon = PriorityDaemon({PID: 40, NEXT_PID: 40}, refuse=True)
+        daemon = PriorityDaemon({PID: 180, NEXT_PID: 180}, refuse=True)
         daemon.sample(3)
         failed = "2026-11-24T12:33:05+00:00 jetsam_priority_failed pid=55731 error=EPERM\n"
         self.assertEqual(daemon.lines, [failed])
         record = daemon.record
         self.assertEqual(record["omlx_priority_error"], "EPERM")
-        self.assertEqual(record["omlx_kernel_priority"], 40)
+        self.assertEqual(record["omlx_kernel_priority"], 180)
         self.assertEqual(record["omlx_priority_resets"], 0)
         daemon.pid = NEXT_PID
         daemon.sample()
         self.assertEqual(daemon.lines, [failed, failed.replace("55731", "55800")])
 
     def test_no_omlx_pid_reads_nothing(self):
-        daemon = PriorityDaemon({PID: 40}, pid=None)
+        daemon = PriorityDaemon({PID: 180}, pid=None)
         daemon.sample()
         self.assertEqual(daemon.control.calls, [])
         self.assertIsNone(daemon.record["omlx_pid"])
@@ -154,6 +181,22 @@ class PriorityTest(unittest.TestCase):
         control = FakeControl({})
         set_kernel_priority(PID, 100, control)
         self.assertEqual(control.calls, [(SET_PRIORITY_PROPERTIES, PID, PROPERTIES.pack(100, 0))])
+
+    def test_enforce_refuses_a_declared_priority_outside_the_bands_above_the_default(self):
+        base = [
+            "enforce", "--floor-gib", "16", "--run-bound-gib", "24", "--agent-user", "x",
+            "--agent-root", "/r/*", "--record", "/nonexistent/floor.json", "--omlx-jetsam-priority",
+        ]
+        self.assertEqual(JETSAM_PRIORITY_DEFAULT, 180)
+        self.assertEqual(JETSAM_PRIORITY_MAX, 210)
+        for value in ("100", "180", "211"):
+            with self.subTest(refused=value), contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as raised:
+                    build_parser().parse_args(base + [value])
+                self.assertEqual(raised.exception.code, 2)
+        for value in ("181", "190", "210"):
+            with self.subTest(accepted=value):
+                self.assertEqual(build_parser().parse_args(base + [value]).omlx_jetsam_priority, int(value))
 
 
 if __name__ == "__main__":

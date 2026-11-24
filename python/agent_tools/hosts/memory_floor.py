@@ -23,9 +23,10 @@ symlink rather than following it) and its lines on stdout, which launchd sends t
 
 launchd ignores this daemon's `JetsamProperties` for oMLX, so the kernel jetsam priority is set
 here, on the running pid, through `memorystatus_control`: a relaunched oMLX gets the declared
-priority on the next sample. The record keeps the value read at the start of each sample (before
-any set) and counts the samples that found it changed again after a set succeeded, so a value that
-does not hold shows; a read-back right after a set would prove nothing.
+priority on the next sample. The helper raises a lower value to the declared one and never lowers
+a higher one; each set logs the value read back right after it. The record keeps the value read at
+the start of each sample (before any set) and counts the samples that found it under the declared
+value again after a set succeeded, so a value that does not hold shows.
 
 The `gate` command is the oMLX relaunch gate: it runs before `exec omlx serve` and waits while
 available memory is under the floor, so it holds only a starting oMLX, never a serving one, and
@@ -72,6 +73,9 @@ GET_PRIORITY_LIST = 1
 SET_PRIORITY_PROPERTIES = 2
 ENTRY = struct.Struct("<iiQiI")  # memorystatus_priority_entry_t: pid, priority, user_data, limit, state
 PROPERTIES = struct.Struct("<i4xQ")  # memorystatus_priority_properties_t: priority, user_data
+# xnu bsd/sys/kern_memorystatus.h: the default band and the highest band; jetsam ends the lowest band first.
+JETSAM_PRIORITY_DEFAULT = 180
+JETSAM_PRIORITY_MAX = 210
 
 
 @dataclass(frozen=True)
@@ -267,6 +271,7 @@ class Loop:
     priority_reads: int = 0
     priority_resets: int = 0
     priority_set: bool = False
+    priority_kept_pid: int | None = None
 
 
 def kernel_priority(pid: int, control: Callable[[int, int, int, bytearray], int]) -> int | None:
@@ -417,10 +422,18 @@ def enforce_once(
     return interval
 
 
+def _read_back(io: Io, pid: int) -> int | str:
+    try:
+        value = io.priority_get(pid)
+    except OSError:
+        return "unread"
+    return "unread" if value is None else value
+
+
 def _prioritize(
     limits: Limits, io: Io, loop: Loop, record: dict, pid: int | None, out: Callable[[str], None]
 ) -> None:
-    """Read oMLX's kernel jetsam priority and set it to the declared one when it differs."""
+    """Read oMLX's kernel jetsam priority and raise it to the declared one; a higher value is kept."""
     declared = limits.jetsam_priority
     if pid != loop.priority_pid:
         loop.priority_pid = pid
@@ -431,14 +444,20 @@ def _prioritize(
         loop.priority_reads += 1
         try:
             current = io.priority_get(pid)
-            if current is not None and current != declared:
+            if current is not None and current < declared:
                 io.priority_set(pid, declared)
                 if loop.priority_set:
                     loop.priority_resets += 1
                 loop.priority_set = True
                 out(
                     f"{io.now().isoformat(timespec='seconds')} jetsam_priority pid={pid}"
-                    f" from={current} to={declared} resets={loop.priority_resets}\n"
+                    f" from={current} to={declared} after={_read_back(io, pid)} resets={loop.priority_resets}\n"
+                )
+            elif current is not None and current > declared and loop.priority_kept_pid != pid:
+                loop.priority_kept_pid = pid
+                out(
+                    f"{io.now().isoformat(timespec='seconds')} jetsam_priority_kept pid={pid}"
+                    f" kernel={current} declared={declared} reason=kernel_above_declared\n"
                 )
         except OSError as failure:
             error = errno.errorcode.get(failure.errno or 0, type(failure).__name__)
@@ -586,6 +605,18 @@ def build_io(args, owners: Owners) -> Io:
     )
 
 
+def _declared_priority(text: str) -> int:
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not an integer: {text!r}") from None
+    if not JETSAM_PRIORITY_DEFAULT < value <= JETSAM_PRIORITY_MAX:
+        raise argparse.ArgumentTypeError(
+            f"must be above the kernel default band {JETSAM_PRIORITY_DEFAULT} and at most {JETSAM_PRIORITY_MAX}"
+        )
+    return value
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog=PROG, description="End the largest agent workload under the eleven-m5 memory floor.")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -598,7 +629,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--fast-seconds", type=float, default=2)
     run.add_argument("--slow-seconds", type=float, default=10)
     run.add_argument("--run-bound-gib", type=int, required=True)
-    run.add_argument("--omlx-jetsam-priority", type=int, required=True)
+    run.add_argument("--omlx-jetsam-priority", type=_declared_priority, required=True)
     run.add_argument("--agent-user", required=True)
     run.add_argument("--agent-root", action="append", required=True)
     run.add_argument("--runner-user", action="append", default=[])
