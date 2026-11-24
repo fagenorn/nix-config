@@ -105,7 +105,7 @@ lint:
 test:
   PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.delivery.verification_command test
 
-# Run the suite members this branch touches, or the whole suite after a host build when a build input changes (the `test-touched` command).
+# Run the suite members this branch touches, or the whole suite when a build input changes (the `test-touched` command).
 test-touched:
   tools="$(nix build --no-link --print-out-paths '{{justfile_directory()}}#agent-platform.tools')" && test -n "$tools" && AGENT_PLATFORM_TOOLS="$tools/bin" WORKFLOW_POLICY_SURFACE=source PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.delivery.touched_tests --base origin/main --source-root python --pair home/common/claude-code/lifecycle_guard.py=tests/test_claude_permission_guard.py --cover 'python/agent_tools/delivery/engine*.py=tests/test_engine_*.py' --cover 'python/agent_tools/delivery/host_admission.py=tests/test_engine_*.py' --cover 'python/agent_tools/delivery/procedure_check.py=tests/test_engine_*.py' --cover 'python/agent_tools/delivery/procedures/*=tests/test_engine_*.py' --cover 'tests/engine_*.py=tests/test_engine_*.py' --cover 'tests/fixtures/engine-*=tests/test_engine_*.py' --build-command 'just build' --build-when '*.nix' --build-when flake.lock --build-when .sops.yaml --build-when 'data/*' --build-when 'homebrew/*' --build-when 'patches/*' --build-when 'secrets/*' --build-when 'vars/*'
 
