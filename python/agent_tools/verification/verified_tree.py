@@ -103,6 +103,24 @@ A usage error, a path that is not a git worktree, a resolver refusal or a missin
 `origin/<integration_branch>` when some id is conditional prints `{"detail": "<text>",
 "verdict": "error"}` and exits 1.
 
+A `run` that passes, while `workflow.verification_before_pull_request` is set, atomically
+replaces `<git rev-parse --absolute-git-dir>/verified-tree-run.json` with exactly
+{"head": "<full sha>", "schema": "verified-tree-run/v1", "verification": ["<id>", ...]}, the HEAD
+it ran at and the ids it ran; a failed or dirty run writes nothing and leaves an earlier record in
+place, and a record that cannot be written prints `verified-tree: cannot record the pass:
+<error>` on stderr while the verdict stands. After the dirty check and the plan, a `run` skips
+every command, starting no `verify-slot`, when all of these hold for the record's head H0: the
+record parses strictly (those keys, that schema, a tree-id `head`, a non-empty list of non-empty
+strings); its `verification` equals the plan's `run`; H0 is an ancestor of HEAD; `git rev-list
+--no-merges H0..HEAD ^refs/remotes/origin/<integration_branch>` prints nothing, so only merges
+and commits already on the integration branch came since; and no path that differs between H0's
+tree and the current tree is among the changed paths above. A skip prints {"clean": true, "head",
+"results", "synced_since": "<H0>", "tree", "verdict": "passed"}, `synced_since` a string, each
+result of the plan's `run` `skipped` with the summary and reason `passed at <H0>; the sync since
+changed none of the pull request's files` and a condition-skipped id keeping its own reason. It
+applies only while the binding is set, and an unreadable record or a git failure in that check
+verifies instead of erroring; a run at H0 itself with nothing changed also skips.
+
 The tree is what a Git-backed build sees: the index's entries, staged new
 files included, with tracked files' working-tree edits and deletions applied,
 built by `git add -u` and `git write-tree` against a temporary copy of the
@@ -116,7 +134,8 @@ The record is one latest-pass file per worktree,
 {"schema": "verified-tree/v1", "tree": "<id>", "verification": ["<id>", ...]}:
 `tree` is 40 or 64 lowercase hex characters and `verification` is a non-empty
 list of non-empty strings, the ids that ran and passed on that tree. It
-carries no run, attempt or launch identity.
+carries no run, attempt or launch identity. `verified-tree-run.json`, written by `run` only,
+sits beside it.
 
 The persisted plan is parsed as strictly as the record: `tree` is a tree id
 and `run` is a non-empty list of non-empty strings.
@@ -159,6 +178,9 @@ RECORD_NAME = "verified-tree.json"
 PLAN_SCHEMA = "verified-tree-plan/v1"
 PLAN_NAME = "verified-tree-plan.json"
 PLAN_LOCK_NAME = "verified-tree-plan.lock"
+RUN_RECORD_SCHEMA = "verified-tree-run/v1"
+RUN_RECORD_NAME = "verified-tree-run.json"
+SYNC_SKIP_REASON = "passed at {head}; the sync since changed none of the pull request's files"
 TREE_PATTERN = r"[0-9a-f]{40}(?:[0-9a-f]{24})?"
 ERROR_EXIT = 2
 NOT_STARTED_EXIT = 127
@@ -211,6 +233,11 @@ def worktree_root() -> Path:
 def record_path(root: Path) -> Path:
     """The record file in the worktree's own git directory."""
     return Path(_git(["rev-parse", "--absolute-git-dir"], root)) / RECORD_NAME
+
+
+def run_record_path(root: Path) -> Path:
+    """The last passed `run`'s record, beside the record."""
+    return record_path(root).with_name(RUN_RECORD_NAME)
 
 
 def plan_path(root: Path) -> Path:
@@ -587,6 +614,56 @@ def _run_command(verification_id: str, command: Mapping) -> dict:
     return result
 
 
+def _read_run_record(path: Path) -> dict | None:
+    """The strictly parsed run record, or None when it is absent or malformed; never raises."""
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"),
+                              object_pairs_hook=reject_duplicate_keys,
+                              parse_constant=reject_nonfinite_literal)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(document, dict) or set(document) != {"head", "schema", "verification"}:
+        return None
+    head, ids = document["head"], document["verification"]
+    if (document["schema"] != RUN_RECORD_SCHEMA or not isinstance(head, str)
+            or not re.fullmatch(TREE_PATTERN, head) or not isinstance(ids, list) or not ids
+            or not all(isinstance(item, str) and item for item in ids)):
+        return None
+    return document
+
+
+def _synced_since(root: Path, tree: str, planned: Mapping, policy: Mapping) -> str | None:
+    """The head a pass was recorded at when only a clean sync has changed the branch since, else None.
+
+    Any git failure or unreadable record answers None: the run verifies instead."""
+    try:
+        recorded = _read_run_record(run_record_path(root))
+        if recorded is None or recorded["verification"] != planned["run"]:
+            return None
+        origin = f"refs/remotes/origin/{policy['integration_branch']}"
+        earlier = recorded["head"]
+        if subprocess.run(["git", "merge-base", "--is-ancestor", earlier, "HEAD"], cwd=root,
+                          capture_output=True, check=False).returncode != 0:
+            return None
+        if _git(["rev-list", "--no-merges", f"{earlier}..HEAD", f"^{origin}"], root):
+            return None
+        if not set(_tree_diff(root, earlier, tree)).isdisjoint(
+                changed_paths(root, policy["integration_branch"], tree)):
+            return None
+    except (VerifiedTreeError, OSError):
+        return None
+    return earlier
+
+
+def _record_pass(root: Path, head: str, run_ids: Sequence[str]) -> None:
+    """Record that `run_ids` passed at `head`; a failure is reported on stderr, never raised."""
+    try:
+        _write_atomically(run_record_path(root), {"head": head, "schema": RUN_RECORD_SCHEMA,
+                                                  "verification": list(run_ids)})
+    except VerifiedTreeError as error:
+        print(f"verified-tree: cannot record the pass: {error}", file=sys.stderr)
+
+
 def run(worktree: Path) -> tuple[int, dict]:
     """Run every declared id once in `worktree`: (0, verdict document) or (1, error document)."""
     try:
@@ -601,6 +678,15 @@ def run(worktree: Path) -> tuple[int, dict]:
         ids = _run_ids(policy)
         planned = _plan_of(root, tree, {**policy, "verification": ids})
         reasons = {entry["id"]: entry["reason"] for entry in planned["skipped"]}
+        bound = isinstance(policy["before_pull_request"], list)
+        earlier = _synced_since(root, tree, planned, policy) if bound else None
+        if earlier is not None:
+            reasons.update({item: SYNC_SKIP_REASON.format(head=earlier) for item in planned["run"]})
+            return 0, {"clean": True, "head": head, "synced_since": earlier, "tree": tree,
+                       "verdict": "passed",
+                       "results": [{"id": item, "status": "skipped",
+                                    "summary": reasons[item], "reason": reasons[item]}
+                                   for item in ids]}
         commands = snapshot["bindings"]["commands"]
         results = []
         for verification_id in ids:
@@ -615,6 +701,8 @@ def run(worktree: Path) -> tuple[int, dict]:
         return 1, {"detail": str(error), "verdict": "error"}
     verdict = ("failed" if any(entry["status"] == "fail" for entry in results)
                else "passed" if clean else "dirty")
+    if bound and verdict == "passed":
+        _record_pass(root, head, planned["run"])
     return 0, {"clean": clean, "head": head, "results": results, "tree": tree,
                "verdict": verdict}
 
