@@ -5405,6 +5405,35 @@ def retry_posts(snap: dict) -> list:
     return [p for p in snap["posts"] if p["url"] == "/api/look-retry"]
 
 
+ACTION_COMMAND = "curl -sS -X POST http://127.0.0.1:27999/api/plan-approve --data '<b>x</b>'"
+ACTION_LINE = ("Choosing \"Run it once\" lets the manager run exactly this command once, "
+               "within 60 minutes of your answer:")
+
+
+class PageActionTest(unittest.TestCase):
+    def test_an_action_card_shows_the_exact_command_under_its_line(self) -> None:
+        asked = {**question(0, "May the manager run this one Apply?", ["Run it once", "Do not run it"],
+                            "Run it once"),
+                 "owner_only": True, "consequential": True,
+                 "action": {"command": ACTION_COMMAND, "approve_index": 0, "line": ACTION_LINE}}
+        (snap,) = render([START, {"frame": frame([asked])}, {"snapshot": True}])
+        (lead,) = [n for n in nodes(snap["inbox"]) if has_class(n, "lead")]
+        (line,) = [n for n in nodes(lead) if has_class(n, "action-line")]
+        (command,) = [n for n in nodes(lead) if has_class(n, "action-command")]
+        self.assertEqual(line["tag"], "p")
+        self.assertEqual(full(line), ACTION_LINE)
+        self.assertEqual(command["tag"], "pre")
+        self.assertEqual(full(command), ACTION_COMMAND)
+        kids = lead["children"]
+        self.assertLess(kids.index(line), kids.index(command))
+
+    def test_a_question_with_no_action_shows_no_action_nodes(self) -> None:
+        (snap,) = render([START, {"frame": frame([Q0])}, {"snapshot": True}])
+        found = [n for n in nodes(snap["inbox"])
+                 if has_class(n, "action-line") or has_class(n, "action-command")]
+        self.assertEqual(found, [])
+
+
 class PageLookTest(unittest.TestCase):
     def test_a_moved_look_question_shows_why_nothing_was_recorded(self) -> None:
         asked = question(0, "May this merge?", ["approve", "ask for changes"], "approve",

@@ -354,7 +354,8 @@ is none. Its entry is
      "look": null | {"issue", "pr", "head", "state": "open" | "moved" | "posting" | "failed",
                      "line": <str>, "approve_index": <int> | null},
      "items": [], "answers": [], "answered": false, "waiting_since": "<time it was asked>",
-     "started_by": "<login>" | null, "owner_only"?: true, "consequential"?: true}
+     "started_by": "<login>" | null, "owner_only"?: true, "consequential"?: true,
+     "action"?: {"command": "<text>", "approve_index": <int> | null, "line": "<text>"}}
 
 `owner_only` is present, and true, only on a question the manager marked for the owner alone
 (#1263); a colleague never answers it. `consequential` is present, and true, on a question the
@@ -363,6 +364,11 @@ the page opens such a card with no option picked (#1265, ADR-console-092). Absen
 with its recommendation picked, as before. On a consequential card the question's `recommended` and
 `recommended_index` are null and `badge_index` (an `int`, present only there) names the option that
 carries the Recommended badge, so a page still open from before the mark preselects nothing.
+
+`action` is present only on a question that carries an action (`Question.action`), and such a question is
+consequential too. Its `command` is the whole command the owner's approval lets the manager run, never cut
+(the card shows exactly what is approved); `approve_index` is the index of the approving option among the
+logged options, or null when it is absent; `line` is `answer.ACTION_APPROVES`, naming that option.
 
 `look` (#1260) is null for a question that carries no look. For one that does, `approve_index` is the index
 among the logged options of the option that approves the head (the page never starts that option picked, so
@@ -2221,6 +2227,15 @@ def _look_entry(question: Question) -> dict | None:
             "approve_index": approve}
 
 
+def _action_entry(question: Question) -> dict | None:
+    action = question.action
+    if action is None:
+        return None
+    approve = question.options.index(action.approve) if action.approve in question.options else None
+    return {"command": action.command, "approve_index": approve,
+            "line": owner_answer.ACTION_APPROVES.format(option=cut(action.approve, MAX_OPTION_CHARS))}
+
+
 def _question_entry(sprint: SprintState, question: Question) -> dict:
     ask = cut(question.question, MAX_ASK_CHARS)
     context = question.context
@@ -2247,7 +2262,9 @@ def _question_entry(sprint: SprintState, question: Question) -> dict:
             "started_by": sprint.started_by}
     if question.owner_only:
         entry["owner_only"] = True
-    if (question.consequential or question.look is not None
+    if question.action is not None:
+        entry["action"] = _action_entry(question)
+    if (question.consequential or question.look is not None or question.action is not None
             or is_look(picture.pair for picture in question.pictures)):
         entry["consequential"] = True
         # A page from before the mark preselects `recommended_index`, or `recommended` by text:

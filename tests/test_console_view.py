@@ -14,7 +14,7 @@ from agent_tools.claims import forge_markers as fm
 from agent_tools.claims import forge_owner_action as foa
 from agent_tools.console import digest
 from agent_tools.console import contract_draft
-from agent_tools.console import approve, folder_trust, inbox, register, release_card
+from agent_tools.console import answer, approve, folder_trust, inbox, register, release_card
 from agent_tools.console import spend
 from agent_tools.console import idle, view
 from agent_tools.console.deliveries import (
@@ -1960,6 +1960,23 @@ class QuestionViewTest(unittest.TestCase):
         entries = derive_view([state("p00", 1)], sprints={A: state_})["inbox"]["open"]
         self.assertIs(entries[0]["owner_only"], True)
         self.assertNotIn("owner_only", entries[1])
+
+    def test_an_action_card_shows_its_whole_command_and_opens_with_nothing_picked(self):
+        command = "curl -sS -X POST http://127.0.0.1:27999/api/plan-approve --data " + "x" * 300
+        state_ = asked(started(A))
+        first, *rest = state_.questions
+        state_ = dataclasses.replace(state_, questions=(dataclasses.replace(
+            first, owner_only=True, action=sprints_module.QuestionAction(command, first.options[0])),
+            *rest))
+        entries = derive_view([state("p00", 1)], sprints={A: state_})["inbox"]["open"]
+        self.assertEqual(entries[0]["action"], {
+            "command": command, "approve_index": 0,
+            "line": answer.ACTION_APPROVES.format(option=first.options[0])})
+        self.assertIs(entries[0]["consequential"], True)
+        shown = entries[0]["questions"][0]
+        self.assertIsNone(shown["recommended"])
+        self.assertEqual(shown["badge_index"], first.options.index(first.recommended))
+        self.assertNotIn("action", entries[1])
 
     def test_a_consequential_question_says_so_and_others_say_nothing(self):
         state_ = asked(started(A))
