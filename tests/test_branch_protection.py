@@ -938,6 +938,17 @@ class ProtectionPayload(unittest.TestCase):
         self.assertIsNone(data["restrictions"])
 
 
+class CommittedProtectionTest(unittest.TestCase):
+    """The lease a landing holds from green rests on strict protection: a head behind its base cannot merge."""
+
+    def test_the_committed_protection_is_strict_with_the_three_required_contexts(self):
+        checks = json.loads(PROTECTION.read_text(encoding="utf-8"))["required_status_checks"]
+        self.assertIs(True, checks["strict"])
+        self.assertEqual({"Nix Eval", "Agent Workflow Tests", "Conformance"},
+                         {check["context"] for check in checks["checks"]})
+        self.assertEqual(3, len(checks["checks"]))
+
+
 def required_context_sentence_problems(text):
     parts = text.split(PROTECTION_SENTENCE)
     if len(parts) != 2:

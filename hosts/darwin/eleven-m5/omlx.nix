@@ -9,10 +9,13 @@ let
   modelDir = "${home}/.omlx/models";
 
   # The models oMLX serves. Each is downloaded into its own directory under modelDir (oMLX names
-  # a model by that directory) and is also reachable by its alias. Nothing is pinned: together
-  # they exceed the GPU limit, so oMLX loads whichever one a request names and unloads the least
-  # recently used one to make room (a swap reloads it from the SSD). Exactly one is the default
-  # for requests that name no model. `mtp` turns on the checkpoint's native multi-token
+  # a model by that directory) and is also reachable by its alias. None of these is pinned (the
+  # one pinned model is installed through the admin UI, see adminModels): together they exceed
+  # the GPU limit, so oMLX loads whichever one a request names and unloads the least recently
+  # used one to make room (a swap reloads it from the SSD). Exactly one is the default for
+  # requests that name no model; a default chosen in the admin UI on another model takes
+  # precedence until it is cleared, and the declared default returns at the next activation
+  # after that. `mtp` turns on the checkpoint's native multi-token
   # prediction; measured on this M5 Ultra (single stream, 600 tokens) it lifts GLM from ~63 to
   # ~80 tok/s and Qwen from ~120 to ~144 tok/s. Adding a model is one entry here plus a switch.
   #
@@ -126,18 +129,18 @@ let
   # directory (`hf download` resumes a partial copy and verifies each file) and moves the model
   # into modelDir only once complete, so oMLX never sees half a model, then restarts the server
   # (launchd's KeepAlive brings it back) so it discovers the new one. A model already in modelDir
-  # without the marker is verified in place. After any completed download it runs omlx-configure,
-  # which mirrors steering presets onto the new weights, and restarts for a moved model or a
-  # changed preset; a successful kill stands in for the restart omlx-configure asked for. Runs at
-  # boot, and activation starts it whenever a listed model is missing, so a failed download is
-  # retried on the next boot or switch.
+  # without the marker is verified in place. A moved model is recorded as a reason in the restart
+  # marker. After any completed download it runs omlx-configure, which mirrors steering presets
+  # onto the new weights, then omlx-restart, which restarts the server only while it is idle and
+  # otherwise keeps the marker for the next activation or download. Runs at boot, and activation
+  # starts it whenever a listed model is missing, so a failed download is retried on the next
+  # boot or switch.
   # Every glob follows a single `--include`, which this hf (argparse, nargs) reads as one list;
   # a repeated `--include` would keep only the last.
-  fetch = pkgs.writeShellScript "omlx-models" ''
+  fetchText = ''
     set -uo pipefail
     hf=${pkgs.python3Packages.huggingface-hub}/bin/hf
     status=0
-    added=0
     completed=0
     ${lib.concatMapStrings (m: ''
       dir=${modelDir}/${modelName m}
@@ -150,7 +153,7 @@ let
         } --local-dir "$target"; then
           touch "$target/.omlx-download-complete"
           completed=1
-          [ "$target" = "$dir" ] || { mv "$target" "$dir" && added=1; }
+          [ "$target" = "$dir" ] || { mv "$target" "$dir" && echo "model ${modelName m} added" >> ${home}/.omlx/.restart-needed; }
           echo "$(date) finished ${m.repo}"
         else
           echo "$(date) failed ${m.repo}; it is retried on the next boot or switch" >&2
@@ -160,12 +163,11 @@ let
     '') models}
     if [ "$completed" != 0 ]; then
       ${configure}/bin/omlx-configure || status=1
-      if [ "$added" != 0 ] || [ -e ${home}/.omlx/.restart-needed ]; then
-        /usr/bin/pkill -U "$(id -u)" -x omlx-server && rm -f ${home}/.omlx/.restart-needed
-      fi
+      ${restart}/bin/omlx-restart || status=1
     fi
     exit $status
   '';
+  fetch = pkgs.writeShellScript "omlx-models" fetchText;
   stagingDir = "${home}/.omlx/downloads";
   modelMarkers = lib.concatMapStringsSep " " (
     m: "${modelDir}/${modelName m}/.omlx-download-complete"
@@ -180,9 +182,17 @@ let
   anthropicEffort = ../../../patches/omlx/anthropic-effort.patch;
   neuronSteering = ../../../patches/omlx/neuron-steering.patch;
 
+  # Models installed by oMLX's admin downloader under modelDir/grant-ai/ rather than by the
+  # downloader above, so no `models` entry exists for them. GLM-5.3-Flash-Abliterated-MLX-4bit is
+  # JarBird's customer-facing model: pinned so it loads at start and is never evicted. Only the pin
+  # is owned here; the admin UI keeps the rest of the entry.
+  adminModels = {
+    "GLM-5.3-Flash-Abliterated-MLX-4bit".is_pinned = true;
+  };
+
   # Per-model settings merged into the file the admin UI also writes: the alias, the single
-  # default, MTP, no pin (which also undoes the pin an earlier generation set), and each entry's
-  # `settings`.
+  # default, MTP, no pin on a declared model (which also undoes the pin an earlier generation set),
+  # each entry's `settings`, and the pin of the admin-installed models.
   settings = builtins.toJSON (
     lib.listToAttrs (
       map (m: {
@@ -207,6 +217,7 @@ let
         // p.settings;
       }) presets
     )
+    // adminModels
   );
   steering = builtins.toJSON (
     lib.listToAttrs (
@@ -236,11 +247,32 @@ let
     scheduler.chunked_prefill = true;
     server.burst_decode_mode = "aggressive";
     integrations.splash_max_memory_gb = 200;
+    # The pinned 182 GB JarBird model did not fit under the dynamic ceiling (175.66 GB) on
+    # 23 Nov, so the guard is custom with a fixed ceiling of 192 GB.
+    memory.memory_guard_tier = "custom";
+    memory.memory_guard_custom_ceiling_gb = 192;
   };
+
+  # Restart the server only through the idle gate, and start the downloader when a listed model
+  # is missing. ~/.omlx is private: its logs can hold other people's prompts, and teammates share
+  # the staff group.
+  activationText = ''
+    if ! sudo --user=${username} --set-home ${configure}/bin/omlx-configure; then
+      echo >&2 "oMLX: configuration failed; server was not restarted"
+      exit 1
+    fi
+    if ! sudo --user=${username} --set-home ${restart}/bin/omlx-restart; then
+      echo >&2 "oMLX: restart failed; .restart-needed retained for the next activation"
+      exit 1
+    fi
+    for marker in ${modelMarkers}; do
+      [ -e "$marker" ] || { launchctl kickstart system/org.nixos.omlx-models || true; break; }
+    done
+  '';
 
   # Also exposed as a user command so a built configuration can be applied and
   # checked independently of a privileged full-system activation. The command
-  # records restart need; the caller restarts only after the entire merge succeeds.
+  # records restart reasons; the caller restarts only after the entire merge succeeds.
   configure =
     (pkgs.writeShellScriptBin "omlx-configure" ''
       set -euo pipefail
@@ -257,8 +289,25 @@ let
         passthru = {
           modelSettings = settings;
           inherit serverSettings steering;
+          activation = activationText;
+          fetch = fetchText;
         };
       });
+  # The kill omlx-restart runs once the gate allows a restart; launchd's KeepAlive brings the
+  # server back. pkill exits 1 when no server runs, which leaves nothing to restart.
+  killServer = pkgs.writeShellScript "omlx-kill" ''
+    /usr/bin/pkill -U "$(id -u)" -x omlx-server
+    status=$?
+    [ "$status" -le 1 ] && exit 0
+    exit "$status"
+  '';
+  # Restarts the server for the pending marker only while it is idle; --now skips that check.
+  restart = pkgs.writeShellScriptBin "omlx-restart" ''
+    exec ${lib.getExe pkgs.python3} ${./omlx-restart.py} \
+      --state-dir ${home}/.omlx \
+      --restart-bin ${killServer} \
+      --health-url http://127.0.0.1:8000/health "$@"
+  '';
   # Tries candidate neurons on oMLX's own Python and patched steering module before they are
   # declared as a preset (it needs the patch applied, i.e. one activation).
   steerCli = pkgs.writeShellScriptBin "omlx-steer" ''
@@ -268,6 +317,7 @@ in
 {
   environment.systemPackages = [
     configure
+    restart
     steerCli
   ];
   system.build.omlxConfigure = configure;
@@ -314,20 +364,5 @@ in
   # Restart the server only when a settings merge, a patch or a steering preset changed something, and start the
   # downloader when a listed model is missing. ~/.omlx is private: its logs can hold other
   # people's prompts, and teammates share the staff group.
-  system.activationScripts.postActivation.text = ''
-    if ! sudo --user=${username} --set-home ${configure}/bin/omlx-configure; then
-      echo >&2 "oMLX: configuration failed; server was not restarted"
-      exit 1
-    fi
-    if [ -e ${home}/.omlx/.restart-needed ]; then
-      if ! launchctl kickstart -k system/org.nixos.omlx; then
-        echo >&2 "oMLX: restart failed; .restart-needed retained for the next activation"
-        exit 1
-      fi
-      rm -f ${home}/.omlx/.restart-needed
-    fi
-    for marker in ${modelMarkers}; do
-      [ -e "$marker" ] || { launchctl kickstart system/org.nixos.omlx-models || true; break; }
-    done
-  '';
+  system.activationScripts.postActivation.text = activationText;
 }

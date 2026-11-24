@@ -198,6 +198,8 @@ agent-workflow-tests *args:
     tests/test_platform_package_hosts.py \
     tests/test_fleet_preflight_recipes.py \
     tests/test_darwin_user_agent_reload.py \
+    tests/test_omlx_restart.py \
+    tests/test_omlx_declaration.py \
     tests/test_darwin_path_order.py \
     tests/test_pinned_file.py \
     tests/test_github_runners.py \
@@ -221,6 +223,8 @@ agent-workflow-tests *args:
     tests/test_forge_owner_action.py \
     tests/test_owner_actions.py \
     tests/test_forge_land_lock.py \
+    tests/test_forge_land_lease.py \
+    tests/test_landing_reading.py \
     tests/test_verified_tree.py \
     tests/test_transaction_core.py \
     tests/test_transaction_custody.py \
@@ -295,6 +299,7 @@ agent-workflow-tests *args:
     tests/test_console_prompt_card.py \
     tests/test_console_prompt_card_service.py \
     tests/test_console_view.py \
+    tests/test_console_view_lock_place.py \
     tests/test_console_draft_facts.py \
     tests/test_console_failed_start.py \
     tests/test_console_activation.py \
@@ -405,8 +410,10 @@ agent-workflow-tests *args:
     tests/test_system_packages.py \
     home/common/agent-skills/tests/test_program_harness.py \
     home/common/agent-skills/tests/test_deliver_standard_program.py \
+    home/common/agent-skills/tests/test_deliver_standard_landing.py \
     home/common/agent-skills/tests/test_deliver_standard_before_pull_request.py \
     home/common/agent-skills/tests/test_deliver_batch_program.py \
+    home/common/agent-skills/tests/test_deliver_batch_landing.py \
     home/common/agent-skills/tests/test_deliver_batch_before_pull_request.py \
     home/common/agent-skills/evals/tests/test-run-eval-tree.sh
 
@@ -450,19 +457,27 @@ agent-installed-skill-tests: build
     fi; \
     settings="$1"; \
     set -- $(nix-store --query --requisites ./result \
+      | grep -- '-claude-bash-lifecycle-guard-base-policy\.json$' || true); \
+    if [ "$#" -ne 1 ]; then \
+      echo "expected exactly one built guard base policy; found $#" >&2; \
+      exit 1; \
+    fi; \
+    base_policy="$1"; \
+    set -- $(nix-store --query --requisites ./result \
       | grep -- '-claude-code-with-accounts-[^/]*$' || true); \
     if [ "$#" -ne 1 ]; then \
       echo "expected exactly one built Claude Code package; found $#" >&2; \
       exit 1; \
     fi; \
-    AGENT_SKILLS_INSTALLED_HOME="$installed_home" AGENT_TOOLS_SYSTEM_RESULT="{{system_result}}" CLAUDE_SETTINGS_PATH="$settings" CLAUDE_CODE_PACKAGE="$1" python3 -m unittest -v \
+    AGENT_SKILLS_INSTALLED_HOME="$installed_home" AGENT_TOOLS_SYSTEM_RESULT="{{system_result}}" CLAUDE_SETTINGS_PATH="$settings" CLAUDE_GUARD_BASE_POLICY_PATH="$base_policy" CLAUDE_CODE_PACKAGE="$1" python3 -m unittest -v \
       home/common/agent-skills/tests/test_dispatch_contracts.py \
       home/common/agent-skills/tests/test_shell_example_contracts.py \
       home/common/agent-skills/tests/test_workflow_skill_contracts.py \
       tests/test_agent_tools_launchers.py \
       tests/test_promotion_installed.py \
       tests/test_impeccable_installed.py \
-      tests/test_claude_code_installed.py
+      tests/test_claude_code_installed.py \
+      tests/test_claude_permission_guard_own_files.py
 
 # Compare the skills activated on this host (~/.claude/skills) with the skill source; run it after a switch, since `test` checks the skills from source only (issue 1580).
 agent-activated-skill-tests:

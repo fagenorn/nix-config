@@ -2770,13 +2770,13 @@ class ScreenshotFixtureTest(unittest.TestCase):
                 elif state == "waiting-its-turn":
                     self.assertEqual(
                         [(s["state"], s["ball"], s["now_text"]) for s in running],
-                        [("on_track", "manager", "waiting its turn to merge")])
+                        [("on_track", "manager", "waiting its turn to merge, position 1")])
                     web = next(p for p in entries_of(view) if p.get("project_id") == "owner/web")
                     lone = next(d for s in web["outside_sprints"]["sessions"]
                                 for d in s["deliveries"] if d["run_id"] == "wf_l1")
                     self.assertEqual(
                         (lone["quiet"], lone["moved_text"], lone["wait_text"]),
-                        (False, "waiting its turn to merge", "waiting its turn to merge"))
+                        (False, "waiting its turn to merge, position 1", "waiting its turn to merge, position 1"))
                 elif state in ("goal-open", "goal-near", "goal-over"):
                     other = shots.build_fixture(Path(tmp) / "other", "tell-box-open", now_s)
                     again = shots.start_service(other, now_s)

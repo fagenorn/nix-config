@@ -83,6 +83,45 @@ class PullsTest(unittest.TestCase):
         with self.subTest("its base's lock at another sha"):
             self.assertIs(release({"main": "40" * 20}).holding, False)
 
+    def test_waiters_from_answer_orders_open_waiters_by_since(self):
+        sha = "40" * 20
+
+        def ref(name):
+            return {"ref": name, "object": {"sha": sha, "type": "commit"}}
+
+        listed = [ref("refs/agent-locks/land/main"),
+                  ref("refs/agent-locks/land-wait/main/100-13-150"),
+                  ref("refs/agent-locks/land-wait/main/90-11-160"),
+                  ref("refs/agent-locks/land-wait/main/95-16-99"),
+                  ref("refs/agent-locks/land-wait/main/50-12-60"),
+                  ref("refs/agent-locks/land-wait/release/v1/70-14-80"),
+                  ref("refs/agent-locks/land-wait/main/not-a-waiter"),
+                  ref("refs/agent-locks/land-wait/90-11-160"),
+                  ref("refs/agent-locks/land-beat/main")]
+        found = movement.waiters_from_answer(listed)
+        self.assertEqual({base: sorted(pairs) for base, pairs in found.items()},
+                         {"main": [(50, 12), (90, 11), (95, 16), (100, 13)],
+                          "release/v1": [(70, 14)]})
+        self.assertEqual(movement.waiters_from_answer(locks()), {"main": ((1794866567, 41),)})
+        for data in ({}, [3], [{"ref": 1, "object": {"sha": sha}}], [{"ref": "x", "object": []}]):
+            with self.subTest(data=data), self.assertRaises(ForgeError):
+                movement.waiters_from_answer(data)
+
+        def pull(number, oid="00" * 20):
+            return {"number": number, "headRefName": f"issue-{number}-x", "baseRefName": "main",
+                    "headRefOid": oid, "isCrossRepository": False, "body": "",
+                    "commits": {"nodes": []}}
+
+        data = {"data": {"repository": {"pullRequests": {"nodes": [
+            pull(13), pull(11), pull(12, sha), pull(15), pull(16)]}}}}
+        read = movement.pulls_from_answer(
+            data, PATTERN, movement.locks_from_answer(listed), found)
+        self.assertEqual({p.number: p.queue_position for p in read},
+                         {11: 1, 12: None, 13: 3, 15: None, 16: 2})
+        self.assertEqual(
+            [p.queue_position for p in movement.pulls_from_answer(data, PATTERN)],
+            [None] * 5)
+
     def test_a_read_is_two_calls_each_asked_before_it_is_cancelled(self):
         calls = []
 
@@ -297,6 +336,19 @@ class MergeTest(unittest.TestCase):
             (PullMovement(40, frozenset({4}), 1000, 2), PullMovement(41, frozenset({5}), 1000, 3)),
             2000, ((4, 1500),), None))
         self.assertEqual(movement.merged(first, (), 9000, LocalReading((), False)).pulls, first.pulls)
+
+    def test_a_failed_read_keeps_the_positions(self):
+        first = movement.merged(
+            None, (PullRequest(40, frozenset({4, 5}), False, 1, queue_position=1),
+                   PullRequest(41, frozenset({5, 6}), False, 1, queue_position=2),
+                   PullRequest(42, frozenset({7}), False, 1)),
+            1000, LocalReading((), False))
+        self.assertEqual(first.positions, ((4, 1), (5, 1), (6, 2)))
+        kept = movement.merged(first, None, 5000, LocalReading((), False))
+        self.assertEqual(kept.positions, first.positions)
+        later = movement.merged(first, (PullRequest(40, frozenset({4}), False, 1),), 6000,
+                                LocalReading((), False))
+        self.assertEqual(later.positions, ())
 
     def test_a_failed_read_keeps_the_last_pulls_and_their_read_time(self):
         first = self.first()
