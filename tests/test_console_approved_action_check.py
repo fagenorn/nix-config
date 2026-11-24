@@ -11,6 +11,7 @@ from agent_tools.console import event_log
 from agent_tools.verification import console_approved_action
 
 from tests.test_verify_checks import CHECKS, ROOT, committed_mode, run_from_root
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures
 
 TIER = "fast"
 
