@@ -286,6 +286,7 @@ PARTS: dict[str, Part] = {
   server = (builtins.fromJSON o.serverSettings);
   activation = o.activation;
   fetch = o.fetch;
+  serve = o.serve;
 }""", ("eleven-m5",)),
     # jetsamElsewhere is every daemon plist but oMLX's that carries a jetsam priority.
     "memory-budget": Part("""c: u: {
@@ -304,6 +305,12 @@ PARTS: dict[str, Part] = {
     inherit (d) command;
     inherit (d.serviceConfig) UserName StartInterval KeepAlive;
   };
+  floor = let d = c.launchd.daemons.memory-floor; in {
+    inherit (d) command;
+    inherit (d.serviceConfig) KeepAlive RunAtLoad StandardOutPath;
+    UserName = d.serviceConfig.UserName or null;
+  };
+  runnerUsers = map (r: r.user) (builtins.attrValues c.services.github-runners);
   owner = u.home.username;
   sopsSecrets = builtins.attrNames u.sops.secrets;
 }""", ("eleven-m5",)),

@@ -128,6 +128,7 @@
     }
   },
   "look-lint": null,
+  "memory-floor": null,
   "node-lint": null,
   "omlx-memory-watch": null,
   "owner-actions": null,

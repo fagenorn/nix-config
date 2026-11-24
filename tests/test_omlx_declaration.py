@@ -56,3 +56,15 @@ class OmlxDeclarationTest(unittest.TestCase):
     def test_the_downloader_restarts_without_reconfiguring(self):
         self.assertNotIn("/bin/omlx-configure", self.got["fetch"])
         self.assertIn("/bin/omlx-restart", self.got["fetch"])
+
+    def test_the_serve_script_gates_the_start_on_the_floor(self):
+        serve = self.got["serve"]
+        gate = next(line for line in serve.splitlines() if " gate " in line)
+        self.assertRegex(gate, r"^/nix/store/[0-9a-z]{32}-agent-platform/bin/memory-floor gate ")
+        self.assertIn("--floor-gib 16 ", gate + " ")
+        self.assertIn("--interval-seconds 2", gate)
+        self.assertLess(serve.index(" gate "), serve.index("sops"))
+        self.assertLess(serve.index(" gate "), serve.index("exec /opt/homebrew/bin/omlx serve"))
+        for forbidden in ("pkill", "kill", "launchctl", "kickstart"):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, gate)
