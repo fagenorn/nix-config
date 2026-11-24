@@ -47,6 +47,10 @@ found, and a failure of `revision` or `changes` for that root propagates at once
 `origin_tip(root)` is the commit of `refs/remotes/origin/<integration_branch(root)>`: None when the
 root has no contract or no such ref, `ReadFailed` when git or the resolver fails.
 
+The branch comes from the contract's core read (`resolve_project.resolve_core`), so a contract the
+installed platform cannot fully read (a newer platform interval, a binding it does not know) still
+names its branch; a broken branch member still fails the read.
+
 A failed read is never a successful "no line". A root with no project contract, no remote-tracking
 ref, or an origin tree without `ENTRY` is not a candidate. A root whose read failed (git exited
 non-zero, could not run or timed out; the resolver failed; a malformed record) raises `ReadFailed`
@@ -250,7 +254,7 @@ def host_changes(root: str, base: str, commit: str) -> tuple[str, ...]:
 def integration_branch(root: str) -> str | None:
     """The integration branch of the project contract at `root`; None only when the root holds no contract."""
     try:
-        branch = resolve_project.resolve(root)["bindings"]["vcs"]["integration_branch"]
+        branch = resolve_project.resolve_core(root)["bindings"]["vcs"]["integration_branch"]
     except resolve_project.ContractError as error:
         if error.code == "not_onboarded":
             return None

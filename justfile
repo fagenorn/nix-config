@@ -130,6 +130,8 @@ agent-workflow-tests *args:
     home/common/agent-skills/tests/test_resolve_platform.py \
     home/common/agent-skills/tests/test_resolve_schema_three.py \
     home/common/agent-skills/tests/test_verification_before_pull_request.py \
+    home/common/agent-skills/tests/test_resolve_unknown_bindings.py \
+    home/common/agent-skills/tests/test_resolve_core.py \
     home/common/agent-skills/tests/test_resolve_conformance_workflow.py \
     home/common/agent-skills/tests/test_schema_three_derivation.py \
     home/common/agent-skills/tests/test_attempt_history.py \
@@ -300,6 +302,7 @@ agent-workflow-tests *args:
     tests/test_console_failed_start.py \
     tests/test_console_activation.py \
     tests/test_console_activation_check.py \
+    tests/test_console_activation_contract.py \
     tests/test_console_capacity.py \
     tests/test_console_capacity_check.py \
     tests/test_console_probe.py \
