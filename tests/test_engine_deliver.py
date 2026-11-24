@@ -1059,6 +1059,13 @@ class RefusalTest(unittest.TestCase):
                 "holds": "run", "mutates": True, "on": {"accept": "done", "revise": "needs-owner"}}],
                 keep_alive=keep_alive)
 
+        def mutating_group(project: EngineProject) -> Path:
+            return project.procedures([
+                {"id": "g", "stage": "setup", "kind": "group", "holds": "run", "mutates": True,
+                 "members": [{"step": "a", "pass": ["ok"]}], "on": {"pass": "done", "blocked": "needs-owner"}},
+                {key: value for key, value in step("a", "standin-record", None).items()
+                 if key != "on"}], keep_alive=keep_alive)
+
         def empty(project: EngineProject) -> Path:
             return Path(tempfile.mkdtemp(dir=project.tmp))
 
@@ -1069,7 +1076,8 @@ class RefusalTest(unittest.TestCase):
             "a mutating step without a check": ("check", with_mutation),
             "a keep-alive with no claim-lost stop": ("missing_claim_lost", no_claim_lost),
             "a mutating decide step": ("marked mutates", mutating_decide),
-            "the shipped toy, whose agent step is marked mutates": ("marked mutates", shipped),
+            "a mutating group step": ("marked mutates", mutating_group),
+            "the shipped toy, whose call step is marked mutates": ("marked mutates", shipped),
             "no deliver.json": ("deliver.json", empty),
         }
         for name, (word, build) in cases.items():

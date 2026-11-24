@@ -1,0 +1,137 @@
+"""The shipped `direct` and `verify` procedures: their shape, their prompts and their review bounds."""
+
+from __future__ import annotations
+
+import unittest
+
+from agent_tools.delivery import engine_core
+from agent_tools.delivery.engine_core import RunGroup, Stop
+from tests.test_engine_check import PROCEDURES, SHIPPED_INPUTS, UNNAMED, load, step
+
+TIER = "fast"
+
+SHA = "a" * 40
+NAMED = [{"severity": "important", "file": "a.py:1", "failing_input": "f('')", "summary": "s"}]
+GRADING = [{"id": "AC1", "met": True, "evidence": "test_x"}]
+PREFLIGHT = {"branch": "b", "worktree_path": "/w", "integration_branch": "main", "issue_text": "t"}
+IMPLEMENTED = {"status": "done", "start_head": SHA, "commit": SHA, "notes": "n", "tests": [],
+               "acceptance": [{"id": "AC1", "text": "t", "kind": "code", "result": "r"}],
+               "sensitive": False, "ineligible": False}
+INDEPENDENT = {"verdict": "pass", "findings": []}
+
+
+def reported(name: str, outcome: str, result: dict) -> list[dict]:
+    return [{"type": "entered", "step": name},
+            {"type": "outcome", "step": name, "outcome": outcome, "result": result}]
+
+
+def lite_review(verdict: str, findings: list[dict]) -> dict:
+    return {"verdict": verdict, "findings": findings, "acceptance": GRADING, "escalate": False}
+
+
+def to_the_lite_group() -> list[dict]:
+    return reported("preflight", "clear", PREFLIGHT) + reported("implement", "done", IMPLEMENTED)
+
+
+def lite_round(review: dict, independent: bool = True) -> list[dict]:
+    events = [{"type": "entered", "step": "lite-group"}] + reported("lite-review", review["verdict"], review)
+    return events + (reported("lite-independent", "pass", INDEPENDENT) if independent else [])
+
+
+def replayed(events: list[dict]) -> engine_core.Replay:
+    return engine_core.replay(load(PROCEDURES, "direct"), SHIPPED_INPUTS, events)
+
+
+class DirectProcedureTest(unittest.TestCase):
+    def test_the_direct_steps_that_commit_are_the_only_mutating_ones(self):
+        self.assertEqual([s["id"] for s in load(PROCEDURES, "direct")["steps"] if s.get("mutates")],
+                         ["implement", "lite-fix", "escalated-fix", "full-fix"])
+        self.assertEqual([s["id"] for s in load(PROCEDURES, "verify")["steps"] if s.get("mutates")], [])
+
+    def test_the_direct_review_roles(self):
+        direct = load(PROCEDURES, "direct")
+        roles = {s["id"]: s["role"] for s in direct["steps"] if s["kind"] == "agent"}
+        self.assertEqual(roles, {
+            "implement": "implementer", "lite-fix": "implementer", "escalated-fix": "implementer",
+            "full-fix": "implementer", "lite-review": "reviewer-lite", "lite-rereview": "reviewer-lite",
+            "escalated-rereview": "reviewer-lite", "full-rereview": "reviewer-lite",
+            "full-review": "reviewer", "escalated": "reviewer"})
+
+    def test_the_direct_stops_keep_the_programs_names_and_needs(self):
+        self.assertEqual(load(PROCEDURES, "direct")["stops"], {
+            "setup": {"need": "owner-decision", "reenter": "preflight"},
+            "claim-lost": {"need": "owner-decision", "reenter": "preflight"},
+            "ineligible": {"need": "owner-decision", "reenter": "preflight"},
+            "task": {"need": "owner-decision", "reenter": "implement"},
+            "direct-review": {"need": "owner-decision", "reenter": "implemented"},
+            "direct-fix": {"need": "owner-decision", "reenter": "implemented"},
+            "codex-unavailable": {"need": "retry", "reenter": "implemented"}})
+        self.assertEqual(load(PROCEDURES, "verify")["stops"], {
+            "setup": {"need": "owner-decision", "reenter": "preflight"},
+            "claim-lost": {"need": "owner-decision", "reenter": "preflight"},
+            "verify": {"need": "owner-decision", "reenter": "checks"}})
+
+    def test_the_route_prompts_differ_only_by_their_producers(self):
+        producers = {"lite": ("lite-review", "lite-independent", "lite-fix"),
+                     "escalated": ("escalated", "lite-independent", "escalated-fix"),
+                     "full": ("full-review", "full-independent", "full-fix")}
+        for kind in ("fix", "rereview"):
+            texts = set()
+            for route, (review, independent, fix) in producers.items():
+                text = (PROCEDURES / f"direct-{kind}-{route}.md").read_text(encoding="utf-8")
+                texts.add(text.replace(fix, "FIX").replace(independent, "INDEPENDENT").replace(review, "REVIEW"))
+            self.assertEqual(len(texts), 1, kind)
+
+    def test_a_blocked_group_reaches_its_tally(self):
+        direct = load(PROCEDURES, "direct")
+        for route in ("lite", "full"):
+            on = step(direct, f"{route}-group")["on"]
+            self.assertEqual((on["pass"], on["blocked"], on["exhausted"]),
+                             (f"{route}-tally", f"{route}-tally", "direct-review"))
+
+    def test_an_unusable_review_is_asked_once_more_without_the_independent_review(self):
+        events = to_the_lite_group() + lite_round(lite_review("pass", UNNAMED["findings"]))
+        again = replayed(events)
+        self.assertIsInstance(again.action, RunGroup)
+        self.assertEqual((again.action.step, tuple(m.step for m in again.action.members)),
+                         ("lite-group", ("lite-review",)))
+        self.assertIn(("lite-tally", "unusable"), [(t.step, t.outcome) for t in again.transitions])
+        second = replayed(events + lite_round(lite_review("pass", UNNAMED["findings"]), independent=False))
+        self.assertIsInstance(second.action, Stop)
+        self.assertEqual(second.action.name, "direct-review")
+        usable = replayed(events + lite_round(lite_review("pass", []), independent=False))
+        self.assertIsInstance(usable.action, engine_core.Done)
+
+    def test_an_unusable_escalated_or_re_review_reply_is_asked_once_more(self):
+        unnamed = UNNAMED["findings"]
+        escalate = {**lite_review("pass", []), "escalate": True}
+        fix = {"status": "done", "start_head": SHA, "commit": "b" * 40, "notes": "n", "tests": []}
+        unusable = lite_review("pass", unnamed)
+        routes = {
+            "escalated": to_the_lite_group() + lite_round(escalate) + reported("escalated", "pass", unusable),
+            "lite-rereview": to_the_lite_group() + lite_round(lite_review("findings", NAMED))
+            + reported("lite-fix", "done", fix) + reported("lite-rereview", "pass", unusable),
+        }
+        for name, events in routes.items():
+            with self.subTest(name=name):
+                again = replayed(events)
+                self.assertEqual((type(again.action), again.action.step), (engine_core.StartSession, name))
+                self.assertEqual(again.action.visit, 2)
+                usable = replayed(events + reported(name, "pass", lite_review("pass", [])))
+                self.assertIsInstance(usable.action, engine_core.Done)
+                twice = replayed(events + reported(name, "pass", unusable))
+                self.assertEqual((type(twice.action), twice.action.name), (Stop, "direct-review"))
+
+    def test_a_fix_with_no_commit_stops_direct_fix(self):
+        fix = {"status": "done", "start_head": SHA, "commit": "", "notes": "n", "tests": []}
+        done = replayed(to_the_lite_group() + lite_round(lite_review("findings", NAMED))
+                        + reported("lite-fix", "done", fix))
+        self.assertIsInstance(done.action, Stop)
+        self.assertEqual(done.action.name, "direct-fix")
+        steps = [(t.step, t.outcome) for t in done.transitions]
+        self.assertIn(("lite-fixed", "not-done"), steps)
+        self.assertNotIn("lite-rereview", [name for name, _ in steps])
+
+
+if __name__ == "__main__":
+    unittest.main()

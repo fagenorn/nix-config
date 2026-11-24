@@ -116,7 +116,7 @@ and `code`, under the same code rule, and returns `(attempt, code)`; `parse_gues
 takes exactly `attempt` and returns it. `guest_answer_members(link)` is exactly `{"link", "route"}`:
 both None for no link, the url and route for `manual` and `unknown`, and `{"link": None, "route":
 "loopback"}` for a loopback link, whose return address is the owner's host's loopback that a colleague's
-browser cannot reach (ADR-console-080 D3). A link a colleague receives must also pass `guest_link(url)`:
+browser cannot reach (ADR-console-080). A link a colleague receives must also pass `guest_link(url)`:
 an `https` URL on one of the client's own authorization endpoints (`GUEST_AUTHORIZE`, a host and path pair:
 `claude.com` `/cai/oauth/authorize`, `claude.ai` `/oauth/authorize`, `platform.claude.com` `/oauth/authorize`),
 the host written bare (no user information or port), with no fragment,

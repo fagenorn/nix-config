@@ -939,7 +939,7 @@ def keys(node, call, **kwargs):
 
 
 class LookAnsweredReviewTest(unittest.TestCase):
-    """An approved look of the merged head answers its look marker criterion (#1186, ADR-console-054 D8)."""
+    """An approved look of the merged head answers its look marker criterion (#1186, ADR-console-054)."""
 
     CARD = [f"{SLUG}#7/ac2"]
 

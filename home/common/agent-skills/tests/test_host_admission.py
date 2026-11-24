@@ -12,6 +12,7 @@ from agent_tools.delivery import host_admission
 
 REPO = Path(__file__).resolve().parents[4]
 COMMITTED_DECLARATION = REPO / "home/common/agent-skills/host-declaration.json"
+HOST_DECLARATIONS = REPO / "home/common/agent-skills/host-declarations"
 
 
 def declaration(**routes):
@@ -30,7 +31,27 @@ class HostAdmissionTest(unittest.TestCase):
             "codex": {"support": "unsupported"}}))
         self.assertEqual(host_admission.validate_declaration(committed), committed)
         self.assertEqual(host_admission.verify_slots(committed), 1)
+        self.assertIsNone(host_admission.verify_budget_seconds(committed))
         self.assertEqual(host_admission.route_slots(committed, host_admission.ENGINE_ROUTE), 8)
+
+    def test_the_eleven_m5_declaration_is_the_shared_one_with_two_verify_slots_and_a_600_second_budget(self):
+        eleven = json.loads((HOST_DECLARATIONS / "eleven-m5.json").read_text(encoding="utf-8"))
+        shared = json.loads(COMMITTED_DECLARATION.read_text(encoding="utf-8"))
+        self.assertEqual(host_admission.validate_declaration(eleven), eleven)
+        self.assertEqual(host_admission.verify_slots(eleven), 2)
+        self.assertEqual(host_admission.verify_budget_seconds(eleven), 600)
+        self.assertEqual({k: v for k, v in eleven.items()
+                          if k not in ("verify_slots", "verify_budget_seconds")}, shared)
+
+    def test_every_host_declaration_names_a_flake_host_and_validates(self):
+        flake = (REPO / "flake.nix").read_text(encoding="utf-8")
+        files = sorted(HOST_DECLARATIONS.glob("*.json"))
+        self.assertTrue(files)
+        for path in files:
+            with self.subTest(path.name):
+                self.assertIn(f'hostname = "{path.stem}";', flake)
+                value = json.loads(path.read_text(encoding="utf-8"))
+                self.assertEqual(host_admission.validate_declaration(value), value)
 
     def test_the_engine_route_counts_one_slot_per_live_session(self):
         one = declaration(engine={"support": "supported", "agent_slots": 1})
@@ -139,6 +160,23 @@ class HostAdmissionTest(unittest.TestCase):
                     host_admission.load_declaration()
             finally:
                 target.parent.chmod(0o700)
+            self.assertEqual(raised.exception.reason_code, "declaration_invalid")
+
+    def test_verify_budget_seconds_is_an_optional_top_level_count(self):
+        supported = {"support": "supported", "agent_slots": 7}
+        with_budget = {**declaration(**{"claude-code": supported}), "verify_budget_seconds": 600}
+        without = declaration(**{"claude-code": supported})
+        self.assertEqual(host_admission.validate_declaration(with_budget), with_budget)
+        self.assertEqual(host_admission.validate_declaration(without), without)
+        self.assertEqual(host_admission.verify_budget_seconds(with_budget), 600)
+        self.assertIsNone(host_admission.verify_budget_seconds(without))
+
+    def test_a_verify_budget_seconds_that_is_not_a_positive_int_is_refused(self):
+        supported = {"support": "supported", "agent_slots": 7}
+        for bad in (0, -1, True, 1.5, "600"):
+            value = {**declaration(**{"claude-code": supported}), "verify_budget_seconds": bad}
+            with self.subTest(bad), self.assertRaises(host_admission.DeclarationError) as raised:
+                host_admission.validate_declaration(value)
             self.assertEqual(raised.exception.reason_code, "declaration_invalid")
 
 

@@ -607,7 +607,7 @@ in
 
   # ~/.claude/agents/<name>.md — tiered pipeline agent definitions. Global
   # effortLevel stays high for interactive/orchestrator sessions; pipeline
-  # subagents dispatch explicitly as implementer (opus/high), reviewer
+  # subagents dispatch explicitly as implementer (sonnet/high), reviewer
   # (opus/high) or reviewer-lite (sonnet/medium). The Workflow programs' steps
   # run as clerk (sonnet/low; Bash, Read and Skill only, for judgment-free
   # steps) and planner (opus/high; the plan step). Skills reference them by

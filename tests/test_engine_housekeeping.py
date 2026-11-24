@@ -543,6 +543,26 @@ class SweepTest(unittest.TestCase):
         self.assertFalse(expired.exists())
         self.assertEqual(captured.getvalue(), "")
 
+    def test_a_removal_that_a_concurrent_sweep_is_also_doing_still_succeeds(self):
+        run = seed(self.root, 101)
+        expired = self.root / f".{run.name}.expired"
+        real = shutil.rmtree
+        calls = []
+
+        def racing(path, *args, **kwargs):
+            calls.append(path)
+            if len(calls) == 1:  # another sweep removes a child between this one's listing and its removal
+                real(Path(path) / "results")
+                raise FileNotFoundError(2, "No such file or directory", "results")
+            return real(path, *args, **kwargs)
+
+        captured = io.StringIO()
+        with mock.patch("agent_tools.delivery.engine_housekeeping.shutil.rmtree", side_effect=racing), \
+                contextlib.redirect_stderr(captured):
+            self.assertEqual(self.sweep(FakeTracker({101: ago(20)})), [run.name])
+        self.assertFalse(expired.exists())
+        self.assertEqual(captured.getvalue(), "")
+
     def test_a_run_of_another_tracker_or_of_none_is_kept_whatever_that_tracker_says(self):
         other = seed(self.root, 101, tracker="github:other/repo")
         mine = seed(self.root, 103)

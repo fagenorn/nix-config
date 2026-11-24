@@ -105,6 +105,10 @@ lint:
 test:
   PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.delivery.verification_command test
 
+# Run the suite members this branch touches, after a host build when a build input changes (the `test-touched` command).
+test-touched:
+  tools="$(nix build --no-link --print-out-paths '{{justfile_directory()}}#agent-platform.tools')" && test -n "$tools" && AGENT_PLATFORM_TOOLS="$tools/bin" WORKFLOW_POLICY_SURFACE=source PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.delivery.touched_tests --base origin/main --source-root python --pair home/common/claude-code/lifecycle_guard.py=tests/test_claude_permission_guard.py --build-command 'just build' --build-when '*.nix' --build-when flake.lock --build-when .sops.yaml --build-when 'data/*' --build-when 'homebrew/*' --build-when 'patches/*' --build-when 'secrets/*' --build-when 'vars/*'
+
 # Verify durable workflow lifecycle and skill contracts, min(8, CPUs - 2) test files at a time, longest first (SUITE_RUNNER_JOBS or --jobs N sets the cap; --jobs 1 runs them serially with live output). The suite gets the platform package's pinned tools.
 agent-workflow-tests *args:
   tools="$(nix build --no-link --print-out-paths '{{justfile_directory()}}#agent-platform.tools')" && test -n "$tools" && AGENT_PLATFORM_TOOLS="$tools/bin" PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.delivery.suite_runner {{args}} \
@@ -125,6 +129,7 @@ agent-workflow-tests *args:
     home/common/agent-skills/tests/test_resolve_project.py \
     home/common/agent-skills/tests/test_resolve_platform.py \
     home/common/agent-skills/tests/test_resolve_schema_three.py \
+    home/common/agent-skills/tests/test_verification_before_pull_request.py \
     home/common/agent-skills/tests/test_resolve_conformance_workflow.py \
     home/common/agent-skills/tests/test_schema_three_derivation.py \
     home/common/agent-skills/tests/test_attempt_history.py \
@@ -158,6 +163,8 @@ agent-workflow-tests *args:
     tests/test_agent_tools_layout.py \
     tests/test_agent_tools_semver.py \
     tests/test_engine_check.py \
+    tests/test_engine_direct_procedures.py \
+    tests/test_engine_graders.py \
     tests/test_engine_ledger.py \
     tests/test_engine_core.py \
     tests/test_engine_commands.py \
@@ -168,6 +175,7 @@ agent-workflow-tests *args:
     tests/test_engine_reaping.py \
     tests/test_engine_keep_alive.py \
     tests/test_engine_continue.py \
+    tests/test_engine_resume.py \
     tests/test_engine_housekeeping.py \
     tests/test_engine_stop.py \
     tests/test_engine_caps.py \
@@ -175,6 +183,7 @@ agent-workflow-tests *args:
     tests/test_engine_slots.py \
     tests/test_engine_fixture.py \
     tests/test_engine_stubbed_run.py \
+    tests/test_independent_review.py \
     tests/test_issue_setup.py \
     tests/test_plan_amend.py \
     tests/test_verify_block.py \
@@ -277,6 +286,7 @@ agent-workflow-tests *args:
     tests/test_suite_timing.py \
     tests/test_verify_slot.py \
     tests/test_verification_command.py \
+    tests/test_touched_tests.py \
     tests/test_console_event_log.py \
     tests/test_console_release_card.py \
     tests/test_console_release_card_service.py \
@@ -335,6 +345,7 @@ agent-workflow-tests *args:
     tests/test_console_live_fault_check.py \
     tests/test_pr_green.py \
     tests/test_console_page.py \
+    tests/test_console_long_permission_card.py \
     tests/test_console_controls.py \
     tests/test_console_goal_box.py \
     tests/test_console_service.py \
@@ -357,6 +368,7 @@ agent-workflow-tests *args:
     tests/test_console_notices.py \
     tests/test_console_reports.py \
     tests/test_console_screenshots.py \
+    tests/test_console_permission_shots.py \
     tests/test_console_sprint_command.py \
     tests/test_console_pictures.py \
     tests/test_console_manager.py \
@@ -390,7 +402,9 @@ agent-workflow-tests *args:
     tests/test_system_packages.py \
     home/common/agent-skills/tests/test_program_harness.py \
     home/common/agent-skills/tests/test_deliver_standard_program.py \
+    home/common/agent-skills/tests/test_deliver_standard_before_pull_request.py \
     home/common/agent-skills/tests/test_deliver_batch_program.py \
+    home/common/agent-skills/tests/test_deliver_batch_before_pull_request.py \
     home/common/agent-skills/evals/tests/test-run-eval-tree.sh
 
 # Validate every explicit pipeline dispatch and print the representative trace.
@@ -406,7 +420,7 @@ agent-instruction-load *args:
 verify host *args:
   PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.verification.verify_pending run --host {{host}} {{args}}
 
-# Shoot the console's sprint states against a fixture console, 114 PNGs into out (default ~/tmp/clarity-screenshots) (#1086).
+# Shoot the console's sprint states against a fixture console, 116 PNGs into out (default ~/tmp/clarity-screenshots) (#1086).
 console-screenshots out="":
   #!/usr/bin/env bash
   set -euo pipefail

@@ -20,6 +20,11 @@ grandchild that stays in the stub's own process group, adds `"hang": {"child": <
 "pid": <its pid>}` to the usual record, writes the log line flushed and the answer file as usual,
 then sleeps 120 s, returns 1 and prints nothing on stdout.
 
+Each record also holds `hung_alive`: a list with one `{"child": bool, "pid": bool}` per earlier log
+record that has `hang`, in log order, each the zombie-aware liveness (`os.kill(pid, 0)` and a `ps -o
+stat=` state not starting with `Z`) of that record's `hang` child and pid at the moment this
+invocation starts; `[]` when no earlier record hangs.
+
 `announced` is true when some `$HOME/.agents/state/engine/runs/*/events.jsonl`
 holds a `session_starting` event whose `session` is the argv word after
 `--session-id`, or a `session_resuming` event whose `session` is the argv word
@@ -81,6 +86,27 @@ def invocations(log: str) -> int:
         return sum(1 for _ in handle)
 
 
+def alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        pass
+    state = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True,
+                           check=False).stdout.strip()
+    return bool(state) and not state.startswith("Z")
+
+
+def hung_alive(log: str) -> list[dict]:
+    if not os.path.exists(log):
+        return []
+    with open(log, encoding="utf-8") as handle:
+        earlier = [json.loads(line) for line in handle if line.strip()]
+    return [{"child": alive(record["hang"]["child"]), "pid": alive(record["hang"]["pid"])}
+            for record in earlier if "hang" in record]
+
+
 def hold_with_child(hold: str) -> None:
     ready = hold + ".ready"
     child = subprocess.Popen([sys.executable, "-c", CHILD, ready], stdin=subprocess.DEVNULL,
@@ -111,6 +137,7 @@ def main(argv: list[str]) -> int:
               "account_env": os.environ.get("CLAUDE_ACCOUNT"), "argv": words,
               "config_dir": os.environ.get("CLAUDE_CONFIG_DIR"), "cwd": os.getcwd(),
               "host_settings": os.environ.get("CLAUDE_ACCOUNT_HOST_SETTINGS"),
+              "hung_alive": hung_alive(log),
               "stdin": sys.stdin.read()}
     if hang:
         child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])

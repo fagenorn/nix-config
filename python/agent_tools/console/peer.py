@@ -35,7 +35,7 @@ listed, or whose descriptor cannot be read, is not seen (like another user's pro
 `read_lsof` and `read_proc` never raise: any `OSError`, `subprocess.TimeoutExpired` or `ValueError`
 is `None`. `reader_for(platform)` names the reader (`darwin` lsof, `linux*` proc, else `None`).
 
-The guest door (ADR-console-077 D2) reads the peer of an accepted Unix socket connection. On
+The guest door (ADR-console-077) reads the peer of an accepted Unix socket connection. On
 macOS `LOCAL_PEERCRED` at level `SOL_LOCAL` (0) returns `struct xucred` (76 bytes: version 0,
 effective uid, group count, groups); on Linux `SO_PEERCRED` returns `struct ucred` (pid, uid,
 gid). `read_xucred` and `read_ucred` never raise and read `None` for anything not a well-formed
@@ -44,7 +44,7 @@ admits only root (Serve runs in the `tailscaled` service) and the owner.
 
 What the lookup cannot see: a non-root lookup sees only its own user's processes, so another
 user's connection has no holder (not-owner), and a descriptor an owner process hands to another
-user's process is seen only through the owner's holder (ADR-console-076 D6).
+user's process is seen only through the owner's holder (ADR-console-076).
 """
 
 import os

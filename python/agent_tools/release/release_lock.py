@@ -5,7 +5,7 @@ the release head and restarts its required checks. The release therefore holds t
 of the integration branch (`forge_land_lock`, ADR-claims-009) from the moment its head is
 fixed until it has merged. The caller of the driver acquires the lock, with a wait, before the
 first preview; the driver's preview takes it one-shot when it is free (issue 1376,
-ADR-release-014), and `run` re-checks and releases it, through the two calls here.
+ADR-release-008), and `run` re-checks and releases it, through the two calls here.
 
 `call(action, repository, branch, sha)` runs `forge-claim land <action> --repo <repository>
 --branch <branch> --sha <sha>` once in this process, with `--release` on `acquire` and never
