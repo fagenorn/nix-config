@@ -92,6 +92,15 @@ class Case(unittest.TestCase):
         run.calls = calls
         return run
 
+    def fake_client(self, body):
+        """A `claude-account` on its own PATH that runs `body`; returns the environ for `run_launch`."""
+        bin_dir = self.tmp / "bin"
+        bin_dir.mkdir(exist_ok=True)
+        client = bin_dir / "claude-account"
+        client.write_text("#!/bin/sh\n" + body)
+        client.chmod(0o755)
+        return {"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": str(self.tmp), "PIDFILE": str(self.tmp / "pid")}
+
 
 class CommandTest(Case):
     def test_the_session_name_names_the_project_and_the_sprint(self):
@@ -426,7 +435,7 @@ class RunTest(Case):
         self.assertEqual(argv, manager.launch_command(launch, "linux"))
         self.assertEqual(kwargs["cwd"], str(self.root))
         self.assertIs(kwargs["stdin"], subprocess.DEVNULL)
-        self.assertIs(kwargs["stdout"], subprocess.DEVNULL)
+        self.assertNotIn(kwargs["stdout"], (subprocess.PIPE, subprocess.DEVNULL, None))
         self.assertNotIn(kwargs["stderr"], (subprocess.PIPE, None))
         self.assertTrue(hasattr(kwargs["stderr"], "fileno"))
         self.assertNotIn("capture_output", kwargs)
@@ -447,19 +456,10 @@ class RunTest(Case):
         self.assertFalse([part for part in argv if "s3cret" in part])
         self.assertIs(kwargs["start_new_session"], True)
         self.assertIs(kwargs["stdin"], subprocess.DEVNULL)
-        self.assertIs(kwargs["stdout"], subprocess.DEVNULL)
+        self.assertNotIn(kwargs["stdout"], (subprocess.PIPE, subprocess.DEVNULL, None))
         self.assertEqual(kwargs["cwd"], str(self.root))
         self.assertEqual(kwargs["env"], {"PATH": "/h/.agents/bin:/p", "HOME": "/h",
                                          "CLAUDE_ACCOUNT": "work"})
-
-    def fake_client(self, body):
-        """A `claude-account` on its own PATH that runs `body`; returns the environ for `run_launch`."""
-        bin_dir = self.tmp / "bin"
-        bin_dir.mkdir(exist_ok=True)
-        client = bin_dir / "claude-account"
-        client.write_text("#!/bin/sh\n" + body)
-        client.chmod(0o755)
-        return {"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": str(self.tmp), "PIDFILE": str(self.tmp / "pid")}
 
     def wait_dead(self, pid, seconds=5.0):
         end = time.monotonic() + seconds

@@ -415,8 +415,8 @@ class ManagerServiceTest(Case):
         sid = self.state(svc)
         record = svc._record_launch
 
-        def record_then_retry_in_the_gap(launch, reason, token):
-            record(launch, reason, token)
+        def record_then_retry_in_the_gap(launch, reason, token, *printed):
+            record(launch, reason, token, *printed)
             svc.retry_manager("owner/p01", sid)
 
         with mock.patch.object(svc, "_record_launch", record_then_retry_in_the_gap):
