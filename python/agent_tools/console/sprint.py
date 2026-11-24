@@ -74,6 +74,7 @@ round is
                     "recommended": "<exact text of one option>",
                     "needs_words": ["<exact text of an option>", ...],
                     "owner_only": true,
+                    "action": {"command": "<the exact Bash command>", "approve": "<exact text of one option>"},
                     "consequential": true,
                     "pictures": [{"file": "<path>", "line": "<one line, at most 140 characters>",
                                   "pair": "before" | "after"}, ...],
@@ -94,6 +95,12 @@ the page refuses that option until the owner writes what to change, the console 
 answers, never a colleague who started the sprint (`OWNER_ONLY_SHAPE`); the command sends it as given. The
 manager contract requires it on a question whose answer is itself a go-ahead (a release, a production step,
 spend, a permission escalation), never on a design choice.
+
+A question with an `action` must be `owner_only`: the action names one exact Bash command, one line of
+at most 4096 characters, that is no merge, rerun or release, and `approve` names the option that approves
+it (`ACTION_*` refusals). When the owner picks that option with no words, the manager's `sprint permit`
+hook lets that exact command run once within 60 minutes of the answer
+(`agent_tools.console.permit.judge_action`); the command sends it as given.
 
 `replaces` is optional: it names one open question of this sprint by its round id and its index (from 0,
 in the order the round was sent), and the console takes that question back in the write that

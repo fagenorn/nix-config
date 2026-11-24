@@ -1226,6 +1226,30 @@ class ManagerContractTest(unittest.TestCase):
         self.assertNotIn("asks for a release, paid or production decision", line)
         self.assertNotIn("another sprint's claim", line)
 
+    def test_the_contract_says_an_owner_only_card_may_name_one_action_run_once(self):
+        text = " ".join(CONTRACT.read_text(encoding="utf-8").split())
+        (line,) = [part for part in text.split("- `") if part.startswith("action`")]
+        for sentence in (
+            "optional, `{\"command\": \"<the exact Bash command>\", \"approve\": \"<exact text of "
+            "one option>\"}`, only on an `owner_only` question: it names the one command the "
+            "owner's answer lets you run.",
+            "A console route with its body is named by the exact command that sends it.",
+            "When the owner picks the `approve` option with no words beside it, run that command, "
+            "spelled exactly as sent, once, within 60 minutes of the answer.",
+            "A second run, a run after that, any other spelling, an answer in words alone or with "
+            "words beside the option, and a message are no approval.",
+            "A merge, a rerun and a release never go on such a card: they keep their own rules.",
+        ):
+            with self.subTest(sentence):
+                self.assertIn(sentence, line)
+        self.assertIn("never does", text)
+
+    def test_the_sprint_ask_help_names_the_action_member(self):
+        doc = " ".join(sprint.__doc__.split())
+        self.assertIn('"action": {"command": "<the exact Bash command>", "approve": "<exact text '
+                      'of one option>"}', doc)
+        self.assertIn("A question with an `action` must be `owner_only`", doc)
+
     def test_the_contract_says_only_an_approved_release_card_approves_a_release(self):
         text = " ".join(CONTRACT.read_text(encoding="utf-8").split())
         self.assertIn("Only an approved release card approves a release, and the lead posts that "
