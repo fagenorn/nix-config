@@ -937,6 +937,26 @@ class IdleQuotaTest(IdleCase):
         self.assertEqual([call.profile for call in self.launches.calls], ["work", "home"])
         self.assertIs(self.launches.calls[-1].takeover, True)
 
+    def test_a_manager_whose_record_lost_its_name_to_a_gone_row_and_a_resume_hook_is_moved(self):
+        """A gone row drops the folded session and the next hook rebuilds it with no name.
+
+        The registry readings that follow are older than that hook, so they were skipped before
+        the name was compared and the manager stayed unlisted.
+        """
+        svc, sid = self.listed_out()
+        self.listed["s-1"] = replace(self.listed["s-1"], updated_ms=int((T0 + 100) * 1000))
+        self.gone(svc)
+        self.append(svc, [("session.hook", "owner/p01", {
+            "event": "SessionStart", "source": "resume", "session_id": "s-1", "cwd": "/srv/p01",
+            "repo": "/srv/p01", "received_ms": int((T0 + 200) * 1000)})])
+        with mock.patch.object(sessions, "read_session_registry",
+                               lambda *args, **kwargs: dict(self.listed)):
+            svc.poll_sessions()
+        self.poll(svc, 300)
+        self.assertEqual(self.stops, [("s-1", "work", 1)])
+        self.assertEqual([c.profile for c in self.launches.calls], ["work", "home"])
+        self.assertIs(self.rows("manager.started")[-1]["moved"], True)
+
     def test_a_gone_manager_waits_when_the_other_account_gives_no_reason_to_move(self):
         cases = {
             "no reading yet": lambda svc: self.append(svc, [
