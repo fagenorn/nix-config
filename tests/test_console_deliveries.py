@@ -569,9 +569,9 @@ class RunFoldTest(unittest.TestCase):
                 self.assertEqual(locking(), {12: expected, 13: False})
 
     def test_only_the_lock_steps_are_lock_steps(self):
-        for label in ("pr", "land-lock-3", "land-relock-2", "checks-2"):
+        for label in ("pr", "land-take", "land-lock-3", "land-relock-2", "checks-2"):
             self.assertIs(deliveries.classify(label, batch=False).lock, True, label)
-        for label in ("land-push-1", "merge", "land-unlock", "look-pr", "sync-1", "verify"):
+        for label in ("land-push-1", "green-checks-1", "merge", "land-unlock", "look-pr", "sync-1", "verify"):
             self.assertIs(deliveries.classify(label, batch=False).lock, False, label)
         for label in ("land-pr-12", "land-lock-12-1", "land-relock-12-2", "land-record-12-1"):
             self.assertIs(deliveries.classify(label, batch=True).lock, True, label)
