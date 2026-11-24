@@ -3,7 +3,7 @@
 import json
 import unittest
 
-from agent_tools.console import quota_move
+from agent_tools.console import capacity
 
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures
 from .test_console_page import GOAL_HEADERS, SPRINT, full, has_class, nodes, render, sprint_lines, START, with_sprints
@@ -14,7 +14,7 @@ TIER = "fast"
 class PageMoveTest(unittest.TestCase):
     def test_a_sprint_line_offering_a_move_posts_it_and_says_a_failure(self) -> None:
         sprint = {**SPRINT, "state": "quota", "state_text": "waiting on quota until",
-                  "now_text": quota_move.CALLED_OFF_TEXT, "manager_state": "started",
+                  "now_text": capacity.CALLED_OFF_TEXT, "manager_state": "started",
                   "manager_text": None, "retry": False, "move": True}
         (snap,) = render([
             START, {"frame": with_sprints([sprint])},
@@ -22,7 +22,7 @@ class PageMoveTest(unittest.TestCase):
             {"click": "move"}, {"frame": with_sprints([sprint])}, {"snapshot": True},
         ])
         (line,) = sprint_lines(snap)
-        self.assertIn(quota_move.CALLED_OFF_TEXT, full(line))
+        self.assertIn(capacity.CALLED_OFF_TEXT, full(line))
         buttons = [n for n in nodes(line) if n["tag"] == "button"]
         (move,) = [n for n in buttons if has_class(n, "move")]
         self.assertEqual(full(move), "Move to another account")

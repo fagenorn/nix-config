@@ -1773,7 +1773,7 @@ choosing again, and with the account identity (its sign-in account and its count
 id) and the owner's pin as they were when it was reserved. When it is prepared, and again after the
 permission read (`_unexcluded_launch`), it must pass `_move_holds`: the manager's account still out
 (`_quota_wait`, which reads the sign-in history, so a late reply from an account the profile left
-does not count), the pin and the account identity unchanged, and `quota_move.room_for_move`: another account
+does not count), the pin and the account identity unchanged, and `capacity.room_for_move`: another account
 than the manager's, by sign-in and by the account ids the counted readings of the target and its
 sign-in aliases carry, not a duplicate of any profile, not kept for another login's waiting sprint,
 and room by `manager.has_room` (reads `ok` or `reset`, not signed out, not excluded). It must also
@@ -1792,9 +1792,9 @@ every listed session carrying the manager's name through `_stop_one`, off the lo
 conclusive listing again. It launches only when that listing shows neither the name nor a session it
 stopped, no folded session of that name is left unstopped, and the move still holds; the same is checked
 again after the permission read, with a fresh conclusive listing. Nothing listed to stop only releases it, unless the owner asked for the move.
-`revive()` keeps in `_move_notes` a `quota_move.Note` for each sprint whose move would be due but for the cancel mark and says why it is not moving:
+`revive()` keeps in `_move_notes` a `capacity.MoveNote` for each sprint whose move would be due but for the cancel mark and says why it is not moving:
 no other account has room (no move offered), its session is unmatched (`_unmatched`) or its move was called off (a move is offered). The sprint line shows the note and, with a move offered, `POST /api/retry-manager` moves the manager, not retries it: it clears the marks and reserves a
-`_ListedMoveReservation` with `asked` set on `_move_target`, refusing with `quota_move.NO_ROOM_REFUSAL` when none is left.
+`_ListedMoveReservation` with `asked` set on `_move_target`, refusing with `capacity.NO_ROOM_REFUSAL` when none is left.
 Any other outcome cancels the move as #1279 does and a failed stop or listing writes
 `console: quota_move_failed <sprint_id> <reason>`. The takeover's
 `manager.started` row carries `"moved": true` and the sprint leaves `_quota_held`, so the digest says the
@@ -2019,7 +2019,7 @@ from urllib.parse import parse_qsl
 from agent_tools.claims import owner_actions
 from agent_tools.console import (
     action_permit, project_question, account_add, account_remove, activation, checkout_remote, activation_run, answer, approve, capacity, contract_draft, deliveries, digest, engine_runs, exclusion, idle, inbox,
-    folder_trust, guest, manager, movement, nudge, peer, permission, permit, pin, plan_questions, probe, question_records, prompt_card, register, release_card, revive, pictures, quota_move, sessions, signin, signin_run, spend, sprints, transcript_digest, write_guard)
+    folder_trust, guest, manager, movement, nudge, peer, permission, permit, pin, plan_questions, probe, question_records, prompt_card, register, release_card, revive, pictures, sessions, signin, signin_run, spend, sprints, transcript_digest, write_guard)
 from agent_tools.console.action_permit import PERMIT_LANDED_SECONDS, ActionPermit
 from agent_tools.console.event_log import (
     BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, FAULT_DECLARED, FAULT_WITHDRAWN, GOAL_STATED, GOAL_WITHDRAWN, MANAGER_FAILED,
@@ -4717,7 +4717,7 @@ class ConsoleService(ActionPermit):
         self._quota_held: set[str] = set()
         self._move_cancelled: set[str] = set()
         self._unmatched: set[str] = set()
-        self._move_notes: dict[str, quota_move.Note] = {}
+        self._move_notes: dict[str, capacity.MoveNote] = {}
         self._moved: dict[str, int] = {}
         self._listing = (
             (lambda: sessions.read_session_registry(self._session_dirs()))
@@ -7775,12 +7775,12 @@ class ConsoleService(ActionPermit):
             if not retry and offered is not None and offered.offer:
                 target = self._move_target(sprint)
                 if target is None:
-                    raise sprints.Refused(quota_move.NO_ROOM_REFUSAL)
+                    raise sprints.Refused(capacity.NO_ROOM_REFUSAL)
                 self._move_cancelled.discard(sprint_id)
                 self._unmatched.discard(sprint_id)
                 self._move_notes.pop(sprint_id)
                 self._launching[sprint_id] = _ListedMoveReservation(
-                    target, quota_move.move_account(self._move_view(), self._capacity, self._signins, target),
+                    target, capacity.move_account(self._move_view(), self._capacity, self._signins, target),
                     self._pinned, asked=True)
             elif not retry:
                 raise sprints.Refused(
@@ -7877,8 +7877,8 @@ class ConsoleService(ActionPermit):
                 if shown and not self._manager_listed(sprint) and sprint_id not in self._unmatched:
                     self._unmatched.add(sprint_id)
                     self._apply(self.log.append([(MANAGER_HELD, sprint.project_id, {
-                        "sprint_id": sprint_id, "goal": sprint.goal, "reason": quota_move.UNMATCHED_REASON})]))
-                    print(f"console: takeover_held {sprint_id} {quota_move.UNMATCHED_REASON}", file=sys.stderr)
+                        "sprint_id": sprint_id, "goal": sprint.goal, "reason": capacity.UNMATCHED_REASON})]))
+                    print(f"console: takeover_held {sprint_id} {capacity.UNMATCHED_REASON}", file=sys.stderr)
                 self._release(sprint_id, token)
                 return None
             if self._revive_step(sprint, now) != sprints.TAKEOVER:
@@ -8861,7 +8861,7 @@ class ConsoleService(ActionPermit):
         if target is None:
             return _TakeoverReservation()
         view = self._move_view()
-        return _TakeoverReservation(target, quota_move.move_account(view, self._capacity, self._signins, target), self._pinned)
+        return _TakeoverReservation(target, capacity.move_account(view, self._capacity, self._signins, target), self._pinned)
 
     def _listed_move_due(self, sprint: sprints.SprintState, now: int, cancelled: bool = False) -> bool:
         """Under the ingest lock: whether a listed manager of the sprint waits on quota and may be moved (#1378).
@@ -8881,12 +8881,12 @@ class ConsoleService(ActionPermit):
                 and self._quota_wait(sprint) is not None
                 and (cancelled or sprint.sprint_id not in self._move_cancelled))
 
-    def _move_note(self, sprint: sprints.SprintState, now: int) -> "quota_move.Note | None":
+    def _move_note(self, sprint: sprints.SprintState, now: int) -> "capacity.MoveNote | None":
         """Under the ingest lock: why a manager whose listed move would be due but for the cancel mark is not moving."""
         if not self._listed_move_due(sprint, now, cancelled=True):
             return None
-        return quota_move.note(self._move_target(sprint), sprint.sprint_id in self._move_cancelled,
-                               sprint.sprint_id in self._unmatched)
+        return capacity.move_note(self._move_target(sprint), sprint.sprint_id in self._move_cancelled,
+                                  sprint.sprint_id in self._unmatched)
 
     def _listed_move_reservation(self, sprint: sprints.SprintState,
                                  now: int) -> "_ListedMoveReservation | None":
@@ -8900,7 +8900,7 @@ class ConsoleService(ActionPermit):
         if target is None:
             return None
         view = self._move_view()
-        return _ListedMoveReservation(target, quota_move.move_account(view, self._capacity, self._signins, target), self._pinned)
+        return _ListedMoveReservation(target, capacity.move_account(view, self._capacity, self._signins, target), self._pinned)
 
     def _unstopped_manager(self, sprint: sprints.SprintState, stopped: set[str]) -> bool:
         """Under the ingest lock: whether a folded session carrying the manager's name is not one the move stopped."""
@@ -9022,17 +9022,17 @@ class ConsoleService(ActionPermit):
         """
         return (token.target is not None and self._quota_wait(sprint) is not None
                 and self._pinned == token.pinned
-                and quota_move.move_account(view, self._capacity, self._signins, token.target) == token.account
-                and quota_move.room_for_move(view, self._capacity, self._signins,
-                                             self._waiting_logins(), sprint, token.target))
+                and capacity.move_account(view, self._capacity, self._signins, token.target) == token.account
+                and capacity.room_for_move(view, self._capacity, self._signins,
+                                           self._waiting_logins(), sprint, token.target))
 
     def _move_target(self, sprint: sprints.SprintState) -> str | None:
         """Under the ingest lock: the profile a quota move would take over on, else None."""
         view = self._move_view()
         choice = manager.choose_profile(view, self._use.last, sprint.started_by,
                                         self._waiting_logins())
-        return choice if quota_move.room_for_move(view, self._capacity, self._signins,
-                                                  self._waiting_logins(), sprint, choice) else None
+        return choice if capacity.room_for_move(view, self._capacity, self._signins,
+                                                self._waiting_logins(), sprint, choice) else None
 
     def revive(self) -> None:
         """Bring back each manager that is gone while its sprint has work (#893)."""

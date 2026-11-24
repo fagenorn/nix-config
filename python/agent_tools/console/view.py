@@ -707,7 +707,7 @@ reads them from its `pending` argument (default none).
 `manager_state`, `manager_text` and `retry` are all `sprints.manager_status` (its docstring holds
 the rules, so the view and the service's retry agree) over the sprint, whether it has a listed
 session of its own (below) and `now_ms`; `manager_until` is the `until` of a `waiting` manager, else
-null. A `moves` note (`quota_move.Note`) for the sprint replaces `now_text` with its text and makes
+null. A `moves` note (`MoveNote`) for the sprint replaces `now_text` with its text and makes
 `move` (always present) true when it offers a move: the sprint's manager is out of quota and not moving.
 `permission_text` (always present) is the mode the manager's settings file was last written
 with and its reason (`SprintState.permission`, ADR-console-060), null when the sprint has none
@@ -816,7 +816,8 @@ from types import MappingProxyType
 
 from agent_tools.console import (
     card_entries, contract_draft, engine_runs as engine_runs_module, inbox, project_question,
-    question_records, quota_move, spend as spend_module)
+    question_records, spend as spend_module)
+from agent_tools.console.capacity import MoveNote
 from agent_tools.console.activation import Activation
 from agent_tools.console.activation_run import LastRun
 from agent_tools.console.capacity import EMPTY
@@ -1868,7 +1869,7 @@ def _sprint_entry(state: SprintState, now_ms: int | None, managers: bool, sessio
                   movement: ProjectMovement | None = None, wait_lines: Sequence[Mapping] = (),
                   waits_of: Callable[[DeliveryState], WaitSignals | None] = lambda run: None, prompted: bool = False,
                   engine: engine_runs_module.SprintEngine = engine_runs_module.NO_ENGINE,
-                  move: quota_move.Note | None = None) -> dict:
+                  move: MoveNote | None = None) -> dict:
     stated_ms = _millis(state.stated_at)
     elapsed = 0 if now_ms is None else now_ms - stated_ms
     report = state.report
@@ -1991,7 +1992,7 @@ def _project_entry(state: ProjectState, sessions: Sequence[SessionState],
                    waits: Sequence[Mapping] = (), read: ReadState | None = None,
                    questions: Mapping | None = None, prompted: Collection[str] = (),
                    engine_runs: Sequence[Mapping] = (), engine_states: Sequence[engine_runs_module.RunState] = (),
-                   moves: Mapping[str, quota_move.Note] | None = None) -> dict:
+                   moves: Mapping[str, MoveNote] | None = None) -> dict:
     manager_ids: dict[str, set[str]] = {}
     for sprint in sprints:
         ids = {s.session_id for s in (sprint_sessions or {}).get(sprint.sprint_id, ())}
@@ -2378,7 +2379,7 @@ def derive_view(
     owner_notices: Mapping[str, tuple[Notice, ...]] | None = None,
     spend: Mapping | None = None,
     project_questions: Mapping[str, Sequence[project_question.AskedQuestion]] | None = None,
-    sharing: Mapping | None = None, moves: Mapping[str, quota_move.Note] | None = None,
+    sharing: Mapping | None = None, moves: Mapping[str, MoveNote] | None = None,
     engine_runs: Iterable[engine_runs_module.RunState] | None = None, engine_lines: bool = True,
 ) -> dict:
     states = list(states)

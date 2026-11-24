@@ -10,7 +10,7 @@ import threading
 from datetime import datetime, timezone
 from unittest import mock
 
-from agent_tools.console import (capacity, manager, nudge, permission, quota_move, revive, service,
+from agent_tools.console import (capacity, manager, nudge, permission, revive, service,
                                  sessions, sprints)
 
 from . import console_test_support as support
@@ -571,8 +571,8 @@ class ReviveServiceTest(ReviveCase):
         self.reserve(svc, 120)
         self.listed_now(sid)
         self.queued.run_next()
-        held = {"sprint_id": sid, "goal": GOAL, "reason": quota_move.UNMATCHED_REASON}
-        line = f"console: takeover_held {sid} {quota_move.UNMATCHED_REASON}"
+        held = {"sprint_id": sid, "goal": GOAL, "reason": capacity.UNMATCHED_REASON}
+        line = f"console: takeover_held {sid} {capacity.UNMATCHED_REASON}"
         self.assertEqual(self.rows("manager.held"), [held])
         self.assertEqual(self.stderr.getvalue().count(line), 1)
         self.assertEqual(len(self.launches.calls), 1)
