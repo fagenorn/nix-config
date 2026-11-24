@@ -24,6 +24,8 @@ Rules, each with the program line it ports:
   least `LAND_WAIT_CALL_S` each) plus one more call fit `LAND_WAIT_MAX_S`, and in the last run the answers that
   ended neither first in line nor in a better place than the one before number `LAND_WAIT_RETRIES` or fewer.
 - `locked_shas(run_dir)`: the `lock.lock_sha` of every result graded in `HOLDS`: the shas this landing held.
+- `held_shas(holder)`: the union of `locked_shas` over every attempt run of the delivery: a continue after a stop
+  that left the lock makes a new attempt that took none, and a release must still free the earlier one's.
 - Per-delivery counts (`entered` over `attempts`): one red-check fix and one sync-review fix a delivery.
 """
 
@@ -228,6 +230,11 @@ def locked_shas(run_dir: Path) -> set[str]:
             if isinstance(sha, str):
                 shas.add(sha)
     return shas
+
+
+def held_shas(holder: str, root: Path | None = None) -> set[str]:
+    """The union of `locked_shas` over every attempt run of the delivery (a release frees any of them)."""
+    return {sha for run in attempts(holder, root) for sha in locked_shas(run)}
 
 
 def latest_result(run_dir: Path, steps: Sequence[str]) -> dict | None:

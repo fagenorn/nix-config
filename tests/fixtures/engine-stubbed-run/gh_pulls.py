@@ -8,7 +8,7 @@ a landing makes from the state file, against the bare `origin` the state names, 
   pr list --repo S --head H --state open|merged|all --json <fields>
   pr view N --repo S --json <fields>
   pr merge N --repo S --merge --match-head-commit SHA --delete-branch
-  api repos/S/commits/<sha>/pulls?per_page=100
+  api repos/S/commits/<sha>/pulls?per_page=100   the pull requests headed at <sha>, and open ones containing it
   api --paginate --slurp repos/S/pulls/N/commits?per_page=100   one page: each commit's `commit.message`
   api repos/S/pulls?state=<open|closed|all>&base=...&head=...
   api repos/S/branches/<b>/protection      GitHub's plan-gated 403, as `gh` reports it
@@ -130,6 +130,19 @@ def behind(state: dict, pull: dict, head: str) -> bool:
     done = subprocess.run([state["git"], "-C", state["bare"], "merge-base", "--is-ancestor",
                            "refs/heads/main", head], capture_output=True, text=True)
     return done.returncode == 1
+
+
+def contains(state: dict, pull: dict, sha: str) -> bool:
+    """True when `sha` is the pull request's head or, for an open one, an ancestor of it (GitHub lists a
+    commit's pull requests by the commits they contain)."""
+    head = head_of(state, pull)
+    if head == sha:
+        return True
+    if pull["state"] != "OPEN" or "fixedHead" in pull:
+        return False
+    done = subprocess.run([state["git"], "-C", state["bare"], "merge-base", "--is-ancestor", sha, head],
+                          capture_output=True, text=True)
+    return done.returncode == 0
 
 
 def rollup_at(state: dict, head: str, fields: str) -> list:
@@ -310,7 +323,7 @@ def api(state: dict, path: str) -> object:
         return None
     rest_of = parts[3:]
     if len(rest_of) == 3 and rest_of[0] == "commits" and rest_of[2] == "pulls":
-        return [rest(state, p) for p in state["pulls"] if head_of(state, p) == rest_of[1]]
+        return [rest(state, p) for p in state["pulls"] if contains(state, p, rest_of[1])]
     if len(rest_of) == 3 and rest_of[0] == "pulls" and rest_of[2] == "commits":
         pull = find(state, rest_of[1])
         return [[{"sha": c["oid"], "commit": {"message": "\n\n".join(

@@ -184,6 +184,12 @@ class LedgerTest(LedgerMaker, unittest.TestCase):
         self.visit(run, "lock", 2, "contended", {"verdict": "contended", "lock": {"lock_sha": "3" * 40}})
         self.assertEqual(land_tally.locked_shas(run), {"1" * 40, "2" * 40})
 
+    def test_the_held_shas_span_every_attempt_of_the_delivery(self):
+        root, _, a1, _, a2 = self.delivery()
+        self.visit(a1, "lock", 1, "held", {"verdict": "held", "lock": {"lock_sha": "1" * 40}})
+        self.visit(a2, "recheck", 1, "retaken", {"verdict": "retaken", "lock": {"lock_sha": "2" * 40}})
+        self.assertEqual(land_tally.held_shas("host-a/" + root.name), {"1" * 40, "2" * 40})
+
     def test_the_latest_result_is_the_stored_result_of_the_latest_graded_visit_among_the_steps(self):
         run = self.run_of("land-attempt")
         self.assertIsNone(land_tally.latest_result(run, land_tally.CHECK_STEPS))

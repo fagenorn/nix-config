@@ -114,7 +114,6 @@
       "lock": ["held", "contended", "no-pull", "error"],
       "checks": ["green", "red", "pending", "moved", "error"],
       "held": ["held", "retaken", "contended", "no-pull", "error"],
-      "unlock": ["released", "unreleased"],
       "pending": ["wait", "spent", "error"],
       "red": ["stale", "presync", "sync", "fix", "checks", "error"],
       "lock-budget": ["again", "spent", "error"],

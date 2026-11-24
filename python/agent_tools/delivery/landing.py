@@ -34,9 +34,7 @@ state is `MERGED`; `merge_commit` is the merge commit's sha) or `open` (it is no
 `no-pull` (no open pull request into `<i>` is headed at `<sha>`, so no lock was taken) or `error`.
 The lock's own answer is the `lock` member. `held` with the same flags reads the lock once and
 never waits: `held` (`already_held` or `moved`), `retaken` (`acquired`: the lock was lost and taken
-again, which is never `held`), `contended`, `no-pull` or `error`. `unlock` with the same flags
-releases it: `released` (the lock is free or another pull request's) or `unreleased` (any failure,
-`detail`; the lock may still be at `<sha>`); it never answers `error`.
+again, which is never `held`), `contended`, `no-pull` or `error`. A lock is freed only by `free` and `release`.
 
 `checks --repo-root <path> --repo <owner/name> --pr <n> --head <sha>` reads the pull request's check
 rollup every `CHECK_POLL_SECONDS` for at most `CHECK_BOUND_SECONDS`: `green`, `red` (`failing`, the
@@ -59,11 +57,11 @@ review fix was already entered in any attempt of the delivery, else `fix`. Each 
 `no_attempt`, `ledger_unreadable`) when the ledger cannot be counted.
 
 `free --repo <owner/name> --integration-branch <i> --holder <h>` frees the land lock of `<i>` when it is at a sha
-the current attempt's lock steps held (`land_tally.locked_shas`): `released` (freed, free already, at another sha,
-or the delivery has no attempt) or `unreleased` (any failure, `detail`); it never answers `error`. `release
---repo-root <path> --issue <n> --repo <owner/name> --holder <h> --items <json>` frees it the same way after a call
-of the attempt (the attempt is the run `items[0].run` names, else the current one) and answers `items[0].end` when
-it is one of `RELEASE_ENDS` (else `land`), or `unreleased`; it never answers `error` either.
+a lock step of any attempt of the delivery held (`land_tally.held_shas`, so a continue's new attempt still frees
+what an earlier one took): `released` (freed, free already, at another sha, or the delivery has no attempt) or
+`unreleased` (any failure, `detail`); it never answers `error`. `release --repo-root <path> --issue <n> --repo
+<owner/name> --holder <h> --items <json>` frees it the same way after a call of the attempt and answers
+`items[0].end` when it is one of `RELEASE_ENDS` (else `land`), or `unreleased`; it never answers `error` either.
 
 `head --worktree-path <w>` prints `clean` or `dirty` (`git status --porcelain` prints anything) with `head`, the
 worktree's `HEAD`. `probe --worktree-path <w> --integration-branch <i>` fetches `origin`, then runs `git merge-tree
@@ -108,7 +106,7 @@ from collections.abc import Iterator, Mapping
 from pathlib import Path
 
 from agent_tools.claims import forge_land_lock
-from agent_tools.delivery import engine_ledger, issue_branch, land_tally
+from agent_tools.delivery import issue_branch, land_tally
 from agent_tools.project_contract import resolve_project
 from agent_tools.system import forge_api
 from agent_tools.verification import verified_tree
@@ -343,16 +341,6 @@ def held(args: argparse.Namespace) -> dict:
     return _lock_reading(status, answer, {"acquired": "retaken", "already_held": "held", "moved": "held"})
 
 
-def unlock(args: argparse.Namespace) -> dict:
-    try:
-        status, answer = _land_lock("release", args, wait=False)
-    except Failure as failure:
-        return {"verdict": "unreleased", "detail": f"{failure.code}: {failure.detail}"}
-    if (status, answer["verdict"]) in ((0, "released"), (3, "not_held")):
-        return {"verdict": "released", "lock": answer}
-    return {"verdict": "unreleased", "detail": f"the land lock answered exit {status}: {answer['verdict']}"}
-
-
 def _tally(read, *args):
     """`read(*args)` of `land_tally`, a `TallyError` made a `Failure`."""
     try:
@@ -423,10 +411,20 @@ def sync_fixes(args: argparse.Namespace) -> dict:
     return {"verdict": "spent" if spent else "fix"}
 
 
-def _free(repo: str, integration_branch: str, run_dir: Path | None) -> dict:
-    """Free the land lock when it is at a sha the run's lock steps held; `run_dir` None frees nothing."""
+def _held_shas(holder: str) -> set[str]:
+    """The shas the delivery's lock steps held; none when the holder has no run."""
     try:
-        shas = land_tally.locked_shas(run_dir) if run_dir is not None else set()
+        return land_tally.held_shas(holder)
+    except land_tally.TallyError as error:
+        if error.code == "no_run":
+            return set()
+        raise
+
+
+def _free(repo: str, integration_branch: str, holder: str) -> dict:
+    """Free the land lock when it is at a sha a lock step of any attempt of the delivery held."""
+    try:
+        shas = _held_shas(holder)
         status, reading = _lock_call("status", repo, integration_branch, None)
         sha = reading.get("lock_sha")
         if status != 0 or reading["verdict"] == "free" or sha not in shas:
@@ -439,38 +437,20 @@ def _free(repo: str, integration_branch: str, run_dir: Path | None) -> dict:
     return {"verdict": "unreleased", "detail": f"the land lock answered exit {status}: {answer['verdict']}"}
 
 
-def _current_or_none(holder: str) -> Path | None:
-    try:
-        return land_tally.current(holder)
-    except land_tally.TallyError as error:
-        if error.code in ("no_run", "no_attempt"):
-            return None
-        raise
-
-
 def free(args: argparse.Namespace) -> dict:
-    try:
-        run_dir = _current_or_none(args.holder)
-    except land_tally.TallyError as error:
-        return {"verdict": "unreleased", "detail": f"{error.code}: {error.detail}"}
-    return _free(args.repo, args.integration_branch, run_dir)
+    return _free(args.repo, args.integration_branch, args.holder)
 
 
 def release(args: argparse.Namespace) -> dict:
     try:
         items = json.loads(args.items)
         first = items[0] if isinstance(items, list) and items and isinstance(items[0], dict) else {}
-        named = first.get("run")
-        run_dir = engine_ledger.runs_root() / named if isinstance(named, str) and named \
-            and Path(named).name == named else None
-        if run_dir is None or not run_dir.is_dir():
-            run_dir = _current_or_none(args.holder)
         branch = placement(args.repo_root, args.issue)["integration_branch"]
-    except (Failure, land_tally.TallyError) as failure:
+    except Failure as failure:
         return {"verdict": "unreleased", "detail": f"{failure.code}: {failure.detail}"}
     except ValueError as error:
         return {"verdict": "unreleased", "detail": f"the items are not JSON: {error}"}
-    freed = _free(args.repo, branch, run_dir)
+    freed = _free(args.repo, branch, args.holder)
     if freed["verdict"] != "released":
         return freed
     end = first.get("end")
@@ -651,7 +631,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_argument("--repo", required=True)
     sub.add_argument("--pr", required=True, type=number)
     sub.add_argument("--head", required=True)
-    for name in ("lock", "held", "unlock"):
+    for name in ("lock", "held"):
         sub = commands.add_parser(name)
         sub.add_argument("--repo", required=True)
         sub.add_argument("--integration-branch", required=True)
@@ -698,7 +678,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 COMMANDS = {"prepare": prepare, "pushed": pushed, "pull": pull, "merged": merged, "lock": lock,
-            "checks": checks, "held": held, "unlock": unlock, "pending": pending, "red": red,
+            "checks": checks, "held": held, "pending": pending, "red": red,
             "lock-budget": lock_budget, "sync-fixes": sync_fixes, "free": free, "release": release,
             "head": head, "probe": probe, "merge-of": merge_of, "fixed": fixed, "merge-state": merge_state,
             "pr-head": pr_head}

@@ -129,7 +129,7 @@ def register_lock(forge: ForgeWorld, lock: str | None, pulls: dict[str, int] | N
 
 
 class LockTest(unittest.TestCase):
-    """`lock`, `held` and `unlock` against the fake forge's ref store, answered in this process."""
+    """`lock` and `held` against the fake forge's ref store, answered in this process."""
 
     def world(self, lock: str | None = None, *, pulls: dict[str, int] | None = None, **store) -> ForgeWorld:
         """The fake forge: the land lock of `main` at `lock` and the open pull request of each head sha."""
@@ -141,28 +141,19 @@ class LockTest(unittest.TestCase):
     def call(self, verb: str, sha: str = SHA) -> tuple[int, dict]:
         return lock_main(self, verb, "--repo", SLUG, "--integration-branch", "main", "--head", sha)
 
-    def test_lock_held_and_unlock_take_and_release_the_land_lock_at_the_head(self):
+    def test_lock_and_held_take_and_keep_the_land_lock_at_the_head(self):
         forge = self.world(pulls={SHA: 7})
         status, taken = self.call("lock")
         self.assertEqual((status, taken["verdict"], taken["lock"]["verdict"]), (0, "held", "acquired"), taken)
         self.assertEqual(forge.refs()[LOCK_REF], SHA)
         status, kept = self.call("held")
         self.assertEqual((status, kept["verdict"]), (0, "held"), kept)
-        status, freed = self.call("unlock")
-        self.assertEqual((status, freed["verdict"]), (0, "released"), freed)
-        self.assertNotIn(LOCK_REF, forge.refs())
+        self.assertEqual(forge.refs()[LOCK_REF], SHA)
 
     def test_held_answers_retaken_when_the_lock_was_lost_and_taken_again(self):
         forge = self.world(pulls={SHA: 7})
         status, answer = self.call("held")
         self.assertEqual((status, answer["verdict"]), (0, "retaken"), answer)
-        self.assertEqual(forge.refs()[LOCK_REF], SHA)
-
-    def test_unlock_reports_an_unreleased_lock_when_the_release_fails(self):
-        forge = self.world(SHA, pulls={SHA: 7}, refuse_to=["0" * 40])
-        status, answer = self.call("unlock")
-        self.assertEqual((status, answer["verdict"]), (0, "unreleased"), answer)
-        self.assertTrue(answer["detail"])
         self.assertEqual(forge.refs()[LOCK_REF], SHA)
 
     def test_held_and_lock_answer_no_pull_when_no_open_pull_request_is_headed_at_the_sha(self):
@@ -175,13 +166,6 @@ class LockTest(unittest.TestCase):
             status, answer = self.call("lock")
         self.assertEqual((status, answer["verdict"]), (0, "no-pull"), answer)
         self.assertEqual(forge.refs(), {})
-
-    def test_unlock_of_a_lock_another_pull_request_holds_answers_released_and_leaves_its_ref(self):
-        forge = self.world(OTHER, pulls={SHA: 7, OTHER: 8})
-        status, answer = self.call("unlock")
-        self.assertEqual((status, answer["verdict"]), (0, "released"), answer)
-        self.assertEqual(answer["lock"]["verdict"], "not_held")
-        self.assertEqual(forge.refs()[LOCK_REF], OTHER)
 
     def test_lock_held_by_another_open_pull_request_is_contended_past_the_wait(self):
         forge = self.world(OTHER, pulls={SHA: 7, OTHER: 8})
@@ -537,6 +521,18 @@ class ReleaseTest(LedgerMaker, unittest.TestCase):
         status, answer = land.call("release", "--repo-root", str(land.fixture.root), "--issue", str(ISSUE),
                                    "--repo", SLUG, "--holder", holder, "--items", items)
         self.assertEqual((status, answer["verdict"]), (0, "checks"), answer)
+        self.assertNotIn(LOCK_REF, land.forge.refs())
+
+    def test_release_frees_a_lock_an_earlier_attempt_of_the_delivery_held(self):
+        land = LandingWorld(self)
+        self.use_home(Path(land.env["HOME"]))
+        register_lock(land.forge, SHA, {SHA: 7, OTHER: 8})
+        root, _, first, _, second = self.delivery()
+        self.visit(first, "lock", 1, "held", {"verdict": "held", "lock": {"lock_sha": SHA}})
+        items = json.dumps([{"end": "unreleased-lock", "item": None, "run": second.name}])
+        status, answer = land.call("release", "--repo-root", str(land.fixture.root), "--issue", str(ISSUE),
+                                   "--repo", SLUG, "--holder", f"host-a/{root.name}", "--items", items)
+        self.assertEqual((status, answer["verdict"]), (0, "unreleased-lock"), answer)
         self.assertNotIn(LOCK_REF, land.forge.refs())
 
     def test_a_failed_release_answers_unreleased(self):
