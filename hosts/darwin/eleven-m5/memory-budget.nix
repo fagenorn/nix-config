@@ -45,8 +45,9 @@ rec {
   runBoundGiB = 24;
   # What the model and the floor leave for Colima, verification, CI and macOS.
   othersBudgetGiB = totalGiB - omlxCeilingGiB - omlxOverCeilingGiB - floorGiB;
-  # The oMLX daemon's jetsam priority; launchd gives every other daemon 40.
-  omlxJetsamPriority = 100;
+  # The oMLX daemon's jetsam priority, above the kernel's default band (180, JETSAM_PRIORITY_DEFAULT), so
+  # jetsam ends the agents' default-band processes first; memory-floor refuses values outside 181-210.
+  omlxJetsamPriority = 190;
   # How often the fseventsd trim daemon restarts it.
   fseventsdRestartMinutes = 60;
 }

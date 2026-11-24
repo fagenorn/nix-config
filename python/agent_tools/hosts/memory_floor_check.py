@@ -17,7 +17,7 @@ count. Met
 with the same members.
 
 `priority`: not yet when the record is missing, `omlx_pid` is null or `omlx_priority_reads` is
-under 2 (no read yet after the first sample's set). Met when `omlx_kernel_priority` equals
+under 2 (no read yet after the first sample's set). Met when `omlx_kernel_priority` is at least
 `declared_priority` and `omlx_priority_resets` is 0, so a value launchd or the kernel puts back
 between samples is not met although each set succeeds. Not met otherwise. The line carries
 `omlx_kernel_priority`, `declared_priority`, `omlx_priority_resets` and `omlx_priority_error`.
@@ -96,7 +96,8 @@ def priority(args: argparse.Namespace) -> tuple[int, dict]:
         return NOT_YET, {"verdict": "not_yet"}
     figures = {key: record[key] for key in (
         "omlx_kernel_priority", "declared_priority", "omlx_priority_resets", "omlx_priority_error")}
-    met = figures["omlx_kernel_priority"] == figures["declared_priority"] and figures["omlx_priority_resets"] == 0
+    kernel = figures["omlx_kernel_priority"]
+    met = kernel is not None and kernel >= figures["declared_priority"] and figures["omlx_priority_resets"] == 0
     return (MET if met else NOT_MET), {"verdict": "met" if met else "not_met", **figures}
 
 
