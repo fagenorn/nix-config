@@ -107,7 +107,7 @@ a duplicate, so one account's allowance is counted once.
 holds taken under its current account, else None), and its `account` is the proxy account id the
 service compares.
 
-Each entry also carries `"owner"` (#1343, ADR-console-087 D4), always present, after
+Each entry also carries `"owner"` (#1343, ADR-console-087), always present, after
 `"duplicate_of"`: the login the optional `owners` mapping (profile to the colleague who added it)
 gives the profile, else None. The owner's page shows it beside the row; it changes no aggregate and
 no other member, and without `owners` every entry's `owner` is None.

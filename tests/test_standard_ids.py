@@ -279,7 +279,7 @@ class LiveStandardsTest(unittest.TestCase):
             self.assertEqual(numbered_items(text), [], path.name)
             found |= set(sections(text))
             bodies |= sections(text)
-        wanted = {f"P{n}" for n in range(1, 14)}
+        wanted = {f"P{n}" for n in range(1, 14)} - {"P7"}  # P7 is retired and its id never reused
         self.assertLessEqual(wanted, found)
         for name in sorted(wanted):
             with self.subTest(rule=name):

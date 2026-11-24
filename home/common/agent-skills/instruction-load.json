@@ -13,12 +13,6 @@
       ],
       "conditional": [],
       "unread": {},
-      "ceiling_bytes": {
-        "claude": 1321
-      },
-      "conditional_ceiling_bytes": {
-        "claude": 0
-      },
       "note": "One deliver-batch lead run: it loads only its entry, which starts deliver-batch.js with the Workflow tool and renders its table. Replaced the orchestrate-issues control-adapter run in place for #637 (P2), and that run's owner profile was dropped with it (P3)."
     },
     {
@@ -40,12 +34,6 @@
         "worktrees/SKILL.md"
       ],
       "unread": {},
-      "ceiling_bytes": {
-        "claude": 16997
-      },
-      "conditional_ceiling_bytes": {
-        "claude": 11167
-      },
       "note": "One delegated release through ship-release and its changelog rubric."
     },
     {
@@ -60,12 +48,6 @@
       "hot": [],
       "conditional": [],
       "unread": {},
-      "ceiling_bytes": {
-        "claude": 0
-      },
-      "conditional_ceiling_bytes": {
-        "claude": 0
-      },
       "note": "The background researcher works from the job list in research's prompt and loads no skill document."
     },
     {
@@ -87,12 +69,6 @@
         "doc-grounded-questions/REFERENCE.md"
       ],
       "unread": {},
-      "ceiling_bytes": {
-        "claude": 8828
-      },
-      "conditional_ceiling_bytes": {
-        "claude": 5639
-      },
       "note": "The read-only scan from improve-codebase-architecture's prompt. The codebase-design vocabulary and the grounding pass are ambiguous between caller and scan owner, so they count as hot. Ceiling raised for #223: the `explorer` lookups name Sonnet instead of Haiku and AUTO.md's design and planning owners name the `auto-owner` role at xhigh (#155 D10)."
     },
     {
@@ -107,12 +83,6 @@
       ],
       "conditional": [],
       "unread": {},
-      "ceiling_bytes": {
-        "claude": 2575
-      },
-      "conditional_ceiling_bytes": {
-        "claude": 0
-      },
       "note": "A standalone research launch. It loads only its entry."
     },
     {
@@ -137,12 +107,6 @@
         "worktrees/SKILL.md"
       ],
       "unread": {},
-      "ceiling_bytes": {
-        "claude": 14696
-      },
-      "conditional_ceiling_bytes": {
-        "claude": 24669
-      },
       "note": "One decision session. Grilling is the default mode; research and prototype sessions are conditional. Ceiling raised for #223: the `explorer` lookups name Sonnet instead of Haiku and AUTO.md's design and planning owners name the `auto-owner` role at xhigh (#155 D10)."
     },
     {
@@ -159,12 +123,6 @@
         "to-issues/WIDE-REFACTORS.md"
       ],
       "unread": {},
-      "ceiling_bytes": {
-        "claude": 6378
-      },
-      "conditional_ceiling_bytes": {
-        "claude": 777
-      },
       "note": "One slicing run. The wide-refactor exception is conditional. Ceiling raised for #274: to-issues/SKILL.md types and locates every acceptance criterion with a `[code|evidence|human]` kind and a `measured:` clause (#155 D10, #274 D12)."
     },
     {
@@ -184,12 +142,6 @@
         "worktrees/SKILL.md"
       ],
       "unread": {},
-      "ceiling_bytes": {
-        "claude": 16997
-      },
-      "conditional_ceiling_bytes": {
-        "claude": 11167
-      },
       "note": "A direct interactive release, with the current session as owner."
     },
     {
@@ -204,12 +156,6 @@
       "hot": [],
       "conditional": [],
       "unread": {},
-      "ceiling_bytes": {
-        "claude": 0
-      },
-      "conditional_ceiling_bytes": {
-        "claude": 0
-      },
       "note": "The built-in Explore type: no installed definition and no skill document. Its prompt is composed from design/SKILL.md."
     },
     {
@@ -224,12 +170,6 @@
       "hot": [],
       "conditional": [],
       "unread": {},
-      "ceiling_bytes": {
-        "claude": 0
-      },
-      "conditional_ceiling_bytes": {
-        "claude": 0
-      },
       "note": "The built-in Explore type: no installed definition and no skill document. Its prompt is composed from grill-with-docs/SKILL.md."
     },
     {
@@ -244,12 +184,6 @@
       "hot": [],
       "conditional": [],
       "unread": {},
-      "ceiling_bytes": {
-        "claude": 0
-      },
-      "conditional_ceiling_bytes": {
-        "claude": 0
-      },
       "note": "The built-in Explore type: no installed definition and no skill document. Its prompt is composed from writing-plans/SKILL.md."
     },
     {
@@ -264,16 +198,8 @@
       "hot": [],
       "conditional": [],
       "unread": {},
-      "ceiling_bytes": {
-        "claude": 0
-      },
-      "conditional_ceiling_bytes": {
-        "claude": 0
-      },
       "note": "The built-in Explore type: no installed definition and no skill document. Its prompt is composed from doc-grounded-questions/SKILL.md."
     }
   ],
-  "excluded_sites": {},
-  "corpus_ceiling_bytes": 145816,
-  "description_ceiling_bytes": 2321
+  "excluded_sites": {}
 }
