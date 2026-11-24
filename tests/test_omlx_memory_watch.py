@@ -19,6 +19,7 @@ import unittest
 from pathlib import Path
 
 from agent_tools.hosts import omlx_memory_watch
+from agent_tools.hosts.omlx_memory_watch import kill_line
 from tests.test_host_alerts import PROXY_VARIABLES, SETTINGS, Bot
 
 TIER = "fast"
@@ -156,7 +157,8 @@ class WatchCase(unittest.TestCase):
             "--footprint", str(self.d / "footprint"),
             "--health-url", (self.d / "health.json").as_uri(),
             "--alert-settings", str(self.settings), "--alert-log", str(self.alert_log),
-            "--telegram-api", self.bot.api, "--now", now, *extra,
+            "--telegram-api", self.bot.api, "--floor-record", str(self.d / "floor.json"),
+            "--now", now, *extra,
         ]
         return subprocess.run(argv, capture_output=True, text=True, env=env or self.env, timeout=60)
 
@@ -165,6 +167,20 @@ class WatchCase(unittest.TestCase):
 
     def log_json(self, name):
         return [json.loads(line) for line in (self.d / name).read_text().splitlines()]
+
+
+SEE = "See hosts/darwin/eleven-m5/README.md, Memory budget."
+
+
+def kill(seq, **kw):
+    entry = {
+        "seq": seq, "at": "2026-11-24T12:33:05+00:00", "reason": "floor", "owner": "anis",
+        "root_pid": 300, "root_command": "node vitest run", "processes": 46, "tree_bytes": 146 * GIB,
+        "available_before_bytes": int(0.2 * GIB), "available_after_bytes": int(140.3 * GIB),
+        "signals": "term+kill",
+    }
+    entry.update(kw)
+    return entry
 
 
 class SampleTest(WatchCase):
@@ -407,6 +423,94 @@ class AlertTest(WatchCase):
         self.assertNotIn(b"SECRET-TOKEN", self.alert_log.read_bytes())
         if self.peaks_file.exists():
             self.assertNotIn(b"SECRET-TOKEN", self.peaks_file.read_bytes())
+
+
+class FloorRecordTest(WatchCase):
+    def floor(self, **kw):
+        record = {
+            "kills": 0, "recent": [], "floor_bytes": 16 * GIB, "run_bound_bytes": 24 * GIB,
+            "omlx_pid": 73552, "omlx_kernel_priority": 100, "omlx_priority_resets": 0,
+            "declared_priority": 100, "omlx_priority_error": None,
+        }
+        record.update(kw)
+        (self.d / "floor.json").write_text(json.dumps(record))
+
+    def texts(self):
+        return [request["body"]["text"] for request in self.bot.requests]
+
+    def test_each_new_kill_in_the_floor_record_sends_one_alert(self):
+        self.put_state(state(floor_kills_seen=1))
+        self.floor(kills=2, recent=[kill(1, root_pid=299), kill(2)])
+        self.health()
+        self.settings_on()
+        first = self.sample()
+        second = self.sample()
+        self.assertEqual((first.returncode, second.returncode), (0, 0), first.stderr + second.stderr)
+        self.assertEqual(self.texts(), [
+            "eleven-m5: the memory floor ended anis's workload node vitest run (46 processes, 146.0 GiB, "
+            "under the 16 GiB floor). Available 0.2 GiB before, 140.3 GiB after. " + SEE])
+        self.assertEqual(first.stdout, (
+            "2026-11-24T12:33:05+00:00 memory_kill reason=floor owner=anis root_pid=300"
+            ' root="node vitest run" processes=46 tree_gib=146.0 available_before_gib=0.2'
+            " available_after_gib=140.3 signals=term+kill\n"))
+        self.assertEqual(first.stdout, kill_line(kill(2)))
+        self.assertEqual(second.stdout, "")
+        saved = self.read_state()
+        self.assertEqual((saved["floor_kills_seen"], saved["floor_log"]), (2, []))
+
+    def test_a_long_workload_command_is_cut_in_the_alert_as_in_the_log(self):
+        self.put_state(state(floor_kills_seen=1))
+        self.floor(kills=2, recent=[kill(2, root_command="x" * 5000)])
+        self.health()
+        self.settings_on()
+        done = self.sample()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(len(self.texts()), 1)
+        self.assertLess(len(self.texts()[0]), 4096)
+        self.assertIn("workload " + "x" * 200 + " (46 processes", self.texts()[0])
+
+    def test_the_first_sample_only_records_the_kill_count(self):
+        self.floor(kills=5, recent=[kill(4, owner="jarbird"), kill(5, owner="jarbird")])
+        self.health()
+        self.settings_on()
+        done = self.sample()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual((self.bot.requests, done.stdout), ([], ""))
+        self.assertEqual(self.read_state()["floor_kills_seen"], 5)
+
+    def test_a_run_bound_kill_names_the_bound(self):
+        self.put_state(state(floor_kills_seen=0))
+        self.floor(kills=1, recent=[kill(1, reason="run_bound", owner="_github-runner", processes=9,
+                                          tree_bytes=31 * GIB, root_command="cargo test")])
+        self.settings_on()
+        self.assertEqual(self.sample().returncode, 0)
+        self.assertEqual(self.texts(), [
+            "eleven-m5: the memory floor ended _github-runner's workload cargo test (9 processes, "
+            "31.0 GiB, over the 24 GiB run bound). Available 0.2 GiB before, 140.3 GiB after. " + SEE])
+
+    def test_the_kernel_priority_replaces_launchctls_only_for_the_same_pid_and_no_reset(self):
+        self.settings_on()
+        for pid, resets, expected in ((73552, 0, 100), (999, 0, 40), (73552, 3, 40)):
+            with self.subTest(pid=pid, resets=resets):
+                self.put_state(state(floor_kills_seen=0))
+                self.floor(omlx_pid=pid, omlx_priority_resets=resets, omlx_kernel_priority=100)
+                self.assertEqual(self.sample().returncode, 0)
+                self.assertEqual(self.read_state()["omlx_jetsam_priority"], expected)
+
+    def test_an_unset_priority_alerts_once_per_episode(self):
+        self.settings_on()
+        self.floor(omlx_priority_error="EPERM", omlx_kernel_priority=40)
+        for _ in range(2):
+            self.assertEqual(self.sample().returncode, 0)
+        self.assertEqual(self.texts(), [
+            "eleven-m5: oMLX's jetsam priority could not be set to 100 (EPERM); it is 40. " + SEE])
+        self.floor()
+        self.assertEqual(self.sample().returncode, 0)
+        self.assertFalse(self.read_state()["priority_unset_open"])
+        self.floor(omlx_priority_resets=2, omlx_kernel_priority=40)
+        self.assertEqual(self.sample().returncode, 0)
+        self.assertEqual(self.texts()[1:], [
+            "eleven-m5: oMLX's jetsam priority could not be set to 100 (put back 2 times); it is 40. " + SEE])
 
 
 class CommandTest(unittest.TestCase):

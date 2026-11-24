@@ -5,7 +5,6 @@ Reads the host through tests/host_readings.py, so it runs on any machine; new fi
 Run: just agent-workflow-tests
 """
 import json
-import re
 import unittest
 from pathlib import Path
 
@@ -22,7 +21,6 @@ ROOT = Path(__file__).resolve().parents[1]
 HOST = ROOT / "hosts" / "darwin" / "eleven-m5"
 DECLARATION = ROOT / "home" / "common" / "agent-skills" / "host-declarations" / "eleven-m5.json"
 GUIDE = HOST / "README.md"
-JETSAM = r"<key>JetsamProperties</key>\s*<dict>\s*<key>JetsamPriority</key>\s*<integer>(\d+)</integer>"
 
 
 class MemoryBudgetTest(unittest.TestCase):
@@ -38,13 +36,33 @@ class MemoryBudgetTest(unittest.TestCase):
         b = self.budget
         others = (
             b["colimaGiB"] + b["colimaOverheadGiB"] + b["verifySlots"] * b["verifyRunGiB"]
-            + b["ciRunners"] * b["ciJobGiB"] + b["macosGiB"]
+            + b["ciRunners"] * b["ciJobGiB"] + b["macosGiB"] + b["agentSessionsGiB"]
         )
         self.assertEqual(b["totalGiB"], 256)
         self.assertLessEqual(others, b["othersBudgetGiB"])
         self.assertLessEqual(
             b["omlxCeilingGiB"] + b["omlxOverCeilingGiB"] + b["othersBudgetGiB"] + b["floorGiB"], b["totalGiB"]
         )
+
+    def test_the_budget_counts_the_agent_sessions_and_declares_the_floor_numbers(self):
+        b = self.budget
+        allowances = (
+            b["colimaGiB"] + b["colimaOverheadGiB"] + b["verifySlots"] * b["verifyRunGiB"]
+            + b["ciRunners"] * b["ciJobGiB"] + b["macosGiB"] + b["agentSessionsGiB"]
+        )
+        self.assertLessEqual(allowances, b["othersBudgetGiB"])
+        for key, value in (
+            ("floorSamples", 3), ("floorGraceSeconds", 5), ("fastSampleSeconds", 2), ("slowSampleSeconds", 10),
+            ("floorMarginGiB", 16), ("floorFallGiB", 2), ("runBoundGiB", 24), ("agentSessionsGiB", 5),
+            ("verifyRunGiB", 4),
+        ):
+            with self.subTest(key=key):
+                self.assertEqual(b[key], value)
+        self.assertGreater(b["runBoundGiB"], b["verifyRunGiB"])
+        self.assertGreater(b["runBoundGiB"], b["ciJobGiB"])
+        self.assertLessEqual(b["runBoundGiB"], b["othersBudgetGiB"])
+        self.assertGreaterEqual(b["floorSamples"], 2)
+        self.assertLess(b["fastSampleSeconds"], b["slowSampleSeconds"])
 
     def test_the_others_budget_is_what_the_model_and_floor_leave(self):
         b = self.budget
@@ -86,12 +104,11 @@ class MemoryBudgetTest(unittest.TestCase):
             r"ciRunners = builtins\.length \(builtins\.attrNames config\.services\.github-runners\);",
         )
 
-    def test_omlx_carries_a_higher_jetsam_priority_than_the_other_daemons(self):
-        found = re.search(JETSAM, self.got["omlxPlist"])
-        self.assertIsNotNone(found)
-        self.assertEqual(found.group(1), str(self.budget["omlxJetsamPriority"]))
-        self.assertGreater(int(found.group(1)), 40)
+    def test_the_omlx_plist_drops_the_ignored_jetsam_key_and_the_floor_daemon_applies_it(self):
+        self.assertNotIn("JetsamProperties", self.got["omlxPlist"])
         self.assertEqual(self.got["jetsamElsewhere"], [])
+        self.assertGreater(self.budget["omlxJetsamPriority"], 40)
+        self.assertIn(f"--omlx-jetsam-priority {self.budget['omlxJetsamPriority']} ", self.got["floor"]["command"])
 
     def test_the_omlx_plist_keeps_its_launchd_job(self):
         plist = self.got["omlxPlist"]
@@ -159,6 +176,50 @@ class WatcherDeclarationTest(unittest.TestCase):
         self.assertIn(f"--min-restart-minutes {budget['fseventsdRestartMinutes']}", command)
 
 
+class FloorDaemonTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.got = host_readings.read("eleven-m5", "memory-budget")
+        cls.budget = cls.got["budget"]
+        cls.floor = cls.got["floor"]
+
+    def test_the_floor_daemon_runs_as_root_with_every_budgeted_number(self):
+        command, budget = self.floor["command"], self.budget
+        self.assertIsNone(self.floor["UserName"])
+        self.assertIs(self.floor["KeepAlive"], True)
+        self.assertIs(self.floor["RunAtLoad"], True)
+        self.assertEqual(self.floor["StandardOutPath"], "/var/log/memory-floor.log")
+        self.assertRegex(command, r"^/nix/store/[0-9a-z]{32}-agent-platform/bin/memory-floor enforce ")
+        for flag, key in (
+            ("floor-gib", "floorGiB"), ("floor-samples", "floorSamples"), ("grace-seconds", "floorGraceSeconds"),
+            ("margin-gib", "floorMarginGiB"), ("fall-gib", "floorFallGiB"), ("fast-seconds", "fastSampleSeconds"),
+            ("slow-seconds", "slowSampleSeconds"), ("run-bound-gib", "runBoundGiB"),
+            ("omlx-jetsam-priority", "omlxJetsamPriority"),
+        ):
+            with self.subTest(flag=flag):
+                self.assertIn(f"--{flag} {budget[key]} ", command)
+        self.assertIn(f"--agent-user {self.got['owner']} ", command)
+        for needle in ("--watch-log", ".omlx"):
+            with self.subTest(needle=needle):
+                self.assertNotIn(needle, command)
+        self.assertTrue(command.endswith("--record /var/db/memory-watch/floor.json"))
+
+    def test_the_floor_daemon_declares_the_agent_roots_and_every_runner_user(self):
+        command, owner = self.floor["command"], self.got["owner"]
+        for root in (
+            f"'/Users/{owner}/Projects/*/.worktrees/*'", "'/private/tmp/verify-pending-*'",
+            "'/private/var/folders/*/*/T/verify-pending-*'",
+        ):
+            with self.subTest(root=root):
+                self.assertIn(f"--agent-root {root} ", command)
+        users = {"_github-runner" if user is None else user for user in self.got["runnerUsers"]}
+        self.assertTrue(users)
+        for user in users:
+            with self.subTest(user=user):
+                self.assertEqual(command.count(f"--runner-user {user} "), 1)
+        self.assertEqual(command.count("--runner-user "), len(users))
+
+
 class GuideTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -218,9 +279,23 @@ class GuideTest(unittest.TestCase):
             with self.subTest(needle=needle):
                 self.assertIn(needle, self.section)
 
+    def test_the_guide_states_how_the_floor_ends_workloads_and_sets_the_priority(self):
+        floor = self.between(self.section, "### The memory floor", "\n### ")
+        self.assertTrue(floor, "the guide has no `### The memory floor` subsection")
+        for needle in (
+            "~/.omlx/logs/memory-watch.log", "/var/log/memory-floor.log", "/var/db/memory-watch/floor.json",
+            "memory_kill", "reason=", "owner=", "root_pid=", "tree_gib=", "available_before_gib=",
+            "available_after_gib=", "signals=", "launchd ignores", "without a restart",
+        ):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, floor)
+        for needle in ("memory_kill", "jetsam_priority_unset"):
+            with self.subTest(alert=needle):
+                self.assertIn(f"- `{needle}`:", self.alerts)
+
     def test_the_guide_lists_the_new_daemons_among_restarts(self):
         self.assertTrue(self.restarts)
-        for needle in ("omlx-memory-watch", "fseventsd-trim"):
+        for needle in ("omlx-memory-watch", "fseventsd-trim", "memory-floor"):
             with self.subTest(needle=needle):
                 self.assertIn(needle, self.restarts)
 

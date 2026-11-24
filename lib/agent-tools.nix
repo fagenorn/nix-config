@@ -86,6 +86,7 @@ let
     "lint-time" = "delivery.lint_time";
     "look-approval" = "delivery.look_approval";
     "look-lint" = "delivery.look_lint";
+    "memory-floor" = "hosts.memory_floor";
     "node-lint" = "delivery.node_lint";
     "omlx-memory-watch" = "hosts.omlx_memory_watch";
     "owner-actions" = "claims.owner_actions";
