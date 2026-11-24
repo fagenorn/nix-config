@@ -373,6 +373,7 @@ agent-workflow-tests *args:
     tests/test_pr_green.py \
     tests/test_console_page.py \
     tests/test_console_page_action.py \
+    tests/test_console_page_move.py \
     tests/test_console_long_permission_card.py \
     tests/test_console_controls.py \
     tests/test_console_goal_box.py \
@@ -414,6 +415,7 @@ agent-workflow-tests *args:
     tests/test_console_stops.py \
     tests/test_console_revive_service.py \
     tests/test_console_idle_service.py \
+    tests/test_console_quota_move.py \
     tests/test_console_nudge.py \
     tests/test_console_deliveries.py \
     tests/test_console_engine_runs.py \

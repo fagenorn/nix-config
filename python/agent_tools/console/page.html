@@ -1129,18 +1129,18 @@ function drawSprint(item, entry, sprint) {
   if (sprint.manager_text !== null && sprint.manager_text !== undefined) {
     item.appendChild(el("span", "manager", sprint.manager_text));
   }
-  if (typeof sprint.manager_until === "string") {
-    item.appendChild(timeEl("weekday", sprint.manager_until, "until"));
-  }
+  if (typeof sprint.manager_until === "string") item.appendChild(timeEl("weekday", sprint.manager_until, "until"));
   const retrying = retries.get(sprint.sprint_id);
-  if (sprint.retry === true && !guestDoor) {
-    const again = actionButton("retry btn-quiet", "Retry", () => retry(item, entry, sprint));
+  const [verb, label] = sprint.retry === true ? ["retry", "Retry"]
+    : sprint.move === true ? ["move", "Move to another account"] : [null, null];
+  if (verb !== null && !guestDoor) {
+    const again = actionButton(verb + " btn-quiet", label, () => retry(item, entry, sprint));
     if (retrying !== undefined && retrying.phase === "sending") again.setAttribute("disabled", "");
     markBusy(again, retrying !== undefined && retrying.phase === "sending");
     item.appendChild(again);
   }
-  if (sprint.retry === true && retrying !== undefined && retrying.phase === "failed") {
-    item.appendChild(el("span", "fail", "Could not retry: " + retrying.reason));
+  if (verb !== null && retrying !== undefined && retrying.phase === "failed") {
+    item.appendChild(el("span", "fail", "Could not " + verb + ": " + retrying.reason));
   }
   const stopButton = sprint.stoppable === true && !guestDoor ? stopControls(item, entry, sprint) : null;
   if (typeof sprint.stop_text === "string") {
@@ -5648,7 +5648,7 @@ function drawProjects(view) {
   const stoppable = new Set();
   for (const { sprint } of running) {
     live.add(sprint.sprint_id);
-    if (sprint.retry === true) retryable.add(sprint.sprint_id);
+    if (sprint.retry === true || sprint.move === true) retryable.add(sprint.sprint_id);
     if (sprint.stoppable === true) stoppable.add(sprint.sprint_id);
   }
   for (const sprint of ended) live.add(sprint.sprint_id);
