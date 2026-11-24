@@ -1,6 +1,6 @@
 """`verify-slot`: run one command while holding one of this host's verify slots (issue 1383).
 
-    verify-slot run [--wait-limit SECONDS] [--live] -- ARGV...
+    verify-slot run [--wait-limit SECONDS] [--live] [--report PATH] -- ARGV...
     verify-slot report [--hours N]
 
 A verify run is heavy, and several runs may start on one host at once. `run` admits at most
@@ -65,7 +65,10 @@ History. Every run that got past setup appends one line to `history.jsonl` in th
 (see `agent_tools.delivery.verify_history`), after it gave its slot and repository lock back:
 a run that took a slot, one that reached `--wait-limit` and one signalled while it waited. A run
 that held no slot records `held_seconds: null`. A setup or usage error records nothing. A failed
-append prints `HISTORY_FAILED_LINE` once and leaves the exit code alone.
+append prints `HISTORY_FAILED_LINE` once and leaves the exit code alone. `--report PATH` writes
+the run's history entry, the same JSON object as its `history.jsonl` line, to PATH. A caller reads
+it to learn the run's wait and hold, and a path that cannot be written is reported and changes
+nothing.
 
 Report. `verify-slot report [--hours N]` reads `history.jsonl` and prints one stdout line per
 repository whose runs started in the last N hours (`DEFAULT_REPORT_HOURS`, 24; a positive
@@ -114,6 +117,7 @@ from __future__ import annotations
 import argparse
 import fcntl
 import hashlib
+import json
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -132,6 +136,7 @@ WAITED_LINE = "verify-slot: waited {seconds:.1f}s for a verify slot"
 DEFERRING_LINE = "verify-slot: a live-fault verify run is waiting for a slot; this run waits behind it"
 SAME_REPOSITORY_LINE = "verify-slot: a verify run of this repository holds a verify slot; waiting"
 HISTORY_FAILED_LINE = "verify-slot: cannot record this run in {path}: {error}"
+REPORT_FAILED_LINE = "verify-slot: cannot write the report {path}: {error}"
 REPORT_SKIPPED_LINE = "verify-slot: skipped {count} unreadable lines of {path}"
 GROUP_LOCK = "repo-{digest}.lock"
 GIT_TIMEOUT_SECONDS = 10
@@ -434,17 +439,28 @@ def _run_child(argv: list[str], run: _Run) -> int:
     return 128 - code if code < 0 else code
 
 
-def _record(directory: Path, group: str | None, argv: list[str], started: datetime,
-            waited: float, held: float | None, code: int) -> None:
+def _record(directory: Path, entry: dict) -> None:
     """Append this run's history line; a failure is reported and never changes the exit code."""
     path = verify_history.history_path(directory)
     try:
-        verify_history.append(path, verify_history.entry(group, argv, started, waited, held, code))
+        verify_history.append(path, entry)
     except (OSError, ValueError) as error:
         _say(HISTORY_FAILED_LINE.format(path=path, error=error))
 
 
-def run_command(argv: list[str], wait_limit: int | None, live: bool = False) -> int:
+def _report(path: Path, entry: dict) -> None:
+    """Write this run's entry to `path`, replacing a file and never following a symlink."""
+    line = json.dumps(entry, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n"
+    try:
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(line)
+    except (OSError, ValueError) as error:
+        _say(REPORT_FAILED_LINE.format(path=path, error=error))
+
+
+def run_command(argv: list[str], wait_limit: int | None, live: bool = False,
+                report: str | None = None) -> int:
     home = os.environ.get("HOME")
     if not home:
         raise SlotError("HOME is unset or empty")
@@ -485,7 +501,10 @@ def run_command(argv: list[str], wait_limit: int | None, live: bool = False) -> 
         for number, handler in previous.items():
             signal.signal(number, handler)
         if acquired:
-            _record(directory, group, argv, started, waited, held_seconds, code)
+            entry = verify_history.entry(group, argv, started, waited, held_seconds, code)
+            _record(directory, entry)
+            if report is not None:
+                _report(Path(report), entry)
 
 
 def report_command(hours: int) -> int:
@@ -517,11 +536,13 @@ def build_parser() -> argparse.ArgumentParser:
         prog="verify-slot", description="Run a command while holding one of this host's verify slots.")
     commands = parser.add_subparsers(dest="command", required=True)
     run = commands.add_parser("run", help="run ARGV in a verify slot (use `--` before ARGV)",
-                              usage="verify-slot run [--wait-limit SECONDS] [--live] -- ARGV...")
+                              usage="verify-slot run [--wait-limit SECONDS] [--live] [--report PATH] -- ARGV...")
     run.add_argument("--wait-limit", type=int, default=None, metavar="SECONDS",
                      help="give up with exit 75 when no slot comes free within this many seconds")
     run.add_argument("--live", action="store_true",
                      help="wait ahead of every ordinary run, never stopping a run in progress")
+    run.add_argument("--report", default=None, metavar="PATH",
+                     help="write this run's history entry to PATH")
     report = commands.add_parser("report", help="print each repository's hold and wait figures",
                                  usage="verify-slot report [--hours N]")
     report.add_argument("--hours", type=int, default=DEFAULT_REPORT_HOURS, metavar="N",
@@ -553,7 +574,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "report":
             return report_command(args.hours)
-        return run_command(command, args.wait_limit, args.live)
+        return run_command(command, args.wait_limit, args.live, args.report)
     except SlotError as error:
         _say(f"verify-slot: {error}")
         return USAGE_EXIT
