@@ -1,4 +1,4 @@
-"""The `git_bin` of the stubbed world's real guard (issue 1530).
+"""The `git_bin` of the stubbed world's real guard.
 
 Run as `python guard_git.py <fixture root> <github url> <real git> <args...>`. The guard reads a
 checkout's origin as `git -C <dir> remote get-url origin` and its push urls as `git -C <dir> remote

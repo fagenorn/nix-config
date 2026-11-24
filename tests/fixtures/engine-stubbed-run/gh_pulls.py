@@ -1,4 +1,4 @@
-"""The stubbed world's fake pull-request forge: a `gh` front (issue 1530).
+"""The stubbed world's fake pull-request forge: a `gh` front.
 
 Run as `python gh_pulls.py <state.json> <forge gh> <args...>`. It answers the pull-request calls
 a landing makes from the state file, against the bare `origin` the state names, and execs
