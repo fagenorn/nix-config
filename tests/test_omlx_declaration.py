@@ -1,4 +1,4 @@
-"""The eleven-m5 oMLX declaration: the pin, the memory guard and the restart wiring (issue 1694).
+"""The eleven-m5 oMLX declaration: the pin, the memory guard and the restart wiring.
 
 Reads the declaration through tests/host_readings.py, so it runs on any machine; new files
 must be `git add`-ed first.

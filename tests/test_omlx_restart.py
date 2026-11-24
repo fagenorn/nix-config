@@ -1,4 +1,4 @@
-"""The eleven-m5 oMLX restart marker (issue 1694).
+"""The eleven-m5 oMLX restart marker.
 
 Runs `hosts/darwin/eleven-m5/omlx-configure.py` against stub commands and a scratch state
 directory: each restart reason lands in `.restart-needed` right after its mutation, a model
