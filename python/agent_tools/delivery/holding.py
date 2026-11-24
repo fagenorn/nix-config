@@ -2,8 +2,8 @@
 
 A merged issue whose criteria are not all proven at the merge is held: a hold comment carrying one
 ```verify fence is posted, the issue is labelled `needs-verification` and the runner is run once. This
-module decides and words that, from facts the caller has already read; it calls no forge and no
-subprocess, so `gate` and `stale` read only their arguments.
+module decides and words that, from facts the caller has already read: `gate` and `stale` read only their
+arguments and call no forge and no subprocess.
 
 The program is `home/common/claude-code/skills/deliver-standard/deliver-standard.js`; the line ranges
 below are its. `criteria` reads the acceptance section of an issue body (`console.inbox`); `asks_owner`
@@ -28,19 +28,33 @@ Otherwise `ready`: the human criteria are split into their own checks only when 
 (`blocks`), and the rest are the parent `block`. `stale` (1127, 1163) names the posted fences that still
 check a criterion the owner's look approval answered and that the hold may not rewrite. Ids compare
 ignoring case, as the program's `upId`.
+
+The reads the `closing` hold subcommands make live below `split_body`: `posted_fences` (the issue's own
+selected fence and those of its split children for one merge), `blocking`, `pr_facts`, `verification`,
+`look_status` and `look_acs`, `lint_all`. Each raises `landing.Failure` for a forge or subprocess fault
+and changes nothing.
 """
 
 from __future__ import annotations
 
 import json
+import os
+import re
+import subprocess
 from collections.abc import Sequence
 
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
 from agent_tools.console import inbox
+from agent_tools.delivery import landing, look_marker
+from agent_tools.delivery.landing import Failure
+from agent_tools.system import forge_api
+from agent_tools.system.siblings import sibling_argv
+from agent_tools.verification import verify_block, verify_issues, verify_pending
 
 LABEL = "needs-verification"
 OPEN_KINDS = ("evidence", "human")
 KINDS = ("code", "evidence", "human", "note")
+LOOK_TIMEOUT = 120
 
 
 def criteria(body: str) -> list[dict]:
@@ -244,3 +258,152 @@ def split_body(issue: int, pr: int, merge: str, criterion: dict, block: dict) ->
     lines = [split_line(issue, criterion["id"], merge),
              f"This human criterion of #{issue} is held on its own after PR #{pr}: {criterion['text']}"]
     return title, "\n".join([*lines, "", "```verify", json.dumps(block, indent=2), "```", ""])
+
+
+def _forge(read):
+    try:
+        return read()
+    except forge_api.ForgeError as error:
+        raise Failure(error.code, error.detail, error.transient) from None
+
+
+def _pages(path: str) -> list:
+    return _forge(lambda: forge_api.api_pages(path))
+
+
+def _fence(number: int, ac: str | None, comments: list[verify_issues.Comment]) -> dict | None:
+    """The selected fence of one issue as `{issue, ac, merge, checks, comment_id, results, block}`, or None."""
+    held = verify_issues.select(comments)
+    if held is None or not _object(held.block) or not isinstance(held.block.get("checks"), list):
+        return None
+    prefix = f"{held.block_id}."
+    results = any(marker.fields.get("block", "").startswith(prefix) for marker in held.markers)
+    return {"issue": number, "ac": ac, "merge": held.block.get("merge"), "checks": held.block["checks"],
+            "comment_id": held.block_id, "results": results, "block": held.block}
+
+
+def _comments(repo: str, number: int) -> list[verify_issues.Comment]:
+    pages = _pages(f"repos/{repo}/issues/{number}/comments?per_page=100")
+    return _forge(lambda: verify_issues.comments_from_rest(pages))
+
+
+def fences(repo: str, issue: int, merge: str | None) -> list[dict]:
+    """The issue's own selected fence, then each open split child's of `merge` (none when `merge` is None)."""
+    found = []
+    own = _fence(issue, None, _comments(repo, issue))
+    if own is not None:
+        found.append(own)
+    if merge is None:
+        return found
+    identity = re.compile(rf"Split from #{issue}: (\S+) after the merge {re.escape(merge)}\.")
+    children = []
+    for page in _pages(f"repos/{repo}/issues?labels={LABEL}"):
+        for item in page if isinstance(page, list) else []:
+            number = item.get("number") if _object(item) else None
+            body = item.get("body") if _object(item) else None
+            if (not isinstance(number, int) or isinstance(number, bool) or number == issue
+                    or "pull_request" in item or item.get("state", "open") != "open"
+                    or not isinstance(body, str)):
+                continue
+            matched = identity.fullmatch(body.split("\n", 1)[0].removesuffix("\r"))
+            if matched:
+                children.append((number, matched[1]))
+    for number, ac in sorted(set(children)):
+        child = _fence(number, ac, _comments(repo, number))
+        if child is not None and child["merge"] == merge:
+            found.append(child)
+    return found
+
+
+def posted_fences(repo: str, issue: int, merge: str) -> list[dict]:
+    """The posted fences of the issue and its split children for `merge`: `{issue, merge, checks, comment_id, results}`."""
+    return [{key: entry[key] for key in ("issue", "merge", "checks", "comment_id", "results")}
+            for entry in fences(repo, issue, merge)]
+
+
+def blocking(repo: str, issue: int) -> list[int]:
+    """The numbers of the issues `issue` blocks."""
+    found = _forge(lambda: forge_api.gh_json(["api", f"repos/{repo}/issues/{issue}/dependencies/blocking"]))
+    if not isinstance(found, list) or not all(_object(item) and isinstance(item.get("number"), int) for item in found):
+        raise Failure("payload_invalid", "the blocking list is not an array of issues")
+    return [item["number"] for item in found]
+
+
+def pr_facts(repo: str, pr: int) -> dict:
+    """The pull request's `pr_head`, `pr_branch` and the sorted distinct `workflows` of its checks."""
+    view = _forge(lambda: forge_api.gh_json(
+        ["pr", "view", str(pr), "--repo", repo, "--json", "headRefOid,headRefName,statusCheckRollup"]))
+    rollup = view.get("statusCheckRollup") if _object(view) else None
+    if (not _object(view) or not isinstance(view.get("headRefOid"), str)
+            or not isinstance(view.get("headRefName"), str) or not isinstance(rollup, list)):
+        raise Failure("payload_invalid", "the pull request has no head, branch or check rollup")
+    names = {item["workflowName"] for item in rollup
+             if _object(item) and isinstance(item.get("workflowName"), str) and item["workflowName"]}
+    return {"pr_head": view["headRefOid"], "pr_branch": view["headRefName"], "workflows": sorted(names)}
+
+
+def verification(repo_root: str) -> list[str]:
+    """The resolved contract's verification command ids."""
+    found = landing._resolve(repo_root)["bindings"]["workflow"]["verification"]
+    if not isinstance(found, list) or not all(isinstance(item, str) for item in found):
+        raise Failure("payload_invalid", "the contract's verification is not a list of ids")
+    return found
+
+
+def look_acs(body: str) -> list[str]:
+    """The ids of the look-marked criteria of a body, in body order."""
+    lines = look_marker.marker_lines(body)
+    return [inbox.ac_id(item) for item in inbox.acceptance_criteria(body) if item.line + 1 in lines]
+
+
+def look_status(*, repo: str, issue: int, pr: int, head: str, merge: str) -> dict:
+    """The parsed line of `look-approval status` for the head (`verdict` `unmarked`, `approved` or `needed`)."""
+    argv = [*sibling_argv("delivery.look_approval"), "status", "--repo", repo, "--issue", str(issue),
+            "--pr", str(pr), "--head", head, "--merge-commit", merge]
+    env = {key: value for key, value in os.environ.items() if key not in ("GITHUB_TOKEN", "GH_TOKEN")}
+    try:
+        done = subprocess.run(argv, capture_output=True, text=True, timeout=LOOK_TIMEOUT, check=False,
+                              env=env, stdin=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired:
+        raise Failure("look_status_failed", "timeout", transient=True) from None
+    except OSError as error:
+        raise Failure("look_status_failed", str(error)) from None
+    lines = done.stdout.splitlines()
+    try:
+        out = json.loads(lines[-1]) if lines else None
+    except ValueError:
+        out = None
+    if done.returncode != 0 or not _object(out) or not isinstance(out.get("verdict"), str):
+        code = out.get("error") if _object(out) and isinstance(out.get("error"), str) else "look_status_failed"
+        raise Failure(code, (done.stderr.strip() or done.stdout.strip())[:500])
+    return out
+
+
+def lint(repo_root: str, block: object, *, workflows: Sequence[str], pr_head: str | None,
+         pr_branch: str | None, blocks: Sequence) -> dict:
+    """`{ok, errors}` of `verify_block.lint_block` for the block."""
+    found = verify_block.lint_block(block, refs=verify_pending.CliReferences(repo_root), pr_workflows=workflows,
+                                    pr_head=pr_head, pr_branch=pr_branch, blocks=[str(number) for number in blocks])
+    return {"ok": found["ok"], "errors": found["errors"]}
+
+
+def lint_all(*, repo_root: str, repo: str, issue: int, pr_head: str, pr_branch: str, workflows: list,
+             blocks: list, answered: list, block: object, split: list[dict]) -> dict:
+    """Lint the parent's block (its posted fence less the answered checks, else `block`) and each split's."""
+    gone = {_up(name) for name in answered}
+    merge = next((entry["block"].get("merge") for entry in [{"block": block}, *split]
+                  if _object(entry["block"]) and isinstance(entry["block"].get("merge"), str)), None)
+    found = fences(repo, issue, merge)
+    context = {"workflows": workflows, "pr_head": pr_head, "pr_branch": pr_branch}
+    lints = []
+    own = next((entry for entry in found if entry["issue"] == issue), None)
+    parent = ({**own["block"], "checks": [check for check in own["checks"]
+                                          if not (_object(check) and _up(check.get("ac")) in gone)]}
+              if own else block)
+    if parent is not None:
+        lints.append({"issue": issue, "ac": None, **lint(repo_root, parent, blocks=blocks, **context)})
+    for entry in split:
+        child = next((item for item in found if item["issue"] != issue and item["ac"] == entry["ac"]), None)
+        lints.append({"issue": child["issue"] if child else None, "ac": entry["ac"],
+                      **lint(repo_root, child["block"] if child else entry["block"], blocks=(), **context)})
+    return {"verdict": "valid" if all(item["ok"] for item in lints) else "invalid", "lints": lints}

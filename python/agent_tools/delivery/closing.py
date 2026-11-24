@@ -24,16 +24,43 @@ not on `<i>`, or a tracked file has changes; untracked files do not count).
 `issue --repo <owner/name> --issue <n> --closes <true|false>` prints `closed` (the issue is
 closed, now as `completed` and read back, or already) or `open-criteria` (`--closes false`: the
 issue's criteria do not let the pull request close it, and nothing changed).
+
+The four `hold-*` subcommands read what the close-out hold decides from (issue 1541) and post, edit,
+label, file and close nothing. Every flag is the member name of the procedure input that feeds it; a
+JSON-valued flag is strict JSON (no repeated key, no NaN), and one that does not parse is a usage error.
+
+`hold-facts --repo-root <path> --repo <owner/name> --issue <n> --pr <n> --merge-commit <sha>` reads the
+issue body: `bad-kinds` (`acs`) when a criterion's kind is not code, evidence, human or note; `closes` when
+`landing.criteria_close` holds, after that one read; else it fetches origin and checks the merge commit
+(`absent-merge` when the checkout lacks it) and prints `open` with `criteria`, `open` (evidence and human
+ones), `verification`, `blocks`, `pr_head`, `pr_branch`, `workflows` and `posted` (`holding.posted_fences`).
+
+`hold-look --repo <owner/name> --issue <n> --pr <n> --pr-head <sha> --merge-commit <sha> --posted <json>`
+prints `stale` (`answered`, `stale`) when the owner's approved look answers a criterion that a posted fence
+the hold may not rewrite still checks, else `clear` (`answered`: the look-marked criteria when the look is
+approved, else none).
+
+`hold-gate --repo-root <path> --issue <n> --merge-commit <sha> --criteria <json> --posted <json> --blocks
+<json> --answered <json> --written <json>` prints the `holding.gate` dict as is: `ready` or the refusal
+verdict (`missing-checks`, `human-checks`, `unattended`, `owner-checks`, `script-checks`, `note-checks`).
+
+`hold-lint --repo-root <path> --repo <owner/name> --issue <n> --pr-head <sha> --pr-branch <b> --workflows
+<json> --blocks <json> --answered <json> --block <json> --split <json>` prints `valid` or `invalid` with
+`lints`, one `{issue, ac, ok, errors}` for the parent block (its posted fence less the checks naming an
+answered criterion, else `--block`, skipped when null) and for each `--split` entry (the child's posted
+fence, else the entry's block, linted with no blocked issues).
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import subprocess
 import sys
 
-from agent_tools.delivery import landing
+from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
+from agent_tools.delivery import holding, landing, look_marker
 from agent_tools.delivery.landing import Failure, emit
 from agent_tools.system import forge_api
 
@@ -147,6 +174,102 @@ def issue(args: argparse.Namespace) -> dict:
     return {"verdict": "closed"}
 
 
+def _body(slug: str, number: int) -> str:
+    body = _issue(slug, number).get("body")
+    return body if isinstance(body, str) else ""
+
+
+def hold_facts(args: argparse.Namespace) -> dict:
+    body = _body(args.repo, args.issue)
+    every = holding.criteria(body)
+    bad = [item["id"] for item in every if item["kind"] not in holding.KINDS]
+    if bad:
+        return {"verdict": "bad-kinds", "acs": bad}
+    if landing.criteria_close(body):
+        return {"verdict": "closes"}
+    _git(args.repo_root, "fetch", "origin")
+    if _run(args.repo_root, "cat-file", "-e", f"{args.merge_commit}^{{commit}}").returncode != 0:
+        return {"verdict": "absent-merge"}
+    return {"verdict": "open", "criteria": every,
+            "open": [item for item in every if item["kind"] in holding.OPEN_KINDS],
+            "verification": holding.verification(args.repo_root),
+            "blocks": holding.blocking(args.repo, args.issue),
+            **holding.pr_facts(args.repo, args.pr),
+            "posted": holding.posted_fences(args.repo, args.issue, args.merge_commit)}
+
+
+def hold_look(args: argparse.Namespace) -> dict:
+    body = _body(args.repo, args.issue)
+    answered: list[str] = []
+    if look_marker.read_look(body).marked:
+        status = holding.look_status(repo=args.repo, issue=args.issue, pr=args.pr, head=args.pr_head,
+                                     merge=args.merge_commit)
+        if status.get("verdict") == "approved":
+            answered = holding.look_acs(body)
+    entries = holding.stale(args.posted, answered, args.issue, holding.criteria(body))
+    return {"verdict": "stale", "answered": answered, "stale": entries} if entries else {
+        "verdict": "clear", "answered": answered}
+
+
+def hold_gate(args: argparse.Namespace) -> dict:
+    return holding.gate(criteria=args.criteria, posted=args.posted, blocks=args.blocks, answered=args.answered,
+                        written=args.written, merge=args.merge_commit, issue=args.issue,
+                        verification=holding.verification(args.repo_root))
+
+
+def hold_lint(args: argparse.Namespace) -> dict:
+    return holding.lint_all(repo_root=args.repo_root, repo=args.repo, issue=args.issue, pr_head=args.pr_head,
+                            pr_branch=args.pr_branch, workflows=args.workflows, blocks=args.blocks,
+                            answered=args.answered, block=args.block, split=args.split)
+
+
+def _json(text: str):
+    try:
+        return json.loads(text, object_pairs_hook=reject_duplicate_keys, parse_constant=reject_nonfinite_literal)
+    except (ValueError, RecursionError) as error:
+        raise argparse.ArgumentTypeError(f"not strict JSON: {error}") from None
+
+
+def _shaped(name: str, check):
+    """A JSON flag type: strict JSON that `check` accepts."""
+    def parse(text: str):
+        value = _json(text)
+        if not check(value):
+            raise argparse.ArgumentTypeError(f"not a {name}")
+        return value
+    return parse
+
+
+def _each(item):
+    return lambda value: isinstance(value, list) and all(item(entry) for entry in value)
+
+
+def _int(value) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _text(value) -> bool:
+    return isinstance(value, str)
+
+
+def _is_criterion(value) -> bool:
+    return (isinstance(value, dict) and _text(value.get("id")) and _text(value.get("text"))
+            and (value.get("kind") is None or _text(value.get("kind"))))
+
+
+def _is_posted(value) -> bool:
+    return (isinstance(value, dict) and _int(value.get("issue")) and isinstance(value.get("checks"), list)
+            and isinstance(value.get("results"), bool) and (value.get("merge") is None or _text(value.get("merge"))))
+
+
+def _is_written(value) -> bool:
+    return isinstance(value, dict) and _text(value.get("ac")) and _text(value.get("check"))
+
+
+def _is_split(value) -> bool:
+    return isinstance(value, dict) and _text(value.get("ac")) and "block" in value
+
+
 class _Parser(argparse.ArgumentParser):
     def error(self, message: str):
         emit({"verdict": "error", "error": "usage", "transient": False, "detail": message})
@@ -185,10 +308,46 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_argument("--repo", required=True)
     sub.add_argument("--issue", required=True, type=number)
     sub.add_argument("--closes", required=True, type=flag)
+    texts = _shaped("list of strings", _each(_text))
+    numbers = _shaped("list of integers", _each(_int))
+    hold = commands.add_parser("hold-facts")
+    hold.add_argument("--repo-root", required=True)
+    hold.add_argument("--repo", required=True)
+    hold.add_argument("--issue", required=True, type=number)
+    hold.add_argument("--pr", required=True, type=number)
+    hold.add_argument("--merge-commit", required=True)
+    hold = commands.add_parser("hold-look")
+    hold.add_argument("--repo", required=True)
+    hold.add_argument("--issue", required=True, type=number)
+    hold.add_argument("--pr", required=True, type=number)
+    hold.add_argument("--pr-head", required=True)
+    hold.add_argument("--merge-commit", required=True)
+    hold.add_argument("--posted", required=True, type=_shaped("list of posted fences", _each(_is_posted)))
+    hold = commands.add_parser("hold-gate")
+    hold.add_argument("--repo-root", required=True)
+    hold.add_argument("--issue", required=True, type=number)
+    hold.add_argument("--merge-commit", required=True)
+    hold.add_argument("--criteria", required=True, type=_shaped("list of criteria", _each(_is_criterion)))
+    hold.add_argument("--posted", required=True, type=_shaped("list of posted fences", _each(_is_posted)))
+    hold.add_argument("--blocks", required=True, type=numbers)
+    hold.add_argument("--answered", required=True, type=texts)
+    hold.add_argument("--written", required=True, type=_shaped("list of written checks", _each(_is_written)))
+    hold = commands.add_parser("hold-lint")
+    hold.add_argument("--repo-root", required=True)
+    hold.add_argument("--repo", required=True)
+    hold.add_argument("--issue", required=True, type=number)
+    hold.add_argument("--pr-head", required=True)
+    hold.add_argument("--pr-branch", required=True)
+    hold.add_argument("--workflows", required=True, type=texts)
+    hold.add_argument("--blocks", required=True, type=numbers)
+    hold.add_argument("--answered", required=True, type=texts)
+    hold.add_argument("--block", required=True, type=_json)
+    hold.add_argument("--split", required=True, type=_shaped("list of split entries", _each(_is_split)))
     return parser
 
 
-COMMANDS = {"read": read, "worktree": worktree, "forward": forward, "branch": branch, "issue": issue}
+COMMANDS = {"read": read, "worktree": worktree, "forward": forward, "branch": branch, "issue": issue,
+            "hold-facts": hold_facts, "hold-look": hold_look, "hold-gate": hold_gate, "hold-lint": hold_lint}
 
 
 def main(argv: list[str] | None = None) -> int:
