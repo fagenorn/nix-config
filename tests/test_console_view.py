@@ -2657,8 +2657,7 @@ class SessionSignalViewTest(unittest.TestCase):
                          {"session_id": "s1", "manager": True, "read_at": None}],
             "nudged_at": iso(now - 30 * MIN),
             "base_at": utc(R),
-            "issues": [1, 2, 3, 4, 5, 6, 7],
-            "engine": {"moving": False, "waits": []},
+            "issues": [1, 2, 3, 4, 5, 6, 7], "engine": {"moving": False, "waits": []},
             "waits": {"ci_at": None, "commit_at": None, "release_at": None, "lock_at": None}})
         self.assertEqual(self.shown(None, sprint_state=s)["movement"]["sessions"], [])
 
