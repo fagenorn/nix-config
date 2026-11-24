@@ -6,6 +6,7 @@ bot token.
 Run: just agent-workflow-tests
 """
 
+import errno
 import http.server
 import json
 import os
@@ -129,10 +130,16 @@ class DeliverTest(HostAlertsCase):
         self.assertEqual(stat.S_IMODE(self.log.parent.stat().st_mode), 0o700)
 
     def test_an_unreadable_file_fails(self):
-        if os.geteuid() == 0:
-            self.skipTest("root reads a mode 0000 file")
         self.write(mode=0o000)
-        outcome = self.call()
+        real_open = os.open
+
+        def refuse_settings(path, *args, **kwargs):
+            if Path(path) == self.settings:
+                raise PermissionError(errno.EACCES, "Permission denied")
+            return real_open(path, *args, **kwargs)
+
+        with mock.patch("os.open", refuse_settings):
+            outcome = self.call()
         self.assertEqual(outcome.status, "failed")
         self.assertTrue(outcome.error.endswith("is unreadable (PermissionError)"), outcome.error)
         self.assertEqual(len(self.log_lines()), 1)
