@@ -21,9 +21,10 @@ export const meta = {
 // is unchanged and the tree clean.
 
 // lane: with none given (and no cont, outside plan mode) setup reads the lane rule (issue-setup lane): direct, else
-// standard, the default; a standing live-fault declaration still wins. direct has no planner, one implementer following deliver-direct, one fresh reviewer and
-// at most one fix round; live, chosen by a standing live-fault declaration of the issue, has one implementer that shows
-// a test failing then passing and one reviewer. A cont keeps its lane; direct and live have no plan mode.
+// standard, the default; a standing live-fault declaration still wins. direct has no planner, one implementer
+// following deliver-direct, one fresh reviewer and at most one fix round; live, chosen by a standing live-fault
+// declaration of the issue, has one implementer that shows a test failing then passing and one reviewer. A cont keeps
+// its lane; direct and live have no plan mode.
 
 // amend: {file, find, replace} edits of files in cont.setup.plan_dir, applied all or none by plan-amend before the next
 // task. look (with cont, in ship mode): the owner's answer to an awaiting-look stop, {answer: approve|fix|changes,
@@ -85,15 +86,17 @@ if (!['plan', 'ready', 'ship'].includes(MODE)) return { stage: 'args', error: 'm
 let CONT = args.cont || null
 if (args.lane !== undefined && !['standard', 'direct', 'live'].includes(args.lane)) return { stage: 'args', error: 'lane must be standard, direct or live' }
 if (CONT && args.lane && args.lane !== (CONT.lane || 'standard')) return { stage: 'args', error: 'a cont keeps its lane; start again without cont: setup re-adopts the branch and the claim' }
-// A lane-less fresh run reads the live-fault declaration and the lane rule in its setup and may switch lane there, so LANE is a let.
+// A lane-less fresh run reads the live-fault declaration and the lane rule in its setup and may switch lane there,
+// so LANE is a let.
 let LANE = args.lane || (CONT && CONT.lane) || 'standard'
 if (LANE === 'direct' && MODE === 'plan') return { stage: 'args', error: 'the direct lane has no plan mode' }
 if (LANE === 'live' && MODE === 'plan') return { stage: 'args', error: 'the live-fault lane has no plan mode' }
 const LIVE_ASKED = args.lane === 'live' || !!(CONT && CONT.lane === 'live')
 const LIVE_AUTO = !CONT && args.lane === undefined
 const LIVE_READING = LIVE_ASKED || LIVE_AUTO
-// The lane rule is read by a lane-less fresh run outside plan mode only; an explicit lane, a cont and plan mode read none.
-// A fresh run given a spec or decisions keeps the standard lane too: only the planner and the plan and final reviews are told them.
+// The lane rule is read by a lane-less fresh run outside plan mode only; an explicit lane, a cont and plan mode read
+// none. A fresh run given a spec or decisions keeps the standard lane too: only the planner and the plan and final
+// reviews are told them.
 const RULE_AUTO = !CONT && args.lane === undefined && MODE !== 'plan' && !args.spec && !(typeof args.decisions === 'string' && args.decisions.trim())
 if (args.review_sizing !== undefined && typeof args.review_sizing !== 'boolean') return { stage: 'args', error: 'review_sizing must be a boolean' }
 const REVIEW_SIZING = args.review_sizing === true
