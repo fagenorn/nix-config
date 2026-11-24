@@ -344,6 +344,7 @@ console did about a look card's approval:
                        "questions": [{"question", "context"?, "blocks", "options": [<str>],
                                       "recommended", "needs_words"?: [<option text>],
                                       "owner_only"?: true, "consequential"?: true,
+                                      "action"?: {"command": <str>, "approve": <str>},
                                       "pictures"?: [{"picture": <id>,
                                       "line": <str>, "pair"?: "before" | "after"}],
                                       "look"?: {"issue": <int>, "pr": <int>, "head": <40 hex>,
@@ -384,7 +385,7 @@ options. A question's `question` is its ask, at most `MAX_ASK_CHARS`; its option
 `NO_QUESTIONS` (`questions` not a list, or empty), `TOO_MANY_QUESTIONS`, `BAD_BLOCKER` (`blocker`
 present and not a bool); then, per question (`n` counts from 1): `QUESTION_SHAPE` (not an object, or
 a key outside `question, context, blocks, options, recommended, needs_words, owner_only,
-consequential, pictures, look, replaces`),
+consequential, pictures, look, replaces, action`),
 `QUESTION_MEMBER` for
 `question`
 (not a string non-empty after stripping), `ASK_TOO_LONG`, `QUESTION_MEMBER` for `context` (present
@@ -399,7 +400,13 @@ whose strip equals no stripped option), then `NEEDS_WORDS_SHAPE`
 (`needs_words` present and not a non-empty list of strings whose strips are each one stripped
 option, each named once) and (#1260) `LOOK_APPROVE_WORDS` (the look's `approve` is also in `needs_words`: choosing it
 records the approval and takes no words, so the owner could never approve), then `OWNER_ONLY_SHAPE` (`owner_only` present and not `true`),
-then `CONSEQUENTIAL_SHAPE` (`consequential` present and not `true`), then `REPLACES_SHAPE`
+then `CONSEQUENTIAL_SHAPE` (`consequential` present and not `true`),
+then (#1687), when `action` is present, `ACTION_SHAPE` (not an object of exactly `command` and
+`approve`, both strings), `ACTION_COMMAND` (the command not 1 to `MAX_ACTION_CHARS` characters, with
+a space at either end or a control character, a line break and a tab included), `ACTION_PERMIT_VERB`
+(`permit.mentions` accepts the command), `ACTION_APPROVE` (`approve` whose strip equals no stripped
+option), `ACTION_APPROVE_WORDS` (that option is in `needs_words`), `ACTION_OWNER_ONLY` (the question
+is not `owner_only`) and `ACTION_WITH_LOOK` (the question also has a `look`), then `REPLACES_SHAPE`
 (`replaces` present and not an object of exactly `round`, an int that is not a bool and at least 1,
 and `index`, an int that is not a bool and at least 0). The picture checks follow (#1090): `PICTURES_SHAPE` (`pictures` present and not a list), `TOO_MANY_PICTURES` (over
 `MAX_PICTURES`), then per picture `m` (from 1) `PICTURE_SHAPE` (not an object, a key outside
@@ -432,7 +439,8 @@ picture's line over `MAX_LINE_CHARS`; the picture count cap stays. It returns a 
 `{"blocker": <bool>, "questions": [{"question", "blocks", "options", "recommended"}]}` with every
 text stripped, a question carrying `"context"` only when the round gave one, `"needs_words"` (the
 stripped option texts, in the given order) only when it gave one, `"owner_only"` (`true`) only when it
-gave it, `"consequential"` (`true`) only when it gave it, `"look"` (`{"issue",
+gave it, `"consequential"` (`true`) only when it gave it, `"action"` (`{"command", "approve"}`,
+the command verbatim, `approve` stripped) only when it gave one, `"look"` (`{"issue",
 "pr", "head", "approve"}`, `approve` stripped) only when it gave one, and `"pictures"`
 (`{"picture", "line"}` plus `"pair"` when given) only when it gave a non-empty list, and `"replaces"`
 (`{"round", "index"}`) only when it gave one. `replaced(checked)` is the `(round, index)` each
@@ -458,7 +466,12 @@ checked question is then added with `round_id` the row's `seq`, its `index` and 
 gave none) and `owner_only`
 (`Question.owner_only`, false unless the round marked it: a question only the console's owner
 answers, #1263) and `consequential` (`Question.consequential`, false unless the round marked it: the
-page opens its card with nothing picked, #1265). Each checked
+page opens its card with nothing picked, #1265) and `action` (`Question.action`, a
+`QuestionAction` of the row's `command` and `approve`, None when the round gave none, #1687). A
+`permit.judged` row of a folded sprint sets `Question.action_used_at` to the row's `at` only when its
+`verb` is `action`, its `decision` is `allow` and its `target` is exactly `{"round", "index"}`, both
+ints and not bools, naming an answered question of that sprint that has an `action` and no
+`action_used_at` yet; every other such row changes nothing. Each checked
 question's pictures become `Question.pictures`, `QuestionPicture`s in order. A `picture.stored`
 row adds its `picture` to `SprintState.pictures` when its `sprint_id` is folded and `picture` fully
 matches `PICTURE_ID`; any other such row changes nothing. A `questions.asked`, `brief.sent` or
@@ -759,7 +772,7 @@ from fractions import Fraction
 from pathlib import Path
 
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
-from agent_tools.console import deliveries
+from agent_tools.console import deliveries, permit
 from agent_tools.console.deliveries import DELIVERY_SEEN
 from agent_tools.console.event_log import (BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, FAULT_DECLARED,
                                            FAULT_WITHDRAWN, GOAL_STATED,
@@ -769,7 +782,7 @@ from agent_tools.console.event_log import (BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_
                                            MANAGER_WOKEN, NOTICE_NUDGED, NOTICE_POSTED,
                                            normal_login,
                                            NOTICE_WITHDRAWN,
-                                           PICTURE_STORED, QUESTION_ANSWERED,
+                                           PERMIT_JUDGED, PICTURE_STORED, QUESTION_ANSWERED,
                                            QUESTION_WITHDRAWN, QUESTIONS_ASKED,
                                            SPRINT_ANSWERED, SPRINT_CLOSED, SPRINT_CONTINUED,
                                            SPRINT_MESSAGED, SPRINT_NUDGED, SPRINT_READ,
@@ -834,6 +847,7 @@ MAX_TITLE_CHARS = 60
 MAX_ASK_CHARS = 140
 MAX_CONTEXT_CHARS = 400
 MAX_OPTION_CHARS = 80
+MAX_ACTION_CHARS = 4096
 MAX_PICTURES = 8
 MAX_PICTURE_LINE_CHARS = 140
 PAIRS = ("before", "after")
@@ -976,6 +990,17 @@ NO_RECOMMENDATION = "question {n} recommends none of its options"
 NEEDS_WORDS_SHAPE = "question {n}'s needs_words must list some of its options, each once"
 OWNER_ONLY_SHAPE = "question {n}'s owner_only must be true when given"
 CONSEQUENTIAL_SHAPE = "question {n}'s consequential must be true when given"
+ACTION_SHAPE = "question {n}'s action must be an object of exactly command and approve, both strings"
+ACTION_COMMAND = ("question {n}'s action command must be one line of 1 to 4096 characters with no "
+                  "control character and no space at either end")
+ACTION_PERMIT_VERB = ("question {n}'s action is a merge, rerun or release, which runs only under "
+                      "the permit's own rules")
+ACTION_APPROVE = "question {n}'s action approve must be the exact text of one option"
+ACTION_APPROVE_WORDS = ("question {n}'s action approve option cannot need words: choosing it is "
+                        "the approval")
+ACTION_OWNER_ONLY = "question {n} names an action, so it must be owner_only"
+ACTION_WITH_LOOK = "question {n} cannot carry both a look and an action"
+ACTION_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 WORDS_NEEDED = "say what to change"
 ROUND_OPEN = "a round of questions is already open"
 UNKNOWN_QUESTION = "this question is not known"
@@ -1198,6 +1223,12 @@ class QuestionLook:
 
 
 @dataclass(frozen=True)
+class QuestionAction:
+    command: str
+    approve: str
+
+
+@dataclass(frozen=True)
 class Question:
     round_id: int
     index: int
@@ -1228,6 +1259,8 @@ class Question:
     answered_by: str | None = None
     owner_only: bool = False
     consequential: bool = False
+    action: QuestionAction | None = None
+    action_used_at: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1755,7 +1788,7 @@ def _checked_question(n: int, question: object, limits: bool, files_withheld: bo
                                                                 "options", "recommended",
                                                                 "needs_words", "owner_only",
                                                                 "consequential", "pictures",
-                                                                "look", "replaces"}:
+                                                                "look", "replaces", "action"}:
         raise Refused(QUESTION_SHAPE.format(n=n))
     text, blocks = question.get("question"), question.get("blocks")
     if not _text(text):
@@ -1809,6 +1842,9 @@ def _checked_question(n: int, question: object, limits: bool, files_withheld: bo
         raise Refused(OWNER_ONLY_SHAPE.format(n=n))
     if "consequential" in question and question["consequential"] is not True:
         raise Refused(CONSEQUENTIAL_SHAPE.format(n=n))
+    action = question.get("action")
+    if "action" in question:
+        _checked_action(n, question, action, stripped, kept if "needs_words" in question else [])
     replaces = question.get("replaces")
     if "replaces" in question and not _replaces_mark(replaces):
         raise Refused(REPLACES_SHAPE.format(n=n))
@@ -1834,9 +1870,32 @@ def _checked_question(n: int, question: object, limits: bool, files_withheld: bo
     if "look" in question:
         checked["look"] = {"issue": look["issue"], "pr": look["pr"], "head": look["head"],
                            "approve": look["approve"].strip()}
+    if "action" in question:
+        checked["action"] = {"command": action["command"], "approve": action["approve"].strip()}
     if "replaces" in question:
         checked["replaces"] = {"round": replaces["round"], "index": replaces["index"]}
     return checked
+
+
+def _checked_action(n: int, question: dict, action: object, options: list[str],
+                    needs_words: list[str]) -> None:
+    if (not isinstance(action, dict) or set(action) != {"command", "approve"}
+            or not all(isinstance(action[key], str) for key in action)):
+        raise Refused(ACTION_SHAPE.format(n=n))
+    command, approve = action["command"], action["approve"].strip()
+    if (not 1 <= len(command) <= MAX_ACTION_CHARS or command != command.strip()
+            or ACTION_CONTROL.search(command)):
+        raise Refused(ACTION_COMMAND.format(n=n))
+    if permit.mentions(command):
+        raise Refused(ACTION_PERMIT_VERB.format(n=n))
+    if approve not in options:
+        raise Refused(ACTION_APPROVE.format(n=n))
+    if approve in needs_words:
+        raise Refused(ACTION_APPROVE_WORDS.format(n=n))
+    if question.get("owner_only") is not True:
+        raise Refused(ACTION_OWNER_ONLY.format(n=n))
+    if "look" in question:
+        raise Refused(ACTION_WITH_LOOK.format(n=n))
 
 
 HEAD = re.compile(r"[0-9a-f]{40}")
@@ -2795,6 +2854,7 @@ def _folded_question(state: SprintState, event: Event) -> SprintState:
                                needs_words=tuple(row.get("needs_words", ())),
                                owner_only=row.get("owner_only", False) is True,
                                consequential=row.get("consequential", False) is True,
+                               action=QuestionAction(**row["action"]) if "action" in row else None,
                                pictures=tuple(QuestionPicture(p["picture"], p["line"],
                                                               p.get("pair"))
                                               for p in row.get("pictures", ())))
@@ -3091,6 +3151,21 @@ def _observed(folded: dict[str, SprintState], event: Event) -> None:
             folded[sprint_id] = replace(state, moved_ms=moved, observed=observed, delivered=delivered)
 
 
+def _folded_action_use(state: SprintState, event: Event) -> SprintState:
+    payload = event.payload
+    target = payload.get("target")
+    if (payload.get("verb") != permit.ACTION or payload.get("decision") != permit.ALLOW
+            or not isinstance(target, dict) or set(target) != {"round", "index"}
+            or not _id(target["round"]) or not _id(target["index"])):
+        return state
+    key = (target["round"], target["index"])
+    return replace(state, questions=tuple(
+        replace(question, action_used_at=event.at)
+        if (question.round_id, question.index) == key and question.answer is not None
+        and question.action is not None and question.action_used_at is None else question
+        for question in state.questions))
+
+
 def sprint_states(events: Iterable[Event],
                   states: Mapping[str, SprintState] | None = None) -> dict[str, SprintState]:
     folded = dict(states or {})
@@ -3146,6 +3221,8 @@ def sprint_states(events: Iterable[Event],
                 folded[sprint_id] = _folded_row_pictures(folded[sprint_id], event)
         elif event.kind == LOOK_RECORDED and sprint_id in folded:
             folded[sprint_id] = _folded_look(folded[sprint_id], event)
+        elif event.kind == PERMIT_JUDGED and sprint_id in folded:
+            folded[sprint_id] = _folded_action_use(folded[sprint_id], event)
         elif event.kind in (NOTICE_POSTED, NOTICE_WITHDRAWN) and sprint_id in folded:
             folded[sprint_id] = _folded_notice(folded[sprint_id], event)
         elif event.kind in (FAULT_DECLARED, FAULT_WITHDRAWN) and sprint_id in folded:

@@ -139,6 +139,7 @@ NOT_MANAGER = "Only the sprint's manager session may run this command."
 MOVED = "The sprint changed while the command was judged."
 
 MERGE, RERUN = "merge", "rerun"
+ACTION = "action"
 RELEASE, ABANDON, DISPOSE = "release", "release-abandon", "release-dispose"
 RELEASE_FLAGS = ("--repo-root", "--profile", "--commit", "--version", "--title", "--notes-file",
                  "--confirm")
