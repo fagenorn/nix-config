@@ -108,6 +108,7 @@ import agent_tools
 from agent_tools.console import (
     account_add, activation, activation_run, account_remove, approve, inbox, manager, movement, nudge, probe,
     guest, project_question, register, service, signin, signin_run)
+from agent_tools.delivery import engine_ledger
 from agent_tools.console.event_log import EventLogError
 from agent_tools.console.write_guard import TokenError
 
@@ -167,7 +168,8 @@ def main(argv: list[str] | None = None) -> int:
             activator=activation_run.Activator(service.default_store().parent),
             choice_file=service.default_choice_file(), screenshot_dirs=args.screenshots,
             serve_reader=None if args.tailscale is None else guest.serve_reader(args.tailscale),
-            status_reader=None if args.tailscale is None else guest.status_reader(args.tailscale))
+            status_reader=None if args.tailscale is None else guest.status_reader(args.tailscale),
+            engine_runs_root=engine_ledger.runs_root())
     except TokenError as error:
         print(f"console: page token unusable: {error}", file=sys.stderr)
         return 1

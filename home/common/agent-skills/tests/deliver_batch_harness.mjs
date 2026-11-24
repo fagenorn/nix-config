@@ -2,7 +2,7 @@
 // Usage: node deliver_batch_harness.mjs <program.js> with a scenario JSON on stdin (one-shot), or import { makeRunner } and call makeRunner(programText)(scenario), which resolves to the exact text one-shot mode prints (program_server.mjs does, once per program); a program throw rejects it, as it escapes the one-shot run:
 //   { "args": {...}, "replies": {"<label>": reply | [reply per call]}, "patch": {"<label>": {...}},
 //     "children": {"<issue>": child result | [one per call] | "throw"}, "turns": {"<issue>:<mode>": n}, "delays": {"<label>": n} }
-// A label with no reply gets its default (DEFAULTS); a patch is merged over that default. A facts reply without `look` reads unmarked and one without `live_fault` reads no-sprint (NESTED). A reply
+// A label with no reply gets its default (DEFAULTS); a patch is merged over that default (a take's patch, over its first call only). A facts reply without `look` reads unmarked and one without `live_fault` reads no-sprint (NESTED). A reply
 // of null is returned as null (a dead agent). Prints { result, calls, events (each agent's `call <label>` and `reply <label>`, in order), logs (each log() line), max_active, max_planning, child_events, child_returns }:
 // calls lists agents ({kind: 'agent', label, prompt, schema, agentType, model, effort, facts_pending}) and children
 // ({kind: 'workflow', label: 'child-<issue>', script, args}) in start order. A children entry applies to every child
@@ -59,8 +59,9 @@ const DEFAULTS = [
   [/^land-sync-/, () => ({ status: 'current', conflicted: false, head: SHA, notes: 'ok' })],
   // #1001: the PR opened while the issue waited in the land queue, at the same number its land-pr or train-pr reports.
   [/^land-open-/, (l, p) => ({ pr: 40 + num(l), head: promptHead(p), renew: { verdict: 'renewed' } })],
-  [/^land-pr-/, (l, p) => ({ pr: 40 + num(l), head: SHA, renew: { verdict: 'renewed' }, lock: { verdict: 'already_held', lock_sha: SHA }, checks: { state: 'passed', head: promptHead(p), required: ['ci'], passed: ['ci'] } })],
-  [/^land-(re)?lock-/, () => ({ renew: { verdict: 'renewed' }, lock: { verdict: 'acquired', lock_sha: SHA } })],
+  [/^land-pr-/, (l, p) => ({ pr: 40 + num(l), head: SHA, renew: { verdict: 'renewed' }, checks: { state: 'passed', head: promptHead(p), required: ['ci'], passed: ['ci'] } })],
+  // The lock is taken once the head is green; the take and each wait for it say whether the base moved past it.
+  [/^land-(take-|(re)?lock-)/, () => ({ renew: { verdict: 'renewed' }, lock: { verdict: 'acquired', lock_sha: SHA }, behind: false })],
   [/^land-checks-/, () => ({ state: 'passed', head: SHA, required: ['ci'], passed: ['ci'] })],
   // #1001: a fix step asked to release the land lock before it edits reports the release, unless a scenario says otherwise.
   [/^land-fix-/, (l, p) => ({ ...DONE, ...RELEASED(p, DONE) })],
@@ -77,7 +78,7 @@ const DEFAULTS = [
   [/^train-merge-/, (l, p) => ({ lock: { verdict: 'already_held', lock_sha: SHA }, merged: true, notes: 'merged', prs: jsonAfter(p, 'The member pull requests, as JSON: ').map(pr => ({ pr, state: 'MERGED' })) })],
 ]
 // Folded labels: the nested steps their reply carries, each defaulted when an explicit reply leaves it out.
-const NESTED = [[/^train-pr-/, ['renew']], [/^train-merge-/, ['lock']], [/^land-pr-/, ['renew', 'lock', 'checks']], [/^land-(re)?lock-/, ['renew', 'lock']], [/^land-merge-/, ['renew', 'lock']], [/^land-record-/, ['lock', 'checks']], [/^close-out-/, ['release']], [/^facts-/, ['look', 'live_fault']]]
+const NESTED = [[/^train-pr-/, ['renew']], [/^train-merge-/, ['lock']], [/^land-pr-/, ['renew', 'checks']], [/^land-(take-|(re)?lock-)/, ['renew', 'lock', 'behind']], [/^land-merge-/, ['renew', 'lock']], [/^land-record-/, ['lock', 'checks']], [/^close-out-/, ['release']], [/^facts-/, ['look', 'live_fault']]]
 
 const readyOf = (a, acceptance) => ({
   stage: 'ready', head: SHA, branch: `issue-${a.issue}-x`, worktree: `/r/.wt/w-issue-${a.issue}-x`,
@@ -143,7 +144,9 @@ export function makeRunner(programText) {
       }
       const hit = DEFAULTS.find(([re]) => re.test(label))
       if (!hit) throw new Error(`no stub reply for agent label ${label}`)
-      return structuredClone({ ...hit[1](label, prompt, ac), ...((scenario.patch || {})[label] || {}) })
+      // A patch of a take applies to its first call: the take after a sync, a resolution or a fix finds the base current.
+      const patch = /^land-take-\d+$/.test(label) && n > 1 ? {} : (scenario.patch || {})[label] || {}
+      return structuredClone({ ...hit[1](label, prompt, ac), ...patch })
     }
 
     let active = 0

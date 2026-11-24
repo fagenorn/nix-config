@@ -1,12 +1,14 @@
-"""Run the agent workflow suite's members a branch touches, after a build when a build input changed (ADR-delivery-012).
+"""Run the agent workflow suite's members a branch touches, or the whole suite after a build when a build input changed (ADR-delivery-012).
 
 Usage: `python -m agent_tools.delivery.touched_tests --base REF [--root DIR]
-[--source-root DIR]... [--pair SOURCE=TEST]... [--build-when GLOB]... [--build-command CMD]`
+[--source-root DIR]... [--pair SOURCE=TEST]... [--cover SOURCE_GLOB=MEMBER_GLOB]...
+[--suite-file PATH] [--build-when GLOB]... [--build-command CMD]`
 
 A project's `test-touched` recipe runs this module (it has no command-table row, after
 `agent_tools.delivery.verification_command`). It reads no project policy: the base, the
-source roots, the pairs, the globs and the build command are all flags. The members are those
-of the `agent-workflow-tests` recipe in `<root>/justfile`, read with
+source roots, the pairs, the covers, the globs and the build command are all flags. The members
+are those of the `agent-workflow-tests` recipe in `<root>/<suite file>` (`--suite-file`, default
+`justfile`), read with
 `agent_tools.delivery.suite_runner.suite_members`. The changed paths are the lines of
 `git diff --no-renames --name-only <base>...HEAD`, read from `<root>`.
 
@@ -23,13 +25,25 @@ Apart from the pairs, only members are selected, so a nightly or unregistered te
   string do not count. A member that does not parse is skipped.
 - path: a member whose text holds the changed path, or a member in the same directory whose
   text holds the changed path's file name.
+- cover: a member matching one of a `--cover` value's member globs, when a changed path
+  matches its source glob (`fnmatch`, so `*` also matches `/`). A cover never selects a
+  non-member.
 - pair: for a changed `--pair` source, each of its tests, even when it is not a member.
 
-Build rule: when a changed path matches a `--build-when` glob (`fnmatch`, so `*` also matches
-`/`), the build command runs first, after `test-touched: building with <command>: <path>
-changed` on stderr, and a non-zero build exit is the result with no suite run. With no match
-no build runs. `--build-when` without `--build-command` is a usage error (exit 2), as is a
-`--pair` value with no `=`.
+Full rule: `full_because` is every changed path, in diff order, matching a `--build-when` glob
+(`fnmatch`, so `*` also matches `/`), and the selection is full when it is not empty. A full
+selection builds first, after `test-touched: building with <command>: <path> changed` on
+stderr (a non-zero build exit is the result with no suite run), then runs every member, then
+the pair tests of changed pair sources that are not members. With no match no build runs and
+the selection is the rules above. `--build-when` without `--build-command` is a usage error
+(exit 2), as is a `--pair` or `--cover` value with no `=` or an empty side.
+
+Selection file: when the environment variable `VERIFIED_TREE_SELECTION` (`SELECTION_ENV`)
+names a path, the selection is written there before anything runs, as one line of JSON with
+sorted keys: `base`, `changed`, `full`, `full_because` and `selected`, even when nothing is
+selected. A file that cannot be written prints `test-touched: cannot write the selection to
+<path>: <error>` on stderr and changes no exit code. The build and the suite runner start
+without the variable.
 
 Output: when nothing is selected, on stdout `test-touched: no suite member is touched by
 <base>...HEAD`, and the result is 0 (or the build's 0). Otherwise, on stderr,
@@ -41,6 +55,8 @@ Output: when nothing is selected, on stdout `test-touched: no suite member is to
 import argparse
 import ast
 import fnmatch
+import json
+import os
 import shlex
 import subprocess
 import sys
@@ -48,6 +64,9 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
 from agent_tools.delivery.suite_runner import suite_members
+
+
+SELECTION_ENV = "VERIFIED_TREE_SELECTION"
 
 
 class GitError(RuntimeError):
@@ -102,7 +121,8 @@ def imports_module(text: str, module: str) -> bool:
 
 def select(changed: Sequence[str], members: Sequence[str], read: Callable[[str], str], *,
            source_roots: Sequence[str] = (),
-           pairs: Mapping[str, Sequence[str]] = {}) -> list[str]:
+           pairs: Mapping[str, Sequence[str]] = {},
+           covers: Mapping[str, Sequence[str]] = {}) -> list[str]:
     modules = [m for m in (module_name(p, source_roots) for p in changed) if m]
     stems = [Path(p).stem for p in changed
              if p.endswith(".py") and not Path(p).name.startswith("test_")]
@@ -113,6 +133,10 @@ def select(changed: Sequence[str], members: Sequence[str], read: Callable[[str],
         if (member in changed
                 or any(name == f"test_{s}.py" or name.startswith(f"test_{s}_") for s in stems)
                 or any(imports_module(text, m) for m in modules)
+                or any(fnmatch.fnmatchcase(member, g)
+                       for source, globs in covers.items()
+                       if any(fnmatch.fnmatchcase(p, source) for p in changed)
+                       for g in globs)
                 or any(p in text or (Path(p).parent == Path(member).parent
                                      and Path(p).name in text) for p in changed)):
             selected.append(member)
@@ -122,18 +146,46 @@ def select(changed: Sequence[str], members: Sequence[str], read: Callable[[str],
     return selected
 
 
-def parse_pairs(parser: argparse.ArgumentParser, values: Sequence[str]) -> dict[str, list[str]]:
-    pairs: dict[str, list[str]] = {}
+def selection(changed: Sequence[str], members: Sequence[str], read: Callable[[str], str], *,
+              source_roots: Sequence[str] = (),
+              pairs: Mapping[str, Sequence[str]] = {},
+              covers: Mapping[str, Sequence[str]] = {},
+              build_globs: Sequence[str] = ()) -> dict:
+    full_because = [p for p in changed if any(fnmatch.fnmatchcase(p, g) for g in build_globs)]
+    if full_because:
+        selected = list(members)
+        for source, tests in pairs.items():
+            if source in changed:
+                selected.extend(t for t in tests if t not in selected)
+    else:
+        selected = select(changed, members, read, source_roots=source_roots,
+                          pairs=pairs, covers=covers)
+    return {"changed": list(changed), "full": bool(full_because),
+            "full_because": full_because, "selected": selected}
+
+
+def _parse_mapping(parser: argparse.ArgumentParser, flag: str, shape: str,
+                   values: Sequence[str]) -> dict[str, list[str]]:
+    mapping: dict[str, list[str]] = {}
     for value in values:
-        source, separator, test = value.partition("=")
-        if not separator or not source or not test:
-            parser.error(f"--pair {value!r}: expected SOURCE=TEST")
-        pairs.setdefault(source, []).append(test)
-    return pairs
+        source, separator, target = value.partition("=")
+        if not separator or not source or not target:
+            parser.error(f"{flag} {value!r}: expected {shape}")
+        mapping.setdefault(source, []).append(target)
+    return mapping
+
+
+def parse_pairs(parser: argparse.ArgumentParser, values: Sequence[str]) -> dict[str, list[str]]:
+    return _parse_mapping(parser, "--pair", "SOURCE=TEST", values)
+
+
+def parse_covers(parser: argparse.ArgumentParser, values: Sequence[str]) -> dict[str, list[str]]:
+    return _parse_mapping(parser, "--cover", "SOURCE_GLOB=MEMBER_GLOB", values)
 
 
 def default_execute(argv: list[str], cwd: Path) -> int:
-    return subprocess.run(argv, cwd=cwd).returncode
+    env = {k: v for k, v in os.environ.items() if k != SELECTION_ENV}
+    return subprocess.run(argv, cwd=cwd, env=env).returncode
 
 
 def _say(stream, line: str) -> None:
@@ -147,10 +199,13 @@ def main(argv: Sequence[str] | None = None, *,
     parser.add_argument("--root", default=None)
     parser.add_argument("--source-root", action="append", default=[])
     parser.add_argument("--pair", action="append", default=[])
+    parser.add_argument("--cover", action="append", default=[])
+    parser.add_argument("--suite-file", default="justfile")
     parser.add_argument("--build-when", action="append", default=[])
     parser.add_argument("--build-command", default=None)
     args = parser.parse_args(argv)
     pairs = parse_pairs(parser, args.pair)
+    covers = parse_covers(parser, args.cover)
     if args.build_when and not args.build_command:
         parser.error("--build-when needs --build-command")
     run = execute or default_execute
@@ -161,22 +216,32 @@ def main(argv: Sequence[str] | None = None, *,
         _say(sys.stderr, str(error))
         return 2
 
-    code = 0
-    trigger = build_trigger(changed, args.build_when)
-    if trigger is not None:
-        _say(sys.stderr, f"test-touched: building with {args.build_command}: {trigger} changed")
-        code = run(shlex.split(args.build_command), root)
-        if code != 0:
-            return code
-
     def read(path: str) -> str:
         try:
             return (root / path).read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             return ""
 
-    members = suite_members(read("justfile"))
-    selected = select(changed, members, read, source_roots=args.source_root, pairs=pairs)
+    members = suite_members(read(args.suite_file))
+    chosen = selection(changed, members, read, source_roots=args.source_root, pairs=pairs,
+                       covers=covers, build_globs=args.build_when)
+    target = os.environ.get(SELECTION_ENV)
+    if target:
+        document = json.dumps({"base": args.base, **chosen}, sort_keys=True,
+                              separators=(",", ":")) + "\n"
+        try:
+            Path(target).write_text(document, encoding="utf-8")
+        except OSError as error:
+            _say(sys.stderr, f"test-touched: cannot write the selection to {target}: {error}")
+
+    code = 0
+    if chosen["full"]:
+        _say(sys.stderr, f"test-touched: building with {args.build_command}: "
+                         f"{chosen['full_because'][0]} changed")
+        code = run(shlex.split(args.build_command), root)
+        if code != 0:
+            return code
+    selected = chosen["selected"]
     if not selected:
         _say(sys.stdout, f"test-touched: no suite member is touched by {args.base}...HEAD")
         return code

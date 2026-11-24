@@ -33,7 +33,7 @@ judged sprint has `state == "quiet"` or `ball == "nobody"`.
 
 Met (exit 0, `{"queued", "sprints": [{"sprint_id", "state", "now_text"}], "status": "met"}`) only
 when no judged sprint reads quiet and at least one waiter's sprint has `now_text ==
-sprints.NOW_LOCK_TEXT`: the wait itself is shown. When every waiter's sprint reads moving for
+sprints.NOW_LOCK_TEXT` or starts with `NOW_LOCK_TEXT + ", position "`: the wait itself is shown. When every waiter's sprint reads moving for
 another reason (another lane building, an owner question), the reading proves nothing about the
 lock wait: it prints `{"queued", "sprints", "status": "no_wait_shown"}` and exits 75.
 
@@ -121,6 +121,12 @@ def sprint_issues(sprint: dict) -> set[int]:
     return found | {n for n in listed or [] if isinstance(n, int)}
 
 
+def is_lock_wait(text) -> bool:
+    """Whether a `now_text` names the lock wait: `NOW_LOCK_TEXT`, with or without its place."""
+    return text == sprints.NOW_LOCK_TEXT or (
+        isinstance(text, str) and text.startswith(sprints.NOW_LOCK_TEXT + ", position "))
+
+
 def main(argv=None, *, read_pulls=movement.read_pulls, read_waiters=default_read_waiters,
          forge_now=forge_land_lock.forge_now, read_state=default_read_state) -> int:
     args = build_parser().parse_args(argv)
@@ -163,7 +169,7 @@ def main(argv=None, *, read_pulls=movement.read_pulls, read_waiters=default_read
     shown = sorted(({"sprint_id": s.get("sprint_id"), "state": s.get("state"),
                      "now_text": s.get("now_text")} for s in waiter_sprints),
                    key=lambda row: str(row["sprint_id"]))
-    status = ("met" if any(s.get("now_text") == sprints.NOW_LOCK_TEXT for s in waiter_sprints)
+    status = ("met" if any(is_lock_wait(s.get("now_text")) for s in waiter_sprints)
               else "no_wait_shown")
     manager_check._print({"queued": queued, "sprints": shown, "status": status})
     return 0 if status == "met" else NOT_YET

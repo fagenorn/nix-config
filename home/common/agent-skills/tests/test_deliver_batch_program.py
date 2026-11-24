@@ -1161,14 +1161,20 @@ FIX = "c0ffee"
 # #913: a sync step whose merge conflicts aborts it and answers conflicted; the resolution is its own step, land-sync-resolve, outside the land lock.
 ABORTED = {"status": "conflicted", "conflicted": True, "head": SHA, "notes": "x.py conflicts"}
 C = "c" * 40
-HAPPY = ["facts-1", "acquire-1", "child-1", "child-1", "land-pr-1", "land-merge-1", "close-out-1"]
-# The folded first checks poll of land-pr answering behind, so the landing resyncs before its next poll, land-checks-1-2 (#801).
-BEHIND = {"land-pr-1": {"checks": {"state": "behind", "head": SHA}}}
+HAPPY = ["facts-1", "acquire-1", "child-1", "child-1", "land-pr-1", "land-take-1", "land-merge-1", "close-out-1"]
+# The take of the lock saying the base moved past the head, so the landing resyncs before its next poll,
+# land-checks-1-2 (#801).
+BEHIND = {"land-take-1": {"behind": True}}
 
 
 def contended(n=1):
     """Replies that answer every retry of issue n's waited land acquire with land-contended (#818)."""
     return {f"land-lock-{n}-{k}": {"lock": {"verdict": "land-contended", "lock_sha": B}} for k in (1, 2, 3)}
+
+
+def green(head=SHA):
+    """A checks poll that passed at `head` (#1679: the poll before the lock, and the poll after a head change)."""
+    return {"state": "passed", "head": head, "required": ["ci"], "passed": ["ci"]}
 
 
 def folded(checks):
@@ -1509,8 +1515,9 @@ class RelaunchContSizeTest(unittest.TestCase):
 
 RENEW_READ = {"verdict", "by", "detail", "transient"}
 FOLDED_READ = {
-    "land-pr-1": ({"pr", "head"}, {"renew": RENEW_READ, "lock": {"verdict"},
-                                   "checks": {"state", "head", "passed", "failing", "pending", "label", "details"}}),
+    "land-pr-1": ({"pr", "head"}, {"renew": RENEW_READ,
+                                   "checks": {"state", "head", "behind", "passed", "failing", "pending", "label", "details"}}),
+    "land-take-1": (set(), {"renew": RENEW_READ, "lock": {"verdict"}}),
     "land-merge-1": ({"merged", "notes"}, {"renew": RENEW_READ, "lock": {"verdict"}}),
     "land-record-1-1": ({"ok", "head", "detail"}, {"lock": {"verdict"},
                                                    "checks": {"state", "head", "passed", "failing", "pending"}}),
@@ -1536,13 +1543,12 @@ class FoldTest(unittest.TestCase):
                 if "renew" in nested:
                     self.assertEqual(schema["required"], ["renew"])
 
-    def test_folded_pr_lock_is_released_on_head_moved(self):
+    def test_a_pr_step_that_moved_the_head_holds_no_lock(self):
         result, calls, _ = run(replies={"land-pr-1": {"pr": 41, "head": B}})
         self.assertEqual((row(result, 1)["outcome"], row(result, 1)["stage"]), ("stopped", "head-moved"))
         ls = of(calls, 1)
-        self.assertEqual(ls[ls.index("land-pr-1"):], ["land-pr-1", "land-unlock-1"])
-        self.assertIn(f"forge-claim land release --repo owner/repo --branch dev --sha {SHA}\n", prompt(calls, "land-unlock-1"))
-        self.assertIn(f"forge-claim land acquire --repo owner/repo --branch dev --sha {SHA} --wait\n", prompt(calls, "land-pr-1"))
+        self.assertEqual(ls[ls.index("land-pr-1"):], ["land-pr-1"])
+        self.assertNotIn("forge-claim land", prompt(calls, "land-pr-1"))
 
     def test_folded_record_lock_is_released_at_the_moved_sha(self):
         result, calls, _ = run(patch=BEHIND, replies={
@@ -1557,20 +1563,22 @@ class FoldTest(unittest.TestCase):
         again = (f"When it prints not_held with lock_sha {B}, run alone and exactly: "
                  f"forge-claim land release --repo owner/repo --branch dev --sha {B}")
         synced = {"land-sync-1-1": {"status": "done", "conflicted": False, "head": B, "notes": "ok"}}
-        # The initial --wait lock and the pre-merge re-check: the lock is held (or may be) at one sha only.
+        # The take of the lock and the pre-merge re-check: the lock is held (or may be) at one sha only.
         # A lost reply stops at its step's own stage; a thrown agent stops at "land". Neither reached the merge
-        # as far as the program knows, so the relaunch keeps the child's ready cont.
-        for label, extra in (("land-pr-1", {}), ("land-merge-1", {})):
+        # as far as the program knows, so the relaunch keeps the child's ready cont. The land-pr step runs no lock
+        # command.
+        for label, stage in (("land-pr-1", "pr"), ("land-take-1", "land-lock"), ("land-merge-1", "merge")):
             for reply in (None, "throw"):
                 with self.subTest(label=label, reply=reply):
-                    result, calls, _ = run(replies=dict(extra, **{label: reply}))
+                    result, calls, _ = run(replies={label: reply})
                     self.assertEqual(row(result, 1)["outcome"], "stopped")
-                    self.assertEqual(row(result, 1)["stage"], {"land-pr-1": "pr", "land-merge-1": "merge"}[label] if reply is None else "land")
+                    self.assertEqual(row(result, 1)["stage"], stage if reply is None else "land")
                     self.assertEqual(result["relaunch"]["issues"], [1])
                     self.assertEqual(result["relaunch"]["conts"], PRE_MERGE_CONTS)
                     ls = of(calls, 1)
-                    self.assertEqual(ls[ls.index(label):], [label, "land-unlock-1"])
-                    self.assertNotIn("When it prints not_held", prompt(calls, "land-unlock-1"))
+                    self.assertEqual(ls[ls.index(label):], [label] if label == "land-pr-1" else [label, "land-unlock-1"])
+                    if label != "land-pr-1":
+                        self.assertNotIn("When it prints not_held", prompt(calls, "land-unlock-1"))
         # The record step's move: unanswered, it may or may not have moved the lock to B, so both are released.
         for reply in (None, "throw", {"ok": True, "head": B, "lock": {"verdict": "error", "detail": "gh failed"}}):
             with self.subTest(record=reply):
@@ -1585,19 +1593,22 @@ class FoldTest(unittest.TestCase):
                 self.assertIn(release, text)
                 self.assertIn(again, text)
                 self.assertEqual(labels(calls).count("land-unlock-1"), 1)
-        # Definitive answers: no move ran (ok false, lock null) or another holder refused it; only the old sha is ours.
-        for reply in ({"ok": False, "head": "d" * 40, "detail": "head differs", "lock": None},
-                      {"ok": True, "head": B, "lock": {"verdict": "held_by", "lock_sha": "c" * 40, "by": "h2/b9"}}):
+        # A definitive answer: no move ran (ok false, lock null); only the old sha is ours.
+        for reply in ({"ok": False, "head": "d" * 40, "detail": "head differs", "lock": None},):
             with self.subTest(record=reply):
                 result, calls, _ = run(patch=BEHIND, replies={"land-sync-1-1": synced["land-sync-1-1"], "land-record-1-1": reply})
                 graded = row(result, 1)
-                if reply["ok"]:
-                    self.assertEqual(graded["outcome"], "land-contended")
-                else:
-                    self.assertEqual((graded["outcome"], graded["stage"]), ("stopped", "land-record"))
+                self.assertEqual((graded["outcome"], graded["stage"]), ("stopped", "land-record"))
                 self.assertEqual(result["relaunch"]["conts"], PRE_MERGE_CONTS)
                 self.assertIn(release, prompt(calls, "land-unlock-1"))
                 self.assertNotIn("When it prints not_held", prompt(calls, "land-unlock-1"))
+        # Another holder refused the move while the lease was held: it is lost, and the landing waits again at the back.
+        with self.subTest(record="held_by"):
+            held = {"ok": True, "head": B, "lock": {"verdict": "held_by", "lock_sha": "c" * 40, "by": "h2/b9"}}
+            result, calls, _ = run(patch=BEHIND, replies={"land-sync-1-1": synced["land-sync-1-1"], "land-record-1-1": held,
+                                                          "land-checks-1-2": green(B)})
+            self.assertEqual(row(result, 1)["outcome"], "landed")
+            self.assertIn(f"--sha {B} --wait --lease", prompt(calls, "land-lock-1-1"))
         # A land-pr whose renew ended ran no lock command: nothing to release.
         _, calls, _ = run(patch={"land-pr-1": {"renew": {"verdict": "not_held", "by": "h2/b9"}}})
         self.assertNotIn("land-unlock-1", labels(calls))
@@ -1661,10 +1672,11 @@ class LandTest(unittest.TestCase):
                       prompt(calls, "land-pr-1"))
         self.assertIn(f"forge-claim renew --repo owner/repo --issue 1 --holder {HOLDER} --branch issue-1-x",
                       prompt(calls, "land-merge-1"))
-        self.assertIn(f"forge-claim land acquire --repo owner/repo --branch dev --sha {SHA} --wait\n",
-                      prompt(calls, "land-pr-1"))
-        self.assertIn(f"forge-claim land acquire --repo owner/repo --branch dev --sha {SHA}\n", prompt(calls, "land-merge-1"))
-        self.assertNotIn(" --wait\n", prompt(calls, "land-merge-1"))
+        self.assertNotIn("forge-claim land", prompt(calls, "land-pr-1"))
+        self.assertIn(f"forge-claim land acquire --repo owner/repo --branch dev --sha {SHA} --wait --lease\n",
+                      prompt(calls, "land-take-1"))
+        self.assertIn(f"forge-claim land acquire --repo owner/repo --branch dev --sha {SHA} --lease\n", prompt(calls, "land-merge-1"))
+        self.assertNotIn(" --wait --lease", prompt(calls, "land-merge-1"))
         self.assertIn(f"gh pr merge 41 --repo owner/repo --merge --match-head-commit {SHA} --delete-branch",
                       prompt(calls, "land-merge-1"))
         self.assertIn(f"forge-claim land release --repo owner/repo --branch dev --sha {SHA}", prompt(calls, "close-out-1"))
@@ -1682,34 +1694,36 @@ class LandTest(unittest.TestCase):
 
     def test_land_lock_contention_is_reported(self):
         result, calls, _ = run(replies=dict(contended(), **{
-            "land-pr-1": {"pr": 41, "head": SHA, "lock": {"verdict": "land-contended", "lock_sha": B}}}))
+            "land-take-1": {"lock": {"verdict": "land-contended", "lock_sha": B}}}))
         self.assertEqual(row(result, 1)["outcome"], "land-contended")
-        for label in ("land-sync-1-1", "land-checks-1-1", "land-merge-1", "land-unlock-1", "release-1", "close-out-1"):
+        for label in ("land-sync-1-1", "land-checks-1-2", "land-merge-1", "land-unlock-1", "release-1", "close-out-1"):
             self.assertNotIn(label, labels(calls))
         self.assertEqual(result["relaunch"]["issues"], [1])
         self.assertEqual(result["relaunch"]["conts"], {"1": ready(1)["cont"]})
 
     def test_ci_failing_twice_is_reported_and_never_merged(self):
         result, calls, _ = run(patch=folded(CI_RED), replies={
-            "land-record-1-1": {"ok": True, "head": FIX, "checks": dict(CI_RED, head=FIX)}})
+            "land-record-1-1": {"ok": True, "head": FIX}, "land-checks-1-2": dict(CI_RED, head=FIX)})
         self.assertEqual(row(result, 1)["outcome"], "ci-failed")
         self.assertEqual(labels(calls).count("land-fix-1"), 1)
         self.assertIn("land-fix-review-1", labels(calls))
-        self.assertIn("land-unlock-1", labels(calls))
-        for label in ("land-merge-1", "release-1", "close-out-1"):
+        for label in ("land-take-1", "land-unlock-1", "land-merge-1", "release-1", "close-out-1"):
             self.assertNotIn(label, labels(calls))
 
     def test_ci_failing_once_is_fixed_and_lands_the_fix_head(self):
         result, calls, _ = run(patch=folded(CI_RED), replies={
-            "land-record-1-1": {"ok": True, "head": FIX}})
+            "land-record-1-1": {"ok": True, "head": FIX}, "land-checks-1-2": green(FIX),
+            "land-take-1": {"lock": {"verdict": "acquired", "lock_sha": FIX}}})
         self.assertEqual(row(result, 1)["outcome"], "landed")
-        # #1001: the lock was released while the fix was made, so the record step takes it again, waiting.
-        self.assertIn(f"--sha {FIX} --wait\n", prompt(calls, "land-record-1-1"))
-        self.assertIn(f"--sha {FIX}\n", prompt(calls, "land-merge-1"))
+        # No lock was asked for while the check was red; the fix is recorded, polled green, and only then takes it.
+        self.assertNotIn("forge-claim land", prompt(calls, "land-record-1-1"))
+        self.assertIn(f"--sha {FIX} --wait --lease\n", prompt(calls, "land-take-1"))
+        self.assertIn(f"--sha {FIX} --lease\n", prompt(calls, "land-merge-1"))
         self.assertIn(f"--match-head-commit {FIX}", prompt(calls, "land-merge-1"))
         ls = labels(calls)
         self.assertLess(ls.index("land-fix-review-1"), ls.index("land-record-1-1"))
-        self.assertLess(ls.index("land-record-1-1"), ls.index("land-merge-1"))
+        self.assertLess(ls.index("land-record-1-1"), ls.index("land-take-1"))
+        self.assertLess(ls.index("land-take-1"), ls.index("land-merge-1"))
         self.assertIn(f"Accepted head: {FIX}", prompt(calls, "land-record-1-1"))
 
     def test_the_pr_body_records_the_accepted_head(self):
@@ -1730,8 +1744,8 @@ class LandTest(unittest.TestCase):
         self.assertEqual((row(result, 1)["outcome"], row(result, 1)["stage"], row(result, 1)["missing"]),
                          ("stopped", "checks", ["lint"]))
         self.assertIn('["ci","lint"]', prompt(calls, "land-pr-1"))  # DECLARED as JSON.stringify writes it
-        self.assertNotIn("land-merge-1", labels(calls))
-        self.assertIn("land-unlock-1", labels(calls))
+        for label in ("land-take-1", "land-merge-1", "land-unlock-1"):
+            self.assertNotIn(label, labels(calls))
 
     def test_a_passed_reply_that_names_no_check_is_pending_and_never_merged(self):  # #1008
         empty = {"state": "passed", "head": SHA, "required": [], "passed": []}
@@ -1743,7 +1757,7 @@ class LandTest(unittest.TestCase):
                 names = labels(calls)
                 self.assertNotIn("land-merge-1", names)
                 self.assertNotIn("land-checks-1-4", names)
-                self.assertIn("land-unlock-1", names)
+                self.assertNotIn("land-take-1", names)
 
     def test_a_head_with_no_check_yet_is_polled_again_and_the_next_poll_decides(self):  # #1008
         empty = {"state": "passed", "head": SHA, "passed": []}
@@ -1751,7 +1765,8 @@ class LandTest(unittest.TestCase):
         self.assertEqual(row(result, 1)["outcome"], "landed")
         names = labels(calls)
         self.assertLess(names.index("land-checks-1-2"), names.index("land-merge-1"))
-        result, calls, _ = run(patch=folded(empty), replies={"land-checks-1-2": CI_RED})
+        result, calls, _ = run(patch=folded(empty), replies={"land-checks-1-2": CI_RED, "land-record-1-1": {"ok": True, "head": FIX},
+                                                             "land-checks-1-3": green(FIX)})
         names = labels(calls)
         self.assertLess(names.index("land-checks-1-2"), names.index("land-fix-1"))
         self.assertEqual(names.count("land-merge-1"), 1)
@@ -1781,13 +1796,14 @@ class LandTest(unittest.TestCase):
     def test_a_conflicting_resync_is_resolved_and_reviewed(self):
         result, calls, _ = run(patch=BEHIND, replies={
             "land-sync-1-1": ABORTED, "land-sync-resolve-1-1": {"status": "done", "conflicted": True, "head": B, "merge_commit": B,
-                              "resolved_files": ["x.py"], "tests": ["t"], "notes": "ok"}})
+                              "resolved_files": ["x.py"], "tests": ["t"], "notes": "ok"}, "land-checks-1-2": green(B)})
         self.assertEqual(row(result, 1)["outcome"], "landed")
         self.assertIn("land-sync-review-1-1", labels(calls))
         ls = labels(calls)
         self.assertLess(ls.index("land-sync-review-1-1"), ls.index("land-record-1-1"))
         self.assertLess(ls.index("land-record-1-1"), ls.index("land-merge-1"))
-        self.assertIn(f"--sha {B}", prompt(calls, "land-record-1-1"))
+        self.assertIn(f"Accepted head: {B}", prompt(calls, "land-record-1-1"))
+        self.assertIn(f"--sha {B}", prompt(calls, "land-take-1"))
         self.assertIn(f"--sha {B}", prompt(calls, "land-merge-1"))
         self.assertNotIn("land-ask-1", labels(calls))
         self.assertIn(f"--match-head-commit {B}", prompt(calls, "land-merge-1"))
@@ -1830,15 +1846,15 @@ class LandTest(unittest.TestCase):
         self.assertIn("--reason needs-label --items-file", text)
         self.assertIn("raise-me", text)
         self.assertIn({"issue": 1, "reason": "needs-label", "comment_id": 99}, result["owner_actions"])
-        self.assertIn("land-unlock-1", labels(calls))
-        self.assertNotIn("land-merge-1", labels(calls))
+        for label in ("land-take-1", "land-unlock-1", "land-merge-1"):
+            self.assertNotIn(label, labels(calls))
 
     NEEDS_LABEL = {"state": "needs_label", "head": SHA, "label": "raise-me", "failing": ["gate"]}
-    # Run with patch=BEHIND: the folded poll resyncs once and conflicts, the retake's poll is behind again and the second resync conflicts
-    # too; its merge is then refused as behind, and the third resync's conflict is past MAX_CONFLICT_ROUNDS (#913).
+    # The first take is behind and its resync conflicts, the second take is behind again and the second resync conflicts
+    # too; the third take is current and its merge is refused as behind, and the third resync's conflict is past MAX_CONFLICT_ROUNDS.
     THIRD_CONFLICT = {
+        "land-take-1": [{"behind": True}, {"behind": True}, {}], "land-checks-1-2": green(B), "land-checks-1-3": green(C),
         "land-sync-1-1": ABORTED, "land-sync-resolve-1-1": {"status": "done", "conflicted": True, "head": B, "merge_commit": B, "notes": "ok"},
-        "land-record-1-1": {"ok": True, "head": B, "checks": {"state": "behind", "head": B}},
         "land-sync-1-2": dict(ABORTED, head=B), "land-sync-resolve-1-2": {"status": "done", "conflicted": True, "head": C, "merge_commit": C, "notes": "ok"},
         "land-merge-1": {"merged": False, "behind": True, "notes": "the head branch is not up to date with the base branch"},
         "land-sync-1-3": {"status": "blocked", "conflicted": True, "head": C, "notes": "aborted"}}
@@ -1853,7 +1869,8 @@ class LandTest(unittest.TestCase):
                 self.assertTrue(r["owner_ask"]["items"])
                 self.assertNotIn("land-ask-1", labels(calls))
                 self.assertEqual(result["owner_actions"], [])
-                self.assertIn("land-unlock-1", labels(calls))
+                # A conflict is met under the lock; a missing label is met before it is asked for.
+                self.assertEqual("land-unlock-1" in labels(calls), reason == "conflict")
                 self.assertNotIn("release-1", labels(calls))
 
     def test_a_close_out_without_the_decision_ended_stays_resumable(self):
@@ -1875,7 +1892,7 @@ class LandTest(unittest.TestCase):
         self.assertEqual(row(result, 1)["outcome"], "land-contended")
         self.assertIn("land-sync-1-2", labels(calls))
         self.assertNotIn("land-sync-1-3", labels(calls))
-        self.assertIn("land-unlock-1", labels(calls))
+        self.assertNotIn("land-take-1", labels(calls))
 
     def test_a_lock_retaken_before_the_merge_resyncs_first(self):
         retaken = [{"merged": False, "notes": "retaken", "lock": {"verdict": "acquired", "lock_sha": SHA}},
@@ -1902,8 +1919,8 @@ class LandTest(unittest.TestCase):
                 self.assertEqual((row(result, 1)["outcome"], row(result, 1)["stage"], row(result, 1)["reason"]),
                                  ("stopped", "renew", f"renew: {detail}"))
                 self.assertNotIn("land-sync-1-1", labels(calls))
-                # An error verdict means the prompt ran nothing after it; a missing renew proves nothing, so the lock is released.
-                self.assertEqual("land-unlock-1" in labels(calls), renew is None)
+                # The pr step runs no lock command, so nothing is held to release.
+                self.assertNotIn("land-unlock-1", labels(calls))
 
     def test_a_lost_claim_at_the_merge_releases_the_lock_and_never_merges(self):
         result, calls, _ = run(patch={"land-merge-1": {"renew": {"verdict": "not_held", "by": "h2/b9"}}})
@@ -1915,7 +1932,7 @@ class LandTest(unittest.TestCase):
         result, calls, _ = run(replies={"land-pr-1": {"pr": 41, "head": B}})
         self.assertEqual((row(result, 1)["outcome"], row(result, 1)["stage"]), ("stopped", "head-moved"))
         self.assertNotIn("land-sync-1-1", labels(calls))
-        self.assertIn("land-unlock-1", labels(calls))
+        self.assertNotIn("land-unlock-1", labels(calls))
 
     def test_an_unmerged_pr_unlocks_and_stops(self):
         result, calls, _ = run(replies={"land-merge-1": {"merged": False, "notes": "head mismatch"}})
@@ -1937,7 +1954,7 @@ class LandTest(unittest.TestCase):
         ls = of(calls, 1)
         self.assertEqual(ls[ls.index("land-merge-1"):], ["land-merge-1", "land-sync-1-2", "land-record-1-2", "land-merge-1", "close-out-1"])
         # The lock moved to the new head, and its checks were waited for, before the second merge names it.
-        self.assertIn(f"forge-claim land acquire --repo owner/repo --branch dev --sha {c}\n", prompt(calls, "land-record-1-2"))
+        self.assertIn(f"forge-claim land acquire --repo owner/repo --branch dev --sha {c} --lease\n", prompt(calls, "land-record-1-2"))
         merges = [call["prompt"] for call in calls if call["label"] == "land-merge-1"]
         self.assertIn(f"--match-head-commit {B}", merges[0])
         self.assertIn(f"--match-head-commit {c}", merges[1])
@@ -2009,7 +2026,7 @@ class LandTest(unittest.TestCase):
 
     def test_a_policy_refusal_whose_poll_is_red_goes_to_the_fix_step(self):
         result, calls, _ = run(replies={"land-merge-1": [self.POLICY, self.MERGED], "land-checks-1-2": CI_RED,
-                                        "land-record-1-1": {"ok": True, "head": FIX}})
+                                        "land-record-1-1": {"ok": True, "head": FIX}, "land-checks-1-3": green(FIX)})
         self.assertEqual(row(result, 1)["outcome"], "landed")
         ls = of(calls, 1)
         self.assertEqual(ls[ls.index("land-merge-1"):ls.index("land-fix-1") + 1], ["land-merge-1", "land-checks-1-2", "land-fix-1"])
@@ -2130,14 +2147,14 @@ class RerunAndContendedRetryTest(unittest.TestCase):
     """#818: a rerun with no new commit goes back to the checks poll, and a land-contended wait is retried within a bound."""
 
     RERAN = {"status": "done", "start_head": SHA, "commit": SHA, "notes": "cache HTTP 416 in setup; reran the failed jobs"}
-    WAIT_OUT = {"land-pr-1": {"pr": 41, "head": SHA, "lock": {"verdict": "land-contended", "lock_sha": B}}}
+    WAIT_OUT = {"land-take-1": {"lock": {"verdict": "land-contended", "lock_sha": B}}}
 
     def test_a_rerun_with_an_unchanged_head_polls_again_and_lands(self):
         result, calls, _ = run(patch=folded(CI_RED), replies={"land-fix-1": self.RERAN})
         self.assertEqual(row(result, 1)["outcome"], "landed")
         ls = of(calls, 1)
         self.assertEqual(ls[ls.index("land-pr-1"):],
-                         ["land-pr-1", "land-fix-1", "land-checks-1-2", "land-merge-1", "close-out-1"])
+                         ["land-pr-1", "land-fix-1", "land-checks-1-2", "land-take-1", "land-merge-1", "close-out-1"])
         self.assertIn(f"--match-head-commit {SHA}", prompt(calls, "land-merge-1"))
 
     def test_a_rerun_that_is_still_red_is_ci_failed_and_never_merged(self):
@@ -2145,8 +2162,7 @@ class RerunAndContendedRetryTest(unittest.TestCase):
         self.assertEqual((row(result, 1)["outcome"], row(result, 1)["failing"]), ("ci-failed", ["ci"]))
         ls = labels(calls)
         self.assertEqual(ls.count("land-fix-1"), 1)
-        self.assertEqual(ls.count("land-unlock-1"), 1)
-        for label in ("land-fix-review-1", "land-record-1-1", "land-checks-1-3", "land-merge-1", "close-out-1"):
+        for label in ("land-take-1", "land-unlock-1", "land-fix-review-1", "land-record-1-1", "land-checks-1-3", "land-merge-1", "close-out-1"):
             self.assertNotIn(label, ls)
 
     # #986: the gate failed only because a shard flaked; the shard's rerun passed and the gate, in its own run, still shows its old failure.
@@ -2161,7 +2177,7 @@ class RerunAndContendedRetryTest(unittest.TestCase):
         self.assertEqual(row(result, 1)["outcome"], "landed")
         ls = of(calls, 1)
         self.assertEqual(ls[ls.index("land-pr-1"):],
-                         ["land-pr-1", "land-fix-1", "land-checks-1-2", "land-checks-1-3", "land-merge-1", "close-out-1"])
+                         ["land-pr-1", "land-fix-1", "land-checks-1-2", "land-checks-1-3", "land-take-1", "land-merge-1", "close-out-1"])
         self.assertIn("#1: land-checks-1-2 reran a stale gate run (43286872194); polling once more", out["logs"])
         # Only the poll that follows the rerun is told of stale checks and may name them.
         asked = prompt(calls, "land-checks-1-2")
@@ -2196,8 +2212,7 @@ class RerunAndContendedRetryTest(unittest.TestCase):
         self.assertNotIn("land-checks-1-3", labels(calls))
         result, calls, _ = run(patch=folded(CI_RED), replies={
             "land-fix-1": {"status": "done", "start_head": SHA, "commit": B, "notes": "fixed"},
-            "land-record-1-1": {"ok": True, "head": B, "lock": {"verdict": "moved", "lock_sha": B},
-                                "checks": dict(self.STALE_GATE, head=B)}})
+            "land-record-1-1": {"ok": True, "head": B}, "land-checks-1-2": dict(self.STALE_GATE, head=B)})
         self.assertEqual(row(result, 1)["outcome"], "ci-failed")
         self.assertNotIn("land-merge-1", labels(calls))
 
@@ -2254,11 +2269,11 @@ class RerunAndContendedRetryTest(unittest.TestCase):
         self.assertEqual((row(result, 1)["outcome"], row(result, 1)["pr"]), ("landed", 41))
         ls = of(calls, 1)
         self.assertEqual(ls[ls.index("land-pr-1"):],
-                         ["land-pr-1", "land-lock-1-1", "land-checks-1-1", "land-merge-1", "close-out-1"])
+                         ["land-pr-1", "land-take-1", "land-lock-1-1", "land-merge-1", "close-out-1"])
         text = prompt(calls, "land-lock-1-1")
         self.assertIn(f"forge-claim renew --repo owner/repo --issue 1 --holder {HOLDER} --branch issue-1-x", text)
-        self.assertIn(f"forge-claim land acquire --repo owner/repo --branch dev --sha {SHA} --wait\n", text)
-        self.assertIn("ends in --wait gets more: the flag takes no value", text)
+        self.assertIn(f"forge-claim land acquire --repo owner/repo --branch dev --sha {SHA} --wait --lease\n", text)
+        self.assertIn("The acquire carries --wait --lease: give it a Bash timeout of 60 minutes", text)
         self.assertNotIn("--wait 60", text)
         schema = schema_of(calls, "land-lock-1-1")
         self.assertEqual(schema["required"], ["renew"])
@@ -2271,7 +2286,7 @@ class RerunAndContendedRetryTest(unittest.TestCase):
         result, calls, _ = run(replies=dict(contended(), **self.WAIT_OUT))
         self.assertEqual(row(result, 1)["outcome"], "land-contended")
         ls = of(calls, 1)
-        self.assertEqual(ls[ls.index("land-pr-1"):], ["land-pr-1", "land-lock-1-1", "land-lock-1-2", "land-lock-1-3"])
+        self.assertEqual(ls[ls.index("land-pr-1"):], ["land-pr-1", "land-take-1", "land-lock-1-1", "land-lock-1-2", "land-lock-1-3"])
         self.assertEqual(result["relaunch"]["issues"], [1])
         self.assertEqual(result["relaunch"]["conts"], PRE_MERGE_CONTS)
 
@@ -2414,18 +2429,20 @@ class AllChecksLandTest(unittest.TestCase):
         names = labels(calls)
         self.assertNotIn("land-merge-1", names)
         self.assertNotIn("land-checks-1-4", names)
-        self.assertIn("land-unlock-1", names)
+        self.assertNotIn("land-take-1", names)
 
     def test_a_failing_non_required_check_in_a_passed_reply_is_never_merged(self):
         red = {"state": "passed", "head": SHA, "required": ["ci"], "passed": ["ci"], "failing": ["e2e"]}
-        result, calls, _ = run(patch=folded(red), replies={"land-record-1-1": {"ok": True, "head": FIX, "checks": dict(red, head=FIX)}})
+        result, calls, _ = run(patch=folded(red), replies={"land-record-1-1": {"ok": True, "head": FIX},
+                                                           "land-checks-1-2": dict(red, head=FIX)})
         self.assertEqual((row(result, 1)["outcome"], row(result, 1)["failing"]), ("ci-failed", ["e2e"]))
         self.assertIn("e2e", prompt(calls, "land-fix-1"))
         self.assertNotIn("land-merge-1", labels(calls))
 
     def test_an_explicit_failed_state_outranks_a_pending_list(self):
         red = {"state": "failed", "head": SHA, "pending": ["slow"], "details": "e2e failed"}
-        result, calls, _ = run(patch=folded(red), replies={"land-record-1-1": {"ok": True, "head": FIX, "checks": dict(red, head=FIX)}})
+        result, calls, _ = run(patch=folded(red), replies={"land-record-1-1": {"ok": True, "head": FIX},
+                                                           "land-checks-1-2": dict(red, head=FIX)})
         r = row(result, 1)
         self.assertEqual((r["outcome"], r["details"]), ("ci-failed", "e2e failed"))
         self.assertIn("e2e failed", prompt(calls, "land-fix-1"))
@@ -2513,38 +2530,40 @@ class TransientTest(unittest.TestCase):
 
 
 class LandOrderTest(unittest.TestCase):
-    """#677, #801: the land lock is taken, waiting, in land-pr before any check, held through the merge,
+    """#677, #801, #1679: the land lock is taken, waiting, in land-take once the head is green, held through the merge,
     a resync runs only on a behind answer, and the last held sha is released after it and on a stop."""
 
     MERGED = {"status": "done", "conflicted": False, "head": B, "merge_commit": B, "notes": "ok"}
 
-    def test_the_lock_is_taken_with_wait_before_any_check_or_resync(self):
+    def test_the_lock_is_taken_with_wait_and_lease_only_after_the_checks(self):
         result, calls, _ = run()
         self.assertEqual(row(result, 1)["outcome"], "landed")
         ls = labels(calls)
         self.assertNotIn("land-sync-1-1", ls)
         text = prompt(calls, "land-pr-1")
-        wait = f"forge-claim land acquire --repo owner/repo --branch dev --sha {SHA} --wait"
-        self.assertIn(wait, text)
-        self.assertLess(text.index(wait), text.index("gh pr checks <the PR number> --repo owner/repo --watch"))
+        self.assertIn("gh pr checks <the PR number> --repo owner/repo --watch", text)
+        self.assertNotIn("forge-claim land", text)
+        self.assertIn(f"forge-claim land acquire --repo owner/repo --branch dev --sha {SHA} --wait --lease", prompt(calls, "land-take-1"))
+        self.assertLess(ls.index("land-pr-1"), ls.index("land-take-1"))
+        self.assertLess(ls.index("land-take-1"), ls.index("land-merge-1"))
         self.assertLess(ls.index("land-merge-1"), ls.index("close-out-1"))
         self.assertIn(f"forge-claim land release --repo owner/repo --branch dev --sha {SHA}\n", prompt(calls, "close-out-1"))
 
     def test_a_waited_acquire_goes_on_to_the_merge(self):
         waited = {"verdict": "acquired", "lock_sha": SHA, "waited_s": 1800, "took_over": "idle"}
-        result, calls, _ = run(replies={"land-pr-1": {"pr": 41, "head": SHA, "lock": waited}})
+        result, calls, _ = run(replies={"land-take-1": {"lock": waited}})
         self.assertEqual(row(result, 1)["outcome"], "landed")
         ls = labels(calls)
-        self.assertEqual(ls[ls.index("land-pr-1") + 1], "land-merge-1")
-        self.assertIn("--wait", prompt(calls, "land-pr-1"))
+        self.assertEqual(ls[ls.index("land-take-1") + 1], "land-merge-1")
+        self.assertIn("--wait", prompt(calls, "land-take-1"))
 
     def test_a_non_holding_wait_answer_gives_up_before_any_sync(self):
         for verdict in ("land-contended", "held_by", "lost_to"):
             with self.subTest(verdict=verdict):
                 result, calls, _ = run(replies=dict(contended(), **{
-                    "land-pr-1": {"pr": 41, "head": SHA, "lock": {"verdict": verdict, "lock_sha": B, "by": "h2/b9"}}}))
+                    "land-take-1": {"lock": {"verdict": verdict, "lock_sha": B, "by": "h2/b9"}}}))
                 self.assertEqual(row(result, 1)["outcome"], "land-contended")
-                for label in ("land-sync-1-1", "land-checks-1-1", "land-merge-1", "land-unlock-1"):
+                for label in ("land-sync-1-1", "land-checks-1-2", "land-merge-1", "land-unlock-1"):
                     self.assertNotIn(label, labels(calls))
                 self.assertEqual(result["relaunch"]["conts"], {"1": ready(1)["cont"]})
 
@@ -2556,15 +2575,15 @@ class LandOrderTest(unittest.TestCase):
         ls = labels(calls)
         self.assertLess(ls.index("land-sync-1-1"), ls.index("land-record-1-1"))
         self.assertLess(ls.index("land-record-1-1"), ls.index("land-merge-1"))
-        self.assertIn(f"--sha {B}\n", prompt(calls, "land-record-1-1"))
-        self.assertNotIn(" --wait\n", prompt(calls, "land-record-1-1"))
+        self.assertIn(f"--sha {B} --lease\n", prompt(calls, "land-record-1-1"))
+        self.assertNotIn(" --wait --lease", prompt(calls, "land-record-1-1"))
         self.assertIn(f"forge-claim land release --repo owner/repo --branch dev --sha {B}",
                       prompt(calls, "close-out-1"))
 
     def test_a_failed_move_releases_the_last_held_sha(self):
         result, calls, _ = run(patch=BEHIND, replies={"land-sync-1-1": self.MERGED,
                                         "land-record-1-1": {"ok": True, "head": B, "lock": {
-                                            "verdict": "lost_to", "lock_sha": "c" * 40, "by": "h2/b9"}}})
+                                            "verdict": "land-contended", "lock_sha": "c" * 40, "by": "h2/b9"}}})
         self.assertEqual(row(result, 1)["outcome"], "land-contended")
         ls = labels(calls)
         self.assertNotIn("land-checks-1-2", ls)
@@ -2587,26 +2606,29 @@ class LandOrderTest(unittest.TestCase):
         self.assertIn(f"forge-claim land release --repo owner/repo --branch dev --sha {B}",
                       prompt(calls, "close-out-1"))
 
-    def test_a_lost_to_that_is_not_this_batchs_own_lock_is_contention_without_a_status_read(self):
+    def test_a_lost_to_that_is_not_this_batchs_own_lock_is_a_lost_lease_without_a_status_read(self):
         for lock in ({"verdict": "lost_to", "lock_sha": SHA, "by": "h2/b9"},
                      {"verdict": "lost_to", "lock_sha": "c" * 40, "by": HOLDER}):
             with self.subTest(lock=lock):
                 result, calls, _ = run(patch=BEHIND, replies={
-                    "land-sync-1-1": self.MERGED, "land-record-1-1": {"ok": True, "head": B, "lock": lock}})
-                self.assertEqual(row(result, 1)["outcome"], "land-contended")
+                    "land-sync-1-1": self.MERGED, "land-record-1-1": {"ok": True, "head": B, "lock": lock},
+                    "land-checks-1-2": green(B)})
+                self.assertEqual(row(result, 1)["outcome"], "landed")
+                self.assertIn(f"--sha {B} --wait --lease", prompt(calls, "land-lock-1-1"))
                 self.assertNotIn("land-status-1-1", labels(calls))
 
-    def test_a_status_read_that_does_not_show_the_expected_head_is_contention(self):
+    def test_a_status_read_that_does_not_show_the_expected_head_is_a_lost_lease(self):
         stale = {"ok": True, "head": B, "lock": {"verdict": "held_by", "lock_sha": SHA, "by": HOLDER}}
         for status in ({"verdict": "held_by", "lock_sha": SHA, "by": HOLDER},
                        {"verdict": "held_by", "lock_sha": "c" * 40, "by": "h2/b9"}, {"verdict": "free"}):
             with self.subTest(status=status):
                 result, calls, _ = run(patch=BEHIND, replies={
-                    "land-sync-1-1": self.MERGED, "land-record-1-1": stale, "land-status-1-1": status})
-                self.assertEqual(row(result, 1)["outcome"], "land-contended")
-                self.assertNotIn("land-checks-1-2", labels(calls))
-                self.assertIn(f"forge-claim land release --repo owner/repo --branch dev --sha {SHA}\n",
-                              prompt(calls, "land-unlock-1"))
+                    "land-sync-1-1": self.MERGED, "land-record-1-1": stale, "land-status-1-1": status,
+                    "land-checks-1-2": green(B)})
+                self.assertEqual(row(result, 1)["outcome"], "landed")
+                ls = labels(calls)
+                self.assertLess(ls.index("land-status-1-1"), ls.index("land-lock-1-1"))
+                self.assertIn(f"--sha {B} --wait --lease", prompt(calls, "land-lock-1-1"))
 
     def test_a_failed_or_lost_status_read_keeps_the_moved_lock_a_release_target(self):
         """The read-back proves nothing when it fails: the move may have landed, so cleanup releases both shas."""
@@ -2657,7 +2679,7 @@ class SyncFixRoundTest(unittest.TestCase):
     UNCHECKED = "The merge was not checked for leftover conflict markers"
 
     def land(self, **replies):
-        return run(patch=BEHIND, replies=dict({"land-sync-1-1": ABORTED, "land-sync-resolve-1-1": self.CONFLICTED}, **replies))
+        return run(patch=BEHIND, replies=dict({"land-sync-1-1": ABORTED, "land-sync-resolve-1-1": self.CONFLICTED, "land-checks-1-2": green(B)}, **replies))
 
     def test_the_sync_checks_the_merged_tree_for_markers_before_it_commits(self):
         result, calls, _ = self.land()
@@ -2672,8 +2694,8 @@ class SyncFixRoundTest(unittest.TestCase):
         self.assertIn("markers_checked", next(c for c in calls if c["label"] == "land-sync-resolve-1-1")["schema"]["properties"])
         self.assertNotIn("diff --check", prompt(calls, "land-sync-1-1"))
         self.assertNotIn(self.UNCHECKED, prompt(calls, "land-sync-review-1-1"))
-        self.assertEqual(land_labels(calls), ["land-pr-1", "land-sync-1-1", "land-unlock-1", "land-sync-resolve-1-1", "land-sync-review-1-1",
-                                              "land-record-1-1", "land-merge-1", "close-out-1"])
+        self.assertEqual(land_labels(calls), ["land-pr-1", "land-take-1", "land-sync-1-1", "land-unlock-1", "land-sync-resolve-1-1", "land-sync-review-1-1",
+                                              "land-record-1-1", "land-checks-1-2", "land-take-1", "land-merge-1", "close-out-1"])
 
     def test_a_resolution_whose_marker_check_did_not_run_is_reviewed_for_markers_in_the_same_call(self):
         for said in ({"markers_checked": False}, {}):
@@ -2685,11 +2707,11 @@ class SyncFixRoundTest(unittest.TestCase):
                 self.assertEqual(labels(calls), labels(self.land()[1]))
 
     def test_a_finding_is_fixed_rereviewed_and_landed_at_the_fix(self):
-        result, calls, _ = self.land(**{"land-sync-review-1-1": self.FOUND})
+        result, calls, _ = self.land(**{"land-sync-review-1-1": self.FOUND, "land-checks-1-2": green(self.FIXED)})
         self.assertEqual(row(result, 1)["outcome"], "landed")
         self.assertEqual(land_labels(calls), [
-            "land-pr-1", "land-sync-1-1", "land-unlock-1", "land-sync-resolve-1-1", "land-sync-review-1-1", "land-sync-fix-1-1",
-            "land-sync-rereview-1-1", "land-record-1-1", "land-merge-1", "close-out-1"])
+            "land-pr-1", "land-take-1", "land-sync-1-1", "land-unlock-1", "land-sync-resolve-1-1", "land-sync-review-1-1", "land-sync-fix-1-1",
+            "land-sync-rereview-1-1", "land-record-1-1", "land-checks-1-2", "land-take-1", "land-merge-1", "close-out-1"])
         fix = next(c for c in calls if c["label"] == "land-sync-fix-1-1")
         self.assertEqual((fix["agentType"], fix["model"]), ("implementer", "sonnet"))
         for text in ("dropped a sentence dev added", f"merge commit {B}", "never redo or rewrite the merge",
@@ -2701,11 +2723,11 @@ class SyncFixRoundTest(unittest.TestCase):
         self.assertEqual(again["agentType"], "reviewer")
         self.assertIn(f"diff {B}..{self.FIXED}", again["prompt"])
         self.assertIn("dropped a sentence dev added", again["prompt"])
-        # The lock is taken again at the fix in the record step, its checks are waited for there, and the merge names it.
-        record = prompt(calls, "land-record-1-1")
-        self.assertIn(f"changed to {self.FIXED}", record)
-        self.assertIn(f"--sha {self.FIXED} --wait\n", record)
-        self.assertIn("wait for every check", record)
+        # The fix is recorded and its checks are waited for with no lock; the lock is taken at it once they pass, and the merge names it.
+        self.assertIn(f"changed to {self.FIXED}", prompt(calls, "land-record-1-1"))
+        self.assertIn("Wait for every check", prompt(calls, "land-checks-1-2"))
+        self.assertNotIn("forge-claim land", prompt(calls, "land-checks-1-2"))
+        self.assertIn(f"--sha {self.FIXED} --wait --lease\n", prompt(calls, "land-take-1"))
         self.assertIn(f"--match-head-commit {self.FIXED}", prompt(calls, "land-merge-1"))
         self.assertIn(f"--sha {self.FIXED}", prompt(calls, "close-out-1"))
         self.assertEqual(labels(calls).count("land-unlock-1"), 1)
@@ -2820,8 +2842,7 @@ class SyncFixRoundTest(unittest.TestCase):
         # MAX_SYNCS is two: were the round a resync, the behind answer after it would end land-contended.
         c = "c" * 40
         result, calls, _ = self.land(**{
-            "land-sync-review-1-1": self.FOUND,
-            "land-record-1-1": {"ok": True, "head": self.FIXED, "checks": {"state": "behind", "head": self.FIXED}},
+            "land-sync-review-1-1": self.FOUND, "land-take-1": [{"behind": True}, {"behind": True}], "land-checks-1-2": green(self.FIXED),
             "land-sync-1-2": {"status": "done", "conflicted": False, "head": c, "notes": "ok"}})
         self.assertEqual(row(result, 1)["outcome"], "landed")
         self.assertIn(f"--match-head-commit {c}", prompt(calls, "land-merge-1"))
@@ -2830,7 +2851,7 @@ class SyncFixRoundTest(unittest.TestCase):
         clean = {"status": "done", "conflicted": False, "head": B, "notes": "ok"}
         result, calls, _ = self.land(**{"land-sync-1-1": clean})
         self.assertEqual(row(result, 1)["outcome"], "landed")
-        self.assertEqual(land_labels(calls), ["land-pr-1", "land-sync-1-1", "land-record-1-1", "land-merge-1", "close-out-1"])
+        self.assertEqual(land_labels(calls), ["land-pr-1", "land-take-1", "land-sync-1-1", "land-record-1-1", "land-merge-1", "close-out-1"])
 
     def test_both_programs_carry_the_same_wording(self):
         names = ("MARKER_CHECK", "MARKERS_UNCHECKED", "SYNC_FIX", "SYNC_REREVIEW", "COMMIT_SCOPE",
@@ -2842,387 +2863,6 @@ class SyncFixRoundTest(unittest.TestCase):
         self.assertEqual(batch, standard)
 
 
-class ConflictedSyncOutsideLockTest(unittest.TestCase):
-    """#913: a sync merge that conflicts is aborted under the land lock and resolved, tested, reviewed and fixed outside it; the
-    reviewed head takes the lock again, waiting, and a clean merge never leaves it."""
-
-    RELEASE = "forge-claim land release --repo owner/repo --branch dev --sha "
-    FOUND = {"verdict": "findings", "findings": [{"severity": "important", "summary": "dropped a change", "failing_input": "x"}]}
-
-    def land(self, **replies):
-        return run_full(patch=BEHIND, replies=dict({"land-sync-1-1": ABORTED}, **replies))
-
-    def test_a_conflict_is_aborted_released_resolved_and_the_lock_taken_again(self):
-        out = self.land()
-        result, calls = out["result"], out["calls"]
-        self.assertEqual(row(result, 1)["outcome"], "landed")
-        self.assertEqual(land_labels(calls), ["land-pr-1", "land-sync-1-1", "land-unlock-1", "land-sync-resolve-1-1", "land-sync-review-1-1",
-                                              "land-record-1-1", "land-merge-1", "close-out-1"])
-        sync = prompt(calls, "land-sync-1-1")
-        self.assertIn("If the merge conflicts, do not resolve it: run git merge --abort inside /r/.wt/w-issue-1-x", sync)
-        self.assertIn("confirm no merge is left in progress", sync)
-        self.assertIn("conflicted", next(c for c in calls if c["label"] == "land-sync-1-1")["schema"]["properties"]["status"]["enum"])
-        # The first hold ends at the head it was taken at, before the resolution starts.
-        self.assertIn(f"{self.RELEASE}{SHA}\n", prompt(calls, "land-unlock-1"))
-        resolve = prompt(calls, "land-sync-resolve-1-1")
-        for text in ("The landing lock is not held while you work", "rev-parse -q --verify MERGE_HEAD", "merge origin/dev",
-                     "git -C /r/.wt/w-issue-1-x push origin issue-1-x"):
-            self.assertIn(text, resolve)
-        # The reviewed head is recorded, then the lock is taken at it with --wait and its checks are polled, in one step.
-        record = prompt(calls, "land-record-1-1")
-        self.assertIn(f"Accepted head: {B}\n", record)
-        self.assertIn(f"forge-claim land acquire --repo owner/repo --branch dev --sha {B} --wait\n", record)
-        self.assertLess(record.index("Accepted head:"), record.index("land acquire"))
-        self.assertIn("merge-base --is-ancestor origin/dev HEAD", record)
-        # The merge keeps its one-shot check, and the second hold is released once, in the close-out call.
-        merge = prompt(calls, "land-merge-1")
-        self.assertIn(f"--sha {B}\n", merge)
-        self.assertIn("Only when lock's verdict is already_held or moved", merge)
-        self.assertIn(f"{self.RELEASE}{B}\n", prompt(calls, "close-out-1"))
-        self.assertEqual(out["logs"][-1], "#1: landed")
-
-    def test_a_clean_merge_keeps_the_lock(self):
-        result, calls, _ = run(patch=BEHIND, replies={"land-sync-1-1": {"status": "done", "conflicted": False, "head": B, "notes": "ok"}})
-        self.assertEqual(row(result, 1)["outcome"], "landed")
-        self.assertEqual(land_labels(calls), ["land-pr-1", "land-sync-1-1", "land-record-1-1", "land-merge-1", "close-out-1"])
-        record = prompt(calls, "land-record-1-1")
-        self.assertIn(f"move the cross-host landing lock of the branch dev to the head {B}", record)
-        self.assertNotIn("--wait\n", record)
-
-    def test_behind_again_after_the_retake_a_clean_merge_stays_under_the_lock(self):
-        out = self.land(**{"land-record-1-1": {"ok": True, "head": B, "lock": {"verdict": "acquired", "lock_sha": B},
-                                               "checks": {"state": "behind", "head": B}},
-                           "land-sync-1-2": {"status": "done", "conflicted": False, "head": C, "notes": "ok"}})
-        result, calls = out["result"], out["calls"]
-        self.assertEqual(row(result, 1)["outcome"], "landed")
-        self.assertEqual(land_labels(calls), ["land-pr-1", "land-sync-1-1", "land-unlock-1", "land-sync-resolve-1-1", "land-sync-review-1-1",
-                                              "land-record-1-1", "land-sync-1-2", "land-record-1-2", "land-merge-1", "close-out-1"])
-        again = prompt(calls, "land-record-1-2")
-        self.assertIn(f"--sha {C}\n", again)
-        self.assertNotIn("--wait\n", again)
-        self.assertIn(f"--match-head-commit {C}", prompt(calls, "land-merge-1"))
-
-    def test_behind_again_with_a_second_conflict_is_resolved_outside_the_lock_again(self):
-        replies = {"land-sync-1-1": ABORTED,
-                   "land-record-1-1": {"ok": True, "head": B, "checks": {"state": "behind", "head": B}},
-                   "land-sync-1-2": dict(ABORTED, head=B),
-                   "land-sync-resolve-1-2": {"status": "done", "conflicted": True, "head": C, "merge_commit": C, "notes": "ok"}}
-        result, calls, _ = run(patch=BEHIND, replies=replies)
-        self.assertEqual(row(result, 1)["outcome"], "landed")
-        self.assertEqual(land_labels(calls), [
-            "land-pr-1", "land-sync-1-1", "land-unlock-1", "land-sync-resolve-1-1", "land-sync-review-1-1", "land-record-1-1",
-            "land-sync-1-2", "land-unlock-1", "land-sync-resolve-1-2", "land-sync-review-1-2", "land-record-1-2",
-            "land-merge-1", "close-out-1"])
-        # Each hold is released once, at the head it was held at.
-        unlocks = [c["prompt"] for c in calls if c["label"] == "land-unlock-1"]
-        self.assertEqual([self.RELEASE + sha + "\n" in text for sha, text in zip((SHA, B), unlocks)], [True, True])
-        self.assertIn(f"--sha {C} --wait\n", prompt(calls, "land-record-1-2"))
-        self.assertIn(f"--match-head-commit {C}", prompt(calls, "land-merge-1"))
-        # Behind once more after the second round: the sync budget is spent, and the third hold is released by the wrapper.
-        result, calls, _ = run(patch=BEHIND, replies=dict(replies, **{"land-record-1-2": {
-            "ok": True, "head": C, "checks": {"state": "behind", "head": C}}}))
-        got = row(result, 1)
-        self.assertEqual((got["outcome"], got["reason"]), ("land-contended", "behind dev after 2 resyncs in all"))
-        self.assertNotIn("land-merge-1", labels(calls))
-        self.assertEqual(labels(calls).count("land-unlock-1"), 3)
-        self.assertIn(f"{self.RELEASE}{C}\n", prompt(calls, "land-unlock-1"))
-
-    def test_a_refused_retake_waits_no_further_and_never_merges(self):
-        for verdict in ("land-contended", "held_by", "lost_to"):
-            with self.subTest(verdict=verdict):
-                result, calls, _ = run(patch=BEHIND, replies={"land-sync-1-1": ABORTED, "land-record-1-1": {
-                    "ok": True, "head": B, "lock": {"verdict": verdict, "lock_sha": C, "by": "h2/b9"}, "checks": None},
-                    **{f"land-relock-1-{k}": {"lock": {"verdict": "land-contended", "lock_sha": C}} for k in (1, 2, 3)}})
-                # Only a wait that ran out is waited for again, as often as a first wait is (LAND_WAIT_RETRIES).
-                self.assertEqual([label for label in labels(calls) if label.startswith("land-relock-")],
-                                 [f"land-relock-1-{k}" for k in (1, 2, 3)] if verdict == "land-contended" else [])
-                got = row(result, 1)
-                self.assertEqual((got["outcome"], got["reason"]),
-                                 ("land-contended", f"the land lock was not taken again at the reviewed head {B} ({verdict})"))
-                ls = labels(calls)
-                for gone in ("land-merge-1", "land-checks-1-2", "land-status-1-1", "close-out-1"):
-                    self.assertNotIn(gone, ls)
-                # Nothing is held after the refusal: the only release is the one before the resolution.
-                self.assertEqual(ls.count("land-unlock-1"), 1)
-                self.assertLess(ls.index("land-unlock-1"), ls.index("land-sync-resolve-1-1"))
-                self.assertEqual(result["relaunch"]["conts"], PRE_MERGE_CONTS)
-
-    def test_a_retake_that_answers_acquired_still_merges_only_on_the_pre_merge_check(self):
-        retaken = {"ok": True, "head": B, "lock": {"verdict": "acquired", "lock_sha": B, "waited_s": 1740, "waited_on": [2257]}}
-        out = self.land(**{"land-record-1-1": retaken})
-        self.assertEqual(row(out["result"], 1)["outcome"], "landed")
-        self.assertIn("land-record-1-1: waited 29 min for the land lock of dev behind PR #2257", out["logs"])
-        out = self.land(**{"land-record-1-1": retaken,
-                           "land-merge-1": {"merged": False, "notes": "held_by", "lock": {"verdict": "held_by", "lock_sha": C}}})
-        got = row(out["result"], 1)
-        self.assertEqual((got["outcome"], got["reason"]), ("land-contended", "the land lock was not held before the merge (held_by)"))
-        self.assertNotIn("close-out-1", labels(out["calls"]))
-
-    def test_a_lost_or_failed_retake_releases_what_it_may_hold(self):
-        # No reply: the waiting acquire may have taken the lock at the reviewed head, so the wrapper releases there.
-        result, calls, _ = run(patch=BEHIND, replies={"land-sync-1-1": ABORTED, "land-record-1-1": None})
-        self.assertEqual((row(result, 1)["outcome"], row(result, 1)["stage"]), ("stopped", "land-record"))
-        self.assertEqual(labels(calls).count("land-unlock-1"), 2)
-        self.assertIn(f"{self.RELEASE}{B}\n", prompt(calls, "land-unlock-1"))
-        self.assertNotIn("land-merge-1", labels(calls))
-        # The record step refused before any lock command: nothing is held and nothing more is released.
-        result, calls, _ = run(patch=BEHIND, replies={"land-sync-1-1": ABORTED, "land-record-1-1": {
-            "ok": False, "head": C, "detail": "the head moved", "lock": None, "checks": None}})
-        self.assertEqual((row(result, 1)["outcome"], row(result, 1)["stage"]), ("stopped", "land-record"))
-        self.assertEqual(labels(calls).count("land-unlock-1"), 1)
-
-    def test_every_stop_outside_the_lock_releases_once_and_accepts_nothing(self):
-        stops = {
-            "the resolution is lost": ({"land-sync-resolve-1-1": None}, "stopped"),
-            "the resolution is blocked": ({"land-sync-resolve-1-1": {"status": "blocked", "conflicted": True, "notes": "too tangled"}}, "conflict"),
-            "the resolution names no head": ({"land-sync-resolve-1-1": {"status": "done", "conflicted": True, "notes": "ok"}}, "stopped"),
-            "the review is lost": ({"land-sync-review-1-1": None}, "sync-review"),
-            "the fix is lost": ({"land-sync-review-1-1": self.FOUND, "land-sync-fix-1-1": None}, "sync-review"),
-            "the finding survives": ({"land-sync-review-1-1": self.FOUND, "land-sync-rereview-1-1": self.FOUND}, "sync-review"),
-        }
-        for name, (replies, outcome) in stops.items():
-            with self.subTest(stop=name):
-                out = self.land(**replies)
-                result, ls = out["result"], labels(out["calls"])
-                self.assertEqual(row(result, 1)["outcome"], outcome)
-                self.assertEqual(ls.count("land-unlock-1"), 1)
-                self.assertEqual(ls[ls.index("land-sync-1-1") + 1], "land-unlock-1")
-                # The accepted head is never rewritten, so a relaunch finds the pushed merge unaccepted and reviews it through the child.
-                for gone in ("land-record-1-1", "land-merge-1", "close-out-1"):
-                    self.assertNotIn(gone, ls)
-                # #1371: a fix commit a stop left unpushed is carried as untested; every other stop keeps the child's cont.
-                self.assertEqual(result["relaunch"]["conts"], unpushed("sync-fix", B, SyncFixRoundTest.FIXED) if name == "the finding survives" else PRE_MERGE_CONTS)
-
-    def test_a_relaunch_after_a_stop_outside_the_lock_goes_through_the_child(self):
-        first, _, _ = run(patch=BEHIND, replies={"land-sync-1-1": ABORTED, "land-sync-review-1-1": None})
-        result, calls, _ = run(args=first["relaunch"], patch={"facts-1": dict(HELD, open_pr=OPEN_PR)},
-                               replies={"readopt-1": {"ok": False, "reason": "unaccepted", "detail": B}})
-        ls = labels(calls)
-        self.assertLess(ls.index("readopt-1"), ls.index("child-1"))
-        self.assertLess(ls.index("child-1"), ls.index("land-pr-1"))
-        self.assertEqual(row(result, 1)["outcome"], "landed")
-
-    def test_a_sync_step_that_resolved_the_conflict_itself_is_released_and_reviewed(self):
-        resolved = {"status": "done", "conflicted": True, "head": B, "merge_commit": B, "notes": "ok"}
-        result, calls, _ = run(patch=BEHIND, replies={"land-sync-1-1": resolved})
-        self.assertEqual(row(result, 1)["outcome"], "landed")
-        self.assertEqual(land_labels(calls), ["land-pr-1", "land-sync-1-1", "land-unlock-1", "land-sync-review-1-1", "land-record-1-1",
-                                              "land-merge-1", "close-out-1"])
-        self.assertIn(f"--sha {B} --wait\n", prompt(calls, "land-record-1-1"))
-        result, calls, _ = run(patch=BEHIND, replies={"land-sync-1-1": resolved, "land-sync-review-1-1": self.FOUND,
-                                                      "land-sync-rereview-1-1": self.FOUND})
-        self.assertEqual(row(result, 1)["outcome"], "sync-review")
-        self.assertNotIn("land-merge-1", labels(calls))
-
-    def test_a_resolution_that_says_it_merged_cleanly_is_reviewed_all_the_same(self):
-        clean = {"land-sync-resolve-1-1": {"status": "done", "conflicted": False, "head": B, "notes": "dev moved"}}
-        out = self.land(**clean)
-        self.assertEqual(row(out["result"], 1)["outcome"], "landed")
-        self.assertEqual(land_labels(out["calls"]), ["land-pr-1", "land-sync-1-1", "land-unlock-1", "land-sync-resolve-1-1",
-                                                     "land-sync-review-1-1", "land-record-1-1", "land-merge-1", "close-out-1"])
-        self.assertIn(f"merge commit {B}", prompt(out["calls"], "land-sync-review-1-1"))
-        self.assertIn(f"--sha {B} --wait\n", prompt(out["calls"], "land-record-1-1"))
-        out = self.land(**clean, **{"land-sync-review-1-1": self.FOUND, "land-sync-rereview-1-1": self.FOUND})
-        self.assertEqual(row(out["result"], 1)["outcome"], "sync-review")
-        self.assertNotIn("land-merge-1", labels(out["calls"]))
-
-    FOLLOWED = {"status": "done", "conflicted": True, "head": C, "merge_commit": B, "resolved_files": ["x.py"],
-                "markers_checked": True, "tests": ["t"], "notes": "the tests caught a missed version bump; fixed on top of the merge"}
-    DESCENDS = {"verdict": "pass", "findings": [], "descends": True}
-
-    def test_a_resolution_whose_head_does_not_descend_from_its_merge_commit_never_lands(self):
-        """#986: only the sync review's own proof of ancestry accepts a head that is not the merge commit."""
-        unrelated = {"verdict": "pass", "findings": [], "descends": False}
-        unproven = {"verdict": "pass", "findings": []}
-        for name, replies in {
-            "resolved outside the lock": {"land-sync-1-1": ABORTED, "land-sync-resolve-1-1": self.FOLLOWED, "land-sync-review-1-1": unrelated},
-            "resolved by the sync step": {"land-sync-1-1": self.FOLLOWED, "land-sync-review-1-1": unrelated},
-            "the review proves nothing": {"land-sync-1-1": ABORTED, "land-sync-resolve-1-1": self.FOLLOWED, "land-sync-review-1-1": unproven},
-            "an unrelated head with findings": {"land-sync-1-1": ABORTED, "land-sync-resolve-1-1": self.FOLLOWED,
-                                                "land-sync-review-1-1": dict(self.FOUND, descends=False)},
-        }.items():
-            with self.subTest(case=name):
-                result, calls, _ = run(patch=BEHIND, replies=replies)
-                got = row(result, 1)
-                self.assertEqual((got["outcome"], got["stage"]), ("stopped", "land-sync"))
-                self.assertEqual(got["reason"], f"land-sync: the resolution names the head {C} and the merge commit {B}, and the head does not "
-                                                "descend from it: only a reviewed merge commit lands")
-                ls = labels(calls)
-                for gone in ("land-sync-fix-1-1", "land-record-1-1", "land-merge-1"):
-                    self.assertNotIn(gone, ls)
-                self.assertEqual(ls.count("land-unlock-1"), 1)
-        # An abbreviated merge commit of the same head is the same commit.
-        out = self.land(**{"land-sync-resolve-1-1": {"status": "done", "conflicted": True, "head": B, "merge_commit": B[:12], "notes": "ok"}})
-        self.assertEqual(row(out["result"], 1)["outcome"], "landed")
-        self.assertNotIn("descends", prompt(out["calls"], "land-sync-review-1-1"))
-
-    def test_a_resolution_with_commits_on_top_of_its_merge_commit_is_reviewed_over_both_and_lands_at_its_head(self):
-        """#986: a follow-up commit the resolver made after the merge is reviewed with the merge, and the head is what lands."""
-        out = self.land(**{"land-sync-resolve-1-1": self.FOLLOWED, "land-sync-review-1-1": self.DESCENDS})
-        result, calls = out["result"], out["calls"]
-        self.assertEqual(row(result, 1)["outcome"], "landed")
-        self.assertEqual(land_labels(calls), ["land-pr-1", "land-sync-1-1", "land-unlock-1", "land-sync-resolve-1-1", "land-sync-review-1-1",
-                                              "land-record-1-1", "land-merge-1", "close-out-1"])
-        review = prompt(calls, "land-sync-review-1-1")
-        wt = "/r/.wt/w-issue-1-x"
-        for needle in (f"git -C {wt} show --cc {B}", f"git -C {wt} merge-base --is-ancestor {B} {C}",
-                       f"git -C {wt} rev-list --count --min-parents=2 {B}..{C}", f"git -C {wt} diff {B}..{C}",
-                       f"git -C {wt} diff --check {B} {C}", "return descends true only when the first exits 0 and the second prints 0",
-                       "above all for a test or check they weaken, skip or delete"):
-            with self.subTest(needle=needle):
-                self.assertIn(needle, review)
-        schema = schema_of(calls, "land-sync-review-1-1")
-        self.assertIn("descends", schema["required"])
-        self.assertEqual(schema["properties"]["descends"], {"type": "boolean"})
-        # Everything downstream is at the head: the accepted head, the lock, the merge and the release.
-        record = prompt(calls, "land-record-1-1")
-        self.assertIn(f"Accepted head: {C}\n", record)
-        self.assertIn(f"confirm headRefOid is {C}", record)
-        self.assertIn(f"forge-claim land acquire --repo owner/repo --branch dev --sha {C} --wait\n", record)
-        self.assertIn(f"--match-head-commit {C}", prompt(calls, "land-merge-1"))
-        self.assertEqual(land_release_shas(calls), [SHA, C])
-
-    def test_a_resolution_that_names_no_merge_commit_never_lands(self):
-        """#986: the head may be a follow-up commit, so a conflicted resolution naming a head alone names no merge to review."""
-        result, calls, _ = run(patch=BEHIND, replies={"land-sync-1-1": ABORTED, "land-sync-resolve-1-1": {
-            "status": "done", "conflicted": True, "head": C, "resolved_files": ["x.py"], "notes": "ok"}})
-        got = row(result, 1)
-        self.assertEqual((got["outcome"], got["stage"], got["reason"]),
-                         ("stopped", "land-sync", "land-sync: the resolution named no merge commit"))
-        ls = labels(calls)
-        for gone in ("land-sync-review-1-1", "land-record-1-1", "land-merge-1"):
-            self.assertNotIn(gone, ls)
-        # The only step that runs a merge command, land-merge, never ran (asserted above); what ran is the landing up to the resolution.
-        self.assertEqual(land_labels(calls), ["land-pr-1", "land-sync-1-1", "land-unlock-1", "land-sync-resolve-1-1"])
-        self.assertEqual(ls.count("land-unlock-1"), 1)
-
-    def test_a_sync_step_that_resolved_the_conflict_itself_and_names_no_merge_commit_never_lands(self):
-        """#986: the same refusal when the sync step, not the resolve step, answers conflicted with a head alone."""
-        result, calls, _ = run(patch=BEHIND, replies={"land-sync-1-1": {
-            "status": "done", "conflicted": True, "head": C, "resolved_files": ["x.py"], "notes": "ok"}})
-        got = row(result, 1)
-        self.assertEqual((got["outcome"], got["stage"], got["reason"]),
-                         ("stopped", "land-sync", "land-sync: the resolution named no merge commit"))
-        ls = labels(calls)
-        for gone in ("land-sync-resolve-1-1", "land-sync-review-1-1", "land-record-1-1", "land-merge-1"):
-            self.assertNotIn(gone, ls)
-        self.assertEqual(land_labels(calls)[:2], ["land-pr-1", "land-sync-1-1"])
-
-    def test_a_clean_sync_whose_head_is_not_its_merge_commit_is_reviewed_too(self):
-        clean = {"status": "done", "conflicted": False, "head": C, "merge_commit": B, "notes": "ok"}
-        result, calls, _ = run(patch=BEHIND, replies={"land-sync-1-1": clean, "land-sync-review-1-1": self.DESCENDS})
-        self.assertEqual(row(result, 1)["outcome"], "landed")
-        self.assertEqual(land_labels(calls), ["land-pr-1", "land-sync-1-1", "land-sync-review-1-1", "land-record-1-1", "land-merge-1", "close-out-1"])
-        self.assertIn(f"diff {B}..{C}", prompt(calls, "land-sync-review-1-1"))
-        self.assertIn(f"--match-head-commit {C}", prompt(calls, "land-merge-1"))
-        result, calls, _ = run(patch=BEHIND, replies={"land-sync-1-1": clean, "land-sync-review-1-1": {"verdict": "pass", "findings": [], "descends": False}})
-        self.assertEqual((row(result, 1)["outcome"], row(result, 1)["stage"]), ("stopped", "land-sync"))
-        self.assertNotIn("land-merge-1", labels(calls))
-
-    def test_the_fix_round_of_a_resolution_with_follow_up_commits_starts_at_its_head_and_names_the_range(self):
-        d = "d" * 40
-        fixed = {"status": "done", "start_head": C, "commit": d, "notes": "ok", "tests": ["t"]}
-        found = dict(self.FOUND, descends=True)
-        out = self.land(**{"land-sync-resolve-1-1": self.FOLLOWED, "land-sync-review-1-1": found, "land-sync-fix-1-1": fixed})
-        calls = out["calls"]
-        self.assertEqual(row(out["result"], 1)["outcome"], "landed")
-        rng = f"merge commit {B} (git -C /r/.wt/w-issue-1-x show --cc {B}) and the commits made on top of it up to the head {C} (git -C /r/.wt/w-issue-1-x diff {B}..{C})"
-        self.assertIn(rng, prompt(calls, "land-sync-fix-1-1"))
-        self.assertIn("on top of that head", prompt(calls, "land-sync-fix-1-1"))
-        rereview = prompt(calls, "land-sync-rereview-1-1")
-        self.assertIn(f"diff {C}..{d}", rereview)
-        self.assertIn(f"merge commit {B} and the commits made on top of it up to the head {C}", rereview)
-        self.assertIn(f"--match-head-commit {d}", prompt(calls, "land-merge-1"))
-        # A fix that started at the merge commit, beneath the follow-up commits, is not a fix of the reviewed head.
-        out = self.land(**{"land-sync-resolve-1-1": self.FOLLOWED, "land-sync-review-1-1": found,
-                           "land-sync-fix-1-1": dict(fixed, start_head=B)})
-        self.assertEqual(row(out["result"], 1)["outcome"], "sync-review")
-        self.assertNotIn("land-merge-1", labels(out["calls"]))
-
-    def test_the_resolver_runs_its_tests_before_it_commits_the_merge_and_never_amends_it(self):
-        resolve = prompt(self.land()["calls"], "land-sync-resolve-1-1")
-        before = "still before committing, run in full every test file among or covering the files you resolved by hand"
-        self.assertIn(before, resolve)
-        self.assertLess(resolve.index("diff --check HEAD"), resolve.index(before))
-        self.assertLess(resolve.index(before), resolve.index("commit the merge only once they pass"))
-        self.assertNotIn(", commit the merge, and run in full", resolve)
-        for needle in ("never amend or redo the merge: fix it in a commit on top of it", "run those tests again",
-                       "merge_commit (the full sha of the merge commit)",
-                       "head (the full sha of HEAD: the merge commit, or the last commit you made on top of it)"):
-            with self.subTest(needle=needle):
-                self.assertIn(needle, resolve)
-
-    def test_a_retake_whose_wait_ran_out_waits_again_like_a_first_wait(self):
-        out_of_time = {"ok": True, "head": B, "lock": {"verdict": "land-contended", "lock_sha": C, "waited_s": 3600, "waited_on": [7]}, "checks": None}
-        out = self.land(**{"land-record-1-1": out_of_time,
-                           "land-relock-1-1": {"lock": {"verdict": "land-contended", "lock_sha": C}},
-                           "land-relock-1-2": {"lock": {"verdict": "acquired", "lock_sha": B, "waited_s": 900, "waited_on": [7, 9]}},
-                           "land-checks-1-2": {"state": "passed", "head": B, "required": ["ci"], "passed": ["ci"]}})
-        result, calls = out["result"], out["calls"]
-        self.assertEqual(row(result, 1)["outcome"], "landed")
-        # A retried wait polled no checks: the loop polls them itself, under the lock, before the merge.
-        self.assertEqual(land_labels(calls), ["land-pr-1", "land-sync-1-1", "land-unlock-1", "land-sync-resolve-1-1", "land-sync-review-1-1",
-                                              "land-record-1-1", "land-relock-1-1", "land-relock-1-2", "land-checks-1-2", "land-merge-1",
-                                              "close-out-1"])
-        again = next(c for c in calls if c["label"] == "land-relock-1-2")
-        self.assertEqual((again["agentType"], again["model"]), ("clerk", "sonnet"))
-        self.assertIn("forge-claim renew --repo owner/repo --issue 1", again["prompt"])
-        self.assertIn(f"forge-claim land acquire --repo owner/repo --branch dev --sha {B} --wait\n", again["prompt"])
-        self.assertIn(f"{self.RELEASE}{B}\n", prompt(calls, "close-out-1"))
-        self.assertEqual([line for line in out["logs"] if "waited" in line],
-                         ["land-record-1-1: waited 60 min for the land lock of dev behind PR #7",
-                          "land-relock-1-2: waited 15 min for the land lock of dev behind PR #7, #9"])
-        # A lost claim ends the wait; a lost reply may hold the lock at the reviewed head, which the wrapper releases.
-        out = self.land(**{"land-record-1-1": out_of_time, "land-relock-1-1": {"renew": {"verdict": "not_held", "by": "h2/b9"}, "lock": None}})
-        self.assertEqual(row(out["result"], 1)["outcome"], "claim-lost")
-        self.assertEqual(labels(out["calls"]).count("land-unlock-1"), 1)
-        out = self.land(**{"land-record-1-1": out_of_time, "land-relock-1-1": None})
-        self.assertEqual((row(out["result"], 1)["outcome"], row(out["result"], 1)["stage"]), ("stopped", "land-lock"))
-        self.assertEqual(labels(out["calls"]).count("land-unlock-1"), 2)
-        self.assertIn(f"{self.RELEASE}{B}\n", prompt(out["calls"], "land-unlock-1"))
-        self.assertNotIn("land-merge-1", labels(out["calls"]))
-
-    FAILED = {"verdict": "error", "detail": "boom"}
-
-    def unlocks(self, out):
-        return [c["prompt"] for c in out["calls"] if c["label"] == "land-unlock-1"]
-
-    def test_a_release_that_failed_before_the_resolution_is_tried_again_at_the_stop(self):
-        for name, first in {"an error": self.FAILED, "a lost reply": None, "a dead agent": "throw"}.items():
-            with self.subTest(release=name):
-                out = self.land(**{"land-unlock-1": [first, {"verdict": "released"}], "land-sync-review-1-1": None})
-                dead = name == "a dead agent"  # the landing ends where the agent died; the resolution never starts
-                self.assertEqual(row(out["result"], 1)["outcome"], "stopped" if dead else "sync-review")
-                self.assertEqual("land-sync-resolve-1-1" in labels(out["calls"]), not dead)
-                # Both releases name the sha the lock is held at: the head it was taken at.
-                self.assertEqual([f"{self.RELEASE}{SHA}\n" in text for text in self.unlocks(out)], [True, True])
-                self.assertNotIn("land-merge-1", labels(out["calls"]))
-
-    def test_after_a_failed_release_a_lost_retake_releases_the_earlier_sha_then_the_reviewed_head(self):
-        out = self.land(**{"land-unlock-1": [self.FAILED, {"verdict": "released"}], "land-record-1-1": None})
-        self.assertEqual((row(out["result"], 1)["outcome"], row(out["result"], 1)["stage"]), ("stopped", "land-record"))
-        first, last = self.unlocks(out)
-        self.assertIn(f"{self.RELEASE}{SHA}\n", last)
-        self.assertIn(f"When it prints not_held with lock_sha {B}, run alone and exactly: {self.RELEASE}{B}", last)
-        self.assertNotIn("When it prints not_held", first)
-
-    def test_after_a_failed_release_the_retake_outcomes_keep_the_right_sha(self):
-        failed = {"land-unlock-1": [self.FAILED, {"verdict": "released"}]}
-        # The retake moves the lock that was never released: the landing goes on and the close-out releases the reviewed head.
-        out = self.land(**failed, **{"land-record-1-1": {"ok": True, "head": B, "lock": {"verdict": "moved", "lock_sha": B}}})
-        self.assertEqual(row(out["result"], 1)["outcome"], "landed")
-        self.assertEqual(len(self.unlocks(out)), 1)
-        self.assertIn(f"{self.RELEASE}{B}\n", prompt(out["calls"], "close-out-1"))
-        # The record step refused before any lock command: the earlier sha is still marked held and is released again.
-        out = self.land(**failed, **{"land-record-1-1": {"ok": False, "head": C, "detail": "the head moved", "lock": None, "checks": None}})
-        self.assertEqual((row(out["result"], 1)["outcome"], row(out["result"], 1)["stage"]), ("stopped", "land-record"))
-        self.assertEqual([f"{self.RELEASE}{SHA}\n" in text for text in self.unlocks(out)], [True, True])
-        # Another landing holds the lock: nothing of this landing's is left to release.
-        out = self.land(**failed, **{"land-record-1-1": {"ok": True, "head": B, "lock": {"verdict": "held_by", "lock_sha": C}, "checks": None}})
-        self.assertEqual(row(out["result"], 1)["outcome"], "land-contended")
-        self.assertEqual(len(self.unlocks(out)), 1)
-
-
 class LockWaitLogTest(unittest.TestCase):
     """#913: forge-claim's waited_on reaches the lock replies, and a long wait is logged with the pull requests it waited on."""
 
@@ -3232,25 +2872,25 @@ class LockWaitLogTest(unittest.TestCase):
 
     def test_the_lock_replies_carry_the_wait(self):
         _, calls, _ = run()
-        self.assertIn("lock_sha, by, detail, waited_s and waited_on from its output", prompt(calls, "land-pr-1"))
-        lock = object_branch(schema_of(calls, "land-pr-1")["properties"]["lock"])["properties"]
+        self.assertIn("lock_sha, by, detail, waited_s and waited_on from its output", prompt(calls, "land-take-1"))
+        lock = object_branch(schema_of(calls, "land-take-1")["properties"]["lock"])["properties"]
         self.assertEqual((lock["waited_s"], lock["waited_on"]), ({"type": "integer"}, {"type": "array", "items": {"type": "integer"}}))
 
     def test_a_long_wait_is_logged_with_its_holders_and_a_short_one_is_not(self):
         def waited(**lock):
-            return {"land-pr-1": {"lock": dict({"verdict": "acquired", "lock_sha": SHA}, **lock)}}
+            return {"land-take-1": {"lock": dict({"verdict": "acquired", "lock_sha": SHA}, **lock)}}
         self.assertEqual(self.waits(run_full(patch=waited(waited_s=1740, waited_on=[2218, 2230]))),
-                         ["land-pr-1: waited 29 min for the land lock of dev behind PR #2218, #2230"])
-        self.assertEqual(self.waits(run_full(patch=waited(waited_s=600))), ["land-pr-1: waited 10 min for the land lock of dev"])
+                         ["land-take-1: waited 29 min for the land lock of dev behind PR #2218, #2230"])
+        self.assertEqual(self.waits(run_full(patch=waited(waited_s=600))), ["land-take-1: waited 10 min for the land lock of dev"])
         for lock in ({"waited_s": 240, "waited_on": [2218]}, {}):
             with self.subTest(lock=lock):
                 self.assertEqual(self.waits(run_full(patch=waited(**lock))), [])
 
     def test_a_retried_wait_is_logged_under_its_own_step(self):
-        out = run_full(replies={"land-pr-1": {"pr": 41, "head": SHA, "lock": {"verdict": "land-contended", "waited_s": 3600, "waited_on": [7]}},
+        out = run_full(replies={"land-take-1": {"lock": {"verdict": "land-contended", "waited_s": 3600, "waited_on": [7]}},
                                 "land-lock-1-1": {"lock": {"verdict": "acquired", "lock_sha": SHA, "waited_s": 480, "waited_on": [7, 9]}}})
         self.assertEqual(row(out["result"], 1)["outcome"], "landed")
-        self.assertEqual(self.waits(out), ["land-pr-1: waited 60 min for the land lock of dev behind PR #7",
+        self.assertEqual(self.waits(out), ["land-take-1: waited 60 min for the land lock of dev behind PR #7",
                                            "land-lock-1-1: waited 8 min for the land lock of dev behind PR #7, #9"])
 
     def test_both_programs_carry_the_same_lock_return_and_wait_log(self):
@@ -3439,8 +3079,7 @@ class DependencyTest(unittest.TestCase):
 
     def test_a_failed_blocker_blocks_its_dependent(self):
         result, calls, _ = run(args=dict(ARGS, issues=[1, 2]), patch={"facts-2": blocked_by(1)},
-                               replies=dict(contended(), **{
-                                   "land-pr-1": {"pr": 41, "head": SHA, "lock": {"verdict": "land-contended"}}}))
+                               replies=dict(contended(), **{"land-take-1": {"lock": {"verdict": "land-contended"}}}))
         self.assertEqual((row(result, 2)["outcome"], row(result, 2)["blocker"]), ("blocked", 1))
         self.assertNotIn("acquire-2", labels(calls))
         self.assertEqual(result["relaunch"]["issues"], [1, 2])
@@ -3467,8 +3106,7 @@ class DependencyTest(unittest.TestCase):
     def test_a_cycle_leaves_the_other_open_issues_in_the_relaunch(self):
         result, _, _ = run(args=dict(ARGS, issues=[1, 2, 3]),
                            patch={"facts-1": blocked_by(2), "facts-2": blocked_by(1)},
-                           replies=dict(contended(3), **{
-                               "land-pr-3": {"pr": 43, "head": SHA, "lock": {"verdict": "land-contended"}}}))
+                           replies=dict(contended(3), **{"land-take-3": {"lock": {"verdict": "land-contended"}}}))
         self.assertEqual(result["relaunch"]["issues"], [3])
 
     def test_a_waiting_dependent_holds_no_slot(self):
@@ -3929,7 +3567,7 @@ class SourceTest(unittest.TestCase):
 CLERK, IMPL, REV = "clerk", "implementer", "reviewer"
 EXPECTED = {stem: frozenset({kind}) for kind, stems in (
     (CLERK, ("setup", "facts-", "release-", "acquire-", "readopt-", "readopt-push-", "recover-end-", "ask-", "settle-",
-             "land-unlock-", "land-ask-", "land-lock-", "land-relock-", "land-record-", "land-status-", "land-sync-prove-", "land-push-", "land-pr-", "land-open-", "land-checks-", "land-merge-", "close-out-",
+             "land-unlock-", "land-ask-", "land-lock-", "land-take-", "land-record-", "land-status-", "land-sync-prove-", "land-push-", "land-pr-", "land-open-", "land-checks-", "land-merge-", "close-out-",
              "train-sweep-", "train-pr-", "train-checks-", "train-ready-", "train-merge-", "train-flip-")),
     (IMPL, ("land-sync-", "land-sync-resolve-", "land-sync-fix-", "land-fix-", "train-build-")),
     (REV, ("land-sync-review-", "land-sync-rereview-", "land-fix-review-")),
@@ -3948,14 +3586,14 @@ SCENARIOS = (
     {"args": dict(ARGS, unattended=True),
      "patch": folded({"state": "needs_label", "head": SHA, "label": "raise-me", "failing": ["gate"]})},
     {"patch": folded(CI_RED),
-     "replies": {"land-record-1-1": {"ok": True, "head": FIX}}},
+     "replies": {"land-record-1-1": {"ok": True, "head": FIX}, "land-checks-1-2": green(FIX)}},
     {"patch": BEHIND,
-     "replies": {"land-sync-1-1": ABORTED, "land-sync-resolve-1-1": {"status": "done", "conflicted": True, "head": B, "merge_commit": B,
-                                   "resolved_files": ["x.py"], "tests": ["t"], "notes": "ok"}}},
-    # #913: a retake whose wait ran out is waited for again in a land-relock step.
+     "replies": {"land-sync-1-1": ABORTED, "land-checks-1-2": green(B),
+                 "land-sync-resolve-1-1": {"status": "done", "conflicted": True, "head": B, "merge_commit": B,
+                                           "resolved_files": ["x.py"], "tests": ["t"], "notes": "ok"}}},
+    # A take after a resolution whose wait ran out is waited for again in a land-lock step.
     {"patch": BEHIND,
-     "replies": {"land-sync-1-1": ABORTED,
-                 "land-record-1-1": {"ok": True, "head": B, "lock": {"verdict": "land-contended"}, "checks": None},
+     "replies": {"land-sync-1-1": ABORTED, "land-take-1": [{"behind": True}, {"lock": {"verdict": "land-contended"}}],
                  "land-checks-1-2": {"state": "passed", "head": B, "required": ["ci"], "passed": ["ci"]}}},
     # #907: a sync-review finding reaches the fix round and its re-review.
     {"patch": BEHIND,
@@ -3972,7 +3610,7 @@ SCENARIOS = (
                  "land-status-1-1": {"verdict": "held_by", "lock_sha": B, "by": HOLDER},
                  "land-checks-1-2": {"state": "passed", "head": B, "required": ["ci"], "passed": ["ci"]}}},
     {"patch": folded({"state": "pending", "head": SHA, "pending": ["e2e"]})},
-    {"replies": {"land-pr-1": {"pr": 41, "head": SHA, "lock": {"verdict": "land-contended"}}}},
+    {"replies": {"land-take-1": {"lock": {"verdict": "land-contended"}}}},
     {"patch": {"facts-1": dict(HELD, open_pr=OPEN_PR)}},
     # #1019: a readopt that finds the worktree ahead of its PR by one clean merge of the integration branch pushes it.
     {"patch": {"facts-1": dict(HELD, open_pr=OPEN_PR)},
@@ -4035,7 +3673,7 @@ class AgentTypeTest(unittest.TestCase):
 class ClerkModelTest(unittest.TestCase):
     """#803, #813: clerk_model is checked, sets the model of every clerk call except the setup and lifecycle steps, which stay on the default, and is passed to every child and the relaunch only when haiku."""
 
-    ON_DEFAULT = {"setup", "readopt-push-", "land-sync-prove-", "land-unlock-", "land-lock-", "land-relock-", "land-pr-", "land-open-", "land-merge-", "land-record-", "land-push-", "land-checks-", "close-out-",
+    ON_DEFAULT = {"setup", "readopt-push-", "land-sync-prove-", "land-unlock-", "land-lock-", "land-take-", "land-pr-", "land-open-", "land-merge-", "land-record-", "land-push-", "land-checks-", "close-out-",
                   "train-sweep-", "train-pr-", "train-checks-", "train-merge-"}
 
     def test_clerk_model_must_be_sonnet_or_haiku(self):
@@ -4305,7 +3943,7 @@ class PushBoundLandFixTest(unittest.TestCase):
         out = run_full(patch=folded(CI_RED), replies={"land-fix-1": dict(OwnRedOutsideLockTest.RERAN, tests=[])})
         self.assertEqual(row(out["result"], 1)["outcome"], "landed")
         self.assertEqual(OwnRedOutsideLockTest.landing(out),
-                         ["land-pr-1", "land-fix-1", "land-checks-1-2", "land-merge-1", "close-out-1"])
+                         ["land-pr-1", "land-fix-1", "land-checks-1-2", "land-take-1", "land-merge-1", "close-out-1"])
         _, calls, _ = SyncFixRoundTest().land(**{
             "land-sync-review-1-1": SyncFixRoundTest.FOUND,
             "land-sync-fix-1-1": {"status": "done", "start_head": B, "commit": B,
@@ -4525,7 +4163,7 @@ class StopReasonTest(unittest.TestCase):
         rows = (
             ("ci-failed", {"patch": {"land-pr-1": {"checks": red}}, "replies": {"land-fix-1": None}},
              "the fix round did not finish; failing checks ci"),
-            ("land-contended", {"patch": {"land-pr-1": {"lock": {"verdict": "held_by", "by": "h2/b9"}}}},
+            ("land-contended", {"patch": {"land-take-1": {"lock": {"verdict": "held_by", "by": "h2/b9"}}}},
              "the land lock is held by another landing (held_by)"),
             ("blocked", {"patch": self.WAITS}, "waits for #50"),
             ("claim-lost", {"children": {"1": {"stage": "claimed", "verdict": "held_by", "by": "h2/b9"}}}, "claimed by h2/b9"),
@@ -4632,15 +4270,15 @@ class FoldedFirstLandChecksTest(unittest.TestCase):
         result, calls, _ = run()
         self.assertEqual(row(result, 1)["outcome"], "landed")
         self.assertIsNone(result["relaunch"])
-        self.assertEqual(of(calls, 1), ["facts-1", "acquire-1", "child-1", "child-1", "land-pr-1", "land-merge-1",
-                                        "close-out-1"])
+        self.assertEqual(of(calls, 1), ["facts-1", "acquire-1", "child-1", "child-1", "land-pr-1", "land-take-1",
+                                        "land-merge-1", "close-out-1"])
         text = prompt(calls, "land-pr-1")
         self.assertIn(self.CHECKS_CMD, text)
         self.assertIn("gh api repos/owner/repo/rules/branches/dev", text)
-        self.assertLess(text.index(f"--sha {SHA} --wait\n"), text.rindex(self.CHECKS_CMD))
+        self.assertNotIn("forge-claim land", text)
         member = schema_of(calls, "land-pr-1")["properties"]["checks"]
         self.assertEqual(set(object_branch(member)["properties"]),
-                         {"state", "head", "required", "passed", "failing", "pending", "label", "details"})
+                         {"state", "head", "behind", "required", "passed", "failing", "pending", "label", "details", "lock_sha"})
         self.assertIn({"type": "null"}, member["anyOf"])
 
     def test_each_folded_first_checks_answer_is_graded_as_before(self):
@@ -4649,7 +4287,7 @@ class FoldedFirstLandChecksTest(unittest.TestCase):
         fix_review = {"verdict": "findings", "findings": [{"severity": "important", "summary": "skipped a test", "failing_input": "x"}]}
         table = (
             (None, {}, ("stopped", "checks"), PRE_MERGE_CONTS,
-             lambda ls: (self.assertEqual(ls.count("land-unlock-1"), 1), self.assertNotIn("land-merge-1", ls))),
+             lambda ls: (self.assertNotIn("land-unlock-1", ls), self.assertNotIn("land-merge-1", ls))),
             ({"state": "passed", "head": B}, {}, ("stopped", "head-moved"), PRE_MERGE_CONTS,
              lambda ls: self.assertNotIn("land-merge-1", ls)),
             (pending, {"land-checks-1-2": pending, "land-checks-1-3": pending}, ("stopped", "checks-pending"),
@@ -4657,11 +4295,11 @@ class FoldedFirstLandChecksTest(unittest.TestCase):
              lambda ls: (self.assertIn("land-checks-1-3", ls), self.assertNotIn("land-checks-1-4", ls))),
             (behind, {}, ("landed", None), None,
              lambda ls: self.assertEqual(ls[ls.index("land-pr-1"):],
-                                         ["land-pr-1", "land-sync-1-1", "land-checks-1-2", "land-merge-1",
+                                         ["land-pr-1", "land-sync-1-1", "land-checks-1-2", "land-take-1", "land-merge-1",
                                           "close-out-1"])),
             (behind, {"land-checks-1-2": behind, "land-checks-1-3": behind}, ("land-contended", None), PRE_MERGE_CONTS,
              lambda ls: (self.assertIn("land-sync-1-1", ls), self.assertIn("land-sync-1-2", ls),
-                         self.assertNotIn("land-sync-1-3", ls), self.assertIn("land-unlock-1", ls))),
+                         self.assertNotIn("land-sync-1-3", ls), self.assertNotIn("land-take-1", ls))),
             (CI_RED, {"land-fix-review-1": fix_review}, ("ci-failed", None), unpushed("checks-fix", SHA, FIX),
              lambda ls: (self.assertNotIn("land-record-1-1", ls), self.assertNotIn("land-merge-1", ls))),
         )
@@ -4681,7 +4319,7 @@ class FoldedFirstLandChecksTest(unittest.TestCase):
 
     def test_a_behind_resync_that_merges_still_pushes_records_and_moves_the_lock(self):
         result, calls, _ = run(
-            patch={"land-pr-1": {"checks": {"state": "behind", "head": SHA}}},
+            patch=BEHIND,
             replies={"land-sync-1-1": {"status": "done", "conflicted": False, "head": B, "merge_commit": B, "notes": "ok"}})
         self.assertEqual(row(result, 1)["outcome"], "landed")
         self.assertIsNone(result["relaunch"])
@@ -4689,45 +4327,42 @@ class FoldedFirstLandChecksTest(unittest.TestCase):
         self.assertLess(ls.index("land-sync-1-1"), ls.index("land-record-1-1"))
         self.assertLess(ls.index("land-record-1-1"), ls.index("land-merge-1"))
         self.assertIn("git -C /r/.wt/w-issue-1-x push origin issue-1-x", prompt(calls, "land-sync-1-1"))
-        self.assertIn(f"--sha {B}\n", prompt(calls, "land-record-1-1"))
+        self.assertIn(f"--sha {B} --lease\n", prompt(calls, "land-record-1-1"))
         self.assertIn(f"forge-claim land release --repo owner/repo --branch dev --sha {B}\n", prompt(calls, "close-out-1"))
 
 
 class FoldedRecordChecksTest(unittest.TestCase):
     """#801: the record step carries the next checks poll."""
 
-    def test_a_fix_lands_through_the_record_step_carrying_its_checks(self):
-        result, calls, _ = run(patch=folded(CI_RED), replies={"land-record-1-1": {"ok": True, "head": FIX}})
+    def test_a_fix_is_recorded_and_polled_before_it_takes_the_lock(self):
+        result, calls, _ = run(patch=folded(CI_RED), replies={"land-record-1-1": {"ok": True, "head": FIX},
+                                                              "land-checks-1-2": green(FIX)})
         self.assertEqual(row(result, 1)["outcome"], "landed")
         self.assertIsNone(result["relaunch"])
         ls = of(calls, 1)
         self.assertEqual(ls[ls.index("land-fix-1"):],
-                         ["land-fix-1", "land-fix-review-1", "land-record-1-1", "land-merge-1", "close-out-1"])
-        self.assertNotIn("land-checks-1-2", ls)
-        text = prompt(calls, "land-record-1-1")
-        self.assertLess(text.index(f"--sha {FIX} --wait\n"), text.index("gh pr checks 41 --repo owner/repo --json name,bucket,link"))
+                         ["land-fix-1", "land-fix-review-1", "land-record-1-1", "land-checks-1-2", "land-take-1", "land-merge-1",
+                          "close-out-1"])
+        self.assertNotIn("forge-claim land", prompt(calls, "land-record-1-1"))
         self.assertIn(f"--match-head-commit {FIX}", prompt(calls, "land-merge-1"))
-        member = schema_of(calls, "land-record-1-1")["properties"]["checks"]
-        self.assertEqual(set(object_branch(member)["properties"]), {"state", "head", "passed", "failing", "pending"} | {"required", "label", "details"})
-        self.assertIn({"type": "null"}, member["anyOf"])
+        self.assertEqual(set(schema_of(calls, "land-record-1-1")["properties"]), {"ok", "head", "detail"})
 
     def test_each_record_step_answer_is_graded_as_before(self):
+        moved = {"land-sync-1-1": {"status": "done", "conflicted": False, "head": B, "merge_commit": B, "notes": "ok"}}
         table = (
-            ({"ok": True, "head": FIX, "checks": None}, ("stopped", "checks"),
+            ({"ok": True, "head": B, "checks": None}, {}, ("stopped", "checks"),
              lambda ls: (self.assertEqual(ls.count("land-unlock-1"), 1), self.assertNotIn("land-checks-1-2", ls),
                          self.assertNotIn("land-merge-1", ls))),
-            ({"ok": True, "head": FIX, "checks": {"state": "passed", "head": "d" * 40}}, ("stopped", "head-moved"),
+            ({"ok": True, "head": B, "checks": {"state": "passed", "head": "d" * 40}}, {}, ("stopped", "head-moved"),
              lambda ls: self.assertNotIn("land-merge-1", ls)),
-            ({"ok": True, "head": FIX, "checks": dict(CI_RED, head=FIX)}, ("ci-failed", None),
-             lambda ls: (self.assertEqual(ls.count("land-fix-1"), 1), self.assertNotIn("land-checks-1-2", ls))),
-            ({"ok": False, "head": "d" * 40, "detail": "head differs", "lock": None}, ("stopped", "land-record"),
+            ({"ok": True, "head": B, "checks": dict(CI_RED, head=B)}, {"land-record-1-2": {"ok": True, "head": FIX}, "land-checks-1-3": dict(CI_RED, head=FIX)},
+             ("ci-failed", None), lambda ls: (self.assertEqual(ls.count("land-fix-1"), 1), self.assertNotIn("land-checks-1-2", ls))),
+            ({"ok": False, "head": "d" * 40, "detail": "head differs", "lock": None}, {}, ("stopped", "land-record"),
              lambda ls: self.assertNotIn("land-checks-1-2", ls)),
-            ({"ok": True, "head": FIX, "lock": {"verdict": "lost_to", "lock_sha": "c" * 40, "by": "h2/b9"}},
-             ("land-contended", None), lambda ls: self.assertNotIn("land-checks-1-2", ls)),
         )
-        for reply, (outcome, stage), check in table:
+        for reply, extra, (outcome, stage), check in table:
             with self.subTest(reply=reply):
-                result, calls, _ = run(patch=folded(CI_RED), replies={"land-record-1-1": reply})
+                result, calls, _ = run(patch=BEHIND, replies=dict(moved, **{"land-record-1-1": reply}, **extra))
                 self.assertEqual(row(result, 1)["outcome"], outcome)
                 if stage:
                     self.assertEqual(row(result, 1)["stage"], stage)
@@ -4736,9 +4371,7 @@ class FoldedRecordChecksTest(unittest.TestCase):
                 if stage == "head-moved":
                     self.assertEqual(row(result, 1)["head"], "d" * 40)
                 self.assertEqual(result["relaunch"]["issues"], [1])
-                # #1371: a record step that did not read the PR at the fix head left the fix unpushed, so it is carried as untested.
-                pushed = reply.get("ok") is True and reply.get("head") == FIX
-                self.assertEqual(result["relaunch"]["conts"], PRE_MERGE_CONTS if pushed else unpushed("checks-fix", SHA, FIX))
+                self.assertEqual(result["relaunch"]["conts"], PRE_MERGE_CONTS)
                 check(of(calls, 1))
 
     def test_a_behind_resync_that_merges_lands_through_the_record_checks(self):
@@ -4974,7 +4607,7 @@ class TrainTest(unittest.TestCase):
     def test_two_ready_issues_land_through_one_car_merge(self):
         result, calls, _ = train_run()
         self.assertEqual(land_labels(calls), [
-            "train-sweep-1", "land-pr-1", "train-pr-2", "train-build-1", "train-checks-1-1", "train-checks-1-2",
+            "train-sweep-1", "land-pr-1", "land-take-1", "train-pr-2", "train-build-1", "train-checks-1-1", "train-checks-1-2",
             "train-ready-1", "train-merge-1", "close-out-1", "train-sweep-2", "close-out-2"])
         merge = prompt(calls, "train-merge-1")
         self.assertIn(f"gh pr merge 92 --repo owner/repo --merge --match-head-commit {X2} --delete-branch", merge)
@@ -5108,14 +4741,14 @@ class TrainTest(unittest.TestCase):
         self.assertEqual(train_labels(calls), [])
         # The one train label is the drain-start sweep of cars a dead earlier run may have left open.
         self.assertEqual([l for l in labels(calls) if l.startswith("train-")], ["train-sweep-1"])
-        self.assertEqual(land_labels(calls)[1:], ["land-pr-1", "land-sync-1-1", "land-checks-1-2", "land-merge-1", "close-out-1"])
+        self.assertEqual(land_labels(calls)[1:], ["land-pr-1", "land-take-1", "land-sync-1-1", "land-checks-1-2", "land-merge-1", "close-out-1"])
         self.assertEqual(row(result, 1), {"issue": 1, "outcome": "landed", "pr": 41})
 
     def test_a_first_landing_that_is_not_behind_lands_the_whole_drain_serially(self):
-        result, calls, _ = train_run(patch={"land-pr-1": {}})
+        result, calls, _ = train_run(patch={"land-take-1": {"behind": False}})
         self.assertEqual(train_labels(calls), [])
-        self.assertEqual(land_labels(calls), ["train-sweep-1", "land-pr-1", "land-merge-1", "close-out-1",
-                                              "land-pr-2", "land-merge-2", "close-out-2"])
+        self.assertEqual(land_labels(calls), ["train-sweep-1", "land-pr-1", "land-take-1", "land-merge-1", "close-out-1",
+                                              "land-pr-2", "land-take-2", "land-merge-2", "close-out-2"])
         self.assertEqual([row(result, n)["outcome"] for n in (1, 2)], ["landed", "landed"])
 
     def test_a_merge_strategy_other_than_merge_never_trains(self):
@@ -5126,14 +4759,14 @@ class TrainTest(unittest.TestCase):
     def test_a_red_car_two_among_three_merges_car_one_and_lands_the_rest_after_it(self):
         # #971: the two issues the train dropped land together, issue 3 riding behind issue 2's own landing.
         result, calls, _ = train_run(issues=(1, 2, 3), replies={"train-checks-1-2": {"state": "failed", "head": X2, "failing": ["ci"]}},
-                                     patch={"land-pr-2": {"checks": {"state": "behind", "head": SHA}}})
+                                     patch={"land-take-2": {"behind": True}})
         order = land_labels(calls)
         self.assertEqual(order[:order.index("train-merge-1")], [
-            "train-sweep-1", "land-pr-1", "train-pr-2", "train-pr-3", "train-build-1",
+            "train-sweep-1", "land-pr-1", "land-take-1", "train-pr-2", "train-pr-3", "train-build-1",
             "train-checks-1-1", "train-checks-1-2", "train-checks-1-3", "train-ready-1"])
         self.assertIn(f"gh pr merge 91 --repo owner/repo --merge --match-head-commit {X1} --delete-branch", prompt(calls, "train-merge-1"))
         self.assertEqual(order[order.index("train-merge-1") + 1:], [
-            "close-out-1", "train-sweep-2", "land-pr-2", "train-pr-3", "train-build-2", "train-checks-2-1", "train-checks-2-2",
+            "close-out-1", "train-sweep-2", "land-pr-2", "land-take-2", "train-pr-3", "train-build-2", "train-checks-2-1", "train-checks-2-2",
             "train-ready-2", "train-merge-2", "close-out-2", "train-sweep-3", "close-out-3"])
         self.assertEqual([m["issue"] for m in members_of(calls, "train-ready-1")], [1])
         self.assertEqual([m["issue"] for m in members_of(calls, "train-build-2")], [2, 3])
@@ -5143,7 +4776,9 @@ class TrainTest(unittest.TestCase):
         self.assertEqual(lock_releases(calls), ["close-out-1"])
 
     def test_a_pending_or_wrong_head_or_undeclared_car_is_not_green(self):
-        declared = {"setup": {"max_parallel": 2, "required_checks": ["gate"]}}
+        # The poll before the lock reads the declared check too, so the first landing reaches the lock and the train.
+        declared = {"setup": {"max_parallel": 2, "required_checks": ["gate"]},
+                    "land-pr-1": {"checks": {"state": "passed", "head": SHA, "required": ["gate"], "passed": ["gate"]}}}
         for name, reply, patch in (
                 ("pending", {"state": "pending", "head": X2, "pending": ["e2e"]}, None),
                 ("head", {"state": "passed", "head": X1, "required": ["ci"], "passed": ["ci"]}, None),
@@ -5167,7 +4802,7 @@ class TrainTest(unittest.TestCase):
         self.assertNotIn("train-checks-1-2", labels(calls))
         self.assertIn(f"--match-head-commit {X1}", prompt(calls, "train-merge-1"))
         order = land_labels(calls)
-        self.assertEqual(order[order.index("train-merge-1") + 1:], ["close-out-1", "train-sweep-2", "land-pr-2", "land-merge-2", "close-out-2"])
+        self.assertEqual(order[order.index("train-merge-1") + 1:], ["close-out-1", "train-sweep-2", "land-pr-2", "land-take-2", "land-merge-2", "close-out-2"])
         self.assertEqual(row(result, 1)["car_pr"], 91)
         self.assertEqual(row(result, 2), {"issue": 2, "outcome": "landed", "pr": 42})
         self.assertEqual(lock_releases(calls), ["close-out-1"])
@@ -5188,7 +4823,7 @@ class TrainTest(unittest.TestCase):
                 self.assertEqual("train-checks-1-1" in order, name in ("car one red", "ready died"))
                 self.assertEqual(order.count("land-pr-1"), 1)
                 tail = ["train-sweep-2", "land-sync-1-1", "land-checks-1-2", "land-merge-1", "close-out-1",
-                        "land-pr-2", "land-merge-2", "close-out-2"]
+                        "land-pr-2", "land-take-2", "land-merge-2", "close-out-2"]
                 self.assertEqual(order[-len(tail):], tail)
                 self.assertEqual(lock_releases(calls), ["close-out-1"])
                 self.assertEqual(row(result, 1), {"issue": 1, "outcome": "landed", "pr": 41})
@@ -5256,7 +4891,7 @@ class TrainTest(unittest.TestCase):
                 self.assertNotIn("train-merge-1", order)
                 self.assertEqual(row(result, 1), expected)
                 self.assertEqual(lock_releases(calls), ["land-unlock-1"])
-                self.assertEqual(order[order.index("land-unlock-1"):], ["land-unlock-1", "train-sweep-2", "land-pr-2", "land-merge-2", "close-out-2"])
+                self.assertEqual(order[order.index("land-unlock-1"):], ["land-unlock-1", "train-sweep-2", "land-pr-2", "land-take-2", "land-merge-2", "close-out-2"])
                 self.assertEqual(row(result, 2), {"issue": 2, "outcome": "landed", "pr": 42})
 
     def test_a_transient_renew_recalls_the_ready_step_once(self):
@@ -5305,7 +4940,7 @@ class TrainTest(unittest.TestCase):
         self.assertEqual([l for l in order if l.startswith("train-checks-")], ["train-checks-1-1", "train-checks-1-2", "train-checks-1-1-more"])
         self.assertNotIn("train-merge-1", order)
         tail = ["train-checks-1-1-more", "train-sweep-2", "land-sync-1-1", "land-checks-1-2", "land-merge-1", "close-out-1",
-                "land-pr-2", "land-merge-2", "close-out-2"]
+                "land-pr-2", "land-take-2", "land-merge-2", "close-out-2"]
         self.assertEqual(order[-len(tail):], tail)
         self.assertEqual(lock_releases(calls), ["close-out-1"])
         self.assertEqual(row(result, 1), {"issue": 1, "outcome": "landed", "pr": 41})
@@ -5337,7 +4972,7 @@ class TrainTest(unittest.TestCase):
         # One read of the forge confirms the car is still open before anything lands serially.
         self.assertIn("gh pr view 92 --repo owner/repo --json state and return its state as car", step_text(calls, "train-flip-1-1"))
         self.assertEqual(order[order.index("train-merge-1") + 1:], [
-            "train-flip-1-1", "train-sweep-2", "land-sync-1-1", "land-record-1-1", "land-merge-1", "close-out-1", "land-pr-2", "land-merge-2", "close-out-2"])
+            "train-flip-1-1", "train-sweep-2", "land-sync-1-1", "land-record-1-1", "land-merge-1", "close-out-1", "land-pr-2", "land-take-2", "land-merge-2", "close-out-2"])
         # The first landing kept the lock at its ready head through the train, moves it to the resynced head and releases it there, once.
         self.assertIn(f"forge-claim land acquire --repo owner/repo --branch dev --sha {c}\n", prompt(calls, "land-record-1-1"))
         self.assertIn(f"--match-head-commit {c}", prompt(calls, "land-merge-1"))
@@ -5491,7 +5126,7 @@ class TrainTest(unittest.TestCase):
     def test_the_sweep_runs_at_the_drain_start_and_after_a_thrown_step(self):
         _, calls, _ = train_run(replies={"train-build-1": "throw"})
         order = land_labels(calls)
-        self.assertEqual(order[:3], ["train-sweep-1", "land-pr-1", "train-pr-2"])
+        self.assertEqual(order[:4], ["train-sweep-1", "land-pr-1", "land-take-1", "train-pr-2"])
         self.assertEqual(order[order.index("train-build-1") + 1], "train-sweep-2")
         self.assertLess(order.index("train-sweep-2"), order.index("land-sync-1-1"))
 
@@ -5594,7 +5229,8 @@ class TrainRelaunchTest(unittest.TestCase):
         self.assertIsNone(second["relaunch"])
 
 
-# #936: land-pr-1 is held this many turns (its wait for the land lock), and a joining issue's child returns this many turns into it.
+# #936: land-take-1 is held this many turns (its wait for the land lock), and a joining issue's child returns this
+# many turns into it.
 LOCK_WAIT = 60
 DURING_WAIT = 40
 AFTER_WAIT = 90
@@ -5610,7 +5246,7 @@ def join_run(issues=(1, 2), replies=None, patch=None, children=None, args=None, 
     merged = {"setup": {"max_parallel": len(issues)}, **BEHIND, **(patch or {})}
     return run_full(args={**ARGS, "issues": issues, "train": True, **(args or {})}, replies=replies, patch=merged, children=children,
                     turns={f"{n}:{'plan' if str(n) in (children or {}) else 'ready'}": late for n in issues[1:]},
-                    delays={"land-pr-1": LOCK_WAIT, **(delays or {})})
+                    delays={"land-take-1": LOCK_WAIT, **(delays or {})})
 
 
 def ready_during(out, n):
@@ -5630,7 +5266,7 @@ def join_logs(out):
 
 
 def waited_acquires(calls):
-    return [c["label"] for c in calls if c["kind"] == "agent" and re.search(r"forge-claim land acquire [^\n]* --wait\n", c["prompt"])]
+    return [c["label"] for c in calls if c["kind"] == "agent" and re.search(r"forge-claim land acquire [^\n]* --wait(?: --lease)?\n", c["prompt"])]
 
 
 def landing_of(calls, n):
@@ -5647,12 +5283,13 @@ class TrainJoinTest(unittest.TestCase):
         result, calls = out["result"], out["calls"]
         # The drain took issue 1 alone: issue 2 was not waiting when it started, and never gets a land-pr of its own.
         self.assertEqual(land_labels(calls), [
-            "train-sweep-1", "land-pr-1", "train-pr-2", "train-build-1", "train-checks-1-1", "train-checks-1-2",
+            "train-sweep-1", "land-pr-1", "land-take-1", "train-pr-2", "train-build-1", "train-checks-1-1", "train-checks-1-2",
             "train-ready-1", "train-merge-1", "close-out-1", "train-sweep-2", "close-out-2"])
-        self.assertEqual(ready_during(out, 2), "land-pr-1")
+        self.assertEqual(ready_during(out, 2), "land-take-1")
         self.assertEqual(join_logs(out), [JOIN_LOG])
-        # One lock hold: taken once, waiting, by land-pr-1 at issue 1's ready head; re-checked there by the train merge; released there once.
-        self.assertEqual(waited_acquires(calls), ["land-pr-1"])
+        # One lock hold: taken once, waiting, by land-take-1 at issue 1's ready head; re-checked there by the train
+        # merge; released there once.
+        self.assertEqual(waited_acquires(calls), ["land-take-1"])
         merge = prompt(calls, "train-merge-1")
         self.assertIn(f"forge-claim land acquire --repo owner/repo --branch dev --sha {SHA}\n", merge)
         self.assertIn(f"gh pr merge 92 --repo owner/repo --merge --match-head-commit {X2} --delete-branch", merge)
@@ -5675,16 +5312,17 @@ class TrainJoinTest(unittest.TestCase):
 
     def test_a_lone_landing_with_nothing_ready_at_the_end_of_its_wait_adds_no_step(self):
         serial = run(args=dict(ARGS, train=False), patch=BEHIND)[1]
-        lone = run_full(args=dict(ARGS, train=True), patch=BEHIND, delays={"land-pr-1": LOCK_WAIT})
-        self.assertEqual([(c["label"], c.get("prompt")) for c in lone["calls"] if c["label"] != "train-sweep-1"],
-                         [(c["label"], c.get("prompt")) for c in serial])
+        lone = run_full(args=dict(ARGS, train=True), patch=BEHIND, delays={"land-take-1": LOCK_WAIT})
+        # A train batch takes no lease (D6), so its prompts differ from a serial batch's in the lock steps; its steps
+        # are the same.
+        self.assertEqual([c["label"] for c in lone["calls"] if c["label"] != "train-sweep-1"], [c["label"] for c in serial])
         self.assertEqual([line for line in lone["logs"] if "train" in line], [])
         # A second issue that is ready only after the wait ended changes nothing in the first landing either.
         out = join_run(late=AFTER_WAIT)
-        self.assertEqual(landing_of(out["calls"], 1), landing_of(serial, 1))
+        self.assertEqual(landing_of(out["calls"], 1), landing_of(lone["calls"], 1))
         self.assertEqual(train_labels(out["calls"]), [])
         self.assertEqual(join_logs(out), [])
-        self.assertNotEqual(ready_during(out, 2), "land-pr-1")
+        self.assertNotEqual(ready_during(out, 2), "land-take-1")
 
     def test_nothing_joins_once_the_sync_or_the_checks_started(self):
         lone = run(args=dict(ARGS, train=True), patch=BEHIND)[1]
@@ -5696,30 +5334,24 @@ class TrainJoinTest(unittest.TestCase):
                 self.assertEqual(ready_during(out, 2), step)
                 self.assertEqual(train_labels(calls), [])
                 self.assertEqual(landing_of(calls, 1), landing_of(lone, 1))
-                self.assertEqual(of(land_labels_calls(calls), 2), ["land-pr-2", "land-merge-2", "close-out-2"])
+                self.assertEqual(of(land_labels_calls(calls), 2), ["land-pr-2", "land-take-2", "land-merge-2", "close-out-2"])
                 self.assertEqual(land_release_shas(calls), [SHA, SHA])
                 self.assertEqual([row(result, n) for n in (1, 2)], [{"issue": n, "outcome": "landed", "pr": 40 + n} for n in (1, 2)])
                 self.assertEqual(join_logs(out), [])
 
-    def test_a_first_poll_that_is_not_behind_or_a_retried_wait_takes_no_joiner(self):
-        # A current head waited for its own checks inside land-pr, and a retried wait's first poll (the loop's own) that is not behind
-        # lands alone in the same way: neither is the handover point.
-        for name, replies, patch in (
-                ("current", None, {"land-pr-1": {}}),
-                ("pending", None, {"land-pr-1": {"checks": {"state": "pending", "head": SHA, "pending": ["e2e"]}}}),
-                ("retried wait", {"land-pr-1": {"pr": 41, "head": SHA, "lock": {"verdict": "land-contended", "lock_sha": B}, "checks": None}}, None)):
-            with self.subTest(name=name):
-                out = join_run(replies=replies, patch=patch)
-                result, calls = out["result"], out["calls"]
-                self.assertEqual(ready_during(out, 2), "land-pr-1")
-                self.assertEqual(train_labels(calls), [])
-                self.assertIn("land-pr-2", labels(calls))
-                self.assertEqual([row(result, n)["outcome"] for n in (1, 2)], ["landed", "landed"])
-                self.assertEqual(join_logs(out), [])
+    def test_a_lock_reply_that_is_not_behind_takes_no_joiner(self):
+        # A current head that took the lock lands alone: only a reply that holds with behind true is the handover point.
+        out = join_run(patch={"land-take-1": {"behind": False}})
+        result, calls = out["result"], out["calls"]
+        self.assertEqual(ready_during(out, 2), "land-take-1")
+        self.assertEqual(train_labels(calls), [])
+        self.assertIn("land-pr-2", labels(calls))
+        self.assertEqual([row(result, n)["outcome"] for n in (1, 2)], ["landed", "landed"])
+        self.assertEqual(join_logs(out), [])
 
     # #986: the first wait ran out at the CLI's bound, so the lock arrives in a retry step, which polls no checks: the loop's first poll does.
-    RETRIED = {"land-pr-1": {"pr": 41, "head": SHA, "lock": {"verdict": "land-contended", "lock_sha": B}, "checks": None},
-               "land-checks-1-1": {"state": "behind", "head": SHA}}
+    RETRIED = {"land-take-1": {"lock": {"verdict": "land-contended", "lock_sha": B}},
+               "land-lock-1-1": {"lock": {"verdict": "acquired", "lock_sha": SHA}, "behind": True}}
 
     def retried(self, **more):
         """Issue 1's lock arrives in land-lock-1-1; the other issues become ready while that step waits."""
@@ -5730,11 +5362,11 @@ class TrainJoinTest(unittest.TestCase):
         result, calls = out["result"], out["calls"]
         self.assertEqual(ready_during(out, 2), "land-lock-1-1")
         self.assertEqual(land_labels(calls), [
-            "train-sweep-1", "land-pr-1", "land-lock-1-1", "land-checks-1-1", "train-pr-2", "train-build-1", "train-checks-1-1",
+            "train-sweep-1", "land-pr-1", "land-take-1", "land-lock-1-1", "train-pr-2", "train-build-1", "train-checks-1-1",
             "train-checks-1-2", "train-ready-1", "train-merge-1", "close-out-1", "train-sweep-2", "close-out-2"])
         self.assertEqual(join_logs(out), [JOIN_LOG])
         # One hold, taken by the retry step at issue 1's ready head and released there once; issue 2 never asks for the lock.
-        self.assertEqual(waited_acquires(calls), ["land-pr-1", "land-lock-1-1"])
+        self.assertEqual(waited_acquires(calls), ["land-take-1", "land-lock-1-1"])
         self.assertIn(f"forge-claim land acquire --repo owner/repo --branch dev --sha {SHA}\n", prompt(calls, "train-merge-1"))
         self.assertEqual(lock_releases(calls), ["close-out-1"])
         self.assertEqual(land_release_shas(calls), [SHA])
@@ -5746,24 +5378,25 @@ class TrainJoinTest(unittest.TestCase):
         self.assertEqual(steps(calls), steps(first))
 
     def test_a_train_whose_first_issue_got_the_lock_in_a_retry_step_still_runs(self):
-        # Two issues that waited together: the first one's handover is asked at its first poll, after the retried wait, as well.
+        # Two issues that waited together: the first one's handover is asked at the lock reply of the retried wait as
+        # well.
         result, calls, _ = train_run(replies=self.RETRIED)
-        self.assertEqual(land_labels(calls)[:6], ["train-sweep-1", "land-pr-1", "land-lock-1-1", "land-checks-1-1", "train-pr-2", "train-build-1"])
+        self.assertEqual(land_labels(calls)[:6], ["train-sweep-1", "land-pr-1", "land-take-1", "land-lock-1-1", "train-pr-2", "train-build-1"])
         self.assertEqual([row(result, n) for n in (1, 2)],
                          [{"issue": n, "outcome": "landed", "pr": 40 + n, "train": 1, "car_pr": 92} for n in (1, 2)])
         self.assertNotIn("land-pr-2", labels(calls))
 
     def test_the_join_after_a_retried_wait_keeps_its_conditions_and_limits(self):
-        # Asked once, at the first poll: an issue ready only after it (during the sync) lands by itself.
+        # Asked once, at the first lock reply that holds: an issue ready only after it (during the sync) lands by
+        # itself.
         out = join_run(replies=self.RETRIED, late=AFTER_WAIT, delays={"land-sync-1-1": LOCK_WAIT})
         self.assertEqual(ready_during(out, 2), "land-sync-1-1")
         self.assertEqual((train_labels(out["calls"]), join_logs(out)), ([], []))
         self.assertIn("land-pr-2", labels(out["calls"]))
-        # A first poll that is not behind, or one at another head, takes no joiner.
-        for name, poll in (("current", {"state": "passed", "head": SHA, "required": ["ci"], "passed": ["ci"]}),
-                           ("pending", {"state": "pending", "head": SHA, "pending": ["e2e"]})):
+        # A lock reply that is not behind takes no joiner.
+        for name, reply in (("current", {"lock": {"verdict": "acquired", "lock_sha": SHA}, "behind": False}),):
             with self.subTest(name=name):
-                out = join_run(replies=dict(self.RETRIED, **{"land-checks-1-1": poll}), late=AFTER_WAIT, delays={"land-lock-1-1": LOCK_WAIT})
+                out = join_run(replies=dict(self.RETRIED, **{"land-lock-1-1": reply}), late=AFTER_WAIT, delays={"land-lock-1-1": LOCK_WAIT})
                 self.assertEqual(ready_during(out, 2), "land-lock-1-1")
                 self.assertEqual((train_labels(out["calls"]), join_logs(out)), ([], []))
                 self.assertEqual([row(out["result"], n)["outcome"] for n in (1, 2)], ["landed", "landed"])
@@ -5784,14 +5417,13 @@ class TrainJoinTest(unittest.TestCase):
         # Nothing waiting when the retried wait ends: no step is added to the lone landing.
         lone = run_full(args=dict(ARGS, train=True), replies=self.RETRIED)
         serial = run(args=dict(ARGS, train=False), replies=self.RETRIED)[1]
-        self.assertEqual([(c["label"], c.get("prompt")) for c in lone["calls"] if c["label"] != "train-sweep-1"],
-                         [(c["label"], c.get("prompt")) for c in serial])
+        self.assertEqual([c["label"] for c in lone["calls"] if c["label"] != "train-sweep-1"], [c["label"] for c in serial])
 
-    def test_a_carried_first_poll_that_is_behind_at_another_head_takes_no_joiner(self):
-        # The handover is asked only for a behind poll at the head the lock is held at.
-        out = join_run(patch={"land-pr-1": {"checks": {"state": "behind", "head": B}}})
-        self.assertEqual(ready_during(out, 2), "land-pr-1")
+    def test_a_carried_poll_at_another_head_takes_no_lock_and_no_joiner(self):
+        # The lock is asked for only once a poll passed at the pushed head: another head stops before any take.
+        out = join_run(patch={"land-pr-1": {"checks": {"state": "passed", "head": B, "required": ["ci"], "passed": ["ci"]}}})
         self.assertEqual((train_labels(out["calls"]), join_logs(out)), ([], []))
+        self.assertNotIn("land-take-1", labels(out["calls"]))
         self.assertEqual((row(out["result"], 1)["outcome"], row(out["result"], 1)["stage"]), ("stopped", "head-moved"))
         self.assertEqual(row(out["result"], 2)["outcome"], "landed")
 
@@ -5800,24 +5432,24 @@ class TrainJoinTest(unittest.TestCase):
             with self.subTest(name=name):
                 out = join_run(args=args, patch=patch)
                 calls = out["calls"]
-                self.assertEqual(ready_during(out, 2), "land-pr-1")
+                self.assertEqual(ready_during(out, 2), "land-take-1")
                 self.assertEqual(join_logs(out), [])
                 self.assertEqual(train_labels(calls), [])
-                self.assertEqual(of(land_labels_calls(calls), 2), ["land-pr-2", "land-merge-2", "close-out-2"])
+                self.assertEqual(of(land_labels_calls(calls), 2), ["land-pr-2", "land-take-2", "land-merge-2", "close-out-2"])
                 self.assertEqual([row(out["result"], n)["outcome"] for n in (1, 2)], ["landed", "landed"])
-        base = run_full(args=dict(ARGS, issues=[1, 2]), patch=BEHIND, turns={"2:ready": DURING_WAIT}, delays={"land-pr-1": LOCK_WAIT})["calls"]
+        base = run_full(args=dict(ARGS, issues=[1, 2]), patch=BEHIND, turns={"2:ready": DURING_WAIT}, delays={"land-take-1": LOCK_WAIT})["calls"]
         off = join_run(args={"train": False}, patch={"setup": {}})["calls"]
         self.assertEqual([(c["label"], c.get("prompt")) for c in off], [(c["label"], c.get("prompt")) for c in base])
 
     def test_up_to_two_issues_join_and_a_third_lands_in_its_own_drain(self):
         out = join_run(issues=(1, 2, 3))
-        self.assertEqual([ready_during(out, n) for n in (2, 3)], ["land-pr-1"] * 2)
+        self.assertEqual([ready_during(out, n) for n in (2, 3)], ["land-take-1"] * 2)
         self.assertEqual(join_logs(out), [JOIN_LOG_23])
         self.assertEqual([m["issue"] for m in members_of(out["calls"], "train-build-1")], [1, 2, 3])
         self.assertEqual(land_release_shas(out["calls"]), [SHA])
         out = join_run(issues=(1, 2, 3, 4))
         result, calls = out["result"], out["calls"]
-        self.assertEqual([ready_during(out, n) for n in (2, 3, 4)], ["land-pr-1"] * 3)
+        self.assertEqual([ready_during(out, n) for n in (2, 3, 4)], ["land-take-1"] * 3)
         self.assertEqual(join_logs(out), [JOIN_LOG_23])
         self.assertEqual([m["issue"] for m in members_of(calls, "train-build-1")], [1, 2, 3])
         self.assertNotIn("train-pr-4", labels(calls))
@@ -5833,7 +5465,7 @@ class TrainJoinTest(unittest.TestCase):
         out = join_run(issues=(1, 2, 3), children={"1": ready(1), "2": odd, "3": ready(3)})
         result, calls = out["result"], out["calls"]
         # Both became ready inside the lock wait, so the landing itself chose its joiners: only the valid one.
-        self.assertEqual([ready_during(out, n) for n in (2, 3)], ["land-pr-1"] * 2)
+        self.assertEqual([ready_during(out, n) for n in (2, 3)], ["land-take-1"] * 2)
         self.assertEqual(join_logs(out), ["#1: #3 became ready while it waited for the land lock; they land with it as a train"])
         self.assertEqual([m["issue"] for m in members_of(calls, "train-build-1")], [1, 3])
         self.assertEqual(train_labels(calls).count("train-pr-3"), 1)
@@ -5855,13 +5487,13 @@ class TrainJoinTest(unittest.TestCase):
                 result, calls = out["result"], out["calls"]
                 order = land_labels(calls)
                 self.assertNotIn("train-merge-1", order)
-                self.assertEqual((ready_during(out, 2), join_logs(out)), ("land-pr-1", [JOIN_LOG]))
+                self.assertEqual((ready_during(out, 2), join_logs(out)), ("land-take-1", [JOIN_LOG]))
                 self.assertEqual(order.count("land-pr-1"), 1)
                 tail = ["train-sweep-2", "land-sync-1-1", "land-checks-1-2", "land-merge-1", "close-out-1",
-                        "land-pr-2", "land-merge-2", "close-out-2"]
+                        "land-pr-2", "land-take-2", "land-merge-2", "close-out-2"]
                 self.assertEqual(order[-len(tail):], tail)
                 # Issue 1 kept its one hold through the failed train; issue 2 then takes and releases its own.
-                self.assertEqual(waited_acquires(calls), ["land-pr-1", "land-pr-2"])
+                self.assertEqual(waited_acquires(calls), ["land-take-1", "land-take-2"])
                 self.assertEqual(lock_releases(calls), ["close-out-1"])
                 self.assertEqual(lock_releases(calls, 2), ["close-out-2"])
                 self.assertEqual(land_release_shas(calls), [SHA, SHA])
@@ -5873,10 +5505,10 @@ class TrainJoinTest(unittest.TestCase):
         out = join_run(replies={"train-merge-1": refused, **OPEN_CAR,
                                 "land-sync-1-1": {"status": "done", "conflicted": False, "head": C, "notes": "ok"}})
         result, calls = out["result"], out["calls"]
-        self.assertEqual((ready_during(out, 2), join_logs(out)), ("land-pr-1", [JOIN_LOG]))
+        self.assertEqual((ready_during(out, 2), join_logs(out)), ("land-take-1", [JOIN_LOG]))
         order = land_labels(calls)
         self.assertEqual(order[order.index("train-merge-1") + 1:], [
-            "train-flip-1-1", "train-sweep-2", "land-sync-1-1", "land-record-1-1", "land-merge-1", "close-out-1", "land-pr-2", "land-merge-2", "close-out-2"])
+            "train-flip-1-1", "train-sweep-2", "land-sync-1-1", "land-record-1-1", "land-merge-1", "close-out-1", "land-pr-2", "land-take-2", "land-merge-2", "close-out-2"])
         self.assertIn(f"forge-claim land acquire --repo owner/repo --branch dev --sha {C}\n", prompt(calls, "land-record-1-1"))
         self.assertEqual(land_release_shas(calls), [C, SHA])
         self.assertNotIn("land-unlock-1", order)
@@ -5887,7 +5519,7 @@ class TrainJoinTest(unittest.TestCase):
             with self.subTest(name=name):
                 out = join_run(replies={"train-pr-2": reply})
                 result, calls = out["result"], out["calls"]
-                self.assertEqual((ready_during(out, 2), join_logs(out)), ("land-pr-1", [JOIN_LOG]))
+                self.assertEqual((ready_during(out, 2), join_logs(out)), ("land-take-1", [JOIN_LOG]))
                 self.assertNotIn("train-build-1", labels(calls))
                 self.assertNotIn("land-pr-2", labels(calls))
                 self.assertEqual(row(result, 2)["outcome"], outcome)
@@ -5910,8 +5542,8 @@ class TrainJoinTest(unittest.TestCase):
                 result, calls = out["result"], out["calls"]
                 order = land_labels(calls)
                 self.assertEqual(order[order.index("train-merge-1") + 1:], tail)
-                self.assertEqual((ready_during(out, 2), join_logs(out)), ("land-pr-1", [JOIN_LOG]))
-                self.assertEqual(waited_acquires(calls), ["land-pr-1"])
+                self.assertEqual((ready_during(out, 2), join_logs(out)), ("land-take-1", [JOIN_LOG]))
+                self.assertEqual(waited_acquires(calls), ["land-take-1"])
                 if release:
                     self.assertEqual(lock_releases(calls), [release])
                     self.assertEqual(land_release_shas(calls), [SHA])
@@ -5929,39 +5561,41 @@ class TrainJoinTest(unittest.TestCase):
     def test_a_lost_lock_before_the_joined_merge_ends_every_member_land_contended(self):
         out = join_run(replies={"train-merge-1": merge_reply({}, lock="acquired", merged=False)})
         result, calls = out["result"], out["calls"]
-        self.assertEqual((ready_during(out, 2), join_logs(out)), ("land-pr-1", [JOIN_LOG]))
+        self.assertEqual((ready_during(out, 2), join_logs(out)), ("land-take-1", [JOIN_LOG]))
         order = land_labels(calls)
         self.assertEqual(order[order.index("train-merge-1") + 1:], ["land-unlock-1", "train-sweep-2"])
         self.assertEqual([row(result, n)["outcome"] for n in (1, 2)], ["land-contended", "land-contended"])
         self.assertEqual(land_release_shas(calls), [SHA])
 
     def test_a_dead_first_landing_step_before_the_handover_leaves_the_joiner_to_its_own_drain(self):
-        out = join_run(replies={"land-pr-1": None})
+        out = join_run(replies={"land-take-1": None})
         result, calls = out["result"], out["calls"]
-        self.assertEqual((ready_during(out, 2), join_logs(out)), ("land-pr-1", []))
+        self.assertEqual((ready_during(out, 2), join_logs(out)), ("land-take-1", []))
         self.assertEqual(train_labels(calls), [])
-        self.assertEqual((row(result, 1)["outcome"], row(result, 1)["stage"]), ("stopped", "pr"))
-        # The lost land-pr may have taken the lock: its landing releases the ready head, and issue 2 lands by itself.
+        self.assertEqual((row(result, 1)["outcome"], row(result, 1)["stage"]), ("stopped", "land-lock"))
+        # The lost take may have taken the lock: its landing releases the ready head, and issue 2 lands by itself.
         self.assertEqual(lock_releases(calls), ["land-unlock-1"])
-        self.assertEqual(of(land_labels_calls(calls), 2), ["land-pr-2", "land-merge-2", "close-out-2"])
+        self.assertEqual(of(land_labels_calls(calls), 2), ["land-pr-2", "land-take-2", "land-merge-2", "close-out-2"])
         self.assertEqual(row(result, 2), {"issue": 2, "outcome": "landed", "pr": 42})
 
 
 class ResolveBeforeLockTest(unittest.TestCase):
-    """#941: before it asks for the land lock, land-pr probes whether the integration branch merges cleanly into the head. A clean
-    probe changes nothing; a conflict is resolved, reviewed and fixed before any lock command, and the reviewed head takes the lock."""
+    """#941, #1679: before it asks for the land lock, land-pr probes whether the integration branch merges cleanly into the head. A
+    clean probe changes nothing; a conflict is resolved, reviewed and fixed before any lock command, the reviewed head is polled with
+    no lock and, once green, is recorded and takes the lock."""
 
     PROBE_CMD = "git -C /r/.wt/w-issue-1-x merge-tree --write-tree --name-only --no-messages HEAD origin/dev"
     # The probe found a conflict, so land-pr ran no lock command and waited for no check.
-    EARLY = {"land-pr-1": {"probe": {"conflicted": True, "tree": "e" * 40, "files": ["x.py"]}, "lock": None, "checks": None}}
-    RESOLVED = ["land-pr-1", "land-sync-resolve-1-1", "land-sync-review-1-1", "land-record-1-1"]
+    EARLY = {"land-pr-1": {"probe": {"conflicted": True, "tree": "e" * 40, "files": ["x.py"]}, "checks": None}}
+    RESOLVED = ["land-pr-1", "land-sync-resolve-1-1", "land-sync-review-1-1", "land-checks-1-1", "land-record-1-1", "land-take-1"]
     FIXED = "f" * 40
     FOUND = {"verdict": "findings", "findings": [{"severity": "important", "summary": "dropped a sentence dev added", "failing_input": "x"}]}
     LEFT = {"verdict": "findings", "findings": [{"severity": "important", "summary": "the sentence is still missing", "failing_input": "x"}]}
-    BEHIND_AT_B = {"ok": True, "head": B, "lock": {"verdict": "acquired", "lock_sha": B}, "checks": {"state": "behind", "head": B}}
+    # The take of the lock says the base moved past the reviewed head.
+    BEHIND_AT_B = {"land-take-1": {"behind": True}}
 
     def land(self, **replies):
-        return run_full(patch=self.EARLY, replies=replies)
+        return run_full(patch=self.EARLY, replies=dict({"land-checks-1-1": green(B)}, **replies))
 
     @staticmethod
     def steps(calls):
@@ -5977,7 +5611,8 @@ class ResolveBeforeLockTest(unittest.TestCase):
             self.assertIn(needle, text)
         self.assertLess(text.index("push origin issue-1-x"), text.index(self.PROBE_CMD))
         self.assertEqual(object_branch(schema_of(calls, "land-pr-1")["properties"]["probe"])["properties"]["tree"], {"type": "string"})
-        self.assertLess(text.index(self.PROBE_CMD), text.index(f"--sha {SHA} --wait\n"))
+        self.assertNotIn("forge-claim land", text)
+        self.assertLess(text.index(self.PROBE_CMD), text.index("gh pr checks <the PR number> --repo owner/repo --watch"))
         schema = schema_of(calls, "land-pr-1")
         self.assertIn({"type": "null"}, schema["properties"]["probe"]["anyOf"])
         self.assertEqual(object_branch(schema["properties"]["probe"])["required"], ["conflicted"])
@@ -5989,7 +5624,7 @@ class ResolveBeforeLockTest(unittest.TestCase):
             probes = (None, {"conflicted": False}, {"conflicted": False, "files": []}, {"conflicted": False, "detail": "fatal: not a tree"})
             for probe in probes:
                 with self.subTest(name=name, probe=probe):
-                    result, calls, _ = run(patch={"land-pr-1": dict(patch.get("land-pr-1", {}), probe=probe)})
+                    result, calls, _ = run(patch=dict(patch, **{"land-pr-1": dict(patch.get("land-pr-1", {}), probe=probe)}))
                     self.assertEqual(self.steps(calls), self.steps(base))
                     self.assertEqual(row(result, 1)["outcome"], "landed")
         # The clean path keeps its call count: the probe rides in land-pr.
@@ -6001,26 +5636,26 @@ class ResolveBeforeLockTest(unittest.TestCase):
         for tree in (None, "", "merge-tree: origin/dev - not something we can merge", "e" * 39, "E" * 40):
             probe = {"conflicted": True, "files": []} if tree is None else {"conflicted": True, "tree": tree, "files": []}
             with self.subTest(tree=tree):
-                # The step took the lock as it always did: the landing is the old flow.
+                # The step waited for the checks as it always did: the landing is the old flow.
                 result, calls, _ = run(patch={"land-pr-1": {"probe": probe}})
                 self.assertEqual(self.steps(calls), base)
                 self.assertEqual(row(result, 1)["outcome"], "landed")
-                # A step that ran no lock command on such a reply resolves nothing: it stops at the lock and releases the ready head.
-                out = run_full(patch={"land-pr-1": {"probe": probe, "lock": None, "checks": None}})
+                # A step that waited for no check on such a reply resolves nothing: it stops, holding no lock.
+                out = run_full(patch={"land-pr-1": {"probe": probe, "checks": None}})
                 got = row(out["result"], 1)
-                self.assertEqual((got["outcome"], got["stage"]), ("stopped", "land-lock"))
-                self.assertEqual(land_labels(out["calls"]), ["land-pr-1", "land-unlock-1"])
-                self.assertEqual(land_release_shas(out["calls"]), [SHA])
+                self.assertEqual((got["outcome"], got["stage"]), ("stopped", "checks"))
+                self.assertEqual(land_labels(out["calls"]), ["land-pr-1"])
+                self.assertEqual(land_release_shas(out["calls"]), [])
         # A tree id with surrounding whitespace is still one.
-        out = run_full(patch={"land-pr-1": dict(self.EARLY["land-pr-1"], probe={"conflicted": True, "tree": "e" * 40 + "\n"})})
+        out = run_full(patch={"land-pr-1": dict(self.EARLY["land-pr-1"], probe={"conflicted": True, "tree": "e" * 40 + "\n"})},
+                       replies={"land-checks-1-1": green(B)})
         self.assertEqual(land_labels(out["calls"]), self.RESOLVED + ["land-merge-1", "close-out-1"])
 
-    def test_a_conflicted_probe_that_still_names_a_lock_verdict_is_the_old_flow(self):
-        # The step took the lock against its prompt: the landing holds it, and a conflict is found by the sync under it (#913).
+    def test_a_conflicted_probe_wins_over_a_poll_the_step_carried(self):
+        # The conflict is resolved before the lock whatever else the step returned: no poll of the old head is read.
         result, calls, _ = run(patch={"land-pr-1": {"probe": {"conflicted": True, "tree": "e" * 40}, "checks": {"state": "behind", "head": SHA}}},
-                               replies={"land-sync-1-1": ABORTED})
-        self.assertEqual(land_labels(calls), ["land-pr-1", "land-sync-1-1", "land-unlock-1", "land-sync-resolve-1-1", "land-sync-review-1-1",
-                                              "land-record-1-1", "land-merge-1", "close-out-1"])
+                               replies={"land-checks-1-1": green(B)})
+        self.assertEqual(land_labels(calls), self.RESOLVED + ["land-merge-1", "close-out-1"])
         self.assertEqual(row(result, 1)["outcome"], "landed")
 
     def test_a_conflict_is_resolved_and_reviewed_before_any_acquire_and_the_reviewed_head_lands(self):
@@ -6035,19 +5670,14 @@ class ResolveBeforeLockTest(unittest.TestCase):
             with self.subTest(label=label):
                 self.assertEqual(prompt(calls, label), prompt(under, label))
         self.assertIn("diff --check HEAD", prompt(calls, "land-sync-resolve-1-1"))
-        # The reviewed head is recorded, then takes the lock for the first time, waiting, and its checks are polled: one step.
-        record = prompt(calls, "land-record-1-1")
-        self.assertIn(f"Accepted head: {B}\n", record)
-        self.assertIn(f"take the cross-host landing lock of the branch dev at the head {B}; a conflict with dev was resolved before the lock was asked for", record)
-        self.assertIn(f"forge-claim land acquire --repo owner/repo --branch dev --sha {B} --wait\n", record)
-        self.assertLess(record.index("Accepted head:"), record.index("land acquire"))
-        self.assertIn("merge-base --is-ancestor origin/dev HEAD", record)
-        # The record step equals the #913 retake's but for the sentence that says why the lock is taken.
-        again = "take the cross-host landing lock of the branch dev again, at the head " + B + "; it was released while a conflict was resolved"
-        first = "take the cross-host landing lock of the branch dev at the head " + B + "; a conflict with dev was resolved before the lock was asked for"
-        self.assertEqual(record, prompt(under, "land-record-1-1").replace(again, first))
+        # The resolved head is polled with no lock, recorded once green, and only then takes the lock for the first
+        # time, waiting.
+        for label in ("land-checks-1-1", "land-record-1-1"):
+            self.assertNotIn("forge-claim land", prompt(calls, label))
+        self.assertIn(f"Accepted head: {B}\n", prompt(calls, "land-record-1-1"))
+        self.assertIn(f"forge-claim land acquire --repo owner/repo --branch dev --sha {B} --wait --lease\n", prompt(calls, "land-take-1"))
         merge = prompt(calls, "land-merge-1")
-        self.assertIn(f"--sha {B}\n", merge)
+        self.assertIn(f"--sha {B} --lease\n", merge)
         self.assertIn(f"--match-head-commit {B}", merge)
         # One hold, taken at the reviewed head and released there once, in the close-out: no step ever held the ready head.
         self.assertEqual(lock_releases(calls), ["close-out-1"])
@@ -6055,15 +5685,15 @@ class ResolveBeforeLockTest(unittest.TestCase):
         self.assertIsNone(result["relaunch"])
 
     def test_a_finding_goes_through_the_fix_round_and_the_fix_is_what_lands(self):
-        out = self.land(**{"land-sync-review-1-1": self.FOUND})
+        out = self.land(**{"land-sync-review-1-1": self.FOUND, "land-checks-1-1": green(self.FIXED)})
         result, calls = out["result"], out["calls"]
         self.assertEqual(row(result, 1)["outcome"], "landed")
         self.assertEqual(land_labels(calls), ["land-pr-1", "land-sync-resolve-1-1", "land-sync-review-1-1", "land-sync-fix-1-1",
-                                              "land-sync-rereview-1-1", "land-record-1-1", "land-merge-1", "close-out-1"])
+                                              "land-sync-rereview-1-1", "land-push-1-1", "land-checks-1-1", "land-record-1-1", "land-take-1",
+                                              "land-merge-1", "close-out-1"])
         self.assertIn(f"merge commit {B}", prompt(calls, "land-sync-fix-1-1"))
-        record = prompt(calls, "land-record-1-1")
-        self.assertIn(f"Accepted head: {self.FIXED}\n", record)
-        self.assertIn(f"--sha {self.FIXED} --wait\n", record)
+        self.assertIn(f"Accepted head: {self.FIXED}\n", prompt(calls, "land-record-1-1"))
+        self.assertIn(f"--sha {self.FIXED} --wait --lease\n", prompt(calls, "land-take-1"))
         self.assertIn(f"--match-head-commit {self.FIXED}", prompt(calls, "land-merge-1"))
         self.assertEqual(land_release_shas(calls), [self.FIXED])
 
@@ -6076,13 +5706,13 @@ class ResolveBeforeLockTest(unittest.TestCase):
                           "finding the sentence is still missing"))
         self.assertEqual(got["fix"], {"commit": self.FIXED, "notes": "ok"})
         self.assertEqual(land_labels(calls), ["land-pr-1", "land-sync-resolve-1-1", "land-sync-review-1-1", "land-sync-fix-1-1",
-                                              "land-sync-rereview-1-1", "land-unlock-1"])
-        # No step was told to take the lock. The one release, at the ready head, covers a land-pr that took it against its prompt.
+                                              "land-sync-rereview-1-1"])
+        # No step was told to take the lock, and no lock was ever held: nothing is released.
         self.assertNotIn("land acquire", "".join(c["prompt"] for c in calls if c["label"].startswith("land-sync-")))
-        self.assertEqual(land_release_shas(calls), [SHA])
+        self.assertEqual(land_release_shas(calls), [])
         self.assertEqual(result["relaunch"]["conts"], unpushed("sync-fix", B, self.FIXED))
 
-    def test_every_stop_before_the_lock_releases_the_ready_head_once_and_accepts_nothing(self):
+    def test_every_stop_before_the_lock_holds_nothing_and_accepts_nothing(self):
         stops = {
             "the resolution is lost": ({"land-sync-resolve-1-1": None}, "stopped"),
             "the resolution is blocked": ({"land-sync-resolve-1-1": {"status": "blocked", "conflicted": True, "notes": "too tangled"}}, "conflict"),
@@ -6097,11 +5727,9 @@ class ResolveBeforeLockTest(unittest.TestCase):
                 result, calls = out["result"], out["calls"]
                 self.assertEqual(row(result, 1)["outcome"], outcome)
                 ls = labels(calls)
-                for gone in ("land-sync-1-1", "land-record-1-1", "land-merge-1", "close-out-1", "land-ask-1"):
+                for gone in ("land-sync-1-1", "land-take-1", "land-unlock-1", "land-record-1-1", "land-merge-1", "close-out-1", "land-ask-1"):
                     self.assertNotIn(gone, ls)
-                # A land-pr that answered conflicted may have taken the lock all the same: the wrapper releases the ready head, once, last.
-                self.assertEqual((ls.count("land-unlock-1"), ls[-1]), (1, "land-unlock-1"))
-                self.assertEqual(land_release_shas(calls), [SHA])
+                self.assertEqual(land_release_shas(calls), [])
                 # The accepted head of the pull request is still the ready head: only land-pr wrote it.
                 heads = {sha for c in calls if c["kind"] == "agent" for sha in re.findall(r"Accepted head: ([0-9a-f]+)", c["prompt"])}
                 self.assertEqual(heads, {SHA})
@@ -6121,20 +5749,21 @@ class ResolveBeforeLockTest(unittest.TestCase):
         self.assertEqual(row(result, 1)["outcome"], "landed")
 
     def test_lost_and_refused_replies_on_the_new_step_order_keep_the_lock_accounting(self):
-        refused = lambda v: {"ok": True, "head": B, "lock": {"verdict": v, "lock_sha": C, "by": "h2/b9"}, "checks": None}
-        waits = {f"land-relock-1-{k}": {"lock": {"verdict": "land-contended", "lock_sha": C}} for k in (1, 2, 3)}
+        refused = lambda v: {"lock": {"verdict": v, "lock_sha": C, "by": "h2/b9"}}  # noqa: E731
+        waits = {f"land-lock-1-{k}": {"lock": {"verdict": "land-contended", "lock_sha": C}} for k in (1, 2, 3)}
         cases = {
-            # The record step may have taken the lock at the reviewed head before its reply was lost: the wrapper releases it there.
-            "record lost": ({"land-record-1-1": None}, "stopped", ["land-unlock-1"], [B]),
-            "record threw": ({"land-record-1-1": "throw"}, "stopped", ["land-unlock-1"], [B]),
-            # A record that changed nothing ran no lock command.
-            "record refused the head": ({"land-record-1-1": {"ok": False, "head": C, "lock": None, "checks": None}}, "stopped", [], []),
-            "held by another": ({"land-record-1-1": refused("held_by")}, "land-contended", [], []),
-            "lost to another": ({"land-record-1-1": refused("lost_to")}, "land-contended", [], []),
-            "every wait ran out": ({"land-record-1-1": refused("land-contended"), **waits}, "land-contended", [], []),
-            "a relock is lost": ({"land-record-1-1": refused("land-contended"), "land-relock-1-1": None}, "stopped", ["land-unlock-1"], [B]),
-            "the merge check lost the lock": ({"land-merge-1": {"merged": False, "notes": "held_by", "lock": {"verdict": "held_by", "lock_sha": C}}},
-                                              "land-contended", ["land-unlock-1"], [B]),
+            # The take may have taken the lock at the reviewed head before its reply was lost: the wrapper releases it
+            # there.
+            "take lost": ({"land-take-1": None}, "stopped", ["land-unlock-1"], [B]),
+            "take threw": ({"land-take-1": "throw"}, "stopped", ["land-unlock-1"], [B]),
+            # A record that changed nothing ran no lock command, and no lock was held.
+            "record refused the head": ({"land-record-1-1": {"ok": False, "head": C}}, "stopped", [], []),
+            "held by another": ({"land-take-1": refused("held_by")}, "land-contended", [], []),
+            "lost to another": ({"land-take-1": refused("lost_to")}, "land-contended", [], []),
+            "every wait ran out": ({"land-take-1": refused("land-contended"), **waits}, "land-contended", [], []),
+            "a wait again is lost": ({"land-take-1": refused("land-contended"), "land-lock-1-1": None}, "stopped", ["land-unlock-1"], [B]),
+            "the merge check keeps losing the lock": ({"land-merge-1": {"merged": False, "notes": "held_by", "lock": {"verdict": "held_by", "lock_sha": C}}},
+                                                       "land-contended", [], []),
             "the close-out is lost": ({"close-out-1": None}, "stopped", ["close-out-1", "land-unlock-1"], [B, B]),
         }
         for name, (replies, outcome, releases, shas) in cases.items():
@@ -6146,20 +5775,19 @@ class ResolveBeforeLockTest(unittest.TestCase):
                 self.assertEqual(land_release_shas(calls), shas)
                 if name != "the close-out is lost":
                     self.assertNotIn("close-out-1", labels(calls))
-        got = row(self.land(**{"land-record-1-1": refused("held_by")})["result"], 1)
-        self.assertEqual(got["reason"], f"the land lock was not taken at the reviewed head {B} (held_by)")
-        # A wait that ran out at the CLI's bound is waited for again through the program, in a land-relock step.
-        out = self.land(**{"land-record-1-1": refused("land-contended"), "land-relock-1-1": {"lock": {"verdict": "acquired", "lock_sha": B}},
-                           "land-checks-1-1": {"state": "passed", "head": B, "required": ["ci"], "passed": ["ci"]}})
-        self.assertEqual(land_labels(out["calls"]), self.RESOLVED + ["land-relock-1-1", "land-checks-1-1", "land-merge-1", "close-out-1"])
-        self.assertIn(f"--sha {B} --wait\n", prompt(out["calls"], "land-relock-1-1"))
+        got = row(self.land(**{"land-take-1": refused("held_by")})["result"], 1)
+        self.assertEqual(got["reason"], "the land lock is held by another landing (held_by)")
+        # A wait that ran out at the CLI's bound is waited for again through the program, in a land-lock step.
+        out = self.land(**{"land-take-1": refused("land-contended"), "land-lock-1-1": {"lock": {"verdict": "acquired", "lock_sha": B}}})
+        self.assertEqual(land_labels(out["calls"]), self.RESOLVED + ["land-lock-1-1", "land-merge-1", "close-out-1"])
+        self.assertIn(f"--sha {B} --wait --lease\n", prompt(out["calls"], "land-lock-1-1"))
         self.assertEqual(land_release_shas(out["calls"]), [B])
         self.assertEqual(row(out["result"], 1)["outcome"], "landed")
 
     def test_a_lost_or_ended_land_pr_is_handled_as_before_the_probe(self):
         out = run_full(replies={"land-pr-1": None})
         self.assertEqual((row(out["result"], 1)["outcome"], row(out["result"], 1)["stage"]), ("stopped", "pr"))
-        self.assertEqual(land_release_shas(out["calls"]), [SHA])
+        self.assertEqual(land_release_shas(out["calls"]), [])
         lost = dict(self.EARLY["land-pr-1"], pr=41, head=SHA, renew={"verdict": "not_held", "by": "h2/b9"})
         out = run_full(replies={"land-pr-1": lost})
         self.assertEqual(row(out["result"], 1)["outcome"], "claim-lost")
@@ -6170,34 +5798,33 @@ class ResolveBeforeLockTest(unittest.TestCase):
         self.assertEqual(land_release_shas(out["calls"]), [])
 
     def test_behind_after_the_first_acquire_a_clean_merge_stays_under_the_lock(self):
-        out = self.land(**{"land-record-1-1": self.BEHIND_AT_B,
+        out = self.land(**{"land-take-1": {"behind": True},
                            "land-sync-1-2": {"status": "done", "conflicted": False, "head": C, "notes": "ok"}})
         result, calls = out["result"], out["calls"]
         self.assertEqual(row(result, 1)["outcome"], "landed")
         self.assertEqual(land_labels(calls), self.RESOLVED + ["land-sync-1-2", "land-record-1-2", "land-merge-1", "close-out-1"])
         again = prompt(calls, "land-record-1-2")
         self.assertIn(f"move the cross-host landing lock of the branch dev to the head {C}", again)
-        self.assertNotIn("--wait\n", again)
+        self.assertNotIn("--wait --lease\n", again)
         self.assertEqual(land_release_shas(calls), [C])
 
     def test_a_conflict_after_the_acquire_takes_the_913_path_and_the_round_bound_counts_both(self):
         D = "d" * 40
-        second = {"land-record-1-1": self.BEHIND_AT_B, "land-sync-1-2": dict(ABORTED, head=B),
+        second = {"land-take-1": [{"behind": True}, {}], "land-checks-1-2": green(C), "land-sync-1-2": dict(ABORTED, head=B),
                   "land-sync-resolve-1-2": {"status": "done", "conflicted": True, "head": C, "merge_commit": C, "notes": "ok"}}
         out = self.land(**second)
         result, calls = out["result"], out["calls"]
         self.assertEqual(row(result, 1)["outcome"], "landed")
         self.assertEqual(land_labels(calls), self.RESOLVED + [
-            "land-sync-1-2", "land-unlock-1", "land-sync-resolve-1-2", "land-sync-review-1-2", "land-record-1-2", "land-merge-1", "close-out-1"])
-        # The hold taken at the reviewed head is released before the second resolution; the retake waits at the second reviewed head.
+            "land-sync-1-2", "land-unlock-1", "land-sync-resolve-1-2", "land-sync-review-1-2", "land-record-1-2", "land-checks-1-2", "land-take-1",
+            "land-merge-1", "close-out-1"])
+        # The hold taken at the reviewed head is released before the second resolution; the lock is taken at the second reviewed head once green.
         self.assertIn(f"{LAND_RELEASE}{B}\n", prompt(calls, "land-unlock-1"))
-        retake = prompt(calls, "land-record-1-2")
-        self.assertIn(f"take the cross-host landing lock of the branch dev again, at the head {C}; it was released while a conflict was resolved", retake)
-        self.assertIn(f"--sha {C} --wait\n", retake)
+        self.assertNotIn("forge-claim land", prompt(calls, "land-record-1-2"))
+        self.assertIn(f"--sha {C} --wait --lease\n", prompt(calls, "land-take-1"))
         self.assertEqual(land_release_shas(calls), [B, C])
         # A third conflict in one landing goes to the owner: the round before the lock counts as the first.
-        third = dict(second, **{"land-record-1-2": {"ok": True, "head": C, "checks": {"state": "behind", "head": C}},
-                                "land-sync-1-3": dict(ABORTED, head=C)})
+        third = dict(second, **{"land-take-1": [{"behind": True}, {"behind": True}], "land-sync-1-3": dict(ABORTED, head=C)})
         out = self.land(**third)
         got = row(out["result"], 1)
         self.assertEqual(got["outcome"], "conflict")
@@ -6207,7 +5834,7 @@ class ResolveBeforeLockTest(unittest.TestCase):
         self.assertNotIn("land-merge-1", ls)
         self.assertEqual(land_release_shas(out["calls"]), [B, C])
         # The round before the lock answered no behind poll, so it spends none of the resyncs a landing has under the lock.
-        clean = {"land-record-1-1": self.BEHIND_AT_B, "land-sync-1-2": {"status": "done", "conflicted": False, "head": C, "notes": "ok"},
+        clean = {"land-take-1": {"behind": True}, "land-sync-1-2": {"status": "done", "conflicted": False, "head": C, "notes": "ok"},
                  "land-record-1-2": {"ok": True, "head": C, "checks": {"state": "behind", "head": C}},
                  "land-sync-1-3": {"status": "done", "conflicted": False, "head": D, "notes": "ok"}}
         out = self.land(**clean)
@@ -6220,16 +5847,15 @@ class ResolveBeforeLockTest(unittest.TestCase):
 
 
 class ResolveBeforeLockTrainTest(unittest.TestCase):
-    """#941 with #936 and #822: a landing that resolved a conflict before the lock hands over to a train from the step that took the
-    lock at the reviewed head, and the train rides that head."""
+    """#941 with #936, #822 and #1679: a landing that resolved a conflict before the lock hands over to a train from the lock reply
+    that took the lock at the reviewed head, and the train rides that head."""
 
     EARLY = ResolveBeforeLockTest.EARLY
-    BEHIND_AT_B = ResolveBeforeLockTest.BEHIND_AT_B
     RESOLVED = ResolveBeforeLockTest.RESOLVED
     TRAIN = ["train-pr-2", "train-build-1", "train-checks-1-1", "train-checks-1-2", "train-ready-1", "train-merge-1"]
 
     def join(self, replies=None, **more):
-        return join_run(patch=self.EARLY, replies={"land-record-1-1": self.BEHIND_AT_B, **(replies or {})}, **more)
+        return join_run(patch=self.EARLY, replies={"land-checks-1-1": green(B), **(replies or {})}, **more)
 
     def test_a_lander_that_resolved_before_the_lock_takes_a_joiner(self):
         out = self.join()
@@ -6243,7 +5869,8 @@ class ResolveBeforeLockTrainTest(unittest.TestCase):
         self.assertIn(f"forge-claim land acquire --repo owner/repo --branch dev --sha {B}\n", merge)
         self.assertIn(f"gh pr merge 92 --repo owner/repo --merge --match-head-commit {X2} --delete-branch", merge)
         self.assertNotIn("forge-claim land", prompt(calls, "train-pr-2"))
-        # One hold: taken at the reviewed head by the record step, never moved, released there once by the first landing's close-out.
+        # One hold: taken at the reviewed head by the take, never moved, released there once by the first landing's
+        # close-out.
         self.assertEqual(lock_releases(calls), ["close-out-1"])
         self.assertEqual(land_release_shas(calls), [B])
         self.assertEqual(lock_releases(calls, 2), [])
@@ -6251,15 +5878,14 @@ class ResolveBeforeLockTrainTest(unittest.TestCase):
         self.assertEqual(row(result, 2), {"issue": 2, "outcome": "landed", "pr": 42, "train": 1, "car_pr": 92})
         self.assertIsNone(result["relaunch"])
 
-    def test_a_retake_at_the_reviewed_head_that_arrives_in_a_retry_step_takes_a_joiner(self):
-        """#986: the record step's wait ran out, so the lock arrives in land-relock and the loop's first poll is the handover point."""
-        out = join_run(patch=self.EARLY, late=AFTER_WAIT, delays={"land-relock-1-1": 3 * LOCK_WAIT}, replies={
-            "land-record-1-1": {"ok": True, "head": B, "lock": {"verdict": "land-contended", "lock_sha": C}, "checks": None},
-            "land-relock-1-1": {"renew": {"verdict": "renewed"}, "lock": {"verdict": "acquired", "lock_sha": B}},
-            "land-checks-1-1": {"state": "behind", "head": B}})
+    def test_a_take_at_the_reviewed_head_that_arrives_in_a_retry_step_takes_a_joiner(self):
+        """#986: the take's wait ran out, so the lock arrives in land-lock and that reply is the handover point."""
+        out = join_run(patch=self.EARLY, late=AFTER_WAIT, delays={"land-lock-1-1": 3 * LOCK_WAIT}, replies={
+            "land-checks-1-1": green(B), "land-take-1": {"lock": {"verdict": "land-contended", "lock_sha": C}},
+            "land-lock-1-1": {"renew": {"verdict": "renewed"}, "lock": {"verdict": "acquired", "lock_sha": B}, "behind": True}})
         result, calls = out["result"], out["calls"]
-        self.assertEqual(ready_during(out, 2), "land-relock-1-1")
-        self.assertEqual(land_labels(calls), ["train-sweep-1"] + self.RESOLVED + ["land-relock-1-1", "land-checks-1-1"] + self.TRAIN
+        self.assertEqual(ready_during(out, 2), "land-lock-1-1")
+        self.assertEqual(land_labels(calls), ["train-sweep-1"] + self.RESOLVED + ["land-lock-1-1"] + self.TRAIN
                          + ["close-out-1", "train-sweep-2", "close-out-2"])
         self.assertEqual(join_logs(out), [JOIN_LOG])
         self.assertEqual([(m["issue"], m["head"]) for m in members_of(calls, "train-build-1")], [(1, B), (2, SHA)])
@@ -6267,26 +5893,28 @@ class ResolveBeforeLockTrainTest(unittest.TestCase):
         self.assertEqual([row(result, n)["outcome"] for n in (1, 2)], ["landed", "landed"])
 
     def test_an_issue_that_becomes_ready_during_the_resolution_or_the_wait_joins(self):
-        for step in ("land-sync-resolve-1-1", "land-record-1-1"):
+        for step in ("land-sync-resolve-1-1", "land-take-1"):
             with self.subTest(step=step):
-                out = self.join(late=AFTER_WAIT, delays={step: LOCK_WAIT})
+                out = self.join(delays={step: LOCK_WAIT})
                 self.assertEqual(ready_during(out, 2), step)
                 self.assertEqual(join_logs(out), [JOIN_LOG])
                 self.assertEqual([row(out["result"], n)["outcome"] for n in (1, 2)], ["landed", "landed"])
                 self.assertEqual(land_release_shas(out["calls"]), [B])
 
-    def test_a_first_poll_at_the_reviewed_head_that_is_not_behind_takes_no_joiner(self):
-        out = join_run(patch=self.EARLY)
+    def test_a_lock_reply_at_the_reviewed_head_that_is_not_behind_takes_no_joiner(self):
+        current = dict(self.EARLY, **{"land-take-1": {"behind": False}})
+        out = join_run(patch=current, replies={"land-checks-1-1": green(B)})
         result, calls = out["result"], out["calls"]
         self.assertEqual(train_labels(calls), [])
         self.assertEqual(join_logs(out), [])
-        self.assertEqual(landing_of(calls, 1), landing_of(run_full(patch=self.EARLY)["calls"], 1))
-        self.assertEqual(of(land_labels_calls(calls), 2), ["land-pr-2", "land-merge-2", "close-out-2"])
+        lone = run_full(args=dict(ARGS, train=True), patch=self.EARLY, replies={"land-checks-1-1": green(B)})
+        self.assertEqual(landing_of(calls, 1), landing_of(lone["calls"], 1))
+        self.assertEqual(of(land_labels_calls(calls), 2), ["land-pr-2", "land-take-2", "land-merge-2", "close-out-2"])
         self.assertEqual([row(result, n) for n in (1, 2)], [{"issue": n, "outcome": "landed", "pr": 40 + n} for n in (1, 2)])
         self.assertEqual(land_release_shas(calls), [B, SHA])
 
     def test_two_issues_that_waited_together_train_on_the_reviewed_head(self):
-        result, calls, _ = train_run(patch=self.EARLY, replies={"land-record-1-1": self.BEHIND_AT_B})
+        result, calls, _ = train_run(patch=self.EARLY, replies={"land-checks-1-1": green(B)})
         self.assertEqual(land_labels(calls), ["train-sweep-1"] + self.RESOLVED + self.TRAIN + ["close-out-1", "train-sweep-2", "close-out-2"])
         self.assertEqual([(m["issue"], m["head"]) for m in members_of(calls, "train-build-1")], [(1, B), (2, SHA)])
         self.assertEqual([row(result, n)["outcome"] for n in (1, 2)], ["landed", "landed"])
@@ -6309,7 +5937,7 @@ class ResolveBeforeLockTrainTest(unittest.TestCase):
         self.assertEqual(join_logs(out), [JOIN_LOG])
         self.assertNotIn("train-merge-1", labels(calls))
         self.assertEqual(of(land_labels_calls(calls), 1), self.RESOLVED + ["land-sync-1-2", "land-record-1-2", "land-merge-1", "close-out-1"])
-        self.assertEqual(of(land_labels_calls(calls), 2), ["land-pr-2", "land-merge-2", "close-out-2"])
+        self.assertEqual(of(land_labels_calls(calls), 2), ["land-pr-2", "land-take-2", "land-merge-2", "close-out-2"])
         self.assertEqual([row(result, n) for n in (1, 2)], [{"issue": n, "outcome": "landed", "pr": 40 + n} for n in (1, 2)])
         # The hold taken at the reviewed head moved to the clean resync's head and was released there once.
         self.assertEqual(land_release_shas(calls), [C, SHA])
@@ -6321,11 +5949,11 @@ def land_labels_calls(calls):
 
 # #971: car 2 of the first train is red, so the train lands issue 1 alone and drops issue 2.
 RED_CAR_TWO = {"state": "failed", "head": X2, "failing": ["ci"]}
-BEHIND_POLL = {"checks": {"state": "behind", "head": SHA}}
+BEHIND_POLL = {"behind": True}
 JOIN_LOG_OF = "#{}: {} became ready while it waited for the land lock; they land with it as a train"
 OBSERVED_CHECKS_MIN = 31
 LOCK_IDLE_MIN = 45
-# Turns after which a child returns while land-pr-3 is held: later than everything the first two trains ran.
+# Turns after which a child returns while land-take-3 is held: later than everything the first two trains ran.
 AFTER_SECOND_TRAIN = 200
 
 
@@ -6333,9 +5961,9 @@ def dropped_run(issues=(1, 2, 3), replies=None, patch=None, turns=None, delays=N
     """Issues 1 and 2 train together and car 2 is red; issue 3 (and any later one, unless `turns` says otherwise) becomes ready
     before issue 2's own landing has the lock."""
     issues = list(issues)
-    merged = {"setup": {"max_parallel": len(issues)}, **BEHIND, "land-pr-2": BEHIND_POLL, **(patch or {})}
+    merged = {"setup": {"max_parallel": len(issues)}, **BEHIND, "land-take-2": BEHIND_POLL, **(patch or {})}
     return run_full(args={**ARGS, "issues": issues, "train": True}, replies={"train-checks-1-2": RED_CAR_TWO, **(replies or {})}, patch=merged,
-                    turns={**{f"{n}:ready": DURING_WAIT for n in issues[2:]}, **(turns or {})}, delays={"land-pr-2": LOCK_WAIT, **(delays or {})})
+                    turns={**{f"{n}:ready": DURING_WAIT for n in issues[2:]}, **(turns or {})}, delays={"land-take-2": LOCK_WAIT, **(delays or {})})
 
 
 def wait_of(text):
@@ -6368,10 +5996,10 @@ class TrainPathTest(unittest.TestCase):
         self.assertEqual(builds_of(calls), [[1, 2], [2, 3]])
         self.assertNotIn("land-pr-3", labels(calls))
         self.assertEqual(order[order.index("land-pr-2"):], [
-            "land-pr-2", "train-pr-3", "train-build-2", "train-checks-2-1", "train-checks-2-2", "train-ready-2", "train-merge-2",
+            "land-pr-2", "land-take-2", "train-pr-3", "train-build-2", "train-checks-2-1", "train-checks-2-2", "train-ready-2", "train-merge-2",
             "close-out-2", "train-sweep-3", "close-out-3"])
         # Two lock holds, each released once: train 1's by issue 1, train 2's by issue 2.
-        self.assertEqual(waited_acquires(calls), ["land-pr-1", "land-pr-2"])
+        self.assertEqual(waited_acquires(calls), ["land-take-1", "land-take-2"])
         self.assertEqual(land_release_shas(calls), [SHA, SHA])
         self.assertEqual(lock_releases(calls, 2), ["close-out-2"])
         self.assertEqual(row(result, 1), {"issue": 1, "outcome": "landed", "pr": 41, "train": 1, "car_pr": 91})
@@ -6388,9 +6016,9 @@ class TrainPathTest(unittest.TestCase):
         self.assertEqual(row(result, 5), {"issue": 5, "outcome": "landed", "pr": 45})
         odd = ready(3, acceptance=[{"id": "AC1", "text": "works", "kind": "vibes"}])
         out = run_full(args={**ARGS, "issues": [1, 2, 3, 4], "train": True}, replies={"train-checks-1-2": RED_CAR_TWO},
-                       patch={"setup": {"max_parallel": 4}, **BEHIND, "land-pr-2": BEHIND_POLL},
+                       patch={"setup": {"max_parallel": 4}, **BEHIND, "land-take-2": BEHIND_POLL},
                        children={"1": ready(1), "2": ready(2), "3": odd, "4": ready(4)},
-                       turns={"3:plan": DURING_WAIT, "4:plan": DURING_WAIT}, delays={"land-pr-2": LOCK_WAIT})
+                       turns={"3:plan": DURING_WAIT, "4:plan": DURING_WAIT}, delays={"land-take-2": LOCK_WAIT})
         self.assertEqual(join_logs(out), [JOIN_LOG_OF.format(2, "#4")])
         self.assertEqual(builds_of(out["calls"]), [[1, 2], [2, 4]])
         self.assertEqual((row(out["result"], 3)["outcome"], row(out["result"], 3)["stage"]), ("stopped", "plan"))
@@ -6401,16 +6029,16 @@ class TrainPathTest(unittest.TestCase):
         self.assertEqual(join_logs(out), [])
         self.assertEqual(builds_of(calls), [[1, 2]])
         order = land_labels(calls)
-        self.assertEqual(order[order.index("land-pr-2"):], ["land-pr-2", "land-sync-2-1", "land-checks-2-2", "land-merge-2", "close-out-2"])
+        self.assertEqual(order[order.index("land-pr-2"):], ["land-pr-2", "land-take-2", "land-sync-2-1", "land-checks-2-2", "land-merge-2", "close-out-2"])
         self.assertEqual(row(result, 2), {"issue": 2, "outcome": "landed", "pr": 42})
 
     def test_a_member_dropped_from_train_after_train_still_ends_the_run(self):
         # Every train's second car is red: train 1 drops issue 2, which leads train 2 and drops issue 3, which leads train 3 and drops issue 4.
         red = {f"train-checks-{t}-2": RED_CAR_TWO for t in (2, 3)}
-        out = dropped_run(issues=(1, 2, 3, 4), replies=red, patch={"land-pr-3": BEHIND_POLL},
-                          turns={"4:ready": AFTER_SECOND_TRAIN}, delays={"land-pr-3": AFTER_SECOND_TRAIN + LOCK_WAIT})
+        out = dropped_run(issues=(1, 2, 3, 4), replies=red, patch={"land-take-3": BEHIND_POLL},
+                          turns={"4:ready": AFTER_SECOND_TRAIN}, delays={"land-take-3": AFTER_SECOND_TRAIN + LOCK_WAIT})
         result, calls = out["result"], out["calls"]
-        self.assertEqual(ready_during(out, 4), "land-pr-3")
+        self.assertEqual(ready_during(out, 4), "land-take-3")
         self.assertEqual(join_logs(out), [JOIN_LOG_OF.format(2, "#3"), JOIN_LOG_OF.format(3, "#4")])
         self.assertEqual(builds_of(calls), [[1, 2], [2, 3], [3, 4]])
         # The chain ends by itself: the last issue dropped finds nothing left to join it and lands alone.
@@ -6453,6 +6081,7 @@ class TrainPathTest(unittest.TestCase):
     def test_a_watch_that_reports_no_check_is_pending_while_a_declared_check_is_missing(self):
         """With no declared check, a pull request that still shows none after 5 minutes has none; with declared checks it is pending."""
         declared = {"setup": {"max_parallel": 2, "required_checks": ["gate"]},
+                    "land-pr-1": {"checks": {"state": "passed", "head": SHA, "required": ["gate"], "passed": ["gate"]}},
                     **{f"train-checks-1-{i}": {"required": ["gate"], "passed": ["gate"]} for i in (1, 2)}}
         _, calls, _ = train_run(patch=declared)
         own = step_text(calls, "train-checks-1-1")
@@ -6527,7 +6156,8 @@ class TrainPathTest(unittest.TestCase):
                 # Car 1 was green, and still nothing merges through the train: the lock it would merge under is gone.
                 self.assertNotIn("train-ready-1", order)
                 self.assertNotIn("train-merge-1", order)
-                tail = ["train-sweep-2", "land-lock-1-1", "land-checks-1-1", "land-merge-1", "close-out-1", "land-pr-2", "land-merge-2", "close-out-2"]
+                tail = ["train-sweep-2", "land-lock-1-1", "land-checks-1-2", "land-merge-1", "close-out-1", "land-pr-2", "land-take-2",
+                        "land-merge-2", "close-out-2"]
                 self.assertEqual(order[-len(tail):], tail)
                 relock = prompt(calls, "land-lock-1-1")
                 self.assertIn(f"forge-claim land acquire --repo owner/repo --branch dev --sha {SHA} --wait\n", relock)
@@ -6549,8 +6179,8 @@ class TrainPathTest(unittest.TestCase):
         """Cars 2 and 3 are not green, so issues 2 and 3 are dropped together: issue 3 rides behind issue 2 at once, ahead of the waiting issue 4."""
         late = {"state": "failed", "head": X2, "failing": ["ci"]}
         out = run_full(args={**ARGS, "issues": [1, 2, 3, 4], "train": True}, replies={"train-checks-1-2": late},
-                       patch={"setup": {"max_parallel": 4}, **BEHIND, "land-pr-2": BEHIND_POLL},
-                       turns={"4:ready": DURING_WAIT}, delays={"land-pr-2": LOCK_WAIT})
+                       patch={"setup": {"max_parallel": 4}, **BEHIND, "land-take-2": BEHIND_POLL},
+                       turns={"4:ready": DURING_WAIT}, delays={"land-take-2": LOCK_WAIT})
         result, calls = out["result"], out["calls"]
         self.assertEqual(builds_of(calls), [[1, 2, 3], [2, 3, 4]])
         self.assertIn("#2: #3 left the same train unlanded; it lands with it as a train", out["logs"])
@@ -6560,8 +6190,8 @@ class TrainPathTest(unittest.TestCase):
         self.assertEqual([row(result, n)["outcome"] for n in (1, 2, 3, 4)], ["landed"] * 4)
         # The limit is the train's: with two issues waiting, only one seat is left behind the sibling.
         out = run_full(args={**ARGS, "issues": [1, 2, 3, 4, 5], "train": True}, replies={"train-checks-1-2": late},
-                       patch={"setup": {"max_parallel": 5}, **BEHIND, "land-pr-2": BEHIND_POLL},
-                       turns={"4:ready": DURING_WAIT, "5:ready": DURING_WAIT}, delays={"land-pr-2": LOCK_WAIT})
+                       patch={"setup": {"max_parallel": 5}, **BEHIND, "land-take-2": BEHIND_POLL},
+                       turns={"4:ready": DURING_WAIT, "5:ready": DURING_WAIT}, delays={"land-take-2": LOCK_WAIT})
         self.assertEqual(builds_of(out["calls"]), [[1, 2, 3], [2, 3, 4]])
         self.assertEqual(row(out["result"], 5), {"issue": 5, "outcome": "landed", "pr": 45})
         # A dropped member whose landing takes no joiner (its head is current) leaves its sibling to land after it, as before.
@@ -6587,7 +6217,7 @@ class StructuredReplyTest(unittest.TestCase):
     REVIEW, REREVIEW = "land-sync-review-1-1", "land-sync-rereview-1-1"
 
     def land(self, **replies):
-        return run_full(patch=BEHIND, replies=dict({"land-sync-1-1": ABORTED, "land-sync-resolve-1-1": self.CONFLICTED}, **replies))
+        return run_full(patch=BEHIND, replies=dict({"land-sync-1-1": ABORTED, "land-sync-resolve-1-1": self.CONFLICTED, "land-checks-1-2": green(B)}, **replies))
 
     def test_every_step_carries_the_one_sentence_once(self):
         seen = all_calls()
@@ -6615,8 +6245,8 @@ class StructuredReplyTest(unittest.TestCase):
                 out = self.land(**{self.REVIEW: reply})
                 self.assertEqual(row(out["result"], 1)["outcome"], "landed")
                 self.assertEqual(land_labels(out["calls"]), [
-                    "land-pr-1", "land-sync-1-1", "land-unlock-1", "land-sync-resolve-1-1", self.REVIEW, self.REVIEW + "-again",
-                    "land-record-1-1", "land-merge-1", "close-out-1"])
+                    "land-pr-1", "land-take-1", "land-sync-1-1", "land-unlock-1", "land-sync-resolve-1-1", self.REVIEW, self.REVIEW + "-again",
+                    "land-record-1-1", "land-checks-1-2", "land-take-1", "land-merge-1", "close-out-1"])
                 first, again = (next(c for c in out["calls"] if c["label"] == label) for label in (self.REVIEW, self.REVIEW + "-again"))
                 self.assertEqual((again["agentType"], again["schema"]), (first["agentType"], first["schema"]))
                 self.assertTrue(again["prompt"].startswith(first["prompt"] + "\nAn earlier reply to this step was discarded: "))
@@ -6625,7 +6255,7 @@ class StructuredReplyTest(unittest.TestCase):
                 self.assertEqual(out["result"]["stage"], "done")
 
     def test_the_rerun_s_real_finding_gets_the_fix_round(self):
-        out = self.land(**{self.REVIEW: PLACEHOLDER, self.REVIEW + "-again": REAL})
+        out = self.land(**{self.REVIEW: PLACEHOLDER, self.REVIEW + "-again": REAL, "land-checks-1-2": green(SyncFixRoundTest.FIXED)})
         self.assertEqual(row(out["result"], 1)["outcome"], "landed")
         fix = prompt(out["calls"], "land-sync-fix-1-1")
         self.assertIn("dropped a guard", fix)
@@ -6681,7 +6311,7 @@ class StructuredReplyTest(unittest.TestCase):
         self.assertEqual((got["dead_agents"], got["lost_reviews"]), (["verify"], ["review-1"]))
 
     def test_an_unusable_rereview_reruns_once_and_then_is_a_lost_rereview(self):
-        out = self.land(**{self.REVIEW: REAL, self.REREVIEW: PLACEHOLDER})
+        out = self.land(**{self.REVIEW: REAL, self.REREVIEW: PLACEHOLDER, "land-checks-1-2": green(SyncFixRoundTest.FIXED)})
         self.assertEqual(row(out["result"], 1)["outcome"], "landed")
         names = land_labels(out["calls"])
         self.assertEqual(names[names.index("land-sync-fix-1-1"):names.index("land-record-1-1")], ["land-sync-fix-1-1", self.REREVIEW, self.REREVIEW + "-again"])
@@ -6695,7 +6325,7 @@ class StructuredReplyTest(unittest.TestCase):
         self.assertEqual(land_labels(out["calls"]).count("land-sync-fix-1-1"), 1)
 
     def test_an_unusable_ci_fix_review_reruns_once_and_two_end_ci_failed(self):
-        fixed = {"land-record-1-1": {"ok": True, "head": FIX}}
+        fixed = {"land-record-1-1": {"ok": True, "head": FIX}, "land-checks-1-2": green(FIX)}
         out = run_full(patch=folded(CI_RED), replies=dict(fixed, **{"land-fix-review-1": INCOMPLETE}))
         self.assertEqual(row(out["result"], 1)["outcome"], "landed")
         names = land_labels(out["calls"])
@@ -6904,29 +6534,43 @@ class CodexQuotaOwnerActionTest(unittest.TestCase):
 
 
 class OwnRedOutsideLockTest(unittest.TestCase):
-    """#1001: a red check the branch itself caused is fixed outside the land lock. Under the lock, the fix step of a red poll at a
-    head no sync has changed releases the lock before it edits, and the reviewed fix takes it again, waiting; a pull request that
-    already existed is read once before the lock is asked for, and a check that had already failed there is fixed with no lock."""
+    """#1001, #1679: a red check the branch itself caused is fixed outside the land lock, which is asked for only once a poll
+    passed. A red poll at a head no sync has changed, read under the lock, has its fix step release the lock before it edits,
+    and the reviewed fix takes it again, waiting; a pull request that already existed is read once before the lock is asked for,
+    and a check that had already failed there is fixed with no lock."""
 
     RELEASE = f"forge-claim land release --repo owner/repo --branch dev --sha {SHA}\n"
     RERAN = {"status": "done", "start_head": SHA, "commit": SHA, "notes": "cache HTTP 416 in setup; reran the failed jobs"}
     FIXED = {"status": "done", "start_head": SHA, "commit": FIX, "notes": "fixed the shard"}
     FINDING = {"verdict": "findings", "findings": [{"severity": "important", "summary": "skipped a test", "failing_input": "x"}]}
-    PRE_RED = {"land-pr-1": {"own_red": {"head": SHA, "failing": ["shard-3"], "details": "https://ci/run/7"}, "lock": None, "checks": None}}
-    LANDS = ["land-pr-1", "land-fix-1", "land-fix-review-1", "land-record-1-1", "land-merge-1", "close-out-1"]
+    PRE_RED = {"land-pr-1": {"own_red": {"head": SHA, "failing": ["shard-3"], "details": "https://ci/run/7"}, "checks": None}}
+    # The fix is recorded with no lock, its head polled green, and only then does the lock come.
+    AFTER_FIX = {"land-checks-1-2": green(FIX), "land-take-1": {"lock": {"verdict": "acquired", "lock_sha": FIX}}}
+    LANDS = ["land-pr-1", "land-fix-1", "land-fix-review-1", "land-record-1-1", "land-checks-1-2", "land-take-1", "land-merge-1",
+             "close-out-1"]
+    # The red head the pr step read counts no poll: the first poll after its fix is land-checks-1-1.
+    PRE_LANDS = ["land-pr-1", "land-fix-1", "land-fix-review-1", "land-record-1-1", "land-checks-1-1", "land-take-1", "land-merge-1",
+                 "close-out-1"]
+    PRE_FIX = {"land-checks-1-1": green(FIX), "land-take-1": {"lock": {"verdict": "acquired", "lock_sha": FIX}}}
+    # A red poll under the lock at an unchanged head: the merge is refused by the base branch's policy and the poll
+    # that follows is red.
+    POLICY = {"merged": False, "behind": False, "notes": "the base branch policy prohibits the merge."}
+    HELD_RED = {"land-merge-1": [POLICY, {"merged": True, "merge_commit": SHA, "notes": "merged"}], "land-checks-1-2": CI_RED}
+    UNDER = ["land-pr-1", "land-take-1", "land-merge-1", "land-checks-1-2", "land-fix-1"]
 
     @staticmethod
     def landing(out):
         names = labels(out["calls"])
         return names[names.index("land-pr-1"):]
 
-    def test_a_red_first_poll_releases_the_lock_for_the_fix_and_lands_the_reviewed_head(self):
-        """The 2212 shape: ready, the PR open before the lock, the lock waited for, the first poll red on the branch's own check."""
-        out = run_full(patch=folded(CI_RED), replies={"land-fix-1": dict(self.FIXED, tests=["t"], lock_released=True)})
+    def test_a_red_poll_under_the_lock_releases_it_for_the_fix_and_lands_the_reviewed_head(self):
+        out = run_full(replies=dict(self.HELD_RED, **{"land-fix-1": dict(self.FIXED, tests=["t"], lock_released=True),
+                                                      "land-record-1-1": {"ok": True, "head": FIX}, "land-checks-1-3": green(FIX)}))
         result, calls = out["result"], out["calls"]
         self.assertEqual(row(result, 1), {"issue": 1, "outcome": "landed", "pr": 41})
-        # No step is added: the fix step releases the lock itself, and the record step takes it again.
-        self.assertEqual(self.landing(out), self.LANDS)
+        # No step is added: the fix step releases the lock itself, and the fix head is read green before the take.
+        self.assertEqual(self.landing(out), self.UNDER + ["land-fix-review-1", "land-record-1-1", "land-checks-1-3", "land-take-1", "land-merge-1",
+                                                          "close-out-1"])
         fix = prompt(calls, "land-fix-1")
         self.assertIn(f"The landing lock of the branch dev is held for this pull request at {SHA}", fix)
         self.assertIn(f"release the lock before you edit any file: run alone and exactly: {self.RELEASE}", fix)
@@ -6934,72 +6578,77 @@ class OwnRedOutsideLockTest(unittest.TestCase):
         self.assertLess(fix.index(self.RELEASE), fix.index("Work in the worktree"))
         self.assertEqual(schema_of(calls, "land-fix-1")["properties"]["lock_released"], {"type": "boolean"})
         self.assertNotIn("forge-claim", prompt(calls, "land-fix-review-1"))
-        record = prompt(calls, "land-record-1-1")
-        self.assertIn(f"take the cross-host landing lock of the branch dev again, at the head {FIX}; "
-                      "it was released while a failing check of the branch was fixed", record)
-        self.assertIn(f"forge-claim land acquire --repo owner/repo --branch dev --sha {FIX} --wait\n", record)
+        self.assertNotIn("forge-claim land", prompt(calls, "land-record-1-1"))
+        self.assertNotIn("forge-claim land", prompt(calls, "land-checks-1-3"))
+        self.assertIn(f"forge-claim land acquire --repo owner/repo --branch dev --sha {FIX} --wait --lease\n", prompt(calls, "land-take-1"))
         # Nothing merges without the lock re-checked at the fix head and that exact head.
         merge = prompt(calls, "land-merge-1")
-        self.assertIn(f"forge-claim land acquire --repo owner/repo --branch dev --sha {FIX}\n", merge)
+        self.assertIn(f"forge-claim land acquire --repo owner/repo --branch dev --sha {FIX} --lease\n", merge)
         self.assertIn(f"--match-head-commit {FIX}", merge)
         self.assertEqual(lock_releases(calls), ["close-out-1"])
         self.assertIn(f"{LAND_RELEASE}{FIX}\n", prompt(calls, "close-out-1"))
         self.assertIn("#1: ci failed at the head the lock was taken at; its fix is reviewed outside the land lock", out["logs"])
 
     def test_a_release_the_fix_step_did_not_report_is_made_before_the_review(self):
-        out = run_full(patch=folded(CI_RED), replies={"land-fix-1": dict(self.FIXED, tests=["t"], lock_released=False)})
+        out = run_full(replies=dict(self.HELD_RED, **{"land-fix-1": dict(self.FIXED, tests=["t"], lock_released=False),
+                                                      "land-record-1-1": {"ok": True, "head": FIX}, "land-checks-1-3": green(FIX)}))
         self.assertEqual(row(out["result"], 1)["outcome"], "landed")
-        self.assertEqual(self.landing(out), ["land-pr-1", "land-fix-1", "land-unlock-1", "land-fix-review-1", "land-record-1-1",
-                                             "land-merge-1", "close-out-1"])
+        self.assertEqual(self.landing(out), self.UNDER + ["land-unlock-1", "land-fix-review-1", "land-record-1-1", "land-checks-1-3", "land-take-1",
+                                                          "land-merge-1", "close-out-1"])
         self.assertIn(self.RELEASE, prompt(out["calls"], "land-unlock-1"))
-        self.assertIn(f"--sha {FIX} --wait\n", prompt(out["calls"], "land-record-1-1"))
+        self.assertIn(f"--sha {FIX} --wait --lease\n", prompt(out["calls"], "land-take-1"))
 
     def test_a_flaky_red_is_rerun_under_the_lock_as_before(self):
-        out = run_full(patch=folded(CI_RED), replies={"land-fix-1": self.RERAN})
+        out = run_full(replies=dict(self.HELD_RED, **{"land-fix-1": self.RERAN}))
         calls = out["calls"]
         self.assertEqual(row(out["result"], 1)["outcome"], "landed")
-        self.assertEqual(self.landing(out), ["land-pr-1", "land-fix-1", "land-checks-1-2", "land-merge-1", "close-out-1"])
+        self.assertEqual(self.landing(out), self.UNDER + ["land-checks-1-3", "land-merge-1", "close-out-1"])
         # The lock is never released or waited for again: one waited acquire, one release, both at the ready head.
-        self.assertEqual(waited_acquires(calls), ["land-pr-1"])
+        self.assertEqual(waited_acquires(calls), ["land-take-1"])
         self.assertEqual(lock_releases(calls), ["close-out-1"])
-        self.assertIn("This poll follows a rerun of failed jobs at this head.", prompt(calls, "land-checks-1-2"))
+        self.assertIn("This poll follows a rerun of failed jobs at this head.", prompt(calls, "land-checks-1-3"))
         self.assertEqual([line for line in out["logs"] if "outside the land lock" in line], [])
 
-    def test_a_rerun_that_released_the_lock_against_its_prompt_waits_for_it_again(self):
-        out = run_full(patch=folded(CI_RED), replies={"land-fix-1": dict(self.RERAN, lock_released=True)})
+    def test_a_rerun_that_released_the_lock_against_its_prompt_is_read_green_before_it_takes_it_again(self):
+        out = run_full(replies=dict(self.HELD_RED, **{"land-fix-1": dict(self.RERAN, lock_released=True)}))
         self.assertEqual(row(out["result"], 1)["outcome"], "landed")
-        self.assertEqual(self.landing(out), ["land-pr-1", "land-fix-1", "land-lock-1-1", "land-checks-1-2", "land-merge-1", "close-out-1"])
-        self.assertIn(f"--sha {SHA} --wait\n", prompt(out["calls"], "land-lock-1-1"))
+        self.assertEqual(self.landing(out), self.UNDER + ["land-checks-1-3", "land-take-1", "land-merge-1", "close-out-1"])
+        self.assertNotIn("forge-claim land", prompt(out["calls"], "land-checks-1-3"))
+        self.assertIn(f"--sha {SHA} --wait --lease\n", prompt(out["calls"], "land-take-1"))
 
     def test_the_fix_outside_the_lock_happens_once_per_landing(self):
-        red_again = {"ok": True, "head": FIX, "checks": dict(CI_RED, head=FIX)}
-        out = run_full(patch=folded(CI_RED), replies={"land-record-1-1": red_again})
+        out = run_full(patch=folded(CI_RED), replies={"land-record-1-1": {"ok": True, "head": FIX},
+                                                      "land-checks-1-2": dict(CI_RED, head=FIX)})
         calls = out["calls"]
         self.assertEqual(row(out["result"], 1)["outcome"], "ci-failed")
-        self.assertEqual(self.landing(out), ["land-pr-1", "land-fix-1", "land-fix-review-1", "land-record-1-1", "land-unlock-1"])
-        self.assertEqual(waited_acquires(calls), ["land-pr-1", "land-record-1-1"])
-        self.assertIn(f"{LAND_RELEASE}{FIX}\n", prompt(calls, "land-unlock-1"))
+        self.assertEqual(self.landing(out), ["land-pr-1", "land-fix-1", "land-fix-review-1", "land-record-1-1", "land-checks-1-2"])
+        self.assertEqual(waited_acquires(calls), [])
+        self.assertEqual(land_release_shas(calls), [])
 
-    def test_a_fix_the_review_rejects_releases_the_ready_head_once_more_and_never_lands(self):
+    def test_a_fix_the_review_rejects_never_takes_the_lock_and_never_lands(self):
         out = run_full(patch=folded(CI_RED), replies={"land-fix-review-1": self.FINDING})
         self.assertEqual(row(out["result"], 1)["outcome"], "ci-failed")
-        self.assertEqual(self.landing(out), ["land-pr-1", "land-fix-1", "land-fix-review-1", "land-unlock-1"])
-        self.assertIn(self.RELEASE, prompt(out["calls"], "land-unlock-1"))
+        self.assertEqual(self.landing(out), ["land-pr-1", "land-fix-1", "land-fix-review-1"])
+        self.assertEqual(land_release_shas(out["calls"]), [])
 
-    def test_a_red_check_after_a_sync_under_the_lock_is_fixed_under_it_as_before(self):
+    def test_a_red_check_after_a_sync_under_the_lock_leaves_the_queue_before_the_fix(self):
         synced = {"status": "done", "conflicted": False, "head": B, "merge_commit": B, "notes": "ok"}
         out = run_full(patch=BEHIND, replies={
             "land-sync-1-1": synced, "land-record-1-1": {"ok": True, "head": B, "checks": dict(CI_RED, head=B)},
             "land-fix-1": {"status": "done", "start_head": B, "commit": FIX, "notes": "fixed", "tests": ["t"]},
-            "land-record-1-2": {"ok": True, "head": FIX}})
+            "land-record-1-2": {"ok": True, "head": FIX}, "land-checks-1-3": green(FIX)})
         calls = out["calls"]
         self.assertEqual(row(out["result"], 1)["outcome"], "landed")
-        self.assertEqual(self.landing(out), ["land-pr-1", "land-sync-1-1", "land-record-1-1", "land-fix-1", "land-fix-review-1",
-                                             "land-record-1-2", "land-merge-1", "close-out-1"])
-        self.assertNotIn("forge-claim", prompt(calls, "land-fix-1"))
+        self.assertEqual(self.landing(out), ["land-pr-1", "land-take-1", "land-sync-1-1", "land-record-1-1", "land-unlock-1",
+                                             "land-fix-1", "land-fix-review-1", "land-record-1-2", "land-checks-1-3", "land-take-1", "land-merge-1",
+                                             "close-out-1"])
+        self.assertIn(f"{LAND_RELEASE}{B}\n", prompt(calls, "land-unlock-1"))
+        self.assertIn("The land lock was released before this fix; run no forge-claim command.", prompt(calls, "land-fix-1"))
+        self.assertNotIn("forge-claim land", prompt(calls, "land-fix-1"))
         self.assertNotIn("lock_released", schema_of(calls, "land-fix-1")["properties"])
-        self.assertIn(f"move the cross-host landing lock of the branch dev to the head {FIX}", prompt(calls, "land-record-1-2"))
-        self.assertEqual(waited_acquires(calls), ["land-pr-1"])
+        self.assertNotIn("forge-claim land", prompt(calls, "land-record-1-2"))
+        self.assertIn(f"--sha {FIX} --wait --lease\n", prompt(calls, "land-take-1"))
+        self.assertIn(f"#1: left the land queue: ci failed at the up-to-date head {B}", out["logs"])
 
     def test_land_pr_reads_a_reused_pull_request_once_before_the_lock(self):
         _, calls, _ = run()
@@ -7009,66 +6658,61 @@ class OwnRedOutsideLockTest(unittest.TestCase):
         for needle in ("only when step 2 reused an open PR (a PR this step opened has no finished check, so skip this read)",
                        f"so the read counts only when its headRefOid is {SHA}",
                        "merge-base --is-ancestor origin/dev HEAD succeeds). When it is not, the head is behind its base and gets new checks "
-                       "once it is synced, so the failure counts only while another landing holds the lock and this one would wait",
-                       f"forge-claim land status --repo owner/repo --branch dev --sha {SHA} (a Bash timeout of 20 minutes), and it counts "
-                       f"only on the verdict held_by with a lock_sha other than {SHA}",
+                       "once it is synced; the failure counts all the same, because no lock is held yet",
                        "a cancelled check does not count), see whether origin/dev is an ancestor of HEAD",
-                       "When the failure counts, run no other lock command and wait for no check",
+                       "When the failure counts, wait for no check",
                        "and behind (true when the head is behind its base, else false)",
                        "count only the newest run of each check name, the one with the latest startedAt, so a failed attempt whose re-run passed does not count",
-                       "In every other case (another head, a head behind its base while no other landing holds the lock, no failed check, "
-                       "checks still running, none reported, or a read failed) return own_red null and go on."):
+                       "In every other case (another head, no failed check, checks still running, none reported, or a read failed) "
+                       "return own_red null and go on."):
             self.assertIn(needle, text)
+        self.assertNotIn("forge-claim land", text)
         self.assertLess(text.index("merge-tree --write-tree"), text.index(read))
-        self.assertLess(text.index(read), text.index(f"--sha {SHA} --wait\n"))
+        self.assertLess(text.index(read), text.index("gh pr checks <the PR number> --repo owner/repo --watch"))
         member = schema_of(calls, "land-pr-1")["properties"]["own_red"]
         self.assertIn({"type": "null"}, member["anyOf"])
         self.assertEqual(object_branch(member)["required"], ["head", "failing"])
 
     def test_a_check_already_red_before_the_lock_is_fixed_with_no_lock_and_the_fix_head_takes_it(self):
-        out = run_full(patch=self.PRE_RED, replies={"land-fix-1": dict(self.FIXED, tests=["t"])})
+        out = run_full(patch=self.PRE_RED, replies=dict(self.PRE_FIX, **{"land-fix-1": dict(self.FIXED, tests=["t"])}))
         result, calls = out["result"], out["calls"]
         self.assertEqual(row(result, 1), {"issue": 1, "outcome": "landed", "pr": 41})
-        self.assertEqual(self.landing(out), self.LANDS)
+        self.assertEqual(self.landing(out), self.PRE_LANDS)
         fix = prompt(calls, "land-fix-1")
         self.assertIn('failed at ' + SHA + ': ["shard-3"]. Details: https://ci/run/7.', fix)
         self.assertIn("The landing lock of the branch dev is not held and was not asked for yet: run no forge-claim command.", fix)
         self.assertNotIn("forge-claim land", fix)
-        record = prompt(calls, "land-record-1-1")
-        self.assertIn(f"take the cross-host landing lock of the branch dev at the head {FIX}; "
-                      "a failing check of the branch was fixed before the lock was asked for", record)
-        self.assertIn(f"--sha {FIX} --wait\n", record)
+        self.assertNotIn("forge-claim land", prompt(calls, "land-record-1-1"))
+        self.assertIn(f"--sha {FIX} --wait --lease\n", prompt(calls, "land-take-1"))
         # One hold, taken at the fix head and released there once: no step ever held the ready head.
         self.assertEqual(lock_releases(calls), ["close-out-1"])
         self.assertEqual(land_release_shas(calls), [FIX])
         self.assertIn("#1: shard-3 had already failed at the head; fixing before the land lock is asked for", out["logs"])
 
-    def test_a_rerun_before_the_lock_takes_the_lock_and_polls(self):
+    def test_a_rerun_before_the_lock_polls_and_then_takes_the_lock(self):
         out = run_full(patch=self.PRE_RED, replies={"land-fix-1": self.RERAN})
-        calls = out["calls"]
         self.assertEqual(row(out["result"], 1)["outcome"], "landed")
-        self.assertEqual(self.landing(out), ["land-pr-1", "land-fix-1", "land-lock-1-1", "land-checks-1-1", "land-merge-1", "close-out-1"])
-        self.assertIn("the failed jobs of a red check were rerun before it was asked for", prompt(calls, "land-lock-1-1"))
-        self.assertIn(f"--sha {SHA} --wait\n", prompt(calls, "land-lock-1-1"))
+        self.assertEqual(self.landing(out), ["land-pr-1", "land-fix-1", "land-checks-1-1", "land-take-1", "land-merge-1", "close-out-1"])
+        self.assertIn("This poll follows a rerun of failed jobs at this head.", prompt(out["calls"], "land-checks-1-1"))
+        self.assertIn(f"--sha {SHA} --wait --lease\n", prompt(out["calls"], "land-take-1"))
         # A second red poll ends the landing, as after any rerun.
         again = run_full(patch=self.PRE_RED, replies={"land-fix-1": self.RERAN, "land-checks-1-1": CI_RED})
         self.assertEqual(row(again["result"], 1)["outcome"], "ci-failed")
         self.assertEqual(labels(again["calls"]).count("land-fix-1"), 1)
 
-    def test_a_stop_before_the_first_take_releases_the_ready_head_once(self):
+    def test_a_stop_before_the_first_take_holds_and_releases_nothing(self):
         for name, replies in (("review", {"land-fix-1": dict(self.FIXED, tests=["t"]), "land-fix-review-1": self.FINDING}), ("fix", {"land-fix-1": None})):
             with self.subTest(name=name):
                 out = run_full(patch=self.PRE_RED, replies=replies)
                 self.assertEqual(row(out["result"], 1)["outcome"], "ci-failed")
                 names = self.landing(out)
-                self.assertEqual(names[-1], "land-unlock-1")
-                self.assertNotIn("land-record-1-1", names)
-                self.assertNotIn("land-merge-1", names)
-                self.assertIn(self.RELEASE, prompt(out["calls"], "land-unlock-1"))
+                for label in ("land-take-1", "land-unlock-1", "land-record-1-1", "land-merge-1"):
+                    self.assertNotIn(label, names)
+                self.assertEqual(land_release_shas(out["calls"]), [])
 
-    def test_an_own_red_reply_that_names_a_lock_verdict_or_no_check_is_the_old_flow(self):
+    def test_an_own_red_reply_that_names_no_check_is_the_old_flow(self):
         base = [(c["label"], c.get("prompt")) for c in run()[1]]
-        for own in ({"head": SHA, "failing": ["shard-3"]}, {"head": SHA, "failing": []}, None):
+        for own in ({"head": SHA, "failing": []}, None):
             with self.subTest(own=own):
                 result, calls, _ = run(patch={"land-pr-1": {"own_red": own}})
                 self.assertEqual([(c["label"], c.get("prompt")) for c in calls], base)
@@ -7082,65 +6726,62 @@ class OwnRedOutsideLockTest(unittest.TestCase):
             with self.subTest(head=head):
                 result, calls, _ = run(patch={"land-pr-1": {"own_red": own}})
                 self.assertEqual([(c["label"], c.get("prompt")) for c in calls], base)
-                # A step that ran no lock command on such a reply fixes nothing: it stops at the lock and releases the ready head.
-                out = run_full(patch={"land-pr-1": {"own_red": own, "lock": None, "checks": None}})
-                self.assertEqual((row(out["result"], 1)["outcome"], row(out["result"], 1)["stage"]), ("stopped", "land-lock"))
-                self.assertEqual(self.landing(out), ["land-pr-1", "land-unlock-1"])
+                # A step that waited for no check on such a reply has nothing to go on: it stops before any lock
+                # command.
+                out = run_full(patch={"land-pr-1": {"own_red": own, "checks": None}})
+                self.assertEqual((row(out["result"], 1)["outcome"], row(out["result"], 1)["stage"]), ("stopped", "checks"))
+                self.assertEqual(self.landing(out), ["land-pr-1"])
 
-    def test_a_red_first_poll_after_a_conflict_resolved_before_the_lock_releases_the_reviewed_head(self):
-        """#941 then #1001: the lock was first taken at the reviewed head, so that head, never the ready one, is released and retaken from."""
-        red_at_b = {"ok": True, "head": B, "lock": {"verdict": "acquired", "lock_sha": B}, "checks": dict(CI_RED, head=B)}
+    def test_a_red_poll_after_a_conflict_resolved_before_the_lock_is_fixed_with_no_lock(self):
+        """#941 then #1679: the reviewed head is polled with no lock asked for; red, its fix is recorded and polled before the take."""
         fixed = {"status": "done", "start_head": B, "commit": FIX, "notes": "fixed", "tests": ["t"]}
-        for told in (True, False):
-            with self.subTest(lock_released=told):
-                out = run_full(patch=ResolveBeforeLockTest.EARLY, replies={
-                    "land-record-1-1": red_at_b, "land-fix-1": dict(fixed, lock_released=told), "land-record-1-2": {"ok": True, "head": FIX}})
-                calls = out["calls"]
-                self.assertEqual(row(out["result"], 1)["outcome"], "landed")
-                self.assertEqual(self.landing(out), ["land-pr-1", "land-sync-resolve-1-1", "land-sync-review-1-1", "land-record-1-1", "land-fix-1"]
-                                 + ([] if told else ["land-unlock-1"]) + ["land-fix-review-1", "land-record-1-2", "land-merge-1", "close-out-1"])
-                fix = prompt(calls, "land-fix-1")
-                self.assertIn(f"is held for this pull request at {B}", fix)
-                self.assertIn(f"{LAND_RELEASE}{B}\n", fix)
-                self.assertNotIn(f"{LAND_RELEASE}{SHA}", fix)
-                if not told:
-                    self.assertIn(f"{LAND_RELEASE}{B}\n", prompt(calls, "land-unlock-1"))
-                self.assertIn(f"--sha {FIX} --wait\n", prompt(calls, "land-record-1-2"))
-                self.assertNotIn(SHA, [sha for sha in land_release_shas(calls)])
+        out = run_full(patch=ResolveBeforeLockTest.EARLY, replies={
+            "land-checks-1-1": dict(CI_RED, head=B), "land-fix-1": fixed, "land-record-1-1": {"ok": True, "head": FIX},
+            "land-checks-1-2": green(FIX)})
+        calls = out["calls"]
+        self.assertEqual(row(out["result"], 1)["outcome"], "landed")
+        self.assertEqual(self.landing(out), ["land-pr-1", "land-sync-resolve-1-1", "land-sync-review-1-1", "land-checks-1-1", "land-fix-1",
+                                             "land-fix-review-1", "land-record-1-1", "land-checks-1-2", "land-take-1", "land-merge-1",
+                                             "close-out-1"])
+        self.assertIn("is not held and was not asked for yet", prompt(calls, "land-fix-1"))
+        self.assertEqual(land_release_shas(calls), [FIX])
 
-    def test_a_reported_release_that_left_the_lock_held_is_a_move_and_lands(self):
+    def test_a_reported_release_that_left_the_lock_held_is_taken_again_at_the_fix_head(self):
         for verdict in ("moved", "already_held", "acquired"):
             with self.subTest(verdict=verdict):
-                out = run_full(patch=folded(CI_RED), replies={
-                    "land-fix-1": dict(self.FIXED, tests=["t"], lock_released=True),
-                    "land-record-1-1": {"ok": True, "head": FIX, "lock": {"verdict": verdict, "lock_sha": FIX}}})
+                out = run_full(replies=dict(self.HELD_RED, **{
+                    "land-fix-1": dict(self.FIXED, tests=["t"], lock_released=True), "land-record-1-1": {"ok": True, "head": FIX},
+                    "land-checks-1-3": green(FIX), "land-take-1": [{}, {"lock": {"verdict": verdict, "lock_sha": FIX}}]}))
                 self.assertEqual(row(out["result"], 1)["outcome"], "landed")
-                self.assertEqual(self.landing(out), self.LANDS)
+                self.assertEqual(self.landing(out), self.UNDER + ["land-fix-review-1", "land-record-1-1", "land-checks-1-3", "land-take-1",
+                                                                  "land-merge-1", "close-out-1"])
                 self.assertEqual(lock_releases(out["calls"]), ["close-out-1"])
                 self.assertIn(f"{LAND_RELEASE}{FIX}\n", prompt(out["calls"], "close-out-1"))
 
     def test_a_rerun_whose_lock_was_lost_unreported_resyncs_before_it_merges(self):
-        """The step kept quiet about a release and reran: the pre-merge acquire answers acquired, so the base is checked again first."""
+        """The pre-merge acquire answers acquired after a rerun: the lock was retaken, so the base is checked again first."""
         retaken = {"merged": False, "lock": {"verdict": "acquired", "lock_sha": SHA}}
         out = run_full(patch=folded(CI_RED), replies={
             "land-fix-1": dict(self.RERAN, lock_released=False),
             "land-merge-1": [retaken, {"merged": True, "merge_commit": SHA, "notes": "merged"}]})
         self.assertEqual(row(out["result"], 1)["outcome"], "landed")
-        self.assertEqual(self.landing(out), ["land-pr-1", "land-fix-1", "land-checks-1-2", "land-merge-1", "land-sync-1-1",
+        self.assertEqual(self.landing(out), ["land-pr-1", "land-fix-1", "land-checks-1-2", "land-take-1", "land-merge-1", "land-sync-1-1",
                                              "land-checks-1-3", "land-merge-1", "close-out-1"])
         self.assertEqual(lock_releases(out["calls"]), ["close-out-1"])
 
     def test_a_green_landing_keeps_its_calls(self):
         result, calls, _ = run()
-        self.assertEqual(of(calls, 1), ["facts-1", "acquire-1", "child-1", "child-1", "land-pr-1", "land-merge-1", "close-out-1"])
+        self.assertEqual(of(calls, 1), ["facts-1", "acquire-1", "child-1", "child-1", "land-pr-1", "land-take-1", "land-merge-1",
+                                        "close-out-1"])
         self.assertEqual([label for label in labels(calls) if label.startswith(EARLY_OPEN)], [])
 
     def test_a_train_leader_with_its_own_red_check_lands_alone_and_the_rest_after_it(self):
-        result, calls, _ = train_run(patch=folded(CI_RED))
+        result, calls, _ = train_run(patch=dict(folded(CI_RED), **{"land-take-1": {"behind": False}}),
+                                     replies=dict(self.AFTER_FIX, **{"land-record-1-1": {"ok": True, "head": FIX}}))
         self.assertEqual(train_labels(calls), [])
         self.assertEqual([row(result, n)["outcome"] for n in (1, 2)], ["landed", "landed"])
         names = land_labels(calls)
-        self.assertEqual(names[names.index("land-pr-1"):], self.LANDS + ["land-pr-2", "land-merge-2", "close-out-2"])
+        self.assertEqual(names[names.index("land-pr-1"):], self.LANDS + ["land-pr-2", "land-take-2", "land-merge-2", "close-out-2"])
 
 
 class EarlyOpenTest(unittest.TestCase):
@@ -7214,109 +6855,6 @@ class EarlyOpenTest(unittest.TestCase):
 
 
 
-class WaitByPlaceTest(unittest.TestCase):
-    """#1018: the retries of a lock wait are spent only by a wait that made no progress. A wait that ended first in line, or at a
-    better place than the wait before it, is made again for nothing, and a ceiling of six hours bounds the waits in all."""
-
-    @staticmethod
-    def ran_out(position, **lock):
-        return {"lock": dict({"verdict": "land-contended", "lock_sha": B, "waited_s": 3000, "waited_on": [7],
-                              "position": position, "ahead": [] if position == 1 else [7]}, **lock)}
-
-    def waits(self, first, *later):
-        """The run whose first wait and whose land-lock steps answer these places; the step after the last takes the lock."""
-        replies = {"land-pr-1": dict({"pr": 41, "head": SHA}, **self.ran_out(first))}
-        replies.update({f"land-lock-1-{k}": self.ran_out(place) for k, place in enumerate(later, 1)})
-        result, calls, _ = run(replies=replies)
-        return row(result, 1)["outcome"], [label for label in labels(calls) if label.startswith("land-lock-")]
-
-    def test_a_wait_that_ends_first_in_line_never_ends_land_contended(self):
-        """The 2441 shape: four waits, the last three first in line with nobody ahead."""
-        outcome, steps = self.waits(2, 1, 1, 1, 1)
-        self.assertEqual((outcome, steps), ("landed", [f"land-lock-1-{k}" for k in range(1, 6)]))
-
-    def test_a_wait_whose_place_improved_spends_no_retry(self):
-        outcome, steps = self.waits(5, 4, 3, 2, 2)
-        self.assertEqual((outcome, steps), ("landed", [f"land-lock-1-{k}" for k in range(1, 6)]))
-
-    def test_a_wait_with_no_progress_still_ends_land_contended(self):
-        for name, places in (("the same place", (2, 2, 2, 2)), ("a worse place", (2, 3, 4, 5)), ("no place read", (None,) * 4),
-                             ("one better place, then none", (3, 2, 2, 2, 2))):
-            with self.subTest(name):
-                outcome, steps = self.waits(*places)
-                # Three retries, as before, plus one wait for each place gained.
-                self.assertEqual((outcome, steps), ("land-contended", [f"land-lock-1-{k}" for k in range(1, len(places))]))
-
-    def test_the_waits_in_all_stop_at_the_ceiling(self):
-        """First in line for ever (a holder that never lets go): no wait starts that could end after six hours."""
-        self.assertIn("const LAND_WAIT_MAX_S = 6 * 3600\nconst LAND_WAIT_CALL_S = 3000\n", PROGRAM.read_text(encoding="utf-8"))
-        outcome, steps = self.waits(*[1] * 12)
-        self.assertEqual((outcome, steps), ("land-contended", [f"land-lock-1-{k}" for k in range(1, 7)]))  # 7 waits of 50 minutes
-        # A reply that names no waited_s counts as a whole call, so a silent clerk cannot wait for ever.
-        replies = {"land-pr-1": {"pr": 41, "head": SHA, "lock": {"verdict": "land-contended", "position": 1}}}
-        replies.update({f"land-lock-1-{k}": {"lock": {"verdict": "land-contended", "position": 1}} for k in range(1, 12)})
-        result, calls, _ = run(replies=replies)
-        self.assertEqual(row(result, 1)["outcome"], "land-contended")
-        self.assertEqual(len([label for label in labels(calls) if label.startswith("land-lock-")]), 6)
-
-    def test_a_reply_that_under_reports_its_wait_does_not_lift_the_ceiling(self):
-        for waited in (0, 1, -5, None):
-            with self.subTest(waited_s=waited):
-                lock = {"verdict": "land-contended", "position": 1, "waited_s": waited}
-                replies = {"land-pr-1": {"pr": 41, "head": SHA, "lock": lock}}
-                replies.update({f"land-lock-1-{k}": {"lock": lock} for k in range(1, 12)})
-                result, calls, _ = run(replies=replies)
-                self.assertEqual(row(result, 1)["outcome"], "land-contended")
-                self.assertEqual(len([label for label in labels(calls) if label.startswith("land-lock-")]), 6)
-
-    def test_a_retake_judges_each_wait_by_its_own_reply(self):
-        """The record step's wait ended first in line; the waits after it end at place 3 and spend the retries."""
-        replies = {"land-sync-1-1": ABORTED, "land-record-1-1": dict({"ok": True, "head": B, "checks": None}, **self.ran_out(1, lock_sha=C)),
-                   **{f"land-relock-1-{k}": self.ran_out(3, lock_sha=C) for k in range(1, 10)}}
-        result, calls, _ = run(patch=BEHIND, replies=replies)
-        self.assertEqual(row(result, 1)["outcome"], "land-contended")
-        self.assertEqual([label for label in labels(calls) if label.startswith("land-relock-")], [f"land-relock-1-{k}" for k in range(1, 5)])
-
-    def test_the_ceiling_is_one_for_the_landing_and_the_retries_are_new_for_each_run_of_waits(self):
-        """Four waits before the lock came, then a retake first in line for ever: the retake's own retries are untouched,
-        and its waits stop where the six hours of the landing do (seven waits of 50 minutes in all)."""
-        replies = {"land-pr-1": dict({"pr": 41, "head": SHA, "checks": None}, **self.ran_out(1)),
-                   **{f"land-lock-1-{k}": self.ran_out(1) for k in (1, 2, 3)},
-                   "land-checks-1-1": {"state": "behind", "head": SHA}, "land-sync-1-1": ABORTED,
-                   "land-record-1-1": dict({"ok": True, "head": B, "checks": None}, **self.ran_out(1, lock_sha=C)),
-                   **{f"land-relock-1-{k}": self.ran_out(1, lock_sha=C) for k in range(1, 10)}}
-        result, calls, _ = run(replies=replies)
-        self.assertEqual(row(result, 1)["outcome"], "land-contended")
-        self.assertEqual([label for label in labels(calls) if label.startswith(("land-lock-", "land-relock-"))],
-                         ["land-lock-1-1", "land-lock-1-2", "land-lock-1-3", "land-lock-1-4", "land-relock-1-1", "land-relock-1-2"])
-
-    def test_a_retake_first_in_line_waits_again_without_a_retry(self):
-        ran_out = self.ran_out(1, lock_sha=C)
-        replies = {"land-sync-1-1": ABORTED, "land-record-1-1": dict({"ok": True, "head": B, "checks": None}, **ran_out),
-                   **{f"land-relock-1-{k}": ran_out for k in (1, 2, 3, 4)},
-                   "land-checks-1-2": {"state": "passed", "head": B, "required": ["ci"], "passed": ["ci"]}}
-        result, calls, _ = run(patch=BEHIND, replies=replies)
-        self.assertEqual(row(result, 1)["outcome"], "landed")
-        self.assertEqual([label for label in labels(calls) if label.startswith("land-relock-")], [f"land-relock-1-{k}" for k in range(1, 6)])
-
-    def test_the_lock_replies_carry_the_place(self):
-        _, calls, _ = run(replies={"land-pr-1": dict({"pr": 41, "head": SHA}, **self.ran_out(1))})
-        for label in ("land-pr-1", "land-lock-1-1"):
-            with self.subTest(label=label):
-                self.assertIn("waited_s and waited_on from its output, and position and ahead when it prints them.", prompt(calls, label))
-                lock = object_branch(schema_of(calls, label)["properties"]["lock"])["properties"]
-                self.assertEqual((lock["position"], lock["ahead"]),
-                                 ({"anyOf": [{"type": "integer"}, {"type": "null"}]}, {"type": "array", "items": {"type": "integer"}}))
-
-    def test_both_programs_carry_the_same_budget(self):
-        def budget(path):
-            text = "\n".join(l for l in path.read_text(encoding="utf-8").split("\n") if not l.lstrip().startswith("//"))
-            start = text.index("const LAND_WAIT_RETRIES = ")
-            return "\n".join(l for l in text[start:text.index("\n}\n", text.index("const waitBudget = ", start)) + 3].split("\n") if not l.lstrip().startswith("//"))
-        self.assertIn("return spent <= LAND_WAIT_RETRIES && total + LAND_WAIT_CALL_S <= LAND_WAIT_MAX_S", budget(PROGRAM))
-        self.assertEqual(budget(PROGRAM), budget(PROGRAM.with_name("deliver-standard.js")))
-
-
 class BehindRedBeforeLockTest(unittest.TestCase):
     """#1018: a check that had failed at a head behind its base, read while another landing holds the lock, is not left for the
     sync under the lock: the branch is brought up to date before the lock is asked for, the checks of the new head are waited for
@@ -7338,22 +6876,23 @@ class BehindRedBeforeLockTest(unittest.TestCase):
         out = run_full(patch=self.PRE, replies={"land-sync-1-1": self.SYNCED, "land-checks-1-1": self.GREEN})
         result, calls = out["result"], out["calls"]
         self.assertEqual(row(result, 1), {"issue": 1, "outcome": "landed", "pr": 41})
-        self.assertEqual(self.landing(out), ["land-pr-1", "land-sync-1-1", "land-checks-1-1", "land-record-1-1", "land-merge-1", "close-out-1"])
-        # The usual sync step, which pushes; neither it nor the poll runs a lock command.
+        self.assertEqual(self.landing(out), ["land-pr-1", "land-sync-1-1", "land-checks-1-1", "land-record-1-1", "land-take-1",
+                                             "land-merge-1", "close-out-1"])
+        # The usual sync step, which pushes; neither it nor the poll runs a lock command, and neither does the record
+        # step.
         sync = prompt(calls, "land-sync-1-1")
         self.assertIn("git -C /r/.wt/w-issue-1-x merge origin/dev", sync)
         self.assertIn("push origin issue-1-x", sync)
-        for label in ("land-sync-1-1", "land-checks-1-1"):
+        for label in ("land-sync-1-1", "land-checks-1-1", "land-record-1-1"):
             self.assertNotIn("forge-claim land", prompt(calls, label))
-        record = prompt(calls, "land-record-1-1")
-        self.assertIn(f"take the cross-host landing lock of the branch dev at the head {B}; {self.UP_TO_DATE}", record)
-        self.assertIn(f"Accepted head: {B}", record)
+        self.assertIn(f"Accepted head: {B}", prompt(calls, "land-record-1-1"))
         # One hold, first asked for at the synced head (the land-pr step ran no lock command) and released there.
-        self.assertEqual(waited_acquires(calls), ["land-pr-1", "land-record-1-1"])
+        self.assertIn(f"--sha {B} --wait --lease\n", prompt(calls, "land-take-1"))
+        self.assertEqual(waited_acquires(calls), ["land-take-1"])
         self.assertEqual(land_release_shas(calls), [B])
         self.assertIn(f"--match-head-commit {B}", prompt(calls, "land-merge-1"))
-        self.assertIn("#1: shard-3 had failed at a head behind dev and the land lock is held; "
-                      "bringing the branch up to date before the lock is asked for", out["logs"])
+        self.assertIn("#1: shard-3 failed at a head behind dev; "
+                      "bringing the branch up to date before the land lock is asked for", out["logs"])
 
     def test_a_sync_fix_that_passed_its_review_is_pushed_before_the_checks_of_its_head_are_polled(self):
         """#1371: the fix agent no longer pushes, and with no lock step before the polls the program pushes the reviewed fix itself."""
@@ -7365,8 +6904,8 @@ class BehindRedBeforeLockTest(unittest.TestCase):
         calls = out["calls"]
         self.assertEqual(row(out["result"], 1), {"issue": 1, "outcome": "landed", "pr": 41})
         self.assertEqual(self.landing(out), ["land-pr-1", "land-sync-1-1", "land-sync-resolve-1-1", "land-sync-review-1-1", "land-sync-fix-1-1",
-                                             "land-sync-rereview-1-1", "land-push-1-1", "land-checks-1-1", "land-record-1-1", "land-merge-1",
-                                             "close-out-1"])
+                                             "land-sync-rereview-1-1", "land-push-1-1", "land-checks-1-1", "land-record-1-1", "land-take-1",
+                                             "land-merge-1", "close-out-1"])
         push = prompt(calls, "land-push-1-1")
         self.assertIn(f"git -C /r/.wt/w-issue-1-x rev-parse HEAD prints {fixed}", push)
         self.assertIn("git -C /r/.wt/w-issue-1-x push origin issue-1-x", push)
@@ -7385,21 +6924,20 @@ class BehindRedBeforeLockTest(unittest.TestCase):
 
     def test_a_failure_that_survives_the_sync_is_fixed_before_the_lock(self):
         fixed = {"status": "done", "start_head": B, "commit": FIX, "notes": "fixed the shard", "tests": ["t"]}
-        out = run_full(patch=self.PRE, replies={"land-sync-1-1": self.SYNCED, "land-checks-1-1": self.RED, "land-fix-1": fixed})
+        replies = {"land-sync-1-1": self.SYNCED, "land-checks-1-1": self.RED, "land-fix-1": fixed, "land-checks-1-2": green(FIX),
+                   "land-take-1": {"lock": {"verdict": "acquired", "lock_sha": FIX}}}
+        out = run_full(patch=self.PRE, replies=replies)
         calls = out["calls"]
         self.assertEqual(row(out["result"], 1)["outcome"], "landed")
         self.assertEqual(self.landing(out), ["land-pr-1", "land-sync-1-1", "land-checks-1-1", "land-fix-1", "land-fix-review-1",
-                                             "land-record-1-1", "land-merge-1", "close-out-1"])
+                                             "land-record-1-1", "land-checks-1-2", "land-take-1", "land-merge-1", "close-out-1"])
         fix = prompt(calls, "land-fix-1")
         self.assertIn('failed at ' + B + ': ["shard-3"]. Details: shard-3 log.', fix)
         self.assertIn("The landing lock of the branch dev is not held and was not asked for yet: run no forge-claim command.", fix)
-        self.assertIn(f"take the cross-host landing lock of the branch dev at the head {FIX}; "
-                      "a failing check of the branch was fixed before the lock was asked for", prompt(calls, "land-record-1-1"))
-        self.assertEqual((waited_acquires(calls), land_release_shas(calls)), (["land-pr-1", "land-record-1-1"], [FIX]))
-        # One fix round per landing, as ever: a check still red under the lock ends it.
-        red_again = {"ok": True, "head": FIX, "checks": dict(CI_RED, head=FIX)}
-        again = run_full(patch=self.PRE, replies={"land-sync-1-1": self.SYNCED, "land-checks-1-1": self.RED, "land-fix-1": fixed,
-                                                  "land-record-1-1": red_again})
+        self.assertNotIn("forge-claim land", prompt(calls, "land-record-1-1"))
+        self.assertEqual((waited_acquires(calls), land_release_shas(calls)), (["land-take-1"], [FIX]))
+        # One fix round per landing, as ever: a check still red at the fix head ends it.
+        again = run_full(patch=self.PRE, replies=dict(replies, **{"land-checks-1-2": dict(CI_RED, head=FIX)}))
         self.assertEqual(row(again["result"], 1)["outcome"], "ci-failed")
 
     def test_a_rerun_after_the_sync_records_the_synced_head_and_takes_the_lock(self):
@@ -7408,9 +6946,9 @@ class BehindRedBeforeLockTest(unittest.TestCase):
                                                 "land-checks-1-2": self.GREEN})
         calls = out["calls"]
         self.assertEqual(row(out["result"], 1)["outcome"], "landed")
-        self.assertEqual(self.landing(out), ["land-pr-1", "land-sync-1-1", "land-checks-1-1", "land-fix-1", "land-record-1-1",
-                                             "land-checks-1-2", "land-merge-1", "close-out-1"])
-        self.assertIn(f"at the head {B}; {self.UP_TO_DATE}", prompt(calls, "land-record-1-1"))
+        self.assertEqual(self.landing(out), ["land-pr-1", "land-sync-1-1", "land-checks-1-1", "land-fix-1", "land-checks-1-2",
+                                             "land-record-1-1", "land-take-1", "land-merge-1", "close-out-1"])
+        self.assertIn(f"Accepted head: {B}", prompt(calls, "land-record-1-1"))
         self.assertIn("This poll follows a rerun of failed jobs at this head.", prompt(calls, "land-checks-1-2"))
 
     def test_a_conflict_met_by_that_sync_is_resolved_and_reviewed_as_any_other(self):
@@ -7419,29 +6957,25 @@ class BehindRedBeforeLockTest(unittest.TestCase):
         out = run_full(patch=self.PRE, replies={"land-sync-1-1": ABORTED, "land-sync-resolve-1-1": resolved, "land-checks-1-1": self.GREEN})
         self.assertEqual(row(out["result"], 1)["outcome"], "landed")
         self.assertEqual(self.landing(out), ["land-pr-1", "land-sync-1-1", "land-sync-resolve-1-1", "land-sync-review-1-1",
-                                             "land-checks-1-1", "land-record-1-1", "land-merge-1", "close-out-1"])
+                                             "land-checks-1-1", "land-record-1-1", "land-take-1", "land-merge-1", "close-out-1"])
         self.assertEqual(land_release_shas(out["calls"]), [B])
-        # The record step says what was done to the head: a conflict was resolved, not merely a sync.
-        record = prompt(out["calls"], "land-record-1-1")
-        self.assertIn(f"at the head {B}; a conflict with dev was resolved before the lock was asked for", record)
-        self.assertNotIn(self.UP_TO_DATE, record)
+        self.assertIn(f"Accepted head: {B}", prompt(out["calls"], "land-record-1-1"))
 
     def test_that_sync_spends_no_resync_of_the_landing(self):
         """Behind once more under the lock: that resync is the landing's first, as if nothing had been synced early."""
-        behind = {"ok": True, "head": B, "checks": {"state": "behind", "head": B}}
         out = run_full(patch=self.PRE, replies={
-            "land-sync-1-1": self.SYNCED, "land-checks-1-1": self.GREEN, "land-record-1-1": behind,
+            "land-sync-1-1": self.SYNCED, "land-checks-1-1": self.GREEN, "land-take-1": {"behind": True},
             "land-sync-1-2": {"status": "done", "conflicted": False, "head": C, "merge_commit": C, "notes": "ok"}})
         self.assertEqual(row(out["result"], 1)["outcome"], "landed")
-        self.assertEqual(self.landing(out), ["land-pr-1", "land-sync-1-1", "land-checks-1-1", "land-record-1-1", "land-sync-1-2",
-                                             "land-record-1-2", "land-merge-1", "close-out-1"])
+        self.assertEqual(self.landing(out), ["land-pr-1", "land-sync-1-1", "land-checks-1-1", "land-record-1-1", "land-take-1",
+                                             "land-sync-1-2", "land-record-1-2", "land-merge-1", "close-out-1"])
         self.assertIn(f"move the cross-host landing lock of the branch dev to the head {C}", prompt(out["calls"], "land-record-1-2"))
 
     def test_that_sync_leaves_both_resyncs_of_the_landing(self):
         """Behind twice under the lock after it: both resyncs of MAX_SYNCS run, and the third behind answer is contention."""
         d = "d" * 40
         behind = lambda head: {"ok": True, "head": head, "checks": {"state": "behind", "head": head}}  # noqa: E731
-        replies = {"land-sync-1-1": self.SYNCED, "land-checks-1-1": self.GREEN, "land-record-1-1": behind(B),
+        replies = {"land-sync-1-1": self.SYNCED, "land-checks-1-1": self.GREEN, "land-take-1": {"behind": True},
                    "land-sync-1-2": {"status": "done", "conflicted": False, "head": C, "merge_commit": C, "notes": "ok"},
                    "land-record-1-2": behind(C),
                    "land-sync-1-3": {"status": "done", "conflicted": False, "head": d, "merge_commit": d, "notes": "ok"}}
@@ -7455,27 +6989,35 @@ class BehindRedBeforeLockTest(unittest.TestCase):
 
     def test_a_red_check_under_the_lock_after_a_green_sync_before_it_is_still_the_branchs_own(self):
         """No sync has changed the head under the lock, so the fix step releases the lock before it edits (#1001)."""
-        out = run_full(patch=self.PRE, replies={
-            "land-sync-1-1": self.SYNCED, "land-checks-1-1": self.GREEN,
-            "land-record-1-1": {"ok": True, "head": B, "checks": dict(CI_RED, head=B)},
-            "land-fix-1": {"status": "done", "start_head": B, "commit": FIX, "notes": "fixed", "tests": ["t"], "lock_released": True}})
+        out = run_full(patch=self.PRE, replies=dict(OwnRedOutsideLockTest.HELD_RED, **{
+            "land-sync-1-1": self.SYNCED, "land-checks-1-1": self.GREEN, "land-checks-1-2": dict(CI_RED, head=B),
+            "land-checks-1-3": green(FIX), "land-record-1-2": {"ok": True, "head": FIX},
+            "land-fix-1": {"status": "done", "start_head": B, "commit": FIX, "notes": "fixed", "tests": ["t"], "lock_released": True}}))
         self.assertEqual(row(out["result"], 1)["outcome"], "landed")
         fix = prompt(out["calls"], "land-fix-1")
         self.assertIn(f"The landing lock of the branch dev is held for this pull request at {B}", fix)
         self.assertIn(f"{LAND_RELEASE}{B}\n", fix)
         self.assertIn("lock_released", schema_of(out["calls"], "land-fix-1")["properties"])
+        self.assertIn(f"--sha {FIX} --wait --lease\n", prompt(out["calls"], "land-take-1"))
 
-    def test_a_poll_that_is_behind_or_needs_a_label_is_no_red_poll_whatever_it_lists_as_failing(self):
-        for name, poll in (("behind", {"state": "behind", "head": B, "failing": ["shard-3"]}),
-                           ("needs a label", {"state": "needs_label", "head": B, "label": "raise-me", "failing": ["gate"]})):
-            with self.subTest(name):
-                out = run_full(patch=self.PRE, replies={"land-sync-1-1": self.SYNCED, "land-checks-1-1": poll})
-                self.assertEqual(row(out["result"], 1)["outcome"], "landed")
-                self.assertEqual(self.landing(out)[:4], ["land-pr-1", "land-sync-1-1", "land-checks-1-1", "land-record-1-1"])
-                self.assertNotIn("land-fix-1", labels(out["calls"]))
-                self.assertIn(self.UP_TO_DATE, prompt(out["calls"], "land-record-1-1"))
+    def test_a_poll_that_needs_a_label_is_no_red_poll_whatever_it_lists_as_failing(self):
+        poll = {"state": "needs_label", "head": B, "label": "raise-me", "failing": ["gate"]}
+        out = run_full(patch=self.PRE, replies={"land-sync-1-1": self.SYNCED, "land-checks-1-1": poll})
+        self.assertEqual(row(out["result"], 1)["outcome"], "needs-label")
+        self.assertEqual(self.landing(out)[:3], ["land-pr-1", "land-sync-1-1", "land-checks-1-1"])
+        self.assertNotIn("land-fix-1", labels(out["calls"]))
 
-    def test_a_stop_before_the_lock_releases_the_ready_head_once(self):
+    def test_a_poll_that_is_behind_is_synced_again_before_the_lock_whatever_it_lists_as_failing(self):
+        poll = {"state": "behind", "head": B, "failing": ["shard-3"]}
+        current = {"status": "current", "conflicted": False, "head": B, "notes": "ok"}
+        out = run_full(patch=self.PRE, replies={"land-sync-1-1": self.SYNCED, "land-checks-1-1": poll, "land-sync-1-2": current,
+                                                "land-checks-1-2": self.GREEN})
+        self.assertEqual(row(out["result"], 1)["outcome"], "landed")
+        self.assertEqual(self.landing(out)[:6], ["land-pr-1", "land-sync-1-1", "land-checks-1-1", "land-sync-1-2", "land-checks-1-2",
+                                                 "land-record-1-1"])
+        self.assertNotIn("land-fix-1", labels(out["calls"]))
+
+    def test_a_stop_before_the_lock_holds_and_releases_nothing(self):
         stops = {"the sync is blocked": ({"land-sync-1-1": {"status": "blocked", "notes": "dirty tree"}}, "land-sync"),
                  "the poll is lost": ({"land-sync-1-1": self.SYNCED, "land-checks-1-1": None}, "checks"),
                  "the poll names another head": ({"land-sync-1-1": self.SYNCED, "land-checks-1-1": dict(self.GREEN, head=C)}, "head-moved")}
@@ -7483,18 +7025,18 @@ class BehindRedBeforeLockTest(unittest.TestCase):
             with self.subTest(name):
                 out = run_full(patch=self.PRE, replies=replies)
                 self.assertEqual((row(out["result"], 1)["outcome"], row(out["result"], 1)["stage"]), ("stopped", stage))
-                self.assertEqual(self.landing(out)[-1], "land-unlock-1")
-                self.assertEqual(land_release_shas(out["calls"]), [SHA])
-                self.assertEqual(waited_acquires(out["calls"]), ["land-pr-1"])
+                self.assertNotIn("land-unlock-1", self.landing(out))
+                self.assertEqual(land_release_shas(out["calls"]), [])
+                self.assertEqual(waited_acquires(out["calls"]), [])
 
-    def test_a_head_that_is_not_behind_or_a_reply_with_a_lock_verdict_is_not_synced_early(self):
-        """Only the land-pr step's own word (red, behind, the lock held by another landing, no lock command run) syncs early."""
+    def test_a_head_that_is_not_behind_is_not_synced_early(self):
+        """Only the land-pr step's own word (red and behind, no lock command run) syncs early."""
         own = dict(self.PRE["land-pr-1"]["own_red"], behind=False)
         out = run_full(patch={"land-pr-1": dict(self.PRE["land-pr-1"], own_red=own)},
-                       replies={"land-fix-1": dict(OwnRedOutsideLockTest.FIXED, tests=["t"])})
-        self.assertEqual(self.landing(out), OwnRedOutsideLockTest.LANDS)
+                       replies=dict(OwnRedOutsideLockTest.PRE_FIX, **{"land-fix-1": dict(OwnRedOutsideLockTest.FIXED, tests=["t"])}))
+        self.assertEqual(self.landing(out), OwnRedOutsideLockTest.PRE_LANDS)
         base = [(c["label"], c.get("prompt")) for c in run()[1]]
-        result, calls, _ = run(patch={"land-pr-1": {"own_red": self.PRE["land-pr-1"]["own_red"]}})
+        result, calls, _ = run(patch={"land-pr-1": {"own_red": {"head": SHA, "failing": []}}})
         self.assertEqual([(c["label"], c.get("prompt")) for c in calls], base)
         self.assertEqual(object_branch(schema_of(calls, "land-pr-1")["properties"]["own_red"])["properties"]["behind"], {"type": "boolean"})
 
@@ -7732,7 +7274,7 @@ class SyncRerunTest(unittest.TestCase):
         out = run_full(patch=BEHIND, replies={"land-sync-1-1": self.current(merge(M1, SHA))})
         calls = out["calls"]
         self.assertEqual(row(out["result"], 1), {"issue": 1, "outcome": "landed", "pr": 41})
-        self.assertEqual(self.landing(out), ["land-pr-1", "land-sync-1-1", "land-sync-prove-1-1", "land-record-1-1", "land-merge-1", "close-out-1"])
+        self.assertEqual(self.landing(out), ["land-pr-1", "land-take-1", "land-sync-1-1", "land-sync-prove-1-1", "land-record-1-1", "land-merge-1", "close-out-1"])
         record = prompt(calls, "land-record-1-1")
         self.assertIn(f"Accepted head: {M1}", record)
         self.assertIn(f"confirm headRefOid is {M1}", record)
@@ -7770,7 +7312,7 @@ class SyncRerunTest(unittest.TestCase):
                 got = row(out["result"], 1)
                 self.assertEqual((got["outcome"], got["stage"], got["expected"], got["head"]), ("stopped", "head-moved", SHA, reply["head"]))
                 # Facts the program itself refuses are never sent to the proof step.
-                self.assertEqual(self.landing(out), ["land-pr-1", "land-sync-1-1", "land-unlock-1"])
+                self.assertEqual(self.landing(out), ["land-pr-1", "land-take-1", "land-sync-1-1", "land-unlock-1"])
                 self.assertEqual(land_release_shas(out["calls"]), [SHA])
                 self.assertEqual([line for line in out["logs"] if "going on from it" in line], [])
 
@@ -7807,9 +7349,11 @@ class SyncRerunTest(unittest.TestCase):
                     self.assertEqual(got["outcome"], "stopped")
                     if reply != "throw":
                         self.assertEqual((got["stage"], got["expected"], got["head"]), ("head-moved", SHA, M1))
-                    # A step that died before any lock was asked for holds nothing; every other stop releases the ready head once.
-                    held = not (reply == "throw" and where == "before the lock")
-                    self.assertEqual(self.landing(out), ["land-pr-1", "land-sync-1-1", "land-sync-prove-1-1"] + (["land-unlock-1"] if held else []))
+                    # A stop before any lock was asked for holds nothing; a stop under the lock releases the ready
+                    # head once.
+                    held = where == "under the lock"
+                    self.assertEqual(self.landing(out), ["land-pr-1"] + (["land-take-1"] if held else []) + ["land-sync-1-1", "land-sync-prove-1-1"]
+                                     + (["land-unlock-1"] if held else []))
                     self.assertEqual(land_release_shas(out["calls"]), [SHA] if held else [])
                     for gone in ("land-record-1-1", "land-checks-1-1", "land-merge-1"):
                         self.assertNotIn(gone, labels(out["calls"]))
@@ -7817,7 +7361,7 @@ class SyncRerunTest(unittest.TestCase):
     def test_current_at_the_expected_head_needs_no_fact(self):
         base = run_full(patch=BEHIND)
         self.assertEqual(row(base["result"], 1)["outcome"], "landed")
-        self.assertEqual(self.landing(base), ["land-pr-1", "land-sync-1-1", "land-checks-1-2", "land-merge-1", "close-out-1"])
+        self.assertEqual(self.landing(base), ["land-pr-1", "land-take-1", "land-sync-1-1", "land-checks-1-2", "land-merge-1", "close-out-1"])
 
     def test_the_sync_step_names_the_expected_head_and_reads_the_facts_itself(self):
         _, calls, _ = run(patch=BEHIND)
@@ -7844,16 +7388,15 @@ class SyncRerunTest(unittest.TestCase):
         calls = out["calls"]
         self.assertEqual(row(out["result"], 1)["outcome"], "landed")
         self.assertEqual(self.landing(out), ["land-pr-1", "land-sync-1-1", "land-sync-prove-1-1", "land-checks-1-1", "land-record-1-1",
-                                             "land-merge-1", "close-out-1"])
-        self.assertIn(f"take the cross-host landing lock of the branch dev at the head {M1}; {BehindRedBeforeLockTest.UP_TO_DATE}",
-                      prompt(calls, "land-record-1-1"))
+                                             "land-take-1", "land-merge-1", "close-out-1"])
+        self.assertIn(f"Accepted head: {M1}", prompt(calls, "land-record-1-1"))
         self.assertEqual(land_release_shas(calls), [M1])
-        # A head the facts do not prove stops before any lock was asked for; the ready head is released once, as ever.
+        # A head the facts do not prove stops before any lock was asked for: nothing is held or released.
         bad = run_full(patch=BehindRedBeforeLockTest.PRE, replies={"land-sync-1-1": self.current({"commit": M1, "parents": [SHA]})})
         got = row(bad["result"], 1)
         self.assertEqual((got["outcome"], got["stage"], got["head"]), ("stopped", "head-moved", M1))
-        self.assertEqual(self.landing(bad), ["land-pr-1", "land-sync-1-1", "land-unlock-1"])
-        self.assertEqual(land_release_shas(bad["calls"]), [SHA])
+        self.assertEqual(self.landing(bad), ["land-pr-1", "land-sync-1-1"])
+        self.assertEqual(land_release_shas(bad["calls"]), [])
 
 
 def marked_ready(n):
@@ -7899,7 +7442,7 @@ class AwaitingLookBatchTest(unittest.TestCase):
         self.assertEqual(row(result, 2)["outcome"], "landed")
 
     def test_a_marked_issue_never_rides_a_train(self):
-        result, calls, _ = train_run(issues=(1, 2, 3), patch={"land-pr-2": BEHIND["land-pr-1"]}, children={"1": [planned(1), marked_ready(1), awaiting(1)]})
+        result, calls, _ = train_run(issues=(1, 2, 3), patch={"land-take-2": BEHIND["land-take-1"]}, children={"1": [planned(1), marked_ready(1), awaiting(1)]})
         self.assertEqual(row(result, 1)["outcome"], "awaiting-look")
         # train-pr-<issue> names an issue; the other train labels carry the train's number, which is 1 here.
         named = [x for x in labels(calls) if x.startswith(("train-pr-",) + LANDING)]
@@ -7935,7 +7478,7 @@ PROMPT_SCENARIOS = {
     "main-integration": lambda: run(patch={"setup": {"integration_branch": "main"}})[1],
     "close-out-unanswered": lambda: run(replies={"close-out-1": None})[1],
     "open-pr": lambda: run(patch={"facts-1": {"open_pr": OPEN_PR}})[1],
-    "own-red": lambda: run(patch=folded(CI_RED))[1],
+    "own-red": lambda: run(replies=OwnRedOutsideLockTest.HELD_RED)[1],
 }
 _SCENARIO_CALLS = {}
 
