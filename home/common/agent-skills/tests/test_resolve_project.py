@@ -1556,9 +1556,7 @@ class ReleaseMemberTest(ResolverTestCase):
     def test_leftover_authored_release_flags_are_unexpected(self):
         for mutate, pointer in (
                 (lambda c: c["capabilities"].update(release={"support": "unsupported"}),
-                 "/capabilities/release"),
-                (lambda c: c["bindings"]["workflow"].update(release=None),
-                 "/bindings/workflow/release")):
+                 "/capabilities/release"),):
             with self.subTest(pointer=pointer):
                 contract = source_contract()
                 mutate(contract)
@@ -2555,15 +2553,6 @@ class LightLaneTest(ResolverTestCase):
                 self.assertEqual(error["repair_id"], repair_id)
                 self.assertEqual([v["pointer"] for v in error["violations"]], [pointer])
 
-    def test_any_other_workflow_member_is_still_unexpected(self):
-        contract = source_contract()
-        contract["bindings"]["workflow"]["heavy_lane"] = None
-        code, payload, _ = self.resolve(self.make_root(contract))
-        self.assertEqual(code, 2)
-        self.assertEqual(payload["error"]["repair_id"], "contract.workflow.member_unexpected")
-        self.assertEqual([v["pointer"] for v in payload["error"]["violations"]],
-                         ["/bindings/workflow/heavy_lane"])
-
 
 class StallMinutesTest(ResolverTestCase):
     """#310 D1: the optional `bindings.workflow.orchestration.stall_minutes` member."""
@@ -2596,14 +2585,6 @@ class StallMinutesTest(ResolverTestCase):
                 self.assertEqual((error["code"], error["repair_id"]),
                                  ("invalid_contract", "contract.workflow.not_positive_int"))
                 self.assertEqual([v["pointer"] for v in error["violations"]], [self.POINTER])
-
-    def test_any_other_orchestration_member_is_still_unexpected(self):
-        code, payload, _ = self.resolve(
-            self.make_root(self.contract_with(stall_seconds=60)))
-        self.assertEqual(code, 2)
-        self.assertEqual(payload["error"]["repair_id"], "contract.workflow.member_unexpected")
-        self.assertEqual([v["pointer"] for v in payload["error"]["violations"]],
-                         ["/bindings/workflow/orchestration/stall_seconds"])
 
 
 class VerificationConditionsTest(ResolverTestCase):

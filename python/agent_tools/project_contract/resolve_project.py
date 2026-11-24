@@ -10,6 +10,17 @@ an implied value. Readiness observes the machine but never executes anything:
 the subcommand opens no file for writing, creates no directory, and starts no
 child process.
 
+Two objects are open: `bindings.workflow` and `bindings.workflow.orchestration`
+(`OPEN_SECTIONS`). A member there that the platform does not know, in no
+resolver member tuple and in no `schema_three` collection, is taken as an
+optional binding of a newer platform: it is left out of the snapshot, and
+`resolve` and `platform-status --repo-root` name it on stderr in one
+`UNKNOWN_BINDING_WARNING` line per pointer. Every reader judges the contract
+through `validate_contract`, which sets such a member aside first. Library
+callers get the pointers only through `resolve(..., warnings=<list>)`, which
+prints nothing. A known name keeps its refusal, and an unknown member anywhere
+else, like an unsupported `schema_version`, is refused as before.
+
 The snapshot's `release` member is derived, not authored: its `targets` list
 the targets the authored `release` member binds, with the operations each one
 runs (`release_profile.release_targets`).
@@ -321,6 +332,37 @@ SCHEMA_THREE_WORKFLOW_OPTIONAL_MEMBERS = (
     "verification_conditions", "verification_before_pull_request")
 # #310: the one orchestration member an author may leave out; never defaulted.
 ORCHESTRATION_OPTIONAL_MEMBERS = ("stall_minutes",)
+
+
+def schema_three_children(section: str) -> frozenset[str]:
+    """The names `schema_three` places directly under the section at `section`."""
+    prefix = section + "/"
+    pointers = (
+        *schema_three.CONSTANTS, *schema_three.DERIVED, *schema_three.RETIRED,
+        *schema_three.AUTHORED, *schema_three.CONSTANT_CONTAINERS,
+        *schema_three.DERIVED_CONTAINERS)
+    return frozenset(
+        pointer[len(prefix):].split("/")[0]
+        for pointer in pointers if pointer.startswith(prefix))
+
+
+# The two objects that accept a member the platform does not know, each with the
+# names it knows: the resolver's member tuples and every name `schema_three`
+# places there, so a retired, derived or platform-owned member keeps its refusal.
+# New members join an open section only as optional bindings; anything the guard
+# or Activate must enforce goes in a closed section or a new schema version.
+OPEN_SECTIONS: dict[str, frozenset[str]] = {
+    "/bindings/workflow": frozenset(
+        WORKFLOW_MEMBERS + WORKFLOW_OPTIONAL_MEMBERS
+        + SCHEMA_THREE_WORKFLOW_OPTIONAL_MEMBERS
+    ) | schema_three_children("/bindings/workflow"),
+    "/bindings/workflow/orchestration": frozenset(
+        ("max_parallel", "attempt_budget_minutes") + ORCHESTRATION_OPTIONAL_MEMBERS
+    ) | schema_three_children("/bindings/workflow/orchestration"),
+}
+UNKNOWN_BINDING_WARNING = (
+    "resolve-project: warning: {pointer} is a binding this platform does not "
+    "know, so it was ignored")
 LIGHT_LANE_MEMBERS = ("mode", "budget_minutes", "risk_paths")
 VERIFICATION_CONDITION_MEMBERS = ("when_changed", "skip_reason")
 # Issue 771: a fast pre-commit check; deliver-standard names it to implementers.
@@ -561,6 +603,42 @@ def check_exact_members(value: dict, pointer: str, expected: tuple[str, ...],
             violations.append(violation(
                 f"{pointer}/{name}", "member is not part of this schema",
                 f"contract.{section}.member_unexpected"))
+
+
+def open_section_of(source: object, pointer: str) -> dict | None:
+    """The object at `pointer`, walked from the root, or None when a step is not one."""
+    node = source
+    for step in pointer.split("/")[1:]:
+        if not isinstance(node, dict) or step not in node:
+            return None
+        node = node[step]
+    return node if isinstance(node, dict) else None
+
+
+def unknown_bindings(source: object) -> list[str]:
+    """The sorted RFC 6901 pointers of every unknown member of an open section.
+
+    It never raises: a step that is not an object yields nothing.
+    """
+    found = []
+    for pointer, known in OPEN_SECTIONS.items():
+        section = open_section_of(source, pointer)
+        for name in section or ():
+            if name not in known:
+                escaped = str(name).replace("~", "~0").replace("/", "~1")
+                found.append(f"{pointer}/{escaped}")
+    return sorted(found)
+
+
+def known_contract(source: dict) -> dict:
+    """A deep copy of `source` without the members `unknown_bindings` names."""
+    copied = copy.deepcopy(source)
+    for pointer, known in OPEN_SECTIONS.items():
+        section = open_section_of(copied, pointer)
+        for name in list(section or ()):
+            if name not in known:
+                del section[name]
+    return copied
 
 
 # --------------------------------------------------------------------------
@@ -1493,6 +1571,7 @@ def validate_contract(source: dict, manifest: dict,
     (the same pointer, one beneath it, or the `project` container whose only
     member is the failed id) is dropped; every other shape violation stays.
     """
+    source = known_contract(source)
     violations: list[dict] = []
     validate_schema_version(
         source, violations, manifest["project_schema_versions"])
@@ -2120,7 +2199,8 @@ RESOLVER_FAILURE_VIOLATIONS = [
     {"pointer": "", "message": "the resolver failed unexpectedly"}]
 
 
-def resolve(repo_root: str | None, required: list[str] | None = None) -> dict:
+def resolve(repo_root: str | None, required: list[str] | None = None, *,
+            warnings: list[str] | None = None) -> dict:
     """The `ResolvedProject` snapshot for `repo_root`, or `ContractError`.
 
     Exactly the composition `resolve-project resolve` prints (#279 D1);
@@ -2129,9 +2209,12 @@ def resolve(repo_root: str | None, required: list[str] | None = None) -> dict:
     which `load_contract` does not translate) raises the same fixed
     `resolver_failure` the command's outer handler prints, so no caller
     evaluates, or crashes on, a project the command refuses.
+
+    A caller that passes `warnings` gets the pointers of the contract's unknown
+    bindings appended to it on success; `resolve` itself prints nothing.
     """
     try:
-        return compose_snapshot(repo_root, required)
+        return compose_snapshot(repo_root, required, warnings)
     except ContractError:
         raise
     except Exception:
@@ -2139,13 +2222,16 @@ def resolve(repo_root: str | None, required: list[str] | None = None) -> dict:
                             RESOLVER_FAILURE_VIOLATIONS) from None
 
 
-def compose_snapshot(repo_root: str | None, required: list[str] | None) -> dict:
+def compose_snapshot(repo_root: str | None, required: list[str] | None,
+                     warnings: list[str] | None = None) -> dict:
     """`resolve()`'s composition; a non-standard-JSON snapshot raises `ValueError`."""
     # Before root discovery, so a broken platform installation can never be
     # masked by `not_onboarded` or a contract error (R1.3).
     manifest, _ = require_platform_manifest()
     root = discover_root(repo_root)
     source = load_contract(root)
+    unknown = unknown_bindings(source)
+    source = known_contract(source)
     derived = derive_for(root, source)
     raise_for_violations(validate_contract(source, manifest, derived))
     # The range check is the inner half of the manifest gate, and it runs only
@@ -2159,11 +2245,21 @@ def compose_snapshot(repo_root: str | None, required: list[str] | None) -> dict:
     snapshot = build_snapshot(root, source, manifest, derived)
     raise_for_unavailable(required, snapshot["capabilities"])
     json.dumps(snapshot, allow_nan=False)
+    if warnings is not None:
+        warnings.extend(unknown)
     return snapshot
 
 
+def warn_unknown_bindings(pointers: list[str]) -> None:
+    for pointer in pointers:
+        print(UNKNOWN_BINDING_WARNING.format(pointer=pointer), file=sys.stderr)
+
+
 def command_resolve(args: argparse.Namespace) -> int:
-    return emit_json(resolve(args.repo_root, args.require))
+    found: list[str] = []
+    status = emit_json(resolve(args.repo_root, args.require, warnings=found))
+    warn_unknown_bindings(found)
+    return status
 
 
 def command_write_projections(args: argparse.Namespace) -> int:
@@ -2470,15 +2566,20 @@ def command_platform_status(args: argparse.Namespace) -> int:
         "compatibility": None,
         "fleet": None,
     }
+    unknown: list[str] = []
     if args.repo_root is not None:
         root = discover_root(args.repo_root)
+        source = load_contract(root)
+        unknown = unknown_bindings(source)
         status["project"], status["compatibility"] = evaluate_named_project(
-            root, load_contract(root), manifest)
+            root, source, manifest)
     if args.fleet:
         status["fleet"] = sorted(
             (fleet_row(entry, manifest) for entry in require_registry()),
             key=lambda row: row["project_id"])
-    return emit_json(status)
+    emitted = emit_json(status)
+    warn_unknown_bindings(unknown)
+    return emitted
 
 
 def add_repo_root(subparser: argparse.ArgumentParser) -> None:
