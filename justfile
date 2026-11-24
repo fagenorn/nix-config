@@ -397,6 +397,7 @@ agent-workflow-tests *args:
     tests/test_console_sprint_action.py \
     tests/test_console_pictures.py \
     tests/test_console_manager.py \
+    tests/test_console_launch_short_id.py \
     tests/test_console_permission.py \
     tests/test_console_manager_service.py \
     tests/test_console_permit.py \
