@@ -287,6 +287,8 @@ PARTS: dict[str, Part] = {
   activation = o.activation;
   fetch = o.fetch;
   serve = o.serve;
+  reload = o.reload;
+  restart = o.restart;
 }""", ("eleven-m5",)),
     # jetsamElsewhere is every daemon plist but oMLX's that carries a jetsam priority.
     "memory-budget": Part("""c: u: {

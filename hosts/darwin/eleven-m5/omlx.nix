@@ -238,6 +238,8 @@ let
           activation = activationText;
           fetch = fetchText;
           serve = serveText;
+          reload = reloadText;
+          restart = restartText;
         };
       });
   # The kill omlx-restart runs once the gate allows a restart; launchd's KeepAlive brings the
@@ -248,13 +250,24 @@ let
     [ "$status" -le 1 ] && exit 0
     exit "$status"
   '';
-  # Restarts the server for the pending marker only while it is idle; --now skips that check.
-  restart = pkgs.writeShellScriptBin "omlx-restart" ''
+  # A kill only relaunches the job definition launchd holds, so a changed plist needs an unload and
+  # load. A failed load keeps the root, because launchd may still hold the old definition.
+  heldRoot = "/nix/var/nix/gcroots/omlx-held-serve";
+  reloadText = ''
+    /usr/bin/sudo -n /bin/launchctl unload /Library/LaunchDaemons/org.nixos.omlx.plist || true
+    /usr/bin/sudo -n /bin/launchctl load -w /Library/LaunchDaemons/org.nixos.omlx.plist || exit
+    exec /usr/bin/sudo -n /bin/rm -f ${heldRoot}
+  '';
+  reloadServer = pkgs.writeShellScript "omlx-reload" reloadText;
+  restartText = ''
     exec ${lib.getExe pkgs.python3} ${./omlx-restart.py} \
       --state-dir ${home}/.omlx \
       --restart-bin ${killServer} \
+      --reload-bin ${reloadServer} \
       --health-url http://127.0.0.1:8000/health "$@"
   '';
+  # Restarts the server for the pending marker only while it is idle; --now skips that check.
+  restart = pkgs.writeShellScriptBin "omlx-restart" restartText;
 in
 {
   environment.systemPackages = [
