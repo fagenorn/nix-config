@@ -8,14 +8,15 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agent_tools.console import engine_runs
+from agent_tools.console import engine_runs, guest, view
 from agent_tools.console.engine_runs import EngineRuns
 from agent_tools.console.movement import ProjectMovement, PullMovement, SessionMovement
 from agent_tools.console.sprints import NOW_CI_TEXT, NOW_LOCK_TEXT
 
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures
 from .test_console_engine_runs import DEAD, LIVE, make_run
-from .test_console_view import A, MIN, R, entry, idle_session, line, moving, reported, started, with_manager
+from .test_console_view import (
+    A, MIN, R, entry, idle_session, line, moving, reported, started, state, with_manager)
 
 TIER = "fast"
 
@@ -155,3 +156,29 @@ class SprintEngineWaitTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GuestSprintEngineTest(unittest.TestCase):
+    def test_a_guests_sprint_reads_its_engine_run_and_the_guest_sees_no_run_line(self):
+        stopped = engine_state("stopped.jsonl", LIVE, issue=5)
+        inputs = {"states": [state("p00", 1)], "sprints": {A: BASE}, "sessions": [idle_session],
+                  "now_ms": NOW, "engine_runs": [engine_state("sprint-moving.jsonl", LIVE), stopped]}
+        owner = view.derive_view(**inputs)
+        guest_view = view.derive_view(**guest.scoped(inputs, frozenset({"p00"})))
+        reading = ("on_track", "manager", "building 1 of 7: Importer resumes")
+        for derived in (owner, guest_view):
+            got = entry(derived)
+            self.assertEqual((got["state"], got["ball"], got["now_text"]), reading)
+        self.assertEqual(len(owner["entries"][0]["engine_runs"]), 2)
+        self.assertEqual(guest_view["entries"][0]["engine_runs"], [])
+        self.assertEqual((owner["statement"]["inbox_items"], guest_view["statement"]["inbox_items"]), (1, 0))
+
+    def test_without_engine_lines_no_engine_run_makes_a_project_active(self):
+        live = engine_state("sprint-moving.jsonl", LIVE, project="acme/app")
+        project = view.ProjectState("acme/app", "/srv/app", 1, "2026-11-21T10:00:00Z", 0)
+        hidden = view.derive_view(states=[project], now_ms=NOW, engine_runs=[live], engine_lines=False)
+        shown_ = view.derive_view(states=[project], now_ms=NOW, engine_runs=[live])
+        self.assertIs(hidden["entries"][0]["quiet"], True)
+        self.assertEqual(hidden["entries"][0]["engine_runs"], [])
+        self.assertIs(shown_["entries"][0]["quiet"], False)
+        self.assertEqual(len(shown_["entries"][0]["engine_runs"]), 1)

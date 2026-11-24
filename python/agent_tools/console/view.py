@@ -491,6 +491,7 @@ only. `unmanaged` is always present, possibly empty, sorted by `root`.
     `engine_runs` is the `engine_runs` argument's runs of this project as `engine_runs.project_lines` gives them, in issue
     order; it is empty without the argument, a run of an unregistered project shows nowhere, and a project with one is active.
     A run stopped with a `need` other than `nothing` counts once in `inbox_items` and the headline; alone, it sets `ENGINE_SENTENCE`.
+    With `engine_lines` false (a guest's view) no engine run line is shown or counted, while the states still feed each sprint's movement.
 
     <wait entry> = {"key", "issue": <int>, "url", "until": "<ISO time>" | null, "text": "<text>"}
     <notice entry> = {"id": <int>, "sprint_id", "poster": "<sprint title>",
@@ -2372,8 +2373,7 @@ def derive_view(
     pending: Mapping[str, PendingStop] | None = None,
     signin_runs: Mapping[str, Mapping] | None = None,
     accounts_added: Iterable[str] = (),
-    pin: Mapping | None = None,
-    pin_launches: Iterable[str] = (),
+    pin: Mapping | None = None, pin_launches: Iterable[str] = (),
     registration: Mapping | None = None,
     adoption_items: Iterable[Mapping] = (),
     release_items: Iterable[Mapping] = (),
@@ -2383,16 +2383,14 @@ def derive_view(
     confirm_items: Iterable[Mapping] = (),
     trust_items: Iterable[Mapping] = (),
     failure_items: Iterable[Mapping] = (),
-    nudges: bool = True,
-    looked: str | None = None,
+    nudges: bool = True, looked: str | None = None,
     movement: Mapping[str, ProjectMovement] | None = None,
-    activation: Activation | None = None,
-    activation_run: LastRun | None = None,
+    activation: Activation | None = None, activation_run: LastRun | None = None,
     owner_notices: Mapping[str, tuple[Notice, ...]] | None = None,
     spend: Mapping | None = None,
     project_questions: Mapping[str, Sequence[project_question.AskedQuestion]] | None = None,
     sharing: Mapping | None = None,
-    engine_runs: Iterable[engine_runs_module.RunState] | None = None,
+    engine_runs: Iterable[engine_runs_module.RunState] | None = None, engine_lines: bool = True,
 ) -> dict:
     states = list(states)
     sessions = list(sessions)
@@ -2411,7 +2409,7 @@ def derive_view(
                       key=lambda r: (r.waiting_since, r.item["key"], r.item["project_id"]))
     stale_projects = sorted(p for p in registered if p in health and not health[p].ok)
     engine_states = list(engine_runs or ())
-    lines = engine_runs_module.project_lines(engine_states, now_ms)
+    lines = engine_runs_module.project_lines(engine_states, now_ms) if engine_lines else {}
     drafted: dict[str, list[SprintState]] = {}
     finished: dict[str, list[SprintState]] = {}
     for sprint in sorted((sprints or {}).values(), key=lambda s: (-s.stated_seq, s.sprint_id)):

@@ -594,9 +594,12 @@ class ServiceLineTest(unittest.TestCase):
         svc = support.service(self, self.store, self.registry, engine_runs_root=runs)
         self.assertEqual(self.entry(svc)["engine_runs"][0]["text"], "planning, moving")
 
-    def test_a_guest_view_takes_no_engine_run(self):
-        scoped = guest.scoped({"engine_runs": [live_state()], "states": []}, frozenset({"acme/app"}))
-        self.assertEqual(scoped["engine_runs"], ())
+    def test_a_guest_scope_keeps_only_its_projects_engine_runs_and_no_line(self):
+        scoped = guest.scoped({"engine_runs": [live_state(), live_state("other/app")], "states": []},
+                              frozenset({"acme/app"}))
+        self.assertEqual(scoped["engine_runs"], (live_state(),))
+        self.assertIs(scoped["engine_lines"], False)
+        self.assertIs(guest.scoped({"states": []}, frozenset({"acme/app"}))["engine_lines"], False)
 
     def test_without_a_runs_root_no_engine_run_is_read(self):
         home = self.root / "home"
