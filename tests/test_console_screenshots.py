@@ -2807,7 +2807,7 @@ class ScreenshotFixtureTest(unittest.TestCase):
                         self.assertEqual(card["questions"][0]["options"], ["Apply it", "Not now"])
                         self.assertEqual(card["lines"][-2:], shots.REGISTER_PLAN_LINES)
                         self.assertEqual(card["lines"][:-2], [shots.PROPOSAL_LINE] if proposes and reconcile
-                                         else [] if reconcile else [register.HOOKS_LINE])
+                                         else [] if reconcile else [register.HOOKS_LEFT_LINE])
                         self.assertIsNone(registration["draft"])
                     elif reconcile:
                         self.assertEqual(view["inbox"]["open"], [])

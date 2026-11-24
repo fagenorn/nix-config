@@ -106,6 +106,55 @@ class HooksMissingCardTest(GlobalHooksPath, unittest.TestCase):
         self.assertEqual(register.hooks_noted(noted), noted)
 
 
+    def test_a_drafted_contract_leaves_the_hooks_uninstalled_and_says_so_on_every_surface(self):
+        root = hooked_repo(self.parent / "r", contract=False)
+        fields = contract_draft.draft(str(root), {**contract_draft.read(str(root)),
+                                                  "default_branch": "main", "branches": ["main"]})
+        row = register.hooks_noted(register.summary(str(root), READY, draft=fields))
+        self.assertEqual(register.HOOKS_LEFT_LINE,
+                         "leaves its git hooks uninstalled on this host "
+                         "(no commit environment to install them in)")
+        self.assertEqual(row["lines"], [register.HOOKS_LEFT_LINE, *register.plan_lines(READY)])
+        shown, _entry = card(row)
+        self.assertEqual(shown["lines"][0], register.HOOKS_LEFT_LINE)
+        self.assertNotIn(register.HOOKS_LINE, shown["lines"])
+        deferred = register.view_entry(None, {**row, "at": "2026-11-24T08:00:00+00:00"})
+        self.assertEqual(deferred["lines"], [register.HOOKS_LEFT_LINE, *register.plan_lines(READY)])
+        self.assertEqual(register.hooks_noted(row), row)
+
+    def test_a_commit_environment_answered_none_leaves_the_hooks_uninstalled(self):
+        root = hooked_repo(self.parent / "r")
+        proposal = contract_draft.reconcile_fields(
+            str(root), {"hooks": ["pre-commit"], "stranded": ["pre-commit"],
+                        "environments": ["devenv.nix"]})
+        declined, error = contract_draft.set_value(proposal, "commit-environment", "none")
+        self.assertIsNone(error)
+        row = register.hooks_noted(register.summary(str(root), READY, draft=declined))
+        self.assertEqual(row["lines"], [register.HOOKS_LEFT_LINE, *register.plan_lines(READY)])
+        shown, _entry = card(row)
+        self.assertEqual(shown["lines"][1], register.HOOKS_LEFT_LINE)
+        self.assertNotIn(register.HOOKS_LINE, shown["lines"])
+
+    def test_a_proposed_commit_environment_keeps_the_installing_line(self):
+        root = hooked_repo(self.parent / "r")
+        proposal = contract_draft.reconcile_fields(
+            str(root), {"hooks": ["pre-commit"], "stranded": ["pre-commit"],
+                        "environments": ["devenv.nix"]})
+        row = register.hooks_noted(register.summary(str(root), READY, draft=proposal))
+        self.assertEqual(row["lines"], [register.HOOKS_LINE, *register.plan_lines(READY)])
+        shown, _entry = card(row)
+        self.assertEqual(shown["lines"], [PROPOSAL, register.HOOKS_LINE, *register.plan_lines(READY)])
+
+    def test_the_adoption_pull_request_body_leaves_the_uninstalled_line_out(self):
+        root = hooked_repo(self.parent / "r", contract=False)
+        fields = contract_draft.draft(str(root), {**contract_draft.read(str(root)),
+                                                  "default_branch": "main", "branches": ["main"]})
+        row = register.hooks_noted(register.summary(str(root), READY, draft=fields))
+        latest = {**row, "at": "2026-11-24T08:00:00+00:00", "headline": "H", "plan_id": PID_A}
+        self.assertIn(register.HOOKS_LEFT_LINE, latest["lines"])
+        self.assertNotIn(register.HOOKS_LEFT_LINE, approve.body(latest))
+
+
 class HooksMissingReadingTest(GlobalHooksPath, unittest.TestCase):
     def setUp(self):
         self.enter_global_hooks_path()
@@ -201,9 +250,9 @@ class HooksMissingPictureTest(unittest.TestCase):
         console_screenshots._seed_registration(seed, state, str(root))
         return seed.ended()
 
-    def test_the_register_apply_state_seeds_the_hooks_line_first(self):
+    def test_the_register_apply_state_seeds_the_uninstalled_line_first(self):
         self.assertEqual(self.seeded("register-apply")["lines"],
-                         [register.HOOKS_LINE, *console_screenshots.REGISTER_PLAN_LINES])
+                         [register.HOOKS_LEFT_LINE, *console_screenshots.REGISTER_PLAN_LINES])
 
     def test_the_reconcile_states_keep_today_s_lines(self):
         self.assertEqual(self.seeded("register-reconcile-apply")["lines"],
