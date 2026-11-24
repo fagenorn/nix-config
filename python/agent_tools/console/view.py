@@ -645,9 +645,12 @@ and the last time a process under one of them used CPU (`check_ms`), each read f
 sprint's manager name, is its `manager_session`, or runs a delivery of one of its issues). A time of
 a manager session inside `NUDGE_REPLY_MS` (five minutes) after the sprint's `idle_nudged_at` is its
 reply to the nudge and moves nothing; a delivery session's time always does. The two signals add no
-sentence: they are part of the base reading, so they never name or replace a wait. The state's `quiet`,
-the ball's `nobody` and the now-sentence's `last seen` prefix are all this one reading, and none
-decides movement itself.
+sentence: they are part of the base reading, so they never name or replace a wait. An engine run of
+the sprint's issues (`engine_runs.sprint_engine`) moves it while its line reads moving, at once and
+with no window; a run reading not running, stopped or done adds nothing at once, and the run's
+session ids (`RunState.sessions`) are left out of the session signals while a manager's own session
+counts as before. The state's `quiet`, the ball's `nobody` and the now-sentence's `last seen` prefix
+are all this one reading, and none decides movement itself.
 The state is the first that holds: `stopped_at` is set, `stopped` ("stopped by you"); `stop_at` is
 set, `stopping` ("stopping"); the sprint has a closing, `done`; the brief is not approved,
 `drafting` ("drafting the brief");
@@ -1385,6 +1388,7 @@ class WaitSignals:
     lock_position: int | None = None
     output_ms: int | None = None
     check_ms: int | None = None
+    engine: engine_runs_module.SprintEngine = engine_runs_module.NO_ENGINE
 
 
 NO_WAITS = WaitSignals()
@@ -1470,7 +1474,8 @@ def sprint_issue_numbers(state: SprintState) -> set[int]:
 
 def wait_signals(state: SprintState, movement: ProjectMovement | None,
                  manager_ids: Collection[str] = (), *, issues: Collection[int] | None = None,
-                 session_id: str | None = None) -> WaitSignals:
+                 session_id: str | None = None,
+                 engine: engine_runs_module.SprintEngine = engine_runs_module.NO_ENGINE) -> WaitSignals:
     """The sprint's wait signals out of its project's movement. The sprint's issues are the
     report's issue numbers united with its `inbox` numbers (none without a report); a pull request
     belongs when its issues meet them, a branch when its issue is one of them, a land lock time
@@ -1478,9 +1483,11 @@ def wait_signals(state: SprintState, movement: ProjectMovement | None,
     running check among the associations of this sprint; a manager session's time inside the reply
     window of an idle nudge (`NUDGE_REPLY_MS` from `idle_nudged_at`) is left out. `issues` replaces
     the sprint's issues with the given ones (a run's own, #1212) and `session_id` keeps only the
-    associations of that session; both default to the whole sprint."""
+    associations of that session; both default to the whole sprint. `engine` is the reading of the
+    sprint's engine runs (#1531): it rides on the result and its session ids are left out of the
+    session signals, a manager's own session counting as before."""
     if movement is None:
-        return NO_WAITS
+        return WaitSignals(engine=engine)
     issues = sprint_issue_numbers(state) if issues is None else set(issues)
     pulls = [pull for pull in movement.pulls if issues & pull.issues]
     running = [pull.running_ms for pull in pulls if pull.running_ms is not None]
@@ -1497,12 +1504,13 @@ def wait_signals(state: SprintState, movement: ProjectMovement | None,
         return ms
 
     mine = [own for own in movement.sessions if own.sprint_id == state.sprint_id
-            and (session_id is None or own.session_id == session_id)]
+            and (session_id is None or own.session_id == session_id)
+            and own.session_id not in engine.sessions]
     outputs = [ms for own in mine if (ms := counted(own, own.output_ms)) is not None]
     checks = [ms for own in mine if (ms := counted(own, own.check_ms)) is not None]
     return WaitSignals(max(running, default=None), max(commits, default=None),
                        movement.release_ms, max(locks, default=None), min(places, default=None),
-                       max(outputs, default=None), max(checks, default=None))
+                       max(outputs, default=None), max(checks, default=None), engine)
 
 
 def _utc(ms: int) -> str:
@@ -1540,8 +1548,9 @@ def sprint_quiet_for(state: SprintState, now_ms: int | None, listed: Collection[
     listed session drops only the stated time (its launch is known to have failed, so a fresh goal
     is no sign of life); a run, a report, an approval or a wait signal inside the window still
     moves the sprint whatever its order against the failure. With no signal left, the sprint reads
-    quiet at once, for the time since the goal was stated."""
-    if now_ms is None or WORKING in listed:
+    quiet at once, for the time since the goal was stated. A moving engine run of its issues moves it
+    at once whatever its age (#1531)."""
+    if now_ms is None or WORKING in listed or waits.engine.moving:
         return None
     brief, report = state.brief, state.report
     signals = []
@@ -1569,7 +1578,8 @@ def sprint_wait(state: SprintState, now_ms: int | None, listed: Collection[str],
     no clock, or when something else moves it, or when it is quiet whatever
     the waits say, it is None. Else the first of CI, a committing delivery, a release step and the
     land lock whose signal is inside `QUIET_AFTER_MS`."""
-    base = WaitSignals(output_ms=waits.output_ms, check_ms=waits.check_ms)
+    base = WaitSignals(output_ms=waits.output_ms, check_ms=waits.check_ms,
+                       engine=replace(waits.engine, waits=frozenset()))
     if (now_ms is None or sprint_quiet_for(state, now_ms, listed, base) is None
             or sprint_quiet_for(state, now_ms, listed, waits) is not None):
         return None
@@ -1842,15 +1852,12 @@ def _finished(state: SprintState, now_ms: int | None) -> bool:
             and now_ms - _millis(ended) >= FINISHED_AFTER_MS)
 
 
-def _sprint_entry(state: SprintState, now_ms: int | None, managers: bool,
-                  sessions: Sequence[SessionState],
-                  deliveries: Mapping[str, Sequence[DeliveryState]],
-                  records: Sequence[InboxRecord] = (), capacity: Mapping = EMPTY,
-                  nudges: bool = True, looked: str | None = None,
-                  movement: ProjectMovement | None = None,
-                  wait_lines: Sequence[Mapping] = (),
+def _sprint_entry(state: SprintState, now_ms: int | None, managers: bool, sessions: Sequence[SessionState],
+                  deliveries: Mapping[str, Sequence[DeliveryState]], records: Sequence[InboxRecord] = (),
+                  capacity: Mapping = EMPTY, nudges: bool = True, looked: str | None = None,
+                  movement: ProjectMovement | None = None, wait_lines: Sequence[Mapping] = (),
                   waits_of: Callable[[DeliveryState], WaitSignals | None] = lambda run: None,
-                  prompted: bool = False) -> dict:
+                  prompted: bool = False, engine: engine_runs_module.SprintEngine = engine_runs_module.NO_ENGINE) -> dict:
     stated_ms = _millis(state.stated_at)
     elapsed = 0 if now_ms is None else now_ms - stated_ms
     report = state.report
@@ -1875,7 +1882,7 @@ def _sprint_entry(state: SprintState, now_ms: int | None, managers: bool,
     manager_ids = {s.session_id for s in sessions}
     if state.manager_session is not None:
         manager_ids.add(state.manager_session)
-    waits = wait_signals(state, movement, manager_ids)
+    waits = wait_signals(state, movement, manager_ids, engine=engine)
     name, text = sprint_state(state, now_ms, waiting, quota, listed=listed, waits=waits)
     ended = ended_at(state)
     failed = failed_start(state, bool(sessions), managers)
@@ -1961,24 +1968,18 @@ def _sprint_entry(state: SprintState, now_ms: int | None, managers: bool,
 
 
 def _project_entry(state: ProjectState, sessions: Sequence[SessionState],
-                   deliveries: Mapping[str, Sequence[DeliveryState]],
-                   now_ms: int | None,
-                   sprints: Sequence[SprintState] = (),
-                   managers: bool = True,
+                   deliveries: Mapping[str, Sequence[DeliveryState]], now_ms: int | None,
+                   sprints: Sequence[SprintState] = (), managers: bool = True,
                    sprint_sessions: Mapping[str, Sequence[SessionState]] | None = None,
-                   records: Sequence[InboxRecord] = (),
-                   finished: Sequence[SprintState] = (),
-                   capacity: Mapping = EMPTY,
-                   nudges: bool = True, looked: str | None = None,
-                   movement: ProjectMovement | None = None,
-                   notices: Sequence[Mapping] = (), notice_post: bool = False,
-                   overlaps: Sequence[Mapping] = (),
+                   records: Sequence[InboxRecord] = (), finished: Sequence[SprintState] = (),
+                   capacity: Mapping = EMPTY, nudges: bool = True, looked: str | None = None,
+                   movement: ProjectMovement | None = None, notices: Sequence[Mapping] = (),
+                   notice_post: bool = False, overlaps: Sequence[Mapping] = (),
                    sprint_waits: Mapping[str, Sequence[Mapping]] | None = None,
-                   waits: Sequence[Mapping] = (),
-                   read: ReadState | None = None,
-                   questions: Mapping | None = None,
-                   prompted: Collection[str] = (),
-                   engine_runs: Sequence[Mapping] = ()) -> dict:
+                   waits: Sequence[Mapping] = (), read: ReadState | None = None,
+                   questions: Mapping | None = None, prompted: Collection[str] = (),
+                   engine_runs: Sequence[Mapping] = (),
+                   engine_states: Sequence[engine_runs_module.RunState] = ()) -> dict:
     manager_ids: dict[str, set[str]] = {}
     for sprint in sprints:
         ids = {s.session_id for s in (sprint_sessions or {}).get(sprint.sprint_id, ())}
@@ -1997,7 +1998,9 @@ def _project_entry(state: ProjectState, sessions: Sequence[SessionState],
         return [_sprint_entry(s, now_ms, managers, (sprint_sessions or {}).get(s.sprint_id, ()),
                               deliveries, records, capacity, nudges, looked, movement,
                               (sprint_waits or {}).get(s.sprint_id, ()), waits_of,
-                              prompted=s.sprint_id in prompted)
+                              prompted=s.sprint_id in prompted,
+                              engine=engine_runs_module.sprint_engine(
+                                  engine_states, s.project_id, sprint_issue_numbers(s), now_ms))
                 for s in group]
 
     return {
@@ -2406,7 +2409,8 @@ def derive_view(
     answered = sorted((r for r in shown if r.item["answered"]),
                       key=lambda r: (r.waiting_since, r.item["key"], r.item["project_id"]))
     stale_projects = sorted(p for p in registered if p in health and not health[p].ok)
-    lines = engine_runs_module.project_lines(engine_runs or (), now_ms)
+    engine_states = list(engine_runs or ())
+    lines = engine_runs_module.project_lines(engine_states, now_ms)
     drafted: dict[str, list[SprintState]] = {}
     finished: dict[str, list[SprintState]] = {}
     for sprint in sorted((sprints or {}).values(),
@@ -2496,17 +2500,13 @@ def derive_view(
     open_by_project: dict[str, list[InboxRecord]] = {}
     for record in open_items:
         open_by_project.setdefault(record.item["project_id"], []).append(record)
-    entries = [_project_entry(s, owned.get(s.project_id, ()), runs, now_ms,
-                              drafted.get(s.project_id, ()), managers, in_sprint,
-                              open_by_project.get(s.project_id, ()),
-                              finished.get(s.project_id, ()), capacity, nudges, looked,
-                              (movement or {}).get(s.project_id),
-                              notices=notices[s.project_id],
-                              notice_post=notice_post[s.project_id],
-                              overlaps=overlaps[s.project_id],
+    entries = [_project_entry(s, owned.get(s.project_id, ()), runs, now_ms, drafted.get(s.project_id, ()), managers, in_sprint,
+                              open_by_project.get(s.project_id, ()), finished.get(s.project_id, ()), capacity, nudges, looked,
+                              (movement or {}).get(s.project_id), notices=notices[s.project_id],
+                              notice_post=notice_post[s.project_id], overlaps=overlaps[s.project_id],
                               sprint_waits=sprint_waits, waits=project_waits.get(s.project_id, ()),
-                              read=health.get(s.project_id), questions=asks[s.project_id],
-                              prompted=prompted, engine_runs=lines.get(s.project_id, ()))
+                              read=health.get(s.project_id), questions=asks[s.project_id], prompted=prompted,
+                              engine_runs=lines.get(s.project_id, ()), engine_states=engine_states)
                for s in active]
     quiet_entries = [_project_entry(s, (), runs, now_ms, (), managers, in_sprint,
                                     finished=finished.get(s.project_id, ()), capacity=capacity,
