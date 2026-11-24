@@ -4,6 +4,10 @@ Resolve-project projects the `conformance_workflow` kind through `render`: a pur
 integration branch, the schema version and the form. The platform's own tree runs the platform
 from the tree itself, with `--lint-times`; every other tree runs it from the revision its
 `devenv.lock` pins as `agent-platform` (ADR-project-contract-018), without it.
+
+The own-tree form also builds the platform at the pull request's base (on a push, the previous
+tip) and reads the head's contract with it: the job fails when that platform refuses the
+contract or finds it incompatible, and annotates each binding it ignores as a warning.
 """
 
 from __future__ import annotations
@@ -52,7 +56,16 @@ jobs:
       - name: Run conformance
 {run}"""
 RUN_OWN_TREE = (
-    "        run: nix shell .#agent-platform --command conformance run --purpose ci --lint-times\n")
+    "        run: nix shell .#agent-platform --command conformance run --purpose ci --lint-times\n"
+    "      - name: Read the contract with the base platform\n"
+    "        run: |\n"
+    "          base=\"git+file://$GITHUB_WORKSPACE?rev=${{ github.event.pull_request.base.sha || github.event.before }}\"\n"
+    "          nix build \"$base#agent-platform\" --out-link \"$RUNNER_TEMP/base-platform\"\n"
+    "          \"$RUNNER_TEMP/base-platform/bin/resolve-project\" platform-status --repo-root . "
+    ">\"$RUNNER_TEMP/base-status.json\" 2>\"$RUNNER_TEMP/base-warnings.txt\" "
+    "|| { cat \"$RUNNER_TEMP/base-status.json\"; exit 1; }\n"
+    "          sed 's/^/::warning::/' \"$RUNNER_TEMP/base-warnings.txt\"\n"
+    "          jq -e '.compatibility.compatible' \"$RUNNER_TEMP/base-status.json\"\n")
 # A single backslash before each `(` is inside the YAML block scalar, where jq
 # reads it as string interpolation.
 RUN_LOCKED = (
