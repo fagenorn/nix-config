@@ -90,6 +90,12 @@ environment. Signing is probed in the same environment. A member the snapshot
 cannot resolve, or whose cwd leaves the worktree, is refused
 `adopt.commit.unresolved_environment`. Untracked files the environment leaves do
 not fail the branch proof, and the proved worktree is removed with `--force`.
+With an environment, when the worktree's `HEAD` tracks a `devenv.nix` declaring
+git hooks and the repository sets no hooks path and holds no commit hook, the
+missing hooks are first installed through it with the global hooks path masked
+for that one command (`hook_install`), and the repository's local hooks paths
+are put back after the commit. The stored plan records the commit's
+`verification.commit_output` and, after an install, `verification.hook_install`.
 
 Tracked `.claude/hints/` files move to `.agents/knowledge/hints/`, and a
 `paths.hints` binding follows them; point-in-time records keep their citations.
@@ -292,7 +298,8 @@ from agent_tools.project_contract import (adopt_apply, adopt_conformance, adopt_
                                           adopt_inspection, adopt_links, adopt_migrate,
                                           adopt_planning, adopt_references, adopt_report,
                                           adopt_verify,
-                                          agent_platform, derived_values, schema_three)
+                                          agent_platform, derived_values, hook_install,
+                                          schema_three)
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
 from agent_tools.system.siblings import sibling_argv
 
@@ -1166,6 +1173,16 @@ def apply_stored_plan(args: argparse.Namespace, manifest: dict, digest: str,
         adopt_apply.retain_failure(digest, document, worktree, branch,
                                    gates, error.repair_id)
         raise
+    before = installed = None
+    if environment is not None:
+        before = hook_install.local_hooks_paths(root)
+        try:
+            installed = hook_install.install(root, worktree, environment)
+        except adopt_inspection.AdoptError as error:
+            adopt_apply.retain_failure(
+                digest, document, worktree, branch, gates, error.repair_id,
+                commit_output=error.commit_output)
+            raise
     try:
         code, output = adopt_apply.run_commit(
             worktree, worktree.parent, "--quiet",
@@ -1177,11 +1194,24 @@ def apply_stored_plan(args: argparse.Namespace, manifest: dict, digest: str,
                 stored_plan["project_id"], digest, records),
             environment=environment)
     except adopt_inspection.AdoptError as error:
+        if before is not None:
+            try:
+                hook_install.restore_hooks_paths(root, before)
+            except adopt_inspection.AdoptError:
+                pass  # the commit's own error is the one retained and raised
         if error.commit_output is not None:
             adopt_apply.retain_failure(
                 digest, document, worktree, branch, gates, error.repair_id,
                 commit_output=error.commit_output)
         raise
+    if before is not None:
+        try:
+            hook_install.restore_hooks_paths(root, before)
+        except adopt_inspection.AdoptError as error:
+            adopt_apply.retain_failure(
+                digest, document, worktree, branch, gates, error.repair_id,
+                commit_output=error.commit_output)
+            raise
     if code != 0:
         # Never retried unsigned: a contract that asks for a signature and a
         # machine that cannot produce one is a failure, not a downgrade.
@@ -1230,6 +1260,9 @@ def apply_stored_plan(args: argparse.Namespace, manifest: dict, digest: str,
             "the adoption worktree could not be removed after the commit")
 
     document["verification"]["commit_gates"] = gates
+    document["verification"]["commit_output"] = output
+    if installed is not None:
+        document["verification"]["hook_install"] = {"installed": installed}
     adopt_planning.store_document(stored_plan["plan_id"], document)
     result = {"branch": branch, "commit": commit,
               "plan_id": stored_plan["plan_id"], **records,

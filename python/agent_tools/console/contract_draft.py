@@ -63,6 +63,13 @@ A runner that is unassigned, empty, relative, an option, or carries `$`, a backt
 unjudged too. Reading a hook never fetches a missing blob (`GIT_NO_LAZY_FETCH=1`), and reads a tracked hook by the
 blob id it first resolved, so the size bound and the content are one blob.
 
+`hooks_missing(root, cancel=None)` says whether the checkout's devenv git hooks are not installed on this host:
+True exactly when `HEAD` tracks `devenv.nix` as a regular file no larger than `hook_install.TEXT_LIMIT` whose
+text `hook_install.declares_hooks` judges to declare hooks, and `hook_install.left_alone` finds neither a
+`core.hooksPath` of the repository's own configuration nor an executable commit hook in `<git-common-dir>/hooks`
+(a global or system hooks path never counts). It is False on any error or a set `cancel`, never raises and never
+writes. It is independent of `read_hooks`, whose reconcile proposal it leaves as it was.
+
 Fields. `FIELDS` lists the five authored field ids in order (`integration-branch`, `lint-command`,
 `test-command`, `release`, `production`), each pointing only at a member `schema_three.authored` accepts; each is a
 record with exactly the keys `FIELD_KEYS`: `field`, `label`, `value` (a str or None), `source` (a key of `SOURCES`
@@ -146,7 +153,7 @@ from pathlib import Path
 from agent_tools import canonical
 from agent_tools.console import manager
 from agent_tools.project_contract import (
-    adopt_conformance, agent_platform, attempt_history, derived_values, schema_three)
+    adopt_conformance, agent_platform, attempt_history, derived_values, hook_install, schema_three)
 from agent_tools.system.semver import parse_semver
 
 QUESTION_ID = "contract-draft"
@@ -715,6 +722,49 @@ def read_hooks(root: str, cancel: threading.Event | None = None, *,
                 "environments": _environments(root, cancel)}
     except Exception:  # read_hooks never raises: an unreadable repository reads as empty
         return {"hooks": [], "stranded": [], "environments": []}
+
+
+def binds_environment(root: str) -> bool:
+    """Whether the contract at `root`, as the resolver fills it, binds `vcs.commit.environment`.
+
+    A schema-3 contract always does (the platform constant `commit-environment`, ADR-project-contract-013 D1-D2);
+    any other only when it authors the member.
+    """
+    try:
+        path = Path(root, ".agents/project.json")
+        if path.stat().st_size > hook_install.TEXT_LIMIT:
+            return False
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if schema_three.declares(document):
+        return True
+    bindings = document.get("bindings") if isinstance(document, dict) else None
+    vcs = bindings.get("vcs") if isinstance(bindings, dict) else None
+    commit = vcs.get("commit") if isinstance(vcs, dict) else None
+    return isinstance(commit, dict) and "environment" in commit
+
+
+def hooks_missing(root: str, cancel: threading.Event | None = None) -> bool:
+    """Whether `HEAD` tracks a `devenv.nix` declaring git hooks that this host has not installed."""
+    try:
+        if cancel is not None and cancel.is_set():
+            return False
+        if _entry(root, "devenv.nix", cancel) not in (("100644", "blob"), ("100755", "blob")):
+            return False
+        size = _git(root, "cat-file", "-s", "HEAD:devenv.nix", cancel=cancel)
+        if size is None or not size.strip().isdigit() or int(size.strip()) > hook_install.TEXT_LIMIT:
+            return False
+        text = _git(root, "cat-file", "blob", "HEAD:devenv.nix", cancel=cancel)
+        if text is None or not hook_install.declares_hooks(text.decode("utf-8", "replace")):
+            return False
+        common = _git(root, "rev-parse", "--path-format=absolute", "--git-common-dir", cancel=cancel)
+        printed = common.decode("utf-8", "replace").strip() if common else ""
+        if not printed:
+            return False
+        return not hook_install.left_alone(_repository_hooks_path(root, cancel), Path(printed) / "hooks")
+    except Exception:  # hooks_missing never raises: an unreadable repository reads as not missing
+        return False
 
 
 # --------------------------------------------------------------------------

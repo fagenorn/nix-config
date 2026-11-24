@@ -151,6 +151,7 @@ agent-workflow-tests *args:
     home/common/agent-skills/tests/test_adopt_migrate.py \
     home/common/agent-skills/tests/test_adopt_project_boundaries.py \
     home/common/agent-skills/tests/test_adopt_apply.py \
+    home/common/agent-skills/tests/test_adopt_hook_install.py \
     home/common/agent-skills/tests/test_adopt_apply_formatting.py \
     home/common/agent-skills/tests/test_adopt_entries.py \
     home/common/agent-skills/tests/test_adopt_conformance.py \
@@ -283,6 +284,7 @@ agent-workflow-tests *args:
     tests/test_docs_tree.py \
     tests/test_standard_ids.py \
     tests/test_standards_lint.py \
+    tests/test_router.py \
     tests/test_citation_lint.py \
     tests/test_never_rise.py \
     tests/test_comment_lint.py \
@@ -336,6 +338,7 @@ agent-workflow-tests *args:
     tests/test_console_question_records.py \
     tests/test_console_question_check.py \
     tests/test_console_contract_draft.py \
+    tests/test_console_hooks_missing.py \
     tests/test_console_checkout_remote.py \
     tests/test_console_register.py \
     tests/test_console_register_service.py \
@@ -359,6 +362,7 @@ agent-workflow-tests *args:
     tests/test_console_message_check.py \
     tests/test_console_revive_check.py \
     tests/test_console_cleanup_check.py \
+    tests/test_adopt_hook_check.py \
     tests/test_console_lock_wait_check.py \
     tests/test_console_serve_probe_check.py \
     tests/test_console_run_line_check.py \
