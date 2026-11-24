@@ -155,6 +155,7 @@ class EngineProject:
             "standin-parity": entry("parity", str(self.tmp / "parity.log")),
             "standin-keep-alive": entry("answers", str(self.renewals), str(self.answers)),
             "standin-hold": entry("hold", str(self.hold), "0"),
+            "standin-branch": entry("emit", "0", '{"verdict":"ok","branch":"issue-7-topic"}'),
         })
         land = ["gh", "pr", "merge", "7", "--repo", "example/engine", "--merge"]
         contract["bindings"]["commands"].update(
@@ -750,6 +751,37 @@ def literal(name: str, on: dict, command: str | None = None) -> dict:
 ALLOW_ON = {"ok": "done", "failed": "needs-owner", "refused": "needs-owner"}
 
 
+class WaitDeliverTest(unittest.TestCase):
+    KINDS = ["step_entered", "wait_started", "process_started", "wait_ended", "result_stored",
+             "outcome_graded", "transition_taken", "run_done"]
+
+    def test_a_command_step_that_declares_a_wait_records_it_around_its_process(self):
+        project = EngineProject(self)
+        waiting = {**step("a", "standin-record", "done"), "wait": "lock"}
+        done = project.deliver(project.procedures([waiting]))
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        events = project.events(project.runs()[0])
+        self.assertEqual([e["event"] for e in events], self.KINDS)
+        started = next(e for e in events if e["event"] == "wait_started")
+        ended = next(e for e in events if e["event"] == "wait_ended")
+        self.assertEqual((started["wait"], started["until"]), ("lock", None))
+        self.assertEqual(ended["wait"], "lock")
+        status = project.status(1512)
+        self.assertEqual(status.returncode, 0, status.stdout + status.stderr)
+        self.assertIsNone(json.loads(status.stdout)["wait"])
+
+    def test_a_refused_command_still_closes_its_wait(self):
+        project = EngineProject(self)
+        project.use_guard(standin_guard(project.tmp, "g", "refuse", str(project.tmp / "g.log"),
+                                        "lifecycle guard: no."))
+        waiting = {**step("a", "standin-record", "done"), "wait": "checks"}
+        stopped = project.deliver(project.procedures([waiting]))
+        self.assertEqual(stopped.returncode, 3, stopped.stdout + stopped.stderr)
+        self.assertEqual([e["event"] for e in project.events(project.runs()[0])],
+                         ["step_entered", "wait_started", "wait_ended", "result_stored",
+                          "outcome_graded", "transition_taken", "stop_reached"])
+
+
 class GuardDeliverTest(unittest.TestCase):
     def tee(self, project: EngineProject, name: str = "tee") -> Path:
         log = project.tmp / f"{name}.log"
@@ -821,6 +853,29 @@ class GuardDeliverTest(unittest.TestCase):
                                   "tool_name": "Bash"})
         self.assertEqual(payloads(project.tmp / "tools.log"),
                          [{"argv": ["branch", "-d", "issue-7-topic"]}])
+        self.assertEqual(project.git("rev-parse", "--verify", "--quiet",
+                                     "refs/heads/issue-7-topic", check=False).returncode, 1)
+
+    def test_a_lifecycle_branch_delete_row_runs_the_text_the_real_guard_judged(self):
+        project = EngineProject(self)
+        project.git("branch", "issue-7-topic")
+        project.record_tools()
+        log = self.tee(project)
+        read = {"id": "read", "stage": "landing", "kind": "command",
+                "command": "standin-branch", "holds": "run",
+                "on": {"ok": "tidy", "failed": "needs-owner", "refused": "needs-owner"}}
+        tidy = {"id": "tidy", "stage": "landing", "kind": "command",
+                "command": "branch-delete", "holds": "run",
+                "in": ["run.repo_root", "read.branch"], "on": ALLOW_ON}
+        done = project.deliver(project.procedures([read, tidy], inputs=("issue", "repo_root")))
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        logged = payloads(log)
+        self.assertEqual(len(logged), 2)
+        judged = logged[1]["payload"]
+        self.assertEqual(judged["tool_input"]["command"],
+                         f"git -C {project.root} branch -d issue-7-topic")
+        self.assertEqual(payloads(project.tmp / "tools.log")[-1]["argv"],
+                         ["-C", str(project.root), "branch", "-d", "issue-7-topic"])
         self.assertEqual(project.git("rev-parse", "--verify", "--quiet",
                                      "refs/heads/issue-7-topic", check=False).returncode, 1)
 

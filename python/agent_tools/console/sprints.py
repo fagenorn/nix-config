@@ -343,6 +343,7 @@ console did about a look card's approval:
                        "questions": [{"question", "context"?, "blocks", "options": [<str>],
                                       "recommended", "needs_words"?: [<option text>],
                                       "owner_only"?: true, "consequential"?: true,
+                                      "action"?: {"command": <str>, "approve": <str>},
                                       "pictures"?: [{"picture": <id>,
                                       "line": <str>, "pair"?: "before" | "after"}],
                                       "look"?: {"issue": <int>, "pr": <int>, "head": <40 hex>,
@@ -376,160 +377,137 @@ The round the manager sends (inside the ask request) and the owner's answer (the
     {"project_id", "sprint_id", "round": <int >= 1>, "question": <int >= 0>, "choice": <int >= 0>,
      "text": "<words>"}
 
-A round has one to `MAX_ROUND_QUESTIONS` questions, each with `MIN_OPTIONS` to `MAX_OPTIONS`
-options. A question's `question` is its ask, at most `MAX_ASK_CHARS`; its optional `context`, at most
-`MAX_CONTEXT_CHARS` and free to span lines, is the why; each option is at most `MAX_OPTION_CHARS`.
-`checked_round(round, limits=True)` refuses with `Refused` the first failure, in this order:
-`NO_QUESTIONS` (`questions` not a list, or empty), `TOO_MANY_QUESTIONS`, `BAD_BLOCKER` (`blocker`
-present and not a bool); then, per question (`n` counts from 1): `QUESTION_SHAPE` (not an object, or
-a key outside `question, context, blocks, options, recommended, needs_words, owner_only,
-consequential, pictures, look, replaces`),
-`QUESTION_MEMBER` for
-`question`
-(not a string non-empty after stripping), `ASK_TOO_LONG`, `QUESTION_MEMBER` for `context` (present
-and not a string non-empty after stripping), `CONTEXT_TOO_LONG`, `QUESTION_MEMBER` for `blocks`
-(one line), `OPTION_COUNT`, `QUESTION_MEMBER` for `options` (an option not a string non-empty after
-stripping), `OPTION_TOO_LONG`, `QUESTION_MEMBER` for `options` again (an option with a line break or
-over `MAX_LINE_CHARS`), `OPTION_TWICE` (two options equal after stripping) and `NO_RECOMMENDATION`
-(`recommended` not a string whose strip equals one stripped option), then (#1260) `LOOK_SHAPE`
-(`look` present and not an object of exactly `issue` and `pr`, each an int that is not a bool and
-at least 1, `head`, 40 lowercase hex, and `approve`, a string) and `LOOK_APPROVE` (`approve`
-whose strip equals no stripped option), then `NEEDS_WORDS_SHAPE`
-(`needs_words` present and not a non-empty list of strings whose strips are each one stripped
-option, each named once) and (#1260) `LOOK_APPROVE_WORDS` (the look's `approve` is also in `needs_words`: choosing it
-records the approval and takes no words, so the owner could never approve), then `OWNER_ONLY_SHAPE` (`owner_only` present and not `true`),
-then `CONSEQUENTIAL_SHAPE` (`consequential` present and not `true`), then `REPLACES_SHAPE`
-(`replaces` present and not an object of exactly `round`, an int that is not a bool and at least 1,
-and `index`, an int that is not a bool and at least 0). The picture checks follow (#1090): `PICTURES_SHAPE` (`pictures` present and not a list), `TOO_MANY_PICTURES` (over
-`MAX_PICTURES`), then per picture `m` (from 1) `PICTURE_SHAPE` (not an object, a key outside
-`picture, line, pair`, or `picture` or `line` missing), `PICTURE_MEMBER` for `picture` (not a string
-fully matching `pictures.PICTURE_ID`), `PICTURE_MEMBER` for `line` (not a string non-empty after
-stripping), `LINE_TOO_LONG` (over `MAX_PICTURE_LINE_CHARS`), `PICTURE_MEMBER` for `line` again (a
-line break, or over `MAX_LINE_CHARS`) and `PICTURE_MEMBER` for `pair` (present and not in `PAIRS`);
-after the loop `PAIR_TWICE` for the first `pair` given twice, then (#1260) `LOOK_PAIR` for a question
-with a `look` whose pictures lack a member marked `before` or one marked `after` (a card
-that approves a head shows the owner the pair, whatever its words say; a round read back from the log
-or a check with `files_withheld=True` skips it), then (#1092) `LOOK_WITHOUT_PICTURE`
-for a question that has no picture while its ask or context matches `LOOK_WORDS` (the word
-screenshot or screenshots in any case, also written "screen shot", a `.png` file or a folder with a
-`screenshots` segment), naming the question's number and ask; a round read back from the log
-(`limits=False`) and a check with `files_withheld=True` (the service's dry run, whose round has its
-`file` members left out) skip it. After the questions `REPLACES_TWICE` names the first question
-whose `replaces` equals an earlier question's (also with `limits=False`). `REPLACES_REFUSED` is the
-service's refusal of a mark that names no open question of the sprint. `PICTURE_UNKNOWN` and `PICTURE_FOREIGN`
-name the service's refusals of a picture it does not hold or another sprint sent. A brief and a
-report check their picture list with the same loop (#1091): `checked_pictures(owner, pictures, *,
-limits=True)` with `owner` `"brief"` or `"report"` takes the same steps in the same order and
-refuses under `PART_PICTURES_SHAPE`, `PART_TOO_MANY_PICTURES`, `PART_PICTURE_SHAPE`,
-`PART_PICTURE_MEMBER`, `PART_LINE_TOO_LONG` and `PART_PAIR_TWICE` (each formatted with `owner`, and
-`m` or `pair` as above), and `PART_PICTURE_UNKNOWN` and `PART_PICTURE_FOREIGN` name the service's
-refusals. `picture_ids(members)` is the unique `picture` values of checked members in first-seen
-order. With
-`limits=False` the three limit steps are replaced by today's caps: a `QUESTION_MEMBER` for a
-`question` or `context` over `MAX_QUESTION_CHARS` (an option's cap is `MAX_LINE_CHARS`), and a
-picture's line over `MAX_LINE_CHARS`; the picture count cap stays. It returns a new
-`{"blocker": <bool>, "questions": [{"question", "blocks", "options", "recommended"}]}` with every
-text stripped, a question carrying `"context"` only when the round gave one, `"needs_words"` (the
-stripped option texts, in the given order) only when it gave one, `"owner_only"` (`true`) only when it
-gave it, `"consequential"` (`true`) only when it gave it, `"look"` (`{"issue",
-"pr", "head", "approve"}`, `approve` stripped) only when it gave one, and `"pictures"`
-(`{"picture", "line"}` plus `"pair"` when given) only when it gave a non-empty list, and `"replaces"`
-(`{"round", "index"}`) only when it gave one. `replaced(checked)` is the `(round, index)` each
-question's `replaces` names in a checked round, in question order.
-`round_pictures(checked)` is the unique picture ids of a checked round, in question then picture
-order.
-`parse_ask_request(body)` reads the manager's `{"sprint_id", "secret", "round"}` (exactly those
-keys, plus an optional `"dry_run"` that must be `true`) and returns `(sprint_id, secret, round,
-dry_run)`, `round` an object whose keys are a subset of
-`questions, blocker`; `parse_round_answer(body)` reads the page's body, one or both of `choice` and
-`text`, and returns `(project_id, sprint_id, round_id, index, choice, text)` with an absent one
-None; `parse_look_retry(body)` reads the page's retry of a look card's approval, exactly
-`{"project_id", "sprint_id", "round": <int >= 1>, "question": <int >= 0>}`, and returns
-`(project_id, sprint_id, round_id, index)`. All three are `ValueError` on anything else, a
-repeated key, NaN or nesting too deep.
+A round has one to `MAX_ROUND_QUESTIONS` questions, each with `MIN_OPTIONS` to `MAX_OPTIONS` options. A question's
+`question` is its ask, at most `MAX_ASK_CHARS`; its optional `context`, at most `MAX_CONTEXT_CHARS` and free to span
+lines, is the why; each option is at most `MAX_OPTION_CHARS`. `checked_round(round, limits=True)` refuses with
+`Refused` the first failure, in this order: `NO_QUESTIONS` (`questions` not a list, or empty), `TOO_MANY_QUESTIONS`,
+`BAD_BLOCKER` (`blocker` present and not a bool); then, per question (`n` counts from 1): `QUESTION_SHAPE` (not an
+object, or a key outside `question, context, blocks, options, recommended, needs_words, owner_only, consequential,
+pictures, look, replaces, action`), `QUESTION_MEMBER` for `question` (not a string non-empty after stripping),
+`ASK_TOO_LONG`, `QUESTION_MEMBER` for `context` (present and not a string non-empty after stripping),
+`CONTEXT_TOO_LONG`, `QUESTION_MEMBER` for `blocks` (one line), `OPTION_COUNT`, `QUESTION_MEMBER` for `options` (an
+option not a string non-empty after stripping), `OPTION_TOO_LONG`, `QUESTION_MEMBER` for `options` again (an option
+with a line break or over `MAX_LINE_CHARS`), `OPTION_TWICE` (two options equal after stripping) and
+`NO_RECOMMENDATION` (`recommended` not a string whose strip equals one stripped option), then (#1260) `LOOK_SHAPE`
+(`look` present and not an object of exactly `issue` and `pr`, each an int that is not a bool and at least 1,
+`head`, 40 lowercase hex, and `approve`, a string) and `LOOK_APPROVE` (`approve` whose strip equals no stripped
+option), then `NEEDS_WORDS_SHAPE` (`needs_words` present and not a non-empty list of strings whose strips are each
+one stripped option, each named once) and (#1260) `LOOK_APPROVE_WORDS` (the look's `approve` is also in
+`needs_words`: choosing it records the approval and takes no words, so the owner could never approve), then
+`OWNER_ONLY_SHAPE` (`owner_only` present and not `true`), then `CONSEQUENTIAL_SHAPE` (`consequential` present and
+not `true`), then, when `action` is present, the refusals of `action_card.refusal`, then `REPLACES_SHAPE`
+(`replaces` present and not an object of exactly `round`, an int that is not a bool and at least 1, and `index`, an
+int that is not a bool and at least 0). The picture checks follow (#1090): `PICTURES_SHAPE` (`pictures` present and
+not a list), `TOO_MANY_PICTURES` (over `MAX_PICTURES`), then per picture `m` (from 1) `PICTURE_SHAPE` (not an
+object, a key outside `picture, line, pair`, or `picture` or `line` missing), `PICTURE_MEMBER` for `picture` (not a
+string fully matching `pictures.PICTURE_ID`), `PICTURE_MEMBER` for `line` (not a string non-empty after stripping),
+`LINE_TOO_LONG` (over `MAX_PICTURE_LINE_CHARS`), `PICTURE_MEMBER` for `line` again (a line break, or over
+`MAX_LINE_CHARS`) and `PICTURE_MEMBER` for `pair` (present and not in `PAIRS`); after the loop `PAIR_TWICE` for the
+first `pair` given twice, then (#1260) `LOOK_PAIR` for a question with a `look` whose pictures lack a member marked
+`before` or one marked `after` (a card that approves a head shows the owner the pair, whatever its words say; a
+round read back from the log or a check with `files_withheld=True` skips it), then (#1092) `LOOK_WITHOUT_PICTURE`
+for a question that has no picture while its ask or context matches `LOOK_WORDS` (the word screenshot or screenshots
+in any case, also written "screen shot", a `.png` file or a folder with a `screenshots` segment), naming the
+question's number and ask; a round read back from the log (`limits=False`) and a check with `files_withheld=True`
+(the service's dry run, whose round has its `file` members left out) skip it. After the questions `REPLACES_TWICE`
+names the first question whose `replaces` equals an earlier question's (also with `limits=False`).
+`REPLACES_REFUSED` is the service's refusal of a mark that names no open question of the sprint. `PICTURE_UNKNOWN`
+and `PICTURE_FOREIGN` name the service's refusals of a picture it does not hold or another sprint sent. A brief and
+a report check their picture list with the same loop (#1091): `checked_pictures(owner, pictures, *, limits=True)`
+with `owner` `"brief"` or `"report"` takes the same steps in the same order and refuses under `PART_PICTURES_SHAPE`,
+`PART_TOO_MANY_PICTURES`, `PART_PICTURE_SHAPE`, `PART_PICTURE_MEMBER`, `PART_LINE_TOO_LONG` and `PART_PAIR_TWICE`
+(each formatted with `owner`, and `m` or `pair` as above), and `PART_PICTURE_UNKNOWN` and `PART_PICTURE_FOREIGN`
+name the service's refusals. `picture_ids(members)` is the unique `picture` values of checked members in first-seen
+order. With `limits=False` the three limit steps are replaced by today's caps: a `QUESTION_MEMBER` for a `question`
+or `context` over `MAX_QUESTION_CHARS` (an option's cap is `MAX_LINE_CHARS`), and a picture's line over
+`MAX_LINE_CHARS`; the picture count cap stays. It returns a new `{"blocker": <bool>, "questions": [{"question",
+"blocks", "options", "recommended"}]}` with every text stripped, a question carrying `"context"` only when the round
+gave one, `"needs_words"` (the stripped option texts, in the given order) only when it gave one, `"owner_only"`
+(`true`) only when it gave it, `"consequential"` (`true`) only when it gave it, `"action"` (`action_card`) only when
+it gave one, `"look"` (`{"issue", "pr", "head", "approve"}`, `approve` stripped) only when it gave one, and
+`"pictures"` (`{"picture", "line"}` plus `"pair"` when given) only when it gave a non-empty list, and `"replaces"`
+(`{"round", "index"}`) only when it gave one. `replaced(checked)` is the `(round, index)` each question's `replaces`
+names in a checked round, in question order. `round_pictures(checked)` is the unique picture ids of a checked round,
+in question then picture order. `parse_ask_request(body)` reads the manager's `{"sprint_id", "secret", "round"}`
+(exactly those keys, plus an optional `"dry_run"` that must be `true`) and returns `(sprint_id, secret, round,
+dry_run)`, `round` an object whose keys are a subset of `questions, blocker`; `parse_round_answer(body)` reads the
+page's body, one or both of `choice` and `text`, and returns `(project_id, sprint_id, round_id, index, choice,
+text)` with an absent one None; `parse_look_retry(body)` reads the page's retry of a look card's approval, exactly
+`{"project_id", "sprint_id", "round": <int >= 1>, "question": <int >= 0>}`, and returns `(project_id, sprint_id,
+round_id, index)`. All three are `ValueError` on anything else, a repeated key, NaN or nesting too deep.
 
-The fold keeps each open sprint's `Question`s on `SprintState.questions`, ordered by `(round_id,
-index)`. A `questions.asked` row changes a sprint only when it is open, its brief is approved
-(`STARTING`) and `checked_round(..., limits=False)` accepts the row's `questions` and `blocker`
-(absent: false), so a logged round over a limit folds whole and renders cut; each
-checked question is then added with `round_id` the row's `seq`, its `index` and `at`, and its
-`look` kept as a `QuestionLook`, its `needs_words` (`Question.needs_words`, `()` when the round
-gave none) and `owner_only`
-(`Question.owner_only`, false unless the round marked it: a question only the console's owner
-answers, #1263) and `consequential` (`Question.consequential`, false unless the round marked it: the
-page opens its card with nothing picked, #1265). Each checked
-question's pictures become `Question.pictures`, `QuestionPicture`s in order. A `picture.stored`
-row adds its `picture` to `SprintState.pictures` when its `sprint_id` is folded and `picture` fully
-matches `PICTURE_ID`; any other such row changes nothing. A `questions.asked`, `brief.sent` or
-`sprint.reported` row of a folded sprint adds the members of its top-level `pictures` list that
-fully match `PICTURE_ID`, whether or not the row itself applied, so a sprint still owns a picture
-its kept row names after retention has removed the `picture.stored` row. A `brief.sent` or
-`sprint.reported` row that applies also reads its pictures back: `Brief.pictures` and
-`Report.pictures` are the `QuestionPicture`s of `checked_pictures(owner, <the logged pictures>,
-limits=False)`, so a logged line over `MAX_PICTURE_LINE_CHARS` folds whole and renders cut, and are
-`()` when the key is absent or that check refuses; a refusal there never drops the brief or the
-report. The fold does not enforce one open round;
-the service does. A `question.answered` row applies only when its `round`
-and `index` (ints, not bools) name an unanswered question of the sprint, its `answer` is a string and
-its `chosen` is null or one of the question's options: the question then keeps `answer`, `chosen`,
-`answered_at` (the row's `at`) and `differs`, computed as `chosen != recommended` (the row's own
-`differs` is not trusted; the owner's own words, `chosen` null, always differ), and the sprint gains
-a `MESSAGE_ANSWER` message (`text` the answer, plus `question`, `round_id`, `chosen`). A row that
-also carries `words` applies only when `words` is a string and `chosen` is not null (an option and
-the owner's words together; `answer` and `chosen` are then the option's text), else it changes
-nothing; the question and message then keep `words` (`Question.words`, `Message.words`), and
-`differs` is `chosen != recommended` either way. An answer
-on a question with a `look` whose `chosen` equals `look.approve` and whose row's `look` equals the
-question's `(issue, pr, head)` and names a `repo` (`owner/name`, the repository the console read it
-for) sets `look_state` to `"posting"` (and `look_message` to the row's `seq`, `look_repo` to the
-`repo`, which a retry posts to) and its message is `held`: `unread` leaves a held message out and no `sprint.read` or
-`sprint.nudged` watermark marks it read or delivered, so the approval reaches the manager only after
-the console has posted it; the `repo` must equal the `look_repo` the `questions.asked` row bound to the
-card when it was issued (`QuestionLook.repo`; a card without one accepts the logged repo), else the answer is an
-ordinary one; any other answer to a look question is an ordinary answer (`look_state` None, not held). A `look.recorded` row names a question by its `round` and `index`: `posted`
-applies when `look_state` is `"posting"` or `"failed"` and `message` is the held answer's id
-(`look_state` `"posted"`, `look_comment` the `comment_id`, the message no longer held, so the next
-read marks it once), `failed` under the same conditions (`look_state` `"failed"`, `look_reason`,
-the message stays held; a later `posted` still applies), `moved` on an unanswered, unwithdrawn look
-question (`look_state` `"moved"`, `look_found`, `look_found_state`; the question stays open and an approving
-answer replaces it with `"posting"`) and, with a `message` that is the held answer's id, on that answered
+The fold keeps each open sprint's `Question`s on `SprintState.questions`, ordered by `(round_id, index)`. A
+`questions.asked` row changes a sprint only when it is open, its brief is approved (`STARTING`) and
+`checked_round(..., limits=False)` accepts the row's `questions` and `blocker` (absent: false), so a logged round
+over a limit folds whole and renders cut; each checked question is then added with `round_id` the row's `seq`, its
+`index` and `at`, and its `look` kept as a `QuestionLook`, its `needs_words` (`Question.needs_words`, `()` when the
+round gave none) and `owner_only` (`Question.owner_only`, false unless the round marked it: a question only the
+console's owner answers, #1263) and `consequential` (`Question.consequential`, false unless the round marked it: the
+page opens its card with nothing picked, #1265) and `action` (`Question.action`, None when the round gave none) and
+`action_used_at` (`action_card.folded_use`). Each checked question's pictures become `Question.pictures`,
+`QuestionPicture`s in order. A `picture.stored` row adds its `picture` to `SprintState.pictures` when its
+`sprint_id` is folded and `picture` fully matches `PICTURE_ID`; any other such row changes nothing. A
+`questions.asked`, `brief.sent` or `sprint.reported` row of a folded sprint adds the members of its top-level
+`pictures` list that fully match `PICTURE_ID`, whether or not the row itself applied, so a sprint still owns a
+picture its kept row names after retention has removed the `picture.stored` row. A `brief.sent` or `sprint.reported`
+row that applies also reads its pictures back: `Brief.pictures` and `Report.pictures` are the `QuestionPicture`s of
+`checked_pictures(owner, <the logged pictures>, limits=False)`, so a logged line over `MAX_PICTURE_LINE_CHARS` folds
+whole and renders cut, and are `()` when the key is absent or that check refuses; a refusal there never drops the
+brief or the report. The fold does not enforce one open round; the service does. A `question.answered` row applies
+only when its `round` and `index` (ints, not bools) name an unanswered question of the sprint, its `answer` is a
+string and its `chosen` is null or one of the question's options: the question then keeps `answer`, `chosen`,
+`answered_at` (the row's `at`) and `differs`, computed as `chosen != recommended` (the row's own `differs` is not
+trusted; the owner's own words, `chosen` null, always differ), and the sprint gains a `MESSAGE_ANSWER` message
+(`text` the answer, plus `question`, `round_id`, `chosen`). A row that also carries `words` applies only when
+`words` is a string and `chosen` is not null (an option and the owner's words together; `answer` and `chosen` are
+then the option's text), else it changes nothing; the question and message then keep `words` (`Question.words`,
+`Message.words`), and `differs` is `chosen != recommended` either way. An answer on a question with a `look` whose
+`chosen` equals `look.approve` and whose row's `look` equals the question's `(issue, pr, head)` and names a `repo`
+(`owner/name`, the repository the console read it for) sets `look_state` to `"posting"` (and `look_message` to the
+row's `seq`, `look_repo` to the `repo`, which a retry posts to) and its message is `held`: `unread` leaves a held
+message out and no `sprint.read` or `sprint.nudged` watermark marks it read or delivered, so the approval reaches
+the manager only after the console has posted it; the `repo` must equal the `look_repo` the `questions.asked` row
+bound to the card when it was issued (`QuestionLook.repo`; a card without one accepts the logged repo), else the
+answer is an ordinary one; any other answer to a look question is an ordinary answer (`look_state` None, not held).
+A `look.recorded` row names a question by its `round` and `index`: `posted` applies when `look_state` is `"posting"`
+or `"failed"` and `message` is the held answer's id (`look_state` `"posted"`, `look_comment` the `comment_id`, the
+message no longer held, so the next read marks it once), `failed` under the same conditions (`look_state`
+`"failed"`, `look_reason`, the message stays held; a later `posted` still applies), `moved` on an unanswered,
+unwithdrawn look question (`look_state` `"moved"`, `look_found`, `look_found_state`; the question stays open and an
+approving answer replaces it with `"posting"`) and, with a `message` that is the held answer's id, on that answered
 question while its `look_state` is `"posting"` or `"failed"`: the console found the pull request moved or ended
-after it kept the answer and before it posted it, so the answer is taken back (`answer`, `chosen`,
-`answered_at`, `look_message` and `look_repo` cleared, its held message removed and never offered to the manager)
-and the question is open again, replaceable or withdrawable by the manager, in the `"moved"` state. Either `moved` row also
-adds one `MESSAGE_LOOK_MOVED` message (id the row's `seq`, `text` `LOOK_MOVED_OPEN` naming the head now found, or
-`LOOK_MOVED_ENDED` when the pull request is closed or merged, `round_id` the card's) so an idle manager is told the card
-is stale: a repeat of the first kind while an identical notice is unread adds none. The owner's panel never shows it
-(`view._shown_messages`); any other `look.recorded` row,
-an unknown `outcome` or a malformed member changes nothing. `pending_looks(state)` is the
-answered questions whose `look_state` is `"posting"` or `"failed"` in `(round_id, index)` order,
-none once the sprint has `stopped_at` or a `closing`. A second
-answer, or any other such row, changes nothing, and so does an answer naming a withdrawn question:
-no answer and no message. A `question.withdrawn` row (#1099) changes a sprint only when
-`takes_questions(state)` holds and its `round` and `index` (ints, not bools) name an unanswered,
-unwithdrawn question of the sprint: that question's `withdrawn_at` becomes the row's `at`. A
-`questions.asked` row the fold accepts first withdraws each own open question its `replaces` marks
-name (`withdrawn_at` the row's `at`, `replaced_by` the row's `seq`), then adds its questions; a mark
-naming anything else is ignored and the round still folds. `withdrawable(state, round_id, index,
-others=())` returns the open question of `state` or raises `Refused`, in this order:
-`QUESTION_FOREIGN` when the pair is no question of `state` but one of a sprint in `others`, else
-`UNKNOWN_QUESTION`; `ANSWERED_ALREADY`; `WITHDRAWN_ALREADY`. (`TAKEN_BACK` is the answer's refusal
-for a withdrawn question.) `parse_withdraw_question_request(body)` reads the manager's
-`{"sprint_id", "secret", "round": <int >= 1>, "index": <int >= 0>}` and returns `(sprint_id,
-secret, round_id, index)`, as strict as `parse_ask_request`. `open_questions(state)` is the
-unanswered, unwithdrawn questions in `(round_id, index)` order, none once the sprint has `stopped_at` or a `closing`, and `round_open(state)` is true while there is one.
-`takes_questions(state)` is false once the sprint has `stopped_at`, a `closing` or has ended (`ended_at`); then
-a `questions.asked` or `question.answered` row changes nothing (the service refuses `ENDED`). An answer's inbox
-entry is `{"id", "kind": "answer", "version": null, "text": <the answer>, "at", "question":
-<question text>, "round": <int>, "chosen": <option text> | null, "words": <str> | null}`, where
-`words` is the message's `words` when set, else its `text` when `chosen` is null (the owner's own
-words), else null (an option alone); every other entry keeps its five keys.
+after it kept the answer and before it posted it, so the answer is taken back (`answer`, `chosen`, `answered_at`,
+`look_message` and `look_repo` cleared, its held message removed and never offered to the manager) and the question
+is open again, replaceable or withdrawable by the manager, in the `"moved"` state. Either `moved` row also adds one
+`MESSAGE_LOOK_MOVED` message (id the row's `seq`, `text` `LOOK_MOVED_OPEN` naming the head now found, or
+`LOOK_MOVED_ENDED` when the pull request is closed or merged, `round_id` the card's) so an idle manager is told the
+card is stale: a repeat of the first kind while an identical notice is unread adds none. The owner's panel never
+shows it (`view._shown_messages`); any other `look.recorded` row, an unknown `outcome` or a malformed member changes
+nothing. `pending_looks(state)` is the answered questions whose `look_state` is `"posting"` or `"failed"` in
+`(round_id, index)` order, none once the sprint has `stopped_at` or a `closing`. A second answer, or any other such
+row, changes nothing, and so does an answer naming a withdrawn question: no answer and no message. A
+`question.withdrawn` row (#1099) changes a sprint only when `takes_questions(state)` holds and its `round` and
+`index` (ints, not bools) name an unanswered, unwithdrawn question of the sprint: that question's `withdrawn_at`
+becomes the row's `at`. A `questions.asked` row the fold accepts first withdraws each own open question its
+`replaces` marks name (`withdrawn_at` the row's `at`, `replaced_by` the row's `seq`), then adds its questions; a
+mark naming anything else is ignored and the round still folds. `withdrawable(state, round_id, index, others=())`
+returns the open question of `state` or raises `Refused`, in this order: `QUESTION_FOREIGN` when the pair is no
+question of `state` but one of a sprint in `others`, else `UNKNOWN_QUESTION`; `ANSWERED_ALREADY`;
+`WITHDRAWN_ALREADY`. (`TAKEN_BACK` is the answer's refusal for a withdrawn question.)
+`parse_withdraw_question_request(body)` reads the manager's `{"sprint_id", "secret", "round": <int >= 1>, "index":
+<int >= 0>}` and returns `(sprint_id, secret, round_id, index)`, as strict as `parse_ask_request`.
+`open_questions(state)` is the unanswered, unwithdrawn questions in `(round_id, index)` order, none once the sprint
+has `stopped_at` or a `closing`, and `round_open(state)` is true while there is one. `takes_questions(state)` is
+false once the sprint has `stopped_at`, a `closing` or has ended (`ended_at`); then a `questions.asked` or
+`question.answered` row changes nothing (the service refuses `ENDED`). An answer's inbox entry is `{"id", "kind":
+"answer", "version": null, "text": <the answer>, "at", "question": <question text>, "round": <int>, "chosen":
+<option text> | null, "words": <str> | null}`, where `words` is the message's `words` when set, else its `text` when
+`chosen` is null (the owner's own words), else null (an option alone); every other entry keeps its five keys.
 
-Notices (#1117, ADR-console-044) are what a sprint's manager tells the other managers of its
-project: a `claim` ("I am working in this area until ..."), a `heads-up` or a `hand-off` (to the
-owner or to another open sprint of the project). They are information, never approval. Two rows
-carry them, both kept (`event_log.NOTICE_POSTED`, `NOTICE_WITHDRAWN`; each with the project in its
-project column):
+Notices (#1117, ADR-console-044) are what a sprint's manager tells the other managers of its project: a `claim` ("I
+am working in this area until ..."), a `heads-up` or a `hand-off` (to the owner or to another open sprint of the
+project). They are information, never approval. Two rows carry them, both kept (`event_log.NOTICE_POSTED`,
+`NOTICE_WITHDRAWN`; each with the project in its project column):
 
     notice.posted     {"sprint_id", "goal": <str>, "notice": {"kind", "text", "what"?, "until"?,
                        "issue"?, "live_fault"?, "to"?}}
@@ -539,61 +517,51 @@ A third row, `notice.nudged {"sprint_id", "notice", "route", "ok", "reason"?, "l
 "permission"?: {"mode", "reason"}}` (`event_log.NOTICE_NUDGED`, not kept), is the nudge an owner's notice
 cost a manager; the fold reads only its `permission`.
 
-`checked_notice(notice)` returns a new dict of exactly the kind's members (`NOTICE_MEMBERS`: a claim
-has kind, text, what, until, issue and live_fault; a heads-up kind and text; a hand-off kind, text and to), texts
-stripped, or raises `Refused` at the first failure, in this order: not an object
-(`NOTICE_NOT_OBJECT`); `kind` missing or not in `NOTICE_KINDS` (`NOTICE_KIND`); a key outside the
-kind's members (`NOTICE_EXTRA`, one fixed text per kind that never carries the key); then `text`,
-then a claim's `what`, then its `until`: not a string, without a visible character, holding an
-unpaired surrogate or holding a line break (`NOTICE_MEMBER`), or longer than `MAX_NOTICE_TEXT_CHARS` / `MAX_CLAIM_WHAT_CHARS` /
-`MAX_CLAIM_UNTIL_CHARS` after stripping (`NOTICE_TOO_LONG`); then, for a claim, `issue`
-(optional; an int of at least 1, not a bool) and `live_fault` (optional; a bool), each refused as
-`NOTICE_MEMBER`; then a hand-off's `to`, which is `"owner"` or a sprint id (`NOTICE_MEMBER`).
-Every notice refusal is one line built only from fixed
-kinds, member names and limits, never from a key or value the manager sent, because the command
-prints it and the service answers it as it is. `takes_notices(state)` is `takes_questions(state)`
-and no stop requested. `postable_notice(state, notice, others)` refuses, in order: a sprint that
-takes no notice (`ALREADY_STOPPING` while a stop waits, else `ENDED`); `checked_notice`; for a claim,
-no `issue` (`NOTICE_MEMBER`), then no part in its `what` (`claim_parts`: split on commas, stripped,
-empty parts and repeats dropped; `NOTICE_MEMBER`), then a part outside the project (absolute or with
-a `..` segment, `outside_claim_part`; `CLAIM_OUTSIDE`), and only then a part naming a whole folder
-tree (`wide_claim_part`: a trailing slash, the root, a `**`, a last segment `*`, or a directory
-`is_folder` reports; `CLAIM_FOLDER`), so no path leaving the project reaches `is_folder`; the
-checked claim keeps `what` as written and `claim_path` / `claim_paths` give the normalized
-comparison keys; for a hand-off to a sprint, its own id (`NOTICE_TO_SELF`) or an id that is no sprint of `others` of the
-same project that takes notices (`NOTICE_TO_REFUSED`); and a sixth open notice (`NOTICE_LIMIT`);
-it never looks at another sprint's claims. `withdrawable_notice(state, notice_id, others)` refuses
-a sprint that takes no notice as `postable_notice` does, then returns the open notice of `state`,
-or raises `NOTICE_ENDED` (withdrawn or ended), `NOTICE_FOREIGN` (a notice of a sprint in `others`)
-or `NOTICE_UNKNOWN`. `open_notices(state)` is the notices neither withdrawn nor ended, in id order
-(the row's `seq`); `notice_entry` and `project_notices(states, project_id)` are the wire entries
-`{"id", "sprint_id", "title", "kind", "text", "at"}` plus `"what"`, `"until"`, `"issue"`,
-`"live_fault"` and `"started"` for a claim (the lowest notice id of the sprint's claims, withdrawn and
-ended ones included, naming the same issue, so a withdrawn and reposted claim keeps its slice's start;
-the claim's own id when it names no issue) and
-`"to"` for a hand-off, of the project's open notices in id order.
-`claim_overlaps(entries)` is the console's reading of those entries (#1337, D5-D8): one dict per pair
-of claims of two different sprints whose paths overlap, `{"claims": [a, b], "sprints": [...],
-"files": [...], "first", "rule"}`, `a` being the claim with the lower `started`. Paths are
-compared segment by segment (`claim_paths`, `*` never crosses a `/`, a shorter path reads as a folder);
-the rule is `OVERLAP_EARLIER` (the earlier-started slice is `first`), `OVERLAP_FAULT` (the one live-fault
-fix is `first`, even when the feature started earlier) or `OVERLAP_UNSETTLED` (both fix a live fault:
-`first` None; the owner's page shows it as one line (#1347) and no sprint asks). The console refuses
-nothing because of an overlap.
-`notice_block` ends with one `- overlap with "<title>" on <files>: ...` line per reading naming the
-reader's sprint, saying who lands first (or, unsettled, that the rule cannot order them and the
-owner sees it on the page). `notice_block(entries, sprint_id,
-now_ms)` renders those entries for the manager of `sprint_id` under `NOTICE_BLOCK_HEAD`, one line
-per entry of another sprint (the sprint's own notices are left out), in the order given, and is
-`""` when no other sprint's notice is open. The four line forms are
-`- claim from "<title>", <age>: <text> (what: <what>; until: <until>)`,
-`- heads-up from "<title>", <age>: <text>`, `- hand-off for you from "<title>", <age>: <text>`
-(a hand-off whose `to` is `sprint_id`) and `- hand-off from "<title>", <age>: <text>`; the age is
-`ago_text` over the entry's `at`. Every field's whitespace runs collapse to one space, so each
-notice is one line beginning with `- `. `parse_notice_request(body)`
-reads `{"sprint_id", "secret", "notice": <object>}` and returns `(sprint_id, secret, notice)`;
-`parse_withdraw_notice_request(body)` reads `{"sprint_id", "secret", "notice": <int >= 1>}` and
-returns `(sprint_id, secret, notice_id)`; both are as strict as `parse_ask_request`.
+`checked_notice(notice)` returns a new dict of exactly the kind's members (`NOTICE_MEMBERS`: a claim has kind, text,
+what, until, issue and live_fault; a heads-up kind and text; a hand-off kind, text and to), texts stripped, or
+raises `Refused` at the first failure, in this order: not an object (`NOTICE_NOT_OBJECT`); `kind` missing or not in
+`NOTICE_KINDS` (`NOTICE_KIND`); a key outside the kind's members (`NOTICE_EXTRA`, one fixed text per kind that never
+carries the key); then `text`, then a claim's `what`, then its `until`: not a string, without a visible character,
+holding an unpaired surrogate or holding a line break (`NOTICE_MEMBER`), or longer than `MAX_NOTICE_TEXT_CHARS` /
+`MAX_CLAIM_WHAT_CHARS` / `MAX_CLAIM_UNTIL_CHARS` after stripping (`NOTICE_TOO_LONG`); then, for a claim, `issue`
+(optional; an int of at least 1, not a bool) and `live_fault` (optional; a bool), each refused as `NOTICE_MEMBER`;
+then a hand-off's `to`, which is `"owner"` or a sprint id (`NOTICE_MEMBER`). Every notice refusal is one line built
+only from fixed kinds, member names and limits, never from a key or value the manager sent, because the command
+prints it and the service answers it as it is. `takes_notices(state)` is `takes_questions(state)` and no stop
+requested. `postable_notice(state, notice, others)` refuses, in order: a sprint that takes no notice
+(`ALREADY_STOPPING` while a stop waits, else `ENDED`); `checked_notice`; for a claim, no `issue` (`NOTICE_MEMBER`),
+then no part in its `what` (`claim_parts`: split on commas, stripped, empty parts and repeats dropped;
+`NOTICE_MEMBER`), then a part outside the project (absolute or with a `..` segment, `outside_claim_part`;
+`CLAIM_OUTSIDE`), and only then a part naming a whole folder tree (`wide_claim_part`: a trailing slash, the root, a
+`**`, a last segment `*`, or a directory `is_folder` reports; `CLAIM_FOLDER`), so no path leaving the project
+reaches `is_folder`; the checked claim keeps `what` as written and `claim_path` / `claim_paths` give the normalized
+comparison keys; for a hand-off to a sprint, its own id (`NOTICE_TO_SELF`) or an id that is no sprint of `others` of
+the same project that takes notices (`NOTICE_TO_REFUSED`); and a sixth open notice (`NOTICE_LIMIT`); it never looks
+at another sprint's claims. `withdrawable_notice(state, notice_id, others)` refuses a sprint that takes no notice as
+`postable_notice` does, then returns the open notice of `state`, or raises `NOTICE_ENDED` (withdrawn or ended),
+`NOTICE_FOREIGN` (a notice of a sprint in `others`) or `NOTICE_UNKNOWN`. `open_notices(state)` is the notices
+neither withdrawn nor ended, in id order (the row's `seq`); `notice_entry` and `project_notices(states, project_id)`
+are the wire entries `{"id", "sprint_id", "title", "kind", "text", "at"}` plus `"what"`, `"until"`, `"issue"`,
+`"live_fault"` and `"started"` for a claim (the lowest notice id of the sprint's claims, withdrawn and ended ones
+included, naming the same issue, so a withdrawn and reposted claim keeps its slice's start; the claim's own id when
+it names no issue) and `"to"` for a hand-off, of the project's open notices in id order. `claim_overlaps(entries)`
+is the console's reading of those entries (#1337, D5-D8): one dict per pair of claims of two different sprints whose
+paths overlap, `{"claims": [a, b], "sprints": [...], "files": [...], "first", "rule"}`, `a` being the claim with the
+lower `started`. Paths are compared segment by segment (`claim_paths`, `*` never crosses a `/`, a shorter path reads
+as a folder); the rule is `OVERLAP_EARLIER` (the earlier-started slice is `first`), `OVERLAP_FAULT` (the one
+live-fault fix is `first`, even when the feature started earlier) or `OVERLAP_UNSETTLED` (both fix a live fault:
+`first` None; the owner's page shows it as one line (#1347) and no sprint asks). The console refuses nothing because
+of an overlap. `notice_block` ends with one `- overlap with "<title>" on <files>: ...` line per reading naming the
+reader's sprint, saying who lands first (or, unsettled, that the rule cannot order them and the owner sees it on the
+page). `notice_block(entries, sprint_id, now_ms)` renders those entries for the manager of `sprint_id` under
+`NOTICE_BLOCK_HEAD`, one line per entry of another sprint (the sprint's own notices are left out), in the order
+given, and is `""` when no other sprint's notice is open. The four line forms are `- claim from "<title>", <age>:
+<text> (what: <what>; until: <until>)`, `- heads-up from "<title>", <age>: <text>`, `- hand-off for you from
+"<title>", <age>: <text>` (a hand-off whose `to` is `sprint_id`) and `- hand-off from "<title>", <age>: <text>`; the
+age is `ago_text` over the entry's `at`. Every field's whitespace runs collapse to one space, so each notice is one
+line beginning with `- `. `parse_notice_request(body)` reads `{"sprint_id", "secret", "notice": <object>}` and
+returns `(sprint_id, secret, notice)`; `parse_withdraw_notice_request(body)` reads `{"sprint_id", "secret",
+"notice": <int >= 1>}` and returns `(sprint_id, secret, notice_id)`; both are as strict as `parse_ask_request`.
 
 The owner posts a notice too (#1120, ADR-console-044): a heads-up to every sprint of one project,
 information only. It reuses the two kept rows with the project in the project column and no
@@ -758,7 +726,8 @@ from fractions import Fraction
 from pathlib import Path
 
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
-from agent_tools.console import deliveries
+from agent_tools.console import action_card, deliveries
+from agent_tools.console.action_card import ActionPermitRequest, QuestionAction
 from agent_tools.console.deliveries import DELIVERY_SEEN
 from agent_tools.console.event_log import (BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, FAULT_DECLARED,
                                            FAULT_WITHDRAWN, GOAL_STATED,
@@ -768,7 +737,7 @@ from agent_tools.console.event_log import (BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_
                                            MANAGER_WOKEN, NOTICE_NUDGED, NOTICE_POSTED,
                                            normal_login,
                                            NOTICE_WITHDRAWN,
-                                           PICTURE_STORED, QUESTION_ANSWERED,
+                                           PERMIT_JUDGED, PICTURE_STORED, QUESTION_ANSWERED,
                                            QUESTION_WITHDRAWN, QUESTIONS_ASKED,
                                            SPRINT_ANSWERED, SPRINT_CLOSED, SPRINT_CONTINUED,
                                            SPRINT_MESSAGED, SPRINT_NUDGED, SPRINT_READ,
@@ -1228,6 +1197,8 @@ class Question:
     answered_by: str | None = None
     owner_only: bool = False
     consequential: bool = False
+    action: QuestionAction | None = None
+    action_used_at: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1527,12 +1498,14 @@ class PermitRequest:
     command: str
 
 
-def parse_permit_request(body: bytes) -> PermitRequest:
-    """The manager's permit request: an object of exactly the five members, none repeated (#1377)."""
-    value = _object(body, {"sprint_id", "secret", "phase", "session_id", "tool_use_id", "command"},
-                    project=False)
+def parse_permit_request(body: bytes) -> PermitRequest | ActionPermitRequest:
+    """The manager's permit request (#1377): six members, or, with a `nonce`, `action_card`'s signed body."""
+    decoded = _decoded(body)
+    signed = isinstance(decoded, dict) and "nonce" in decoded
+    value = _object(body, action_card.PERMIT_KEYS if signed else
+                    {"sprint_id", "secret", "phase", "session_id", "tool_use_id", "command"}, project=False)
     sprint_id = _sprint_id(value["sprint_id"])
-    if not isinstance(value["secret"], str):
+    if not signed and not isinstance(value["secret"], str):
         raise ValueError("secret must be a string")
     if value["phase"] not in PERMIT_PHASES:
         raise ValueError("phase must be judge or landed")
@@ -1542,6 +1515,8 @@ def parse_permit_request(body: bytes) -> PermitRequest:
     tool_use_id = value["tool_use_id"]
     if not isinstance(tool_use_id, str) or not 1 <= len(tool_use_id) <= MAX_PERMIT_SESSION_CHARS:
         raise ValueError("tool_use_id must be a string of 1 to 128 characters")
+    if signed:
+        return action_card.permit_request(value, (sprint_id, value["phase"], session_id, tool_use_id))
     command = value["command"]
     if not isinstance(command, str) or len(command) > MAX_PERMIT_COMMAND_CHARS:
         raise ValueError("command must be a string of at most 8192 characters")
@@ -1755,7 +1730,7 @@ def _checked_question(n: int, question: object, limits: bool, files_withheld: bo
                                                                 "options", "recommended",
                                                                 "needs_words", "owner_only",
                                                                 "consequential", "pictures",
-                                                                "look", "replaces"}:
+                                                                "look", "replaces", "action"}:
         raise Refused(QUESTION_SHAPE.format(n=n))
     text, blocks = question.get("question"), question.get("blocks")
     if not _text(text):
@@ -1809,6 +1784,8 @@ def _checked_question(n: int, question: object, limits: bool, files_withheld: bo
         raise Refused(OWNER_ONLY_SHAPE.format(n=n))
     if "consequential" in question and question["consequential"] is not True:
         raise Refused(CONSEQUENTIAL_SHAPE.format(n=n))
+    if refused := action_card.refusal(n, question, stripped, kept if "needs_words" in question else []):
+        raise Refused(refused)
     replaces = question.get("replaces")
     if "replaces" in question and not _replaces_mark(replaces):
         raise Refused(REPLACES_SHAPE.format(n=n))
@@ -1834,6 +1811,9 @@ def _checked_question(n: int, question: object, limits: bool, files_withheld: bo
     if "look" in question:
         checked["look"] = {"issue": look["issue"], "pr": look["pr"], "head": look["head"],
                            "approve": look["approve"].strip()}
+    if "action" in question:
+        checked["action"] = {"command": question["action"]["command"],
+                             "approve": question["action"]["approve"].strip()}
     if "replaces" in question:
         checked["replaces"] = {"round": replaces["round"], "index": replaces["index"]}
     return checked
@@ -2795,6 +2775,7 @@ def _folded_question(state: SprintState, event: Event) -> SprintState:
                                needs_words=tuple(row.get("needs_words", ())),
                                owner_only=row.get("owner_only", False) is True,
                                consequential=row.get("consequential", False) is True,
+                               action=QuestionAction(**row["action"]) if "action" in row else None,
                                pictures=tuple(QuestionPicture(p["picture"], p["line"],
                                                               p.get("pair"))
                                               for p in row.get("pictures", ())))
@@ -3146,6 +3127,8 @@ def sprint_states(events: Iterable[Event],
                 folded[sprint_id] = _folded_row_pictures(folded[sprint_id], event)
         elif event.kind == LOOK_RECORDED and sprint_id in folded:
             folded[sprint_id] = _folded_look(folded[sprint_id], event)
+        elif event.kind == PERMIT_JUDGED and sprint_id in folded:
+            folded[sprint_id] = action_card.folded_use(folded[sprint_id], event)
         elif event.kind in (NOTICE_POSTED, NOTICE_WITHDRAWN) and sprint_id in folded:
             folded[sprint_id] = _folded_notice(folded[sprint_id], event)
         elif event.kind in (FAULT_DECLARED, FAULT_WITHDRAWN) and sprint_id in folded:

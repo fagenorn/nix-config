@@ -53,7 +53,11 @@ async def nothing(*args, **kwargs):
     pass
 
 
-class VLMBatchedEngine:
+class BatchedEngine:
+    """Stand-in for upstream's type check; the probe engine is never one."""
+
+
+class VLMBatchedEngine(BatchedEngine):
     """Stand-in for upstream's type check; the probe engine is never one."""
 
 
@@ -71,7 +75,8 @@ class AdapterRouteTest(unittest.TestCase):
         )
         self.namespace = {
             "__name__": "omlx_adapter_route_probe", "inspect": inspect,
-            "asyncio": asyncio, "VLMBatchedEngine": VLMBatchedEngine,
+            "asyncio": asyncio, "BatchedEngine": BatchedEngine,
+            "VLMBatchedEngine": VLMBatchedEngine,
             "logger": logging.getLogger(__name__),
             "InvalidRequestError": InvalidRequestError,
             "HTTPException": RuntimeError,
@@ -80,7 +85,13 @@ class AdapterRouteTest(unittest.TestCase):
             "forced_ct_keys": forced_ct_keys,
             "MINIMAX_M3_MODEL_TYPES": frozenset({"minimax_m3", "minimax_m3_vl"}),
             "_AUTO_MODE_CLASSIFIER_THINKING_BUDGET": 256,
-            "_server_state": SimpleNamespace(oq_manager=None, mcp_manager=None),
+            "_server_state": SimpleNamespace(
+                oq_manager=None, mcp_manager=None, global_settings=None,
+            ),
+            # The probe's requests carry no web_search tool.
+            "maybe_handle_anthropic_web_search": nothing,
+            # The probe engine attaches no SpecPrefill draft.
+            "_specprefill_kwargs": lambda engine, model, resolved_model: {},
             "_LLMEngineLease": Lease,
             "_resolve_gpu_power_limit": lambda request, model: None,
             "dataclass": dataclass,

@@ -4,9 +4,21 @@
   "agent-model-matrix": null,
   "artifact-budget": null,
   "attempt-budget": null,
+  "branch-delete": {
+    "verdicts": []
+  },
   "bypass-proof": null,
   "cache-proxy": null,
   "cleanup-issue": null,
+  "closing": {
+    "subcommands": {
+      "read": ["merged", "unmerged", "error"],
+      "worktree": ["removed", "dirty", "error"],
+      "forward": ["forwarded", "skipped", "error"],
+      "branch": ["gone", "kept", "error"],
+      "issue": ["closed", "open-criteria", "error"]
+    }
+  },
   "comment-lint": null,
   "conformance": null,
   "console": null,
@@ -28,6 +40,11 @@
         "lost_to",
         "error"
       ],
+      "release": [
+        "released",
+        "not_held",
+        "error"
+      ],
       "renew": [
         "renewed",
         "not_held",
@@ -42,6 +59,9 @@
     }
   },
   "forge-issue": null,
+  "git-push": {
+    "verdicts": []
+  },
   "guard-policy": null,
   "host-readiness": null,
   "independent-review": {
@@ -85,6 +105,18 @@
       ]
     }
   },
+  "landing": {
+    "subcommands": {
+      "prepare": ["ready", "unverified", "error"],
+      "pushed": ["pushed", "head-moved", "absent", "error"],
+      "pull": ["open", "absent", "error"],
+      "merged": ["merged", "open", "error"],
+      "lock": ["held", "contended", "no-pull", "error"],
+      "checks": ["green", "red", "pending", "moved", "error"],
+      "held": ["held", "retaken", "contended", "no-pull", "error"],
+      "unlock": ["released", "unreleased"]
+    }
+  },
   "lint-time": null,
   "look-approval": {
     "subcommands": {
@@ -100,7 +132,13 @@
   "omlx-memory-watch": null,
   "owner-actions": null,
   "plan-amend": null,
+  "pr-create": {
+    "verdicts": []
+  },
   "pr-green": null,
+  "pr-merge": {
+    "verdicts": []
+  },
   "program-copies": null,
   "promotion": null,
   "release": null,

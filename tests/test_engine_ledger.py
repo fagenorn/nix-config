@@ -260,6 +260,7 @@ class EventShapeTest(unittest.TestCase):
             with self.subTest(variant=variant), self.assertRaises(LedgerError):
                 engine_ledger.validate_event(variant)
         engine_ledger.validate_event({**EXAMPLES["wait_started"], "until": None})
+        engine_ledger.validate_event({**EXAMPLES["wait_started"], "wait": "checks"})
 
     def test_optional_members_round_trip_and_are_checked(self):
         validate = engine_ledger.validate_event
