@@ -35,6 +35,7 @@ from __future__ import annotations
 import json
 from collections.abc import Sequence
 
+from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
 from agent_tools.console import inbox
 
 LABEL = "needs-verification"
@@ -90,8 +91,9 @@ def parse_written(written: list[dict]) -> list[dict]:
     checks = []
     for entry in written:
         try:
-            check = json.loads(entry["check"])
-        except (TypeError, KeyError, ValueError):
+            check = json.loads(entry["check"], object_pairs_hook=reject_duplicate_keys,
+                               parse_constant=reject_nonfinite_literal)
+        except (TypeError, KeyError, ValueError, RecursionError):
             continue
         if _object(check):
             checks.append(check)

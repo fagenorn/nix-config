@@ -161,6 +161,13 @@ class WrittenTest(unittest.TestCase):
                    {"ac": "AC4", "check": "[1]"}]
         self.assertEqual(holding.parse_written(entries), [EVIDENCE])
 
+    def test_parse_written_drops_a_check_that_is_not_strict_json(self):
+        nonfinite = json.dumps(EVIDENCE)[:-1] + ', "expect": NaN}'
+        repeated = json.dumps(EVIDENCE)[:-1] + ', "run": {"command": "lint"}}'
+        entries = [{"ac": "AC2", "check": nonfinite}, {"ac": "AC2", "check": repeated}]
+        self.assertEqual(holding.parse_written(entries), [])
+        self.assertEqual(gate(written=entries)["verdict"], "missing-checks")
+
 
 class StaleTest(unittest.TestCase):
     def test_stale_names_a_child_fence_or_an_own_fence_with_results(self):
