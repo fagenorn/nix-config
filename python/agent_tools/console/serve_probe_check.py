@@ -5,7 +5,7 @@ loopback (`--port`, default `service.DEFAULT_PORT`) and judges `sharing.last_req
 one diagnostics reading of the last request on the guest door (`guest.reading`, never a login value).
 It makes one loopback GET and no other network call, and it writes nothing.
 
-What it shows: the guest door (a Unix socket, ADR-console-077 D4) admits a request only when its
+What it shows: the guest door (a Unix socket, ADR-console-077) admits a request only when its
 `Host` is exactly `localhost`, its one `X-Forwarded-Host` is exactly the tailnet name the console reads
 from this host's Tailscale client (ADR-console-078), with no port form, and exactly one
 `Tailscale-User-Login` header names a listed colleague. Nobody could
@@ -41,7 +41,7 @@ The rules, read in this order, each printing one line:
    reads as `client` `unknown`, so it waits at rule 7 for the activated console rather than failing;
 6. `forwarded_for` is false, a local request and not one through Serve: `not_through_serve`, 75;
 7. `client` is `this_host`, a request this host sent to itself, which proves nothing about the
-   tailnet's access rules (ADR-console-079 D5): `from_this_host`, 75; `client` is `unknown`, the
+   tailnet's access rules (ADR-console-079): `from_this_host`, 75; `client` is `unknown`, the
    console could not tell this host's address from another device's: `client_unknown`, 75; only
    `other_device` goes on;
 8. the reading's `reason` is `sharing_off` or `name_unread`: it was taken while sharing was off or the
@@ -62,7 +62,7 @@ The rules, read in this order, each printing one line:
 12. otherwise `met`, exit 0.
 
 A `with_port` or other result, or a `Host` that is not `localhost`, is not met: it shows the strict
-rule refuses what Serve sends, and the owner decides any change to the rule (ADR-console-077 D4),
+rule refuses what Serve sends, and the owner decides any change to the rule (ADR-console-077),
 never this check.
 
 Output: exactly one stdout line, `json.dumps(result, sort_keys=True)`. From rule 6 on it has

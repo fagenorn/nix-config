@@ -220,7 +220,7 @@ a refused notices request is exit 1. A status with no secret is not an error.
 sends `POST /api/permit` with `{"sprint_id", "secret", "phase": "judge" | "landed", "session_id",
 "tool_use_id", "command"}`; it prints at most one line and is always exit 0. For a command that
 `agent_tools.console.permit.mentions` rejects it contacts nothing and prints nothing; a mention is a
-merge, a rerun, the plain `release transaction run` (allowed, ADR-console-098) or a release abandon or
+merge, a rerun, the plain `release transaction run` (allowed, ADR-console-094) or a release abandon or
 dispose (denied). The request also
 carries the hook input's string `tool_use_id`, which names the one tool call, so a landed merge is paired
 with the allow of that same call; a command `mentions` accepts whose input has none is the failure below.
