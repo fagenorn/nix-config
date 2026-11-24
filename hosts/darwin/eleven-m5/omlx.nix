@@ -1,4 +1,5 @@
 {
+  config,
   lib,
   pkgs,
   username,
@@ -7,6 +8,7 @@
 let
   home = "/Users/${username}";
   modelDir = "${home}/.omlx/models";
+  budget = import ./memory-budget.nix;
 
   # The models oMLX serves. Each is downloaded into its own directory under modelDir (oMLX names
   # a model by that directory) and is also reachable by its alias. None of these is pinned (the
@@ -71,8 +73,8 @@ let
   };
 
   # 240 of 256 GB may be wired for the GPU; macOS's default (~75%) is too small for the
-  # 185 GB model plus its KV cache. The sysctl resets on reboot, hence a boot daemon. The ~16 GB
-  # left over also holds Colima's 8 GiB VM (docker.nix), so raising this squeezes macOS.
+  # 185 GB model plus its KV cache. The sysctl resets on reboot, hence a boot daemon. What the
+  # limit leaves is shared as memory-budget.nix sets out, so raising this squeezes macOS.
   wiredLimitMb = 240 * 1024;
 
   # Teammates reach the server over the tailnet, so it listens on every interface behind an
@@ -188,9 +190,9 @@ let
     server.burst_decode_mode = "aggressive";
     integrations.splash_max_memory_gb = 200;
     # The pinned 182 GB JarBird model did not fit under the dynamic ceiling (175.66 GB) on
-    # 23 Nov, so the guard is custom with a fixed ceiling of 192 GB.
+    # 23 Nov, so the guard is custom with the fixed ceiling memory-budget.nix sets.
     memory.memory_guard_tier = "custom";
-    memory.memory_guard_custom_ceiling_gb = 192;
+    memory.memory_guard_custom_ceiling_gb = budget.omlxCeilingGiB;
   };
 
   # Restart the server only through the idle gate, and start the downloader when a listed model
@@ -281,6 +283,17 @@ in
     StandardOutPath = "${home}/.omlx/logs/launchd.log";
     StandardErrorPath = "${home}/.omlx/logs/launchd.log";
   };
+
+  # serviceConfig is a strict submodule with no JetsamProperties option, so the plist text is
+  # generated here with the priority memory-budget.nix sets; jetsam then takes the other daemons first.
+  environment.launchDaemons."org.nixos.omlx.plist".text = lib.mkForce (
+    lib.generators.toPlist { escape = true; } (
+      config.launchd.daemons.omlx.serviceConfig
+      // {
+        JetsamProperties.JetsamPriority = budget.omlxJetsamPriority;
+      }
+    )
+  );
 
   launchd.daemons.omlx-models.command = "${fetch}";
   launchd.daemons.omlx-models.serviceConfig = {

@@ -70,6 +70,10 @@ ALLOWED_IMPORTS: dict[str, frozenset[str]] = {
         "agent_tools.release.forge_adapter",  # guard_policy
         "agent_tools.release.release_profile",  # guard_policy
     }),
+    "hosts": frozenset({
+        "agent_tools.delivery.verify_history",  # omlx_memory_day
+        "agent_tools.delivery.verify_slot",  # omlx_memory_day
+    }),
     "project_contract": frozenset({
         "agent_tools.release.release_adapter",  # resolve_project, conformance_checks
         "agent_tools.release.release_profile",  # resolve_project, conformance_checks
