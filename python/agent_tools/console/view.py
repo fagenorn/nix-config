@@ -624,33 +624,29 @@ list meets none of the sprint's open issues (report issues not landed, held, dro
 out) is not counted and is listed in `checks`
 instead; a missing or malformed `blocking` counts as blocking. `checks` is ordered by
 `waiting_since` then `key`, and each check stays an inbox item.
-A running sprint's movement (#1109, `sprint_quiet_for`) is one reading. With no clock (`now_ms`
-None) or while one of the sprint's listed sessions works, it moves. Else it is the latest of the
-approved brief's time (`decided_at`, else the sent time), the report's time, the fold's `moved_ms`
-(the latest movement of any run of the sprint, before or after its report) and the goal's stated
-time, plus the wait signals of #1110 (`wait_signals`); it is quiet once `now_ms` minus that reaches
-`QUIET_AFTER_MS`. A `failed` manager with no listed session drops only the stated time (a run,
-report, approval or wait signal still moves the sprint whatever its order against the failure); with
-nothing else left it reads quiet at once. The wait signals are the last time CI ran on a pull
-request (`ci_ms`), the last time a commit landed on a pull request or a delivery's branch
-(`commit_ms`), the last time a release was in progress (`release_ms`) and the last time a delivery
-of the sprint held or waited for the land lock (`lock_ms`, #1184), each read from the project's
-`ProjectMovement`, which keeps the last time a signal was seen after it disappears. A
-pull request belongs to the sprint when its issues meet the issues of the report and its `inbox`
-numbers; a branch belongs when its issue is one of them; a release belongs whatever the issues. Each
-signal moves the sprint for `QUIET_AFTER_MS` after its time. Two session signals (#1185) join the
-reading the same way: the last time one of the sprint's sessions wrote its transcript (`output_ms`),
-and the last time a process under one of them used CPU (`check_ms`), each read from the project's
-`ProjectMovement.sessions` associations of this sprint (`sprint_sessions_of`: the session carries the
-sprint's manager name, is its `manager_session`, or runs a delivery of one of its issues). A time of
-a manager session inside `NUDGE_REPLY_MS` (five minutes) after the sprint's `idle_nudged_at` is its
-reply to the nudge and moves nothing; a delivery session's time always does. The two signals add no
-sentence: they are part of the base reading, so they never name or replace a wait. An engine run of
-the sprint's issues (`engine_runs.sprint_engine`) moves it while its line reads moving, at once and
-with no window; a run reading not running, stopped or done adds nothing at once, and the run's
-session ids (`RunState.sessions`) are left out of the session signals while a manager's own session
-counts as before. The state's `quiet`, the ball's `nobody` and the now-sentence's `last seen` prefix
-are all this one reading, and none decides movement itself.
+A running sprint's movement (#1109, `sprint_quiet_for`) is one reading. With no clock (`now_ms` None) or while one of the
+sprint's listed sessions works, it moves. Else it is the latest of the approved brief's time (`decided_at`, else the sent time),
+the report's time, the fold's `moved_ms` (the latest movement of any run of the sprint, before or after its report) and the
+goal's stated time, plus the wait signals of #1110 (`wait_signals`); it is quiet once `now_ms` minus that reaches
+`QUIET_AFTER_MS`. A `failed` manager with no listed session drops only the stated time (a run, report, approval or wait signal
+still moves the sprint whatever its order against the failure); with nothing else left it reads quiet at once. The wait signals
+are the last time CI ran on a pull request (`ci_ms`), the last time a commit landed on a pull request or a delivery's branch
+(`commit_ms`), the last time a release was in progress (`release_ms`) and the last time a delivery of the sprint held or waited
+for the land lock (`lock_ms`, #1184), each read from the project's `ProjectMovement`, which keeps the last time a signal was
+seen after it disappears. A pull request belongs to the sprint when its issues meet the issues of the report and its `inbox`
+numbers; a branch belongs when its issue is one of them; a release belongs whatever the issues. Each signal moves the sprint for
+`QUIET_AFTER_MS` after its time. Two session signals (#1185) join the reading the same way: the last time one of the sprint's
+sessions wrote its transcript (`output_ms`), and the last time a process under one of them used CPU (`check_ms`), each read from
+the project's `ProjectMovement.sessions` associations of this sprint (`sprint_sessions_of`: the session carries the sprint's
+manager name, is its `manager_session`, or runs a delivery of one of its issues). A time of a manager session inside
+`NUDGE_REPLY_MS` (five minutes) after the sprint's `idle_nudged_at` is its reply to the nudge and moves nothing; a delivery
+session's time always does. The two signals add no sentence: they are part of the base reading, so they never name or replace a
+wait. An engine run of the sprint's issues (`engine_runs.sprint_engine`) moves it while its line reads moving or waiting, at
+once and with no window; a run reading not running, stopped or done adds nothing at once, and the run's session ids
+(`RunState.sessions`) are left out of the session signals while a manager's own session counts as before. For an issue an engine
+run carries (`SprintEngine.issues`) the forge's pulls, the branches, the land locks and the queue places are not read, the run's
+open wait event being its wait (#1531); the release reading is read whatever the issues. The state's `quiet`, the ball's
+`nobody` and the now-sentence's `last seen` prefix are all this one reading, and none decides movement itself.
 The state is the first that holds: `stopped_at` is set, `stopped` ("stopped by you"); `stop_at` is
 set, `stopping` ("stopping"); the sprint has a closing, `done`; the brief is not approved,
 `drafting` ("drafting the brief");
@@ -658,34 +654,35 @@ the report's phase is `done` and no question is open and no look approval is sti
 the movement reading is quiet, `quiet` ("quiet for <n> min \u2014 may be stuck"); the
 phase is `closing`, `closing`; no report, `starting`; else `on_track` ("on track").
 `status_at` is the report's own time, which the page words against its own clock.
-`ball`, `ball_text` and `now_text` (#1086) are null for an ended sprint (`ended_at` set); a running
-sprint has exactly one ball and a non-empty now-sentence, and `state` and `state_text` are
-unchanged. `ball` (`sprint_ball`) is the first that holds: `owner` ("waiting on you") when `waiting`
-is above 0, the brief waits on the owner (decision none), the sprint is stalled, `no_progress_at` is
-set, its manager failed to start with no brief (`sprints.failed_start`), the sprint has an open permission card
-(`prompted`, #1424; a listed session waiting for an answer or a permission is no longer read here), or its manager
-cannot hear the console (below); `manager` ("manager working") while the movement reading moves;
-else `nobody` ("nothing running, may be stuck"), except that a stated pause (`paused`, "paused") or a stated wait whose time is ahead (`waiting`, "waiting"; `sprints.stated_hold`, #1380) holds it, after the owner's rules and before the movement reading, until the stated time has passed. `ball_text` is `BALL_TEXT[ball]`. `now_text` (`sprint_now`) is the first
-that holds: a stop requested, `NOW_STOPPING_TEXT`; a manager that cannot hear the console
-(#1229: the sprint's manager session has `SessionMovement.held`, its transcript's last peer message
-being one the client held and did not deliver), `NOW_DEAF_TEXT`; an open permission card of the sprint,
-`NOW_PERMISSION_TEXT`; a manager that failed to start, `NOW_FAILED_START_TEXT` (`state` stays
-`drafting`); no brief or one the owner asked to change,
-`NOW_DRAFTING_TEXT`; a brief waiting on the owner, `NOW_BRIEF_TEXT`; an open question,
-`NOW_QUESTION_TEXT` with the first one's text; a waiting item (`waiting` above 0) while an answered look card's approval failed to post (#1260), `NOW_LOOK_RETRY_TEXT`, or is being recorded, `NOW_LOOK_RECORDING_TEXT`; any other waiting item,
-`NOW_DECISION_TEXT`; a stall, `NOW_STALLED_TEXT`; no progress, `NOW_NO_PROGRESS_TEXT`; a quota
-wait, `NOW_QUOTA_TEXT`; a stated pause (`sprints.stated_hold`, #1380), `NOW_PAUSED_TEXT` with its reason; a stated wait whose time is ahead (or with no clock), `NOW_WAIT_TEXT`, with `now_until` its time (and no `last seen` prefix); an unread message the console delivered (`sprints.unread`, `delivered_at` set,
-#1379), `NOW_UNREAD_TEXT`; with no merge refusal shown, a wait signal that alone moves the sprint
-(`sprint_wait`), the first of `NOW_CI_TEXT`, `NOW_COMMITTING_TEXT`, `NOW_RELEASE_TEXT` and `NOW_LOCK_TEXT`
-whose signal is inside the window (`NOW_LOCK_POSITION_TEXT`, the place in the queue, in place of `NOW_LOCK_TEXT` when the sprint's smallest
-`ProjectMovement.positions` is known); no report, `NOW_STARTING_TEXT`; else a shown merge refusal
-(`sprints.merge_refused`), `NOW_REFUSED_TEXT` with its reason; else the stage phrase,
-`NOW_STAGE_TEXT`: the leading stage, its issue count, the total and the report's whole milestone (just the milestone when the report names no issue); either prefixed by `NOW_QUIET_TEXT` when the
-ball is `nobody`. The
-leading stage is the non-final, non-queued stage the most issues hold (a tie goes to the later in
-`REPORT_STAGES`); with none, `queued`; with none, `landed` when any landed, else the most common
-remaining stage. The sentence is never the status line but for a merge refusal, and never
-shortened (the page holds it to two lines).
+`ball`, `ball_text` and `now_text` (#1086) are null for an ended sprint (`ended_at` set); a running sprint has exactly one ball
+and a non-empty now-sentence, and `state` and `state_text` are unchanged. `ball` (`sprint_ball`) is the first that holds:
+`owner` ("waiting on you") when `waiting` is above 0, the brief waits on the owner (decision none), the sprint is stalled,
+`no_progress_at` is set, its manager failed to start with no brief (`sprints.failed_start`), the sprint has an open permission
+card (`prompted`, #1424; a listed session waiting for an answer or a permission is no longer read here), or its manager cannot
+hear the console (below); `manager` ("manager working") while the movement reading moves; else `nobody` ("nothing running, may
+be stuck"), except that a stated pause (`paused`, "paused") or a stated wait whose time is ahead (`waiting`, "waiting";
+`sprints.stated_hold`, #1380) holds it, after the owner's rules and before the movement reading, until the stated time has
+passed. `ball_text` is `BALL_TEXT[ball]`. `now_text` (`sprint_now`) is the first that holds: a stop requested,
+`NOW_STOPPING_TEXT`; a manager that cannot hear the console (#1229: the sprint's manager session has `SessionMovement.held`, its
+transcript's last peer message being one the client held and did not deliver), `NOW_DEAF_TEXT`; an open permission card of the
+sprint, `NOW_PERMISSION_TEXT`; a manager that failed to start, `NOW_FAILED_START_TEXT` (`state` stays `drafting`); no brief or
+one the owner asked to change, `NOW_DRAFTING_TEXT`; a brief waiting on the owner, `NOW_BRIEF_TEXT`; an open question,
+`NOW_QUESTION_TEXT` with the first one's text; a waiting item (`waiting` above 0) while an answered look card's approval failed
+to post (#1260), `NOW_LOOK_RETRY_TEXT`, or is being recorded, `NOW_LOOK_RECORDING_TEXT`; any other waiting item,
+`NOW_DECISION_TEXT`; a stall, `NOW_STALLED_TEXT`; no progress, `NOW_NO_PROGRESS_TEXT`; a quota wait, `NOW_QUOTA_TEXT`; a stated
+pause (`sprints.stated_hold`, #1380), `NOW_PAUSED_TEXT` with its reason; a stated wait whose time is ahead (or with no clock),
+`NOW_WAIT_TEXT`, with `now_until` its time (and no `last seen` prefix); an unread message the console delivered
+(`sprints.unread`, `delivered_at` set, #1379), `NOW_UNREAD_TEXT`; with no merge refusal shown, a wait signal that alone moves
+the sprint (`sprint_wait`), the first of `NOW_CI_TEXT`, `NOW_COMMITTING_TEXT`, `NOW_RELEASE_TEXT` and `NOW_LOCK_TEXT` whose
+signal is inside the window (`NOW_LOCK_POSITION_TEXT`, the place in the queue, in place of `NOW_LOCK_TEXT` when the sprint's
+smallest `ProjectMovement.positions` is known), where an open engine wait of CI or the lock counts as fresh in the same place
+with the same words, then a usage limit and a free session slot on this host in the words of the run line
+(`engine_runs.wait_text`); no report, `NOW_STARTING_TEXT`; else a shown merge refusal (`sprints.merge_refused`),
+`NOW_REFUSED_TEXT` with its reason; else the stage phrase, `NOW_STAGE_TEXT`: the leading stage, its issue count, the total and
+the report's whole milestone (just the milestone when the report names no issue); either prefixed by `NOW_QUIET_TEXT` when the
+ball is `nobody`. The leading stage is the non-final, non-queued stage the most issues hold (a tie goes to the later in
+`REPORT_STAGES`); with none, `queued`; with none, `landed` when any landed, else the most common remaining stage. The sentence
+is never the status line but for a merge refusal, and never shortened (the page holds it to two lines).
 `ended_at` is `sprints.ended_at` for every route to done (a stop, a closing, or a latest report of
 phase `done`), so the `done` state and `ended_at` never disagree; `stoppable` is true exactly when
 the sprint has no stop request, is not stopped and has not ended; `stop_text` is `STOP_FAILED_TEXT`
@@ -1479,7 +1476,8 @@ def wait_signals(state: SprintState, movement: ProjectMovement | None,
     """The sprint's wait signals out of its project's movement. The sprint's issues are the
     report's issue numbers united with its `inbox` numbers (none without a report); a pull request
     belongs when its issues meet them, a branch when its issue is one of them, a land lock time
-    when its issue is one of them, and the release whatever the issues. The session signals are the newest transcript write and the newest
+    when its issue is one of them, and the release whatever the issues; the issues an engine run
+    carries are left out of the first four. The session signals are the newest transcript write and the newest
     running check among the associations of this sprint; a manager session's time inside the reply
     window of an idle nudge (`NUDGE_REPLY_MS` from `idle_nudged_at`) is left out. `issues` replaces
     the sprint's issues with the given ones (a run's own, #1212) and `session_id` keeps only the
@@ -1488,7 +1486,7 @@ def wait_signals(state: SprintState, movement: ProjectMovement | None,
     session signals, a manager's own session counting as before."""
     if movement is None:
         return WaitSignals(engine=engine)
-    issues = sprint_issue_numbers(state) if issues is None else set(issues)
+    issues = (sprint_issue_numbers(state) if issues is None else set(issues)) - engine.issues
     pulls = [pull for pull in movement.pulls if issues & pull.issues]
     running = [pull.running_ms for pull in pulls if pull.running_ms is not None]
     commits = [pull.committed_ms for pull in pulls if pull.committed_ms is not None]
@@ -1550,7 +1548,7 @@ def sprint_quiet_for(state: SprintState, now_ms: int | None, listed: Collection[
     moves the sprint whatever its order against the failure. With no signal left, the sprint reads
     quiet at once, for the time since the goal was stated. A moving engine run of its issues moves it
     at once whatever its age (#1531)."""
-    if now_ms is None or WORKING in listed or waits.engine.moving:
+    if now_ms is None or WORKING in listed or waits.engine.moves:
         return None
     brief, report = state.brief, state.report
     signals = []
@@ -1577,7 +1575,8 @@ def sprint_wait(state: SprintState, now_ms: int | None, listed: Collection[str],
     move the sprint (the session signals are part of the base reading and never name a wait): with
     no clock, or when something else moves it, or when it is quiet whatever
     the waits say, it is None. Else the first of CI, a committing delivery, a release step and the
-    land lock whose signal is inside `QUIET_AFTER_MS`."""
+    land lock whose signal is inside `QUIET_AFTER_MS` or whose engine wait is open, then the engine's
+    usage limit and free host slot (#1531)."""
     base = WaitSignals(output_ms=waits.output_ms, check_ms=waits.check_ms,
                        engine=replace(waits.engine, waits=frozenset()))
     if (now_ms is None or sprint_quiet_for(state, now_ms, listed, base) is None
@@ -1588,15 +1587,16 @@ def sprint_wait(state: SprintState, now_ms: int | None, listed: Collection[str],
 
 def fresh_wait(waits: WaitSignals, now_ms: int) -> str | None:
     """The first of CI, a committing delivery, a release step and the land lock whose signal is
-    inside `QUIET_AFTER_MS`. The idle hold of an in-progress run reads it too. The land lock
-    reads `NOW_LOCK_POSITION_TEXT` when `lock_position` is known."""
+    inside `QUIET_AFTER_MS` or whose engine wait is open, then the engine's usage limit and free host
+    slot. The idle hold of an in-progress run reads it too. The land lock reads `NOW_LOCK_POSITION_TEXT`
+    when `lock_position` is known."""
     for ms, text in ((waits.ci_ms, NOW_CI_TEXT), (waits.commit_ms, NOW_COMMITTING_TEXT),
                      (waits.release_ms, NOW_RELEASE_TEXT), (waits.lock_ms, NOW_LOCK_TEXT)):
-        if ms is not None and now_ms - ms < QUIET_AFTER_MS:
+        if (ms is not None and now_ms - ms < QUIET_AFTER_MS) or text in waits.engine.texts:
             if text == NOW_LOCK_TEXT and waits.lock_position is not None:
                 return NOW_LOCK_POSITION_TEXT.format(n=waits.lock_position)
             return text
-    return None
+    return waits.engine.later
 
 
 @dataclass(frozen=True)

@@ -8,12 +8,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from agent_tools.console import engine_runs
 from agent_tools.console.engine_runs import EngineRuns
-from agent_tools.console.movement import ProjectMovement, SessionMovement
+from agent_tools.console.movement import ProjectMovement, PullMovement, SessionMovement
+from agent_tools.console.sprints import NOW_CI_TEXT, NOW_LOCK_TEXT
 
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures
 from .test_console_engine_runs import DEAD, LIVE, make_run
-from .test_console_view import A, MIN, R, entry, idle_session, line, reported, started, with_manager
+from .test_console_view import A, MIN, R, entry, idle_session, line, moving, reported, started, with_manager
 
 TIER = "fast"
 
@@ -81,6 +83,64 @@ class SprintEngineMovementTest(unittest.TestCase):
         derived = line(BASE, NOW, sessions=[idle_session], engine_runs=iter([live]))
         self.assertEqual(len(derived["entries"][0]["engine_runs"]), 1)
         self.assertEqual(entry(derived)["ball"], "manager")
+
+
+class SprintEngineWaitTest(unittest.TestCase):
+    def test_with_no_forge_reading_an_open_ci_wait_and_an_open_lock_wait_read_their_sentences(self):
+        for fixture, text in (("sprint-ci.jsonl", "waiting for CI on its pull request"),
+                              ("sprint-lock.jsonl", "waiting its turn to merge")):
+            with self.subTest(fixture):
+                got = shown(engine_runs=[engine_state(fixture, LIVE)])
+                self.assertEqual((got["state"], got["ball"], got["now_text"]), ("on_track", "manager", text))
+                self.assertNotIn("stuck", json.dumps(got))
+
+    def test_the_run_line_and_the_sprint_line_give_one_wait_sentence(self):
+        for wait in ("ci", "lock", "usage-limit", "host-slot"):
+            with self.subTest(wait):
+                run = engine_state(f"sprint-{wait}.jsonl", LIVE)
+                derived = line(BASE, NOW, sessions=[idle_session], engine_runs=[run])
+                run_text = derived["entries"][0]["engine_runs"][0]["text"]
+                now_text = entry(derived)["now_text"]
+                self.assertEqual(run_text, f"building, {now_text}")
+                self.assertEqual(now_text, engine_runs.wait_text(run))
+
+    def test_a_usage_limit_and_a_free_slot_read_the_run_lines_sentences(self):
+        for fixture, text in (("sprint-usage-limit.jsonl", "waiting out a usage limit"),
+                              ("sprint-host-slot.jsonl", "waiting for a free session slot on this host")):
+            with self.subTest(fixture):
+                got = shown(engine_runs=[engine_state(fixture, LIVE)])
+                self.assertEqual((got["ball"], got["now_text"]), ("manager", text))
+
+    def test_engine_waits_follow_ci_commit_release_and_lock_in_that_order(self):
+        release = moving(release_ms=NOW - MIN)
+        for label, fixtures, movement, text in (
+                ("ci beats a slot", ("sprint-host-slot.jsonl", "sprint-ci.jsonl"), None, NOW_CI_TEXT),
+                ("lock beats a limit", ("sprint-lock.jsonl", "sprint-usage-limit.jsonl"), None, NOW_LOCK_TEXT),
+                ("limit beats a slot", ("sprint-usage-limit.jsonl", "sprint-host-slot.jsonl"), None,
+                 "waiting out a usage limit"),
+                ("release beats a lock", ("sprint-lock.jsonl",), release, "waiting for a release step"),
+                ("ci beats a release", ("sprint-ci.jsonl",), release, NOW_CI_TEXT)):
+            with self.subTest(label):
+                runs = [engine_state(fixture, LIVE, issue=4 + number) for number, fixture in enumerate(fixtures)]
+                self.assertEqual(shown(engine_runs=runs, movement=movement)["now_text"], text)
+
+    def test_a_moving_run_beside_a_waiting_one_names_no_wait(self):
+        runs = [engine_state("sprint-moving.jsonl", LIVE, issue=4), engine_state("sprint-ci.jsonl", LIVE, issue=5)]
+        self.assertEqual(shown(engine_runs=runs)["now_text"], "building 1 of 7: Importer resumes")
+
+    def test_the_forge_is_not_read_for_an_issue_an_engine_run_carries(self):
+        ci_on_4 = moving(pulls=(PullMovement(40, frozenset({4}), NOW - MIN, None),), read_ms=NOW - MIN)
+        dead = engine_state("sprint-moving.jsonl", DEAD)
+        self.assertEqual(shown(movement=ci_on_4)["now_text"], NOW_CI_TEXT)
+        self.assertEqual(shown(engine_runs=[dead], movement=ci_on_4)["state"], "quiet")
+        ci_on_5 = moving(pulls=(PullMovement(41, frozenset({5}), NOW - MIN, None),), read_ms=NOW - MIN)
+        self.assertEqual(shown(engine_runs=[dead], movement=ci_on_5)["now_text"], NOW_CI_TEXT)
+        placed = shown(engine_runs=[engine_state("sprint-lock.jsonl", LIVE)], movement=moving(positions=((4, 2),)))
+        self.assertEqual(placed["now_text"], "waiting its turn to merge")
+
+    def test_with_no_clock_no_engine_wait_is_named(self):
+        got = entry(line(BASE, None, sessions=[idle_session], engine_runs=[engine_state("sprint-ci.jsonl", LIVE)]))
+        self.assertEqual(got["now_text"], "building 1 of 7: Importer resumes")
 
 
 if __name__ == "__main__":
