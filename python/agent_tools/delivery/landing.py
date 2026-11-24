@@ -76,8 +76,8 @@ ancestor of `HEAD`, `merge_commit` empty), `clean` (`HEAD` is M and a fresh merg
 `review` (a conflicted merge, an evil merge, or commits on top of M); `merge_commit` is M and `head` is `HEAD`.
 
 `fixed --status X --start-head S --commit C --tests T --notes N --head H` reads a fix reply: `untested` (C is not
-empty and not H, and `T` is not a non-empty JSON list of strings), else `not-done` (X is not `done`, S is not H or
-C is empty), else `unchanged` (C is H with non-blank N), `silent` (C is H with blank N) or `committed`.
+empty and not H, and `T` is not a JSON list with at least one non-blank string), else `not-done` (X is not `done`,
+S is not H or C is empty), else `unchanged` (C is H with non-blank N), `silent` (C is H with blank N) or `committed`.
 
 `merge-state --repo <o/n> --pr <n>` reads `mergeStateStatus`: `behind` (`BEHIND`), `blocked` (`BLOCKED`) or `other`,
 with `state` the raw string; a missing or non-string value is `error`. `pr-head --repo <o/n> --pr <n> --head <sha>`
@@ -600,7 +600,7 @@ def fixed(args: argparse.Namespace) -> dict:
         tests = json.loads(args.tests)
     except ValueError:
         tests = None
-    tested = isinstance(tests, list) and bool(tests) and all(isinstance(test, str) for test in tests)
+    tested = isinstance(tests, list) and any(isinstance(test, str) and test.strip() for test in tests)
     if args.commit and args.commit != args.head and not tested:
         return {"verdict": "untested"}
     if args.status != "done" or args.start_head != args.head or not args.commit:
