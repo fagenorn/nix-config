@@ -1767,7 +1767,8 @@ sprint is open and the service not stopping; a failure also prints `console: wak
 `manager_seen_seq`) while the command ran; the reservation's end after a wake was sent, or one that could not start, also sets `_settled`, so a stop that waited out the wake defers for the resumed session. A takeover job reads the listing off the lock (one that
 raises ends the reservation and appends nothing), then launches only while the sprint is open,
 neither the fresh listing nor the folded sessions show the manager and `_revive_step` is still a
-takeover; otherwise it appends nothing. A takeover the bring-back reserves because the manager's
+takeover; a release because only the fresh listing shows the manager appends `manager.held {sprint_id, goal, reason}` and prints
+`console: takeover_held <sprint_id> <reason>` once per run of releases (`_unmatched`, cleared when the folded sessions list the manager), any other release appends nothing. A takeover the bring-back reserves because the manager's
 account is out (`_quota_target`: out, and the step would otherwise be a wake) carries the profile it
 chose as `target` on its `_TakeoverReservation`. The launch is prepared on that profile without
 choosing again, and with the account identity (its sign-in account and its counted reading's account
@@ -2021,7 +2022,7 @@ from agent_tools.console import (
 from agent_tools.console.action_permit import PERMIT_LANDED_SECONDS, ActionPermit
 from agent_tools.console.event_log import (
     BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, FAULT_DECLARED, FAULT_WITHDRAWN, GOAL_STATED, GOAL_WITHDRAWN, MANAGER_FAILED,
-    MANAGER_NO_PROGRESS, MANAGER_NUDGED, MANAGER_STALLED, MANAGER_STARTED, MANAGER_STOP_FAILED,
+    MANAGER_HELD, MANAGER_NO_PROGRESS, MANAGER_NUDGED, MANAGER_STALLED, MANAGER_STARTED, MANAGER_STOP_FAILED,
     MANAGER_STOPPED, MANAGER_WAITING, MANAGER_WOKEN, NOTICE_NUDGED, NOTICE_POSTED, NOTICE_WITHDRAWN,
     LOOK_RECORDED, PERMIT_JUDGED, PERMIT_LANDED, PROJECT_QUESTION_ANSWERED, PROJECT_QUESTION_ASKED, PROJECT_QUESTION_KEYED,
     QUESTION_ANSWERED, QUESTION_WITHDRAWN, QUESTIONS_ASKED,
@@ -4713,6 +4714,7 @@ class ConsoleService(ActionPermit):
         self._settled: dict[str, int] = {}
         self._quota_held: set[str] = set()
         self._move_cancelled: set[str] = set()
+        self._unmatched: set[str] = set()
         self._moved: dict[str, int] = {}
         self._listing = (
             (lambda: sessions.read_session_registry(self._session_dirs()))
@@ -7854,6 +7856,11 @@ class ConsoleService(ActionPermit):
             if shown:
                 self._last_listed[sprint_id] = now
             if shown or self._manager_listed(sprint):
+                if shown and not self._manager_listed(sprint) and sprint_id not in self._unmatched:
+                    self._unmatched.add(sprint_id)
+                    self._apply(self.log.append([(MANAGER_HELD, sprint.project_id, {
+                        "sprint_id": sprint_id, "goal": sprint.goal, "reason": quota_move.UNMATCHED_REASON})]))
+                    print(f"console: takeover_held {sprint_id} {quota_move.UNMATCHED_REASON}", file=sys.stderr)
                 self._release(sprint_id, token)
                 return None
             if self._revive_step(sprint, now) != sprints.TAKEOVER:
@@ -9014,9 +9021,11 @@ class ConsoleService(ActionPermit):
             for sprint_id in [key for key in self._last_listed if key not in self._sprints]:
                 del self._last_listed[sprint_id]
             self._move_cancelled.intersection_update(self._sprints)
+            self._unmatched.intersection_update(self._sprints)
             for sprint_id, sprint in list(self._sprints.items()):
                 if self._manager_listed(sprint):
                     self._last_listed[sprint_id] = now
+                    self._unmatched.discard(sprint_id)
                     if (sprint_id not in self._launching and sprint_id not in self._nudging
                             and sprint_id not in self._stopping):
                         moved = self._listed_move_reservation(sprint, now)

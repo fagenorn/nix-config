@@ -13,6 +13,9 @@ from collections.abc import Mapping
 
 from agent_tools.console import capacity, manager, sprints
 
+UNMATCHED_REASON = ("the session registry lists the manager under the sprint's name, "
+                    "but no session the console holds carries that name")
+
 
 def move_account(view: Mapping, readings: capacity.CapacityState, signins: Mapping,
                  profile: str) -> tuple[str | None, str | None]:
