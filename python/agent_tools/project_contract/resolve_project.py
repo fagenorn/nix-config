@@ -2244,18 +2244,15 @@ CORE_POINTERS = ("/schema_version", "/project", "/bindings/vcs", "/bindings/trac
 
 
 def _is_core(pointer: str) -> bool:
-    """Whether a violation at `pointer` is one the core read refuses: a core member, below one, or `/bindings` itself."""
+    """Whether a violation at `pointer` is one the core read refuses."""
     return pointer == "/bindings" or any(
         pointer == core or pointer.startswith(core + "/") for core in CORE_POINTERS)
 
 
 def resolve_core(repo_root: str | None) -> dict:
-    """The core members of the `ResolvedProject` snapshot for `repo_root`, or `ContractError`.
+    """The core members of the snapshot for `repo_root` (see the module docstring), or `ContractError`.
 
-    See the module docstring: the project, the vcs, tracker and (effective) commands
-    bindings, the release targets and the production rules, judged by the core
-    violations alone. Prints nothing; any other exception raises the closed
-    `resolver_failure` as `resolve` does.
+    Prints nothing; any other exception raises the closed `resolver_failure`.
     """
     try:
         return compose_core(repo_root)

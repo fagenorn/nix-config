@@ -1,4 +1,4 @@
-"""Activate reads the contract's branch and command through the core read, not the full resolve (#1698)."""
+"""Activate reads the contract's branch and command through the core read, not the full resolve."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from agent_tools.console import activation, activation_run
 from agent_tools.project_contract import resolve_project
 
 from . import accounts_sandbox
-from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures
 
 TIER = "fast"
 

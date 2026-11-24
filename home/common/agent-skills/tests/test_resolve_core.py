@@ -1,4 +1,4 @@
-"""The core read of the project contract: `resolve_core` judges and returns only the members enforcement reads (#1698)."""
+"""The core read of the project contract: `resolve_core` judges and returns only the members enforcement reads."""
 
 from __future__ import annotations
 
