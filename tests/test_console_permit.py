@@ -5,16 +5,19 @@ and calls it directly: the two granted shapes, each refusal reason, the literal-
 memo the console re-judges with, and the readers' fail-closed parsing.
 """
 import contextlib
+import dataclasses
+import hashlib
 import importlib.util
 import io
 import os
 import tempfile
 import time
 import unittest
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.console import permit
+from agent_tools.console import permit, prompt_card, sprints
 from agent_tools.release import release
 from agent_tools.console.permit import (ALLOW, DENY, Forge, ForgeUnreadable, Grant, judge,
                                         memoized, mentions, merge_target, words)
@@ -643,6 +646,67 @@ class MergeBindingTest(unittest.TestCase):
         with mock.patch.object(permit.resolve_project, "resolve",
                                return_value={"bindings": {"vcs": {"merge": {"strategy": 3}}}}):
             self.assertEqual((None, False), permit.merge_binding("/r"))
+
+
+ANSWERED = "2026-11-23T10:00:00.000000+00:00"
+
+
+class ActionJudgeTest(unittest.TestCase):
+    """`permit.judge_action`: an owner-only card's approved command, once, within an hour."""
+
+    CARD = sprints.Question(
+        41, 0, "2026-11-23T10:00:00.000000+00:00", False, "May it run?", "the check",
+        ("Run it once", "Do not run it"), "Run it once", answer="Run it once", chosen="Run it once",
+        answered_at=ANSWERED, owner_only=True, action=sprints.QuestionAction("curl x", "Run it once"))
+    DIGEST = permit.command_digest("curl x")
+
+    def now(self, seconds):
+        return datetime.fromisoformat(ANSWERED) + timedelta(seconds=seconds)
+
+    def judged(self, *cards, digest=None, seconds=1):
+        verdict = permit.judge_action(digest or self.DIGEST, cards, self.now(seconds))
+        return verdict.decision, verdict.reason, verdict.verb, dict(verdict.target)
+
+    def test_only_the_owners_own_answer_on_an_owner_only_card_approves(self):
+        for changes in ({"answered_by": "colleague-login"}, {"owner_only": False}):
+            with self.subTest(changes=changes):
+                card = dataclasses.replace(self.CARD, **changes)
+                self.assertEqual(self.judged(card)[:2], ("deny", permit.ACTION_NOT_OWNERS))
+        self.assertEqual(self.judged(self.CARD),
+                         ("allow", "", "action", {"round": 41, "index": 0}))
+
+    def test_the_expiry_boundary_is_sixty_minutes(self):
+        self.assertEqual(self.judged(self.CARD, seconds=3599)[0], "allow")
+        self.assertEqual(self.judged(self.CARD, seconds=3600)[:2], ("deny", permit.ACTION_EXPIRED))
+        for stamp in ("not a time", "2026-11-23T10:00:00"):
+            with self.subTest(stamp=stamp):
+                card = dataclasses.replace(self.CARD, answered_at=stamp)
+                self.assertEqual(self.judged(card)[:2], ("deny", permit.ACTION_EXPIRED))
+
+    def test_a_withdrawn_card_names_nothing_and_a_live_card_wins(self):
+        withdrawn = dataclasses.replace(self.CARD, withdrawn_at=ANSWERED)
+        self.assertEqual(self.judged(withdrawn), (None, "", None, {}))
+        self.assertEqual(self.judged(self.CARD, digest=permit.command_digest("curl y")),
+                         (None, "", None, {}))
+        used = dataclasses.replace(self.CARD, action_used_at=ANSWERED)
+        live = dataclasses.replace(self.CARD, round_id=42)
+        self.assertEqual(self.judged(used, live),
+                         ("allow", "", "action", {"round": 42, "index": 0}))
+        self.assertEqual(self.judged(used, dataclasses.replace(used, round_id=42))[:2],
+                         ("deny", permit.ACTION_USED))
+
+    def test_the_proof_binds_each_member_and_is_its_own_domain(self):
+        self.assertEqual(permit.command_digest("curl x"), hashlib.sha256(b"curl x").hexdigest())
+        base = ("s", "0" * 16, "b" * 32, "d" * 64, "allow", "")
+        wanted = permit.action_reply_mac(*base)
+        for index, changed in ((1, "1" * 16), (2, "c" * 32), (3, "e" * 64), (4, "deny"), (4, None),
+                               (5, "r")):
+            with self.subTest(member=index, changed=changed):
+                other = list(base)
+                other[index] = changed
+                self.assertNotEqual(permit.action_reply_mac(*other), wanted)
+        self.assertNotEqual(permit.action_request_auth("s", b"x"), prompt_card.request_auth("s", b"x"))
+        self.assertEqual(permit.signed_bytes({"b": 1, "a": 2, "auth": "z"}), b'{"a":2,"b":1}')
 
 
 if __name__ == "__main__":

@@ -7,6 +7,7 @@
 }:
 let
   home = "/Users/${username}";
+  budget = import ./memory-budget.nix;
 
   # Colima (a Docker engine in a Lima VM) rather than the shared OrbStack cask: it runs headless
   # from boot, and OrbStack needs a paid licence for commercial use. From unstable, because
@@ -14,7 +15,7 @@ let
   colima = unstablePkgs.colima;
   socket = "${home}/.colima/default/docker.sock";
 
-  # The VM shares the ~16 GB oMLX leaves macOS (see omlx.nix's wired limit), hence 8 GiB. It runs
+  # The VM's memory comes from the host's memory budget (memory-budget.nix). It runs
   # on Apple's Virtualization framework with Rosetta for amd64 images. Colima saves these flags to
   # ~/.colima/default/colima.yaml on every start; CPUs and memory apply on the next start, the
   # disk can grow but never shrink, and the VM type needs `colima delete`. `--activate=false`
@@ -23,7 +24,7 @@ let
     "--vm-type=vz"
     "--vz-rosetta"
     "--cpus=8"
-    "--memory=8"
+    "--memory=${toString budget.colimaGiB}"
     "--disk=200"
     "--activate=false"
   ];
@@ -46,6 +47,9 @@ let
   '';
 in
 {
+  # The flags the VM starts with, for tests.
+  system.build.colimaStartFlags = startFlags;
+
   # Started at boot as the owner, like oMLX, and kept alive. Only the owner can use the engine:
   # Colima creates the socket 0600, and the tools are on the owner's PATH alone. Docker access is
   # owner-level access to the host, since Colima mounts $HOME writable into the VM.

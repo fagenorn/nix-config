@@ -32,7 +32,9 @@ Exits, one JSON line with sorted keys.
   `OLD_MS` (so the goal, approval, report and run movement would not move it), a `movement.waits`
   object whose `ci_at`, `commit_at`, `release_at` and `lock_at` (the land lock wait) are each null
   or older than `OLD_MS` (the console's own wait signals, read as published and never inferred from
-  the now-sentence, which a moving session hides), no `sessions[]` entry in state `working`, and no delivery entry with a
+  the now-sentence, which a moving session hides), a `movement.engine` object whose `moving` is
+  false and whose `waits` is empty (an engine run of the sprint's issues that moves it or waits is
+  not session output), no `sessions[]` entry in state `working`, and no delivery entry with a
   `journal_at` (the run journal's own last movement, ADR-console-005) missing or younger than
   `OLD_MS`; `reading_at`, which adds the run session's output and running check (the evidence
   itself) and the run's wait signals, which `movement.waits` already judges, is not read.
@@ -143,11 +145,13 @@ def _old(text, now_ms: int) -> bool:
 def _reads_moving(project: dict, sprint: dict, found: list[dict], now_ms: int) -> bool:
     moved = _dict(sprint.get("movement"))
     waits = moved.get("waits")
+    engine = moved.get("engine")
     if not (any(a["fresh"] for a in found) and sprint.get("state") != "quiet"
             and sprint.get("ball") == "manager"
             and _old(sprint.get("status_at"), now_ms)
             and _old(moved.get("base_at"), now_ms)
             and isinstance(waits, dict)
+            and isinstance(engine, dict) and engine.get("moving") is False and engine.get("waits") == []
             and all(waits.get(key) is None or _old(waits.get(key), now_ms) for key in WAITS)):
         return False
     own = [_dict(s) for s in _list(sprint.get("sessions"))]

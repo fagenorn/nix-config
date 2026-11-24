@@ -129,6 +129,7 @@
   },
   "look-lint": null,
   "node-lint": null,
+  "omlx-memory-watch": null,
   "owner-actions": null,
   "plan-amend": null,
   "pr-create": {

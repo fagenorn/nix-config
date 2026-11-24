@@ -74,6 +74,7 @@ round is
                     "recommended": "<exact text of one option>",
                     "needs_words": ["<exact text of an option>", ...],
                     "owner_only": true,
+                    "action": {"command": "<the exact Bash command>", "approve": "<exact text of one option>"},
                     "consequential": true,
                     "pictures": [{"file": "<path>", "line": "<one line, at most 140 characters>",
                                   "pair": "before" | "after"}, ...],
@@ -94,6 +95,12 @@ the page refuses that option until the owner writes what to change, the console 
 answers, never a colleague who started the sprint (`OWNER_ONLY_SHAPE`); the command sends it as given. The
 manager contract requires it on a question whose answer is itself a go-ahead (a release, a production step,
 spend, a permission escalation), never on a design choice.
+
+A question with an `action` must be `owner_only`: the action names one exact Bash command, one line of
+at most 4096 characters, that is no merge, rerun or release, and `approve` names the option that approves
+it (`ACTION_*` refusals). When the owner picks that option with no words, the manager's `sprint permit`
+hook lets that exact command run once within 60 minutes of the answer
+(`agent_tools.console.permit.judge_action`); the command sends it as given.
 
 `replaces` is optional: it names one open question of this sprint by its round id and its index (from 0,
 in the order the round was sent), and the console takes that question back in the write that
@@ -219,7 +226,10 @@ a refused notices request is exit 1. A status with no secret is not an error.
 `session_id` and a string `tool_input.command`), resolves the sprint and secret as `sprint inbox` does and
 sends `POST /api/permit` with `{"sprint_id", "secret", "phase": "judge" | "landed", "session_id",
 "tool_use_id", "command"}`; it prints at most one line and is always exit 0. For a command that
-`agent_tools.console.permit.mentions` rejects it contacts nothing and prints nothing; a mention is a
+`agent_tools.console.permit.mentions` rejects it sends the signed body `{"sprint_id", "phase", "session_id",
+"tool_use_id", "command_sha256", "nonce", "auth"}`, never the secret and never the command text,
+prints the console's decision only when the reply's `mac` proves it, and prints nothing on any failure, with no
+`tool_use_id`, or for a reply that is not signed; a mention is a
 merge, a rerun, the plain `release transaction run` (allowed, ADR-console-094) or a release abandon or
 dispose (denied). The request also
 carries the hook input's string `tool_use_id`, which names the one tool call, so a landed merge is paired
@@ -590,6 +600,49 @@ def permit_reply(text: str) -> tuple[str | None, str]:
     return decision, reason
 
 
+def action_reply(text: str, secret: str, sprint: str, nonce: str, digest: str) -> tuple[str | None, str]:
+    """The decision and reason of the console's judge reply to the action request that carried `nonce`.
+
+    A reply of another shape is `HookFailure`; one whose `mac` is not the console's HMAC under `secret`
+    for this sprint, nonce, digest, decision and reason is `Unproven`, so no decision of whatever else
+    answered is used."""
+    try:
+        reply = json.loads(text)
+    except ValueError as error:
+        raise HookFailure(f"the console's answer is not JSON: {error}") from error
+    if not isinstance(reply, dict) or set(reply) != {"decision", "reason", "mac"}:
+        raise HookFailure("the console's answer is not a decision")
+    decision, reason, given = reply["decision"], reply["reason"], reply["mac"]
+    if decision not in ("allow", "deny", None) or not isinstance(reason, str):
+        raise HookFailure("the console's answer is not a decision")
+    wanted = permit.action_reply_mac(secret, sprint, nonce, digest, decision, reason)
+    if not isinstance(given, str) or not hmac.compare_digest(given.encode(), wanted.encode()):
+        raise Unproven("the listener on the console's port did not sign its answer with the sprint's secret")
+    return decision, reason
+
+
+def run_action_permit(args: argparse.Namespace, session: str, call: str | None, command: str) -> int:
+    """The signed request for a command `permit.mentions` rejects: prints a proven decision, else nothing."""
+    try:
+        if call is None:
+            return 0
+        sprint, secret = resolve_sprint(args), resolve_secret(args)
+        digest = permit.command_digest(command)
+        fields = {"sprint_id": sprint, "phase": "landed" if args.landed else "judge",
+                  "session_id": session, "tool_use_id": call, "command_sha256": digest,
+                  "nonce": secrets.token_hex(16)}
+        sent = {**fields, "auth": permit.action_request_auth(secret, permit.signed_bytes(fields))}
+        text = ask(args.port, "POST", service.PERMIT_PATH, json.dumps(sent).encode())
+        if args.landed:
+            return 0
+        decision, reason = action_reply(text, secret, sprint, fields["nonce"], digest)
+    except (HookFailure, Unreadable, Refused, UnicodeError):
+        return 0
+    if decision is not None:
+        print(permit_line(decision, reason))
+    return 0
+
+
 def permit_line(decision: str, reason: str) -> str:
     return json.dumps({"hookSpecificOutput": {
         "hookEventName": "PreToolUse", "permissionDecision": decision,
@@ -601,7 +654,7 @@ def run_permit(args: argparse.Namespace) -> int:
     try:
         session, call, command = hook_command(sys.stdin.read())
         if not permit.mentions(command):
-            return 0
+            return run_action_permit(args, session, call, command)
         if call is None:
             raise HookFailure("the hook input has no tool_use_id")
         body = json.dumps({"sprint_id": resolve_sprint(args), "secret": resolve_secret(args),

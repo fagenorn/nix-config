@@ -40,3 +40,19 @@ class OmlxDeclarationTest(unittest.TestCase):
         self.assertIn("kickstart system/org.nixos.omlx-models", self.got["activation"])
         self.assertIn(' added" >> ', self.got["fetch"])
         self.assertIn(".restart-needed", self.got["fetch"])
+
+    def test_the_declared_models_are_the_served_set(self):
+        self.assertEqual(
+            set(self.got["models"]),
+            {
+                "GLM-5.3-Flash-MLX-oQ4-MTP",
+                "Qwen3.8-Flash-Next-oQ4e-mtp",
+                "Qwen3.8-Flash-Next-UD-Q4_K_XL",
+                "Qwen3.8-Flash-Next-DFlash2",
+                JARBIRD,
+            },
+        )
+
+    def test_the_downloader_restarts_without_reconfiguring(self):
+        self.assertNotIn("/bin/omlx-configure", self.got["fetch"])
+        self.assertIn("/bin/omlx-restart", self.got["fetch"])

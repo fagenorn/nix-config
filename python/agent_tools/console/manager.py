@@ -87,7 +87,8 @@ crash, prints the client's deny decision with `REFUSAL`, one fixed sentence, thr
 (`sprint permit`, `PERMIT_TIMEOUT` 60 seconds) and `LANDED_COMMAND` (`sprint permit --landed`,
 `LANDED_TIMEOUT` 30 seconds): the console judges each Bash call of the session and allows only the
 sprint's own merge and rerun (ADR-console-094) and the plain `release transaction run`, never abandon
-or dispose (ADR-console-094); an `if` filter would let a
+or dispose (ADR-console-094); the console also allows, once, a command an owner-only card's answer
+approved (`permit.judge_action`), over the signed body, with no settings change; an `if` filter would let a
 spelling it missed fall to the owner's global `gh pr merge` allow. The third member is
 `"permissions": {"defaultMode": <mode>, "deny": [...], "allow": [...]}`, the mode the launch's
 `Permission` chose for the project (ADR-console-060, #1151), the `MANAGER_DENY` rules and the allow

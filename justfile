@@ -207,10 +207,16 @@ agent-workflow-tests *args:
     tests/test_github_runners.py \
     tests/test_host_sudo.py \
     tests/test_runner_home.py \
+    tests/test_host_alerts.py \
+    tests/test_omlx_memory_watch.py \
+    tests/test_omlx_memory_fseventsd.py \
+    tests/test_memory_budget.py \
+    tests/test_omlx_memory_day.py \
     tests/test_verify_checks.py \
     tests/test_cleanup_fix_check.py \
     tests/test_suite_test_failures.py \
     tests/test_protection_tree.py \
+    tests/test_console_approved_action_check.py \
     tests/test_issue_branch.py \
     tests/test_program_copies.py \
     tests/test_keepalive_end_turn_cap.py \
@@ -302,6 +308,7 @@ agent-workflow-tests *args:
     tests/test_console_prompt_card.py \
     tests/test_console_prompt_card_service.py \
     tests/test_console_view.py \
+    tests/test_console_view_action.py \
     tests/test_console_view_lock_place.py \
     tests/test_console_draft_facts.py \
     tests/test_console_failed_start.py \
@@ -356,6 +363,7 @@ agent-workflow-tests *args:
     tests/test_console_live_fault_check.py \
     tests/test_pr_green.py \
     tests/test_console_page.py \
+    tests/test_console_page_action.py \
     tests/test_console_long_permission_card.py \
     tests/test_console_controls.py \
     tests/test_console_goal_box.py \
@@ -370,6 +378,7 @@ agent-workflow-tests *args:
     tests/test_console_writes.py \
     tests/test_console_answer.py \
     tests/test_console_sprints.py \
+    tests/test_console_action_card.py \
     tests/test_console_revive.py \
     tests/test_console_idle.py \
     tests/test_console_briefs.py \
@@ -381,6 +390,7 @@ agent-workflow-tests *args:
     tests/test_console_screenshots.py \
     tests/test_console_permission_shots.py \
     tests/test_console_sprint_command.py \
+    tests/test_console_sprint_action.py \
     tests/test_console_pictures.py \
     tests/test_console_manager.py \
     tests/test_console_permission.py \
@@ -389,12 +399,14 @@ agent-workflow-tests *args:
     tests/test_console_own_reads.py \
     tests/test_console_own_reads_wiring.py \
     tests/test_console_permit_wire.py \
+    tests/test_console_approved_action.py \
     tests/test_console_stops.py \
     tests/test_console_revive_service.py \
     tests/test_console_idle_service.py \
     tests/test_console_nudge.py \
     tests/test_console_deliveries.py \
     tests/test_console_engine_runs.py \
+    tests/test_console_sprint_engine.py \
     tests/test_console_movement.py \
     tests/test_console_movement_check.py \
     tests/test_console_spend.py \

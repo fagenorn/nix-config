@@ -352,7 +352,8 @@ is none. Its entry is
      "look": null | {"issue", "pr", "head", "state": "open" | "moved" | "posting" | "failed",
                      "line": <str>, "approve_index": <int> | null},
      "items": [], "answers": [], "answered": false, "waiting_since": "<time it was asked>",
-     "started_by": "<login>" | null, "owner_only"?: true, "consequential"?: true}
+     "started_by": "<login>" | null, "owner_only"?: true, "consequential"?: true,
+     "action"?: {"command": "<text>", "approve_index": <int> | null, "line": "<text>"}}
 
 `owner_only` is present, and true, only on a question the manager marked for the owner alone
 (#1263); a colleague never answers it. `consequential` is present, and true, on a question the
@@ -361,6 +362,11 @@ the page opens such a card with no option picked (#1265, ADR-console-092). Absen
 with its recommendation picked, as before. On a consequential card the question's `recommended` and
 `recommended_index` are null and `badge_index` (an `int`, present only there) names the option that
 carries the Recommended badge, so a page still open from before the mark preselects nothing.
+
+`action` is present only on a question that carries an action (`Question.action`), and such a question is
+consequential too. Its `command` is the whole command the owner's approval lets the manager run, never cut
+(the card shows exactly what is approved); `approve_index` is the index of the approving option among the
+logged options, or null when it is absent; `line` is `answer.ACTION_APPROVES`, naming that option.
 
 `look` (#1260) is null for a question that carries no look. For one that does, `approve_index` is the index
 among the logged options of the option that approves the head (the page never starts that option picked, so
@@ -491,6 +497,7 @@ only. `unmanaged` is always present, possibly empty, sorted by `root`.
     `engine_runs` is the `engine_runs` argument's runs of this project as `engine_runs.project_lines` gives them (each with
     its `spend`), in issue order; it is empty without the argument, a run of an unregistered project shows nowhere, and a project with one is active.
     A run stopped with a `need` other than `nothing` counts once in `inbox_items` and the headline; alone, it sets `ENGINE_SENTENCE`.
+    With `engine_lines` false (a guest's view) no engine run line is shown or counted, while the states still feed each sprint's movement.
 
     <wait entry> = {"key", "issue": <int>, "url", "until": "<ISO time>" | null, "text": "<text>"}
     <notice entry> = {"id": <int>, "sprint_id", "poster": "<sprint title>",
@@ -538,7 +545,7 @@ only. `unmanaged` is always present, possibly empty, sorted by `root`.
                       "movement": {"sessions": [{"session_id", "manager": <bool>,
                                                  "read_at": "<ISO time>" | null}, ...],
                                    "nudged_at": "<time>" | null, "base_at": "<ISO time>",
-                                   "issues": [<int>],
+                                   "issues": [<int>], "engine": {"moving": <bool>, "waits": [<wait kind>]},
                                    "waits": {"ci_at", "commit_at", "release_at", "lock_at":
                                              "<ISO time>" | null}}}
     <message entry> = {"id": <int>, "kind": "approved" | "changes" | "text" | "stop" | "answer",
@@ -624,30 +631,30 @@ list meets none of the sprint's open issues (report issues not landed, held, dro
 out) is not counted and is listed in `checks`
 instead; a missing or malformed `blocking` counts as blocking. `checks` is ordered by
 `waiting_since` then `key`, and each check stays an inbox item.
-A running sprint's movement (#1109, `sprint_quiet_for`) is one reading. With no clock (`now_ms`
-None) or while one of the sprint's listed sessions works, it moves. Else it is the latest of the
-approved brief's time (`decided_at`, else the sent time), the report's time, the fold's `moved_ms`
-(the latest movement of any run of the sprint, before or after its report) and the goal's stated
-time, plus the wait signals of #1110 (`wait_signals`); it is quiet once `now_ms` minus that reaches
-`QUIET_AFTER_MS`. A `failed` manager with no listed session drops only the stated time (a run,
-report, approval or wait signal still moves the sprint whatever its order against the failure); with
-nothing else left it reads quiet at once. The wait signals are the last time CI ran on a pull
-request (`ci_ms`), the last time a commit landed on a pull request or a delivery's branch
-(`commit_ms`), the last time a release was in progress (`release_ms`) and the last time a delivery
-of the sprint held or waited for the land lock (`lock_ms`, #1184), each read from the project's
-`ProjectMovement`, which keeps the last time a signal was seen after it disappears. A
-pull request belongs to the sprint when its issues meet the issues of the report and its `inbox`
-numbers; a branch belongs when its issue is one of them; a release belongs whatever the issues. Each
-signal moves the sprint for `QUIET_AFTER_MS` after its time. Two session signals (#1185) join the
-reading the same way: the last time one of the sprint's sessions wrote its transcript (`output_ms`),
-and the last time a process under one of them used CPU (`check_ms`), each read from the project's
-`ProjectMovement.sessions` associations of this sprint (`sprint_sessions_of`: the session carries the
-sprint's manager name, is its `manager_session`, or runs a delivery of one of its issues). A time of
-a manager session inside `NUDGE_REPLY_MS` (five minutes) after the sprint's `idle_nudged_at` is its
-reply to the nudge and moves nothing; a delivery session's time always does. The two signals add no
-sentence: they are part of the base reading, so they never name or replace a wait. The state's `quiet`,
-the ball's `nobody` and the now-sentence's `last seen` prefix are all this one reading, and none
-decides movement itself.
+A running sprint's movement (#1109, `sprint_quiet_for`) is one reading. With no clock (`now_ms` None) or while one of the
+sprint's listed sessions works, it moves. Else it is the latest of the approved brief's time (`decided_at`, else the sent time),
+the report's time, the fold's `moved_ms` (the latest movement of any run of the sprint, before or after its report) and the
+goal's stated time, plus the wait signals of #1110 (`wait_signals`); it is quiet once `now_ms` minus that reaches
+`QUIET_AFTER_MS`. A `failed` manager with no listed session drops only the stated time (a run, report, approval or wait signal
+still moves the sprint whatever its order against the failure); with nothing else left it reads quiet at once. The wait signals
+are the last time CI ran on a pull request (`ci_ms`), the last time a commit landed on a pull request or a delivery's branch
+(`commit_ms`), the last time a release was in progress (`release_ms`) and the last time a delivery of the sprint held or waited
+for the land lock (`lock_ms`, #1184), each read from the project's `ProjectMovement`, which keeps the last time a signal was
+seen after it disappears. A pull request belongs to the sprint when its issues meet the issues of the report and its `inbox`
+numbers; a branch belongs when its issue is one of them; a release belongs whatever the issues. Each signal moves the sprint for
+`QUIET_AFTER_MS` after its time. Two session signals (#1185) join the reading the same way: the last time one of the sprint's
+sessions wrote its transcript (`output_ms`), and the last time a process under one of them used CPU (`check_ms`), each read from
+the project's `ProjectMovement.sessions` associations of this sprint (`sprint_sessions_of`: the session carries the sprint's
+manager name, is its `manager_session`, or runs a delivery of one of its issues). A time of a manager session inside
+`NUDGE_REPLY_MS` (five minutes) after the sprint's `idle_nudged_at` is its reply to the nudge and moves nothing; a delivery
+session's time always does. The two signals add no sentence: they are part of the base reading, so they never name or replace a
+wait. An engine run of the sprint's issues (`engine_runs.sprint_engine`) moves it while its line reads moving or waiting, at
+once and with no window; a run reading not running, stopped or done adds nothing at once, and the run's session ids
+(`RunState.sessions`) are left out of the session signals while a manager's own session counts as before. For an issue an engine
+run carries (`SprintEngine.issues`) the forge's pulls, the branches, the land locks and the queue places are not read, the run's
+open wait event being its wait; the release reading is read whatever the issues. `movement.engine` is the sprint's engine
+reading. The state's `quiet`, the ball's `nobody` and the now-sentence's `last seen` prefix are all this one reading, and
+none decides movement itself.
 The state is the first that holds: `stopped_at` is set, `stopped` ("stopped by you"); `stop_at` is
 set, `stopping` ("stopping"); the sprint has a closing, `done`; the brief is not approved,
 `drafting` ("drafting the brief");
@@ -655,34 +662,35 @@ the report's phase is `done` and no question is open and no look approval is sti
 the movement reading is quiet, `quiet` ("quiet for <n> min \u2014 may be stuck"); the
 phase is `closing`, `closing`; no report, `starting`; else `on_track` ("on track").
 `status_at` is the report's own time, which the page words against its own clock.
-`ball`, `ball_text` and `now_text` (#1086) are null for an ended sprint (`ended_at` set); a running
-sprint has exactly one ball and a non-empty now-sentence, and `state` and `state_text` are
-unchanged. `ball` (`sprint_ball`) is the first that holds: `owner` ("waiting on you") when `waiting`
-is above 0, the brief waits on the owner (decision none), the sprint is stalled, `no_progress_at` is
-set, its manager failed to start with no brief (`sprints.failed_start`), the sprint has an open permission card
-(`prompted`, #1424; a listed session waiting for an answer or a permission is no longer read here), or its manager
-cannot hear the console (below); `manager` ("manager working") while the movement reading moves;
-else `nobody` ("nothing running, may be stuck"), except that a stated pause (`paused`, "paused") or a stated wait whose time is ahead (`waiting`, "waiting"; `sprints.stated_hold`, #1380) holds it, after the owner's rules and before the movement reading, until the stated time has passed. `ball_text` is `BALL_TEXT[ball]`. `now_text` (`sprint_now`) is the first
-that holds: a stop requested, `NOW_STOPPING_TEXT`; a manager that cannot hear the console
-(#1229: the sprint's manager session has `SessionMovement.held`, its transcript's last peer message
-being one the client held and did not deliver), `NOW_DEAF_TEXT`; an open permission card of the sprint,
-`NOW_PERMISSION_TEXT`; a manager that failed to start, `NOW_FAILED_START_TEXT` (`state` stays
-`drafting`); no brief or one the owner asked to change,
-`NOW_DRAFTING_TEXT`; a brief waiting on the owner, `NOW_BRIEF_TEXT`; an open question,
-`NOW_QUESTION_TEXT` with the first one's text; a waiting item (`waiting` above 0) while an answered look card's approval failed to post (#1260), `NOW_LOOK_RETRY_TEXT`, or is being recorded, `NOW_LOOK_RECORDING_TEXT`; any other waiting item,
-`NOW_DECISION_TEXT`; a stall, `NOW_STALLED_TEXT`; no progress, `NOW_NO_PROGRESS_TEXT`; a quota
-wait, `NOW_QUOTA_TEXT`; a stated pause (`sprints.stated_hold`, #1380), `NOW_PAUSED_TEXT` with its reason; a stated wait whose time is ahead (or with no clock), `NOW_WAIT_TEXT`, with `now_until` its time (and no `last seen` prefix); an unread message the console delivered (`sprints.unread`, `delivered_at` set,
-#1379), `NOW_UNREAD_TEXT`; with no merge refusal shown, a wait signal that alone moves the sprint
-(`sprint_wait`), the first of `NOW_CI_TEXT`, `NOW_COMMITTING_TEXT`, `NOW_RELEASE_TEXT` and `NOW_LOCK_TEXT`
-whose signal is inside the window (`NOW_LOCK_POSITION_TEXT`, the place in the queue, in place of `NOW_LOCK_TEXT` when the sprint's smallest
-`ProjectMovement.positions` is known); no report, `NOW_STARTING_TEXT`; else a shown merge refusal
-(`sprints.merge_refused`), `NOW_REFUSED_TEXT` with its reason; else the stage phrase,
-`NOW_STAGE_TEXT`: the leading stage, its issue count, the total and the report's whole milestone (just the milestone when the report names no issue); either prefixed by `NOW_QUIET_TEXT` when the
-ball is `nobody`. The
-leading stage is the non-final, non-queued stage the most issues hold (a tie goes to the later in
-`REPORT_STAGES`); with none, `queued`; with none, `landed` when any landed, else the most common
-remaining stage. The sentence is never the status line but for a merge refusal, and never
-shortened (the page holds it to two lines).
+`ball`, `ball_text` and `now_text` (#1086) are null for an ended sprint (`ended_at` set); a running sprint has exactly one ball
+and a non-empty now-sentence, and `state` and `state_text` are unchanged. `ball` (`sprint_ball`) is the first that holds:
+`owner` ("waiting on you") when `waiting` is above 0, the brief waits on the owner (decision none), the sprint is stalled,
+`no_progress_at` is set, its manager failed to start with no brief (`sprints.failed_start`), the sprint has an open permission
+card (`prompted`, #1424; a listed session waiting for an answer or a permission is no longer read here), or its manager cannot
+hear the console (below); `manager` ("manager working") while the movement reading moves; else `nobody` ("nothing running, may
+be stuck"), except that a stated pause (`paused`, "paused") or a stated wait whose time is ahead (`waiting`, "waiting";
+`sprints.stated_hold`, #1380) holds it, after the owner's rules and before the movement reading, until the stated time has
+passed. `ball_text` is `BALL_TEXT[ball]`. `now_text` (`sprint_now`) is the first that holds: a stop requested,
+`NOW_STOPPING_TEXT`; a manager that cannot hear the console (#1229: the sprint's manager session has `SessionMovement.held`, its
+transcript's last peer message being one the client held and did not deliver), `NOW_DEAF_TEXT`; an open permission card of the
+sprint, `NOW_PERMISSION_TEXT`; a manager that failed to start, `NOW_FAILED_START_TEXT` (`state` stays `drafting`); no brief or
+one the owner asked to change, `NOW_DRAFTING_TEXT`; a brief waiting on the owner, `NOW_BRIEF_TEXT`; an open question,
+`NOW_QUESTION_TEXT` with the first one's text; a waiting item (`waiting` above 0) while an answered look card's approval failed
+to post (#1260), `NOW_LOOK_RETRY_TEXT`, or is being recorded, `NOW_LOOK_RECORDING_TEXT`; any other waiting item,
+`NOW_DECISION_TEXT`; a stall, `NOW_STALLED_TEXT`; no progress, `NOW_NO_PROGRESS_TEXT`; a quota wait, `NOW_QUOTA_TEXT`; a stated
+pause (`sprints.stated_hold`, #1380), `NOW_PAUSED_TEXT` with its reason; a stated wait whose time is ahead (or with no clock),
+`NOW_WAIT_TEXT`, with `now_until` its time (and no `last seen` prefix); an unread message the console delivered
+(`sprints.unread`, `delivered_at` set, #1379), `NOW_UNREAD_TEXT`; with no merge refusal shown, a wait signal that alone moves
+the sprint (`sprint_wait`), the first of `NOW_CI_TEXT`, `NOW_COMMITTING_TEXT`, `NOW_RELEASE_TEXT` and `NOW_LOCK_TEXT` whose
+signal is inside the window (`NOW_LOCK_POSITION_TEXT`, the place in the queue, in place of `NOW_LOCK_TEXT` when the sprint's
+smallest `ProjectMovement.positions` is known), where an open engine wait of CI or the lock counts as fresh in the same place
+with the same words, then a usage limit and a free session slot on this host in the words of the run line
+(`engine_runs.wait_text`), a usage limit with `now_until` the earliest end time its runs' lines show (`SprintEngine.later_until`); no report, `NOW_STARTING_TEXT`; else a shown merge refusal (`sprints.merge_refused`),
+`NOW_REFUSED_TEXT` with its reason; else the stage phrase, `NOW_STAGE_TEXT`: the leading stage, its issue count, the total and
+the report's whole milestone (just the milestone when the report names no issue); either prefixed by `NOW_QUIET_TEXT` when the
+ball is `nobody`. The leading stage is the non-final, non-queued stage the most issues hold (a tie goes to the later in
+`REPORT_STAGES`); with none, `queued`; with none, `landed` when any landed, else the most common remaining stage. The sentence
+is never the status line but for a merge refusal, and never shortened (the page holds it to two lines).
 `ended_at` is `sprints.ended_at` for every route to done (a stop, a closing, or a latest report of
 phase `done`), so the `done` state and `ended_at` never disagree; `stoppable` is true exactly when
 the sprint has no stop request, is not stopped and has not ended; `stop_text` is `STOP_FAILED_TEXT`
@@ -805,7 +813,7 @@ from pathlib import PurePosixPath
 from types import MappingProxyType
 
 from agent_tools.console import (
-    answer as owner_answer, contract_draft, engine_runs as engine_runs_module, inbox, project_question,
+    card_entries, contract_draft, engine_runs as engine_runs_module, inbox, project_question,
     question_records, spend as spend_module)
 from agent_tools.console.activation import Activation
 from agent_tools.console.activation_run import LastRun
@@ -1385,6 +1393,7 @@ class WaitSignals:
     lock_position: int | None = None
     output_ms: int | None = None
     check_ms: int | None = None
+    engine: engine_runs_module.SprintEngine = engine_runs_module.NO_ENGINE
 
 
 NO_WAITS = WaitSignals()
@@ -1470,18 +1479,22 @@ def sprint_issue_numbers(state: SprintState) -> set[int]:
 
 def wait_signals(state: SprintState, movement: ProjectMovement | None,
                  manager_ids: Collection[str] = (), *, issues: Collection[int] | None = None,
-                 session_id: str | None = None) -> WaitSignals:
+                 session_id: str | None = None,
+                 engine: engine_runs_module.SprintEngine = engine_runs_module.NO_ENGINE) -> WaitSignals:
     """The sprint's wait signals out of its project's movement. The sprint's issues are the
     report's issue numbers united with its `inbox` numbers (none without a report); a pull request
     belongs when its issues meet them, a branch when its issue is one of them, a land lock time
-    when its issue is one of them, and the release whatever the issues. The session signals are the newest transcript write and the newest
+    when its issue is one of them, and the release whatever the issues; the issues an engine run
+    carries are left out of the first four. The session signals are the newest transcript write and the newest
     running check among the associations of this sprint; a manager session's time inside the reply
     window of an idle nudge (`NUDGE_REPLY_MS` from `idle_nudged_at`) is left out. `issues` replaces
     the sprint's issues with the given ones (a run's own, #1212) and `session_id` keeps only the
-    associations of that session; both default to the whole sprint."""
+    associations of that session; both default to the whole sprint. `engine` is the reading of the
+    sprint's engine runs: it rides on the result and its session ids are left out of the
+    session signals, a manager's own session counting as before."""
     if movement is None:
-        return NO_WAITS
-    issues = sprint_issue_numbers(state) if issues is None else set(issues)
+        return WaitSignals(engine=engine)
+    issues = (sprint_issue_numbers(state) if issues is None else set(issues)) - engine.issues
     pulls = [pull for pull in movement.pulls if issues & pull.issues]
     running = [pull.running_ms for pull in pulls if pull.running_ms is not None]
     commits = [pull.committed_ms for pull in pulls if pull.committed_ms is not None]
@@ -1497,12 +1510,13 @@ def wait_signals(state: SprintState, movement: ProjectMovement | None,
         return ms
 
     mine = [own for own in movement.sessions if own.sprint_id == state.sprint_id
-            and (session_id is None or own.session_id == session_id)]
+            and (session_id is None or own.session_id == session_id)
+            and own.session_id not in engine.sessions]
     outputs = [ms for own in mine if (ms := counted(own, own.output_ms)) is not None]
     checks = [ms for own in mine if (ms := counted(own, own.check_ms)) is not None]
     return WaitSignals(max(running, default=None), max(commits, default=None),
                        movement.release_ms, max(locks, default=None), min(places, default=None),
-                       max(outputs, default=None), max(checks, default=None))
+                       max(outputs, default=None), max(checks, default=None), engine)
 
 
 def _utc(ms: int) -> str:
@@ -1540,8 +1554,9 @@ def sprint_quiet_for(state: SprintState, now_ms: int | None, listed: Collection[
     listed session drops only the stated time (its launch is known to have failed, so a fresh goal
     is no sign of life); a run, a report, an approval or a wait signal inside the window still
     moves the sprint whatever its order against the failure. With no signal left, the sprint reads
-    quiet at once, for the time since the goal was stated."""
-    if now_ms is None or WORKING in listed:
+    quiet at once, for the time since the goal was stated. A moving engine run of its issues moves it
+    at once whatever its age."""
+    if now_ms is None or WORKING in listed or waits.engine.moves:
         return None
     brief, report = state.brief, state.report
     signals = []
@@ -1568,8 +1583,10 @@ def sprint_wait(state: SprintState, now_ms: int | None, listed: Collection[str],
     move the sprint (the session signals are part of the base reading and never name a wait): with
     no clock, or when something else moves it, or when it is quiet whatever
     the waits say, it is None. Else the first of CI, a committing delivery, a release step and the
-    land lock whose signal is inside `QUIET_AFTER_MS`."""
-    base = WaitSignals(output_ms=waits.output_ms, check_ms=waits.check_ms)
+    land lock whose signal is inside `QUIET_AFTER_MS` or whose engine wait is open, then the engine's
+    usage limit and free host slot."""
+    base = WaitSignals(output_ms=waits.output_ms, check_ms=waits.check_ms,
+                       engine=replace(waits.engine, waits=frozenset()))
     if (now_ms is None or sprint_quiet_for(state, now_ms, listed, base) is None
             or sprint_quiet_for(state, now_ms, listed, waits) is not None):
         return None
@@ -1578,15 +1595,16 @@ def sprint_wait(state: SprintState, now_ms: int | None, listed: Collection[str],
 
 def fresh_wait(waits: WaitSignals, now_ms: int) -> str | None:
     """The first of CI, a committing delivery, a release step and the land lock whose signal is
-    inside `QUIET_AFTER_MS`. The idle hold of an in-progress run reads it too. The land lock
-    reads `NOW_LOCK_POSITION_TEXT` when `lock_position` is known."""
+    inside `QUIET_AFTER_MS` or whose engine wait is open, then the engine's usage limit and free host
+    slot. The idle hold of an in-progress run reads it too. The land lock reads `NOW_LOCK_POSITION_TEXT`
+    when `lock_position` is known."""
     for ms, text in ((waits.ci_ms, NOW_CI_TEXT), (waits.commit_ms, NOW_COMMITTING_TEXT),
                      (waits.release_ms, NOW_RELEASE_TEXT), (waits.lock_ms, NOW_LOCK_TEXT)):
-        if ms is not None and now_ms - ms < QUIET_AFTER_MS:
+        if (ms is not None and now_ms - ms < QUIET_AFTER_MS) or text in waits.engine.texts:
             if text == NOW_LOCK_TEXT and waits.lock_position is not None:
                 return NOW_LOCK_POSITION_TEXT.format(n=waits.lock_position)
             return text
-    return None
+    return waits.engine.later
 
 
 @dataclass(frozen=True)
@@ -1842,15 +1860,12 @@ def _finished(state: SprintState, now_ms: int | None) -> bool:
             and now_ms - _millis(ended) >= FINISHED_AFTER_MS)
 
 
-def _sprint_entry(state: SprintState, now_ms: int | None, managers: bool,
-                  sessions: Sequence[SessionState],
-                  deliveries: Mapping[str, Sequence[DeliveryState]],
-                  records: Sequence[InboxRecord] = (), capacity: Mapping = EMPTY,
-                  nudges: bool = True, looked: str | None = None,
-                  movement: ProjectMovement | None = None,
-                  wait_lines: Sequence[Mapping] = (),
-                  waits_of: Callable[[DeliveryState], WaitSignals | None] = lambda run: None,
-                  prompted: bool = False) -> dict:
+def _sprint_entry(state: SprintState, now_ms: int | None, managers: bool, sessions: Sequence[SessionState],
+                  deliveries: Mapping[str, Sequence[DeliveryState]], records: Sequence[InboxRecord] = (),
+                  capacity: Mapping = EMPTY, nudges: bool = True, looked: str | None = None,
+                  movement: ProjectMovement | None = None, wait_lines: Sequence[Mapping] = (),
+                  waits_of: Callable[[DeliveryState], WaitSignals | None] = lambda run: None, prompted: bool = False,
+                  engine: engine_runs_module.SprintEngine = engine_runs_module.NO_ENGINE) -> dict:
     stated_ms = _millis(state.stated_at)
     elapsed = 0 if now_ms is None else now_ms - stated_ms
     report = state.report
@@ -1875,7 +1890,7 @@ def _sprint_entry(state: SprintState, now_ms: int | None, managers: bool,
     manager_ids = {s.session_id for s in sessions}
     if state.manager_session is not None:
         manager_ids.add(state.manager_session)
-    waits = wait_signals(state, movement, manager_ids)
+    waits = wait_signals(state, movement, manager_ids, engine=engine)
     name, text = sprint_state(state, now_ms, waiting, quota, listed=listed, waits=waits)
     ended = ended_at(state)
     failed = failed_start(state, bool(sessions), managers)
@@ -1900,7 +1915,8 @@ def _sprint_entry(state: SprintState, now_ms: int | None, managers: bool,
         "ball_text": None if ball is None else BALL_TEXT[ball],
         "now_text": now_text,
         "now_until": (hold[1] if hold is not None and hold[0] == WAIT_UNTIL
-                      and now_text == NOW_WAIT_TEXT else None),
+                      and now_text == NOW_WAIT_TEXT
+                      else engine.later_until if now_text == engine.later else None),
         "stated_at": state.stated_at,
         "started_by": state.started_by,
         "age_text": age_text(elapsed),
@@ -1950,7 +1966,7 @@ def _sprint_entry(state: SprintState, now_ms: int | None, managers: bool,
                           "read_at": None if m.read_ms is None else _utc(m.read_ms)}
                          for m in own],
             "nudged_at": state.idle_nudged_at,
-            "issues": sorted(sprint_issue_numbers(state)),
+            "issues": sorted(sprint_issue_numbers(state)), "engine": waits.engine.as_json(),
             "waits": {"ci_at": None if waits.ci_ms is None else _utc(waits.ci_ms),
                       "commit_at": None if waits.commit_ms is None else _utc(waits.commit_ms),
                       "release_at": None if waits.release_ms is None else _utc(waits.release_ms),
@@ -1961,24 +1977,18 @@ def _sprint_entry(state: SprintState, now_ms: int | None, managers: bool,
 
 
 def _project_entry(state: ProjectState, sessions: Sequence[SessionState],
-                   deliveries: Mapping[str, Sequence[DeliveryState]],
-                   now_ms: int | None,
-                   sprints: Sequence[SprintState] = (),
-                   managers: bool = True,
+                   deliveries: Mapping[str, Sequence[DeliveryState]], now_ms: int | None,
+                   sprints: Sequence[SprintState] = (), managers: bool = True,
                    sprint_sessions: Mapping[str, Sequence[SessionState]] | None = None,
-                   records: Sequence[InboxRecord] = (),
-                   finished: Sequence[SprintState] = (),
-                   capacity: Mapping = EMPTY,
-                   nudges: bool = True, looked: str | None = None,
-                   movement: ProjectMovement | None = None,
-                   notices: Sequence[Mapping] = (), notice_post: bool = False,
-                   overlaps: Sequence[Mapping] = (),
+                   records: Sequence[InboxRecord] = (), finished: Sequence[SprintState] = (),
+                   capacity: Mapping = EMPTY, nudges: bool = True, looked: str | None = None,
+                   movement: ProjectMovement | None = None, notices: Sequence[Mapping] = (),
+                   notice_post: bool = False, overlaps: Sequence[Mapping] = (),
                    sprint_waits: Mapping[str, Sequence[Mapping]] | None = None,
-                   waits: Sequence[Mapping] = (),
-                   read: ReadState | None = None,
-                   questions: Mapping | None = None,
-                   prompted: Collection[str] = (),
-                   engine_runs: Sequence[Mapping] = ()) -> dict:
+                   waits: Sequence[Mapping] = (), read: ReadState | None = None,
+                   questions: Mapping | None = None, prompted: Collection[str] = (),
+                   engine_runs: Sequence[Mapping] = (),
+                   engine_states: Sequence[engine_runs_module.RunState] = ()) -> dict:
     manager_ids: dict[str, set[str]] = {}
     for sprint in sprints:
         ids = {s.session_id for s in (sprint_sessions or {}).get(sprint.sprint_id, ())}
@@ -1997,7 +2007,9 @@ def _project_entry(state: ProjectState, sessions: Sequence[SessionState],
         return [_sprint_entry(s, now_ms, managers, (sprint_sessions or {}).get(s.sprint_id, ()),
                               deliveries, records, capacity, nudges, looked, movement,
                               (sprint_waits or {}).get(s.sprint_id, ()), waits_of,
-                              prompted=s.sprint_id in prompted)
+                              prompted=s.sprint_id in prompted,
+                              engine=engine_runs_module.sprint_engine(
+                                  engine_states, s.project_id, sprint_issue_numbers(s), now_ms))
                 for s in group]
 
     return {
@@ -2207,26 +2219,6 @@ def _brief_entry(sprint: SprintState) -> dict:
             "started_by": sprint.started_by}
 
 
-def _look_entry(question: Question) -> dict | None:
-    look = question.look
-    if look is None:
-        return None
-    state, line = "open", owner_answer.LOOK_APPROVES.format(
-        option=cut(look.approve, MAX_OPTION_CHARS), head=look.head[:7], pr=look.pr, issue=look.issue)
-    if question.look_state == "moved":
-        state = "moved"
-        line = (owner_answer.LOOK_MOVED.format(found=(question.look_found or "")[:7], head=look.head[:7])
-                if question.look_found_state == "open" and question.look_found is not None
-                else owner_answer.LOOK_CLOSED.format(state=question.look_found_state))
-    elif question.look_state == "posting":
-        state, line = "posting", owner_answer.LOOK_RECORDING.format(head=look.head[:7], issue=look.issue)
-    elif question.look_state == "failed":
-        state, line = "failed", question.look_reason
-    approve = question.options.index(look.approve) if look.approve in question.options else None
-    return {"issue": look.issue, "pr": look.pr, "head": look.head, "state": state, "line": line,
-            "approve_index": approve}
-
-
 def _question_entry(sprint: SprintState, question: Question) -> dict:
     ask = cut(question.question, MAX_ASK_CHARS)
     context = question.context
@@ -2248,12 +2240,14 @@ def _question_entry(sprint: SprintState, question: Question) -> dict:
                            "recommended_index": question.options.index(question.recommended),
                            "needs_words_index": [i for i, option in enumerate(question.options)
                                                  if option in question.needs_words]}],
-            "pictures": _picture_entries(question.pictures), "look": _look_entry(question),
+            "pictures": _picture_entries(question.pictures), "look": card_entries.look_entry(question),
             "items": [], "answers": [], "answered": answered, "waiting_since": question.at,
             "started_by": sprint.started_by}
     if question.owner_only:
         entry["owner_only"] = True
-    if (question.consequential or question.look is not None
+    if question.action is not None:
+        entry["action"] = card_entries.action_entry(question)
+    if (question.consequential or question.look is not None or question.action is not None
             or is_look(picture.pair for picture in question.pictures)):
         entry["consequential"] = True
         # A page from before the mark preselects `recommended_index`, or `recommended` by text:
@@ -2368,8 +2362,7 @@ def derive_view(
     pending: Mapping[str, PendingStop] | None = None,
     signin_runs: Mapping[str, Mapping] | None = None,
     accounts_added: Iterable[str] = (),
-    pin: Mapping | None = None,
-    pin_launches: Iterable[str] = (),
+    pin: Mapping | None = None, pin_launches: Iterable[str] = (),
     registration: Mapping | None = None,
     adoption_items: Iterable[Mapping] = (),
     release_items: Iterable[Mapping] = (),
@@ -2379,16 +2372,14 @@ def derive_view(
     confirm_items: Iterable[Mapping] = (),
     trust_items: Iterable[Mapping] = (),
     failure_items: Iterable[Mapping] = (),
-    nudges: bool = True,
-    looked: str | None = None,
+    nudges: bool = True, looked: str | None = None,
     movement: Mapping[str, ProjectMovement] | None = None,
-    activation: Activation | None = None,
-    activation_run: LastRun | None = None,
+    activation: Activation | None = None, activation_run: LastRun | None = None,
     owner_notices: Mapping[str, tuple[Notice, ...]] | None = None,
     spend: Mapping | None = None,
     project_questions: Mapping[str, Sequence[project_question.AskedQuestion]] | None = None,
     sharing: Mapping | None = None,
-    engine_runs: Iterable[engine_runs_module.RunState] | None = None,
+    engine_runs: Iterable[engine_runs_module.RunState] | None = None, engine_lines: bool = True,
 ) -> dict:
     states = list(states)
     sessions = list(sessions)
@@ -2406,11 +2397,11 @@ def derive_view(
     answered = sorted((r for r in shown if r.item["answered"]),
                       key=lambda r: (r.waiting_since, r.item["key"], r.item["project_id"]))
     stale_projects = sorted(p for p in registered if p in health and not health[p].ok)
-    lines = engine_runs_module.project_lines(engine_runs or (), now_ms, spend)
+    engine_states = list(engine_runs or ())
+    lines = engine_runs_module.project_lines(engine_states, now_ms, spend) if engine_lines else {}
     drafted: dict[str, list[SprintState]] = {}
     finished: dict[str, list[SprintState]] = {}
-    for sprint in sorted((sprints or {}).values(),
-                         key=lambda s: (-s.stated_seq, s.sprint_id)):
+    for sprint in sorted((sprints or {}).values(), key=lambda s: (-s.stated_seq, s.sprint_id)):
         if sprint.project_id in registered:
             kept = finished if _finished(sprint, now_ms) else drafted
             kept.setdefault(sprint.project_id, []).append(sprint)
@@ -2496,17 +2487,13 @@ def derive_view(
     open_by_project: dict[str, list[InboxRecord]] = {}
     for record in open_items:
         open_by_project.setdefault(record.item["project_id"], []).append(record)
-    entries = [_project_entry(s, owned.get(s.project_id, ()), runs, now_ms,
-                              drafted.get(s.project_id, ()), managers, in_sprint,
-                              open_by_project.get(s.project_id, ()),
-                              finished.get(s.project_id, ()), capacity, nudges, looked,
-                              (movement or {}).get(s.project_id),
-                              notices=notices[s.project_id],
-                              notice_post=notice_post[s.project_id],
-                              overlaps=overlaps[s.project_id],
+    entries = [_project_entry(s, owned.get(s.project_id, ()), runs, now_ms, drafted.get(s.project_id, ()), managers, in_sprint,
+                              open_by_project.get(s.project_id, ()), finished.get(s.project_id, ()), capacity, nudges, looked,
+                              (movement or {}).get(s.project_id), notices=notices[s.project_id],
+                              notice_post=notice_post[s.project_id], overlaps=overlaps[s.project_id],
                               sprint_waits=sprint_waits, waits=project_waits.get(s.project_id, ()),
-                              read=health.get(s.project_id), questions=asks[s.project_id],
-                              prompted=prompted, engine_runs=lines.get(s.project_id, ()))
+                              read=health.get(s.project_id), questions=asks[s.project_id], prompted=prompted,
+                              engine_runs=lines.get(s.project_id, ()), engine_states=engine_states)
                for s in active]
     quiet_entries = [_project_entry(s, (), runs, now_ms, (), managers, in_sprint,
                                     finished=finished.get(s.project_id, ()), capacity=capacity,

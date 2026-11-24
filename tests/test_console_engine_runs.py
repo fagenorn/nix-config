@@ -15,7 +15,7 @@ from pathlib import Path
 from unittest import mock
 
 from agent_tools.console import console, engine_runs, guest, service, sprints, view
-from agent_tools.console.engine_runs import EngineRuns
+from agent_tools.console.engine_runs import NO_ENGINE, EngineRuns, SprintEngine
 from agent_tools.delivery import engine, engine_ledger, procedure_check
 from agent_tools.delivery.engine_ledger import RunState
 
@@ -131,11 +131,33 @@ class ReadingTest(unittest.TestCase):
         self.assertEqual(set(engine_runs.WAIT_TEXT), set(engine_ledger.WAITS))
         self.assertEqual(set(engine_runs.NEED_TEXT), set(procedure_check.NEEDS))
         self.assertEqual(engine_runs.WAIT_TEXT["lock"], sprints.NOW_LOCK_TEXT)
+        self.assertEqual(engine_runs.WAIT_TEXT["checks"], sprints.NOW_CI_TEXT)
         state = bare_state(stage="building", engine_alive=True, last_event=LAST_AT,
                            wait={"wait": "usage-limit", "since": LAST_AT, "until": "2026-11-21T18:00:00Z"})
         entry = engine_runs.engine_entry(state, None)
         self.assertEqual(entry["wait_until"], "2026-11-21T18:00:00Z")
         self.assertEqual(entry["text"], "building, waiting out a usage limit")
+
+    def test_an_open_ci_wait_reads_waiting_for_ci_on_its_pull_request(self):
+        state = poll_state("sprint-checks.jsonl", LIVE)
+        entry = engine_runs.engine_entry(state, None)
+        self.assertEqual((entry["reading"], entry["text"]),
+                         ("waiting", "building, waiting for CI on its pull request"))
+        self.assertEqual(engine_runs.wait_text(state), sprints.NOW_CI_TEXT)
+
+    def test_wait_text_names_the_open_wait_only_while_the_run_reads_waiting(self):
+        self.assertEqual(engine_runs.wait_text(poll_state("sprint-host-slot.jsonl", LIVE)),
+                         "waiting for a free session slot on this host")
+        for fixture, probe in (("sprint-host-slot.jsonl", DEAD), ("sprint-moving.jsonl", LIVE),
+                               ("stopped.jsonl", LIVE)):
+            with self.subTest(fixture=fixture, live=probe is LIVE):
+                self.assertIsNone(engine_runs.wait_text(poll_state(fixture, probe)))
+
+    def test_a_waiting_lines_text_ends_with_its_wait_text(self):
+        for wait in ("checks", "lock", "usage-limit", "host-slot"):
+            with self.subTest(wait=wait):
+                state = poll_state(f"sprint-{wait}.jsonl", LIVE)
+                self.assertEqual(engine_runs.line_text(state), f"building, {engine_runs.wait_text(state)}")
 
     def test_precedence_is_done_stop_not_running_wait_moving(self):
         for fixture, probe, reading in (("stopped.jsonl", DEAD, "stopped"), ("done.jsonl", DEAD, "done"),
@@ -170,6 +192,49 @@ class ReadingTest(unittest.TestCase):
         self.assertEqual(lines, {
             "acme/app": [engine_runs.engine_entry(states[1], None), engine_runs.engine_entry(states[0], None)],
             "other/app": [engine_runs.engine_entry(states[2], None)]})
+
+
+class SprintEngineTest(unittest.TestCase):
+    def read(self, fixture, probe, project="acme/app", issues=(41, 42), now_ms=None):
+        return engine_runs.sprint_engine([poll_state(fixture, probe)], project, set(issues), now_ms)
+
+    def test_a_moving_run_of_the_sprints_issue_moves_it_and_names_its_sessions(self):
+        self.assertEqual(self.read("sprint-moving.jsonl", LIVE), SprintEngine(
+            moving=True, waits=frozenset(), sessions=frozenset({"eng-s1"}), issues=frozenset({41})))
+
+    def test_a_waiting_run_gives_its_wait_kind_and_does_not_read_moving(self):
+        self.assertEqual(self.read("sprint-checks.jsonl", LIVE), SprintEngine(
+            moving=False, waits=frozenset({"checks"}), sessions=frozenset({"eng-s1"}),
+            issues=frozenset({41})))
+
+    def test_a_gone_engine_moves_nothing_but_keeps_its_sessions_and_issue(self):
+        self.assertEqual(self.read("sprint-moving.jsonl", DEAD), SprintEngine(
+            sessions=frozenset({"eng-s1"}), issues=frozenset({41})))
+
+    def test_a_run_of_another_project_or_issue_is_not_read(self):
+        self.assertEqual(self.read("sprint-moving.jsonl", LIVE, project="other/app", issues=(41,)), NO_ENGINE)
+        self.assertEqual(self.read("sprint-moving.jsonl", LIVE, issues=(7,)), NO_ENGINE)
+
+    def test_a_run_hidden_a_day_after_it_ended_carries_no_issue(self):
+        state = bare_state(stage="landing", done=True, last_event=LAST_AT, sessions=("eng-s9",))
+        self.assertEqual(engine_runs.sprint_engine([state], "acme/app", {41}, LAST_MS + DAY_MS),
+                         SprintEngine(sessions=frozenset({"eng-s9"})))
+
+    def test_a_sprint_engine_reads_whether_it_moves_its_wait_sentences_and_its_json(self):
+        self.assertIs(NO_ENGINE.moves, False)
+        self.assertIs(SprintEngine(moving=True).moves, True)
+        self.assertIs(SprintEngine(waits=frozenset({"checks"})).moves, True)
+        both = SprintEngine(waits=frozenset({"checks", "lock"}))
+        self.assertEqual(both.texts, {sprints.NOW_CI_TEXT, sprints.NOW_LOCK_TEXT})
+        self.assertIsNone(both.later)
+        self.assertEqual(SprintEngine(waits=frozenset({"host-slot", "usage-limit"})).later,
+                         "waiting out a usage limit")
+        self.assertEqual(SprintEngine(waits=frozenset({"host-slot"})).later,
+                         "waiting for a free session slot on this host")
+        self.assertEqual(SprintEngine(waits=frozenset({"lock", "checks"})).as_json(),
+                         {"moving": False, "waits": ["checks", "lock"]})
+        every = SprintEngine(waits=frozenset(engine_ledger.WAITS)).as_json()["waits"]
+        self.assertEqual(every, ["checks", "host-slot", "lock", "usage-limit"])
 
 
 class IncrementalTest(unittest.TestCase):
@@ -556,9 +621,12 @@ class ServiceLineTest(unittest.TestCase):
         svc = support.service(self, self.store, self.registry, engine_runs_root=runs)
         self.assertEqual(self.entry(svc)["engine_runs"][0]["text"], "planning, moving")
 
-    def test_a_guest_view_takes_no_engine_run(self):
-        scoped = guest.scoped({"engine_runs": [live_state()], "states": []}, frozenset({"acme/app"}))
-        self.assertEqual(scoped["engine_runs"], ())
+    def test_a_guest_scope_keeps_only_its_projects_engine_runs_and_no_line(self):
+        scoped = guest.scoped({"engine_runs": [live_state(), live_state("other/app")], "states": []},
+                              frozenset({"acme/app"}))
+        self.assertEqual(scoped["engine_runs"], (live_state(),))
+        self.assertIs(scoped["engine_lines"], False)
+        self.assertIs(guest.scoped({"states": []}, frozenset({"acme/app"}))["engine_lines"], False)
 
     def test_without_a_runs_root_no_engine_run_is_read(self):
         home = self.root / "home"

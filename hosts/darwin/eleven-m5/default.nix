@@ -1,4 +1,5 @@
 {
+  config,
   lib,
   pkgs,
   unstablePkgs,
@@ -49,11 +50,17 @@ in
     ./omlx.nix
     ./docker.nix
     ./github-runners.nix
+    ./memory-watch.nix
   ];
 
   # Nobody is logged in at the screen as the owner and automatic login stays off, so launchd
   # never loads login agents here: run the owner's services as boot daemons (issue 1290).
   ownerServices.atBoot = true;
+
+  # The memory budget (memory-budget.nix) with the runner count the configuration declares.
+  system.build.memoryBudget = import ./memory-budget.nix // {
+    ciRunners = builtins.length (builtins.attrNames config.services.github-runners);
+  };
 
   # mkDarwin sets HostName and LocalHostName; Tailscale names the node after the Computer Name.
   networking.computerName = "eleven-m5";
