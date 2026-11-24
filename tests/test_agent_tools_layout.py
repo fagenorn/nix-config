@@ -41,6 +41,7 @@ ALLOWED_IMPORTS: dict[str, frozenset[str]] = {
         "agent_tools.claims.forge_owner_action",  # answer, inbox
         "agent_tools.claims.owner_actions",  # inbox, look_check, movement, service
         "agent_tools.delivery.look_marker",  # inbox, look_check, look_kept_check
+        "agent_tools.delivery.engine_ledger",  # console, engine_runs
         "agent_tools.release.release_profile",  # release_card
         "agent_tools.release.transaction_history",  # movement
         "agent_tools.release.transaction_storage",  # movement

@@ -130,6 +130,10 @@ def both_fields_line(cid, a=A, h=H):
                                                   "pictures": DIG, "rule": "look-files"}, "x"))
 
 
+def own_files_comment(cid, a=A, h=H, association="OWNER", pr=1300):
+    return comment(cid, lm.carry_body(1200, pr, a, h, None, rule=lm.OWN_FILES_RULE), association)
+
+
 def files_world(after, a_files, h_files, ah_files=(DOC,), sets=CONSOLE):
     """The four reads the look-files carry rule makes."""
     return {
@@ -1053,6 +1057,31 @@ class SettleTest(unittest.TestCase):
         read.assert_not_called()
 
 
+class OwnFilesLineTest(unittest.TestCase):
+    """An own-files line carries an approval over merges that touch none of the pull request's files."""
+
+    def test_judge_refuses_when_a_merged_in_path_is_an_own_path(self):
+        facts = [lm.IssueFacts(1200, BODY, (pics_approval(10), own_files_comment(11)))]
+        reads = merges_world([(H, [A, X])])
+        self.assertEqual(lm.judge(1300, H, facts, lm.Carry(B, reads)), lm.Verdict(True, marked=(1200,)))
+        reads[lm.compare_path(A, H)] = cmp([PAGE])
+        refused = lm.judge(1300, H, facts, lm.Carry(B, reads))
+        self.assertEqual((refused.admit, refused.issue, refused.need), (False, 1200, ()))
+
+    def test_judge_refuses_when_a_merge_itself_edits_a_file_neither_side_touched(self):
+        facts = [lm.IssueFacts(1200, BODY, (pics_approval(10), own_files_comment(11)))]
+        reads = merges_world([(H, [A, X])])
+        reads[lm.compare_path(B, H)] = cmp([PAGE, DOC], commits=[(A, [FORK]), (H, [A, X])])
+        refused = lm.judge(1300, H, facts, lm.Carry(B, reads))
+        self.assertEqual((refused.admit, refused.issue, refused.need), (False, 1200, ()))
+
+    def test_a_pictureless_approval_is_kept_by_its_own_files_line_before_any_set_file_read(self):
+        comments = [approval(10, A), own_files_comment(11)]
+        found = lm.carry_candidate(comments, 1200, 1300, H)
+        self.assertEqual(lm.kept(found, H, lm.Carry(B, {})), lm.Kept(False, three_reads()))
+        self.assertEqual(lm.kept(found, H, lm.Carry(B, merges_world([(H, [A, X])]))), lm.Kept(True, ()))
+
+
 def pull(head=H, sha=MC):
     found = {"merged": True, "head": {"sha": head}}
     if sha is not None:
@@ -1098,6 +1127,13 @@ class MergedUnderLookTest(unittest.TestCase):
         reads = self.world_at_b()
         reads[lm.compare_path(A, H)] = cmp([PAGE])
         self.assertIs(lm.merged_under_look([approval(10, A)], 1200, 1300, pull(), self.reader(reads)), False)
+
+    def test_an_own_files_line_holds_a_pictured_approval_at_the_merge(self):
+        comments = [pics_approval(10), own_files_comment(11)]
+        reads = {**merges_world([(H, [A, X])]), f"commits/{MC}": {"sha": MC, "parents": [{"sha": B}, {"sha": H}]}}
+        self.assertIs(lm.merged_under_look(comments, 1200, 1300, pull(), self.reader(reads)), True)
+        reads[lm.compare_path(A, H)] = cmp([PAGE])
+        self.assertIs(lm.merged_under_look(comments, 1200, 1300, pull(), self.reader(reads)), False)
 
     def test_an_unreadable_merge_raises(self):
         comments = [approval(10, A)]

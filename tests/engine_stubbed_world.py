@@ -8,7 +8,8 @@ the other methods read what the run left: its result line, its run directories a
 claim comments and the launches. `replies` overrides the default replies by step id (an entry
 `<step>.<visit>` answers that visit only); `review_code` is the answer list of the `codex-companion`
 stand-in that makes the independent code review supported; `conditions` is the contract's
-`verification_conditions`.
+`verification_conditions`; `before_pull_request` makes the fixture declare the pre-pull-request commands
+(lint and the touched-only test), and `slot_history()` reads the slot's history lines.
 
 The run installs the real lifecycle guard on a confirmed row for the fixture (the fixture's owner is
 not an authorized owner, so only the row authorizes it): `guard(text, cwd)` runs the installed hook
@@ -76,7 +77,8 @@ class StubbedRun:
                  body: str = DEFAULT_BODY, state: str = "open", labels=(), comments=(), pulls=(),
                  replies: dict | None = None, review_code: list | None = None,
                  conditions: dict | None = None, required_checks=FixtureProject.REQUIRED_CHECKS,
-                 rollup: list | None = None, forge_events=(), lock_release_fails: bool = False) -> None:
+                 rollup: list | None = None, forge_events=(), lock_release_fails: bool = False,
+                 before_pull_request: bool = False) -> None:
         self.test = test_case
         self.issue = issue
         self.title = title
@@ -85,7 +87,8 @@ class StubbedRun:
         if review_code is not None:
             self._install_companion(review_code)
         self.fixture = FixtureProject(test_case, self.world, review_code=review_code is not None,
-                                      conditions=conditions, required_checks=required_checks)
+                                      conditions=conditions, required_checks=required_checks,
+                                      before_pull_request=before_pull_request)
         self.forge = ForgeWorld(test_case)
         slug = self.fixture.slug
         self.forge.comment_store(slug, issue, comments, labels=list(labels))
@@ -201,10 +204,19 @@ class StubbedRun:
         for name in ("implementer", "reviewer", "reviewer-lite"):
             shutil.copy(ROLES / f"{name}.md", home / ".claude/agents" / f"{name}.md")
 
-    def deliver(self) -> subprocess.CompletedProcess:
+    def deliver(self, procedures: Path | None = None) -> subprocess.CompletedProcess:
+        """`engine deliver <issue>` in the fixture checkout, with the procedures in `procedures` when given."""
+        extra = ["--procedures", str(procedures)] if procedures is not None else []
         return subprocess.run([sys.executable, "-m", "agent_tools.delivery.engine", "deliver",
-                               str(self.issue)], cwd=self.fixture.root, env=self.env,
+                               str(self.issue), *extra], cwd=self.fixture.root, env=self.env,
                               capture_output=True, text=True, timeout=600)
+
+    def slot_history(self) -> list[dict]:
+        """The lines the verification slot recorded, `[]` when it recorded none."""
+        path = Path(self.env["VERIFY_SLOT_DIR"]) / "history.jsonl"
+        if not path.exists():
+            return []
+        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
 
     @staticmethod
     def line(done: subprocess.CompletedProcess) -> dict:

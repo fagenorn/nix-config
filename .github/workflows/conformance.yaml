@@ -28,3 +28,10 @@ jobs:
         uses: DeterminateSystems/nix-installer-action@v4
       - name: Run conformance
         run: nix shell .#agent-platform --command conformance run --purpose ci --lint-times
+      - name: Read the contract with the base platform
+        run: |
+          base="git+file://$GITHUB_WORKSPACE?rev=${{ github.event.pull_request.base.sha || github.event.before }}"
+          nix build "$base#agent-platform" --out-link "$RUNNER_TEMP/base-platform"
+          "$RUNNER_TEMP/base-platform/bin/resolve-project" platform-status --repo-root . >"$RUNNER_TEMP/base-status.json" 2>"$RUNNER_TEMP/base-warnings.txt" || { cat "$RUNNER_TEMP/base-status.json"; exit 1; }
+          sed 's/^/::warning::/' "$RUNNER_TEMP/base-warnings.txt"
+          jq -e '.compatibility.compatible' "$RUNNER_TEMP/base-status.json"

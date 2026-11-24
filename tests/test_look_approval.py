@@ -858,6 +858,83 @@ class CarryVerbTest(unittest.TestCase):
                     self.assertEqual((code, out["verdict"], out["comment_id"], out["kept_from"]),
                                      (0, "approved", 5, A))
 
+    def own_files_comment(self, cid, **extra):
+        fields = {"issue": "7", "pr": "12", "from": A, "to": HEAD, "rule": "own-files", **extra}
+        return comment(cid, forge_markers.render(lm.CARRY_KIND, fields, "x"))
+
+    def own_files_run(self, *extra):
+        return run("carry", *POST, "--from", A, "--own-files", *extra)
+
+    def test_carry_own_files_records_a_line_when_the_merges_touch_no_own_file(self):
+        self.seed([self.pics(5)])
+        code, out = self.own_files_run()
+        self.assertEqual((code, out["verdict"], out["from"], out["reason"], out["rule"], out["pictures"],
+                          out["comment_id"]), (0, "carried", A, None, "own-files", None, 100))
+        self.assertEqual(list(out), ["command", "action", "repo", "issue", "pr", "head", "verdict", "from",
+                                     "reason", "rule", "pictures", "comment_id"])
+        self.assertEqual(self.world.stored()[-1]["body"].splitlines()[0],
+                         f"<!-- agent:look-carry v1 issue=7 pr=12 from={A} to={HEAD} rule=own-files -->")
+        self.assertEqual(len(self.posted()), 1)
+        for argv in self.world.argvs("gh"):
+            self.assertFalse(any("contents/" in part for part in argv), argv)
+
+    def test_carry_own_files_refuses_when_a_merge_touches_an_own_file(self):
+        compares = self.merges()
+        compares[f"compare/{A}...{HEAD}"] = cmp([PAGE])
+        self.seed([self.pics(5)], compares)
+        code, out = self.own_files_run()
+        self.assertEqual((code, out["verdict"], out["reason"], out["rule"], out["comment_id"]),
+                         (0, "needed", "own-files-touched", "own-files", None))
+        self.assertEqual(self.posted(), [])
+
+    def test_carry_own_files_refuses_a_malformed_pictures_field(self):
+        bad = comment(5, forge_markers.render(lm.KIND, {"issue": "7", "pr": "12", "head": A,
+                                                         "answer": "approved", "message": "m5",
+                                                         "pictures": "nothex"}, "x"))
+        self.seed([bad])
+        code, out = self.own_files_run()
+        self.assertEqual((code, out["verdict"], out["reason"], out["rule"], out["comment_id"]),
+                         (0, "needed", "pictures-unreadable", None, None))
+        self.assertEqual(self.posted(), [])
+
+    def test_carry_own_files_refuses_a_non_merge_commit(self):
+        self.seed([self.pics(5)], self.merges([(A, [FORK]), (HEAD, [A])]))
+        code, out = self.own_files_run()
+        self.assertEqual((code, out["verdict"], out["reason"], out["comment_id"]), (0, "needed", "not-merges", None))
+        self.assertEqual(self.posted(), [])
+
+    def test_carry_own_files_with_a_picture_flag_is_a_usage_error(self):
+        for flag in ("--before", "--after", "--picture"):
+            with self.subTest(flag=flag):
+                self.world = ForgeWorld(self)
+                code, out = self.own_files_run(flag, str(self.before))
+                self.assertEqual((code, out["verdict"], out["error"]), (2, "error", "usage"))
+                self.assertEqual(self.world.argvs("gh"), [])
+
+    def test_status_reads_an_own_files_carry_line_as_a_kept_approval(self):
+        self.seed([self.pics(5), self.own_files_comment(6)])
+        code, out = run(*STATUS)
+        self.assertEqual((code, out["verdict"], out["comment_id"], out["kept_from"]), (0, "approved", 5, A))
+
+    def test_a_line_naming_own_files_and_pictures_carries_nothing(self):
+        self.seed([self.pics(5), self.own_files_comment(6, pictures=self.DIG)])
+        code, out = run(*STATUS)
+        self.assertEqual((code, out["verdict"]), (0, "needed"))
+
+    def test_a_truncated_compare_never_carries_by_own_files(self):
+        compares = self.merges()
+        compares[f"compare/{A}...{HEAD}"] = cmp([f"docs/f{n}.md" for n in range(lm.COMPARE_FILE_LIMIT)])
+        self.seed([self.pics(5)], compares)
+        code, out = self.own_files_run()
+        self.assertEqual((code, out["verdict"], out["reason"]), (0, "needed", "own-files-touched"))
+        self.assertEqual(self.posted(), [])
+
+    def test_plain_carry_does_not_short_circuit_on_an_own_files_line(self):
+        self.seed([self.pics(5), self.own_files_comment(70)])
+        code, out = run(*self.carry_args())
+        self.assertEqual((code, out["verdict"], out["rule"], out["comment_id"]), (0, "carried", "pictures", 100))
+        self.assertEqual(len(self.posted()), 1)
+
     def test_carry_usage_errors_come_before_any_gh_call(self):
         full = self.carry_args()
         cases = {
@@ -934,8 +1011,9 @@ class TickCarryTest(unittest.TestCase):
     def setUp(self):
         self.world = ForgeWorld(self)
 
-    def seed(self, served=None, pull=None):
-        self.world.comment_store(SLUG, ISSUE, [comment(5, lm.approval_body(7, 12, A, "approved", "m5"))])
+    def seed(self, served=None, pull=None, comments=None):
+        self.world.comment_store(SLUG, ISSUE, [comment(5, lm.approval_body(7, 12, A, "approved", "m5"))]
+                                 if comments is None else comments)
         self.world.respond_json("gh", ISSUE_ARGV, {"number": 7, "body": TickTest.TICK_BODY})
         self.world.respond_json("gh", PULL_ARGV, self.PULL if pull is None else pull)
         self.world.respond_json("gh", self.PATCH, {"number": 7})
@@ -948,6 +1026,17 @@ class TickCarryTest(unittest.TestCase):
 
     def test_tick_ticks_under_a_kept_approval(self):
         self.seed()
+        code, out = run(*self.TICK)
+        self.assertEqual((code, out["verdict"], out["ticked"], out["kept_from"]), (0, "ticked", 1, A))
+        self.assertEqual(len(self.patches()), 1)
+
+    def test_tick_accepts_an_own_files_carry_line(self):
+        pictured = comment(5, lm.approval_body(7, 12, A, "approved", "m5", pictures=CarryVerbTest.DIG))
+        line = comment(6, lm.carry_body(7, 12, A, HEAD, None, rule=lm.OWN_FILES_RULE))
+        served = {f"compare/{BT}...{A}": cmp([PAGE], commits=[(A, [FORK])]),
+                  f"compare/{A}...{HEAD}": cmp(["docs/x.md"]),
+                  f"compare/{BT}...{HEAD}": cmp(commits=[(A, [FORK]), (HEAD, [A, "7" * 40])])}
+        self.seed(served, comments=[pictured, line])
         code, out = run(*self.TICK)
         self.assertEqual((code, out["verdict"], out["ticked"], out["kept_from"]), (0, "ticked", 1, A))
         self.assertEqual(len(self.patches()), 1)
@@ -1028,6 +1117,26 @@ class CarryJudgeTest(unittest.TestCase):
         code, out = self.judge(self.payload({"base": B, "reads": reads(B, ah_files=(PAGE,))}))
         self.assertEqual((code, out["verdict"]), (1, "refuse"))
         self.assertNotIn("need", out)
+
+    def test_the_guard_runs_admit_a_pictured_approval_carried_by_its_own_files_line(self):
+        digest = CarryVerbTest.DIG
+        data = {"pr": 12, "head": HEAD, "issues": [{"number": 1200, "body": BODY, "comments": [
+            comment(5, lm.approval_body(1200, 12, A, "approved", "m1", pictures=digest)),
+            comment(6, lm.carry_body(1200, 12, A, HEAD, None, rule=lm.OWN_FILES_RULE))]}]}
+        served = {f"compare/{B}...{A}": cmp([PAGE], commits=[(A, [FORK])]),
+                  f"compare/{A}...{HEAD}": cmp(["docs/b.md"]),
+                  f"compare/{B}...{HEAD}": cmp(commits=[(A, [FORK]), (HEAD, [A, "7" * 40])])}
+        code, out = self.judge(json.dumps(data))
+        self.assertEqual((code, out["verdict"], out["candidates"]),
+                         (1, "refuse", [{"issue": 1200, "head": A, "answer": "approved"}]))
+        code, out = self.judge(json.dumps({**data, "carry": {"base": B, "reads": {}}}))
+        self.assertEqual((code, out["verdict"]), (1, "refuse"))
+        self.assertEqual(out["need"], sorted(f"compare/{x}...{y}" for x, y in ((B, A), (A, HEAD), (B, HEAD))))
+        for path in out["need"]:
+            self.assertTrue(lm.read_path_ok(path, B), path)
+        code, out = self.judge(json.dumps({**data, "carry": {"base": B, "reads": served}}))
+        self.assertEqual((code, out), (0, {"command": "look-approval", "action": "judge", "verdict": "admit",
+                                           "marked": [1200]}))
 
     def test_a_malformed_carry_is_a_usage_error(self):
         cases = [[], {"base": B}, {"base": "main", "reads": {}}, {"base": B, "reads": []},

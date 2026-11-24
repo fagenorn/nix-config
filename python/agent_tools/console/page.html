@@ -448,6 +448,7 @@ code.md-code { padding: 0 4px; font-size: .875em; background: var(--mantle); bor
 .outside .runs { flex: 1 0 100%; margin-top: 0; padding: 0 0 0 16px; }
 .run { display: flex; flex-wrap: wrap; gap: 0 10px; }
 .run .stage { color: var(--sub0); }
+.outside li.engine .stage { flex: 1 1 0; min-width: 0; }
 .run .moved { color: var(--ov2); }
 .sp-spend { flex: 1 0 100%; margin: 0; font-size: .8125rem; color: var(--ov2); }
 a.spend { color: var(--ov2); text-decoration: none; }
@@ -713,24 +714,29 @@ function spendLine(kind, id) {
   line.appendChild(figure);
   return line;
 }
-function lineFold(key, nameNode, words, outside, root) {
+function engineUntil(run) {
+  return typeof run.wait_until === "string" ? [" until ", timeEl("weekday", run.wait_until, "now-until")] : [];
+}
+function lineFold(key, nameNode, words, outside, root, engineRuns) {
   const fold = el("details");
   fold.dataset.key = key;
   const summary = el("summary");
-  summary.appendChild(nameNode);
-  for (const word of words) summary.appendChild(word);
+  for (const node of [nameNode, ...words]) summary.appendChild(node);
   if (outside.sessions.length > 0) summary.appendChild(el("span", "sess-sum", outside.summary));
-  for (const session of outside.sessions) {
-    for (const run of session.deliveries || []) summary.appendChild(runSummary(run));
-  }
+  for (const run of outside.sessions.flatMap((session) => session.deliveries || [])) summary.appendChild(runSummary(run));
+  for (const run of engineRuns) summary.appendChild(phrase("span", "run-sum", "#" + run.issue + " " + run.text, ...engineUntil(run)));
   fold.appendChild(summary);
   fold.appendChild(el("span", "root", root));
+  if (engineRuns.length > 0) {
+    const engineList = el("ul");
+    for (const run of engineRuns) engineList.appendChild(phrase("li", "run engine", el("span", "issue", "#" + run.issue), phrase("span", "stage", run.text, ...engineUntil(run))));
+    fold.appendChild(phrase("div", "outside", el("h3", "", "Engine runs"), engineList));
+  }
   if (outside.sessions.length === 0) return fold;
-  const outsideBox = el("div", "outside");
-  outsideBox.appendChild(el("h3", "", outside.label));
   const list = el("ul");
+  fold.appendChild(phrase("div", "outside", el("h3", "", outside.label), list));
   for (const session of outside.sessions) {
-    const row = el("li");
+    const row = list.appendChild(el("li"));
     row.appendChild(el("span", "", session.name));
     row.appendChild(el("span", "s-" + session.state, session.state_text));
     const runs = session.deliveries || [];
@@ -738,10 +744,7 @@ function lineFold(key, nameNode, words, outside, root) {
       const runList = el("ul", "runs");
       for (const run of runs) {
         const item = el("li", "run");
-        for (const issue of run.issues) {
-          item.appendChild(el("span", "issue", "#" + issue.issue));
-          item.appendChild(el("span", "stage", issue.stage_text));
-        }
+        for (const issue of run.issues) for (const part of [el("span", "issue", "#" + issue.issue), el("span", "stage", issue.stage_text)]) item.appendChild(part);
         item.appendChild(movedWords(run, run.quiet ? "moved quiet" : "moved"));
         const figure = spendFigure("run", run.run_id);
         if (figure !== null) item.appendChild(figure);
@@ -749,10 +752,7 @@ function lineFold(key, nameNode, words, outside, root) {
       }
       row.appendChild(runList);
     }
-    list.appendChild(row);
   }
-  outsideBox.appendChild(list);
-  fold.appendChild(outsideBox);
   return fold;
 }
 function untouchedDays(lastActivity) {
@@ -2240,7 +2240,7 @@ function projectLine(entry) {
     }
   }
   line.appendChild(lineFold("line:" + entry.project_id, el("h3", "pname", entry.project_id), words,
-                            entry.outside_sprints, entry.root));
+                            entry.outside_sprints, entry.root, entry.engine_runs || []));
   const acts = el("span", "line-acts");
   let buttons = 0;
   if (entry.quiet) {
@@ -5729,7 +5729,7 @@ function drawProjects(view) {
       list.appendChild(item);
     } else {
       const waits = Array.isArray(entry.waits) ? entry.waits : [];
-      const drawn = entry.quiet === true || entry.outside_sprints.sessions.length > 0 || waits.length > 0;
+      const drawn = entry.quiet === true || entry.outside_sprints.sessions.length > 0 || waits.length > 0 || (entry.engine_runs || []).length > 0;
       if (drawn) list.appendChild(projectLine(entry));
       for (const wait of waits) list.appendChild(waitLine(wait, "li"));
       const notices = noticeFold(entry, drawn);
@@ -5781,7 +5781,7 @@ function renderUnmanaged(view) {
   for (const entry of view.unmanaged) {
     const line = el("li", "line");
     line.appendChild(lineFold("line:" + entry.root, el("h3", "pname", entry.name),
-                              [el("span", "", entry.label)], entry.outside_sprints, entry.root));
+                              [el("span", "", entry.label)], entry.outside_sprints, entry.root, entry.engine_runs || []));
     list.appendChild(line);
   }
   section.appendChild(list);

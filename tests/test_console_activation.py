@@ -326,7 +326,7 @@ class ActivationReadingTest(Trees):
         self.assertEqual(activation.integration_branch(str(REPO_ROOT)), "main")
         self.assertIsNone(activation.integration_branch(str(self.checkout)))
         broken = resolve_project.ContractError("resolver_failure", "resolver.internal", [])
-        with mock.patch.object(activation.resolve_project, "resolve", side_effect=broken):
+        with mock.patch.object(activation.resolve_project, "resolve_core", side_effect=broken):
             with self.assertRaises(activation.ReadFailed):
                 activation.integration_branch(str(REPO_ROOT))
 

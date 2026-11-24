@@ -7,7 +7,9 @@ adopted: no contract is written by hand and nothing is registered. `review_code=
 independent code review supported through the `codex-companion` command, and `conditions` is the
 contract's `verification_conditions`. `required_checks` is the draft's `merge.required_checks`; an empty
 one deletes the member, since the resolver refuses an empty list and an absent member means none
-declared. When the adoption cannot reach
+declared. `before_pull_request=True` also declares the touched-only test
+command and binds `BEFORE_PULL_REQUEST`, over a `suite.just` of two checks of which one imports nothing
+from the fixture. When the adoption cannot reach
 a ready plan and a commit, the build fails with the command's own output.
 """
 
@@ -33,14 +35,16 @@ IDENTITY = {"GIT_AUTHOR_NAME": "fixture", "GIT_AUTHOR_EMAIL": "fixture@example.i
 
 class FixtureProject:
     VERIFICATION = ["lint", "test"]
+    BEFORE_PULL_REQUEST = ["lint", "test-touched"]
     REQUIRED_CHECKS = ["Fixture Checks"]
 
     def __init__(self, test_case: unittest.TestCase, world: GuardPolicyWorld, *,
                  slug: str = "example/fixture", review_code: bool = False,
-                 conditions: dict | None = None,
-                 required_checks=REQUIRED_CHECKS) -> None:
+                 conditions: dict | None = None, required_checks=REQUIRED_CHECKS,
+                 before_pull_request: bool = False) -> None:
         self.world = world
         self.required_checks = list(required_checks)
+        self.before_pull_request = before_pull_request
         self.slug = slug
         self.review_code = review_code
         self.conditions = conditions
@@ -79,6 +83,13 @@ class FixtureProject:
                                                      "diff-review"]
         if self.conditions is not None:
             draft["bindings"]["workflow"]["verification_conditions"] = self.conditions
+        draft["bindings"]["workflow"].pop("verification_before_pull_request", None)
+        if self.before_pull_request:
+            commands["test-touched"] = {
+                "argv": [sys.executable, "-m", "agent_tools.delivery.touched_tests", "--base", "origin/main",
+                         "--suite-file", "suite.just", "--cover", "fixture/greet.py=checks/check_greet.py"],
+                "cwd": ".", "env": []}
+            draft["bindings"]["workflow"]["verification_before_pull_request"] = list(self.BEFORE_PULL_REQUEST)
         # The fixture has no devenv and signs nothing: the adoption commit runs plain and unsigned.
         commands.pop("commit-environment")
         draft["bindings"]["vcs"]["commit"].update(signed=False)
@@ -104,6 +115,13 @@ class FixtureProject:
             if not target.exists():
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_text("# knowledge\n", "utf-8")
+        if self.before_pull_request:
+            (self.root / "suite.just").write_text(
+                "agent-workflow-tests *args:\n  runner {{args}} \\\n    checks/check_greet.py \\\n"
+                "    checks/check_other.py\n", "utf-8")
+            (self.root / "checks/check_other.py").write_text(
+                "import unittest\n\n\nclass OtherTest(unittest.TestCase):\n"
+                "    def test_upper(self):\n        self.assertEqual(\"a\".upper(), \"A\")\n", "utf-8")
         self.world.git(self.root, "add", "-A")
         self.world.git(self.root, "commit", "--quiet", "-m", "fixture source")
 

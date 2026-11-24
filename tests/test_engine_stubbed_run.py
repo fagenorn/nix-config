@@ -63,6 +63,25 @@ def implementing(path: str, text: str, **members) -> dict:
     return {"reply": {**IMPLEMENTED["reply"], **members}, "commit": {"path": path, "text": text}}
 
 
+def stopping_after_verify(tmp: Path) -> Path:
+    """A copy of the shipped procedures whose run is kept across a continue and stops once verified."""
+    copy = tmp / "procedures"
+    shutil.copytree(PROCEDURES, copy)
+    path = copy / "deliver.json"
+    document = json.loads(path.read_text("utf-8"))
+    for step in document["steps"]:
+        if step["id"] == "start":
+            step["holds"] = "run"
+        if step["id"] == "issue":
+            step["on"]["refused"] = "done"  # the check wants one reachable step that still ends the run
+        if step["id"] == "verification":
+            step["on"]["done"] = "verified"
+            step["on"]["verify"] = "landing"  # the check wants the landing step reachable too
+    document["stops"]["verified"] = {"need": "owner-decision", "reenter": "verification"}
+    path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+    return copy
+
+
 def model_of(launch: dict) -> str:
     return launch["argv"][launch["argv"].index("--model") + 1]
 
@@ -440,6 +459,54 @@ class VerifyTest(Scenario):
         lint, test = results
         self.assertEqual((lint["status"], lint["reason"]), ("skipped", "no documentation changed"))
         self.assertEqual(test["status"], "pass")
+
+    def test_before_a_pull_request_verify_runs_lint_and_the_touched_checks_and_records_the_selection_and_slot_seconds(self):
+        greet = 'def greet(name: str) -> str:\n    return "Hello, " + name + "."\n'
+        run = StubbedRun(self, before_pull_request=True,
+                         replies={"implement": implementing("fixture/greet.py", greet)})
+
+        self.finish(run, "done")
+
+        verify = self.child(run, "verify")
+        event = next(e for e in run.events(verify) if e["event"] == "result_stored" and e["step"] == "checks")
+        checks = json.loads((verify / event["result"]).read_text("utf-8"))
+        self.assertEqual(checks["verdict"], "passed")
+        self.assertEqual([(r["id"], r["status"]) for r in checks["results"]],
+                         [("lint", "pass"), ("test-touched", "pass")])
+        self.assertEqual(checks["results"][1]["selection"],
+                         {"base": "origin/main", "changed": ["fixture/greet.py"], "full": False,
+                          "full_because": [], "selected": ["checks/check_greet.py"]})
+        for result in checks["results"]:
+            for member in ("waited_seconds", "held_seconds"):
+                self.assertNotIsInstance(result[member], bool)
+                self.assertIsInstance(result[member], (int, float))
+                self.assertGreaterEqual(result[member], 0)
+        self.assertEqual(len(run.slot_history()), 2)
+
+    def test_a_continued_run_after_a_clean_sync_that_changes_none_of_the_pull_requests_files_runs_no_verification(self):
+        run = StubbedRun(self, before_pull_request=True)
+        procedures = stopping_after_verify(run.tmp)
+        self.stopped(run, run.deliver(procedures), "verified", "owner-decision")
+        first = self.stored(self.child(run, "verify"), "checks")
+        self.assertEqual(first["verdict"], "passed")
+        held = len(run.slot_history())
+        root = run.fixture.root
+        (root / "README.md").write_text((root / "README.md").read_text("utf-8") + "more\n", "utf-8")
+        run.world.git(root, "commit", "-qam", "unrelated")
+        run.world.git(root, "push", "-q", "origin", "main")
+        run.world.git(run.worktree_path, "fetch", "-q", "origin")
+        run.world.git(run.worktree_path, "merge", "-q", "--no-edit", "origin/main")
+
+        done = run.deliver(procedures)
+
+        self.stopped(run, done, "verified", "owner-decision")
+        self.assertEqual(len(run.runs()), 1)
+        self.assertEqual([e["event"] for e in run.events(run.runs()[0])].count("run_continued"), 1)
+        second = self.stored(self.child(run, "verify", last=True), "checks")
+        self.assertEqual(second["verdict"], "passed")
+        self.assertEqual(second["synced_since"], first["head"])
+        self.assertEqual([r["status"] for r in second["results"]], ["skipped", "skipped"])
+        self.assertEqual(len(run.slot_history()), held)
 
 
 RED = [{"__typename": "CheckRun", "name": "Fixture Checks", "status": "COMPLETED",

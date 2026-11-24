@@ -1,0 +1,5 @@
+#!/bin/sh
+# Verify check for the land lock lease: the first landings of this host after its deployment each have
+# one approval and at most one sync after the first approval. verify-pending runs it from the
+# repository root at the commit the block names. Exit 0 met, 1 not met, 75 not yet.
+PYTHONPATH=python exec python3 -m agent_tools.claims.landing_reading syncs "$@"

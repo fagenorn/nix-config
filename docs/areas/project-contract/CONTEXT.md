@@ -68,3 +68,7 @@ The step of a platform version that deletes a deprecated surface once its migrat
 **ResolvedProject**:
 The one retained snapshot that `resolve-project resolve` prints: the contract with every path made absolute and every command addressed by id. Every command and skill reads it and never the contract file.
 _Avoid_: snapshot, config
+
+**Unknown binding**:
+A member of `bindings.workflow` or `bindings.workflow.orchestration` that the installed platform does not know, taken as an optional binding of a newer platform. The resolver ignores it and names it in a warning. An unknown member anywhere else is refused.
+_Avoid_: unknown key

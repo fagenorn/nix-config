@@ -1183,8 +1183,8 @@ class ReleaseWaitTest(Base):
         # once. The forge's clock stands still here, so the registration (D12) is created once
         # and never rewritten: 8 calls in the first poll (listing, default branch, clock,
         # registrations, lock, the holder's lookup, the beat read of D11, the registration), 6 in
-        # the second, 5 in the one that creates the lock, 2 to delete the registration.
-        self.assertEqual((len(self.reads(OPEN_FROM)), len(self.reads(DEFAULT_READ)), len(calls)), (3, 1, 21))
+        # the second, 5 in the one that creates the lock, 2 to delete the registration, 2 to list the leases (D13).
+        self.assertEqual((len(self.reads(OPEN_FROM)), len(self.reads(DEFAULT_READ)), len(calls)), (3, 1, 21 + 2))
         self.assertEqual([a for a in calls if f"commits/{A}/pulls" in a[1]], [])
 
     def test_a_release_pull_request_closed_while_waiting_stops_with_no_open_pr(self):
@@ -1320,8 +1320,8 @@ class ReleaseWaitTest(Base):
         # (once a wait) and the delete of the old one (9, 8 from the third on). The poll that
         # takes the released lock: eligibility, clock, registrations, lock, create (5), and the
         # delete of the registration (1). Two of a poll's calls are writes, none on the lock,
-        # and the poll that takes the lock refreshes nothing.
-        self.assertEqual((len(self.world.argvs("gh")), self.reads(OPEN_BASED)), (7 + 9 + 5 + 1, []))
+        # and the poll that takes the lock refreshes nothing; listing the leases (D13) adds a call to two polls.
+        self.assertEqual((len(self.world.argvs("gh")), self.reads(OPEN_BASED)), (7 + 1 + 9 + 1 + 5 + 1, []))
         self.assertEqual(len(self.reads(BEAT_READ)), 2)
         self.assertEqual([op for op, _ in self.queue_calls()], ["create", "create", "delete", "delete"])
         self.assertEqual(len(self.attempts()), 1)

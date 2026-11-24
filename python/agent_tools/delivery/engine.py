@@ -19,7 +19,8 @@ graders or a prompt file exceeds; nothing changes a cap.
 
 `engine status <issue> [--project <slug>]` reads the newest run of the issue under
 `~/.agents/state/engine/runs/` and prints one line of compact sorted-key JSON, the state one
-fold of the run's `events.jsonl` derives. It writes nothing and creates no directory:
+fold of the run's `events.jsonl` derives, with the lock holder and whether it lives. It writes
+nothing and creates no directory:
 
 - exit 0: the folded state (`engine_ledger.RunState.as_json()`);
 - exit 1: `{"issue": <n>, "run": null}`, no run of that issue (and project);
@@ -147,7 +148,8 @@ def _status(issue: int, project: str | None) -> int:
                 state = engine_ledger.fold(
                     engine_ledger.read_run(run_dir),
                     engine_ledger.replay(run_dir / "events.jsonl"),
-                    engine_ledger.process_alive)
+                    engine_ledger.process_alive,
+                    engine_ledger.read_holder(run_dir))
             except (engine_ledger.LedgerError, OSError):
                 if run_dir.exists():
                     raise
