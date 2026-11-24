@@ -215,6 +215,7 @@ agent-workflow-tests *args:
     tests/test_memory_floor.py \
     tests/test_memory_floor_priority.py \
     tests/test_memory_floor_gate.py \
+    tests/test_memory_floor_check.py \
     tests/test_verify_checks.py \
     tests/test_cleanup_fix_check.py \
     tests/test_suite_test_failures.py \
