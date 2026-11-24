@@ -1050,7 +1050,7 @@ def console_made(found: Mapping, name: str, plan_id: str, attempt: str) -> bool:
 
 
 def body(latest: Mapping, attempt: str | None = None) -> str:
-    bullets = "\n".join(f"- {line}" for line in latest["lines"])
+    bullets = "\n".join(f"- {line}" for line in latest["lines"] if line != register.HOOKS_LINE)
     text = (f"{latest['headline']}\n\n{bullets}\n\n{signature(latest['plan_id'])} Merge it "
             "once its required checks pass.")
     return text if attempt is None else f"{text}\n\n{attempt_marker(attempt)}"

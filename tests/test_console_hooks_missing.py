@@ -149,6 +149,15 @@ class HooksMissingServiceTest(GlobalHooksPath, Case):
         (apply_card,) = [i for i in self.view()["inbox"]["open"] if i["reason"] == "register_apply"]
         self.assertEqual(apply_card["lines"][0], register.HOOKS_LINE)
 
+    def test_the_adoption_pull_request_body_leaves_the_line_out(self):
+        row = register.hooks_noted(register.summary(str(hooked_repo(self.parent / "r")), READY))
+        latest = {**row, "at": "2026-11-24T08:00:00+00:00", "headline": "H", "plan_id": PID_A}
+        self.assertIn(register.HOOKS_LINE, latest["lines"])
+        text = approve.body(latest)
+        self.assertNotIn(register.HOOKS_LINE, text)
+        for line in register.plan_lines(READY):
+            self.assertIn(f"- {line}", text)
+
     def test_an_answer_run_keeps_the_line(self):
         self.begin(Fake(plan=[DRAFT, READY]))
         root = hooked_repo(self.parent / "r")
