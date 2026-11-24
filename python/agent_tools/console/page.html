@@ -1764,7 +1764,7 @@ function exclusionControls(acct, p) {
     acct.appendChild(el("span", "fail", state.failure + state.reason));
   }
 }
-// A colleague's profile carries his login; the owner may sign it out beside Remove (ADR-console-087 D3).
+// A colleague's profile carries his login; the owner may sign it out beside Remove (ADR-console-087).
 const signoutPosts = new Map();
 async function signOutAccount(p) {
   const current = signoutPosts.get(p.profile);
@@ -1869,7 +1869,7 @@ function removeSessionsWords(p, view, colleague) {
   if (typeof n !== "number") return null;
   if (n === 0) return "No session is running under " + p + ".";
   if (colleague) {
-    // A colleague's account: its managers move to the pool's choice (ADR-console-087 D5).
+    // A colleague's account: its managers move to the pool's choice (ADR-console-087).
     if (n === 1) {
       return "1 session is running under " + p + ". A manager on it moves to another account, or waits for one with room; any other session keeps running.";
     }
