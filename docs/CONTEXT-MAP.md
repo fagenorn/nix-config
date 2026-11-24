@@ -115,7 +115,6 @@
 | Question round | Console |
 | Question thread | Console |
 | Quiet project | Console |
-| Raise label | Guard |
 | Read-only route | Guard |
 | Receipt | Release |
 | Registration | Console |

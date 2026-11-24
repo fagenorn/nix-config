@@ -204,6 +204,7 @@ agent-workflow-tests *args:
     tests/test_verify_checks.py \
     tests/test_cleanup_fix_check.py \
     tests/test_suite_test_failures.py \
+    tests/test_protection_tree.py \
     tests/test_issue_branch.py \
     tests/test_program_copies.py \
     tests/test_keepalive_end_turn_cap.py \
@@ -415,10 +416,6 @@ agent-model-matrix:
 # Compare the instruction documents each agent profile loads at two revisions (#155 D9).
 agent-instruction-load *args:
   PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.instruction_load {{args}}
-
-# Run the Instruction Budget gate against origin/main; pass --raise-label for a labelled raise (#292 D9).
-agent-instruction-budget *args:
-  PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.instruction_load check --base origin/main {{args}}
 
 # Run this host's due read-only verification checks and close passing issues (issue 630)
 verify host *args:
