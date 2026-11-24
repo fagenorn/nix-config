@@ -265,19 +265,20 @@ let
 
   # nix-darwin unloads and loads a daemon whose plist changed, which would end the requests a
   # loaded oMLX is serving. While oMLX is loaded, the launchd step installs the new plist, roots
-  # the serve script launchd still runs and records the reload for omlx-restart, which applies it
-  # through its idle gate. Every other call reaches launchctl unchanged. The functions live in
-  # one eval body, so the activate script's shellcheck sees no unused variable or function.
+  # the serve script launchctl print shows launchd running and records the reload for omlx-restart.
+  # Every other call reaches launchctl unchanged. The functions live in one eval body, so the
+  # activate script's shellcheck sees no unused variable or function.
   holdReason = "launchd plist changed: org.nixos.omlx";
   holdText = ''
     eval 'omlx_hold_root() {
-      [ -L ${heldRoot} ] && return 0
-      set -- "$(grep -o "/nix/store/[0-9a-z]\{32\}-omlx-serve" /Library/LaunchDaemons/org.nixos.omlx.plist | head -n 1)"
+      set -- "$(command launchctl print system/org.nixos.omlx 2>/dev/null | grep -o "/nix/store/[0-9a-z]\{32\}-omlx-serve" | head -n 1)"
+      [ -n "$1" ] || set -- "$(grep -o "/nix/store/[0-9a-z]\{32\}-omlx-serve" /Library/LaunchDaemons/org.nixos.omlx.plist | head -n 1)"
       if [ -z "$1" ]; then
-        echo "oMLX: the installed plist names no omlx-serve store path, so none is kept for the running job" >&2
+        echo "oMLX: neither launchd nor the installed plist names an omlx-serve store path, so none is kept for the running job" >&2
         return 0
       fi
-      ln -s "$1" ${heldRoot}
+      [ "$(readlink ${heldRoot} 2>/dev/null)" = "$1" ] && return 0
+      ln -sfn "$1" ${heldRoot}
     }
     omlx_hold_record() {
       sudo --user=${username} -- grep -qxF "${holdReason}" ${home}/.omlx/.restart-needed 2>/dev/null && return 0

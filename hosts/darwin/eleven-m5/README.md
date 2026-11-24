@@ -37,8 +37,9 @@ never unloads `org.nixos.omlx` while it is loaded. It installs the changed plist
 edit changes it) and adds `launchd plist changed: org.nixos.omlx` to
 `.restart-needed`. `omlx-restart` applies it as an unload and `load -w` of the job
 only while the server is idle, or with `omlx-restart --now`. While the reload is
-pending, launchd keeps running the old generation's serve script. The activation
-roots it at `/nix/var/nix/gcroots/omlx-held-serve`, so `just gc` cannot remove the
+pending, launchd keeps running the old generation's serve script. Each held
+activation roots the script `launchctl print` shows launchd running (a reboot or a
+manual unload and load changes it) at `/nix/var/nix/gcroots/omlx-held-serve`, so `just gc` cannot remove the
 script KeepAlive relaunches after a crash or a jetsam kill. The reload removes the
 root. A pending reload with a model loaded waits for an idle server, and
 `omlx-restart --now` applies it at once.

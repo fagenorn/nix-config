@@ -21,10 +21,14 @@ GUIDE = Path(__file__).resolve().parents[1] / "hosts/darwin/eleven-m5/README.md"
 REASON = "launchd plist changed: org.nixos.omlx"
 OLD_SERVE = "/nix/store/" + "a" * 32 + "-omlx-serve"
 OLD_PLIST = f"old <string>/bin/wait4path /nix/store &amp;&amp; exec {OLD_SERVE}</string>\n"
+LOADED_SERVE = "/nix/store/" + "c" * 32 + "-omlx-serve"
 NEW_PLIST = "new <string>/bin/wait4path /nix/store &amp;&amp; exec /nix/store/" + "b" * 32 + "-omlx-serve</string>\n"
 LAUNCHCTL = """#!/bin/bash
 echo "launchctl $*" >> "$CALLS"
-[ "$1" = print ] && exit "$PRINT_RC"
+if [ "$1" = print ]; then
+  [ -n "$LOADED_SERVE" ] && printf '\t\t/bin/wait4path /nix/store && exec %s\n' "$LOADED_SERVE"
+  exit "$PRINT_RC"
+fi
 exit 0
 """
 SUDO = """#!/bin/bash
@@ -75,7 +79,7 @@ class ActivationHoldTest(unittest.TestCase):
     def plist(self, root, name="org.nixos.omlx.plist"):
         return root / "Library/LaunchDaemons" / name
 
-    def run_snippet(self, snippet, root=None, print_rc=0, sudo_fails=False, tail="", held=False):
+    def run_snippet(self, snippet, root=None, print_rc=0, sudo_fails=False, tail="", held=False, loaded_serve=""):
         root = root or self.scratch()
         (root / "bin").mkdir(exist_ok=True)
         for name, body in (("launchctl", LAUNCHCTL), ("sudo", SUDO), ("diff", DIFF), ("cp", CP)):
@@ -95,7 +99,7 @@ class ActivationHoldTest(unittest.TestCase):
         text = text.replace("/nix/var/nix/gcroots/", f"{root}/gcroots/")
         calls = root / "calls"
         env = {"PATH": f"{root / 'bin'}:/usr/bin:/bin", "CALLS": str(calls), "PRINT_RC": str(print_rc),
-               "SUDO_FAIL": "1" if sudo_fails else "0"}
+               "SUDO_FAIL": "1" if sudo_fails else "0", "LOADED_SERVE": loaded_serve}
         done = subprocess.run(["/bin/bash", "-c", "set -e\n" + text + "\n" + tail], env=env,
                               capture_output=True, text=True, timeout=60)
         return done, (calls.read_text().splitlines() if calls.exists() else []), root
@@ -166,12 +170,18 @@ class ActivationHoldTest(unittest.TestCase):
                 self.assertIn(needle, section)
 
     def test_a_held_activation_keeps_the_running_serve_script_rooted_until_the_reload(self):
-        done, _, root = self.omlx_step(print_rc=0)
+        done, _, root = self.omlx_step(print_rc=0, loaded_serve=OLD_SERVE)
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertEqual(os.readlink(self.held_root(root)), OLD_SERVE)
-        done, _, _ = self.omlx_step(root=root, print_rc=0)
+        done, _, _ = self.omlx_step(root=root, print_rc=0, loaded_serve=OLD_SERVE)
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertEqual(os.readlink(self.held_root(root)), OLD_SERVE)
+
+    def test_a_stale_root_is_repointed_at_the_definition_launchd_holds(self):
+        done, _, root = self.omlx_step(print_rc=0, held=True, loaded_serve=LOADED_SERVE)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(os.readlink(self.held_root(root)), LOADED_SERVE)
+        self.assertEqual(self.plist(root).read_text(), NEW_PLIST)
 
     def test_the_hold_keeps_its_variables_and_functions_inside_its_eval_body(self):
         hold = self.got["hold"]
