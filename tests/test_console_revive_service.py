@@ -559,12 +559,36 @@ class ReviveServiceTest(ReviveCase):
                     self.listed_now(sid)
                 self.queued.run_next()
                 self.assertEqual(len(self.launches.calls), 1)
-                self.assertEqual(self.manager_rows(), before)
+                self.assertEqual([r for r in self.manager_rows() if r[2] != "manager.held"], before)
+                self.assertEqual(len(self.rows("manager.held")), 1 if name == "listing" else 0)
                 self.assertEqual(svc._launching, {})
                 if name == "listing":
                     self.reserve(svc, 239)
                     self.assertEqual(self.queued.jobs, [])
                     self.assertEqual(len(self.launches.calls), 1)
+
+    def test_a_takeover_dropped_because_only_the_listing_shows_the_manager_writes_why_once(self):
+        svc = self.begin(nudger=None)
+        sid = self.on_track(svc, seen=False)
+        self.reserve(svc, 120)
+        self.listed_now(sid)
+        self.queued.run_next()
+        held = {"sprint_id": sid, "goal": GOAL, "reason": capacity.UNMATCHED_REASON}
+        line = f"console: takeover_held {sid} {capacity.UNMATCHED_REASON}"
+        self.assertEqual(self.rows("manager.held"), [held])
+        self.assertEqual(self.stderr.getvalue().count(line), 1)
+        self.assertEqual(len(self.launches.calls), 1)
+        self.assertEqual(svc._launching, {})
+        self.reserve(svc, 240)
+        self.drain()
+        self.assertEqual(self.rows("manager.held"), [held])
+        self.assertEqual(self.stderr.getvalue().count(line), 1)
+        self.seen(svc, sid)
+        self.reserve(svc, 241)
+        self.gone(svc)
+        self.reserve(svc, 361)
+        self.drain()
+        self.assertEqual(self.rows("manager.held"), [held, held])
 
     def waiting_takeover(self):
         """A sprint with an unknown session whose takeover waited for quota until `until`."""
