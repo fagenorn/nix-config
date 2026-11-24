@@ -385,7 +385,6 @@ class IntakeLaneTest(unittest.TestCase):
         self.assertEqual(child(calls, 1)["args"]["lane"], "direct")
         text = prompt(calls, "facts-1")
         self.assertIn("gh issue view 1 --repo owner/repo --json state,labels,title,body,createdAt,comments", text)
-        self.assertIn("deliver-direct", text)
         facts = next(c for c in calls if c["label"] == "facts-1")
         self.assertEqual((facts["agentType"], facts["model"], facts["effort"]), ("clerk", "sonnet", "medium"))
         self.assertEqual(facts["schema"]["properties"]["lane"]["enum"], ["direct", "standard", "needs-design"])

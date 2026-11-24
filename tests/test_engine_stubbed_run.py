@@ -39,10 +39,6 @@ SHA = "a" * 40
 CODEX_LIMIT = {"stdout": json.dumps({"status": 1, "error": "You've hit your usage limit."}), "exit": 1}
 
 
-def lane(name: str) -> dict:
-    return {"applies": APPLIES, "lane": {"lane": name, "why": "w"}}
-
-
 def lite_findings(**members) -> dict:
     return dict(CLEAN_LITE, verdict="findings", findings=[FINDING], **members)
 
@@ -59,6 +55,24 @@ def committing(path: str, text: str, **reply) -> dict:
 
 def implementing(path: str, text: str, **members) -> dict:
     return {"reply": {**IMPLEMENTED["reply"], **members}, "commit": {"path": path, "text": text}}
+
+
+def stopping_after_verify(tmp: Path) -> Path:
+    """A copy of the shipped procedures whose run is kept across a continue and stops once verified."""
+    copy = tmp / "procedures"
+    shutil.copytree(PROCEDURES, copy)
+    path = copy / "deliver.json"
+    document = json.loads(path.read_text("utf-8"))
+    for step in document["steps"]:
+        if step["id"] == "start":
+            step["holds"] = "run"
+        if step["id"] == "issue":
+            step["on"]["refused"] = "done"  # the check wants one reachable step that still ends the run
+        if step["id"] == "verification":
+            step["on"]["done"] = "verified"
+    document["stops"]["verified"] = {"need": "owner-decision", "reenter": "verification"}
+    path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+    return copy
 
 
 def model_of(launch: dict) -> str:
@@ -147,22 +161,42 @@ class StubbedRunTest(Scenario):
         launches = run.launches()
         self.assertIn(run.title, launches[1]["prompt"])
         self.assertEqual(model_of(self.launch(run, "implement")), "sonnet")
-        self.assertEqual(self.keys(run), ["applies", "lane", "implement", "lite-review"])
+        self.assertEqual(self.keys(run), ["applies", "implement", "lite-review"])
 
 
 class LaneTest(Scenario):
-    def test_the_lane_answer_standard_stops_at_standard_not_on_engine(self):
-        run = StubbedRun(self, replies=lane("standard"))
+    OVER_THE_RULE = "Add greet().\n\n## Acceptance criteria\n\n" + "".join(f"- [ ] c{i}\n" for i in range(4))
 
-        self.stopped(run, run.deliver(), "standard-not-on-engine", "nothing")
+    def test_a_body_over_the_rule_stops_at_standard_not_on_engine_with_no_lane_agent(self):
+        run = StubbedRun(self, body=self.OVER_THE_RULE)
 
+        done = run.deliver()
+
+        self.stopped(run, done, "standard-not-on-engine", "nothing")
+        self.assertIn(("lane", "standard"), run.transitions(run.runs()[0]))
+        self.assertEqual(self.keys(run), ["applies"])
         self.assertEqual(len(run.claims()), 1)
         self.assertEqual(self.branch_here(run, run.worktree_path), run.branch)
 
-    def test_the_lane_answer_needs_design_stops_for_the_owners_decision(self):
-        run = StubbedRun(self, replies=lane("needs-design"))
+    def test_a_body_naming_a_lane_path_stops_at_standard_not_on_engine(self):
+        run = StubbedRun(self, body="Fix `secrets/x.yaml`.\n\n## Acceptance criteria\n\n- [ ] c\n")
 
-        self.stopped(run, run.deliver(), "needs-design", "owner-decision")
+        self.stopped(run, run.deliver(), "standard-not-on-engine", "nothing")
+
+        self.assertEqual(self.keys(run), ["applies"])
+
+    def test_a_continued_standard_stop_reads_the_issue_again(self):
+        # The behaviour, not the stop's `reenter` value: the live `start` step is stale on every continue and is
+        # re-entered first, so only test_engine_check's structural assertion on the three stops pins `reenter`.
+        run = StubbedRun(self, body=self.OVER_THE_RULE)
+        self.stopped(run, run.deliver(), "standard-not-on-engine", "nothing")
+
+        self.stopped(run, run.deliver(), "standard-not-on-engine", "nothing")
+
+        self.assertEqual(len(run.runs()), 1)
+        events = run.events(run.runs()[0])
+        self.assertEqual([e["event"] for e in events].count("run_continued"), 1)
+        self.assertEqual(len([e for e in events if e["event"] == "step_entered" and e.get("step") == "issue"]), 2)
 
     def test_an_issue_with_a_look_marker_stops_at_look_not_on_engine_and_never_asks_the_lane(self):
         run = StubbedRun(self, body=LOOK_BODY)
@@ -346,7 +380,7 @@ class ReviewRouteTest(Scenario):
 
         self.finish(run, "ineligible", "owner-decision")
 
-        self.assertEqual(self.keys(run), ["applies", "lane", "implement"])
+        self.assertEqual(self.keys(run), ["applies", "implement"])
         steps = [step for step, _ in run.transitions(self.child(run, "direct"))]
         self.assertNotIn("lite-group", steps)
         self.assertNotIn("full-group", steps)
@@ -377,7 +411,7 @@ class ReviewRouteTest(Scenario):
 
         self.finish(run, "done")
 
-        self.assertEqual(self.keys(run), ["applies", "lane", "implement", "lite-review", "lite-review"])
+        self.assertEqual(self.keys(run), ["applies", "implement", "lite-review", "lite-review"])
         tallies = [edge for edge in run.transitions(self.child(run, "direct")) if edge[0] == "lite-tally"]
         self.assertEqual(tallies, [("lite-tally", "unusable"), ("lite-tally", "clean")])
 
@@ -421,6 +455,54 @@ class VerifyTest(Scenario):
         lint, test = results
         self.assertEqual((lint["status"], lint["reason"]), ("skipped", "no documentation changed"))
         self.assertEqual(test["status"], "pass")
+
+    def test_before_a_pull_request_verify_runs_lint_and_the_touched_checks_and_records_the_selection_and_slot_seconds(self):
+        greet = 'def greet(name: str) -> str:\n    return "Hello, " + name + "."\n'
+        run = StubbedRun(self, before_pull_request=True,
+                         replies={"implement": implementing("fixture/greet.py", greet)})
+
+        self.finish(run, "done")
+
+        verify = self.child(run, "verify")
+        event = next(e for e in run.events(verify) if e["event"] == "result_stored" and e["step"] == "checks")
+        checks = json.loads((verify / event["result"]).read_text("utf-8"))
+        self.assertEqual(checks["verdict"], "passed")
+        self.assertEqual([(r["id"], r["status"]) for r in checks["results"]],
+                         [("lint", "pass"), ("test-touched", "pass")])
+        self.assertEqual(checks["results"][1]["selection"],
+                         {"base": "origin/main", "changed": ["fixture/greet.py"], "full": False,
+                          "full_because": [], "selected": ["checks/check_greet.py"]})
+        for result in checks["results"]:
+            for member in ("waited_seconds", "held_seconds"):
+                self.assertNotIsInstance(result[member], bool)
+                self.assertIsInstance(result[member], (int, float))
+                self.assertGreaterEqual(result[member], 0)
+        self.assertEqual(len(run.slot_history()), 2)
+
+    def test_a_continued_run_after_a_clean_sync_that_changes_none_of_the_pull_requests_files_runs_no_verification(self):
+        run = StubbedRun(self, before_pull_request=True)
+        procedures = stopping_after_verify(run.tmp)
+        self.stopped(run, run.deliver(procedures), "verified", "owner-decision")
+        first = self.stored(self.child(run, "verify"), "checks")
+        self.assertEqual(first["verdict"], "passed")
+        held = len(run.slot_history())
+        root = run.fixture.root
+        (root / "README.md").write_text((root / "README.md").read_text("utf-8") + "more\n", "utf-8")
+        run.world.git(root, "commit", "-qam", "unrelated")
+        run.world.git(root, "push", "-q", "origin", "main")
+        run.world.git(run.worktree_path, "fetch", "-q", "origin")
+        run.world.git(run.worktree_path, "merge", "-q", "--no-edit", "origin/main")
+
+        done = run.deliver(procedures)
+
+        self.stopped(run, done, "verified", "owner-decision")
+        self.assertEqual(len(run.runs()), 1)
+        self.assertEqual([e["event"] for e in run.events(run.runs()[0])].count("run_continued"), 1)
+        second = self.stored(self.child(run, "verify", last=True), "checks")
+        self.assertEqual(second["verdict"], "passed")
+        self.assertEqual(second["synced_since"], first["head"])
+        self.assertEqual([r["status"] for r in second["results"]], ["skipped", "skipped"])
+        self.assertEqual(len(run.slot_history()), held)
 
 
 class CoverageTest(Scenario):

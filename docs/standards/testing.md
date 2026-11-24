@@ -14,7 +14,7 @@ The tiers are:
 
 ([ADR-delivery-015](../areas/delivery/adr/015-tests-carry-a-tier-and-ci-reports-suite-time-growth.md))
 
-`just test-touched` runs the `fast` and `integration` members a branch touches: the touched test files, the test files named for or importing a changed module, the files naming a changed path, and the lifecycle guard's adversarial table when the guard changes. It runs `just build` first when the branch changes a `.nix` file, `flake.lock` or another host build input, because CI builds no darwin configuration. Deliveries run it with `lint` before a pull request (the contract's `workflow.verification_before_pull_request`), and `Agent Workflow Tests` runs the whole suite on the pull request.
+`just test-touched` runs the `fast` and `integration` members a branch touches: the touched test files, the test files named for or importing a changed module, the files naming a changed path, the engine's `tests/test_engine_*.py` when an engine module, procedure or test helper changes, and the lifecycle guard's adversarial table when the guard changes. When the branch changes a `.nix` file, `flake.lock` or another host build input, which CI cannot test because it builds no darwin configuration, it runs `just build` and then the whole suite, and its selection names that file. Deliveries run it with `lint` before a pull request (the contract's `workflow.verification_before_pull_request`), the engine's verify step included, and `Agent Workflow Tests` runs the whole suite on the pull request.
 
 ### P16. A new test file declares its tier
 

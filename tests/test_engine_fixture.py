@@ -33,6 +33,7 @@ class FixtureTest(unittest.TestCase):
         snapshot = resolve_project.resolve(str(fixture.root))
 
         self.assertEqual(snapshot["bindings"]["workflow"]["verification"], ["lint", "test"])
+        self.assertIsNone(snapshot["bindings"]["workflow"].get("verification_before_pull_request"))
         self.assertEqual(snapshot["bindings"]["vcs"]["merge"]["required_checks"],
                          FixtureProject.REQUIRED_CHECKS)
         self.assertEqual(snapshot["project"]["id"], "example/fixture")

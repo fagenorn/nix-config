@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "sets": {
+    "guard": [
+      "home/common/claude-code/lifecycle_guard.py",
+      "python/agent_tools/guard/",
+      "docs/areas/guard/",
+      "tests/test_claude_permission_guard.py"
+    ],
+    "release": [
+      "python/agent_tools/release/",
+      "home/common/agent-skills/skills/ship-release/",
+      "docs/areas/release/"
+    ],
+    "secrets": [
+      "secrets/",
+      ".sops.yaml",
+      "home/common/sops/"
+    ]
+  }
+}

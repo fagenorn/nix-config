@@ -8,7 +8,8 @@ the other methods read what the run left: its result line, its run directories a
 claim comments and the launches. `replies` overrides the default replies by step id (an entry
 `<step>.<visit>` answers that visit only); `review_code` is the answer list of the `codex-companion`
 stand-in that makes the independent code review supported; `conditions` is the contract's
-`verification_conditions`.
+`verification_conditions`; `before_pull_request` makes the fixture declare the pre-pull-request commands
+(lint and the touched-only test), and `slot_history()` reads the slot's history lines.
 """
 
 from __future__ import annotations
@@ -34,7 +35,6 @@ STUB = REPO_ROOT / "tests/fixtures/engine-stubbed-run/claude_stub.py"
 COMPANION = REPO_ROOT / "tests/fixtures/engine-stubbed-run/codex_companion_stub.py"
 ROLES = REPO_ROOT / "home/common/claude-code/agents"
 APPLIES = {"verdict": "applies", "details": "greet() is still missing.", "evidence": ""}
-DIRECT = {"lane": "direct", "why": "A one-file fix with checkable criteria."}
 CLEAN_LITE = {"verdict": "pass", "findings": [],
               "acceptance": [{"id": "AC1", "met": True, "evidence": "checks/check_greet.py:8"}],
               "escalate": False}
@@ -45,7 +45,7 @@ IMPLEMENTED = {
               "sensitive": False, "ineligible": False, "tests": ["checks/check_greet.py"]},
     "commit": {"path": "fixture/farewell.py",
                "text": 'def farewell(name: str) -> str:\n    return f"Goodbye, {name}."\n'}}
-DEFAULT_REPLIES = {"applies": APPLIES, "lane": DIRECT, "implement": IMPLEMENTED, "lite-review": CLEAN_LITE}
+DEFAULT_REPLIES = {"applies": APPLIES, "implement": IMPLEMENTED, "lite-review": CLEAN_LITE}
 DEFAULT_BODY = ("Add a greet() function to the fixture module.\n\n"
                 "## Acceptance criteria\n\n- [ ] greet() returns the greeting\n")
 PULL_FIELDS = "number,state,headRefName,closingIssuesReferences"
@@ -57,7 +57,7 @@ class StubbedRun:
     def __init__(self, test_case: unittest.TestCase, *, issue: int = 41, title: str = "Add a greeting",
                  body: str = DEFAULT_BODY, state: str = "open", labels=(), comments=(), pulls=(),
                  replies: dict | None = None, review_code: list | None = None,
-                 conditions: dict | None = None) -> None:
+                 conditions: dict | None = None, before_pull_request: bool = False) -> None:
         self.test = test_case
         self.issue = issue
         self.title = title
@@ -66,7 +66,7 @@ class StubbedRun:
         if review_code is not None:
             self._install_companion(review_code)
         self.fixture = FixtureProject(test_case, self.world, review_code=review_code is not None,
-                                      conditions=conditions)
+                                      conditions=conditions, before_pull_request=before_pull_request)
         self.forge = ForgeWorld(test_case)
         slug = self.fixture.slug
         self.forge.comment_store(slug, issue, comments, labels=list(labels))
@@ -139,10 +139,19 @@ class StubbedRun:
         for name in ("implementer", "reviewer", "reviewer-lite"):
             shutil.copy(ROLES / f"{name}.md", home / ".claude/agents" / f"{name}.md")
 
-    def deliver(self) -> subprocess.CompletedProcess:
+    def deliver(self, procedures: Path | None = None) -> subprocess.CompletedProcess:
+        """`engine deliver <issue>` in the fixture checkout, with the procedures in `procedures` when given."""
+        extra = ["--procedures", str(procedures)] if procedures is not None else []
         return subprocess.run([sys.executable, "-m", "agent_tools.delivery.engine", "deliver",
-                               str(self.issue)], cwd=self.fixture.root, env=self.env,
+                               str(self.issue), *extra], cwd=self.fixture.root, env=self.env,
                               capture_output=True, text=True, timeout=600)
+
+    def slot_history(self) -> list[dict]:
+        """The lines the verification slot recorded, `[]` when it recorded none."""
+        path = Path(self.env["VERIFY_SLOT_DIR"]) / "history.jsonl"
+        if not path.exists():
+            return []
+        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
 
     @staticmethod
     def line(done: subprocess.CompletedProcess) -> dict:

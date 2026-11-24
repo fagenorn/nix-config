@@ -70,19 +70,24 @@ id>"}, `fresh` exactly when `changed` is empty. It reads no project contract
 and takes no lock; a planned run's final review and conformance reviewer run it instead of
 judging a measured surface by hand (issue 477).
 
-`verified-tree run --worktree-path <path>` runs every declared verification id once, in
+`verified-tree run --worktree-path <path>` runs `workflow.verification_before_pull_request`
+when the contract sets it, else every declared `workflow.verification` id, once each, in
 that worktree, and prints one line of canonical JSON, {"clean": <bool>, "head": "<full
 sha>", "results": [<result>, ...], "tree": "<tree id>", "verdict": "passed" | "failed" |
 "dirty"}, exiting 0. The root is `git -C <path> rev-parse --show-toplevel`; the snapshot is
 `resolve_project.resolve(<root>, ["verification"])`, so each command's argv and cwd are the
 worktree's own contract (its cwd is absolute, rooted at the worktree). `results` holds exactly
-one entry per declared id, in declared order: `{"id", "status": "pass" | "fail" | "skipped",
+one entry per run id, in declared order: `{"id", "status": "pass" | "fail" | "skipped",
 "summary"}`, plus `"exit": <int>` when the command ran, `"reason": <skip_reason>` when skipped
 (only an id the plan above skipped, with its `skip_reason`), and `"no_slot": true` only on a
-`fail` where no slot came free. A tree that is not clean before (`git status --porcelain`
-prints anything) runs nothing: verdict `dirty`, `results` empty. Each run id runs as
-`verify-slot run --wait-limit SLOT_WAIT_SECONDS -- <argv>` in its cwd, stdin closed and output
-captured: stdout carries only the one line, and each command's captured output goes to stderr
+`fail` where no slot came free, and, on every id that ran a command, `"waited_seconds"` and
+`"held_seconds"` (each a number or null, from `verify-slot`'s report, the wait summed over the
+attempts and the hold that of the last) and `"selection"` (the JSON object the command wrote to
+the file `VERIFIED_TREE_SELECTION` names, left out when it wrote none or not an object). A tree
+that is not clean before (`git status --porcelain` prints anything) runs nothing: verdict
+`dirty`, `results` empty. Each run id runs as
+`verify-slot run --wait-limit SLOT_WAIT_SECONDS --report <file> -- <argv>` in its cwd, stdin
+closed and output captured: stdout carries only the one line, and each command's captured output goes to stderr
 after it ends. Exit 75 retries, `SLOT_ATTEMPTS` runs in all, then `fail` with `no_slot` and
 summary `no verify slot came free in <SLOT_ATTEMPTS> attempts`; a run past
 `COMMAND_TIMEOUT_SECONDS` is terminated and is `fail` with summary `timed out after <N> s`
@@ -98,6 +103,24 @@ A usage error, a path that is not a git worktree, a resolver refusal or a missin
 `origin/<integration_branch>` when some id is conditional prints `{"detail": "<text>",
 "verdict": "error"}` and exits 1.
 
+A `run` that passes, while `workflow.verification_before_pull_request` is set, atomically
+replaces `<git rev-parse --absolute-git-dir>/verified-tree-run.json` with exactly
+{"head": "<full sha>", "schema": "verified-tree-run/v1", "verification": ["<id>", ...]}, the HEAD
+it ran at and the ids it ran; a failed or dirty run writes nothing and leaves an earlier record in
+place, and a record that cannot be written prints `verified-tree: cannot record the pass:
+<error>` on stderr while the verdict stands. After the dirty check and the plan, a `run` skips
+every command, starting no `verify-slot`, when all of these hold for the record's head H0: the
+record parses strictly (those keys, that schema, a tree-id `head`, a non-empty list of non-empty
+strings); its `verification` equals the plan's `run`; H0 is an ancestor of HEAD; `git rev-list
+--no-merges H0..HEAD ^refs/remotes/origin/<integration_branch>` prints nothing, so only merges
+and commits already on the integration branch came since; and no path that differs between H0's
+tree and the current tree is among the changed paths above. A skip prints {"clean": true, "head",
+"results", "synced_since": "<H0>", "tree", "verdict": "passed"}, `synced_since` a string, each
+result of the plan's `run` `skipped` with the summary and reason `passed at <H0>; the sync since
+changed none of the pull request's files` and a condition-skipped id keeping its own reason. It
+applies only while the binding is set, and an unreadable record or a git failure in that check
+verifies instead of erroring; a run at H0 itself with nothing changed also skips.
+
 The tree is what a Git-backed build sees: the index's entries, staged new
 files included, with tracked files' working-tree edits and deletions applied,
 built by `git add -u` and `git write-tree` against a temporary copy of the
@@ -111,7 +134,8 @@ The record is one latest-pass file per worktree,
 {"schema": "verified-tree/v1", "tree": "<id>", "verification": ["<id>", ...]}:
 `tree` is 40 or 64 lowercase hex characters and `verification` is a non-empty
 list of non-empty strings, the ids that ran and passed on that tree. It
-carries no run, attempt or launch identity.
+carries no run, attempt or launch identity. `verified-tree-run.json`, written by `run` only,
+sits beside it.
 
 The persisted plan is parsed as strictly as the record: `tree` is a tree id
 and `run` is a non-empty list of non-empty strings.
@@ -135,6 +159,7 @@ from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 import fcntl
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -153,6 +178,9 @@ RECORD_NAME = "verified-tree.json"
 PLAN_SCHEMA = "verified-tree-plan/v1"
 PLAN_NAME = "verified-tree-plan.json"
 PLAN_LOCK_NAME = "verified-tree-plan.lock"
+RUN_RECORD_SCHEMA = "verified-tree-run/v1"
+RUN_RECORD_NAME = "verified-tree-run.json"
+SYNC_SKIP_REASON = "passed at {head}; the sync since changed none of the pull request's files"
 TREE_PATTERN = r"[0-9a-f]{40}(?:[0-9a-f]{24})?"
 ERROR_EXIT = 2
 NOT_STARTED_EXIT = 127
@@ -162,6 +190,7 @@ SLOT_ATTEMPTS = 12
 COMMAND_TIMEOUT_SECONDS = 3600
 SUMMARY_LINES = 20
 NO_SLOT_EXIT = 75
+SELECTION_ENV = "VERIFIED_TREE_SELECTION"  # the selector's name for it, which this package may not import
 TERMINATE_GRACE_SECONDS = 30
 
 
@@ -204,6 +233,11 @@ def worktree_root() -> Path:
 def record_path(root: Path) -> Path:
     """The record file in the worktree's own git directory."""
     return Path(_git(["rev-parse", "--absolute-git-dir"], root)) / RECORD_NAME
+
+
+def run_record_path(root: Path) -> Path:
+    """The last passed `run`'s record, beside the record."""
+    return record_path(root).with_name(RUN_RECORD_NAME)
 
 
 def plan_path(root: Path) -> Path:
@@ -324,8 +358,15 @@ def _policy(snapshot: Mapping) -> dict:
     bindings = snapshot["bindings"]
     workflow = bindings["workflow"]
     return {"verification": workflow["verification"],
+            "before_pull_request": workflow.get("verification_before_pull_request"),
             "conditions": workflow.get("verification_conditions") or {},
             "integration_branch": bindings["vcs"]["integration_branch"]}
+
+
+def _run_ids(policy: Mapping) -> list[str]:
+    """The ids `run` runs: the pre-pull-request list when the contract sets one, else all."""
+    before = policy["before_pull_request"]
+    return list(before) if isinstance(before, list) else list(policy["verification"])
 
 
 def verification_policy(root: Path) -> dict:
@@ -475,18 +516,51 @@ def _signal_group(child: subprocess.Popen, number: int) -> None:
         pass
 
 
-def _slotted(argv: Sequence[str], cwd: str) -> tuple[int | None, str]:
+def _number(value: object) -> bool:
+    """A finite non-negative number, not a bool."""
+    return (isinstance(value, (int, float)) and not isinstance(value, bool)
+            and math.isfinite(value) and value >= 0)
+
+
+def _read_json_object(path: Path) -> dict | None:
+    """The JSON object in `path`, or None for a missing or empty file, bad JSON or a non-object."""
+    try:
+        parsed = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _read_report(path: Path) -> dict | None:
+    """`verify-slot`'s report when readable: a wait and a hold that is a number or null."""
+    report = _read_json_object(path)
+    if (report is None or not _number(report.get("waited_seconds"))
+            or not (report.get("held_seconds") is None or _number(report.get("held_seconds")))):
+        return None
+    return report
+
+
+def _slot_seconds(reports: Sequence[Mapping | None]) -> tuple[float | None, float | None]:
+    """(summed wait, last hold) over the attempts' readable reports; None when none was readable."""
+    readable = [report for report in reports if report is not None]
+    if not readable:
+        return None, None
+    return round(sum(report["waited_seconds"] for report in readable), 1), readable[-1]["held_seconds"]
+
+
+def _slotted(argv: Sequence[str], cwd: str, report: Path, selection: Path) -> tuple[int | None, str]:
     """One `verify-slot run` of `argv` in `cwd`: (exit code, output), or (None, output) on timeout.
     verify-slot leads its own session so a timeout reaches the command and its descendants, which
     verify-slot's SIGKILL cannot forward. Output goes to a file, never a pipe, so a descendant
     that outlives the command and holds its stdout cannot delay the exit code or hang a read.
     """
     command = [*sibling_argv("delivery.verify_slot"), "run", "--wait-limit",
-               str(SLOT_WAIT_SECONDS), "--", *argv]
+               str(SLOT_WAIT_SECONDS), "--report", str(report), "--", *argv]
     with tempfile.TemporaryFile() as captured:
         try:
             child = subprocess.Popen(command, cwd=cwd, stdin=subprocess.DEVNULL,
                                      stdout=captured, stderr=subprocess.STDOUT,
+                                     env={**os.environ, SELECTION_ENV: str(selection)},
                                      start_new_session=True)
         except OSError as error:
             return NOT_STARTED_EXIT, f"cannot start {argv[0]}: {error}"
@@ -509,23 +583,85 @@ def _slotted(argv: Sequence[str], cwd: str) -> tuple[int | None, str]:
 def _run_command(verification_id: str, command: Mapping) -> dict:
     """The result of one declared id, retried while no verify slot comes free."""
     code: int | None = None
+    reports: list[dict | None] = []
+    selection: dict | None = None
     for _ in range(SLOT_ATTEMPTS):
-        code, output = _slotted(command["argv"], command["cwd"])
+        with tempfile.TemporaryDirectory() as scratch:
+            report_path, selection_path = Path(scratch) / "report.json", Path(scratch) / "selection.json"
+            code, output = _slotted(command["argv"], command["cwd"], report_path, selection_path)
+            reports.append(_read_report(report_path))
+            selection = _read_json_object(selection_path)
         if output:
             sys.stderr.write(f"verified-tree: output of {verification_id}\n{output}")
             if not output.endswith("\n"):
                 sys.stderr.write("\n")
         if code != NO_SLOT_EXIT:
             break
+    waited, held = _slot_seconds(reports)
     if code is None:
-        return {"id": verification_id, "status": "fail",
-                "summary": f"timed out after {COMMAND_TIMEOUT_SECONDS} s"}
-    if code == NO_SLOT_EXIT:
-        return {"id": verification_id, "status": "fail", "exit": code, "no_slot": True,
-                "summary": f"no verify slot came free in {SLOT_ATTEMPTS} attempts"}
-    status = "pass" if code == 0 else "fail"
-    summary = "passed" if code == 0 else _output_summary(output) or f"exit {code}"
-    return {"id": verification_id, "status": status, "exit": code, "summary": summary}
+        result = {"id": verification_id, "status": "fail",
+                  "summary": f"timed out after {COMMAND_TIMEOUT_SECONDS} s"}
+    elif code == NO_SLOT_EXIT:
+        result = {"id": verification_id, "status": "fail", "exit": code, "no_slot": True,
+                  "summary": f"no verify slot came free in {SLOT_ATTEMPTS} attempts"}
+    else:
+        status = "pass" if code == 0 else "fail"
+        summary = "passed" if code == 0 else _output_summary(output) or f"exit {code}"
+        result = {"id": verification_id, "status": status, "exit": code, "summary": summary}
+    result["waited_seconds"], result["held_seconds"] = waited, held
+    if selection is not None:
+        result["selection"] = selection
+    return result
+
+
+def _read_run_record(path: Path) -> dict | None:
+    """The strictly parsed run record, or None when it is absent or malformed; never raises."""
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"),
+                              object_pairs_hook=reject_duplicate_keys,
+                              parse_constant=reject_nonfinite_literal)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(document, dict) or set(document) != {"head", "schema", "verification"}:
+        return None
+    head, ids = document["head"], document["verification"]
+    if (document["schema"] != RUN_RECORD_SCHEMA or not isinstance(head, str)
+            or not re.fullmatch(TREE_PATTERN, head) or not isinstance(ids, list) or not ids
+            or not all(isinstance(item, str) and item for item in ids)):
+        return None
+    return document
+
+
+def _synced_since(root: Path, tree: str, planned: Mapping, policy: Mapping) -> str | None:
+    """The head a pass was recorded at when only a clean sync has changed the branch since, else None.
+
+    Any git failure or unreadable record answers None: the run verifies instead."""
+    try:
+        recorded = _read_run_record(run_record_path(root))
+        if recorded is None or recorded["verification"] != planned["run"]:
+            return None
+        origin = f"refs/remotes/origin/{policy['integration_branch']}"
+        earlier = recorded["head"]
+        if subprocess.run(["git", "merge-base", "--is-ancestor", earlier, "HEAD"], cwd=root,
+                          capture_output=True, check=False).returncode != 0:
+            return None
+        if _git(["rev-list", "--no-merges", f"{earlier}..HEAD", f"^{origin}"], root):
+            return None
+        if not set(_tree_diff(root, earlier, tree)).isdisjoint(
+                changed_paths(root, policy["integration_branch"], tree)):
+            return None
+    except (VerifiedTreeError, OSError):
+        return None
+    return earlier
+
+
+def _record_pass(root: Path, head: str, run_ids: Sequence[str]) -> None:
+    """Record that `run_ids` passed at `head`; a failure is reported on stderr, never raised."""
+    try:
+        _write_atomically(run_record_path(root), {"head": head, "schema": RUN_RECORD_SCHEMA,
+                                                  "verification": list(run_ids)})
+    except VerifiedTreeError as error:
+        print(f"verified-tree: cannot record the pass: {error}", file=sys.stderr)
 
 
 def run(worktree: Path) -> tuple[int, dict]:
@@ -539,11 +675,21 @@ def run(worktree: Path) -> tuple[int, dict]:
         if not _clean(root):
             return 0, {"clean": False, "head": head, "results": [], "tree": tree,
                        "verdict": "dirty"}
-        planned = _plan_of(root, tree, policy)
+        ids = _run_ids(policy)
+        planned = _plan_of(root, tree, {**policy, "verification": ids})
         reasons = {entry["id"]: entry["reason"] for entry in planned["skipped"]}
+        bound = isinstance(policy["before_pull_request"], list)
+        earlier = _synced_since(root, tree, planned, policy) if bound else None
+        if earlier is not None:
+            reasons.update({item: SYNC_SKIP_REASON.format(head=earlier) for item in planned["run"]})
+            return 0, {"clean": True, "head": head, "synced_since": earlier, "tree": tree,
+                       "verdict": "passed",
+                       "results": [{"id": item, "status": "skipped",
+                                    "summary": reasons[item], "reason": reasons[item]}
+                                   for item in ids]}
         commands = snapshot["bindings"]["commands"]
         results = []
-        for verification_id in policy["verification"]:
+        for verification_id in ids:
             if verification_id in reasons:
                 reason = reasons[verification_id]
                 results.append({"id": verification_id, "status": "skipped",
@@ -555,6 +701,8 @@ def run(worktree: Path) -> tuple[int, dict]:
         return 1, {"detail": str(error), "verdict": "error"}
     verdict = ("failed" if any(entry["status"] == "fail" for entry in results)
                else "passed" if clean else "dirty")
+    if bound and verdict == "passed":
+        _record_pass(root, head, planned["run"])
     return 0, {"clean": clean, "head": head, "results": results, "tree": tree,
                "verdict": verdict}
 
