@@ -332,6 +332,9 @@ SCHEMA_THREE_WORKFLOW_OPTIONAL_MEMBERS = (
     "verification_conditions", "verification_before_pull_request")
 # #310: the one orchestration member an author may leave out; never defaulted.
 ORCHESTRATION_OPTIONAL_MEMBERS = ("stall_minutes",)
+# A workflow binding the platform retired before schema 3 existed (`release` moved to the
+# top-level `release` member): it is no member of any tuple above, yet it keeps its refusal.
+RETIRED_WORKFLOW_MEMBERS = ("release",)
 
 
 def schema_three_children(section: str) -> frozenset[str]:
@@ -354,7 +357,7 @@ def schema_three_children(section: str) -> frozenset[str]:
 OPEN_SECTIONS: dict[str, frozenset[str]] = {
     "/bindings/workflow": frozenset(
         WORKFLOW_MEMBERS + WORKFLOW_OPTIONAL_MEMBERS
-        + SCHEMA_THREE_WORKFLOW_OPTIONAL_MEMBERS
+        + SCHEMA_THREE_WORKFLOW_OPTIONAL_MEMBERS + RETIRED_WORKFLOW_MEMBERS
     ) | schema_three_children("/bindings/workflow"),
     "/bindings/workflow/orchestration": frozenset(
         ("max_parallel", "attempt_budget_minutes") + ORCHESTRATION_OPTIONAL_MEMBERS

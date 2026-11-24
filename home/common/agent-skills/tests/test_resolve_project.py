@@ -1556,7 +1556,9 @@ class ReleaseMemberTest(ResolverTestCase):
     def test_leftover_authored_release_flags_are_unexpected(self):
         for mutate, pointer in (
                 (lambda c: c["capabilities"].update(release={"support": "unsupported"}),
-                 "/capabilities/release"),):
+                 "/capabilities/release"),
+                (lambda c: c["bindings"]["workflow"].update(release=None),
+                 "/bindings/workflow/release")):
             with self.subTest(pointer=pointer):
                 contract = source_contract()
                 mutate(contract)

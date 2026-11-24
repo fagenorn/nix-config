@@ -90,6 +90,7 @@ class UnknownBindingTest(ResolverTestCase):
         workflow = set(resolve_project.WORKFLOW_MEMBERS)
         workflow |= set(resolve_project.WORKFLOW_OPTIONAL_MEMBERS)
         workflow |= set(resolve_project.SCHEMA_THREE_WORKFLOW_OPTIONAL_MEMBERS)
+        workflow |= set(resolve_project.RETIRED_WORKFLOW_MEMBERS)
         orchestration = {"max_parallel", "attempt_budget_minutes"}
         orchestration |= set(resolve_project.ORCHESTRATION_OPTIONAL_MEMBERS)
         pointers = [
