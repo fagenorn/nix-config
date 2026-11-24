@@ -9,6 +9,7 @@ a landing makes from the state file, against the bare `origin` the state names, 
   pr view N --repo S --json <fields>
   pr merge N --repo S --merge --match-head-commit SHA --delete-branch
   api repos/S/commits/<sha>/pulls?per_page=100
+  api --paginate --slurp repos/S/pulls/N/commits?per_page=100   one page: each commit's `commit.message`
   api repos/S/pulls?state=<open|closed|all>&base=...&head=...
   api repos/S/branches/<b>/protection      GitHub's plan-gated 403, as `gh` reports it
   api repos/S/branches/<b>
@@ -216,6 +217,11 @@ def api(state: dict, path: str) -> object:
     rest_of = parts[3:]
     if len(rest_of) == 3 and rest_of[0] == "commits" and rest_of[2] == "pulls":
         return [rest(state, p) for p in state["pulls"] if head_of(state, p) == rest_of[1]]
+    if len(rest_of) == 3 and rest_of[0] == "pulls" and rest_of[2] == "commits":
+        pull = find(state, rest_of[1])
+        return [[{"sha": c["oid"], "commit": {"message": "\n\n".join(
+            part for part in (c["messageHeadline"], c["messageBody"]) if part)}}
+            for c in commits_of(state, pull)]]
     if rest_of == ["pulls"]:
         if params.get("page", "1") != "1":
             return []
@@ -264,8 +270,9 @@ def handle(state: dict, argv: list[str]) -> bool:
         print(json.dumps({"data": {"repository": {"pullRequest": {"closingIssuesReferences": {
             "nodes": [{"number": int(n)} for n in closes]}}}}}))
         return True
-    if len(argv) == 2 and argv[0] == "api":
-        answer = api(state, argv[1])
+    paged = argv[:3] == ["api", "--paginate", "--slurp"] and len(argv) == 4
+    if paged and re.search(r"/pulls/\d+/commits\?", argv[3]) or len(argv) == 2 and argv[0] == "api":
+        answer = api(state, argv[-1])
         if answer is None:
             return False
         print(json.dumps(answer))

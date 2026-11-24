@@ -267,7 +267,8 @@ class ChecksTest(unittest.TestCase):
 
     def test_checks_with_no_declared_check_need_every_entry_green(self):
         land = self.world(NoDeclaredChecks)
-        snapshot = resolve_project.resolve(str(land.fixture.root))
+        with mock.patch.dict(os.environ, land.env):
+            snapshot = resolve_project.resolve(str(land.fixture.root))
         self.assertNotIn("required_checks", snapshot["bindings"]["vcs"]["merge"])
         rows = (("empty", [], "pending"),
                 ("one green", [check_run("CI")], "green"),
