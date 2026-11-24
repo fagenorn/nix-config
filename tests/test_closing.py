@@ -237,6 +237,15 @@ class HoldFactsTest(HoldTest):
         self.assertEqual(facts["posted"], [{"issue": ISSUE, "merge": merge, "checks": [EVIDENCE],
                                             "comment_id": 100, "results": False}])
 
+    def test_hold_facts_reports_a_posted_fence_that_is_not_json_as_posted_with_no_checks(self):
+        forge, merge = self.landing.forge, self.merge()
+        self.respond_body(OPEN_BODY)
+        forge.comment_store(SLUG, ISSUE, [comment(100, "held\n```verify\n{\"v\": 1, \"checks\": [\n```")], labels=[])
+        forge.respond_json("gh", BLOCKING, [])
+        forge.respond_json("gh", PR_VIEW, {"headRefOid": HEAD, "headRefName": "b", "statusCheckRollup": []})
+        self.assertEqual(self.facts(merge)[1]["posted"], [
+            {"issue": ISSUE, "merge": None, "checks": [], "comment_id": 100, "results": False}])
+
     def test_hold_facts_reads_the_results_marker_and_the_split_children_of_this_merge_only(self):
         forge, merge = self.landing.forge, self.merge()
         self.respond_body(OPEN_BODY)
@@ -365,6 +374,16 @@ class HoldLintTest(HoldTest):
         status, lint = self.lint(holding.block_of([EVIDENCE], self.merge()), posted=[posted])
         self.assertEqual((status, lint["verdict"]), (0, "invalid"))
         self.assertEqual([error["field"] for error in lint["lints"][0]["errors"]], ["checks[0].when.not_before"])
+
+    def test_a_posted_fence_that_is_not_json_or_has_no_checks_is_linted_not_the_drafted_block(self):
+        merge = self.merge()
+        broken = "held\n```verify\n" + json.dumps({"v": 1, "merge": merge, "checks": []})[:-2] + "\n```"
+        for text in (broken, "held\n```verify\n" + json.dumps({"v": 1, "merge": merge}) + "\n```"):
+            with self.subTest(text=text):
+                status, lint = self.lint(holding.block_of([EVIDENCE], merge), posted=[comment(100, text)])
+                self.assertEqual((status, lint["verdict"]), (0, "invalid"))
+                self.assertEqual([(entry["issue"], entry["ac"], entry["ok"]) for entry in lint["lints"]],
+                                 [(ISSUE, None, False)])
 
     def test_an_existing_fence_is_linted_without_the_checks_naming_an_answered_criterion(self):
         stale = {**ASK, "ac": "ac3", "when": {"not_before": "not-a-time"}}

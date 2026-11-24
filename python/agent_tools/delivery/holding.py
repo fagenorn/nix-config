@@ -272,14 +272,20 @@ def _pages(path: str) -> list:
 
 
 def _fence(number: int, ac: str | None, comments: list[verify_issues.Comment]) -> dict | None:
-    """The selected fence of one issue as `{issue, ac, merge, checks, comment_id, results, block}`, or None."""
+    """The selected fence of one issue as `{issue, ac, merge, checks, comment_id, results, block}`, or None.
+
+    A fence whose JSON is not an object or has no `checks` list is still the selected one: its `checks` is
+    empty, its `merge` None and its `block` is what parsed (None for a fence that did not parse)."""
     held = verify_issues.select(comments)
-    if held is None or not _object(held.block) or not isinstance(held.block.get("checks"), list):
+    if held is None:
         return None
+    block = held.block if _object(held.block) else None
+    checks = block.get("checks") if block else None
     prefix = f"{held.block_id}."
     results = any(marker.fields.get("block", "").startswith(prefix) for marker in held.markers)
-    return {"issue": number, "ac": ac, "merge": held.block.get("merge"), "checks": held.block["checks"],
-            "comment_id": held.block_id, "results": results, "block": held.block}
+    return {"issue": number, "ac": ac, "merge": block.get("merge") if block else None,
+            "checks": checks if isinstance(checks, list) else [], "comment_id": held.block_id,
+            "results": results, "block": held.block}
 
 
 def _comments(repo: str, number: int) -> list[verify_issues.Comment]:
@@ -397,10 +403,12 @@ def lint_all(*, repo_root: str, repo: str, issue: int, pr_head: str, pr_branch: 
     context = {"workflows": workflows, "pr_head": pr_head, "pr_branch": pr_branch}
     lints = []
     own = next((entry for entry in found if entry["issue"] == issue), None)
-    parent = ({**own["block"], "checks": [check for check in own["checks"]
-                                          if not (_object(check) and _up(check.get("ac")) in gone)]}
-              if own else block)
-    if parent is not None:
+    if own and _object(own["block"]) and isinstance(own["block"].get("checks"), list):
+        parent = {**own["block"], "checks": [check for check in own["checks"]
+                                             if not (_object(check) and _up(check.get("ac")) in gone)]}
+    else:
+        parent = own["block"] if own else block
+    if own or parent is not None:
         lints.append({"issue": issue, "ac": None, **lint(repo_root, parent, blocks=blocks, **context)})
     for entry in split:
         child = next((item for item in found if item["issue"] != issue and item["ac"] == entry["ac"]), None)
