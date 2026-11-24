@@ -406,8 +406,10 @@ agent-workflow-tests *args:
     home/common/agent-skills/tests/test_program_harness.py \
     home/common/agent-skills/tests/test_deliver_standard_program.py \
     home/common/agent-skills/tests/test_deliver_standard_before_pull_request.py \
+    home/common/agent-skills/tests/test_deliver_standard_lane_rule.py \
     home/common/agent-skills/tests/test_deliver_batch_program.py \
     home/common/agent-skills/tests/test_deliver_batch_before_pull_request.py \
+    home/common/agent-skills/tests/test_deliver_batch_lane_rule.py \
     home/common/agent-skills/evals/tests/test-run-eval-tree.sh
 
 # Validate every explicit pipeline dispatch and print the representative trace.

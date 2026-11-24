@@ -17,7 +17,7 @@ LANE_RULE_ARGV = re.compile(r"\bissue-setup lane --repo-root (\S+) --repo (\S+) 
 
 
 class IntakeLaneRuleTest(unittest.TestCase):
-    """#1675: facts-n answers the lane the rule chose; needs-design is still refused."""
+    """Facts-n answers the lane the rule chose; needs-design is still refused."""
 
     def test_the_facts_lane_is_the_lane_rules_verdict(self):
         _, calls, _ = batch.run(patch={"facts-1": {"lane": "direct", "why": "named files 1 of at most 3"}})

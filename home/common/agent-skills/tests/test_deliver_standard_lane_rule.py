@@ -25,7 +25,7 @@ RULE_DIRECT = {"verdict": "direct", "reason": "named files 1 of at most 3"}
 
 
 class LaneRuleTest(unittest.TestCase):
-    """#1675: a lane-less fresh run outside plan mode takes the lane rule's direct or standard lane."""
+    """A lane-less fresh run outside plan mode takes the lane rule's direct or standard lane."""
 
     def test_a_lane_less_run_takes_the_rules_direct_lane(self):
         out = run_out(ARGS, None, {"setup": {"lane_rule": RULE_DIRECT}})
