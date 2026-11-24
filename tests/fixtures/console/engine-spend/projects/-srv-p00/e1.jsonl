@@ -1,0 +1,2 @@
+{"cwd":"/srv/p00","message":{"id":"E1a","model":"claude-sonnet-4-6","usage":{"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"input_tokens":100,"output_tokens":0}},"sessionId":"e1","timestamp":"2026-11-16T10:00:00.000Z","type":"assistant"}
+{"cwd":"/srv/p00","message":{"id":"E1b","model":"claude-sonnet-4-6","usage":{"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"input_tokens":0,"output_tokens":7}},"sessionId":"e1","timestamp":"2026-11-16T10:00:00.000Z","type":"assistant"}
