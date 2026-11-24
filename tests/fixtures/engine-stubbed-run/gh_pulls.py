@@ -15,13 +15,29 @@ a landing makes from the state file, against the bare `origin` the state names, 
   api repos/S/branches/<b>
   api graphql (the closingIssuesReferences query of a pull request: its body's `Closes #<n>` lines)
 
-The state is `{"slug", "bare", "git", "next", "pulls", "rollup", "events"}`, read and written under
-an exclusive lock. A merge lands only the head named by `--match-head-commit` and only with
-`--delete-branch`; it is a real `--no-ff` merge into `main` of the bare, and it does not close the
-issue. Each event of `events` fires once, on the first read of `statusCheckRollup` of a pull
-request and after that read's answer is computed: `move-head` adds a commit on top of the head
-branch, `steal-lock` moves the land lock of `main` (in the tracker fake's ref store) to the sha of a
-second open pull request. A token variable in the environment is refused with exit 65.
+The state is `{"slug", "bare", "git", "next", "pulls", "rollup", "events", "rollups",
+"rollup_heads", "advance", "advanced", "main_change", "main_moves", "merge_behind", "merge_policy",
+"blocked_once"}`, read and written under an exclusive lock. A merge lands only the head named by
+`--match-head-commit` and only with `--delete-branch`; it is a real `--no-ff` merge into `main` of
+the bare, and it does not close the issue. Each event of `events` fires once. `move-head` (adds a
+commit on top of the head branch) and `steal-lock` (moves the land lock of `main`, in the tracker
+fake's ref store, to the sha of a second open pull request) fire on the first read of
+`statusCheckRollup` of a pull request, after that read's answer is computed. `steal-lock-at-head`
+(the same move) and `drop-lock-at-head` (deletes the lock ref) fire before the answer, on a
+`pr view` whose `--json` is exactly `headRefOid`; one entry per distinct name fires on each such
+read, so a name listed twice fires on two reads. A token variable in the environment is refused with
+exit 65.
+
+`rollups`, when not null, answers the i-th distinct head a `statusCheckRollup` is read at (heads
+are listed in `rollup_heads` in order of first read) with `rollups[min(i, len(rollups) - 1)]`.
+After the answer of each of the first `advance` reads of `statusCheckRollup`, one commit goes to
+the bare's `main`: `main_change` (`{"path", "text"}`) for the first, `main-<k>.txt` otherwise (k
+counts every commit this fake makes to `main`, from 1). `mergeStateStatus` reads `BEHIND` when the
+bare's `main` tip is not an ancestor of an open pull request's head, else `CLEAN`. Each of the
+first `merge_behind` merges commits to `main` and fails (exit 1, the base is not up to date)
+and each of the next `merge_policy` merges fails with the policy refusal and makes the next read of
+`mergeStateStatus` answer `BLOCKED`, once; a refused merge changes no pull request. Every commit
+runs with `commit.gpgsign=false` and a fixed identity.
 
 The tracker fake answers a read of the issue from one fixed response; once the tracker fake's store
 holds the issue closed, this front lays that state over the read's `state` and `state_reason`.
@@ -40,6 +56,7 @@ PLAN_GATED = ('{"message":"Upgrade to GitHub Pro or make this repository public 
               'feature.","documentation_url":"https://docs.github.com/rest/branches/'
               'branch-protection#get-branch-protection","status":"403"}')
 LOCK_REF = "refs/agent-locks/land/main"
+HEAD_EVENTS = ("steal-lock-at-head", "drop-lock-at-head")
 PLAIN = {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull,
          "GIT_AUTHOR_NAME": "forge", "GIT_AUTHOR_EMAIL": "forge@example.invalid",
          "GIT_COMMITTER_NAME": "forge", "GIT_COMMITTER_EMAIL": "forge@example.invalid"}
@@ -106,10 +123,30 @@ def commits_of(state: dict, pull: dict) -> list[dict]:
     return commits
 
 
-def view(state: dict, pull: dict) -> dict:
+def behind(state: dict, pull: dict, head: str) -> bool:
+    """True when the bare's `main` tip is not an ancestor of the open pull request's head."""
+    if pull["state"] != "OPEN" or "fixedHead" in pull:
+        return False
+    done = subprocess.run([state["git"], "-C", state["bare"], "merge-base", "--is-ancestor",
+                           "refs/heads/main", head], capture_output=True, text=True)
+    return done.returncode == 1
+
+
+def rollup_at(state: dict, head: str, fields: str) -> list:
+    """The rollup answered for `head`; a read of `statusCheckRollup` registers the head in order."""
+    rollups = state["rollups"]
+    if rollups is None or "statusCheckRollup" not in fields.split(","):
+        return state["rollup"]
+    heads = state["rollup_heads"]
+    if head not in heads:
+        heads.append(head)
+    return rollups[min(heads.index(head), len(rollups) - 1)]
+
+
+def view(state: dict, pull: dict, fields: str = "") -> dict:
     head = head_of(state, pull)
-    return {**pull, "headRefOid": head, "mergeStateStatus": "CLEAN",
-            "statusCheckRollup": state["rollup"], "commits": commits_of(state, pull),
+    return {**pull, "headRefOid": head, "mergeStateStatus": "BEHIND" if behind(state, pull, head) else "CLEAN",
+            "statusCheckRollup": rollup_at(state, head, fields), "commits": commits_of(state, pull),
             "closingIssuesReferences": [], "mergeCommit": pull.get("mergeCommit")}
 
 
@@ -131,9 +168,61 @@ def find(state: dict, number: str) -> dict:
     raise SystemExit(1)
 
 
+def main_commit(state: dict, change: dict | None = None) -> None:
+    """One commit to the bare's `main`: `change`'s file, else `main-<k>.txt`."""
+    state["main_moves"] += 1
+    path, text = (change["path"], change["text"]) if change else (
+        f"main-{state['main_moves']}.txt", f"main moved {state['main_moves']}\n")
+    clone = scratch(state, "main")
+    target = Path(clone, path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(text, encoding="utf-8")
+    git(state, "-C", clone, "add", path)
+    git(state, "-C", clone, "-c", "commit.gpgsign=false", "commit", "--quiet", "-m",
+        f"move main {state['main_moves']}")
+    git(state, "-C", clone, "push", "--quiet", state["bare"], "HEAD:refs/heads/main")
+
+
+def advance(state: dict) -> None:
+    """After a read of `statusCheckRollup`: one commit to `main` for each of the first `advance` reads."""
+    if state["advanced"] >= state["advance"]:
+        return
+    state["advanced"] += 1
+    main_commit(state, state["main_change"] if state["advanced"] == 1 else None)
+
+
+def steal_pull(state: dict, sha: str) -> None:
+    """Open a second pull request headed at `sha` and hand the land lock of `main` to it."""
+    number = state["next"]
+    state["next"] += 1
+    state["pulls"].append({
+        "number": number, "state": "OPEN", "baseRefName": "main",
+        "headRefName": "stolen-lock", "headRefOid": sha, "fixedHead": sha,
+        "title": "A second pull request", "body": "",
+        "url": f"https://github.com/{state['slug']}/pull/{number}"})
+    set_lock(sha)
+
+
+def fire_at_head(state: dict) -> None:
+    """Before the answer of a `headRefOid`-only read: one pending entry of each lock-at-head name."""
+    kept, seen = [], set()
+    for event in state["events"]:
+        name = event["event"]
+        if name not in HEAD_EVENTS or name in seen:
+            kept.append(event)
+            continue
+        seen.add(name)
+        if name == "steal-lock-at-head":
+            steal_pull(state, event["sha"])
+        else:
+            set_lock(None)
+    state["events"] = kept
+
+
 def fire(state: dict) -> None:
-    """Fire every pending event, once; the read that called this has already been answered."""
-    pending, state["events"] = state["events"], []
+    """Fire every pending read event, once; the read that called this has already been answered."""
+    pending = [e for e in state["events"] if e["event"] not in HEAD_EVENTS]
+    state["events"] = [e for e in state["events"] if e["event"] in HEAD_EVENTS]
     for event in pending:
         if event["event"] == "move-head":
             pull = next(p for p in state["pulls"] if p["state"] == "OPEN")
@@ -144,23 +233,19 @@ def fire(state: dict) -> None:
             git(state, "-C", clone, "push", "--quiet", state["bare"],
                 f"HEAD:refs/heads/{pull['headRefName']}")
         elif event["event"] == "steal-lock":
-            number = state["next"]
-            state["next"] += 1
-            state["pulls"].append({
-                "number": number, "state": "OPEN", "baseRefName": "main",
-                "headRefName": "stolen-lock", "headRefOid": event["sha"], "fixedHead": event["sha"],
-                "title": "A second pull request", "body": "",
-                "url": f"https://github.com/{state['slug']}/pull/{number}"})
-            steal(event["sha"])
+            steal_pull(state, event["sha"])
 
 
-def steal(sha: str) -> None:
-    """Move the land lock of `main` in the tracker fake's ref store to `sha`."""
+def set_lock(sha: str | None) -> None:
+    """Move the land lock of `main` in the tracker fake's ref store to `sha`; None deletes it."""
     forge = Path(os.environ["FORGE_WORLD"])
     with open(forge / "refs.lock", "a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         store = json.loads((forge / "refs.json").read_text("utf-8"))
-        store["refs"][LOCK_REF] = sha
+        if sha is None:
+            store["refs"].pop(LOCK_REF, None)
+        else:
+            store["refs"][LOCK_REF] = sha
         scratch_file = forge / "refs.json.tmp"
         scratch_file.write_text(json.dumps(store), encoding="utf-8")
         os.replace(scratch_file, forge / "refs.json")
@@ -188,6 +273,15 @@ def merge(state: dict, number: str, flags: dict) -> None:
         fail("this fake lands only with --delete-branch")
     if flags.get("--match-head-commit") != head:
         fail(f"head branch was modified: the head is {head}")
+    if state["merge_behind"] > 0:
+        state["merge_behind"] -= 1
+        main_commit(state)
+        fail(f"Pull request #{number} is not mergeable: the head branch is not up to date with the "
+             "base branch")
+    if state["merge_policy"] > 0:
+        state["merge_policy"] -= 1
+        state["blocked_once"] = True
+        fail("the base branch policy prohibits the merge")
     clone = scratch(state, pull["baseRefName"])
     git(state, "-C", clone, "merge", "--quiet", "--no-ff", "--no-edit", f"origin/{pull['headRefName']}")
     git(state, "-C", clone, "push", "--quiet", state["bare"], f"HEAD:refs/heads/{pull['baseRefName']}")
@@ -252,13 +346,21 @@ def handle(state: dict, argv: list[str]) -> bool:
         create(state, flags)
         return True
     if argv[:2] == ["pr", "list"] and "--search" not in flags and flags.get("--repo") == state["slug"]:
-        print(json.dumps([project(view(state, p), flags["--json"]) for p in listing(state, flags)]))
+        print(json.dumps([project(view(state, p, flags["--json"]), flags["--json"])
+                          for p in listing(state, flags)]))
         return True
     if argv[:2] == ["pr", "view"] and len(argv) > 2 and flags.get("--repo") == state["slug"]:
         pull = find(state, argv[2])
-        print(json.dumps(project(view(state, pull), flags["--json"])))
-        if "statusCheckRollup" in flags["--json"].split(","):
+        fields = flags["--json"]
+        if fields == "headRefOid":
+            fire_at_head(state)
+        answer = project(view(state, pull, fields), fields)
+        if "mergeStateStatus" in answer and state["blocked_once"]:
+            answer["mergeStateStatus"], state["blocked_once"] = "BLOCKED", False
+        print(json.dumps(answer))
+        if "statusCheckRollup" in fields.split(","):
             fire(state)
+            advance(state)
         return True
     if argv[:2] == ["pr", "merge"] and len(argv) > 2 and flags.get("--repo") == state["slug"]:
         merge(state, argv[2], flags)

@@ -8,7 +8,12 @@ when the scenario holds it, else the entry `<step>`. An entry is the structured 
 `{"reply": {...}, "commit": {"worktree": <abs path>, "path": <relative>, "text": <file text>}}`:
 then the stub records `start = git -C <worktree> rev-parse HEAD`, writes the file, adds and
 commits it as `stub change`, and answers the reply with `start_head` = start and `commit` = the
-new HEAD. It appends `{"argv", "key", "prompt"}` as one JSON line to `<log>`, `key` being the
+new HEAD. An entry may carry more effects beside `commit`, each answered with the entry's `reply`:
+`"upstream": {"bare", "path", "text"}` commits that file to the `main` of the bare repository
+(as `stub upstream`) after any `commit`; `"merge": {"worktree", "resolve": {path: text}}` fetches
+origin and merges `origin/main` into the worktree (a conflict is resolved with the given files and
+committed, or aborted when `resolve` is absent); `"same_head": {"worktree"}` answers
+`start_head` and `commit` both as the worktree's HEAD and commits nothing. It appends `{"argv", "key", "prompt"}` as one JSON line to `<log>`, `key` being the
 step id (never the visit), writes `{"account": "stub"}` to the file named by
 `CLAUDE_ACCOUNT_ANSWER` when that is set, and prints
 `tests/fixtures/engine-session/result-normal.json` with `structured_output` replaced by the
@@ -18,7 +23,9 @@ step with no entry prints a result with no `structured_output`.
 
 import json
 import os
+import shutil
 import subprocess
+import tempfile
 import sys
 from pathlib import Path
 
@@ -59,6 +66,52 @@ def commit_effect(effect: dict) -> tuple[str, str]:
     return start, git("rev-parse", "HEAD")
 
 
+IDENTITY = ("-c", "user.name=stub", "-c", "user.email=stub@example.invalid", "-c", "commit.gpgsign=false")
+
+
+def git_in(tree: str, *args: str, check: bool = True) -> subprocess.CompletedProcess:
+    return subprocess.run(["git", "-C", tree, *IDENTITY, *args], capture_output=True, text=True, check=check)
+
+
+def upstream_effect(effect: dict) -> None:
+    """Commit the effect's file to the `main` of the effect's bare repository, as `stub upstream`."""
+    clone = tempfile.mkdtemp(prefix="stub-upstream-")
+    try:
+        subprocess.run(["git", "clone", "-q", "--branch", "main", effect["bare"], clone],
+                       capture_output=True, text=True, check=True)
+        target = Path(clone) / effect["path"]
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(effect["text"], encoding="utf-8")
+        git_in(clone, "add", effect["path"])
+        git_in(clone, "-c", "user.name=stub upstream", "commit", "-q", "-m", "stub upstream")
+        git_in(clone, "push", "-q", effect["bare"], "HEAD:refs/heads/main")
+    finally:
+        shutil.rmtree(clone, ignore_errors=True)
+
+
+def merge_effect(effect: dict) -> None:
+    """Merge `origin/main` into the worktree; resolve a conflict with the given files, else abort it."""
+    tree = effect["worktree"]
+    git_in(tree, "fetch", "-q", "origin")
+    merged = git_in(tree, "merge", "--no-edit", "origin/main", check=False)
+    if merged.returncode == 0:
+        return
+    conflicted = git_in(tree, "rev-parse", "-q", "--verify", "MERGE_HEAD", check=False).returncode == 0
+    if not conflicted:
+        raise subprocess.CalledProcessError(merged.returncode, "git merge", merged.stdout, merged.stderr)
+    if not effect.get("resolve"):
+        git_in(tree, "merge", "--abort")
+        return
+    for path, text in effect["resolve"].items():
+        (Path(tree) / path).write_text(text, encoding="utf-8")
+        git_in(tree, "add", path)
+    git_in(tree, "commit", "--no-edit")
+
+
+def same_head_effect(effect: dict) -> str:
+    return git_in(effect["worktree"], "rev-parse", "HEAD").stdout.strip()
+
+
 def main(argv: list[str]) -> int:
     scenario = json.loads(Path(argv[0]).read_text(encoding="utf-8"))
     log, words = argv[1], argv[2:]
@@ -82,6 +135,12 @@ def main(argv: list[str]) -> int:
             reply = dict(entry["reply"])
             if "commit" in entry:
                 reply["start_head"], reply["commit"] = commit_effect(entry["commit"])
+            if "upstream" in entry:
+                upstream_effect(entry["upstream"])
+            if "merge" in entry:
+                merge_effect(entry["merge"])
+            if "same_head" in entry:
+                reply["start_head"] = reply["commit"] = same_head_effect(entry["same_head"])
             entry = reply
         result["structured_output"] = entry
     sys.stdout.write(json.dumps(result))
