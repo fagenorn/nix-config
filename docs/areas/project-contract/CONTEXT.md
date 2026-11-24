@@ -47,7 +47,7 @@ A contract value that is the same in every project, which project schema 3 leave
 _Avoid_: default, built-in setting
 
 **Pre-pull-request verification**:
-`workflow.verification_before_pull_request` is an optional list of declared command ids that the delivery programs run before a pull request exists, instead of `workflow.verification`; the pull request's required checks gate landing. When it is absent or null, the programs run `workflow.verification` as before. Every id must be a declared command and the list must not be empty.
+`workflow.verification_before_pull_request` is an optional list of declared command ids that the delivery programs run before a pull request exists, instead of `workflow.verification`; the pull request's required checks gate landing. When it is absent or null, the programs run `workflow.verification` as before. Every id must be a declared command and the list must not be empty. While it is set, every step of the delivery programs that runs tests is told these commands by name instead of the full verification, before and after the pull request exists, and a clean landing sync that changes none of the pull request's files runs none.
 _Avoid_: smoke verification
 
 **Production rules**:
