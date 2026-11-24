@@ -196,6 +196,7 @@ agent-workflow-tests *args:
     tests/test_verify_answer.py \
     tests/test_verify_pending_pass.py \
     tests/test_verify_pending_units.py \
+    tests/test_verify_pending_interrupted.py \
     tests/test_host_readings.py \
     tests/test_platform_package_hosts.py \
     tests/test_fleet_preflight_recipes.py \
