@@ -724,6 +724,21 @@ def read_hooks(root: str, cancel: threading.Event | None = None, *,
         return {"hooks": [], "stranded": [], "environments": []}
 
 
+def binds_environment(root: str) -> bool:
+    """Whether the contract at `root` binds `vcs.commit.environment`: the one thing Apply installs hooks through."""
+    try:
+        path = Path(root, ".agents/project.json")
+        if path.stat().st_size > hook_install.TEXT_LIMIT:
+            return False
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    bindings = document.get("bindings") if isinstance(document, dict) else None
+    vcs = bindings.get("vcs") if isinstance(bindings, dict) else None
+    commit = vcs.get("commit") if isinstance(vcs, dict) else None
+    return isinstance(commit, dict) and "environment" in commit
+
+
 def hooks_missing(root: str, cancel: threading.Event | None = None) -> bool:
     """Whether `HEAD` tracks a `devenv.nix` declaring git hooks that this host has not installed."""
     try:

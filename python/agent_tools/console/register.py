@@ -64,7 +64,7 @@ pure function of the document. `summary(root, plan, report=None, draft=None)` is
 `bootstrap` or `reconcile` plan carries its header's `plan_id` and `state`, its
 `plan_questions.questions`, and its answered decisions as `{id, subject, value}` (ADR-console-029
 D1) and the `draft` it was given (the drafted contract's fields, ADR-console-031); every other row
-carries `DEFAULTS` (None, None, `[]`, `[]`, None). `hooks_noted(payload, cancel=None)` puts one line first in the lines of a planned row whose checkout `contract_draft.hooks_missing` finds uninstalled devenv hooks, once, and returns every other payload as it is: `HOOKS_LINE` where the plan carries a commit environment to install them in (no draft, or a draft proposing one), `HOOKS_LEFT_LINE` where it carries none (a drafted contract, or a proposal answered `none`). A ready plan's note is `The plan
+carries `DEFAULTS` (None, None, `[]`, `[]`, None). `hooks_noted(payload, cancel=None)` puts one line first in the lines of a planned row whose checkout `contract_draft.hooks_missing` finds uninstalled devenv hooks, once, and returns every other payload as it is: `HOOKS_LINE` where the plan carries a commit environment to install them in (a draft proposing one, or no draft and a contract that binds `vcs.commit.environment`), `HOOKS_LEFT_LINE` where it carries none (a drafted contract, a proposal answered `none`, or no draft and a contract binding none). A ready plan's note is `The plan
 is ready.` with no command and no plan id (#1065; ADR-console-030 keeps it, the page offers Approve beside it). A `no_change` plan with no report is
 `not_registered` and says `waiting_headline(name)`, `<name> is already adopted and is not registered
 yet.`, with the note `CONFIRM_NOTE`, `Choose Register it to register it.` (#1078, ADR-console-034):
@@ -582,15 +582,20 @@ def hooks_noted(payload: dict | None, cancel: threading.Event | None = None) -> 
         return payload
     if not contract_draft.hooks_missing(payload["root"], cancel):
         return payload
-    line = HOOKS_LINE if _installs_hooks(payload.get("draft")) else HOOKS_LEFT_LINE
+    line = HOOKS_LINE if _installs_hooks(payload["root"], payload.get("draft")) else HOOKS_LEFT_LINE
     return {**payload, "lines": [line, *payload["lines"]]}
 
 
-def _installs_hooks(draft: object) -> bool:
-    """Whether Apply has a commit environment to install the hooks in: a drafted contract has none."""
+def _installs_hooks(root: str, draft: object) -> bool:
+    """Whether Apply has a commit environment to install the hooks in.
+
+    A drafted contract has none; an amendment has the one it proposes; with no draft it is the contract's own binding.
+    """
     if contract_draft.amends(draft):
         return contract_draft.environment(draft) is not None
-    return not (isinstance(draft, list) and draft)
+    if isinstance(draft, list) and draft:
+        return False
+    return contract_draft.binds_environment(root)
 
 
 def failed(root: str, kind: str, verb: str = "plan") -> dict:

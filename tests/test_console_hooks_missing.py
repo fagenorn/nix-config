@@ -30,10 +30,16 @@ DECLARED = "{ pkgs, ... }: {\n  git-hooks.hooks.needs-dev-shell.enable = true;\n
 PROPOSAL = "commits run in its development shell: devenv shell (found in its files)"
 
 
-def hooked_repo(path: Path, *, contract: bool = True, text: str = DECLARED) -> Path:
+BOUND = '{"bindings": {"vcs": {"commit": {"environment": "commit-environment"}}}}\n'
+
+
+def hooked_repo(path: Path, *, contract: bool = True, text: str = DECLARED, bound: bool = True) -> Path:
     root = git_repo(path, contract=contract)
     (root / "devenv.nix").write_text(text)
     git(root, "add", "devenv.nix")
+    if contract and bound:
+        (root / ".agents/project.json").write_text(BOUND)
+        git(root, "add", ".agents/project.json")
     git(root, "commit", "-q", "-m", "devenv")
     return root
 
@@ -84,6 +90,24 @@ class HooksMissingCardTest(GlobalHooksPath, unittest.TestCase):
         for line in (*shown["lines"], *row["lines"]):
             self.assertFalse(line.startswith("commits run in its development shell"), line)
         self.assertEqual(row["lines"], [register.HOOKS_LINE, *register.plan_lines(READY)])
+
+    def test_a_ready_plan_of_a_contract_binding_no_commit_environment_leaves_the_hooks_uninstalled(self):
+        root = hooked_repo(self.parent / "r", bound=False)
+        row = register.hooks_noted(register.summary(str(root), READY))
+        self.assertEqual(row["lines"], [register.HOOKS_LEFT_LINE, *register.plan_lines(READY)])
+        shown, _entry = card(row)
+        self.assertEqual(shown["lines"][0], register.HOOKS_LEFT_LINE)
+        self.assertNotIn(register.HOOKS_LINE, shown["lines"])
+        deferred = register.view_entry(None, {**row, "at": "2026-11-24T08:00:00+00:00"})
+        self.assertEqual(deferred["lines"], [register.HOOKS_LEFT_LINE, *register.plan_lines(READY)])
+        latest = {**row, "at": "2026-11-24T08:00:00+00:00", "headline": "H", "plan_id": PID_A}
+        self.assertNotIn(register.HOOKS_LEFT_LINE, approve.body(latest))
+
+    def test_a_ready_plan_whose_contract_is_unreadable_leaves_the_hooks_uninstalled(self):
+        root = hooked_repo(self.parent / "r")
+        (root / ".agents/project.json").write_text("not json")
+        row = register.hooks_noted(register.summary(str(root), READY))
+        self.assertEqual(row["lines"][0], register.HOOKS_LEFT_LINE)
 
     def test_a_ready_plan_whose_hooks_are_installed_reads_as_today(self):
         root = hooked_repo(self.parent / "r")
