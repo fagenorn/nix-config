@@ -4,9 +4,12 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import MappingProxyType
 from unittest import mock
 
-from agent_tools.delivery import hint_phases, procedure_check, standards_lint
+from agent_tools.delivery import hint_phases, never_rise, procedure_check, rule_ids, standards_lint
+from agent_tools.delivery.never_rise import Rise, Snapshot, Violation
+from agent_tools.project_contract import conformance_checks
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TIER = "fast"
@@ -337,6 +340,85 @@ class HintTest(unittest.TestCase):
         self.assertLessEqual(set(hint_phases.HINT_STAGES), set(procedure_check.STAGES))
         self.assertEqual(
             hint_phases.HINT_FILES, ("planning.md", "plan-review.md", "building.md", "final-review.md"))
+
+
+class RoutedSetBudgetTest(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        write_files(self.root / "standards", {
+            "the-bar.md": "### B1. One\n" + "x" * 4084,
+            "stacks/python.md": "# Python\n" + "y" * 4087})
+        patch = mock.patch.dict(os.environ, {"AGENT_PLATFORM_ROOT": str(self.root)})
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def snapshot(self, shards: dict[str, tuple[int, str]], paths: tuple[str, ...] = ("big/x.py",)):
+        """One shard per name: its byte size and the glob it governs."""
+        rows = "".join(f"| [{name}]({name}) | `{glob}` | Gist. |\n"
+                       for name, (_, glob) in shards.items())
+        files = {"docs/standards/README.md": "# P\n\n| Shard | governs | Gist |\n|---|---|---|\n" + rows}
+        files.update({f"docs/standards/{name}": b"z" * size for name, (size, _) in shards.items()})
+        contents = {path: (text if isinstance(text, bytes) else text.encode())
+                    for path, text in files.items()}
+        return Snapshot("a" * 40, {}, contents=MappingProxyType(contents),
+                        paths=frozenset(contents) | frozenset(paths))
+
+    def test_a_branch_putting_one_path_over_24_kb_rises_naming_it(self):
+        base = self.snapshot({"a.md": (8000, "big/**")})
+        branch = self.snapshot({"a.md": (8000, "big/**"), "b.md": (9000, "big/**")})
+
+        risen = never_rise.compare(base, branch, {}, [standards_lint.ROUTED_SET_ENFORCER])
+
+        self.assertEqual(risen, (Rise("B26", 0, 1, (Violation("B26", "big/x.py", 25192, 1),)),))
+        self.assertEqual(risen[0].new[0].text(), "B26 big/x.py:25192")
+
+    def test_a_path_at_24_kb_is_no_violation_and_one_byte_more_is(self):
+        at = self.snapshot({"a.md": (16384, "big/**")})
+        over = self.snapshot({"a.md": (16385, "big/**")})
+
+        self.assertEqual(standards_lint.routed_set_violations(at), [])
+        self.assertEqual(standards_lint.routed_set_violations(over),
+                         [Violation("B26", "big/x.py", 24577, 1)])
+
+    def test_an_over_budget_path_that_grows_does_not_rise(self):
+        base = self.snapshot({"a.md": (8000, "big/**"), "b.md": (9000, "big/**")})
+        branch = self.snapshot({"a.md": (8000, "big/**"), "b.md": (9500, "big/**")})
+
+        self.assertEqual(never_rise.compare(base, branch, {}, [standards_lint.ROUTED_SET_ENFORCER]), ())
+
+    def test_a_renamed_over_budget_path_does_not_rise(self):
+        shards = {"a.md": (8000, "big/**"), "b.md": (9000, "big/**"),
+                  "c.md": (8000, "moved/**"), "d.md": (9000, "moved/**")}
+        base = self.snapshot(shards, ("big/x.py",))
+        branch = self.snapshot(shards, ("moved/x.py",))
+        enforcers = [standards_lint.ROUTED_SET_ENFORCER]
+
+        self.assertEqual(never_rise.compare(base, branch, {"moved/x.py": "big/x.py"}, enforcers), ())
+        risen = never_rise.compare(base, branch, {}, enforcers)
+        self.assertEqual([v.path for rise in risen for v in rise.new], ["moved/x.py"])
+
+    def test_a_platform_with_no_bar_fails_the_enforcer(self):
+        (self.root / "standards" / "the-bar.md").unlink()
+
+        with self.assertRaises(never_rise.EnforcerFailed) as failed:
+            standards_lint.routed_set_violations(self.snapshot({"a.md": (10, "big/**")}))
+
+        self.assertEqual(failed.exception.enforcer, "B26")
+        empty = self.snapshot({"a.md": (10, "big/**")})._replace(paths=frozenset())
+        self.assertEqual(standards_lint.routed_set_violations(empty), [])
+
+    def test_the_enforcer_is_registered_with_the_never_rise_check(self):
+        self.assertIn(standards_lint.ROUTED_SET_ENFORCER,
+                      conformance_checks.never_rise_enforcers({"bindings": {}}))
+
+    def test_the_bar_holds_b26_and_the_enforcer_cites_it(self):
+        bar = REPO_ROOT / "home/common/agent-skills/standards/the-bar.md"
+        module = Path(standards_lint.__file__).read_text(encoding="utf-8")
+
+        self.assertIn("B26", rule_ids.sections(bar.read_text(encoding="utf-8")))
+        self.assertIn("B26", {c.token for c in rule_ids.citations(module) if c.well_formed})
 
 
 class LiveTreeTest(unittest.TestCase):
