@@ -240,6 +240,9 @@ let
           serve = serveText;
           reload = reloadText;
           restart = restartText;
+          hold = holdText;
+          unhold = unholdText;
+          inherit holdReason;
         };
       });
   # The kill omlx-restart runs once the gate allows a restart; launchd's KeepAlive brings the
@@ -259,6 +262,49 @@ let
     exec /usr/bin/sudo -n /bin/rm -f ${heldRoot}
   '';
   reloadServer = pkgs.writeShellScript "omlx-reload" reloadText;
+
+  # nix-darwin unloads and loads a daemon whose plist changed, which would end the requests a
+  # loaded oMLX is serving. While oMLX is loaded, the launchd step installs the new plist, roots
+  # the serve script launchd still runs and records the reload for omlx-restart, which applies it
+  # through its idle gate. Every other call reaches launchctl unchanged. The functions live in
+  # one eval body, so the activate script's shellcheck sees no unused variable or function.
+  holdReason = "launchd plist changed: org.nixos.omlx";
+  holdText = ''
+    eval 'omlx_hold_root() {
+      [ -L ${heldRoot} ] && return 0
+      set -- "$(grep -o "/nix/store/[0-9a-z]\{32\}-omlx-serve" /Library/LaunchDaemons/org.nixos.omlx.plist | head -n 1)"
+      if [ -z "$1" ]; then
+        echo "oMLX: the installed plist names no omlx-serve store path, so none is kept for the running job" >&2
+        return 0
+      fi
+      ln -s "$1" ${heldRoot}
+    }
+    omlx_hold_record() {
+      sudo --user=${username} -- grep -qxF "${holdReason}" ${home}/.omlx/.restart-needed 2>/dev/null && return 0
+      printf "%s\n" "${holdReason}" | sudo --user=${username} -- tee -a ${home}/.omlx/.restart-needed >/dev/null
+    }
+    launchctl() {
+      if [ "''${1:-}" = unload ] && [ "''${2:-}" = /Library/LaunchDaemons/org.nixos.omlx.plist ]; then
+        omlxProbe=0
+        command launchctl print system/org.nixos.omlx >/dev/null 2>&1 || omlxProbe=$?
+        if [ "$omlxProbe" = 113 ]; then
+          rm -f ${heldRoot}
+        else
+          if ! { omlx_hold_root && omlx_hold_record; }; then
+            echo "oMLX: could not keep the running job or record the pending restart in ${home}/.omlx/.restart-needed; activation stopped before the new plist was installed" >&2
+            exit 1
+          fi
+          omlxHeld=1
+          echo "oMLX: org.nixos.omlx is loaded, so its new plist is installed without unloading it; pending for omlx-restart: ${holdReason}" >&2
+          return 0
+        fi
+      elif [ "''${1:-}" = load ] && [ "''${2:-}" = -w ] && [ "''${3:-}" = /Library/LaunchDaemons/org.nixos.omlx.plist ] && [ -n "''${omlxHeld:-}" ]; then
+        return 0
+      fi
+      command launchctl "$@"
+    }'
+  '';
+  unholdText = "unset -f launchctl omlx_hold_record omlx_hold_root\n";
   restartText = ''
     exec ${lib.getExe pkgs.python3} ${./omlx-restart.py} \
       --state-dir ${home}/.omlx \
@@ -319,4 +365,9 @@ in
   # downloader when a listed model is missing. ~/.omlx is private: its logs can hold other
   # people's prompts, and teammates share the staff group.
   system.activationScripts.postActivation.text = activationText;
+
+  system.activationScripts.launchd.text = lib.mkMerge [
+    (lib.mkBefore holdText)
+    (lib.mkAfter unholdText)
+  ];
 }

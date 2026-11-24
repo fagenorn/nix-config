@@ -31,16 +31,32 @@ in `omlx.nix`; the 192 GB ceiling is read from `memory-budget.nix`.
 
 ## What else an activation restarts
 
-nix-darwin reloads every launchd daemon whose plist changed, so an activation
-restarts oMLX outside the gate whenever its serve script changes. That script
-embeds the store path of `secrets/secrets.yaml`, so any secrets edit does it. The
-same holds for `omlx-models`, `iogpu-wired-limit` (which re-runs the sysctl),
+nix-darwin reloads every launchd daemon whose plist changed, but an activation
+never unloads `org.nixos.omlx` while it is loaded. It installs the changed plist
+(the serve script embeds the store path of `secrets/secrets.yaml`, so any secrets
+edit changes it) and adds `launchd plist changed: org.nixos.omlx` to
+`.restart-needed`. `omlx-restart` applies it as an unload and `load -w` of the job
+only while the server is idle, or with `omlx-restart --now`. While the reload is
+pending, launchd keeps running the old generation's serve script. The activation
+roots it at `/nix/var/nix/gcroots/omlx-held-serve`, so `just gc` cannot remove the
+script KeepAlive relaunches after a crash or a jetsam kill. The reload removes the
+root. A pending reload with a model loaded waits for an idle server, and
+`omlx-restart --now` applies it at once.
+
+oMLX is the only held daemon. Every other daemon still reloads when its plist
+changes: `omlx-models`, `iogpu-wired-limit` (which re-runs the sysctl),
 `colima` and `docker-socket`, the GitHub runners, `fseventsd-trim`, `memory-floor`, and the owner's
 `agent-console`, `verify-pending`, `claude-cache-proxy`, `omlx-memory-watch` and
-`sops-nix` daemons when their plists change. The serve script carries the
-relaunch gate, so a changed `floorGiB` or `fastSampleSeconds` restarts oMLX at the
-next activation; a changed `omlxJetsamPriority` restarts only `memory-floor`. Homebrew's `onActivation.upgrade` can replace the oMLX install; the running
-server keeps its loaded code, and the re-applied patches become a deferred restart.
+`sops-nix` daemons. The serve script carries the relaunch gate, so a changed
+`floorGiB` or `fastSampleSeconds` becomes a pending oMLX reload at the next
+activation; a changed `omlxJetsamPriority` restarts only `memory-floor`. Homebrew's
+`onActivation.upgrade` can replace the oMLX install; the running server keeps its
+loaded code, and the re-applied patches become a deferred restart.
+
+`verify-pending`: a changed plist is unloaded and loaded with `load -w`. That loads a
+job that was booted out and clears a `launchctl disable`, and RunAtLoad starts a pass.
+An unchanged plist leaves a booted-out job out, and the postActivation kick's
+`kickstart` of it fails harmlessly.
 
 The Anthropic patch accepts Claude Code's `output_config.effort` and preserves
 valid explicit `chat_template_kwargs.reasoning_effort`. Qwen4-exp templates
