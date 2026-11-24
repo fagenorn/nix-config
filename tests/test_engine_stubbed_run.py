@@ -17,7 +17,7 @@ from agent_tools.delivery import engine_session
 from agent_tools.project_contract import resolve_project
 from tests.engine_fixture import FixtureProject
 from tests.engine_guards import payloads
-from tests.engine_stubbed_world import APPLIES, CLEAN_LITE, IMPLEMENTED, ROLES, StubbedRun
+from tests.engine_stubbed_world import APPLIES, CLEAN_LITE, GREEN, IMPLEMENTED, ROLES, StubbedRun
 from tests.guard_policy_world import REAL_GIT, install_platform_manifest_in_environ
 
 TIER = "integration"  # every case builds a repository and runs the engine as a child process
@@ -78,6 +78,19 @@ def stopping_after_verify(tmp: Path) -> Path:
             step["on"]["done"] = "verified"
             step["on"]["verify"] = "landing"  # the check wants the landing step reachable too
     document["stops"]["verified"] = {"need": "owner-decision", "reenter": "verification"}
+    path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+    return copy
+
+
+def keeping_the_run(tmp: Path) -> Path:
+    """A copy of the shipped procedures whose run is kept across a continue and otherwise unchanged."""
+    copy = tmp / "kept-procedures"
+    shutil.copytree(PROCEDURES, copy)
+    path = copy / "deliver.json"
+    document = json.loads(path.read_text("utf-8"))
+    for step in document["steps"]:
+        if step["id"] == "start":
+            step["holds"] = "run"
     path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
     return copy
 
@@ -507,6 +520,31 @@ class VerifyTest(Scenario):
         self.assertEqual(second["synced_since"], first["head"])
         self.assertEqual([r["status"] for r in second["results"]], ["skipped", "skipped"])
         self.assertEqual(len(run.slot_history()), held)
+
+
+    def test_a_continued_run_that_skips_verification_after_a_clean_sync_still_lands(self):
+        run = StubbedRun(self, before_pull_request=True, rollup=RED)
+        procedures = keeping_the_run(run.tmp)
+        self.stopped(run, run.deliver(procedures), "checks", "owner-decision")
+        held = len(run.slot_history())
+        state = json.loads(run.pulls_state.read_text("utf-8"))
+        state["rollup"] = GREEN
+        run.pulls_state.write_text(json.dumps(state), encoding="utf-8")
+        root = run.fixture.root
+        (root / "README.md").write_text((root / "README.md").read_text("utf-8") + "more\n", "utf-8")
+        run.world.git(root, "commit", "-qam", "unrelated")
+        run.world.git(root, "push", "-q", "origin", "main")
+        run.world.git(run.worktree_path, "fetch", "-q", "origin")
+        run.world.git(run.worktree_path, "merge", "-q", "--no-edit", "origin/main")
+
+        done = run.deliver(procedures)
+
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(run.line(done)["end"], "done")
+        skipped = self.stored(self.child(run, "verify", last=True), "checks")
+        self.assertEqual([r["status"] for r in skipped["results"]], ["skipped", "skipped"])
+        self.assertEqual(len(run.slot_history()), held)
+        self.assertEqual([p["state"] for p in run.pulls()], ["MERGED"])
 
 
 RED = [{"__typename": "CheckRun", "name": "Fixture Checks", "status": "COMPLETED",

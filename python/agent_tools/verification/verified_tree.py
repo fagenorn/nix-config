@@ -124,6 +124,7 @@ result of the plan's `run` `skipped` with the summary and reason `passed at <H0>
 changed none of the pull request's files` and a condition-skipped id keeping its own reason. It
 applies only while the binding is set, and an unreadable record or a git failure in that check
 verifies instead of erroring; a run at H0 itself with nothing changed also skips.
+A skip also records the current tree as verified, as a passing run does, with the plan's `run` ids.
 
 The tree is what a Git-backed build sees: the index's entries, staged new
 files included, with tracked files' working-tree edits and deletions applied,
@@ -685,6 +686,9 @@ def run(worktree: Path) -> tuple[int, dict]:
         bound = isinstance(policy["before_pull_request"], list)
         earlier = _synced_since(root, tree, planned, policy) if bound else None
         if earlier is not None:
+            if planned["run"]:  # the synced tree is the verified one, so landing can ready it
+                _write_atomically(record_path(root), {"schema": SCHEMA, "tree": tree,
+                                                      "verification": list(planned["run"])})
             reasons.update({item: SYNC_SKIP_REASON.format(head=earlier) for item in planned["run"]})
             return 0, {"clean": True, "head": head, "synced_since": earlier, "tree": tree,
                        "verdict": "passed",

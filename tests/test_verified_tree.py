@@ -944,6 +944,14 @@ class SyncSkipTest(RunTest):
         self.assertEqual(self.logged(), logged)
         self.assertEqual(len(self.history()), before)
 
+    def test_a_skip_after_a_clean_sync_records_the_synced_tree_as_verified(self):
+        self.passed_then_synced(lambda: self.write_main("main.txt", "main\n"))
+        answer = self.answer(self.run_verified())
+        record = json.loads(verified_tree.record_path(self.worktree).read_text())
+        self.assertIn("synced_since", answer)
+        self.assertEqual(record, {"schema": "verified-tree/v1", "tree": answer["tree"],
+                                  "verification": ["lint", "test"]})
+
     def test_a_sync_that_changes_a_pull_request_file_runs_again(self):
         self.passed_then_synced(lambda: self.edit_line(self.repo, 10, "ten"),
                                 pr_change=lambda: self.edit_line(self.worktree, 1, "one"))
