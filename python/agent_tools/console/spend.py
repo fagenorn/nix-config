@@ -50,6 +50,24 @@ empty. A phase that does not begin with `CHILD_PHASE_PREFIX` is top-level, and t
 `run_program` of its top-level phases: `BATCH` when any is `Intake`, `Deliver` or `Land`, else
 `STANDARD` when any is `Plan` or `Tasks`, else `OTHER`.
 
+Engine runs (#1532, ADR-console-049): an engine agent session has no journal, so `read(..., engine_root)`
+attributes it from the run ledger under `engine_root` (`<run>/run.json` read through
+`engine_ledger.read_run`, `<run>/events.jsonl` through the same incremental reader). Only the
+`step_entered` (step, visit, stage), `session_starting` and `session_resuming` (step, visit, session)
+records are used; a `result_stored` record's tokens and dollars are never read, the transcript is the
+only spend. The first record naming a session fixes its step (a resumed session is one step), its
+stage is the stage of the `step_entered` of that step and visit (`UNATTRIBUTED` when none), and a
+child run's sessions belong to its root run (`parent`); the sprint is the one the session that
+started the root run (`starter` in `run.json`) is the manager of, none when there is no starter or its
+name is no sprint's. A run whose `run.json` the ledger refuses attributes nothing. An `events.jsonl`
+whose modification date (UTC) is before `since` is not opened and its run's sessions are dropped. The
+engine deletes a run's directory 14 days after its issue closes, inside the window: a run this
+reader read keeps its attribution in memory while the UTC date of its events file's last-read
+modification time is not before `since`; a reader started after the sweep never saw the run, so its
+sessions count as ordinary sessions (the accepted limit). `Snapshot.engine` maps a session id to its
+`EngineSession(run, step, stage)` and `Snapshot.starters` a root run id to its starter session id;
+both are empty without `engine_root`.
+
 The phase table: `phase_of(label)` reads a label (without a trailing `RERUN_SUFFIX`) through the
 `PHASE_LABELS` rows, one `(phase, regex)` per row matched with `re.fullmatch`, in order, first match
 wins; a label no row matches is `OTHER`. The rows follow the cost measurement's role mapping, so
@@ -73,10 +91,12 @@ per message key:
 - `account`: `profiles[session]` (the profile the session was seen under), else `questions[session]`
   (the profile of its question row), else `UNATTRIBUTED`.
 - `sprint`: the sprint id when the session's name fully matches `MANAGER_SESSION_NAME`, `UNATTRIBUTED`
-  when the session is unknown, and not counted for any other session.
+  when the session is unknown, and not counted for any other session; for an engine session, the
+  sprint id when its run's starter session's name matches, and not counted otherwise.
 - `run` and `phase` (source `AGENT` only): the run id when the run has a journal, and the phase of
-  the agent's journal label; `UNATTRIBUTED` when the run or the agent has no journal record.
-- `aspect`: `KEEPALIVE` for a ping; `DELIVERIES` for a workflow agent; for a session's own and
+  the agent's journal label; `UNATTRIBUTED` when the run or the agent has no journal record. An
+  engine session (`Snapshot.engine`) has its root run id and its stage.
+- `aspect`: `KEEPALIVE` for a ping; `DELIVERIES` for a workflow agent and for an engine session; for a session's own and
   subagent transcripts `QUESTIONS` when the session is in `questions` (the sessions
   `question_sessions` folds from the log's `project_question.asked` rows, ADR-console-059),
   checked before `MANAGERS`, which is for a session that is a sprint's, `OUTSIDE` otherwise, and
@@ -127,7 +147,7 @@ import re
 import sys
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from stat import S_ISREG
@@ -144,6 +164,8 @@ from agent_tools.console.deliveries import (
 )
 from agent_tools.console.event_log import PROJECT_QUESTION_ASKED, Event
 from agent_tools.console.sprints import MANAGER_SESSION_NAME
+from agent_tools.delivery import engine_ledger
+from agent_tools.delivery.procedure_check import STAGES
 from agent_tools.hosts import model_pricing
 
 UNATTRIBUTED = "unattributed"
@@ -273,6 +295,14 @@ class Key(NamedTuple):
     source: str
 
 
+class EngineSession(NamedTuple):
+    """An engine agent session: its root run id, the step that named it and that step's stage."""
+
+    run: str
+    step: str
+    stage: str
+
+
 @dataclass(frozen=True)
 class Snapshot:
     totals: Mapping[Key, Tokens]
@@ -280,6 +310,8 @@ class Snapshot:
     programs: Mapping[tuple[str, str], str]
     names: Mapping[str, str]
     repos: Mapping[str, str | None]
+    engine: Mapping[str, EngineSession] = field(default_factory=dict)
+    starters: Mapping[str, str] = field(default_factory=dict)
 
 
 def _day(timestamp: object) -> str | None:
@@ -346,14 +378,42 @@ class SpendReader:
         self._names: dict[str, str] = {}
         self._repos: dict[str, str | None] = {}
         self._known: set[Path] = set()
+        self._runs: dict[str, dict] = {}
+        self._steps: dict[str, dict[tuple[str, int], str]] = {}
+        self._named: dict[str, dict[str, tuple[str, str]]] = {}
+        self._events_seen: dict[str, str] = {}
         self.roots_unreadable = False
 
     def snapshot(self) -> Snapshot:
+        engine: dict[str, EngineSession] = {}
+        starters: dict[str, str] = {}
+        for name in sorted(self._runs):
+            root = self._root_of(name)
+            if root is None:
+                continue
+            for session, (step, stage) in self._named.get(name, {}).items():
+                engine.setdefault(session, EngineSession(root, step, stage))
+            if root == name and isinstance(self._runs[name].get(engine_ledger.STARTER_MEMBER), str):
+                starters[name] = self._runs[name][engine_ledger.STARTER_MEMBER]
         return Snapshot(dict(self._totals),
                         {run: dict(labels) for run, labels in self._journals.items()},
-                        dict(self._programs), dict(self._names), dict(self._repos))
+                        dict(self._programs), dict(self._names), dict(self._repos),
+                        engine, starters)
 
-    def read(self, projects_dirs: Iterable[Path], since: str, ping_log: Path | None = None) -> None:
+    def _root_of(self, name: str) -> str | None:
+        """The root run of a run: follow `parent` while it is known; None on a repeat."""
+        seen = {name}
+        while True:
+            parent = self._runs[name].get(engine_ledger.PARENT_MEMBER)
+            if parent not in self._runs:
+                return name
+            if parent in seen:
+                return None
+            seen.add(parent)
+            name = parent
+
+    def read(self, projects_dirs: Iterable[Path], since: str, ping_log: Path | None = None,
+             engine_root: Path | None = None) -> None:
         walk = _Walk()
         walked: set[str] = set()
         for projects in projects_dirs:
@@ -363,6 +423,8 @@ class SpendReader:
             walked.add(real)
             self._walk_projects(Path(real), since, walk)
         self.roots_unreadable = bool(walked) and all(Path(real) in walk.failed for real in walked)
+        if engine_root is not None:
+            self._read_engine(Path(os.path.realpath(engine_root)), since, walk)
         if ping_log is not None:
             self._read_pings(Path(ping_log), since)
         for path in sorted(self._known - walk.listed):
@@ -452,6 +514,77 @@ class SpendReader:
         else:
             for record in chunk.records:
                 self._transcript(record, since, source, run, agent)
+
+    def _read_engine(self, root: Path, since: str, walk: _Walk) -> None:
+        failures = len(walk.failed)
+        entries = self._children(root, walk)
+        if len(walk.failed) > failures:
+            return
+        present: set[str] = set()
+        for entry in entries:
+            if engine_ledger.RUN_ID_RE.match(entry.name) and self._kind(entry)[1]:
+                present.add(entry.name)
+                self._read_engine_run(Path(entry.path), entry.name, since, walk)
+        for name in sorted(set(self._runs) - present):
+            # A swept run keeps its attribution while its events file was last read inside the window.
+            if self._events_seen.get(name, "") < since:
+                self._drop_run(name)
+
+    def _drop_run(self, name: str) -> None:
+        for table in (self._runs, self._steps, self._named, self._events_seen):
+            table.pop(name, None)
+
+    def _read_engine_run(self, run_dir: Path, name: str, since: str, walk: _Walk) -> None:
+        path = run_dir / "events.jsonl"
+        try:
+            moved = os.stat(path)
+        except _ABSENT:
+            self._lines.forget(path)
+            self._known.discard(path)
+            self._drop_run(name)
+            return
+        except OSError:
+            walk.listed.add(path)
+            return
+        if not S_ISREG(moved.st_mode):
+            return
+        if _utc_date(moved.st_mtime) < since:
+            self._lines.forget(path)
+            self._known.discard(path)
+            self._drop_run(name)
+            return
+        if name not in self._runs:
+            try:
+                self._runs[name] = engine_ledger.read_run(run_dir)
+            except (engine_ledger.LedgerError, OSError):
+                return
+        walk.listed.add(path)
+        chunk = self._lines.read(path)
+        if chunk is None:
+            self._known.discard(path)
+            walk.listed.discard(path)
+            self._drop_run(name)
+            return
+        self._known.add(path)
+        if not isinstance(chunk, Chunk):
+            return
+        self._events_seen[name] = _utc_date(moved.st_mtime)
+        steps = self._steps.setdefault(name, {})
+        named = self._named.setdefault(name, {})
+        if chunk.from_start:
+            steps.clear()
+            named.clear()
+        for record in chunk.records:
+            event, step, visit = record.get("event"), record.get("step"), record.get("visit")
+            if not isinstance(step, str) or not isinstance(visit, int) or isinstance(visit, bool):
+                continue
+            if event == "step_entered":
+                if record.get("stage") in STAGES:
+                    steps[(step, visit)] = record["stage"]
+            elif event in ("session_starting", "session_resuming"):
+                session = record.get("session")
+                if isinstance(session, str) and session and session not in named:
+                    named[session] = (step, steps.get((step, visit), UNATTRIBUTED))
 
     def _journal(self, run: tuple[str, str] | None, chunk: Chunk) -> None:
         labels = self._journals.setdefault(run, {})
@@ -605,11 +738,14 @@ def _attribute(snapshot: Snapshot, key: Key, project_of: Callable[[str], str | N
         yield "account", profiles[session]
     else:
         yield "account", questions.get(session, UNATTRIBUTED)
+    engine = snapshot.engine.get(session) if key.source == SESSION and session is not None else None
     sprint = None
     if session is None:
         yield "sprint", UNATTRIBUTED
     else:
-        match = MANAGER_SESSION_NAME.fullmatch(snapshot.names.get(session, ""))
+        name = (snapshot.names.get(snapshot.starters.get(engine.run, ""), "")
+                if engine is not None else snapshot.names.get(session, ""))
+        match = MANAGER_SESSION_NAME.fullmatch(name)
         if match:
             sprint = match.group("sprint")
             yield "sprint", sprint
@@ -618,6 +754,10 @@ def _attribute(snapshot: Snapshot, key: Key, project_of: Callable[[str], str | N
         label = labels.get(key.agent) if labels is not None else None
         yield "run", key.run[1] if labels is not None else UNATTRIBUTED
         yield "phase", phase_of(label) if label is not None else UNATTRIBUTED
+        yield "aspect", DELIVERIES
+    elif engine is not None:
+        yield "run", engine.run
+        yield "phase", engine.stage
         yield "aspect", DELIVERIES
     elif key.source == PING:
         yield "aspect", KEEPALIVE
