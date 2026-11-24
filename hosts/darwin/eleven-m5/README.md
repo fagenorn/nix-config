@@ -5,8 +5,11 @@ patches required by the Homebrew oMLX installation. `omlx-configure` is generate
 as a user command and called by system activation. It checks every patch before
 applying any, recursively merges owned settings, preserves unrelated UI settings
 and server secrets, and writes one reason line to `.omlx/.restart-needed` for each
-change the server reads only at start: an applied patch, a changed declared key, a
-created file or a steering preset. It prints the reasons as `restart_reasons`.
+change the server reads only at start: an applied patch, a changed declared key or a
+created file. It prints the reasons as `restart_reasons`.
+It also removes the preset directories an earlier version created (each marked by a
+`.omlx-*-preset` file) and lists them as `removed_presets`; it refuses one that holds
+anything but symlinks and JSON files.
 Incompatible patches fail activation. It leaves the entries of undeclared models
 untouched. When the admin UI makes an undeclared model (or the JarBird model) the
 default, the declared default yields to it so there stays one default, and returns
@@ -52,30 +55,13 @@ budget. This bounds routine reasoning while preserving an explicit request's
 default budget is attached to generation parameters. GLM's reasoning settings
 are not changed. A budget is a reasoning-token bound, not a latency guarantee.
 
-## Neuron steering presets
+## Retiring a model
 
-A model entry's `steer.<preset>` list serves that model a second time as
-`<alias>-<preset>` (for example `qwen3.5-4b-evil`). Each entry,
-`"L<layer> N<neuron> <dose>"`, adds a constant `a` to neuron n's down_proj input
-at every position:
-`a = dose × median(‖residual leaving L‖, tokens 1:) / ‖W_down[:, n]‖`. The patch
-wraps the decoder layer, since oMLX substitutes kernels for the MLP projections.
-That matches adding to the MLP output only when the output joins the residual
-unnormalised, so a model with a `post_feedforward_layernorm` (Gemma, for example)
-is refused at load. The patch adds a steering digest to the engine's cache identity,
-so a changed preset never restores cached state. It measures the medians once at load on five fixed chat prompts, where they
-vary by about ±5%. `omlx-configure` keeps one directory per preset, holding
-symlinks to the downloaded weights and a `steering.json`. It removes the
-directories of presets that are no longer declared, and refuses to replace a
-directory it did not create. A preset waits until its base model finishes
-downloading; the downloader syncs it after any completed download. Each loaded preset costs its base
-model's memory again.
-
-To try candidate neurons before declaring them, run
-`omlx-steer "L14 N8949 +1" "L13 N7956 -1"`. Optional flags are `--model`,
-`--scale`, `--prompt`, `--max-tokens` and `--no-baseline`. For each prompt it
-prints the baseline reply and then the steered one. It loads the model itself, outside the server, using oMLX's
-Python and the patched module, so its output matches what a preset serves.
+Deleting a `models` entry stops its download and its declared settings, but leaves
+its weights on the host: delete `~/.omlx/models/<directory>` (the repository name
+after the slash, or the admin UI's directory) by hand, then apply the change with
+`omlx-restart --now` when the server may pause. Its entry in `model_settings.json`
+is left as the admin UI keeps it.
 
 Run `nix build --no-link .#checks.aarch64-darwin.omlx-adapter` for the portable
 adapter/configuration tests, then `just build eleven-m5` for the host. The restart
@@ -89,5 +75,4 @@ GPU inference is covered separately by deployed Claude-shaped smoke requests.
 
 After a Homebrew update, incompatible patches require checking upstream before
 regenerating or removing them. The GLM fix tracks upstream PR4644; the effort
-patch is the local compatibility change for nix-config issue410; the steering patch is
-local to nix-config issue457.
+patch is the local compatibility change for nix-config issue410.

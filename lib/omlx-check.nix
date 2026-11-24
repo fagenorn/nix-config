@@ -36,7 +36,6 @@ pkgs.runCommand "omlx-adapter-check"
     OMLX_PATCHES = builtins.toJSON [
       ../patches/omlx/glm5-next-mtp-tail.patch
       ../patches/omlx/anthropic-effort.patch
-      ../patches/omlx/neuron-steering.patch
     ];
     OMLX_ADAPTER_PROBE = ../tests/omlx_adapter_probe.py;
     OMLX_QWEN_TEMPLATE = qwenTemplate;
