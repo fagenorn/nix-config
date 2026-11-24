@@ -3,7 +3,6 @@
   omlxSource,
   modelSettings,
   serverSettings,
-  steering,
 }:
 let
   python = pkgs.python3.withPackages (p: [
@@ -34,7 +33,6 @@ pkgs.runCommand "omlx-adapter-check"
     OMLX_CONFIGURE_SOURCE = ../hosts/darwin/eleven-m5/omlx-configure.py;
     OMLX_MODEL_SETTINGS = pkgs.writeText "omlx-test-model-settings.json" modelSettings;
     OMLX_SERVER_SETTINGS = pkgs.writeText "omlx-test-server-settings.json" serverSettings;
-    OMLX_STEERING = pkgs.writeText "omlx-test-steering.json" steering;
     OMLX_PATCHES = builtins.toJSON [
       ../patches/omlx/glm5-next-mtp-tail.patch
       ../patches/omlx/anthropic-effort.patch

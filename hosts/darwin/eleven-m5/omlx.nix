@@ -219,14 +219,6 @@ let
     )
     // adminModels
   );
-  steering = builtins.toJSON (
-    lib.listToAttrs (
-      map (p: {
-        name = p.dir;
-        value = { inherit (p) base neurons; };
-      }) presets
-    )
-  );
 
   # Server settings deep-merged into settings.json, which the admin UI also writes and which holds
   # the auth secrets, so only these keys are owned here. Measured on live team traffic: total decode
@@ -282,13 +274,12 @@ let
         --patch-bin ${lib.getExe pkgs.patch} \
         --patch ${glm5Fix} --patch ${anthropicEffort} --patch ${neuronSteering} \
         --model-settings ${pkgs.writeText "omlx-model-settings.json" settings} \
-        --server-settings ${pkgs.writeText "omlx-server-settings.json" serverSettings} \
-        --steering ${pkgs.writeText "omlx-steering.json" steering}
+        --server-settings ${pkgs.writeText "omlx-server-settings.json" serverSettings}
     '').overrideAttrs
       (_: {
         passthru = {
           modelSettings = settings;
-          inherit serverSettings steering;
+          inherit serverSettings;
           activation = activationText;
           fetch = fetchText;
         };
