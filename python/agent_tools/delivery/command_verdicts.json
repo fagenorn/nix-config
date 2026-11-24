@@ -20,7 +20,14 @@
       "hold-facts": ["closes", "open", "bad-kinds", "absent-merge", "error"],
       "hold-look": ["clear", "stale", "error"],
       "hold-gate": ["ready", "missing-checks", "human-checks", "unattended", "owner-checks", "script-checks", "note-checks", "error"],
-      "hold-lint": ["valid", "invalid", "error"]
+      "hold-lint": ["valid", "invalid", "error"],
+      "hold-split": ["split", "none", "error"],
+      "hold-split-check": ["split", "none", "absent", "error"],
+      "hold-post": ["posted", "closed", "error"],
+      "hold-posted": ["posted", "closed", "absent", "error"],
+      "hold-label": ["labelled", "error"],
+      "hold-labelled": ["labelled", "absent", "error"],
+      "hold-run": ["ran", "failed", "error"]
     }
   },
   "comment-lint": null,

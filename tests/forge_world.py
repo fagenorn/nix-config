@@ -45,7 +45,10 @@ reaches it, and one that matches no entry at or past the cursor runs unscheduled
 reads the comments now and `wait_cursor(n)` blocks until `n` entries have run. Given `labels`
 (issue 630) the store also holds the issue's state, labels and created issues, posted comments
 carry `author_association` `OWNER`, and the fake serves the GraphQL listing, label add and
-remove, close, issue creation and the labelled issue listing; `fail_once` names operations
+remove, close, issue creation and the labelled issue listing, and the comment list and POST of a created issue
+number (its `comments`, ids from the store's one counter, kept in that created entry; a seeded entry without a
+`comments` member is left to the registered responses), and the GraphQL listing also returns each open created issue
+labelled `needs-verification` with its comments; `fail_once` names operations
 (`graphql`, `add_label`, `remove_label`, `close`, `create_issue`, `list_issues`, `post`, `edit`)
 that each answer `HTTP 502` once and change nothing; a created issue can be closed by number
 and keeps its `state`; the GraphQL comment nodes carry `fullDatabaseId` (a BigInt, so a string) and no `databaseId`,
@@ -274,7 +277,11 @@ if tool == "gh" and (state / "store.json").exists():
     import fcntl
     from urllib.parse import unquote
 
-    ISSUE_KINDS = ("graphql", "add_label", "remove_label", "close", "create_issue", "list_issues")
+    ISSUE_KINDS = ("graphql", "add_label", "remove_label", "close", "create_issue", "list_issues",
+                   "child_list", "child_post")
+
+    def st_created(store):
+        return [made for made in store["issue_state"]["created"] if "comments" in made]
 
     def store_op(store):
         slug, issue = store["slug"], store["issue"]
@@ -304,6 +311,13 @@ if tool == "gh" and (state / "store.json").exists():
                     and argv[3].startswith("repos/" + slug + "/issues?labels=")):
                 query = argv[3].split("?labels=", 1)[1].split("&")
                 return "list_issues", (unquote(query[0]), "state=open" in query[1:]), None
+            for made in st_created(store):
+                at = "repos/" + slug + "/issues/" + str(made["number"]) + "/comments"
+                if argv == ["api", "--paginate", "--slurp", at + "?per_page=100"]:
+                    return "child_list", made["number"], None
+                if (len(argv) == 6 and argv[:4] == ["api", "-X", "POST", at] and argv[4] == "-f"
+                        and argv[5].startswith("body=")):
+                    return "child_post", made["number"], argv[5][5:]
         base = "repos/" + slug + "/issues/" + str(issue) + "/comments"
         one = "repos/" + slug + "/issues/comments/"
         body = argv[5][5:] if len(argv) == 6 and argv[4] == "-f" and argv[5].startswith("body=") else None
@@ -339,17 +353,22 @@ if tool == "gh" and (state / "store.json").exists():
         sys.stderr.write("gh: Not Found (HTTP 404)\\n")
         sys.exit(1)
 
-    def issue_op(store, kind, target):
+    def graphql_node(number, labels, comments):
+        every = [{"fullDatabaseId": str(c["id"]), "authorAssociation": c.get("author_association", "OWNER"),
+                  "body": c["body"], "createdAt": c["created_at"], "updatedAt": c["updated_at"]}
+                 for c in sorted(comments, key=lambda c: c["id"])]
+        return {"number": number, "labels": {"nodes": [{"name": n} for n in labels]},
+                "comments": {"totalCount": len(every), "nodes": every[-100:]}}
+
+    def issue_op(store, kind, target, body):
         st = store["issue_state"]
         out = None
         if kind == "graphql":
             nodes = []
             if st["state"] == "open" and "needs-verification" in st["labels"]:
-                every = [{"fullDatabaseId": str(c["id"]), "authorAssociation": c.get("author_association", "OWNER"),
-                          "body": c["body"], "createdAt": c["created_at"], "updatedAt": c["updated_at"]}
-                         for c in sorted(store["comments"], key=lambda c: c["id"])]
-                nodes = [{"number": store["issue"], "labels": {"nodes": [{"name": n} for n in st["labels"]]},
-                          "comments": {"totalCount": len(every), "nodes": every[-100:]}}]
+                nodes = [graphql_node(store["issue"], st["labels"], store["comments"])]
+            nodes += [graphql_node(c["number"], c["labels"], c.get("comments", [])) for c in st["created"]
+                      if c["state"] == "open" and "needs-verification" in c["labels"]]
             out = {"data": {"repository": {"issues": {"pageInfo": {"hasNextPage": False, "endCursor": None},
                                                        "nodes": nodes}}}}
         elif kind == "add_label":
@@ -377,8 +396,17 @@ if tool == "gh" and (state / "store.json").exists():
             st["next_issue"] += 1
             st["created"].append({"number": number, "title": title, "body": issue_body, "labels": labels,
                                   "author_association": "OWNER", "updated_at": store["clock"],
-                                  "state": "open", "state_reason": None})
+                                  "state": "open", "state_reason": None, "comments": []})
             out = {"number": number}
+        elif kind == "child_list":
+            made = [c for c in st["created"] if c["number"] == target][0]
+            out = [sorted(made["comments"], key=lambda c: c["id"])]
+        elif kind == "child_post":
+            made = [c for c in st["created"] if c["number"] == target][0]
+            out = {"id": store["next_id"], "body": body, "author_association": "OWNER",
+                   "created_at": store["clock"], "updated_at": store["clock"]}
+            store["next_id"] += 1
+            made["comments"].append(out)
         elif target[1]:
             label = target[0]
             rows = [{"number": c["number"], "state": "open", "labels": [{"name": n} for n in c["labels"]]}
@@ -417,7 +445,7 @@ if tool == "gh" and (state / "store.json").exists():
                     sys.stderr.write("gh: Server Error (HTTP 502)\\n")
                     sys.exit(1)
                 if kind in ISSUE_KINDS:
-                    issue_op(store, kind, target)
+                    issue_op(store, kind, target, body)
                 comments = store["comments"]
                 found = [c for c in comments if c["id"] == target]
                 if kind == "list":

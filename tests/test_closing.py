@@ -17,6 +17,7 @@ from io import StringIO
 from unittest import mock
 
 from agent_tools.delivery import closing, holding
+from agent_tools.verification import verify_block
 
 from .forge_world import ForgeWorld
 from .test_landing import BODY, ISSUE, SLUG, LandingWorld
@@ -44,10 +45,23 @@ import json, os, sys
 if sys.argv[1:] == {read!r}:
     state = json.loads(open(os.path.join(os.environ["FORGE_WORLD"], "store.json")).read())["issue_state"]
     sys.stdout.write(json.dumps({{"number": {issue}, "state": state["state"],
-                                 "state_reason": state["state_reason"], "labels": []}}))
+                                 "state_reason": state["state_reason"], "body": {body!r},
+                                 "labels": [{{"name": name}} for name in state["labels"]]}}))
     sys.exit(0)
 os.execv({fake!r}, [{fake!r}, *sys.argv[1:]])
 """
+
+
+def store_gh(forge: ForgeWorld, body: str) -> dict:
+    """The child environment of a `gh` that reads the issue, with `body`, from the store, so a label or a
+    close shows on the next read, and leaves every other call to the world's fake."""
+    directory = forge.state.parent / "store-gh"
+    directory.mkdir(exist_ok=True)
+    wrapper = directory / "gh"
+    wrapper.write_text(STORE_GH.format(python=sys.executable, read=ISSUE_READ, issue=ISSUE, body=body,
+                                       fake=str(forge.bin / "gh")), encoding="utf-8")
+    wrapper.chmod(wrapper.stat().st_mode | stat.S_IXUSR)
+    return {"PATH": str(directory), "FORGE_WORLD": str(forge.state)}
 
 
 def call(env: dict, *args: str) -> tuple[int, dict]:
@@ -65,13 +79,7 @@ class IssueTest(unittest.TestCase):
     def test_issue_closes_an_open_issue_only_when_its_criteria_close_it(self):
         forge = ForgeWorld(self)
         forge.comment_store(SLUG, ISSUE, [], labels=[])
-        directory = forge.state.parent / "store-gh"
-        directory.mkdir()
-        wrapper = directory / "gh"
-        wrapper.write_text(STORE_GH.format(python=sys.executable, read=ISSUE_READ, issue=ISSUE,
-                                           fake=str(forge.bin / "gh")), encoding="utf-8")
-        wrapper.chmod(wrapper.stat().st_mode | stat.S_IXUSR)
-        env = {"PATH": str(directory), "FORGE_WORLD": str(forge.state)}
+        env = store_gh(forge, "")
 
         def issue(closes: str) -> tuple[int, dict]:
             return call(env, "issue", "--repo", SLUG, "--issue", str(ISSUE), "--closes", closes)
@@ -413,17 +421,224 @@ class HoldLintTest(HoldTest):
         self.assertEqual([(entry["issue"], entry["ac"]) for entry in lint["lints"]], [(50, "AC3")])
 
 
+READ_HOLDS = ("hold-facts", "hold-look", "hold-gate", "hold-lint")
+
+
 class DeclarationTest(unittest.TestCase):
-    def test_the_closing_declaration_lists_every_hold_subcommand(self):
+    def test_the_closing_declaration_lists_every_hold_read_subcommand(self):
         path = os.path.join(os.path.dirname(closing.__file__), "command_verdicts.json")
         with open(path, encoding="utf-8") as handle:
             subcommands = json.load(handle)["closing"]["subcommands"]
-        self.assertEqual({name: subcommands[name] for name in subcommands if name.startswith("hold-")}, {
+        self.assertEqual({name: subcommands[name] for name in READ_HOLDS}, {
             "hold-facts": ["closes", "open", "bad-kinds", "absent-merge", "error"],
             "hold-look": ["clear", "stale", "error"],
             "hold-gate": ["ready", "missing-checks", "human-checks", "unattended", "owner-checks",
                           "script-checks", "note-checks", "error"],
             "hold-lint": ["valid", "invalid", "error"]})
+
+
+SPLIT_BODY = OPEN_BODY + "- [ ] [human] The greeting reads well to its owner.\n"
+CRITERIA = holding.criteria(SPLIT_BODY)
+MERGE = "a" * 40
+LABEL_CREATE = ["api", "-X", "POST", f"repos/{SLUG}/labels", "-f", "name=needs-verification",
+                "-f", "color=1D76DB"]
+
+
+def card(block: dict) -> str:
+    """The fenced hold comment text for a block, as `hold_body` words it."""
+    return holding.hold_body(7, MERGE, [{"id": "AC2", "kind": "evidence", "text": "the evidence"},
+                                        {"id": "AC3", "kind": "human", "text": "the human one"}], block)
+
+
+class WriteTest(unittest.TestCase):
+    """The write-side hold subcommands over a `ForgeWorld` store (no git: they read only the tracker)."""
+
+    def setUp(self):
+        self.forge = ForgeWorld(self)
+
+    def store(self, comments=(), body=SPLIT_BODY, created=()) -> None:
+        self.forge.comment_store(SLUG, ISSUE, list(comments), labels=[], created=list(created))
+        self.forge.respond("gh", LABEL_CREATE)
+        self.env = store_gh(self.forge, body)
+
+    def hold(self, command: str, **flags) -> tuple[int, dict]:
+        args = [command]
+        for name, value in flags.items():
+            args += ["--" + name.replace("_", "-"),
+                     value if isinstance(value, str) else str(value) if isinstance(value, int)
+                     else json.dumps(value)]
+        return call(self.env, *args)
+
+    def posts(self, path: str) -> list:
+        return [argv for argv in self.forge.argvs("gh")
+                if argv[:3] == ["api", "-X", "POST"] and argv[3].endswith(path)]
+
+
+class HoldPostTest(WriteTest):
+    def post(self, command="hold-post", block=None, answered=(), children=()) -> tuple[int, dict]:
+        block = holding.block_of([EVIDENCE], MERGE) if block is None else block
+        return self.hold(command, repo=SLUG, issue=ISSUE, pr=7, merge_commit=MERGE, criteria=CRITERIA[:2],
+                         answered=list(answered), block=block, children=list(children))
+
+    def test_hold_post_posts_one_hold_comment_and_a_second_call_posts_none(self):
+        self.store()
+        block = holding.block_of([EVIDENCE], MERGE)
+        status, first = self.post()
+        self.assertEqual((status, first["verdict"], first["block"]), (0, "posted", block))
+        self.assertIsInstance(first["comment_id"], int)
+        self.assertEqual(self.post(), (0, first))
+        stored = self.forge.stored()
+        self.assertEqual(len(stored), 1)
+        self.assertIn("```verify", stored[0]["body"])
+        self.assertEqual(verify_block.parse_block(stored[0]["body"]), (block, []))
+        held = [line for line in stored[0]["body"].splitlines() if line.startswith("- ")]
+        self.assertEqual(held, ["- AC2 [evidence] The greeting reads well in production."])
+
+    def test_hold_posted_is_absent_before_the_post_and_posted_after_it(self):
+        self.store()
+        self.assertEqual(self.post("hold-posted"), (0, {"verdict": "absent"}))
+        posted = self.post()[1]
+        self.assertEqual(self.post("hold-posted"), (0, posted))
+
+    def test_hold_post_edits_an_answered_check_out_of_an_existing_fence(self):
+        self.store([comment(100, card(holding.block_of([EVIDENCE, ASK], MERGE)))])
+        self.assertEqual(self.post("hold-posted", answered=["AC3"])[1]["verdict"], "absent")
+        status, edited = self.post(answered=["AC3"])
+        self.assertEqual((status, edited), (0, {"verdict": "posted", "comment_id": 100,
+                                                "block": holding.block_of([EVIDENCE], MERGE)}))
+        patches = [argv for argv in self.forge.argvs("gh") if argv[:3] == ["api", "-X", "PATCH"]]
+        self.assertEqual(len(patches), 1, patches)
+        stored = self.forge.stored()
+        self.assertEqual(len(stored), 1)
+        self.assertEqual(verify_block.parse_block(stored[0]["body"]), (holding.block_of([EVIDENCE], MERGE), []))
+        self.assertNotIn("AC3", stored[0]["body"])
+        self.assertIn("- AC2 [evidence] the evidence", stored[0]["body"])
+        self.assertEqual(self.post(answered=["AC3"]), (0, edited))
+        self.assertEqual(self.post("hold-posted", answered=["AC3"]), (0, edited))
+        self.assertEqual(len([a for a in self.forge.argvs("gh") if a[:3] == ["api", "-X", "PATCH"]]), 1)
+
+    def test_hold_post_with_no_block_closes_the_issue_naming_the_split_issues(self):
+        self.store()
+        children = [{"ac": "AC3", "issue": 50}, {"ac": "AC4", "issue": 51}]
+        flags = {"block": "null", "children": json.dumps(children)}
+        absent = self.hold("hold-posted", repo=SLUG, issue=ISSUE, pr=7, merge_commit=MERGE,
+                           criteria=CRITERIA[:2], answered=[], **flags)
+        self.assertEqual(absent, (0, {"verdict": "absent"}))
+        for _ in range(2):
+            status, closed = self.hold("hold-post", repo=SLUG, issue=ISSUE, pr=7, merge_commit=MERGE,
+                                       criteria=CRITERIA[:2], answered=[], **flags)
+            self.assertEqual((status, closed), (0, {"verdict": "closed", "comment_id": None, "block": None}))
+        self.assertEqual(self.forge.issue()["state"], "closed")
+        stored = self.forge.stored()
+        self.assertEqual([c["body"] for c in stored],
+                         ["Delivered by PR #7; the human checks are held on #50, #51"])
+        again = self.hold("hold-posted", repo=SLUG, issue=ISSUE, pr=7, merge_commit=MERGE,
+                          criteria=CRITERIA[:2], answered=[], **flags)
+        self.assertEqual(again, (0, {"verdict": "closed", "comment_id": None, "block": None}))
+
+
+class HoldLabelTest(WriteTest):
+    def test_hold_label_adds_the_label_once_and_its_check_reads_it(self):
+        self.store()
+        self.assertEqual(self.hold("hold-labelled", repo=SLUG, issue=ISSUE), (0, {"verdict": "absent"}))
+        for _ in range(2):
+            self.assertEqual(self.hold("hold-label", repo=SLUG, issue=ISSUE), (0, {"verdict": "labelled"}))
+        self.assertEqual(self.hold("hold-labelled", repo=SLUG, issue=ISSUE), (0, {"verdict": "labelled"}))
+        self.assertEqual(self.forge.issue()["labels"], ["needs-verification"])
+        self.assertEqual(len(self.posts(f"issues/{ISSUE}/labels")), 1)
+
+
+class HoldSplitTest(WriteTest):
+    def split(self, command="hold-split", entries=None) -> tuple[int, dict]:
+        entries = [{"ac": "AC3", "block": holding.block_of([ASK], MERGE)}] if entries is None else entries
+        return self.hold(command, repo=SLUG, issue=ISSUE, pr=7, merge_commit=MERGE, split=entries)
+
+    def test_hold_split_files_one_child_and_a_second_call_files_none(self):
+        self.store()
+        first = self.split()
+        self.assertEqual(first, (0, {"verdict": "split", "children": [{"ac": "AC3", "issue": 500}]}))
+        self.assertEqual(self.split(), first)
+        created = self.forge.issue()["created"]
+        self.assertEqual(len(created), 1)
+        self.assertEqual(created[0]["body"].split("\n", 1)[0], f"Split from #{ISSUE}: AC3 after the merge {MERGE}.")
+        self.assertEqual(created[0]["labels"], ["needs-verification"])
+        self.assertEqual(created[0]["title"], f"Verify AC3 of #{ISSUE}: The greeting reads well to its owner.")
+        self.assertEqual(len(created[0]["comments"]), 1)
+        self.assertEqual(verify_block.parse_block(created[0]["comments"][0]["body"]),
+                         (holding.block_of([ASK], MERGE), []))
+        self.assertEqual(self.forge.stored(), [])
+        self.assertEqual(self.split("hold-split-check"), first)
+
+    def test_hold_split_check_is_absent_until_the_child_holds_its_fence(self):
+        child = {"number": 500, "title": "t", "labels": ["needs-verification"], "state": "open",
+                 "body": holding.split_line(ISSUE, "AC3", MERGE) + "\nbody", "comments": []}
+        self.store(created=[child])
+        self.assertEqual(self.split("hold-split-check"), (0, {"verdict": "absent"}))
+        self.assertEqual(self.split("hold-split")[1]["children"], [{"ac": "AC3", "issue": 500}])
+        created = self.forge.issue()["created"]
+        self.assertEqual((len(created), len(created[0]["comments"])), (1, 1))
+        self.assertEqual(self.split("hold-split-check")[1]["verdict"], "split")
+
+    def test_an_empty_split_is_none(self):
+        self.store()
+        for command in ("hold-split", "hold-split-check"):
+            self.assertEqual(self.split(command, []), (0, {"verdict": "none", "children": []}))
+        self.assertEqual(self.forge.issue()["created"], [])
+
+
+class HoldRunTest(WriteTest):
+    def run_hold(self, verdict="posted", children=(), holder="Mac-Studio/run-1", exits=(0,)):
+        self.store()
+        with mock.patch.object(holding, "verify_run", side_effect=list(exits)) as run:
+            result = self.hold("hold-run", repo=SLUG, issue=ISSUE, holder=holder, verdict=verdict,
+                               children=list(children))
+        return result, run.call_args_list
+
+    def test_hold_run_runs_each_child_then_the_parent_once(self):
+        result, calls = self.run_hold(children=[{"ac": "AC3", "issue": 50}], exits=(0, 0))
+        self.assertEqual(calls, [mock.call("mac-studio", SLUG, 50), mock.call("mac-studio", SLUG, ISSUE)])
+        self.assertEqual(result, (0, {"verdict": "ran", "runs": [{"issue": 50, "exit": 0}, {"issue": ISSUE, "exit": 0}],
+                                      "issue_state": "OPEN"}))
+
+    def test_a_nonzero_once_run_is_failed(self):
+        result, calls = self.run_hold(exits=(2,))
+        self.assertEqual(result, (0, {"verdict": "failed", "runs": [{"issue": ISSUE, "exit": 2}],
+                                      "issue_state": "OPEN"}))
+        self.assertEqual(len(calls), 1)
+
+    def test_a_closed_parent_gets_no_once_run(self):
+        self.store()
+        self.forge.respond("gh", LABEL_CREATE)
+        flags = {"repo": SLUG, "issue": ISSUE, "pr": 7, "merge_commit": MERGE, "criteria": [], "answered": [],
+                 "block": "null", "children": [{"ac": "AC3", "issue": 50}]}
+        self.assertEqual(self.hold("hold-post", **flags)[1]["verdict"], "closed")
+        with mock.patch.object(holding, "verify_run", return_value=0) as run:
+            result = self.hold("hold-run", repo=SLUG, issue=ISSUE, holder="mac/run", verdict="closed",
+                               children=[{"ac": "AC3", "issue": 50}])
+        self.assertEqual(run.call_args_list, [mock.call("mac", SLUG, 50)])
+        self.assertEqual(result, (0, {"verdict": "ran", "runs": [{"issue": 50, "exit": 0}],
+                                      "issue_state": "CLOSED"}))
+
+    def test_a_holder_whose_host_is_no_hostname_is_failed_without_a_run(self):
+        result, calls = self.run_hold(holder="bad_host/run", children=[{"ac": "AC3", "issue": 50}])
+        self.assertEqual(result, (0, {"verdict": "failed", "reason": "host"}))
+        self.assertEqual(calls, [])
+
+
+class WriteDeclarationTest(unittest.TestCase):
+    def test_the_closing_declaration_lists_every_hold_write_subcommand_and_check(self):
+        path = os.path.join(os.path.dirname(closing.__file__), "command_verdicts.json")
+        with open(path, encoding="utf-8") as handle:
+            subcommands = json.load(handle)["closing"]["subcommands"]
+        self.assertEqual({name: subcommands[name] for name in subcommands
+                          if name.startswith("hold-") and name not in READ_HOLDS}, {
+            "hold-split": ["split", "none", "error"],
+            "hold-split-check": ["split", "none", "absent", "error"],
+            "hold-post": ["posted", "closed", "error"],
+            "hold-posted": ["posted", "closed", "absent", "error"],
+            "hold-label": ["labelled", "error"],
+            "hold-labelled": ["labelled", "absent", "error"],
+            "hold-run": ["ran", "failed", "error"]})
 
 
 if __name__ == "__main__":

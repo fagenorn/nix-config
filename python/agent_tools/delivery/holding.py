@@ -29,10 +29,12 @@ Otherwise `ready`: the human criteria are split into their own checks only when 
 check a criterion the owner's look approval answered and that the hold may not rewrite. Ids compare
 ignoring case, as the program's `upId`.
 
-The reads the `closing` hold subcommands make live below `split_body`: `posted_fences` (the issue's own
+The reads and writes the `closing` hold subcommands make live below `split_body`: `posted_fences` (the issue's own
 selected fence and those of its split children for one merge), `blocking`, `pr_facts`, `verification`,
-`look_status` and `look_acs`, `lint_all`. Each raises `landing.Failure` for a forge or subprocess fault
-and changes nothing.
+`look_status` and `look_acs`, `lint_all` change nothing; `file_split`, `post_hold`, `deliver_close`,
+`label_hold` and `verify_run` write, each idempotent by itself (a second call with the same arguments posts,
+files, labels and closes nothing more) and each paired with a read the engine runs as its check. Every one
+raises `landing.Failure` for a forge or subprocess fault.
 """
 
 from __future__ import annotations
@@ -43,6 +45,7 @@ import re
 import subprocess
 from collections.abc import Sequence
 
+from agent_tools.claims import forge_markers
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
 from agent_tools.console import inbox
 from agent_tools.delivery import landing, look_marker
@@ -55,6 +58,8 @@ LABEL = "needs-verification"
 OPEN_KINDS = ("evidence", "human")
 KINDS = ("code", "evidence", "human", "note")
 LOOK_TIMEOUT = 120
+LABEL_COLOR = "1D76DB"
+RUN_TIMEOUT = 900
 
 
 def criteria(body: str) -> list[dict]:
@@ -293,14 +298,8 @@ def _comments(repo: str, number: int) -> list[verify_issues.Comment]:
     return _forge(lambda: verify_issues.comments_from_rest(pages))
 
 
-def fences(repo: str, issue: int, merge: str | None) -> list[dict]:
-    """The issue's own selected fence, then each open split child's of `merge` (none when `merge` is None)."""
-    found = []
-    own = _fence(issue, None, _comments(repo, issue))
-    if own is not None:
-        found.append(own)
-    if merge is None:
-        return found
+def split_children(repo: str, issue: int, merge: str) -> list[tuple[int, str]]:
+    """`(number, ac)` of each open `needs-verification` issue split from `issue` for `merge`, ascending."""
     identity = re.compile(rf"Split from #{issue}: (\S+) after the merge {re.escape(merge)}\.")
     children = []
     for page in _pages(f"repos/{repo}/issues?labels={LABEL}"):
@@ -314,7 +313,18 @@ def fences(repo: str, issue: int, merge: str | None) -> list[dict]:
             matched = identity.fullmatch(body.split("\n", 1)[0].removesuffix("\r"))
             if matched:
                 children.append((number, matched[1]))
-    for number, ac in sorted(set(children)):
+    return sorted(set(children))
+
+
+def fences(repo: str, issue: int, merge: str | None) -> list[dict]:
+    """The issue's own selected fence, then each open split child's of `merge` (none when `merge` is None)."""
+    found = []
+    own = _fence(issue, None, _comments(repo, issue))
+    if own is not None:
+        found.append(own)
+    if merge is None:
+        return found
+    for number, ac in split_children(repo, issue, merge):
         child = _fence(number, ac, _comments(repo, number))
         if child is not None and child["merge"] == merge:
             found.append(child)
@@ -415,3 +425,144 @@ def lint_all(*, repo_root: str, repo: str, issue: int, pr_head: str, pr_branch: 
         lints.append({"issue": child["issue"] if child else None, "ac": entry["ac"],
                       **lint(repo_root, child["block"] if child else entry["block"], blocks=(), **context)})
     return {"verdict": "valid" if all(item["ok"] for item in lints) else "invalid", "lints": lints}
+
+
+def split_child(repo: str, issue: int, merge: str, ac: str) -> dict | None:
+    """The open split child of `issue` for `ac` at `merge` as `{issue, fence}` (`fence` None until it holds one)."""
+    number = next((found for found, spelled in split_children(repo, issue, merge) if spelled == ac), None)
+    if number is None:
+        return None
+    return {"issue": number, "fence": _fence(number, ac, _comments(repo, number))}
+
+
+def split_state(repo: str, issue: int, merge: str, split: list[dict]) -> dict:
+    """`{verdict, children}`: `none` for no split, `split` when every entry has its child holding a fence."""
+    children = []
+    for entry in split:
+        child = split_child(repo, issue, merge, entry["ac"])
+        if child is None or child["fence"] is None:
+            return {"verdict": "absent"}
+        children.append({"ac": entry["ac"], "issue": child["issue"]})
+    return {"verdict": "split" if split else "none", "children": children}
+
+
+def _own_criterion(repo: str, issue: int, ac: str) -> dict:
+    body = read_issue(repo, issue).get("body")
+    found = next((item for item in criteria(body if isinstance(body, str) else "") if _up(item["id"]) == _up(ac)),
+                 None)
+    if found is None:
+        raise Failure("payload_invalid", f"issue #{issue} has no criterion {ac}")
+    return found
+
+
+def read_issue(repo: str, number: int) -> dict:
+    """The issue as the REST read gives it."""
+    found = _forge(lambda: forge_api.gh_json(["api", f"repos/{repo}/issues/{number}"]))
+    if not _object(found):
+        raise Failure("payload_invalid", "the issue is not an object")
+    return found
+
+
+def file_split(repo: str, issue: int, pr: int, merge: str, split: list[dict]) -> dict:
+    """File each split entry's child (when none is open) and post its hold comment (when it has no fence)."""
+    children = []
+    for entry in split:
+        criterion = _own_criterion(repo, issue, entry["ac"])
+        child = split_child(repo, issue, merge, entry["ac"])
+        if child is None:
+            title, body = split_body(issue, pr, merge, criterion, entry["block"])
+            _forge(lambda: forge_api.ensure_label(repo, LABEL, LABEL_COLOR))
+            number = _forge(lambda: forge_api.create_issue(repo, title, body, labels=[LABEL]))
+            child = {"issue": number, "fence": None}
+        if child["fence"] is None:
+            text = hold_body(pr, merge, [criterion], entry["block"])
+            _forge(lambda: forge_markers.post(repo, child["issue"], text))
+        children.append({"ac": entry["ac"], "issue": child["issue"]})
+    return {"verdict": "split" if split else "none", "children": children}
+
+
+def _drop_answered(text: str, block: dict, answered: list[str]) -> tuple[str, dict]:
+    """The hold comment `text` and its fence `block` without the checks naming an answered criterion."""
+    gone = {_up(name) for name in answered}
+    kept = [check for check in block["checks"] if not (_object(check) and _up(check.get("ac")) in gone)]
+    reduced = {**block, "checks": kept}
+    lines = [line for line in text.replace("\r\n", "\n").split("\n")
+             if not any(re.match(rf"- {re.escape(name)}(\s|$)", line, re.IGNORECASE) for name in answered)]
+    text = "\n".join(lines)
+    fence = verify_block.FENCE.search(text)
+    text = text[:fence.start(1)] + json.dumps(reduced, indent=2) + "\n" + text[fence.end(1):]
+    return text, reduced
+
+
+def _answers(block: object, answered: list[str]) -> bool:
+    gone = {_up(name) for name in answered}
+    checks = block.get("checks") if _object(block) else None
+    return isinstance(checks, list) and any(_object(check) and _up(check.get("ac")) in gone for check in checks)
+
+
+def post_state(repo: str, issue: int, answered: list[str], block: object) -> dict:
+    """`posted` with the issue's own fence (none of whose checks name an answered criterion), `closed` when
+    `block` is null and the issue is closed, else `absent`."""
+    if block is None:
+        closed = str(read_issue(repo, issue).get("state", "")).lower() == "closed"
+        return {"verdict": "closed", "comment_id": None, "block": None} if closed else {"verdict": "absent"}
+    own = _fence(issue, None, _comments(repo, issue))
+    if own is None or _answers(own["block"], answered):
+        return {"verdict": "absent"}
+    return {"verdict": "posted", "comment_id": own["comment_id"], "block": own["block"]}
+
+
+def post_hold(repo: str, issue: int, pr: int, merge: str, criteria_: list[dict], answered: list[str],
+              block: object, children: list[dict]) -> dict:
+    """Post the hold comment, edit an answered check out of the one that exists, or close the issue.
+
+    With a null `block` every open criterion was split: post `Delivered by PR #<pr>` once and close the issue.
+    Otherwise the issue's one fence comment is never posted twice."""
+    comments = _comments(repo, issue)
+    if block is None:
+        lead = f"Delivered by PR #{pr}"
+        if not any(item.body.startswith(lead) for item in comments):
+            held = ", ".join(f"#{child['issue']}" for child in children)
+            _forge(lambda: forge_markers.post(repo, issue, f"{lead}; the human checks are held on {held}"))
+        _forge(lambda: forge_api.close_issue(repo, issue, "completed"))
+        return {"verdict": "closed", "comment_id": None, "block": None}
+    own = _fence(issue, None, comments)
+    if own is None:
+        named = block.get("checks") if _object(block) else None
+        held = [item for item in criteria_ if _object(block) and isinstance(named, list) and _named(named, item)]
+        comment_id = _forge(lambda: forge_markers.post(repo, issue, hold_body(pr, merge, held, block)))
+        return {"verdict": "posted", "comment_id": comment_id, "block": block}
+    if _answers(own["block"], answered):
+        text = next(item.body for item in comments if item.id == own["comment_id"])
+        text, reduced = _drop_answered(text, own["block"], answered)
+        _forge(lambda: forge_markers.edit(repo, own["comment_id"], text))
+        return {"verdict": "posted", "comment_id": own["comment_id"], "block": reduced}
+    return {"verdict": "posted", "comment_id": own["comment_id"], "block": own["block"]}
+
+
+def label_state(repo: str, issue: int) -> bool:
+    """Whether the issue carries the hold label."""
+    labels = read_issue(repo, issue).get("labels")
+    names = [item.get("name") if _object(item) else item for item in labels] if isinstance(labels, list) else []
+    return LABEL in names
+
+
+def label_hold(repo: str, issue: int) -> None:
+    """Add the hold label unless the issue carries it."""
+    if not label_state(repo, issue):
+        _forge(lambda: forge_api.ensure_label(repo, LABEL, LABEL_COLOR))
+        _forge(lambda: forge_api.add_label(repo, issue, LABEL))
+
+
+def verify_run(host: str, repo: str, number: int) -> int:
+    """Run `verify-pending run` for the issue on `host`; its exit status."""
+    argv = [*sibling_argv("verification.verify_pending"), "run", "--host", host, "--repo", repo,
+            "--issue", str(number)]
+    env = {key: value for key, value in os.environ.items() if key not in ("GITHUB_TOKEN", "GH_TOKEN")}
+    try:
+        return subprocess.run(argv, capture_output=True, text=True, timeout=RUN_TIMEOUT, check=False, env=env,
+                              stdin=subprocess.DEVNULL).returncode
+    except subprocess.TimeoutExpired:
+        raise Failure("verify_run_failed", "timeout", transient=True) from None
+    except OSError as error:
+        raise Failure("verify_run_failed", str(error)) from None

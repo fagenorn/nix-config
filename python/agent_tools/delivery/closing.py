@@ -49,6 +49,35 @@ verdict (`missing-checks`, `human-checks`, `unattended`, `owner-checks`, `script
 `lints`, one `{issue, ac, ok, errors}` for the parent block (its posted fence less the checks naming an
 answered criterion, else `--block`, skipped when null) and for each `--split` entry (the child's posted
 fence, else the entry's block, linted with no blocked issues).
+
+The write-side `hold-*` subcommands post, label, file, close and run (issue 1541). Each is idempotent by
+itself, because the engine owes a check only to an arrival a rewind discarded: a second call with the same
+flags posts, files, labels and closes nothing more. Each prints the members its check prints (the engine
+stores the check's document as the step's result), and its check changes nothing.
+
+`hold-split --repo <owner/name> --issue <n> --pr <n> --merge-commit <sha> --split <json>` (`--split`: the
+`hold-gate` list of `{ac, block}`) files, for each entry in order, the open `needs-verification` issue whose
+body starts `Split from #<n>: <AC> after the merge <sha>.` unless one exists, then posts its hold comment
+unless it has a fence: `split` or `none` (an empty `--split`), with `children`, one `{ac, issue}` per entry.
+`hold-split-check` (same flags) prints `split` or `none` with the same `children` when every entry has its
+child holding a fence, else `absent`.
+
+`hold-post --repo --issue --pr --merge-commit --criteria <json> --answered <json> --block <json> --children
+<json>` posts the hold comment of `--block` (naming the criteria its checks name) unless the issue has a
+fence; when it has one whose checks name an answered criterion it edits those checks, and their lines, out
+in place: `posted` with `comment_id` and the `block` as it stands. A null `--block` (every open criterion was
+split) posts `Delivered by PR #<pr>; the human checks are held on #<child>, ...` once and closes the issue
+as completed: `closed` with a null `comment_id` and `block`. `hold-posted` (same flags) prints `posted` or
+`closed` when that holds now, else `absent`.
+
+`hold-label --repo --issue` adds `needs-verification` (creating the label) unless the issue carries it:
+`labelled`; `hold-labelled` prints `labelled` or `absent`.
+
+`hold-run --repo --issue --holder <host/..> --verdict <v> --children <json>` runs `verify-pending run` once
+for each child in order, then for the issue only when `--verdict` is `posted`, on the host that is the
+holder's text before its first `/`, lower-cased (`failed` with `reason` `host` and no run when that is no
+hostname): `ran` or `failed` (a run exited non-zero) with `runs`, one `{issue, exit}` each, and `issue_state`
+(`OPEN` or `CLOSED`), read after the runs.
 """
 
 from __future__ import annotations
@@ -63,6 +92,7 @@ from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_litera
 from agent_tools.delivery import holding, landing, look_marker
 from agent_tools.delivery.landing import Failure, emit
 from agent_tools.system import forge_api
+from agent_tools.verification import verify_block
 
 GIT_TIMEOUT = 120
 MERGED_FIELDS = "number,mergeCommit,headRefOid"
@@ -223,6 +253,43 @@ def hold_lint(args: argparse.Namespace) -> dict:
                             answered=args.answered, block=args.block, split=args.split)
 
 
+def hold_split(args: argparse.Namespace) -> dict:
+    return holding.file_split(args.repo, args.issue, args.pr, args.merge_commit, args.split)
+
+
+def hold_split_check(args: argparse.Namespace) -> dict:
+    return holding.split_state(args.repo, args.issue, args.merge_commit, args.split)
+
+
+def hold_post(args: argparse.Namespace) -> dict:
+    return holding.post_hold(args.repo, args.issue, args.pr, args.merge_commit, args.criteria, args.answered,
+                             args.block, args.children)
+
+
+def hold_posted(args: argparse.Namespace) -> dict:
+    return holding.post_state(args.repo, args.issue, args.answered, args.block)
+
+
+def hold_label(args: argparse.Namespace) -> dict:
+    holding.label_hold(args.repo, args.issue)
+    return {"verdict": "labelled"}
+
+
+def hold_labelled(args: argparse.Namespace) -> dict:
+    return {"verdict": "labelled" if holding.label_state(args.repo, args.issue) else "absent"}
+
+
+def hold_run(args: argparse.Namespace) -> dict:
+    host = args.holder.split("/", 1)[0].lower()
+    if not verify_block.HOST.fullmatch(host):
+        return {"verdict": "failed", "reason": "host"}
+    wanted = [child["issue"] for child in args.children] + ([args.issue] if args.verdict == "posted" else [])
+    runs = [{"issue": number, "exit": holding.verify_run(host, args.repo, number)} for number in wanted]
+    state = str(_issue(args.repo, args.issue).get("state", "")).upper()
+    return {"verdict": "ran" if all(run["exit"] == 0 for run in runs) else "failed", "runs": runs,
+            "issue_state": state}
+
+
 def _json(text: str):
     try:
         return json.loads(text, object_pairs_hook=reject_duplicate_keys, parse_constant=reject_nonfinite_literal)
@@ -264,6 +331,10 @@ def _is_posted(value) -> bool:
 
 def _is_written(value) -> bool:
     return isinstance(value, dict) and _text(value.get("ac")) and _text(value.get("check"))
+
+
+def _is_child(value) -> bool:
+    return isinstance(value, dict) and _text(value.get("ac")) and _int(value.get("issue"))
 
 
 def _is_split(value) -> bool:
@@ -343,11 +414,44 @@ def build_parser() -> argparse.ArgumentParser:
     hold.add_argument("--answered", required=True, type=texts)
     hold.add_argument("--block", required=True, type=_json)
     hold.add_argument("--split", required=True, type=_shaped("list of split entries", _each(_is_split)))
+    split = _shaped("list of split entries", _each(_is_split))
+    children = _shaped("list of split children", _each(_is_child))
+    for name in ("hold-split", "hold-split-check"):
+        hold = commands.add_parser(name)
+        hold.add_argument("--repo", required=True)
+        hold.add_argument("--issue", required=True, type=number)
+        hold.add_argument("--pr", required=True, type=number)
+        hold.add_argument("--merge-commit", required=True)
+        hold.add_argument("--split", required=True, type=split)
+    for name in ("hold-post", "hold-posted"):
+        hold = commands.add_parser(name)
+        hold.add_argument("--repo", required=True)
+        hold.add_argument("--issue", required=True, type=number)
+        hold.add_argument("--pr", required=True, type=number)
+        hold.add_argument("--merge-commit", required=True)
+        hold.add_argument("--criteria", required=True, type=_shaped("list of criteria", _each(_is_criterion)))
+        hold.add_argument("--answered", required=True, type=texts)
+        hold.add_argument("--block", required=True,
+                          type=_shaped("block or null", lambda value: value is None or isinstance(value, dict)))
+        hold.add_argument("--children", required=True, type=children)
+    for name in ("hold-label", "hold-labelled"):
+        hold = commands.add_parser(name)
+        hold.add_argument("--repo", required=True)
+        hold.add_argument("--issue", required=True, type=number)
+    hold = commands.add_parser("hold-run")
+    hold.add_argument("--repo", required=True)
+    hold.add_argument("--issue", required=True, type=number)
+    hold.add_argument("--holder", required=True)
+    hold.add_argument("--verdict", required=True)
+    hold.add_argument("--children", required=True, type=children)
     return parser
 
 
 COMMANDS = {"read": read, "worktree": worktree, "forward": forward, "branch": branch, "issue": issue,
-            "hold-facts": hold_facts, "hold-look": hold_look, "hold-gate": hold_gate, "hold-lint": hold_lint}
+            "hold-facts": hold_facts, "hold-look": hold_look, "hold-gate": hold_gate, "hold-lint": hold_lint,
+            "hold-split": hold_split, "hold-split-check": hold_split_check, "hold-post": hold_post,
+            "hold-posted": hold_posted, "hold-label": hold_label, "hold-labelled": hold_labelled,
+            "hold-run": hold_run}
 
 
 def main(argv: list[str] | None = None) -> int:
