@@ -35,7 +35,7 @@ stream `Content-Length`):
     POST /api/pin   204, a JSON body, the page pins or unpins a profile (below)
     POST /api/approve 204, a JSON body, the page approves a brief (below)
     POST /api/reply 204, a JSON body, the page asks a brief for changes (below)
-    POST /api/retry-manager 204, a JSON body, the page starts a sprint's manager again (below)
+    POST /api/retry-manager 204, a JSON body, the page starts a sprint's manager again or moves it (below)
     POST /api/message 204, a JSON body, the page sends the owner's message to a sprint (below)
     POST /api/stop  204, a JSON body, the page stops a sprint (below)
     POST /api/register-project 204, a JSON body, the page names a repository to adopt (below)
@@ -1793,7 +1793,10 @@ every listed one is on the profile the sprint's record gives (else the move is c
 every listed session carrying the manager's name through `_stop_one`, off the lock, and reads the
 conclusive listing again. It launches only when that listing shows neither the name nor a session it
 stopped, no folded session of that name is left unstopped, and the move still holds; the same is checked
-again after the permission read, with a fresh conclusive listing. Nothing listed to stop only releases it.
+again after the permission read, with a fresh conclusive listing. Nothing listed to stop only releases it, unless the owner asked for the move.
+`revive()` keeps in `_move_notes` a `quota_move.Note` for each sprint whose move would be due but for the cancel mark and says why it is not moving:
+no other account has room (no move offered), its session is unmatched (`_unmatched`) or its move was called off (a move is offered). The sprint line shows the note and, with a move offered, `POST /api/retry-manager` moves the manager, not retries it: it clears the marks and reserves a
+`_ListedMoveReservation` with `asked` set on `_move_target`, refusing with `quota_move.NO_ROOM_REFUSAL` when none is left.
 Any other outcome cancels the move as #1279 does and a failed stop or listing writes
 `console: quota_move_failed <sprint_id> <reason>`. The takeover's
 `manager.started` row carries `"moved": true` and the sprint leaves `_quota_held`, so the digest says the
@@ -4526,9 +4529,10 @@ class _ListedMoveReservation(_TakeoverReservation):
     """
 
     def __init__(self, target: str, account: tuple[str | None, str | None],
-                 pinned: str | None) -> None:
+                 pinned: str | None, asked: bool = False) -> None:
         super().__init__(target, account, pinned)
         self.stopped: set[str] = set()
+        self.asked = asked
 
 
 MOVE_NOT_STARTED = "the manager could not be started again after its account was signed out or removed"
@@ -4715,6 +4719,7 @@ class ConsoleService(ActionPermit):
         self._quota_held: set[str] = set()
         self._move_cancelled: set[str] = set()
         self._unmatched: set[str] = set()
+        self._move_notes: dict[str, quota_move.Note] = {}
         self._moved: dict[str, int] = {}
         self._listing = (
             (lambda: sessions.read_session_registry(self._session_dirs()))
@@ -5195,7 +5200,8 @@ class ConsoleService(ActionPermit):
                 cap, self._use.last, None, self._waiting_logins())),
             pin_launches=self._pin_launches.launched,
             managers=self._launcher is not None, pending=self._pending,
-            nudges=self._nudger is not None, looked=self._looked, movement=self._movement, engine_runs=self._engine_states)
+            nudges=self._nudger is not None, looked=self._looked, movement=self._movement, engine_runs=self._engine_states,
+            moves=self._move_notes)
         return inputs
 
     def _publish(self, *, guests: bool = True) -> None:
@@ -7765,11 +7771,23 @@ class ConsoleService(ActionPermit):
             if sprint_id in self._launching or sprint_id in self._nudging:
                 raise sprints.Refused(sprints.LAUNCHING)
             state, _, retry = self._manager_state(sprint)
-            if not retry:
+            offered = self._move_notes.get(sprint_id)
+            if not retry and offered is not None and offered.offer:
+                target = self._move_target(sprint)
+                if target is None:
+                    raise sprints.Refused(quota_move.NO_ROOM_REFUSAL)
+                self._move_cancelled.discard(sprint_id)
+                self._unmatched.discard(sprint_id)
+                self._move_notes.pop(sprint_id)
+                self._launching[sprint_id] = _ListedMoveReservation(
+                    target, quota_move.move_account(self._move_view(), self._capacity, self._signins, target),
+                    self._pinned, asked=True)
+            elif not retry:
                 raise sprints.Refused(
                     sprints.HAS_MANAGER if state in (sprints.STARTED, sprints.STALLED)
                     else sprints.TOO_SOON)
-            self._launching[sprint_id] = _RetryReservation()
+            else:
+                self._launching[sprint_id] = _RetryReservation()
         self._dispatch_launch(sprint_id)
 
     def _launch_reserved(self, sprint_id: str) -> None:
@@ -8845,13 +8863,13 @@ class ConsoleService(ActionPermit):
         view = self._move_view()
         return _TakeoverReservation(target, quota_move.move_account(view, self._capacity, self._signins, target), self._pinned)
 
-    def _listed_move_due(self, sprint: sprints.SprintState, now: int) -> bool:
+    def _listed_move_due(self, sprint: sprints.SprintState, now: int, cancelled: bool = False) -> bool:
         """Under the ingest lock: whether a listed manager of the sprint waits on quota and may be moved (#1378).
 
         Everything the move needs but the session's own state: a launcher and a stopper, a started
         manager on an open sprint that is not stalled and has no open no-progress item, work to do,
         fewer than `revive.LIMIT` counted revivals in the window, an account that is out and no
-        cancelled move for it.
+        cancelled move for it (`cancelled=True` does not read that mark).
         """
         return (self._launcher is not None and self._stopper is not None
                 and sprint.manager is not None and sprint.manager.state == sprints.STARTED
@@ -8861,7 +8879,14 @@ class ConsoleService(ActionPermit):
                 and revive.has_work(sprint, self._waiting(sprint))
                 and revive.counted(sprint, now) < revive.LIMIT
                 and self._quota_wait(sprint) is not None
-                and sprint.sprint_id not in self._move_cancelled)
+                and (cancelled or sprint.sprint_id not in self._move_cancelled))
+
+    def _move_note(self, sprint: sprints.SprintState, now: int) -> "quota_move.Note | None":
+        """Under the ingest lock: why a manager whose listed move would be due but for the cancel mark is not moving."""
+        if not self._listed_move_due(sprint, now, cancelled=True):
+            return None
+        return quota_move.note(self._move_target(sprint), sprint.sprint_id in self._move_cancelled,
+                               sprint.sprint_id in self._unmatched)
 
     def _listed_move_reservation(self, sprint: sprints.SprintState,
                                  now: int) -> "_ListedMoveReservation | None":
@@ -8969,7 +8994,7 @@ class ConsoleService(ActionPermit):
                     return None
                 name = manager.session_name(sprint.project_id, sprint_id)
             manager.stop_listed([name], lambda: listed, stop)
-            if not token.stopped:
+            if not token.stopped and not token.asked:
                 with self._ingest:
                     self._release(sprint_id, token)
                 return None
@@ -9022,7 +9047,10 @@ class ConsoleService(ActionPermit):
                 del self._last_listed[sprint_id]
             self._move_cancelled.intersection_update(self._sprints)
             self._unmatched.intersection_update(self._sprints)
+            notes = {}
             for sprint_id, sprint in list(self._sprints.items()):
+                if (note := self._move_note(sprint, now)) is not None:
+                    notes[sprint_id] = note
                 if self._manager_listed(sprint):
                     self._last_listed[sprint_id] = now
                     self._unmatched.discard(sprint_id)
@@ -9046,6 +9074,9 @@ class ConsoleService(ActionPermit):
                 elif step == sprints.TAKEOVER:
                     self._launching[sprint_id] = self._takeover_reservation(sprint, now)
                     jobs.append((step, sprint_id))
+            if notes != self._move_notes:
+                self._move_notes = notes
+                self._publish()
         for step, sprint_id in jobs:
             try:
                 if step == sprints.WAKE:

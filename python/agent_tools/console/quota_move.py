@@ -10,11 +10,34 @@ the capacity view and the readings the caller passes; this module imports neithe
 """
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 
 from agent_tools.console import capacity, manager, sprints
 
 UNMATCHED_REASON = ("the session registry lists the manager under the sprint's name, "
                     "but no session the console holds carries that name")
+NO_ROOM_TEXT = f"{sprints.NOW_QUOTA_TEXT}: no other account has room"
+UNMATCHED_TEXT = (f"{sprints.NOW_QUOTA_TEXT}: its move did not start because the console "
+                  "could not match its session")
+CALLED_OFF_TEXT = f"{sprints.NOW_QUOTA_TEXT}: its move to an account with room was called off"
+NO_ROOM_REFUSAL = "no other account has room"
+
+
+@dataclass(frozen=True)
+class Note:
+    """The sprint line's sentence for a manager out of quota that is not moving, and whether it offers the move."""
+
+    text: str
+    offer: bool
+
+
+def note(target: str | None, cancelled: bool, unmatched: bool) -> Note | None:
+    """Why a manager out of quota is not moved: no target has room, its session is unmatched or its move was called off."""
+    if target is None:
+        return Note(NO_ROOM_TEXT, False)
+    if unmatched:
+        return Note(UNMATCHED_TEXT, True)
+    return Note(CALLED_OFF_TEXT, True) if cancelled else None
 
 
 def move_account(view: Mapping, readings: capacity.CapacityState, signins: Mapping,
