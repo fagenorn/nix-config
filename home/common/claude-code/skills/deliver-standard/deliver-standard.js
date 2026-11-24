@@ -3123,8 +3123,8 @@ const LOOK_CARRY_VERIFY = { ...VERIFY, properties: { ...VERIFY.properties, merge
 const LOOK_REVERIFY = { ...VERIFY, properties: { ...VERIFY.properties, merge_only: { type: 'boolean' }, untouched: { type: 'boolean' } } }
 const LOOK_CARRY_SCHEMA = { type: 'object', properties: { verdict: { type: 'string' }, from: { type: ['string', 'null'] }, reason: { type: ['string', 'null'] }, rule: { type: ['string', 'null'] }, comment_id: { type: ['integer', 'null'] }, detail: { type: 'string' } }, required: ['verdict'] }
 // The reasons look-approval carry gives for a needed answer; any other reason is an unreadable reply.
-const CARRY_REASONS = ['no-approval', 'source-differs', 'pictures-unreadable', 'pictures-missing', 'pictures-differ', 'not-merges', 'no-look-files', 'look-files-differ', 'own-files-touched']
-// The rules a carried reply may name; with no picture passed it must be look-files.
+const CARRY_REASONS = ['no-approval', 'source-differs', 'pictures-unreadable', 'pictures-missing', 'pictures-differ', 'not-merges', 'no-look-files', 'look-files-differ', 'own-files-touched', 'picture-input-changed']
+// The rules a carried reply may name; with no picture passed it must be look-files or own-files. A reason may add a file name after a colon.
 const CARRY_RULES = ['pictures', 'look-files', 'own-files']
 const USABLE_PICTURE = /^\/[^\0\r\n]+$/
 const CLEAN_MERGE = `a clean two-parent merge, meaning git -C ${W} merge-tree --write-tree <merge>^1 <merge>^2 exits 0 and prints the tree id that git -C ${W} rev-parse <merge>^{tree} gives (a conflict resolved by hand, or an octopus merge, gives a different tree; never judge this from git show --cc, which omits a hunk where the merge keeps one parent unchanged)`
@@ -3186,11 +3186,11 @@ ${RULES}`, { label: 'look-carry', phase: 'Ship', agentType: 'clerk', model: CLER
     ownerHead = H
     return null
   }
-  if (isEntry(reply) && reply.verdict === 'carried' && typeof reply.from === 'string' && SHA_RE.test(reply.from) && sameSha(reply.from, S) && Number.isInteger(reply.comment_id) && reply.comment_id > 0 && CARRY_RULES.includes(reply.rule) && (pics.length > 0 || reply.rule === 'look-files')) {
+  if (isEntry(reply) && reply.verdict === 'carried' && typeof reply.from === 'string' && SHA_RE.test(reply.from) && sameSha(reply.from, S) && Number.isInteger(reply.comment_id) && reply.comment_id > 0 && CARRY_RULES.includes(reply.rule) && (pics.length > 0 || reply.rule === 'look-files' || reply.rule === 'own-files')) {
     log(`look-carry: the approval of ${S} carried to ${H} by the ${reply.rule} rule (comment ${reply.comment_id})`)
     return null
   }
-  if (isEntry(reply) && reply.verdict === 'needed' && CARRY_REASONS.includes(reply.reason)) {
+  if (isEntry(reply) && reply.verdict === 'needed' && CARRY_REASONS.includes(String(reply.reason).split(': ')[0])) {
     lookWhy = `the approval of ${S} does not carry to ${H}: ${reply.reason}`
     return lookWaitStop(pr, H)
   }
@@ -3214,7 +3214,7 @@ ${RULES}`, { label: 'look-carry-own', phase: 'Ship', agentType: 'clerk', model: 
     log(`look-carry-own: the approval of ${S} carried to ${H} by the own-files rule (comment ${reply.comment_id})`)
     return { landed: true }
   }
-  if (isEntry(reply) && reply.verdict === 'needed' && CARRY_REASONS.includes(reply.reason)) return null
+  if (isEntry(reply) && reply.verdict === 'needed' && CARRY_REASONS.includes(String(reply.reason).split(': ')[0])) return null
   return { row: stop('look-carry', { pr: pr, head: H, result: reply }) }
 }
 // The owner's approve answer is always validated here, never from a cached approval: the answer clears it, the pull

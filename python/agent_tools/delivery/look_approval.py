@@ -119,8 +119,8 @@ Every call prints one JSON object on one stdout line with `command` (`look-appro
    that is not an `approved` answer), `source-differs` (the candidate's head is not `--from`: the
    command records only the interval the caller checked), `pictures-unreadable` (its `pictures`
    field is malformed; no pull request or compare is read), under the pictures rule
-   `pictures-missing` (no picture was given) or `pictures-differ` (its digest is not the given
-   files'; neither reads the pull request or a compare), then after one read of the pull request
+   `pictures-differ` (pictures were given and its digest is not theirs; no pull request or compare
+   is read; with none given see the end of this item), then after one read of the pull request
    and of the compares, `not-merges`, and under the look-files rule `no-look-files` (the look file
    set is absent at the base) or `look-files-differ` (the change to the look files differs, or a
    merge brought a look file in, even one a later merge took out again); `moved` (exit 1: the pull request is not open or its head is
@@ -149,6 +149,15 @@ Every call prints one JSON object on one stdout line with `command` (`look-appro
    `look_marker.merged_under_look`), all decide an own-files line with `look_marker.own_files_untouched`
    through `look_marker.kept`, so the writer and every reader agree. Without the flag `carry` reads
    only the line of its own rule: an own-files line short-circuits nothing.
+   An approval with a `pictures` digest and no picture given (the manager took the pictures, issue 1719)
+   is carried by the own-files rule once the pictures' inputs are also unchanged: it is decided as
+   `--own-files` is, then `A...H` must list no file of a look file set at the base (`.github/look-files.json`,
+   read once; absent is `needed` with `no-look-files`) and not `look_marker.PICTURE_TOOL_FILES`. The line
+   written is the own-files line, and its sentence says the look files and the picture tool did not change
+   either. `rule` is `own-files` and `pictures` null. A `needed` answer for `own-files-touched` or for the new
+   reason `picture-input-changed` then carries the file after a colon and a space in `reason`, for example
+   `picture-input-changed: tests/console_screenshots.py`; `look_marker.own_file_changed` names an own file and
+   `look_marker.picture_input_changed` a picture input, a name neither can give leaving the bare reason.
 """
 import argparse
 import json
@@ -387,6 +396,13 @@ def _memo(read: Callable[[str], Any]) -> Callable[[str], Any]:
     return memoised
 
 
+def _seen(args: argparse.Namespace, base: str, read: Callable[[str], Any], contents: bool = False) -> lm.Carry:
+    """The reads a carry already made, as `look_marker` takes them; `read` is memoised, so this reads nothing new."""
+    paths = (lm.compare_path(base, args.from_head), lm.compare_path(args.from_head, args.head),
+             lm.compare_path(base, args.head)) + ((lm.contents_path(base),) if contents else ())
+    return lm.Carry(base, {p: read(p) for p in paths})
+
+
 def carry(args: argparse.Namespace) -> int:
     """Record the carry line of `--from`'s approval at `--head` once only merges came in (issues 1566, 1597)."""
     body = _issue_body(args)
@@ -420,10 +436,14 @@ def carry(args: argparse.Namespace) -> int:
     if rule is None:
         return needed("pictures-unreadable")
     state["rule"] = rule
+    inputs = False
     if rule == lm.PICTURES_RULE:
         if args.digest is None:
-            return needed("pictures-missing")
-        if candidate.pictures != args.digest:
+            # The pictures were not taken here (the manager took them): the approval stands when the pull
+            # request's own files and the pictures' inputs are unchanged (issue 1719).
+            rule, inputs = lm.OWN_FILES_RULE, True
+            state["rule"] = rule
+        elif candidate.pictures != args.digest:
             return needed("pictures-differ")
     pull = forge_api.gh_json(["api", f"repos/{args.repo}/pulls/{args.pr}"])
     head = pull.get("head") if isinstance(pull, dict) else None
@@ -437,7 +457,14 @@ def carry(args: argparse.Namespace) -> int:
             return needed("not-merges")
         if rule == lm.OWN_FILES_RULE:
             if not lm.settle_own_files(args.from_head, args.head, base, read):
-                return needed("own-files-touched")
+                touched = lm.own_file_changed(args.from_head, args.head, _seen(args, base, read)) if inputs else None
+                return needed("own-files-touched" if touched is None else f"own-files-touched: {touched}")
+            if inputs:
+                if read(lm.contents_path(base)) is None:
+                    return needed("no-look-files")
+                changed = lm.picture_input_changed(args.from_head, args.head, _seen(args, base, read, True))
+                if changed is not None:
+                    return needed(f"picture-input-changed: {changed}")
         elif rule == lm.LOOK_FILES_RULE:
             if read(lm.contents_path(base)) is None:
                 return needed("no-look-files")
@@ -452,7 +479,7 @@ def carry(args: argparse.Namespace) -> int:
     named = lm.OWN_FILES_RULE if rule == lm.OWN_FILES_RULE else None
     fields = lm.carry_fields(args.issue, args.pr, args.from_head, args.head, pictures, named)
     result = forge_markers.write(args.repo, args.issue, lm.CARRY_KIND, fields,
-                                 lm.carry_sentence(args.pr, args.from_head, args.head, rule), match=fields,
+                                 lm.carry_sentence(args.pr, args.from_head, args.head, rule, inputs), match=fields,
                                  associations=lm.TRUSTED,
                                  accept=lambda m: lm.carry_matches(m.fields, args.issue, args.pr, args.from_head,
                                                                    args.head, pictures, named))
