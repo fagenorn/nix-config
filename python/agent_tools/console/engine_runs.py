@@ -43,7 +43,8 @@ from agent_tools.delivery.engine_ledger import LedgerError, RunState
 READINGS = ("moving", "waiting", "stopped", "not_running", "done")
 WAIT_TEXT = {"usage-limit": "waiting out a usage limit",
              "host-slot": "waiting for a free session slot on this host",
-             "lock": sprints.NOW_LOCK_TEXT}
+             "lock": sprints.NOW_LOCK_TEXT,
+             "checks": "waiting for the pull request's checks"}
 NEED_TEXT = {"owner-decision": "your decision", "owner-look": "your look", "retry": "a retry",
              "nothing": "nothing"}
 NOT_RUNNING_TEXT = "the engine is not running"

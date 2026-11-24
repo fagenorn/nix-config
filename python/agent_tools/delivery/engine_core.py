@@ -91,7 +91,9 @@ Continuing
     stale, `head` is stale when the recorded head is absent, `head` is None or
     they differ, `run` never; only a step's latest outcome is judged), else the
     pending step, else the stop's `reenter` step with its latest arrival's visit
-    (None when never reached). `stale` lists every stale step in arrival order; a stale
+    (None when never reached); a run at a stop declared `pinned` skips the stale rule and
+    re-enters at the stop's `reenter` step with an empty `stale` (the stop comes after an effect no
+    earlier step may redo, such as a merge). `stale` lists every stale step in arrival order; a stale
     group member names its group and the group's visit, once.
 
 Calls
@@ -560,13 +562,14 @@ def reentry(
             if (arrival.step, arrival.visit) not in stale:
                 stale.append((arrival.step, arrival.visit))
     names = tuple(name for name, _ in stale)
-    if stale:
+    pinned = walk.pending is None and bool(procedure["stops"][walk.position].get("pinned"))
+    if stale and not pinned:
         return Reentry(stale[0][0], stale[0][1], names)
     if walk.pending is not None:
         return Reentry(walk.pending.step["id"], walk.arrivals[-1].visit, names)
     target = procedure["stops"][walk.position]["reenter"]
     latest = next((a.visit for a in reversed(walk.arrivals) if a.step == target), None)
-    return Reentry(target, latest, names)
+    return Reentry(target, latest, () if pinned else names)
 
 
 def next_action(procedure: Mapping, inputs: Mapping[str, object], events: Sequence[Mapping]) -> Action:
