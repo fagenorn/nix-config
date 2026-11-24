@@ -212,6 +212,7 @@ agent-workflow-tests *args:
     tests/test_omlx_memory_fseventsd.py \
     tests/test_memory_budget.py \
     tests/test_omlx_memory_day.py \
+    tests/test_memory_floor.py \
     tests/test_verify_checks.py \
     tests/test_cleanup_fix_check.py \
     tests/test_suite_test_failures.py \
