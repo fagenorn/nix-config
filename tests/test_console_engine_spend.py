@@ -1,4 +1,4 @@
-"""The spend reader's engine sessions (#1532): a session the run ledger names is spent under its run, stage and sprint."""
+"""The spend reader's engine sessions: a session the run ledger names is spent under its run, stage and sprint."""
 
 import json
 import os
@@ -12,7 +12,7 @@ from agent_tools.console import spend
 from agent_tools.delivery import engine_ledger
 
 from . import console_test_support as support
-from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures
 
 TIER = "fast"
 

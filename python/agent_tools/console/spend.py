@@ -50,7 +50,7 @@ empty. A phase that does not begin with `CHILD_PHASE_PREFIX` is top-level, and t
 `run_program` of its top-level phases: `BATCH` when any is `Intake`, `Deliver` or `Land`, else
 `STANDARD` when any is `Plan` or `Tasks`, else `OTHER`.
 
-Engine runs (#1532, ADR-console-049): an engine agent session has no journal, so `read(..., engine_root)`
+Engine runs (ADR-console-049): an engine agent session has no journal, so `read(..., engine_root)`
 attributes it from the run ledger under `engine_root` (`<run>/run.json` read through
 `engine_ledger.read_run`, `<run>/events.jsonl` through the same incremental reader). Only the
 `step_entered` (step, visit, stage), `session_starting` and `session_resuming` (step, visit, session)
