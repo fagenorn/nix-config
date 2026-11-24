@@ -46,13 +46,13 @@ records for the project (None: none). The session's file is `records_path(ask)`:
 directory (0700), the question's id plus `RECORDS_SUFFIX`, mode 0600, written atomically after the
 settings file with exactly `ask.records`. The settings file is removed on every path once the run ends;
 the records file is removed then too unless the outcome is `ANSWERED`, when it is kept so the verify check
-can read its spend section (`question_check`, ADR-console-090 D3), and a write of any records file first removes
+can read its spend section (`question_check`, ADR-console-089), and a write of any records file first removes
 the kept files older than `RECORDS_KEPT_SECONDS` (90 days, the question's own retention). `prompt` puts `RECORDS_TEXT` with that path after the reads paragraph and before the
 thread text, only with records. With records it also gives each part of `question_records.SECTIONS`
 that the document holds as `<name> offset <n> limit <m>` (`SECTIONS_TEXT`, from `section_lines`), so
 the session reads one part alone, and it asks the session to cite the file with the parts it read in
 parentheses right after the file name, as `<path> (spend)`; a cost question is answered with figures
-from the spend part, and spend is null only when the console could not read its spend (ADR-console-090).
+from the spend part, and spend is null only when the console could not read its spend (ADR-console-089).
 No permission rule is added: Read is already admitted. A write that
 fails is a failed outcome (`RECORDS_UNWRITABLE`) and no session starts.
 
@@ -74,7 +74,7 @@ Read, Grep, Glob and the admitted commands to the root and the records file (`OU
 limit (ADR-console-101 D1).
 `checked_question` strips and refuses an empty question or one over `MAX_QUESTION_CHARS`;
 `parse_request` reads the page's strict JSON body of exactly `project_id` and `question`
-(`parse_keyed_request` also reads an optional `request_key`, ADR-console-089 D9).
+(`parse_keyed_request` also reads an optional `request_key`, ADR-console-089).
 A credential-shaped text (#1272) is refused first, with `CREDENTIAL`, before it is stored or sent:
 `credential_shaped(text)` is true when any pattern of `CREDENTIAL_SHAPES` (known token prefixes,
 key blocks, a `Bearer` value, a JWT, a `token`/`secret`/`password`-style assignment in any case,
@@ -119,7 +119,7 @@ stderr to a temporary file; `TimeoutExpired` (`TIMED_OUT`); a missing `claude-ac
 stdout: not an object with a string `result` (`UNREADABLE_TEXT`), `is_error` true (the result text),
 else `ANSWERED` with `answer_text`, which adds `NO_PRODUCTION_LINE` when no route is declared (D5).
 `asker_for(platform)` is `run_question` on Linux and macOS (what `manager.supported` admits), else None
-(ADR-console-081: a project question runs wherever a manager does).
+(ADR-console-058: a project question runs wherever a manager does).
 
 Fold and answer shape (#1177). `asked_questions(events, known)` folds the two row kinds into each
 project's questions, a tuple of `AskedQuestion` in ascending `seq`. An asked row counts only with
@@ -179,7 +179,7 @@ otherwise), and returns `parse_keyed_request`'s four with it, and `parse_keyed_r
 unless the thread's last question is not deep and has this very text: a Dig deeper is honoured only
 against the thread's current last light answer. The key names one request: an asked row carries `request_key` only when one was
 given, the fold keeps it only when it is a string fullmatching `REQUEST_KEY`, and the service asks
-a key once per project (ADR-console-089 D9).
+a key once per project (ADR-console-089).
 """
 
 from __future__ import annotations
@@ -915,7 +915,7 @@ def asked_questions(events: Iterable[Event],
 
 def question_keys(events: Iterable[Event],
                   known: Mapping[tuple[str, str], str] | None = None) -> dict[tuple[str, str], str]:
-    """`(project, request key)` to the id of the question asked under it, from the receipt rows (ADR-console-089 D9).
+    """`(project, request key)` to the id of the question asked under it, from the receipt rows (ADR-console-089).
 
     A receipt is kept whatever its age, so this outlives the asked row `asked_questions` folds; the first receipt of a key wins.
     """

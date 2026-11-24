@@ -11,9 +11,8 @@ Members, in order:
 
 - `lint`: `agnostic-lint` (`agent_tools.delivery.agnostic_lint --root <root>`),
   `context-map-lint` (`agent_tools.delivery.context_map_lint` with the root and
-  `docs/CONTEXT-MAP.md`) and `instruction-budget` (`agent_tools.instruction_load check`
-  with no base, so raise control against a base stays with CI). No lint member builds a
-  host configuration.
+  `docs/CONTEXT-MAP.md`) and `skill-lint` (`agent_tools.skill_lint check --root <root>`).
+  No lint member builds a host configuration.
 - `test`: `nix-build` (`just build`) then `agent-workflow-tests` (`just agent-workflow-tests`),
   which runs with `WORKFLOW_POLICY_SURFACE=source` added to its environment, the way CI runs
   it: before activation the suite checks the skills from source only (issue 1580). The
@@ -59,8 +58,8 @@ def members(command: str, root: Path) -> tuple[Member, ...]:
             Member("context-map-lint", (
                 *sibling_argv("delivery.context_map_lint"), "--repo-root", str(root),
                 "--context-map", str(root / "docs" / "CONTEXT-MAP.md"))),
-            Member("instruction-budget",
-                   (*sibling_argv("instruction_load"), "check", "--root", str(root))),
+            Member("skill-lint",
+                   (*sibling_argv("skill_lint"), "check", "--root", str(root))),
         )
     if command == "test":
         return (

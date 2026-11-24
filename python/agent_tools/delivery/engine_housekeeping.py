@@ -295,7 +295,10 @@ def _line(error: BaseException) -> str:
 
 def _remove(path: Path) -> bool:
     try:
-        shutil.rmtree(path)
+        try:
+            shutil.rmtree(path)
+        except FileNotFoundError:  # a concurrent sweep removes the same directory: finish what it left
+            shutil.rmtree(path, ignore_errors=not path.exists())
     except OSError as error:
         sys.stderr.write(f"engine: housekeeping could not remove {path}: {_line(error)}\n")
         return False

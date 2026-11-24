@@ -45,7 +45,7 @@ or 2 returns the parsed stdout object. A failed run raises `RunFailed(kind)`, `s
 `unreadable` (stdout is not a JSON object), `timed_out` (`subprocess.TimeoutExpired`), `not_installed`
 (`FileNotFoundError`, or `PermissionError` on the executable) and `unavailable` (any other
 `OSError`). `adopter_for(platform)` is `Adopter()` on Linux and macOS (what `manager.supported` admits), else None
-(ADR-console-081: registration and the adoption it opens run wherever a manager does).
+(ADR-console-028: registration and the adoption it opens run wherever a manager does).
 
 Plain lines. `plan_lines(document)` is the D4 list of ADR-console-028, each line only when its count
 is above zero, in this order: `moves N agent file(s)` (followed by ` under .agents/` when every move
@@ -173,7 +173,7 @@ current one and drops the new root's older entry), `roots` each registered proje
 with, else it names nothing; while another registered project still holds that root it changes
 nothing, else it drops the root from `before` and, when it is the shown
 registration's, folds back to the last entry of `before`, so a registration whose project left the
-registry gives the page back what it replaced (ADR-console-084 D1); a matching cancel folds to none
+registry gives the page back what it replaced (ADR-console-084); a matching cancel folds to none
 and clears `before`; `held` is `(latest, the saved planned row it replaced)` when the latest row was replanned over a stored plan (the retired light-lane field, #1445) and None otherwise, and `shown(fold, adoptions)` is the saved row instead of `latest` when the plan id's adoption is past `plans_again`; `latest(events, state)` is `fold(events, Fold(state, (), {})).latest`. `view_entry(running, latest, *, again=False, refusal=None, adoption=None,
 approve=None)` is that member, always the same twenty-two keys: the `running` entry (headline `Planning the adoption of <name>…`, or
 `again_headline(name)`, `Planning the adoption of <name> again with your answer…`, when `again`)

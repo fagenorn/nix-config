@@ -51,7 +51,7 @@ the same days. The caller starts the transcript read at the later of that
 date and 30 days ago. `run_issues(events, project_id)` is the run id to sorted issues mapping of the
 project's own delivery rows, the one the spend part and the transcript join share.
 
-Ownership of a path (ADR-console-089 D3). A checkout path can be registered to another project later,
+Ownership of a path (ADR-console-089). A checkout path can be registered to another project later,
 and the activation rows name a path and the spend view is attributed by today's registry, so neither
 says who owned the path when it was observed. The rows' registrations are folded in `seq` order
 (`project.registered` carries the root, `project.unregistered` ends it): the newest row at which a
@@ -67,7 +67,7 @@ rule may already be gone from an older log; an activation row at or before the s
 earliest retained registration at `root` is not counted either, since the project cannot have owned the path
 before it was registered there. With neither bound nothing is dropped.
 
-Scope (ADR-console-089 D3, D4). Every section holds only rows, keys and ids of `project_id`. A `delivery.seen` row counts
+Scope (ADR-console-089). Every section holds only rows, keys and ids of `project_id`. A `delivery.seen` row counts
 only when its project column is `project_id`. The activation rows have no project column, so one
 counts only when its payload's `root` equals `root`. A sprint counts only when its `project_id` is
 `project_id`, an inbox record only when `key[0]` is. The spend figures come only from
@@ -84,12 +84,12 @@ and the rest is still written. The `transcripts` part holds only what the
 
 Deliveries. The rows are walked in `seq` order and parsed by `deliveries.delivery_states`; a row that
 gives no state is skipped. A run is one `(session_id, run_id)`; its state is its last row's, and its
-`first_seen_at` and `last_seen_at` are the `at` of its first and last row. `live` (ADR-console-089 D3) is
+`first_seen_at` and `last_seen_at` are the `at` of its first and last row. `live` (ADR-console-089) is
 `(session_id, run_id) in live_runs`, the service's own answer from its current fold and its sessions,
 never inferred from the rows (a run of an ended session never gets a `delivery.gone` row). Any other
 recorded run is listed with `live` false and its last stage.
 
-Activations (ADR-console-089 D3). The rows of the project's root, in `seq` order, folded as `activation_run.fold`
+Activations (ADR-console-089). The rows of the project's root, in `seq` order, folded as `activation_run.fold`
 does: a started row opens an entry `running`; a finished row with a bool `ok` settles the newest open
 entry of its commit as `activated` or `failed`, or opens a settled one with `started_at` None. They
 are the console's record of why a production run failed. Newest first.
@@ -98,7 +98,7 @@ Held checks. An inbox item whose `reason` starts with `HELD_PREFIX` or equals `i
 a tracker `decision` item is not one. `waiting_since` and `answered_at` are the `InboxRecord`'s own
 attributes. Ordered by `(waiting_since, key)`.
 
-Sections (ADR-console-090). `SECTIONS` names the five top-level members a session reads alone, in the
+Sections (ADR-console-089). `SECTIONS` names the five top-level members a session reads alone, in the
 order the prompt lists them; `DEEP_SECTIONS` adds `transcripts`, which only a deeper question's prompt
 lists. `section_lines(text, names=SECTIONS)` gives, for each of `names` that `encode` wrote as a
 top-level member of `text`, `(offset, limit)` for Read: `offset` is the 1-based number of the line that

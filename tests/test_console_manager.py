@@ -1383,7 +1383,7 @@ BOB = "bob@example.invalid"
 
 
 class ColleagueAccountTest(unittest.TestCase):
-    """A colleague's account serves his own sprints first and anyone's when it has room (#1344, ADR-console-087 D1)."""
+    """A colleague's account serves his own sprints first and anyone's when it has room (#1344, ADR-console-087)."""
 
     def test_his_own_sprint_takes_his_account_while_it_has_room_though_an_owner_account_has_more(self):
         shown = cap(("work", "ok", 90, 90), ("colleague-1", "ok", 10, 10, None, False, False, ALICE))

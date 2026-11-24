@@ -17,5 +17,3 @@ Run `git push`, `git branch -d`, `gh pr create`, `gh pr merge` and
 redirection beyond an `unset GITHUB_TOKEN && ` prefix, an explicit `--repo`
 on each `gh` verb, and no `"`, `$`, backtick or backslash in a title,
 subject or body.
-
-Only the user applies the `instruction-budget-raise` label.

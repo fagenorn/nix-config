@@ -16,7 +16,7 @@ normal form (lowercase) or whose projects are not a non-empty list of non-empty 
 that login (fail closed); a row whose login is not a string is ignored.
 
 The tailnet name the door admits is never configured and never stored: it is read from this host's
-Tailscale client (ADR-console-078 D1). `self_name(status)` takes the parsed `tailscale status
+Tailscale client (ADR-console-078). `self_name(status)` takes the parsed `tailscale status
 --json` and returns `Self.DNSName` with exactly one trailing dot removed and lowercased, only when
 the raw string is ASCII (checked before any case change, because `str.lower` maps U+212A to an
 ASCII `k`) and the result is exactly `<host>.<tailnet>.ts.net`, two labels before `.ts.net` and no
@@ -38,7 +38,7 @@ the read name changes or sharing goes off, so a request is answered from the one
 admitted it and an open stream can tell a revocation that came and went while it was blocked.
 
 `admit(access, name, hosts, forwarded_hosts, logins)` returns `(login, None)` for an admitted request
-and `(None, text)` for a refused one (ADR-console-077 D4, ADR-console-078). The checks run in this
+and `(None, text)` for a refused one (ADR-console-077, ADR-console-078). The checks run in this
 order: sharing is off (`SHARING_OFF_TEXT`); the name is unread (`NAME_UNREAD_TEXT`); the request
 carries exactly one `Host` that, lowercased, is `LOCAL_HOST` (`localhost`, no port) and exactly one
 `X-Forwarded-Host` (`FORWARDED_HOST_HEADER`) that, lowercased, is the read name exactly, with no port
@@ -80,7 +80,7 @@ capacity profiles, and puts in their place the `pool` member (#1341, ADR-console
 builds it from the owner's capacity view: `POOL_MEMBERS` are `state`, `tight`, `all_out`,
 `resumes_at`, `no_reading` and `accounts`; each account row carries exactly `ACCOUNT_MEMBERS`: a
 neutral `label` (`Account <n>`, or `yours` on the page of a colleague holding a profile of that
-account, ADR-console-087 D4), the account's `number` (an `int`, the `<n>` of `Account <n>`, and
+account, ADR-console-087), the account's `number` (an `int`, the `<n>` of `Account <n>`, and
 the number of a `yours` row's account too: how a guest names an account in a write, #1345), its
 `ident` (a `yours` row's token, `own_tokens` of the account's profiles' recorded directory identities, each with its
 profile's sign-in generation, through `account_token`, else None: a number is recycled and a profile can be signed in
@@ -272,7 +272,7 @@ NO_OWN_SIGNIN_TEXT = "No sign-in of yours is running."
 
 
 def colleague_signin_text(profile: str, login: str) -> str:
-    """The owner's refusal to start a sign-in of a profile a colleague added (#1361, ADR-console-087 D3)."""
+    """The owner's refusal to start a sign-in of a profile a colleague added (#1361, ADR-console-087)."""
     return f"{profile} is {login}'s account, so only {login} can sign it in. You can sign it out or remove it."
 ACCOUNT_BUSY_TEXT = "That cannot be done right now. Try again in a moment."
 NOT_YOUR_ACCOUNT_TEXT = "That account is not yours."
