@@ -1010,9 +1010,9 @@ const LOCAL = BEFORE_PR ? setup.verification_before_pull_request : setup.verific
 const LOCAL_IDS = LOCAL.map(e => e.id)
 // The same text in deliver-batch.js.
 const PRE_PR_EVIDENCE = 'the verification above ran the pre-pull-request list, and CI on this pull request runs the full declared verification'
-// With the list set, every step that runs tests names its commands: the same texts in deliver-batch.js. An implementer's
-// pre-commit checks or formatter (FMT) stay in force beside them, so each sentence that limits the commands run says
-// only what this prompt asks before committing stays.
+// With the list set, every step that runs tests names its commands: the same texts in deliver-batch.js. An
+// implementer's pre-commit checks or formatter (FMT) stay in force beside them, so each sentence that limits the
+// commands run says only what this prompt asks before committing stays.
 const LOCAL_CMDS = JSON.stringify(LOCAL.map(e => ({ id: e.id, argv: e.argv, cwd: e.cwd })))
 const ONLY_PRE_COMMIT = 'only what this prompt says to run before committing'
 const RUN_LATER = `the delivery runs its pre-pull-request commands ${LOCAL_CMDS} itself, and the pull request's checks run the rest`

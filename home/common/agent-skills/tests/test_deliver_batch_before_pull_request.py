@@ -64,7 +64,7 @@ class PrePullRequestEvidenceTest(unittest.TestCase):
 
 
 def lsweep(extra):
-    """The two landing scenarios that reach every landing step that runs tests, each with `extra` merged into its patch."""
+    """The two landing scenarios that reach every landing step that runs tests, `extra` merged into each patch."""
     sync = dict(patch={**batch.BEHIND, **extra},
                 replies={"land-sync-1-1": batch.ABORTED, "land-sync-resolve-1-1": batch.SyncFixRoundTest.CONFLICTED,
                          "land-sync-review-1-1": FOUND})
