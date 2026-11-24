@@ -85,6 +85,7 @@ DAY_LINE = {
     "min_available_gib": 26.0, "others_budget_gib": 46, "over_budget": True, "jetsam_exits": 1,
     "peak_ci_jobs": 2, "samples": 1440, "loaded_samples": 1400, "min_loaded_available_gib": 28.0,
     "floor_gib": 16, "omlx_jetsam_priority": 100, "declared_jetsam_priority": 100,
+    "peak_fseventsd_gib": None, "fseventsd_restarts": 0,
 }
 
 

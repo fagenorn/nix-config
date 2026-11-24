@@ -29,6 +29,21 @@ killer's (`jetsam`), and when available memory falls under the floor while a mod
 is delivered through `agent_tools.hosts.host_alerts`, in order, before the state is written;
 one that fails stays queued, is logged once and is retried by the next sample.
 
+`fseventsd --record FILE --limit-gib N [--min-restart-minutes 60] [--label com.apple.fseventsd]
+[--launchctl PATH] [--footprint PATH] [--kill PATH] [--now ISO8601]` runs as root: it reads the
+`pid` of `launchctl print system/<label>` and its `footprint`, and sends `kill -TERM` when the
+footprint is known and over the limit (strictly) and the last restart is null or at least the
+interval ago; over the limit inside the interval it holds. It replaces FILE (default
+`/var/db/memory-watch/fseventsd.json`, directory 0755, file 0644, atomically) with `at`, `pid`,
+`footprint_bytes` (null when unread), `limit_bytes`, `restarts`, `last_restart_at`, `held` and
+`restart_failed`. Exit 1 when the kill fails (the record says `restart_failed`) or launchctl
+shows no pid (no record). It never reads the alert settings and sends nothing: `sample
+[--fseventsd-record FILE]` reads the record once per run, keeps `fseventsd_bytes`,
+`peak_fseventsd_bytes`, `fseventsd_restarts_seen`, `fseventsd_restarts_today` and
+`fseventsd_held_open` in the state, writes `peak_fseventsd_gib` and `fseventsd_restarts` to the
+day line, and queues `fseventsd_restarted` when `restarts` rose and `fseventsd_held` once per
+held episode. A missing or non-JSON record is not a failed reading.
+
 Exit 0: recorded, every alert delivered or recorded. 3: recorded, at least one alert not sent
 (stderr `host alert not sent: <reason>`). 1: `vm_stat`, `sysctl`, `launchctl` or `ps` failed
 or printed nothing parseable (stderr names it; nothing is written). 2: usage. A failed
@@ -43,13 +58,20 @@ import re
 import subprocess
 import sys
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from agent_tools.hosts import host_alerts
 
 GIB = 1024**3
 PROG = "omlx-memory-watch"
+FSEVENTSD_RECORD = "/var/db/memory-watch/fseventsd.json"
+FSEVENTSD_LABEL = "com.apple.fseventsd"
+FSEVENTSD_MINUTES = 60
+FSEVENTSD_DEFAULTS = {
+    "fseventsd_bytes": None, "peak_fseventsd_bytes": None, "fseventsd_restarts_seen": None,
+    "fseventsd_restarts_today": 0, "fseventsd_held_open": False,
+}
 STATE_NAME = "memory-watch.json"
 PEAKS_NAME = "memory-peaks.jsonl"
 RUN_TIMEOUT = 30
@@ -120,6 +142,7 @@ def fresh_day(since: str, day: str) -> dict:
         "peak_omlx_bytes": None, "min_available_bytes": None, "samples": 0, "loaded_samples": 0,
         "min_loaded_available_bytes": None, "peak_ci_jobs": 0, "jetsam_exits": 0, "omlx_runs": None,
         "omlx_jetsam_priority": None, "low_memory_open": False, "pending": [],
+        **FSEVENTSD_DEFAULTS,
     }
 
 
@@ -153,7 +176,56 @@ def _day_line(state: dict, floor_bytes: int, others_budget_bytes: int, declared:
         "floor_gib": floor_bytes // GIB,
         "omlx_jetsam_priority": state["omlx_jetsam_priority"],
         "declared_jetsam_priority": declared,
+        "peak_fseventsd_gib": _gib(state["peak_fseventsd_bytes"]),
+        "fseventsd_restarts": state["fseventsd_restarts_today"],
     }
+
+
+def _int(value) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _gib_text(value) -> str:
+    return "unknown" if _int(value) is None else f"{value / GIB:.1f}"
+
+
+def _minutes_since(last, at) -> int:
+    try:
+        return max(0, int((datetime.fromisoformat(at) - datetime.fromisoformat(last)).total_seconds() // 60))
+    except (TypeError, ValueError):
+        return FSEVENTSD_MINUTES
+
+
+def _fold_fseventsd(state: dict, found: dict | None, host: str) -> None:
+    found = found or {}
+    size = _int(found.get("footprint_bytes"))
+    state["fseventsd_bytes"] = size
+    if size is not None:
+        state["peak_fseventsd_bytes"] = _higher(state["peak_fseventsd_bytes"], size)
+    limit = _int(found.get("limit_bytes"))
+    limit_text = "unknown" if limit is None else str(limit // GIB)
+    restarts = _int(found.get("restarts"))
+    if restarts is not None:
+        seen = state["fseventsd_restarts_seen"]
+        if seen is not None and restarts > seen:
+            state["fseventsd_restarts_today"] += restarts - seen
+            state["pending"].append({
+                "kind": "fseventsd_restarted", "logged": False,
+                "text": f"{host}: fseventsd was restarted at {_gib_text(size)} GiB "
+                        f"(limit {limit_text} GiB). {SEE}",
+            })
+        state["fseventsd_restarts_seen"] = restarts
+    if found.get("held") is True:
+        if not state["fseventsd_held_open"]:
+            state["fseventsd_held_open"] = True
+            minutes = _minutes_since(found.get("last_restart_at"), found.get("at"))
+            state["pending"].append({
+                "kind": "fseventsd_held", "logged": False,
+                "text": f"{host}: fseventsd is at {_gib_text(size)} GiB, over {limit_text} GiB within "
+                        f"{minutes} minutes of its last restart, and was not restarted. {SEE}",
+            })
+    else:
+        state["fseventsd_held_open"] = False
 
 
 def decide(state, reading: dict, now: datetime, floor_bytes: int, others_budget_bytes: int):
@@ -163,11 +235,12 @@ def decide(state, reading: dict, now: datetime, floor_bytes: int, others_budget_
     if state is None:
         state = fresh_day(day, day)
     else:
-        state = {**state, "pending": [dict(entry) for entry in state["pending"]]}
+        state = {**FSEVENTSD_DEFAULTS, **state, "pending": [dict(entry) for entry in state["pending"]]}
         if state["day"] != day:
             line = _day_line(state, floor_bytes, others_budget_bytes, reading["declared_jetsam_priority"])
             carried = fresh_day(state["since"], day)
-            for key in ("omlx_runs", "omlx_jetsam_priority", "low_memory_open", "pending"):
+            for key in ("omlx_runs", "omlx_jetsam_priority", "low_memory_open", "pending",
+                        "fseventsd_restarts_seen", "fseventsd_held_open"):
                 carried[key] = state[key]
             state = carried
     used, available, loaded = reading["used_bytes"], reading["available_bytes"], reading["loaded"]
@@ -205,6 +278,7 @@ def decide(state, reading: dict, now: datetime, floor_bytes: int, others_budget_
             })
     else:
         state["low_memory_open"] = False
+    _fold_fseventsd(state, reading["fseventsd"], reading["host"])
     return state, line
 
 
@@ -227,6 +301,85 @@ def read_footprint(footprint: str, pid: int | None) -> int | None:
     except (OSError, subprocess.SubprocessError):
         return None
     return parse_footprint(done.stdout) if done.returncode == 0 else None
+
+
+def read_fseventsd_record(path: Path) -> dict | None:
+    try:
+        document = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    return document if isinstance(document, dict) else None
+
+
+def fseventsd_step(record, pid, footprint_bytes, now, limit_bytes, min_interval):
+    """Decide one fseventsd check; answer the new record (as if a restart succeeds) and whether to kill."""
+    record = record or {}
+    restarts = _int(record.get("restarts")) or 0
+    last = record.get("last_restart_at")
+    over = footprint_bytes is not None and footprint_bytes > limit_bytes
+    due = True
+    if over and last is not None:
+        try:
+            due = now - datetime.fromisoformat(last) >= min_interval
+        except (TypeError, ValueError):
+            due = True
+    restart = over and due
+    if restart:
+        restarts, last = restarts + 1, now.isoformat()
+    return {
+        "at": now.isoformat(), "pid": pid, "footprint_bytes": footprint_bytes,
+        "limit_bytes": limit_bytes, "restarts": restarts, "last_restart_at": last,
+        "held": over and not due, "restart_failed": False,
+    }, restart
+
+
+def write_record(path: Path, document: dict) -> None:
+    if not path.parent.exists():
+        path.parent.mkdir(parents=True)
+        path.parent.chmod(0o755)
+    temporary = path.parent / f".{path.name}.{os.getpid()}.tmp"
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+    try:
+        os.fchmod(descriptor, 0o644)
+        with os.fdopen(descriptor, "w") as handle:
+            handle.write(json.dumps(document, indent=2) + "\n")
+        os.replace(temporary, path)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+def fseventsd(args) -> int:
+    now = args.now if args.now is not None else datetime.now().astimezone()
+    try:
+        service = parse_launchctl(_run("launchctl", [args.launchctl, "print", f"system/{args.label}"]))
+    except (ReadingError, ValueError) as error:
+        print(f"{PROG}: {error}", file=sys.stderr)
+        return 1
+    pid = service["pid"]
+    if pid is None:
+        print(f"{PROG}: launchctl shows no pid for {args.label}", file=sys.stderr)
+        return 1
+    previous = read_fseventsd_record(args.record)
+    document, restart = fseventsd_step(
+        previous, pid, read_footprint(args.footprint, pid), now, args.limit_gib * GIB,
+        timedelta(minutes=args.min_restart_minutes))
+    status = 0
+    if restart:
+        try:
+            killed = subprocess.run(
+                [args.kill, "-TERM", str(pid)], capture_output=True, text=True, timeout=RUN_TIMEOUT)
+            failure = None if killed.returncode == 0 else f"kill exited {killed.returncode}"
+        except (OSError, subprocess.SubprocessError) as error:
+            failure = f"kill could not run ({type(error).__name__})"
+        if failure:
+            print(f"{PROG}: {failure}", file=sys.stderr)
+            before = previous or {}
+            document = {**document, "restarts": _int(before.get("restarts")) or 0,
+                        "last_restart_at": before.get("last_restart_at"), "restart_failed": True}
+            status = 1
+    write_record(args.record, document)
+    return status
 
 
 def _run(name: str, argv: list[str]) -> str:
@@ -257,6 +410,7 @@ def take_reading(args) -> dict:
         "runs": service["runs"], "last_exit_reason": service["last_exit_reason"],
         "jetsam_priority": service["jetsam_priority"],
         "declared_jetsam_priority": args.omlx_jetsam_priority,
+        "fseventsd": read_fseventsd_record(args.fseventsd_record),
     }
 
 
@@ -342,13 +496,23 @@ def build_parser() -> argparse.ArgumentParser:
     one.add_argument("--alert-settings", type=Path, default=None)
     one.add_argument("--alert-log", type=Path, default=None)
     one.add_argument("--telegram-api", default=None)
+    one.add_argument("--fseventsd-record", type=Path, default=Path(FSEVENTSD_RECORD))
     one.add_argument("--now", type=datetime.fromisoformat, default=None)
+    trim = commands.add_parser("fseventsd", help="restart fseventsd above its limit and record its size")
+    trim.add_argument("--record", type=Path, required=True)
+    trim.add_argument("--limit-gib", type=int, required=True)
+    trim.add_argument("--min-restart-minutes", type=int, default=FSEVENTSD_MINUTES)
+    trim.add_argument("--label", default=FSEVENTSD_LABEL)
+    trim.add_argument("--launchctl", default="/bin/launchctl")
+    trim.add_argument("--footprint", default="/usr/bin/footprint")
+    trim.add_argument("--kill", default="/bin/kill")
+    trim.add_argument("--now", type=datetime.fromisoformat, default=None)
     return parser
 
 
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
-    return sample(args)
+    return fseventsd(args) if args.command == "fseventsd" else sample(args)
 
 
 if __name__ == "__main__":
