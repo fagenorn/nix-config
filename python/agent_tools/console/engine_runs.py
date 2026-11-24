@@ -152,6 +152,10 @@ class EngineRuns:
         self._tails: dict[str, _Tail] = {}
         self._states: dict[str, RunState] = {}
 
+    @property
+    def root(self) -> Path:
+        return self._root
+
     def poll(self) -> EnginePoll:
         names = self._names()
         unreadable: list[tuple[str, str]] = []

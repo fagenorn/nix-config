@@ -488,9 +488,8 @@ only. `unmanaged` is always present, possibly empty, sorted by `root`.
     at or after a moment has seen the tracker as it was then); after a restart `read_at` is the time of the last
     logged change between good and failed reads and `began_at` is null. It is null before any read, never a guessed time.
 
-    `engine_runs` is the `engine_runs` argument's runs of this project as `engine_runs.project_lines` gives them, in issue
-    order, each carrying `spend` (`spend.run_figure` of the passed spend view); it is empty without the argument,
-    a run of an unregistered project shows nowhere, and a project with one is active.
+    `engine_runs` is the `engine_runs` argument's runs of this project as `engine_runs.project_lines` gives them (each with
+    its `spend`), in issue order; it is empty without the argument, a run of an unregistered project shows nowhere, and a project with one is active.
     A run stopped with a `need` other than `nothing` counts once in `inbox_items` and the headline; alone, it sets `ENGINE_SENTENCE`.
 
     <wait entry> = {"key", "issue": <int>, "url", "until": "<ISO time>" | null, "text": "<text>"}

@@ -699,15 +699,12 @@ function spendDollars(dollars) {
   const parts = dollars.toFixed(2).split(".");
   return parts[0].replace(/\B(?=(\d{3})+(?!\d))/g, ",") + "." + parts[1];
 }
-function spendLink(kind, id, found) {
-  if (found === undefined || found === null || !(found.tokens > 0)) return null;
+function spendFigure(kind, id, found = spendNow[kind].get(id)) {
+  if (!found || !(found.tokens > 0)) return null;
   const link = el("a", "spend", spendCount(found.tokens) + " tokens, about $" + spendDollars(found.dollars));
   link.href = "/spend#" + kind + "=" + encodeURIComponent(id);
   link.setAttribute("title", "Estimated at API list prices" + (found.approximate ? ", approximate" : ""));
   return link;
-}
-function spendFigure(kind, id) {
-  return spendLink(kind, id, spendNow[kind].get(id));
 }
 function spendLine(kind, id) {
   const figure = spendFigure(kind, id);
@@ -731,12 +728,7 @@ function lineFold(key, nameNode, words, outside, root, engineRuns) {
   fold.appendChild(el("span", "root", root));
   if (engineRuns.length > 0) {
     const engineList = el("ul");
-    for (const run of engineRuns) {
-      const li = phrase("li", "run engine", el("span", "issue", "#" + run.issue), phrase("span", "stage", run.text, ...engineUntil(run)));
-      const figure = spendLink("run", run.run_id, run.spend || null);
-      if (figure !== null) li.appendChild(figure);
-      engineList.appendChild(li);
-    }
+    for (const run of engineRuns) engineList.appendChild(phrase("li", "run engine", el("span", "issue", "#" + run.issue), phrase("span", "stage", run.text, ...engineUntil(run)), spendFigure("run", run.run_id, run.spend || null)));
     fold.appendChild(phrase("div", "outside", el("h3", "", "Engine runs"), engineList));
   }
   if (outside.sessions.length === 0) return fold;
@@ -3207,7 +3199,7 @@ function timeEl(form, stamp, cls) {
 }
 function phrase(tag, cls, ...parts) {
   const node = el(tag, cls);
-  for (const part of parts) node.appendChild(typeof part === "string" ? el("span", "", part) : part);
+  for (const part of parts) if (part !== null) node.appendChild(typeof part === "string" ? el("span", "", part) : part);
   return node;
 }
 function outWords(p, cls) {

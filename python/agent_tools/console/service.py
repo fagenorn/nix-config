@@ -4783,7 +4783,6 @@ class ConsoleService:
         self._sessions: dict[str, sessions.SessionState] = {}
         self._use = manager.ProfileUse({}, {})
         self._spend = spend.SpendReader(repo_of=repo_of)
-        self._engine_root = engine_runs_root
         self._spend_view: dict | None = None
         self._spend_lock = threading.Lock()
         self._spend_profiles: dict[str, str] = {}
@@ -10466,7 +10465,7 @@ class ConsoleService:
                 projects_dirs.append(projects)
         today = datetime.fromtimestamp(self._clock(), timezone.utc).date()
         since = (today - timedelta(days=spend.WINDOW_DAYS - 1)).isoformat()
-        self._spend.read(projects_dirs, since, self._ping_log(), engine_root=self._engine_root)
+        self._spend.read(projects_dirs, since, self._ping_log(), engine_root=None if self._engine is None else self._engine.root)
         if self._spend.roots_unreadable and self._spend_view is None:
             # A cold start whose only transcript roots cannot be listed knows no spend: publishing the empty totals
             # would show 30 zero days, so the view stays absent and the records' spend stays null.
