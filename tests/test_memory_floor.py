@@ -61,7 +61,7 @@ def table_of(*procs):
     return {p.pid: p for p in procs}
 
 
-LIMITS = Limits(16 * GIB, 3, 5, 16 * GIB, 2 * GIB, 2, 10, 24 * GIB, 100)
+LIMITS = Limits(16 * GIB, 3, 5, 16 * GIB, 2 * GIB, 2, 10, 24 * GIB, 190)
 KILL_LINE = re.compile(
     r"^2026-11-24T12:33:05\+00:00 memory_kill reason=(floor|run_bound) owner=anis root_pid=300"
     r' root="node vitest run" processes=3 tree_gib=\d+\.\d available_before_gib=\d+\.\d'
