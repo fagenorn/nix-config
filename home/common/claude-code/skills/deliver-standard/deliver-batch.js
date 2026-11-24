@@ -2450,3 +2450,4 @@ return {
   relaunch: open.length ? relaunchArgs() : null,
   ...(breaker ? { breaker } : {}),
 }
+// suppress-standard:B17 the batch's phases share module state (setup, the landing loop), so it stays one file
