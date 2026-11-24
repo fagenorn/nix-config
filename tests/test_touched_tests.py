@@ -3,13 +3,17 @@
 `agent_tools.delivery.touched_tests` selects the agent workflow suite's members a branch
 touches, builds the host first when a build input changed, and runs the selection through
 the suite runner. `SelectTest` and `BuildTriggerTest` run the pure functions on fixtures,
-`MainTest` runs `main` against a real temporary git repository with a recording stub for
+`SelectionTableTest` pins the selection each kind of diff gets, `MainTest` runs `main` against a real temporary git repository with a recording stub for
 every command it would start, and `RecipeTest` reads the repository's justfile.
 """
 
 import contextlib
+import fnmatch
+import importlib
 import io
+import json
 import os
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -18,7 +22,8 @@ from pathlib import Path
 from unittest import mock
 
 from agent_tools.delivery.suite_runner import suite_members
-from agent_tools.delivery.touched_tests import build_trigger, main, select
+from agent_tools.delivery.touched_tests import (
+    SELECTION_ENV, build_trigger, default_execute, main, select, selection)
 
 TIER = "integration"  # MainTest builds a git repository
 
@@ -30,6 +35,15 @@ def reader(texts):
     def read(path):
         return texts.get(path, "")
     return read
+
+
+def hermetic_env(environ):
+    env = {k: v for k, v in environ.items()
+           if not k.startswith("GIT_") and k != SELECTION_ENV}
+    env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull,
+               GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@example.invalid",
+               GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@example.invalid")
+    return env
 
 
 class SelectTest(unittest.TestCase):
@@ -91,6 +105,53 @@ class SelectTest(unittest.TestCase):
         self.assertEqual(result, ["tests/test_zed.py", "tests/test_alpha.py"])
 
 
+class SelectionTableTest(unittest.TestCase):
+    MEMBERS = ["tests/test_engine_slots.py", "tests/test_engine_core.py",
+               "tests/test_engine_stubbed_run.py", "tests/test_touched_tests.py",
+               "tests/test_unrelated.py"]
+    TEXTS = {
+        "tests/test_engine_core.py": "from agent_tools.delivery import engine_core\n",
+        "tests/test_engine_stubbed_run.py": "from tests.engine_stubbed_world import StubbedRun\n",
+        "tests/test_touched_tests.py": "from agent_tools.delivery.touched_tests import main\n",
+        "tests/test_unrelated.py": "import json\n",
+    }
+    COVERS = {"python/agent_tools/delivery/engine*.py": ["tests/test_engine_*.py"],
+              "python/agent_tools/delivery/procedure_check.py": ["tests/test_engine_*.py"]}
+    PAIRS = {"home/common/claude-code/lifecycle_guard.py": ["tests/test_claude_permission_guard.py"]}
+    ENGINE_TIER = ["tests/test_engine_slots.py", "tests/test_engine_core.py",
+                   "tests/test_engine_stubbed_run.py"]
+
+    def test_each_diff_selects_its_row(self):
+        everything = self.MEMBERS
+        rows = {
+            "engine module and its test": (
+                ["python/agent_tools/delivery/engine_slots.py", "tests/test_engine_slots.py"],
+                False, [], self.ENGINE_TIER),
+            "a file CI cannot test": (["hosts/m.nix"], True, ["hosts/m.nix"], everything),
+            "a file CI cannot test beside an engine module": (
+                ["hosts/m.nix", "python/agent_tools/delivery/engine_core.py"],
+                True, ["hosts/m.nix"], everything),
+            "a file CI cannot test beside the guard": (
+                ["hosts/m.nix", "home/common/claude-code/lifecycle_guard.py"],
+                True, ["hosts/m.nix"], everything + ["tests/test_claude_permission_guard.py"]),
+            "nothing a member covers": (["docs/notes.md"], False, [], []),
+            "a module outside the engine": (
+                ["python/agent_tools/delivery/touched_tests.py"],
+                False, [], ["tests/test_touched_tests.py"]),
+            "an engine module outside engine*.py and its test": (
+                ["python/agent_tools/delivery/procedure_check.py", "tests/test_engine_slots.py"],
+                False, [], self.ENGINE_TIER),
+        }
+        for name, (changed, full, because, selected) in rows.items():
+            with self.subTest(row=name):
+                self.assertEqual(
+                    selection(changed, self.MEMBERS, reader(self.TEXTS),
+                              source_roots=["python"], pairs=self.PAIRS, covers=self.COVERS,
+                              build_globs=["*.nix"]),
+                    {"changed": changed, "full": full, "full_because": because,
+                     "selected": selected})
+
+
 class BuildTriggerTest(unittest.TestCase):
     def test_a_build_glob_matches_nested_paths(self):
         self.assertEqual(build_trigger(["hosts/darwin/m/default.nix"], ["*.nix"]),
@@ -105,16 +166,15 @@ class MainTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
-        self.env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-        self.env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull,
-                        GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@example.invalid",
-                        GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@example.invalid")
+        self.env = hermetic_env(os.environ)
         patcher = mock.patch.dict(os.environ, self.env, clear=True)
         patcher.start()
         self.addCleanup(patcher.stop)
         self.git("init", "-q", "-b", "main")
         self.write("justfile", "agent-workflow-tests *args:\n  runner {{args}} \\\n"
-                               "    tests/test_alpha.py\n")
+                               "    tests/test_alpha.py \\\n    tests/test_beta.py\n")
+        self.write("tests/test_alpha.py", "from pkg import alpha\n")
+        self.write("tests/test_beta.py", "import json\n")
         self.write("python/pkg/alpha.py", "VALUE = 1\n")
         self.write("hosts/m.nix", "{ }\n")
         self.commit("first")
@@ -156,13 +216,62 @@ class MainTest(unittest.TestCase):
         self.assertEqual(self.calls, [([*RUNNER, "tests/test_alpha.py"], self.root)])
         self.assertEqual(code, 3)
 
-    def test_a_build_input_change_builds_before_the_suite(self):
+    def test_a_build_input_change_builds_and_runs_every_member(self):
         code, _, err = self.run_main("--base", "HEAD~1", "--source-root", "python",
                                      "--build-command", "just build", "--build-when", "*.nix")
         self.assertEqual([argv for argv, _ in self.calls],
-                         [["just", "build"], [*RUNNER, "tests/test_alpha.py"]])
+                         [["just", "build"], [*RUNNER, "tests/test_alpha.py", "tests/test_beta.py"]])
         self.assertIn("hosts/m.nix", err)
         self.assertEqual(code, 0)
+
+    def test_main_writes_the_selection_to_the_file_the_variable_names(self):
+        out = self.root / "selection.json"
+        with mock.patch.dict(os.environ, {SELECTION_ENV: str(out)}):
+            self.run_main("--base", "HEAD~1", "--source-root", "python")
+        self.assertEqual(json.loads(out.read_text()),
+                         {"base": "HEAD~1", "changed": ["hosts/m.nix", "python/pkg/alpha.py"],
+                          "full": False, "full_because": [], "selected": ["tests/test_alpha.py"]})
+
+    def test_the_suite_file_flag_reads_the_members_from_that_file(self):
+        self.write("suite.just", "agent-workflow-tests *args:\n  runner {{args}} \\\n"
+                                 "    tests/test_gamma.py\n")
+        self.write("tests/test_gamma.py", "from pkg import alpha\n")
+        self.run_main("--base", "HEAD~1", "--source-root", "python",
+                      "--suite-file", "suite.just")
+        self.assertEqual([argv for argv, _ in self.calls], [[*RUNNER, "tests/test_gamma.py"]])
+
+    def test_an_empty_selection_is_still_written(self):
+        out = self.root / "selection.json"
+        with mock.patch.dict(os.environ, {SELECTION_ENV: str(out)}):
+            code, _, _ = self.run_main("--base", "HEAD", "--source-root", "python")
+        document = json.loads(out.read_text())
+        self.assertEqual(code, 0)
+        self.assertEqual(self.calls, [])
+        self.assertEqual((document["selected"], document["changed"]), ([], []))
+
+    def test_a_selection_that_cannot_be_written_changes_no_exit(self):
+        out = self.root / "missing" / "selection.json"
+        with mock.patch.dict(os.environ, {SELECTION_ENV: str(out)}):
+            code, _, err = self.run_main("--base", "HEAD~1", "--source-root", "python")
+        self.assertEqual(code, 0)
+        self.assertIn("test-touched: cannot write the selection to", err)
+
+    def test_a_cover_without_an_equals_sign_is_a_usage_error(self):
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as raised:
+            main(["--base", "HEAD", "--root", str(self.root), "--cover", "a.py"])
+        self.assertEqual(raised.exception.code, 2)
+
+    def test_the_commands_main_starts_do_not_see_the_selection_variable(self):
+        probe = "import os, sys; sys.exit(3 if 'VERIFIED_TREE_SELECTION' in os.environ else 0)"
+        with mock.patch.dict(os.environ, {SELECTION_ENV: str(self.root / "selection.json")}):
+            code = default_execute([sys.executable, "-c", probe], self.root)
+        self.assertEqual(code, 0)
+
+    def test_the_hermetic_environment_drops_the_selection_variable(self):
+        env = hermetic_env({"VERIFIED_TREE_SELECTION": "x", "GIT_DIR": "y", "HOME": "h"})
+        self.assertNotIn("VERIFIED_TREE_SELECTION", env)
+        self.assertNotIn("GIT_DIR", env)
+        self.assertEqual(env["HOME"], "h")
 
     def test_a_failed_build_stops_before_the_suite(self):
         code, _, _ = self.run_main("--base", "HEAD~1", "--source-root", "python",
@@ -218,6 +327,29 @@ class RecipeTest(unittest.TestCase):
         self.assertIn("--build-when '*.nix'", self.recipe)
         self.assertIn("--build-when flake.lock", self.recipe)
         self.assertIn("build target_host=hostname", self.justfile)
+
+    def test_the_recipe_covers_the_engine_with_its_tier(self):
+        for source in ["python/agent_tools/delivery/engine*.py",
+                       "python/agent_tools/delivery/host_admission.py",
+                       "python/agent_tools/delivery/procedure_check.py",
+                       "python/agent_tools/delivery/procedures/*",
+                       "tests/engine_*.py", "tests/fixtures/engine-*"]:
+            self.assertIn(f"--cover '{source}=tests/test_engine_*.py'", self.recipe)
+        self.assertTrue(any(fnmatch.fnmatchcase(m, "tests/test_engine_*.py")
+                            for m in suite_members(self.justfile)))
+
+    def test_the_recipe_covers_every_engine_module_with_the_engine_tier(self):
+        words = shlex.split(self.recipe.splitlines()[-1])
+        covers = [words[i + 1].split("=", 1) for i, w in enumerate(words) if w == "--cover"]
+        caps = importlib.import_module("agent_tools.delivery.engine_caps")
+        modules = [p.relative_to(REPO_ROOT).as_posix()
+                   for p in caps.engine_modules(REPO_ROOT / "python/agent_tools/delivery")]
+        self.assertIn("python/agent_tools/delivery/procedure_check.py", modules)
+        for module in modules:
+            with self.subTest(module=module):
+                self.assertTrue(any(fnmatch.fnmatchcase(module, source)
+                                    and fnmatch.fnmatchcase("tests/test_engine_*.py", member)
+                                    for source, member in covers))
 
     def test_this_test_is_a_suite_member(self):
         self.assertIn("tests/test_touched_tests.py", suite_members(self.justfile))
