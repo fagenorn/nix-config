@@ -303,7 +303,7 @@ def sweep(binding, verification=DEFAULT, scenarios=SWEEP):
 
 
 class SetBindingPromptsTest(unittest.TestCase):
-    """#1695: with the pre-pull-request list set, every step that runs tests names its commands and no suite."""
+    """With the pre-pull-request list set, every step that runs tests names its commands and no suite."""
 
     def test_with_the_binding_set_every_step_that_runs_tests_names_its_commands(self):
         for expected, calls in sweep(LOCAL_ONE):
