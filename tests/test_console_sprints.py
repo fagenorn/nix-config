@@ -2346,6 +2346,12 @@ class ActionCardTest(unittest.TestCase):
                 self.assertEqual(
                     self.refused({**ACTION, "action": {"command": command, "approve": "sqlite"}}),
                     sprints.ACTION_COMMAND.format(n=1))
+        hebrew = "echo hi \u05d0# ;>\u05d0 rm -rf ~"  # drawn in logical order by the card's CSS
+        arabic = "echo \u0627\u0628 \u0661\u0662"
+        for command in (hebrew, arabic):
+            checked = sprints.checked_round({"questions": [
+                {**ACTION, "action": {"command": command, "approve": "sqlite"}}]})
+            self.assertEqual(checked["questions"][0]["action"]["command"], command)
         accented = "echo caf\u00e9 \u65e5\u672c"
         checked = sprints.checked_round({"questions": [
             {**ACTION, "action": {"command": accented, "approve": "sqlite"}}]})

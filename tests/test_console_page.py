@@ -5427,6 +5427,16 @@ class PageActionTest(unittest.TestCase):
         kids = lead["children"]
         self.assertLess(kids.index(line), kids.index(command))
 
+    def test_the_command_is_drawn_in_logical_order_whatever_letters_it_holds(self) -> None:
+        # Right-to-left letters are legitimate text, so the card cannot refuse them; without a bidi
+        # override the browser would reorder and mirror the characters between two of them, and the
+        # owner would read other than the bytes that run (e.g. "echo hi \u05d0#" then ">\u05d0 rm").
+        (rule,) = re.findall(r"\.card \.action-command \{([^}]*)\}", PAGE.read_text(encoding="utf-8"))
+        declarations = {key.strip(): value.strip()
+                        for key, value in (part.split(":", 1) for part in rule.split(";") if part.strip())}
+        self.assertEqual(declarations["direction"], "ltr")
+        self.assertEqual(declarations["unicode-bidi"], "bidi-override")
+
     def test_a_question_with_no_action_shows_no_action_nodes(self) -> None:
         (snap,) = render([START, {"frame": frame([Q0])}, {"snapshot": True}])
         found = [n for n in nodes(snap["inbox"])
