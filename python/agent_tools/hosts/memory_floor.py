@@ -26,6 +26,11 @@ here, on the running pid, through `memorystatus_control`: a relaunched oMLX gets
 priority on the next sample. The record keeps the value read at the start of each sample (before
 any set) and counts the samples that found it changed again after a set succeeded, so a value that
 does not hold shows; a read-back right after a set would prove nothing.
+
+The `gate` command is the oMLX relaunch gate: it runs before `exec omlx serve` and waits while
+available memory is under the floor, so it holds only a starting oMLX, never a serving one, and
+launchd's KeepAlive still owns the relaunch. It only reads memory (it signals nothing and runs no
+launchctl) and starts at once when memory cannot be read.
 """
 
 import argparse
@@ -280,6 +285,28 @@ def read_available(vm_stat: str, sysctl: str) -> int:
         return int(sysctl.strip()) - used_bytes(parse_vm_stat(vm_stat))
     except ValueError as error:
         raise ReadingError(f"memory output not parseable ({error})") from None
+
+
+def wait_for_floor(
+    read_available: Callable[[], int], floor_bytes: int, interval: float,
+    sleep: Callable[[float], None], log: Callable[[str], None],
+) -> int:
+    """Wait while available memory is under the floor; return the number of waits."""
+    waits = 0
+    while True:
+        try:
+            available = read_available()
+        except ReadingError as error:
+            log(f"oMLX start: memory unreadable ({error}); starting")
+            return waits
+        if available >= floor_bytes:
+            if waits:
+                log(f"oMLX start: available {available / GIB:.1f} GiB, starting after {waits} waits")
+            return waits
+        if not waits:
+            log(f"oMLX start waits: available {available / GIB:.1f} GiB is under the {floor_bytes // GIB} GiB floor")
+        waits += 1
+        sleep(interval)
 
 
 def next_interval(limits: Limits, available: int, previous: int | None, streak: int) -> float:
@@ -570,6 +597,11 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--ps", default="/bin/ps")
     run.add_argument("--libproc", default="/usr/lib/libproc.dylib")
     run.add_argument("--once", action="store_true")
+    gate = commands.add_parser("gate", help="hold oMLX's start until available memory is back over the floor")
+    gate.add_argument("--floor-gib", type=int, required=True)
+    gate.add_argument("--interval-seconds", type=float, required=True)
+    gate.add_argument("--vm-stat", default="/usr/bin/vm_stat")
+    gate.add_argument("--sysctl", default="/usr/sbin/sysctl")
     return parser
 
 
@@ -608,8 +640,23 @@ def enforce(args) -> int:
         io.sleep(interval)
 
 
+def _log_line(line: str) -> None:
+    print(line, file=sys.stderr, flush=True)
+
+
+def gate(args) -> int:
+    def available() -> int:
+        return read_available(
+            _run("vm_stat", [args.vm_stat]), _run("sysctl", [args.sysctl, "-n", "hw.memsize"])
+        )
+
+    wait_for_floor(available, args.floor_gib * GIB, args.interval_seconds, time.sleep, _log_line)
+    return 0
+
+
 def main(argv=None) -> int:
-    return enforce(build_parser().parse_args(argv))
+    args = build_parser().parse_args(argv)
+    return gate(args) if args.command == "gate" else enforce(args)
 
 
 if __name__ == "__main__":
