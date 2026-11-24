@@ -340,7 +340,7 @@ def _complain(error: ReadingError) -> None:
 
 
 def _candidates(io: Io, owners: Owners) -> tuple[list[Workload], int | None] | None:
-    """The workloads now, largest first, and the oMLX pid; None (after naming the cause) when a protection input is unreadable."""
+    """The workloads, largest first, and the oMLX pid; None, after naming the cause, when an input is unreadable."""
     try:
         services, omlx_pid, table = io.services(), io.omlx_pid(), io.table()
     except ReadingError as error:
