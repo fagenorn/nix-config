@@ -249,6 +249,9 @@ def service(test, store, registry, session_dirs=(), repo_of=lambda cwd: cwd, pro
     kwargs.setdefault("dispatch", lambda job: job())
     kwargs.setdefault("peer_reader", OWNER_PEER)
     kwargs.setdefault("ping_log", lambda: None)
+    if "engine_runs_root" not in kwargs:
+        kwargs["engine_runs_root"] = Path(tempfile.mkdtemp(prefix="console-engine-runs-"))
+        test.addCleanup(shutil.rmtree, kwargs["engine_runs_root"], True)
     svc = console_service.ConsoleService(
         store, registry, port=0, session_dirs=lambda: list(session_dirs),
         profile_dirs=lambda: list(profile_dirs), repo_of=repo_of, **kwargs)
