@@ -1,0 +1,3 @@
+#!/bin/sh
+# Verify check for issue 1687: a sprint's manager ran an action the owner approved on a console card, from its own session, after activation.
+PYTHONPATH=python exec python3 -m agent_tools.verification.verify_checks console-approved-action "$@"
