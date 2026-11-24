@@ -45,6 +45,17 @@ shows no pid (no record). It never reads the alert settings and sends nothing: `
 `fseventsd_held` and `fseventsd_restart_failed` (the record says `restart_failed`) once per
 episode each. A missing or non-JSON record is not a failed reading.
 
+`sample [--floor-record FILE]` (default `/var/db/memory-watch/floor.json`, written by the root memory
+floor daemon, which never writes this watcher's log or alerts) reads the floor record once per run
+and keeps `floor_kills_seen`, `priority_unset_open` and `floor_log` (kill lines not yet printed) in
+the state. Each `recent` entry whose `seq` is above `floor_kills_seen` queues one `memory_kill`
+alert, in `seq` order, and puts its `kill_line` in `floor_log`; `sample` prints `floor_log` to
+stdout, the watch log, and empties it before the state is written. The first sight of the record
+only sets `floor_kills_seen` to its `kills`. When the record's `omlx_pid` is launchctl's pid, its
+`omlx_kernel_priority` is an integer and `omlx_priority_resets` is 0, the kernel priority replaces
+launchctl's in `omlx_jetsam_priority`. `omlx_priority_error` or `omlx_priority_resets` above 0
+queues `jetsam_priority_unset` once per episode. A missing or non-JSON record queues nothing.
+
 Exit 0: recorded, every alert delivered or recorded. 3: recorded, at least one alert not sent
 (stderr `host alert not sent: <reason>`). 1: `vm_stat`, `sysctl`, `launchctl` or `ps` failed
 or printed nothing parseable (stderr names it; nothing is written). 2: usage. A failed
@@ -73,6 +84,8 @@ FSEVENTSD_DEFAULTS = {
     "fseventsd_bytes": None, "peak_fseventsd_bytes": None, "fseventsd_restarts_seen": None,
     "fseventsd_restarts_today": 0, "fseventsd_held_open": False, "fseventsd_failed_open": False,
 }
+FLOOR_RECORD = "/var/db/memory-watch/floor.json"
+FLOOR_DEFAULTS = {"floor_kills_seen": None, "priority_unset_open": False, "floor_log": []}
 STATE_NAME = "memory-watch.json"
 PEAKS_NAME = "memory-peaks.jsonl"
 RUN_TIMEOUT = 30
@@ -91,6 +104,12 @@ SEE = "See hosts/darwin/eleven-m5/README.md, Memory budget."
 
 class ReadingError(Exception):
     pass
+
+
+class CommandFailed(ReadingError):
+    def __init__(self, message: str, code: int):
+        super().__init__(message)
+        self.code = code
 
 
 def parse_vm_stat(text: str) -> dict:
@@ -143,7 +162,7 @@ def fresh_day(since: str, day: str) -> dict:
         "peak_omlx_bytes": None, "min_available_bytes": None, "samples": 0, "loaded_samples": 0,
         "min_loaded_available_bytes": None, "peak_ci_jobs": 0, "jetsam_exits": 0, "omlx_runs": None,
         "omlx_jetsam_priority": None, "low_memory_open": False, "pending": [],
-        **FSEVENTSD_DEFAULTS,
+        **FSEVENTSD_DEFAULTS, **FLOOR_DEFAULTS, "floor_log": [],
     }
 
 
@@ -239,6 +258,46 @@ def _fold_fseventsd(state: dict, found: dict | None, host: str) -> None:
         state["fseventsd_failed_open"] = False
 
 
+def _fold_floor(state: dict, found: dict | None, reading: dict) -> None:
+    found = found or {}
+    host = reading["host"]
+    kills = _int(found.get("kills"))
+    if kills is not None:
+        seen = state["floor_kills_seen"]
+        if seen is not None:
+            entries = [entry for entry in found.get("recent") or []
+                       if isinstance(entry, dict) and _int(entry.get("seq")) is not None and entry["seq"] > seen]
+            for entry in sorted(entries, key=lambda entry: entry["seq"]):
+                bound = entry["reason"] == "run_bound"
+                why = (f"over the {found['run_bound_bytes'] // GIB} GiB run bound" if bound
+                       else f"under the {found['floor_bytes'] // GIB} GiB floor")
+                state["floor_log"].append(kill_line(entry))
+                state["pending"].append({
+                    "kind": "memory_kill", "logged": False,
+                    "text": f"{host}: the memory floor ended {entry['owner']}'s workload "
+                            f"{entry['root_command'][:200]} ({entry['processes']} processes, "
+                            f"{entry['tree_bytes'] / GIB:.1f} GiB, {why}). Available "
+                            f"{entry['available_before_bytes'] / GIB:.1f} GiB before, "
+                            f"{entry['available_after_bytes'] / GIB:.1f} GiB after. {SEE}",
+                })
+        state["floor_kills_seen"] = kills
+    error, resets = found.get("omlx_priority_error"), _int(found.get("omlx_priority_resets")) or 0
+    if error or resets > 0:
+        if not state["priority_unset_open"]:
+            state["priority_unset_open"] = True
+            declared = _int(found.get("declared_priority"))
+            declared = reading["declared_jetsam_priority"] if declared is None else declared
+            current = _int(found.get("omlx_kernel_priority"))
+            state["pending"].append({
+                "kind": "jetsam_priority_unset", "logged": False,
+                "text": f"{host}: oMLX's jetsam priority could not be set to {declared} "
+                        f"({error or f'put back {resets} times'}); it is "
+                        f"{'unknown' if current is None else current}. {SEE}",
+            })
+    else:
+        state["priority_unset_open"] = False
+
+
 def decide(state, reading: dict, now: datetime, floor_bytes: int, others_budget_bytes: int):
     """Fold one reading into the state; answer the new state and the finished day's line or None."""
     day = now.date().isoformat()
@@ -246,12 +305,15 @@ def decide(state, reading: dict, now: datetime, floor_bytes: int, others_budget_
     if state is None:
         state = fresh_day(day, day)
     else:
-        state = {**FSEVENTSD_DEFAULTS, **state, "pending": [dict(entry) for entry in state["pending"]]}
+        state = {**FSEVENTSD_DEFAULTS, **FLOOR_DEFAULTS, **state,
+                 "pending": [dict(entry) for entry in state["pending"]]}
+        state["floor_log"] = list(state["floor_log"])
         if state["day"] != day:
             line = _day_line(state, floor_bytes, others_budget_bytes, reading["declared_jetsam_priority"])
             carried = fresh_day(state["since"], day)
             for key in ("omlx_runs", "omlx_jetsam_priority", "low_memory_open", "pending",
-                        "fseventsd_restarts_seen", "fseventsd_held_open", "fseventsd_failed_open"):
+                        "fseventsd_restarts_seen", "fseventsd_held_open", "fseventsd_failed_open",
+                        "floor_kills_seen", "priority_unset_open", "floor_log"):
                 carried[key] = state[key]
             state = carried
     used, available, loaded = reading["used_bytes"], reading["available_bytes"], reading["loaded"]
@@ -290,6 +352,7 @@ def decide(state, reading: dict, now: datetime, floor_bytes: int, others_budget_
     else:
         state["low_memory_open"] = False
     _fold_fseventsd(state, reading["fseventsd"], reading["host"])
+    _fold_floor(state, reading["floor"], reading)
     return state, line
 
 
@@ -360,6 +423,28 @@ def write_record(path: Path, document: dict) -> None:
         raise
 
 
+def kill_line(entry: dict) -> str:
+    """The one-line wire format of a floor kill, shared by the floor daemon's log and the watch log."""
+    return (
+        f"{entry['at']} memory_kill reason={entry['reason']} owner={entry['owner']}"
+        f" root_pid={entry['root_pid']} root={json.dumps(entry['root_command'][:200])}"
+        f" processes={entry['processes']} tree_gib={entry['tree_bytes'] / GIB:.1f}"
+        f" available_before_gib={entry['available_before_bytes'] / GIB:.1f}"
+        f" available_after_gib={entry['available_after_bytes'] / GIB:.1f}"
+        f" signals={entry['signals']}\n"
+    )
+
+
+def kernel_priority(service: dict, found: dict | None) -> int | None:
+    """launchctl's jetsam priority, or the floor daemon's kernel reading when it is oMLX's own and not put back."""
+    found = found or {}
+    kernel = _int(found.get("omlx_kernel_priority"))
+    if kernel is not None and service["pid"] is not None and found.get("omlx_pid") == service["pid"] \
+            and found.get("omlx_priority_resets") == 0:
+        return kernel
+    return service["jetsam_priority"]
+
+
 def fseventsd(args) -> int:
     now = args.now if args.now is not None else datetime.now().astimezone()
     try:
@@ -399,7 +484,7 @@ def _run(name: str, argv: list[str]) -> str:
     except (OSError, subprocess.SubprocessError) as error:
         raise ReadingError(f"{name} could not run ({type(error).__name__})") from None
     if done.returncode != 0:
-        raise ReadingError(f"{name} exited {done.returncode}")
+        raise CommandFailed(f"{name} exited {done.returncode}", done.returncode)
     return done.stdout
 
 
@@ -414,14 +499,15 @@ def take_reading(args) -> dict:
     if not listing.strip():
         raise ReadingError("ps printed nothing")
     used = used_bytes(vm)
+    floor = read_fseventsd_record(args.floor_record)
     return {
         "host": args.host, "used_bytes": used, "available_bytes": total - used,
         "loaded": read_health(args.health_url), "ci_jobs": count_ci_jobs(listing),
         "omlx_bytes": read_footprint(args.footprint, service["pid"]),
         "runs": service["runs"], "last_exit_reason": service["last_exit_reason"],
-        "jetsam_priority": service["jetsam_priority"],
+        "jetsam_priority": kernel_priority(service, floor),
         "declared_jetsam_priority": args.omlx_jetsam_priority,
-        "fseventsd": read_fseventsd_record(args.fseventsd_record),
+        "fseventsd": read_fseventsd_record(args.fseventsd_record), "floor": floor,
     }
 
 
@@ -484,6 +570,9 @@ def sample(args) -> int:
         return 1
     state, line = decide(previous, reading, now, args.floor_gib * GIB, args.others_budget_gib * GIB)
     failed = deliver_pending(state, args, now)
+    for entry in state["floor_log"]:
+        print(entry, end="", flush=True)
+    state["floor_log"] = []
     write_state(directory, state, line)
     return 3 if failed else 0
 
@@ -508,6 +597,7 @@ def build_parser() -> argparse.ArgumentParser:
     one.add_argument("--alert-log", type=Path, default=None)
     one.add_argument("--telegram-api", default=None)
     one.add_argument("--fseventsd-record", type=Path, default=Path(FSEVENTSD_RECORD))
+    one.add_argument("--floor-record", type=Path, default=Path(FLOOR_RECORD))
     one.add_argument("--now", type=datetime.fromisoformat, default=None)
     trim = commands.add_parser("fseventsd", help="restart fseventsd above its limit and record its size")
     trim.add_argument("--record", type=Path, required=True)

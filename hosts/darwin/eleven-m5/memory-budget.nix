@@ -17,16 +17,32 @@ rec {
     (builtins.fromJSON (
       builtins.readFile ../../../home/common/agent-skills/host-declarations/eleven-m5.json
     )).verify_slots;
-  # One verification run's memory (provisional, checked against the day line).
-  verifyRunGiB = 6;
+  # One verification run's memory (provisional, checked against the day line); 4 leaves room for agentSessionsGiB.
+  verifyRunGiB = 4;
   # One CI job's memory (provisional, checked against the day line).
   ciJobGiB = 3;
   # What macOS and its daemons take (provisional, checked against the day line).
   macosGiB = 12;
   # The fseventsd share inside macosGiB, enforced by the trim daemon.
   fseventsdLimitGiB = 4;
+  # What the agent's Claude sessions take together (4.5 GiB at the 24 Nov panic).
+  agentSessionsGiB = 5;
   # Memory held back from every other use.
   floorGiB = 16;
+  # Consecutive samples under the floor before the floor daemon ends a workload.
+  floorSamples = 3;
+  # Seconds a workload gets to exit on SIGTERM before SIGKILL.
+  floorGraceSeconds = 5;
+  # How far above the floor the floor daemon samples at the fast interval.
+  floorMarginGiB = 16;
+  # A fall in available memory between two samples that also earns the fast interval.
+  floorFallGiB = 2;
+  # The floor daemon's sampling interval near the floor or while memory falls.
+  fastSampleSeconds = 2;
+  # The floor daemon's sampling interval otherwise.
+  slowSampleSeconds = 10;
+  # The footprint over which one workload is ended whatever memory is free.
+  runBoundGiB = 24;
   # What the model and the floor leave for Colima, verification, CI and macOS.
   othersBudgetGiB = totalGiB - omlxCeilingGiB - omlxOverCeilingGiB - floorGiB;
   # The oMLX daemon's jetsam priority; launchd gives every other daemon 40.

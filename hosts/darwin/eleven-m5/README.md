@@ -35,10 +35,11 @@ nix-darwin reloads every launchd daemon whose plist changed, so an activation
 restarts oMLX outside the gate whenever its serve script changes. That script
 embeds the store path of `secrets/secrets.yaml`, so any secrets edit does it. The
 same holds for `omlx-models`, `iogpu-wired-limit` (which re-runs the sysctl),
-`colima` and `docker-socket`, the GitHub runners, `fseventsd-trim`, and the owner's
+`colima` and `docker-socket`, the GitHub runners, `fseventsd-trim`, `memory-floor`, and the owner's
 `agent-console`, `verify-pending`, `claude-cache-proxy`, `omlx-memory-watch` and
-`sops-nix` daemons when their plists change. The oMLX plist also carries its jetsam
-priority, so a changed budget value restarts oMLX outside the gate. Homebrew's `onActivation.upgrade` can replace the oMLX install; the running
+`sops-nix` daemons when their plists change. The serve script carries the
+relaunch gate, so a changed `floorGiB` or `fastSampleSeconds` restarts oMLX at the
+next activation; a changed `omlxJetsamPriority` restarts only `memory-floor`. Homebrew's `onActivation.upgrade` can replace the oMLX install; the running
 server keeps its loaded code, and the re-applied patches become a deferred restart.
 
 The Anthropic patch accepts Claude Code's `output_config.effort` and preserves
@@ -67,9 +68,10 @@ number changed in one place cannot drift from the rest.
 
 The budget is `totalGiB` - `omlxCeilingGiB` - `omlxOverCeilingGiB` - `floorGiB`
 = 256 - 192 - 2 - 16 = 46 GiB for everything but the model. The allowances add
-up to 8 + 1 + 2 x 6 + 4 x 3 + 12 = 45 GiB, so one GiB is unallocated. The 46 GiB
-others budget is the owner's capacity number: whether it holds is a question
-for the lead.
+up to 8 + 1 + 2 x 4 + 4 x 3 + 12 + 5 = 46 GiB, so nothing is unallocated. The
+5 GiB for the agent's Claude sessions had to come from somewhere, and
+`verifyRunGiB` went from 6 to 4 to pay for it. The 46 GiB others budget is the
+owner's capacity number: whether it holds is a question for the lead.
 
 | Name | Value | What it bounds | Source |
 |---|---|---|---|
@@ -79,14 +81,22 @@ for the lead.
 | `colimaGiB` | 8 | The Colima VM's memory, passed as `--memory`. | `~/.colima/default/colima.yaml` shows `memory: 8`. |
 | `colimaOverheadGiB` | 1 | What the VM's host-side processes take beyond its memory. | Estimate, checked against the day line. |
 | `verifySlots` | 2 | Verification runs that may hold a slot at once. | Read from `verify_slots` in `home/common/agent-skills/host-declarations/eleven-m5.json`. |
-| `verifyRunGiB` | 6 | One verification run's memory (provisional). | Estimate; `peak_others_gib` in the day line tests it. |
+| `verifyRunGiB` | 4 | One verification run's memory (provisional). | Estimate; `peak_others_gib` in the day line tests it. |
+| `agentSessionsGiB` | 5 | What the agent's Claude sessions take together. | 4.5 GiB of Claude sessions at the 24 Nov panic. |
 | `ciRunners` | 4 | CI jobs that may run at once, one per runner. | Counted in `default.nix` from `config.services.github-runners`, not declared in `memory-budget.nix`. |
 | `ciJobGiB` | 3 | One CI job's memory (provisional). | Estimate; `peak_others_gib` in the day line tests it. |
 | `macosGiB` | 12 | What macOS and its daemons take, fseventsd included (provisional). | Estimate; `peak_others_gib` in the day line tests it. |
 | `fseventsdLimitGiB` | 4 | fseventsd's share inside `macosGiB`, enforced by `fseventsd-trim`. | See "What makes fseventsd grow". |
 | `floorGiB` | 16 | Memory held back from every other use; a loaded sample with less available raises `low_memory`. | The owner's choice. |
+| `floorSamples` | 3 | Consecutive samples under `floorGiB` before `memory-floor` ends a workload. | The owner's choice. |
+| `floorGraceSeconds` | 5 | How long a workload has to exit on SIGTERM before SIGKILL. | The owner's choice. |
+| `floorMarginGiB` | 16 | How far above `floorGiB` `memory-floor` samples at the fast interval. | The owner's choice. |
+| `floorFallGiB` | 2 | A fall in available memory between two samples that also earns the fast interval. | The owner's choice. |
+| `fastSampleSeconds` | 2 | `memory-floor`'s sampling interval near the floor or while memory falls, and the relaunch gate's polling interval. | The owner's choice. |
+| `slowSampleSeconds` | 10 | `memory-floor`'s sampling interval otherwise. | The owner's choice. |
+| `runBoundGiB` | 24 | The footprint over which one workload is ended whatever memory is free: over `verifyRunGiB` and `ciJobGiB`, at most `othersBudgetGiB`. | Leaves a verification run or CI job its allowance several times over, and stops one workload from taking the whole others budget. |
 | `othersBudgetGiB` | 46 | What the model and the floor leave for the rows above. | Computed: `totalGiB` - `omlxCeilingGiB` - `omlxOverCeilingGiB` - `floorGiB`. |
-| `omlxJetsamPriority` | 100 | oMLX's jetsam priority; the kernel ends lower numbers first. | `launchctl print system/org.nixos.omlx` showed `jetsam priority = 40`, the same as Colima, the console, `verify-pending` and the runners, before this change. |
+| `omlxJetsamPriority` | 100 | oMLX's jetsam priority; the kernel ends lower numbers first. Applied by `memory-floor` to the running pid. | `launchctl print system/org.nixos.omlx` showed `jetsam priority = 40`, the same as Colima, the console, `verify-pending` and the runners, while the plist carried 100. |
 | `fseventsdRestartMinutes` | 60 | The shortest time between two `fseventsd-trim` restarts. | See "What makes fseventsd grow". |
 
 `verifyRunGiB`, `ciJobGiB` and `macosGiB` are provisional: nobody has measured
@@ -136,6 +146,67 @@ values so far.
 5. Read the next day's line in `memory-peaks.jsonl`: `peak_others_gib` must stay
    under `others_budget_gib`.
 
+### The memory floor
+
+`memory-floor` is a root daemon (`KeepAlive`) that ends agent and CI workloads
+when memory stays under `floorGiB`. It only ends a workload with a declared
+owner: the agent user (`--agent-user`), whose processes count when their working
+directory is under a worktree (`~/Projects/*/.worktrees/*`) or a verification
+run's temporary directory, and the CI runner accounts, whose `Runner.Worker`
+starts a job's workload. A process of any other user is never ended.
+
+Protected, whatever its owner: pids 0 and 1, the oMLX server and everything it
+started, and each service process the host runs for the system.
+
+It samples available memory every `fastSampleSeconds` when it is under
+`floorGiB` + `floorMarginGiB`, or fell by `floorFallGiB` since the last sample,
+or is under the floor; otherwise every `slowSampleSeconds`. After
+`floorSamples` samples in a row under the floor it ends the largest workload.
+It signals the workload's processes with SIGTERM, deepest in the process tree
+first (leaves first), waits `floorGraceSeconds`, and sends SIGKILL to what is
+left, then reads memory again. If memory is still under the floor, it ends the
+next largest. A workload over
+`runBoundGiB` is ended at once, whatever memory is free. With no workload left
+to end, it logs `floor_breached no agent workload to end` once per episode.
+
+Each kill is one line:
+
+```
+<time> memory_kill reason=<floor|run_bound> owner=<agent:dir|ci:user:pid> root_pid=<pid> root="<command>" processes=<n> tree_gib=<size> available_before_gib=<n> available_after_gib=<n> signals=<term|term+kill>
+```
+
+It lands at once in the root daemon's `/var/log/memory-floor.log`, and within a
+minute in `~/.omlx/logs/memory-watch.log`, where the owner's sampler writes it:
+the root daemon writes no path the agent user can write, so it cannot write the
+watcher log itself. The daemon keeps its record at
+`/var/db/memory-watch/floor.json` (the kill count, the last fifty kills and
+oMLX's priority); the sampler reads it, queues one `memory_kill` alert for each
+new kill, and sends it through the owner's alert settings.
+
+A gate also holds oMLX's start: the serve script runs `memory-floor gate`
+before it decrypts the key, and the gate waits, polling every
+`fastSampleSeconds`, while available memory is under `floorGiB`. It only reads
+memory and signals nothing, so a serving oMLX is never held, and launchd's
+`KeepAlive` still owns the relaunch.
+
+launchd ignores the `JetsamProperties` key in the oMLX plist: `launchctl print
+system/org.nixos.omlx` shows `jetsam priority = 40` and `jetsamproperties
+category = daemon` while the plist carried 100, and launchd takes a daemon's
+priority from the category in the sealed
+`/System/Library/LaunchDaemons/com.apple.jetsamproperties.Mac.plist`, whose
+entries are Apple's labels. So the plist no longer carries the key, and
+`memory-floor` sets `omlxJetsamPriority` on the running pid with
+`memorystatus_control`, which needs root. It sets it on the first sample and
+after each relaunch, so a changed `omlxJetsamPriority` needs a restart of
+`memory-floor` only, and oMLX gets it without a restart.
+
+The record keeps the priority it read at the start of each sample, before any
+set, and counts how often it found the value changed again after a successful
+set (`omlx_priority_resets`). A read right after a set would prove nothing. The
+sampler puts the record's value in `omlx_jetsam_priority`, so the day line shows
+whether the kernel kept it, and queues `jetsam_priority_unset` when the call
+failed or the resets are above zero.
+
 ### Alerts
 
 Alerts go to the owner's Telegram bot. The owner sets it up on the console page,
@@ -148,7 +219,7 @@ the error is logged in `~/.omlx/logs/memory-watch.log`, and the watcher exits 3
 on every sample until the alert is sent. With `enabled` false, alerts are
 recorded in the alerts log only.
 
-There are five kinds:
+There are seven kinds:
 
 - `jetsam`: the kernel's memory killer ended oMLX.
 - `low_memory`: available memory fell under `floorGiB` while a model was loaded
@@ -158,6 +229,9 @@ There are five kinds:
   interval and was left running.
 - `fseventsd_restart_failed`: the restart's kill failed, so fseventsd stays over
   its limit (once per episode).
+- `memory_kill`: `memory-floor` ended an agent or CI workload; one alert per kill.
+- `jetsam_priority_unset`: `memory-floor` could not set oMLX's kernel jetsam
+  priority, or the value did not hold after a set (once per episode).
 
 ### What makes fseventsd grow
 
