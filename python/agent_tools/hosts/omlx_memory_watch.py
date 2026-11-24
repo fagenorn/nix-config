@@ -39,10 +39,11 @@ interval ago; over the limit inside the interval it holds. It replaces FILE (def
 `restart_failed`. Exit 1 when the kill fails (the record says `restart_failed`) or launchctl
 shows no pid (no record). It never reads the alert settings and sends nothing: `sample
 [--fseventsd-record FILE]` reads the record once per run, keeps `fseventsd_bytes`,
-`peak_fseventsd_bytes`, `fseventsd_restarts_seen`, `fseventsd_restarts_today` and
-`fseventsd_held_open` in the state, writes `peak_fseventsd_gib` and `fseventsd_restarts` to the
-day line, and queues `fseventsd_restarted` when `restarts` rose and `fseventsd_held` once per
-held episode. A missing or non-JSON record is not a failed reading.
+`peak_fseventsd_bytes`, `fseventsd_restarts_seen`, `fseventsd_restarts_today`,
+`fseventsd_held_open` and `fseventsd_failed_open` in the state, writes `peak_fseventsd_gib` and
+`fseventsd_restarts` to the day line, and queues `fseventsd_restarted` when `restarts` rose, and
+`fseventsd_held` and `fseventsd_restart_failed` (the record says `restart_failed`) once per
+episode each. A missing or non-JSON record is not a failed reading.
 
 Exit 0: recorded, every alert delivered or recorded. 3: recorded, at least one alert not sent
 (stderr `host alert not sent: <reason>`). 1: `vm_stat`, `sysctl`, `launchctl` or `ps` failed
@@ -70,7 +71,7 @@ FSEVENTSD_LABEL = "com.apple.fseventsd"
 FSEVENTSD_MINUTES = 60
 FSEVENTSD_DEFAULTS = {
     "fseventsd_bytes": None, "peak_fseventsd_bytes": None, "fseventsd_restarts_seen": None,
-    "fseventsd_restarts_today": 0, "fseventsd_held_open": False,
+    "fseventsd_restarts_today": 0, "fseventsd_held_open": False, "fseventsd_failed_open": False,
 }
 STATE_NAME = "memory-watch.json"
 PEAKS_NAME = "memory-peaks.jsonl"
@@ -226,6 +227,16 @@ def _fold_fseventsd(state: dict, found: dict | None, host: str) -> None:
             })
     else:
         state["fseventsd_held_open"] = False
+    if found.get("restart_failed") is True:
+        if not state["fseventsd_failed_open"]:
+            state["fseventsd_failed_open"] = True
+            state["pending"].append({
+                "kind": "fseventsd_restart_failed", "logged": False,
+                "text": f"{host}: fseventsd is at {_gib_text(size)} GiB, over {limit_text} GiB, "
+                        f"and its restart failed. {SEE}",
+            })
+    else:
+        state["fseventsd_failed_open"] = False
 
 
 def decide(state, reading: dict, now: datetime, floor_bytes: int, others_budget_bytes: int):
@@ -240,7 +251,7 @@ def decide(state, reading: dict, now: datetime, floor_bytes: int, others_budget_
             line = _day_line(state, floor_bytes, others_budget_bytes, reading["declared_jetsam_priority"])
             carried = fresh_day(state["since"], day)
             for key in ("omlx_runs", "omlx_jetsam_priority", "low_memory_open", "pending",
-                        "fseventsd_restarts_seen", "fseventsd_held_open"):
+                        "fseventsd_restarts_seen", "fseventsd_held_open", "fseventsd_failed_open"):
                 carried[key] = state[key]
             state = carried
     used, available, loaded = reading["used_bytes"], reading["available_bytes"], reading["loaded"]

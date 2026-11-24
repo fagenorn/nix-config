@@ -284,6 +284,20 @@ class SampleTest(FakeHost):
         self.sample()
         self.assertEqual(len(self.bot.requests), 2)
 
+    def test_a_restart_that_keeps_failing_alerts_once_per_episode(self):
+        self.put_state(state())
+        failed = record(restart_failed=True, at=NOW, footprint_bytes=6 * GIB)
+        self.put_record(failed)
+        self.assertEqual(self.sample().returncode, 0)
+        self.assertEqual(self.sample().returncode, 0)
+        self.assertEqual(len(self.bot.requests), 1)
+        self.assertIn("fseventsd is at 6.0 GiB, over 4 GiB, and its restart failed", self.texts()[0])
+        self.put_record(record())
+        self.sample()
+        self.put_record(failed)
+        self.sample()
+        self.assertEqual(len(self.bot.requests), 2)
+
     def test_a_missing_record_is_not_a_failed_reading(self):
         self.assertEqual(self.sample().returncode, 0)
         saved = self.read_state()

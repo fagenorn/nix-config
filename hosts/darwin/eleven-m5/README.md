@@ -145,7 +145,7 @@ the error is logged in `~/.omlx/logs/memory-watch.log`, and the watcher exits 3
 on every sample until the alert is sent. With `enabled` false, alerts are
 recorded in the alerts log only.
 
-There are four kinds:
+There are five kinds:
 
 - `jetsam`: the kernel's memory killer ended oMLX.
 - `low_memory`: available memory fell under `floorGiB` while a model was loaded
@@ -153,6 +153,8 @@ There are four kinds:
 - `fseventsd_restarted`: `fseventsd-trim` restarted fseventsd.
 - `fseventsd_held`: fseventsd was over its limit again inside the restart
   interval and was left running.
+- `fseventsd_restart_failed`: the restart's kill failed, so fseventsd stays over
+  its limit (once per episode).
 
 ### What makes fseventsd grow
 
