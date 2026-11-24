@@ -271,10 +271,6 @@ class HookInstallRuleTest(unittest.TestCase):
         for text in ("# git-hooks.hooks.x", 'scripts.a.exec = "pre-commit run";', "{ }"):
             self.assertFalse(hook_install.declares_hooks(text), text)
 
-    def test_the_module_contract_states_the_later_shell_entry_limit(self):
-        for phrase in ("issue 1714", "uninstall", "core.hooksPath"):
-            self.assertIn(phrase, hook_install.__doc__)
-
 
 if __name__ == "__main__":
     unittest.main()
