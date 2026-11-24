@@ -659,6 +659,56 @@ class VerifySlotTest(SlotHarness, unittest.TestCase):
         self.assertEqual(self.finish(self.start("a"))[0], 2)
         self.assertFalse((self.slots / "history.jsonl").exists())
 
+    def test_a_run_with_report_writes_its_history_entry_to_the_report_path(self):
+        report = Path(self.home) / "report.json"
+        self.release("a")
+        code, _ = self.finish(self.start("a", "--report", str(report), code=3))
+        self.assertEqual(code, 3)
+        text = report.read_text()
+        self.assertTrue(text.endswith("\n"))
+        self.assertEqual(len(text.splitlines()), 1)
+        self.assertEqual(json.loads(text), self.history()[0])
+        self.assertEqual(len(self.history()), 1)
+
+    def test_a_report_that_cannot_be_written_still_returns_the_commands_exit(self):
+        report = Path(self.home) / "missing-dir" / "report.json"
+        self.release("a")
+        code, err = self.finish(self.start("a", "--report", str(report), code=4))
+        self.assertEqual(code, 4)
+        self.assertIn("verify-slot: cannot write the report", err)
+        self.assertEqual(len(self.history()), 1)
+
+    def test_a_run_that_gets_no_slot_reports_its_wait_and_no_hold(self):
+        report = Path(self.home) / "report.json"
+        first = self.start("a")
+        self.assertTrue(wait_for(self.mark("a", "start")))
+        self.release("b")
+        code, _ = self.finish(self.start("b", "--wait-limit", "1", "--report", str(report)))
+        self.release("a")
+        self.finish(first)
+        self.assertEqual(code, NO_SLOT_EXIT)
+        reported = json.loads(report.read_text())
+        self.assertIsNone(reported["held_seconds"])
+        self.assertGreaterEqual(reported["waited_seconds"], 0.9)
+        self.assertEqual(reported, {entry["exit"]: entry for entry in self.history()}[75])
+
+    def test_a_setup_error_writes_no_report(self):
+        report = Path(self.home) / "report.json"
+        self.declare(verify_slots=0)
+        self.assertEqual(self.finish(self.start("a", "--report", str(report)))[0], 2)
+        self.assertFalse(report.exists())
+
+    def test_a_report_path_that_is_a_symlink_is_not_followed(self):
+        target = Path(self.home) / "target"
+        target.write_text("keep\n")
+        link = Path(self.home) / "link"
+        link.symlink_to(target)
+        self.release("a")
+        code, err = self.finish(self.start("a", "--report", str(link)))
+        self.assertEqual(code, 0)
+        self.assertEqual(target.read_text(), "keep\n")
+        self.assertIn("cannot write the report", err)
+
     def test_the_history_file_is_shared_by_every_account(self):
         other = Path(self.home) / "other-account"
         other.mkdir()
