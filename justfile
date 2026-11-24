@@ -452,19 +452,27 @@ agent-installed-skill-tests: build
     fi; \
     settings="$1"; \
     set -- $(nix-store --query --requisites ./result \
+      | grep -- '-claude-bash-lifecycle-guard-base-policy\.json$' || true); \
+    if [ "$#" -ne 1 ]; then \
+      echo "expected exactly one built guard base policy; found $#" >&2; \
+      exit 1; \
+    fi; \
+    base_policy="$1"; \
+    set -- $(nix-store --query --requisites ./result \
       | grep -- '-claude-code-with-accounts-[^/]*$' || true); \
     if [ "$#" -ne 1 ]; then \
       echo "expected exactly one built Claude Code package; found $#" >&2; \
       exit 1; \
     fi; \
-    AGENT_SKILLS_INSTALLED_HOME="$installed_home" AGENT_TOOLS_SYSTEM_RESULT="{{system_result}}" CLAUDE_SETTINGS_PATH="$settings" CLAUDE_CODE_PACKAGE="$1" python3 -m unittest -v \
+    AGENT_SKILLS_INSTALLED_HOME="$installed_home" AGENT_TOOLS_SYSTEM_RESULT="{{system_result}}" CLAUDE_SETTINGS_PATH="$settings" CLAUDE_GUARD_BASE_POLICY_PATH="$base_policy" CLAUDE_CODE_PACKAGE="$1" python3 -m unittest -v \
       home/common/agent-skills/tests/test_dispatch_contracts.py \
       home/common/agent-skills/tests/test_shell_example_contracts.py \
       home/common/agent-skills/tests/test_workflow_skill_contracts.py \
       tests/test_agent_tools_launchers.py \
       tests/test_promotion_installed.py \
       tests/test_impeccable_installed.py \
-      tests/test_claude_code_installed.py
+      tests/test_claude_code_installed.py \
+      tests/test_claude_permission_guard_own_files.py
 
 # Compare the skills activated on this host (~/.claude/skills) with the skill source; run it after a switch, since `test` checks the skills from source only (issue 1580).
 agent-activated-skill-tests:
