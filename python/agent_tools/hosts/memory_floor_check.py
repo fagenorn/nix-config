@@ -10,7 +10,9 @@ daemon's record (default `/var/db/memory-watch/floor.json`) and prints one JSON 
 directory (default `/Library/Logs/DiagnosticReports`) whose mtime is at or after `since`, and
 `jetsam_exits` is the sum of `jetsam_exits` over the lines of `DIR/memory-peaks.jsonl` (default
 `~/.omlx/memory`) with `day` on or after `since`'s local date, plus the watcher's
-`DIR/memory-watch.json` when its `day` is on or after that date. Met
+`DIR/memory-watch.json` when its `day` is on or after that date. A reports
+directory, peaks file or watcher state file that is missing or cannot be read is exit 2, never an empty
+count. Met
 (`{"verdict": "met", "since", "panics": [], "jetsam_exits": 0}`) when both are empty, else not met
 with the same members.
 
@@ -22,7 +24,9 @@ between samples is not met although each set succeeds. Not met otherwise. The li
 """
 
 import argparse
+import fnmatch
 import json
+import os
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -50,10 +54,7 @@ def _read_json(path: Path) -> dict | None:
 
 def _jetsam_exits(directory: Path, first_day: str) -> int:
     total = 0
-    try:
-        text = (directory / PEAKS_NAME).read_text(encoding="utf-8")
-    except FileNotFoundError:
-        text = ""
+    text = (directory / PEAKS_NAME).read_text(encoding="utf-8")
     for piece in text.splitlines():
         if not piece.strip():
             continue
@@ -61,7 +62,9 @@ def _jetsam_exits(directory: Path, first_day: str) -> int:
         if line["day"] >= first_day:
             total += line["jetsam_exits"]
     state = _read_json(directory / STATE_NAME)
-    if state is not None and state["day"] >= first_day:
+    if state is None:
+        raise FileNotFoundError(f"{directory / STATE_NAME} does not exist")
+    if state["day"] >= first_day:
         total += state["jetsam_exits"]
     return total
 
@@ -74,10 +77,11 @@ def week(args: argparse.Namespace) -> tuple[int, dict]:
     now = datetime.fromisoformat(args.now) if args.now else datetime.now(timezone.utc)
     if now - since < timedelta(days=args.days):
         return NOT_YET, {"verdict": "not_yet", "since": record["since"]}
-    panics = sorted(
-        path.name for path in args.reports_dir.glob("panic-full-*.panic")
-        if path.stat().st_mtime >= since.timestamp()
-    )
+    with os.scandir(args.reports_dir) as listing:
+        panics = sorted(
+            entry.name for entry in listing
+            if fnmatch.fnmatchcase(entry.name, "panic-full-*.panic") and entry.stat().st_mtime >= since.timestamp()
+        )
     exits = _jetsam_exits(args.state_dir, since.astimezone().date().isoformat())
     met = not panics and exits == 0
     return (MET if met else NOT_MET), {

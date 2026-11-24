@@ -9,6 +9,7 @@ Run: just agent-workflow-tests
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -96,6 +97,30 @@ class WeekTest(Scratch):
                 self.assertEqual(answer["verdict"], "not_met")
                 self.assertEqual(answer["jetsam_exits"], 1)
                 self.assertEqual(answer["panics"], [])
+
+    def assert_unreadable(self, result):
+        self.assertEqual(result.returncode, 2, result.stdout)
+        self.assertEqual(result.stdout, "")
+        self.assertTrue(result.stderr)
+
+    def test_a_reports_dir_that_cannot_be_listed_is_unreadable_not_met(self):
+        for name in ("missing", "not_a_directory"):
+            with self.subTest(name):
+                self.arrange(panics={LATER_PANIC: "2026-11-28"})
+                shutil.rmtree(self.reports)
+                if name == "not_a_directory":
+                    self.reports.write_text("x")
+                self.assert_unreadable(self.week())
+                if self.reports.is_file():
+                    self.reports.unlink()
+                self.reports.mkdir(exist_ok=True)
+
+    def test_a_missing_peaks_file_or_state_file_is_unreadable_not_met(self):
+        for name in ("memory-peaks.jsonl", "memory-watch.json"):
+            with self.subTest(name):
+                self.arrange()
+                (self.state / name).unlink()
+                self.assert_unreadable(self.week())
 
 
 class PriorityTest(Scratch):
