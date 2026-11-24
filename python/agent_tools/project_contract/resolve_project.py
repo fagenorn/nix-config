@@ -175,6 +175,20 @@ looks at the repository, so a missing or malformed platform installation always
 surfaces as `resolver_failure` and can never be masked by `not_onboarded` or a
 contract error (R1.3).
 
+The core read, `resolve_core(repo_root)`, is the narrower read the installed
+platform makes of a contract it may not fully understand: Activate's two reads
+and the lifecycle guard's row proof need only the branch, the commands and the
+release rules, and a newer contract's platform interval, projections, capabilities,
+`bindings.paths` and `bindings.workflow` say nothing about them. It judges the
+whole contract with `validate_contract` but keeps only the violations at or under
+`CORE_POINTERS` (and `/bindings` itself), so an unknown, missing or malformed
+member inside the core still refuses `invalid_contract`, an unsupported schema
+version still refuses `unsupported_schema`, and any other exception is the
+closed `resolver_failure`. It never reads the platform interval, the projections
+or the capabilities. It returns exactly `{"project": {"root", "id"},
+"bindings": {"vcs", "tracker", "commands"}, "release": {"targets"},
+"production"}` (`project` also carries `name` when authored), each member equal to the full snapshot's, and prints nothing.
+
 A structural refusal prints exactly one JSON object carrying an `error` member
 on stdout and exits 2 (D12). An argparse usage error also exits 2 but prints no
 JSON, which is how a caller tells the two apart (D16).
@@ -2223,6 +2237,61 @@ def resolve(repo_root: str | None, required: list[str] | None = None, *,
     except Exception:
         raise ContractError("resolver_failure", "resolver.internal",
                             RESOLVER_FAILURE_VIOLATIONS) from None
+
+
+CORE_POINTERS = ("/schema_version", "/project", "/bindings/vcs", "/bindings/tracker",
+                 "/bindings/commands", "/release", "/production")
+
+
+def _is_core(pointer: str) -> bool:
+    """Whether a violation at `pointer` is one the core read refuses: a core member, below one, or `/bindings` itself."""
+    return pointer == "/bindings" or any(
+        pointer == core or pointer.startswith(core + "/") for core in CORE_POINTERS)
+
+
+def resolve_core(repo_root: str | None) -> dict:
+    """The core members of the `ResolvedProject` snapshot for `repo_root`, or `ContractError`.
+
+    See the module docstring: the project, the vcs, tracker and (effective) commands
+    bindings, the release targets and the production rules, judged by the core
+    violations alone. Prints nothing; any other exception raises the closed
+    `resolver_failure` as `resolve` does.
+    """
+    try:
+        return compose_core(repo_root)
+    except ContractError:
+        raise
+    except Exception:
+        raise ContractError("resolver_failure", "resolver.internal",
+                            RESOLVER_FAILURE_VIOLATIONS) from None
+
+
+def compose_core(repo_root: str | None) -> dict:
+    """`resolve_core()`'s composition."""
+    manifest, _ = require_platform_manifest()
+    root = discover_root(repo_root)
+    source = known_contract(load_contract(root))
+    derived = derive_for(root, source)
+    raise_for_violations([
+        entry for entry in validate_contract(source, manifest, derived)
+        if _is_core(entry["pointer"])])
+    view = contract_view(source, derived)
+    commands = copy.deepcopy(effective_commands(view["bindings"]["commands"], platform_commands(source)))
+    for entry in commands.values():
+        entry["cwd"] = str(root / entry["cwd"])
+    project = {"root": str(root), "id": view["project"]["id"]}
+    if "name" in view["project"]:
+        project["name"] = view["project"]["name"]
+    return {
+        "project": project,
+        "bindings": {
+            "vcs": copy.deepcopy(view["bindings"]["vcs"]),
+            "tracker": copy.deepcopy(view["bindings"]["tracker"]),
+            "commands": commands,
+        },
+        "release": {"targets": release_profile.release_targets(view["release"])},
+        "production": production_rules(view),
+    }
 
 
 def compose_snapshot(repo_root: str | None, required: list[str] | None,
