@@ -174,10 +174,12 @@ class LookGateWorld:
             "statusCheckRollup": [{"__typename": "CheckRun", "status": "COMPLETED",
                                    "conclusion": "SUCCESS"}]})
         subjects = self.git("log", "--format=%s", f"main..{branch}", cwd=self.bare).splitlines()
-        self.forge.respond_json(*view[:1], view[1:] + ["title,body,commits,closingIssuesReferences"], {
+        self.forge.respond_json(*view[:1], view[1:] + ["title,body,closingIssuesReferences"], {
             "title": f"Issue {pr['issue']}", "body": f"Closes #{pr['issue']}",
-            "commits": [{"messageHeadline": s, "messageBody": ""} for s in subjects],
             "closingIssuesReferences": []})
+        self.forge.respond_json(
+            "gh", ["api", "--paginate", "--slurp", f"repos/{SLUG}/pulls/{number}/commits?per_page=100"],
+            [[{"sha": f"{i:040x}", "commit": {"message": s}} for i, s in enumerate(subjects)]])
 
     def open_pr(self, issue: int, branch: str) -> int:
         number = 100 + issue

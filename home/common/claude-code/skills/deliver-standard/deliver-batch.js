@@ -192,13 +192,14 @@ const SETUP_SCHEMA = {
     merge_strategy: { type: 'string' }, delete_branch: { type: 'boolean' }, unset_env: STRS,
     max_parallel: { type: 'integer' }, required_checks: { anyOf: [STRS, { type: 'null' }] },
     guards: { type: 'array', items: { type: 'object', properties: { id: { type: 'string' }, argv: STRS, cwd: { type: 'string' } }, required: ['id', 'argv', 'cwd'] } },
+    verification_before_pull_request: { type: 'array', items: { type: 'object', properties: { id: { type: 'string' }, argv: STRS, cwd: { type: 'string' } }, required: ['id', 'argv', 'cwd'] } },
     issues: { type: 'array', items: { type: 'integer' } },
   },
   required: ['ok'],
 }
 const setup = await agent(`You read the project contract of the git repository at ${REPO} for a batch delivery. Change nothing in this step.
 1. Run hostname -s and return it as host.
-2. Run resolve-project resolve --repo-root ${REPO}. If it refuses, return ok=false with the resolver's error.code, its repair_id and its ordered violations exactly as given. Otherwise return ok=true and these fields from the resolved snapshot: slug (bindings.tracker.repo_slug), unset_env (bindings.tracker.credential_env.unset_before_invocation), integration_branch and default_branch (bindings.vcs.integration_branch and bindings.vcs.default_branch), merge_strategy and delete_branch (bindings.vcs.merge.strategy and bindings.vcs.merge.delete_branch), max_parallel (bindings.workflow.orchestration.max_parallel), required_checks (bindings.vcs.merge.required_checks exactly as resolved, null when the contract declares none), guards (for each id in bindings.workflow.verification whose bindings.workflow.verification_conditions entry has pre_commit true: {id, argv: its bindings.commands argv, cwd: its cwd relative to project.root, . for the root}; [] when none).
+2. Run resolve-project resolve --repo-root ${REPO}. If it refuses, return ok=false with the resolver's error.code, its repair_id and its ordered violations exactly as given. Otherwise return ok=true and these fields from the resolved snapshot: slug (bindings.tracker.repo_slug), unset_env (bindings.tracker.credential_env.unset_before_invocation), integration_branch and default_branch (bindings.vcs.integration_branch and bindings.vcs.default_branch), merge_strategy and delete_branch (bindings.vcs.merge.strategy and bindings.vcs.merge.delete_branch), max_parallel (bindings.workflow.orchestration.max_parallel), required_checks (bindings.vcs.merge.required_checks exactly as resolved, null when the contract declares none), guards (for each id in bindings.workflow.verification whose bindings.workflow.verification_conditions entry has pre_commit true: {id, argv: its bindings.commands argv, cwd: its cwd relative to project.root, . for the root}; [] when none), and verification_before_pull_request (only when bindings.workflow.verification_before_pull_request is a list: for each of its ids {id, argv: its bindings.commands argv, cwd: its cwd relative to project.root, . for the root}; omit it when the binding is absent or null).
 ${HAS_LABEL ? `3. Return issues: the numbers from gh issue list --repo <slug> --label ${args.label} --state open --json number --limit 500, run after unsetting exactly the names in bindings.tracker.credential_env.unset_before_invocation (prefix it with unset <those names> && when there are any, nothing else chained).` : '3. Do not list issues.'}
 ${BASE_RULES}`, { label: 'setup', phase: 'Setup', agentType: 'clerk', model: DEFAULT_CLERK_MODEL, effort: 'low', schema: SETUP_SCHEMA })
 if (setup === null || setup === undefined) return { stage: 'setup', result: null }
@@ -219,6 +220,16 @@ if (RC === undefined || (RC !== null && !(Array.isArray(RC) && RC.length && RC.e
 const GUARD_OK = e => !!e && typeof e === 'object' && !Array.isArray(e) && nonEmpty(e.id) && Array.isArray(e.argv) && e.argv.length > 0 && e.argv.every(nonEmpty) && nonEmpty(e.cwd)
 if (!Array.isArray(setup.guards) || !setup.guards.every(GUARD_OK)) return { stage: 'setup', result: setup, invalid: 'guards' }
 const GUARDS = setup.guards.map(e => ({ id: e.id, argv: e.argv, cwd: e.cwd }))
+// The contract's pre-pull-request list, when it sets one: a malformed list is read as absent, never a stop.
+const BEFORE_PR = Array.isArray(setup.verification_before_pull_request) && setup.verification_before_pull_request.length > 0 && setup.verification_before_pull_request.every(GUARD_OK)
+const LOCAL = BEFORE_PR ? setup.verification_before_pull_request.map(e => ({ id: e.id, argv: e.argv, cwd: e.cwd })) : []
+// With the list set, every landing step that runs tests names its commands: the same texts in deliver-standard.js. The
+// batch has no formatter step, so what each landing prompt asks before committing is all that ONLY_PRE_COMMIT allows.
+const LOCAL_CMDS = JSON.stringify(LOCAL)
+const ONLY_PRE_COMMIT = 'only what this prompt says to run before committing'
+const RUN_LATER = `the delivery runs its pre-pull-request commands ${LOCAL_CMDS} itself, and the pull request's checks run the rest`
+const REVIEW_TESTS = `Run only the targeted tests a finding needs and no command the project declares: ${RUN_LATER}.`
+const SYNC_TESTS = (wt, int, from) => `For a clean merge that changes none of the pull request's files (no path that git -C ${wt} diff --no-renames --name-only ${from} HEAD prints is among the paths git -C ${wt} diff --no-renames --name-only origin/${int}...HEAD prints), run no test and, of the commands the project declares, ${ONLY_PRE_COMMIT}; for any other, run the pre-pull-request commands ${LOCAL_CMDS} as well.`
 const SETUP = setup
 const DECLARED = SETUP.required_checks || []
 const HOLDER = `${SETUP.host}/${BATCH}`
@@ -614,9 +625,11 @@ const IMPL = {
 // The sync review's schema; with followup it also returns descends. Every FINDINGS schema is one readReview() reads.
 const SYNC_REVIEW_SCHEMA = followup => (followup ? { ...FINDINGS, properties: { ...FINDINGS.properties, descends: { type: 'boolean' } }, required: [...FINDINGS.required, 'descends'] } : FINDINGS)
 const IMPL_RETURN = 'Return start_head (git rev-parse HEAD before you change anything) and commit (the full sha of HEAD after your last commit).'
-const WHOLE = files => `run in full every test file among or covering ${files} (never a single test class) and any fast suite the project declares, not the declared verification; return tests: each command and its result`
+const WHOLE = files => BEFORE_PR
+  ? `run in full every test file among or covering ${files} (never a single test class) and the pre-pull-request commands ${LOCAL_CMDS} (each argv with <worktree>/<its cwd> as working directory) and, of the other commands the project declares, ${ONLY_PRE_COMMIT}; return tests: each command and its result`
+  : `run in full every test file among or covering ${files} (never a single test class) and any fast suite the project declares, not the declared verification; return tests: each command and its result`
 // The same text in deliver-standard.js; the push_tests payload is what a test reads.
-const PUSH_TESTS = (guards, onFailure = 'fix-and-rerun') => `If you made a commit, then before pushing, run in full every test file among or covering the files you changed (never a single test class), the test files of their direct callers and checkers, and the declared cheap guards (with none declared, any fast suite the project declares), not the declared verification, as this payload lists them: ${JSON.stringify({ push_tests: { when: 'committed', scopes: ['touched', 'callers', 'guards'], guards, on_failure: onFailure, report: 'tests' } })}. touched: every test file among or covering the files you changed; callers: for each function, constant, option, command or file name the commit changed, added or removed, git grep the tree and take the test files of every file that uses or checks it; guards: each entry's argv, run with <worktree>/<its cwd> as working directory. on_failure fix-and-rerun: fix a run that fails and run it again; report: change nothing and return status blocked with the failing command in notes; either way a failing or unrun commit is never pushed. Then return tests: each command and its result, one entry per command; a commit whose report records no test command is refused`
+const PUSH_TESTS = (guards, onFailure = 'fix-and-rerun') => `If you made a commit, then before pushing, run in full every test file among or covering the files you changed (never a single test class), the test files of their direct callers and checkers, and the declared cheap guards ${BEFORE_PR ? `(with none declared, the pre-pull-request commands ${LOCAL_CMDS}, each argv with <worktree>/<its cwd> as working directory) and, of the other commands the project declares, ${ONLY_PRE_COMMIT},` : '(with none declared, any fast suite the project declares), not the declared verification,'} as this payload lists them: ${JSON.stringify({ push_tests: { when: 'committed', scopes: ['touched', 'callers', 'guards'], guards, on_failure: onFailure, report: 'tests' } })}. touched: every test file among or covering the files you changed; callers: for each function, constant, option, command or file name the commit changed, added or removed, git grep the tree and take the test files of every file that uses or checks it; guards: each entry's argv, run with <worktree>/<its cwd> as working directory. on_failure fix-and-rerun: fix a run that fails and run it again; report: change nothing and return status blocked with the failing command in notes; either way a failing or unrun commit is never pushed. Then return tests: each command and its result, one entry per command; a commit whose report records no test command is refused`
 const tested = f => !!f && Array.isArray(f.tests) && f.tests.some(t => typeof t === 'string' && t.trim() !== '')
 const UNTESTED = 'the fix report records no test command, so its commit is not pushed'
 // What a conflicted sync merge's resolution tests, the same text in deliver-standard.js: the files it resolved.
@@ -780,7 +793,7 @@ const PR_OPEN = (n, ready, expected, opened = false) => {
   return `Then open the pull request of issue #${n} of ${SLUG} (the git repository at ${REPO}) from the branch ${ready.branch} (worktree ${ready.worktree}) into ${INT}, or re-adopt the open one, so that its body is exactly the text below.
 1. Push the branch: git -C ${ready.worktree} push origin ${ready.branch}.
 2. If an open PR with head ${ready.branch} exists (a re-run), reuse it: ${opened ? `an earlier step of this run opened it, so read its body first (${UNSET}gh pr view <pr> --repo ${SLUG} --json body) and, when its Evidence section already ends with the line Accepted head: ${expected}, leave the body as it is and edit nothing; otherwise ` : ''}write the body to a file under a fresh directory made with mktemp -d and run ${UNSET}gh pr edit <pr> --repo ${SLUG} --body-file <that file>. Never reuse or edit a PR whose head is another branch, even when it references this issue; leave it untouched. Otherwise open one with the create form above. Title: a short summary of the issue.
-Body, plain prose, no single or double quotes, dollar signs, backticks or backslashes: sections Why, What changes, Acceptance (a table with one row per criterion: id, criterion, kind, and the test or command that shows it; criteria ${ACS}), Evidence (verification ${JSON.stringify(ready.verify || [])}${OUTSIDE[n] ? `; verification fixes outside the branch's diff, each with its cause: ${JSON.stringify(OUTSIDE[n])}` : ''}; ${(ready.tasks || []).length} tasks reviewed; the last line of the Evidence section is exactly: Accepted head: ${expected}), Merge danger; then the line ${closesLine} as the last line of the body, with no attribution or generated-by line. Never attach or link the plan or the spec.
+Body, plain prose, no single or double quotes, dollar signs, backticks or backslashes: sections Why, What changes, Acceptance (a table with one row per criterion: id, criterion, kind, and the test or command that shows it; criteria ${ACS}), Evidence (verification ${JSON.stringify(ready.verify || [])}${ready.verify_scope === 'before_pull_request' ? '; the verification above ran the pre-pull-request list, and CI on this pull request runs the full declared verification' : ''}${OUTSIDE[n] ? `; verification fixes outside the branch's diff, each with its cause: ${JSON.stringify(OUTSIDE[n])}` : ''}; ${(ready.tasks || []).length} tasks reviewed; the last line of the Evidence section is exactly: Accepted head: ${expected}), Merge danger; then the line ${closesLine} as the last line of the body, with no attribution or generated-by line. Never attach or link the plan or the spec.
 Return pr (number) and head (the full sha of the pushed head).`
 }
 // The wait and the grading of a checks poll, shared by a landing's poll and a train car's; `wait` is the bound of the
@@ -847,7 +860,7 @@ const land = async (n, ready, via = {}) => {
   // <label>-again; a second is answered as null, so it spends no fix round. The step did answer, so the breaker is left
   // alone: the row names it in lost_reviews.
   const readReview = async (asked, label, opts) => {
-    const prompt = `${asked}\n${READ_ONLY}`
+    const prompt = `${asked}${BEFORE_PR ? `\n${REVIEW_TESTS}` : ''}\n${READ_ONLY}`
     const first = await call(prompt, label, opts)
     const why = unusable(first)
     if (!why) return first
@@ -1017,7 +1030,7 @@ ${RULES}`, rl, { ...lifecycleClerk, schema: withRenew({ type: 'object', properti
 1. git -C ${W} fetch origin. If origin/${INT} is an ancestor of HEAD (git -C ${W} merge-base --is-ancestor origin/${INT} HEAD succeeds), change nothing and answer status current with head (git -C ${W} rev-parse HEAD, the full sha). When that head is not ${expected} (an earlier run of this step may have merged and pushed before it was interrupted), the answer also carries these facts, read without changing anything, every sha in full: ${AHEAD_FACTS(W, expected)}; and pushed (true only when git -C ${W} rev-parse origin/${B} prints that head).
 2. Otherwise merge it: git -C ${W} merge origin/${INT}. A clean merge: answer status done, conflicted false, head (the full sha of the merge commit).
 3. If the merge conflicts, do not resolve it: run git merge --abort inside ${W}, confirm no merge is left in progress (git -C ${W} rev-parse -q --verify MERGE_HEAD fails), and answer status conflicted, conflicted true, with head (the full sha of HEAD, unchanged) and the conflicting files in notes. A later step resolves it.
-${pr ? `4. After a clean merge, push the result: git -C ${W} push origin ${B}.` : '4. Do not push.'}
+${BEFORE_PR ? `${SYNC_TESTS(W, INT, expected)}\n` : ''}${pr ? `4. After a clean merge, push the result: git -C ${W} push origin ${B}.` : '4. Do not push.'}
 ${RULES}`, label, { phase: 'Land', agentType: 'implementer', model: 'sonnet', schema: LAND_SYNC_SCHEMA })
     if (!sy) return out('stopped', { stage: 'land-sync', detail: `${label} returned nothing` })
     // A blocked answer that names a conflict is the aborted merge under another name.
@@ -2437,3 +2450,4 @@ return {
   relaunch: open.length ? relaunchArgs() : null,
   ...(breaker ? { breaker } : {}),
 }
+// suppress-standard:B17 the batch's phases share module state (setup, the landing loop), so it stays one file

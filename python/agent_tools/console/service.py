@@ -113,7 +113,7 @@ guest_refused <door_wider|not_permitted|unreadable>`. A guest request is admitte
 `guest.admit` in this order, each refusal `403` `text/plain`, one line, `Connection: close`, with
 nothing appended (the one thing a guest-door request may publish is the reading below): sharing
 off, then a tailnet name this console cannot read (`guest.NAME_UNREAD_TEXT`: the name is read from
-this host's Tailscale, ADR-console-078), a `Host` that is not exactly one `localhost` or an `X-Forwarded-Host` that is not exactly one and the read name (no port form; ADR-console-077 D4), then not exactly one `Tailscale-User-Login` header of a listed colleague.
+this host's Tailscale, ADR-console-078), a `Host` that is not exactly one `localhost` or an `X-Forwarded-Host` that is not exactly one and the read name (no port form; ADR-console-077), then not exactly one `Tailscale-User-Login` header of a listed colleague.
 One request is judged by one `guest.Snapshot` (the switch, the list and the read name, with the scoped views
 and picture ids derived under them): the handler reads `ConsoleService.guest_snapshot` once, in `parse_request`,
 and the recorded reading, the decision, the state read and the picture check all use that snapshot; the
@@ -462,7 +462,7 @@ the answer is an empty `204`. The mark is dropped on every way out, and the stor
 written again then. Any other exception is `console:
 account_remove_failed <Type>` (never its message) and 500 `removing the account failed`. A running
 session of the owner's own profile is not stopped. For a colleague's profile (one in `_owners_now()`
-at the first block, #1345, ADR-console-087 D5) the same block also reserves, as a `_MoveReservation`,
+at the first block, #1345, ADR-console-087) the same block also reserves, as a `_MoveReservation`,
 every started manager on it with no stop and no end, and refuses `<profile> is still being read; try
 again in a moment` (nothing marked, signed out, stopped or launched) when such a sprint is launching,
 nudged or stopping, and, for a sign-out and a removal alike, when a started manager on it has a stop pending or a
@@ -495,7 +495,7 @@ profile, else `account_remove.SIGNOUT_UNAVAILABLE` or `NOT_COLLEAGUE`) runs the 
 sign-out alone and appends one `signin.acted` row of action `signout`, outcome `signed_out` or
 `failed`; a stop that failed is `account_remove.MoveFailed("stop_failed")` after that row.
 
-`POST /api/account-signout` (#1345, ADR-console-087 D3) is the owner's sign-out of a colleague's
+`POST /api/account-signout` (#1345, ADR-console-087) is the owner's sign-out of a colleague's
 account alone, the account staying in the pool and his. After the page-write guard the body is JSON
 read with `MAX_REMOVE_BYTES` and `account_remove.parse_signout_request` (exactly one member,
 `profile`, a non-empty string; else 400 `bad sign-out`), then `sign_out_account(profile)` runs with
@@ -519,7 +519,7 @@ registered); and, under the ingest lock, a second registration while one runs
 (`register.running`). With `"unless_open": true`, under the same lock, a registration the owner's view
 shows open (`register.open_shown` of `derive_view` of the inputs `_publish` uses: not null and not
 dismissed; a card that reduces the entry makes it open) is refused with `register.OPEN_SHOWN` (#1334,
-ADR-console-084 D2); the page never sends the member. Otherwise the answer is an empty `204` at once
+ADR-console-084); the page never sends the member. Otherwise the answer is an empty `204` at once
 and the run is dispatched: the adopter's plan. A fresh run first compares the checkout with its remote (`checkout_reader`, #1233,
 ADR-console-070): a checkout behind a remote's default branch is one `behind` row (`register.behind`)
 and the `register_behind` card, with no plan, no draft and no child; an unreadable remote runs today's
@@ -563,7 +563,7 @@ register_confirm_failed <Type>` and 500 `registering failed`.
 `POST /api/register-cancel` (#1088, ADR-console-037) is the owner's Cancel registration of the shown
 registration, which was not applied yet or whose apply failed. It takes `{"root"}`, or `{"root", "restore":
 true}` (#1334): a restoring Cancel writes the shown plan's row with `"restore": true` and gives the page
-back the registration shown before the cancelled one (ADR-console-084 D2) instead of none; the page sends
+back the registration shown before the cancelled one (ADR-console-084) instead of none; the page sends
 only `{"root"}`. The body has `MAX_REGISTER_CANCEL_BYTES` (4096) and goes through
 `register.parse_cancel_request`: 400 `bad registration cancel`.
 The service refuses, each as 409 with the text, one stderr line `console: register_cancel_refused
@@ -1071,7 +1071,7 @@ hold any text, is never printed; any other exception is `console: live_fault_wit
 the owner withdraws a declaration of an ended sprint too. It nudges nobody and sends no message; a refusal
 appends and publishes nothing.
 
-Owner notice nudges (#1120, ADR-console-053, D6): with a nudger, `post_owner_notice` records, still under the
+Owner notice nudges (#1120, ADR-console-044): with a nudger, `post_owner_notice` records, still under the
 lock, in `_notice_due[sprint_id]` the new row's seq for each sprint of the project with `sprints.takes_notices`
 and `_reachable` (every `_nudgeable` condition but the unread message), and reserves in `_nudging` and
 dispatches `_dispatch_notice_nudge` after the lock each of them not already reserved; a reserved sprint keeps
@@ -1089,7 +1089,7 @@ nothing folds it. A notice nudge is never retried after its own attempt, counts 
 `last_nudge_at` and delivers no message; one that cannot be dispatched is the same row with route null and the
 reason `the nudge could not start: <Type>: <message>`, and the post still answers 204.
 
-Permit (#1377, #1401, ADR-console-094, ADR-console-098): `POST /api/permit` is a manager write dispatched beside `/api/notices`
+Permit (#1377, #1401, ADR-console-094): `POST /api/permit` is a manager write dispatched beside `/api/notices`
 through `_checked_length(MAX_PERMIT_BYTES)` (16384). Its body is `sprints.parse_permit_request`'s
 `{"sprint_id", "secret", "phase": "judge" | "landed", "session_id", "tool_use_id", "command"}`, else 400 `bad permit`;
 a `sprints.SecretRefused` is 403 `secret refused`, any other `sprints.Refused` 409 with its reason, any
@@ -1152,7 +1152,7 @@ prompt after a restart before its hook's next wait, takes no answer); 500 `permi
 (`prompt_card.prompts`) at construction and on every append, and the view lists the open ones through
 `prompt_items`. `/api/hooks` and the lifecycle guard are not touched.
 
-Owner notices (#1120, ADR-console-053): `POST /api/owner-notice` (`{"project_id", "text"}`, at most
+Owner notices (#1120, ADR-console-044): `POST /api/owner-notice` (`{"project_id", "text"}`, at most
 `MAX_OWNER_NOTICE_BYTES` 4096) and `POST /api/owner-notice-withdraw` (`{"project_id", "notice"}`, at most
 `MAX_OWNER_NOTICE_WITHDRAW_BYTES` 4096) are page writes: both pass `_page_write`'s guard before any body is
 read (no or a foreign `Origin` is 403 `origin refused`, a missing or wrong token 403 `token refused`,
@@ -1441,7 +1441,7 @@ None, and `movement.merged` keeps the last good reading of the pull requests: th
 its wait for the quiet window from the last time anything moved, then goes quiet. The fold also
 receives the issues whose run is in a session not ended (`live`) and those of them in a lock step (`IssueStage.locking`,
 #1184); a holding pull request's issues count only when live (a run that died holding the lock leaves its pull request
-holding until a waiter takes it over, ADR-console-061 D1); a lock step counts only in a good read that saw a pull request hold a lock, and a failed
+holding until a waiter takes it over, ADR-console-050); a lock step counts only in a good read that saw a pull request hold a lock, and a failed
 read refreshes no lock time, a journal lock step's included, so a lock wait ages out with the rest
 of the kept reading. The merged reading
 is kept per project in memory only (a restart reads at once), published, and never appended to the
@@ -1548,7 +1548,7 @@ at that moment (`_read_profiles`, never the last poll's) with the sign-ins and e
 folded from the log's session rows (`manager.profile_use`, kept after a session leaves; ADR-console-023,
 #1011) and the excluded profiles folded from the log's `profile.exclusion` rows (`exclusion.excluded_profiles`,
 #1028), which `capacity_view` leaves out of the room, and the pinned profile (#1029), which it
-answers first while it has room, with the sprint's starter and `_waiting_logins()` so that a colleague's account serves his own sprints first (#1344, ADR-console-087 D1), and `Wait` appends `manager.waiting`. Otherwise the launcher is called outside the lock, and then,
+answers first while it has room, with the sprint's starter and `_waiting_logins()` so that a colleague's account serves his own sprints first (#1344, ADR-console-087), and `Wait` appends `manager.waiting`. Otherwise the launcher is called outside the lock, and then,
 under it, a sprint that was withdrawn meanwhile has its secret and settings file removed again and
 no row appended, and otherwise, unless the service is stopping, `manager.started {sprint_id, profile, session_name}`
 or `manager.failed {sprint_id, reason}` is appended (the reason of a `LaunchFailed`, else `<Type>:
@@ -1649,7 +1649,7 @@ message with no `delivered_at` whose `at` is at least `sprints.RENUDGE_AFTER_MS`
 `self._clock()` and a `last_nudge_at` that is None or as old, and dispatches each after the lock
 (row times are compared as epoch milliseconds).
 
-Unread after a relay (#1379, ADR-console-096): a sprint `renudge()` did not reserve by that rule is
+Unread after a relay (#1379, ADR-console-016): a sprint `renudge()` did not reserve by that rule is
 asked `sprints.unread_step(sprint, now)`. `RELAY_AGAIN` reserves it and dispatches the ordinary message
 nudge (so a manager listed meanwhile gets a relay and a gone one a wake); `WAKE_UNREAD` reserves it and
 dispatches `_dispatch_unread_wake` after the lock. `_unread_wake` decides the step again under the lock
@@ -1789,7 +1789,7 @@ and room by `manager.has_room` (reads `ok` or `reset`, not signed out, not exclu
 still be scanned and not being removed. Otherwise the reservation ends, nothing is appended and the
 sprint is marked in `_move_cancelled` until the manager's account has room: no later poll decides a
 move again. The started manager row stays, and the sprint waits to wake its session after the reset
-(#1279). A listed manager waiting on quota is moved too (#1378, ADR-console-095): when it is idle
+(#1279). A listed manager waiting on quota is moved too (#1378, ADR-console-020): when it is idle
 or at its limit, the sprint is open, not stalled, with no open no-progress item and work to do, fewer than
 `revive.LIMIT` counted revivals sit in the window, a launcher and a stopper exist, the move was not
 cancelled and `_move_target` finds an account with room, `revive()` reserves a `_ListedMoveReservation`
@@ -1932,7 +1932,7 @@ tracker, movement, retention, digest and spend threads and the folder-trust star
 
 `POST /api/project-question` (#1176, ADR-console-058) carries one JSON body of `project_id` and
 `question`, and optionally a non-empty string `thread_id` (#1178, ADR-console-062), an optional
-`request_key` of 32 lowercase hex digits that the console asks once per project (ADR-console-089 D9) and an
+`request_key` of 32 lowercase hex digits that the console asks once per project (ADR-console-089) and an
 optional boolean `deep` (#1274, ADR-console-101)
 (`MAX_PROJECT_QUESTION_BYTES`, 16384, the checks of the goal route): a body
 `project_question.parse_ask` does not accept (a non-boolean `deep` included) is 400 `bad question`; `project_question.Refused` is
@@ -4049,7 +4049,7 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         """Write views as they publish; `delivered` hears each version once written.
 
         Only the owner's stream passes it: a guest view never carries the evidence card, so a frame
-        written to a colleague shows the owner nothing (ADR-console-071 D4).
+        written to a colleague shows the owner nothing (ADR-console-071).
         """
         console = self.server.console
         self.close_connection = True
@@ -5600,7 +5600,7 @@ class ConsoleService:
         return sprint_id
 
     def _admit_run(self, root: str) -> None:
-        """Reserve the run of `root`, or refuse once the console stops (ADR-console-081 D3); `_ingest` held."""
+        """Reserve the run of `root`, or refuse once the console stops (ADR-console-028); `_ingest` held."""
         if self._stop.is_set():
             raise sprints.Refused(register.STOPPING)
         self._registering = root
@@ -5628,7 +5628,7 @@ class ConsoleService:
         return contract_draft.read_hooks(root, cancel=self._stop)
 
     def _end_run(self) -> None:
-        """Release the reservation and wake the drain of `close` (ADR-console-081 D3); `_ingest` held."""
+        """Release the reservation and wake the drain of `close` (ADR-console-028); `_ingest` held."""
         self._registering = None
         self._runs_done.notify_all()
 
@@ -5672,7 +5672,7 @@ class ConsoleService:
         makes it a follow-up (#1178, ADR-console-062): it is checked against the project's folded
         questions after the question's own checks and before the profile choice, and its thread's
         turns go to the job. A `request_key` already on a folded question of the project returns
-        that question's id, or a receipt of one, and appends, counts and dispatches nothing (ADR-console-089 D9); the
+        that question's id, or a receipt of one, and appends, counts and dispatches nothing (ADR-console-089); the
         check precedes the follow-up check, so a re-sent follow-up is not refused. Refusals are
         `project_question.Refused` and append and count nothing. A credential-shaped text is
         refused first, before every other check and before the request-key replay (#1272). A `deep`
@@ -5833,7 +5833,7 @@ class ConsoleService:
         That section also rechecks that `project_id` still holds `root`: a checkout path taken by another
         project since the question was admitted would put the next owner's activations after the cutoff,
         so the gathering raises and the question is a failed answer. A question asked before the first
-        spend poll reads the spend view first through the console's own poll (#1357, ADR-console-090),
+        spend poll reads the spend view first through the console's own poll (#1357, ADR-console-089),
         and spend stays null only when that read failed. A `deep` question also reads its project's own
         delivery transcripts, aggregated (`transcript_digest.project_runs`, #1274, ADR-console-101), from the
         later of the spend window's first day and the day the project began to hold `root`, outside the lock,
@@ -7699,7 +7699,7 @@ class ConsoleService:
         """Under the ingest lock: the logins with an open sprint whose manager waits for a profile (#1344).
 
         A colleague's account is kept for them: another starter's sprint does not take it while
-        one of the owner's waits (ADR-console-087 D1).
+        one of the owner's waits (ADR-console-087).
         """
         return frozenset(
             sprint.started_by for sprint in self._sprints.values()
@@ -8286,7 +8286,7 @@ class ConsoleService:
         return chosen
 
     def _relays_in_bypass(self, sprint_id: str) -> bool:
-        """Under the ingest lock: whether the sprint's newest logged mode (ADR-console-060 D4) is bypass, so its relay must come from a bypassing sender (ADR-console-068)."""
+        """Under the ingest lock: whether the sprint's newest logged mode (ADR-console-060) is bypass, so its relay must come from a bypassing sender (ADR-console-068)."""
         sprint = self._sprints.get(sprint_id)
         return (sprint is not None and sprint.permission is not None
                 and sprint.permission.mode == permission.BYPASS)
@@ -8586,7 +8586,7 @@ class ConsoleService:
             self._dispatch_notice_nudge(sprint_id)
 
     def _unread_wake(self, sprint_id: str) -> None:
-        """Stop the manager's listed session and wake it in place for a message it left unread; the reservation ends here (ADR-console-096)."""
+        """Stop the manager's listed session and wake it in place for a message it left unread; the reservation ends here (ADR-console-016)."""
         heard: set[int] = set()
         with self._ingest:
             found = self._nudgeable(sprint_id)
@@ -9186,7 +9186,7 @@ class ConsoleService:
     def _run_wait(self, sprint: sprints.SprintState, session: sessions.SessionState | None,
                   now_ms: int) -> bool:
         """Under the ingest lock: whether a run of the session still in progress reads a wait of
-        ADR-console-050 or ADR-console-061 inside the quiet window (#1381)."""
+        ADR-console-050 inside the quiet window (#1381)."""
         if session is None or self._run_moved(session) is None:
             return False
         issues = {issue.issue for (sid, _), state in self._deliveries.items()
@@ -9877,7 +9877,7 @@ class ConsoleService:
             comment = answer.with_retries(
                 record, clock=self._monotonic, sleep=self._write_sleep, on_retry=on_retry)
             # The tracker offers no way to make the read and the post one step, so the pull request is
-            # read once more before the answer is declared recorded (ADR-console-074 D10).
+            # read once more before the answer is declared recorded (ADR-console-074).
             state, found = answer.with_retries(
                 lambda: self._look_reader(slug, look.pr), clock=self._monotonic,
                 sleep=self._write_sleep, on_retry=on_retry)
@@ -10608,7 +10608,7 @@ class ConsoleService:
                 self._tailnet_addresses = addresses
             if (name is not None and self._guest_reading_name is not None
                     and name != self._guest_reading_name):
-                self._guest_reading = None  # judged under a name that has gone (ADR-console-079 D3)
+                self._guest_reading = None  # judged under a name that has gone (ADR-console-079)
             self._publish()
 
     def activate(self, commit: str) -> None:

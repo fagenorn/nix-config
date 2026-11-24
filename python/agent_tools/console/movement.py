@@ -47,7 +47,7 @@ The fold. `lock_held` is `any(p.holding for p in pulls)` for a read and the prev
 `pulls` is None. In a good read each issue of a read pull with `holding` that is in `live` (the issues whose delivery run is in a session not ended; None
 gates nothing), and each issue of `locking` (the issues whose journal sits at a lock step) when that read's
 `lock_held` is true, is seen: a run that died holding the lock leaves its pull request holding, so its issues
-are seen no more and the sprint ages out to may be stuck (ADR-console-061 D1); its `locks` time
+are seen no more and the sprint ages out to may be stuck (ADR-console-050); its `locks` time
 becomes `max(now_ms, kept)`; an issue not seen keeps its time, never refreshed; `locks` is ascending by
 issue. A failed read sees nothing and keeps `locks` unchanged whatever `locking` holds, so a lock time ages
 out after the quiet window like every signal (ADR-console-050), a journal lock step's included. `merged` keys pull requests by number and returns them ascending by number. With `pulls` None
@@ -80,7 +80,7 @@ a session with a sprint, at `sessions_ms` (the time the caller started the read)
 `output_ms` is the larger of the read and the last one, never moving back. A reading of a manager session carries `replies`, the `(sprint, idle-nudge time)` of
 the sprints it manages that were nudged: an output or a CPU reading for such a sprint that falls from the
 nudge to `NUDGE_REPLY_MS` (five minutes) after it is the manager's reply, so it is never folded and the
-last qualifying time stays (a reply never erases earlier movement; ADR-console-057 D6). `check_ms` is that time
+last qualifying time stays (a reply never erases earlier movement; ADR-console-042). `check_ms` is that time
 when the CPU used since the last reading, summed per process key `(pid, start)` (a process new since
 then counts all of its CPU), is at least `CHECK_CPU_MS` (one second: a watcher loop idling at a few
 milliseconds per poll must not read as a running check), and with no earlier table to compare (the

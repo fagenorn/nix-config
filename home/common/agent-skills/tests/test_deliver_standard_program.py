@@ -247,12 +247,12 @@ FOLDED_READ = {
     "setup": ({"ok", "reason", "details", "host", "slug", "integration_branch", "default_branch", "branch",
                "worktree_path", "head", "merged_pr", "merged_refs", "merged_heads", "dirty", "duplicate_pr", "since_reviewed", "branch_heads",
                "existing", "unset_env", "merge_strategy", "delete_branch", "review", "review_state", "knowledge",
-               "verification", "holder", "acquire", "claim", "answer", "renew", "live_fault", "lane_rule"},
+               "verification", "verification_before_pull_request", "holder", "acquire", "claim", "answer", "renew", "live_fault", "lane_rule"},
               {"existing": {"local_branch", "remote_branch", "worktree", "dirty", "status"},
                "merged_refs[]": {"number", "closes"}, "merged_heads[]": {"number", "commits"},
                "review": {"code", "plan"}, "review_state": {"code", "plan"},
                "knowledge": {"standards", "hints", "rejections"},
-               "verification[]": {"id", "argv", "cwd", "when_changed", "skip_reason", "pre_commit"},
+               "verification[]": {"id", "argv", "cwd", "when_changed", "skip_reason", "pre_commit"}, "verification_before_pull_request[]": {"id", "argv", "cwd", "when_changed", "skip_reason"},
                "acquire": {"verdict", "by", "detail", "transient"}, "claim": {"ok", "reason", "worktree", "base_sha", "plan_dir"},
                "answer": {"verdict", "comment_id", "questions", "decisions"}, "renew": RENEW_READ,
                "lane_rule": {"verdict", "reason"}}),
@@ -12254,7 +12254,7 @@ class ReadOnlyReviewTest(unittest.TestCase):
         for text in (mine, batch):
             self.assertEqual(text.count("${READ_ONLY}"), 1)
             self.assertEqual(text.count("Never check out, switch, reset or stash"), 1)
-            self.assertIn("    const prompt = `${asked}\\n${READ_ONLY}`\n" if text is batch else "  const prompt = `${asked}\\n${READ_ONLY}`\n", text)
+            self.assertIn(f"{'    ' if text is batch else '  '}const prompt = `${{asked}}${{BEFORE_PR ? `\\n${{REVIEW_TESTS}}` : ''}}\\n${{READ_ONLY}}`\n", text)
         for word in ("check out", "switch", "reset", "stash", "git show"):
             self.assertIn(word, READ_ONLY)
         # No second worktree is offered: every step works only in the worktree it is given.
