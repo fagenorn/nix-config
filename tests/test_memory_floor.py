@@ -33,6 +33,7 @@ from agent_tools.hosts.memory_floor import (
     parse_launchctl_list,
     parse_ps,
     protected_pids,
+    read_omlx_pid,
     step,
     workloads,
 )
@@ -355,6 +356,24 @@ class FloorTest(unittest.TestCase):
             self.assertRegex(
                 line, r"^2026-11-24T12:33:05\+00:00 floor_breached no agent workload to end available_gib=10\.0\n$"
             )
+
+
+class OmlxPidReadingTest(unittest.TestCase):
+
+    def launchctl(self, directory, code, out=""):
+        path = Path(directory) / "launchctl"
+        path.write_text(f"#!/bin/sh\ncat <<'EOF'\n{out}\nEOF\nexit {code}\n")
+        path.chmod(0o755)
+        return str(path)
+
+    def test_a_job_that_is_not_loaded_has_no_pid_so_kills_stay_on(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.assertIsNone(read_omlx_pid(self.launchctl(directory, 113), "org.nixos.omlx"))
+
+    def test_any_other_launchctl_failure_is_unreadable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(ReadingError, "launchctl exited 1$"):
+                read_omlx_pid(self.launchctl(directory, 1), "org.nixos.omlx")
 
 
 class RunBoundTest(unittest.TestCase):

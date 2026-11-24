@@ -106,6 +106,12 @@ class ReadingError(Exception):
     pass
 
 
+class CommandFailed(ReadingError):
+    def __init__(self, message: str, code: int):
+        super().__init__(message)
+        self.code = code
+
+
 def parse_vm_stat(text: str) -> dict:
     header = re.search(r"page size of (\d+) bytes", text)
     found = {"page_size": int(header.group(1))} if header else {}
@@ -269,7 +275,7 @@ def _fold_floor(state: dict, found: dict | None, reading: dict) -> None:
                 state["pending"].append({
                     "kind": "memory_kill", "logged": False,
                     "text": f"{host}: the memory floor ended {entry['owner']}'s workload "
-                            f"{entry['root_command']} ({entry['processes']} processes, "
+                            f"{entry['root_command'][:200]} ({entry['processes']} processes, "
                             f"{entry['tree_bytes'] / GIB:.1f} GiB, {why}). Available "
                             f"{entry['available_before_bytes'] / GIB:.1f} GiB before, "
                             f"{entry['available_after_bytes'] / GIB:.1f} GiB after. {SEE}",
@@ -478,7 +484,7 @@ def _run(name: str, argv: list[str]) -> str:
     except (OSError, subprocess.SubprocessError) as error:
         raise ReadingError(f"{name} could not run ({type(error).__name__})") from None
     if done.returncode != 0:
-        raise ReadingError(f"{name} exited {done.returncode}")
+        raise CommandFailed(f"{name} exited {done.returncode}", done.returncode)
     return done.stdout
 
 

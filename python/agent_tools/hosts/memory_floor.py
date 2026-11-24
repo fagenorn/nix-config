@@ -51,6 +51,7 @@ from pathlib import Path
 
 from agent_tools.hosts.omlx_memory_watch import (
     GIB,
+    CommandFailed,
     ReadingError,
     _run,
     kill_line,
@@ -522,6 +523,21 @@ def _memorystatus_control(path: str) -> Callable[[int, int, int, bytearray], int
     return control
 
 
+LAUNCHCTL_NOT_LOADED = 113
+
+
+def read_omlx_pid(launchctl: str, label: str) -> int | None:
+    """The oMLX job's pid; None when it has no process or is not loaded (launchctl exits 113), so kills stay on."""
+    try:
+        return parse_launchctl(_run("launchctl", [launchctl, "print", f"system/{label}"]))["pid"]
+    except CommandFailed as error:
+        if error.code == LAUNCHCTL_NOT_LOADED:
+            return None
+        raise
+    except ValueError as error:
+        raise ReadingError(f"launchctl output not parseable ({error})") from None
+
+
 def build_io(args, owners: Owners) -> Io:
     footprint, cwd = _libproc_readers(args.libproc)
     relevant = {owners.agent_uid, *(uid for uid, _ in owners.runners)}
@@ -550,10 +566,7 @@ def build_io(args, owners: Owners) -> Io:
         return parse_launchctl_list(_run("launchctl", [args.launchctl, "list"]))
 
     def omlx_pid() -> int | None:
-        try:
-            return parse_launchctl(_run("launchctl", [args.launchctl, "print", f"system/{args.label}"]))["pid"]
-        except ValueError as error:
-            raise ReadingError(f"launchctl output not parseable ({error})") from None
+        return read_omlx_pid(args.launchctl, args.label)
 
     def alive(pid: int) -> bool:
         try:

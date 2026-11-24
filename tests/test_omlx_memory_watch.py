@@ -458,6 +458,17 @@ class FloorRecordTest(WatchCase):
         saved = self.read_state()
         self.assertEqual((saved["floor_kills_seen"], saved["floor_log"]), (2, []))
 
+    def test_a_long_workload_command_is_cut_in_the_alert_as_in_the_log(self):
+        self.put_state(state(floor_kills_seen=1))
+        self.floor(kills=2, recent=[kill(2, root_command="x" * 5000)])
+        self.health()
+        self.settings_on()
+        done = self.sample()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(len(self.texts()), 1)
+        self.assertLess(len(self.texts()[0]), 4096)
+        self.assertIn("workload " + "x" * 200 + " (46 processes", self.texts()[0])
+
     def test_the_first_sample_only_records_the_kill_count(self):
         self.floor(kills=5, recent=[kill(4, owner="jarbird"), kill(5, owner="jarbird")])
         self.health()
