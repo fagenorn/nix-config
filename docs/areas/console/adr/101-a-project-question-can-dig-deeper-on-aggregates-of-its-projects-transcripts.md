@@ -24,4 +24,4 @@ Ask could not answer an analysis question such as where a project's delivery tim
 - A deeper answer costs more than a light one, and its estimate is shown before and its spend after.
 - A session still cannot open a transcript. What stays limited: a record without a `cwd`, a line that is not one JSON object and an encoding real transcripts do not produce are skipped, and a symlink inside the checkout keeps the existing walk rule.
 - Amends ADR-console-058 and ADR-console-089.
-- Related: ADR-console-059, ADR-console-062, ADR-console-090, ADR-console-093.
+- Related: ADR-console-059, ADR-console-062, ADR-console-093.

@@ -1,14 +1,15 @@
-"""The stand-in `gh` of the permission guard's table as the source of a Python script."""
-# Stand-in for `gh`. Answers the lookups the guard makes for any slug and
-# any protected branch, so the merge path can be exercised in every fixture
-# repository: the PR, its protection, and the PR body, an issue and
-# an issue's comments, the last two from FAKE_ISSUES (a JSON object of issue
-# number -> {"body", "comments"}; an absent number answers an empty issue).
-# FAKE_<STAGE>_MODE injects failures; FAKE_<STAGE>_JSON overrides
-# the payload. Mode `http_error` replays a failed `gh api` read as gh reports
-# it: exit 1, the response body on stdout (FAKE_<STAGE>_JSON, else
-# GitHub's plan-gated protection answer) and `gh: <message> (HTTP <status>)` on
-# stderr, or `gh: HTTP 403` when the body holds no string message and status.
+"""The stand-in `gh` the lifecycle guard suite runs the guard against.
+
+`FAKE_GH_SCRIPT` answers the lookups the guard makes for any slug and any protected branch, so the merge
+path can be exercised in every fixture repository: the PR, its protection, the PR body, the PR's commit
+pages, an issue and an issue's comments, the last two from FAKE_ISSUES (a JSON object of issue number ->
+{"body", "comments"}; an absent number answers an empty issue). FAKE_<STAGE>_MODE injects failures;
+FAKE_<STAGE>_JSON overrides the payload. Mode `http_error` replays a failed `gh api` read as gh reports
+it: exit 1, the response body on stdout (FAKE_<STAGE>_JSON, else GitHub's plan-gated protection answer)
+and `gh: <message> (HTTP <status>)` on stderr, or `gh: HTTP 403` when the body holds no string message
+and status. It lives beside the suite to keep both files under the size budget (rule B17).
+"""
+
 FAKE_GH_SCRIPT = '''
 import base64
 import json
@@ -54,7 +55,7 @@ elif (
     and argv[0:2] == ["pr", "view"]
     and argv[3] == "--repo"
     and argv[5] == "--json"
-    and argv[6] == "title,body,commits,closingIssuesReferences"
+    and argv[6] == "title,body,closingIssuesReferences"
 ):
     stage, number, slug = "body", argv[2], argv[4]
 elif len(argv) == 2 and argv[0] == "api":
@@ -105,6 +106,16 @@ elif (
         stage = "comments"
         slug = parts[1] + "/" + parts[2]
         number = parts[4]
+    elif (
+        len(parts) == 6
+        and parts[0] == "repos"
+        and parts[3] == "pulls"
+        and parts[5] == "commits"
+        and argv[3].endswith("?per_page=100")
+    ):
+        stage = "commits"
+        slug = parts[1] + "/" + parts[2]
+        number = parts[4]
 if stage is None:
     print("unexpected fake-gh argv: " + repr(argv), file=sys.stderr)
     raise SystemExit(64)
@@ -140,7 +151,9 @@ if stage == "pr":
         '"status":"COMPLETED","conclusion":"SUCCESS"}]}'
     )
 elif stage == "body":
-    default = '{"title": "", "body": "", "commits": [], "closingIssuesReferences": []}'
+    default = '{"title": "", "body": "", "closingIssuesReferences": []}'
+elif stage == "commits":
+    default = "[[]]"
 elif stage == "issue":
     issue = json.loads(os.environ.get("FAKE_ISSUES", "{}")).get(number, {})
     default = json.dumps({"number": int(number), "body": issue.get("body", "")})

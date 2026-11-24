@@ -19,7 +19,7 @@ launch, nudge or wake of the sprint) or None, `out` whether the manager's profil
 `run_ms` the latest movement of a delivery run of the manager's session that is still in progress
 (ended or unseen runs do not count) or None (#974). `run_wait` is whether an in-progress run of the
 manager's session reads a wait the console reads (CI on its pull request, a committing delivery, a
-release step or the land lock, ADR-console-050 and ADR-console-061, seen within the quiet window)
+release step or the land lock, ADR-console-050, seen within the quiet window)
 (#1381).
 The first rule that matches wins:
 

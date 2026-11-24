@@ -37,7 +37,10 @@ Contract:
   `/api/permission-prompt` by its literal path with the sprint's secret and kept held while shooting
   (a phase `wait` right before each width's shot), so the branch's console shows the card with Allow
   once and Refuse under "1 thing needs you"; on a console that does not know the route (the base answers 405) the seed
-  is the `PermissionRequest` hook row only, which is the before picture; `waiting-until` is the `stuck` sprint whose report states a wait until a time two hours
+  is the `PermissionRequest` hook row only, which is the before picture; `permission-long` is the same sprint holding a
+  long heredoc command (a python3 script that rewrites test names, a `cat` into `/tmp` and a `git diff` into `review/diff.txt`),
+  so the card shows its summary of what it reads, runs and writes above the folded text, and the base console the raw text;
+  `waiting-until` is the `stuck` sprint whose report states a wait until a time two hours
   ahead (#1380), so its line reads "waiting until" with that time, and `paused` the same sprint whose
   report states a pause with `PAUSE_REASON`, so its line reads "paused: " and the reason (a base console
   ignores both and reads the stage phrase, which is the before picture); `desk-spend` is the desk page over seeded transcripts: a running sprint and a finished,
@@ -265,7 +268,6 @@ import http.client
 import inspect
 import json
 import os
-import secrets
 import socket
 import struct
 import sys
@@ -278,22 +280,23 @@ from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from agent_tools.console import account_add, approve, capacity, contract_draft, event_log, manager, pictures, prompt_card, sessions, signin, view
+from agent_tools.console import account_add, approve, capacity, contract_draft, event_log, manager, pictures, sessions, signin, view
 from agent_tools.console.activation import Activation
 from agent_tools.console.answer import FORGE_DOWN
 from agent_tools.console.event_log import SHARING_COLLEAGUE, SHARING_TAILNET, EventLog
 from agent_tools.console.movement import LocalReading
 from agent_tools.console.service import ConsoleService
-from agent_tools.console.sprints import TELL_MINUTE_TEXT, Question, SprintState, create_secret, read_secret
+from agent_tools.console.sprints import TELL_MINUTE_TEXT, Question, SprintState, create_secret
 from agent_tools.system.forge_api import ForgeError
 
 from .console_land_queue import land_queue_reader
+from .console_screenshot_permissions import HELD_PROMPTS, PERMISSION_MANAGER, hold_permission, keep_permission
 from .console_test_support import hook_body, write_registry
 
 STATES = ("live-several", "waiting-on-you", "stuck", "tell-box-open", "message-sent",
           "message-picked-up", "message-replied", "message-not-picked-up", "finished-list",
           "nothing-running", "waiting-its-turn", "manager-cannot-hear", "permission-stale", "permission-card",
-          "waiting-until", "paused",
+          "permission-long", "waiting-until", "paused",
           "owner-check", "spend-page", "notices-fold",
           "notice-post-open", "live-fault", "desk-spend", "failed-start", "goal-open", "goal-near", "goal-over",
           "inbox-card", "question-words", "question-refused", "look-card", "look-moved",
@@ -328,7 +331,7 @@ REGISTER_STATES = ("register-apply", "register-draft", "register-reconcile-apply
                    "register-reconcile-draft")
 ADOPTION_STATES = ("adoption-merge", "adoption-moved", "adoption-failed")
 CLICKED_STATES = ("adoption-failed",)
-PERMISSION_STATES = ("permission-stale", "permission-card")
+PERMISSION_STATES = ("permission-stale", "permission-card", "permission-long")
 ADOPTION_BRANCH = "adopt-" + "5" * 12
 ADOPTION_COMMIT = "a" * 40
 ADOPTION_MOVED_HEAD = "d" * 40
@@ -389,10 +392,6 @@ OPEN_THREAD = (True, FOLLOW_READ_LINE, True)
 BASE_THREAD = (False, FOLLOW_READ_LINE, False)
 DESK_OUTSIDE = "outside-1136"
 DEAF_MANAGER = "manager-1229"
-PERMISSION_MANAGER = "manager-1424"
-PERMISSION_PROMPT = "/api/permission-prompt"
-PERMISSION_COMMAND = "git worktree add ../.worktrees/issue-12"
-PERMISSION_WORDS = "Create the delivery's worktree"
 READING_PANEL = "section#reading"
 READING_PANEL_ID = b'id="reading"'
 ACTIVATION_COMMIT = "1258" * 10
@@ -2789,51 +2788,6 @@ def _write_permission_manager(fixture: Fixture, now_s: float) -> None:
         {"type": "user", "timestamp": _iso(now_s - 5 * MINUTE), "message": {"content": "carry on"}}]))
 
 
-def _permission_post(service: ConsoleService, fixture: Fixture, body: Mapping) -> tuple[int, dict]:
-    """One POST of `body`, signed as the manager's hook signs it (a fresh nonce, the sprint's secret never sent), to the permission route by its literal path: its status and JSON."""
-    sprint_id = fixture.prompting
-    body = {**body, "sprint_id": sprint_id, "nonce": secrets.token_hex(16)}
-    body["auth"] = prompt_card.request_auth(read_secret(fixture.secrets, sprint_id),
-                                            prompt_card.signed_bytes(body))
-    connection = http.client.HTTPConnection(*service.address, timeout=10)
-    try:
-        connection.request("POST", PERMISSION_PROMPT, body=json.dumps(body),
-                           headers={"Content-Type": "application/json"})
-        response = connection.getresponse()
-        raw = response.read()
-        return response.status, json.loads(raw) if response.status == 200 else {}
-    finally:
-        connection.close()
-
-
-def hold_permission(service: ConsoleService, fixture: Fixture) -> int | None:
-    """The manager's held Bash prompt of `permission-card`: its id, or None on a console without the route.
-
-    A console that does not know the route (the base commit answers 405, another 404) gets the `PermissionRequest` hook row
-    alone, which is what its manager's hook produces there.
-    """
-    status, answer = _permission_post(service, fixture, {
-        "phase": "ask", "session_id": PERMISSION_MANAGER, "command": PERMISSION_COMMAND,
-        "description": PERMISSION_WORDS})
-    if status in (404, 405):
-        service.ingest_hook(hook_body("permission prompt", session_id=PERMISSION_MANAGER,
-                                      cwd=str(fixture.projects[0])))
-        return None
-    if status != 200 or not isinstance(answer.get("prompt"), int):
-        raise RuntimeError(f"the permission prompt was not held ({status})")
-    return answer["prompt"]
-
-
-def keep_permission(service: ConsoleService, fixture: Fixture, prompt: int | None) -> None:
-    """Renew the held prompt's contact right before a shot, as its hook's wait does."""
-    if prompt is None:
-        return
-    status, answer = _permission_post(service, fixture, {
-        "phase": "wait", "session_id": PERMISSION_MANAGER, "prompt": prompt})
-    if status != 200 or answer.get("state") != "open":
-        raise RuntimeError(f"the permission prompt is not held open ({status})")
-
-
 def build_fixture(root: Path, state: str, now_s: float, *,
                   read: tuple[str, str] = (READ_QUESTION, READ_ANSWER)) -> Fixture:
     root = Path(root)
@@ -2874,7 +2828,7 @@ def build_fixture(root: Path, state: str, now_s: float, *,
         _write_held_manager(fixture, now_s)
     if state == "permission-stale":
         _write_permission_manager(fixture, now_s)
-    if state == "permission-card":
+    if state in HELD_PROMPTS:
         create_secret(fixture.secrets, sprint_ids[0])
         fixture = replace(fixture, prompting=sprint_ids[0])
     if state == "spend-page":
@@ -3188,15 +3142,15 @@ def capture(out: Path, states: Sequence[str] = STATES, widths: Sequence[int] = W
                         serve = None
                         try:
                             host, port = service.address
-                            if state == "permission-card":
-                                held = hold_permission(service, fixture)
+                            if state in HELD_PROMPTS:
+                                held = hold_permission(service, fixture, state)
                             if state in SHARING_PANELS:
                                 guest_requests(state, guest_door(service))
                             elif state in ("guest-page", "guest-steer"):
                                 serve = _Serve(guest_door(service))
                                 host, port = serve.address
                             for width in group:
-                                if state == "permission-card":
+                                if state in HELD_PROMPTS:
                                     keep_permission(service, fixture, held)
                                 path = "spend" if state == "spend-page" else ""
                                 taken.append(

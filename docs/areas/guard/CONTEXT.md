@@ -36,9 +36,6 @@ The rule that relaxes the protection demand for one answer only: a repository wh
 **Production rule**:
 A rule of the project contract that names a command id, key file glob or MCP tool that changes production. The guard refuses the command in the project's checkout, a write to the key file in that checkout and a call to the MCP tool anywhere, in every permission mode, read from the project's derived row. It names the id, never the binary inside a script, alias or `just` recipe. A project that declares none declares no production. See ADR-guard-009.
 
-**Raise label**:
-The label that raises a repository's instruction budget for one change. Only the owner applies it, and the guard refuses an agent adding it.
-
 **Read-only route**:
 A declared way to reach production that only reads, such as a project's documented read-only check. The guard admits it in every permission mode. See ADR-guard-009.
 

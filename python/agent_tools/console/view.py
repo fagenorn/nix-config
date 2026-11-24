@@ -93,7 +93,7 @@ pending change is `pending` (the reading's commit, `activate` true); otherwise n
 is the one rule the service's admission of Activate shares: a reading with a pending change, or a
 `failed` run whose commit is the reading's and that finished less than OUTCOME_MS before `now_ms`, even
 with nothing pending, because the host's revision can reach the commit before the switch fails
-(ADR-system-004); a day later, with the host at that commit, the line goes (ADR-console-073 D5). The pending text is ACTIVATION_TEXT when
+(ADR-system-004); a day later, with the host at that commit, the line goes (ADR-console-073). The pending text is ACTIVATION_TEXT when
 the reading names a changed console file; else ACTIVATION_TOOLING_TEXT when every other path starts
 with a member of AGENT_TOOLING (`python/`, `home/common/agent-`, `home/common/claude-code/`,
 `home/common/codex/`, `patches/agent-plugins/`, `lib/agent-`); else ACTIVATION_CONFIGURATION_TEXT.
@@ -225,7 +225,7 @@ stalls, progress, sign-in, questions, then the existing ones.
 
 A profile whose sign-in asks (#1010: `capacity["profiles"][i]["signin"]["ask"]` is true, a read of
 `entry.get("signin")` so a capacity without that member shows none) and that no colleague added (#1361,
-ADR-console-087 D3: its entry's `owner` is none, a read of `entry.get("owner")`; signing a colleague's
+ADR-console-087: its entry's `owner` is none, a read of `entry.get("owner")`; signing a colleague's
 account in is his, so it raises no card) is one entry of `inbox.open`,
 after the progress entries and before the questions, ordered by profile, and counts in
 `inbox_items` and the headline. Its entry is
@@ -266,17 +266,17 @@ The item is listed per `approve.inbox_entries`, and Merge is offered (`merge` tr
 `approve.merge_refusal`; otherwise `why` says in plain words why the card offers no Merge.
 
 A permission card (#1424, `prompt_card.inbox_entries`) arrives through the `prompt_items` argument, one mapping
-each, and is one entry of `inbox.open`, copied, right after the release entries, in the order given. It counts
-once in `inbox_items` and the headline, is not filtered by the registered projects, and its `sprint_id` marks
-that sprint `prompted` (its ball is `owner`, its now-sentence `NOW_PERMISSION_TEXT`, and it is never counted a
-second time). Its entry is
+each, and is one entry of `inbox.open`, copied, right after the release entries, in the order given. It counts once
+in `inbox_items` and the headline, is not filtered by the registered projects, and its `sprint_id` marks that sprint
+`prompted` (its ball is `owner`, its now-sentence `NOW_PERMISSION_TEXT`, and it is never counted a second time). A
+guest view never carries one. Its entry, whose `summary` is null for a short command and else what
+`command_summary.summarize` reads from the command against the project's root, is
 
     {"type": "inbox_item", "reason": "permission", "key": "permission/<prompt>", "project_id": "<project>",
      "sprint_id": "<sprint>", "prompt": <prompt number>, "title": "<sprint title>",
      "headline": "The manager of <title> asks to run a command", "words": "<what the command is for>",
-     "command": "<the command>", "answered": false, "waiting_since": "<time the prompt opened>"}
-
-A guest view never carries one.
+     "command": "<the command>", "summary": null | <summary>, "answered": false,
+     "waiting_since": "<time the prompt opened>"}
 
 A release card (#1401, `release_card.inbox_entries`) arrives through the `release_items` argument, one mapping each,
 and is one entry of `inbox.open`, copied, right after the adoption entries, in the order given. It counts in
@@ -386,7 +386,7 @@ none): the page refuses such an option until the owner has written words with it
 `QUESTION_SENTENCE` ("Choose an option with its number and press Enter, or answer in your own
 words.") says what the page offers.
 
-Each open question of a done registration's plan (#1066, ADR-console-029 D10; `registration.status`
+Each open question of a done registration's plan (#1066, ADR-console-029; `registration.status`
 is `done` and `registration.questions` is not empty) is one entry of `inbox.open` too, after the
 manager questions and before every tracker item, in the plan's order, and counts in `inbox_items` and the headline; a running registration, one with no question and none at all add nothing. Its
 entry is
@@ -413,7 +413,7 @@ the page offers; `REGISTER_TYPE_SENTENCE` ("Type the answer on its card and pres
 when no register item offers options but one takes a typed answer; `REGISTER_STEP_SENTENCE` ("Each one says what to do next.") stands when no plan
 question offers an answer and nothing else is open.
 
-Each retry item a caller passes (`retry_items`; #1055, ADR-console-028 D10) is one entry of
+Each retry item a caller passes (`retry_items`; #1055, ADR-console-028) is one entry of
 `inbox.open` too: a registration the remote refused after its adoption merged, offering the one
 option `Retry`. It is copied as given and not filtered by the registered projects (the project is
 not registered yet), sits after the manager questions and before the plan questions, in the order
@@ -567,7 +567,7 @@ characters of its id.
 session, from the delivery states `derive_view` is given: the states whose `session_id` equals the
 session's id, newest `moved_ms` first, then `run_id`; each run's issues are ordered by number.
 `quiet` and `moved_text` come from `moved_text(now_ms - latest)` where `latest` is the run's
-reading (#1212, ADR-console-069): the journal's `moved_ms` alone for a run outside a running
+reading (#1212, ADR-console-005): the journal's `moved_ms` alone for a run outside a running
 sprint. A run belongs to the first of the project's shown sprints (newest stated first) that has
 not ended and either names one of the run's issue numbers (`sprint_issue_numbers`) or lists the
 run's session (a session of its `sessions`, or its `manager_session`); it then also reads the
@@ -746,7 +746,7 @@ landed gives none) whose rule is `OVERLAP_UNSETTLED`, in `claim_overlaps` order,
 `sprints` are the reading's two sprint ids, the earlier-started first, `files` its files and `text`
 is `OVERLAP_UNSETTLED_TEXT` over the two sprints' titles in that order and the files joined with
 `", "`. A settled overlap gives no entry. An overlap entry is never an inbox item and changes no
-`inbox`, count, headline, sentence or `stale` (#1347, ADR-console-091).
+`inbox`, count, headline, sentence or `stale` (#1347, ADR-console-085).
 Every sprint entry, running or finished, carries `live_faults`: the sprint's standing live-fault
 declarations (`open_faults`, so never a withdrawn one) in id order, `[]` when none. `text` is
 `LIVE_FAULT_TEXT` over the issue, `observed`, `when` and `proven`; `at` is the declaration's own time, unchanged. A live fault is never an inbox item and changes no `inbox`, count, headline, sentence or
@@ -765,7 +765,7 @@ when the project has no question, else `{"label": QUESTIONS_LABEL, "count", "thr
 thread per `project_question.threads` group, newest first by the last question's `seq`, `count`
 their number. A thread is `{"id", "questions", "follow_up"}`: `id` is its first question's
 `thread_id` (its own id when it has none), `questions` its question entries ascending by `seq`, and
-`follow_up` true exactly when its last question is answered (#1178, ADR-console-059 D4).
+`follow_up` true exactly when its last question is answered (#1178, ADR-console-059).
 A question entry is `{"id", "question", "asked_at",
 "state": "working" | "answered" | "timed_out" | "failed", "state_text", "answered_at": <time> |
 null, "answer": <str> | null, "read_text", "ran_text", "unknown_text", "back_text",
@@ -786,7 +786,7 @@ over the integer mean tokens and mean dollars of the project's newest `DEEP_ESTI
 questions that are not working and spent above 0 tokens, or `ASK_DEEP_NO_ESTIMATE_TEXT` when none did
 (`DEEP_TIMEOUT_SECONDS // 60` minutes), and null otherwise.
 A question is never an inbox item; it changes no count, headline, sentence, `stale`, `quiet` or
-order (#1177, #1178, ADR-console-059 D3, D4).
+order (#1177, #1178, ADR-console-059).
 `encode_view` writes sorted keys, compact separators, non-ASCII kept, NaN
 refused, no newline.
 """
@@ -1325,7 +1325,7 @@ def _effective_stages(state: SprintState) -> list[tuple[int, str, str]]:
 
 def owner_check(item: Mapping) -> bool:
     """Whether a tracker item is a verification owner prompt or a held-issue review card
-    (ADR-console-051 D1, ADR-console-054)."""
+    (ADR-console-051, ADR-console-054)."""
     return item.get("reason") in verify_owner.REASONS or item.get("reason") == inbox.REVIEW_REASON
 
 
@@ -1598,7 +1598,7 @@ def run_reading(run: DeliveryState, now_ms: int | None,
     """A run's reading. Without `waits` it is the journal's alone. With them its base is the newest
     of the journal and the run's session output and running check, and its latest also takes the
     wait signals; the wait is named only with a clock when the base is `QUIET_AFTER_MS` old and a
-    wait is not (ADR-console-050 D3, ADR-console-069)."""
+    wait is not (ADR-console-050, ADR-console-005)."""
     signals = [run.moved_ms]
     if waits is not None:
         signals += [ms for ms in (waits.output_ms, waits.check_ms) if ms is not None]
@@ -1620,7 +1620,7 @@ def run_reading(run: DeliveryState, now_ms: int | None,
 def run_sprint(run: DeliveryState, sprints: Iterable[SprintState],
                manager_ids: Mapping[str, Collection[str]]) -> SprintState | None:
     """The sprint a run belongs to: the first of `sprints` (newest stated first) that has not ended
-    and either names one of the run's issues or lists the run's session (ADR-console-042 D3)."""
+    and either names one of the run's issues or lists the run's session (ADR-console-042)."""
     numbers = {i.issue for i in run.issues}
     return next((s for s in sprints
                  if ended_at(s) is None

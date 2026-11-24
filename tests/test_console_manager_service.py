@@ -1545,7 +1545,7 @@ class ProfileChoiceServiceTest(ManagerServiceTest):
 
 
 class ColleagueAccountLaunchTest(GuestCase):
-    """The manager launch follows the colleague-account rule (#1344, ADR-console-087 D1)."""
+    """The manager launch follows the colleague-account rule (#1344, ADR-console-087)."""
 
     ACTOR = guest.GuestActor(COLLEAGUE, TAILNET)
 

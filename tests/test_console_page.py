@@ -188,8 +188,8 @@ class PageTest(unittest.TestCase):
         # Raised from 71 KB by #1432: a sprint's declared live fault line, its Withdraw and the same line on an
         # ended sprint's finished line (about 0.5 KB compressed) did not fit the 279 bytes the cap had left.
         # Raised from 72 KB by the merge of #1274 with #1432 and #1424: each side fit under its cap, and merged the
-        # page is 74199 bytes.
-        self.assertLess(len(gzip.compress(self.data, 9)), 74752)
+        # page is 74199 bytes. Raised from 73 KB: a long command's permission card summary and fold did not fit.
+        self.assertLess(len(gzip.compress(self.data, 9)), 75264)
 
     def test_the_top_bar_carries_one_spend_link(self) -> None:
         header = self.text[self.text.index('<header class="top">'):self.text.index("</header>")]
@@ -8443,7 +8443,7 @@ class SigninPageTest(unittest.TestCase):
         self.assertEqual(full(default), "default signed out")
 
     def test_a_signed_out_colleague_profile_waits_for_him_and_the_owners_own_says_signed_out(self) -> None:
-        """#1361, ADR-console-087 D3: the strip says whose sign-in a signed-out account waits for."""
+        """#1361, ADR-console-087: the strip says whose sign-in a signed-out account waits for."""
         snap = capacity_snap(capacity([
             profile("work", "unknown", signin=si("signed_out", None, ask=True), owner=None),
             profile("colleague-1", "unknown", signin=si("signed_out", None, ask=True),

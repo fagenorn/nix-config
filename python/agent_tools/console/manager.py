@@ -25,7 +25,7 @@ profile used most recently (as an instant; a never-used one ranks below every us
 the smallest name) answers; with none signed in, None (P2). The entries are the accounts only (the
 service lists the named profiles, #1016), so the unprofiled client directory is never chosen. A
 name in `last_use` that is not an entry is ignored.
-A colleague's account (#1344, ADR-console-087 D1; an entry whose `owner` is the login that added it,
+A colleague's account (#1344, ADR-console-087; an entry whose `owner` is the login that added it,
 which `capacity_view` carries) serves his own sprints first and anyone's when it has room.
 `starter` is the login that started the sprint (None for the owner's) and `waiting` the logins that
 have a sprint waiting for a profile. After the pin, which outranks both, an account is dropped from
@@ -87,7 +87,7 @@ crash, prints the client's deny decision with `REFUSAL`, one fixed sentence, thr
 (`sprint permit`, `PERMIT_TIMEOUT` 60 seconds) and `LANDED_COMMAND` (`sprint permit --landed`,
 `LANDED_TIMEOUT` 30 seconds): the console judges each Bash call of the session and allows only the
 sprint's own merge and rerun (ADR-console-094) and the plain `release transaction run`, never abandon
-or dispose (ADR-console-098); an `if` filter would let a
+or dispose (ADR-console-094); an `if` filter would let a
 spelling it missed fall to the owner's global `gh pr merge` allow. The third member is
 `"permissions": {"defaultMode": <mode>, "deny": [...], "allow": [...]}`, the mode the launch's
 `Permission` chose for the project (ADR-console-060, #1151), the `MANAGER_DENY` rules and the allow
@@ -99,7 +99,7 @@ rerun (a valid slug), each bare and behind each `env -u` credential spelling, an
 transaction run *`; there is no `unset` rule. A rule's `*` matches more than the grant, and the permit
 hook decides every text a rule matches, so auto mode resolves the permitted forms without the classifier
 while the hooks still judge each call (ADR-console-102). No rule names a `--dispose`, which the permit
-judges from the parsed words (ADR-console-098). There is no ask rule, no `autoMode` and no
+judges from the parsed words (ADR-console-094). There is no ask rule, no `autoMode` and no
 `disableAllHooks`. A launch built without a permission carries `permission.FALLBACK`,
 so `auto`. `settings_document(env, permission, allow)` is that content and `write_settings(path, env,
 permission, allow)` writes it (mode 0600, atomically); the console writes it again before every wake of a
@@ -235,7 +235,7 @@ FAILED_TEXT = "could not start a manager"
 WAITING_TEXT = "waiting on quota until"
 MISSING_TEXT = "the manager is not running"
 
-# The plain words a failed launch is shown with (ADR-console-042 D1: never "stalled", which
+# The plain words a failed launch is shown with (ADR-console-042: never "stalled", which
 # "installed" holds, so the missing-program text avoids that word).
 UNTRUSTED_TEXT = "this account does not trust the project's folder"
 NOT_INSTALLED_TEXT = "a program the manager needs is missing on this host"

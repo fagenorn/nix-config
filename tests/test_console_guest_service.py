@@ -1412,7 +1412,7 @@ class DoorTest(GuestCase):
 
 
 class GuestPeerTest(GuestCase):
-    """Every guest connection is judged by its peer's uid before a byte is read (ADR-console-077 D2)."""
+    """Every guest connection is judged by its peer's uid before a byte is read (ADR-console-077)."""
 
     def refused(self, reader, code, counted=True):
         self.seed()

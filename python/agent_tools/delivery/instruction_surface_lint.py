@@ -7,10 +7,10 @@ per profile and host of the model (`instruction-surface/<kind>/<profile id>/<hos
 paths are synthetic, so a violation's path names the surface. Its line is the measured bytes,
 so a surface that grows reports a larger line.
 
-The budgets are `BUDGETS`, platform constants. No project file sets them: the ceilings of the
-model file (`corpus_ceiling_bytes`, `description_ceiling_bytes`, each profile's `ceiling_bytes`
-and `conditional_ceiling_bytes`) are never read, and `structure` neutralises them before the
-model is validated, so a project ceiling, low, high, absent or malformed, changes no verdict.
+The budgets are `BUDGETS`, platform constants. No project file sets them: the model's retired
+ceiling keys (`RETIRED_TOP_LEVEL_KEYS` and `RETIRED_PROFILE_KEYS`, which revisions before issue
+1483 carry) are never read, and `structure` removes them before the model is validated, so a
+project ceiling, low, high, absent or malformed, changes no verdict.
 
 A surface that cannot be measured is a violation of its own, one per part, so a part held
 unmeasurable on both sides never hides a new one: a model that cannot be loaded or does not
@@ -68,19 +68,16 @@ def reads(path: str) -> bool:
 
 
 def structure(model: dict) -> dict:
-    """A copy of the model with every ceiling neutralised, so only its structure is validated."""
+    """A copy of the model without its retired ceiling keys, so only its structure is validated."""
     result = copy.deepcopy(model)
-    for key in instruction_load.GATE_TOP_LEVEL_KEYS:
+    for key in instruction_load.RETIRED_TOP_LEVEL_KEYS:
         result.pop(key, None)
     profiles = result.get("profiles")
     for profile in profiles if isinstance(profiles, list) else []:
         if not isinstance(profile, dict):
             continue
-        for key in instruction_load.GATE_PROFILE_KEYS:
+        for key in instruction_load.RETIRED_PROFILE_KEYS:
             profile.pop(key, None)
-        hosts = profile.get("hosts")
-        named = isinstance(hosts, list) and all(isinstance(host, str) for host in hosts)
-        profile["ceiling_bytes"] = {host: 0 for host in hosts} if named else {}
     return result
 
 
@@ -100,7 +97,7 @@ def _reader(snapshot: Snapshot) -> skill_lint.Snapshot:
 
 def _profile_surfaces(reader: skill_lint.Snapshot) -> list[Surface]:
     model = structure(instruction_load.load_model(reader.read(instruction_load.MODEL_PATH)))
-    if instruction_load.validate(model, reader.read, gate_fields=False):
+    if instruction_load.validate(model, reader.read):
         raise ValueError("the model does not validate")
     measure = instruction_load.measure(model, reader.read)["profiles"]
     return [Surface(f"instruction-surface/{kind}/{profile['id']}/{host}", kind,

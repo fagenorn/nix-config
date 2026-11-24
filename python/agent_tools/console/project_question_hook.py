@@ -73,7 +73,7 @@ this order:
 9. A command whose first word, by basename, is `git` or `gh` and was not admitted: `reads_denied`.
 10. Anything else is `NO_COMMANDS` when `allowed` is empty and `COMMAND_DENIED` otherwise.
 
-The confinement (#1271, ADR-console-089 D2). With a confinement the only file under its private
+The confinement (#1271, ADR-console-089). With a confinement the only file under its private
 directory that any tool may reach is its records file. A path reaches (`_reaches`) when its real path
 (symlinks resolved, `~` expanded, relative to `cwd`) is not the records file and is the private
 directory, the directory holding the records file or a transcript store, lies inside one, or is an ancestor of one, and is not inside the

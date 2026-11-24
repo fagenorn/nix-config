@@ -33,7 +33,7 @@ def body_of(path):
 EXPECTED_TIERS = {
     "owner": ("opus", "high"),
     "ship-owner": ("opus", "high"),
-    "implementer": ("opus", "high"),
+    "implementer": ("sonnet", "high"),
     "reviewer": ("opus", "high"),
     "reviewer-lite": ("sonnet", "medium"),
     "explorer": ("sonnet", "medium"),
@@ -158,6 +158,10 @@ class AgentToolSetTest(unittest.TestCase):
         for kept in ("Agent", "SendMessage", "Skill", "Bash", "Read", "Edit", "Write",
                      "Glob", "Grep", "ToolSearch"):
             self.assertNotIn(kept, blocked)
+
+    def test_the_implementer_role_file_runs_on_sonnet_at_high_effort(self):
+        metadata = frontmatter(AGENTS / "implementer.md")
+        self.assertEqual((metadata["model"], metadata["effort"]), ("sonnet", "high"))
 
     def test_no_program_agent_type_runs_on_the_default_tool_set(self):
         for name in ("clerk", "planner", "implementer", "reviewer", "reviewer-lite"):

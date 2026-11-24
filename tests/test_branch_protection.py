@@ -5,8 +5,8 @@ reports are the same string held in two files that GitHub will never reconcile f
 us — and once `just protect-main` has been applied, a rename on
 either side raises no error anywhere: it leaves `main` waiting forever on a context
 that never reports, with nothing in the UI pointing at the cause. These tests are
-the only offline place that failure can surface. `ci.yaml`,
-`instruction-budget.yaml` and the generated `conformance.yaml` share one indentation
+the only offline place that failure can surface. `ci.yaml`
+and the generated `conformance.yaml` share one indentation
 convention, so every helper reads any of them through a trailing `path` parameter that
 defaults to `ci.yaml`.
 """
@@ -14,7 +14,6 @@ defaults to `ci.yaml`.
 import json
 import os
 import re
-import shutil
 import subprocess
 import tempfile
 import unittest
@@ -24,13 +23,12 @@ from unittest import mock
 REPO_ROOT = Path(__file__).resolve().parents[1]
 WORKFLOWS = REPO_ROOT / ".github" / "workflows"
 WORKFLOW = WORKFLOWS / "ci.yaml"
-BUDGET_WORKFLOW = WORKFLOWS / "instruction-budget.yaml"
 CONFORMANCE_WORKFLOW = WORKFLOWS / "conformance.yaml"
 CLEANUP_WORKFLOW = WORKFLOWS / "cleanup-issue.yaml"
 LINT_TIME_WORKFLOW = WORKFLOWS / "lint-time.yaml"
 PROTECTION = REPO_ROOT / ".github" / "branch-protection.json"
 
-# The indentation convention that ci.yaml and instruction-budget.yaml share:
+# The indentation convention that ci.yaml and conformance.yaml share:
 # workflow name at column 0, job keys at two spaces, job attributes at four, step
 # attributes at six or more. PyYAML is not a guaranteed dependency on this host, so
 # the convention is the parser.
@@ -107,9 +105,7 @@ CONFORMANCE_INVOCATION = "nix shell .#agent-platform --command conformance run -
 CONFORMANCE_STEP = ["      - name: Run conformance",
                     f"        run: {CONFORMANCE_INVOCATION}"]
 CONFORMANCE_CHECKOUT_REF = "          ref: ${{ github.event.pull_request.head.sha || github.sha }}"
-BUDGET_COMMAND_RE = re.compile(r"PYTHONPATH=python python3 -m agent_tools\.instruction_load check\b")
-BUDGET_INVOCATION = 'PYTHONPATH=python python3 -m agent_tools.instruction_load check "${args[@]}"'
-REQUIRED_CONTEXTS = ("Nix Eval", "Instruction Budget", "Agent Workflow Tests", "Conformance")
+REQUIRED_CONTEXTS = ("Nix Eval", "Agent Workflow Tests", "Conformance")
 EXPECTED_PROTECTION_PAYLOAD = {
     "required_status_checks": {
         "strict": True,
@@ -350,16 +346,6 @@ def step_blocks(key, path=WORKFLOW):
     return steps
 
 
-def forwards_budget_args(body):
-    """Whether the one budget call is the invocation that forwards `args`.
-
-    Without the forwarding, `--base HEAD^1` and `--raise-label` are still built and
-    still in the body, yet the check runs with neither.
-    """
-    calls = [line.strip() for line in body.splitlines() if BUDGET_COMMAND_RE.search(line)]
-    return calls == [BUDGET_INVOCATION]
-
-
 def conformance_job_problems(path=CONFORMANCE_WORKFLOW):
     """Why the Conformance job could report green without running its command, or [].
 
@@ -395,27 +381,6 @@ def conformance_job_problems(path=CONFORMANCE_WORKFLOW):
     if any(RENAMING_KEY_RE.match(line) for line in job):
         problems.append("a job-level strategy: or uses:")
     return problems
-
-
-BUDGET_STEP = "Check the instruction budget"
-# The budget step's whole `env:` mapping: the event name and the payload-derived label.
-BUDGET_ENV = [
-    "EVENT_NAME: ${{ github.event_name }}",
-    "RAISE_LABEL: ${{ github.event_name == 'pull_request' && "
-    "contains(github.event.pull_request.labels.*.name, 'instruction-budget-raise') }}",
-]
-# The arguments `check` must receive for each event and label value (D14: the head
-# runs its own workflow, so losing raise control here would be permanent).
-BUDGET_CASES = (
-    ("pull_request", "true", ["--base", "HEAD^1", "--raise-label"]),
-    ("pull_request", "false", ["--base", "HEAD^1"]),
-    ("push", "false", []),
-)
-
-
-def budget_step(path=BUDGET_WORKFLOW):
-    """The lines of the budget job's checking step."""
-    return step_blocks("instruction-budget", path)[BUDGET_STEP]
 
 
 def green_without_work(lines, evaluation_run):
@@ -462,49 +427,6 @@ def step_env(step):
             break
         out.append(line.strip())
     return out
-
-
-def step_script(step):
-    """The shell body of a step's `run: |` block, dedented."""
-    body = []
-    for line in step[step.index("        run: |") + 1:]:
-        if line.strip() and not line.startswith("          "):
-            break
-        body.append(line[10:])
-    return "\n".join(body) + "\n"
-
-
-def execute_budget_script(script, event, label):
-    """Run `script` with `python3` stubbed to print its argv; exit code, argv, stderr.
-
-    The stub is a shell function, not an executable on PATH: a function shadows every
-    PATH entry, so a host that refuses to exec a freshly written file cannot make bash
-    fall through to the real interpreter.
-    """
-    stub = "python3() { printf '%s\\n' \"$@\"; }\n"
-    with tempfile.TemporaryDirectory() as directory:
-        result = subprocess.run(
-            [shutil.which("bash"), "-c", stub + script], cwd=directory, capture_output=True,
-            text=True, check=False,
-            env={"PATH": os.environ["PATH"], "EVENT_NAME": event, "RAISE_LABEL": label},
-        )
-    return result.returncode, result.stdout.splitlines(), result.stderr
-
-
-def budget_step_problems(step):
-    """Each way the step fails to pass `check` the base and the label it should."""
-    problems = []
-    env = step_env(step)
-    if env != BUDGET_ENV:
-        problems.append(f"env is {env!r}, not {BUDGET_ENV!r}")
-    script = step_script(step)
-    for event, label, extra in BUDGET_CASES:
-        expected = (0, ["-m", "agent_tools.instruction_load", "check", *extra])
-        code, argv, stderr = execute_budget_script(script, event, label)
-        if (code, argv) != expected:
-            problems.append(f"{event} with label {label}: ran {(code, argv)!r}, not "
-                            f"{expected!r}; stderr {stderr!r}")
-    return problems
 
 
 def payload():
@@ -710,7 +632,6 @@ class WorkflowShape(unittest.TestCase):
         )
         self.assertIn("Nix Eval", names)
         self.assertIn("Flake Checker", names)
-        self.assertIn("Instruction Budget", job_names(BUDGET_WORKFLOW))
 
     def test_pull_request_on_main_is_a_trigger(self):
         """Without this trigger a PR head carries zero check runs and the required
@@ -809,23 +730,14 @@ class WorkflowShape(unittest.TestCase):
 
     def test_each_required_job_still_runs_the_evaluation_it_exists_for(self):
         """Steps that run fine and evaluate nothing are the inverse of green-without-work:
-        a `run:` body of `true`, another flake attribute, or a budget call that no
-        longer forwards the arguments the step builds each leave every other assertion
-        here green. Whether the step builds `--base` and `--raise-label` under the right
-        event and label is BudgetWorkflowShape's behavioural test, not this one."""
+        a `run:` body of `true` or another flake attribute leaves every other
+        assertion here green."""
         self.assertEqual(list(REQUIRED_CONTEXTS), required_contexts())
         jobs = required_jobs()
         nix_path, nix_key = jobs["Nix Eval"]
         nix_body = job_body(nix_key, nix_path)
         self.assertRegex(nix_body, NIX_EVAL_COMMAND_RE)
         self.assertIn(EVALUATED_ATTRIBUTE, nix_body)
-        budget_path, budget_key = jobs["Instruction Budget"]
-        self.assertEqual(BUDGET_WORKFLOW, budget_path)
-        budget_body = job_body(budget_key, budget_path)
-        self.assertRegex(budget_body, BUDGET_COMMAND_RE)
-        self.assertTrue(forwards_budget_args(budget_body), budget_body)
-        self.assertIn("--base HEAD^1", budget_body)
-        self.assertIn("--raise-label", budget_body)
         suite_path, suite_key = jobs["Agent Workflow Tests"]
         self.assertEqual(WORKFLOW, suite_path)
         self.assertIn(SUITE_INVOCATION, job_body(suite_key, suite_path))
@@ -834,76 +746,6 @@ class WorkflowShape(unittest.TestCase):
         self.assertEqual("conformance", conformance_key)
         self.assertEqual([], conformance_job_problems(conformance_path))
 
-    def test_the_budget_forwarding_rejects_mutations(self):
-        body = job_body("instruction-budget", BUDGET_WORKFLOW)
-        self.assertTrue(forwards_budget_args(body))
-        self.assertFalse(forwards_budget_args(body + "\n" + BUDGET_INVOCATION))
-        for mutated in ("check", "check --base HEAD^1 --raise-label", 'check "${args[*]}"'):
-            with self.subTest(invocation=mutated):
-                self.assertFalse(forwards_budget_args(body.replace('check "${args[@]}"', mutated)))
-
-
-class BudgetWorkflowShape(unittest.TestCase):
-    LABEL_EXPRESSION = ("contains(github.event.pull_request.labels.*.name, "
-                        "'instruction-budget-raise')")
-
-    def test_label_events_and_push_are_the_triggers(self):
-        block = trigger_block("pull_request", BUDGET_WORKFLOW)
-        self.assertIsNotNone(block)
-        self.assertEqual(["main"], trigger_branches("pull_request", BUDGET_WORKFLOW))
-        self.assertIn("    types: [opened, synchronize, reopened, labeled, unlabeled]", block)
-        self.assertEqual(["main"], trigger_branches("push", BUDGET_WORKFLOW))
-        for absent in ("schedule", "workflow_dispatch", "pull_request_target"):
-            self.assertIsNone(trigger_block(absent, BUDGET_WORKFLOW), absent)
-        for trigger in ("pull_request", "push"):
-            self.assertFalse([line for line in trigger_block(trigger, BUDGET_WORKFLOW)
-                              if line.startswith("    paths")])
-
-    def test_minimum_permissions_and_no_job_override(self):
-        self.assertEqual(EXPECTED_WORKFLOW_PERMISSIONS, workflow_permissions(BUDGET_WORKFLOW))
-        for key, block in job_blocks(BUDGET_WORKFLOW).items():
-            self.assertEqual([], job_permission_lines(block), key)
-
-    def test_full_history_and_a_payload_derived_label(self):
-        names = job_names(BUDGET_WORKFLOW)
-        self.assertEqual({"Instruction Budget": "instruction-budget"}, names)
-        body = job_body("instruction-budget", BUDGET_WORKFLOW)
-        self.assertIn("          fetch-depth: 0", body.splitlines())
-        self.assertIn(self.LABEL_EXPRESSION, body)
-        for forbidden in ("secrets.", "GITHUB_TOKEN", "GH_TOKEN", "gh api", "gh pr"):
-            self.assertNotIn(forbidden, body)
-
-
-    def test_the_budget_step_passes_the_base_and_label_per_event(self):
-        self.assertEqual([], budget_step_problems(budget_step()))
-
-    def test_the_budget_step_rejects_raise_control_mutations(self):
-        text = "\n".join(budget_step())
-        guard = 'if [ "$EVENT_NAME" = pull_request ]; then'
-        condition = ('            if [ "$RAISE_LABEL" = true ]; then\n'
-                     "              args+=(--raise-label)\n"
-                     "            fi")
-        label_expression = BUDGET_ENV[1].split(": ", 1)[1]
-        mutations = {
-            "event name pinned": ("EVENT_NAME: ${{ github.event_name }}", "EVENT_NAME: push"),
-            "label not payload-derived": (label_expression, "true"),
-            "label not limited to pull requests": (
-                "github.event_name == 'pull_request' && ", ""),
-            "guard never matches": (guard, 'if [ "$EVENT_NAME" = pull-request ]; then'),
-            "guard always matches": (guard, "if true; then"),
-            "condition removed": (condition, "            args+=(--raise-label)"),
-            "condition inverted": ('[ "$RAISE_LABEL" = true ]', '[ "$RAISE_LABEL" != true ]'),
-            "env dropped": ("        env:\n", ""),
-        }
-        for label, (old, new) in mutations.items():
-            with self.subTest(mutation=label):
-                self.assertIn(old, text)
-                mutated = text.replace(old, new, 1)
-                if label == "env dropped":
-                    mutated = "\n".join(line for line in mutated.splitlines()
-                                        if not line.startswith(("          EVENT_NAME:",
-                                                                "          RAISE_LABEL:")))
-                self.assertNotEqual([], budget_step_problems(mutated.splitlines()))
 
 
 class ConformanceWorkflowShape(unittest.TestCase):
@@ -966,6 +808,15 @@ class RequiredContexts(unittest.TestCase):
                 f"`name:` in any workflow under {WORKFLOWS.name} (found {sorted(jobs)}); "
                 f"merges to main would block forever waiting for it",
             )
+
+    def test_no_instruction_budget_context_or_workflow(self):
+        contexts = required_contexts()
+        workflows = sorted(WORKFLOWS.glob("*.yaml")) + sorted(WORKFLOWS.glob("*.yml"))
+        self.assertNotIn("Instruction Budget", contexts)
+        self.assertFalse((WORKFLOWS / "instruction-budget.yaml").exists())
+        for path in workflows:
+            with self.subTest(workflow=path.name):
+                self.assertNotIn("Instruction Budget", job_names(path))
 
     def test_every_required_context_runs_on_pull_requests_to_main(self):
         contexts = required_contexts()
@@ -1059,12 +910,12 @@ class ProtectionPayload(unittest.TestCase):
 class CommittedProtectionTest(unittest.TestCase):
     """The lease a landing holds from green rests on strict protection: a head behind its base cannot merge."""
 
-    def test_the_committed_protection_is_strict_with_the_four_required_contexts(self):
+    def test_the_committed_protection_is_strict_with_the_three_required_contexts(self):
         checks = json.loads(PROTECTION.read_text(encoding="utf-8"))["required_status_checks"]
         self.assertIs(True, checks["strict"])
-        self.assertEqual({"Nix Eval", "Agent Workflow Tests", "Instruction Budget", "Conformance"},
+        self.assertEqual({"Nix Eval", "Agent Workflow Tests", "Conformance"},
                          {check["context"] for check in checks["checks"]})
-        self.assertEqual(4, len(checks["checks"]))
+        self.assertEqual(3, len(checks["checks"]))
 
 
 def required_context_sentence_problems(text):
@@ -1088,7 +939,7 @@ class ProjectInstructions(unittest.TestCase):
     def test_a_stale_sentence_is_caught(self):
         text = INSTRUCTIONS.read_text(encoding="utf-8")
         mutations = {
-            "stale count": text.replace("four contexts", "three contexts"),
+            "stale count": text.replace("three contexts", "two contexts"),
             "unbackticked context": text.replace("`Conformance`", "Conformance"),
             "sentence twice": text + PROTECTION_SENTENCE,
             "sentence removed": text.replace(PROTECTION_SENTENCE, ""),
@@ -1253,6 +1104,35 @@ class LintTimeWorkflowTest(unittest.TestCase):
     def test_the_job_is_not_a_required_context(self):
         self.assertNotIn("Lint Time", required_contexts())
         self.assertEqual(LINT_TIME_WORKFLOW, required_jobs()["Lint Time"][0])
+
+
+def tracked_files_naming(root, needle):
+    """The sorted tracked paths under root whose bytes contain needle, ignoring case."""
+    listing = subprocess.run(["git", "-C", str(root), "ls-files", "-z"], check=True, capture_output=True).stdout
+    wanted = needle.lower().encode()
+    found = []
+    for name in listing.decode().split("\0"):
+        path = Path(root) / name
+        if name and path.is_file() and not path.is_symlink() and wanted in path.read_bytes().lower():
+            found.append(name)
+    return sorted(found)
+
+
+class RetiredLabelTest(unittest.TestCase):
+    def test_no_tracked_file_names_the_retired_label(self):
+        needle = "-".join(("instruction", "budget", "raise"))
+        found = tracked_files_naming(REPO_ROOT, needle)
+        self.assertEqual(found, [])
+
+    def test_the_search_finds_a_planted_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            env = {**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null"}
+            subprocess.run(["git", "init", "-q", str(root)], check=True, env=env)
+            (root / "a.txt").write_bytes(b"mentions RETIRED-NAME here\n")
+            (root / "b.txt").write_bytes(b"clean\n")
+            subprocess.run(["git", "-C", str(root), "add", "a.txt", "b.txt"], check=True, env=env)
+            self.assertEqual(tracked_files_naming(root, "retired-name"), ["a.txt"])
 
 
 if __name__ == "__main__":

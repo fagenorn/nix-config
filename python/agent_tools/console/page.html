@@ -135,7 +135,7 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .rest .opts, .done .opts { flex-basis: 100%; margin: 0; padding-left: 18px; list-style: disc; color: var(--sub0); font-size: .84375rem; }
 .rest .meta, .done .meta { flex-basis: 100%; margin: 0; font-size: .8125rem; color: var(--ov2); }
 .card .opts .picked, .rest .opts .picked, .done .opts .picked { color: var(--lav); }
-.card .cmd { margin-top: 10px; max-width: 100%; overflow-x: auto; padding: 10px 14px; background: var(--mantle); border-radius: 8px; font: .8125rem/1.5 ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+.card .cmd { margin-top: 10px; max-width: 100%; overflow-x: auto; padding: 10px 14px; background: var(--mantle); border-radius: 8px; font: .8125rem/1.5 ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; } .summary-outside { color: var(--yellow); }
 .card .reason { display: block; margin-top: 8px; font-size: .8125rem; color: var(--ov2); }
 .card .meta { margin-top: 8px; font-size: .8125rem; color: var(--ov2); }
 .card .head, .rest .head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin-top: 0; font-size: .84375rem; color: var(--sub0); }
@@ -1602,43 +1602,47 @@ function releaseCard(item) {
   card.appendChild(act);
   return card;
 }
-function isPermission(item) {
-  return item.reason === "permission";
-}
+const isPermission = (item) => item.reason === "permission";
 // A permission card (#1424): a manager's held prompt; the owner always clicks, so neither answer is picked for them.
 const permissionAnswers = new Map();
 let permissionButtons = new Map();
 async function answerPermission(item, answer) {
-  const current = permissionAnswers.get(item.key);
-  if (current !== undefined && current.phase === "sending") return;
+  if (permissionAnswers.get(item.key)?.phase === "sending") return;
   const state = { phase: "sending", reason: "" };
-  permissionAnswers.set(item.key, state);
-  redraw();
+  permissionAnswers.set(item.key, state); redraw();
   let reason = null;
   try {
-    const response = await fetch("/api/permission-answer", {
-      method: "POST", headers: ownerHeaders(), body: JSON.stringify({ prompt: item.prompt, answer }),
-    });
-    if (response.status !== 204) {
-      reason = (await response.text()).trim() || "the console did not answer";
-    }
-  } catch (error) {
-    console.error(error);
-    reason = "the console did not answer";
-  }
+    const response = await fetch("/api/permission-answer", { method: "POST", headers: ownerHeaders(), body: JSON.stringify({ prompt: item.prompt, answer }) });
+    if (response.status !== 204) { reason = (await response.text()).trim() || "the console did not answer"; }
+  } catch (error) { console.error(error); reason = "the console did not answer"; }
   if (permissionAnswers.get(item.key) !== state) return;
-  if (reason === null) permissionAnswers.delete(item.key);
-  else {
-    state.phase = "failed";
-    state.reason = reason;
-  }
+  if (reason === null) permissionAnswers.delete(item.key); else Object.assign(state, { phase: "failed", reason });
   redraw();
+}
+const summaryList = (xs) => xs.slice(0, 8).join(", ") + (xs.length > 8 ? ", and " + (xs.length - 8) + " more" : "");
+// What the console read of a long command (#1621, ADR-console-104): a summary the owner reads before the full text.
+function commandSummary(summary) {
+  const box = el("div", "cmd-summary");
+  const line = (cls, text) => box.appendChild(el("p", cls, text));
+  const readable = summary.read === true && [summary.runs, summary.writes, summary.outside, summary.scripts].every(Array.isArray);
+  if (!readable) { line("summary-unread", "The console could not read what this command does: read it in full below before you answer."); return box; }
+  if (summary.runs.length > 0) line("summary-runs", "Runs " + summaryList(summary.runs));
+  line("summary-writes", summary.writes.length > 0 ? "Writes or deletes " + summaryList(summary.writes) : "No write the console recognises");
+  for (const script of summary.scripts) line("summary-script", "Runs a " + script.program + " script of " + script.lines + (script.lines === 1 ? " line" : " lines") + " the console does not read" + (script.paths.length > 0 ? "; it names " + summaryList(script.paths) : ""));
+  if (summary.outside.length > 0) line("summary-outside", "Outside the worktree: " + summaryList(summary.outside));
+  return box;
 }
 function permissionCard(item) {
   const card = el("article", "card permission");
-  card.appendChild(el("p", "q", item.headline));
-  card.appendChild(el("p", "words", item.words));
-  card.appendChild(el("pre", "cmd", item.command));
+  card.appendChild(el("p", "q", item.headline)); card.appendChild(el("p", "words", item.words));
+  const command = el("pre", "cmd", item.command);
+  if (typeof item.summary !== "object" || item.summary === null) card.appendChild(command);
+  else {
+    const fold = el("details", "cmd-fold quietfold");
+    fold.dataset.key = "cmd:" + item.key;
+    fold.appendChild(el("summary", "", "Show the full command (" + item.command.length + " characters)")); fold.appendChild(command);
+    card.appendChild(commandSummary(item.summary)); card.appendChild(fold);
+  }
   card.appendChild(phrase("p", "meta", "waiting ", timeEl("since", item.waiting_since, "")));
   const state = permissionAnswers.get(item.key);
   const sending = state !== undefined && state.phase === "sending";
@@ -1651,12 +1655,8 @@ function permissionCard(item) {
     if (sending) button.setAttribute("aria-disabled", "true");
     markBusy(button, sending);
   }
-  const act = el("div", "act");
-  act.appendChild(allow);
-  act.appendChild(refuse);
-  if (state !== undefined && state.phase === "failed") {
-    act.appendChild(el("span", "fail", "Could not answer: " + state.reason));
-  }
+  const act = el("div", "act"); act.appendChild(allow); act.appendChild(refuse);
+  if (state !== undefined && state.phase === "failed") act.appendChild(el("span", "fail", "Could not answer: " + state.reason));
   card.appendChild(act);
   return card;
 }
@@ -1765,7 +1765,7 @@ function exclusionControls(acct, p) {
     acct.appendChild(el("span", "fail", state.failure + state.reason));
   }
 }
-// A colleague's profile carries his login; the owner may sign it out beside Remove (ADR-console-087 D3).
+// A colleague's profile carries his login; the owner may sign it out beside Remove (ADR-console-087).
 const signoutPosts = new Map();
 async function signOutAccount(p) {
   const current = signoutPosts.get(p.profile);
@@ -1870,7 +1870,7 @@ function removeSessionsWords(p, view, colleague) {
   if (typeof n !== "number") return null;
   if (n === 0) return "No session is running under " + p + ".";
   if (colleague) {
-    // A colleague's account: its managers move to the pool's choice (ADR-console-087 D5).
+    // A colleague's account: its managers move to the pool's choice (ADR-console-087).
     if (n === 1) {
       return "1 session is running under " + p + ". A manager on it moves to another account, or waits for one with room; any other session keeps running.";
     }

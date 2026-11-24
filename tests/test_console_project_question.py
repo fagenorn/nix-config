@@ -3700,7 +3700,7 @@ class QuestionDeleteServiceTest(QuestionCase):
 
 
 class QuestionRequestKeyTest(QuestionCase):
-    """A request may carry a key the console asks once per project (ADR-console-089 D9)."""
+    """A request may carry a key the console asks once per project (ADR-console-089)."""
 
     KEY = "0123456789abcdef" * 2
 

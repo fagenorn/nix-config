@@ -143,6 +143,32 @@ def result_for(procedure: Mapping, step_id: str, outcome: str, schemas: Mapping[
     return result
 
 
+def result_with(procedure: Mapping, step_id: str, outcome: str, schemas: Mapping[str, Mapping],
+                extra: Mapping[str, object]) -> dict:
+    """`result_for` with one alternative's members merged in; an agent's reply keeps its outcome and its schema."""
+    result = result_for(procedure, step_id, outcome, schemas)
+    owner = next(item for item in procedure["steps"] if item["id"] == step_id)
+    if owner["kind"] != "agent":
+        return {**result, **extra}
+    if outcome in (procedure_check.NO_REPLY, procedure_check.OUT_OF_BOUNDS):
+        return result
+    if owner["outcome_from"] in extra:
+        raise AssertionError(f"the alternative of {step_id!r} names its outcome member {owner['outcome_from']!r}")
+    result = {**result, **extra}
+    errors = reply_errors(schemas[step_id], result)
+    if errors:
+        raise AssertionError(f"the alternative of {step_id!r} breaks its schema: {errors}")
+    return result
+
+
+def alternatives(procedure: Mapping, step_id: str, outcome: str,
+                 members: Mapping[str, tuple[Mapping[str, object], ...]]) -> tuple[Mapping[str, object], ...]:
+    owner = next(item for item in procedure["steps"] if item["id"] == step_id)
+    if owner["kind"] == "agent" and outcome in (procedure_check.NO_REPLY, procedure_check.OUT_OF_BOUNDS):
+        return ({},)
+    return members.get(step_id, ({},))
+
+
 RUN = "1-20261121T000000Z-aaaa"
 
 
@@ -161,7 +187,8 @@ def walk_edges(
     schemas: Mapping[str, Mapping],
     members: Mapping[str, tuple[Mapping[str, object], ...]] | None = None,
 ) -> Coverage:
-    """`members` gives a command step the result members its readers name, one alternative per route to walk."""
+    """`members` gives a command or agent step, or a waiting group member, the result members its readers name,
+    one alternative per route to walk; an agent's alternative never reaches its `no-reply` or `out-of-bounds`."""
     members = members or {}
     wanted = edges(procedure)
     found: dict[tuple[str, str], Walk] = {}
@@ -173,17 +200,22 @@ def walk_edges(
         action = replayed.action
         if isinstance(action, (RunCommand, StartSession)):
             for outcome in outcomes[action.step]:
-                for extra in members.get(action.step, ({},)) if isinstance(action, RunCommand) else ({},):
-                    result = {**result_for(procedure, action.step, outcome, schemas), **extra}
+                for extra in alternatives(procedure, action.step, outcome, members):
+                    result = result_with(procedure, action.step, outcome, schemas, extra)
                     queue.append(events + _reported(action.step, outcome, result))
             continue
         if isinstance(action, RunGroup):
             listed = [member.step for member in action.members]
-            for combination in itertools.product(*(outcomes[name] for name in listed)):
+            choices = [
+                [(name, outcome, extra) for outcome in outcomes[name]
+                 for extra in alternatives(procedure, name, outcome, members)]
+                for name in listed
+            ]
+            for combination in itertools.product(*choices):
                 reported = tuple(
                     event
-                    for name, outcome in zip(listed, combination)
-                    for event in _reported(name, outcome, result_for(procedure, name, outcome, schemas))
+                    for name, outcome, extra in combination
+                    for event in _reported(name, outcome, result_with(procedure, name, outcome, schemas, extra))
                 )
                 queue.append(events + (_entered(action.step),) + reported)
             continue

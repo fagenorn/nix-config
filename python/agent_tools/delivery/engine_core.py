@@ -65,7 +65,8 @@ Groups
     with no member to run is graded at once. `Replay.graded` lists every group
     grade, one `Graded(group, visit, outcome, target)` per graded visit, in
     order; it never holds `exhausted`, since a group past its bound is not
-    graded.
+    graded. A `decide` step reads `None` for a member of a group member's result that is absent:
+    no reply, a fired bound, a refusal or `exhausted` store none.
 
 Continuing
     `continued(X, v)` rewinds the walk to the arrival of X's visit v: the visit
@@ -110,7 +111,7 @@ or before its `entered`; an `outcome` naming a pending group; any event once the
 run ended in a stop or `done`; an `outcome` reporting `exhausted`; any outcome
 (reported, graded or `exhausted`) the step's `on` does not map; a member outcome
 that is not a string; a `result` that is not a dict; an `in` path with no value
-when the walk reaches the step; entry `max_visits + 2` of a step (a loop through
+when the walk reaches the step (a decide's read of a group member's result excepted); entry `max_visits + 2` of a step (a loop through
 `exhausted`); an `each` that is not a list or holds an item that is not a string
 or an integer; a call outcome that disagrees with its ends or a call result
 without one entry per item; a group member that is a `call` step; a `continued`
@@ -292,6 +293,8 @@ def _walk(procedure: Mapping, inputs: Mapping[str, object], events: Sequence[Map
     owed: dict[tuple[str, str], int] = {}
     transitions: list[Transition] = []
     arrivals: list[_Arrival] = []
+    members = {member["step"] for item in procedure["steps"] if item["kind"] == "group"
+               for member in item["members"]}
 
     def value(path: str) -> object:
         source, _, member = path.partition(".")
@@ -299,6 +302,12 @@ def _walk(procedure: Mapping, inputs: Mapping[str, object], events: Sequence[Map
         if member not in table:
             raise CoreError(f"no value for {path!r}")
         return table[member]
+
+    def absent_ok(path: str) -> object:
+        source, _, member = path.partition(".")
+        if source in members and member not in results.get(source, {}):
+            return None
+        return value(path)
 
     def follow(step: Mapping, outcome: str, visit: int) -> str:
         target = step["on"].get(outcome) if isinstance(outcome, str) else None
@@ -312,7 +321,7 @@ def _walk(procedure: Mapping, inputs: Mapping[str, object], events: Sequence[Map
 
     def grade_decide(step: Mapping) -> str:
         grader = engine_graders.GRADERS[step["grader"]]
-        outcome = grader.grade({path: value(path) for path in step.get("in", [])})
+        outcome = grader.grade({path: absent_ok(path) for path in step.get("in", [])})
         results[step["id"]] = {"verdict": outcome}
         return outcome
 

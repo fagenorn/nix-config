@@ -94,6 +94,14 @@
         "cwd": ".",
         "env": []
       },
+      "test-touched": {
+        "argv": [
+          "just",
+          "test-touched"
+        ],
+        "cwd": ".",
+        "env": []
+      },
       "codex-plan-review": {
         "argv": [
           "codex-companion",
@@ -130,6 +138,10 @@
       "verification": [
         "lint",
         "test"
+      ],
+      "verification_before_pull_request": [
+        "lint",
+        "test-touched"
       ],
       "orchestration": {
         "max_parallel": 2,

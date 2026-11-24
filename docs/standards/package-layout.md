@@ -12,7 +12,7 @@ Code no area owns lives in `agent_tools.system`, which imports only itself and t
 
 ### P11. The top level is the gate closure
 
-It holds only `__init__` and the Instruction Budget gate modules with their import closure, which move only with a raise-labelled change. ([ADR-system-003](../areas/system/adr/003-agent-tools-subpackages-are-the-areas.md))
+It holds only `__init__`, `instruction_load`, `skill_lint` and their import closure. ([ADR-system-003](../areas/system/adr/003-agent-tools-subpackages-are-the-areas.md))
 
 ### P12. Imports are absolute and follow one table
 

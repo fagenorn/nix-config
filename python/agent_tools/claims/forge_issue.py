@@ -76,9 +76,6 @@ KEYS = ("command", "repo", "issue", "verdict", "blocked_by", "blocked_by_states"
         "missing_blocks", "unexpected_blocked_by", "unexpected_blocks", "error", "detail")
 STATES = ("open", "closed")
 OK, FORGE_ERROR, USAGE = 0, 1, 2
-# The user-only Instruction Budget raise label: the lifecycle guard sees `gh --add-label`, not this
-# helper's API call, and the helper is allowed outright, so it refuses the label itself (COR-001).
-RESERVED_LABEL = "instruction-budget-raise"
 
 
 class UsageError(Exception):
@@ -105,8 +102,6 @@ def _number(value: str) -> int:
 def _label(value: str) -> str:
     if not value:
         raise argparse.ArgumentTypeError("a label must not be empty")
-    if value.strip().casefold() == RESERVED_LABEL:
-        raise argparse.ArgumentTypeError(f"label {RESERVED_LABEL!r} is the user's to apply, never the helper's")
     return value
 
 
