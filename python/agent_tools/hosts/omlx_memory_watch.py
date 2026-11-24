@@ -36,6 +36,7 @@ or printed nothing parseable (stderr names it; nothing is written). 2: usage. A 
 """
 
 import argparse
+import http.client
 import json
 import os
 import re
@@ -211,7 +212,7 @@ def read_health(url: str) -> bool:
     try:
         with DIRECT.open(url, timeout=HEALTH_TIMEOUT) as response:
             count = json.loads(response.read())["engine_pool"]["loaded_count"]
-    except (OSError, ValueError, KeyError, TypeError):
+    except (OSError, http.client.HTTPException, ValueError, KeyError, TypeError):
         return False
     return isinstance(count, int) and not isinstance(count, bool) and count >= 1
 

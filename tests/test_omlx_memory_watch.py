@@ -9,6 +9,7 @@ Run: just agent-workflow-tests
 import http.server
 import json
 import os
+import socketserver
 import stat
 import subprocess
 import sys
@@ -287,6 +288,31 @@ class SampleTest(WatchCase):
         url = f"http://127.0.0.1:{server.server_address[1]}/health"
         self.assertEqual(self.sample("--health-url", url, env=env).returncode, 0)
         self.assertEqual(self.read_state()["loaded_samples"], 1)
+
+    def serve_raw(self, reply):
+        """A loopback server that answers every connection with `reply` bytes, then closes it."""
+        class Handler(socketserver.BaseRequestHandler):
+            def handle(self):
+                self.request.recv(4096)
+                self.request.sendall(reply)
+
+        server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return f"http://127.0.0.1:{server.server_address[1]}/health"
+
+    def test_a_health_answer_cut_short_counts_as_not_loaded(self):
+        url = self.serve_raw(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n{")
+        done = self.sample("--health-url", url)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(self.read_state()["loaded_samples"], 0)
+
+    def test_a_garbled_health_status_line_counts_as_not_loaded(self):
+        url = self.serve_raw(b"garbage\r\n\r\n")
+        done = self.sample("--health-url", url)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(self.read_state()["loaded_samples"], 0)
 
     def stale_others_state(self):
         self.put_state(state(
