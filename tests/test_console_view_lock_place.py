@@ -3,6 +3,7 @@ import unittest
 
 from agent_tools.console import view
 
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 from .test_console_view import MIN, SprintWaitViewTest, moving
 
 TIER = "fast"
