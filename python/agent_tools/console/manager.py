@@ -124,6 +124,12 @@ and `CONSOLE_SPRINT_SECRET`, plus `CLAUDE_ACCOUNT=<profile>` and `$HOME/.agents/
 Linux launch runs by name on `PATH`; `launch_tools(platform)` is that tuple on Linux, without
 `systemd-run` on macOS and empty elsewhere.
 
+Identity. The launch record names the manager: the sprint's latest valid `manager.started` row's
+`short_id` (`short_id_mark` writes it from what the launch printed, `launched_short_id` reads it back,
+`SprintState.manager_short_id` holds it). When it is set, `is_manager_session` admits only a session
+whose id starts with it, whatever a listing names; when it is not, it admits the listed
+`manager_session`. The permit's refusal and the delivered fold both decide through it.
+
 Failures are `LaunchFailed` with a one-line reason, the secret shown as `<secret>`: the host is
 neither Linux nor macOS (`UNAVAILABLE_TEXT`), `the project root <root> is not a directory`, `cannot write the
 manager's settings: <reason>`, `<program> is not installed`, `the launch did not return within
@@ -188,12 +194,16 @@ from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from agent_tools.claims import owner_actions
 from agent_tools.console import permission as permissions
 from agent_tools.console import permit
 from agent_tools.console.event_log import Event
 from agent_tools.console.sessions import DEFAULT_PROFILE, GONE, HOOK, PROFILE, SEEN
+
+if TYPE_CHECKING:
+    from agent_tools.console.sprints import SprintState
 
 CHOICE_FILE = "chosen-profile"
 
@@ -708,6 +718,24 @@ def printed_short_id(text: str) -> str | None:
     found = {match[1] for line in text.splitlines()
              if (match := _BACKGROUNDED.fullmatch(_ESCAPE.sub("", line).strip()))}
     return found.pop() if len(found) == 1 else None
+
+
+def launched_short_id(value: object) -> str | None:
+    """`value` when it is a short id in `SHORT_ID`'s form, else None."""
+    return value if isinstance(value, str) and SHORT_ID.fullmatch(value) else None
+
+
+def short_id_mark(printed: object) -> dict[str, str]:
+    """The `short_id` member of a `manager.started` row for what the launch printed, else none."""
+    launched = launched_short_id(printed)
+    return {} if launched is None else {"short_id": launched}
+
+
+def is_manager_session(sprint: "SprintState", session_id: str) -> bool:
+    """Whether `session_id` is the sprint's manager: the launched short id decides, else the listing."""
+    if sprint.manager_short_id is not None:
+        return isinstance(session_id, str) and short_id(session_id) == sprint.manager_short_id
+    return sprint.manager_session is not None and session_id == sprint.manager_session
 
 
 def run_launch(launch: Launch, *, platform: str = sys.platform, run=None,
