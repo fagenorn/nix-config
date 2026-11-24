@@ -1020,7 +1020,9 @@ class PurityTest(unittest.TestCase):
         graders = (delivery / "engine_graders.py").read_text(encoding="utf-8")
         common = {"__future__", "dataclasses", "typing", "collections.abc"}
         self.assertEqual(impure(core, common | {"agent_tools.delivery.engine_graders"}), [])
-        self.assertEqual(impure(graders, common), [])
+        lane_rule = (delivery / "lane_rule.py").read_text(encoding="utf-8")
+        self.assertEqual(impure(graders, common | {"agent_tools.delivery.lane_rule"}), [])
+        self.assertEqual(impure(lane_rule, common | {"re"}), [])
 
     def test_the_purity_check_refuses_an_impure_source(self) -> None:
         allowed = {"__future__", "dataclasses", "typing"}
