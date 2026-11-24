@@ -271,7 +271,7 @@ class ProtectionFileTest(unittest.TestCase):
         checks = before["required_status_checks"]["checks"]
         self.assertEqual(after["required_status_checks"]["checks"],
                          [*checks, {"context": "Conformance"}])
-        self.assertEqual(len(checks), 3)
+        self.assertEqual(len(checks), 2)
         self.assertTrue(all(entry["app_id"] == 15368 for entry in checks))
         after["required_status_checks"]["checks"] = checks
         self.assertEqual(after, before)
@@ -281,8 +281,7 @@ class ProtectionFileTest(unittest.TestCase):
             target.parent.mkdir()
             target.write_bytes(result)
             self.assertEqual(derived_values.required_checks(Path(raw)),
-                             ["Nix Eval", "Instruction Budget", "Agent Workflow Tests",
-                              "Conformance"])
+                             ["Nix Eval", "Agent Workflow Tests", "Conformance"])
 
     def test_a_contexts_list_beside_checks_is_kept_in_step(self):
         document = {"required_status_checks": {
