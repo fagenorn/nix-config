@@ -1091,8 +1091,8 @@ decision (`decision` None, no row) for a command `permit.mentions` rejects (a co
 mention: the plain `release transaction run` is `allow` with verb `release` and target `{"commit", "version"}` and
 reads no forge; abandon and dispose are `deny` with `permit.NO_ABANDON` and `permit.NO_DISPOSE`, whatever the
 program is named), and denies `permit.NOT_ACTIVE` unless the sprint is `STARTING` and `sprints.takes_questions` (no
-closing, no stop request, no stop, and not ended by a done report), and `permit.NOT_MANAGER` unless `session_id` is
-the sprint's `manager_session`. It takes the grant from the sprint (`issues`: the newest report's issues that a
+closing, no stop request, no stop, and not ended by a done report), and `permit.NOT_MANAGER` unless `manager.is_manager_session` admits
+`session_id`. It takes the grant from the sprint (`issues`: the newest report's issues that a
 delivery of the manager's own session carries, as `SprintState.delivered` records them, so a delivery run the
 console has since cleaned up still counts; `others`: the issues the newest report of every other open sprint of the
 project lists) and, off the lock, the project's slug (`slug_of`), branch pattern (`branch_pattern_of`) and merge
@@ -1540,8 +1540,8 @@ folded from the log's session rows (`manager.profile_use`, kept after a session 
 #1028), which `capacity_view` leaves out of the room, and the pinned profile (#1029), which it
 answers first while it has room, with the sprint's starter and `_waiting_logins()` so that a colleague's account serves his own sprints first (#1344, ADR-console-087), and `Wait` appends `manager.waiting`. Otherwise the launcher is called outside the lock, and then,
 under it, a sprint that was withdrawn meanwhile has its secret and settings file removed again and
-no row appended, and otherwise, unless the service is stopping, `manager.started {sprint_id, profile, session_name}`
-or `manager.failed {sprint_id, reason}` is appended (the reason of a `LaunchFailed`, else `<Type>:
+no row appended, and otherwise, unless the service is stopping, `manager.started {sprint_id, profile, session_name,
+short_id?}` or `manager.failed {sprint_id, reason}` is appended (the reason of a `LaunchFailed`, else `<Type>:
 <message>`, the secret shown as `<secret>`), a failure is one stderr line `console: manager_failed
 <sprint_id> <reason>`, and the view is published. `withdraw_goal` also removes the manager's
 settings file. The sprint's secret appears in no row, view or stderr line. `_prepared_launch`
@@ -4596,7 +4596,7 @@ class ConsoleService(ActionPermit):
                  look_reader: Callable[[str, int], tuple[str, str | None]] = answer.look_head,
                  look_recorder: Callable[[str, int, int, str, str, Sequence[tuple[str | None, str]]], int] = answer.record_look,
                  look_ender: Callable[[str, int, int], None] = answer.end_look,
-                 launcher: Callable[[manager.Launch], None] | None = None,
+                 launcher: Callable[[manager.Launch], str | None] | None = None,
                  dispatch: Callable[[Callable[[], None]], None] | None = None,
                  nudger: Callable[[nudge.Nudge], None] | None = None,
                  listing: Callable[[], Mapping[str, sessions.Observation]] | None = None,
@@ -7835,13 +7835,13 @@ class ConsoleService(ActionPermit):
             if launch is None:
                 return
             try:
-                reason = None
+                reason = printed = None
                 try:
-                    self._launcher(launch)
+                    printed = self._launcher(launch)
                 except Exception as error:
                     reason = (str(error) if isinstance(error, manager.LaunchFailed)
                               else f"{type(error).__name__}: {error}")
-                self._record_launch(launch, reason, token)
+                self._record_launch(launch, reason, token, printed)
             finally:
                 with self._ingest:
                     self._client_live[launch.profile] -= 1
@@ -7977,7 +7977,7 @@ class ConsoleService(ActionPermit):
         self._release(payload["sprint_id"], token)
         self._apply(self.log.append([(kind, project_id, payload)]))
 
-    def _record_launch(self, launch: manager.Launch, reason: str | None, token: object) -> None:
+    def _record_launch(self, launch: manager.Launch, reason: str | None, token: object, printed: object = None) -> None:
         secret = launch.env[manager.SECRET_ENV]
         with self._ingest:
             self._settled[launch.sprint_id] = int(self._clock() * 1000)
@@ -7996,7 +7996,7 @@ class ConsoleService(ActionPermit):
                 self._append_manager(MANAGER_STARTED, launch.project_id, {
                     "sprint_id": launch.sprint_id, "profile": launch.profile,
                     "session_name": launch.session_name, "seen_after": launch.seen_after,
-                    "permission": launch.permission.payload(), **marks}, token)
+                    "permission": launch.permission.payload(), **marks, **manager.short_id_mark(printed)}, token)
                 return
             if secret:
                 reason = reason.replace(secret, "<secret>")
@@ -9615,7 +9615,7 @@ class ConsoleService(ActionPermit):
         """Under the ingest lock: the verdict that refuses the caller before a grant is judged, else None."""
         if not self._permit_active(sprint):
             return permit.Verdict(permit.DENY, permit.NOT_ACTIVE, verb, {})
-        if session_id != sprint.manager_session:
+        if not manager.is_manager_session(sprint, session_id):
             return permit.Verdict(permit.DENY, permit.NOT_MANAGER, verb, {})
         if sprint.project_id not in self._states:
             return permit.Verdict(permit.DENY, permit.NOT_GRANTED, verb, {})
