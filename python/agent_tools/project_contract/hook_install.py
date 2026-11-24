@@ -42,8 +42,7 @@ will uninstall that hook again. It also writes a local hooks path, which takes
 the managed hooks, the pre-push guard included, out of the repository. For a
 left-alone project whose hook a pre-commit tool installed, the adoption commit's
 own shell entry in the fresh adoption worktree is such an entry: apply puts the
-hooks path back, but the removed hook stays removed. Follow-up issue 1714 covers
-it.
+hooks path back, but the removed hook stays removed.
 """
 
 from __future__ import annotations
@@ -152,11 +151,10 @@ def hooks_directory(root: Path) -> Path | None:
 
 
 def install(root: Path, worktree: Path, environment: dict) -> list[str] | None:
-    """Install the project's missing hooks with the global hooks path masked.
+    """Install the missing hooks with the global hooks path masked, returning the `COMMIT_HOOKS` installed.
 
-    None, with no process run, when the repository is left alone, git cannot
-    answer, or the worktree's `devenv.nix` declares no hooks. Otherwise the
-    `COMMIT_HOOKS` names installed after the run; an `AdoptError` on a failed run.
+    None, with no process run, when the repository is left alone, git cannot answer, or the
+    worktree's `devenv.nix` declares no hooks; an `AdoptError` on a failed run.
     """
     code, _ = adopt_inspection.run_git(root, "config", "--local",
                                        "--get-all", HOOKS_PATH)
