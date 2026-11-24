@@ -12252,7 +12252,7 @@ class ReadOnlyReviewTest(unittest.TestCase):
         for text in (mine, batch):
             self.assertEqual(text.count("${READ_ONLY}"), 1)
             self.assertEqual(text.count("Never check out, switch, reset or stash"), 1)
-            self.assertIn("    const prompt = `${asked}\\n${READ_ONLY}`\n" if text is batch else "  const prompt = `${asked}\\n${READ_ONLY}`\n", text)
+            self.assertIn(f"{'    ' if text is batch else '  '}const prompt = `${{asked}}${{BEFORE_PR ? `\\n${{REVIEW_TESTS}}` : ''}}\\n${{READ_ONLY}}`\n", text)
         for word in ("check out", "switch", "reset", "stash", "git show"):
             self.assertIn(word, READ_ONLY)
         # No second worktree is offered: every step works only in the worktree it is given.

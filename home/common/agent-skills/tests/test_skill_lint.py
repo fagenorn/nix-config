@@ -6,12 +6,14 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
 
 from agent_tools import instruction_load, skill_lint
+from agent_tools.agent_model_matrix import MATRIX_PATH
 
 
 REPO_ROOT = Path(__file__).parents[4]
@@ -356,9 +358,42 @@ class CommandTest(unittest.TestCase):
         self.assertTrue(broken.stderr.startswith("skill-lint: "))
 
 
+def live_tree_lint(root: Path) -> list[str]:
+    return skill_lint.lint(skill_lint.working_tree(root))
+
+
 class LiveTreeTest(unittest.TestCase):
     def test_the_live_tree_lints_clean(self):
-        self.assertEqual(skill_lint.lint(skill_lint.working_tree(REPO_ROOT)), [])
+        self.assertEqual(live_tree_lint(REPO_ROOT), [])
+
+    def test_the_live_tree_check_fails_on_a_fixture_skill_breaking_a_rule(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            temp = Path(temporary)
+            for tree in (skill_lint.SHARED_TREE, skill_lint.CLAUDE_TREE, skill_lint.AGENTS_DIR):
+                shutil.copytree(REPO_ROOT / tree, temp / tree)
+            matrix = temp / MATRIX_PATH
+            matrix.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(REPO_ROOT / MATRIX_PATH, matrix)
+            self.assertEqual(live_tree_lint(temp), [])
+            broken = temp / "home/common/agent-skills/skills/zz-broken-fixture/SKILL.md"
+            broken.parent.mkdir(parents=True)
+            broken.write_bytes(b"no frontmatter\n")
+            lines = live_tree_lint(temp)
+        self.assertNotEqual(lines, [])
+        self.assertTrue(
+            any("zz-broken-fixture/SKILL.md" in line and line.startswith("L1 ") for line in lines),
+            lines)
+
+    def test_the_required_suite_runs_the_skill_lint(self):
+        justfile = (REPO_ROOT / "justfile").read_text(encoding="utf-8")
+        recipe = re.search(r"^agent-workflow-tests.*?(?:\n\n|\Z)", justfile, re.M | re.S)
+        self.assertIsNotNone(recipe)
+        self.assertIn("home/common/agent-skills/tests/test_skill_lint.py", recipe.group(0))
+        protection = json.loads(
+            (REPO_ROOT / ".github/branch-protection.json").read_text(encoding="utf-8"))
+        contexts = [check["context"]
+                    for check in protection["required_status_checks"]["checks"]]
+        self.assertIn("Agent Workflow Tests", contexts)
 
     def test_the_live_tree_names_no_python_tree_path(self):
         self.assertEqual(python_tree_pointers(skill_lint.working_tree(REPO_ROOT)), [])
