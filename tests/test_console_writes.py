@@ -577,7 +577,7 @@ class GoalRouteTest(Case):
             "live_faults": [], "permission_text": None,
             "movement": {"sessions": [], "nudged_at": None,
                          "base_at": stated.replace(microsecond=stated.microsecond // 1000 * 1000).isoformat(),
-                         "issues": [],
+                         "issues": [], "engine": {"moving": False, "waits": []},
                          "waits": {"ci_at": None, "commit_at": None, "release_at": None,
                                    "lock_at": None}}}])
         self.assertEqual(view_of(svc)["recent_projects"][0], "owner/p01")

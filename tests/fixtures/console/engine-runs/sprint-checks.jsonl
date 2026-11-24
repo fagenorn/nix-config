@@ -1,0 +1,4 @@
+{"at":"2026-11-12T10:01:00Z","event":"step_entered","stage":"building","step":"build","visit":1}
+{"account":"work","at":"2026-11-12T10:01:01Z","event":"session_starting","role":"implementer","session":"eng-s1","step":"build","visit":1}
+{"at":"2026-11-12T10:01:02Z","event":"process_started","pid":4242,"started":"2026-11-12T10:01:02Z","step":"build","visit":1}
+{"at":"2026-11-12T10:01:03Z","event":"wait_started","until":null,"wait":"checks"}
