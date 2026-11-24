@@ -118,6 +118,7 @@ ISSUE_READS = {
     "bindings.paths.rejections",
     "bindings.workflow.verification",
     "bindings.workflow.verification_conditions",
+    "bindings.workflow.verification_before_pull_request",
     "bindings.commands",
 }
 
@@ -696,6 +697,8 @@ class SchemaThreeRefusalTest(SchemaThreeCase):
         for label, mutate, pointers in rows:
             with self.subTest(label):
                 contract = schema_three_contract()
+                # The pre-pull-request list names `lint`; this case is about the constants.
+                del contract["bindings"]["workflow"]["verification_before_pull_request"]
                 mutate(contract)
                 code, payload, _ = self.resolve(self.schema_three_root(contract))
                 error = self.assert_refusal(code, payload, "invalid_contract")
@@ -1031,6 +1034,24 @@ class AttemptBudgetSnapshotTest(SchemaThreeCase):
             self.assertEqual(
                 resolve_project.derive_for(root, schema_three_contract()), expected)
         self.assertEqual(expected.values[schema_three.ATTEMPT_BUDGET], 1621)
+
+
+class PrePullRequestListTest(SchemaThreeCase):
+    POINTER = "/bindings/workflow/verification_before_pull_request"
+
+    def test_a_schema_three_contract_may_author_the_pre_pull_request_list(self):
+        code, snap, err = self.resolve(self.schema_three_root(schema_three_contract()))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(snap["bindings"]["workflow"]["verification_before_pull_request"],
+                         ["lint"])
+        # D5: the ids are checked although schema 3 never checks `verification`.
+        contract = schema_three_contract()
+        contract["bindings"]["workflow"]["verification_before_pull_request"] = ["nope"]
+        code, payload, _ = self.resolve(self.schema_three_root(contract))
+        error = self.assert_refusal(code, payload, "invalid_contract")
+        self.assertEqual([v["pointer"] for v in error["violations"]],
+                         [self.POINTER + "/0"])
+        self.assertEqual(error["repair_id"], "contract.workflow.unknown_command_id")
 
 
 if __name__ == "__main__":

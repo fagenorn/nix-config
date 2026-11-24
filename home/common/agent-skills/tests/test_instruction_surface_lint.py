@@ -121,14 +121,6 @@ def ceilings(model, value):
     return result
 
 
-def without_ceilings(model):
-    result = copy.deepcopy(model)
-    del result["corpus_ceiling_bytes"], result["description_ceiling_bytes"]
-    for profile in result["profiles"]:
-        del profile["ceiling_bytes"], profile["conditional_ceiling_bytes"]
-    return result
-
-
 def malformed_ceilings(model):
     result = copy.deepcopy(model)
     result["corpus_ceiling_bytes"] = "x"
@@ -210,7 +202,7 @@ class SurfaceRuleTest(unittest.TestCase):
         files = sized("descriptions", B["descriptions"] + 10)
         files[HOT] = padded(files[HOT], B["always-loaded"] - 10)
         models = {"low": ceilings(fixture_model(), 1), "high": ceilings(fixture_model(), 10**9),
-                  "absent": without_ceilings(fixture_model()),
+                  "absent": fixture_model(),   # fixture_model() carries no ceiling since issue 1483
                   "malformed": malformed_ceilings(fixture_model())}
         with fixture() as tmp:
             reference = M.surfaces(head_snapshot(world(tmp, files, models["low"], name="low")))

@@ -14,7 +14,7 @@ Every agent-workflow helper is a module of one standard-library Python package, 
 
 - Installed: call the launcher by its command name, for example `forge-issue` or `resolve-project`.
 - From source: `PYTHONPATH=python python3 -m agent_tools.<area>.<module>`, or `-m agent_tools.<module>` for a top-level module, from the repository root.
-- The `just` recipes that run package code (`agent-workflow-tests`, `agent-run-profile`, `verify`, `agent-instruction-budget` and the others) set `PYTHONPATH` to `python/` themselves.
+- The `just` recipes that run package code (`agent-workflow-tests`, `agent-run-profile`, `verify` and the others) set `PYTHONPATH` to `python/` themselves.
 - A command's contract (arguments, output, exit codes) is its module docstring. Read it with `python3 -m pydoc agent_tools.<area>.<module>` (`agent_tools.<module>` for a top-level module) or from the head of the file.
 
 ## Testing
@@ -25,7 +25,7 @@ Every agent-workflow helper is a module of one standard-library Python package, 
 - A test that reads a host configuration reads a named part through `tests/host_readings.py`, which evaluates each host once per checkout content and caches the answer under the git directory (`HOST_READINGS_CACHE` overrides); a new attribute is a new part there.
 - `just agent-activated-skill-tests` compares the skills activated under `~/.claude/skills` with the skill source; run it after a switch, since `test` does not (#1580).
 - `just agent-installed-skill-tests` checks the skill contracts, the launchers, the generated Claude settings and the Claude launchers against what the Nix build installs.
-- `just lint` and `just test` are the contract's verification commands (`agent_tools.delivery.verification_command`). `lint` runs agnostic-lint, context-map-lint and the instruction budget check, and `test` runs `just build` then `just agent-workflow-tests` with `WORKFLOW_POLICY_SURFACE=source`, as CI does, so before activation the skills are checked from source only. Each runs every member and names each one that fails.
+- `just lint` and `just test` are the contract's verification commands (`agent_tools.delivery.verification_command`). `lint` runs agnostic-lint, context-map-lint and skill-lint, and `test` runs `just build` then `just agent-workflow-tests` with `WORKFLOW_POLICY_SURFACE=source`, as CI does, so before activation the skills are checked from source only. Each runs every member and names each one that fails.
 - `just build` is the import check for the package and the Nix side.
 
 ## Where docs live

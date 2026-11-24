@@ -105,6 +105,10 @@ lint:
 test:
   PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.delivery.verification_command test
 
+# Run the suite members this branch touches, after a host build when a build input changes (the `test-touched` command).
+test-touched:
+  tools="$(nix build --no-link --print-out-paths '{{justfile_directory()}}#agent-platform.tools')" && test -n "$tools" && AGENT_PLATFORM_TOOLS="$tools/bin" WORKFLOW_POLICY_SURFACE=source PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.delivery.touched_tests --base origin/main --source-root python --pair home/common/claude-code/lifecycle_guard.py=tests/test_claude_permission_guard.py --build-command 'just build' --build-when '*.nix' --build-when flake.lock --build-when .sops.yaml --build-when 'data/*' --build-when 'homebrew/*' --build-when 'patches/*' --build-when 'secrets/*' --build-when 'vars/*'
+
 # Verify durable workflow lifecycle and skill contracts, min(8, CPUs - 2) test files at a time, longest first (SUITE_RUNNER_JOBS or --jobs N sets the cap; --jobs 1 runs them serially with live output). The suite gets the platform package's pinned tools.
 agent-workflow-tests *args:
   tools="$(nix build --no-link --print-out-paths '{{justfile_directory()}}#agent-platform.tools')" && test -n "$tools" && AGENT_PLATFORM_TOOLS="$tools/bin" PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.delivery.suite_runner {{args}} \
@@ -125,6 +129,9 @@ agent-workflow-tests *args:
     home/common/agent-skills/tests/test_resolve_project.py \
     home/common/agent-skills/tests/test_resolve_platform.py \
     home/common/agent-skills/tests/test_resolve_schema_three.py \
+    home/common/agent-skills/tests/test_verification_before_pull_request.py \
+    home/common/agent-skills/tests/test_resolve_unknown_bindings.py \
+    home/common/agent-skills/tests/test_resolve_core.py \
     home/common/agent-skills/tests/test_resolve_conformance_workflow.py \
     home/common/agent-skills/tests/test_schema_three_derivation.py \
     home/common/agent-skills/tests/test_attempt_history.py \
@@ -201,6 +208,7 @@ agent-workflow-tests *args:
     tests/test_verify_checks.py \
     tests/test_cleanup_fix_check.py \
     tests/test_suite_test_failures.py \
+    tests/test_protection_tree.py \
     tests/test_issue_branch.py \
     tests/test_program_copies.py \
     tests/test_keepalive_end_turn_cap.py \
@@ -282,6 +290,7 @@ agent-workflow-tests *args:
     tests/test_suite_timing.py \
     tests/test_verify_slot.py \
     tests/test_verification_command.py \
+    tests/test_touched_tests.py \
     tests/test_console_event_log.py \
     tests/test_console_release_card.py \
     tests/test_console_release_card_service.py \
@@ -292,6 +301,7 @@ agent-workflow-tests *args:
     tests/test_console_failed_start.py \
     tests/test_console_activation.py \
     tests/test_console_activation_check.py \
+    tests/test_console_activation_contract.py \
     tests/test_console_capacity.py \
     tests/test_console_capacity_check.py \
     tests/test_console_probe.py \
@@ -397,7 +407,9 @@ agent-workflow-tests *args:
     tests/test_system_packages.py \
     home/common/agent-skills/tests/test_program_harness.py \
     home/common/agent-skills/tests/test_deliver_standard_program.py \
+    home/common/agent-skills/tests/test_deliver_standard_before_pull_request.py \
     home/common/agent-skills/tests/test_deliver_batch_program.py \
+    home/common/agent-skills/tests/test_deliver_batch_before_pull_request.py \
     home/common/agent-skills/evals/tests/test-run-eval-tree.sh
 
 # Validate every explicit pipeline dispatch and print the representative trace.
@@ -408,10 +420,6 @@ agent-model-matrix:
 # Compare the instruction documents each agent profile loads at two revisions (#155 D9).
 agent-instruction-load *args:
   PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.instruction_load {{args}}
-
-# Run the Instruction Budget gate against origin/main; pass --raise-label for a labelled raise (#292 D9).
-agent-instruction-budget *args:
-  PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.instruction_load check --base origin/main {{args}}
 
 # Run this host's due read-only verification checks and close passing issues (issue 630)
 verify host *args:

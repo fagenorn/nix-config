@@ -84,7 +84,7 @@ Order of one run:
    cost question's (`QUESTIONS[1]`) answer is also grounded only when `spend_figure(answer, spend_figures(records
    text))` holds and `cites_part(read_text, question_id + RECORDS_SUFFIX, SPEND_PART)` holds, so a cost answer
    that quotes no figure of its own records' spend section, or does not cite the spend part of its own file, is
-   `ungrounded` (ADR-console-090). The deeper question's (`DEEP_QUESTION`) answer is grounded iff it is answered with a non-blank
+   `ungrounded` (ADR-console-089). The deeper question's (`DEEP_QUESTION`) answer is grounded iff it is answered with a non-blank
    answer, `cites(read_text, id + RECORDS_SUFFIX)`, `cites_part(read_text, name, TRANSCRIPTS_PART)` and
    `spend_figure(answer, section_figures(records text, TRANSCRIPTS_PART))` hold, else `ungrounded`. The records
    text is the question's own retained file,
@@ -127,7 +127,7 @@ set. `spend_figure(text, figures)` is False for None, else whether the text quot
 number in the text (digits with commas only between three-digit groups, an optional fraction, not inside a longer
 word or number, an optional `$` before it) and holds a token count when a number with no `$` and no fraction,
 commas dropped, is in `figures`, and a dollar amount when a number with `$` and a fraction, commas dropped, is.
-The shape of the prose around a figure is never judged (ADR-console-090: the session is told to quote each
+The shape of the prose around a figure is never judged (ADR-console-089: the session is told to quote each
 figure exactly as the records print it). Stated limits, not defects: a number of the answer that is no spend
 figure but equals a spend value passes, and a figure the session reformats (rounded, `1.2M`, converted or
 reworded) is no figure.

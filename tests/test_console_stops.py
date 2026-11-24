@@ -710,7 +710,7 @@ class StopServiceTest(Case):
 
 
 class ColleagueAccountMoveTest(StopServiceTest):
-    """Signing a colleague's account out or removing it restarts each manager on it (#1345, ADR-console-087 D5)."""
+    """Signing a colleague's account out or removing it restarts each manager on it (#1345, ADR-console-087)."""
 
     COLLEAGUE = "colleague@example.invalid"
     SECOND = "s-2bbbbbbbb"

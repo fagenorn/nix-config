@@ -226,7 +226,7 @@ stalls, progress, sign-in, questions, then the existing ones.
 
 A profile whose sign-in asks (#1010: `capacity["profiles"][i]["signin"]["ask"]` is true, a read of
 `entry.get("signin")` so a capacity without that member shows none) and that no colleague added (#1361,
-ADR-console-087 D3: its entry's `owner` is none, a read of `entry.get("owner")`; signing a colleague's
+ADR-console-087: its entry's `owner` is none, a read of `entry.get("owner")`; signing a colleague's
 account in is his, so it raises no card) is one entry of `inbox.open`,
 after the progress entries and before the questions, ordered by profile, and counts in
 `inbox_items` and the headline. Its entry is
@@ -752,7 +752,7 @@ landed gives none) whose rule is `OVERLAP_UNSETTLED`, in `claim_overlaps` order,
 `sprints` are the reading's two sprint ids, the earlier-started first, `files` its files and `text`
 is `OVERLAP_UNSETTLED_TEXT` over the two sprints' titles in that order and the files joined with
 `", "`. A settled overlap gives no entry. An overlap entry is never an inbox item and changes no
-`inbox`, count, headline, sentence or `stale` (#1347, ADR-console-091).
+`inbox`, count, headline, sentence or `stale` (#1347, ADR-console-085).
 Every sprint entry, running or finished, carries `live_faults`: the sprint's standing live-fault
 declarations (`open_faults`, so never a withdrawn one) in id order, `[]` when none. `text` is
 `LIVE_FAULT_TEXT` over the issue, `observed`, `when` and `proven`; `at` is the declaration's own time,

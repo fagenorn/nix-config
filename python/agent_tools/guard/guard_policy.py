@@ -9,7 +9,9 @@ branch is read at the commit `origin` lists for it, through
 `adopt_verify.SourceReader`: `adopt_inspection.pin_listed` fetches the branch
 only when the checkout lacks that commit, and `contract_export.export_contract`
 exports the contract and its projection files (`resolve_project.projection_paths`)
-sparsely (`contract_export`), with no tree inventory. The base policy must be an
+sparsely (`contract_export`), with no tree inventory. The row proof does not
+judge those projection files; the full read through `resolver`, verification's,
+still does. The base policy must be an
 object with exactly the five trusted members `authorized_owners`,
 `integration_bases`, `git_bin`, `gh_bin` and `jq_bin`, where the owners and
 branches are non-empty strings and the three tools are absolute paths; anything
@@ -24,8 +26,11 @@ fetch url and its single push url name one `github.com` slug, spelt as
 issue 126 D9); `origin` yields a default branch and the contract's branch
 (`branch_unresolved` for `adopt.registration.remote_default_unknown` and
 `adopt.registration.integration_branch_unresolved`, `fetch_failed` for every
-other `AdoptError`); the resolver accepts that contract (`contract_unresolved`,
-with its repair id in the detail). `target_profiles` runs steps 5 to 8 on the
+other `AdoptError`); the contract's core read (`resolve_project.resolve_core`)
+accepts the members a row is made of (`contract_unresolved`, with its repair id
+in the detail). The interval, projections, capabilities, paths and workflow are
+not judged, so a contract the installed platform cannot fully read keeps its row
+while those members are valid. `target_profiles` runs steps 5 to 8 on the
 resolved snapshot: the contract's project id is the registered one
 (`identity_mismatch`), its tracker is the `github` repository named by the slug
 (`tracker_mismatch`), it has a `github_repository` release target
@@ -386,11 +391,24 @@ def origin_slug(root: Path) -> str:
 
 
 def resolver(root: Path, command: str) -> tuple[int, object]:
-    """`remote_source`'s resolver seam, in process: `(0, snapshot)` or `(2, error object)`."""
+    """`remote_source`'s resolver seam, in process: `(0, snapshot)` or `(2, error object)`.
+
+    The full read: `verify_exec.project_source` needs the snapshot's workflow bindings.
+    """
     if command != "resolve":
         raise ValueError(f"unknown resolver command: {command!r}")
     try:
         return 0, resolve_project.resolve(str(root))
+    except resolve_project.ContractError as error:
+        return 2, {"error": {"code": error.code, "repair_id": error.repair_id}}
+
+
+def core_resolver(root: Path, command: str) -> tuple[int, object]:
+    """The row proof's resolver seam, in process, over the core read."""
+    if command != "resolve":
+        raise ValueError(f"unknown resolver command: {command!r}")
+    try:
+        return 0, resolve_project.resolve_core(str(root))
     except resolve_project.ContractError as error:
         return 2, {"error": {"code": error.code, "repair_id": error.repair_id}}
 
@@ -455,7 +473,7 @@ def production_row(snapshot: dict) -> dict | None:
 
 def _proof(root: Path, entry: dict, slug: str, source: adopt_verify.VerificationSource) -> dict:
     """Steps 4 and 5 to 10 over the pinned `source`: the row for `slug`."""
-    status, payload = resolver(source.resolver_root, "resolve")
+    status, payload = core_resolver(source.resolver_root, "resolve")
     if status != 0:
         raise ProjectRefused("contract_unresolved", "the resolver refused the contract on "
                              f"{source.ref}: {adopt_inspection.resolver_repair_id(payload)}")
@@ -517,7 +535,7 @@ def prove(entry: dict, root: Path, slug: str) -> dict:
     override = entry.get("branch_override")
     try:
         with adopt_verify.remote_source(
-                root, resolver, override["branch"] if override else None,
+                root, core_resolver, override["branch"] if override else None,
                 network_timeout=forge_adapter.CHILD_TIMEOUT_SECONDS,
                 reader=CONTRACT_READER) as source:
             return _proof(root, entry, slug, source)

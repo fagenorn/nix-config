@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import copy
-from dataclasses import dataclass
 import json
 from pathlib import Path
 import posixpath
@@ -19,7 +17,6 @@ from agent_tools.agent_model_matrix import (
     parse_matrix,
 )
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
-from agent_tools import skill_lint
 from agent_tools.skill_lint import (
     AGENTS_DIR,
     CLAUDE_TREE,
@@ -43,13 +40,7 @@ HOSTS = ("claude",)
 # `report` regenerates reports for revisions that predate the Codex retirement,
 # whose models still name the Codex host; only the current tree is Claude-only.
 HISTORICAL_HOSTS = ("claude", "codex")
-TOP_LEVEL_KEYS = (
-    "frame",
-    "profiles",
-    "excluded_sites",
-    "corpus_ceiling_bytes",
-    "description_ceiling_bytes",
-)
+TOP_LEVEL_KEYS = ("frame", "profiles", "excluded_sites")
 PROFILE_KEYS = (
     "id",
     "hosts",
@@ -57,24 +48,14 @@ PROFILE_KEYS = (
     "hot",
     "conditional",
     "unread",
-    "ceiling_bytes",
-    "conditional_ceiling_bytes",
     "note",
 )
 PROFILE_CHOICE_KEYS = ("entry", "launch")
-# The gate's ceilings (#292 D4). A model committed before the gate has none of
-# them, and `report` still reads such a model; `check` and `tighten` require them.
-GATE_TOP_LEVEL_KEYS = ("corpus_ceiling_bytes", "description_ceiling_bytes")
-GATE_PROFILE_KEYS = ("conditional_ceiling_bytes",)
+# Revisions before issue 1483 carry these ceiling keys; only `report` reads such a
+# revision's model, so a current model holding one is refused as an unknown key.
+RETIRED_TOP_LEVEL_KEYS = ("corpus_ceiling_bytes", "description_ceiling_bytes")
+RETIRED_PROFILE_KEYS = ("ceiling_bytes", "conditional_ceiling_bytes")
 SKILL_NAME = re.compile(r"[A-Za-z0-9_-]+")
-WORKFLOW_PATH = ".github/workflows/instruction-budget.yaml"
-RAISE_LABEL = "instruction-budget-raise"
-GATE_FILES = (
-    WORKFLOW_PATH,
-    "python/agent_tools/skill_lint.py",
-    "python/agent_tools/instruction_load.py",
-    ".github/branch-protection.json",
-)
 REGENERATE = "just agent-instruction-load report --base {base} --head {head} --output <path>"
 
 
@@ -157,14 +138,10 @@ def _is_reason_map(value: object) -> bool:
     return isinstance(value, dict) and all(isinstance(reason, str) for reason in value.values())
 
 
-def _is_byte_count(value: object) -> bool:
-    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
-
-
-def _top_level_violations(model: dict, read: Reader, gate_fields: bool = True) -> list[str]:
-    found = [f"model: missing key '{key}'" for key in TOP_LEVEL_KEYS
-             if key not in model and (gate_fields or key not in GATE_TOP_LEVEL_KEYS)]
-    found += [f"model: unknown key '{key}'" for key in sorted(set(model) - set(TOP_LEVEL_KEYS))]
+def _top_level_violations(model: dict, read: Reader, historical: bool = False) -> list[str]:
+    found = [f"model: missing key '{key}'" for key in TOP_LEVEL_KEYS if key not in model]
+    allowed = set(TOP_LEVEL_KEYS) | (set(RETIRED_TOP_LEVEL_KEYS) if historical else set())
+    found += [f"model: unknown key '{key}'" for key in sorted(set(model) - allowed)]
     if "frame" in model:
         if model["frame"] != FRAME_MEMBER:
             found.append(f"model: frame must be {FRAME_MEMBER!r}")
@@ -181,36 +158,17 @@ def _top_level_violations(model: dict, read: Reader, gate_fields: bool = True) -
         ]
     if not isinstance(model.get("profiles", []), list):
         found.append("model: profiles must be a list")
-    for key in ("corpus_ceiling_bytes", "description_ceiling_bytes"):
-        if key in model and not _is_byte_count(model[key]):
-            found.append(f"model: {key} must be a non-negative integer")
     return found
 
 
-def _ceiling_map_violations(key: str, value: object, hosts: object,
-                            hosts_valid: bool) -> list[str]:
-    """Violations of one per-host ceiling map of a profile."""
-    if not isinstance(value, dict):
-        return [f"{key} must map hosts to byte counts"]
-    found = []
-    if hosts_valid and set(value) != set(hosts):
-        found.append(f"{key} hosts {sorted(value)} differ from hosts {sorted(hosts)}")
-    found += [
-        f"{key} {host} must be a non-negative integer"
-        for host, ceiling in value.items()
-        if not _is_byte_count(ceiling)
-    ]
-    return found
-
-
-def _profile_violations(profile: object, gate_fields: bool = True,
-                        hosts_allowed: tuple[str, ...] = HOSTS) -> list[str]:
+def _profile_violations(profile: object, hosts_allowed: tuple[str, ...] = HOSTS,
+                        historical: bool = False) -> list[str]:
     """Unprefixed structural violations of one profile."""
     if not isinstance(profile, dict):
         return ["must be an object"]
-    found = [f"missing key '{key}'" for key in PROFILE_KEYS
-             if key not in profile and (gate_fields or key not in GATE_PROFILE_KEYS)]
-    unknown = set(profile) - set(PROFILE_KEYS) - set(PROFILE_CHOICE_KEYS)
+    found = [f"missing key '{key}'" for key in PROFILE_KEYS if key not in profile]
+    known = set(PROFILE_KEYS) | set(PROFILE_CHOICE_KEYS)
+    unknown = set(profile) - known - (set(RETIRED_PROFILE_KEYS) if historical else set())
     found += [f"unknown key '{key}'" for key in sorted(unknown)]
     if "id" in profile and not (isinstance(profile["id"], str) and profile["id"]):
         found.append("id must be a non-empty string")
@@ -258,17 +216,14 @@ def _profile_violations(profile: object, gate_fields: bool = True,
         for member in dict.fromkeys(listed)
         if listed.count(member) > 1
     ]
-    for key in ("ceiling_bytes", "conditional_ceiling_bytes"):
-        if gate_fields or key not in GATE_PROFILE_KEYS or key in profile:
-            found += _ceiling_map_violations(key, profile.get(key), hosts, hosts_valid)
     note = profile.get("note")
     if not isinstance(note, str) or not note.strip():
         found.append("empty note")
     return found
 
 
-def _structure_violations(profiles: list, gate_fields: bool = True,
-                          hosts_allowed: tuple[str, ...] = HOSTS) -> tuple[list[str], list[dict]]:
+def _structure_violations(profiles: list, hosts_allowed: tuple[str, ...] = HOSTS,
+                          historical: bool = False) -> tuple[list[str], list[dict]]:
     """Every profile's structural violations, and the profiles that have none."""
     violations: list[str] = []
     sound: list[dict] = []
@@ -277,7 +232,7 @@ def _structure_violations(profiles: list, gate_fields: bool = True,
         profile_id = profile.get("id") if isinstance(profile, dict) else None
         named = isinstance(profile_id, str) and bool(profile_id)
         label = profile_id if named else f"#{index}"
-        found = _profile_violations(profile, gate_fields, hosts_allowed)
+        found = _profile_violations(profile, hosts_allowed, historical)
         if named:
             if profile_id in seen:
                 found.append("duplicate id")
@@ -391,20 +346,18 @@ def _member_violations(profile: dict, read: Reader, sites: Optional[list[dict]])
     return [f"profile {profile['id']}: {message}" for message in found]
 
 
-def validate(model: dict, read: Reader, *, gate_fields: bool = True,
-             historical: bool = False) -> list[str]:
+def validate(model: dict, read: Reader, *, historical: bool = False) -> list[str]:
     """Every violation of the model, in report order; empty when it is sound.
 
-    With ``gate_fields`` false, a model that predates the gate's ceilings is
-    still sound: ``report`` reads models committed before them. With
-    ``historical`` true, hosts retired since are still accepted: ``report``
-    reads models of revisions that predate their retirement.
+    With ``historical`` true, hosts and ceiling keys retired since are still
+    accepted, unchecked: ``report`` reads models of revisions that predate
+    their retirement.
     """
     hosts_allowed = HISTORICAL_HOSTS if historical else HOSTS
-    violations = _top_level_violations(model, read, gate_fields)
+    violations = _top_level_violations(model, read, historical)
     profiles = model.get("profiles")
     profiles = profiles if isinstance(profiles, list) else []
-    structure, sound = _structure_violations(profiles, gate_fields, hosts_allowed)
+    structure, sound = _structure_violations(profiles, hosts_allowed, historical)
     violations += structure
     matrix, sites = _matrix_sites(read)
     violations += matrix
@@ -469,28 +422,6 @@ def measure(model: dict, read: Reader) -> dict:
     return {"frame": frame, "documents": documents, "profiles": profiles}
 
 
-def over_ceiling(model: dict, measurement: dict) -> list[str]:
-    """One message per profile and host whose hot bytes exceed its ceiling."""
-    found = []
-    for profile in model["profiles"]:
-        for host in profile["hosts"]:
-            hot = measurement["profiles"][profile["id"]][host]["hot"]
-            ceiling = profile["ceiling_bytes"][host]
-            if hot["bytes"] > ceiling:
-                listing = ", ".join(
-                    f"{member} {measurement['documents'][member]['bytes']}"
-                    for member in hot["members"]
-                )
-                found.append(
-                    f"profile {profile['id']} on {host}: hot {hot['bytes']} bytes "
-                    f"exceed ceiling {ceiling} ({listing})"
-                )
-    return found
-
-
-CEILING_KINDS = {"ceiling_bytes": "hot", "conditional_ceiling_bytes": "conditional"}
-
-
 def measure_corpus(snapshot: Snapshot) -> dict[str, int]:
     """Bytes of every instruction document, and of every skill description."""
     total = 0
@@ -511,168 +442,6 @@ def measure_corpus(snapshot: Snapshot) -> dict[str, int]:
             total += len(read_listed(snapshot, path))
     total += len(snapshot.read(FRAME_PATH) or b"")   # the frame is read by path: absent counts 0
     return {"corpus": total, "descriptions": descriptions}
-
-
-@dataclass(frozen=True)
-class Ceiling:
-    label: str
-    location: tuple[str, ...]
-    ceiling: int
-    measured: int
-
-
-def ceiling_locations(model: dict) -> list[tuple[str, ...]]:
-    """Where each ceiling lives in `model`; the one definition, tolerant of an invalid model."""
-    found: list[tuple[str, ...]] = []
-    profiles = model.get("profiles")
-    for profile in profiles if isinstance(profiles, list) else []:
-        if not (isinstance(profile, dict) and isinstance(profile.get("id"), str)):
-            continue
-        hosts = profile.get("hosts")
-        if not _is_string_list(hosts):
-            continue
-        for host in hosts:
-            found += [("profiles", profile["id"], key, host) for key in CEILING_KINDS]
-    return [*found, ("corpus_ceiling_bytes",), ("description_ceiling_bytes",)]
-
-
-def _ceiling_at(model: dict, location: tuple[str, ...]) -> int:
-    if location[0] != "profiles":
-        return model[location[0]]
-    _, profile_id, key, host = location
-    return next(p for p in model["profiles"]
-                if isinstance(p, dict) and p.get("id") == profile_id)[key][host]
-
-
-def ceilings(model: dict, measurement: dict, corpus: dict[str, int]) -> list[Ceiling]:
-    """Every ceiling of a valid model with its measured size, in `ceiling_locations` order."""
-    found = []
-    for location in ceiling_locations(model):
-        if location[0] == "profiles":
-            _, profile_id, key, host = location
-            kind = CEILING_KINDS[key]
-            label = f"profile {profile_id} on {host}: {kind}"
-            measured = measurement["profiles"][profile_id][host][kind]["bytes"]
-        elif location[0] == "corpus_ceiling_bytes":
-            label, measured = "corpus", corpus["corpus"]
-        else:
-            label, measured = "descriptions", corpus["descriptions"]
-        found.append(Ceiling(label, location, _ceiling_at(model, location), measured))
-    return found
-
-
-def breached(found: list[Ceiling]) -> list[Ceiling]:
-    return [c for c in found if c.measured > c.ceiling]
-
-
-def loose(found: list[Ceiling]) -> list[Ceiling]:
-    """The ceilings more than 5% above what they measure."""
-    return [c for c in found if 100 * c.ceiling > 105 * c.measured]
-
-
-def _slot(model: dict, location: tuple[str, ...]) -> Optional[dict]:
-    """The dict holding `location`'s last key, or None when it does not resolve.
-
-    A profile is matched by id, and only when `model` holds exactly one profile with it.
-    """
-    if len(location) == 1:
-        return model
-    _, profile_id, kind, _ = location
-    profiles = model.get("profiles") if isinstance(model.get("profiles"), list) else []
-    matches = [p for p in profiles if isinstance(p, dict) and p.get("id") == profile_id]
-    if len(matches) != 1 or not isinstance(matches[0].get(kind), dict):
-        return None
-    return matches[0][kind]
-
-
-def lowered_to(model: dict, base: dict) -> dict:
-    """`model` with each ceiling that is at or below its base value set to that value.
-
-    Raise control compares the result with `base`: anything still unequal is a change
-    other than lowering a ceiling. Non-dict and non-list values are skipped, never lowered.
-    """
-    result = copy.deepcopy(model)
-    for location in ceiling_locations(result):
-        target, source, key = _slot(result, location), _slot(base, location), location[-1]
-        if target is not None and source is not None and _is_byte_count(target.get(key)) \
-                and _is_byte_count(source.get(key)) and target[key] <= source[key]:
-            target[key] = source[key]
-    return result
-
-
-def renoted_to(model: dict, base: dict) -> dict:
-    """`model` with each profile's `note` set to the note of the base profile with its id.
-
-    A note is prose no gate step reads, so raise control lets it change unlabelled (#300).
-    Only a profile whose id names exactly one profile on each side, both carrying a
-    `note`, is renoted; a new, removed or renamed profile stays a change.
-    """
-    def by_id(document: dict) -> dict:
-        profiles = document.get("profiles") if isinstance(document.get("profiles"), list) else []
-        found: dict = {}
-        for profile in profiles:
-            if isinstance(profile, dict) and isinstance(profile.get("id"), str):
-                found.setdefault(profile["id"], []).append(profile)
-        return found
-
-    result = copy.deepcopy(model)
-    sources = by_id(base)
-    for profile_id, targets in by_id(result).items():
-        matches = sources.get(profile_id, [])
-        if len(targets) == 1 and len(matches) == 1 \
-                and "note" in targets[0] and "note" in matches[0]:
-            targets[0]["note"] = copy.deepcopy(matches[0]["note"])
-    return result
-
-
-def tightened(model: dict, found: list[Ceiling]) -> tuple[dict, list[str]]:
-    """`model` with every ceiling above its measure lowered to it, and the lines saying so."""
-    result = copy.deepcopy(model)
-    lines = []
-    for c in found:
-        if c.ceiling > c.measured:
-            _slot(result, c.location)[c.location[-1]] = c.measured
-            lines.append(f"lowered {c.label}: {c.ceiling} -> {c.measured}")
-    return result, lines
-
-
-def run_check(head: Snapshot, base: Optional[Snapshot], raise_label: bool) -> list[str]:
-    """Every failing line of the gate, in step order; raises ValueError when it cannot run."""
-    lines = [f"lint: {line}" for line in skill_lint.lint(head)]
-    raw = head.read(MODEL_PATH)
-    if raw is None:
-        raise ValueError(f"no {MODEL_PATH} in the working tree")
-    model = load_model(raw)
-    violations = validate(model, head.read)
-    if violations:
-        lines += [f"ceiling: invalid model: {violation}" for violation in violations]
-    else:
-        found = ceilings(model, measure(model, head.read), measure_corpus(head))
-        lines += [
-            f"ceiling: {c.label} measures {c.measured} bytes, above its ceiling {c.ceiling}; "
-            f"cut the text, or raise the ceiling in a PR carrying the {RAISE_LABEL} label"
-            for c in breached(found)
-        ]
-        lines += [
-            f"tightness: {c.label} ceiling {c.ceiling} is more than 5% above its measured "
-            f"{c.measured} bytes; run `just agent-instruction-load tighten`"
-            for c in loose(found)
-        ]
-    if base is not None and base.read(WORKFLOW_PATH) is not None:
-        base_raw = base.read(MODEL_PATH)
-        if base_raw is None:
-            raise ValueError(f"no {MODEL_PATH} at the base")
-        base_model = load_model(base_raw)
-        if not raise_label:
-            if lowered_to(renoted_to(model, base_model), base_model) != base_model:
-                lines.append(f"raise: {MODEL_PATH} changes more than lowering a ceiling; "
-                             f"revert it, or have a human apply the {RAISE_LABEL} label")
-            lines += [
-                f"raise: gate file {path} differs from the base; "
-                f"revert it, or have a human apply the {RAISE_LABEL} label"
-                for path in GATE_FILES if head.read(path) != base.read(path)
-            ]
-    return lines
 
 
 PREFACE = (
@@ -737,9 +506,8 @@ def compare(model: dict, base_measurement: dict, head_measurement: dict,
             "unread": profile["unread"],
             "hosts": {
                 host: {
-                    **{kind: _compare_total(totals[host][kind], base_documents, head_documents)
-                       for kind in ("hot", "conditional")},
-                    "ceiling_bytes": profile["ceiling_bytes"][host],
+                    kind: _compare_total(totals[host][kind], base_documents, head_documents)
+                    for kind in ("hot", "conditional")
                 }
                 for host in profile["hosts"]
             },
@@ -849,13 +617,6 @@ def _parser() -> argparse.ArgumentParser:
     report.add_argument("--output", type=Path, help="write the report here instead of stdout")
     report.add_argument("--format", choices=("markdown", "json"), default="markdown")
     report.add_argument("--root", type=Path, default=Path("."), help="the repository")
-    check = commands.add_parser("check", help="run the growth gate on the working tree")
-    check.add_argument("--base", help="the base revision for raise control")
-    check.add_argument("--raise-label", action="store_true",
-                       help="the pull request carries the raise label")
-    check.add_argument("--root", type=Path, default=Path("."), help="the repository")
-    tighten = commands.add_parser("tighten", help="lower every loose ceiling to its measure")
-    tighten.add_argument("--root", type=Path, default=Path("."), help="the repository")
     return parser
 
 
@@ -869,7 +630,7 @@ def _report(args: argparse.Namespace) -> int:
         model = load_model(raw)
     except ValueError as error:
         raise ValueError(f"invalid model at {head}: {error}") from None
-    violations = validate(model, read_head, gate_fields=False, historical=True)
+    violations = validate(model, read_head, historical=True)
     if violations:
         raise ValueError(f"invalid model at {head}: " + "; ".join(violations))
     report = compare(model, measure(model, read_base), measure(model, read_head), base, head)
@@ -881,43 +642,9 @@ def _report(args: argparse.Namespace) -> int:
     return 0
 
 
-def _check(args: argparse.Namespace) -> int:
-    if args.raise_label and args.base is None:
-        raise ValueError("--raise-label needs --base")
-    head = skill_lint.working_tree(args.root)
-    base = None if args.base is None else revision_snapshot(args.root, args.base)[1]
-    if base is not None and base.read(WORKFLOW_PATH) is None:
-        print(f"agent-instruction-load: the base has no {WORKFLOW_PATH}; "
-              f"raise control skipped", file=sys.stderr)
-    lines = run_check(head, base, args.raise_label)
-    print("\n".join(lines) if lines else "check: pass")
-    return 1 if lines else 0
-
-
-def _tighten(args: argparse.Namespace) -> int:
-    snapshot = skill_lint.working_tree(args.root)
-    raw = snapshot.read(MODEL_PATH)
-    if raw is None:
-        raise ValueError(f"no {MODEL_PATH} in the working tree")
-    model = load_model(raw)
-    violations = validate(model, snapshot.read)
-    if violations:
-        raise ValueError("invalid model: " + "; ".join(violations))
-    found = ceilings(model, measure(model, snapshot.read), measure_corpus(snapshot))
-    result, lowered = tightened(model, found)
-    if lowered:
-        (args.root / MODEL_PATH).write_text(
-            json.dumps(result, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-        print("\n".join(lowered))
-    over = breached(found)
-    for c in over:
-        print(f"breach {c.label}: measures {c.measured} bytes, above its ceiling {c.ceiling}")
-    return 1 if over else 0
-
-
 def main(argv: Optional[list[str]] = None) -> int:
     args = _parser().parse_args(argv)
-    handler = {"report": _report, "check": _check, "tighten": _tighten}[args.command]
+    handler = {"report": _report}[args.command]
     try:
         return handler(args)
     except (ValueError, OSError) as error:
