@@ -14400,6 +14400,14 @@ class LaneRuleTest(unittest.TestCase):
         self.assertEqual(result["stage"], "planned")
         self.assertEqual(LANE_RULE_ARGV.findall(prompt(calls, "setup")), [])
 
+    def test_a_spec_or_fresh_decisions_keep_the_standard_lane_and_read_no_rule(self):
+        for name, extra in (("spec", {"spec": "docs/specs/x.md"}), ("decisions", {"decisions": "use the cache"})):
+            with self.subTest(given=name):
+                _, calls = run(args=dict(ARGS, **extra), patch={"setup": {"lane_rule": RULE_DIRECT}})
+                self.assertEqual(LANE_RULE_ARGV.findall(prompt(calls, "setup")), [])
+                self.assertIn("plan", labels(calls))
+                self.assertNotIn("direct-impl", labels(calls))
+
     def test_a_standard_or_unreadable_rule_keeps_the_standard_lane(self):
         for name, rule in (("standard", {"verdict": "standard", "reason": "r"}), ("error", {"verdict": "error", "reason": "e"}),
                            ("not an object", "direct"), ("absent", None)):

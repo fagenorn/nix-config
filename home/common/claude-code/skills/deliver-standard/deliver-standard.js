@@ -93,7 +93,8 @@ const LIVE_ASKED = args.lane === 'live' || !!(CONT && CONT.lane === 'live')
 const LIVE_AUTO = !CONT && args.lane === undefined
 const LIVE_READING = LIVE_ASKED || LIVE_AUTO
 // The lane rule is read by a lane-less fresh run outside plan mode only; an explicit lane, a cont and plan mode read none.
-const RULE_AUTO = !CONT && args.lane === undefined && MODE !== 'plan'
+// A fresh run given a spec or decisions keeps the standard lane too: only the planner and the plan and final reviews are told them.
+const RULE_AUTO = !CONT && args.lane === undefined && MODE !== 'plan' && !args.spec && !(typeof args.decisions === 'string' && args.decisions.trim())
 if (args.review_sizing !== undefined && typeof args.review_sizing !== 'boolean') return { stage: 'args', error: 'review_sizing must be a boolean' }
 const REVIEW_SIZING = args.review_sizing === true
 if (args.clerk_model !== undefined && !['sonnet', 'haiku'].includes(args.clerk_model)) return { stage: 'args', error: 'clerk_model must be sonnet or haiku' }
