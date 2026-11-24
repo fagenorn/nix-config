@@ -8,8 +8,9 @@ guard-policy reader, never the checkout's working tree, index or local branches)
 runs (a detached worktree at the one commit the caller chose, removed afterwards: a `command` run
 executes at the contract commit, a `script` or `at` run at the commit the lint checked, the block's
 `merge` unless `at` names another) and how its exit is read (P5: 0 met, 1 not met, 75 not yet,
-anything else, or the 11-minute timeout, leaves the check pending; P2: output is trimmed, never
-trusted). Every git child, the source reader's included, runs without `GITHUB_TOKEN` and
+anything else, or the 11-minute timeout, leaves the check pending, bar a run a signal ended, a
+negative exit or 128+N for a signal N as a shell reports a child's, which is `interrupted`; P2: output
+is trimmed, never trusted). Every git child, the source reader's included, runs without `GITHUB_TOKEN` and
 `GH_TOKEN` (P16). No shell is ever involved: a run becomes an argv or
 nothing.
 """
@@ -286,10 +287,23 @@ def expect_met(expect: Mapping | None, stdout: str) -> bool:
     return True
 
 
+def signal_of(exit: int | None) -> int | None:
+    """The signal that ended a run with this exit: `-exit` for a negative exit, `exit - 128` for the
+    code a shell reports for a child a signal ended; None for any other exit."""
+    if exit is None:
+        return None
+    if exit < 0:
+        return -exit
+    number = exit - 128
+    return number if number > 0 and number in signal.valid_signals() else None
+
+
 def classify(result: Result, expect: Mapping | None) -> str:
-    """`met`, `not_met`, `not_yet`, `timeout` or `exit_unexpected` (P5)."""
+    """`met`, `not_met`, `not_yet`, `timeout`, `interrupted` or `exit_unexpected` (P5)."""
     if result.timed_out:
         return "timeout"
+    if signal_of(result.exit) is not None:
+        return "interrupted"
     if result.exit == 0:
         return "met" if expect_met(expect, result.stdout) else "not_met"
     if result.exit == 1:

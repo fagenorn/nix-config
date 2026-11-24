@@ -10,13 +10,18 @@ import contextlib
 import io
 import os
 import stat
+import sys
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.verification import verify_exec as vx, verify_interrupt as vi, verify_run as vr
+from agent_tools.verification import (
+    verify_exec as vx, verify_interrupt as vi, verify_pending, verify_run as vr,
+)
+
+from .test_verify_pending import ISSUE, SLUG, TIP, PassBase, Refs, bkey, check, line
 
 TIER = "integration"  # its pass cases run PassBase passes against ForgeWorld and spawn real children
 
@@ -125,6 +130,171 @@ class InterruptStoreTest(unittest.TestCase):
 
     def test_two_runs_and_the_ceiling_fit_in_one_lease(self):
         self.assertLess(2 * vx.TIMEOUT + vi.BACKOFF_CEILING_SECONDS, vr.LEASE.total_seconds())
+
+
+TERM = "import os, signal\nos.kill(os.getpid(), signal.SIGTERM)"
+
+
+class InterruptedPassTest(PassBase):
+    def setUp(self):
+        super().setUp()
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tmp = Path(tmp.name)
+        self.store = self.tmp / "interrupted.json"
+        self.runs = self.tmp / "runs"
+        self.waits, self.logged = [], []
+
+    def stub(self, name, body):
+        script = self.world.checkout / "scripts" / name
+        script.write_text(
+            f"#!{sys.executable}\nopen({str(self.runs)!r}, 'a').write('x')\n{body}\n", encoding="utf-8")
+        script.chmod(0o755)
+        return check(run={"script": f"scripts/{name}"})
+
+    def interruptions(self):
+        return vi.Interruptions(self.store, clock=lambda: NOW, sleep=self.waits.append, log=self.logged.append,
+                                started=NOW)
+
+    def run_pass(self):
+        return [entry for node in vr.list_held(SLUG)
+                for entry in vr.pass_issue(self.project, "mbp", node, Refs(), interruptions=self.interruptions())]
+
+    def run_count(self):
+        return len(self.runs.read_text()) if self.runs.exists() else 0
+
+    def streak_of(self, held):
+        return self.interruptions().streak(vi.key(SLUG, ISSUE, bkey(held), 0))
+
+    def test_a_check_a_signal_ends_twice_is_held_interrupted_twice_and_never_failed(self):
+        held = self.stub("term.py", TERM)
+        self.hold(held)
+        lines = self.run_pass()
+        self.assertEqual(lines, [line(0, "AC1", "pending", "interrupted_twice")])
+        self.assertEqual(self.run_count(), 2)
+        self.assertEqual(self.waits, [60])
+        self.assertEqual(self.markers("verify-result"), [])
+        self.assertNotIn("verification-failed", self.world.issue()["labels"])
+        self.assertEqual(len(self.markers("verify-due")), 1)
+        self.assertEqual(self.logged, [
+            "2026-11-24T15:29:04Z interrupted host=mbp repo=octo/widgets issue=7 check=0 ac=AC1 "
+            "signal=SIGTERM next=2026-11-24T15:30:04Z then=rerun",
+            "2026-11-24T15:29:04Z interrupted host=mbp repo=octo/widgets issue=7 check=0 ac=AC1 "
+            "signal=SIGTERM next=2026-11-24T15:44:04Z then=held",
+        ])
+        self.assertEqual(self.streak_of(held), 1)
+
+    def test_a_rerun_that_completes_is_recorded_and_ends_the_streak(self):
+        killed = self.tmp / "killed"
+        held = self.stub("once.py", (
+            f"import pathlib, sys\nmark = pathlib.Path({str(killed)!r})\n"
+            f"if mark.exists():\n    sys.exit(0)\nmark.write_text('x')\n{TERM}"))
+        self.hold(held)
+        key = vi.key(SLUG, ISSUE, bkey(held), 0)
+        self.interruptions().hold(key)
+        self.interruptions().hold(key)
+        lines = self.run_pass()
+        self.assertEqual(lines, [line(0, "AC1", "pass", "changed"), line(None, None, "closed", "verified")])
+        self.assertEqual(self.run_count(), 2)
+        self.assertEqual(self.waits, [240])
+        self.assertEqual(len(self.logged), 1)
+        self.assertTrue(self.logged[0].endswith("then=rerun"))
+        self.assertEqual(self.streak_of(held), 0)
+
+    def test_the_back_off_doubles_on_each_later_interrupted_pass_to_the_ceiling(self):
+        held = self.stub("term.py", TERM)
+        self.hold(held)
+        passes = [self.run_pass() for _ in range(5)]
+        self.assertEqual(passes, [[line(0, "AC1", "pending", "interrupted_twice")]] * 5)
+        self.assertEqual(self.waits, [60, 120, 240, 300, 300])
+        self.assertEqual(self.run_count(), 10)
+        self.assertEqual(self.markers("verify-result"), [])
+        self.assertEqual(self.streak_of(held), 5)
+
+    def test_a_completed_run_restarts_the_back_off_at_the_base(self):
+        mode = self.tmp / "mode"
+        held = self.stub("flip.py", (
+            f"import pathlib, sys\nif pathlib.Path({str(mode)!r}).read_text() == 'term':\n"
+            f"    {TERM.replace(chr(10), chr(10) + '    ')}\nsys.exit(75)"))
+        self.hold(held)
+        mode.write_text("term")
+        self.run_pass()
+        mode.write_text("later")
+        second = self.run_pass()
+        mode.write_text("term")
+        self.run_pass()
+        self.assertEqual(second, [line(0, "AC1", "pending", "not_yet")])
+        self.assertEqual(self.waits, [60, 60])
+        self.assertEqual(self.run_count(), 5)
+
+    def test_a_first_run_that_completes_never_waits_or_writes_a_store(self):
+        self.hold(self.stub("ok.py", "import sys\nsys.exit(0)"))
+        self.run_pass()
+        self.assertEqual((self.waits, self.logged), ([], []))
+        self.assertFalse(self.store.exists())
+        self.assertEqual(self.run_count(), 1)
+
+
+class ClassifyInterruptTest(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tmp = Path(tmp.name)
+
+    def test_a_run_a_signal_ended_is_interrupted(self):
+        script = self.tmp / "term.py"
+        script.write_text(f"#!{sys.executable}\n{TERM}\n", encoding="utf-8")
+        script.chmod(0o755)
+        result = vx.execute([str(script)], self.tmp)
+        self.assertEqual((result.exit, result.timed_out), (-15, False))
+        self.assertEqual(vx.signal_of(result.exit), 15)
+        self.assertEqual(vx.classify(result, None), "interrupted")
+
+    def test_a_shell_report_of_a_signal_is_interrupted(self):
+        for code, number in ((-9, 9), (143, 15), (137, 9), (129, 1)):
+            with self.subTest(exit=code):
+                self.assertEqual(vx.signal_of(code), number)
+                self.assertEqual(vx.classify(vx.Result(code, "", "", False), None), "interrupted")
+
+    def test_exits_that_name_no_signal_are_not_interrupted(self):
+        for code, outcome in ((0, "met"), (1, "not_met"), (75, "not_yet"), (2, "exit_unexpected"),
+                              (128, "exit_unexpected"), (200, "exit_unexpected"), (255, "exit_unexpected"),
+                              (None, "exit_unexpected")):
+            with self.subTest(exit=code):
+                self.assertIsNone(vx.signal_of(code))
+                self.assertEqual(vx.classify(vx.Result(code, "", "", False), None), outcome)
+
+    def test_a_timeout_stays_a_timeout(self):
+        for code in (None, -9):
+            with self.subTest(exit=code):
+                self.assertEqual(vx.classify(vx.Result(code, "", "", True), None), "timeout")
+
+
+class RunWiringTest(unittest.TestCase):
+    def test_one_run_hands_one_store_under_home_to_every_project(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        home = Path(tmp.name)
+        entries = [{"project_id": "a/one", "root": str(home)}, {"project_id": "a/two", "root": str(home)}]
+
+        @contextlib.contextmanager
+        def source(entry):
+            bindings = {"tracker": {"kind": "github", "repo_slug": entry["project_id"]}, "commands": {}}
+            yield vx.Source({"bindings": bindings}, home, TIP, "main")
+
+        pass_repo = mock.Mock(return_value=[])
+        with (mock.patch.dict(os.environ, {"HOME": str(home)}),
+              mock.patch.object(verify_pending.forge_api, "logged_in", return_value=True),
+              mock.patch.object(verify_pending.agent_platform, "read_registry", return_value=entries),
+              mock.patch.object(vx, "project_source", source),
+              mock.patch.object(vr, "pass_repo", pass_repo),
+              contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO())):
+            code = verify_pending.main(["run", "--host", "mbp"])
+        self.assertEqual(code, 0)
+        self.assertEqual(pass_repo.call_count, 2)
+        stores = [call.kwargs["interruptions"] for call in pass_repo.call_args_list]
+        self.assertIs(stores[0], stores[1])
+        self.assertEqual(stores[0].path, home / ".agents" / "state" / "verify-pending" / "interrupted.json")
 
 
 if __name__ == "__main__":

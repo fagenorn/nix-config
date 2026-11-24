@@ -8,7 +8,8 @@
 # while a round is running, because the service manager ignores a start of a
 # running job. Each round then runs the cleanup command's fix-only run for this
 # project, which opens a fix change the workflow token deferred. A pass never
-# fails: it exits 0 whatever its children do.
+# fails: it exits 0 whatever its children do. `verify-pending run` writes an `interrupted` line on
+# stderr for each run a signal ended, which the redirect below appends to the log.
 # Placeholders (@...@) are substituted by home/common/verify-pending/default.nix.
 set -u
 if [ "$#" -ne 1 ]; then

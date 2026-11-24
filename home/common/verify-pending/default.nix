@@ -30,7 +30,8 @@
 # `~/.agents/state/verify-pending/runner.log`, rotated to `runner.log.1` above 1 MiB, then runs
 # `owner-actions refresh` and the cleanup command's fix-only run for this project, and the pass
 # always exits 0; what runs unattended is decided by
-# `verify-pending run` itself (see `agent_tools.verification.verify_exec`).
+# `verify-pending run` itself (see `agent_tools.verification.verify_exec`). The log also carries
+# `verify-pending run`'s `interrupted host=H repo=R issue=N check=I ac=A signal=S next=T then=rerun|held` lines.
 #
 # A login Mac (issue 668) runs the darwin job as a launchd user agent in `gui/<uid>`, and gh reads
 # its token from the login keychain, so neither exists while nobody is logged in at the

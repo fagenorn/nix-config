@@ -25,11 +25,13 @@ project or issue level line. The states are `due`, `pending`, `pass`, `fail`, `h
 `rejected`, `closed` and `skipped`; the reasons are closed (`due`, `changed`, `unchanged`,
 `resolved`, `verified`, `not_verified`, `not_this_host`, `host_retired`, `lost_contest`,
 `owner_check`, `effects_live`, `effects_paid`, `command_not_verification`, `not_yet`, `timeout`,
-`exit_unexpected`, `fail_ask`, `no_block`, `block_invalid`, `block_changed`, `project_unresolved`,
+`exit_unexpected`, `interrupted_twice`, `fail_ask`, `no_block`, `block_invalid`, `block_changed`, `project_unresolved`,
 `tracker_not_github`, `forge_error`, `runner_untrusted`, `owner_asked`, `owner_waiting`,
 `owner_ambiguous`, `owner_answered`, `owner_waived`, plus the `when` reasons that name what is
 awaited). The `ask`, `act`, `live` and `paid` checks and the `on_fail: ask` and `on_expire: ask`
 decisions reach the owner through the prompts of `agent_tools.verification.verify_owner`.
+Each run a signal ended writes one `interrupted` line on stderr (format in
+`agent_tools.verification.verify_interrupt`).
 A project that cannot be read is a `skipped` line with reason `project_unresolved`, one whose
 tracker is not GitHub is `tracker_not_github` (both omitted when `--repo` is given), and a forge
 failure while listing is `forge_error`. A write pass whose `gh` account the forge would not label
@@ -61,7 +63,7 @@ import sys
 from collections.abc import Collection
 from pathlib import Path
 
-from agent_tools.verification import verify_exec, verify_run
+from agent_tools.verification import verify_exec, verify_interrupt, verify_run
 from agent_tools.project_contract import agent_platform
 from agent_tools.claims.owner_actions import SLUG_PATTERN
 from agent_tools.project_contract.resolve_project import ContractError, resolve
@@ -281,6 +283,7 @@ def run_run(args: argparse.Namespace) -> int:
         return 2
     lines: list[dict] = []
     matched = False
+    interruptions = verify_interrupt.Interruptions.at_home()
     for entry in registry:
         try:
             with verify_exec.project_source(entry) as source:
@@ -300,7 +303,7 @@ def run_run(args: argparse.Namespace) -> int:
                 refs = PinnedReferences(Path(entry["root"]), bindings["commands"])
                 try:
                     lines.extend(verify_run.pass_repo(project, args.host, refs, issue=args.issue,
-                                                      report=args.report))
+                                                      report=args.report, interruptions=interruptions))
                 except ForgeError:
                     lines.append(skipped(slug, "forge_error"))
         except verify_exec.SourceError:

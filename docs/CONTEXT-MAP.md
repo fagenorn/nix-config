@@ -64,6 +64,7 @@
 | Held issue | Verification |
 | Held work | Console |
 | Inbox item | Console |
+| Interrupted run | Verification |
 | Judged rule | Delivery |
 | Keepalive ping | Hosts |
 | Land lock | Claims |

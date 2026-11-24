@@ -17,6 +17,10 @@ _Avoid_: assertion
 An issue kept open after its change merged because an evidence criterion is still unproven. It holds a verify block in its hold comment.
 _Avoid_: pending issue
 
+**Interrupted run**:
+A run of a check that a signal ended. It is neither a pass nor a fail: the runner starts it once more after a back-off and then holds the check until the next pass, with a longer back-off each pass it stays interrupted.
+_Avoid_: killed check
+
 **Owner prompt**:
 A comment asking the owner to approve, act on, decide or look at a stale check. Each prompt is an owner-action marker with tick boxes, posted once per identity.
 
