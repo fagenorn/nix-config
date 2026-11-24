@@ -488,8 +488,8 @@ only. `unmanaged` is always present, possibly empty, sorted by `root`.
     at or after a moment has seen the tracker as it was then); after a restart `read_at` is the time of the last
     logged change between good and failed reads and `began_at` is null. It is null before any read, never a guessed time.
 
-    `engine_runs` is the `engine_runs` argument's runs of this project as `engine_runs.project_lines` gives them, in issue
-    order; it is empty without the argument, a run of an unregistered project shows nowhere, and a project with one is active.
+    `engine_runs` is the `engine_runs` argument's runs of this project as `engine_runs.project_lines` gives them (each with
+    its `spend`), in issue order; it is empty without the argument, a run of an unregistered project shows nowhere, and a project with one is active.
     A run stopped with a `need` other than `nothing` counts once in `inbox_items` and the headline; alone, it sets `ENGINE_SENTENCE`.
     With `engine_lines` false (a guest's view) no engine run line is shown or counted, while the states still feed each sprint's movement.
 
@@ -2409,7 +2409,7 @@ def derive_view(
                       key=lambda r: (r.waiting_since, r.item["key"], r.item["project_id"]))
     stale_projects = sorted(p for p in registered if p in health and not health[p].ok)
     engine_states = list(engine_runs or ())
-    lines = engine_runs_module.project_lines(engine_states, now_ms) if engine_lines else {}
+    lines = engine_runs_module.project_lines(engine_states, now_ms, spend) if engine_lines else {}
     drafted: dict[str, list[SprintState]] = {}
     finished: dict[str, list[SprintState]] = {}
     for sprint in sorted((sprints or {}).values(), key=lambda s: (-s.stated_seq, s.sprint_id)):
