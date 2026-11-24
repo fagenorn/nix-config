@@ -20,6 +20,7 @@ from contextlib import ExitStack, redirect_stdout
 from io import StringIO
 from unittest import mock
 
+from agent_tools.delivery import touched_tests
 from agent_tools.verification import verified_tree
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -668,7 +669,7 @@ class RunTest(ProjectCase):
                 + extra)
         return {"argv": [sys.executable, "-c", code], "cwd": ".", "env": []}
 
-    def declare(self, commands, conditions=ABSENT):
+    def declare(self, commands, conditions=ABSENT, before=ABSENT):
         """Commit a contract declaring `commands` (id -> extra code), publish it, add the worktree."""
         path = self.repo / ".agents" / "project.json"
         contract = json.loads(path.read_text(encoding="utf-8"))
@@ -678,6 +679,10 @@ class RunTest(ProjectCase):
         bindings["workflow"].pop("verification_conditions", None)
         if conditions is not ABSENT:
             bindings["workflow"]["verification_conditions"] = conditions
+        if before is not ABSENT:
+            bindings["workflow"]["verification_before_pull_request"] = before
+        else:
+            bindings["workflow"].pop("verification_before_pull_request", None)
         path.write_text(json.dumps(contract, indent=2) + "\n", encoding="utf-8")
         self.commit_all("declare")
         self.git("update-ref", "refs/remotes/origin/main", "HEAD")
@@ -764,6 +769,54 @@ class RunTest(ProjectCase):
         where = str(self.worktree.resolve())
         self.assertEqual(self.logged(), [f"{where} lint", f"{where} lint", f"{where} test"])
 
+    def assert_slot_seconds(self, result):
+        for member in ("waited_seconds", "held_seconds"):
+            value = result[member]
+            self.assertIsInstance(value, (int, float), result)
+            self.assertNotIsInstance(value, bool)
+            self.assertGreaterEqual(value, 0)
+
+    def test_run_runs_the_pre_pull_request_ids_and_reports_each_commands_slot_seconds_and_selection(self):
+        write = ("import json;open(os.environ['VERIFIED_TREE_SELECTION'],'w')"
+                 ".write(json.dumps({'selected':['t.py']}))")
+        self.declare({"lint": "", "test": write, "suite": ""}, before=["lint", "test"])
+        answer = self.answer(self.run_verified())
+        self.assertEqual([r["id"] for r in answer["results"]], ["lint", "test"])
+        where = str(self.worktree.resolve())
+        self.assertEqual(self.logged(), [f"{where} lint", f"{where} test"])
+        for result in answer["results"]:
+            self.assert_slot_seconds(result)
+        self.assertEqual(answer["results"][1]["selection"], {"selected": ["t.py"]})
+        self.assertNotIn("selection", answer["results"][0])
+
+    def test_without_the_binding_run_runs_every_verification_id_with_its_slot_seconds(self):
+        self.declare({"lint": "", "test": ""})
+        answer = self.answer(self.run_verified())
+        self.assertEqual([r["id"] for r in answer["results"]], ["lint", "test"])
+        for result in answer["results"]:
+            self.assert_slot_seconds(result)
+        where = str(self.worktree.resolve())
+        self.assertEqual(self.logged(), [f"{where} lint", f"{where} test"])
+
+    def test_a_selection_that_is_not_a_json_object_is_left_out(self):
+        write = "open(os.environ['VERIFIED_TREE_SELECTION'],'w').write('[1]')"
+        self.declare({"lint": "", "test": write})
+        answer = self.answer(self.run_verified())
+        for result in answer["results"]:
+            self.assertNotIn("selection", result)
+
+    def test_a_condition_skip_carries_no_seconds(self):
+        self.declare({"lint": "", "test": ""},
+                     {"lint": {"when_changed": ["docs/**"], "skip_reason": "no docs"}})
+        (self.worktree / "src").mkdir()
+        (self.worktree / "src" / "x.py").write_text("x = 1\n")
+        self.git("add", "-A", cwd=self.worktree)
+        self.git("commit", "-q", "-m", "change", cwd=self.worktree)
+        lint, _ = self.answer(self.run_verified())["results"]
+        self.assertEqual(lint["status"], "skipped")
+        for member in ("waited_seconds", "held_seconds", "selection"):
+            self.assertNotIn(member, lint)
+
     def run_in_process(self, **patches):
         """`main(["run", ...])` in this process under `patches` of module constants: (answer, seconds)."""
         env = {**HERMETIC_GIT, "HOME": self.env["HOME"], "VERIFY_SLOT_DIR": str(self.slots)}
@@ -812,6 +865,28 @@ class RunTest(ProjectCase):
             [sys.executable, "-m", "agent_tools.verification.verified_tree", "run"],
             cwd=self.repo, capture_output=True, text=True, check=False, env=self.env)
         self.assertEqual(self.answer(done, 1)["verdict"], "error")
+
+
+class SlotSecondsTest(unittest.TestCase):
+    def test_the_waits_sum_and_the_last_report_gives_the_hold(self):
+        reports = [{"waited_seconds": 1.0, "held_seconds": 2.0},
+                   {"waited_seconds": 0.5, "held_seconds": 3.0}]
+        self.assertEqual(verified_tree._slot_seconds(reports), (1.5, 3.0))
+
+    def test_no_report_gives_none_for_both(self):
+        self.assertEqual(verified_tree._slot_seconds([None]), (None, None))
+
+    def test_a_null_hold_stays_none(self):
+        self.assertEqual(verified_tree._slot_seconds([{"waited_seconds": 1.2, "held_seconds": None}]),
+                         (1.2, None))
+
+    def test_an_unreadable_attempt_is_ignored(self):
+        reports = [{"waited_seconds": 1.0, "held_seconds": 2.0}, None]
+        self.assertEqual(verified_tree._slot_seconds(reports), (1.0, 2.0))
+
+    def test_the_selection_variable_is_the_selectors(self):
+        self.assertEqual(verified_tree.SELECTION_ENV, touched_tests.SELECTION_ENV)
+        self.assertEqual(verified_tree.SELECTION_ENV, "VERIFIED_TREE_SELECTION")
 
 
 if __name__ == "__main__":

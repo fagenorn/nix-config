@@ -75,6 +75,7 @@ class FixtureProject:
                                                      "diff-review"]
         if self.conditions is not None:
             draft["bindings"]["workflow"]["verification_conditions"] = self.conditions
+        draft["bindings"]["workflow"].pop("verification_before_pull_request", None)
         # The fixture has no devenv and signs nothing: the adoption commit runs plain and unsigned.
         commands.pop("commit-environment")
         draft["bindings"]["vcs"]["commit"].update(signed=False)
