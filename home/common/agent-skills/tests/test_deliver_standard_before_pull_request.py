@@ -11,6 +11,7 @@ import json
 import re
 import unittest
 
+from . import test_deliver_standard_landing as landing
 from . import test_deliver_standard_program as program
 
 TIER = "integration"
@@ -30,7 +31,8 @@ SETUP_READ = ("- verification_before_pull_request: only when bindings.workflow.v
               "for each of its ids its bindings.commands argv, its cwd relative to project.root (. for the root), and any "
               "bindings.workflow.verification_conditions entry for that id (when_changed globs, skip_reason); omit "
               "verification_before_pull_request when the binding is absent or null.")
-MARKER = ("// suppress-standard:B17 the program's phases share module state (setup, verify, the look loop), so it stays one file")
+MARKER = ("// suppress-standard:B17 one Workflow script that cannot import a module: the program's phases share module state "
+          "(setup, verify, the look loop), and the green-first lease gate and the own-files carry stay in it")
 
 
 def setup_with(**members):
@@ -118,14 +120,14 @@ UNTOUCHED_SENTENCE = "When untouched is true, run no verification command and re
 class UntouchedSyncTest(unittest.TestCase):
     """A sync that changes none of the pull request's files is not verified again locally."""
 
-    CARRY = program.LookCarryLandingTest
+    CARRY = landing.LookCarryLandingTest
     UNTOUCHED = {"head": program.D, "clean": True, "merge_only": True, "untouched": True, "results": []}
     LOOK_UNTOUCHED = {"head": program.D, "clean": True, "merge_only": True, "ahead": False, "untouched": True,
                       "results": []}
     MOVED = {"head": program.D, "clean": True, "merge_only": True, "untouched": True, "results": []}
 
     def approve(self, reply):
-        return program.LookCarryLandingTest().approve(
+        return landing.LookCarryLandingTest().approve(
             replies={"look-carry-verify": reply, "look-carry": self.CARRY.FILES_CARRIED})
 
     def stops_with_problems(self, reply):
@@ -173,11 +175,11 @@ class UntouchedSyncTest(unittest.TestCase):
         landed = {"merged": True, "merge_commit": program.F, "notes": "merged", "renew": {"verdict": "renewed"},
                   "lock": {"verdict": "already_held", "lock_sha": program.F}}
         second = dict(self.UNTOUCHED, head=program.F)
-        patch = dict(self.CARRY.NEEDED, **{"checks-3": {"state": "behind", "head": program.D},
-                                           "sync-2": {"merge_commit": program.F, "head": program.F},
-                                           "checks-4": {"state": "passed", "head": program.F, "required": ["ci"],
-                                                        "passed": ["ci"]}})
-        replies = {"look-status": [{"verdict": "needed", "kept_from": None}] * 2,
+        patch = dict(program.LookResumeTest.MOVED, **{"checks-4": {"state": "behind", "head": program.D},
+                                                   "sync-2": {"merge_commit": program.F, "head": program.F},
+                                                   "checks-5": {"state": "passed", "head": program.F, "required": ["ci"], "passed": ["ci"]},
+                                                   "checks-6": {"state": "passed", "head": program.F, "required": ["ci"], "passed": ["ci"]}})
+        replies = {"look-status": self.CARRY.AFTER_CARRY * 2,
                    "look-carry-verify": [self.CARRY.BARE, second], "merge": [stale, landed],
                    "look-carry": [self.CARRY.FILES_CARRIED] * 2}
         result, calls = self.CARRY().approve(patch=patch, replies=replies)
@@ -228,9 +230,9 @@ class UntouchedSyncTest(unittest.TestCase):
         self.assertEqual(result["cont"]["verified"]["pictures"], pics)
 
     def test_an_untouched_landing_sync_carries_the_approval_by_the_pictures_rule(self):
-        pics = program.LookCarryLandingTest.PICS
+        pics = landing.LookCarryLandingTest.PICS
         first, _ = program.run(patch={"setup": {"look": program.MARKED}, "verify": {"pictures": pics}})
-        result, calls = program.LookCarryLandingTest().approve(
+        result, calls = landing.LookCarryLandingTest().approve(
             cont=first["cont"], replies={"look-carry-verify": self.UNTOUCHED, "look-carry": self.CARRY.CARRIED})
         self.assertEqual(result["stage"], "done", program.labels(calls))
         self.assertIn("--match-head-commit " + program.D, program.prompt(calls, "merge"))
@@ -339,7 +341,7 @@ class SetBindingPromptsTest(unittest.TestCase):
                 self.assertIn(sentence, found[label])
 
     def test_a_clean_landing_sync_that_changes_no_pull_request_file_runs_no_tests(self):
-        patch = {"pr": {"checks": {"state": "behind", "head": program.SHA}}, "sync-1": {"merge_commit": program.MERGE}}
+        patch = {"land-take": {"behind": True}, "sync-1": {"merge_commit": program.MERGE}}
         replies = {"checks-2": {"state": "passed", "passed": ["ci"], "head": program.MERGE}}
         result, calls = program.run(patch=dict(setup_with(verification=TWO, verification_before_pull_request=LOCAL_ONE),
                                                **patch), replies=replies)

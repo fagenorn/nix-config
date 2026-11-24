@@ -93,7 +93,7 @@ class OmlxConfigureTest(unittest.TestCase):
         self.assertEqual(mlx["temperature"], 0.42)
         self.assertFalse(mlx["chat_template_kwargs"]["preserve_thinking"])
         self.assertEqual(actual["future_root_key"], "keep")
-        self.assertEqual(actual["models"]["unmanaged"], {"is_default": False, "temperature": 0.27})
+        self.assertEqual(actual["models"]["unmanaged"], {"is_default": True, "temperature": 0.27})
         self.assertNotIn("thinking_budget_tokens", actual["models"]["GLM-5.3-Flash-MLX-oQ4-MTP"])
         server = json.loads(self.server.read_text())
         self.assertEqual(server["auth"]["api_key"], "test-secret-preserved")

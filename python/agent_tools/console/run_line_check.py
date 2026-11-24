@@ -14,7 +14,7 @@ The rules are read in this order:
    `http.client.HTTPException`) prints `{"reason", "status": "no_console"}` and exits 75.
 3. The waiting sprints are the running sprints (`ended_at` null) of the project entry whose
    `project_id` is `--project` in `/api/state` (an entry or a `quiet_group`'s `projects`) whose
-   `now_text == sprints.NOW_LOCK_TEXT`. None prints `{"queued", "status": "no_wait_shown"}`, exit 75.
+   `now_text` equal to `sprints.NOW_LOCK_TEXT` or starting with `NOW_LOCK_TEXT + ", position "`. None prints `{"queued", "status": "no_wait_shown"}`, exit 75.
 4. The judged run lines are the delivery entries of that project entry, in
    `outside_sprints.sessions[].deliveries[]` and in each running sprint's
    `sessions[].deliveries[]`, that carry one issue common to all three of the union of the `issues` of
@@ -39,7 +39,7 @@ import http.client
 import os
 
 from agent_tools.claims import forge_land_lock
-from agent_tools.console import deliveries, lock_wait_check, manager_check, movement, service, sprints
+from agent_tools.console import deliveries, lock_wait_check, manager_check, movement, service
 from agent_tools.system.forge_api import ForgeError
 
 NOT_YET = manager_check.NOT_YET
@@ -105,7 +105,7 @@ def main(argv=None, *, read_pulls=movement.read_pulls,
         manager_check._print({"reason": str(error), "status": "no_console"})
         return NOT_YET
     waiting = [s for s in lock_wait_check.running_sprints(state, args.project)
-               if s.get("now_text") == sprints.NOW_LOCK_TEXT]
+               if lock_wait_check.is_lock_wait(s.get("now_text"))]
     if not waiting:
         manager_check._print({"queued": queued, "status": "no_wait_shown"})
         return NOT_YET
