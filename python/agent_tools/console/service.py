@@ -624,14 +624,12 @@ drafts the plan again from the changed fields as a registration does, appending 
 or the plan's row. An answer of any other question to a row that holds a draft plans it with the
 draft file the same way, and the plan's row carries the draft.
 
-A checkout that already has a contract proposes the commit environment a stranded hook needs
-(ADR-console-083). A fresh run (no draft, no answers, not confirmed) reads its hooks once
-(`hook_reader`, `contract_draft.read_hooks` by default); when
-`contract_draft.reconcile_fields` is non-empty the run plans with the one `commit-environment`
-record: the adopter's `--commit-environment` command, never a draft file, and the row carries the
-record as its draft only when the plan took the command (`contract_draft.carried`). An answer run
-and a confirm run read no hooks and resend the command the row's draft holds. A `contract-draft`
-answer to such a row changes the record through `contract_draft.set_value`; `none` plans as
+A checkout that already has a contract proposes the commit environment a stranded hook needs (ADR-console-083). A fresh run (no draft, no
+answers, not confirmed) reads its hooks once (`hook_reader`, `contract_draft.read_hooks` by default); when `contract_draft.reconcile_fields`
+is non-empty the run plans with the one `commit-environment` record: the adopter's `--commit-environment` command, never a draft file, and
+the row carries the record as its draft only when the plan took the command (`contract_draft.carried`). An answer run and a confirm run read
+no hooks and resend the command the row's draft holds. Every planned row of a checkout is also checked for uninstalled devenv hooks
+(`register.hooks_noted`). A `contract-draft` answer to such a row changes the record through `contract_draft.set_value`; `none` plans as
 today, and the run never writes a draft file.
 
 `POST /api/plan-approve` (#1054, ADR-console-030) runs the same checks with `MAX_PLAN_APPROVE_BYTES`
@@ -6612,6 +6610,7 @@ class ConsoleService:
                                           "detail": str(error)})
             traceback.print_exception(error, file=sys.stderr)
             payload = register.failed(root, type(error).__name__, verb)
+        payload = register.hooks_noted(payload, self._stop)
         if unread:
             payload = register.unread(payload)
         elif remote is not None:
@@ -6803,6 +6802,7 @@ class ConsoleService:
                 {"root": root, "exception": type(error).__name__, "detail": str(error)})
             traceback.print_exception(error, file=sys.stderr)
             text = plan_questions.rerun_failed(register.UNEXPECTED)
+        payload = register.hooks_noted(payload, self._stop)
         with self._ingest:
             try:
                 if payload is not None and not self._closed:

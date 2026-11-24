@@ -34,6 +34,7 @@ ALLOWED_IMPORTS: dict[str, frozenset[str]] = {
         "agent_tools.project_contract.adopt_project",  # draft_register_check
         "agent_tools.project_contract.attempt_history",  # contract_draft
         "agent_tools.project_contract.derived_values",  # contract_draft
+        "agent_tools.project_contract.hook_install",  # contract_draft
         "agent_tools.project_contract.schema_three",  # contract_draft
         "agent_tools.project_contract.adopt_apply",  # approve
         "agent_tools.claims.forge_markers",  # answer, inbox, look_check, look_kept_check

@@ -64,7 +64,7 @@ pure function of the document. `summary(root, plan, report=None, draft=None)` is
 `bootstrap` or `reconcile` plan carries its header's `plan_id` and `state`, its
 `plan_questions.questions`, and its answered decisions as `{id, subject, value}` (ADR-console-029
 D1) and the `draft` it was given (the drafted contract's fields, ADR-console-031); every other row
-carries `DEFAULTS` (None, None, `[]`, `[]`, None). A ready plan's note is `The plan
+carries `DEFAULTS` (None, None, `[]`, `[]`, None). `hooks_noted(payload, cancel=None)` puts `HOOKS_LINE` first in the lines of a planned row whose checkout `contract_draft.hooks_missing` finds uninstalled devenv hooks, once, and returns every other payload as it is. A ready plan's note is `The plan
 is ready.` with no command and no plan id (#1065; ADR-console-030 keeps it, the page offers Approve beside it). A `no_change` plan with no report is
 `not_registered` and says `waiting_headline(name)`, `<name> is already adopted and is not registered
 yet.`, with the note `CONFIRM_NOTE`, `Choose Register it to register it.` (#1078, ADR-console-034):
@@ -203,6 +203,7 @@ import json
 import os
 import re
 import subprocess
+import threading
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import NamedTuple
@@ -226,6 +227,7 @@ OUTCOME_TEXT = {
     "bootstrap": "it has no agent files or project contract yet",
     "reconcile": "it has agent files or a contract to bring up to date",
 }
+HOOKS_LINE = "its git hooks are not installed on this host"
 MEMBERS = {"by", "root", "project_id", "result", "outcome", "headline", "lines", "note"}
 EXTRA = {"plan_id", "state", "questions", "answered"}
 EXTENDED = MEMBERS | EXTRA | {"draft", "remote"}
@@ -570,6 +572,14 @@ def summary(root: str, plan: Mapping, report: Mapping | None = None,
                     f"{name} needs a repair before it can be adopted.", [],
                     "Ask an agent to repair its project contract in a terminal, then " + AGAIN)
     return failed(root, "unreadable")
+
+
+def hooks_noted(payload: dict | None, cancel: threading.Event | None = None) -> dict | None:
+    if not isinstance(payload, dict) or payload.get("result") != "planned":
+        return payload
+    if payload["lines"][:1] == [HOOKS_LINE] or not contract_draft.hooks_missing(payload["root"], cancel):
+        return payload
+    return {**payload, "lines": [HOOKS_LINE, *payload["lines"]]}
 
 
 def failed(root: str, kind: str, verb: str = "plan") -> dict:
