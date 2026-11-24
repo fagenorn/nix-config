@@ -209,33 +209,68 @@ class ConfigureMarkerTest(unittest.TestCase):
         self.assertIn("cannot verify applied noop.patch", result.stderr)
         self.assertEqual(self.marker_lines(), ["patch noop.patch applied"])
 
-    def test_a_failure_after_a_settings_write_and_a_steering_change_keeps_both_reasons(self):
+    def legacy_directory(self, name, *entries):
+        directory = self.state / "models" / name
+        directory.mkdir(parents=True)
+        (directory / ".omlx-old-preset").touch()
+        for entry in entries:
+            (directory / entry).write_text("{}")
+        return directory
+
+    def test_a_legacy_preset_directory_is_removed_and_reported(self):
+        models = self.state / "models"
+        target = self.root / "weights.safetensors"
+        target.write_text("weights")
+        old = self.legacy_directory("Old-preset", "spec.json")
+        (old / "model.safetensors").symlink_to(target)
+        kept = models / "Kept"
+        kept.mkdir()
+        (kept / "config.json").write_text("{}")
+        result = self.run_configure()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["removed_presets"], ["Old-preset"])
+        self.assertFalse(old.exists())
+        self.assertTrue((kept / "config.json").is_file())
+        self.assertTrue(target.exists())
+        self.assertEqual(self.reasons_of(result), [])
+        self.assertEqual(self.marker_lines(), [])
+
+    def test_a_legacy_preset_directory_holding_a_real_file_is_refused(self):
         settings = self.read_json(self.server)
         settings["memory"]["memory_guard_tier"] = "balanced"
         self.write_json(self.server, settings)
-        self.write_json(self.root / "steering.json", {
-            "P": {"base": "Base", "neurons": [{"layer": 1, "neuron": 2, "dose": 0.5}]},
-        })
-        self.extra = ["--steering", str(self.root / "steering.json")]
-        base = self.state / "models/Base"
-        base.mkdir(parents=True)
-        (base / ".omlx-download-complete").touch()
-        (base / "config.json").write_text("{}")
-        preset = self.state / "models/P"
-        preset.mkdir()
-        (preset / ".omlx-steering-preset").touch()
-        # A link the base does not want is unlinked first; the regular file then
-        # collides with the wanted config.json link, so symlink_to raises.
-        (preset / "old.json").symlink_to(base / "gone.json")
-        (preset / "config.json").write_text("{}")
+        before = self.server.read_bytes()
+        old = self.legacy_directory("Old-preset", "weights.safetensors")
         result = self.run_configure()
         self.assertEqual(result.returncode, 1)
-        self.assertIn("FileExistsError", result.stderr)
-        self.assertFalse(os.path.lexists(preset / "old.json"))
-        self.assertEqual(
-            self.marker_lines(),
-            ["settings.json memory/memory_guard_tier", "steering preset P changed"],
-        )
+        self.assertIn("legacy preset", result.stderr)
+        self.assertIn("holds weights.safetensors", result.stderr)
+        self.assertTrue((old / "weights.safetensors").is_file())
+        self.assertEqual(self.server.read_bytes(), before)
+        self.assertEqual(self.marker_lines(), [])
+
+    def test_a_legacy_preset_directory_holding_a_subdirectory_is_refused(self):
+        old = self.legacy_directory("Old-preset")
+        (old / "nested.json").mkdir()
+        (old / "nested.json" / "weights.safetensors").write_text("weights")
+        result = self.run_configure()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("holds nested.json", result.stderr)
+        self.assertTrue((old / "nested.json" / "weights.safetensors").exists())
+
+    def test_a_failure_after_a_settings_write_keeps_its_reason(self):
+        settings = self.read_json(self.server)
+        settings["memory"]["memory_guard_tier"] = "balanced"
+        self.write_json(self.server, settings)
+        old = self.legacy_directory("Old-preset")
+        (old / "config.json").symlink_to(self.root / "anywhere")
+        old.chmod(0o500)
+        self.addCleanup(old.chmod, 0o700)
+        result = self.run_configure()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("PermissionError", result.stderr)
+        self.assertEqual(self.marker_lines(), ["settings.json memory/memory_guard_tier"])
+        self.assertEqual(self.read_json(self.server)["memory"]["memory_guard_tier"], "custom")
 
 
 class HealthHandler(http.server.BaseHTTPRequestHandler):
