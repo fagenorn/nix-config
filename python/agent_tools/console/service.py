@@ -1774,7 +1774,7 @@ choosing again, and with the account identity (its sign-in account and its count
 id) and the owner's pin as they were when it was reserved. When it is prepared, and again after the
 permission read (`_unexcluded_launch`), it must pass `_move_holds`: the manager's account still out
 (`_quota_wait`, which reads the sign-in history, so a late reply from an account the profile left
-does not count), the pin and the account identity unchanged, and `_room_for_move`: another account
+does not count), the pin and the account identity unchanged, and `quota_move.room_for_move`: another account
 than the manager's, by sign-in and by the account ids the counted readings of the target and its
 sign-in aliases carry, not a duplicate of any profile, not kept for another login's waiting sprint,
 and room by `manager.has_room` (reads `ok` or `reset`, not signed out, not excluded). It must also
@@ -2017,7 +2017,7 @@ from urllib.parse import parse_qsl
 from agent_tools.claims import owner_actions
 from agent_tools.console import (
     action_permit, project_question, account_add, account_remove, activation, checkout_remote, activation_run, answer, approve, capacity, contract_draft, deliveries, digest, engine_runs, exclusion, idle, inbox,
-    folder_trust, guest, manager, movement, nudge, peer, permission, permit, pin, plan_questions, probe, question_records, prompt_card, register, release_card, revive, pictures, sessions, signin, signin_run, spend, sprints, transcript_digest, write_guard)
+    folder_trust, guest, manager, movement, nudge, peer, permission, permit, pin, plan_questions, probe, question_records, prompt_card, register, release_card, revive, pictures, quota_move, sessions, signin, signin_run, spend, sprints, transcript_digest, write_guard)
 from agent_tools.console.action_permit import PERMIT_LANDED_SECONDS, ActionPermit
 from agent_tools.console.event_log import (
     BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, FAULT_DECLARED, FAULT_WITHDRAWN, GOAL_STATED, GOAL_WITHDRAWN, MANAGER_FAILED,
@@ -8824,15 +8824,19 @@ class ConsoleService(ActionPermit):
             return self._move_target(sprint)
         return None
 
+    def _move_view(self) -> Mapping:
+        """Under the ingest lock: the capacity view a quota move reads its target and accounts from."""
+        return capacity.capacity_view(self._profiles - self._removing, self._capacity, self._clock(),
+                                      self._signins, excluded=self._excluded, pinned=self._pinned,
+                                      owners=self._owners_now())
+
     def _takeover_reservation(self, sprint: sprints.SprintState, now: int) -> "_TakeoverReservation":
         """Under the ingest lock: the reservation of a takeover, a quota move carrying its target, account and pin."""
         target = self._quota_target(sprint, now)
         if target is None:
             return _TakeoverReservation()
-        view = capacity.capacity_view(self._profiles - self._removing, self._capacity, self._clock(),
-                                      self._signins, excluded=self._excluded, pinned=self._pinned,
-                                      owners=self._owners_now())
-        return _TakeoverReservation(target, self._move_account(view, target), self._pinned)
+        view = self._move_view()
+        return _TakeoverReservation(target, quota_move.move_account(view, self._capacity, self._signins, target), self._pinned)
 
     def _listed_move_due(self, sprint: sprints.SprintState, now: int) -> bool:
         """Under the ingest lock: whether a listed manager of the sprint waits on quota and may be moved (#1378).
@@ -8863,10 +8867,8 @@ class ConsoleService(ActionPermit):
         target = self._move_target(sprint)
         if target is None:
             return None
-        view = capacity.capacity_view(self._profiles - self._removing, self._capacity, self._clock(),
-                                      self._signins, excluded=self._excluded, pinned=self._pinned,
-                                      owners=self._owners_now())
-        return _ListedMoveReservation(target, self._move_account(view, target), self._pinned)
+        view = self._move_view()
+        return _ListedMoveReservation(target, quota_move.move_account(view, self._capacity, self._signins, target), self._pinned)
 
     def _unstopped_manager(self, sprint: sprints.SprintState, stopped: set[str]) -> bool:
         """Under the ingest lock: whether a folded session carrying the manager's name is not one the move stopped."""
@@ -8988,59 +8990,17 @@ class ConsoleService(ActionPermit):
         """
         return (token.target is not None and self._quota_wait(sprint) is not None
                 and self._pinned == token.pinned
-                and self._move_account(view, token.target) == token.account
-                and self._room_for_move(view, sprint, token.target))
-
-    def _move_account(self, view: Mapping, profile: str) -> tuple[str | None, str | None]:
-        """Under the ingest lock: the identity of `profile`'s account, its sign-in account and its counted reading's account id."""
-        entry = {e["profile"]: e for e in view["profiles"]}.get(profile)
-        own = capacity.counted_reading(self._capacity, profile, self._signins.get(profile))
-        return (entry["account"] if entry is not None else None,
-                own.account if own is not None else None)
-
-    def _account_ids(self, by_name: Mapping[str, Mapping], profile: str) -> set[str]:
-        """Under the ingest lock: the account ids the counted readings of `profile` and its sign-in aliases carry."""
-        entry = by_name.get(profile)
-        names = [profile, *(entry["same_account_as"] if entry is not None else ())]
-        held = (capacity.counted_reading(self._capacity, name, self._signins.get(name))
-                for name in names)
-        return {reading.account for reading in held
-                if reading is not None and reading.account is not None}
+                and quota_move.move_account(view, self._capacity, self._signins, token.target) == token.account
+                and quota_move.room_for_move(view, self._capacity, self._signins,
+                                             self._waiting_logins(), sprint, token.target))
 
     def _move_target(self, sprint: sprints.SprintState) -> str | None:
         """Under the ingest lock: the profile a quota move would take over on, else None."""
-        view = capacity.capacity_view(self._profiles - self._removing, self._capacity, self._clock(),
-                                      self._signins, excluded=self._excluded, pinned=self._pinned,
-                                      owners=self._owners_now())
+        view = self._move_view()
         choice = manager.choose_profile(view, self._use.last, sprint.started_by,
                                         self._waiting_logins())
-        return choice if self._room_for_move(view, sprint, choice) else None
-
-    def _room_for_move(self, view: Mapping, sprint: sprints.SprintState, choice: object) -> bool:
-        """Under the ingest lock: whether `choice` is another account with room (#1279).
-
-        The reading behind the entry may be an alias's (profiles on one sign-in share the newest),
-        so the account ids of the readings of `choice` and its aliases are compared with the
-        manager's. A duplicate of any profile is not a move, and a colleague's account kept for a
-        waiting sprint of another login is not either (the rule `manager.choose_profile` applies).
-        """
-        mine = sprint.manager.profile if sprint.manager else None
-        if not isinstance(choice, str) or choice == mine:
-            return False
-        by_name = {entry["profile"]: entry for entry in view["profiles"]}
-        chosen = by_name.get(choice)
-        if chosen is None or not manager.has_room(chosen) or chosen.get("duplicate_of") is not None:
-            return False
-        if mine in chosen["same_account_as"]:
-            return False
-        starter = sprint.started_by
-        owners = {owner for name in (choice, *chosen["same_account_as"])
-                  if (owner := (by_name.get(name) or {}).get("owner")) is not None}
-        if any(login in self._waiting_logins() and login != starter for login in owners):
-            return False
-        if mine is None:
-            return True
-        return not (self._account_ids(by_name, mine) & self._account_ids(by_name, choice))
+        return choice if quota_move.room_for_move(view, self._capacity, self._signins,
+                                                  self._waiting_logins(), sprint, choice) else None
 
     def revive(self) -> None:
         """Bring back each manager that is gone while its sprint has work (#893)."""
