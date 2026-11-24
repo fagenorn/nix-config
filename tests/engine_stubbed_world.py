@@ -35,7 +35,6 @@ STUB = REPO_ROOT / "tests/fixtures/engine-stubbed-run/claude_stub.py"
 COMPANION = REPO_ROOT / "tests/fixtures/engine-stubbed-run/codex_companion_stub.py"
 ROLES = REPO_ROOT / "home/common/claude-code/agents"
 APPLIES = {"verdict": "applies", "details": "greet() is still missing.", "evidence": ""}
-DIRECT = {"lane": "direct", "why": "A one-file fix with checkable criteria."}
 CLEAN_LITE = {"verdict": "pass", "findings": [],
               "acceptance": [{"id": "AC1", "met": True, "evidence": "checks/check_greet.py:8"}],
               "escalate": False}
@@ -46,7 +45,7 @@ IMPLEMENTED = {
               "sensitive": False, "ineligible": False, "tests": ["checks/check_greet.py"]},
     "commit": {"path": "fixture/farewell.py",
                "text": 'def farewell(name: str) -> str:\n    return f"Goodbye, {name}."\n'}}
-DEFAULT_REPLIES = {"applies": APPLIES, "lane": DIRECT, "implement": IMPLEMENTED, "lite-review": CLEAN_LITE}
+DEFAULT_REPLIES = {"applies": APPLIES, "implement": IMPLEMENTED, "lite-review": CLEAN_LITE}
 DEFAULT_BODY = ("Add a greet() function to the fixture module.\n\n"
                 "## Acceptance criteria\n\n- [ ] greet() returns the greeting\n")
 PULL_FIELDS = "number,state,headRefName,closingIssuesReferences"

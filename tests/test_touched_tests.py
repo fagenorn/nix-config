@@ -336,6 +336,7 @@ class RecipeTest(unittest.TestCase):
         for source in [f"{DELIVERY}/engine*.py",
                        f"{DELIVERY}/host_admission.py",
                        f"{DELIVERY}/procedure_check.py",
+                       f"{DELIVERY}/lane_rule.py",
                        f"{DELIVERY}/procedures/*",
                        "tests/engine_*.py", "tests/fixtures/engine-*"]:
             self.assertIn(f"--cover '{source}=tests/test_engine_*.py'", self.recipe)

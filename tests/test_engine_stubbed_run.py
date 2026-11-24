@@ -39,10 +39,6 @@ SHA = "a" * 40
 CODEX_LIMIT = {"stdout": json.dumps({"status": 1, "error": "You've hit your usage limit."}), "exit": 1}
 
 
-def lane(name: str) -> dict:
-    return {"applies": APPLIES, "lane": {"lane": name, "why": "w"}}
-
-
 def lite_findings(**members) -> dict:
     return dict(CLEAN_LITE, verdict="findings", findings=[FINDING], **members)
 
@@ -165,22 +161,42 @@ class StubbedRunTest(Scenario):
         launches = run.launches()
         self.assertIn(run.title, launches[1]["prompt"])
         self.assertEqual(model_of(self.launch(run, "implement")), "sonnet")
-        self.assertEqual(self.keys(run), ["applies", "lane", "implement", "lite-review"])
+        self.assertEqual(self.keys(run), ["applies", "implement", "lite-review"])
 
 
 class LaneTest(Scenario):
-    def test_the_lane_answer_standard_stops_at_standard_not_on_engine(self):
-        run = StubbedRun(self, replies=lane("standard"))
+    OVER_THE_RULE = "Add greet().\n\n## Acceptance criteria\n\n" + "".join(f"- [ ] c{i}\n" for i in range(4))
 
-        self.stopped(run, run.deliver(), "standard-not-on-engine", "nothing")
+    def test_a_body_over_the_rule_stops_at_standard_not_on_engine_with_no_lane_agent(self):
+        run = StubbedRun(self, body=self.OVER_THE_RULE)
 
+        done = run.deliver()
+
+        self.stopped(run, done, "standard-not-on-engine", "nothing")
+        self.assertIn(("lane", "standard"), run.transitions(run.runs()[0]))
+        self.assertEqual(self.keys(run), ["applies"])
         self.assertEqual(len(run.claims()), 1)
         self.assertEqual(self.branch_here(run, run.worktree_path), run.branch)
 
-    def test_the_lane_answer_needs_design_stops_for_the_owners_decision(self):
-        run = StubbedRun(self, replies=lane("needs-design"))
+    def test_a_body_naming_a_lane_path_stops_at_standard_not_on_engine(self):
+        run = StubbedRun(self, body="Fix `secrets/x.yaml`.\n\n## Acceptance criteria\n\n- [ ] c\n")
 
-        self.stopped(run, run.deliver(), "needs-design", "owner-decision")
+        self.stopped(run, run.deliver(), "standard-not-on-engine", "nothing")
+
+        self.assertEqual(self.keys(run), ["applies"])
+
+    def test_a_continued_standard_stop_reads_the_issue_again(self):
+        # The behaviour, not the stop's `reenter` value: the live `start` step is stale on every continue and is
+        # re-entered first, so only test_engine_check's structural assertion on the three stops pins `reenter`.
+        run = StubbedRun(self, body=self.OVER_THE_RULE)
+        self.stopped(run, run.deliver(), "standard-not-on-engine", "nothing")
+
+        self.stopped(run, run.deliver(), "standard-not-on-engine", "nothing")
+
+        self.assertEqual(len(run.runs()), 1)
+        events = run.events(run.runs()[0])
+        self.assertEqual([e["event"] for e in events].count("run_continued"), 1)
+        self.assertEqual(len([e for e in events if e["event"] == "step_entered" and e.get("step") == "issue"]), 2)
 
     def test_an_issue_with_a_look_marker_stops_at_look_not_on_engine_and_never_asks_the_lane(self):
         run = StubbedRun(self, body=LOOK_BODY)
@@ -364,7 +380,7 @@ class ReviewRouteTest(Scenario):
 
         self.finish(run, "ineligible", "owner-decision")
 
-        self.assertEqual(self.keys(run), ["applies", "lane", "implement"])
+        self.assertEqual(self.keys(run), ["applies", "implement"])
         steps = [step for step, _ in run.transitions(self.child(run, "direct"))]
         self.assertNotIn("lite-group", steps)
         self.assertNotIn("full-group", steps)
@@ -395,7 +411,7 @@ class ReviewRouteTest(Scenario):
 
         self.finish(run, "done")
 
-        self.assertEqual(self.keys(run), ["applies", "lane", "implement", "lite-review", "lite-review"])
+        self.assertEqual(self.keys(run), ["applies", "implement", "lite-review", "lite-review"])
         tallies = [edge for edge in run.transitions(self.child(run, "direct")) if edge[0] == "lite-tally"]
         self.assertEqual(tallies, [("lite-tally", "unusable"), ("lite-tally", "clean")])
 

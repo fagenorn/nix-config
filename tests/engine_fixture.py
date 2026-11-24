@@ -107,6 +107,9 @@ class FixtureProject:
             if not target.exists():
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_text("# knowledge\n", "utf-8")
+        (self.root / ".github").mkdir(exist_ok=True)
+        (self.root / ".github/lane-paths.json").write_text(
+            json.dumps({"version": 1, "sets": {"secrets": ["secrets/"]}}), "utf-8")
         if self.before_pull_request:
             (self.root / "suite.just").write_text(
                 "agent-workflow-tests *args:\n  runner {{args}} \\\n    checks/check_greet.py \\\n"
