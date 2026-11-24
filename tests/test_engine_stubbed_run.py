@@ -548,7 +548,7 @@ class VerifyTest(Scenario):
     def test_a_continued_run_that_skips_verification_after_a_clean_sync_still_lands(self):
         run = StubbedRun(self, before_pull_request=True, rollup=RED)
         procedures = keeping_the_run(run.tmp)
-        self.stopped(run, run.deliver(procedures), "checks", "owner-decision")
+        self.stopped(run, run.deliver(procedures), "checks-fix", "owner-decision")
         held = len(run.slot_history())
         state = json.loads(run.pulls_state.read_text("utf-8"))
         state["rollup"] = GREEN
@@ -645,13 +645,14 @@ class LandStopTest(Landing):
         self.assertEqual([p["state"] for p in run.pulls()], ["OPEN"])
         self.assertFalse({"recheck", "merge"} & self.entered(run))
 
-    def test_a_red_required_check_stops_checks_with_the_lock_released(self):
+    def test_a_red_required_check_with_no_fix_answer_stops_checks_fix_with_the_lock_free(self):
         run = StubbedRun(self, rollup=RED)
 
-        self.finish(run, "checks", "owner-decision")
+        self.finish(run, "checks-fix", "owner-decision")
 
         self.assertIn(("gate", "red"), self.land_transitions(run))
-        self.assertIn(("release", "checks"), self.release_transitions(run))
+        self.assertIn(("red", "fix"), self.land_transitions(run))
+        self.assertIn(("release", "checks-fix"), self.release_transitions(run))
         self.assertEqual(run.lock_refs(), {})
         self.assertEqual([p["state"] for p in run.pulls()], ["OPEN"])
 
@@ -812,6 +813,12 @@ class CoverageTest(Landing):
             {"replies": {"implement": sensitive, "full-review": full_findings(), "full-fix": fix,
                          "full-rereview": CLEAN_REREVIEW}},
             {"rollup": RED},
+            {"rollup": []},
+            {"rollups": [RED, GREEN], "replies": {"ci-fix": sync_fix, "ci-review": CLEAN_REREVIEW}},
+            {"rollups": [RED], "replies": {
+                "ci-fix": {"reply": {"status": "done", "notes": "n", "tests": []}, "same_head": {}},
+                "stale": {"verdict": "real", "reran": [], "notes": "n"}}},
+            {"advance_main": 1, "rollups": [RED, GREEN], "replies": {"presync": SYNCED}},
             {"rollup": UNNAMED},
             {"advance_main": 1, "replies": {"lock-sync": SYNCED}},
             {"advance_main": 1, "main_change": CONFLICTING_MAIN,

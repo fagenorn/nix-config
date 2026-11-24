@@ -1,4 +1,4 @@
-Issue {{run.issue}} is landing from branch {{prepare.branch}}, whose head is {{expect.head}}, and the branch is behind origin/{{prepare.integration_branch}}. The landing lock is held. Work only in the worktree {{prepare.worktree_path}}: run git as git -C <worktree> and name every file by its absolute path. Never push, open or merge a pull request, run a land lock or claim command, run git stash, run sed -i or run a destructive git command.
+Issue {{run.issue}} is landing from branch {{prepare.branch}}, whose head is {{expect.head}}, and the branch is behind origin/{{prepare.integration_branch}}. Run no land lock or claim command. Work only in the worktree {{prepare.worktree_path}}: run git as git -C <worktree> and name every file by its absolute path. Never push, open or merge a pull request, run a land lock or claim command, run git stash, run sed -i or run a destructive git command.
 
 Fetch origin (git -C <worktree> fetch origin), then merge origin/{{prepare.integration_branch}} into the branch in the worktree (git -C <worktree> merge origin/{{prepare.integration_branch}}).
 

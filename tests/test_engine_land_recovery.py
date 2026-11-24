@@ -12,8 +12,8 @@ from agent_tools.delivery import landing
 from tests.engine_stubbed_world import StubbedRun
 from tests.guard_policy_world import install_platform_manifest_in_environ
 from tests.test_engine_stubbed_run import (
-    CONFLICTED, CONFLICTING_MAIN, FINDING, PROCEDURES, RESOLVED, RESOLVED_TEXT, SYNCED, UPSTREAM_IMPLEMENTED,
-    Scenario, committing)
+    CONFLICTED, CONFLICTING_MAIN, FINDING, GREEN, PROCEDURES, RED, RESOLVED, RESOLVED_TEXT, SYNCED,
+    UPSTREAM_IMPLEMENTED, Scenario, committing, keeping_the_run)
 
 TIER = "integration"  # every run case builds a repository and runs the engine as a child process
 
@@ -25,7 +25,13 @@ STOPS = ["land", "claim-lost", "claim", "head-moved", "checks", "checks-fix", "c
          "checks-pending", "sync", "sync-contention", "sync-review", "sync-fix", "land-contended", "merge",
          "unreleased-lock"]
 RETRY = ("claim", "land-contended", "sync-contention", "checks-pending")
-PROMPTS = ("land-sync", "land-resolve", "land-sync-review", "land-sync-fix", "land-sync-rereview")
+PROMPTS = ("land-sync", "land-resolve", "land-sync-review", "land-sync-fix", "land-sync-rereview",
+           "land-ci-fix", "land-ci-review", "land-stale")
+FIXED = committing("fixture/fix.py", "FIXED = 1\n", tests=["checks/check_greet.py"])
+RERAN = {"reply": {"status": "done", "notes": "runner lost", "tests": []}, "same_head": {}}
+PRESYNCED = {"reply": {"status": "done", "notes": "n", "tests": ["checks/check_greet.py"]}, "merge": {}}
+OTHER = [{"__typename": "CheckRun", "name": "Other", "status": "COMPLETED", "conclusion": "SUCCESS",
+          "startedAt": "2026-11-06T10:00:00Z", "workflowName": "Other"}]
 
 
 def procedure(name: str) -> dict:
@@ -151,6 +157,125 @@ class ConflictTest(Landing):
         self.assertEqual(self.count(run, "resolve"), 1)
 
 
+class RedCheckTest(Landing):
+    def fixing(self, **replies) -> dict:
+        return {"ci-fix": FIXED, "ci-review": PASS, **replies}
+
+    def test_one_red_check_gets_one_fix_and_its_review_and_then_merges(self):
+        run = StubbedRun(self, rollups=[RED, GREEN], replies=self.fixing())
+
+        self.finish(run, "done")
+
+        self.assert_in_order(
+            self.walk(run), ("gate", "red"), ("red", "fix"), ("fix-unlock", "released"), ("ci-fix", "done"),
+            ("ci-fixed", "committed"), ("ci-review", "pass"), ("gate", "green"), ("lock", "held"),
+            ("merge-pr", "ok"))
+        self.assertEqual((self.count(run, "ci-fix"), self.count(run, "ci-review")), (1, 1))
+        fix = self.stored(self.attempt(run), "ci-fix")["commit"]
+        self.assertEqual(run.pulls()[0]["headRefOid"], fix)
+        self.assertEqual(run.pulls()[0]["state"], "MERGED")
+        self.assertEqual(run.lock_refs(), {})
+
+    def test_a_second_red_poll_stops_checks_after_the_one_fix(self):
+        run = StubbedRun(self, rollups=[RED, RED], replies=self.fixing())
+
+        self.finish(run, "checks", "owner-decision")
+
+        self.assertEqual(self.count(run, "ci-fix"), 1)
+        self.assertEqual(self.walk(run)[-1], ("red", "checks"))
+        self.assertEqual(run.lock_refs(), {})
+
+    def test_a_rerun_answer_spends_the_one_fix_and_a_second_red_stops_checks(self):
+        run = StubbedRun(self, rollups=[RED], replies={
+            "ci-fix": RERAN, "stale": {"verdict": "real", "reran": [], "notes": "n"}})
+
+        self.finish(run, "checks", "owner-decision")
+
+        self.assert_in_order(self.walk(run), ("ci-fixed", "unchanged"), ("red", "stale"), ("stale", "real"),
+                             ("red", "checks"))
+        self.assertEqual(self.count(run, "ci-fix"), 1)
+
+    def test_a_stale_answer_polls_once_more_without_counting_a_red_read(self):
+        run = StubbedRun(self, rollups=[RED], replies={
+            "ci-fix": RERAN, "stale": {"verdict": "stale", "reran": [7], "notes": "n"}})
+
+        self.finish(run, "checks", "owner-decision")
+
+        walk = self.walk(run)
+        self.assert_in_order(walk, ("stale", "stale"), ("gate", "red"), ("red", "checks"))
+        self.assertEqual(walk[walk.index(("stale", "stale")) + 1][0], "gate")
+        self.assertEqual(self.count(run, "stale"), 1)
+
+    def test_a_fix_with_no_test_recorded_stops_checks_fix_and_is_not_pushed(self):
+        run = StubbedRun(self, rollups=[RED, GREEN], replies=self.fixing(
+            **{"ci-fix": committing("fixture/fix.py", "FIXED = 1\n", tests=[])}))
+
+        self.finish(run, "checks-fix", "owner-decision")
+
+        self.assertIn(("ci-fixed", "untested"), self.walk(run))
+        head = run.world.git(run.worktree_path, "rev-parse", "HEAD").strip()
+        self.assertNotEqual(run.origin_tip(run.branch), head)
+        self.assertEqual(self.count(run, "ci-review"), 0)
+
+    def test_review_findings_on_the_fix_stop_checks_fix_review(self):
+        run = StubbedRun(self, rollups=[RED, GREEN], replies=self.fixing(**{"ci-review": FINDINGS}))
+
+        self.finish(run, "checks-fix-review", "owner-decision")
+
+        self.assertIn(("ci-review", "findings"), self.walk(run))
+        self.assertEqual(run.lock_refs(), {})
+
+    def test_the_one_fix_per_delivery_holds_across_a_continue(self):
+        run = StubbedRun(self, rollups=[RED, RED], replies=self.fixing())
+        procedures = keeping_the_run(run.tmp)
+        self.stopped(run, run.deliver(procedures), "checks", "owner-decision")
+        first = self.attempt(run)
+
+        self.stopped(run, run.deliver(procedures), "checks", "owner-decision")
+
+        self.assertEqual(self.count(run, "ci-fix"), 1)
+        second = [child for child in run.children(self.child(run, "land", last=True))
+                  if child.name != first.name][-1]
+        self.assertNotEqual(second, first)
+        self.assertIn(("red", "checks"), run.transitions(second))
+
+    def test_a_red_check_at_a_head_behind_its_base_is_synced_before_the_lock(self):
+        run = StubbedRun(self, advance_main=1, rollups=[RED, GREEN], replies={"presync": PRESYNCED})
+
+        self.finish(run, "done")
+
+        walk = self.walk(run)
+        self.assertIn(("red", "presync"), walk)
+        self.assertLess(walk.index(("red", "presync")), min(
+            i for i, (step, _) in enumerate(walk) if step == "lock"))
+        self.assertEqual(self.count(run, "ci-fix"), 0)
+
+    def test_a_third_presync_stops_sync_contention(self):
+        run = StubbedRun(self, advance_main=3, rollups=[RED], replies={"presync": PRESYNCED})
+
+        self.finish(run, "sync-contention", "retry")
+
+        self.assertEqual(self.count(run, "presync"), 2)
+
+
+class PendingTest(Landing):
+    def test_three_pending_waits_stop_checks_pending(self):
+        run = StubbedRun(self, rollup=[])
+
+        self.finish(run, "checks-pending", "retry")
+
+        walk = self.walk(run)
+        self.assertEqual(walk.count(("gate", "pending")), 3)
+        self.assertNotIn("lock", {step for step, _ in walk})
+
+    def test_a_passed_poll_naming_no_passing_check_counts_as_pending(self):
+        run = StubbedRun(self, rollup=OTHER)
+
+        self.finish(run, "checks-pending", "retry")
+
+        self.assertIn(("gate", "pending"), self.walk(run))
+
+
 BOUNDS = {
     "expect": (12, "land"), "push": (12, "land"), "pushed": (12, "land"), "find-pull": (12, "land"),
     "create": (2, "land"), "opened": (12, "land"), "probe": (12, "land"), "gate": (12, "land"),
@@ -159,28 +284,42 @@ BOUNDS = {
     "resolve-unlock": (6, "sync"), "resolve": (4, "sync"), "merge-of": (8, "sync"),
     "merge-review": (4, "sync-review"), "merge-fixes": (4, "sync-review"), "merge-fix": (1, "sync-review"),
     "merge-fixed": (1, "sync-fix"), "merge-rereview": (1, "sync-review"),
+    "pending": (12, "checks-pending"), "red": (12, "checks"), "stale": (1, "checks"),
+    "presync": (2, "sync-contention"), "fix-unlock": (2, "checks"), "ci-fix": (1, "checks"),
+    "ci-fixed": (1, "checks-fix"), "ci-review": (1, "checks-fix-review"),
 }
 STOP_TARGETS = {
     "renew": ("claim-lost", "claim"), "prepare": ("land",), "settled": (), "expect": ("land",),
     "pushed": ("head-moved", "land"), "find-pull": ("land",), "opened": ("land",),
-    "probe": ("land",), "gate": ("checks", "checks-pending", "head-moved", "land"),
+    "probe": ("land",), "gate": ("head-moved", "land"),
     "lock": ("land-contended", "land"), "fresh": ("land",), "head": ("head-moved", "land"),
     "recheck": ("land-contended", "land"), "merge-pr": ("merge",), "merged": ("merge",),
     "lock-sync": ("sync", "sync-contention"), "resolve-unlock": ("unreleased-lock", "sync"),
     "resolve": ("sync",), "merge-of": ("sync", "land"), "merge-review": ("sync-review",),
     "merge-fixes": ("sync-review", "land"), "merge-fix": ("sync-fix", "sync-review"),
     "merge-fixed": ("sync-fix",), "merge-rereview": ("sync-review",),
+    "pending": ("checks-pending", "land"), "red": ("checks", "land"), "stale": ("checks",),
+    "presync": ("sync", "sync-contention"), "fix-unlock": ("unreleased-lock", "checks"),
+    "ci-fix": ("checks-fix", "checks"), "ci-fixed": ("checks-fix", "land"),
+    "ci-review": ("checks-fix-review",),
 }
 
 
 class ShapeTest(unittest.TestCase):
     def test_each_bound_of_the_attempt_is_the_programs(self):
         steps = steps_of("land-attempt")
-        self.assertEqual(len(steps), 26)
+        self.assertEqual(len(steps), 34)
         for step, (bound, stop) in BOUNDS.items():
             with self.subTest(step):
                 self.assertEqual(steps[step].get("max_visits"), bound)
                 self.assertEqual(steps[step]["on"]["exhausted"], stop)
+
+    def test_a_red_check_fix_is_entered_only_through_the_release(self):
+        steps = steps_of("land-attempt")
+        into = [(step, outcome) for step, body in steps.items() for outcome, target in body["on"].items()
+                if target == "ci-fix"]
+        self.assertEqual(into, [("fix-unlock", "released")])
+        self.assertEqual(steps["red"]["on"]["fix"], "fix-unlock")
 
     def test_every_end_of_the_attempt_is_released_by_the_wrapper(self):
         wrapper, attempt = procedure("land"), procedure("land-attempt")
