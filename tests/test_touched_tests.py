@@ -111,11 +111,11 @@ class SelectTest(unittest.TestCase):
 
 class SelectionTableTest(unittest.TestCase):
     MEMBERS = ["tests/test_engine_alpha.py", "tests/test_engine_beta.py",
-               "tests/test_engine_stubbed_run.py", "tests/test_touched_tests.py",
+               "tests/test_engine_gamma.py", "tests/test_touched_tests.py",
                "tests/test_unrelated.py"]
     TEXTS = {
         "tests/test_engine_beta.py": "from agent_tools.delivery import engine_beta\n",
-        "tests/test_engine_stubbed_run.py": "from tests.engine_stubbed_world import StubbedRun\n",
+        "tests/test_engine_gamma.py": "from tests.engine_gamma_world import GammaRun\n",
         "tests/test_touched_tests.py": "from agent_tools.delivery.touched_tests import main\n",
         "tests/test_unrelated.py": "import json\n",
     }
@@ -123,7 +123,7 @@ class SelectionTableTest(unittest.TestCase):
               "python/agent_tools/delivery/procedure_zeta.py": ["tests/test_engine_*.py"]}
     PAIRS = {"home/common/claude-code/lifecycle_guard.py": ["tests/test_claude_permission_guard.py"]}
     ENGINE_TIER = ["tests/test_engine_alpha.py", "tests/test_engine_beta.py",
-                   "tests/test_engine_stubbed_run.py"]
+                   "tests/test_engine_gamma.py"]
 
     def test_each_diff_selects_its_row(self):
         everything = self.MEMBERS
@@ -374,6 +374,25 @@ class RecipeTest(unittest.TestCase):
                     build_globs=values("--build-when"))
                 self.assertNotIn("tests/test_touched_tests.py", result["selected"])
                 self.assertEqual(set(engine_tier) - set(result["selected"]), set())
+
+    def test_a_diff_to_any_engine_tier_member_does_not_select_this_file(self):
+        words = shlex.split(self.recipe.splitlines()[-1])
+        values = lambda flag: [words[i + 1] for i, w in enumerate(words) if w == flag]
+        pairs, covers = {}, {}
+        for flag, table in (("--pair", pairs), ("--cover", covers)):
+            for value in values(flag):
+                source, member = value.split("=", 1)
+                table.setdefault(source, []).append(member)
+        members = suite_members(self.justfile)
+        engine_tier = [m for m in members if fnmatch.fnmatchcase(m, "tests/test_engine_*.py")]
+        for member in engine_tier:
+            with self.subTest(member=member):
+                result = selection(
+                    [member], members,
+                    lambda path: (REPO_ROOT / path).read_text(encoding="utf-8"),
+                    source_roots=values("--source-root"), pairs=pairs, covers=covers,
+                    build_globs=values("--build-when"))
+                self.assertNotIn("tests/test_touched_tests.py", result["selected"])
 
     def test_this_test_is_a_suite_member(self):
         self.assertIn("tests/test_touched_tests.py", suite_members(self.justfile))
