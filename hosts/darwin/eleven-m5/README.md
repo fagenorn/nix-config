@@ -74,5 +74,7 @@ the real schema and executing the real Anthropic endpoint to engine preflight.
 GPU inference is covered separately by deployed Claude-shaped smoke requests.
 
 After a Homebrew update, incompatible patches require checking upstream before
-regenerating or removing them. The GLM fix tracks upstream PR4644; the effort
-patch is the local compatibility change for nix-config issue410.
+regenerating or removing them. Two patches are applied: the GLM fix tracks
+upstream PR4644, and the effort patch is the local compatibility change for
+nix-config issue410. Both were last checked against oMLX 0.8.3, which still
+needs both.

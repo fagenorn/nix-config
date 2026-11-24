@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -19,10 +20,10 @@ class OmlxConfigureTest(unittest.TestCase):
         source = Path(os.environ["OMLX_TEST_SOURCE"]) / "omlx"
         for name in (
             "__init__.py", "_version.py", "server.py", "exceptions.py",
-            "model_settings.py", "model_profiles.py",
+            "model_settings.py", "model_profiles.py", "settings.py", "config.py",
             "patches/mlx_vlm_glm5_next_compat/__init__.py",
             "engine/batched.py", "engine/vlm.py",
-            # api/tool_calling.py imports omlx.utils.tokenizer (0.7.3).
+            # api/tool_calling.py imports omlx.utils.tokenizer.
             "utils/__init__.py", "utils/tokenizer.py", "utils/formatting.py",
             "utils/install.py", "utils/hardware.py",
         ):
@@ -64,6 +65,38 @@ class OmlxConfigureTest(unittest.TestCase):
 
     def configure(self):
         return subprocess.run(self.command, text=True, capture_output=True)
+
+    def test_the_pinned_source_is_the_release_the_formula_installs(self):
+        root = Path(os.environ["OMLX_TEST_SOURCE"])
+        version = re.search(
+            r'__version__ = "(.+)"', (root / "omlx/_version.py").read_text()
+        ).group(1)
+        formula = re.search(
+            r'refs/tags/v([^/"]+)\.tar\.gz', (root / "Formula/omlx.rb").read_text()
+        ).group(1)
+        self.assertEqual(
+            version, formula,
+            f"omlx/_version.py says {version} but Formula/omlx.rb installs {formula}",
+        )
+
+    def test_the_declared_server_settings_read_back_through_omlx_settings(self):
+        configured = self.configure()
+        self.assertEqual(configured.returncode, 0, configured.stderr)
+        code = (
+            "import json, sys\n"
+            "from omlx.settings import SchedulerSettings, MemorySettings\n"
+            "s = json.load(open(sys.argv[1]))\n"
+            "m = MemorySettings.from_dict(s['memory'])\n"
+            "print(json.dumps([SchedulerSettings.from_dict(s['scheduler']).chunked_prefill,"
+            " m.memory_guard_tier, m.memory_guard_custom_ceiling_gb]))\n"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", code, str(self.server)],
+            env=dict(os.environ, PYTHONPATH=str(self.package)),
+            text=True, capture_output=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(json.loads(result.stdout), [True, "custom", 192.0])
 
     def test_real_adapter_schema_and_route(self):
         configured = self.configure()
