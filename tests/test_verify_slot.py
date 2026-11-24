@@ -16,6 +16,7 @@ import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest import mock
 
 from agent_tools.canonical import parse_rfc3339_utc
 from agent_tools.delivery import verify_history, verify_slot
@@ -78,7 +79,10 @@ class SlotHarness:
             except ValueError:
                 continue
             if process_alive(pid):
-                os.kill(pid, signal.SIGKILL)
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
 
     def declare(self, **extra):
         target = Path(self.home) / ".agents/share/host-declaration.json"
@@ -209,6 +213,13 @@ class VerifySlotTest(SlotHarness, unittest.TestCase):
         self.release("a")
         self.release("b")
         self.assertEqual(self.finish(second)[0], 0)
+
+    def test_the_cleanup_tolerates_a_child_that_exits_between_its_check_and_its_kill(self):
+        gone = subprocess.Popen([sys.executable, "-c", "pass"])
+        gone.wait()
+        self.mark("gone", "pid").write_text(str(gone.pid))
+        with mock.patch(f"{__name__}.process_alive", return_value=True):
+            self.reap()
 
     def test_a_live_run_waits_for_a_running_holder_of_its_repository(self):
         self.declare(verify_slots=2)
