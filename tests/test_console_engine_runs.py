@@ -4,6 +4,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -19,6 +20,7 @@ from agent_tools.delivery import engine, engine_ledger, procedure_check
 from agent_tools.delivery.engine_ledger import RunState
 
 from . import console_test_support as support
+from . import test_console_page as page
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures
 
 TIER = "fast"
@@ -101,7 +103,7 @@ class ReadingTest(unittest.TestCase):
         self.assertEqual(entry, {
             "run_id": RUN_ID, "issue": 41, "stage": "planning", "stage_text": "planning",
             "reading": "moving", "text": "planning, moving", "wait_until": None,
-            "last_event_at": LAST_AT})
+            "need": None, "last_event_at": LAST_AT})
 
     def test_a_live_engine_forty_minutes_into_a_step_reads_moving_and_no_line_says_quiet_or_stuck(self):
         state = poll_state("moving.jsonl", LIVE)
@@ -362,6 +364,75 @@ class ViewLineTest(unittest.TestCase):
         self.assertEqual(len(projects), view.FOLD_AFTER + 2)
         for entry in projects:
             self.assertEqual(entry.pop("engine_runs"), [])
+
+
+def stopped_state(need):
+    return bare_state(stage="landing", stop={"name": "claim-lost", "need": need}, last_event=LAST_AT)
+
+
+class NeedsYouTest(unittest.TestCase):
+    """A stopped run that asks for the owner counts in the heading, so the page never disagrees with its line."""
+
+    def derive(self, *states):
+        projects = [view.ProjectState("acme/app", "/srv/app", 1, "2026-11-21T10:00:00Z", 0)]
+        return view.derive_view(states=projects, now_ms=LAST_MS, engine_runs=list(states))
+
+    def test_each_stop_that_asks_for_the_owner_counts_once_and_names_a_sentence(self):
+        for need in ("owner-decision", "owner-look", "retry"):
+            with self.subTest(need=need):
+                statement = self.derive(stopped_state(need))["statement"]
+                self.assertEqual((statement["inbox_items"], statement["headline"]),
+                                 (1, "1 thing needs you"))
+                self.assertEqual(statement["sentence"], view.ENGINE_SENTENCE)
+
+    def test_stops_of_two_issues_count_twice(self):
+        statement = self.derive(stopped_state("owner-decision"),
+                                bare_state(run="42-20261121T160000Z-ab12", issue=42, stage="landing",
+                                           stop={"name": "claim-lost", "need": "retry"}))["statement"]
+        self.assertEqual((statement["inbox_items"], statement["headline"]), (2, "2 things need you"))
+
+    def test_a_run_that_asks_nothing_of_the_owner_counts_none(self):
+        states = (stopped_state("nothing"), live_state(), bare_state(stage="landing", done=True, last_event=LAST_AT),
+                  bare_state(stage="landing", last_event=LAST_AT))
+        for state in states:
+            with self.subTest(reading=engine_runs.reading(state)):
+                statement = self.derive(state)["statement"]
+                self.assertEqual((statement["inbox_items"], statement["headline"]), (0, view.HEADLINE))
+
+    def test_a_run_of_an_unregistered_project_counts_none(self):
+        stopped = bare_state(project="other/app", stage="landing", last_event=LAST_AT,
+                             stop={"name": "claim-lost", "need": "owner-decision"})
+        self.assertEqual(self.derive(stopped)["statement"]["inbox_items"], 0)
+
+
+class EnginePageTest(unittest.TestCase):
+    def drawn(self, run):
+        entry = {**page.project(0, []), "engine_runs": [run]}
+        (snap,) = page.render([{"start": {"focused": False, "clock": page.NOW_MS}},
+                               {"frame": page.view([entry])}, {"open": "line:owner/p00"},
+                               {"snapshot": True}])
+        (item,) = [n for n in page.nodes(snap["projects"]) if page.has_class(n, "run") and n["tag"] == "li"]
+        return item
+
+    def test_the_stage_of_an_open_run_is_one_member_beside_its_number(self):
+        item = self.drawn({"issue": 42, "text": "stopped at claim lost, needs your decision", "wait_until": None})
+        self.assertEqual([(c["cls"], page.full(c)) for c in item["children"]],
+                         [("issue", "#42"), ("stage", "stopped at claim lost, needs your decision")])
+
+    def test_a_waiting_runs_until_is_part_of_its_one_sentence(self):
+        until = "2026-11-24T22:04:00Z"
+        item = self.drawn({"issue": 47, "text": "building, waiting out a usage limit", "wait_until": until})
+        self.assertEqual([c["cls"] for c in item["children"]], ["issue", "stage"])
+        stage = item["children"][1]
+        self.assertEqual(len([n for n in page.nodes(stage) if n["tag"] == "time"]), 1)
+        self.assertTrue(page.full(stage).startswith("building, waiting out a usage limit until "))
+
+    def test_the_stage_wraps_inside_itself_rather_than_dropping_under_its_number(self):
+        html = page.PAGE.read_text(encoding="utf-8")
+        rule = re.search(r"\.outside li\.engine \.stage \{([^}]*)\}", html)
+        self.assertIsNotNone(rule)
+        self.assertIn("min-width: 0", rule.group(1))
+        self.assertRegex(rule.group(1), r"flex: 1 1 0(px|%)?;")
 
 
 class ServiceLineTest(unittest.TestCase):

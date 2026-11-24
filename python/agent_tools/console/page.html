@@ -448,6 +448,7 @@ code.md-code { padding: 0 4px; font-size: .875em; background: var(--mantle); bor
 .outside .runs { flex: 1 0 100%; margin-top: 0; padding: 0 0 0 16px; }
 .run { display: flex; flex-wrap: wrap; gap: 0 10px; }
 .run .stage { color: var(--sub0); }
+.outside li.engine .stage { flex: 1 1 0; min-width: 0; }
 .run .moved { color: var(--ov2); }
 .sp-spend { flex: 1 0 100%; margin: 0; font-size: .8125rem; color: var(--ov2); }
 a.spend { color: var(--ov2); text-decoration: none; }
@@ -728,7 +729,7 @@ function lineFold(key, nameNode, words, outside, root, engineRuns) {
   fold.appendChild(el("span", "root", root));
   if (engineRuns.length > 0) {
     const engineList = el("ul");
-    for (const run of engineRuns) engineList.appendChild(phrase("li", "run", el("span", "issue", "#" + run.issue), el("span", "stage", run.text), ...engineUntil(run)));
+    for (const run of engineRuns) engineList.appendChild(phrase("li", "run engine", el("span", "issue", "#" + run.issue), phrase("span", "stage", run.text, ...engineUntil(run))));
     fold.appendChild(phrase("div", "outside", el("h3", "", "Engine runs"), engineList));
   }
   if (outside.sessions.length === 0) return fold;

@@ -491,8 +491,9 @@ only. `unmanaged` is always present, possibly empty, sorted by `root`.
     at or after a moment has seen the tracker as it was then); after a restart `read_at` is the time of the last
     logged change between good and failed reads and `began_at` is null. It is null before any read, never a guessed time.
 
-    `engine_runs` is the `engine_runs` argument's runs of this project as `engine_runs.project_lines` gives them,
-    in issue order; it is empty without the argument, a run of an unregistered project shows nowhere, and a project with one is active.
+    `engine_runs` is the `engine_runs` argument's runs of this project as `engine_runs.project_lines` gives them, in issue
+    order; it is empty without the argument, a run of an unregistered project shows nowhere, and a project with one is active.
+    A run stopped with a `need` other than `nothing` counts once in `inbox_items` and the headline; alone, it sets `ENGINE_SENTENCE`.
 
     <wait entry> = {"key", "issue": <int>, "url", "until": "<ISO time>" | null, "text": "<text>"}
     <notice entry> = {"id": <int>, "sprint_id", "poster": "<sprint title>",
@@ -1032,6 +1033,7 @@ SIGNIN_HEADLINE = "Sign in to {profile} again"
 SIGNIN_FIRST_HEADLINE = "Sign in to {profile}"
 SIGNIN_SENTENCE = "Press Sign in, then finish signing in in your browser."
 DEAF_SENTENCE = "Bring the manager back, or drop the sprint."
+ENGINE_SENTENCE = "A run has stopped and needs you; its project line says which."
 PERMISSION_SENTENCE = "Allow the command once or refuse it on its card."
 ADOPTION_SENTENCE = "Merge the adoption from its card; when it cannot be merged there, the card says why."
 REGISTER_TITLE = "Register {name}"
@@ -2509,24 +2511,19 @@ def derive_view(
                for s in active]
     quiet_entries = [_project_entry(s, (), runs, now_ms, (), managers, in_sprint,
                                     finished=finished.get(s.project_id, ()), capacity=capacity,
-                                    nudges=nudges, looked=looked,
-                                    notices=notices[s.project_id],
-                                    notice_post=notice_post[s.project_id],
-                                    overlaps=overlaps[s.project_id],
-                                    read=health.get(s.project_id), questions=asks[s.project_id],
-                                    prompted=prompted)
+                                    nudges=nudges, looked=looked, notices=notices[s.project_id],
+                                    notice_post=notice_post[s.project_id], overlaps=overlaps[s.project_id],
+                                    read=health.get(s.project_id), questions=asks[s.project_id], prompted=prompted)
                      for s in quiet]
     counted = {s.sprint_id for s in (*briefs, *stalls, *starts, *unprogressed)}
     counted.update(s.sprint_id for s, _ in asked)
     counted.update(prompted)
-    deaf_sprints = [sprint for project in (*entries, *quiet_entries)
-                           for sprint in project["sprints"]
-                           if sprint["ball"] == BALL_OWNER and not sprint["waiting"]
-                           and sprint["sprint_id"] not in counted]
-    deaf = [sprint["sprint_id"] for sprint in deaf_sprints]
+    deaf = [sprint["sprint_id"] for project in (*entries, *quiet_entries) for sprint in project["sprints"]
+            if sprint["ball"] == BALL_OWNER and not sprint["waiting"] and sprint["sprint_id"] not in counted]
+    stopped_runs = [run for project in entries for run in project["engine_runs"] if run["need"] not in (None, "nothing")]
     open_count = (len(briefs) + len(stalls) + len(starts) + len(unprogressed) + len(signins) + len(adoptions)
                   + len(releases) + len(prompts) + len(asked) + len(retries) + len(registering) + len(applies) + len(confirms)
-                  + len(failures) + len(trusts) + len(open_items) + len(deaf))
+                  + len(failures) + len(trusts) + len(open_items) + len(deaf) + len(stopped_runs))
     all_out = bool(capacity["all_out"])
     if all_out:
         sentence = ALL_OUT_SENTENCE
@@ -2550,6 +2547,8 @@ def derive_view(
         sentence = PERMISSION_SENTENCE
     elif deaf and open_count == len(deaf):
         sentence = DEAF_SENTENCE
+    elif stopped_runs and open_count == len(stopped_runs):
+        sentence = ENGINE_SENTENCE
     elif retries or applies or confirms or failures or trusts or any(e["questions"] for e in registering):
         sentence = REGISTER_SENTENCE
     elif any(e["text"] for e in registering):

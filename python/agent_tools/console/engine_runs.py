@@ -25,7 +25,7 @@ fold of its own, so `engine status` and this view agree. The rules the readings 
 - P6. The newest root run of each (project, issue) is shown once it entered a step; a done run or one stopped
   with need `nothing` leaves the page a day after its last event.
 - P7. A fan-out reads `building task n of m` from the newest `call` event since the last step entered.
-- P8. A stop reads `stopped at <name, hyphens as spaces>, needs <need words>`.
+- P8. A stop reads `stopped at <name, hyphens as spaces>, needs <need words>`; a need but `nothing` counts in the heading.
 
 No line says a run is quiet or stuck: a live engine is moving, whatever the time since its last event.
 """
@@ -100,6 +100,7 @@ def engine_entry(state: RunState, now_ms: int | None) -> dict | None:
     return {"run_id": state.run, "issue": state.issue, "stage": state.stage,
             "stage_text": stage_text(state), "reading": kind, "text": line_text(state),
             "wait_until": state.wait["until"] if kind == "waiting" and state.wait else None,
+            "need": state.stop["need"] if kind == "stopped" else None,  # type: ignore[index]
             "last_event_at": state.last_event}
 
 
