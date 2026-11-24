@@ -31,7 +31,7 @@ project or issue level line. The states are `due`, `pending`, `pass`, `fail`, `h
 awaited). The `ask`, `act`, `live` and `paid` checks and the `on_fail: ask` and `on_expire: ask`
 decisions reach the owner through the prompts of `agent_tools.verification.verify_owner`.
 Each run a signal ended writes one `interrupted` line on stderr (format in
-`agent_tools.verification.verify_interrupt`).
+`agent_tools.verification.verify_interrupt`). A run catches SIGTERM and SIGHUP and goes on (SIGINT still stops it).
 A project that cannot be read is a `skipped` line with reason `project_unresolved`, one whose
 tracker is not GitHub is `tracker_not_github` (both omitted when `--repo` is given), and a forge
 failure while listing is `forge_error`. A write pass whose `gh` account the forge would not label
@@ -284,31 +284,32 @@ def run_run(args: argparse.Namespace) -> int:
     lines: list[dict] = []
     matched = False
     interruptions = verify_interrupt.Interruptions.at_home()
-    for entry in registry:
-        try:
-            with verify_exec.project_source(entry) as source:
-                snapshot = source.snapshot
-                bindings = snapshot["bindings"]
-                tracker = bindings["tracker"]
-                if tracker.get("kind") != "github":
-                    if args.repo is None:
-                        lines.append(skipped(entry["project_id"], "tracker_not_github"))
-                    continue
-                if args.repo is not None and tracker.get("repo_slug") != args.repo:
-                    continue
-                matched = True
-                slug = tracker["repo_slug"]
-                project = verify_run.Project(entry["project_id"], slug, Path(entry["root"]),
-                                             source.contract_root, source.commit, bindings)
-                refs = PinnedReferences(Path(entry["root"]), bindings["commands"])
-                try:
-                    lines.extend(verify_run.pass_repo(project, args.host, refs, issue=args.issue,
-                                                      report=args.report, interruptions=interruptions))
-                except ForgeError:
-                    lines.append(skipped(slug, "forge_error"))
-        except verify_exec.SourceError:
-            if args.repo is None:
-                lines.append(skipped(entry["project_id"], "project_unresolved"))
+    with verify_interrupt.survive():
+        for entry in registry:
+            try:
+                with verify_exec.project_source(entry) as source:
+                    snapshot = source.snapshot
+                    bindings = snapshot["bindings"]
+                    tracker = bindings["tracker"]
+                    if tracker.get("kind") != "github":
+                        if args.repo is None:
+                            lines.append(skipped(entry["project_id"], "tracker_not_github"))
+                        continue
+                    if args.repo is not None and tracker.get("repo_slug") != args.repo:
+                        continue
+                    matched = True
+                    slug = tracker["repo_slug"]
+                    project = verify_run.Project(entry["project_id"], slug, Path(entry["root"]),
+                                                 source.contract_root, source.commit, bindings)
+                    refs = PinnedReferences(Path(entry["root"]), bindings["commands"])
+                    try:
+                        lines.extend(verify_run.pass_repo(project, args.host, refs, issue=args.issue,
+                                                          report=args.report, interruptions=interruptions))
+                    except ForgeError:
+                        lines.append(skipped(slug, "forge_error"))
+            except verify_exec.SourceError:
+                if args.repo is None:
+                    lines.append(skipped(entry["project_id"], "project_unresolved"))
     if args.repo is not None and not matched:
         print(f"verify-pending: {args.repo} is not a registered project", file=sys.stderr)
         return 2

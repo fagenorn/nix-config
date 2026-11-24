@@ -9,7 +9,9 @@ Run: just agent-workflow-tests
 import contextlib
 import io
 import os
+import signal
 import stat
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -234,6 +236,21 @@ class InterruptedPassTest(PassBase):
         self.assertFalse(self.store.exists())
         self.assertEqual(self.run_count(), 1)
 
+    def test_a_host_wide_sigterm_reaches_the_runner_and_its_check_and_the_check_is_rerun_once(self):
+        held = self.stub("wide.py", (
+            "import os, signal\nos.kill(os.getppid(), signal.SIGTERM)\nos.kill(os.getpid(), signal.SIGTERM)"))
+        self.hold(held)
+        before = signal.getsignal(signal.SIGTERM)
+        with vi.survive() as received:
+            lines = self.run_pass()
+        self.assertEqual(lines, [line(0, "AC1", "pending", "interrupted_twice")])
+        self.assertEqual(received, [signal.SIGTERM, signal.SIGTERM])
+        self.assertEqual(self.run_count(), 2)
+        self.assertEqual(self.waits, [60])
+        self.assertEqual([entry.rsplit(" ", 1)[1] for entry in self.logged], ["then=rerun", "then=held"])
+        self.assertEqual(self.markers("verify-result"), [])
+        self.assertIs(signal.getsignal(signal.SIGTERM), before)
+
 
 class ClassifyInterruptTest(unittest.TestCase):
     def setUp(self):
@@ -270,11 +287,38 @@ class ClassifyInterruptTest(unittest.TestCase):
                 self.assertEqual(vx.classify(vx.Result(code, "", "", True), None), "timeout")
 
 
+class SurviveTest(unittest.TestCase):
+    def child(self, code):
+        env = {**os.environ, "PYTHONPATH": str(REPO_ROOT / "python")}
+        return subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, timeout=30)
+
+    def test_sigterm_and_sighup_are_survived_and_recorded(self):
+        for sig in (signal.SIGTERM, signal.SIGHUP):
+            with self.subTest(sig=sig.name):
+                done = self.child(
+                    "import os, signal\nfrom agent_tools.verification import verify_interrupt as vi\n"
+                    f"with vi.survive() as got:\n    os.kill(os.getpid(), {int(sig)})\nprint(got)")
+                self.assertEqual((done.returncode, done.stdout), (0, f"[{int(sig)}]\n"))
+
+    def test_other_signals_and_signals_after_survive_still_end_the_process(self):
+        self.assertEqual(vi.SURVIVED, (signal.SIGTERM, signal.SIGHUP))
+        cases = {
+            "inside": (signal.SIGINT, "with vi.survive():\n    os.kill(os.getpid(), {n})\n"),
+            "after": (signal.SIGTERM, "with vi.survive():\n    pass\nos.kill(os.getpid(), {n})\n"),
+        }
+        for name, (sig, body) in cases.items():
+            with self.subTest(case=name):
+                done = self.child("import os\nfrom agent_tools.verification import verify_interrupt as vi\n"
+                                  + body.format(n=int(sig)) + "import time\ntime.sleep(5)")
+                self.assertEqual(done.returncode, -sig)
+
+
 class RunWiringTest(unittest.TestCase):
-    def test_one_run_hands_one_store_under_home_to_every_project(self):
+    def run_main(self, pass_repo):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
-        home = Path(tmp.name)
+        self.home = Path(tmp.name)
+        home = self.home
         entries = [{"project_id": "a/one", "root": str(home)}, {"project_id": "a/two", "root": str(home)}]
 
         @contextlib.contextmanager
@@ -282,19 +326,35 @@ class RunWiringTest(unittest.TestCase):
             bindings = {"tracker": {"kind": "github", "repo_slug": entry["project_id"]}, "commands": {}}
             yield vx.Source({"bindings": bindings}, home, TIP, "main")
 
-        pass_repo = mock.Mock(return_value=[])
         with (mock.patch.dict(os.environ, {"HOME": str(home)}),
               mock.patch.object(verify_pending.forge_api, "logged_in", return_value=True),
               mock.patch.object(verify_pending.agent_platform, "read_registry", return_value=entries),
               mock.patch.object(vx, "project_source", source),
               mock.patch.object(vr, "pass_repo", pass_repo),
               contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO())):
-            code = verify_pending.main(["run", "--host", "mbp"])
+            return verify_pending.main(["run", "--host", "mbp"])
+
+    def test_one_run_hands_one_store_under_home_to_every_project(self):
+        pass_repo = mock.Mock(return_value=[])
+        code = self.run_main(pass_repo)
         self.assertEqual(code, 0)
         self.assertEqual(pass_repo.call_count, 2)
         stores = [call.kwargs["interruptions"] for call in pass_repo.call_args_list]
         self.assertIs(stores[0], stores[1])
-        self.assertEqual(stores[0].path, home / ".agents" / "state" / "verify-pending" / "interrupted.json")
+        self.assertEqual(stores[0].path, self.home / ".agents" / "state" / "verify-pending" / "interrupted.json")
+
+    def test_a_run_catches_sigterm_and_sighup_while_it_passes_the_projects(self):
+        seen = []
+        pass_repo = mock.Mock(side_effect=lambda *a, **k: seen.append(
+            (signal.getsignal(signal.SIGTERM), signal.getsignal(signal.SIGHUP))) or [])
+        before = signal.getsignal(signal.SIGTERM)
+        code = self.run_main(pass_repo)
+        self.assertEqual(code, 0)
+        self.assertEqual(len(seen), 2)
+        for handler in (h for pair in seen for h in pair):
+            self.assertTrue(callable(handler))
+            self.assertNotIn(handler, (signal.SIG_DFL, signal.SIG_IGN))
+        self.assertIs(signal.getsignal(signal.SIGTERM), before)
 
 
 if __name__ == "__main__":

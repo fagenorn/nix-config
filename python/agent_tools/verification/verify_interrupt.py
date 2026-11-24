@@ -7,6 +7,8 @@ runner's state directory (so a later pass knows an earlier pass was interrupted 
 the one log line a person or a parser reads, and the pass interval the next-run time is computed from.
 The host clock lives here and not in `verify_run`: that module reads time only from the forge
 (`Context.now()`), and a wait the host performs, or a log line the host writes, is the host's time.
+The runner catches SIGTERM and SIGHUP for the length of a run, so a sweep of the account's processes is
+recorded as interrupted runs instead of ending the runner; SIGINT and SIGKILL still end it.
 """
 from __future__ import annotations
 
@@ -26,6 +28,7 @@ from typing import Callable, Iterator
 BACKOFF_BASE_SECONDS = 60
 BACKOFF_CEILING_SECONDS = 300
 PASS_INTERVAL_SECONDS = 900
+SURVIVED = (signal.SIGTERM, signal.SIGHUP)
 STORE = Path(".agents/state/verify-pending/interrupted.json")
 
 _STAMP = "%Y-%m-%dT%H:%M:%SZ"
@@ -76,6 +79,29 @@ def parse_line(text: str) -> dict | None:
         "at": at, "host": host, "repo": repo, "issue": int(issue), "check": int(check),
         "ac": ac, "signal": sig, "next": nxt, "then": then,
     }
+
+
+@contextlib.contextmanager
+def survive() -> Iterator[list[int]]:
+    """Catch `SURVIVED` for the length of the block, yielding the signal numbers received, in order.
+
+    The handler only records, so a blocked wait or child read resumes. Main thread only: `signal.signal`
+    refuses any other. Nothing is ignored (an ignored signal would stay ignored in every check child),
+    and the previous handlers return on leaving.
+    """
+    received: list[int] = []
+    saved = {number: signal.getsignal(number) for number in SURVIVED}
+
+    def record(number, frame) -> None:
+        received.append(number)
+
+    for number in SURVIVED:
+        signal.signal(number, record)
+    try:
+        yield received
+    finally:
+        for number, handler in saved.items():
+            signal.signal(number, handler)
 
 
 def utc_now() -> datetime:

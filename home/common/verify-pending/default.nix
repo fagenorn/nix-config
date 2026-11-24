@@ -32,6 +32,8 @@
 # always exits 0; what runs unattended is decided by
 # `verify-pending run` itself (see `agent_tools.verification.verify_exec`). The log also carries
 # `verify-pending run`'s `interrupted host=H repo=R issue=N check=I ac=A signal=S next=T then=rerun|held` lines.
+# The pass and `verify-pending run` go on through SIGTERM and SIGHUP; launchd (`ExitTimeOut`) and systemd
+# (`TimeoutStopSec`) still end a stopped job with SIGKILL.
 #
 # A login Mac (issue 668) runs the darwin job as a launchd user agent in `gui/<uid>`, and gh reads
 # its token from the login keychain, so neither exists while nobody is logged in at the
