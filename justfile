@@ -189,6 +189,7 @@ agent-workflow-tests *args:
     tests/test_issue_setup.py \
     tests/test_closing.py \
     tests/test_landing.py \
+    tests/test_land_tally.py \
     tests/test_plan_amend.py \
     tests/test_verify_block.py \
     tests/test_verify_pending.py \

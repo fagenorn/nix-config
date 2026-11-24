@@ -28,6 +28,7 @@ from .engine_fixture import FixtureProject
 from .forge_world import ForgeWorld
 from .guard_policy_world import GuardPolicyWorld
 from .test_issue_setup import gh_only
+from .test_land_tally import LedgerMaker, answer
 
 TIER = "integration"
 
@@ -107,6 +108,26 @@ def lock_main(test: unittest.TestCase, *args: str) -> tuple[int, dict]:
     return status, json.loads(lines[0])
 
 
+def register_lock(forge: ForgeWorld, lock: str | None, pulls: dict[str, int] | None, **store) -> None:
+    """Serve the land lock of `main` at `lock` and the open pull request of each head sha from `forge`."""
+    forge.ref_store(SLUG, {LOCK_REF: lock} if lock else {}, **store)
+    stamp = format_datetime(datetime(2026, 11, 6, 10, tzinfo=timezone.utc), usegmt=True)
+    forge.respond("gh", FORGE_NOW, stdout=f"HTTP/2.0 200 OK\ndate: {stamp}\n\n{{}}")
+    repo = {"full_name": SLUG}
+    for sha in (SHA, OTHER):
+        number = (pulls or {}).get(sha)
+        forge.respond_json("gh", ["api", f"repos/{SLUG}/commits/{sha}/pulls?per_page=100"], [] if number is None else [
+            {"number": number, "state": "open", "merged_at": None,
+             "base": {"ref": "main", "repo": repo},
+             "head": {"ref": f"issue-{number}-add-a-greeting", "sha": sha, "repo": repo}}])
+    for number in set((pulls or {}).values()):  # the holder is read from the issues it closes
+        forge.respond_json("gh", ["api", "graphql", "-f", f"query={forge_markers.CLOSING_ISSUES}",
+                                  "-f", "owner=example", "-f", "name=fixture", "-F", f"number={number}"],
+                           {"data": {"repository": {"pullRequest": {"closingIssuesReferences": {"nodes": []}}}}})
+    forge.respond_json("gh", ["api", f"repos/{SLUG}/pulls?state=open&base=main&sort=updated"
+                                     "&direction=desc&per_page=100&page=1"], [])
+
+
 class LockTest(unittest.TestCase):
     """`lock`, `held` and `unlock` against the fake forge's ref store, answered in this process."""
 
@@ -114,22 +135,7 @@ class LockTest(unittest.TestCase):
         """The fake forge: the land lock of `main` at `lock` and the open pull request of each head sha."""
         forge = ForgeWorld(self)
         forge.answer_in_process(forge_api)
-        forge.ref_store(SLUG, {LOCK_REF: lock} if lock else {}, **store)
-        stamp = format_datetime(datetime(2026, 11, 6, 10, tzinfo=timezone.utc), usegmt=True)
-        forge.respond("gh", FORGE_NOW, stdout=f"HTTP/2.0 200 OK\ndate: {stamp}\n\n{{}}")
-        repo = {"full_name": SLUG}
-        for sha in (SHA, OTHER):
-            number = (pulls or {}).get(sha)
-            forge.respond_json("gh", ["api", f"repos/{SLUG}/commits/{sha}/pulls?per_page=100"], [] if number is None else [
-                {"number": number, "state": "open", "merged_at": None,
-                 "base": {"ref": "main", "repo": repo},
-                 "head": {"ref": f"issue-{number}-add-a-greeting", "sha": sha, "repo": repo}}])
-        for number in set((pulls or {}).values()):  # the holder is read from the issues it closes
-            forge.respond_json("gh", ["api", "graphql", "-f", f"query={forge_markers.CLOSING_ISSUES}",
-                                      "-f", "owner=example", "-f", "name=fixture", "-F", f"number={number}"],
-                               {"data": {"repository": {"pullRequest": {"closingIssuesReferences": {"nodes": []}}}}})
-        forge.respond_json("gh", ["api", f"repos/{SLUG}/pulls?state=open&base=main&sort=updated"
-                                         "&direction=desc&per_page=100&page=1"], [])
+        register_lock(forge, lock, pulls, **store)
         return forge
 
     def call(self, verb: str, sha: str = SHA) -> tuple[int, dict]:
@@ -426,6 +432,121 @@ class MergedTest(unittest.TestCase):
                 with redirect_stdout(out):
                     status = landing.main(list(args))
                 self.assertEqual((status, json.loads(out.getvalue())), (0, want))
+
+
+class TallyCommandTest(LedgerMaker, unittest.TestCase):
+    """`pending`, `red`, `lock-budget` and `sync-fixes` answer from the delivery's run ledger."""
+
+    def world(self) -> tuple[LandingWorld, str, Path]:
+        """A landing world, the holder of a delivery two attempts deep and its current attempt run."""
+        land = LandingWorld(self)
+        self.use_home(Path(land.env["HOME"]))
+        return land, *self.holder()
+
+    def holder(self) -> tuple[str, Path]:
+        root, _, _, _, current = self.delivery()
+        return f"host-a/{root.name}", current
+
+    def test_pending_answers_spent_on_the_third_pending_read_of_the_current_attempt(self):
+        land, holder, attempt = self.world()
+        self.visit(attempt, "gate", 1, "pending", {"verdict": "pending"})
+        self.visit(attempt, "gate", 2, "pending", {"verdict": "pending"})
+        self.assertEqual(land.call("pending", "--holder", holder), (0, {"verdict": "wait"}))
+        self.visit(attempt, "gate", 3, "pending", {"verdict": "pending"})
+        self.assertEqual(land.call("pending", "--holder", holder), (0, {"verdict": "spent"}))
+
+    def test_red_answers_presync_behind_without_the_lock_sync_behind_with_it_and_carries_the_failing_names(self):
+        land = LandingWorld(self)
+        self.use_home(Path(land.env["HOME"]))
+        worktree = land.worktree()
+        land.world.advance(land.fixture.root, "main")
+        red = {"verdict": "red", "failing": ["Fixture Checks"]}
+        for name, held, want in (("without the lock", False, "presync"), ("with the lock", True, "sync")):
+            with self.subTest(name):
+                root, _, _, _, attempt = self.delivery()
+                if held:
+                    self.visit(attempt, "lock", 1, "held", {"verdict": "held"})
+                self.visit(attempt, "gate", 1, "red", red)
+                status, answer = land.call("red", "--holder", f"host-a/{root.name}", "--worktree-path",
+                                           str(worktree), "--integration-branch", "main")
+                self.assertEqual((status, answer["verdict"]), (0, want), answer)
+                self.assertEqual(answer["failing"], ["Fixture Checks"])
+                self.assertIs(answer["behind"], True)
+
+    def test_red_answers_fix_with_no_earlier_fix_and_checks_after_one_in_an_earlier_attempt(self):
+        land = LandingWorld(self)
+        self.use_home(Path(land.env["HOME"]))
+        worktree = land.worktree()
+        root, _, first, _, attempt = self.delivery()
+        self.visit(attempt, "gate", 1, "red", {"verdict": "red", "failing": ["Fixture Checks"]})
+        args = ("red", "--holder", f"host-a/{root.name}", "--worktree-path", str(worktree),
+                "--integration-branch", "main")
+        status, answer = land.call(*args)
+        self.assertEqual((status, answer["verdict"], answer["behind"]), (0, "fix", False), answer)
+        self.enter(first, "ci-fix")
+        self.assertEqual(land.call(*args)[1]["verdict"], "checks")
+        self.visit(attempt, "ci-fixed", 1, "unchanged", {})
+        self.visit(attempt, "gate", 2, "pending", {"verdict": "pending"})
+        self.visit(attempt, "gate", 3, "red", {"verdict": "red", "failing": ["Fixture Checks"]})
+        self.assertEqual(land.call(*args)[1]["verdict"], "stale")
+
+    def test_lock_budget_and_sync_fixes_answer_from_the_ledger(self):
+        land, holder, attempt = self.world()
+        for visit in (1, 2, 3):
+            self.visit(attempt, "lock", visit, "contended", {"verdict": "contended", "lock": answer(2)})
+        self.assertEqual(land.call("lock-budget", "--holder", holder), (0, {"verdict": "again", "waits": 3}))
+        self.visit(attempt, "lock", 4, "contended", {"verdict": "contended", "lock": answer(2)})
+        self.assertEqual(land.call("lock-budget", "--holder", holder), (0, {"verdict": "spent", "waits": 4}))
+        self.assertEqual(land.call("sync-fixes", "--holder", holder), (0, {"verdict": "fix"}))
+        self.enter(attempt, "merge-fix")
+        self.assertEqual(land.call("sync-fixes", "--holder", holder), (0, {"verdict": "spent"}))
+
+    def test_a_holder_without_a_run_is_an_error(self):
+        land, _, _ = self.world()
+        status, answer = land.call("pending", "--holder", "host-a/9-20261124T090000Z-zzzz")
+        self.assertEqual((status, answer["verdict"], answer["error"]), (1, "error", "no_run"))
+
+
+class ReleaseTest(LedgerMaker, unittest.TestCase):
+    """`free` and `release` free the land lock only at a sha the landing's lock steps held."""
+
+    def world(self, lock: str) -> tuple[LandingWorld, str, Path]:
+        land = LandingWorld(self)
+        self.use_home(Path(land.env["HOME"]))
+        register_lock(land.forge, lock, {SHA: 7, OTHER: 8})
+        root, _, _, _, attempt = self.delivery()
+        self.visit(attempt, "lock", 1, "held", {"verdict": "held", "lock": {"lock_sha": SHA}})
+        return land, f"host-a/{root.name}", attempt
+
+    def free(self, land: LandingWorld, holder: str) -> tuple[int, dict]:
+        return land.call("free", "--repo", SLUG, "--integration-branch", "main", "--holder", holder)
+
+    def test_free_releases_the_lock_only_at_a_sha_this_landing_held(self):
+        land, holder, _ = self.world(SHA)
+        status, answer = self.free(land, holder)
+        self.assertEqual((status, answer["verdict"]), (0, "released"), answer)
+        self.assertNotIn(LOCK_REF, land.forge.refs())
+        land, holder, _ = self.world(OTHER)
+        status, answer = self.free(land, holder)
+        self.assertEqual((status, answer["verdict"]), (0, "released"), answer)
+        self.assertEqual(land.forge.refs()[LOCK_REF], OTHER)
+
+    def test_release_answers_the_attempt_end_once_the_lock_is_free(self):
+        land, holder, attempt = self.world(SHA)
+        items = json.dumps([{"end": "checks", "item": None, "run": attempt.name}])
+        status, answer = land.call("release", "--repo-root", str(land.fixture.root), "--issue", str(ISSUE),
+                                   "--repo", SLUG, "--holder", holder, "--items", items)
+        self.assertEqual((status, answer["verdict"]), (0, "checks"), answer)
+        self.assertNotIn(LOCK_REF, land.forge.refs())
+
+    def test_a_failed_release_answers_unreleased(self):
+        land, holder, attempt = self.world(SHA)
+        land.forge.ref_store(SLUG, {LOCK_REF: SHA}, refuse_to=["0" * 40])
+        items = json.dumps([{"end": "checks", "item": None, "run": attempt.name}])
+        status, answer = land.call("release", "--repo-root", str(land.fixture.root), "--issue", str(ISSUE),
+                                   "--repo", SLUG, "--holder", holder, "--items", items)
+        self.assertEqual((status, answer["verdict"]), (0, "unreleased"), answer)
+        self.assertEqual(land.forge.refs()[LOCK_REF], SHA)
 
 
 if __name__ == "__main__":
