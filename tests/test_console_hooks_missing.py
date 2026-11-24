@@ -31,14 +31,15 @@ PROPOSAL = "commits run in its development shell: devenv shell (found in its fil
 
 
 BOUND = '{"bindings": {"vcs": {"commit": {"environment": "commit-environment"}}}}\n'
+SCHEMA_THREE = '{"schema_version": 3, "bindings": {"vcs": {"integration_branch": "main"}}}\n'
 
 
-def hooked_repo(path: Path, *, contract: bool = True, text: str = DECLARED, bound: bool = True) -> Path:
+def hooked_repo(path: Path, *, contract: bool = True, text: str = DECLARED, project: str | None = BOUND) -> Path:
     root = git_repo(path, contract=contract)
     (root / "devenv.nix").write_text(text)
     git(root, "add", "devenv.nix")
-    if contract and bound:
-        (root / ".agents/project.json").write_text(BOUND)
+    if contract and project is not None:
+        (root / ".agents/project.json").write_text(project)
         git(root, "add", ".agents/project.json")
     git(root, "commit", "-q", "-m", "devenv")
     return root
@@ -92,8 +93,11 @@ class HooksMissingCardTest(GlobalHooksPath, unittest.TestCase):
         self.assertEqual(row["lines"], [register.HOOKS_LINE, *register.plan_lines(READY)])
 
     def test_a_ready_plan_of_a_contract_binding_no_commit_environment_leaves_the_hooks_uninstalled(self):
-        root = hooked_repo(self.parent / "r", bound=False)
+        root = hooked_repo(self.parent / "r", project=None)
         row = register.hooks_noted(register.summary(str(root), READY))
+        self.assertEqual(register.HOOKS_LEFT_LINE,
+                         "leaves its git hooks uninstalled on this host "
+                         "(no commit environment to install them in)")
         self.assertEqual(row["lines"], [register.HOOKS_LEFT_LINE, *register.plan_lines(READY)])
         shown, _entry = card(row)
         self.assertEqual(shown["lines"][0], register.HOOKS_LEFT_LINE)
@@ -130,24 +134,39 @@ class HooksMissingCardTest(GlobalHooksPath, unittest.TestCase):
         self.assertEqual(register.hooks_noted(noted), noted)
 
 
-    def test_a_drafted_contract_leaves_the_hooks_uninstalled_and_says_so_on_every_surface(self):
+    def test_a_drafted_contract_installs_the_hooks_and_says_so_on_every_surface(self):
         root = hooked_repo(self.parent / "r", contract=False)
         fields = contract_draft.draft(str(root), {**contract_draft.read(str(root)),
                                                   "default_branch": "main", "branches": ["main"]})
         row = register.hooks_noted(register.summary(str(root), READY, draft=fields))
-        self.assertEqual(register.HOOKS_LEFT_LINE,
-                         "leaves its git hooks uninstalled on this host "
-                         "(no commit environment to install them in)")
-        self.assertEqual(row["lines"], [register.HOOKS_LEFT_LINE, *register.plan_lines(READY)])
+        self.assertEqual(row["lines"], [register.HOOKS_LINE, *register.plan_lines(READY)])
         shown, _entry = card(row)
-        self.assertEqual(shown["lines"][0], register.HOOKS_LEFT_LINE)
-        self.assertNotIn(register.HOOKS_LINE, shown["lines"])
+        self.assertEqual(shown["lines"][0], register.HOOKS_LINE)
+        self.assertNotIn(register.HOOKS_LEFT_LINE, shown["lines"])
+        for line in (*shown["lines"], *row["lines"]):
+            self.assertFalse(line.startswith("commits run in its development shell"), line)
         deferred = register.view_entry(None, {**row, "at": "2026-11-24T08:00:00+00:00"})
-        self.assertEqual(deferred["lines"], [register.HOOKS_LEFT_LINE, *register.plan_lines(READY)])
+        self.assertEqual(deferred["lines"], [register.HOOKS_LINE, *register.plan_lines(READY)])
         self.assertEqual(register.hooks_noted(row), row)
 
+    def test_a_ready_plan_of_a_schema_three_contract_installs_the_hooks(self):
+        root = hooked_repo(self.parent / "r", project=SCHEMA_THREE)
+        row = register.hooks_noted(register.summary(str(root), READY))
+        self.assertTrue(contract_draft.binds_environment(str(root)))
+        self.assertEqual(row["lines"], [register.HOOKS_LINE, *register.plan_lines(READY)])
+
+    def test_a_schema_three_contract_answered_none_still_installs_the_hooks(self):
+        root = hooked_repo(self.parent / "r", project=SCHEMA_THREE)
+        proposal = contract_draft.reconcile_fields(
+            str(root), {"hooks": ["pre-commit"], "stranded": ["pre-commit"],
+                        "environments": ["devenv.nix"]})
+        declined, error = contract_draft.set_value(proposal, "commit-environment", "none")
+        self.assertIsNone(error)
+        row = register.hooks_noted(register.summary(str(root), READY, draft=declined))
+        self.assertEqual(row["lines"], [register.HOOKS_LINE, *register.plan_lines(READY)])
+
     def test_a_commit_environment_answered_none_leaves_the_hooks_uninstalled(self):
-        root = hooked_repo(self.parent / "r")
+        root = hooked_repo(self.parent / "r", project=None)
         proposal = contract_draft.reconcile_fields(
             str(root), {"hooks": ["pre-commit"], "stranded": ["pre-commit"],
                         "environments": ["devenv.nix"]})
@@ -160,7 +179,7 @@ class HooksMissingCardTest(GlobalHooksPath, unittest.TestCase):
         self.assertNotIn(register.HOOKS_LINE, shown["lines"])
 
     def test_a_proposed_commit_environment_keeps_the_installing_line(self):
-        root = hooked_repo(self.parent / "r")
+        root = hooked_repo(self.parent / "r", project=None)
         proposal = contract_draft.reconcile_fields(
             str(root), {"hooks": ["pre-commit"], "stranded": ["pre-commit"],
                         "environments": ["devenv.nix"]})
@@ -170,10 +189,8 @@ class HooksMissingCardTest(GlobalHooksPath, unittest.TestCase):
         self.assertEqual(shown["lines"], [PROPOSAL, register.HOOKS_LINE, *register.plan_lines(READY)])
 
     def test_the_adoption_pull_request_body_leaves_the_uninstalled_line_out(self):
-        root = hooked_repo(self.parent / "r", contract=False)
-        fields = contract_draft.draft(str(root), {**contract_draft.read(str(root)),
-                                                  "default_branch": "main", "branches": ["main"]})
-        row = register.hooks_noted(register.summary(str(root), READY, draft=fields))
+        root = hooked_repo(self.parent / "r", project=None)
+        row = register.hooks_noted(register.summary(str(root), READY))
         latest = {**row, "at": "2026-11-24T08:00:00+00:00", "headline": "H", "plan_id": PID_A}
         self.assertIn(register.HOOKS_LEFT_LINE, latest["lines"])
         self.assertNotIn(register.HOOKS_LEFT_LINE, approve.body(latest))
@@ -274,9 +291,9 @@ class HooksMissingPictureTest(unittest.TestCase):
         console_screenshots._seed_registration(seed, state, str(root))
         return seed.ended()
 
-    def test_the_register_apply_state_seeds_the_uninstalled_line_first(self):
+    def test_the_register_apply_state_seeds_the_installing_line_first(self):
         self.assertEqual(self.seeded("register-apply")["lines"],
-                         [register.HOOKS_LEFT_LINE, *console_screenshots.REGISTER_PLAN_LINES])
+                         [register.HOOKS_LINE, *console_screenshots.REGISTER_PLAN_LINES])
 
     def test_the_reconcile_states_keep_today_s_lines(self):
         self.assertEqual(self.seeded("register-reconcile-apply")["lines"],

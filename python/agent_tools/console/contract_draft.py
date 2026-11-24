@@ -725,7 +725,11 @@ def read_hooks(root: str, cancel: threading.Event | None = None, *,
 
 
 def binds_environment(root: str) -> bool:
-    """Whether the contract at `root` binds `vcs.commit.environment`: the one thing Apply installs hooks through."""
+    """Whether the contract at `root`, as the resolver fills it, binds `vcs.commit.environment`.
+
+    A schema-3 contract always does (the platform constant `commit-environment`, ADR-project-contract-013 D1-D2);
+    any other only when it authors the member.
+    """
     try:
         path = Path(root, ".agents/project.json")
         if path.stat().st_size > hook_install.TEXT_LIMIT:
@@ -733,6 +737,8 @@ def binds_environment(root: str) -> bool:
         document = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return False
+    if schema_three.declares(document):
+        return True
     bindings = document.get("bindings") if isinstance(document, dict) else None
     vcs = bindings.get("vcs") if isinstance(bindings, dict) else None
     commit = vcs.get("commit") if isinstance(vcs, dict) else None
