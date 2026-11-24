@@ -54,7 +54,6 @@ GREEN = [{"__typename": "CheckRun", "name": "Fixture Checks", "status": "COMPLET
           "conclusion": "SUCCESS", "startedAt": "2026-11-06T10:00:00Z", "workflowName": "Fixture"}]
 ROLES = REPO_ROOT / "home/common/claude-code/agents"
 APPLIES = {"verdict": "applies", "details": "greet() is still missing.", "evidence": ""}
-DIRECT = {"lane": "direct", "why": "A one-file fix with checkable criteria."}
 CLEAN_LITE = {"verdict": "pass", "findings": [],
               "acceptance": [{"id": "AC1", "met": True, "evidence": "checks/check_greet.py:8"}],
               "escalate": False}
@@ -65,11 +64,12 @@ IMPLEMENTED = {
               "sensitive": False, "ineligible": False, "tests": ["checks/check_greet.py"]},
     "commit": {"path": "fixture/farewell.py",
                "text": 'def farewell(name: str) -> str:\n    return f"Goodbye, {name}."\n'}}
-DEFAULT_REPLIES = {"applies": APPLIES, "lane": DIRECT, "implement": IMPLEMENTED, "lite-review": CLEAN_LITE}
+DEFAULT_REPLIES = {"applies": APPLIES, "implement": IMPLEMENTED, "lite-review": CLEAN_LITE}
 DEFAULT_BODY = ("Add a greet() function to the fixture module.\n\n"
                 "## Acceptance criteria\n\n- [ ] [code] greet() returns the greeting\n")
 PULL_FIELDS = "number,state,headRefName,closingIssuesReferences"
-DROPPED_ENV = ("AGENT_PLATFORM_ROOT", "GITHUB_TOKEN", "GH_TOKEN", "CLAUDE_ACCOUNT")
+DROPPED_ENV = ("AGENT_PLATFORM_ROOT", "GITHUB_TOKEN", "GH_TOKEN", "CLAUDE_ACCOUNT",
+               "CLAUDE_CODE_SESSION_ID")
 
 
 class StubbedRun:

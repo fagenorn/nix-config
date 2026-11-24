@@ -13,12 +13,16 @@ may be `None` (a group member that sent no reply reads as `None`, D6).
 - `direct-fixed`: a fix reply -> done or not-done (keys on the suffixes).
 - `direct-settled`: a re-review reply -> unusable, findings or clean (keys on
   the suffixes).
+- `lane-rule`: the issue step's body, marker and lane paths -> direct or
+  standard, by `lane_rule.choose`, with an unknown marker read as marked.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Callable, Mapping
+
+from agent_tools.delivery import lane_rule
 
 
 @dataclass(frozen=True)
@@ -133,6 +137,11 @@ def _direct_settled(results: Mapping[str, object]) -> str:
     return "findings" if _blocking(findings) else "clean"
 
 
+def _lane_rule(results: Mapping[str, object]) -> str:
+    return lane_rule.choose(results.get("issue.body"), marked=results.get("issue.marked") is not False,
+                            lane_paths=results.get("issue.lane_paths")).lane
+
+
 GRADERS: Mapping[str, Grader] = {
     "toy-tally": Grader(("accept", "revise"), _toy_tally),
     "review-capability": Grader(("clear", "blocked"), _review_capability),
@@ -146,4 +155,5 @@ GRADERS: Mapping[str, Grader] = {
         ("no-review", "unusable", "codex-unavailable", "findings", "clean"), _direct_full_tally),
     "direct-fixed": Grader(("done", "not-done"), _direct_fixed),
     "direct-settled": Grader(("unusable", "findings", "clean"), _direct_settled),
+    "lane-rule": Grader(("direct", "standard"), _lane_rule),
 }

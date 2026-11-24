@@ -5,7 +5,8 @@ refuses what it cannot run before anything is changed, creates the run directory
 (or finds the issue's open run), then loops (replay the run's events through `engine_core.replay`, act on the
 next action, record it) until the walk is `Done` or a `Stop`. `_walk` is that
 loop for any run directory: it reads the run's procedure name and inputs from
-its `run.json`, so the root run and every child run share it.
+its `run.json`, so the root run and every child run share it. A new root run records the
+`CLAUDE_CODE_SESSION_ID` of the process as `starter`.
 
 Every refusal raises `Refused`, before a run directory exists and before any
 process starts: the project contract must resolve from the current directory; a
@@ -198,6 +199,7 @@ KEEP_ALIVE_SECONDS = 1200
 API_RETRY_SECONDS = 30
 LOCK_NAME = "lock"
 ENTRY = "deliver"
+STARTER_ENV = "CLAUDE_CODE_SESSION_ID"
 SUPPLIED_INPUTS = ("holder", "issue", "repo", "repo_root")
 RUNNABLE_KINDS = ("command", "agent", "decide", "group", "call")
 QUOTA_NEED = "retry"
@@ -539,7 +541,8 @@ def deliver(issue: int, procedures_dir: Path, *, clock: Callable[[], datetime] |
                     procedures_dir=procedures_dir,
                     platform_revision=platform_revision(os.environ),
                     host=host, inputs=inputs, now=now, token=token,
-                    tracker=identity, before_publish=stage)
+                    tracker=identity, before_publish=stage,
+                    starter=os.environ.get(STARTER_ENV) or None)
         finally:
             os.close(creation)
     except (engine_ledger.LedgerError, OSError, KeyError) as error:

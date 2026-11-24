@@ -147,6 +147,24 @@ class RunCreationTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             self.assertNotIn("tracker", engine_ledger.read_run(new_run(tmp)))
 
+    def test_a_starter_session_is_stored_in_run_json_and_read_back_and_must_be_a_string(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = new_run(tmp, starter="m-1")
+            self.assertEqual(engine_ledger.read_run(path)["starter"], "m-1")
+            document = json.loads((path / "run.json").read_text())
+            self.assertEqual(document["starter"], "m-1")
+            for bad in (1, "", None, ["m"]):
+                with self.subTest(starter=bad):
+                    document["starter"] = bad
+                    (path / "run.json").write_text(compact(document))
+                    with self.assertRaises(LedgerError):
+                        engine_ledger.read_run(path)
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertNotIn("starter", engine_ledger.read_run(new_run(tmp)))
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(LedgerError):
+                new_run(tmp, starter="")
+
     def test_creation_leaves_no_temporary_directory(self):
         with tempfile.TemporaryDirectory() as tmp:
             with mock.patch("os.rename", side_effect=OSError("cut")):

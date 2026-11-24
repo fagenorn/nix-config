@@ -4,7 +4,8 @@ Layout, under `~/.agents/state/engine/runs/<run id>/` (mode 0700):
 
     run.json            the run's identity: exactly `RUN_MEMBERS`, plus `parent` (the id of the run that called
                         it) in a child run, plus `tracker` (the identity of the tracker its issue lives in)
-                        when the run was created with one
+                        when the run was created with one, plus `starter` (the id of the session that started a
+                        root run) when the deliver process had one
     procedure/          a byte copy of the entry procedure directory's `*.json`, `*.md`, `SHA256SUMS`
     events.jsonl        one compact JSON event per line, appended and fsynced
     lock  the deliver process's exclusive flock and its {"pid","started"}; `read_holder` reads the
@@ -46,8 +47,8 @@ event naming no result. An append first cuts a write that was cut short back to 
 torn tail never joins the next event; the cut and the write run under an exclusive `flock` on
 `events.jsonl`.
 
-The ledger holds no environment value and no credential: `run.json` carries only the names and values its
-caller passes as `inputs`.
+The ledger holds no credential: `run.json` carries only the inputs its caller passes, plus the starting
+session id the shell reads from `CLAUDE_CODE_SESSION_ID`.
 """
 
 from __future__ import annotations
@@ -78,7 +79,8 @@ TOKEN_RE = re.compile(r"^[a-z0-9]{4}$")
 RUN_MEMBERS = ("host", "inputs", "issue", "platform_revision", "procedure", "project",
                "run", "sequence", "started")
 PARENT_MEMBER = "parent"
-OPTIONAL_RUN_MEMBERS = ("tracker", PARENT_MEMBER)
+STARTER_MEMBER = "starter"
+OPTIONAL_RUN_MEMBERS = ("tracker", PARENT_MEMBER, STARTER_MEMBER)
 TOKEN_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789"
 TOKEN_COUNTS = frozenset(("input", "cache_write", "cache_read", "output"))
 
@@ -200,7 +202,7 @@ def create_run(*, project: str, issue: int, procedure: str, procedures_dir: Path
                platform_revision: str, host: str, inputs: Mapping[str, str | int],
                now: datetime, token: str | None = None, root: Path | None = None,
                tracker: str | None = None, before_publish: Callable[[Path], None] | None = None,
-               parent: str | None = None) -> Path:
+               parent: str | None = None, starter: str | None = None) -> Path:
     """Create the run directory and return its path; a `before_publish(staged)` raise leaves no run.
 
     With `parent` (a run id) the run is a child: its `run.json` also names the parent."""
@@ -214,6 +216,8 @@ def create_run(*, project: str, issue: int, procedure: str, procedures_dir: Path
     if _inside(procedures_dir, f"{procedure}.json") is None:
         raise LedgerError(f"no procedure file {procedure}.json in the procedure directory")
     _check_inputs(inputs)
+    if starter is not None and not _is_name(starter):
+        raise LedgerError("starter must be a non-empty string")
     if parent is not None and not (isinstance(parent, str) and RUN_ID_RE.fullmatch(parent)):
         raise LedgerError("parent is not a run id")
     if token is None:
@@ -240,6 +244,8 @@ def create_run(*, project: str, issue: int, procedure: str, procedures_dir: Path
             document[PARENT_MEMBER] = parent
         if tracker is not None:
             document["tracker"] = tracker
+        if starter is not None:
+            document[STARTER_MEMBER] = starter
         _write_file(temporary / "run.json", _compact(document).encode("utf-8"))
         copied = temporary / "procedure"
         os.mkdir(copied, 0o700)
@@ -287,6 +293,8 @@ def read_run(run_dir: Path) -> dict:
         raise LedgerError("run.json parent is not a run id")
     if "tracker" in document and not (isinstance(document["tracker"], str) and document["tracker"]):
         raise LedgerError("run.json tracker is not a non-empty string")
+    if STARTER_MEMBER in document and not _is_name(document[STARTER_MEMBER]):
+        raise LedgerError("run.json starter is not a non-empty string")
     if not isinstance(document["project"], str):
         raise LedgerError("run.json project is not a string")
     if not _is_int(document["sequence"]) or document["sequence"] < 1:

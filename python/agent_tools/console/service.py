@@ -1910,7 +1910,7 @@ reads a transcript, so the view's `spend` is null until that poll; a question jo
 one spend read itself (#1357), the spend loop, that read and a direct `poll_spend()` hold one lock so they
 never read at once, and a job that finds a view once it holds the lock reads nothing. `poll_spend()` reads the session,
 session-subagent and workflow agent transcripts under the `projects` directory beside each of
-`session_dirs()` (see `spend.py`), and on darwin the keepalive ping log (`ping_log()`), outside the
+`session_dirs()` and the run ledgers under `engine_runs_root` that attribute an engine session (see `spend.py`), and on darwin the keepalive ping log (`ping_log()`), outside the
 ingest lock, then builds the spend view and publishes it under that lock; it appends nothing to the
 log. The account of a session is folded from the log's `session.seen` and `session.profile` rows
 (`spend.session_profiles`) and is kept after `session.gone`, for as long as those rows are retained.
@@ -10465,7 +10465,7 @@ class ConsoleService:
                 projects_dirs.append(projects)
         today = datetime.fromtimestamp(self._clock(), timezone.utc).date()
         since = (today - timedelta(days=spend.WINDOW_DAYS - 1)).isoformat()
-        self._spend.read(projects_dirs, since, self._ping_log())
+        self._spend.read(projects_dirs, since, self._ping_log(), engine_root=None if self._engine is None else self._engine.root)
         if self._spend.roots_unreadable and self._spend_view is None:
             # A cold start whose only transcript roots cannot be listed knows no spend: publishing the empty totals
             # would show 30 zero days, so the view stays absent and the records' spend stays null.

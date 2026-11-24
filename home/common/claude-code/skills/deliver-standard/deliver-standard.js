@@ -1,7 +1,7 @@
 export const meta = {
   name: 'deliver-standard',
   description: 'Deliver one standard-lane tracker issue: plan, implement and review each task, final review, verify once, ship',
-  whenToUse: 'A standard-lane issue the user asked to deliver with this program; args {repo_root, issue, session_id|batch_id, mode?, lane?, decisions?, spec?, look? (with cont: {answer: approve, head, message?}, {answer: fix, head, words, message?} to approve that head with one fix, or {answer: changes, words}), review_sizing?, clerk_model?, cont?, amend?}; mode plan stops after plan review, ready after verify with no PR, ship (the default) merges; lane direct has no plan: one implementer following deliver-direct, one fresh reviewer, at most one fix round; lane live, chosen by a standing live-fault declaration of the issue (sprint recap), has no plan: one implementer that shows a test failing before its change and passing after it, one reviewer; review_sizing true (default off) narrows the Claude plan review to rules, conventions and consistency when the Codex plan review runs, and chunks the final review only above 1500 changed lines; clerk_model sonnet (the default) or haiku sets the model of the status clerk steps (a trial, #803); the setup steps and every step that emits a lifecycle verb stay on sonnet (#813); amend (a resume of a standard-lane cont with a plan) lists {file, find, replace} edits of files in cont.setup.plan_dir, applied by plan-amend before the next task and recorded under an Amendments heading in plan.md; a file outside plan_dir, or a find text that does not occur exactly once, stops at stage amend with the cont unchanged',
+  whenToUse: 'A standard-lane issue the user asked to deliver with this program; args {repo_root, issue, session_id|batch_id, mode?, lane?, decisions?, spec?, look? (with cont: {answer: approve, head, message?}, {answer: fix, head, words, message?} to approve that head with one fix, or {answer: changes, words}), review_sizing?, clerk_model?, cont?, amend?}; mode plan stops after plan review, ready after verify with no PR, ship (the default) merges; with no lane and no cont, outside plan mode, setup takes the direct or standard lane of the lane rule (issue-setup lane), and a standing live-fault declaration still makes it live; lane direct has no plan: one implementer following deliver-direct, one fresh reviewer, at most one fix round; lane live, chosen by a standing live-fault declaration of the issue (sprint recap), has no plan: one implementer that shows a test failing before its change and passing after it, one reviewer; review_sizing true (default off) narrows the Claude plan review to rules, conventions and consistency when the Codex plan review runs, and chunks the final review only above 1500 changed lines; clerk_model sonnet (the default) or haiku sets the model of the status clerk steps (a trial, #803); the setup steps and every step that emits a lifecycle verb stay on sonnet (#813); amend (a resume of a standard-lane cont with a plan) lists {file, find, replace} edits of files in cont.setup.plan_dir, applied by plan-amend before the next task and recorded under an Amendments heading in plan.md; a file outside plan_dir, or a find text that does not occur exactly once, stops at stage amend with the cont unchanged',
   phases: [
     { title: 'Setup', detail: 'resolve contract, pre-flight, claim, worktree' },
     { title: 'Plan', detail: 'plan outside the tree, then review' },
@@ -20,9 +20,11 @@ export const meta = {
 // claim kept; ship, the default, merges. A ready cont resumed in ship skips the final review and verify when the head
 // is unchanged and the tree clean.
 
-// lane: standard, the default; direct has no planner, one implementer following deliver-direct, one fresh reviewer and
-// at most one fix round; live, chosen by a standing live-fault declaration of the issue, has one implementer that shows
-// a test failing then passing and one reviewer. A cont keeps its lane; direct and live have no plan mode.
+// lane: with none given (and no cont, outside plan mode) setup reads the lane rule (issue-setup lane): direct, else
+// standard, the default; a standing live-fault declaration still wins. direct has no planner, one implementer
+// following deliver-direct, one fresh reviewer and at most one fix round; live, chosen by a standing live-fault
+// declaration of the issue, has one implementer that shows a test failing then passing and one reviewer. A cont keeps
+// its lane; direct and live have no plan mode.
 
 // amend: {file, find, replace} edits of files in cont.setup.plan_dir, applied all or none by plan-amend before the next
 // task. look (with cont, in ship mode): the owner's answer to an awaiting-look stop, {answer: approve|fix|changes,
@@ -82,13 +84,18 @@ if (!['plan', 'ready', 'ship'].includes(MODE)) return { stage: 'args', error: 'm
 let CONT = args.cont || null
 if (args.lane !== undefined && !['standard', 'direct', 'live'].includes(args.lane)) return { stage: 'args', error: 'lane must be standard, direct or live' }
 if (CONT && args.lane && args.lane !== (CONT.lane || 'standard')) return { stage: 'args', error: 'a cont keeps its lane; start again without cont: setup re-adopts the branch and the claim' }
-// A lane-less fresh run reads the live-fault declaration in its setup and may switch to live there, so LANE is a let.
+// A lane-less fresh run reads the live-fault declaration and the lane rule in its setup and may switch lane there,
+// so LANE is a let.
 let LANE = args.lane || (CONT && CONT.lane) || 'standard'
 if (LANE === 'direct' && MODE === 'plan') return { stage: 'args', error: 'the direct lane has no plan mode' }
 if (LANE === 'live' && MODE === 'plan') return { stage: 'args', error: 'the live-fault lane has no plan mode' }
 const LIVE_ASKED = args.lane === 'live' || !!(CONT && CONT.lane === 'live')
 const LIVE_AUTO = !CONT && args.lane === undefined
 const LIVE_READING = LIVE_ASKED || LIVE_AUTO
+// The lane rule is read by a lane-less fresh run outside plan mode only; an explicit lane, a cont and plan mode read
+// none. A fresh run given a spec or decisions keeps the standard lane too: only the planner and the plan and final
+// reviews are told them.
+const RULE_AUTO = !CONT && args.lane === undefined && MODE !== 'plan' && !args.spec && !(typeof args.decisions === 'string' && args.decisions.trim())
 if (args.review_sizing !== undefined && typeof args.review_sizing !== 'boolean') return { stage: 'args', error: 'review_sizing must be a boolean' }
 const REVIEW_SIZING = args.review_sizing === true
 if (args.clerk_model !== undefined && !['sonnet', 'haiku'].includes(args.clerk_model)) return { stage: 'args', error: 'clerk_model must be sonnet or haiku' }
@@ -207,6 +214,8 @@ const REVIEW_STATE = { type: 'string', enum: ['available', 'blocked', 'unsupport
 // The look-approval marked verdict the setup reads once per run; error carries the detail of its failure.
 const LOOK_SCHEMA = { type: 'object', properties: { verdict: { type: 'string', enum: ['marked', 'unmarked', 'error'] }, covers: STRS, acs: STRS, detail: { type: 'string' } }, required: ['verdict'] }
 const LIVE_READ = { type: 'object', properties: { verdict: { type: 'string', enum: ['declared', 'none', 'no-sprint', 'error'] }, sprint_id: { type: 'string' }, fault: { type: 'object', properties: { id: { type: 'integer' }, issue: { type: 'integer' }, observed: { type: 'string' }, when: { type: 'string' }, proven: { type: 'string' }, at: { type: 'string' } } }, detail: { type: 'string' } }, required: ['verdict'] }
+// The lane rule's verdict the setup reads once per fresh lane-less run; error carries the failure as reason.
+const LANE_RULE_READ = { type: 'object', properties: { verdict: { type: 'string', enum: ['direct', 'standard', 'error'] }, reason: { type: 'string' } }, required: ['verdict'] }
 const SETUP_SCHEMA = {
   type: 'object',
   properties: {
@@ -228,6 +237,7 @@ const SETUP_SCHEMA = {
     verification_before_pull_request: { type: 'array', items: { type: 'object', properties: { id: { type: 'string' }, argv: STRS, cwd: { type: 'string' }, when_changed: STRS, skip_reason: { type: 'string' } }, required: ['id', 'argv', 'cwd'] } },
     look: LOOK_SCHEMA,
     live_fault: LIVE_READ,
+    lane_rule: LANE_RULE_READ,
   },
   required: ['ok'],
 }
@@ -498,6 +508,8 @@ On refusal return ok=false, reason contract, and in details the resolver's error
 Then run alone and exactly: look-approval marked --repo <slug> --issue ${ISSUE} and return its verdict (marked or unmarked), covers and acs (the array of its acs, [] when it names none) as look; on a non-zero exit return look with verdict error and the error and detail of its JSON line as detail.`
 const LIVE_STEP = LIVE_READING ? `
 Also run alone and exactly: sprint recap, before you return any refusal, and return live_fault on every reply, a refusal included. When it exits 0 its one JSON line gives sprint_id: return verdict declared, that sprint_id and fault (the entry of its live_faults whose issue is ${ISSUE}, every member as printed) when there is one, and verdict none when it lists none for issue ${ISSUE}. When it exits 2 printing sprint: no sprint id, return verdict no-sprint; on any other non-zero exit return verdict error and the stderr line as detail. Change nothing.` : ''
+const LANE_RULE_STEP = RULE_AUTO ? `
+Also run alone and exactly: issue-setup lane --repo-root ${REPO} --repo <slug> --issue ${ISSUE} and return its verdict and reason as lane_rule; on a non-zero exit return lane_rule with verdict error and the error and detail of its JSON line as reason. Change nothing.` : ''
 const DEAD = []
 const LOST = []
 // What a review that gave the program nothing did: with no label, any review of this run.
@@ -610,7 +622,7 @@ const setupCall = () => call(CONT ? `You re-adopt issue #${ISSUE} of the git rep
 ${CONT.claim_incomplete ? `4. After git -C ${REPO} fetch origin: ${EXISTING_READ(RES_BRANCH, RES_PATH)} An earlier worktree step may have created the branch, the worktree or both before it failed, so report existing afresh.
 5.` : '4.'} Return every contract field read fresh, ${REDERIVE ? 'with branch and worktree_path as derived' : 'branch as in the earlier setup'}. Change nothing but that re-attach.
 ${BASE_RULES}` : `You check issue #${ISSUE} of the git repository at ${REPO} before delivery. Change nothing in this step except one issue comment named below, the claim of step 5 and the worktree of step ${WT_STEP}.
-1. ${CONTRACT_READ}${LIVE_STEP}
+1. ${CONTRACT_READ}${LIVE_STEP}${LANE_RULE_STEP}
 2. ${DERIVE_LOCATION} Then gh issue view ${ISSUE} --repo <slug> --json state,labels,title and gh pr list --repo <slug> --state all --search ${ISSUE} --json number,state,headRefName,closingIssuesReferences. Return merged_refs: one {number, closes} per merged PR that list holds, closes true only when its closingIssuesReferences lists issue ${ISSUE}. Refuse (ok=false) with reason closed, parked (label needs-verification or parked), duplicate (a merged PR whose closes is true, a possible duplicate delivery: set duplicate_pr to its number; a merged PR that only mentions or Refs the issue, such as an approved spec merged in its own docs PR, is no duplicate) or open-pr (an open PR referencing this issue whose head is not branch).
 3. After git -C ${REPO} fetch origin, re-adopt instead of refusing when the work already exists. ${EXISTING_READ('<branch>', '<worktree_path>')}
 4. Read the issue and the code at origin/<integration_branch>: if the issue no longer applies (already fixed or obsolete), comment the evidence on the issue and refuse with reason no-longer-applies. Otherwise return in details, in a few lines, what still applies, where (files and symbols) and what already exists.
@@ -646,6 +658,8 @@ delete setup.reattached
 // first exit that builds a cont.
 const LIVE_RAW = setup.live_fault
 delete setup.live_fault
+const RULE_RAW = setup.lane_rule
+delete setup.lane_rule
 const liveStanding = r => isEntry(r) && r.verdict === 'declared' && typeof r.sprint_id === 'string' && /^[0-9a-f]{16}$/.test(r.sprint_id) && isEntry(r.fault)
   && Number.isInteger(r.fault.issue) && r.fault.issue === Number(ISSUE) && typeof r.fault.at === 'string' && r.fault.at.trim() !== '' && Number.isInteger(r.fault.id) && r.fault.id > 0
 const liveText = v => (typeof v === 'string' ? v : '')
@@ -655,6 +669,8 @@ const LIVE = liveStanding(LIVE_RAW)
 const LIVE_USABLE = liveStanding(LIVE_RAW) || (isEntry(LIVE_RAW) && (LIVE_RAW.verdict === 'none' || LIVE_RAW.verdict === 'no-sprint'))
 const LIVE_UNREAD = isEntry(LIVE_RAW) && LIVE_RAW.verdict === 'error' ? true : !LIVE_USABLE && setup.ok === true
 if (LIVE_AUTO && (LIVE || LIVE_UNREAD)) LANE = 'live'
+else if (RULE_AUTO && isEntry(RULE_RAW) && RULE_RAW.verdict === 'direct') LANE = 'direct'
+if (RULE_AUTO && LANE !== 'live') log(`lane: ${LANE} by the lane rule${isEntry(RULE_RAW) && typeof RULE_RAW.reason === 'string' && RULE_RAW.reason.trim() ? `: ${RULE_RAW.reason.split(/\s+/).join(' ')}` : ''}`)
 const LIVE_REC = CONT && isEntry(CONT.live_fault) ? { id: CONT.live_fault.id, sprint_id: CONT.live_fault.sprint_id, issue: CONT.live_fault.issue, at: CONT.live_fault.at }
   : LIVE ? { id: LIVE.id, sprint_id: LIVE.sprint_id, issue: LIVE.issue, at: LIVE.at } : null
 const liveSame = (a, b) => isEntry(a) && isEntry(b) && a.id === b.id && a.sprint_id === b.sprint_id && a.at === b.at

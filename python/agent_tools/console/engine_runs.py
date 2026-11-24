@@ -33,10 +33,10 @@ No line says a run is quiet or stuck: a live engine is moving, whatever the time
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO, Callable, Iterable
+from typing import BinaryIO, Callable, Iterable, Mapping
 
 from agent_tools.canonical import parse_rfc3339_utc
-from agent_tools.console import sprints
+from agent_tools.console import spend as spend_module, sprints
 from agent_tools.delivery import engine_ledger
 from agent_tools.delivery.engine_ledger import LedgerError, RunState
 
@@ -89,8 +89,11 @@ def _ended(state: RunState, kind: str) -> bool:
     return kind == "done" or (kind == "stopped" and state.stop["need"] == "nothing")  # type: ignore[index]
 
 
-def engine_entry(state: RunState, now_ms: int | None) -> dict | None:
-    """The run's entry for the page; None before its first step, or a day after it ended."""
+def engine_entry(state: RunState, now_ms: int | None, spend: Mapping | None = None) -> dict | None:
+    """The run's entry for the page; None before its first step, or a day after it ended.
+
+    Its `spend` is the run's figure over the days of the spend view (`spend.run_figure`), null without one.
+    """
     if state.stage is None:
         return None
     kind = reading(state)
@@ -102,14 +105,16 @@ def engine_entry(state: RunState, now_ms: int | None) -> dict | None:
             "stage_text": stage_text(state), "reading": kind, "text": line_text(state),
             "wait_until": state.wait["until"] if kind == "waiting" and state.wait else None,
             "need": state.stop["need"] if kind == "stopped" else None,  # type: ignore[index]
-            "last_event_at": state.last_event}
+            "last_event_at": state.last_event,
+            "spend": spend_module.run_figure(spend, state.run)}
 
 
-def project_lines(states: Iterable[RunState], now_ms: int | None) -> dict[str, list[dict]]:
+def project_lines(states: Iterable[RunState], now_ms: int | None,
+                  spend: Mapping | None = None) -> dict[str, list[dict]]:
     """Each project's shown entries in (issue, run id) order; a project with none is absent."""
     lines: dict[str, list[dict]] = {}
     for state in states:
-        entry = engine_entry(state, now_ms)
+        entry = engine_entry(state, now_ms, spend)
         if entry is not None:
             lines.setdefault(state.project, []).append(entry)
     for entries in lines.values():
@@ -147,6 +152,10 @@ class EngineRuns:
         self._documents: dict[str, dict] = {}
         self._tails: dict[str, _Tail] = {}
         self._states: dict[str, RunState] = {}
+
+    @property
+    def root(self) -> Path:
+        return self._root
 
     def poll(self) -> EnginePoll:
         names = self._names()
