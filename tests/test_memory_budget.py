@@ -14,11 +14,14 @@ try:
 except ImportError:  # run directly: no parent package, and tests/ is sys.path[0]
     import host_readings
 
+from agent_tools.hosts import host_alerts
+
 TIER = "integration"
 
 ROOT = Path(__file__).resolve().parents[1]
 HOST = ROOT / "hosts" / "darwin" / "eleven-m5"
 DECLARATION = ROOT / "home" / "common" / "agent-skills" / "host-declarations" / "eleven-m5.json"
+GUIDE = HOST / "README.md"
 JETSAM = r"<key>JetsamProperties</key>\s*<dict>\s*<key>JetsamPriority</key>\s*<integer>(\d+)</integer>"
 
 
@@ -154,6 +157,72 @@ class WatcherDeclarationTest(unittest.TestCase):
         self.assertRegex(command, r"-agent-platform/bin/omlx-memory-watch fseventsd --record /var/db/memory-watch/fseventsd\.json ")
         self.assertIn(f"--limit-gib {budget['fseventsdLimitGiB']} ", command)
         self.assertIn(f"--min-restart-minutes {budget['fseventsdRestartMinutes']}", command)
+
+
+class GuideTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.got = host_readings.read("eleven-m5", "memory-budget")
+        cls.guide = GUIDE.read_text(encoding="utf-8")
+        cls.section = cls.between(cls.guide, "## Memory budget", "\n## ")
+        cls.alerts = cls.between(cls.section, "### Alerts", "\n### ")
+        cls.restarts = cls.between(cls.guide, "## What else an activation restarts", "\n## ")
+
+    @staticmethod
+    def between(text, start, end):
+        begin = text.find(start)
+        if begin < 0:
+            return ""
+        finish = text.find(end, begin + len(start))
+        return text[begin:] if finish < 0 else text[begin:finish]
+
+    def test_the_guide_tables_every_budget_member(self):
+        self.assertTrue(self.section, "the guide has no `## Memory budget` section")
+        for key in self.got["budget"]:
+            with self.subTest(key=key):
+                self.assertIn(f"`{key}`", self.section)
+
+    def test_the_guide_says_what_to_do_for_a_new_workload(self):
+        for needle in ("### When you add a workload", "memory-budget.nix", "tests/test_memory_budget.py", "memory-peaks.jsonl"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, self.section)
+
+    def test_the_guide_marks_the_unmeasured_allowances_provisional(self):
+        for key in ("verifyRunGiB", "ciJobGiB", "macosGiB"):
+            with self.subTest(key=key):
+                lines = [line for line in self.section.splitlines() if line.startswith(f"| `{key}` |")]
+                self.assertTrue(lines)
+                for line in lines:
+                    self.assertIn("provisional", line)
+        for needle in ("peak_others_gib", "phys_footprint"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, self.section)
+
+    def test_the_guide_names_the_alert_settings_file(self):
+        self.assertTrue(self.alerts, "the guide has no `### Alerts` subsection")
+        for needle in (
+            f"~/{host_alerts.RELATIVE_SETTINGS}", f"~/{host_alerts.RELATIVE_LOG}", "0600", "enabled", "bot_token",
+            "chat_id", "console",
+        ):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, self.alerts)
+        for needle in ("sops", "gh issue"):
+            with self.subTest(needle=needle):
+                self.assertNotIn(needle, self.alerts)
+
+    def test_the_guide_states_what_makes_fseventsd_grow(self):
+        for needle in (
+            "### What makes fseventsd grow", "JetsamEvent-2026-11-20-002944.ips", "51.53 GiB", "5210544", "node_modules",
+            "exclusion", "fseventsd-trim",
+        ):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, self.section)
+
+    def test_the_guide_lists_the_new_daemons_among_restarts(self):
+        self.assertTrue(self.restarts)
+        for needle in ("omlx-memory-watch", "fseventsd-trim"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, self.restarts)
 
 
 if __name__ == "__main__":
