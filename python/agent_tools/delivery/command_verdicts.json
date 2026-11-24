@@ -147,6 +147,7 @@
       "resolve": []
     }
   },
+  "router": null,
   "ruff-lint": null,
   "size-lint": null,
   "skill-lint": null,

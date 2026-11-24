@@ -272,6 +272,7 @@ agent-workflow-tests *args:
     tests/test_docs_tree.py \
     tests/test_standard_ids.py \
     tests/test_standards_lint.py \
+    tests/test_router.py \
     tests/test_citation_lint.py \
     tests/test_never_rise.py \
     tests/test_comment_lint.py \

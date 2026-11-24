@@ -91,6 +91,7 @@ from pathlib import Path
 
 from agent_tools.delivery import citation_lint, hint_phases
 from agent_tools.delivery.context_map_lint import CODE_RE, LINK_RE
+from agent_tools.delivery.routing import index_table
 from agent_tools.delivery.rule_ids import (
     HEADING_LINE, REASON_NO_ID, REASON_TWO_IDS, SECOND_ID, layer_problems, numbered_items,
     prefix_table, scan)
@@ -199,26 +200,6 @@ def governs_problems(shard: str, cell: str) -> list[str]:
         elif set(glob) <= {"*", "/"}:
             problems.append(f"{prefix} `{glob}`, which matches every path")
     return problems
-
-
-def index_table(text: str) -> list[list[str]]:
-    """The rows of the first run of rendered `|` lines, separator rows dropped, the header first.
-
-    A line inside a fence or an HTML block (a comment included) is not rendered and breaks the run.
-    """
-    rows: list[list[str]] = []
-    previous = None
-    for number, line, _ in scan(text):
-        line = line.strip()
-        if not line.startswith("|") or (previous is not None and number != previous + 1):
-            if rows:
-                break
-            continue
-        previous = number
-        cells = [cell.strip() for cell in line.strip("|").split("|")]
-        if not all(set(cell) <= set("-: ") for cell in cells):
-            rows.append(cells)
-    return rows
 
 
 def index_problems(repo: Path) -> list[str]:
