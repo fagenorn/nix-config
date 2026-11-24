@@ -16,9 +16,10 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.console import approve, contract_draft, register
+from agent_tools.console import approve, contract_draft, event_log, register
 from agent_tools.console.view import derive_view
 
+from . import console_screenshots
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures
 from .test_console_register_service import (
     A1, DRAFT, PID_A, PID_B, READY, Case, Fake, answer_of, git, git_repo)
@@ -175,6 +176,38 @@ class HooksMissingServiceTest(GlobalHooksPath, Case):
         self.registered(root)
         for _at, row in self.rows("registration.ended"):
             self.assertNotIn(register.HOOKS_LINE, row["lines"])
+
+
+class RecordingSeed:
+    """The one method the screenshot seed calls: put(at, kind, project, payload)."""
+
+    def __init__(self) -> None:
+        self.puts: list[tuple[str, dict]] = []
+
+    def put(self, at, kind, project, payload) -> None:
+        self.puts.append((kind, payload))
+
+    def ended(self) -> dict:
+        (payload,) = [p for kind, p in self.puts if kind == event_log.REGISTRATION_ENDED]
+        return payload
+
+
+class HooksMissingPictureTest(unittest.TestCase):
+    def seeded(self, state: str) -> dict:
+        root = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, root, True)
+        git(root, "init", "-q")
+        seed = RecordingSeed()
+        console_screenshots._seed_registration(seed, state, str(root))
+        return seed.ended()
+
+    def test_the_register_apply_state_seeds_the_hooks_line_first(self):
+        self.assertEqual(self.seeded("register-apply")["lines"],
+                         [register.HOOKS_LINE, *console_screenshots.REGISTER_PLAN_LINES])
+
+    def test_the_reconcile_states_keep_today_s_lines(self):
+        self.assertEqual(self.seeded("register-reconcile-apply")["lines"],
+                         list(console_screenshots.REGISTER_PLAN_LINES))
 
 
 if __name__ == "__main__":

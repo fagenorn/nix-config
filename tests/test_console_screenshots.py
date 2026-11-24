@@ -22,7 +22,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from agent_tools.console import account_add, approve, event_log, pictures, service, sprints
+from agent_tools.console import account_add, approve, event_log, pictures, register, service, sprints
 
 from . import accounts_sandbox
 from . import console_screenshots as shots
@@ -2806,8 +2806,8 @@ class ScreenshotFixtureTest(unittest.TestCase):
                         self.assertEqual(card["reason"], "register_apply")
                         self.assertEqual(card["questions"][0]["options"], ["Apply it", "Not now"])
                         self.assertEqual(card["lines"][-2:], shots.REGISTER_PLAN_LINES)
-                        self.assertEqual(card["lines"][:-2],
-                                         [shots.PROPOSAL_LINE] if proposes and reconcile else [])
+                        self.assertEqual(card["lines"][:-2], [shots.PROPOSAL_LINE] if proposes and reconcile
+                                         else [] if reconcile else [register.HOOKS_LINE])
                         self.assertIsNone(registration["draft"])
                     elif reconcile:
                         self.assertEqual(view["inbox"]["open"], [])
