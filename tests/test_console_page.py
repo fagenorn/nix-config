@@ -5431,11 +5431,28 @@ class PageActionTest(unittest.TestCase):
         # Right-to-left letters are legitimate text, so the card cannot refuse them; without a bidi
         # override the browser would reorder and mirror the characters between two of them, and the
         # owner would read other than the bytes that run (e.g. "echo hi \u05d0#" then ">\u05d0 rm").
-        (rule,) = re.findall(r"\.card \.action-command \{([^}]*)\}", PAGE.read_text(encoding="utf-8"))
+        (rule,) = re.findall(r"^\.action-command \{([^}]*)\}", PAGE.read_text(encoding="utf-8"), re.M)
         declarations = {key.strip(): value.strip()
                         for key, value in (part.split(":", 1) for part in rule.split(";") if part.strip())}
         self.assertEqual(declarations["direction"], "ltr")
         self.assertEqual(declarations["unicode-bidi"], "bidi-override")
+
+    def test_an_inbox_row_command_is_covered_by_the_same_unscoped_override(self) -> None:
+        # The override must not hang off `.card`: a second open question renders as a `li.row`, and
+        # the owner approves from that row too.
+        hebrew = "echo hi \u05d0# ;>\u05d0 rm -rf ~"
+        def action_question(index: int, command: str) -> dict:
+            return {**question(index, f"May the manager run Apply {index}?", ["Run it once", "Do not run it"],
+                               "Run it once"),
+                    "owner_only": True, "consequential": True,
+                    "action": {"command": command, "approve_index": 0, "line": ACTION_LINE}}
+        (snap,) = render([START, {"frame": frame([action_question(0, ACTION_COMMAND),
+                                                  action_question(1, hebrew)])}, {"snapshot": True}])
+        (row,) = [n for n in nodes(snap["inbox"]) if n["tag"] == "li" and has_class(n, "row")]
+        (command,) = [n for n in nodes(row) if has_class(n, "action-command")]
+        self.assertEqual(full(command), hebrew)
+        css = PAGE.read_text(encoding="utf-8")
+        self.assertEqual(re.findall(r"^[^\n{]*action-command[^\n{]*\{", css, re.M), [".action-command {"])
 
     def test_a_question_with_no_action_shows_no_action_nodes(self) -> None:
         (snap,) = render([START, {"frame": frame([Q0])}, {"snapshot": True}])
