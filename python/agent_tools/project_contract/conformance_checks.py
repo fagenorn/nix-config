@@ -774,13 +774,13 @@ def never_rise_enforcers(contract: dict, revisions: tuple[str, ...] = ()
                          ) -> tuple[never_rise.Enforcer, ...]:
     """The size rule, the test rules, the ruff rules, the comment rules judged against the
     contract's own tracker repository when it authors one, the record rules, the instruction
-    surface rule, then the Node rules, which keep covering the programs of either of the two
+    surface rule, the routed-set rule, then the Node rules, which keep covering the programs of either of the two
     `revisions` on both."""
     repository = contract["bindings"].get("tracker", {}).get("repo_slug") or None
     return (size_lint.ENFORCER, skipped_test_lint.ENFORCER, copied_test_lint.ENFORCER,
             *ruff_lint.ENFORCERS, *comment_lint.enforcers(repository),
             *record_lint.RECORD_ENFORCERS, instruction_surface_lint.ENFORCER,
-            *node_lint.enforcers(also=revisions))
+            standards_lint.ROUTED_SET_ENFORCER, *node_lint.enforcers(also=revisions))
 
 
 def check_never_rise(context: "Context") -> "Outcome":

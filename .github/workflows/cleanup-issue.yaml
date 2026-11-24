@@ -11,7 +11,9 @@
 # newer merge completed. The never-rise rules include the pinned Ruff, which the
 # platform package carries (ADR-project-contract-020): Nix builds the tools
 # directory and the command gets it as AGENT_PLATFORM_TOOLS, or it cannot judge
-# a Python file and exits 2.
+# a Python file and exits 2. The routed-set rule (B26) reads the platform's bar and stack shards;
+# the command runs from source, so AGENT_PLATFORM_ROOT names the checkout's
+# home/common/agent-skills, which holds standards/, or it exits 2.
 name: Cleanup Issue
 
 on:
@@ -47,4 +49,4 @@ jobs:
         run: |
           tools="$(nix build --no-link --print-out-paths '.#agent-platform.tools')"
           test -n "$tools"
-          AGENT_PLATFORM_TOOLS="$tools/bin" PYTHONPATH=python python3 -m agent_tools.delivery.cleanup_issue file --repo-root "$GITHUB_WORKSPACE" --repo "$GITHUB_REPOSITORY" --branch "$GITHUB_REF_NAME"
+          AGENT_PLATFORM_ROOT="$GITHUB_WORKSPACE/home/common/agent-skills" AGENT_PLATFORM_TOOLS="$tools/bin" PYTHONPATH=python python3 -m agent_tools.delivery.cleanup_issue file --repo-root "$GITHUB_WORKSPACE" --repo "$GITHUB_REPOSITORY" --branch "$GITHUB_REF_NAME"
