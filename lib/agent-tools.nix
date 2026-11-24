@@ -85,6 +85,7 @@ let
     "look-approval" = "delivery.look_approval";
     "look-lint" = "delivery.look_lint";
     "node-lint" = "delivery.node_lint";
+    "omlx-memory-watch" = "hosts.omlx_memory_watch";
     "owner-actions" = "claims.owner_actions";
     "plan-amend" = "delivery.plan_amend";
     "program-copies" = "delivery.program_copies";
