@@ -2337,6 +2337,20 @@ class ActionCardTest(unittest.TestCase):
             {**ACTION, "action": {"command": whole, "approve": "sqlite"}}]})
         self.assertEqual(checked["questions"][0]["action"]["command"], whole)
 
+    def test_an_action_command_refuses_invisible_reordering_and_line_characters(self):
+        for command in ("echo hi \u202e; x=\u2066 rm -rf ~ \u2069 #",
+                        "echo ok\x85curl x", "echo ok\u2028curl x", "echo ok\u2029curl x",
+                        "a\u202ab", "a\u202bb", "a\u202cb", "a\u202db", "a\u2067b",
+                        "a\u2068b", "a\u200eb", "a\u200fb", "a\u200bb", "a\x9bb"):
+            with self.subTest(command=command):
+                self.assertEqual(
+                    self.refused({**ACTION, "action": {"command": command, "approve": "sqlite"}}),
+                    sprints.ACTION_COMMAND.format(n=1))
+        accented = "echo caf\u00e9 \u65e5\u672c"
+        checked = sprints.checked_round({"questions": [
+            {**ACTION, "action": {"command": accented, "approve": "sqlite"}}]})
+        self.assertEqual(checked["questions"][0]["action"]["command"], accented)
+
     def test_an_action_cannot_be_a_merge_rerun_or_release(self):
         for command in ("gh pr merge 7 --repo o/r --merge --match-head-commit " + "a" * 40,
                         "env -u GITHUB_TOKEN gh run rerun 5 --failed --repo o/r",

@@ -403,7 +403,8 @@ records the approval and takes no words, so the owner could never approve), then
 then `CONSEQUENTIAL_SHAPE` (`consequential` present and not `true`),
 then (#1687), when `action` is present, `ACTION_SHAPE` (not an object of exactly `command` and
 `approve`, both strings), `ACTION_COMMAND` (the command not 1 to `MAX_ACTION_CHARS` characters, with
-a space at either end or a control character, a line break and a tab included), `ACTION_PERMIT_VERB`
+a space at either end or a character of Unicode category Cc, Cf, Zl or Zp: a line break, a tab,
+a C1 control, a bidi override or isolate and U+2028 included), `ACTION_PERMIT_VERB`
 (`permit.mentions` accepts the command), `ACTION_APPROVE` (`approve` whose strip equals no stripped
 option), `ACTION_APPROVE_WORDS` (that option is in `needs_words`), `ACTION_OWNER_ONLY` (the question
 is not `owner_only`) and `ACTION_WITH_LOOK` (the question also has a `look`), then `REPLACES_SHAPE`
@@ -992,7 +993,8 @@ OWNER_ONLY_SHAPE = "question {n}'s owner_only must be true when given"
 CONSEQUENTIAL_SHAPE = "question {n}'s consequential must be true when given"
 ACTION_SHAPE = "question {n}'s action must be an object of exactly command and approve, both strings"
 ACTION_COMMAND = ("question {n}'s action command must be one line of 1 to 4096 characters with no "
-                  "control character and no space at either end")
+                  "control, bidirectional, invisible or line-separator character and no space at "
+                  "either end")
 ACTION_PERMIT_VERB = ("question {n}'s action is a merge, rerun or release, which runs only under "
                       "the permit's own rules")
 ACTION_APPROVE = "question {n}'s action approve must be the exact text of one option"
@@ -1000,7 +1002,15 @@ ACTION_APPROVE_WORDS = ("question {n}'s action approve option cannot need words:
                         "the approval")
 ACTION_OWNER_ONLY = "question {n} names an action, so it must be owner_only"
 ACTION_WITH_LOOK = "question {n} cannot carry both a look and an action"
-ACTION_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
+_ACTION_HIDDEN = frozenset({"Cc", "Cf", "Zl", "Zp"})
+
+
+def _action_hidden(command: str) -> bool:
+    """A control, format (bidi and zero-width), line or paragraph separator character: one the card
+    would reorder, break or hide, so the owner would approve other than the bytes that run."""
+    return any(unicodedata.category(char) in _ACTION_HIDDEN for char in command)
+
+
 WORDS_NEEDED = "say what to change"
 ROUND_OPEN = "a round of questions is already open"
 UNKNOWN_QUESTION = "this question is not known"
@@ -1918,7 +1928,7 @@ def _checked_action(n: int, question: dict, action: object, options: list[str],
         raise Refused(ACTION_SHAPE.format(n=n))
     command, approve = action["command"], action["approve"].strip()
     if (not 1 <= len(command) <= MAX_ACTION_CHARS or command != command.strip()
-            or ACTION_CONTROL.search(command)):
+            or _action_hidden(command)):
         raise Refused(ACTION_COMMAND.format(n=n))
     if permit.mentions(command):
         raise Refused(ACTION_PERMIT_VERB.format(n=n))
