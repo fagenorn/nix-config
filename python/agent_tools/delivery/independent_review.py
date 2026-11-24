@@ -77,7 +77,7 @@ from agent_tools.system.siblings import sibling_argv
 
 OPERATION = "diff-review"
 MODEL = "gpt-6.2-astra"
-EFFORT = "xhigh"
+EFFORT = "high"
 FILE_BUDGET = 20
 ATTEMPT_SECONDS = 1700
 GIT_TIMEOUT = 120
