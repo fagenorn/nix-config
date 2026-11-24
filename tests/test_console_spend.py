@@ -646,6 +646,22 @@ class SpendViewTest(ViewCase):
         self.assertIs(v["approximate"], False)
 
 
+class RunFigureTest(unittest.TestCase):
+    def test_a_run_no_day_holds_or_no_view_has_no_figure(self):
+        self.assertIsNone(spend.run_figure(None, "r"))
+        self.assertIsNone(spend.run_figure({"days": [{"day": "2026-11-16", "run": {}}]}, "r"))
+
+    def test_a_run_is_summed_over_the_days_and_other_runs_are_ignored(self):
+        def part(input_, dollars, approximate=False):
+            return {"input": input_, "cache_write": 1, "cache_read": 2, "output": 3,
+                    "dollars": dollars, "approximate": approximate}
+        view = {"approximate": False, "days": [
+            {"day": "2026-11-15", "run": {"r": part(10, 0.1)}},
+            {"day": "2026-11-16", "run": {"r": part(20, 0.2, True), "other": part(99, 9.0)}},
+            {"day": "2026-11-17", "run": {}}]}
+        self.assertEqual(spend.run_figure(view, "r"), {"tokens": 42, "dollars": 0.3, "approximate": True})
+
+
 class UnattributedTest(ViewCase):
     def test_line_without_session_id(self):
         line = json.loads(assistant("A", TODAY, input=2))

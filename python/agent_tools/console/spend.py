@@ -102,6 +102,9 @@ per message key:
   checked before `MANAGERS`, which is for a session that is a sprint's, `OUTSIDE` otherwise, and
   `UNATTRIBUTED` when the session is unknown.
 
+`run_figure(view, run)` is the desk's figure of one run: the sum of `run[<run id>]` over the view's
+days as `{"tokens", "dollars", "approximate"}`, None without a view or when no day holds the run.
+
 `question_sessions(events, known)` maps a session id to the profile of the latest
 `project_question.asked` row naming it; a row without a non-empty `session_id` and a `profile`
 (one written before the row carried them) is ignored, `known` is copied, never mutated.
@@ -721,6 +724,22 @@ def spend_view(
                       for project, kinds in by_project[day].items()}}
                  for day in days],
     }
+
+
+def run_figure(view: Mapping | None, run: str) -> dict | None:
+    """The run's tokens and dollars over the days of a spend view; None when there is no view or no day holds it."""
+    if view is None:
+        return None
+    tokens, dollars, approximate, found = 0, 0.0, False, False
+    for day in view["days"]:
+        part = day["run"].get(run)
+        if part is None:
+            continue
+        found = True
+        tokens += part["input"] + part["cache_write"] + part["cache_read"] + part["output"]
+        dollars += part["dollars"]
+        approximate = approximate or bool(part["approximate"])
+    return {"tokens": tokens, "dollars": round(dollars, 4), "approximate": approximate} if found else None
 
 
 def _attribute(snapshot: Snapshot, key: Key, project_of: Callable[[str], str | None],
