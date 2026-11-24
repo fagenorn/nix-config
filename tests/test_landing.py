@@ -549,5 +549,214 @@ class ReleaseTest(LedgerMaker, unittest.TestCase):
         self.assertEqual(land.forge.refs()[LOCK_REF], SHA)
 
 
+def publish(land: LandingWorld, name: str, text: str) -> str:
+    """Push a commit of `name` holding `text` onto origin's `main` from another clone; return its id."""
+    git = land.world.git
+    bare = git(land.fixture.root, "remote", "get-url", "origin").strip()
+    other = land.world.tmp / f"publisher-{len(os.listdir(land.world.tmp))}"
+    git(land.world.tmp, "clone", "--quiet", "--branch", "main", bare, str(other))
+    (other / name).parent.mkdir(parents=True, exist_ok=True)
+    (other / name).write_text(text, encoding="utf-8")
+    git(other, "add", name)
+    git(other, "commit", "--quiet", "-m", f"publish {name}")
+    git(other, "push", "--quiet", "origin", "HEAD:refs/heads/main")
+    return git(other, "rev-parse", "HEAD").strip()
+
+
+def commit_text(land: LandingWorld, root: Path, name: str, text: str) -> str:
+    (root / name).parent.mkdir(parents=True, exist_ok=True)
+    (root / name).write_text(text, encoding="utf-8")
+    land.world.git(root, "add", name)
+    land.world.git(root, "commit", "--quiet", "-m", f"commit {name}")
+    return land.world.git(root, "rev-parse", "HEAD").strip()
+
+
+class HeadTest(unittest.TestCase):
+    def test_head_answers_clean_with_the_head_and_dirty_for_an_untracked_file(self):
+        land = LandingWorld(self)
+        worktree = land.worktree()
+        head = land.world.git(worktree, "rev-parse", "HEAD").strip()
+        args = ("head", "--worktree-path", str(worktree))
+        self.assertEqual(land.call(*args), (0, {"verdict": "clean", "head": head}))
+        (worktree / "stray.txt").write_text("x\n", encoding="utf-8")
+        self.assertEqual(land.call(*args), (0, {"verdict": "dirty", "head": head}))
+
+
+class ProbeTest(unittest.TestCase):
+    def probe(self, land: LandingWorld, worktree: Path, branch: str = "main") -> tuple[int, dict]:
+        return land.call("probe", "--worktree-path", str(worktree), "--integration-branch", branch)
+
+    def test_probe_answers_conflicted_with_the_files_when_the_base_changed_the_same_lines(self):
+        land = LandingWorld(self)
+        worktree = land.worktree()
+        commit_text(land, worktree, "fixture/farewell.py", "one\n")
+        publish(land, "fixture/farewell.py", "two\n")
+        status, answer = self.probe(land, worktree)
+        self.assertEqual((status, answer), (0, {"verdict": "conflicted", "files": ["fixture/farewell.py"]}))
+        self.assertEqual(land.world.git(worktree, "status", "--porcelain"), "")
+
+    def test_probe_answers_clean_when_up_to_date_and_behind_when_main_moved_without_a_conflict(self):
+        land = LandingWorld(self)
+        worktree = land.worktree()
+        commit_text(land, worktree, "mine.txt", "mine\n")
+        self.assertEqual(self.probe(land, worktree), (0, {"verdict": "clean", "files": []}))
+        publish(land, "theirs.txt", "theirs\n")
+        self.assertEqual(self.probe(land, worktree), (0, {"verdict": "behind", "files": []}))
+        self.assertEqual(land.world.git(worktree, "status", "--porcelain"), "")
+
+    def test_probe_answers_error_for_a_missing_integration_branch(self):
+        land = LandingWorld(self)
+        status, answer = self.probe(land, land.worktree(), "absent")
+        self.assertEqual((status, answer["verdict"], answer["error"]), (1, "error", "probe_failed"), answer)
+
+
+class MergeOfTest(unittest.TestCase):
+    def merge_of(self, land: LandingWorld, worktree: Path) -> tuple[int, dict]:
+        return land.call("merge-of", "--worktree-path", str(worktree), "--integration-branch", "main")
+
+    def moved(self, land: LandingWorld) -> Path:
+        """A worktree with one commit of its own and a fetched `origin/main` that moved on."""
+        worktree = land.worktree()
+        commit_text(land, worktree, "mine.txt", "mine\n")
+        publish(land, "theirs.txt", "theirs\n")
+        land.world.git(worktree, "fetch", "--quiet", "origin")
+        return worktree
+
+    def head(self, land: LandingWorld, worktree: Path) -> str:
+        return land.world.git(worktree, "rev-parse", "HEAD").strip()
+
+    def test_a_clean_merge_of_main_at_head_answers_clean(self):
+        land = LandingWorld(self)
+        worktree = self.moved(land)
+        land.world.git(worktree, "merge", "--quiet", "--no-edit", "origin/main")
+        head = self.head(land, worktree)
+        self.assertEqual(self.merge_of(land, worktree), (0, {"verdict": "clean", "merge_commit": head, "head": head}))
+
+    def test_a_conflicted_merge_answers_review_with_its_merge_commit(self):
+        land = LandingWorld(self)
+        worktree = land.worktree()
+        commit_text(land, worktree, "fixture/farewell.py", "one\n")
+        publish(land, "fixture/farewell.py", "two\n")
+        land.world.git(worktree, "fetch", "--quiet", "origin")
+        with self.assertRaises(Exception):
+            land.world.git(worktree, "merge", "--no-edit", "origin/main")
+        commit_text(land, worktree, "fixture/farewell.py", "resolved\n")
+        head = self.head(land, worktree)
+        self.assertEqual(self.merge_of(land, worktree), (0, {"verdict": "review", "merge_commit": head, "head": head}))
+
+    def test_an_evil_merge_answers_review(self):
+        land = LandingWorld(self)
+        worktree = self.moved(land)
+        land.world.git(worktree, "merge", "--quiet", "--no-commit", "--no-ff", "origin/main")
+        commit_text(land, worktree, "extra.txt", "snuck in\n")
+        head = self.head(land, worktree)
+        self.assertEqual(self.merge_of(land, worktree), (0, {"verdict": "review", "merge_commit": head, "head": head}))
+
+    def test_plain_commits_on_top_of_the_merge_answer_review_with_the_head(self):
+        land = LandingWorld(self)
+        worktree = self.moved(land)
+        land.world.git(worktree, "merge", "--quiet", "--no-edit", "origin/main")
+        merge = self.head(land, worktree)
+        top = commit_text(land, worktree, "more.txt", "more\n")
+        self.assertEqual(self.merge_of(land, worktree), (0, {"verdict": "review", "merge_commit": merge, "head": top}))
+
+    def test_a_head_with_no_merge_of_the_moved_main_answers_none(self):
+        land = LandingWorld(self)
+        worktree = self.moved(land)
+        head = self.head(land, worktree)
+        self.assertEqual(self.merge_of(land, worktree), (0, {"verdict": "none", "merge_commit": "", "head": head}))
+        land.world.git(worktree, "merge", "--quiet", "--no-edit", "origin/main")
+        publish(land, "later.txt", "later\n")
+        land.world.git(worktree, "fetch", "--quiet", "origin")
+        verdict = self.merge_of(land, worktree)[1]
+        self.assertEqual((verdict["verdict"], verdict["merge_commit"]), ("none", ""))
+
+
+class FixedTest(unittest.TestCase):
+    def test_each_reply_reads_its_verdict(self):
+        tests = json.dumps(["python3 -m unittest"])
+        rows = (("committed", "done", SHA, OTHER, tests, "", "committed"),
+                ("committed with no test", "done", SHA, OTHER, "[]", "", "untested"),
+                ("committed with tests not json", "done", SHA, OTHER, "not json", "", "untested"),
+                ("committed with tests not strings", "done", SHA, OTHER, "[1]", "", "untested"),
+                ("untested before not-done", "blocked", SHA, OTHER, "[]", "", "untested"),
+                ("blocked", "blocked", SHA, OTHER, tests, "", "not-done"),
+                ("started elsewhere", "done", OTHER, SHA, tests, "", "not-done"),
+                ("no commit", "done", SHA, "", tests, "", "not-done"),
+                ("unchanged", "done", SHA, SHA, "[]", "already fine", "unchanged"),
+                ("silent", "done", SHA, SHA, "[]", "  ", "silent"))
+        for name, status, start, commit, given, notes, want in rows:
+            with self.subTest(name):
+                answer = lock_main(self, "fixed", "--status", status, "--start-head", start, "--commit", commit,
+                                   "--tests", given, "--notes", notes, "--head", SHA)
+                self.assertEqual(answer, (0, {"verdict": want}))
+
+
+class MergeStateTest(unittest.TestCase):
+    def test_behind_blocked_and_any_other_state_read_their_verdicts(self):
+        forge = ForgeWorld(self)
+        view = ["pr", "view", "7", "--repo", SLUG, "--json", "mergeStateStatus"]
+        for state, want in (("BEHIND", "behind"), ("BLOCKED", "blocked"), ("CLEAN", "other"), ("UNKNOWN", "other")):
+            with self.subTest(state):
+                forge.respond_json("gh", view, {"mergeStateStatus": state})
+                self.assertEqual(lock_main(self, "merge-state", "--repo", SLUG, "--pr", "7"),
+                                 (0, {"verdict": want, "state": state}))
+        for name, payload in (("missing", {}), ("not a string", {"mergeStateStatus": 3})):
+            with self.subTest(name):
+                forge.respond_json("gh", view, payload)
+                status, answer = lock_main(self, "merge-state", "--repo", SLUG, "--pr", "7")
+                self.assertEqual((status, answer["verdict"]), (1, "error"), answer)
+
+
+class PrHeadTest(unittest.TestCase):
+    def test_pr_head_compares_the_pull_requests_head_with_the_expected_one(self):
+        forge = ForgeWorld(self)
+        view = ["pr", "view", "7", "--repo", SLUG, "--json", "headRefOid"]
+        args = ("pr-head", "--repo", SLUG, "--pr", "7", "--head", SHA)
+        forge.respond_json("gh", view, {"headRefOid": SHA})
+        self.assertEqual(lock_main(self, *args), (0, {"verdict": "pushed", "remote": SHA}))
+        forge.respond_json("gh", view, {"headRefOid": OTHER})
+        self.assertEqual(lock_main(self, *args), (0, {"verdict": "head-moved", "remote": OTHER}))
+        forge.respond_json("gh", view, {})
+        status, answer = lock_main(self, *args)
+        self.assertEqual((status, answer["verdict"]), (1, "error"), answer)
+
+
+class BoundSeamTest(unittest.TestCase):
+    def setUp(self):
+        for module, name in ((landing, "CHECK_BOUND_SECONDS"), (forge_land_lock, "BOUND")):
+            patcher = mock.patch.object(module, name, getattr(module, name))
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_a_zero_bound_answers_a_pending_rollup_after_one_read(self):
+        land = LandingWorld(self)
+        land.forge.respond_json("gh", CHECKS_VIEW, {"headRefOid": SHA, "statusCheckRollup": []})
+        with mock.patch.dict(os.environ, {**land.env, "LANDING_BOUND_SECONDS": "0"}), \
+                mock.patch.object(landing, "sleep", side_effect=AssertionError("slept")):
+            status, answer = lock_main(self, "checks", "--repo-root", str(land.fixture.root), "--repo", SLUG,
+                                       "--pr", "7", "--head", SHA)
+        self.assertEqual((status, answer["verdict"]), (0, "pending"), answer)
+        self.assertEqual(sum(argv == CHECKS_VIEW for argv in land.forge.argvs("gh")), 1)
+
+    def test_a_zero_bound_answers_a_lock_another_pull_request_holds_as_contended_without_sleeping(self):
+        forge = ForgeWorld(self)
+        forge.answer_in_process(forge_api)
+        register_lock(forge, OTHER, {SHA: 7, OTHER: 8})
+        with mock.patch.dict(os.environ, {"LANDING_BOUND_SECONDS": "0"}), \
+                mock.patch.object(forge_land_lock, "sleep", side_effect=AssertionError("slept")):
+            status, answer = lock_main(self, "lock", "--repo", SLUG, "--integration-branch", "main", "--head", SHA)
+        self.assertEqual((status, answer["verdict"]), (0, "contended"), answer)
+
+    def test_a_bound_that_is_not_a_number_is_ignored(self):
+        land = LandingWorld(self)
+        land.forge.respond_json("gh", ["pr", "view", "7", "--repo", SLUG, "--json", "mergeStateStatus"],
+                                {"mergeStateStatus": "CLEAN"})
+        for text in ("soon", "-1", "1.5", ""):
+            with self.subTest(text), mock.patch.dict(os.environ, {"LANDING_BOUND_SECONDS": text}):
+                lock_main(self, "merge-state", "--repo", SLUG, "--pr", "7")
+                self.assertEqual((landing.CHECK_BOUND_SECONDS, forge_land_lock.BOUND), (3000, 3000))
+
+
 if __name__ == "__main__":
     unittest.main()

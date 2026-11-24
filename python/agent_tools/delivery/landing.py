@@ -65,6 +65,29 @@ or the delivery has no attempt) or `unreleased` (any failure, `detail`); it neve
 of the attempt (the attempt is the run `items[0].run` names, else the current one) and answers `items[0].end` when
 it is one of `RELEASE_ENDS` (else `land`), or `unreleased`; it never answers `error` either.
 
+`head --worktree-path <w>` prints `clean` or `dirty` (`git status --porcelain` prints anything) with `head`, the
+worktree's `HEAD`. `probe --worktree-path <w> --integration-branch <i>` fetches `origin`, then runs `git merge-tree
+--write-tree --name-only --no-messages HEAD origin/<i>` and prints `clean` (exit 0, `origin/<i>` an ancestor of
+`HEAD`), `behind` (exit 0, not an ancestor) or `conflicted` (exit 1 whose first line is a 40 hex tree id; `files`
+the remaining non-empty lines); any other exit or output is `error` `probe_failed`, for exit 1 alone proves no
+conflict. It changes nothing in the worktree or its index. `merge-of --worktree-path <w> --integration-branch <i>`
+runs no fetch and reads M, the newest first-parent merge commit of `HEAD`: `none` (no M, or `origin/<i>` is not an
+ancestor of `HEAD`, `merge_commit` empty), `clean` (`HEAD` is M and a fresh merge of M's parents has M's tree) or
+`review` (a conflicted merge, an evil merge, or commits on top of M); `merge_commit` is M and `head` is `HEAD`.
+
+`fixed --status X --start-head S --commit C --tests T --notes N --head H` reads a fix reply: `untested` (C is not
+empty and not H, and `T` is not a non-empty JSON list of strings), else `not-done` (X is not `done`, S is not H or
+C is empty), else `unchanged` (C is H with non-blank N), `silent` (C is H with blank N) or `committed`.
+
+`merge-state --repo <o/n> --pr <n>` reads `mergeStateStatus`: `behind` (`BEHIND`), `blocked` (`BLOCKED`) or `other`,
+with `state` the raw string; a missing or non-string value is `error`. `pr-head --repo <o/n> --pr <n> --head <sha>`
+prints `pushed` (the pull request's `headRefOid` is `<sha>`) or `head-moved`, with `remote`; a missing one is
+`error`.
+
+`LANDING_BOUND_SECONDS`, when a decimal integer from 0 up, replaces the check poll bound and the land lock wait
+bound for the process (0: `checks` answers `pending` after one read and `lock` answers `contended` without
+waiting); any other value is ignored.
+
 `criteria_close(body)` and `placement(repo_root, issue)` are the policy the engine's later
 steps import: whether the issue's criteria let a pull request close it, and the branch, the
 worktree path, the integration branch and the tracker slug of the issue.
@@ -97,6 +120,7 @@ CHECK_FIELDS = "headRefOid,statusCheckRollup"
 GREEN_CONCLUSIONS = ("SUCCESS", "SKIPPED", "NEUTRAL")
 UNSETTLED_STATES = ("PENDING", "EXPECTED")
 # GitHub's `YYYY-MM-DDTHH:MM:SSZ`, a year from 1970 on (the guard's `ROLLUP_STARTED_AT_PATTERN`).
+TREE_ID = re.compile(r"^[0-9a-f]{40}$")
 STARTED_AT = re.compile(r"^(19[7-9][0-9]|[2-9][0-9]{3})-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
 LOCK_HELD = ("already_held", "moved")
 # The ends of a land attempt that `release` passes on once the lock is free.
@@ -337,21 +361,31 @@ def _tally(read, *args):
         raise Failure(error.code, error.detail) from None
 
 
-def _is_behind(worktree: str, integration_branch: str) -> bool:
-    """Whether `origin/<integration_branch>`, fetched now, is not an ancestor of the worktree's `HEAD`."""
-    _git(worktree, "fetch", "origin")
+def _git_exit(root: str, *args: str) -> tuple[int, str]:
+    """`git -C root args` as (exit status, stdout); a failure to run it is a `Failure`."""
     env = {k: v for k, v in os.environ.items() if k not in REPOSITORY_ENV}
     try:
-        done = subprocess.run(["git", "-C", worktree, "merge-base", "--is-ancestor",
-                               f"origin/{integration_branch}", "HEAD"], capture_output=True, text=True,
+        done = subprocess.run(["git", "-C", root, *args], capture_output=True, text=True,
                               timeout=GIT_TIMEOUT, check=False, env=env, stdin=subprocess.DEVNULL)
     except subprocess.TimeoutExpired:
         raise Failure("git_failed", "timeout", transient=True) from None
     except OSError as error:
         raise Failure("git_failed", str(error)) from None
-    if done.returncode not in (0, 1):
-        raise Failure("git_failed", done.stderr.strip())
-    return done.returncode == 1
+    return done.returncode, done.stdout if done.returncode in (0, 1) else done.stderr.strip()
+
+
+def _is_ancestor(worktree: str, integration_branch: str) -> bool:
+    """Whether `origin/<integration_branch>` is an ancestor of the worktree's `HEAD`, as it is now."""
+    status, detail = _git_exit(worktree, "merge-base", "--is-ancestor", f"origin/{integration_branch}", "HEAD")
+    if status not in (0, 1):
+        raise Failure("git_failed", detail)
+    return status == 0
+
+
+def _is_behind(worktree: str, integration_branch: str) -> bool:
+    """Whether `origin/<integration_branch>`, fetched now, is not an ancestor of the worktree's `HEAD`."""
+    _git(worktree, "fetch", "origin")
+    return not _is_ancestor(worktree, integration_branch)
 
 
 def pending(args: argparse.Namespace) -> dict:
@@ -530,6 +564,68 @@ def checks(args: argparse.Namespace) -> dict:
         sleep(CHECK_POLL_SECONDS)
 
 
+def head(args: argparse.Namespace) -> dict:
+    sha = _git(args.worktree_path, "rev-parse", "HEAD").strip()
+    dirty = bool(_git(args.worktree_path, "status", "--porcelain").strip())
+    return {"verdict": "dirty" if dirty else "clean", "head": sha}
+
+
+def probe(args: argparse.Namespace) -> dict:
+    _git(args.worktree_path, "fetch", "origin")
+    status, out = _git_exit(args.worktree_path, "merge-tree", "--write-tree", "--name-only", "--no-messages",
+                            "HEAD", f"origin/{args.integration_branch}")
+    if status == 0:
+        return {"verdict": "clean" if _is_ancestor(args.worktree_path, args.integration_branch) else "behind",
+                "files": []}
+    lines = out.splitlines() if status == 1 else []
+    if lines and TREE_ID.match(lines[0]):
+        return {"verdict": "conflicted", "files": [line for line in lines[1:] if line]}
+    raise Failure("probe_failed", f"merge-tree answered exit {status}: {out}")
+
+
+def merge_of(args: argparse.Namespace) -> dict:
+    path = args.worktree_path
+    sha = _git(path, "rev-parse", "HEAD").strip()
+    merge = _git(path, "rev-list", "--first-parent", "--min-parents=2", "--max-count=1", "HEAD").strip()
+    if not merge or not _is_ancestor(path, args.integration_branch):
+        return {"verdict": "none", "merge_commit": "", "head": sha}
+    status, out = _git_exit(path, "merge-tree", "--write-tree", f"{merge}^1", f"{merge}^2")
+    tree = _git(path, "rev-parse", f"{merge}^{{tree}}").strip()
+    clean = sha == merge and status == 0 and out.splitlines()[:1] == [tree]
+    return {"verdict": "clean" if clean else "review", "merge_commit": merge, "head": sha}
+
+
+def fixed(args: argparse.Namespace) -> dict:
+    try:
+        tests = json.loads(args.tests)
+    except ValueError:
+        tests = None
+    tested = isinstance(tests, list) and bool(tests) and all(isinstance(test, str) for test in tests)
+    if args.commit and args.commit != args.head and not tested:
+        return {"verdict": "untested"}
+    if args.status != "done" or args.start_head != args.head or not args.commit:
+        return {"verdict": "not-done"}
+    if args.commit == args.head:
+        return {"verdict": "unchanged" if args.notes.strip() else "silent"}
+    return {"verdict": "committed"}
+
+
+def merge_state(args: argparse.Namespace) -> dict:
+    view = _forge(["pr", "view", str(args.pr), "--repo", args.repo, "--json", "mergeStateStatus"])
+    state = view.get("mergeStateStatus") if isinstance(view, dict) else None
+    if not isinstance(state, str):
+        raise Failure("payload_invalid", "the pull request has no merge state")
+    return {"verdict": {"BEHIND": "behind", "BLOCKED": "blocked"}.get(state, "other"), "state": state}
+
+
+def pr_head(args: argparse.Namespace) -> dict:
+    view = _forge(["pr", "view", str(args.pr), "--repo", args.repo, "--json", "headRefOid"])
+    remote = view.get("headRefOid") if isinstance(view, dict) else None
+    if not isinstance(remote, str):
+        raise Failure("payload_invalid", "the pull request has no head")
+    return {"verdict": "pushed" if remote == args.head else "head-moved", "remote": remote}
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = _Parser(prog="landing", description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True, parser_class=_Parser)
@@ -577,6 +673,22 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_argument("--repo", required=True)
     sub.add_argument("--holder", required=True)
     sub.add_argument("--items", required=True)
+    sub = commands.add_parser("head")
+    sub.add_argument("--worktree-path", required=True)
+    for name in ("probe", "merge-of"):
+        sub = commands.add_parser(name)
+        sub.add_argument("--worktree-path", required=True)
+        sub.add_argument("--integration-branch", required=True)
+    sub = commands.add_parser("fixed")
+    for name in ("status", "start-head", "commit", "tests", "notes", "head"):
+        sub.add_argument(f"--{name}", required=True)
+    sub = commands.add_parser("merge-state")
+    sub.add_argument("--repo", required=True)
+    sub.add_argument("--pr", required=True, type=number)
+    sub = commands.add_parser("pr-head")
+    sub.add_argument("--repo", required=True)
+    sub.add_argument("--pr", required=True, type=number)
+    sub.add_argument("--head", required=True)
     sub = commands.add_parser("checks")
     sub.add_argument("--repo-root", required=True)
     sub.add_argument("--repo", required=True)
@@ -587,11 +699,22 @@ def build_parser() -> argparse.ArgumentParser:
 
 COMMANDS = {"prepare": prepare, "pushed": pushed, "pull": pull, "merged": merged, "lock": lock,
             "checks": checks, "held": held, "unlock": unlock, "pending": pending, "red": red,
-            "lock-budget": lock_budget, "sync-fixes": sync_fixes, "free": free, "release": release}
+            "lock-budget": lock_budget, "sync-fixes": sync_fixes, "free": free, "release": release,
+            "head": head, "probe": probe, "merge-of": merge_of, "fixed": fixed, "merge-state": merge_state,
+            "pr-head": pr_head}
+
+
+def _apply_bound() -> None:
+    """`LANDING_BOUND_SECONDS`, a decimal integer from 0 up, bounds the check poll and the lock wait."""
+    text = os.environ.get("LANDING_BOUND_SECONDS", "")
+    if text.isascii() and text.isdigit():
+        global CHECK_BOUND_SECONDS
+        CHECK_BOUND_SECONDS = forge_land_lock.BOUND = int(text)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    _apply_bound()
     try:
         emit(COMMANDS[args.command](args))
     except Failure as failure:
