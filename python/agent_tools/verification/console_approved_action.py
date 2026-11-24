@@ -1,4 +1,4 @@
-"""The `console-approved-action` verify check (issue 1687).
+"""The `console-approved-action` verify check.
 
 `console-approved-action --since SHA [--log PATH] [--repo-root DIR]` (`console_approved_action`), run through the
 wrapper `home/common/verify-pending/checks/console-approved-action` as

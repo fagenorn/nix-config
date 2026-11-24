@@ -1,4 +1,4 @@
-"""The `sprint` command and its contract for an owner-approved action card (issue 1687)."""
+"""The `sprint` command and its contract for an owner-approved action card."""
 import json
 import unittest
 
@@ -6,7 +6,7 @@ from .test_console_questions import Q0
 from . import test_console_sprint_command as commands
 from .test_console_sprint_command import CONTRACT, run_sprint
 from .test_console_writes import Case
-from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures
 
 
 class SprintActionTest(Case):

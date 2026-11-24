@@ -1,10 +1,10 @@
-"""A question card's owner-approved action: its refusals, its fold and the use that spends it (issue 1687)."""
+"""A question card's owner-approved action: its refusals, its fold and the use that spends it."""
 import unittest
 
 from agent_tools.console import action_card, event_log, sprints
 from agent_tools.console.event_log import Event
 
-from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures
 from .test_console_sprints import QUESTION, SID, answer_row, asked, at, question_state
 
 

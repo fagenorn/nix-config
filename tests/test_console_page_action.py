@@ -1,9 +1,9 @@
-"""The desk page's card for an owner-approved action: its line and its exact command (issue 1687)."""
+"""The desk page's card for an owner-approved action: its line and its exact command."""
 
 import re
 import unittest
 
-from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures
 from .test_console_page import PAGE, Q0, START, frame, full, has_class, nodes, question, render
 
 

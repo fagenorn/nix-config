@@ -1,7 +1,7 @@
 """The wire entries of a question card's look and action, which `view._question_entry` embeds.
 
 `look_entry(question)` is `{"issue", "pr", "head", "state", "line", "approve_index"}` of a card that carries a look
-and `action_entry(question)` is `{"command", "approve_index", "line"}` of one that carries an action (#1687); each
+and `action_entry(question)` is `{"command", "approve_index", "line"}` of one that carries an action; each
 is None for a card without one. `view` documents both entries in its module docstring.
 """
 

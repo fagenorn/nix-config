@@ -1,4 +1,4 @@
-"""An owner-only card's approved command runs once, within an hour, over a signed request (issue 1687)."""
+"""An owner-only card's approved command runs once, within an hour, over a signed request."""
 import http.client
 import json
 from datetime import datetime, timezone
@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from agent_tools.console import permit, service, sprints
 
 from .test_console_manager_service import PermitCase
-from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures
 
 ACTION_COMMAND = "curl -sS -X POST http://127.0.0.1:27999/api/plan-approve --data @/tmp/approve.json"
 T0 = 1_795_000_000.0

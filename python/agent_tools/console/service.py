@@ -1108,7 +1108,7 @@ and appends one `permit.landed` row `{"sprint_id", "session_id", "tool_use_id", 
 {"pr", "head"}}`, only when the command is exactly such a merge (`permit.merge_target`) and the allow of that same
 tool call was judged at most `PERMIT_LANDED_SECONDS` (30 minutes) ago; otherwise it is False and appends nothing.
 
-An approved action (#1687, `action_permit`): a body with a `nonce` is a signed body that carries no secret and no
+An approved action (`action_permit`): a body with a `nonce` is a signed body that carries no secret and no
 command text, which `action_permit.reply` answers through `permit_action` and `permit_action_landed`; only
 that body decides an action: `permit` for a command that names no granted verb still has no decision and no row.
 

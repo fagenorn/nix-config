@@ -1,11 +1,11 @@
-"""The view's entry for a question card that carries an owner-approved action (issue 1687)."""
+"""The view's entry for a question card that carries an owner-approved action."""
 import dataclasses
 import unittest
 
 from agent_tools.console import answer
 from agent_tools.console import sprints as sprints_module
 
-from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures
 from .test_console_view import A, asked, derive_view, started, state
 
 

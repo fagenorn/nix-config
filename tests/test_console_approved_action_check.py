@@ -14,7 +14,7 @@ from tests.test_verify_checks import CHECKS, ROOT, committed_mode, run_from_root
 
 
 class ConsoleApprovedActionTest(unittest.TestCase):
-    """`console-approved-action` (issue 1687): a manager ran an action the owner approved, from its own session."""
+    """`console-approved-action`: a manager ran an action the owner approved, from its own session."""
 
     SPRINT = "a" * 16
     SESSION = "manager-session"

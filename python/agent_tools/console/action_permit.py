@@ -1,4 +1,4 @@
-"""The console's verdict on an approved action a manager's session is about to run (issue 1687).
+"""The console's verdict on an approved action a manager's session is about to run.
 
 A `POST /api/permit` body with a `nonce` is the signed body of `action_card.ActionPermitRequest`:
 `{"sprint_id", "phase", "session_id", "tool_use_id", "command_sha256", "nonce", "auth"}`, which carries no

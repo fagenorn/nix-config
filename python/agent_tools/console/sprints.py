@@ -395,7 +395,7 @@ option), then `NEEDS_WORDS_SHAPE` (`needs_words` present and not a non-empty lis
 one stripped option, each named once) and (#1260) `LOOK_APPROVE_WORDS` (the look's `approve` is also in
 `needs_words`: choosing it records the approval and takes no words, so the owner could never approve), then
 `OWNER_ONLY_SHAPE` (`owner_only` present and not `true`), then `CONSEQUENTIAL_SHAPE` (`consequential` present and
-not `true`), then, when `action` is present, the refusals of `action_card.refusal` (#1687), then `REPLACES_SHAPE`
+not `true`), then, when `action` is present, the refusals of `action_card.refusal`, then `REPLACES_SHAPE`
 (`replaces` present and not an object of exactly `round`, an int that is not a bool and at least 1, and `index`, an
 int that is not a bool and at least 0). The picture checks follow (#1090): `PICTURES_SHAPE` (`pictures` present and
 not a list), `TOO_MANY_PICTURES` (over `MAX_PICTURES`), then per picture `m` (from 1) `PICTURE_SHAPE` (not an
@@ -444,7 +444,7 @@ over a limit folds whole and renders cut; each checked question is then added wi
 round gave none) and `owner_only` (`Question.owner_only`, false unless the round marked it: a question only the
 console's owner answers, #1263) and `consequential` (`Question.consequential`, false unless the round marked it: the
 page opens its card with nothing picked, #1265) and `action` (`Question.action`, None when the round gave none) and
-`action_used_at` (`action_card.folded_use`, #1687). Each checked question's pictures become `Question.pictures`,
+`action_used_at` (`action_card.folded_use`). Each checked question's pictures become `Question.pictures`,
 `QuestionPicture`s in order. A `picture.stored` row adds its `picture` to `SprintState.pictures` when its
 `sprint_id` is folded and `picture` fully matches `PICTURE_ID`; any other such row changes nothing. A
 `questions.asked`, `brief.sent` or `sprint.reported` row of a folded sprint adds the members of its top-level

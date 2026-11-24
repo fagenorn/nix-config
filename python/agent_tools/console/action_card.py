@@ -1,4 +1,4 @@
-"""The action a question card may carry, which the owner's approval lets a manager run (issue 1687).
+"""The action a question card may carry, which the owner's approval lets a manager run.
 
 A question of a round may carry `"action": {"command": <str>, "approve": <str>}`. `sprints.checked_questions`
 asks `refusal` for each, which returns the refusal's text or None, in this order: `ACTION_SHAPE` (not an
