@@ -7,17 +7,38 @@ runner orphans are workloads of their runner user, and the order of a workload's
 Run: just agent-workflow-tests
 """
 
+import contextlib
+import io as stdio
+import json
+import os
+import re
+import signal
+import subprocess
+import sys
+import tempfile
 import unittest
+from datetime import datetime, timezone
+from pathlib import Path
 
 from agent_tools.hosts.memory_floor import (
     GIB,
+    Io,
+    Limits,
+    Loop,
     Owners,
     Proc,
+    enforce_once,
+    kill_line,
+    next_interval,
     parse_launchctl_list,
     parse_ps,
     protected_pids,
+    step,
     workloads,
 )
+from agent_tools.hosts.omlx_memory_watch import ReadingError
+
+ROOT = Path(__file__).resolve().parents[1]
 
 TIER = "fast"
 
@@ -37,6 +58,14 @@ def proc(pid, ppid, uid, cwd, gib, command="node"):
 
 def table_of(*procs):
     return {p.pid: p for p in procs}
+
+
+LIMITS = Limits(16 * GIB, 3, 5, 16 * GIB, 2 * GIB, 2, 10, 24 * GIB, 100)
+KILL_LINE = re.compile(
+    r"^2026-11-24T12:33:05\+00:00 memory_kill reason=(floor|run_bound) owner=anis root_pid=300"
+    r' root="node vitest run" processes=3 tree_gib=\d+\.\d available_before_gib=\d+\.\d'
+    r" available_after_gib=\d+\.\d signals=(term|term\+kill)\n$"
+)
 
 
 def selected(table, omlx_pid=None, services=()):
@@ -137,6 +166,241 @@ class ParseTest(unittest.TestCase):
             parse_ps("garbage")
         listing = "PID\tStatus\tLabel\n55731\t0\torg.nixos.omlx\n-\t0\torg.nixos.sops-nix\n"
         self.assertEqual(parse_launchctl_list(listing), {55731})
+
+
+class FakeIo:
+    """Readings in GiB (the last repeats); a pid dies on SIGKILL, or on SIGTERM unless stubborn."""
+
+    def __init__(self, readings, table, stubborn=(), broken=()):
+        self.readings = list(readings)
+        self.base = dict(table)
+        self.stubborn = set(stubborn)
+        self.broken = set(broken)
+        self.dead = set()
+        self.signals = []
+        self.stamps = []
+        self.time = 1000.0
+
+    def _read(self, name):
+        if name in self.broken:
+            raise ReadingError(f"{name} could not run")
+
+    def available(self):
+        self._read("available")
+        value = self.readings.pop(0) if len(self.readings) > 1 else self.readings[0]
+        return int(value * GIB)
+
+    def table(self):
+        self._read("table")
+        return {pid: p for pid, p in self.base.items() if pid not in self.dead}
+
+    def services(self):
+        self._read("services")
+        return set()
+
+    def omlx_pid(self):
+        self._read("omlx_pid")
+        return None
+
+    def signal(self, pid, sig):
+        self.signals.append((sig, pid))
+        self.stamps.append(self.time)
+        if sig == signal.SIGKILL or pid not in self.stubborn:
+            self.dead.add(pid)
+
+    def alive(self, pid):
+        return pid not in self.dead
+
+    def sleep(self, seconds):
+        self.time += seconds
+
+    def clock(self):
+        return self.time
+
+    def now(self):
+        return datetime(2026, 11, 24, 12, 33, 5, tzinfo=timezone.utc)
+
+    def priority_get(self, pid):
+        return LIMITS.jetsam_priority
+
+    def priority_set(self, pid, priority):
+        pass
+
+    def io(self):
+        return Io(
+            self.available, self.table, self.services, self.omlx_pid, self.signal, self.alive,
+            self.sleep, self.clock, self.now, self.priority_get, self.priority_set,
+        )
+
+
+def w1_and_w2(w1_gib=(8, 6, 6)):
+    first, second, third = w1_gib
+    return table_of(
+        proc(300, 1, 501, W1, first, "node vitest run"),
+        proc(301, 300, 501, W1, second),
+        proc(302, 301, 501, W1, third),
+        proc(310, 1, 501, W2, 4),
+    )
+
+
+class Daemon:
+    def __init__(self, readings, table, stubborn=(), broken=()):
+        self.fake = FakeIo(readings, table, stubborn, broken)
+        self.io = self.fake.io()
+        self.loop = Loop()
+        self.record = {}
+        self.lines = []
+        self.stderr = stdio.StringIO()
+
+    def sample(self, times=1):
+        interval = None
+        with contextlib.redirect_stderr(self.stderr):
+            for _ in range(times):
+                interval = enforce_once(LIMITS, OWNERS, self.io, self.loop, self.record, self.lines.append)
+        return interval
+
+
+class FloorTest(unittest.TestCase):
+    def test_under_the_floor_for_the_declared_samples_the_largest_workload_ends_leaves_first(self):
+        daemon = Daemon([10, 10, 10, 40], w1_and_w2(), stubborn=(302,))
+        daemon.sample(2)
+        self.assertEqual(daemon.fake.signals, [])
+        daemon.sample()
+        self.assertEqual(
+            daemon.fake.signals,
+            [(signal.SIGTERM, 302), (signal.SIGTERM, 301), (signal.SIGTERM, 300), (signal.SIGKILL, 302)],
+        )
+        self.assertGreaterEqual(daemon.fake.stamps[-1] - daemon.fake.stamps[0], LIMITS.grace_seconds)
+        self.assertNotIn(310, [pid for _, pid in daemon.fake.signals])
+
+    def test_the_next_workload_ends_only_while_the_floor_is_still_breached(self):
+        rows = {
+            "recovered": ([10, 10, 10, 40], [300], 1),
+            "still_low": ([10, 10, 10, 12, 30], [300, 310], 2),
+        }
+        for name, (readings, roots, kills) in rows.items():
+            with self.subTest(name):
+                daemon = Daemon(readings, w1_and_w2())
+                daemon.sample(3)
+                termed = {pid for sig, pid in daemon.fake.signals if sig == signal.SIGTERM}
+                self.assertEqual({300, 310} & termed, set(roots))
+                self.assertEqual([e["root_pid"] for e in daemon.record["recent"]], roots)
+                self.assertEqual(len(daemon.record["recent"]), kills)
+
+    def test_a_workload_that_exits_on_sigterm_gets_no_sigkill(self):
+        daemon = Daemon([10, 10, 10, 40], w1_and_w2())
+        daemon.sample(3)
+        self.assertEqual({sig for sig, _ in daemon.fake.signals}, {signal.SIGTERM})
+        self.assertEqual(daemon.record["recent"][0]["signals"], "term")
+
+    def test_each_kill_prints_one_line_and_records_it(self):
+        daemon = Daemon([10, 10, 10, 40], w1_and_w2())
+        daemon.sample(3)
+        (line,) = daemon.lines
+        entry = daemon.record["recent"][0]
+        self.assertEqual(line, kill_line(entry))
+        self.assertRegex(line, KILL_LINE)
+        self.assertIn("reason=floor", line)
+        self.assertEqual(daemon.record["kills"], 1)
+        self.assertEqual(entry["seq"], 1)
+        self.assertEqual(entry["available_before_bytes"], 10 * GIB)
+        self.assertEqual(entry["available_after_bytes"], 40 * GIB)
+        carried = Daemon([10, 10, 10, 40], w1_and_w2())
+        carried.record = {"kills": 50, "recent": [{"seq": seq} for seq in range(1, 51)]}
+        carried.sample(3)
+        self.assertEqual(carried.record["kills"], 51)
+        self.assertEqual([e["seq"] for e in carried.record["recent"]], list(range(2, 52)))
+
+    def test_the_daemon_writes_only_its_record_and_never_follows_a_symlink(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            directory = Path(scratch)
+            target = directory / "target"
+            target.write_text("keep\n")
+            record_path = directory / "floor.json"
+            log_path = directory / "memory-watch.log"
+            record_path.symlink_to(target)
+            log_path.symlink_to(target)
+            daemon = Daemon([10, 10, 10, 40], w1_and_w2())
+            lines = []
+            with contextlib.redirect_stderr(daemon.stderr):
+                for _ in range(3):
+                    step(LIMITS, OWNERS, daemon.io, daemon.loop, daemon.record, record_path, lines.append)
+            self.assertEqual(target.read_text(), "keep\n")
+            self.assertFalse(record_path.is_symlink())
+            self.assertEqual(json.loads(record_path.read_text())["kills"], 1)
+            self.assertTrue(log_path.is_symlink())
+            self.assertEqual(os.readlink(log_path), str(target))
+            self.assertEqual(
+                sorted(p.name for p in directory.iterdir()), ["floor.json", "memory-watch.log", "target"]
+            )
+            self.assertEqual(len(lines), 1)
+
+    def test_an_unreadable_protection_input_ends_nothing(self):
+        for name in ("table", "services", "omlx_pid", "available"):
+            with self.subTest(name):
+                daemon = Daemon([10], w1_and_w2(), broken=(name,))
+                interval = daemon.sample(3)
+                self.assertEqual(daemon.fake.signals, [])
+                self.assertIn(f"{name} could not run", daemon.stderr.getvalue())
+                if name == "available":
+                    self.assertEqual(interval, LIMITS.fast_seconds)
+
+    def test_a_breach_with_no_workload_logs_once_per_episode(self):
+        only_protected = table_of(proc(400, 1, 501, "/Users/anis/Projects/nix-config", 50))
+        daemon = Daemon([10, 10, 10, 10, 50, 10, 10, 10, 10], only_protected)
+        daemon.sample(9)
+        self.assertEqual(daemon.fake.signals, [])
+        self.assertEqual(len(daemon.lines), 2)
+        for line in daemon.lines:
+            self.assertRegex(
+                line, r"^2026-11-24T12:33:05\+00:00 floor_breached no agent workload to end available_gib=10\.0\n$"
+            )
+
+
+class RunBoundTest(unittest.TestCase):
+    def test_a_workload_over_the_run_bound_ends_while_memory_is_over_the_floor(self):
+        table = table_of(
+            proc(300, 1, 501, W1, 30, "node vitest run"),
+            proc(310, 1, 501, W2, 20),
+        )
+        daemon = Daemon([100], table)
+        daemon.sample()
+        self.assertEqual([pid for _, pid in daemon.fake.signals], [300])
+        (line,) = daemon.lines
+        self.assertIn("reason=run_bound", line)
+        (entry,) = daemon.record["recent"]
+        self.assertEqual(entry["reason"], "run_bound")
+        self.assertEqual(daemon.record["kills"], 1)
+
+
+class CadenceTest(unittest.TestCase):
+    def test_the_interval_is_fast_while_memory_falls_or_sits_near_the_floor(self):
+        rows = [
+            (31 * GIB, None, 0, 2),
+            (33 * GIB, None, 0, 10),
+            (50 * GIB, 53 * GIB, 0, 2),
+            (50 * GIB, 51 * GIB, 0, 10),
+            (60 * GIB, 60 * GIB, 1, 2),
+        ]
+        for available, previous, streak, expected in rows:
+            with self.subTest(available=available / GIB, previous=previous, streak=streak):
+                self.assertEqual(next_interval(LIMITS, available, previous, streak), expected)
+
+
+class CommandTest(unittest.TestCase):
+    def test_the_floor_daemon_is_a_row_of_the_command_table(self):
+        lines = (ROOT / "lib" / "agent-tools.nix").read_text().splitlines()
+        self.assertEqual(lines.count('    "memory-floor" = "hosts.memory_floor";'), 1)
+        verdicts = json.loads((ROOT / "python/agent_tools/delivery/command_verdicts.json").read_text())
+        self.assertIsNone(verdicts["memory-floor"])
+        env = {**os.environ, "PYTHONPATH": str(ROOT / "python")}
+        base = [sys.executable, "-m", "agent_tools.hosts.memory_floor"]
+        top = subprocess.run(base + ["--help"], capture_output=True, text=True, env=env, timeout=60)
+        self.assertEqual(top.returncode, 0)
+        self.assertIn("enforce", top.stdout)
+        enforce = subprocess.run(base + ["enforce", "--help"], capture_output=True, text=True, env=env, timeout=60)
+        self.assertEqual(enforce.returncode, 0)
+        self.assertNotIn("--watch-log", enforce.stdout)
 
 
 if __name__ == "__main__":

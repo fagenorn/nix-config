@@ -360,6 +360,18 @@ def write_record(path: Path, document: dict) -> None:
         raise
 
 
+def kill_line(entry: dict) -> str:
+    """The one-line wire format of a floor kill, shared by the floor daemon's log and the watch log."""
+    return (
+        f"{entry['at']} memory_kill reason={entry['reason']} owner={entry['owner']}"
+        f" root_pid={entry['root_pid']} root={json.dumps(entry['root_command'][:200])}"
+        f" processes={entry['processes']} tree_gib={entry['tree_bytes'] / GIB:.1f}"
+        f" available_before_gib={entry['available_before_bytes'] / GIB:.1f}"
+        f" available_after_gib={entry['available_after_bytes'] / GIB:.1f}"
+        f" signals={entry['signals']}\n"
+    )
+
+
 def fseventsd(args) -> int:
     now = args.now if args.now is not None else datetime.now().astimezone()
     try:
