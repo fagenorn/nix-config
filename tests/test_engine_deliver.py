@@ -78,7 +78,7 @@ class EngineProject:
                          encoding="utf-8")
         decoy.chmod(0o755)
         self.env = {key: value for key, value in self.world.env.items()
-                    if key != "AGENT_PLATFORM_ROOT"}
+                    if key not in ("AGENT_PLATFORM_ROOT", "CLAUDE_CODE_SESSION_ID")}
         self.env["PATH"] = f"{self.bin}{os.pathsep}{self.world.env['PATH']}"
         shutil.copy(REPO_ROOT / "home/common/agent-skills/host-declaration.json",
                     self.declaration_path)
@@ -354,6 +354,22 @@ class DeliverTest(unittest.TestCase):
         state = json.loads(status.stdout)
         self.assertIs(state["done"], True)
         self.assertIsNone(state["stop"])
+
+    def test_deliver_records_the_starting_session_from_the_environment(self):
+        project = EngineProject(self)
+        procedures = project.procedures([
+            step("a", "standin-json", "b"), step("b", "standin-record", "c"),
+            step("c", "standin-json", "done")])
+        project.env["CLAUDE_CODE_SESSION_ID"] = "manager-session-1"
+        done = project.deliver(procedures, issue=1512)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        project.env["CLAUDE_CODE_SESSION_ID"] = ""
+        done = project.deliver(procedures, issue=1513)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        documents = {document["issue"]: document for document in (
+            json.loads((run / "run.json").read_text()) for run in project.runs())}
+        self.assertEqual(documents[1512]["starter"], "manager-session-1")
+        self.assertNotIn("starter", documents[1513])
 
     def test_a_failing_command_reaches_the_stop_with_its_code_name_and_need(self):
         for command in ("standin-fail", "standin-says-failed"):

@@ -103,7 +103,7 @@ class ReadingTest(unittest.TestCase):
         self.assertEqual(entry, {
             "run_id": RUN_ID, "issue": 41, "stage": "planning", "stage_text": "planning",
             "reading": "moving", "text": "planning, moving", "wait_until": None,
-            "need": None, "last_event_at": LAST_AT})
+            "need": None, "last_event_at": LAST_AT, "spend": None})
 
     def test_a_live_engine_forty_minutes_into_a_step_reads_moving_and_no_line_says_quiet_or_stuck(self):
         state = poll_state("moving.jsonl", LIVE)
@@ -350,6 +350,20 @@ class ViewLineTest(unittest.TestCase):
         self.assertEqual(entry["engine_runs"], [engine_runs.engine_entry(state, now_ms)])
         self.assertIs(entry["quiet"], False)
 
+    def test_an_engine_runs_entry_carries_its_spend_figure(self):
+        spend_view = {"approximate": False, "days": [
+            {"day": "2026-11-20", "run": {RUN_ID: {"input": 100, "cache_write": 10, "cache_read": 1000,
+                                                    "output": 5, "dollars": 0.25, "approximate": False}}},
+            {"day": "2026-11-21", "run": {
+                RUN_ID: {"input": 50, "cache_write": 0, "cache_read": 0, "output": 5,
+                         "dollars": 0.5, "approximate": True},
+                "wf_9": {"input": 7, "cache_write": 0, "cache_read": 0, "output": 0,
+                         "dollars": 0.01, "approximate": False}}}]}
+        derived = self.derive([view.ProjectState("acme/app", "/srv/app", 1, "2026-11-21T10:00:00Z", 0)],
+                              engine_runs=[live_state()], spend=spend_view)
+        self.assertEqual(derived["entries"][0]["engine_runs"][0]["spend"],
+                         {"tokens": 1170, "dollars": 0.75, "approximate": True})
+
     def test_a_run_of_an_unregistered_project_shows_nowhere(self):
         derived = self.derive([view.ProjectState("acme/app", "/srv/app", 1, "2026-11-21T10:00:00Z", 0)],
                               engine_runs=[live_state("other/app")])
@@ -418,6 +432,19 @@ class EnginePageTest(unittest.TestCase):
         item = self.drawn({"issue": 42, "text": "stopped at claim lost, needs your decision", "wait_until": None})
         self.assertEqual([(c["cls"], page.full(c)) for c in item["children"]],
                          [("issue", "#42"), ("stage", "stopped at claim lost, needs your decision")])
+
+    def test_an_engine_runs_spend_figure_links_to_its_spend_item(self):
+        run = {"issue": 42, "run_id": RUN_ID, "text": "building, moving", "wait_until": None,
+               "spend": {"tokens": 12345, "dollars": 1.5, "approximate": False}}
+        item = self.drawn(run)
+        self.assertEqual([c["cls"] for c in item["children"]], ["issue", "stage", "spend"])
+        link = item["children"][2]
+        self.assertEqual(page.full(link), "12.3k tokens, about $1.50")
+        self.assertEqual(link["href"], "/spend#run=" + RUN_ID)
+        for spend in ({**run["spend"], "tokens": 0}, None):
+            with self.subTest(spend=spend):
+                item = self.drawn({**run, "spend": spend})
+                self.assertEqual([c["cls"] for c in item["children"]], ["issue", "stage"])
 
     def test_a_waiting_runs_until_is_part_of_its_one_sentence(self):
         until = "2026-11-24T22:04:00Z"
