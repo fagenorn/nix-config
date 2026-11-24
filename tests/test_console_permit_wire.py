@@ -17,7 +17,8 @@ from agent_tools.console import manager, permit
 from agent_tools.console import sprint
 
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
-from .test_console_manager_service import ACTION_COMMAND, MERGE, PermitCase
+from .test_console_approved_action import ACTION_COMMAND, ActionCase
+from .test_console_manager_service import MERGE, PermitCase
 
 TIER = "fast"  # a local service on a free port and the standard library
 
@@ -53,7 +54,7 @@ def hook_input(command, call="t-1"):
     return json.dumps(document)
 
 
-class ActionWireTest(PermitCase):
+class ActionWireTest(ActionCase):
     def run_hook(self, port, text, *flags, env):
         out = io.StringIO()
         with mock.patch.dict(os.environ, env), mock.patch.object(sys, "stdin", io.StringIO(text)), \

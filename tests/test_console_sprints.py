@@ -12,7 +12,7 @@ from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
-from agent_tools.console import event_log, manager, permission, sprints
+from agent_tools.console import action_card, event_log, manager, permission, sprints
 from agent_tools.console.deliveries import DELIVERY_GONE, DELIVERY_SEEN, IssueStage
 from agent_tools.console.event_log import (BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, FAULT_DECLARED,
                                            FAULT_WITHDRAWN, GOAL_STATED,
@@ -2314,7 +2314,7 @@ class ActionCardTest(unittest.TestCase):
 
     def test_an_action_must_be_owner_only(self):
         self.assertEqual(self.refused({**QUESTION, "action": ACTION["action"]}),
-                         sprints.ACTION_OWNER_ONLY.format(n=1))
+                         action_card.ACTION_OWNER_ONLY.format(n=1))
 
     def test_a_malformed_action_is_refused_by_shape(self):
         for value in ("curl x", [], {"command": ACTION_COMMAND},
@@ -2323,7 +2323,7 @@ class ActionCardTest(unittest.TestCase):
                       {"command": ACTION_COMMAND, "approve": None}):
             with self.subTest(value=value):
                 self.assertEqual(self.refused({**ACTION, "action": value}),
-                                 sprints.ACTION_SHAPE.format(n=1))
+                                 action_card.ACTION_SHAPE.format(n=1))
 
     def test_an_action_command_must_be_one_exact_line(self):
         for command in ("", "a\nb", "a\rb", " curl x", "curl x ", "curl\tx", "curl \x07x",
@@ -2331,7 +2331,7 @@ class ActionCardTest(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertEqual(
                     self.refused({**ACTION, "action": {"command": command, "approve": "sqlite"}}),
-                    sprints.ACTION_COMMAND.format(n=1))
+                    action_card.ACTION_COMMAND.format(n=1))
         whole = "x" * 4096
         checked = sprints.checked_round({"questions": [
             {**ACTION, "action": {"command": whole, "approve": "sqlite"}}]})
@@ -2345,7 +2345,7 @@ class ActionCardTest(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertEqual(
                     self.refused({**ACTION, "action": {"command": command, "approve": "sqlite"}}),
-                    sprints.ACTION_COMMAND.format(n=1))
+                    action_card.ACTION_COMMAND.format(n=1))
         hebrew = "echo hi \u05d0# ;>\u05d0 rm -rf ~"  # drawn in logical order by the card's CSS
         arabic = "echo \u0627\u0628 \u0661\u0662"
         for command in (hebrew, arabic):
@@ -2365,14 +2365,14 @@ class ActionCardTest(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertEqual(
                     self.refused({**ACTION, "action": {"command": command, "approve": "sqlite"}}),
-                    sprints.ACTION_PERMIT_VERB.format(n=1))
+                    action_card.ACTION_PERMIT_VERB.format(n=1))
 
     def test_the_approve_option_must_be_an_option_that_takes_no_words(self):
         self.assertEqual(
             self.refused({**ACTION, "action": {"command": ACTION_COMMAND, "approve": "postgres"}}),
-            sprints.ACTION_APPROVE.format(n=1))
+            action_card.ACTION_APPROVE.format(n=1))
         self.assertEqual(self.refused({**ACTION, "needs_words": ["sqlite"]}),
-                         sprints.ACTION_APPROVE_WORDS.format(n=1))
+                         action_card.ACTION_APPROVE_WORDS.format(n=1))
         checked = sprints.checked_round({"questions": [
             {**ACTION, "action": {"command": ACTION_COMMAND, "approve": " sqlite "}}]})
         self.assertEqual(checked["questions"][0]["action"]["approve"], "sqlite")
@@ -2380,7 +2380,7 @@ class ActionCardTest(unittest.TestCase):
     def test_an_action_cannot_ride_on_a_look(self):
         look = {"issue": 1, "pr": 2, "head": "a" * 40, "approve": "sqlite"}
         self.assertEqual(self.refused({**ACTION, "look": look}),
-                         sprints.ACTION_WITH_LOOK.format(n=1))
+                         action_card.ACTION_WITH_LOOK.format(n=1))
 
     def test_an_allowed_action_row_marks_the_approval_used(self):
         before = [asked(41, SID, [ACTION]),

@@ -130,9 +130,8 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .more { font-size: .8125rem; color: var(--ov2); }
 .card .more { display: block; margin-top: 4px; }
 .card .context { margin-top: 8px; font-size: .9375rem; line-height: 1.5; color: var(--sub0); overflow-wrap: anywhere; }
-.card .action-line { margin-top: 8px; font-size: .9375rem; line-height: 1.5; color: var(--text); overflow-wrap: anywhere; }
 .action-command { margin: 6px 0 0; direction: ltr; unicode-bidi: bidi-override; white-space: pre-wrap; overflow-wrap: anywhere; font-family: ui-monospace, monospace; font-size: .875rem; }
-.card .look-line { margin-top: 8px; font-size: .9375rem; line-height: 1.5; color: var(--text); overflow-wrap: anywhere; }
+.card .look-line, .card .action-line { margin-top: 8px; font-size: .9375rem; line-height: 1.5; color: var(--text); overflow-wrap: anywhere; }
 .card .opts { margin-top: 6px; padding-left: 18px; list-style: disc; color: var(--sub0); font-size: .84375rem; }
 .rest .opts, .done .opts { flex-basis: 100%; margin: 0; padding-left: 18px; list-style: disc; color: var(--sub0); font-size: .84375rem; }
 .rest .meta, .done .meta { flex-basis: 100%; margin: 0; font-size: .8125rem; color: var(--ov2); }
@@ -3924,17 +3923,9 @@ function lookOf(item) {
   return isQuestion(item) && item.look !== null && typeof item.look === "object" ? item.look : null;
 }
 function lookLine(node, item) {
-  const look = lookOf(item);
+  const look = lookOf(item), action = isQuestion(item) ? item.action : null;
   if (look !== null && typeof look.line === "string") node.appendChild(el("p", "look-line", look.line));
-}
-function approvedOf(item) {
-  return isQuestion(item) && typeof item.action === "object" && item.action !== null ? item.action : null;
-}
-function approvedLine(node, item) {
-  const action = approvedOf(item);
-  if (action === null || typeof action.line !== "string" || typeof action.command !== "string") return;
-  node.appendChild(el("p", "action-line", action.line));
-  node.appendChild(el("pre", "action-command", action.command));
+  if (action && typeof action.line === "string" && typeof action.command === "string") [el("p", "action-line", action.line), el("pre", "action-command", action.command)].forEach((part) => node.appendChild(part));
 }
 function isLookCard(item) {
   return item.answered === true && lookOf(item) !== null;
@@ -4638,9 +4629,7 @@ function sprintGoal(sprintId) {
       const finished = project.finished_sprints;
       const shown = (project.sprints || []).concat(
         finished !== null && finished !== undefined && Array.isArray(finished.sprints) ? finished.sprints : []);
-      for (const sprint of shown) {
-        if (sprint.sprint_id === sprintId && typeof sprint.goal === "string") return sprint.goal;
-      }
+      for (const sprint of shown) if (sprint.sprint_id === sprintId && typeof sprint.goal === "string") return sprint.goal;
     }
   }
   return null;
@@ -5048,7 +5037,6 @@ function leadItem(item) {
   if (isOwnerCheck(item)) checkHead(card, item);
   if (isQuestion(item) && typeof item.context === "string") card.appendChild(el("p", "context", item.context));
   lookLine(card, item);
-  approvedLine(card, item);
   if (isQuestion(item)) {
     const gallery = pictureGallery(itemId(item), item.pictures);
     if (gallery !== null) card.appendChild(gallery);
@@ -5091,7 +5079,6 @@ function itemLine(item) {
   if (isOwnerCheck(item)) checkHead(line, item);
   if (isQuestion(item) && typeof item.context === "string") line.appendChild(el("p", "context", item.context));
   lookLine(line, item);
-  approvedLine(line, item);
   if (isQuestion(item)) {
     const gallery = pictureGallery(itemId(item), item.pictures);
     if (gallery !== null) line.appendChild(gallery);

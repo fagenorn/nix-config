@@ -1029,115 +1029,88 @@ Success is 200 `application/json` (sorted keys, compact): `{"notice":<id>}` for 
 `seq`) and a withdrawal (the withdrawn id), `{"notices":[<sprints.notice_entry>...],"overlaps":
 [<sprints.claim_overlaps of those entries>...]}` for the list.
 `post_notice(sprint_id, secret, notice)`, under the ingest lock, is `_manager_sprint` (`NOT_OPEN`, then
-`SecretRefused`), then `sprints.postable_notice` against every other folded sprint, with a folder
-test built from the sprint's project root (a stat per part of a claim's `what`, so a claim naming a
-directory is refused; a project not registered has no folder); it appends exactly
-one `notice.posted` row (project the sprint's project) `{"sprint_id", "goal", "notice": <checked>}`,
-folds, publishes and returns the row's `seq`. `withdraw_notice` is `_manager_sprint` then
-`sprints.withdrawable_notice`; it appends exactly one `notice.withdrawn` row `{"sprint_id", "goal",
-"notice": <id>}` and returns the id. `list_notices` is `_manager_sprint` then
-`sprints.project_notices` over every folded sprint of the project, and appends and publishes
-nothing. None of the three nudges anybody, and none calls `tick`, `owner_path` or any other tracker
-writer; a refusal appends and publishes nothing.
+`SecretRefused`), then `sprints.postable_notice` against every other folded sprint, with a folder test built from the
+sprint's project root (a stat per part of a claim's `what`, so a claim naming a directory is refused; a project not
+registered has no folder); it appends exactly one `notice.posted` row (project the sprint's project) `{"sprint_id",
+"goal", "notice": <checked>}`, folds, publishes and returns the row's `seq`. `withdraw_notice` is `_manager_sprint`
+then `sprints.withdrawable_notice`; it appends exactly one `notice.withdrawn` row `{"sprint_id", "goal", "notice":
+<id>}` and returns the id. `list_notices` is `_manager_sprint` then `sprints.project_notices` over every folded sprint
+of the project, and appends and publishes nothing. None of the three nudges anybody, and none calls `tick`,
+`owner_path` or any other tracker writer; a refusal appends and publishes nothing.
 
-Live faults (#1432): `POST /api/live-fault` is a manager write dispatched like `/api/notice`, before
-`PAGE_WRITES`, through `_checked_length(MAX_LIVE_FAULT_BYTES)` (16384: any `Origin` 403 `origin
-refused`, 415, 411, 413 `too large`), so it is owner-only on the guest port. A body
-`sprints.parse_live_fault_request` (`sprint_id`, `secret`, `fault`) does not accept is 400 `bad live
-fault`; a `sprints.SecretRefused` is `console: live_fault_refused <sprint_id> secret refused` and 403
-`secret refused`; any other `sprints.Refused` is the same prefix with the reason and 409 with the
-reason (a fixed `sprints.py` text: neither the secret nor the evidence text is printed); any other
-exception is `console: live_fault_failed <Type>: <message>` and 500 `live fault failed`. Success is
-200 `application/json` (sorted keys, compact) `{"fault":<id>}`, the new row's `seq`.
-`declare_live_fault(sprint_id, secret, fault)`, under the ingest lock, is `_manager_sprint`
-(`NOT_OPEN`, then `SecretRefused`), then `sprints.declarable_fault`; it appends exactly one
-`fault.declared` row (project the sprint's project) `{"sprint_id", "goal", "fault": <checked>}`,
-folds, publishes and returns the row's `seq`. It nudges nobody and calls no tracker writer; a
-refusal appends and publishes nothing.
+Live faults (#1432): `POST /api/live-fault` is a manager write dispatched like `/api/notice`, before `PAGE_WRITES`,
+through `_checked_length(MAX_LIVE_FAULT_BYTES)` (16384: any `Origin` 403 `origin refused`, 415, 411, 413 `too large`),
+so it is owner-only on the guest port. A body `sprints.parse_live_fault_request` (`sprint_id`, `secret`, `fault`) does
+not accept is 400 `bad live fault`; a `sprints.SecretRefused` is `console: live_fault_refused <sprint_id> secret
+refused` and 403 `secret refused`; any other `sprints.Refused` is the same prefix with the reason and 409 with the
+reason (a fixed `sprints.py` text: neither the secret nor the evidence text is printed); any other exception is
+`console: live_fault_failed <Type>: <message>` and 500 `live fault failed`. Success is 200 `application/json` (sorted
+keys, compact) `{"fault":<id>}`, the new row's `seq`. `declare_live_fault(sprint_id, secret, fault)`, under the ingest
+lock, is `_manager_sprint` (`NOT_OPEN`, then `SecretRefused`), then `sprints.declarable_fault`; it appends exactly one
+`fault.declared` row (project the sprint's project) `{"sprint_id", "goal", "fault": <checked>}`, folds, publishes and
+returns the row's `seq`. It nudges nobody and calls no tracker writer; a refusal appends and publishes nothing.
 
-The owner withdraws a live fault (#1432): `POST /api/live-fault-withdraw` (`{"project_id", "sprint_id",
-"fault"}`, at most `MAX_LIVE_FAULT_WITHDRAW_BYTES` 4096) is a page write, so it passes `_page_write`'s guard
-before any body is read (no or a foreign `Origin` 403 `origin refused`, a missing or wrong token 403 `token
-refused`, nothing appended) and is owner-only on the guest port. A body `sprints.parse_live_fault_withdrawal`
-does not accept is 400 `bad live fault withdrawal`; a `sprints.Refused` is 409 with the reason and the one
-line `console: live_fault_withdraw_refused <sprint_id> <reason>`, where `<sprint_id>` is the id the parser
-checked as 16 lowercase hex and `<reason>` a fixed `sprints.py` text: the request's `project_id`, which may
-hold any text, is never printed; any other exception is `console: live_fault_withdraw_failed <Type>:
-<message>` and 500 `live fault withdrawal failed`. Success is 204.
-`withdraw_live_fault(project_id, sprint_id, fault_id)`, under the ingest lock, takes the folded sprint
-(`NOT_OPEN` when there is none or its project is not `project_id`), then `sprints.withdrawable_fault`
-(unknown or already withdrawn), and appends exactly one `fault.withdrawn` row (project the sprint's project)
-`{"sprint_id", "goal", "fault": <id>}`, folds, publishes and returns the id. It applies no stop or end gate:
-the owner withdraws a declaration of an ended sprint too. It nudges nobody and sends no message; a refusal
-appends and publishes nothing.
+The owner withdraws a live fault (#1432): `POST /api/live-fault-withdraw` (`{"project_id", "sprint_id", "fault"}`, at
+most `MAX_LIVE_FAULT_WITHDRAW_BYTES` 4096) is a page write, so it passes `_page_write`'s guard before any body is read
+(no or a foreign `Origin` 403 `origin refused`, a missing or wrong token 403 `token refused`, nothing appended) and is
+owner-only on the guest port. A body `sprints.parse_live_fault_withdrawal` does not accept is 400 `bad live fault
+withdrawal`; a `sprints.Refused` is 409 with the reason and the one line `console: live_fault_withdraw_refused
+<sprint_id> <reason>`, where `<sprint_id>` is the id the parser checked as 16 lowercase hex and `<reason>` a fixed
+`sprints.py` text: the request's `project_id`, which may hold any text, is never printed; any other exception is
+`console: live_fault_withdraw_failed <Type>: <message>` and 500 `live fault withdrawal failed`. Success is 204.
+`withdraw_live_fault(project_id, sprint_id, fault_id)`, under the ingest lock, takes the folded sprint (`NOT_OPEN` when
+there is none or its project is not `project_id`), then `sprints.withdrawable_fault` (unknown or already withdrawn),
+and appends exactly one `fault.withdrawn` row (project the sprint's project) `{"sprint_id", "goal", "fault": <id>}`,
+folds, publishes and returns the id. It applies no stop or end gate: the owner withdraws a declaration of an ended
+sprint too. It nudges nobody and sends no message; a refusal appends and publishes nothing.
 
-Owner notice nudges (#1120, ADR-console-044): with a nudger, `post_owner_notice` records, still under the
-lock, in `_notice_due[sprint_id]` the new row's seq for each sprint of the project with `sprints.takes_notices`
-and `_reachable` (every `_nudgeable` condition but the unread message), and reserves in `_nudging` and
-dispatches `_dispatch_notice_nudge` after the lock each of them not already reserved; a reserved sprint keeps
-the due notice for later. `_nudge` and `_notice_nudge` pop the due id (`covered`) in their first lock block, so
-a nudge started after the post covers it: one relay carries a queued message and a notice together, and a
-notice posted after that start is due again. A failed message send puts `covered` back. Wherever either ends a
-reservation without scheduling a message re-nudge, `_notice_follow` reserves the sprint again when a notice is
-still due (and drops it for a stopping service, no nudger or a sprint no longer reachable), and the notice
-nudge is dispatched; `renudge` drains `_notice_due` the same way for a sprint another holder (a wake, an idle
-nudge, a takeover) released without looking. `_notice_nudge` sends the same fixed sentence through `_reach`,
-the routing `_nudge` shares (listing, wake settings, quota recheck, relay or wake, `UNKNOWN_SESSION`), then
-appends one `notice.nudged {sprint_id, notice, route, ok[, reason][, listing_failed]}` row for the sprint's
-project (a failure also prints `console: notice_nudge_failed <sprint_id> <reason>`); the row is not kept and
-nothing folds it. A notice nudge is never retried after its own attempt, counts no `failed_nudges`, sets no
-`last_nudge_at` and delivers no message; one that cannot be dispatched is the same row with route null and the
+Owner notice nudges (#1120, ADR-console-044): with a nudger, `post_owner_notice` records, still under the lock, in
+`_notice_due[sprint_id]` the new row's seq for each sprint of the project with `sprints.takes_notices` and `_reachable`
+(every `_nudgeable` condition but the unread message), and reserves in `_nudging` and dispatches
+`_dispatch_notice_nudge` after the lock each of them not already reserved; a reserved sprint keeps the due notice for
+later. `_nudge` and `_notice_nudge` pop the due id (`covered`) in their first lock block, so a nudge started after the
+post covers it: one relay carries a queued message and a notice together, and a notice posted after that start is due
+again. A failed message send puts `covered` back. Wherever either ends a reservation without scheduling a message
+re-nudge, `_notice_follow` reserves the sprint again when a notice is still due (and drops it for a stopping service,
+no nudger or a sprint no longer reachable), and the notice nudge is dispatched; `renudge` drains `_notice_due` the same
+way for a sprint another holder (a wake, an idle nudge, a takeover) released without looking. `_notice_nudge` sends the
+same fixed sentence through `_reach`, the routing `_nudge` shares (listing, wake settings, quota recheck, relay or
+wake, `UNKNOWN_SESSION`), then appends one `notice.nudged {sprint_id, notice, route, ok[, reason][, listing_failed]}`
+row for the sprint's project (a failure also prints `console: notice_nudge_failed <sprint_id> <reason>`); the row is
+not kept and nothing folds it. A notice nudge is never retried after its own attempt, counts no `failed_nudges`, sets
+no `last_nudge_at` and delivers no message; one that cannot be dispatched is the same row with route null and the
 reason `the nudge could not start: <Type>: <message>`, and the post still answers 204.
 
 Permit (#1377, #1401, ADR-console-094): `POST /api/permit` is a manager write dispatched beside `/api/notices`
-through `_checked_length(MAX_PERMIT_BYTES)` (16384). Its body is `sprints.parse_permit_request`'s
-`{"sprint_id", "secret", "phase": "judge" | "landed", "session_id", "tool_use_id", "command"}`, else 400 `bad permit`;
-a `sprints.SecretRefused` is 403 `secret refused`, any other `sprints.Refused` 409 with its reason, any
-other exception 500 `permit failed`, each with one stderr line `console: permit_refused <sprint_id>
-<reason>` or `console: permit_failed <Type>: <message>`. Success is 200: phase `judge` answers
-`{"decision": "allow" | "deny" | null, "reason": <str>}` and phase `landed` `{"recorded": <bool>}`.
-`permit(sprint_id, secret, session_id, tool_use_id, command)` answers a `permit.Verdict`: under the ingest lock it
-checks the secret (`_manager_sprint`), returns no decision (`decision` None, no row) for a command
-`permit.mentions` rejects (a command running a release is a mention: the plain `release transaction run`
-is `allow` with verb `release` and target `{"commit", "version"}` and reads no forge; abandon and dispose are
-`deny` with `permit.NO_ABANDON` and `permit.NO_DISPOSE`, whatever the program is named), and denies `permit.NOT_ACTIVE` unless the sprint is `STARTING` and
-`sprints.takes_questions` (no closing, no stop request, no stop, and not ended by a done report), and
-`permit.NOT_MANAGER` unless `session_id` is the sprint's
-`manager_session`. It takes the grant from the sprint (`issues`: the newest report's issues that a
-delivery of the manager's own session carries, as `SprintState.delivered` records them, so a delivery
-run the console has since cleaned up still counts; `others`: the issues the newest report of every other
-open sprint of the project lists) and, off the lock,
-the project's slug (`slug_of`), branch pattern (`branch_pattern_of`) and merge binding
-(`merge_binding_of`), judges with `permit.judge` over `permit.memoized(permit_forge)`, then under the
-lock again takes the sprint, its checks and the grant afresh and judges once more over the memo's
-frozen replay: any refusal, any difference or any read the memo did not hold is `permit.MOVED`. Each
-decided verdict appends one `permit.judged` row under that lock `{"sprint_id", "session_id",
-"tool_use_id", "repo", "verb", "decision", "reason", "target"}`; an allowed merge is also remembered in
-memory as `(sprint_id, session_id, tool_use_id, repo, pr, head)` with the service's clock.
-`permit_landed(sprint_id, secret, session_id, tool_use_id, command)` is True, and
-appends one `permit.landed` row `{"sprint_id", "session_id", "tool_use_id", "repo", "verb": "merge",
-"target": {"pr", "head"}}`, only when the command is exactly such a merge (`permit.merge_target`) and
-the allow of that same tool call was judged at most `PERMIT_LANDED_SECONDS` (30 minutes) ago;
-otherwise it is False and appends nothing.
+through `_checked_length(MAX_PERMIT_BYTES)` (16384). Its body is `sprints.parse_permit_request`'s `{"sprint_id",
+"secret", "phase": "judge" | "landed", "session_id", "tool_use_id", "command"}`, else 400 `bad permit`; a
+`sprints.SecretRefused` is 403 `secret refused`, any other `sprints.Refused` 409 with its reason, any other
+exception 500 `permit failed`, each with one stderr line `console: permit_refused <sprint_id> <reason>` or `console:
+permit_failed <Type>: <message>`. Success is 200: phase `judge` answers `{"decision": "allow" | "deny" | null,
+"reason": <str>}` and phase `landed` `{"recorded": <bool>}`. `permit(sprint_id, secret, session_id, tool_use_id,
+command)` answers a `permit.Verdict`: under the ingest lock it checks the secret (`_manager_sprint`), returns no
+decision (`decision` None, no row) for a command `permit.mentions` rejects (a command running a release is a
+mention: the plain `release transaction run` is `allow` with verb `release` and target `{"commit", "version"}` and
+reads no forge; abandon and dispose are `deny` with `permit.NO_ABANDON` and `permit.NO_DISPOSE`, whatever the
+program is named), and denies `permit.NOT_ACTIVE` unless the sprint is `STARTING` and `sprints.takes_questions` (no
+closing, no stop request, no stop, and not ended by a done report), and `permit.NOT_MANAGER` unless `session_id` is
+the sprint's `manager_session`. It takes the grant from the sprint (`issues`: the newest report's issues that a
+delivery of the manager's own session carries, as `SprintState.delivered` records them, so a delivery run the
+console has since cleaned up still counts; `others`: the issues the newest report of every other open sprint of the
+project lists) and, off the lock, the project's slug (`slug_of`), branch pattern (`branch_pattern_of`) and merge
+binding (`merge_binding_of`), judges with `permit.judge` over `permit.memoized(permit_forge)`, then under the lock
+again takes the sprint, its checks and the grant afresh and judges once more over the memo's frozen replay: any
+refusal, any difference or any read the memo did not hold is `permit.MOVED`. Each decided verdict appends one
+`permit.judged` row under that lock `{"sprint_id", "session_id", "tool_use_id", "repo", "verb", "decision",
+"reason", "target"}`; an allowed merge is also remembered in memory as `(sprint_id, session_id, tool_use_id, repo,
+pr, head)` with the service's clock. `permit_landed(sprint_id, secret, session_id, tool_use_id, command)` is True,
+and appends one `permit.landed` row `{"sprint_id", "session_id", "tool_use_id", "repo", "verb": "merge", "target":
+{"pr", "head"}}`, only when the command is exactly such a merge (`permit.merge_target`) and the allow of that same
+tool call was judged at most `PERMIT_LANDED_SECONDS` (30 minutes) ago; otherwise it is False and appends nothing.
 
-An approved action (`permit.judge_action`): a body with a `nonce` is the signed body
-`{"sprint_id", "phase", "session_id", "tool_use_id", "command_sha256", "nonce", "auth"}`, which carries no
-secret and no command text. `permit_secret(sprint_id, auth, signed)` (the ingest lock; an unknown sprint
-is 409, a sprint with no secret file or an `auth` that is not `permit.action_request_auth` of the body's
-`signed_bytes` under the secret 403) returns the secret, and the handler calls `permit_action` (phase
-`judge`) or `permit_action_landed` (`landed`) with it. A judge reply is 200 `{"decision", "reason",
-"mac"}`, `mac` being `permit.action_reply_mac` for the request's nonce, which the hook checks before it
-honours the decision; a landed reply is `{"recorded": <bool>}`. `permit_action` holds the ingest lock for
-all of it: the secret and the manager's session as `permit` checks them (`_permit_refusal`), then
-`permit.judge_action` over the sprint's questions at the console's time; a command no card names has no
-decision and no row, otherwise the decided verdict is appended as a `permit.judged` row (verb `action`,
-repo null, target `{"round", "index"}`) before the lock is released, which folds the card as used, so
-an allow is never given twice for one approval. An allowed action is also remembered in memory with the
-console's clock, and `permit_action_landed` appends one `permit.landed` row `{"sprint_id", "session_id",
-"tool_use_id", "repo": null, "verb": "action", "target": {"round", "index"}}` only for a card whose
-command has the digest and an allow of that same tool call at most `PERMIT_LANDED_SECONDS` ago; otherwise
-it is False and appends nothing. Only the signed body decides an action: `permit` for a command that names
-no granted verb still has no decision and no row.
+An approved action (#1687, `action_permit`): a body with a `nonce` is a signed body that carries no secret and no
+command text, which `action_permit.reply` answers through `permit_action` and `permit_action_landed`; only
+that body decides an action: `permit` for a command that names no granted verb still has no decision and no row.
 
 Permission card (#1424, `prompt_card`): `POST /api/permission-prompt` is a manager write dispatched beside
 `/api/permit` through `_checked_length(MAX_PROMPT_BYTES)` (262144: twelve bytes for each of the
@@ -2043,8 +2016,9 @@ from urllib.parse import parse_qsl
 
 from agent_tools.claims import owner_actions
 from agent_tools.console import (
-    project_question, account_add, account_remove, activation, checkout_remote, activation_run, answer, approve, capacity, contract_draft, deliveries, digest, engine_runs, exclusion, idle, inbox,
+    action_permit, project_question, account_add, account_remove, activation, checkout_remote, activation_run, answer, approve, capacity, contract_draft, deliveries, digest, engine_runs, exclusion, idle, inbox,
     folder_trust, guest, manager, movement, nudge, peer, permission, permit, pin, plan_questions, probe, question_records, prompt_card, register, release_card, revive, pictures, sessions, signin, signin_run, spend, sprints, transcript_digest, write_guard)
+from agent_tools.console.action_permit import PERMIT_LANDED_SECONDS, ActionPermit
 from agent_tools.console.event_log import (
     BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, FAULT_DECLARED, FAULT_WITHDRAWN, GOAL_STATED, GOAL_WITHDRAWN, MANAGER_FAILED,
     MANAGER_NO_PROGRESS, MANAGER_NUDGED, MANAGER_STALLED, MANAGER_STARTED, MANAGER_STOP_FAILED,
@@ -2222,7 +2196,6 @@ MAX_PERMIT_BYTES = 16384
 # astral one is two `\uXXXX` escapes), so a command of `MAX_COMMAND_CHARS` characters needs that many.
 MAX_PROMPT_BYTES = 12 * prompt_card.MAX_COMMAND_CHARS + 65536
 MAX_PROMPT_ANSWER_BYTES = 1024
-PERMIT_LANDED_SECONDS = 30 * 60
 MAX_WITHDRAW_NOTICE_BYTES = 4096
 MAX_OWNER_NOTICE_BYTES = 4096
 MAX_OWNER_NOTICE_WITHDRAW_BYTES = 4096
@@ -3372,29 +3345,16 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             request = sprints.parse_permit_request(self.rfile.read(length))
         except ValueError:
             return self._refuse(400, "bad permit")
-        console = self.server.console
         try:
             if isinstance(request, sprints.ActionPermitRequest):
-                secret = console.permit_secret(request.sprint_id, request.auth, request.signed)
-                if request.phase == "judge":
-                    verdict = console.permit_action(
-                        request.sprint_id, secret, request.session_id, request.tool_use_id,
-                        request.digest)
-                    reply = {"decision": verdict.decision, "reason": verdict.reason,
-                             "mac": permit.action_reply_mac(
-                                 secret, request.sprint_id, request.nonce, request.digest,
-                                 verdict.decision, verdict.reason)}
-                else:
-                    reply = {"recorded": console.permit_action_landed(
-                        request.sprint_id, secret, request.session_id, request.tool_use_id,
-                        request.digest)}
+                reply = action_permit.reply(self.server.console, request)
             elif request.phase == "judge":
-                verdict = console.permit(
+                verdict = self.server.console.permit(
                     request.sprint_id, request.secret, request.session_id, request.tool_use_id,
                     request.command)
                 reply = {"decision": verdict.decision, "reason": verdict.reason}
             else:
-                reply = {"recorded": console.permit_landed(
+                reply = {"recorded": self.server.console.permit_landed(
                     request.sprint_id, request.secret, request.session_id, request.tool_use_id,
                     request.command)}
         except sprints.SecretRefused:
@@ -4594,7 +4554,7 @@ def _retry_line(project_id: str, key: str) -> Callable[[int, ForgeError], None]:
     return on_retry
 
 
-class ConsoleService:
+class ConsoleService(ActionPermit):
     def __init__(self, store: Path, registry: Path, *, port: int = DEFAULT_PORT,
                  poll_seconds: float = POLL_SECONDS,
                  session_dirs: Callable[[], Iterable[Path]] = default_session_dirs,
@@ -9697,50 +9657,6 @@ class ConsoleService:
             "repo": slug, "verb": verdict.verb, "decision": verdict.decision, "reason": verdict.reason,
             "target": dict(verdict.target)})]))
         return verdict
-
-    def permit_secret(self, sprint_id: str, auth: str, signed: bytes) -> str:
-        """The sprint's secret, when `auth` is the hook's HMAC under it of `signed` (the secret is never sent)."""
-        with self._ingest:
-            if sprint_id not in self._sprints:
-                raise sprints.Refused(sprints.NOT_OPEN)
-            expected = sprints.read_secret(self._sprint_secrets, sprint_id)
-            if expected is None or not hmac.compare_digest(
-                    permit.action_request_auth(expected, signed).encode(), auth.encode()):
-                raise sprints.SecretRefused(sprints.SECRET_REFUSED)
-            return expected
-
-    def permit_action(self, sprint_id: str, secret: str, session_id: str, tool_use_id: str,
-                      digest: str) -> permit.Verdict:
-        """The verdict on a command an owner-only card may have approved, by its digest."""
-        with self._ingest:
-            sprint = self._manager_sprint(sprint_id, secret)
-            verdict = permit.judge_action(digest, sprint.questions, self._now())
-            if verdict.decision is None:
-                return verdict
-            verdict = self._permit_refusal(sprint, session_id, permit.ACTION) or verdict
-            if verdict.decision == permit.ALLOW:
-                self._permit_allows[(sprint_id, session_id, tool_use_id, permit.ACTION,
-                                     verdict.target["round"], verdict.target["index"])] = self._clock()
-            return self._permit_record(sprint, session_id, tool_use_id, None, verdict)
-
-    def permit_action_landed(self, sprint_id: str, secret: str, session_id: str, tool_use_id: str,
-                             digest: str) -> bool:
-        """Record an approved action the console allowed and the manager's session ran; False records nothing."""
-        with self._ingest:
-            sprint = self._manager_sprint(sprint_id, secret)
-            for question in sprint.questions:
-                if question.action is None or permit.command_digest(question.action.command) != digest:
-                    continue
-                judged = self._permit_allows.get((sprint_id, session_id, tool_use_id, permit.ACTION,
-                                                  question.round_id, question.index))
-                if judged is None or self._clock() - judged > PERMIT_LANDED_SECONDS:
-                    continue
-                self._apply(self.log.append([(PERMIT_LANDED, sprint.project_id, {
-                    "sprint_id": sprint_id, "session_id": session_id, "tool_use_id": tool_use_id,
-                    "repo": None, "verb": permit.ACTION,
-                    "target": {"round": question.round_id, "index": question.index}})]))
-                return True
-            return False
 
     def permit(self, sprint_id: str, secret: str, session_id: str, tool_use_id: str,
                command: str) -> permit.Verdict:
