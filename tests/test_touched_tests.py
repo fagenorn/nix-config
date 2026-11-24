@@ -28,6 +28,10 @@ from agent_tools.delivery.touched_tests import (
 TIER = "integration"  # MainTest builds a git repository
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+# Real module paths are assembled from this prefix, never spelled out whole: the selector
+# selects any member whose text contains a changed path, so a literal real path here would
+# make every diff touching that module run this file as well as the engine tier.
+DELIVERY = "python/agent_tools/delivery"
 RUNNER = [sys.executable, "-m", "agent_tools.delivery.suite_runner"]
 
 
@@ -106,30 +110,30 @@ class SelectTest(unittest.TestCase):
 
 
 class SelectionTableTest(unittest.TestCase):
-    MEMBERS = ["tests/test_engine_slots.py", "tests/test_engine_core.py",
+    MEMBERS = ["tests/test_engine_alpha.py", "tests/test_engine_beta.py",
                "tests/test_engine_stubbed_run.py", "tests/test_touched_tests.py",
                "tests/test_unrelated.py"]
     TEXTS = {
-        "tests/test_engine_core.py": "from agent_tools.delivery import engine_core\n",
+        "tests/test_engine_beta.py": "from agent_tools.delivery import engine_beta\n",
         "tests/test_engine_stubbed_run.py": "from tests.engine_stubbed_world import StubbedRun\n",
         "tests/test_touched_tests.py": "from agent_tools.delivery.touched_tests import main\n",
         "tests/test_unrelated.py": "import json\n",
     }
     COVERS = {"python/agent_tools/delivery/engine*.py": ["tests/test_engine_*.py"],
-              "python/agent_tools/delivery/procedure_check.py": ["tests/test_engine_*.py"]}
+              "python/agent_tools/delivery/procedure_zeta.py": ["tests/test_engine_*.py"]}
     PAIRS = {"home/common/claude-code/lifecycle_guard.py": ["tests/test_claude_permission_guard.py"]}
-    ENGINE_TIER = ["tests/test_engine_slots.py", "tests/test_engine_core.py",
+    ENGINE_TIER = ["tests/test_engine_alpha.py", "tests/test_engine_beta.py",
                    "tests/test_engine_stubbed_run.py"]
 
     def test_each_diff_selects_its_row(self):
         everything = self.MEMBERS
         rows = {
             "engine module and its test": (
-                ["python/agent_tools/delivery/engine_slots.py", "tests/test_engine_slots.py"],
+                ["python/agent_tools/delivery/engine_alpha.py", "tests/test_engine_alpha.py"],
                 False, [], self.ENGINE_TIER),
             "a file CI cannot test": (["hosts/m.nix"], True, ["hosts/m.nix"], everything),
             "a file CI cannot test beside an engine module": (
-                ["hosts/m.nix", "python/agent_tools/delivery/engine_core.py"],
+                ["hosts/m.nix", "python/agent_tools/delivery/engine_beta.py"],
                 True, ["hosts/m.nix"], everything),
             "a file CI cannot test beside the guard": (
                 ["hosts/m.nix", "home/common/claude-code/lifecycle_guard.py"],
@@ -139,7 +143,7 @@ class SelectionTableTest(unittest.TestCase):
                 ["python/agent_tools/delivery/touched_tests.py"],
                 False, [], ["tests/test_touched_tests.py"]),
             "an engine module outside engine*.py and its test": (
-                ["python/agent_tools/delivery/procedure_check.py", "tests/test_engine_slots.py"],
+                ["python/agent_tools/delivery/procedure_zeta.py", "tests/test_engine_alpha.py"],
                 False, [], self.ENGINE_TIER),
         }
         for name, (changed, full, because, selected) in rows.items():
@@ -329,10 +333,10 @@ class RecipeTest(unittest.TestCase):
         self.assertIn("build target_host=hostname", self.justfile)
 
     def test_the_recipe_covers_the_engine_with_its_tier(self):
-        for source in ["python/agent_tools/delivery/engine*.py",
-                       "python/agent_tools/delivery/host_admission.py",
-                       "python/agent_tools/delivery/procedure_check.py",
-                       "python/agent_tools/delivery/procedures/*",
+        for source in [f"{DELIVERY}/engine*.py",
+                       f"{DELIVERY}/host_admission.py",
+                       f"{DELIVERY}/procedure_check.py",
+                       f"{DELIVERY}/procedures/*",
                        "tests/engine_*.py", "tests/fixtures/engine-*"]:
             self.assertIn(f"--cover '{source}=tests/test_engine_*.py'", self.recipe)
         self.assertTrue(any(fnmatch.fnmatchcase(m, "tests/test_engine_*.py")
@@ -344,12 +348,32 @@ class RecipeTest(unittest.TestCase):
         caps = importlib.import_module("agent_tools.delivery.engine_caps")
         modules = [p.relative_to(REPO_ROOT).as_posix()
                    for p in caps.engine_modules(REPO_ROOT / "python/agent_tools/delivery")]
-        self.assertIn("python/agent_tools/delivery/procedure_check.py", modules)
+        self.assertIn(f"{DELIVERY}/procedure_check.py", modules)
         for module in modules:
             with self.subTest(module=module):
                 self.assertTrue(any(fnmatch.fnmatchcase(module, source)
                                     and fnmatch.fnmatchcase("tests/test_engine_*.py", member)
                                     for source, member in covers))
+
+    def test_an_engine_diff_selects_the_engine_tier_and_not_this_file(self):
+        words = shlex.split(self.recipe.splitlines()[-1])
+        values = lambda flag: [words[i + 1] for i, w in enumerate(words) if w == flag]
+        pairs, covers = {}, {}
+        for flag, table in (("--pair", pairs), ("--cover", covers)):
+            for value in values(flag):
+                source, member = value.split("=", 1)
+                table.setdefault(source, []).append(member)
+        members = suite_members(self.justfile)
+        engine_tier = [m for m in members if fnmatch.fnmatchcase(m, "tests/test_engine_*.py")]
+        for name in ["engine_slots", "engine_core", "host_admission", "procedure_check"]:
+            with self.subTest(module=name):
+                result = selection(
+                    [f"{DELIVERY}/{name}.py", f"tests/test_{name}.py"], members,
+                    lambda path: (REPO_ROOT / path).read_text(encoding="utf-8"),
+                    source_roots=values("--source-root"), pairs=pairs, covers=covers,
+                    build_globs=values("--build-when"))
+                self.assertNotIn("tests/test_touched_tests.py", result["selected"])
+                self.assertEqual(set(engine_tier) - set(result["selected"]), set())
 
     def test_this_test_is_a_suite_member(self):
         self.assertIn("tests/test_touched_tests.py", suite_members(self.justfile))
