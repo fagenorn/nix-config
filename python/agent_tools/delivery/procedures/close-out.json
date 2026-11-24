@@ -1,0 +1,17 @@
+{
+  "format": 1,
+  "inputs": ["holder", "issue", "repo", "repo_root"],
+  "stops": {
+    "close-out": {"need": "owner-decision", "reenter": "read"},
+    "hold": {"need": "owner-decision", "reenter": "close"}
+  },
+  "steps": [
+    {"id": "read", "stage": "closing out", "kind": "command", "command": "closing", "subcommand": "read", "holds": "live", "in": ["run.repo_root", "run.issue", "run.repo"], "on": {"merged": "remove", "unmerged": "close-out", "error": "close-out", "refused": "close-out"}},
+    {"id": "remove", "stage": "closing out", "kind": "command", "command": "closing", "subcommand": "worktree", "holds": "live", "in": ["run.repo_root", "read.worktree_path"], "on": {"removed": "forward", "dirty": "close-out", "error": "close-out", "refused": "close-out"}},
+    {"id": "forward", "stage": "closing out", "kind": "command", "command": "closing", "subcommand": "forward", "holds": "live", "in": ["run.repo_root", "read.integration_branch"], "on": {"forwarded": "delete", "skipped": "delete", "error": "close-out", "refused": "close-out"}},
+    {"id": "delete", "stage": "closing out", "kind": "command", "command": "branch-delete", "holds": "run", "in": ["run.repo_root", "read.branch"], "on": {"ok": "gone", "failed": "gone", "refused": "close-out"}},
+    {"id": "gone", "stage": "closing out", "kind": "command", "command": "closing", "subcommand": "branch", "holds": "live", "in": ["run.repo_root", "read.branch"], "on": {"gone": "release", "kept": "close-out", "error": "close-out", "refused": "close-out"}},
+    {"id": "release", "stage": "closing out", "kind": "command", "command": "forge-claim", "subcommand": "release", "holds": "live", "in": ["run.repo", "run.issue", "run.holder"], "on": {"released": "close", "not_held": "close-out", "error": "close-out", "refused": "close-out"}},
+    {"id": "close", "stage": "closing out", "kind": "command", "command": "closing", "subcommand": "issue", "holds": "live", "in": ["run.repo", "run.issue", "read.closes"], "on": {"closed": "done", "open-criteria": "hold", "error": "close-out", "refused": "close-out"}}
+  ]
+}

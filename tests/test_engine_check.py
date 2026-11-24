@@ -24,6 +24,7 @@ from typing import Callable
 from unittest import mock
 
 from agent_tools.delivery import engine, engine_reply, procedure_check
+from agent_tools.delivery.engine_commands import LIFECYCLE_ARGV
 from agent_tools.delivery.procedure_check import CommandDeclaration, load_commands
 from tests.engine_walks import reply_schemas, step_outcomes, walk_edges
 from tests.guard_policy_world import install_platform_manifest_in_environ
@@ -39,7 +40,7 @@ def compact(value: object) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n"
 
 
-SHIPPED_OK = compact({"procedures": ["deliver", "direct", "setup", "toy", "toy-child", "verify"], "verdict": "ok"})
+SHIPPED_OK = compact({"procedures": ["close-out", "deliver", "direct", "land", "setup", "toy", "toy-child", "verify"], "verdict": "ok"})
 
 
 def load(directory: Path, name: str) -> dict:
@@ -407,6 +408,9 @@ CASES = [
          [("toy", "tally", "unknown_target")]),
     Case("stop_reenters_a_missing_step", editing("toy", _reenter_nowhere),
          [("toy", None, "unknown_target")]),
+    Case("stop_pinned_with_a_non_bool",
+         editing("toy", lambda toy: toy["stops"]["needs-owner"].update(pinned="yes")),
+         [("toy", None, "invalid_field")]),
     Case("unknown_command_id",
          editing("toy", _set(lambda toy: step(toy, "scope"), "command", "nope")),
          [("toy", "scope", "unknown_command")]),
@@ -433,7 +437,7 @@ CASES = [
     Case("command_without_declared_verdicts", editing("toy", _undeclared_command),
          [("toy", "scope", "undeclared_verdicts")]),
     Case("subcommand_without_declared_verdicts",
-         editing("toy-child", _set(lambda toy: step(toy, "claim"), "subcommand", "release")),
+         editing("toy-child", _set(lambda toy: step(toy, "claim"), "subcommand", "land")),
          [("toy-child", "claim", "undeclared_verdicts")]),
     Case("unknown_role",
          editing("toy", _set(lambda toy: step(toy, "review-b"), "role", "auditor")),
@@ -725,6 +729,12 @@ class ToyProcedureTest(unittest.TestCase):
                 code, out, _ = run_check("--procedures", str(directory))
                 self.assertEqual((code, out), (0, SHIPPED_OK))
 
+    def test_a_pinned_stop_is_accepted(self):
+        directory = broken_copy(
+            editing("toy", lambda toy: toy["stops"]["needs-owner"].update(pinned=True)))
+        code, out, _ = run_check("--procedures", str(directory))
+        self.assertEqual((code, out), (0, SHIPPED_OK))
+
 
 class NoReplyOutcomeTest(unittest.TestCase):
     def test_an_agent_step_may_map_no_reply_and_a_command_step_may_not(self):
@@ -780,6 +790,52 @@ class RefusedOutcomeTest(unittest.TestCase):
         self.assertIn("'probe'", refusals[0]["detail"])
         code2, out2, _ = run_check("--procedures", str(with_probe(["ok"])))
         self.assertEqual(code2, 0, out2)
+
+
+def _releasing_claim(mapped: dict) -> Callable[[dict], None]:
+    def change(toy: dict) -> None:
+        claim = step(toy, "claim")
+        for member in ("mutates", "check"):
+            claim.pop(member)
+        claim.update(subcommand="release", on=mapped)
+    return change
+
+
+class ClaimReleaseTest(unittest.TestCase):
+    OUTCOMES = {"released": "done", "not_held": "done", "error": "child-stop", "refused": "child-stop"}
+
+    def test_forge_claim_release_is_a_declared_step_with_three_verdicts(self):
+        code, out, _ = run_check("--procedures", str(broken_copy(
+            editing("toy-child", _releasing_claim(self.OUTCOMES)))))
+        self.assertEqual(code, 0, out)
+        short = {key: value for key, value in self.OUTCOMES.items() if key != "not_held"}
+        code, out, _ = run_check("--procedures", str(broken_copy(
+            editing("toy-child", _releasing_claim(short)))))
+        self.assertEqual(code, 1, out)
+        self.assertEqual([(r["procedure"], r["step"], r["defect"]) for r in json.loads(out)["refusals"]],
+                         [("toy-child", "claim", "unmapped_outcome")])
+
+
+class WaitMemberTest(unittest.TestCase):
+    def refusals(self, change: Callable[[dict], None]) -> list[tuple[str, str]]:
+        code, out, _ = run_check("--procedures", str(broken_copy(editing("toy", change))))
+        if code == 0:
+            return []
+        return [(r["defect"], r["step"]) for r in json.loads(out)["refusals"]]
+
+    def test_a_command_step_may_declare_a_wait_of_the_closed_set(self):
+        for wait in procedure_check.WAITS:
+            with self.subTest(wait):
+                self.assertEqual(self.refusals(
+                    lambda toy: step(toy, "scope").update(wait=wait)), [])
+
+    def test_a_wait_outside_the_closed_set_is_an_invalid_field(self):
+        self.assertEqual(self.refusals(lambda toy: step(toy, "scope").update(wait="forever")),
+                         [("invalid_field", "scope")])
+
+    def test_an_agent_step_that_declares_a_wait_is_an_undefined_field(self):
+        self.assertEqual(self.refusals(lambda toy: step(toy, "draft").update(wait="lock")),
+                         [("undefined_field", "draft")])
 
 
 class RefusalTableTest(unittest.TestCase):
@@ -1186,7 +1242,7 @@ class ShippedProcedureTest(unittest.TestCase):
             for name in load(PROCEDURES, procedure)["stops"]:
                 self.assertEqual(mapped[name], name)
         self.assertEqual(step(deliver, "direct-lane")["on"]["done"], "verification")
-        self.assertEqual(step(deliver, "verification")["on"]["done"], "done")
+        self.assertEqual(step(deliver, "verification")["on"]["done"], "landing")
         for name in ("ineligible", "task", "direct-review", "direct-fix", "codex-unavailable", "verify"):
             self.assertIn(name, deliver["stops"])
         self.assertNotIn("needs-design", deliver["stops"])
@@ -1214,12 +1270,13 @@ class ShippedProcedureTest(unittest.TestCase):
 class DeclarationTest(unittest.TestCase):
     def test_the_declarations_name_every_command_table_row(self):
         self.assertIn("engine", table_rows())
-        self.assertEqual(set(load_commands()), set(table_rows()))
+        self.assertEqual(set(load_commands()), set(table_rows()) | set(LIFECYCLE_ARGV))
 
     def test_the_toy_commands_declare_their_verdicts(self):
         commands = load_commands()
         self.assertEqual(commands["forge-claim"], CommandDeclaration(None, {
             "acquire": ("acquired", "already_held", "held_by", "lost_to", "error"),
+            "release": ("released", "not_held", "error"),
             "renew": ("renewed", "not_held", "error"),
             "status": ("free", "held_by", "stale", "error")}))
         self.assertEqual(commands["diff-scope"].outcomes(None), ("ok", "failed"))

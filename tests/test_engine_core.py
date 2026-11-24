@@ -587,6 +587,15 @@ class ContinueTest(unittest.TestCase):
     def test_an_unchanged_head_reenters_at_the_stops_reenter_step(self) -> None:
         self.assertEqual(reentry(toy(), INPUTS, E1, "h1"), Reentry("draft", 1, ()))
 
+    def test_a_pinned_stop_reenters_at_its_reenter_step_whatever_is_stale(self) -> None:
+        doc = toy()
+        doc["stops"]["needs-owner"]["pinned"] = True
+        self.assertEqual(reentry(doc, INPUTS, E1, "h2"), Reentry("draft", 1, ()))
+        self.assertEqual(reentry(doc, INPUTS, E1, None), Reentry("draft", 1, ()))
+        step(doc, "scope")["holds"] = "live"
+        self.assertEqual(reentry(doc, INPUTS, E1, "h1"), Reentry("draft", 1, ()))
+        self.assertEqual(next_action(doc, INPUTS, E1 + [C("draft", 1)]), DRAFT(2))
+
     def test_a_stop_reenter_step_never_reached_is_entered_fresh(self) -> None:
         events = pair("scope", "failed")
         self.assertEqual(reentry(toy(), INPUTS, events, "h1"), Reentry("draft", None, ()))

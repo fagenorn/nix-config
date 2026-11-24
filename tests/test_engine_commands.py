@@ -25,7 +25,7 @@ from unittest import mock
 
 from agent_tools.delivery import engine_caps, engine_commands
 from agent_tools.delivery.engine_commands import (
-    PLATFORM_MODULES, PLATFORM_WALL_SECONDS, PROJECT_WALL_SECONDS, CommandTable, Invocation,
+    LIFECYCLE_ARGV, LIFECYCLE_WALL_SECONDS, PLATFORM_MODULES, PLATFORM_WALL_SECONDS, PROJECT_WALL_SECONDS, CommandTable, Invocation,
     UnknownCommand, argument, command_text, grade, run)
 from agent_tools.delivery.engine_guard import Hook, Unavailable, locate
 from agent_tools.delivery.procedure_check import load_commands
@@ -124,9 +124,49 @@ class TableTest(unittest.TestCase):
                                (REPO_ROOT / "lib/agent-tools.nix").read_text("utf-8"), re.M))
         declared = {name for name, declaration in load_commands().items()
                     if declaration is not None}
-        self.assertEqual(set(PLATFORM_MODULES), declared)
-        for name in declared:
+        self.assertEqual(set(PLATFORM_MODULES) | set(LIFECYCLE_ARGV), declared)
+        self.assertTrue(set(PLATFORM_MODULES).isdisjoint(LIFECYCLE_ARGV))
+        for name in PLATFORM_MODULES:
             self.assertEqual(PLATFORM_MODULES[name], rows[name])
+
+
+class LifecycleTest(unittest.TestCase):
+    CASES = (
+        ("git-push", (("run.repo_root", "/p"), ("prepare.branch", "issue-7-topic")),
+         ("git", "-C", "/p", "push", "origin", "issue-7-topic"),
+         "git -C /p push origin issue-7-topic"),
+        ("pr-create", (("run.repo", "example/fixture"), ("prepare.integration_branch", "main"),
+                       ("prepare.branch", "issue-7-topic"), ("prepare.title", "Add a greeting"),
+                       ("prepare.body", "Closes #7. Delivered by the engine.")),
+         ("gh", "pr", "create", "--repo", "example/fixture", "--base", "main", "--head",
+          "issue-7-topic", "--title", "Add a greeting", "--body",
+          "Closes #7. Delivered by the engine."),
+         'gh pr create --repo example/fixture --base main --head issue-7-topic '
+         '--title "Add a greeting" --body "Closes #7. Delivered by the engine."'),
+        ("pr-merge", (("opened.pr", 7), ("run.repo", "example/fixture"),
+                      ("prepare.head", "a" * 40)),
+         ("gh", "pr", "merge", "7", "--repo", "example/fixture", "--merge",
+          "--match-head-commit", "a" * 40, "--delete-branch"),
+         "gh pr merge 7 --repo example/fixture --merge --match-head-commit "
+         + "a" * 40 + " --delete-branch"),
+        ("branch-delete", (("run.repo_root", "/p"), ("read.branch", "issue-7-topic")),
+         ("git", "-C", "/p", "branch", "-d", "issue-7-topic"),
+         "git -C /p branch -d issue-7-topic"),
+    )
+
+    def test_each_lifecycle_id_spells_the_guards_accepted_form(self):
+        for name, args, argv, text in self.CASES:
+            with self.subTest(name):
+                invocation = table().invocation(name, None, args)
+                self.assertEqual(invocation, Invocation(argv, "/root"))
+                self.assertEqual(command_text(invocation.argv), text)
+                self.assertEqual(shlex.split(command_text(argv)), list(argv))
+
+    def test_a_lifecycle_id_with_a_subcommand_or_a_missing_slot_is_unknown(self):
+        with self.assertRaises(UnknownCommand):
+            table().invocation("pr-merge", None, (("opened.pr", 7), ("run.repo", "o/r")))
+        with self.assertRaises(UnknownCommand):
+            table().invocation("git-push", "x", (("run.repo_root", "/p"), ("a.b", "c")))
 
 
 class WallBoundTest(unittest.TestCase):
@@ -135,6 +175,12 @@ class WallBoundTest(unittest.TestCase):
         for name, seconds in PLATFORM_WALL_SECONDS.items():
             with self.subTest(command=name):
                 self.assertGreater(seconds, 0)
+
+    def test_every_lifecycle_id_has_the_lifecycle_bound(self):
+        for name in LIFECYCLE_ARGV:
+            with self.subTest(name):
+                self.assertEqual(table().wall_seconds(name), LIFECYCLE_WALL_SECONDS)
+        self.assertEqual(LIFECYCLE_WALL_SECONDS, 600)
 
     def test_wall_seconds_reads_the_platform_row_then_the_project_bound(self):
         commands = table(mine=project("json", "0"))
