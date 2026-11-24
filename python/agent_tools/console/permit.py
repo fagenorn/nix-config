@@ -85,11 +85,34 @@ readable merge behind a bad prefix still names its omitted flag, and names none 
 reason keeps its sentence.
 
 `Verdict.payload()` is `{"verb", "decision", "reason", "target"}`; `verb` is `merge`, `rerun`,
-`release` (target `{"commit", "version"}`, None for a member the run does not name), `release-abandon` or
-`release-dispose`. `merge_target(command, grant)` is `{"pr", "head"}` when the command is exactly the granted
+`release` (target `{"commit", "version"}`, None for a member the run does not name), `release-abandon`,
+`release-dispose` or `action` (target `{"round", "index"}`). `merge_target(command, grant)` is
+`{"pr", "head"}` when the command is exactly the granted
 merge shape and None otherwise. `NOT_ACTIVE`, `NOT_MANAGER` and `MOVED` are the reasons the console
 itself gives (the sprint is not active, the caller is not its manager, the sprint changed between
 the first judgement and the second).
+
+Approved actions: `judge_action(digest, questions, now)` is the console's verdict on a command no
+granted shape names, by its SHA-256 `command_digest` over the sprint's question cards. A card names a
+command when it carries an `action` whose command has that digest and is not withdrawn; none names it:
+`Verdict(None, "", None, {})`. The first live card is `ALLOW`, verb `action`, target `{"round", "index"}`.
+A card is live when the owner answered it (no guest: `answered_by` None, on an `owner_only` card), picked
+exactly the action's `approve` option with no words beside it, no allowed run used it yet
+(`action_used_at` None) and the answer is less than `APPROVAL_SECONDS` (60 minutes) old, an `answered_at`
+that does not parse or carries no time zone being expired. Otherwise `DENY` with the reason of the last
+card, the first that applies: `ACTION_UNANSWERED`, `ACTION_NOT_OWNERS`, `ACTION_NOT_APPROVED`,
+`ACTION_USED`, else `ACTION_EXPIRED`. `judge` itself is unchanged: a command naming no granted verb still
+gets no decision there, and the console, not `judge`, calls `judge_action` for a signed request.
+
+Proof: the secret never travels on the action path, because another local account may own the loopback
+port while the console restarts (ADR-console-100 D9). The command travels only as its SHA-256. The hook's
+request carries `auth`, `action_request_auth(secret, signed_bytes(fields))`, an HMAC-SHA256 under the
+secret over the request's members but `auth` (sorted compact JSON) behind the tag `permit-action-request`;
+the console's judge reply carries `mac`, `action_reply_mac(secret, sprint_id, nonce, digest, decision,
+reason)`, which the hook checks before it honours the decision, so whatever else listens on the port
+neither learns the secret nor has a decision honoured. A replay of a captured request to the console is
+not detected and at worst uses the approval (the manager asks again). The merge, rerun and release path
+keeps its secret-bearing body (ADR-console-094, unchanged).
 
 `verb_of(command)` is the verb `mentions` found (`merge`, `rerun` or one of the three release verbs), None
 when it found none.
@@ -105,10 +128,14 @@ page of the run's jobs. `read_required` names only the checks a GitHub Actions j
 check bound to another app is left out, even when the legacy `contexts` list repeats its name. `merge_binding(root)` is the project contract's `bindings.vcs.merge` `strategy` and
 `delete_branch`, `(None, False)` on any failure.
 """
+import hashlib
+import hmac
+import json
 import os
 import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 
 from agent_tools.console import deliveries
 from agent_tools.project_contract import resolve_project
@@ -137,8 +164,17 @@ FORGE_UNREADABLE = "The forge could not be read to judge this command: {reason}"
 NOT_ACTIVE = "This sprint is not active."
 NOT_MANAGER = "Only the sprint's manager session may run this command."
 MOVED = "The sprint changed while the command was judged."
+APPROVAL_SECONDS = 60 * 60
+ACTION_UNANSWERED = "The owner has not answered this action's card yet; run it after the answer approves it."
+ACTION_NOT_OWNERS = "Only the owner's answer on an owner-only card approves an action."
+ACTION_NOT_APPROVED = ("The owner's answer did not approve this action: only its approve option, picked "
+                       "with no words beside it, approves.")
+ACTION_USED = "The owner's approval of this action was used; ask again on a new owner-only card to run it again."
+ACTION_EXPIRED = ("The owner's approval of this action expired 60 minutes after the answer; ask again on "
+                  "a new owner-only card.")
 
 MERGE, RERUN = "merge", "rerun"
+ACTION = "action"
 RELEASE, ABANDON, DISPOSE = "release", "release-abandon", "release-dispose"
 RELEASE_FLAGS = ("--repo-root", "--profile", "--commit", "--version", "--title", "--notes-file",
                  "--confirm")
@@ -650,3 +686,67 @@ def judge(command: str, grant: Grant, forge: Forge) -> Verdict:
     start = next((i for i in range(len(parts)) if parts[i:i + 3] == opening), None)
     missing = () if start is None else _missing(verb, parts[start:], grant)
     return _deny(verb, spelling_refusal(ALONE, verb, grant, missing))
+
+
+# --- approved actions ---------------------------------------------------------------------
+
+def command_digest(command: str) -> str:
+    """The SHA-256 of a command, the only form in which an action's command travels."""
+    return hashlib.sha256(command.encode("utf-8")).hexdigest()
+
+
+def signed_bytes(fields: Mapping[str, object]) -> bytes:
+    """The bytes a request's `auth` covers: its members but `auth`, as sorted compact JSON."""
+    return json.dumps({k: v for k, v in fields.items() if k != "auth"}, sort_keys=True,
+                      separators=(",", ":")).encode()
+
+
+def action_request_auth(secret: str, signed: bytes) -> str:
+    """The hook's `auth` of an action request whose `signed_bytes` are given (see the module docstring)."""
+    return hmac.new(secret.encode(), b"permit-action-request\0" + signed, hashlib.sha256).hexdigest()
+
+
+def action_reply_mac(secret: str, sprint_id: str, nonce: str, digest: str, decision: str | None,
+                     reason: str) -> str:
+    """The `mac` of a judge reply to the request that carried `nonce` (see the module docstring)."""
+    return hmac.new(
+        secret.encode(),
+        f"permit-action-reply\0{sprint_id}\0{nonce}\0{digest}\0{decision or ''}\0{reason}".encode(),
+        hashlib.sha256).hexdigest()
+
+
+def _approval_live(card, now: datetime) -> bool:
+    if (card.answer is None or not card.owner_only or card.answered_by is not None
+            or card.chosen != card.action.approve or card.words is not None
+            or card.action_used_at is not None):
+        return False
+    try:
+        answered = datetime.fromisoformat(card.answered_at)
+    except (TypeError, ValueError):
+        return False
+    return answered.tzinfo is not None and now < answered + timedelta(seconds=APPROVAL_SECONDS)
+
+
+def _action_refusal(card) -> str:
+    if card.answer is None:
+        return ACTION_UNANSWERED
+    if not card.owner_only or card.answered_by is not None:
+        return ACTION_NOT_OWNERS
+    if card.chosen != card.action.approve or card.words is not None:
+        return ACTION_NOT_APPROVED
+    if card.action_used_at is not None:
+        return ACTION_USED
+    return ACTION_EXPIRED
+
+
+def judge_action(digest: str, questions: Sequence, now: datetime) -> Verdict:
+    """The verdict on a command by its digest over the sprint's question cards (see the module docstring)."""
+    cards = [card for card in questions
+             if card.action is not None and card.withdrawn_at is None
+             and command_digest(card.action.command) == digest]
+    if not cards:
+        return _no_decision()
+    for card in cards:
+        if _approval_live(card, now):
+            return _allow(ACTION, {"round": card.round_id, "index": card.index})
+    return _deny(ACTION, _action_refusal(cards[-1]))

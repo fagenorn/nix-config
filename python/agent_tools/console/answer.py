@@ -166,6 +166,8 @@ LOOK_MOVED = ("Nothing was recorded: the pull request is now at {found}, not at 
 LOOK_CLOSED = "Nothing was recorded: the pull request is {state}."
 LOOK_APPROVES = ("Choosing \"{option}\" records your approval of {head}, pull request #{pr}, on "
                  "issue #{issue}.")
+ACTION_APPROVES = ("Choosing \"{option}\" lets the manager run exactly this command once, within 60 "
+                   "minutes of your answer:")
 LOOK_RECORDING = "Recording your approval of {head} on issue #{issue}."
 LOOK_UNTRUSTED = ("GitHub took the approval, but not as the repository's owner or a member, so the "
                   "merge would not count it. Sign gh in as the owner, then Retry.")
