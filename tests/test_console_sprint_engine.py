@@ -30,6 +30,20 @@ def engine_state(fixture, probe, issue=4, project="p00"):
         return EngineRuns(Path(tmp), alive=probe).poll().states[0]
 
 
+ROOT = "4-20261112T100100Z-ab12"
+CHILD = "4-20261112T100200Z-c0a1"
+GRANDCHILD = "4-20261112T100300Z-c0a2"
+
+
+def engine_state_with_children(root_fixture, probe, *children):
+    """The root run's state, polled with child runs `(name, parent)` whose ledger is sprint-child.jsonl."""
+    with tempfile.TemporaryDirectory() as tmp:
+        make_run(tmp, ROOT, root_fixture, issue=4, project="p00")
+        for name, parent in children:
+            make_run(tmp, name, "sprint-child.jsonl", issue=4, project="p00", parent=parent, holder=None)
+        return EngineRuns(Path(tmp), alive=probe).poll().states[0]
+
+
 def shown(engine_runs=(), movement=None, sprint_state=BASE, now=NOW):
     extra = {} if movement is None else {"movement": movement}
     return entry(line(sprint_state, now, sessions=[idle_session], engine_runs=list(engine_runs), **extra))
@@ -58,6 +72,21 @@ class SprintEngineMovementTest(unittest.TestCase):
         self.assertEqual((got["state"], got["state_text"], got["ball"]),
                          ("quiet", "quiet for 40 min — may be stuck", "nobody"))
         self.assertTrue(got["now_text"].startswith("last seen "))
+
+    def test_a_gone_engines_call_step_sessions_in_a_child_run_do_not_move_its_sprint(self):
+        movement = session_movement(SessionMovement("c1", A, NOW - MIN, NOW - MIN, None, read_ms=NOW - MIN))
+        for label, fixture, children in (
+                ("fan-out", "fanout.jsonl", ((CHILD, ROOT),)),
+                ("direct lane", "moving.jsonl", ((CHILD, ROOT),)),
+                ("a child of a child", "fanout.jsonl", ((CHILD, ROOT), (GRANDCHILD, CHILD)))):
+            with self.subTest(label):
+                dead = engine_state_with_children(fixture, DEAD, *children)
+                self.assertIn("c1", dead.sessions)
+                got = shown(engine_runs=[dead], movement=movement)
+                self.assertEqual((got["state"], got["ball"]), ("quiet", "nobody"))
+        with self.subTest("a child of no shown run"):
+            dead = engine_state_with_children("fanout.jsonl", DEAD, (CHILD, "4-20261112T100000Z-ffff"))
+            self.assertNotIn("c1", dead.sessions)
 
     def test_a_managers_own_session_output_still_moves_its_sprint_beside_a_gone_engine(self):
         dead = engine_state("sprint-moving.jsonl", DEAD)

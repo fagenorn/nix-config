@@ -4,8 +4,10 @@ The engine writes each run as a directory under the runs root: `run.json` (never
 (append-only; the engine cuts a torn tail and writes over it) and `lock` (the deliver process's
 `{"pid","started"}`). This module reads them with no lock and writes nothing. Each poll lists the root with
 `os.scandir`, which may be absent, and keeps the names that match the run id form and are directories.
-It reads each `run.json` once per name and skips a run whose document has a `parent`. Per (project, issue)
-it reads only the run with the greatest (`sequence`, name), which is the order the engine's `find_runs` uses.
+It reads each `run.json` once per name and shows no run whose document has a `parent`; it reads such a child
+run's session events only, and names them among the sessions of the root run it descends from, because a
+call step's sessions live in the child's ledger (#1531). Per (project, issue) it reads only the root run with
+the greatest (`sequence`, name), which is the order the engine's `find_runs` uses.
 
 `events.jsonl` is read by byte offset. Per run the reader keeps the inode, the offset just past the last
 newline consumed and the events parsed so far, and never a partial tail. A torn tail stays unread until a
@@ -34,7 +36,7 @@ No line says a run is quiet or stuck: a live engine is moving, whatever the time
 """
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import BinaryIO, Callable, Collection, Iterable
 
@@ -197,6 +199,17 @@ def _reason(error: BaseException) -> str:
     return f"{type(error).__name__}: {error}"
 
 
+def _root_of(name: str, parents: dict[str, str]) -> str:
+    """The run a child descends from, through its parents; a parent that is no run here, or a loop, ends it."""
+    seen = {name}
+    while parents.get(name) is not None:
+        name = parents[name]
+        if name in seen:
+            break
+        seen.add(name)
+    return name
+
+
 class EngineRuns:
     def __init__(self, root: Path, alive: Callable[[int, str], bool] = engine_ledger.process_alive,
                  opener: Callable[[Path], BinaryIO] = _open_binary):
@@ -210,20 +223,34 @@ class EngineRuns:
         unreadable: list[tuple[str, str]] = []
         self._documents = {name: doc for name, doc in self._documents.items() if name in names}
         newest: dict[tuple[str, int], tuple[tuple[int, str], str]] = {}
+        parents: dict[str, str] = {}
         for name in names:
             document = self._document(name, unreadable)
-            if document is None or engine_ledger.PARENT_MEMBER in document:
+            if document is None:
+                continue
+            if engine_ledger.PARENT_MEMBER in document:
+                parents[name] = document[engine_ledger.PARENT_MEMBER]
                 continue
             key = (document["project"], document["issue"])
             order = (document["sequence"], name)
             if key not in newest or order > newest[key][0]:
                 newest[key] = (order, name)
         chosen = {name for _, name in newest.values()}
+        descendants = {name: root for name in parents if (root := _root_of(name, parents)) in chosen}
         for cache in (self._tails, self._states):
-            for name in [name for name in cache if name not in chosen]:
+            for name in [name for name in cache if name not in chosen and name not in descendants]:
                 del cache[name]
         for name in sorted(chosen):
             self._fold(name, unreadable)
+        child_sessions: dict[str, list[str]] = {}
+        for name, root in sorted(descendants.items()):
+            child_sessions.setdefault(root, []).extend(self._child_sessions(name, unreadable))
+        for name, found in child_sessions.items():
+            if name in self._states:
+                known = self._states[name].sessions
+                self._states[name] = replace(
+                    self._states[name], sessions=known + tuple(dict.fromkeys(
+                        session for session in found if session not in known)))
         states = sorted((self._states[name] for name in chosen if name in self._states),
                         key=lambda state: (state.project, state.issue))
         return EnginePoll(tuple(states), tuple(sorted(unreadable)))
@@ -258,6 +285,16 @@ class EngineRuns:
             return
         self._states[name] = engine_ledger.fold(self._documents[name], events, self._alive,
                                                 engine_ledger.read_holder(run_dir))
+
+    def _child_sessions(self, name: str, unreadable: list[tuple[str, str]]) -> list[str]:
+        """The session ids a child run's events name, in first-seen order; none for a child it cannot read."""
+        try:
+            events = self._events(name, self._root / name / EVENTS_NAME)
+        except (LedgerError, OSError) as error:
+            unreadable.append((name, _reason(error) if isinstance(error, OSError) else str(error)))
+            return []
+        return [event["session"] for event in events
+                if event["event"] in ("session_starting", "session_resuming", "session_answered")]
 
     def _events(self, name: str, path: Path) -> tuple[dict, ...]:
         try:
