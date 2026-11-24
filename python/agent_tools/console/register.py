@@ -227,7 +227,7 @@ OUTCOME_TEXT = {
     "bootstrap": "it has no agent files or project contract yet",
     "reconcile": "it has agent files or a contract to bring up to date",
 }
-HOOKS_LINE = "its git hooks are not installed on this host"
+HOOKS_LINE = "installs its git hooks on this host (not installed now)"
 MEMBERS = {"by", "root", "project_id", "result", "outcome", "headline", "lines", "note"}
 EXTRA = {"plan_id", "state", "questions", "answered"}
 EXTENDED = MEMBERS | EXTRA | {"draft", "remote"}

@@ -80,7 +80,7 @@ class HooksMissingCardTest(GlobalHooksPath, unittest.TestCase):
         row = register.hooks_noted(register.summary(str(root), READY))
         shown, _entry = card(row)
         self.assertEqual(shown["lines"][0], register.HOOKS_LINE)
-        self.assertEqual(register.HOOKS_LINE, "its git hooks are not installed on this host")
+        self.assertEqual(register.HOOKS_LINE, "installs its git hooks on this host (not installed now)")
         for line in (*shown["lines"], *row["lines"]):
             self.assertFalse(line.startswith("commits run in its development shell"), line)
         self.assertEqual(row["lines"], [register.HOOKS_LINE, *register.plan_lines(READY)])
