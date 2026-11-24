@@ -393,7 +393,7 @@ class ShippedTreeTest(unittest.TestCase):
             timeout=60,
         )
         self.assertEqual(result.returncode, 0)
-        self.assertEqual(result.stdout, '{"procedures":["deliver","direct","setup","toy","toy-child","verify"],"verdict":"ok"}\n')
+        self.assertEqual(result.stdout, '{"procedures":["close-out","deliver","direct","land","setup","toy","toy-child","verify"],"verdict":"ok"}\n')
 
 
 def compact(value: object) -> str:
@@ -494,7 +494,7 @@ class CheckRefusesTest(unittest.TestCase):
         write_json(ok, "chain", chain(40))
         code, out, _ = run_check("--procedures", str(ok))
         self.assertEqual(code, 0)
-        self.assertEqual(out, compact({"procedures": ["chain", "deliver", "direct", "setup", "toy", "toy-child", "verify"], "verdict": "ok"}))
+        self.assertEqual(out, compact({"procedures": ["chain", "close-out", "deliver", "direct", "land", "setup", "toy", "toy-child", "verify"], "verdict": "ok"}))
         fresh = procedures_copy()
         toy_with(34, fresh)
         code, out, _ = run_check("--procedures", str(fresh))
@@ -548,7 +548,7 @@ class CheckRefusesTest(unittest.TestCase):
                     )
                 else:
                     self.assertEqual(code, 0)
-                    self.assertEqual(out, compact({"procedures": ["deliver", "direct", "setup", "toy", "toy-child", "verify"], "verdict": "ok"}))
+                    self.assertEqual(out, compact({"procedures": ["close-out", "deliver", "direct", "land", "setup", "toy", "toy-child", "verify"], "verdict": "ok"}))
 
     def test_a_filesystem_error_while_measuring_is_usage(self):
         error = FileNotFoundError(2, "No such file or directory", "toy-review.md")

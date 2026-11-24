@@ -63,6 +63,7 @@ let
     "bypass-proof" = "console.bypass_proof";
     "cache-proxy" = "hosts.cache_proxy";
     "cleanup-issue" = "delivery.cleanup_issue";
+    "closing" = "delivery.closing";
     "comment-lint" = "delivery.comment_lint";
     "conformance" = "project_contract.conformance";
     "console" = "console.console";
@@ -81,6 +82,7 @@ let
     "instruction-surface-lint" = "delivery.instruction_surface_lint";
     "issue-branch" = "delivery.issue_branch";
     "issue-setup" = "delivery.issue_setup";
+    "landing" = "delivery.landing";
     "lint-time" = "delivery.lint_time";
     "look-approval" = "delivery.look_approval";
     "look-lint" = "delivery.look_lint";
