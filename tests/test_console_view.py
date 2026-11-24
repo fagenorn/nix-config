@@ -2658,6 +2658,7 @@ class SessionSignalViewTest(unittest.TestCase):
             "nudged_at": iso(now - 30 * MIN),
             "base_at": utc(R),
             "issues": [1, 2, 3, 4, 5, 6, 7],
+            "engine": {"moving": False, "waits": []},
             "waits": {"ci_at": None, "commit_at": None, "release_at": None, "lock_at": None}})
         self.assertEqual(self.shown(None, sprint_state=s)["movement"]["sessions"], [])
 
@@ -2948,7 +2949,7 @@ class SprintViewTest(unittest.TestCase):
             "state_until": None, "pictures": [], "permission_text": None,
         "movement": {"sessions": [], "nudged_at": None,
                      "base_at": "2026-11-12T10:00:00+00:00",
-                     "issues": [],
+                     "issues": [], "engine": {"moving": False, "waits": []},
                      "waits": {"ci_at": None, "commit_at": None, "release_at": None,
                                "lock_at": None}}}])
 

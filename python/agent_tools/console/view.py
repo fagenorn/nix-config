@@ -538,7 +538,7 @@ only. `unmanaged` is always present, possibly empty, sorted by `root`.
                       "movement": {"sessions": [{"session_id", "manager": <bool>,
                                                  "read_at": "<ISO time>" | null}, ...],
                                    "nudged_at": "<time>" | null, "base_at": "<ISO time>",
-                                   "issues": [<int>],
+                                   "issues": [<int>], "engine": {"moving": <bool>, "waits": [<wait kind>]},
                                    "waits": {"ci_at", "commit_at", "release_at", "lock_at":
                                              "<ISO time>" | null}}}
     <message entry> = {"id": <int>, "kind": "approved" | "changes" | "text" | "stop" | "answer",
@@ -645,8 +645,9 @@ wait. An engine run of the sprint's issues (`engine_runs.sprint_engine`) moves i
 once and with no window; a run reading not running, stopped or done adds nothing at once, and the run's session ids
 (`RunState.sessions`) are left out of the session signals while a manager's own session counts as before. For an issue an engine
 run carries (`SprintEngine.issues`) the forge's pulls, the branches, the land locks and the queue places are not read, the run's
-open wait event being its wait (#1531); the release reading is read whatever the issues. The state's `quiet`, the ball's
-`nobody` and the now-sentence's `last seen` prefix are all this one reading, and none decides movement itself.
+open wait event being its wait (#1531); the release reading is read whatever the issues. `movement.engine` is the sprint's engine
+reading (#1531). The state's `quiet`, the ball's `nobody` and the now-sentence's `last seen` prefix are all this one reading, and
+none decides movement itself.
 The state is the first that holds: `stopped_at` is set, `stopped` ("stopped by you"); `stop_at` is
 set, `stopping` ("stopping"); the sprint has a closing, `done`; the brief is not approved,
 `drafting` ("drafting the brief");
@@ -1856,8 +1857,8 @@ def _sprint_entry(state: SprintState, now_ms: int | None, managers: bool, sessio
                   deliveries: Mapping[str, Sequence[DeliveryState]], records: Sequence[InboxRecord] = (),
                   capacity: Mapping = EMPTY, nudges: bool = True, looked: str | None = None,
                   movement: ProjectMovement | None = None, wait_lines: Sequence[Mapping] = (),
-                  waits_of: Callable[[DeliveryState], WaitSignals | None] = lambda run: None,
-                  prompted: bool = False, engine: engine_runs_module.SprintEngine = engine_runs_module.NO_ENGINE) -> dict:
+                  waits_of: Callable[[DeliveryState], WaitSignals | None] = lambda run: None, prompted: bool = False,
+                  engine: engine_runs_module.SprintEngine = engine_runs_module.NO_ENGINE) -> dict:
     stated_ms = _millis(state.stated_at)
     elapsed = 0 if now_ms is None else now_ms - stated_ms
     report = state.report
@@ -1957,7 +1958,7 @@ def _sprint_entry(state: SprintState, now_ms: int | None, managers: bool, sessio
                           "read_at": None if m.read_ms is None else _utc(m.read_ms)}
                          for m in own],
             "nudged_at": state.idle_nudged_at,
-            "issues": sorted(sprint_issue_numbers(state)),
+            "issues": sorted(sprint_issue_numbers(state)), "engine": waits.engine.as_json(),
             "waits": {"ci_at": None if waits.ci_ms is None else _utc(waits.ci_ms),
                       "commit_at": None if waits.commit_ms is None else _utc(waits.commit_ms),
                       "release_at": None if waits.release_ms is None else _utc(waits.release_ms),
@@ -2413,8 +2414,7 @@ def derive_view(
     lines = engine_runs_module.project_lines(engine_states, now_ms)
     drafted: dict[str, list[SprintState]] = {}
     finished: dict[str, list[SprintState]] = {}
-    for sprint in sorted((sprints or {}).values(),
-                         key=lambda s: (-s.stated_seq, s.sprint_id)):
+    for sprint in sorted((sprints or {}).values(), key=lambda s: (-s.stated_seq, s.sprint_id)):
         if sprint.project_id in registered:
             kept = finished if _finished(sprint, now_ms) else drafted
             kept.setdefault(sprint.project_id, []).append(sprint)

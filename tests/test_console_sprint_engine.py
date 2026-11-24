@@ -85,6 +85,16 @@ class SprintEngineMovementTest(unittest.TestCase):
         self.assertEqual(entry(derived)["ball"], "manager")
 
 
+class SprintEngineEntryTest(unittest.TestCase):
+    def test_the_sprint_entry_publishes_its_engine_reading(self):
+        for label, runs, reading in (
+                ("moving", [engine_state("sprint-moving.jsonl", LIVE)], {"moving": True, "waits": []}),
+                ("ci", [engine_state("sprint-ci.jsonl", LIVE)], {"moving": False, "waits": ["ci"]}),
+                ("no engine run", [], {"moving": False, "waits": []})):
+            with self.subTest(label):
+                self.assertEqual(shown(engine_runs=runs)["movement"]["engine"], reading)
+
+
 class SprintEngineWaitTest(unittest.TestCase):
     def test_with_no_forge_reading_an_open_ci_wait_and_an_open_lock_wait_read_their_sentences(self):
         for fixture, text in (("sprint-ci.jsonl", "waiting for CI on its pull request"),
