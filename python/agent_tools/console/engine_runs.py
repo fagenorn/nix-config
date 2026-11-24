@@ -21,7 +21,7 @@ fold of its own, so `engine status` and this view agree. The rules the readings 
 
 - P1. The engine is the process in the run's `lock`, read with a plain open; it is not the fold's step process.
 - P2. A live engine ends any step past its bound, so a live engine is moving and no step bound is read.
-- P3. Waits are keyed by the ledger's `WAITS`; the `ci` and `lock` waits keep the sprint wording.
+- P3. Waits are keyed by the ledger's `WAITS`; the `checks` and `lock` waits keep the sprint wording.
 - P4. The reading is the first that holds of: done, stopped, not running (no live engine), waiting, moving.
 - P5. Engine run states live in memory and are not logged; a restart reads each ledger once from its start.
 - P6. The newest root run of each (project, issue) is shown once it entered a step; a done run or one stopped
@@ -48,7 +48,7 @@ from agent_tools.delivery.engine_ledger import LedgerError, RunState
 READINGS = ("moving", "waiting", "stopped", "not_running", "done")
 WAIT_TEXT = {"usage-limit": "waiting out a usage limit",
              "host-slot": "waiting for a free session slot on this host",
-             "lock": sprints.NOW_LOCK_TEXT, "ci": sprints.NOW_CI_TEXT}
+             "lock": sprints.NOW_LOCK_TEXT, "checks": sprints.NOW_CI_TEXT}
 NEED_TEXT = {"owner-decision": "your decision", "owner-look": "your look", "retry": "a retry",
              "nothing": "nothing"}
 NOT_RUNNING_TEXT = "the engine is not running"

@@ -94,7 +94,7 @@ class MovementCheckTest(unittest.TestCase):
         missing = self.moving()
         del missing["movement"]["engine"]
         for label, case in (("moving", self.moving(engine={"moving": True, "waits": []})),
-                            ("waiting", self.moving(engine={"moving": False, "waits": ["ci"]})),
+                            ("waiting", self.moving(engine={"moving": False, "waits": ["checks"]})),
                             ("missing", missing)):
             with self.subTest(label):
                 code, out = self.check(view(project(case)))

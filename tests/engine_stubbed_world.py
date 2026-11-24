@@ -10,11 +10,23 @@ claim comments and the launches. `replies` overrides the default replies by step
 stand-in that makes the independent code review supported; `conditions` is the contract's
 `verification_conditions`; `before_pull_request` makes the fixture declare the pre-pull-request commands
 (lint and the touched-only test), and `slot_history()` reads the slot's history lines.
+
+The run installs the real lifecycle guard on a confirmed row for the fixture (the fixture's owner is
+not an authorized owner, so only the row authorizes it): `guard(text, cwd)` runs the installed hook
+and `guard_log` holds every payload it judged. A fake pull-request forge
+(`tests/fixtures/engine-stubbed-run/gh_pulls.py`) fronts the tracker's `gh` over the bare origin;
+`pulls()`, `lock_refs()` and `origin_tip(branch)` read what it left. `required_checks` is the
+contract's `merge.required_checks` (`()` declares none and the member is absent), `rollup` the pull
+requests' `statusCheckRollup` (default: one green `Fixture Checks` run), `forge_events` the one-shot
+events that fire on the first `statusCheckRollup` read of a pull request (`"move-head"` adds a commit
+to the head branch, `"steal-lock"` hands the land lock of `main` to a second open pull request headed
+at `stolen_sha`), and `lock_release_fails` makes every compare-and-swap delete of the land lock refused.
 """
 
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import os
 import shutil
@@ -25,14 +37,21 @@ from pathlib import Path
 
 from agent_tools.claims import forge_markers
 from agent_tools.delivery import issue_branch
+from agent_tools.delivery.engine_guard import payload
 from tests.engine_fixture import FixtureProject
-from tests.engine_guards import standin_guard, write_settings
+from tests.engine_guards import script, standin_guard, write_settings
 from tests.forge_world import ForgeWorld
-from tests.guard_policy_world import REPO_ROOT, GuardPolicyWorld
+from tests.guard_policy_world import REAL_GIT, REPO_ROOT, GuardPolicyWorld
 from tests.test_issue_setup import gh_only
 
 STUB = REPO_ROOT / "tests/fixtures/engine-stubbed-run/claude_stub.py"
 COMPANION = REPO_ROOT / "tests/fixtures/engine-stubbed-run/codex_companion_stub.py"
+GH_PULLS = REPO_ROOT / "tests/fixtures/engine-stubbed-run/gh_pulls.py"
+GUARD_GIT = REPO_ROOT / "tests/fixtures/engine-stubbed-run/guard_git.py"
+GUARD_SOURCE = REPO_ROOT / "home/common/claude-code/lifecycle_guard.py"
+LOCKS = "refs/agent-locks/land/"
+GREEN = [{"__typename": "CheckRun", "name": "Fixture Checks", "status": "COMPLETED",
+          "conclusion": "SUCCESS", "startedAt": "2026-11-06T10:00:00Z", "workflowName": "Fixture"}]
 ROLES = REPO_ROOT / "home/common/claude-code/agents"
 APPLIES = {"verdict": "applies", "details": "greet() is still missing.", "evidence": ""}
 CLEAN_LITE = {"verdict": "pass", "findings": [],
@@ -47,7 +66,7 @@ IMPLEMENTED = {
                "text": 'def farewell(name: str) -> str:\n    return f"Goodbye, {name}."\n'}}
 DEFAULT_REPLIES = {"applies": APPLIES, "implement": IMPLEMENTED, "lite-review": CLEAN_LITE}
 DEFAULT_BODY = ("Add a greet() function to the fixture module.\n\n"
-                "## Acceptance criteria\n\n- [ ] greet() returns the greeting\n")
+                "## Acceptance criteria\n\n- [ ] [code] greet() returns the greeting\n")
 PULL_FIELDS = "number,state,headRefName,closingIssuesReferences"
 DROPPED_ENV = ("AGENT_PLATFORM_ROOT", "GITHUB_TOKEN", "GH_TOKEN", "CLAUDE_ACCOUNT",
                "CLAUDE_CODE_SESSION_ID")
@@ -57,7 +76,9 @@ class StubbedRun:
     def __init__(self, test_case: unittest.TestCase, *, issue: int = 41, title: str = "Add a greeting",
                  body: str = DEFAULT_BODY, state: str = "open", labels=(), comments=(), pulls=(),
                  replies: dict | None = None, review_code: list | None = None,
-                 conditions: dict | None = None, before_pull_request: bool = False) -> None:
+                 conditions: dict | None = None, required_checks=FixtureProject.REQUIRED_CHECKS,
+                 rollup: list | None = None, forge_events=(), lock_release_fails: bool = False,
+                 before_pull_request: bool = False) -> None:
         self.test = test_case
         self.issue = issue
         self.title = title
@@ -66,7 +87,8 @@ class StubbedRun:
         if review_code is not None:
             self._install_companion(review_code)
         self.fixture = FixtureProject(test_case, self.world, review_code=review_code is not None,
-                                      conditions=conditions, before_pull_request=before_pull_request)
+                                      conditions=conditions, required_checks=required_checks,
+                                      before_pull_request=before_pull_request)
         self.forge = ForgeWorld(test_case)
         slug = self.fixture.slug
         self.forge.comment_store(slug, issue, comments, labels=list(labels))
@@ -87,11 +109,31 @@ class StubbedRun:
                             encoding="utf-8")
         launcher.chmod(0o755)
         self.env = {key: value for key, value in self.world.env.items() if key not in DROPPED_ENV}
+        forge_gh = gh_only(self.forge, self.tmp / "gh") / "gh"
+        self.stolen_sha: str | None = (hashlib.sha1(b"steal-lock").hexdigest()
+                                       if "steal-lock" in forge_events else None)
+        pulls_bin = self._install_pulls(forge_gh, slug, GREEN if rollup is None else rollup,
+                                        forge_events)
         self.env["PATH"] = os.pathsep.join(
-            [str(stub_bin), str(gh_only(self.forge, self.tmp / "gh")), self.world.env["PATH"]])
+            [str(stub_bin), str(pulls_bin), str(forge_gh.parent), self.world.env["PATH"]])
         self.env["FORGE_WORLD"] = str(self.forge.state)
         self.env["VERIFY_SLOT_DIR"] = str(self.tmp / "verify-slots")
-        self._install_home()
+        self.forge.ref_store(slug, {}, **({"refuse_to": ["0" * 40]} if lock_release_fails else {}))
+        self._install_home(pulls_bin / "gh", slug)
+
+    def _install_pulls(self, forge_gh: Path, slug: str, rollup: list, events) -> Path:
+        """The directory of the `gh` front that answers pull-request calls over the bare origin."""
+        root = self.fixture.root
+        git = self.world.git
+        git(root, "remote", "set-head", "origin", "main")
+        self.bare = git(root, "remote", "get-url", "origin").strip()
+        self.pulls_state = self.tmp / "pulls.json"
+        sha = self.stolen_sha
+        self.pulls_state.write_text(json.dumps({
+            "slug": slug, "bare": self.bare, "git": REAL_GIT, "next": 1, "pulls": [], "rollup": rollup,
+            "events": [{"event": name, "sha": sha} for name in events]}), encoding="utf-8")
+        return script(self.tmp / "pulls-bin" / "gh", sys.executable, str(GH_PULLS),
+                      str(self.pulls_state), str(forge_gh)).parent
 
     def _with_worktree(self, replies: dict) -> dict:
         """The replies, each `commit` effect without a worktree made in the run's worktree."""
@@ -128,10 +170,33 @@ class StubbedRun:
         respond("gh", ["pr", "list", "--repo", slug, "--state", "all", "--search", str(issue),
                        "--json", PULL_FIELDS], pulls)
 
-    def _install_home(self) -> None:
+    def _install_home(self, gh_bin: Path, slug: str) -> None:
         home = self.world.home
-        write_settings(home, str(standin_guard(self.tmp, "allow-guard", "allow",
-                                               str(self.tmp / "guard.log"))))
+        root = self.fixture.root
+        git_bin = script(self.tmp / "guard-git", sys.executable, str(GUARD_GIT), str(root),
+                         f"git@github.com:{slug}.git", REAL_GIT)
+        self.world.write_base(
+            authorized_owners=["fagenorn"], integration_bases={}, git_bin=str(git_bin),
+            gh_bin=str(gh_bin), jq_bin=shutil.which("jq") or "/usr/bin/jq")
+        self.world.register({"project_id": "example/fixture", "root": str(root)})
+        code, report, stderr = self.world.compile()
+        self.test.assertEqual((code, report["derived"]), (0, [slug]), f"{report} {stderr}")
+        row = self.world.policy()["derived_repositories"][slug]
+        self.test.assertEqual(row["required_checks"], list(self.fixture.required_checks))
+        look = self.tmp / "look-bin"
+        look.write_text(
+            f"#!{sys.executable}\nimport os\nimport sys\n"
+            f"os.environ['PYTHONPATH'] = {str(REPO_ROOT / 'python')!r}\n"
+            "os.execv(sys.executable, [sys.executable, '-m', 'agent_tools.delivery.look_approval',"
+            " 'judge', *sys.argv[1:]])\n", encoding="utf-8")
+        look.chmod(0o755)
+        self.guard_log = self.tmp / "guard.log"
+        real = script(self.tmp / "real-guard", sys.executable, "-I", str(GUARD_SOURCE),
+                      "--base-policy", str(self.world.base), "--policy", str(self.world.output),
+                      "--derive-bin", str(self.world.row_check()), "--look-bin", str(look),
+                      "--derive-timeout-seconds", "25")
+        write_settings(home, str(standin_guard(self.tmp, "tee-guard", "tee", str(self.guard_log),
+                                               str(real))))
         declaration = home / ".agents/share/host-declaration.json"
         declaration.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(REPO_ROOT / "home/common/agent-skills/host-declaration.json", declaration)
@@ -199,3 +264,24 @@ class StubbedRun:
         if not self.log.exists():
             return []
         return [json.loads(line) for line in self.log.read_text(encoding="utf-8").splitlines()]
+
+    def pulls(self) -> list[dict]:
+        """The fake forge's pull requests now."""
+        return json.loads(self.pulls_state.read_text(encoding="utf-8"))["pulls"]
+
+    def lock_refs(self) -> dict:
+        """The land lock refs of the tracker fake's ref store now."""
+        return {ref: sha for ref, sha in self.forge.refs().items() if ref.startswith(LOCKS)}
+
+    def origin_tip(self, branch: str) -> str | None:
+        """The tip of `branch` in the bare origin, or None when it is not there."""
+        done = subprocess.run([REAL_GIT, "-C", self.bare, "rev-parse", "--verify", "--quiet",
+                               f"refs/heads/{branch}^{{commit}}"], capture_output=True, text=True)
+        return done.stdout.strip() if done.returncode == 0 else None
+
+    def guard(self, text: str, cwd: Path) -> subprocess.CompletedProcess:
+        """Run the installed settings hook as the engine does, with the Bash payload for `text`."""
+        hook = json.loads((self.world.home / ".claude/settings.json").read_text("utf-8"))
+        command = hook["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+        return subprocess.run([command], cwd=cwd, env=self.env, capture_output=True, text=True,
+                              input=payload(text, str(cwd)).decode("utf-8"), timeout=120)

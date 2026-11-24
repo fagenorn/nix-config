@@ -119,7 +119,7 @@ class SprintEngineEntryTest(unittest.TestCase):
     def test_the_sprint_entry_publishes_its_engine_reading(self):
         for label, runs, reading in (
                 ("moving", [engine_state("sprint-moving.jsonl", LIVE)], {"moving": True, "waits": []}),
-                ("ci", [engine_state("sprint-ci.jsonl", LIVE)], {"moving": False, "waits": ["ci"]}),
+                ("checks", [engine_state("sprint-checks.jsonl", LIVE)], {"moving": False, "waits": ["checks"]}),
                 ("no engine run", [], {"moving": False, "waits": []})):
             with self.subTest(label):
                 self.assertEqual(shown(engine_runs=runs)["movement"]["engine"], reading)
@@ -127,7 +127,7 @@ class SprintEngineEntryTest(unittest.TestCase):
 
 class SprintEngineWaitTest(unittest.TestCase):
     def test_with_no_forge_reading_an_open_ci_wait_and_an_open_lock_wait_read_their_sentences(self):
-        for fixture, text in (("sprint-ci.jsonl", "waiting for CI on its pull request"),
+        for fixture, text in (("sprint-checks.jsonl", "waiting for CI on its pull request"),
                               ("sprint-lock.jsonl", "waiting its turn to merge")):
             with self.subTest(fixture):
                 got = shown(engine_runs=[engine_state(fixture, LIVE)])
@@ -135,7 +135,7 @@ class SprintEngineWaitTest(unittest.TestCase):
                 self.assertNotIn("stuck", json.dumps(got))
 
     def test_the_run_line_and_the_sprint_line_give_one_wait_sentence(self):
-        for wait in ("ci", "lock", "usage-limit", "host-slot"):
+        for wait in ("checks", "lock", "usage-limit", "host-slot"):
             with self.subTest(wait):
                 run = engine_state(f"sprint-{wait}.jsonl", LIVE)
                 derived = line(BASE, NOW, sessions=[idle_session], engine_runs=[run])
@@ -159,30 +159,30 @@ class SprintEngineWaitTest(unittest.TestCase):
                          ["entries"][0]["engine_runs"][0]["wait_until"])
 
     def test_a_wait_with_no_end_time_leaves_the_sprint_block_without_one(self):
-        for fixture in ("sprint-host-slot.jsonl", "sprint-ci.jsonl", "sprint-lock.jsonl"):
+        for fixture in ("sprint-host-slot.jsonl", "sprint-checks.jsonl", "sprint-lock.jsonl"):
             with self.subTest(fixture):
                 self.assertIsNone(shown(engine_runs=[engine_state(fixture, LIVE)])["now_until"])
 
     def test_a_limit_beside_a_ci_wait_names_the_ci_wait_and_no_end_time(self):
-        runs = [engine_state("sprint-usage-limit.jsonl", LIVE, issue=4), engine_state("sprint-ci.jsonl", LIVE, issue=5)]
+        runs = [engine_state("sprint-usage-limit.jsonl", LIVE, issue=4), engine_state("sprint-checks.jsonl", LIVE, issue=5)]
         got = shown(engine_runs=runs)
         self.assertEqual((got["now_text"], got["now_until"]), (NOW_CI_TEXT, None))
 
     def test_engine_waits_follow_ci_commit_release_and_lock_in_that_order(self):
         release = moving(release_ms=NOW - MIN)
         for label, fixtures, movement, text in (
-                ("ci beats a slot", ("sprint-host-slot.jsonl", "sprint-ci.jsonl"), None, NOW_CI_TEXT),
+                ("ci beats a slot", ("sprint-host-slot.jsonl", "sprint-checks.jsonl"), None, NOW_CI_TEXT),
                 ("lock beats a limit", ("sprint-lock.jsonl", "sprint-usage-limit.jsonl"), None, NOW_LOCK_TEXT),
                 ("limit beats a slot", ("sprint-usage-limit.jsonl", "sprint-host-slot.jsonl"), None,
                  "waiting out a usage limit"),
                 ("release beats a lock", ("sprint-lock.jsonl",), release, "waiting for a release step"),
-                ("ci beats a release", ("sprint-ci.jsonl",), release, NOW_CI_TEXT)):
+                ("ci beats a release", ("sprint-checks.jsonl",), release, NOW_CI_TEXT)):
             with self.subTest(label):
                 runs = [engine_state(fixture, LIVE, issue=4 + number) for number, fixture in enumerate(fixtures)]
                 self.assertEqual(shown(engine_runs=runs, movement=movement)["now_text"], text)
 
     def test_a_moving_run_beside_a_waiting_one_names_no_wait(self):
-        runs = [engine_state("sprint-moving.jsonl", LIVE, issue=4), engine_state("sprint-ci.jsonl", LIVE, issue=5)]
+        runs = [engine_state("sprint-moving.jsonl", LIVE, issue=4), engine_state("sprint-checks.jsonl", LIVE, issue=5)]
         self.assertEqual(shown(engine_runs=runs)["now_text"], "building 1 of 7: Importer resumes")
 
     def test_the_forge_is_not_read_for_an_issue_an_engine_run_carries(self):
@@ -196,7 +196,7 @@ class SprintEngineWaitTest(unittest.TestCase):
         self.assertEqual(placed["now_text"], "waiting its turn to merge")
 
     def test_with_no_clock_no_engine_wait_is_named(self):
-        got = entry(line(BASE, None, sessions=[idle_session], engine_runs=[engine_state("sprint-ci.jsonl", LIVE)]))
+        got = entry(line(BASE, None, sessions=[idle_session], engine_runs=[engine_state("sprint-checks.jsonl", LIVE)]))
         self.assertEqual(got["now_text"], "building 1 of 7: Importer resumes")
 
 

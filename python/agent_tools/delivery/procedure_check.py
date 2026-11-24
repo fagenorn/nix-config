@@ -5,8 +5,9 @@ reply schema files `*.reply.json`. A procedure's name is its file stem and match
 JSON: a duplicate key or a non-finite literal makes it unreadable.
 
 Header. A procedure is an object with these members: `format` (the integer 1, the only version number), `inputs` (distinct
-names matching `^[a-z][a-z0-9_]*$`), `stops` (stop name -> object with exactly `need`, one of `NEEDS`, and `reenter`, a step
-id) and `steps` (a non-empty list), all required, and `keep_alive`, optional (a procedure with none runs no keep-alive): an
+names matching `^[a-z][a-z0-9_]*$`), `stops` (stop name -> object with `need`, one of `NEEDS`, and `reenter`, a step
+id, and optional `pinned`, a bool: a continue re-enters a pinned stop's `reenter` step without rewinding to an earlier
+stale result) and `steps` (a non-empty list), all required, and `keep_alive`, optional (a procedure with none runs no keep-alive): an
 object with `command`, a command id, optional `subcommand`, and `in`, a list of distinct `run.<input>` paths, the one
 keep-alive command and where its arguments come from. A procedure naming a `keep_alive` declares a stop `claim-lost`. A stop
 is never named `done`, `exhausted`, `out-of-bounds`, `quota-wait`, `superseded` or like a step. `exhausted` and `out-of-bounds` are reserved:
@@ -20,7 +21,7 @@ stored result holds when a stopped run continues), `in` (distinct paths,
 `<step id>.<member>` or `run.<input>`), `on` (outcome -> target; required on every step except a group
 member, forbidden on one), `max_visits` (integer >= 1; its presence makes the
 step bounded) and `mutates` (bool). Kind members: `command`: `command`,
-optional `subcommand`, its arguments being its `in` paths, and optional `check`
+optional `subcommand`, optional `wait` (one of `WAITS`), its arguments being its `in` paths, and optional `check`
 (an object with `command` and optional `subcommand`: the command that reads
 whether the step's effect already happened; a command step with `mutates` true
 requires one and no other step carries one); `agent`: `role`,
@@ -127,10 +128,12 @@ PLACEHOLDER_RE = re.compile(r"\{\{\s*([^{}]*?)\s*\}\}")
 
 # The members of each platform command's JSON output that are lists; every other member is not one.
 PLATFORM_LISTS: Mapping[str, frozenset[str]] = {
+    "closing": frozenset(),
     "diff-scope": frozenset({"files"}),
     "forge-claim": frozenset(),
     "independent-review": frozenset({"findings"}),
     "issue-setup": frozenset(),
+    "landing": frozenset(),
     "look-approval": frozenset({"acs", "covers"}),
     "resolve-project": frozenset(),
     "verified-tree": frozenset({"results"}),
@@ -139,8 +142,9 @@ PLATFORM_LISTS: Mapping[str, frozenset[str]] = {
 HOLDS = ("run", "head", "live")
 COMMON_REQUIRED = ("id", "stage", "kind", "holds")
 COMMON_OPTIONAL = ("in", "on", "max_visits", "mutates")
+WAITS = ("usage-limit", "host-slot", "lock", "checks")
 KIND_MEMBERS = {
-    "command": (("command",), ("subcommand", "check")),
+    "command": (("command",), ("subcommand", "check", "wait")),
     "agent": (("role", "prompt", "reply", "outcome_from"), ()),
     "decide": (("grader",), ()),
     "group": (("members",), ()),
@@ -348,7 +352,9 @@ def _stops(doc: dict, ids: set[str], found: _Findings) -> None:
         if not isinstance(stop, dict):
             found.add("invalid_field", f"stop {name!r} must be an object.")
             continue
-        _members(stop, ("need", "reenter"), (), found, None, f"stop {name!r}")
+        _members(stop, ("need", "reenter"), ("pinned",), found, None, f"stop {name!r}")
+        if "pinned" in stop and not isinstance(stop["pinned"], bool):
+            found.add("invalid_field", f"stop {name!r} pinned must be a bool.")
         if "need" in stop and stop["need"] not in NEEDS:
             found.add("invalid_field", f"stop {name!r} need must be one of {', '.join(NEEDS)}.")
         if "reenter" in stop and not _is_text(stop["reenter"]):
@@ -396,6 +402,8 @@ def _kind_members(item: dict, kind: str, label: str | None, found: _Findings) ->
             invalid("command must be a command id.")
         if "subcommand" in item and not (isinstance(item["subcommand"], str) and NAME_RE.fullmatch(item["subcommand"])):
             invalid(f"subcommand must match {NAME_RE.pattern}.")
+        if "wait" in item and item["wait"] not in WAITS:
+            invalid(f"wait must be one of {', '.join(WAITS)}.")
         _check_member(item, label, found)
     elif kind == "agent":
         if "role" in item and not _is_text(item["role"]):

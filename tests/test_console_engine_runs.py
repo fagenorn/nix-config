@@ -131,7 +131,7 @@ class ReadingTest(unittest.TestCase):
         self.assertEqual(set(engine_runs.WAIT_TEXT), set(engine_ledger.WAITS))
         self.assertEqual(set(engine_runs.NEED_TEXT), set(procedure_check.NEEDS))
         self.assertEqual(engine_runs.WAIT_TEXT["lock"], sprints.NOW_LOCK_TEXT)
-        self.assertEqual(engine_runs.WAIT_TEXT["ci"], sprints.NOW_CI_TEXT)
+        self.assertEqual(engine_runs.WAIT_TEXT["checks"], sprints.NOW_CI_TEXT)
         state = bare_state(stage="building", engine_alive=True, last_event=LAST_AT,
                            wait={"wait": "usage-limit", "since": LAST_AT, "until": "2026-11-21T18:00:00Z"})
         entry = engine_runs.engine_entry(state, None)
@@ -139,7 +139,7 @@ class ReadingTest(unittest.TestCase):
         self.assertEqual(entry["text"], "building, waiting out a usage limit")
 
     def test_an_open_ci_wait_reads_waiting_for_ci_on_its_pull_request(self):
-        state = poll_state("sprint-ci.jsonl", LIVE)
+        state = poll_state("sprint-checks.jsonl", LIVE)
         entry = engine_runs.engine_entry(state, None)
         self.assertEqual((entry["reading"], entry["text"]),
                          ("waiting", "building, waiting for CI on its pull request"))
@@ -154,7 +154,7 @@ class ReadingTest(unittest.TestCase):
                 self.assertIsNone(engine_runs.wait_text(poll_state(fixture, probe)))
 
     def test_a_waiting_lines_text_ends_with_its_wait_text(self):
-        for wait in ("ci", "lock", "usage-limit", "host-slot"):
+        for wait in ("checks", "lock", "usage-limit", "host-slot"):
             with self.subTest(wait=wait):
                 state = poll_state(f"sprint-{wait}.jsonl", LIVE)
                 self.assertEqual(engine_runs.line_text(state), f"building, {engine_runs.wait_text(state)}")
@@ -203,8 +203,8 @@ class SprintEngineTest(unittest.TestCase):
             moving=True, waits=frozenset(), sessions=frozenset({"eng-s1"}), issues=frozenset({41})))
 
     def test_a_waiting_run_gives_its_wait_kind_and_does_not_read_moving(self):
-        self.assertEqual(self.read("sprint-ci.jsonl", LIVE), SprintEngine(
-            moving=False, waits=frozenset({"ci"}), sessions=frozenset({"eng-s1"}),
+        self.assertEqual(self.read("sprint-checks.jsonl", LIVE), SprintEngine(
+            moving=False, waits=frozenset({"checks"}), sessions=frozenset({"eng-s1"}),
             issues=frozenset({41})))
 
     def test_a_gone_engine_moves_nothing_but_keeps_its_sessions_and_issue(self):
@@ -223,18 +223,18 @@ class SprintEngineTest(unittest.TestCase):
     def test_a_sprint_engine_reads_whether_it_moves_its_wait_sentences_and_its_json(self):
         self.assertIs(NO_ENGINE.moves, False)
         self.assertIs(SprintEngine(moving=True).moves, True)
-        self.assertIs(SprintEngine(waits=frozenset({"ci"})).moves, True)
-        both = SprintEngine(waits=frozenset({"ci", "lock"}))
+        self.assertIs(SprintEngine(waits=frozenset({"checks"})).moves, True)
+        both = SprintEngine(waits=frozenset({"checks", "lock"}))
         self.assertEqual(both.texts, {sprints.NOW_CI_TEXT, sprints.NOW_LOCK_TEXT})
         self.assertIsNone(both.later)
         self.assertEqual(SprintEngine(waits=frozenset({"host-slot", "usage-limit"})).later,
                          "waiting out a usage limit")
         self.assertEqual(SprintEngine(waits=frozenset({"host-slot"})).later,
                          "waiting for a free session slot on this host")
-        self.assertEqual(SprintEngine(waits=frozenset({"lock", "ci"})).as_json(),
-                         {"moving": False, "waits": ["ci", "lock"]})
+        self.assertEqual(SprintEngine(waits=frozenset({"lock", "checks"})).as_json(),
+                         {"moving": False, "waits": ["checks", "lock"]})
         every = SprintEngine(waits=frozenset(engine_ledger.WAITS)).as_json()["waits"]
-        self.assertEqual(every, ["ci", "host-slot", "lock", "usage-limit"])
+        self.assertEqual(every, ["checks", "host-slot", "lock", "usage-limit"])
 
 
 class IncrementalTest(unittest.TestCase):
