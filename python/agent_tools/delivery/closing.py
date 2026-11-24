@@ -5,9 +5,11 @@ Exit 0 carries any verdict but `error`; exit 1 is `error` (`{verdict, error, tra
 detail}`, `error` the closed code, `transient` true for a failure worth retrying); a usage
 error is exit 2 with `error` `usage`. Nothing here forces, resets, stashes or deletes by force.
 
-`read --repo-root <path> --issue <n> --repo <owner/name>` reads `gh pr list --head <branch>
---state merged` and prints `merged` (`branch`, `worktree_path`, `integration_branch`, `closes`
-from the issue body as `landing.prepare` reads it, `pr`, `merge_commit`) or `unmerged`.
+`read --repo-root <path> --issue <n> --repo <owner/name> [--head <sha>]` reads `gh pr list --head
+<branch> --state merged` and prints `merged` (`branch`, `worktree_path`, `integration_branch`,
+`closes` from the issue body as `landing.prepare` reads it, `pr`, `merge_commit`) or `unmerged`.
+Given `--head`, only a merged pull request whose head is `<sha>` counts, so an earlier merged pull
+request on the same branch at another head is `unmerged`.
 
 `worktree --repo-root <path> --worktree-path <w>` runs `git worktree remove <w>` with no
 `--force`: `removed` (removed now, or `<w>` is no worktree of the repository) or `dirty` (git
@@ -36,7 +38,7 @@ from agent_tools.delivery.landing import Failure, emit
 from agent_tools.system import forge_api
 
 GIT_TIMEOUT = 120
-MERGED_FIELDS = "number,mergeCommit"
+MERGED_FIELDS = "number,mergeCommit,headRefOid"
 DIRTY = "contains modified or untracked files"
 
 
@@ -78,6 +80,8 @@ def read(args: argparse.Namespace) -> dict:
                     "--json", MERGED_FIELDS])
     if not isinstance(pulls, list) or not all(isinstance(pull, dict) for pull in pulls):
         raise Failure("payload_invalid", "the pull request list is not an array of objects")
+    if args.head is not None:
+        pulls = [pull for pull in pulls if pull.get("headRefOid") == args.head]
     if not pulls:
         return {"verdict": "unmerged"}
     pull = max(pulls, key=lambda entry: entry.get("number") if isinstance(entry.get("number"), int) else 0)
@@ -167,6 +171,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_argument("--repo-root", required=True)
     sub.add_argument("--issue", required=True, type=number)
     sub.add_argument("--repo", required=True)
+    sub.add_argument("--head")
     sub = commands.add_parser("worktree")
     sub.add_argument("--repo-root", required=True)
     sub.add_argument("--worktree-path", required=True)

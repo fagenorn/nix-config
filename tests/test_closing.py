@@ -25,7 +25,7 @@ TIER = "integration"
 
 ISSUE_READ = ["api", f"repos/{SLUG}/issues/{ISSUE}"]
 PR_LIST = ["pr", "list", "--repo", SLUG, "--head", "issue-41-add-a-greeting", "--state", "merged",
-           "--json", "number,mergeCommit"]
+           "--json", "number,mergeCommit,headRefOid"]
 SHA = "1" * 40
 # A `gh` that reads the issue from the store (so a close shows on the next read) and leaves every
 # other call to the world's fake.
@@ -141,8 +141,8 @@ class BranchTest(GitTest):
 
 
 class ReadTest(GitTest):
-    def read(self) -> tuple[int, dict]:
-        return self.call("read", "--repo-root", str(self.root), "--issue", str(ISSUE), "--repo", SLUG)
+    def read(self, *extra: str) -> tuple[int, dict]:
+        return self.call("read", "--repo-root", str(self.root), "--issue", str(ISSUE), "--repo", SLUG, *extra)
 
     def test_read_answers_merged_with_the_placement_and_the_criteria(self):
         forge = self.landing.forge
@@ -159,6 +159,20 @@ class ReadTest(GitTest):
         self.assertEqual(self.read()[1]["closes"], False)
         forge.respond_json("gh", PR_LIST, [])
         self.assertEqual(self.read(), (0, {"verdict": "unmerged"}))
+
+    def test_read_given_a_head_settles_only_on_a_merged_pull_request_with_that_head(self):
+        forge = self.landing.forge
+        other, head = "b" * 40, "c" * 40
+        earlier = {"number": 7, "mergeCommit": {"oid": SHA}, "headRefOid": other}
+        forge.respond_json("gh", PR_LIST, [earlier])
+        self.assertEqual(self.read("--head", head), (0, {"verdict": "unmerged"}))
+        self.assertEqual(self.read()[1]["pr"], 7)
+        later = {"number": 9, "mergeCommit": {"oid": SHA}, "headRefOid": head}
+        forge.respond_json("gh", PR_LIST, [later, earlier])
+        status, merged = self.read("--head", head)
+        self.assertEqual((status, merged["verdict"], merged["pr"]), (0, "merged", 9))
+        forge.respond_json("gh", PR_LIST, [{"number": 9, "mergeCommit": {"oid": SHA}}])
+        self.assertEqual(self.read("--head", head), (0, {"verdict": "unmerged"}))
 
 
 if __name__ == "__main__":

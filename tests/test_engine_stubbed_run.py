@@ -569,6 +569,37 @@ class LandWaitTest(Landing):
         self.assertLess(spans["lock"][1], spans["checks"][0])
 
 
+class SettledTest(Landing):
+    def earlier_merge(self, run: StubbedRun) -> tuple[str, str]:
+        """A merge commit and its side head in the origin's object store, on no ref."""
+        git, bare = run.world.git, run.bare
+        tree = git(bare, "rev-parse", "main^{tree}").strip()
+        main = git(bare, "rev-parse", "main").strip()
+        side = git(bare, "commit-tree", tree, "-p", main, "-m", "earlier work").strip()
+        return git(bare, "commit-tree", tree, "-p", main, "-p", side, "-m", "earlier merge").strip(), side
+
+    def test_an_earlier_merged_pull_request_at_another_head_does_not_settle_the_landing(self):
+        run = StubbedRun(self)
+        merge, side = self.earlier_merge(run)
+        state = json.loads(run.pulls_state.read_text(encoding="utf-8"))
+        state["pulls"].append({"number": 1, "state": "MERGED", "baseRefName": "main",
+                               "headRefName": run.branch, "headRefOid": side,
+                               "mergeCommit": {"oid": merge}, "title": "earlier",
+                               "body": "Refs #41.", "url": "https://github.com/example/fixture/pull/1"})
+        state["next"] = 2
+        run.pulls_state.write_text(json.dumps(state), encoding="utf-8")
+
+        self.finish(run, "done")
+
+        walk = self.land_transitions(run)
+        self.assertIn(("settled", "unmerged"), walk)
+        self.assertIn(("merge", "ok"), walk)
+        self.assertEqual([pull["number"] for pull in run.pulls()], [1, 2])
+        landed = run.pulls()[1]
+        self.assertEqual((landed["state"], landed["headRefOid"]), ("MERGED", self.prepared_head(run)))
+        self.assertNotEqual(self.prepared_head(run), side)
+
+
 class CloseOutTest(Landing):
     def test_an_issue_with_a_criterion_no_test_shows_merges_with_refs_and_stops_hold(self):
         body = ("Add a greet() function.\n\n## Acceptance criteria\n\n- [ ] [code] greet() returns the greeting\n"
