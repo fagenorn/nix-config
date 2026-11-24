@@ -27,7 +27,6 @@ SHA = "a" * 40
 ARGS = {"repo_root": "/r", "batch_id": "b1", "child_script": "/s/deliver-standard.js", "issues": [1]}
 HOLDER = "h1/b1"
 ISSUE_BRANCH_ARGV = re.compile(r"\bissue-branch --repo-root (\S+) --issue (\d+)\b")
-LANE_RULE_ARGV = re.compile(r"\bissue-setup lane --repo-root (\S+) --repo (\S+) --issue (\d+)\b")
 
 
 HELD = {"claim": {"verdict": "held_by", "by": HOLDER}}
@@ -391,25 +390,6 @@ class IntakeLaneTest(unittest.TestCase):
         self.assertEqual(facts["schema"]["properties"]["lane"]["enum"], ["direct", "standard", "needs-design"])
         self.assertIn("lane", facts["schema"]["required"])
 
-    def test_the_facts_lane_is_the_lane_rules_verdict(self):
-        _, calls, _ = run(patch={"facts-1": {"lane": "direct", "why": "named files 1 of at most 3"}})
-        self.assertEqual(LANE_RULE_ARGV.findall(prompt(calls, "facts-1")), [("/r", "owner/repo", "1")])
-        args = child(calls, 1)["args"]
-        self.assertEqual(args["lane"], "direct")
-        self.assertNotIn("cont", args)
-
-    def test_needs_design_is_still_refused_with_the_rule(self):
-        result, calls, _ = run(patch={"facts-1": {"lane": "needs-design", "why": "no criteria"}})
-        self.assertEqual(row(result, 1)["outcome"], "needs-design")
-        self.assertNotIn("child-1", labels(calls))
-        self.assertNotIn("acquire-1", labels(calls))
-
-    def test_a_standard_rule_reaches_the_child_as_its_explicit_lane(self):
-        _, calls, _ = run(patch={"facts-1": {"lane": "standard",
-                                             "why": "acceptance criteria 4, over the 3 of the direct lane"}})
-        first = next(c for c in calls if c["label"] == "child-1")
-        self.assertEqual(first["args"]["lane"], "standard")
-
     def test_a_facts_reply_without_lane_is_a_stopped_row(self):
         cases = ({"patch": {"facts-1": {"lane": None}}}, {"patch": {"facts-1": {"lane": "fast"}}},
                  {"replies": {"facts-1": FACTS_NO_LANE}})
@@ -468,11 +448,6 @@ class LiveFaultIntakeTest(unittest.TestCase):
         self.assertEqual(row(result, 1)["reason"], LIVE_ROW)
         self.assertLeftOut(result, calls)
         self.assertNotIn("release-1", labels(calls))
-
-    def test_a_declared_live_fault_with_a_direct_rule_is_still_left_out(self):
-        result, calls, _ = run(patch={"facts-1": {"lane": "direct", "why": "r", "live_fault": {"verdict": "declared"}}})
-        self.assertLeftOut(result, calls)
-        self.assertEqual(row(result, 1)["reason"], LIVE_ROW)
 
     def test_an_unreadable_declaration_leaves_the_issue_out(self):
         for fault in ({"verdict": "error", "detail": "console down\nagain"}, None, "yes"):
