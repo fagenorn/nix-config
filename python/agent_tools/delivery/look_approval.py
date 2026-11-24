@@ -149,7 +149,7 @@ Every call prints one JSON object on one stdout line with `command` (`look-appro
    `look_marker.merged_under_look`), all decide an own-files line with `look_marker.own_files_untouched`
    through `look_marker.kept`, so the writer and every reader agree. Without the flag `carry` reads
    only the line of its own rule: an own-files line short-circuits nothing.
-   An approval with a `pictures` digest and no picture given (the manager took the pictures, issue 1719)
+   An approval with a `pictures` digest and no picture given (the manager took the pictures)
    is carried by the own-files rule once the pictures' inputs are also unchanged: it is decided as
    `--own-files` is, then `A...H` must list no file of a look file set at the base (`.github/look-files.json`,
    read once; absent is `needed` with `no-look-files`) and not `look_marker.PICTURE_TOOL_FILES`. The line
@@ -440,7 +440,7 @@ def carry(args: argparse.Namespace) -> int:
     if rule == lm.PICTURES_RULE:
         if args.digest is None:
             # The pictures were not taken here (the manager took them): the approval stands when the pull
-            # request's own files and the pictures' inputs are unchanged (issue 1719).
+            # request's own files and the pictures' inputs are unchanged.
             rule, inputs = lm.OWN_FILES_RULE, True
             state["rule"] = rule
         elif candidate.pictures != args.digest:

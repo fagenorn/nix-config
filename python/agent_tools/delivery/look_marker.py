@@ -136,7 +136,7 @@ returns its answer when it keeps or needs reads, so `judge` (the guard's carry r
 line naming `rule=own-files` with a `pictures` field carries nothing. `settle_own_files` drives it alone,
 for `look-approval carry --own-files`.
 
-Manager-pictured approvals (issue 1719). The pictures of an approval may be the manager's, so a delivery with
+Manager-pictured approvals. The pictures of an approval may be the manager's, so a delivery with
 none of its own cannot re-render them. Such a carry holds under the own-files rule when, besides, `A...H` lists no
 file of any look file set at the base and none of `PICTURE_TOOL_FILES`, the inputs the pictures were rendered from.
 `own_file_changed` and `picture_input_changed` name the file that makes it refuse, for the reason `look-approval
@@ -849,11 +849,10 @@ def own_file_changed(approved_head: str, head: str, carry: Carry) -> str | None:
 
 
 def picture_input_changed(approved_head: str, head: str, carry: Carry) -> str | None:
-    """The first name `A...H` lists that a picture was rendered from, else None (issue 1719).
+    """The first name `A...H` lists that a picture was rendered from, else None.
 
-    The inputs are the files of every look file set at the base (the page files the look covers) and
-    `PICTURE_TOOL_FILES`, whoever took the pictures. A set file or a listing it cannot read raises
-    `Unreadable`.
+    The inputs are the files of every look file set at the base and `PICTURE_TOOL_FILES`, whoever took
+    the pictures. An unreadable set file or listing raises `Unreadable`.
     """
     contents = contents_path(carry.base)
     sets = read_look_files(carry.reads.get(contents))

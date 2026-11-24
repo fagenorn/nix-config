@@ -3124,7 +3124,7 @@ const LOOK_REVERIFY = { ...VERIFY, properties: { ...VERIFY.properties, merge_onl
 const LOOK_CARRY_SCHEMA = { type: 'object', properties: { verdict: { type: 'string' }, from: { type: ['string', 'null'] }, reason: { type: ['string', 'null'] }, rule: { type: ['string', 'null'] }, comment_id: { type: ['integer', 'null'] }, detail: { type: 'string' } }, required: ['verdict'] }
 // The reasons look-approval carry gives for a needed answer; any other reason is an unreadable reply.
 const CARRY_REASONS = ['no-approval', 'source-differs', 'pictures-unreadable', 'pictures-missing', 'pictures-differ', 'not-merges', 'no-look-files', 'look-files-differ', 'own-files-touched', 'picture-input-changed']
-// The rules a carried reply may name; with no picture passed it must be look-files or own-files. A reason may add a file name after a colon.
+// The rules a carried reply may name; with no picture passed it must be look-files or own-files.
 const CARRY_RULES = ['pictures', 'look-files', 'own-files']
 const USABLE_PICTURE = /^\/[^\0\r\n]+$/
 const CLEAN_MERGE = `a clean two-parent merge, meaning git -C ${W} merge-tree --write-tree <merge>^1 <merge>^2 exits 0 and prints the tree id that git -C ${W} rev-parse <merge>^{tree} gives (a conflict resolved by hand, or an octopus merge, gives a different tree; never judge this from git show --cc, which omits a hunk where the merge keeps one parent unchanged)`
