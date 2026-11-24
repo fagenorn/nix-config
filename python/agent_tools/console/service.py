@@ -62,7 +62,7 @@ stream `Content-Length`):
     POST /api/withdraw-notice 200 application/json, a manager takes back one of its notices (below)
     POST /api/live-fault 200 application/json, a manager declares an issue a fault live in production (below)
     POST /api/live-fault-withdraw 204, a JSON body, the page withdraws a live fault (below)
-    POST /api/permit 200 application/json, the console judges a manager session's merge or rerun (below)
+    POST /api/permit 200 application/json, the console judges a manager's merge, rerun or approved action (below)
     POST /api/permission-prompt 200 application/json, a manager's hook holds one Bash prompt on the console (below)
     POST /api/permission-answer 204, a JSON body, the page allows or refuses a manager's held prompt (below)
     POST /api/picture 200 application/json, a manager sends one PNG picture (below)
@@ -1119,6 +1119,25 @@ appends one `permit.landed` row `{"sprint_id", "session_id", "tool_use_id", "rep
 "target": {"pr", "head"}}`, only when the command is exactly such a merge (`permit.merge_target`) and
 the allow of that same tool call was judged at most `PERMIT_LANDED_SECONDS` (30 minutes) ago;
 otherwise it is False and appends nothing.
+
+An approved action (`permit.judge_action`): a body with a `nonce` is the signed body
+`{"sprint_id", "phase", "session_id", "tool_use_id", "command_sha256", "nonce", "auth"}`, which carries no
+secret and no command text. `permit_secret(sprint_id, auth, signed)` (the ingest lock; an unknown sprint
+is 409, a sprint with no secret file or an `auth` that is not `permit.action_request_auth` of the body's
+`signed_bytes` under the secret 403) returns the secret, and the handler calls `permit_action` (phase
+`judge`) or `permit_action_landed` (`landed`) with it. A judge reply is 200 `{"decision", "reason",
+"mac"}`, `mac` being `permit.action_reply_mac` for the request's nonce, which the hook checks before it
+honours the decision; a landed reply is `{"recorded": <bool>}`. `permit_action` holds the ingest lock for
+all of it: the secret and the manager's session as `permit` checks them (`_permit_refusal`), then
+`permit.judge_action` over the sprint's questions at the console's time; a command no card names has no
+decision and no row, otherwise the decided verdict is appended as a `permit.judged` row (verb `action`,
+repo null, target `{"round", "index"}`) before the lock is released, which folds the card as used, so
+an allow is never given twice for one approval. An allowed action is also remembered in memory with the
+console's clock, and `permit_action_landed` appends one `permit.landed` row `{"sprint_id", "session_id",
+"tool_use_id", "repo": null, "verb": "action", "target": {"round", "index"}}` only for a card whose
+command has the digest and an allow of that same tool call at most `PERMIT_LANDED_SECONDS` ago; otherwise
+it is False and appends nothing. Only the signed body decides an action: `permit` for a command that names
+no granted verb still has no decision and no row.
 
 Permission card (#1424, `prompt_card`): `POST /api/permission-prompt` is a manager write dispatched beside
 `/api/permit` through `_checked_length(MAX_PROMPT_BYTES)` (262144: twelve bytes for each of the
@@ -3349,14 +3368,29 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             request = sprints.parse_permit_request(self.rfile.read(length))
         except ValueError:
             return self._refuse(400, "bad permit")
+        console = self.server.console
         try:
-            if request.phase == "judge":
-                verdict = self.server.console.permit(
+            if isinstance(request, sprints.ActionPermitRequest):
+                secret = console.permit_secret(request.sprint_id, request.auth, request.signed)
+                if request.phase == "judge":
+                    verdict = console.permit_action(
+                        request.sprint_id, secret, request.session_id, request.tool_use_id,
+                        request.digest)
+                    reply = {"decision": verdict.decision, "reason": verdict.reason,
+                             "mac": permit.action_reply_mac(
+                                 secret, request.sprint_id, request.nonce, request.digest,
+                                 verdict.decision, verdict.reason)}
+                else:
+                    reply = {"recorded": console.permit_action_landed(
+                        request.sprint_id, secret, request.session_id, request.tool_use_id,
+                        request.digest)}
+            elif request.phase == "judge":
+                verdict = console.permit(
                     request.sprint_id, request.secret, request.session_id, request.tool_use_id,
                     request.command)
                 reply = {"decision": verdict.decision, "reason": verdict.reason}
             else:
-                reply = {"recorded": self.server.console.permit_landed(
+                reply = {"recorded": console.permit_landed(
                     request.sprint_id, request.secret, request.session_id, request.tool_use_id,
                     request.command)}
         except sprints.SecretRefused:
@@ -4814,7 +4848,7 @@ class ConsoleService:
         self._branch_pattern_of = branch_pattern_of
         self._permit_forge = permit_forge
         self._merge_binding_of = merge_binding_of
-        self._permit_allows: dict[tuple[str, str, str, str | None, int, str], float] = {}
+        self._permit_allows: dict[tuple[str, str, str, object, int, object], float] = {}
         self._patterns: dict[str, str] = {}
         self._activity = activity
         self._clock = clock
@@ -9655,6 +9689,50 @@ class ConsoleService:
             "repo": slug, "verb": verdict.verb, "decision": verdict.decision, "reason": verdict.reason,
             "target": dict(verdict.target)})]))
         return verdict
+
+    def permit_secret(self, sprint_id: str, auth: str, signed: bytes) -> str:
+        """The sprint's secret, when `auth` is the hook's HMAC under it of `signed` (the secret is never sent)."""
+        with self._ingest:
+            if sprint_id not in self._sprints:
+                raise sprints.Refused(sprints.NOT_OPEN)
+            expected = sprints.read_secret(self._sprint_secrets, sprint_id)
+            if expected is None or not hmac.compare_digest(
+                    permit.action_request_auth(expected, signed).encode(), auth.encode()):
+                raise sprints.SecretRefused(sprints.SECRET_REFUSED)
+            return expected
+
+    def permit_action(self, sprint_id: str, secret: str, session_id: str, tool_use_id: str,
+                      digest: str) -> permit.Verdict:
+        """The verdict on a command an owner-only card may have approved, by its digest."""
+        with self._ingest:
+            sprint = self._manager_sprint(sprint_id, secret)
+            verdict = permit.judge_action(digest, sprint.questions, self._now())
+            if verdict.decision is None:
+                return verdict
+            verdict = self._permit_refusal(sprint, session_id, permit.ACTION) or verdict
+            if verdict.decision == permit.ALLOW:
+                self._permit_allows[(sprint_id, session_id, tool_use_id, permit.ACTION,
+                                     verdict.target["round"], verdict.target["index"])] = self._clock()
+            return self._permit_record(sprint, session_id, tool_use_id, None, verdict)
+
+    def permit_action_landed(self, sprint_id: str, secret: str, session_id: str, tool_use_id: str,
+                             digest: str) -> bool:
+        """Record an approved action the console allowed and the manager's session ran; False records nothing."""
+        with self._ingest:
+            sprint = self._manager_sprint(sprint_id, secret)
+            for question in sprint.questions:
+                if question.action is None or permit.command_digest(question.action.command) != digest:
+                    continue
+                judged = self._permit_allows.get((sprint_id, session_id, tool_use_id, permit.ACTION,
+                                                  question.round_id, question.index))
+                if judged is None or self._clock() - judged > PERMIT_LANDED_SECONDS:
+                    continue
+                self._apply(self.log.append([(PERMIT_LANDED, sprint.project_id, {
+                    "sprint_id": sprint_id, "session_id": session_id, "tool_use_id": tool_use_id,
+                    "repo": None, "verb": permit.ACTION,
+                    "target": {"round": question.round_id, "index": question.index}})]))
+                return True
+            return False
 
     def permit(self, sprint_id: str, secret: str, session_id: str, tool_use_id: str,
                command: str) -> permit.Verdict:

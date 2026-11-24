@@ -1560,13 +1560,25 @@ class PermitRequest:
     command: str
 
 
-def parse_permit_request(body: bytes) -> PermitRequest:
-    """The manager's permit request: an object of exactly the five members, none repeated (#1377)."""
-    value = _object(body, {"sprint_id", "secret", "phase", "session_id", "tool_use_id", "command"},
-                    project=False)
+_HEX32 = re.compile(r"[0-9a-f]{32}")
+_HEX64 = re.compile(r"[0-9a-f]{64}")
+ACTION_PERMIT_KEYS = {"sprint_id", "phase", "session_id", "tool_use_id", "command_sha256", "nonce", "auth"}
+
+
+@dataclass(frozen=True)
+class ActionPermitRequest:
+    sprint_id: str
+    phase: str
+    session_id: str
+    tool_use_id: str
+    digest: str
+    nonce: str
+    auth: str
+    signed: bytes
+
+
+def _permit_ids(value: dict) -> tuple[str, str, str, str]:
     sprint_id = _sprint_id(value["sprint_id"])
-    if not isinstance(value["secret"], str):
-        raise ValueError("secret must be a string")
     if value["phase"] not in PERMIT_PHASES:
         raise ValueError("phase must be judge or landed")
     session_id = value["session_id"]
@@ -1575,10 +1587,32 @@ def parse_permit_request(body: bytes) -> PermitRequest:
     tool_use_id = value["tool_use_id"]
     if not isinstance(tool_use_id, str) or not 1 <= len(tool_use_id) <= MAX_PERMIT_SESSION_CHARS:
         raise ValueError("tool_use_id must be a string of 1 to 128 characters")
+    return sprint_id, value["phase"], session_id, tool_use_id
+
+
+def parse_permit_request(body: bytes) -> PermitRequest | ActionPermitRequest:
+    """The manager's permit request (#1377): the six-member body that carries the secret, or, when it
+    has a `nonce`, the seven-member signed body of an action (`sprint_id`, `phase`, `session_id`,
+    `tool_use_id`, `command_sha256`, `nonce`, `auth`), which carries no secret and no command text."""
+    decoded = _decoded(body)
+    if isinstance(decoded, dict) and "nonce" in decoded:
+        value = _object(body, ACTION_PERMIT_KEYS, project=False)
+        sprint_id, phase, session_id, tool_use_id = _permit_ids(value)
+        for name, pattern, size in (("command_sha256", _HEX64, 64), ("nonce", _HEX32, 32),
+                                    ("auth", _HEX64, 64)):
+            if not isinstance(value[name], str) or pattern.fullmatch(value[name]) is None:
+                raise ValueError(f"{name} must be {size} lowercase hex characters")
+        return ActionPermitRequest(sprint_id, phase, session_id, tool_use_id, value["command_sha256"],
+                                   value["nonce"], value["auth"], permit.signed_bytes(value))
+    value = _object(body, {"sprint_id", "secret", "phase", "session_id", "tool_use_id", "command"},
+                    project=False)
+    sprint_id, phase, session_id, tool_use_id = _permit_ids(value)
+    if not isinstance(value["secret"], str):
+        raise ValueError("secret must be a string")
     command = value["command"]
     if not isinstance(command, str) or len(command) > MAX_PERMIT_COMMAND_CHARS:
         raise ValueError("command must be a string of at most 8192 characters")
-    return PermitRequest(sprint_id, value["secret"], value["phase"], session_id, tool_use_id, command)
+    return PermitRequest(sprint_id, value["secret"], phase, session_id, tool_use_id, command)
 
 
 def parse_message_reply_request(body: bytes) -> tuple[str, str, int, str]:

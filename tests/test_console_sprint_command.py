@@ -1582,7 +1582,12 @@ class PermitCommandTest(unittest.TestCase):
     def test_permit_is_silent_on_a_command_it_does_not_judge(self):
         for command in ("npm test", "git status", "gh pr view 7"):
             with self.subTest(command):
-                self.assertEqual(self.run_permit(self.hook(command), "{}"), (0, "", []))
+                code, out, sent = self.run_permit(self.hook(command), "{}")
+                self.assertEqual((code, out), (0, ""))
+                self.assertEqual([set(body) for _, _, _, body in sent], [
+                    {"sprint_id", "phase", "session_id", "tool_use_id", "command_sha256", "nonce", "auth"}])
+                self.assertNotIn("secret", json.dumps(sent))
+                self.assertNotIn(command, json.dumps(sent))
 
     def test_permit_denies_a_bad_hook_input(self):
         for name, stdin in (("not json", "not json"), ("an array", "[]"),
