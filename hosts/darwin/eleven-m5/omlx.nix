@@ -1,5 +1,5 @@
 {
-  config,
+  inputs,
   lib,
   pkgs,
   username,
@@ -77,16 +77,21 @@ let
   # limit leaves is shared as memory-budget.nix sets out, so raising this squeezes macOS.
   wiredLimitMb = 240 * 1024;
 
+  floorLauncher =
+    inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.agent-platform.launchers.memory-floor;
   # Teammates reach the server over the tailnet, so it listens on every interface behind an
   # API key. The key is passed in the environment, never argv, where `ps` would show it to
   # every account on the machine.
-  serve = pkgs.writeShellScript "omlx-serve" ''
+  # The gate holds a starting server until memory is back over the floor; it only reads memory.
+  serveText = ''
     set -euo pipefail
+    ${floorLauncher} gate --floor-gib ${toString budget.floorGiB} --interval-seconds ${toString budget.fastSampleSeconds}
     OMLX_API_KEY=$(SOPS_AGE_KEY_FILE=${home}/.config/sops/age/keys.txt \
       ${lib.getExe pkgs.sops} -d --extract '["omlx_api_key"]' ${../../../secrets/secrets.yaml})
     export OMLX_API_KEY
     exec /opt/homebrew/bin/omlx serve --host 0.0.0.0 --port 8000 --model-dir ${modelDir}
   '';
+  serve = pkgs.writeShellScript "omlx-serve" serveText;
 
   # Fetches every listed model that has not finished downloading. It downloads into a staging
   # directory (`hf download` resumes a partial copy and verifies each file) and moves the model
@@ -232,6 +237,7 @@ let
           inherit serverSettings;
           activation = activationText;
           fetch = fetchText;
+          serve = serveText;
         };
       });
   # The kill omlx-restart runs once the gate allows a restart; launchd's KeepAlive brings the
@@ -283,17 +289,6 @@ in
     StandardOutPath = "${home}/.omlx/logs/launchd.log";
     StandardErrorPath = "${home}/.omlx/logs/launchd.log";
   };
-
-  # serviceConfig is a strict submodule with no JetsamProperties option, so the plist text is
-  # generated here with the priority memory-budget.nix sets; jetsam then takes the other daemons first.
-  environment.launchDaemons."org.nixos.omlx.plist".text = lib.mkForce (
-    lib.generators.toPlist { escape = true; } (
-      config.launchd.daemons.omlx.serviceConfig
-      // {
-        JetsamProperties.JetsamPriority = budget.omlxJetsamPriority;
-      }
-    )
-  );
 
   launchd.daemons.omlx-models.command = "${fetch}";
   launchd.daemons.omlx-models.serviceConfig = {
