@@ -757,6 +757,18 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             with self.subTest(path=path.name):
                 self.assertNotIn("xhigh", path.read_text(encoding="utf-8"))
 
+    def test_patched_plugin_reviewer_detach_test_declares_no_effort_xhigh(self):
+        # The patch also carries a legitimate xhigh in the CLI usage
+        # enumeration, so scope the search to the added reviewer-detach test.
+        patch = (
+            REPO_ROOT / "patches/agent-plugins/codex-plugin-cc.patch"
+        ).read_text(encoding="utf-8")
+        header = "diff --git a/tests/reviewer-detach.test.mjs b/tests/reviewer-detach.test.mjs\n"
+        self.assertEqual(patch.count(header), 1)
+        hunk = patch.split(header, 1)[1].split("\ndiff --git ", 1)[0]
+        self.assertIn('"--effort", "high"', hunk)
+        self.assertNotIn("xhigh", hunk)
+
     def test_codex_collaboration_documents_carry_their_machine_text(self):
         for path, items in CODEX_COLLABORATION_MACHINE_TEXT.items():
             text = normalized(path.read_text(encoding="utf-8").replace("\n> ", "\n"))
