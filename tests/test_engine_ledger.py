@@ -562,6 +562,21 @@ def fan_out_events(*, then_entered: bool = False) -> list[dict]:
     return [engine_ledger.validate_event(event) for event in raw]
 
 
+class SessionsFoldTest(unittest.TestCase):
+    def test_the_fold_keeps_each_session_the_run_started_once_in_order(self):
+        def at(kind, **members):
+            return engine_ledger.validate_event({**EXAMPLES[kind], **members})
+        events = [at("step_entered", step="plan", visit=1, stage="planning"),
+                  at("session_starting", step="plan", visit=1, session="s1"),
+                  at("session_resuming", step="plan", visit=1, session="s1", attempt=2),
+                  at("session_answered", step="plan", visit=1, session="s1", attempt=2),
+                  at("step_entered", step="build", visit=1, stage="building"),
+                  at("session_starting", step="build", visit=1, session="s2")]
+        got = engine_ledger.fold(RUN, events, never)
+        self.assertEqual(got.sessions, ("s1", "s2"))
+        self.assertNotIn("sessions", got.as_json())
+
+
 class HolderFoldTest(unittest.TestCase):
     def test_the_fold_reports_the_engine_holder_and_the_newest_fan_out(self):
         got = engine_ledger.fold(RUN, fan_out_events(), live, holder=HOLDER).as_json()
