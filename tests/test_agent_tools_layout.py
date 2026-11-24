@@ -12,7 +12,6 @@ import unittest
 from collections.abc import Mapping
 from pathlib import Path
 
-from agent_tools import instruction_load
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PACKAGE = REPO_ROOT / "python/agent_tools"
@@ -42,6 +41,7 @@ ALLOWED_IMPORTS: dict[str, frozenset[str]] = {
         "agent_tools.claims.forge_owner_action",  # answer, inbox
         "agent_tools.claims.owner_actions",  # inbox, look_check, movement, service
         "agent_tools.delivery.look_marker",  # inbox, look_check, look_kept_check
+        "agent_tools.delivery.engine_ledger",  # console, engine_runs
         "agent_tools.release.release_profile",  # release_card
         "agent_tools.release.transaction_history",  # movement
         "agent_tools.release.transaction_storage",  # movement
@@ -143,12 +143,12 @@ def _targets(root: Path, module: str, names) -> list[str]:
     return [module]
 
 
-def gate_modules(root: Path) -> frozenset[str]:
-    """The flat gate-file modules and every flat module they import."""
-    prefix, suffix = "python/agent_tools/", ".py"
-    pending = [path[len(prefix):-len(suffix)] for path in instruction_load.GATE_FILES
-               if path.startswith(prefix) and path.endswith(suffix)
-               and "/" not in path[len(prefix):-len(suffix)]]
+FLAT_ROOTS = ("instruction_load", "skill_lint")
+
+
+def flat_modules(root: Path) -> frozenset[str]:
+    """The flat root modules and every flat module they import."""
+    pending = list(FLAT_ROOTS)
     seen: set[str] = set()
     while pending:
         name = pending.pop()
@@ -347,16 +347,16 @@ class SyntheticLayoutTest(unittest.TestCase):
 
 
 class LayoutRuleTest(unittest.TestCase):
-    def test_the_flat_allowance_is_the_instruction_budget_gate_closure(self):
+    def test_the_flat_allowance_is_the_closure_of_instruction_load_and_skill_lint(self):
         self.assertEqual(
-            gate_modules(PACKAGE),
+            flat_modules(PACKAGE),
             frozenset({"instruction_load", "skill_lint", "agent_model_matrix", "canonical"}))
 
     def test_the_package_follows_the_layout_rule(self):
         self.assertEqual(
             layout_violations(PACKAGE, areas=area_packages(AREAS_DIR),
                               allowed=ALLOWED_IMPORTS,
-                              flat_allowed=gate_modules(PACKAGE) | {"__init__"}), [])
+                              flat_allowed=flat_modules(PACKAGE) | {"__init__"}), [])
 
     def test_the_areas_are_the_docs_areas(self):
         self.assertEqual(

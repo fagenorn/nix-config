@@ -1,4 +1,4 @@
-"""The console grants every registered project's folder trust at start (#1183, ADR-console-034 D9).
+"""The console grants every registered project's folder trust at start (#1183, ADR-console-034).
 
 Run: just agent-workflow-tests
 """

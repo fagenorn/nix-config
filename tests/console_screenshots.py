@@ -19,10 +19,10 @@ Contract:
   `fault.declared` row is seeded as a literal kind, so the module needs nothing the base commit
   lacks): the sprint line carries the declaration and the owner's Withdraw, and on a base console
   that ignores the row the same sprint shows neither, which is the before picture (#1432);
-  `waiting-its-turn` is a sprint whose only movement is a pull request of its holding the land
-  lock, served through a stand-in forge reader, with a live delivery run of issue 12 in its `pr`
-  step (a run that is not live is no holder of the sprint's), whose run line reads
-  "waiting its turn to merge", not quiet;
+  `waiting-its-turn` is a sprint whose only movement is the land lock held by a pull request of another issue,
+  with the sprint's own pull request registered behind it (`console_land_queue`) and a live delivery run of the sprint's issue
+  in its `pr` step (a run that is not live is no holder of the sprint's), whose run line reads "waiting its turn to
+  merge, position 1", not quiet; a base console reads "waiting its turn to merge", the before picture;
   `manager-cannot-hear` is a running sprint whose manager session (listed, named for the sprint)
   has a transcript whose last peer-message record is one the client held and did not deliver
   (#1229), read once through the movement poll, so its line reads that the manager cannot hear
@@ -284,11 +284,12 @@ from agent_tools.console import account_add, approve, capacity, contract_draft, 
 from agent_tools.console.activation import Activation
 from agent_tools.console.answer import FORGE_DOWN
 from agent_tools.console.event_log import SHARING_COLLEAGUE, SHARING_TAILNET, EventLog
-from agent_tools.console.movement import LocalReading, PullRequest
+from agent_tools.console.movement import LocalReading
 from agent_tools.console.service import ConsoleService
 from agent_tools.console.sprints import TELL_MINUTE_TEXT, Question, SprintState, create_secret
 from agent_tools.system.forge_api import ForgeError
 
+from .console_land_queue import land_queue_reader
 from .console_screenshot_permissions import HELD_PROMPTS, PERMISSION_MANAGER, hold_permission, keep_permission
 from .console_test_support import hook_body, write_registry
 
@@ -2992,8 +2993,7 @@ def start_service(fixture: Fixture, now_s: float, launches: list | None = None, 
     if fixture.holding or fixture.deaf:
         forge = {"local_reader": lambda root, pattern: LocalReading((), False)}
     if fixture.holding:
-        forge["pull_reader"] = lambda slug, pattern, *, cancelled: (
-            PullRequest(7, frozenset(fixture.holding), False, None, True),)
+        forge["pull_reader"] = land_queue_reader(fixture.holding)
     if fixture.activating:
         forge["activation_reader"] = _activation_reader(fixture.activating)
     if fixture.registering:

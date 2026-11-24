@@ -17,7 +17,7 @@ yet, 2 usage. In this order:
    "not_deployed"}`, 75;
 3. the view's registration is open (`register.open_shown`: not null and not a dismissed one, status
    done with the note `register.LATER_NOTE`, the owner's Not now): `{"status": "busy"}`, 75, building
-   and posting nothing (#1334, ADR-console-084 D3);
+   and posting nothing (#1334, ADR-console-084);
 4. the token file is unreadable: `{"status": "no_token"}`, 75;
 5. the registry is present but unreadable: `{"status": "registry_unreadable"}`, 75.
 
@@ -33,7 +33,7 @@ that cannot be built is `{"status": "no_fixture", "reason": <exception type>}`, 
 - A status from 400 to 499 is a definite refusal: nothing was dispatched. A 409 whose text starts with
   `a registration is already running`, or whose text is `register.OPEN_SHOWN`, is `{"status": "busy"}`,
   75 (another run owns the console, or the console found a registration open on the page: it decides
-  under its lock, ADR-console-084 D2); a console older than that refuses with 400, which is `not_met`;
+  under its lock, ADR-console-084); a console older than that refuses with 400, which is `not_met`;
   any other is `{"status": "not_met", "reason": "refused <status> <text>"}`, 1.
 - A 5xx, or any other status but 204, is `not_met` with the same reason, though it may have
   dispatched a run.

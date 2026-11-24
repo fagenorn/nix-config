@@ -46,6 +46,10 @@ _Avoid_: built-in command, default command
 A contract value that is the same in every project, which project schema 3 leaves out of the contract and the resolver fills into the ResolvedProject; a schema-3 contract that authors one is refused (ADR-project-contract-013).
 _Avoid_: default, built-in setting
 
+**Pre-pull-request verification**:
+`workflow.verification_before_pull_request` is an optional list of declared command ids that the delivery programs run before a pull request exists, instead of `workflow.verification`; the pull request's required checks gate landing. When it is absent or null, the programs run `workflow.verification` as before. Every id must be a declared command and the list must not be empty. While it is set, every step of the delivery programs that runs tests is told these commands by name instead of the full verification, before and after the pull request exists, and a clean landing sync that changes none of the pull request's files runs none.
+_Avoid_: smoke verification
+
 **Production rules**:
 The optional `production` section of a project contract: the commands, key files and MCP tools that change the project's production, the routes that only read it, and the release profile through which a change is allowed, or the declaration that the project has no production. A contract without the section has no production rules, which is not the same as declaring no production. A rules section may name one of its changing commands as its console activation, the command the console's Activate runs (ADR-system-004).
 _Avoid_: deploy rules, production config
@@ -64,3 +68,7 @@ The step of a platform version that deletes a deprecated surface once its migrat
 **ResolvedProject**:
 The one retained snapshot that `resolve-project resolve` prints: the contract with every path made absolute and every command addressed by id. Every command and skill reads it and never the contract file.
 _Avoid_: snapshot, config
+
+**Unknown binding**:
+A member of `bindings.workflow` or `bindings.workflow.orchestration` that the installed platform does not know, taken as an optional binding of a newer platform. The resolver ignores it and names it in a warning. An unknown member anywhere else is refused.
+_Avoid_: unknown key

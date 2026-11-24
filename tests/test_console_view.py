@@ -3443,7 +3443,7 @@ class SigninViewTest(unittest.TestCase):
         self.assertEqual(shown["statement"]["headline"], "Nothing needs you")
 
     def test_a_signed_out_profile_a_colleague_added_raises_no_sign_in_item(self):
-        """#1361, ADR-console-087 D3: signing a colleague's account in is his, never the owner's."""
+        """#1361, ADR-console-087: signing a colleague's account in is his, never the owner's."""
         mine = signin_entry("work", "signed_out", True, since="t1", ever=True)
         his = {**signin_entry("colleague-1", "signed_out", True, since="t2"), "owner": "ana@corp.invalid"}
         plain = {**signin_entry("home", "signed_out", True, since="t3"), "owner": None}

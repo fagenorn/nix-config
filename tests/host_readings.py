@@ -281,6 +281,12 @@ PARTS: dict[str, Part] = {
 }""", DARWIN_HOSTS),
     "runner-triples": Part(runner_triples_apply, DARWIN_HOSTS),
     "agent-platform": Part(AGENT_PLATFORM, ALL_HOSTS),
+    "omlx": Part("""c: u: let o = c.system.build.omlxConfigure; in {
+  models = (builtins.fromJSON o.modelSettings);
+  server = (builtins.fromJSON o.serverSettings);
+  activation = o.activation;
+  fetch = o.fetch;
+}""", ("eleven-m5",)),
 }
 
 

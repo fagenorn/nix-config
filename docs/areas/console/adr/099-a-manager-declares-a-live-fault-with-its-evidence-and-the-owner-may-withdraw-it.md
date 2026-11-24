@@ -30,6 +30,6 @@ A claim's `live_fault` flag (ADR-console-085) is the manager's own mark on one n
 ## Consequences
 
 - #1433's lane and #1434's slot read `live_faults`.
-- ADR-console-085 and ADR-console-091 stand.
+- ADR-console-085 stands.
 - A build older than this one refuses a store this one has opened (schema 13), as every earlier schema bump did.
 - The manager contract changed outside the instruction corpus (ADR-console-015, ADR-console-044 D10), so no Instruction Budget raise is needed.

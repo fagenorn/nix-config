@@ -119,6 +119,12 @@ class CreateTest(Base):
         code, out = self.file("--label", "agent:ready", "--label", "bug")
         self.assertEqual((code, out["verdict"]), (0, "created"))
 
+    def test_any_label_name_is_passed_through(self):
+        label = "-".join(("instruction", "budget", "raise"))
+        self.created_world([], [], labels=[label])
+        code, out = self.file("--label", label)
+        self.assertEqual((code, out["verdict"]), (0, "created"))
+
     def test_a_missing_link_on_read_back_exits_nonzero(self):
         self.created_world([B1], [DOWN])
         code, out = self.file("--blocked-by", "555", "--blocked-by", "688", "--blocks", "689")
@@ -357,9 +363,6 @@ class UsageTest(Base):
             ["link", "--repo", SLUG, "--issue", str(NEW), "--blocked-by", str(NEW)],
             ["read", "--repo", SLUG],
             ["read", "--repo", SLUG, "--issue", str(NEW), "--blocked-by", "555"],
-            base + ["--label", "instruction-budget-raise"],
-            base + ["--label", "Instruction-Budget-Raise"],
-            base + ["--label", " instruction-budget-raise "],
             ["frobnicate"],
             [],
         ):

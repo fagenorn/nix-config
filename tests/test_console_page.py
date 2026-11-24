@@ -8499,7 +8499,7 @@ class SigninPageTest(unittest.TestCase):
         self.assertEqual(full(default), "default signed out")
 
     def test_a_signed_out_colleague_profile_waits_for_him_and_the_owners_own_says_signed_out(self) -> None:
-        """#1361, ADR-console-087 D3: the strip says whose sign-in a signed-out account waits for."""
+        """#1361, ADR-console-087: the strip says whose sign-in a signed-out account waits for."""
         snap = capacity_snap(capacity([
             profile("work", "unknown", signin=si("signed_out", None, ask=True), owner=None),
             profile("colleague-1", "unknown", signin=si("signed_out", None, ask=True),

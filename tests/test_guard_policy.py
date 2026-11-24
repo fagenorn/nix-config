@@ -646,8 +646,8 @@ class ProjectRefusalTest(WorldCase):
         self.world.project("fixture/one", "fagenorn/one", integration_branch="dev+ci")
         self.refused("literal_conflict")
 
-    def test_a_symlinked_projection_target_is_contract_unresolved(self):
-        """D9: the sparse export leaves a symlinked projection file absent."""
+    def test_a_symlinked_projection_target_does_not_cost_the_row(self):
+        """D9: the sparse export leaves a symlinked projection file absent; the row ignores it."""
         root = self.world.project("fixture/one", "fagenorn/one")
         (root / "CLAUDE.real.md").write_bytes((root / "CLAUDE.md").read_bytes())
         (root / "CLAUDE.md").unlink()
@@ -655,12 +655,11 @@ class ProjectRefusalTest(WorldCase):
         self.world.git(root, "add", "-A")
         self.world.git(root, "commit", "--quiet", "-m", "symlinked target")
         self.world.publish(root, ["main"])
-        refusal = self.refused("contract_unresolved")
-        self.assertIn("projection.claude.entry.missing", refusal["detail"])
+        code, report, _ = self.world.derive("fagenorn/one")
+        self.assertEqual((code, report["outcome"]), (0, "derived"), report)
 
-
-    def test_a_projection_path_git_cannot_name_refuses_that_project_only(self):
-        """A NUL in a projection path is the resolver's refusal, not a whole-compile one."""
+    def test_a_projection_path_git_cannot_name_does_not_cost_the_row(self):
+        """A NUL in a projection path is not a member the row is made of."""
         root = self.world.project("fixture/one", "fagenorn/one")
         self.world.project("fixture/two", "fagenorn/two")
         contract = self.world.contract("fixture/one", "fagenorn/one")
@@ -669,8 +668,78 @@ class ProjectRefusalTest(WorldCase):
                 entry["target"] = "CLAUDE\u0000.md"
         self.world.commit_contract(root, contract, "a NUL in a target", render=False)
         self.world.publish(root, ["main"])
-        self.refused("contract_unresolved")
-        self.assertEqual(sorted(self.world.policy()["derived_repositories"]), ["fagenorn/two"])
+        code, _, _ = self.world.compile()
+        self.assertEqual(code, 0)
+        self.assertEqual(sorted(self.world.policy()["derived_repositories"]),
+                         ["fagenorn/one", "fagenorn/two"])
+
+
+class CoreReadTest(WorldCase):
+    """The row proof reads the contract's core members; verification keeps the full read."""
+
+    def newer_platform_contract(self, root: Path, project_id: str, slug: str) -> None:
+        contract = self.world.contract(project_id, slug)
+        contract["platform"] = {"min_inclusive": "99.0.0", "max_exclusive": "100.0.0"}
+        contract["bindings"]["paths"]["playbooks"] = ["docs"]
+        self.world.commit_contract(root, contract, "a contract from a newer platform",
+                                   render=False)
+        self.world.publish(root, ["main"])
+
+    def test_a_contract_the_installed_resolver_cannot_fully_read_still_derives_its_row(self):
+        root = self.world.project("fixture/one", "fagenorn/one")
+        self.newer_platform_contract(root, "fixture/one", "fagenorn/one")
+        full = subprocess.run(
+            [sys.executable, "-m", "agent_tools.project_contract.resolve_project", "resolve",
+             "--repo-root", str(root)], env=self.world.env, capture_output=True, text=True,
+            timeout=120)
+        self.assertEqual(full.returncode, 2, full.stderr)
+        code, report, err = self.world.derive("fagenorn/one")
+        self.assertEqual((code, report["outcome"]), (0, "derived"), (report, err))
+        self.assertEqual((report["row"]["default_branch"], report["row"]["integration_branch"]),
+                         ("main", "main"))
+        self.assertEqual(report["row"]["evidence"]["source"]["commit"],
+                         self.world.git(root, "rev-parse", "HEAD").strip())
+        code, report, _ = self.world.compile()
+        self.assertEqual(code, 0, report)
+        self.assertIn("fagenorn/one", self.world.policy()["derived_repositories"])
+
+    def test_the_verification_read_keeps_the_full_resolve(self):
+        root = self.world.project("fixture/one", "fagenorn/one", register=False)
+        plain_commit = self.world.git(root, "rev-parse", "HEAD").strip()
+        self.newer_platform_contract(root, "fixture/one", "fagenorn/one")
+        newer_commit = self.world.git(root, "rev-parse", "HEAD").strip()
+        export, plain = self.world.tmp / "export", self.world.tmp / "plain"
+        with mock.patch.dict(os.environ, {"HOME": str(self.world.home),
+                                          "GIT_CONFIG_GLOBAL": os.devnull,
+                                          "GIT_CONFIG_SYSTEM": os.devnull}):
+            contract_export.export_contract(root, newer_commit, export)
+            contract_export.export_contract(root, plain_commit, plain)
+            self.assertEqual(guard_policy.resolver(export, "resolve")[0], 2)
+            status, payload = guard_policy.core_resolver(export, "resolve")
+            self.assertEqual((status, payload["bindings"]["vcs"]["integration_branch"]),
+                             (0, "main"))
+            self.assertNotIn("workflow", payload["bindings"])
+            self.assertIsInstance(
+                guard_policy.resolver(plain, "resolve")[1]["bindings"]["workflow"]["verification"],
+                list)
+            with self.assertRaises(ValueError):
+                guard_policy.core_resolver(export, "check-projections")
+
+    def test_an_unknown_member_the_row_is_made_of_still_refuses_the_row(self):
+        mutations = {
+            "vcs": lambda c: c["bindings"]["vcs"]["merge"].__setitem__("required_reviews", 1),
+            "tracker": lambda c: c["bindings"]["tracker"].__setitem__("extra", "x"),
+        }
+        for index, (name, mutate) in enumerate(mutations.items()):
+            project_id, slug = f"fixture/m{index}", f"fagenorn/m{index}"
+            with self.subTest(name):
+                root = self.world.project(project_id, slug)
+                contract = self.world.contract(project_id, slug)
+                mutate(contract)
+                self.world.commit_contract(root, contract, f"unknown {name} member", render=False)
+                self.world.publish(root, ["main"])
+                self.assertIn("member_unexpected", self.refused("contract_unresolved",
+                                                                project_id)["detail"])
 
 
 class UnsupportedNameTest(unittest.TestCase):
