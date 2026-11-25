@@ -93,6 +93,18 @@ class Pass(Scripts):
         self.assertRegex(lines[4], rf"^{STAMP} pass end host=mbp verify=0 owner_actions=0 cleanup_fix=0$")
         self.assertEqual(len(lines), 5)
 
+    def test_a_signal_to_the_pass_lets_the_round_finish(self):
+        for sig in ("TERM", "HUP"):
+            with self.subTest(sig=sig):
+                self.calls.unlink(missing_ok=True)
+                self.log.unlink(missing_ok=True)
+                done = self.run_pass("eleven-m5", verify_extra=f"kill -{sig} $PPID\n")
+                self.assertEqual(done.returncode, 0)
+                self.assertEqual(self.calls_made(),
+                                 ["verify-pending run --host eleven-m5", "owner-actions refresh", FIX_CALL])
+                self.assertRegex(self.lines()[-1],
+                                 rf"^{STAMP} pass end host=eleven-m5 verify=0 owner_actions=0 cleanup_fix=0$")
+
     def test_a_pass_runs_the_cleanup_fix_step_after_the_owner_refresh(self):
         done = self.run_pass("eleven-m5")
         self.assertEqual((done.returncode, done.stdout, done.stderr), (0, "", ""))
