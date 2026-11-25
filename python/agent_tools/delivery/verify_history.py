@@ -34,6 +34,19 @@ and of the hold over the runs that held a slot, plus the sum of those holds. Its
 
 with each figure rounded to whole seconds, the hold medians `-` and the total `0s` when no run held
 a slot, and ` over budget <budget>s` appended when the hold median is strictly above the budget.
+
+`read_from(path, identity, offset, baseline=False, limit=READ_LIMIT)` reads only what a caller has not
+consumed. It answers the readable
+records after `offset`, the file's identity `[st_dev, st_ino]` and the new offset. It reads from
+`offset` while `identity` is the file's and the file is not shorter than `offset`, and from the first
+byte otherwise (a replaced or shrunk file); it seeks there and never reads the bytes before it. It
+reads at most `limit` bytes (`READ_LIMIT`, 1 MiB) per call and consumes only through the last newline
+of them, so a torn last line is read whole by a later call, and skips an unreadable consumed line. A
+record longer than `limit` has no newline in the bytes read: they are consumed unread, so the offset
+advances and the memory held stays at `limit`. `baseline=True` reads no record: it answers
+`([], identity, offset)` with the offset after the last newline of the file's final `limit` bytes (the
+end of the file when they hold none, 0 for a short file without one). An absent file answers
+`([], None, 0)`; the open is `read`'s.
 """
 from __future__ import annotations
 
@@ -53,6 +66,7 @@ from agent_tools import canonical
 
 HISTORY_FILE = "history.jsonl"
 COMMAND_WORDS = 3
+READ_LIMIT = 1 << 20
 NO_REPOSITORY = "(no repository)"
 
 
@@ -172,6 +186,33 @@ def read(path: Path) -> tuple[list[dict], int]:
         pieces.pop()
     records = [_readable(piece) for piece in pieces]
     return [record for record in records if record is not None], records.count(None)
+
+
+def read_from(path: Path, identity: list[int] | None, offset: int, baseline: bool = False,
+              limit: int = READ_LIMIT) -> tuple[list[dict], list[int] | None, int]:
+    """The readable records of `path` after the consumed position, the file's identity and the new offset."""
+    try:
+        descriptor = _regular(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), path)
+    except FileNotFoundError:
+        return [], None, 0
+    with os.fdopen(descriptor, "rb") as handle:
+        status = os.fstat(handle.fileno())
+        found = [status.st_dev, status.st_ino]
+        if baseline:
+            start = max(0, status.st_size - limit)
+            handle.seek(start)
+            tail = handle.read(limit)
+            newline = tail.rfind(b"\n")
+            return [], found, start + newline + 1 if newline >= 0 else (0 if start == 0 else status.st_size)
+        start = offset if identity == found and status.st_size >= offset else 0
+        handle.seek(start)
+        data = handle.read(limit)
+    consumed = data.rfind(b"\n") + 1
+    if consumed == 0 and len(data) == limit:
+        consumed = limit
+    pieces = data[:consumed].split(b"\n")[:-1]
+    records = [_readable(piece) for piece in pieces]
+    return [record for record in records if record is not None], found, start + consumed
 
 
 def nearest_rank_p90(values: Sequence[float]) -> float:
