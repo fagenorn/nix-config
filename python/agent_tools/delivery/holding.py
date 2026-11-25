@@ -182,7 +182,7 @@ def gate(*, criteria: list[dict], posted: list[dict], blocks: list, answered: li
         return _refusal("human-checks", asked, criteria, posted_holds=holds)
 
     outside = [check["ac"] for check in [*chosen, *(own["checks"] if own else [])]
-               if _object(check) and command_outside(check, verification)]
+               if _object(check) and isinstance(check.get("ac"), str) and command_outside(check, verification)]
     if outside:
         return _refusal("unattended", outside, criteria)
 
@@ -539,16 +539,21 @@ def post_hold(repo: str, issue: int, pr: int, merge: str, criteria_: list[dict],
               block: object, children: list[dict]) -> dict:
     """Post the hold comment, edit an answered check out of the one that exists, or close the issue.
 
-    With a null `block` every open criterion was split: post `Delivered by PR #<pr>` once and close the issue.
+    With a null `block` every open criterion was split or answered by the look: post `Delivered by PR #<pr>` once
+    and close the issue; with neither a split child nor an open criterion answered there is nothing to close on.
     Otherwise the issue's one fence comment is never posted twice."""
     comments = _comments(repo, issue)
     if block is None:
-        if not children:
+        gone = {_up(name) for name in answered}
+        every_answered = any(item["kind"] in OPEN_KINDS for item in criteria_) and all(
+            _up(item["id"]) in gone for item in criteria_ if item["kind"] in OPEN_KINDS)
+        if not children and not every_answered:
             raise Failure("nothing_held", "no check is held and no criterion was split, so there is nothing to close on")
         lead = f"Delivered by PR #{pr}"
         if not any(item.body.startswith(lead) for item in comments):
-            held = ", ".join(f"#{child['issue']}" for child in children)
-            _forge(lambda: forge_markers.post(repo, issue, f"{lead}; the human checks are held on {held}"))
+            numbers = ", ".join(f"#{child['issue']}" for child in children)
+            held = f"the human checks are held on {numbers}" if children else "the owner's look answered every open criterion"
+            _forge(lambda: forge_markers.post(repo, issue, f"{lead}; {held}"))
         _forge(lambda: forge_api.close_issue(repo, issue, "completed"))
         return {"verdict": "closed", "comment_id": None, "block": None}
     own = _fence(issue, None, comments)

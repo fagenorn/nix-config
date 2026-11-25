@@ -90,6 +90,15 @@ class GateTest(unittest.TestCase):
                 verdict = gate(written=written(check))
                 self.assertEqual((verdict["verdict"], verdict["acs"]), ("unattended", ["AC2"]))
 
+    def test_a_posted_own_check_whose_ac_is_no_string_is_left_to_the_lint_not_a_crash(self):
+        for ac in ([], 7, None, {"x": 1}):
+            nameless = {**EVIDENCE, "ac": ac, "run": {"command": "curl"}}
+            with self.subTest(ac=ac):
+                self.assertEqual(gate(posted=[fence(41, EVIDENCE, nameless)])["verdict"], "ready")
+        keyless = {key: value for key, value in EVIDENCE.items() if key != "ac"}
+        self.assertEqual(gate(posted=[fence(41, EVIDENCE, {**keyless, "run": {"command": "curl"}})])["verdict"],
+                         "ready")
+
     def test_a_posted_machine_check_for_a_human_criterion_is_owner_checks(self):
         machine = {**EVIDENCE, "ac": "AC3"}
         verdict = gate(HUMAN_CRITERIA, written=written(EVIDENCE, ASK), posted=[fence(50, machine)])

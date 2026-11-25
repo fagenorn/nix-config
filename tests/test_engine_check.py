@@ -1240,7 +1240,8 @@ class ShippedProcedureTest(unittest.TestCase):
         graded = step(close_out, "graded")
         self.assertEqual((graded["on"]["unmet"], graded["on"]["met"]), ("code-unmet", "hold-lint"))
         self.assertEqual((graded["on"]["error"], graded["on"]["refused"]), ("hold", "hold"))
-        self.assertEqual(graded["in"], ["regrade.verdict", "regrade.code_unmet", "regrade.acceptance"])
+        self.assertEqual(graded["in"], ["regrade.verdict", "regrade.code_unmet", "regrade.acceptance",
+                                         "hold-facts.criteria"])
         self.assertEqual(close_out["stops"]["code-unmet"],
                          {"need": "owner-decision", "reenter": "read"})
         self.assertEqual(step(deliver, "closing")["on"]["code-unmet"], "code-unmet")

@@ -37,9 +37,9 @@ ones), `verification`, `blocks`, `pr_head`, `pr_branch`, `workflows` and `posted
 Both verdicts carry `closes` (true for `closes`, false for `open`): the criteria the close step goes by, read
 now, since an issue edited after `read` must not be closed on the earlier answer.
 
-`hold-graded --verdict <v> --code-unmet <json> --acceptance <json>` re-reads the regrade's whole reply: `unmet`
-(`code_unmet`: the ids it names and every graded criterion with `met` false) when the verdict is not `met` or
-any id is unmet, else `met`.
+`hold-graded --verdict <v> --code-unmet <json> --acceptance <json> --criteria <json>` re-reads the regrade's whole
+reply against the criteria: `unmet` (`code_unmet`: the ids it names, every graded criterion with `met` false and
+every `code` criterion the reply does not grade) when the verdict is not `met` or any id is unmet, else `met`.
 
 `hold-look --repo <owner/name> --issue <n> --pr <n> --pr-head <sha> --merge-commit <sha> --posted <json>`
 prints `stale` (`answered`, `stale`) when the owner's approved look answers a criterion that a posted fence
@@ -235,8 +235,10 @@ def hold_facts(args: argparse.Namespace) -> dict:
 
 
 def hold_graded(args: argparse.Namespace) -> dict:
+    graded = {entry["id"].upper() for entry in args.acceptance}
     refused = [entry["id"] for entry in args.acceptance if entry["met"] is not True]
-    unmet = list(dict.fromkeys([*args.code_unmet, *refused]))
+    ungraded = [item["id"] for item in args.criteria if item.get("kind") == "code" and item["id"].upper() not in graded]
+    unmet = list(dict.fromkeys([*args.code_unmet, *refused, *ungraded]))
     return {"verdict": "unmet" if args.verdict != "met" or unmet else "met", "code_unmet": unmet}
 
 
@@ -407,6 +409,7 @@ def build_parser() -> argparse.ArgumentParser:
     hold.add_argument("--verdict", required=True)
     hold.add_argument("--code-unmet", required=True, type=texts)
     hold.add_argument("--acceptance", required=True, type=_shaped("list of graded criteria", _each(_is_graded)))
+    hold.add_argument("--criteria", required=True, type=_shaped("list of criteria", _each(_is_criterion)))
     hold = commands.add_parser("hold-look")
     hold.add_argument("--repo", required=True)
     hold.add_argument("--issue", required=True, type=number)

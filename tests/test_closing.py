@@ -364,9 +364,13 @@ class HoldGateTest(HoldTest):
 
 
 class HoldGradedTest(HoldTest):
-    def graded(self, verdict: str, code_unmet: list, acceptance: list) -> tuple[int, dict]:
+    CODE = [{"id": "AC1", "kind": "code", "text": "a"}, {"id": "AC4", "kind": "code", "text": "b"},
+            {"id": "AC2", "kind": "evidence", "text": "c"}]
+
+    def graded(self, verdict: str, code_unmet: list, acceptance: list, criteria=None) -> tuple[int, dict]:
         return self.call("hold-graded", "--verdict", verdict, "--code-unmet", json.dumps(code_unmet),
-                         "--acceptance", json.dumps(acceptance))
+                         "--acceptance", json.dumps(acceptance),
+                         "--criteria", json.dumps(self.CODE[:1] if criteria is None else criteria))
 
     def test_a_met_reply_with_every_criterion_met_is_met(self):
         self.assertEqual(self.graded("met", [], [{"id": "AC1", "met": True, "evidence": "t.py:1"}]),
@@ -378,14 +382,26 @@ class HoldGradedTest(HoldTest):
 
     def test_a_met_verdict_with_a_criterion_graded_unmet_is_unmet_naming_it(self):
         self.assertEqual(self.graded("met", [], [{"id": "AC1", "met": True, "evidence": "a"},
-                                                 {"id": "AC4", "met": False, "evidence": "b"}]),
+                                                 {"id": "AC4", "met": False, "evidence": "b"}], self.CODE),
                          (0, {"verdict": "unmet", "code_unmet": ["AC4"]}))
 
+    def test_a_met_reply_that_leaves_a_code_criterion_ungraded_is_unmet_naming_it(self):
+        self.assertEqual(self.graded("met", [], [], self.CODE[:1]),
+                         (0, {"verdict": "unmet", "code_unmet": ["AC1"]}))
+        self.assertEqual(self.graded("met", [], [{"id": "ac1", "met": True, "evidence": "a"}], self.CODE),
+                         (0, {"verdict": "unmet", "code_unmet": ["AC4"]}))
+
+    def test_a_criterion_of_another_kind_needs_no_grade(self):
+        self.assertEqual(self.graded("met", [], [{"id": "AC1", "met": True, "evidence": "a"},
+                                                 {"id": "AC4", "met": True, "evidence": "b"}], self.CODE),
+                         (0, {"verdict": "met", "code_unmet": []}))
+
     def test_an_unmet_verdict_is_unmet_even_with_nothing_named(self):
-        self.assertEqual(self.graded("unmet", [], []), (0, {"verdict": "unmet", "code_unmet": []}))
+        self.assertEqual(self.graded("unmet", [], [], []), (0, {"verdict": "unmet", "code_unmet": []}))
 
     def test_an_acceptance_member_that_is_not_graded_criteria_is_a_usage_error(self):
-        usage = self.usage("hold-graded", "--verdict", "met", "--code-unmet", "[]", "--acceptance", "[{}]")
+        usage = self.usage("hold-graded", "--verdict", "met", "--code-unmet", "[]", "--acceptance", "[{}]",
+                           "--criteria", "[]")
         self.assertEqual(usage["error"], "usage")
 
 
@@ -594,6 +610,23 @@ class HoldPostTest(WriteTest):
         self.assertEqual(self.forge.stored(), [])
         self.assertEqual(self.forge.issue()["state"], "open")
         self.assertEqual(self.hold("hold-posted", **self.NOTHING_HELD), (0, {"verdict": "absent"}))
+
+    def test_hold_post_with_every_open_criterion_answered_closes_the_issue_on_one_comment(self):
+        self.store()
+        flags = {**self.NOTHING_HELD, "criteria": CRITERIA[:2], "answered": ["AC2"]}
+        for _ in range(2):
+            self.assertEqual(self.hold("hold-post", **flags),
+                             (0, {"verdict": "closed", "comment_id": None, "block": None}))
+        self.assertEqual(self.forge.issue()["state"], "closed")
+        self.assertEqual(len(self.forge.stored()), 1)
+        self.assertTrue(self.forge.stored()[0]["body"].startswith("Delivered by PR #7"))
+
+    def test_hold_post_with_an_open_criterion_unanswered_and_nothing_split_still_refuses(self):
+        self.store()
+        flags = {**self.NOTHING_HELD, "criteria": CRITERIA[:2]}
+        status, refused = self.hold("hold-post", **flags)
+        self.assertEqual((status, refused["error"]), (1, "nothing_held"))
+        self.assertEqual(self.forge.issue()["state"], "open")
 
     def test_hold_post_does_not_edit_a_fence_that_has_a_recorded_result(self):
         marker = comment(101, "<!-- agent:verify-result v1 block=100.abc -->\nresult")
