@@ -13,6 +13,9 @@ may be `None` (a group member that sent no reply reads as `None`, D6).
 - `direct-fixed`: a fix reply -> done or not-done (keys on the suffixes).
 - `direct-settled`: a re-review reply -> unusable, findings or clean (keys on
   the suffixes).
+- `verify-fixed`: a verify fix reply -> unrelated (a test and its evidence), not-done or done.
+- `verify-narrowing`: the fix review, the round and the fix's range -> findings, rerun-failed-only
+  or rerun-all (a rerun of only the failing ids needs every condition, else all).
 - `lane-rule`: the issue step's body, marker and lane paths -> direct or
   standard, by `lane_rule.choose`, with an unknown marker read as marked.
 """
@@ -137,6 +140,41 @@ def _direct_settled(results: Mapping[str, object]) -> str:
     return "findings" if _blocking(findings) else "clean"
 
 
+def _verify_fixed(results: Mapping[str, object]) -> str:
+    unrelated = results.get("fix.unrelated")
+    if isinstance(unrelated, Mapping) and not _blank(unrelated.get("test")) and not _blank(unrelated.get("evidence")):
+        return "unrelated"
+    return _direct_fixed(results)
+
+
+def _failed_only(results: Mapping[str, object]) -> bool:
+    rows = results.get("round.results")
+    if results.get("round.clean") is not True or not isinstance(rows, list):
+        return False
+    if not all(isinstance(r, Mapping) and r.get("status") in ("pass", "fail", "skipped")
+               and r.get("no_slot") is not True for r in rows):
+        return False
+    failed = [r for r in rows if r.get("status") == "fail"]
+    named = [r.get("named") for r in failed]
+    if not failed or not any(r.get("status") == "pass" for r in rows):
+        return False
+    if not all(isinstance(n, list) and n and all(isinstance(x, str) for x in n) for n in named):
+        return False
+    paths = results.get("ws-check.changed_paths")
+    return (results.get("ws-check.whitespace_only") is True and isinstance(paths, list) and bool(paths)
+            and all(isinstance(p, str) and p.strip() in {x for n in named for x in n} for p in paths)
+            and results.get("fix-review.whitespace_insignificant") is True
+            and not _blank(results.get("fix-review.whitespace_evidence")))
+
+
+def _verify_narrowing(results: Mapping[str, object]) -> str:
+    findings = results.get("fix-review.findings")
+    if not isinstance(findings, list) or any(
+            not isinstance(f, Mapping) or f.get("severity") != "minor" for f in findings):
+        return "findings"
+    return "rerun-failed-only" if _failed_only(results) else "rerun-all"
+
+
 def _lane_rule(results: Mapping[str, object]) -> str:
     return lane_rule.choose(results.get("issue.body"), marked=results.get("issue.marked") is not False,
                             lane_paths=results.get("issue.lane_paths")).lane
@@ -155,5 +193,7 @@ GRADERS: Mapping[str, Grader] = {
         ("no-review", "unusable", "codex-unavailable", "findings", "clean"), _direct_full_tally),
     "direct-fixed": Grader(("done", "not-done"), _direct_fixed),
     "direct-settled": Grader(("unusable", "findings", "clean"), _direct_settled),
+    "verify-fixed": Grader(("unrelated", "not-done", "done"), _verify_fixed),
+    "verify-narrowing": Grader(("findings", "rerun-failed-only", "rerun-all"), _verify_narrowing),
     "lane-rule": Grader(("direct", "standard"), _lane_rule),
 }

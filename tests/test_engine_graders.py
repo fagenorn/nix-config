@@ -57,6 +57,22 @@ def fixed(**over):
     return {f"fix.{name}": value for name, value in reply.items()}
 
 
+def verify_fixed(**over):
+    return {**fixed(), **{f"fix.{name}": value for name, value in over.items()}}
+
+
+FAILING = {"id": "test", "status": "fail", "named": ["fixture/a.json", "fixture/b.json"]}
+
+
+def narrowing(**over):
+    results = {"fix-review.findings": [], "round.clean": True,
+               "round.results": [{"id": "lint", "status": "pass"}, dict(FAILING)],
+               "ws-check.whitespace_only": True, "ws-check.changed_paths": ["fixture/a.json"],
+               "fix-review.whitespace_insignificant": True, "fix-review.whitespace_evidence": "only indentation"}
+    results.update(over)
+    return results
+
+
 def settled(verdict, findings):
     return {"lite-rereview.verdict": verdict, "lite-rereview.findings": findings}
 
@@ -99,12 +115,52 @@ class GraderTest(unittest.TestCase):
         ("direct-fixed", fixed(), "done"),
         ("direct-fixed", fixed(commit=""), "not-done"),
         ("direct-fixed", fixed(status="blocked"), "not-done"),
+        ("verify-fixed", verify_fixed(status="blocked", unrelated={"test": "t", "evidence": "e"}), "unrelated"),
+        ("verify-fixed", verify_fixed(status="blocked", unrelated={"test": "t", "evidence": " "}), "not-done"),
+        ("verify-fixed", verify_fixed(), "done"),
+        ("verify-narrowing", narrowing(**{"fix-review.findings": [NAMED]}), "findings"),
+        ("verify-narrowing", narrowing(), "rerun-failed-only"),
+        ("verify-narrowing", narrowing(**{"round.clean": False}), "rerun-all"),
         ("direct-settled", settled("findings", [MINOR]), "clean"),
         ("direct-settled", settled("findings", [NAMED]), "findings"),
         ("direct-settled", settled("findings", [UNNAMED]), "unusable"),
         ("lane-rule", LANE_RESULTS, "direct"),
         ("lane-rule", dict(LANE_RESULTS, **{"issue.marked": True}), "standard"),
     ]
+
+    def test_the_narrowing_grader_reruns_all_when_any_one_condition_fails(self):
+        grader = GRADERS["verify-narrowing"]
+        no_pass = [dict(FAILING)]
+        no_slot = [{"id": "lint", "status": "pass", "no_slot": True}, dict(FAILING)]
+        unnamed = {"id": "test", "status": "fail"}
+        broken = {
+            "round.clean false": {"round.clean": False},
+            "no pass result": {"round.results": no_pass},
+            "a no_slot result": {"round.results": no_slot},
+            "named empty": {"round.results": [{"id": "lint", "status": "pass"}, {**FAILING, "named": []}]},
+            "named absent": {"round.results": [{"id": "lint", "status": "pass"}, unnamed]},
+            "whitespace_only false": {"ws-check.whitespace_only": False},
+            "whitespace_only 1": {"ws-check.whitespace_only": 1},
+            "changed_paths empty": {"ws-check.changed_paths": []},
+            "a path no failure named": {"ws-check.changed_paths": ["fixture/a.json", "fixture/c.json"]},
+            "not attested": {"fix-review.whitespace_insignificant": False},
+            "blank evidence": {"fix-review.whitespace_evidence": "  "},
+        }
+        self.assertEqual(grader.grade(narrowing()), "rerun-failed-only")
+        for label, over in broken.items():
+            with self.subTest(label):
+                self.assertEqual(grader.grade(narrowing(**over)), "rerun-all")
+
+    def test_a_fix_review_with_a_blocking_finding_is_findings_whatever_its_verdict(self):
+        grade = GRADERS["verify-narrowing"].grade
+        important = {"severity": "important", "summary": "s"}
+        self.assertEqual(grade(narrowing(**{"fix-review.findings": [important]})), "findings")
+        self.assertEqual(grade(narrowing(**{"fix-review.findings": [MINOR]})), "rerun-failed-only")
+        self.assertEqual(grade(narrowing(**{"fix-review.findings": None})), "findings")
+
+    def test_an_unrelated_reply_with_a_blank_test_is_not_unrelated(self):
+        results = verify_fixed(status="blocked", unrelated={"test": "", "evidence": "e"})
+        self.assertEqual(GRADERS["verify-fixed"].grade(results), "not-done")
 
     def test_the_lane_rule_grader_reads_the_issue_step(self):
         grader = GRADERS["lane-rule"]
