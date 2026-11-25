@@ -37,10 +37,12 @@ per project so that a sweep cut short by its time budget resumes after it.
 
 from __future__ import annotations
 
+import errno
 import fcntl
 import json
 import os
 import shutil
+import stat
 import sys
 import tempfile
 import time
@@ -297,16 +299,20 @@ def _line(error: BaseException) -> str:
 def _remove(path: Path) -> bool:
     """Remove `path`, whoever else is removing it: a concurrent removal of the same directory may take any
     path first. A path it took counts as removed and the removal goes on until the directory is gone.
-    Nothing is added under a renamed-aside run, so the loop ends. Any other failure is one stderr line
-    and False."""
+    Nothing is added under a renamed-aside run, so the loop ends. Any other failure, a path that cannot be
+    examined or an entry that is not a directory included, is one stderr line and False."""
     try:
         while True:
             try:
                 shutil.rmtree(path)
                 return True
             except FileNotFoundError:
-                if not os.path.lexists(path):
+                try:
+                    mode = path.lstat().st_mode
+                except FileNotFoundError:
                     return True
+                if not stat.S_ISDIR(mode):  # a link whose target vanished survives every attempt
+                    raise NotADirectoryError(errno.ENOTDIR, "not a directory", str(path))
     except OSError as error:
         sys.stderr.write(f"engine: housekeeping could not remove {path}: {_line(error)}\n")
         return False
