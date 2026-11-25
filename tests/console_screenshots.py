@@ -40,6 +40,9 @@ Contract:
   is the `PermissionRequest` hook row only, which is the before picture; `permission-long` is the same sprint holding a
   long heredoc command (a python3 script that rewrites test names, a `cat` into `/tmp` and a `git diff` into `review/diff.txt`),
   so the card shows its summary of what it reads, runs and writes above the folded text, and the base console the raw text;
+  `held-sprint` is a sprint whose last report, two hours old, says `HELD_STATUS` with issues still
+  building and queued and nothing running or asked, so the branch's console shows its held-sprint card
+  under "1 thing needs you" and the base console only the quiet line, which is the before picture;
   `waiting-until` is the `stuck` sprint whose report states a wait until a time two hours
   ahead (#1380), so its line reads "waiting until" with that time, and `paused` the same sprint whose
   report states a pause with `PAUSE_REASON`, so its line reads "paused: " and the reason (a base console
@@ -293,8 +296,8 @@ from .console_land_queue import land_queue_reader
 from .console_screenshot_permissions import HELD_PROMPTS, PERMISSION_MANAGER, hold_permission, keep_permission
 from .console_test_support import hook_body, write_registry
 
-STATES = ("live-several", "waiting-on-you", "stuck", "tell-box-open", "message-sent",
-          "message-picked-up", "message-replied", "message-not-picked-up", "finished-list",
+STATES = ("live-several", "waiting-on-you", "stuck", "held-sprint", "tell-box-open",
+          "message-sent", "message-picked-up", "message-replied", "message-not-picked-up", "finished-list",
           "nothing-running", "waiting-its-turn", "manager-cannot-hear", "permission-stale", "permission-card",
           "permission-long", "waiting-until", "paused",
           "owner-check", "spend-page", "notices-fold",
@@ -315,6 +318,7 @@ GOAL_NEAR_CHARS = 1900
 GOAL_OVER_CHARS = 2100
 MINUTE = 60.0
 PAUSE_REASON = "the lead freed its account for a release"
+HELD_STATUS = "the last slice waits on the lead's go to grant its deploy key"
 PROJECTS = ("owner/web", "owner/api", "owner/docs")
 TRACKER_URL = "https://github.com/owner/web/issues"
 LOOK_APPROVE = "Approve this head"
@@ -2474,6 +2478,9 @@ def _seed_state(seed: _Seed, state: str, web_root: str = "",
                     asks=True)
     elif state == "stuck":
         seed.sprint(web, "Add resumable uploads", started=60 * MINUTE, report=45 * MINUTE)
+    elif state == "held-sprint":
+        seed.sprint(web, "Add resumable uploads", started=180 * MINUTE, report=120 * MINUTE,
+                    report_extra={"status": HELD_STATUS})
     elif state == "manager-cannot-hear":
         sid, _ = seed.sprint(web, "Add resumable uploads", started=60 * MINUTE,
                              report=45 * MINUTE)

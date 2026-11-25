@@ -1701,6 +1701,14 @@ function progressCard(item) {
   card.appendChild(act);
   return card;
 }
+function isHeldSprint(item) { return item.reason === "held_sprint"; }
+function heldSprintCard(item) {
+  const card = el("article", "card held-sprint");
+  card.appendChild(el("p", "q", item.headline));
+  card.appendChild(el("span", "reason", item.last_status));
+  card.appendChild(phrase("p", "meta", "nothing has moved since ", timeEl("since", item.waiting_since, "")));
+  return card;
+}
 function signinWords(s) {
   if (s === null || typeof s !== "object") return "";
   if (s.state === "signed_out") return "signed out";
@@ -5187,6 +5195,7 @@ function drawInbox(view, guest = null) {
   const stalls = open.filter(isStall);
   const starts = open.filter(isFailedStart);
   const progress = open.filter(isProgress);
+  const heldSprints = open.filter(isHeldSprint);
   const signins = open.filter(isSignin);
   const signinRuns = guest === null && view.signin_runs !== null && typeof view.signin_runs === "object" ? view.signin_runs : {};
   for (const [profile, run] of Object.entries(signinRuns)) {
@@ -5197,7 +5206,7 @@ function drawInbox(view, guest = null) {
     signins.push({ type: "inbox_item", reason: "signin", key: "signin/" + profile, project_id: null, profile,
       headline: "Sign in to " + profile, action: "signin", run, signin: null, answered: false, waiting_since: null });
   }
-  const tracked = open.filter((item) => !isBrief(item) && !isStall(item) && !isFailedStart(item) && !isProgress(item) && !isSignin(item) && !isAdoption(item) && !isRelease(item) && !isPermission(item) && !isLookCard(item));
+  const tracked = open.filter((item) => !isBrief(item) && !isStall(item) && !isFailedStart(item) && !isProgress(item) && !isHeldSprint(item) && !isSignin(item) && !isAdoption(item) && !isRelease(item) && !isPermission(item) && !isLookCard(item));
   const looks = open.filter(isLookCard);
   for (const [key, state] of [...stallPosts]) {
     const id = key.split("\n")[1];
@@ -5285,6 +5294,7 @@ function drawInbox(view, guest = null) {
   for (const item of stalls) section.appendChild(stallCard(item));
   for (const item of starts) section.appendChild(failedStartCard(item));
   for (const item of progress) section.appendChild(progressCard(item));
+  for (const item of heldSprints) section.appendChild(heldSprintCard(item));
   for (const item of signins) section.appendChild(signinCard(item));
   for (const [id, state] of answers) {
     if (present.has(id) || !keptWords(state)) continue;
