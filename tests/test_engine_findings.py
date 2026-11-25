@@ -1,4 +1,4 @@
-"""Contract tests for the findings of the shipped review and fix steps (issue 1535).
+"""Contract tests for the findings of the shipped review and fix steps.
 
 Every review reply schema carries a closed `kind` and an optional `rule` on each
 finding, a re-review finding may name the one it `restates`, and each of the

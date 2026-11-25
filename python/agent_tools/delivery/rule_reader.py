@@ -1,9 +1,8 @@
-"""The engine's one reader of rule ids: the `###` rule headings of the standards layers (#1535).
+"""The engine's one reader of rule ids: the `###` rule headings of the standards layers.
 
 A rule heading is `### B12. Fail loud`: the heading hashes, one id (capital letters then a number
 with no leading zero), a full stop, then the title. `RULE_ID_HEADING` is the form's single home.
-This module is the engine's only reader of rule ids (owner ruling on issue 1496, comment
-7155533735), so it imports nothing from `agent_tools`: importing it brings no other delivery
+This module is the engine's only reader of rule ids (by owner ruling), so it imports nothing from `agent_tools`: importing it brings no other delivery
 module into the engine package.
 
 `scan` reads a Markdown file the way CommonMark renders it, skipping fences, indented code and HTML

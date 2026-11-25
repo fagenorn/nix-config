@@ -1,4 +1,4 @@
-"""The closed kind list of a review finding and its computed disposition (issue 1416, issue 1535).
+"""The closed kind list of a review finding and its computed disposition.
 
 This module is the home of `KINDS`, the closed list of kinds a reviewer gives
 each finding. Every review reply schema under `procedures/` copies the list into

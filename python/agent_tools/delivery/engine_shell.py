@@ -33,7 +33,7 @@ run's `sessions/`, the session holds one of the engine route's agent slots (`eng
 when none is free, `session_starting` is on disk before the process is spawned,
 and a session that ends normally is graded only by the `outcome_from` member of its
 structured reply, so neither the prose nor the exit code selects an outcome. A stored reply's finding whose `rule` names no id of the
-platform or project standards layer is stored with `rule` blank when the step's schema admits the blank, and the outcome is unchanged (issue 1535). A reading with no
+platform or project standards layer is stored with `rule` blank when the step's schema admits the blank, and the outcome is unchanged. A reading with no
 usable reply (none, or one that breaks the schema) is a miss when `engine_session.is_miss` accepts
 its stdout: the same session is then resumed once (`session_resuming`, `--resume <session>`,
 `REASK_PROMPT`) and a second miss grades `no-reply` with `{}` stored, its measurements the sums of

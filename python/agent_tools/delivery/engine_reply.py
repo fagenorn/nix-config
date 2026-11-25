@@ -18,8 +18,8 @@ Anything else (`number`, `null`, a type list, `const`, `oneOf`, `$ref`, `descrip
 `pattern`, ...) is outside the subset. `reply_problem` fails closed on such a node: it
 returns a problem, never `None`.
 
-The engine blanks a finding's rule id that no standards layer defines when it stores the reply
-(issue 1535): `cites_rules` says whether a reply cites any rule and `without_unknown_rules` is the
+The engine blanks a finding's rule id that no standards layer defines when it stores the reply:
+`cites_rules` says whether a reply cites any rule and `without_unknown_rules` is the
 reply with each unknown id set to `""`. This module imports nothing from the engine.
 """
 
