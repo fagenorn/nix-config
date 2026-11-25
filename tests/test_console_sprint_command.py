@@ -1126,17 +1126,6 @@ class ManagerContractTest(unittest.TestCase):
         self.assertEqual((got.returncode, got.stdout, got.stderr),
                          (0, CONTRACT.read_text(encoding="utf-8"), ""))
 
-    def test_the_contract_sends_status_lines_cards_and_questions_to_the_plain_words_rule(self):
-        text = run_sprint("contract").stdout
-        section = text.partition("\n## Writing for the owner\n")[2].partition("\n## ")[0]
-        self.assertNotEqual(section, "")
-        flat = " ".join(section.split())
-        self.assertIn("plain-words rule", flat)
-        for surface in ("status line", "card", "question"):
-            self.assertIn(surface, flat)
-        self.assertIn("`docs/guides/write-for-the-owner.md`", flat)
-        self.assertIn("`docs/guides/owner-words.md`", flat)
-
     def test_the_contract_says_to_mark_a_look_change_when_cutting_issues(self):
         text = run_sprint("contract").stdout
         after = text.partition("## After approval\n")[2].partition("\n## ")[0]

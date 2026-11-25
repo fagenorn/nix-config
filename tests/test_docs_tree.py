@@ -452,7 +452,7 @@ class DocsTreeTest(unittest.TestCase):
         for name in ("write-for-the-owner.md", "owner-words.md", "console-page-audit-2026-11-25.md"):
             with self.subTest(name=name):
                 self.assertTrue((REPO_ROOT / "docs/guides" / name).is_file())
-                self.assertIn(f"(./guides/{name})", index)
+                self.assertIn(f"docs/guides/{name}", index_destinations(index))
 
     def test_dissolved_readmes_fit_150_lines(self):
         too_long = []

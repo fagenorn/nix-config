@@ -7,11 +7,11 @@ Each internal word the console or a manager may use, with its one-line gloss in 
 | land lock | A turn-taking token: only one change at a time may be merged into the main branch, so a change waits until it holds the lock. |
 | slice | One small piece of a larger job, made so that it can be built, checked and finished on its own. |
 | held | Finished and merged, but not counted as done until a check afterwards shows it works for real. |
-| verify | Check, after the change is live, that it does what it was meant to do. |
-| brief version | One numbered draft of the plan the manager writes for the owner to approve; a new version replaces the last when the owner asks for changes. |
+| verify | A check that a change does what it was meant to do. It runs twice: before the change is merged, when it has not shipped yet, and after the change is live, when it has. Say which one is meant. |
+| brief version | One numbered draft of the plan the manager writes for the owner, or the colleague who started the sprint, to approve; a new version replaces the last when the owner asks for changes. |
 | guard | A safety check that refuses a risky command before it runs, such as pushing code or merging a change. |
 | rerun | Run a failed automatic check again, in case it failed for a passing reason. |
-| claim | A note that says one sprint is working on certain files, so another sprint does not edit them at the same time. |
+| claim | A note that says one sprint is working on certain files. It does not lock them: two sprints with overlapping claims both keep working, the one that started first lands first, and the other waits for it and then updates its own work. |
 | look | Your own look at how something appears on screen, before it is merged. |
 | live fault | A fault the manager has found in the running system that real users are meeting now. |
 | CI | The automatic checks that GitHub runs on every proposed change before it can be merged. |
