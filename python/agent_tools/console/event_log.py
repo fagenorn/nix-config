@@ -116,6 +116,8 @@ the manager's session ran after the console allowed it: `sprint_id`, `session_id
 any other row, and only `sprints.sprint_states` reads a row: an `action` allow of `permit.judged`
 marks its question's approval used, and retention removing it later changes nothing an approval at
 most an hour old needs.
+The `target` of an allowed `rerun` is `{"run", "pr", "head", "count", "members"}`: `count` is the allowed reruns
+of that head with this one and `members` the failing suite members (ADR-console-106).
 
 Two rows record a release card outside any sprint (#1401): `RELEASE_CARD_POSTED` (`release_card.posted`)
 carries payload `commit`, `version`, with a null project column, and `RELEASE_CARD_ANSWERED`
