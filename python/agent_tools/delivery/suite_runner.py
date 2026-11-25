@@ -56,11 +56,12 @@ floor of 1 (also when the CPU count is unknown); an explicit `--jobs` wins over 
 bad `SUITE_RUNNER_JOBS` is a usage error (exit 2); the hosted CI job sets it to 4, the vCPUs
 of its runner (`.github/workflows/ci.yaml:101`). In parallel mode members start
 longest-first (LPT): the order comes from `python/agent_tools/delivery/suite_timings.json`, a
-committed map of member path to wall seconds taken from a full run's timing table, with
-members it does not name starting first in list order, ties in list order, and a missing or
-malformed file meaning list order. Serial mode keeps list order, and the report stays in
-list order for ties. Refresh the file from a run's `suite-runner: <wall>s wall ... <member>`
-rows when the suite's shape changes. Every completed run checks the file against what it
+committed map of member path to wall seconds, refreshed from main's CI `suite-timing`
+artifacts (the median per member over up to three runs, registered members only; the newest
+of them is named in tests/test_suite_runner.py with its members over 30 s and their times, and
+a refresh replaces both), with members it does not name starting first in list order, ties in
+list order, and a missing or malformed file meaning list order. Serial mode keeps list order,
+and the report stays in list order for ties. Every completed run checks the file against what it
 measured, and a stale file fails the run (exit 1) with a `suite-runner: stale timing` line per
 member. A checked member passed, took more than `STALE_FLOOR_SECONDS` (30 s) and, when the
 justfile's suite recipe is readable (`registered_members`), is registered there, so a paired

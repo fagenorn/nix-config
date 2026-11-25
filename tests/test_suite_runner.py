@@ -34,37 +34,56 @@ from agent_tools.delivery.suite_runner import MemberResult
 REPO_ROOT = Path(__file__).resolve().parents[1]
 EVAL_TREE_SCRIPT = "home/common/agent-skills/evals/tests/test-run-eval-tree.sh"
 
-# Members over 30 s of wall time on the run the committed suite timings were last
-# refreshed from: https://github.com/fagenorn/nix-config/actions/runs/44426940077
-# (job `Agent Workflow Tests`, head b31db72b4). A refresh from a newer run replaces both.
-SLOW_ON_LAST_FULL_RUN: tuple[str, ...] = (
-    "home/common/agent-skills/tests/test_deliver_standard_program.py",
-    "tests/test_forge_land_lock.py",
-    "tests/test_console_approve_service.py",
-    "home/common/agent-skills/tests/test_deliver_batch_program.py",
-    "tests/test_verify_checks.py",
-    "tests/test_verify_pending_owner.py",
-    "tests/test_console_bypass_proof_wakes.py",
-    "tests/test_console_service.py",
-    "tests/test_release_sync.py",
-    "tests/test_console_manager_service.py",
-    "tests/test_guard_policy.py",
-    "tests/test_release_driver.py",
-    "tests/test_console_sprint_command.py",
-    "tests/test_console_register_service.py",
-    "tests/test_verify_pending.py",
-    "tests/test_console_messages.py",
-    "tests/test_console_capacity_check.py",
-    "home/common/agent-skills/tests/test_adopt_apply.py",
-    "tests/test_console_pictures.py",
-    "tests/test_release_lock.py",
-    "tests/test_console_stops.py",
-    "tests/test_release_crash_matrix.py",
-    "tests/test_console_screenshots.py",
-    "tests/test_console_page.py",
-    "tests/test_console_activation.py",
-    "tests/test_forge_adapter.py",
-)
+# Members over 30 s of wall time on the run the committed suite timings were last refreshed from:
+# https://github.com/fagenorn/nix-config/actions/runs/45629674495 (job `Agent Workflow Tests`, head d7f0962f4).
+# A refresh from a newer run replaces both.
+SLOW_ON_LAST_FULL_RUN: dict[str, float] = {
+    "tests/test_engine_land_recovery.py": 841.7776128529999,
+    "tests/test_engine_stubbed_run.py": 808.021807008,
+    "home/common/agent-skills/tests/test_node_lint.py": 424.108416878,
+    "tests/test_landing.py": 202.14075563300003,
+    "tests/test_console_project_question.py": 129.03870142000005,
+    "home/common/agent-skills/tests/test_conformance.py": 118.454383216,
+    "tests/test_verify_checks.py": 107.20902268999998,
+    "tests/test_release_lock.py": 87.22645604699983,
+    "tests/test_verify_pending_owner.py": 86.36769764300004,
+    "tests/test_release_sync.py": 78.838920745,
+    "tests/test_release_driver.py": 78.82376323899996,
+    "tests/test_console_sprint_command.py": 77.19809404400007,
+    "tests/test_console_bypass_proof_wakes.py": 76.92724768200003,
+    "tests/test_engine_commands.py": 75.773821156,
+    "tests/test_guard_policy.py": 74.44087040299996,
+    "tests/test_engine_stubbed_world.py": 68.35561683700001,
+    "home/common/agent-skills/tests/test_conformance_registry.py": 67.77202925899996,
+    "tests/test_console_page.py": 66.68874197200012,
+    "tests/test_engine_guard.py": 62.242144177,
+    "tests/test_host_readings.py": 58.03442204800001,
+    "tests/test_verify_pending.py": 54.534275686,
+    "tests/test_engine_fanout.py": 52.432624393,
+    "tests/test_console_capacity_check.py": 51.63266597400002,
+    "tests/test_release_crash_matrix.py": 51.420359955000094,
+    "tests/test_engine_check.py": 48.931770607999994,
+    "tests/test_verified_tree.py": 48.49246358900018,
+    "home/common/agent-skills/tests/test_adopt_apply.py": 47.894286405,
+    "home/common/agent-skills/tests/test_deliver_standard_program.py": 44.030549166000014,
+    "tests/test_console_approve_service.py": 43.67870271999993,
+    "tests/test_platform_package_hosts.py": 41.871332833000054,
+    "tests/test_console_commit_failure.py": 40.90931748999992,
+    "home/common/agent-skills/tests/test_conformance_checks.py": 38.150558505999925,
+    "tests/test_docs_tree.py": 36.87514999700011,
+    "tests/test_engine_session.py": 36.24425292400002,
+    "tests/test_console_screenshots.py": 35.94789836299992,
+    "tests/test_engine_fixture.py": 35.14855385199999,
+    "tests/test_console_bypass_proof.py": 34.553453697999885,
+    "tests/test_forge_adapter.py": 34.34469885900012,
+    "tests/test_look_approval.py": 33.864812419000145,
+    "tests/test_touched_tests.py": 33.766439633999994,
+    "tests/test_console_activation.py": 33.54097501499996,
+    "tests/test_claude_account_routing.py": 33.07724325999993,
+    "tests/test_console_manager_service.py": 32.93012106200001,
+    "tests/test_engine_deliver.py": 31.188518614999992,
+    "tests/test_console_register_service.py": 30.159735117999958,
+}
 
 # A unittest module that meets its peers at the barrier. It holds a live token
 # until `min(cap, members not yet done)` tokens are live, writes three stdout
@@ -540,9 +559,12 @@ class ScheduleOrderTest(RunnerCase):
 
 
 class CommittedTimingsTest(unittest.TestCase):
-    def test_the_timings_name_every_member_slower_than_30_seconds_on_the_last_full_run(self):
-        timings = suite_runner.load_timings()
-        self.assertEqual([m for m in SLOW_ON_LAST_FULL_RUN if m not in timings], [])
+    def test_the_timings_are_not_stale_against_the_last_full_run(self):
+        last_run = [
+            MemberResult(index=i, member=member, returncode=0, seconds=seconds, cpu_seconds=0.0)
+            for i, (member, seconds) in enumerate(SLOW_ON_LAST_FULL_RUN.items())
+        ]
+        self.assertEqual(suite_runner.stale_timings(last_run, suite_runner.load_timings()), [])
 
 
 def results_of(*rows: tuple[str, int | None, float]) -> list[MemberResult]:
