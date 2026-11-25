@@ -20,7 +20,20 @@ contract's `merge.required_checks` (`()` declares none and the member is absent)
 requests' `statusCheckRollup` (default: one green `Fixture Checks` run), `forge_events` the one-shot
 events that fire on the first `statusCheckRollup` read of a pull request (`"move-head"` adds a commit
 to the head branch, `"steal-lock"` hands the land lock of `main` to a second open pull request headed
-at `stolen_sha`), and `lock_release_fails` makes every compare-and-swap delete of the land lock refused.
+at `stolen_sha`; `"steal-lock-at-head"` and `"drop-lock-at-head"` fire once each, before the answer,
+on a read of `headRefOid` alone: the first as `steal-lock`, the second deleting the lock ref), and
+`lock_release_fails` makes every compare-and-swap delete of the land lock refused.
+
+`rollups` answers the i-th distinct head a pull request's rollup is read at with
+`rollups[min(i, len(rollups) - 1)]` (`rollup` otherwise); `advance_main` commits once to the bare's
+`main` after each of the first n reads of `statusCheckRollup` (`main_change`, `{"path", "text"}`, is
+the first one's file, the others add `main-<k>.txt`); `merge_behind` makes each of the first n merges
+commit to `main` and fail as not up to date; `merge_policy` makes each of the first n merges fail
+on the base branch policy, after which one read of `mergeStateStatus` answers `BLOCKED`. A pull
+request's `mergeStateStatus` is `BEHIND` while `main` is not an ancestor of its head, else `CLEAN`.
+The environment always sets `LANDING_BOUND_SECONDS` to 0 (no wait on a lock or a pending check).
+The replies' `merge`, `same_head` and `upstream` effects (see the launcher stand-in) are given the
+run's worktree and bare origin when they name none.
 """
 
 from __future__ import annotations
@@ -78,7 +91,9 @@ class StubbedRun:
                  replies: dict | None = None, review_code: list | None = None,
                  conditions: dict | None = None, required_checks=FixtureProject.REQUIRED_CHECKS,
                  rollup: list | None = None, forge_events=(), lock_release_fails: bool = False,
-                 before_pull_request: bool = False) -> None:
+                 before_pull_request: bool = False, rollups: list[list] | None = None,
+                 advance_main: int = 0, main_change: dict | None = None, merge_behind: int = 0,
+                 merge_policy: int = 0) -> None:
         self.test = test_case
         self.issue = issue
         self.title = title
@@ -98,6 +113,7 @@ class StubbedRun:
         self.branch: str = issue_branch.render(self.fixture.branch_pattern, issue,
                                                issue_branch.title_slug(title))
         self.worktree_path: Path = self.fixture.worktree_root / (self.fixture.worktree_prefix + self.branch)
+        self.bare = self.world.git(self.fixture.root, "remote", "get-url", "origin").strip()
         self.replies = self._with_worktree({**DEFAULT_REPLIES, **(replies or {})})
         scenario = self.tmp / "scenario.json"
         scenario.write_text(json.dumps(self.replies), encoding="utf-8")
@@ -110,10 +126,13 @@ class StubbedRun:
         launcher.chmod(0o755)
         self.env = {key: value for key, value in self.world.env.items() if key not in DROPPED_ENV}
         forge_gh = gh_only(self.forge, self.tmp / "gh") / "gh"
-        self.stolen_sha: str | None = (hashlib.sha1(b"steal-lock").hexdigest()
-                                       if "steal-lock" in forge_events else None)
-        pulls_bin = self._install_pulls(forge_gh, slug, GREEN if rollup is None else rollup,
-                                        forge_events)
+        self.env["LANDING_BOUND_SECONDS"] = "0"
+        self.stolen_sha: str | None = (hashlib.sha1(b"steal-lock").hexdigest() if any(
+            name in forge_events for name in ("steal-lock", "steal-lock-at-head")) else None)
+        pulls_bin = self._install_pulls(
+            forge_gh, slug, GREEN if rollup is None else rollup, forge_events,
+            {"rollups": rollups, "advance": advance_main, "main_change": main_change,
+             "merge_behind": merge_behind, "merge_policy": merge_policy})
         self.env["PATH"] = os.pathsep.join(
             [str(stub_bin), str(pulls_bin), str(forge_gh.parent), self.world.env["PATH"]])
         self.env["FORGE_WORLD"] = str(self.forge.state)
@@ -121,26 +140,32 @@ class StubbedRun:
         self.forge.ref_store(slug, {}, **({"refuse_to": ["0" * 40]} if lock_release_fails else {}))
         self._install_home(pulls_bin / "gh", slug)
 
-    def _install_pulls(self, forge_gh: Path, slug: str, rollup: list, events) -> Path:
+    def _install_pulls(self, forge_gh: Path, slug: str, rollup: list, events, knobs: dict) -> Path:
         """The directory of the `gh` front that answers pull-request calls over the bare origin."""
         root = self.fixture.root
         git = self.world.git
         git(root, "remote", "set-head", "origin", "main")
-        self.bare = git(root, "remote", "get-url", "origin").strip()
         self.pulls_state = self.tmp / "pulls.json"
         sha = self.stolen_sha
         self.pulls_state.write_text(json.dumps({
             "slug": slug, "bare": self.bare, "git": REAL_GIT, "next": 1, "pulls": [], "rollup": rollup,
-            "events": [{"event": name, "sha": sha} for name in events]}), encoding="utf-8")
+            "events": [{"event": name, "sha": sha} for name in events],
+            "rollup_heads": [], "advanced": 0, "main_moves": 0, "blocked_once": False, **knobs}),
+            encoding="utf-8")
         return script(self.tmp / "pulls-bin" / "gh", sys.executable, str(GH_PULLS),
                       str(self.pulls_state), str(forge_gh)).parent
 
     def _with_worktree(self, replies: dict) -> dict:
-        """The replies, each `commit` effect without a worktree made in the run's worktree."""
+        """The replies, each `commit`, `merge` and `same_head` effect without a worktree made in the
+        run's worktree and each `upstream` effect without a bare made in the bare origin."""
         filled = copy.deepcopy(replies)
         for entry in filled.values():
-            if isinstance(entry.get("commit"), dict) and "worktree" not in entry["commit"]:
-                entry["commit"]["worktree"] = str(self.worktree_path)
+            for effect, member, value in (("commit", "worktree", self.worktree_path),
+                                          ("merge", "worktree", self.worktree_path),
+                                          ("same_head", "worktree", self.worktree_path),
+                                          ("upstream", "bare", self.bare)):
+                if isinstance(entry.get(effect), dict) and member not in entry[effect]:
+                    entry[effect][member] = str(value)
         return filled
 
     def _install_companion(self, answers: list) -> None:

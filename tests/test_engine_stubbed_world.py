@@ -1,0 +1,241 @@
+"""The stubbed world's own knobs: the fake forge's moving `main`, refused merges and per-head checks,
+and the launcher stand-in's `merge`, `upstream` and `same_head` effects."""
+
+from __future__ import annotations
+
+import json
+import subprocess
+import sys
+import unittest
+from pathlib import Path
+
+from tests.engine_stubbed_world import GREEN, STUB, StubbedRun
+from tests.guard_policy_world import REAL_GIT, install_platform_manifest_in_environ
+
+TIER = "integration"  # every case builds a repository and runs a fake forge or the stub as a process
+
+setUpModule = install_platform_manifest_in_environ
+
+RED = [{"__typename": "CheckRun", "name": "Fixture Checks", "status": "COMPLETED",
+        "conclusion": "FAILURE", "startedAt": "2026-11-06T10:00:00Z", "workflowName": "Fixture"}]
+BRANCH = "issue-41-add-a-greeting"
+LOCK = "refs/agent-locks/land/main"
+SLUG = "example/fixture"
+
+
+def git(run: StubbedRun, *args: str, root: Path | None = None) -> str:
+    return run.world.git(root or run.fixture.root, *args).strip()
+
+
+def bare_git(run: StubbedRun, *args: str) -> str:
+    done = subprocess.run([REAL_GIT, "-C", run.bare, *args], capture_output=True, text=True, check=True)
+    return done.stdout.strip()
+
+
+class ForgeTest(unittest.TestCase):
+    def push_commit(self, run: StubbedRun, text: str) -> str:
+        """Commit one file on the branch (made when absent) of the fixture, push it, return its tip."""
+        root = run.fixture.root
+        if run.origin_tip(BRANCH) is None:
+            git(run, "switch", "--quiet", "-c", BRANCH)
+        else:
+            git(run, "switch", "--quiet", BRANCH)
+        (root / "greeting.txt").write_text(text, encoding="utf-8")
+        git(run, "add", "-A")
+        git(run, "commit", "--quiet", "-m", f"Work: {text.strip()}")
+        git(run, "switch", "--quiet", "main")
+        git(run, "push", "--quiet", "origin", BRANCH)
+        return run.origin_tip(BRANCH)
+
+    def opened(self, run: StubbedRun) -> str:
+        head = self.push_commit(run, "a greeting\n")
+        self.gh(run, "pr", "create", "--repo", SLUG, "--base", "main", "--head", BRANCH,
+                "--title", "Add a greeting", "--body", "Closes #41.")
+        return head
+
+    def gh(self, run: StubbedRun, *argv: str, check: bool = True) -> subprocess.CompletedProcess:
+        done = subprocess.run(["gh", *argv], cwd=run.fixture.root, env=run.env, capture_output=True,
+                              text=True, timeout=120)
+        if check:
+            self.assertEqual(done.returncode, 0, done.stderr)
+        return done
+
+    def view(self, run: StubbedRun, fields: str) -> dict:
+        return json.loads(self.gh(run, "pr", "view", "1", "--repo", SLUG, "--json", fields).stdout)
+
+    def merge(self, run: StubbedRun, head: str) -> subprocess.CompletedProcess:
+        return self.gh(run, "pr", "merge", "1", "--repo", SLUG, "--merge", "--match-head-commit", head,
+                       "--delete-branch", check=False)
+
+    def test_rollups_answer_per_distinct_head_and_the_last_repeats(self):
+        run = StubbedRun(self, rollups=[RED, GREEN])
+        self.opened(run)
+        fields = "headRefOid,statusCheckRollup"
+        first = [self.view(run, fields)["statusCheckRollup"] for _ in range(2)]
+        self.push_commit(run, "a second greeting\n")
+        second = [self.view(run, fields)["statusCheckRollup"] for _ in range(2)]
+        self.assertEqual(first + second, [RED, RED, GREEN, GREEN])
+        heads = json.loads(run.pulls_state.read_text("utf-8"))["rollup_heads"]
+        self.assertEqual(len(heads), 2)
+
+    def test_advance_main_commits_to_main_after_each_of_the_first_n_rollup_reads(self):
+        run = StubbedRun(self, advance_main=2,
+                         main_change={"path": "fixture/farewell.py", "text": "x\n"})
+        self.opened(run)
+        before = bare_git(run, "rev-list", "--count", "main")
+        tip = bare_git(run, "rev-parse", "main")
+        for _ in range(3):
+            self.view(run, "statusCheckRollup")
+        self.assertEqual(int(bare_git(run, "rev-list", "--count", "main")) - int(before), 2)
+        first, second = bare_git(run, "rev-list", "--reverse", f"{tip}..main").split()
+        self.assertEqual(bare_git(run, "show", "--name-only", "--format=", first), "fixture/farewell.py")
+        self.assertEqual(bare_git(run, "show", "--name-only", "--format=", second), "main-2.txt")
+
+    def test_merge_state_reads_behind_when_main_is_not_an_ancestor_of_the_head(self):
+        run = StubbedRun(self, advance_main=1)
+        self.opened(run)
+        self.assertEqual(self.view(run, "mergeStateStatus")["mergeStateStatus"], "CLEAN")
+        self.view(run, "statusCheckRollup")
+        self.assertEqual(self.view(run, "mergeStateStatus")["mergeStateStatus"], "BEHIND")
+        fresh = StubbedRun(self)
+        self.opened(fresh)
+        self.assertEqual(self.view(fresh, "mergeStateStatus")["mergeStateStatus"], "CLEAN")
+
+    def test_merge_behind_moves_main_and_refuses_the_first_n_merges(self):
+        run = StubbedRun(self, merge_behind=1)
+        head = self.opened(run)
+        tip = bare_git(run, "rev-parse", "main")
+        done = self.merge(run, head)
+        self.assertEqual(done.returncode, 1)
+        self.assertIn("Pull request #1 is not mergeable: the head branch is not up to date with the "
+                      "base branch", done.stderr)
+        self.assertEqual([p["state"] for p in run.pulls()], ["OPEN"])
+        self.assertNotEqual(bare_git(run, "rev-parse", "main"), tip)
+        self.assertEqual(self.view(run, "mergeStateStatus")["mergeStateStatus"], "BEHIND")
+
+    def test_merge_policy_refuses_and_reports_blocked_once(self):
+        run = StubbedRun(self, merge_policy=1)
+        head = self.opened(run)
+        done = self.merge(run, head)
+        self.assertEqual(done.returncode, 1)
+        self.assertIn("the base branch policy prohibits the merge", done.stderr)
+        states = [self.view(run, "mergeStateStatus")["mergeStateStatus"] for _ in range(2)]
+        self.assertEqual(states, ["BLOCKED", "CLEAN"])
+        self.assertEqual(self.merge(run, head).returncode, 0)
+        self.assertEqual([p["state"] for p in run.pulls()], ["MERGED"])
+
+    def test_a_lock_event_at_head_fires_on_the_head_only_read(self):
+        dropping = StubbedRun(self, forge_events=("drop-lock-at-head",))
+        dropping.forge.set_ref(LOCK, "1" * 40)
+        self.opened(dropping)
+        self.view(dropping, "headRefOid,statusCheckRollup")
+        self.assertEqual(dropping.lock_refs(), {LOCK: "1" * 40})
+        self.view(dropping, "headRefOid")
+        self.assertEqual(dropping.lock_refs(), {})
+        stealing = StubbedRun(self, forge_events=("steal-lock-at-head",))
+        stealing.forge.set_ref(LOCK, "1" * 40)
+        self.opened(stealing)
+        self.view(stealing, "headRefOid,statusCheckRollup")
+        self.assertEqual(stealing.lock_refs(), {LOCK: "1" * 40})
+        self.view(stealing, "headRefOid")
+        self.assertEqual(stealing.lock_refs(), {LOCK: stealing.stolen_sha})
+
+    def test_a_repeated_lock_event_at_head_fires_again_on_the_next_such_read(self):
+        run = StubbedRun(self, forge_events=("drop-lock-at-head", "drop-lock-at-head"))
+        self.opened(run)
+        run.forge.set_ref(LOCK, "1" * 40)
+        self.view(run, "headRefOid")
+        self.assertEqual(run.lock_refs(), {})
+        run.forge.set_ref(LOCK, "2" * 40)
+        self.view(run, "headRefOid")
+        self.assertEqual(run.lock_refs(), {})
+        run.forge.set_ref(LOCK, "3" * 40)
+        self.view(run, "headRefOid")
+        self.assertEqual(run.lock_refs(), {LOCK: "3" * 40})
+
+    def test_the_bound_seam_is_zero_in_the_run_environment(self):
+        self.assertEqual(StubbedRun(self).env["LANDING_BOUND_SECONDS"], "0")
+
+
+class StubTest(unittest.TestCase):
+    def play(self, run: StubbedRun, entry: dict) -> dict:
+        """Run the stub on a scenario of one entry for step `fix`, as the launcher shim does."""
+        scenario = run.tmp / "stub-scenario.json"
+        scenario.write_text(json.dumps({"fix": entry}), encoding="utf-8")
+        done = subprocess.run(
+            [sys.executable, str(STUB), str(scenario), str(run.tmp / "stub.log"),
+             "--append-system-prompt-file", str(run.tmp / "fix.1.system.md")],
+            input="prompt", env=run.env, capture_output=True, text=True, timeout=120)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return json.loads(done.stdout)["structured_output"]
+
+    def diverged(self, run: StubbedRun, shared: str | None = None) -> Path:
+        """The fixture root on a branch with one commit, `main` of the bare ahead of it by one."""
+        root = run.fixture.root
+        git(run, "switch", "--quiet", "-c", "feature")
+        (root / (shared or "feature.txt")).write_text("feature\n", encoding="utf-8")
+        git(run, "add", "-A")
+        git(run, "commit", "--quiet", "-m", "feature")
+        other = run.tmp / "other"
+        subprocess.run([REAL_GIT, "clone", "-q", "--branch", "main", run.bare, str(other)], check=True)
+        (other / (shared or "main.txt")).write_text("main\n", encoding="utf-8")
+        git(run, "add", "-A", root=other)
+        git(run, "commit", "--quiet", "-m", "main moves", root=other)
+        git(run, "push", "--quiet", "origin", "HEAD:refs/heads/main", root=other)
+        return root
+
+    def test_the_same_head_effect_answers_the_worktree_head_as_start_and_commit_and_commits_nothing(self):
+        run = StubbedRun(self)
+        head = git(run, "rev-parse", "HEAD")
+        reply = self.play(run, {"reply": {"status": "done"}, "same_head": {"worktree": str(run.fixture.root)}})
+        self.assertEqual((reply["start_head"], reply["commit"], reply["status"]), (head, head, "done"))
+        self.assertEqual(git(run, "rev-parse", "HEAD"), head)
+
+    def test_the_merge_effect_commits_a_clean_merge_of_main(self):
+        run = StubbedRun(self)
+        root = self.diverged(run)
+        self.play(run, {"reply": {"status": "done"}, "merge": {"worktree": str(root)}})
+        self.assertEqual(len(git(run, "rev-list", "--parents", "-n", "1", "HEAD").split()), 3)
+        self.assertEqual((root / "main.txt").read_text("utf-8"), "main\n")
+        self.assertEqual(git(run, "status", "--porcelain"), "")
+
+    def test_the_merge_effect_aborts_a_conflict_without_a_resolution(self):
+        run = StubbedRun(self)
+        root = self.diverged(run, "shared.txt")
+        head = git(run, "rev-parse", "HEAD")
+        self.play(run, {"reply": {"status": "done"}, "merge": {"worktree": str(root)}})
+        self.assertEqual(git(run, "rev-parse", "HEAD"), head)
+        self.assertFalse((root / ".git" / "MERGE_HEAD").exists())
+        self.assertEqual((root / "shared.txt").read_text("utf-8"), "feature\n")
+
+    def test_the_merge_effect_commits_a_resolution_it_is_given(self):
+        run = StubbedRun(self)
+        root = self.diverged(run, "shared.txt")
+        self.play(run, {"reply": {"status": "done"},
+                        "merge": {"worktree": str(root), "resolve": {"shared.txt": "both\n"}}})
+        self.assertEqual(len(git(run, "rev-list", "--parents", "-n", "1", "HEAD").split()), 3)
+        self.assertEqual((root / "shared.txt").read_text("utf-8"), "both\n")
+        self.assertEqual(git(run, "status", "--porcelain"), "")
+
+    def test_the_upstream_effect_commits_to_the_bare_main(self):
+        run = StubbedRun(self)
+        before = bare_git(run, "rev-parse", "main")
+        self.play(run, {"reply": {"status": "done"},
+                        "upstream": {"bare": run.bare, "path": "up/stream.txt", "text": "up\n"}})
+        self.assertEqual(bare_git(run, "show", "main:up/stream.txt"), "up")
+        self.assertEqual(bare_git(run, "rev-parse", "main^"), before)
+        self.assertEqual(bare_git(run, "log", "-1", "--format=%an"), "stub upstream")
+
+    def test_the_world_fills_the_worktree_and_the_bare_an_effect_names_none_of(self):
+        entry = {"reply": {"status": "done"}, "merge": {}, "same_head": {}, "commit": {"path": "a", "text": "b"},
+                 "upstream": {"path": "up.txt", "text": "up\n"}}
+        run = StubbedRun(self, replies={"fix": entry})
+        filled = run.replies["fix"]
+        worktree = str(run.worktree_path)
+        self.assertEqual([filled[effect]["worktree"] for effect in ("merge", "same_head", "commit")],
+                         [worktree] * 3)
+        self.assertEqual(filled["upstream"]["bare"], run.bare)
+
+
+if __name__ == "__main__":
+    unittest.main()

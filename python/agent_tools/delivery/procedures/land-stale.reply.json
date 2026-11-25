@@ -1,0 +1,1 @@
+{"type": "object", "properties": {"verdict": {"enum": ["stale", "real"]}, "reran": {"type": "array", "items": {"type": "integer"}}, "notes": {"type": "string"}}, "required": ["verdict", "reran", "notes"], "additionalProperties": false}
