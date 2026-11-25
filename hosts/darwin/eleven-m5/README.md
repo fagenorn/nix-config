@@ -300,12 +300,14 @@ shared memory such as Postgres shared buffers. Each record carries `census_secon
 `error` and no figure, and so does a timeout, a failed run or output that is not parseable.
 
 Each sample line also ends with `events`, what changed since the previous sample. `ram_disk_attached` and
-`ram_disk_detached` come from `hdiutil info -plist` (the `ram://` images, named by their whole disk).
+`ram_disk_detached` come from `hdiutil info -plist` (the `ram://` images, named by their whole disk and
+size, so a disk replaced at the same device by one of another size is a detach and an attach).
 `vm_started` and `vm_stopped` come from the pid in Colima's own `~/.colima/_lima/colima/vz.pid`, counted while
 that pid is a live process: other Virtualization processes are not Colima's. `ci_job_started` and
 `ci_job_ended` come from the `Runner.Worker` pids of `ps -axwwo pid=,args=`, and `floor_kill` from the new
 entries of the floor record. `verify_started` and `verify_ended` come from the live `verify-slot run`
-processes of that listing, and `verify_run` (when the slot was held, from `held_from` to `held_until`) from
+local processes of that listing (not a remote run through `ssh`), and `verify_run` (when the slot was
+held, from `held_from` to `held_until`) from
 the lines the verify-slot history gains. The first sample of a source records a baseline and no event, and a
 source that could not be read changes nothing. A CI job or a RAM disk that starts and ends between two samples
 is not recorded, because those are read as a snapshot each minute.

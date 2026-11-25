@@ -40,8 +40,11 @@ class RecordsCase(unittest.TestCase):
         self.addCleanup(scratch.cleanup)
         self.dir = Path(scratch.name)
 
-    def put_state(self, records_since):
-        (self.dir / "memory-watch.json").write_text(json.dumps({"day": "2026-11-27", "records_since": records_since}))
+    def put_state(self, records_since, records_since_at=None):
+        state = {"day": "2026-11-27", "records_since": records_since}
+        if records_since_at is not None:
+            state["records_since_at"] = records_since_at
+        (self.dir / "memory-watch.json").write_text(json.dumps(state))
 
     def write_day(self, day, samples, census_samples, peak_gib, peak_at):
         line = {"day": day, "samples": samples, "census_samples": census_samples,
@@ -185,6 +188,75 @@ class CensusDayTest(RecordsCase):
         result = self.run_check()
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertEqual(self.verdict(result)["reason"], "no_peak")
+
+    def test_an_event_near_the_peak_is_published_by_its_kind_and_timing_only(self):
+        self.put_state("2026-11-26")
+        run = {"kind": "verify_run", "repository": "o/r", "command": "env API_TOKEN=example just test", "exit": 0,
+               "held_from": "2026-11-27T10:50:00+00:00", "held_until": "2026-11-27T11:10:00+00:00"}
+        kill = {"kind": "floor_kill", "at": "2026-11-27T11:20:00+00:00", "reason": "floor", "owner": "secret-owner",
+                "root_pid": 300, "signals": "term+kill", "tree_gib": 146.0}
+        disk = {"kind": "ram_disk_attached", "dev": "/dev/disk5", "mount": "/Volumes/private-mount", "gib": 1.0}
+        self.healthy("2026-11-27", events={"11:05": [run, kill, disk]})
+        result = self.run_check()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.verdict(result)["events_near_peak"], [
+            {"kind": "verify_run", "sample_at": "2026-11-27T11:05:00+00:00",
+             "held_from": "2026-11-27T10:50:00+00:00", "held_until": "2026-11-27T11:10:00+00:00"},
+            {"kind": "floor_kill", "sample_at": "2026-11-27T11:05:00+00:00", "at": "2026-11-27T11:20:00+00:00"},
+            {"kind": "ram_disk_attached", "sample_at": "2026-11-27T11:05:00+00:00"}])
+        for secret in ("API_TOKEN", "secret-owner", "private-mount"):
+            self.assertNotIn(secret, result.stdout)
+
+    def test_a_deploy_whose_first_sample_came_just_after_midnight_judges_that_day(self):
+        self.put_state("2026-11-26", "2026-11-26T00:00:30+00:00")
+        self.healthy("2026-11-27")
+        result = self.run_check()
+        self.assertEqual(result.returncode, 1, result.stderr)
+        answer = self.verdict(result)
+        self.assertEqual((answer["reason"], answer["day"]), ("missing_day", "2026-11-26"))
+
+    def test_a_deploy_whose_first_sample_came_late_in_its_day_judges_the_next_day(self):
+        self.put_state("2026-11-26", "2026-11-26T09:00:30+00:00")
+        self.healthy("2026-11-27")
+        result = self.run_check()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.verdict(result)["day"], "2026-11-27")
+
+    def test_a_day_of_copies_of_the_day_before_is_not_met(self):
+        self.put_state("2026-11-26")
+        self.write_day("2026-11-27", 1440, 1440, 9.0, "2026-11-26T11:00:00+00:00")
+        self.write_samples("2026-11-27", minute_lines("2026-11-26", 1440, peak=("11:00", 9 * GIB)))
+        result = self.run_check()
+        self.assertEqual(result.returncode, 1, result.stderr)
+        answer = self.verdict(result)
+        self.assertEqual((answer["reason"], answer["outside_day"]), ("bad_timestamps", 1440))
+
+    def test_a_day_of_one_reading_repeated_is_not_met(self):
+        self.put_state("2026-11-26")
+        self.write_day("2026-11-27", 1440, 1440, 9.0, "2026-11-27T11:00:00+00:00")
+        lines = minute_lines("2026-11-27", 1440)
+        for line in lines:
+            line["at"] = "2026-11-27T11:00:00+00:00"
+        lines[0]["unowned_bytes"] = 9 * GIB
+        self.write_samples("2026-11-27", lines)
+        result = self.run_check()
+        self.assertEqual(result.returncode, 1, result.stderr)
+        answer = self.verdict(result)
+        self.assertEqual((answer["reason"], answer["repeated"]), ("bad_timestamps", 1439))
+
+    def test_events_before_a_peak_just_after_midnight_come_from_the_day_before(self):
+        self.put_state("2026-11-25")
+        self.write_day("2026-11-26", 1440, 1440, 9.0, "2026-11-26T00:05:00+00:00")
+        self.write_samples("2026-11-26", minute_lines("2026-11-26", 1440, peak=("00:05", 9 * GIB)))
+        kill = {"kind": "floor_kill", "at": "2026-11-25T23:55:00+00:00", "owner": "o"}
+        older = {"kind": "floor_kill", "at": "2026-11-25T22:00:00+00:00", "owner": "o"}
+        self.write_samples("2026-11-25", [
+            {"at": "2026-11-25T22:00:30+00:00", "unowned_bytes": GIB, "events": [older]},
+            {"at": "2026-11-25T23:55:30+00:00", "unowned_bytes": GIB, "events": [kill]}])
+        result = self.run_check()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.verdict(result)["events_near_peak"], [
+            {"kind": "floor_kill", "sample_at": "2026-11-25T23:55:30+00:00", "at": "2026-11-25T23:55:00+00:00"}])
 
 
 if __name__ == "__main__":

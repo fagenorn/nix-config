@@ -1,14 +1,16 @@
 """`omlx-memory-census-day`: the verify check that the day after the census deploy holds the unowned figure.
 
 `python3 -m agent_tools.hosts.omlx_memory_census_day [--state-dir DIR]` reads the memory watcher's
-`DIR/memory-watch.json` (default `~/.omlx/memory`) for its `records_since`, each line of
+`DIR/memory-watch.json` (default `~/.omlx/memory`) for its `records_since` and `records_since_at`, each line of
 `DIR/memory-peaks.jsonl` and the sample records of `DIR/samples/<day>.jsonl`. It prints one JSON line
 and exits 0 met, 1 not met, 75 not yet, 2 (stderr `omlx-memory-census-day: <error>`, nothing on
 stdout) when the state, a peaks line or a sample line is not a JSON object, or `records_since` is
 neither null nor an ISO date.
 
-The target day T is `records_since` plus one day: the first whole day after the deploy, since the
-deploy day itself is partial. The first decision that applies wins:
+The target day T is the first day the deploy leaves whole: `records_since_at` is the first sample the
+new watcher wrote, and its day is T when that sample is within the first `1440 - MIN_SAMPLES` minutes of
+it (a deploy that only reached its first sample just after midnight), the next day otherwise. A state
+without `records_since_at` takes `records_since` plus one day. The first decision that applies wins:
 
 1. No state file, or a null `records_since`: `{"verdict": "not_yet", "records_since", "day": null}`.
 2. No peaks line has `day >= T` (no peaks file counts as none): `not_yet` with `day` T.
@@ -19,7 +21,8 @@ deploy day itself is partial. The first decision that applies wins:
    `unowned_bytes` that is not an integer: `missing_figure`, with `missing` the larger of the
    difference and the count of such records.
 6. The file holds a record count other than the day line's `samples`: `records_disagree`, with
-   `records` and `samples`.
+   `records` and `samples`. A record whose `at` is not on T, or not after the record before it, makes
+   it `bad_timestamps`, with `outside_day` and `repeated` the counts of such records.
 7. `samples` is under `MIN_SAMPLES` (90 % of a day's minutes): `few_samples`.
 8. `peak_unowned_at` is null: `no_peak`.
 9. The records' largest `unowned_bytes` in GiB, rounded to 0.1, differs from `peak_unowned_gib`, or
@@ -29,11 +32,13 @@ deploy day itself is partial. The first decision that applies wins:
     "peak_unowned_gib", "peak_unowned_at", "events_near_peak"}`.
 
 Every not met answer is `{"verdict": "not_met", "day", "reason", ...}`. `events_near_peak` holds the
-events of `samples/T.jsonl` and then, when it exists, of `samples/<T+1>.jsonl` (a verify run that held
-a slot through the peak is recorded once it ends, possibly after midnight), each as `{**event,
-"sample_at": the record's at}` in file order, at most `NEAR_PEAK_LIMIT`, within `NEAR_PEAK` either side
-of the peak: a `verify_run` when its `held_from` to `held_until` overlaps that window, a `floor_kill`
-when its own `at` is in it, any other event when its record's `at` is.
+events of every existing `samples/<day>.jsonl` from the day `NEAR_PEAK` before the peak through T+1 (a
+verify run that held a slot through the peak is recorded once it ends, possibly after midnight), in file
+order, at most `NEAR_PEAK_LIMIT`, within `NEAR_PEAK` either side of the peak: a `verify_run` when its
+`held_from` to `held_until` overlaps that window, a `floor_kill` when its own `at` is in it, any other
+event when its record's `at` is. Each is only its kind and timing, `{"kind", "sample_at": the record's
+at}` with `held_from` and `held_until` for a `verify_run` and `at` for a `floor_kill`: the answer is
+posted to the issue, so no command, owner or other text of an event is repeated.
 """
 
 import argparse
@@ -46,6 +51,7 @@ STATE_NAME = "memory-watch.json"
 PEAKS_NAME = "memory-peaks.jsonl"
 SAMPLES_NAME = "samples"
 GIB = 1024 ** 3
+DAY_MINUTES = 1440
 MIN_SAMPLES = 1296
 NEAR_PEAK = timedelta(minutes=30)
 NEAR_PEAK_LIMIT = 50
@@ -67,8 +73,8 @@ def _objects(path: Path):
             yield record
 
 
-def _read_state(directory: Path) -> date | None:
-    """The state's `records_since` as a date, None when there is no state or it is null."""
+def _read_state(directory: Path) -> tuple[date, date] | None:
+    """The state's `records_since` and the target day, None when there is no state or it is null."""
     try:
         with (directory / STATE_NAME).open(encoding="utf-8") as handle:
             state = json.load(handle)
@@ -81,7 +87,17 @@ def _read_state(directory: Path) -> date | None:
         return None
     if not isinstance(since, str):
         raise ValueError(f"records_since is not an ISO date: {since!r}")
-    return date.fromisoformat(since)
+    since_day = date.fromisoformat(since)
+    first = state.get("records_since_at")
+    if first is None:
+        return since_day, since_day + timedelta(days=1)
+    if not isinstance(first, str):
+        raise ValueError(f"records_since_at is not an ISO time: {first!r}")
+    started = datetime.fromisoformat(first)
+    if started.date() != since_day:
+        raise ValueError(f"records_since_at {first} is not on {since}")
+    whole = started.hour * 60 + started.minute <= DAY_MINUTES - MIN_SAMPLES
+    return since_day, since_day + timedelta(days=0 if whole else 1)
 
 
 def _peaks_from(directory: Path, target: date) -> tuple[dict | None, bool]:
@@ -103,25 +119,42 @@ def _is_figure(value) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
-def _scan(path: Path) -> tuple[int, int, int | None, str | None]:
-    """The record count, the count without a figure, the largest figure and its earliest `at`."""
-    records = missing = 0
-    largest, largest_at = None, None
+def _scan(path: Path, target: date) -> tuple[int, int, int | None, str | None, int, int]:
+    """The record count, the count without a figure, the largest figure and its earliest `at`, then the counts
+    of records off `target` and of records not after the one before."""
+    records = missing = outside = repeated = 0
+    largest, largest_at, last = None, None, None
     for record in _objects(path):
         records += 1
+        moment = datetime.fromisoformat(record["at"])
+        outside += moment.date() != target
+        repeated += last is not None and moment <= last
+        last = moment
         figure = record.get("unowned_bytes")
         if not _is_figure(figure):
             missing += 1
         elif largest is None or figure > largest:
             largest, largest_at = figure, record["at"]
-    return records, missing, largest, largest_at
+    return records, missing, largest, largest_at, outside, repeated
+
+
+def _timing(event: dict, stamp: str) -> dict:
+    """The kind and timing of `event`, which carries more that must not be published."""
+    kept = {"kind": event["kind"], "sample_at": stamp}
+    if event["kind"] == "verify_run":
+        kept.update(held_from=event["held_from"], held_until=event["held_until"])
+    elif event["kind"] == "floor_kill":
+        kept["at"] = event["at"]
+    return kept
 
 
 def _near_peak(directory: Path, target: date, peak: datetime) -> list[dict]:
     first, last = peak - NEAR_PEAK, peak + NEAR_PEAK
     kept: list[dict] = []
-    for day in (target, target + timedelta(days=1)):
+    day = first.date()
+    while day <= target + timedelta(days=1):
         path = directory / SAMPLES_NAME / f"{day.isoformat()}.jsonl"
+        day += timedelta(days=1)
         if not path.exists():
             continue
         for record in _objects(path):
@@ -138,7 +171,7 @@ def _near_peak(directory: Path, target: date, peak: datetime) -> list[dict]:
                 else:
                     inside = first <= datetime.fromisoformat(stamp) <= last
                 if inside:
-                    kept.append({**event, "sample_at": stamp})
+                    kept.append(_timing(event, stamp))
                     if len(kept) >= NEAR_PEAK_LIMIT:
                         return kept
     return kept
@@ -146,10 +179,10 @@ def _near_peak(directory: Path, target: date, peak: datetime) -> list[dict]:
 
 def decide(directory: Path) -> tuple[int, dict]:
     """The exit code and the JSON answer for the state directory `directory`."""
-    since = _read_state(directory)
-    if since is None:
+    anchored = _read_state(directory)
+    if anchored is None:
         return NOT_YET, {"verdict": "not_yet", "records_since": None, "day": None}
-    target = since + timedelta(days=1)
+    since, target = anchored
     line, later = _peaks_from(directory, target)
     if line is None and not later:
         return NOT_YET, {"verdict": "not_yet", "records_since": since.isoformat(), "day": target.isoformat()}
@@ -164,11 +197,13 @@ def decide(directory: Path) -> tuple[int, dict]:
     if not path.exists():
         return not_met("no_samples")
     samples, census = line["samples"], line["census_samples"]
-    records, missing, largest, largest_at = _scan(path)
+    records, missing, largest, largest_at, outside, repeated = _scan(path, target)
     if census < samples or missing > 0:
         return not_met("missing_figure", missing=max(samples - census, missing))
     if records != samples:
         return not_met("records_disagree", records=records, samples=samples)
+    if outside or repeated:
+        return not_met("bad_timestamps", outside_day=outside, repeated=repeated)
     if samples < MIN_SAMPLES:
         return not_met("few_samples")
     if line["peak_unowned_at"] is None:

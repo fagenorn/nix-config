@@ -210,6 +210,23 @@ class UnownedAlertTest(RecordsCase):
         self.samples_ok("2026-11-24T12:00:00")
         self.assertEqual(len(self.bot.requests), 2)
 
+    def test_a_sampler_stopped_after_its_state_was_written_keeps_the_episode_and_the_sample(self):
+        self.settings_on()
+        self.put_census(census(unowned_bytes=6 * GIB))
+        blocker = self.state_dir / "samples" / f"{DAY}.jsonl"
+        blocker.mkdir(parents=True)
+        stopped = self.sample(now="2026-11-24T12:00:00")
+        self.assertNotEqual(stopped.returncode, 0)
+        self.assertEqual(len(self.bot.requests), 1)
+        self.assertEqual((self.read_state()["samples"], self.read_state()["unowned_open"]), (1, True))
+        blocker.rmdir()
+        self.samples_ok("2026-11-24T12:01:00", "2026-11-24T12:02:00")
+        self.assertEqual(len(self.bot.requests), 1)
+        self.assertEqual(
+            [line["at"] for line in self.sample_lines()],
+            ["2026-11-24T12:00:00", "2026-11-24T12:01:00", "2026-11-24T12:02:00"])
+        self.assertEqual(self.read_state()["samples"], 3)
+
     def test_unowned_at_the_threshold_does_not_alert(self):
         self.settings_on()
         self.put_census(census(unowned_bytes=5 * GIB))

@@ -38,10 +38,8 @@ def held_line(started, waited, held, command="just test"):
 
 
 def image(blocks, dev, mount):
-    return {
-        "image-path": f"ram://{blocks}", "blockcount": blocks, "blocksize": 512,
-        "system-entities": [{"dev-entry": dev, "mount-point": mount}],
-    }
+    entity = {"dev-entry": dev} if mount is None else {"dev-entry": dev, "mount-point": mount}
+    return {"image-path": f"ram://{blocks}", "blockcount": blocks, "blocksize": 512, "system-entities": [entity]}
 
 
 def plist(*images):
@@ -116,6 +114,17 @@ class EventSampleTest(RecordsCase):
         self.assertEqual(
             third["events"],
             [{"kind": "ram_disk_detached", "dev": "/dev/disk4", "mount": "/private/tmp/secrets.d", "gib": 0.1}])
+
+    def test_a_disk_replaced_at_the_same_device_by_one_of_another_size_is_detached_and_attached(self):
+        self.disks(image(2097152, "/dev/disk5", "/Volumes/X"))
+        self.take("2026-11-24T12:00:00")
+        self.disks(image(16777216, "/dev/disk5", "/Volumes/X"))
+        line = self.take("2026-11-24T12:01:00")
+        self.assertEqual(line["events"], [
+            {"kind": "ram_disk_detached", "dev": "/dev/disk5", "mount": "/Volumes/X", "gib": 1.0},
+            {"kind": "ram_disk_attached", "dev": "/dev/disk5", "mount": "/Volumes/X", "gib": 8.0}])
+        self.disks(image(16777216, "/dev/disk5", None))
+        self.assertEqual(self.take("2026-11-24T12:02:00")["events"], [])
 
     def test_a_replaced_history_of_the_same_length_is_read_again(self):
         first = held_line("2026-11-24T11:00:00Z", 0.0, 60.0)
@@ -198,6 +207,15 @@ class ParseEventsTest(unittest.TestCase):
         self.assertEqual(
             events.verify_runs_live(events.parse_listing(listing)), {25168: "just test", 30: "nix build .#a"})
 
+    def test_a_remote_or_wrapped_verify_slot_run_is_not_a_local_run(self):
+        listing = (
+            "40 ssh buildhost python3 -m agent_tools.delivery.verify_slot run -- just test\n"
+            "41 /bin/sh -c python3 -m agent_tools.delivery.verify_slot run -- just test\n"
+            "42 /usr/bin/python3 -c print -m agent_tools.delivery.verify_slot run -- just test\n"
+            "43 vi verify-slot run -- just test\n"
+            "44 /nix/store/x/bin/.python3.13-wrapped -I -B -m agent_tools.delivery.verify_slot run -- just lint\n")
+        self.assertEqual(events.verify_runs_live(events.parse_listing(listing)), {44: "just lint"})
+
     def test_the_colima_pid_counts_only_while_its_process_lives(self):
         self.assertEqual(events.colima_vm_pid("71379\n", {71379: "x"}), 71379)
         self.assertIsNone(events.colima_vm_pid("71379\n", {500: "x"}))
@@ -246,6 +264,37 @@ class HistoryReadFromTest(unittest.TestCase):
             handle.write("\n")
         records, _, offset = verify_history.read_from(self.path, identity, offset)
         self.assertEqual((records, offset), ([json.loads(two)], len(one) + len(two)))
+
+    def test_a_record_longer_than_the_read_limit_is_skipped_and_the_offset_advances(self):
+        good = held_line("2026-11-24T10:00:00Z", 0.0, 60.0)
+        self.assertLess(len(good), 256)
+        self.path.write_text("x" * 600 + "\n" + good)
+        records, identity, offset = verify_history.read_from(self.path, None, 0, limit=256)
+        self.assertEqual((records, offset), ([], 256))
+        offsets = [offset]
+        while not records:
+            records, identity, offset = verify_history.read_from(self.path, identity, offset, limit=256)
+            offsets.append(offset)
+        self.assertEqual(records, [json.loads(good)])
+        self.assertEqual(offset, 601 + len(good))
+        self.assertEqual(offsets, [256, 512, 601 + len(good)])
+
+    def test_an_unterminated_record_under_the_limit_is_read_again_without_growing_the_read(self):
+        self.path.write_text("y" * 40)
+        records, identity, offset = verify_history.read_from(self.path, None, 0, limit=64)
+        self.assertEqual((records, offset), ([], 0))
+        self.assertEqual(verify_history.read_from(self.path, identity, offset, limit=64)[2], 0)
+
+    def test_a_baseline_skips_to_the_last_newline_of_the_final_bytes_without_reading_records(self):
+        one = held_line("2026-11-24T10:00:00Z", 0.0, 60.0)
+        torn = held_line("2026-11-24T11:00:00Z", 1.0, 30.0)[:-1]
+        self.path.write_text("z" * 5000 + "\n" + one + torn)
+        records, identity, offset = verify_history.read_from(self.path, None, 0, baseline=True, limit=1024)
+        self.assertEqual((records, identity, offset), ([], self.identity(), 5001 + len(one)))
+        self.path.write_text("z" * 5000)
+        self.assertEqual(verify_history.read_from(self.path, None, 0, baseline=True, limit=1024)[2], 5000)
+        self.path.write_text(torn)
+        self.assertEqual(verify_history.read_from(self.path, None, 0, baseline=True, limit=1024)[2], 0)
 
     def test_a_symlinked_history_is_refused(self):
         real = self.path.parent / "real.jsonl"

@@ -3,14 +3,17 @@
 Each sample line of `omlx-memory-watch sample` ends with `events`, a list of the changes since the
 previous sample, in this order (every event is a JSON object whose `kind` names its shape):
 
-1. RAM disks, from `hdiutil info -plist`: `ram_disk_detached`, then `ram_disk_attached`, each by `dev`:
+1. RAM disks, from `hdiutil info -plist`: `ram_disk_detached`, then `ram_disk_attached`, each by `dev` and
+   size, so a disk replaced at the same `dev` by one of another size is a detach and an attach:
    `{"kind", "dev": "/dev/disk5", "mount": "/Volumes/X" or null, "gib": 1.0}`.
 2. The Colima VM, from the pid in Colima's own `vz.pid` file while that pid is a live process:
    `vm_stopped` for the old pid, then `vm_started` for the new one: `{"kind", "pid": 71379}`. Only that
    file names the VM: the host runs other Virtualization-framework processes that are not Colima.
 3. CI jobs, the `Runner.Worker` processes of `ps -axwwo pid=,args=`: `ci_job_ended`, then
    `ci_job_started`, by pid: `{"kind", "pid": 9002}`.
-4. Live `verify-slot run` processes of the same listing: `verify_ended`, then `verify_started`, by pid:
+4. Live local `verify-slot run` processes of the same listing, the `verify-slot` executable or a python
+   interpreter given only options before `-m agent_tools.delivery.verify_slot run` (a remote run such
+   as `ssh host python3 -m ...` is not local): `verify_ended`, then `verify_started`, by pid:
    `{"kind", "pid": 25432, "command": "just test"}` (an ended run carries the command last seen).
 5. Finished verify runs, the lines the verify-slot history gained: `verify_run`, one per run that held a
    slot, in history order: `{"kind", "repository", "command", "exit", "held_from", "held_until"}`, where
@@ -19,8 +22,9 @@ previous sample, in this order (every event is a JSON object whose `kind` names 
 6. Floor kills (`floor_kill`, appended by the watcher from the floor record's new `recent` entries):
    `{"kind", "at", "reason", "owner", "root_pid", "signals", "tree_gib"}`.
 
-A source seen for the first time records its baseline and emits nothing; for the history the baseline
-consumes the whole file once. A source that could not be read emits nothing and keeps what it last saw: a
+A source seen for the first time records its baseline and emits nothing; for the history the baseline is
+the offset after the file's last whole line, found from its final megabyte. A source that could not be
+read emits nothing and keeps what it last saw: a
 failed `hdiutil`, an unreadable pid file (`UNREAD`; an absent one is read, and means the VM is not
 running) or an unreadable history. The history is read from the offset the state holds while its identity
 (`[st_dev, st_ino]`) is unchanged and the file has not shrunk, and from its first line otherwise. The
@@ -46,6 +50,7 @@ UNREAD = "unread"
 EVENT_DEFAULTS = {
     "ci_pids_seen": None, "vm_seen": None, "ram_disks_seen": None, "verify_live_seen": None, "history_seen": None,
 }
+PYTHON_NAME = re.compile(r"^\.?python[0-9.]*(-wrapped)?$")
 LISTING_LINE = re.compile(r"^\s*(\d+)\s+(.*?)\s*$")
 
 
@@ -72,9 +77,19 @@ def ci_pids(processes: dict[int, str]) -> list[int]:
 
 
 def _is_verify_run(words: list[str]) -> bool:
-    if len(words) >= 2 and words[0].rsplit("/", 1)[-1] == "verify-slot" and words[1] == "run":
-        return True
-    return any(words[index:index + 3] == ["-m", VERIFY_MODULE, "run"] for index in range(len(words)))
+    if not words:
+        return False
+    executable = words[0].rsplit("/", 1)[-1]
+    if executable == "verify-slot":
+        return words[1:2] == ["run"]
+    if not PYTHON_NAME.match(executable):
+        return False
+    for index, word in enumerate(words[1:], 1):
+        if word == "-m":
+            return words[index + 1:index + 3] == [VERIFY_MODULE, "run"]
+        if not word.startswith("-"):
+            return False
+    return False
 
 
 def verify_runs_live(processes: dict[int, str]) -> dict[int, str]:
@@ -160,8 +175,11 @@ def _fold_ram_disks(state: dict, disks: dict | None) -> list[dict]:
     seen, state["ram_disks_seen"] = state["ram_disks_seen"], disks
     if seen is None:
         return []
-    return ([_disk_event("ram_disk_detached", dev, seen[dev]) for dev in sorted(seen) if dev not in disks]
-            + [_disk_event("ram_disk_attached", dev, disks[dev]) for dev in sorted(disks) if dev not in seen])
+    def same(dev: str) -> bool:
+        return dev in disks and dev in seen and disks[dev]["bytes"] == seen[dev]["bytes"]
+
+    return ([_disk_event("ram_disk_detached", dev, seen[dev]) for dev in sorted(seen) if not same(dev)]
+            + [_disk_event("ram_disk_attached", dev, disks[dev]) for dev in sorted(disks) if not same(dev)])
 
 
 def _fold_vm(state: dict, pid) -> list[dict]:

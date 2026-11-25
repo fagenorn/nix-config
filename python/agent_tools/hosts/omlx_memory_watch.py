@@ -48,7 +48,11 @@ files more than 14 days older than the new day. The state holds `census_peaks` (
 the census figures only from a fresh census), `peak_owners` (each `(name, pid)` at its largest size,
 earliest on a tie, the five largest kept), `census_samples` (samples with a fresh census), all three
 reset each day, and `records_since`, the day of the first sample that kept them: it is set once and
-carried across days, so a day rolled over from a state without it reports null.
+carried across days, so a day rolled over from a state without it reports null. `records_since_at`,
+that first sample's time, is kept with it for the post-deploy check. The state also keeps `last_sample`,
+`{day, line}`, the last sample line: the state is replaced first and the line appended after, so a run
+stopped between the two leaves the line in the state, and the next run appends it if the file does not
+end with it before it reads anything else.
 
 An alert is queued when the service's `runs` changed and its last exit reason is the memory
 killer's (`jetsam`), and when available memory falls under the floor while a model is loaded
@@ -144,7 +148,8 @@ SAMPLE_DAYS = 14
 SAMPLES_DIR = "samples"
 PEAK_FIGURES = ("sys_footprint", "process_footprint", "unowned", "wired", "anonymous", "compressions")
 CENSUS_DEFAULTS = {
-    "census_peaks": {}, "peak_owners": [], "census_samples": 0, "records_since": None, "unowned_open": False,
+    "census_peaks": {}, "peak_owners": [], "census_samples": 0, "records_since": None, "records_since_at": None,
+    "unowned_open": False, "last_sample": None,
 }
 TOP_OWNERS = 5
 FLOOR_RECORD = "/var/db/memory-watch/floor.json"
@@ -527,11 +532,13 @@ def decide(state, reading: dict, now: datetime, floor_bytes: int, others_budget_
             for key in ("omlx_runs", "omlx_jetsam_priority", "low_memory_open", "pending",
                         "fseventsd_restarts_seen", "fseventsd_held_open", "fseventsd_failed_open",
                         "floor_kills_seen", "floor_unmet_seen", "priority_unset_open", "floor_log",
-                        "records_since", "unowned_open", *omlx_memory_events.EVENT_DEFAULTS):
+                        "records_since", "records_since_at", "unowned_open", "last_sample",
+                        *omlx_memory_events.EVENT_DEFAULTS):
                 carried[key] = state[key]
             state = carried
     if state["records_since"] is None:
         state["records_since"] = day
+        state["records_since_at"] = now.isoformat()
     used, available, loaded = reading["used_bytes"], reading["available_bytes"], reading["loaded"]
     omlx = reading["omlx_bytes"]
     footprint = "unknown" if omlx is None else f"{omlx / GIB:.1f}"
@@ -775,7 +782,7 @@ def _observe(args, processes: dict[int, str], seen) -> dict:
     identity, offset = (seen["identity"], seen["offset"]) if seen else (None, 0)
     path = args.slot_history or verify_history.history_path(verify_slot.slot_dir())
     try:
-        records, found, consumed = verify_history.read_from(path, identity, offset)
+        records, found, consumed = verify_history.read_from(path, identity, offset, baseline=not seen)
         history = {"records": records, "identity": found, "offset": consumed}
     except (OSError, ValueError):
         history = None
@@ -848,12 +855,38 @@ def _prune_samples(samples: Path, day: str) -> None:
             continue
 
 
+def _holds_last(path: Path, data: bytes) -> bool:
+    try:
+        with path.open("rb") as handle:
+            size = handle.seek(0, os.SEEK_END)
+            if size < len(data):
+                return False
+            handle.seek(size - len(data))
+            return handle.read() == data
+    except FileNotFoundError:
+        return False
+
+
+def _append_sample(directory: Path, day: str, sample: dict, only_if_missing: bool = False) -> None:
+    samples = directory / SAMPLES_DIR
+    samples.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path = samples / f"{day}.jsonl"
+    if only_if_missing and _holds_last(path, (json.dumps(sample) + "\n").encode()):
+        return
+    _append(path, sample)
+
+
+def recover_sample(directory: Path, previous: dict | None) -> None:
+    """Append the state's last sample line to its day file when a stopped run wrote the state but not the line."""
+    held = (previous or {}).get("last_sample")
+    if held is not None:
+        _append_sample(directory, held["day"], held["line"], only_if_missing=True)
+
+
 def write_state(directory: Path, document: dict, line: dict | None, sample: dict | None = None) -> None:
+    """Replace the state (it keeps `last_sample`), then append the sample; `recover_sample` finishes a stop between."""
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     samples = directory / SAMPLES_DIR
-    if sample is not None:
-        samples.mkdir(mode=0o700, exist_ok=True)
-        _append(samples / f"{document['day']}.jsonl", sample)
     if line is not None:
         _append(directory / PEAKS_NAME, line)
         _prune_samples(samples, document["day"])
@@ -866,6 +899,8 @@ def write_state(directory: Path, document: dict, line: dict | None, sample: dict
     except BaseException:
         temporary.unlink(missing_ok=True)
         raise
+    if sample is not None:
+        _append_sample(directory, document["day"], sample)
 
 
 def deliver_pending(state: dict, args, now: datetime) -> bool:
@@ -887,6 +922,7 @@ def sample(args) -> int:
     directory = args.state_dir
     try:
         previous = read_state(directory / STATE_NAME)
+        recover_sample(directory, previous)
         reading = take_reading(args, previous)
     except ReadingError as error:
         print(f"{PROG}: {error}", file=sys.stderr)
@@ -897,6 +933,7 @@ def sample(args) -> int:
     for entry in state["floor_log"]:
         print(entry, end="", flush=True)
     state["floor_log"] = []
+    state["last_sample"] = {"day": state["day"], "line": record}
     write_state(directory, state, line, record)
     return 3 if failed else 0
 
