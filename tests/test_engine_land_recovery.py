@@ -28,7 +28,7 @@ RETRY = ("claim", "land-contended", "sync-contention", "checks-pending")
 PROMPTS = ("land-sync", "land-resolve", "land-sync-review", "land-sync-fix", "land-sync-rereview",
            "land-ci-fix", "land-ci-review", "land-stale")
 FIXED = committing("fixture/fix.py", "FIXED = 1\n", tests=["checks/check_greet.py"])
-RERAN = {"reply": {"status": "done", "notes": "runner lost", "tests": []}, "same_head": {}}
+RERAN = {"reply": {"status": "done", "notes": "runner lost", "tests": [], "declines": []}, "same_head": {}}
 PRESYNCED = {"reply": {"status": "done", "notes": "n", "tests": ["checks/check_greet.py"]}, "merge": {}}
 OTHER = [{"__typename": "CheckRun", "name": "Other", "status": "COMPLETED", "conclusion": "SUCCESS",
           "startedAt": "2026-11-06T10:00:00Z", "workflowName": "Other"}]
@@ -147,6 +147,17 @@ class ConflictTest(Landing):
         self.assertNotEqual(run.origin_tip(run.branch), head)
         self.assertEqual(run.world.git(run.worktree_path, "show", "--name-only", "--format=", head).strip(),
                          "fixture/fix.py")
+
+    def test_a_sync_fix_that_declines_every_finding_and_commits_nothing_is_re_reviewed(self):
+        declined = {"reply": {"status": "done", "notes": "declined the one finding", "tests": [], "declines": [
+            {"finding": "merge-review:1", "reason": "farewell('') is refused before it reaches line 2"}]},
+            "same_head": {}}
+        run = self.probe_conflict(**{"merge-review": FINDINGS, "merge-fix": declined, "merge-rereview": PASS})
+
+        self.finish(run, "done")
+
+        self.assert_in_order(self.walk(run), ("merge-fixed", "unchanged"), ("merge-rereview", "pass"))
+        self.assertEqual(self.count(run, "merge-fix"), 1)
 
     def test_a_resolution_that_does_not_merge_the_base_stops_sync(self):
         run = self.probe_conflict(resolve={"reply": {"status": "done", "notes": "n", "tests": []}})

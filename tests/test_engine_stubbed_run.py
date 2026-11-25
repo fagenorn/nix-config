@@ -14,6 +14,7 @@ from pathlib import Path
 
 from agent_tools.claims import forge_markers
 from agent_tools.delivery import engine_session
+from agent_tools.delivery.review_findings import Round, dispositions
 from agent_tools.project_contract import resolve_project
 from tests.engine_fixture import FixtureProject
 from tests.engine_guards import payloads
@@ -32,9 +33,9 @@ SETUP_WALK = [("contract", "ok"), ("review", "clear"), ("preflight", "clear"), (
 
 
 FINDING = {"severity": "important", "file": "fixture/farewell.py:2", "failing_input": "farewell('')",
-           "summary": "s"}
+           "summary": "s", "kind": "other"}
 UNNAMED_LITE = dict(CLEAN_LITE, verdict="findings",
-                    findings=[{"severity": "important", "file": "", "failing_input": "", "summary": "s"}])
+                    findings=[{"severity": "important", "file": "", "failing_input": "", "summary": "s", "kind": "other"}])
 CLEAN_FULL = {key: value for key, value in CLEAN_LITE.items() if key != "escalate"}
 CLEAN_REREVIEW = {"verdict": "pass", "findings": []}
 SHA = "a" * 40
@@ -58,7 +59,7 @@ def full_findings() -> dict:
 
 def committing(path: str, text: str, **reply) -> dict:
     """A fix reply that commits `text` to `path`: the stub reports the commit it made."""
-    return {"reply": {"status": "done", "notes": "n", "tests": [], **reply},
+    return {"reply": {"status": "done", "notes": "n", "tests": [], "declines": [], **reply},
             "commit": {"path": path, "text": text}}
 
 
@@ -95,6 +96,34 @@ def keeping_the_run(tmp: Path) -> Path:
         if step["id"] == "start":
             step["holds"] = "run"
     path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+    return copy
+
+
+def unstructured_procedures(tmp: Path) -> Path:
+    """A copy of the shipped procedures as they were before findings carried a kind, a rule and declines."""
+    copy = tmp / "unstructured-procedures"
+    shutil.copytree(PROCEDURES, copy)
+    for path in sorted(copy.glob("*.json")):
+        document = json.loads(path.read_text("utf-8"))
+        if path.name.endswith(".reply.json"):
+            items = document["properties"].get("findings", {}).get("items")
+            if items is not None:
+                for member in ("kind", "rule", "restates"):
+                    items["properties"].pop(member, None)
+                    if member in items["required"]:
+                        items["required"].remove(member)
+            if path.name == "direct-fix.reply.json":
+                document["properties"].pop("declines")
+                document["required"].remove("declines")
+            path.write_text(json.dumps(document) + "\n", encoding="utf-8")
+        else:
+            for step in document["steps"]:
+                if "in" in step:
+                    step["in"] = [name for name in step["in"] if not name.endswith(".declines")]
+            path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+    for path in sorted(copy.glob("*.md")):
+        lines = path.read_text("utf-8").splitlines(keepends=True)
+        path.write_text("".join(line for line in lines if ".declines}}" not in line), encoding="utf-8")
     return copy
 
 
@@ -375,6 +404,85 @@ class ReviewRouteTest(Scenario):
     def reviewer_model(self, run: StubbedRun, name: str = "reviewer") -> str:
         return engine_session.read_role(ROLES, name).model
 
+    def seed_bar(self, run: StubbedRun) -> None:
+        bar = run.world.home / ".agents/standards/the-bar.md"
+        bar.parent.mkdir(parents=True, exist_ok=True)
+        bar.write_text("# The bar\n\n### B1. Defense in depth\n\nBody.\n", encoding="utf-8")
+
+    def test_a_finding_citing_a_made_up_rule_is_stored_blanked_and_graded_the_same(self):
+        minor = {"severity": "minor", "file": "fixture/farewell.py:2", "failing_input": "farewell('')",
+                 "summary": "s", "kind": "other"}
+        run = StubbedRun(self, replies={"lite-review": dict(
+            CLEAN_LITE, findings=[dict(minor, rule="ZZ999"), dict(minor, rule="B1"), minor])})
+        self.seed_bar(run)
+
+        self.finish(run, "done")
+
+        direct = self.child(run, "direct")
+        self.assertEqual([f.get("rule") for f in self.stored(direct, "lite-review")["findings"]], ["", "B1", None])
+        self.assertIn(("lite-review", "pass"), [(e["step"], e["outcome"]) for e in StubbedRun.events(direct)
+                                                 if e["event"] == "outcome_graded"])
+        self.assertIn(("lite-tally", "clean"), run.transitions(direct))
+
+    def test_a_schema_that_admits_only_one_rule_value_keeps_the_reply_unblanked(self):
+        minor = {"severity": "minor", "file": "fixture/farewell.py:2", "failing_input": "farewell('')",
+                 "summary": "s", "kind": "other", "rule": "local"}
+        run = StubbedRun(self, replies={"lite-review": dict(CLEAN_LITE, findings=[minor])})
+        copy = run.tmp / "local-rule-procedures"
+        shutil.copytree(PROCEDURES, copy)
+        path = copy / "direct-review-lite.reply.json"
+        schema = json.loads(path.read_text("utf-8"))
+        schema["properties"]["findings"]["items"]["properties"]["rule"] = {"enum": ["local"]}
+        path.write_text(json.dumps(schema) + "\n", encoding="utf-8")
+
+        done = run.deliver(copy)
+
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        stored = self.stored(self.child(run, "direct"), "lite-review")["findings"]
+        self.assertEqual([f.get("rule") for f in stored], ["local"])
+
+    def test_a_declined_finding_takes_the_same_rounds_and_end_as_an_unstructured_one(self):
+        reason = "farewell(None) is refused by the type checker at fixture/farewell.py:1"
+        plain_finding = {k: v for k, v in FINDING.items() if k != "kind"}
+        plain_second = dict(plain_finding, file="fixture/farewell.py:1", failing_input="farewell(None)")
+        plain = StubbedRun(self, replies={
+            "lite-review": dict(CLEAN_LITE, verdict="findings", findings=[plain_finding, plain_second]),
+            "lite-fix": {"reply": {"status": "done", "notes": "the second finding is wrong: None never reaches it",
+                                   "tests": []},
+                         "commit": {"path": "fixture/second.py", "text": "SECOND = 2\n"}},
+            "lite-rereview": CLEAN_REREVIEW})
+        structured = StubbedRun(self, replies={
+            "lite-review": dict(CLEAN_LITE, verdict="findings", findings=[
+                dict(FINDING, kind="missing-test", rule="B1"),
+                dict(FINDING, file="fixture/farewell.py:1", failing_input="farewell(None)", kind="weak-test")]),
+            "lite-fix": committing("fixture/second.py", "SECOND = 2\n",
+                                   declines=[{"finding": "lite-review:2", "reason": reason}]),
+            "lite-rereview": CLEAN_REREVIEW})
+        self.seed_bar(structured)
+
+        done = plain.deliver(unstructured_procedures(plain.tmp))
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(plain.line(done)["end"], "done")
+        self.finish(structured, "done")
+
+        stored = self.stored(self.child(structured, "direct"), "lite-review")["findings"]
+        self.assertEqual([f.get("rule") for f in stored], ["B1", None])
+        self.assertEqual(self.keys(plain), self.keys(structured))
+        self.assertEqual(plain.transitions(self.child(plain, "direct")),
+                         structured.transitions(self.child(structured, "direct")))
+        rendered = self.launch(structured, "lite-rereview")["prompt"]
+        control = self.launch(plain, "lite-rereview")["prompt"]
+        self.assertIn(reason, rendered)
+        self.assertNotIn(reason, control)
+        self.assertEqual(rendered.count("lite-review:2"), control.count("lite-review:2") + 1)
+        direct = self.child(structured, "direct")
+        round_ = Round(reviews=(("lite-review", self.stored(direct, "lite-review")),
+                                ("lite-independent", self.stored(direct, "lite-independent"))),
+                       fix=self.stored(direct, "lite-fix"),
+                       rereview=("lite-rereview", self.stored(direct, "lite-rereview")))
+        self.assertEqual([(d.name, d.disposition) for d in dispositions([round_])],
+                         [("lite-review:1", "fixed"), ("lite-review:2", "declined")])
+
     def test_a_change_marked_sensitive_is_reviewed_under_the_full_reviewer(self):
         implemented = dict(IMPLEMENTED, reply=dict(IMPLEMENTED["reply"], sensitive=True))
         run = StubbedRun(self, replies={"implement": implemented, "full-review": CLEAN_FULL})
@@ -464,7 +572,7 @@ class ReviewRouteTest(Scenario):
         self.assertNotIn("lite-fix", self.keys(run))
 
     def test_a_fix_that_reports_no_commit_stops_direct_fix(self):
-        unfixed = {"status": "done", "start_head": SHA, "commit": "", "notes": "n", "tests": []}
+        unfixed = {"status": "done", "start_head": SHA, "commit": "", "notes": "n", "tests": [], "declines": []}
         run = StubbedRun(self, replies={"lite-review": lite_findings(), "lite-fix": unfixed})
 
         self.finish(run, "direct-fix", "owner-decision")
@@ -818,7 +926,7 @@ class CoverageTest(Landing):
             {"rollup": []},
             {"rollups": [RED, GREEN], "replies": {"ci-fix": sync_fix, "ci-review": CLEAN_REREVIEW}},
             {"rollups": [RED], "replies": {
-                "ci-fix": {"reply": {"status": "done", "notes": "n", "tests": []}, "same_head": {}},
+                "ci-fix": {"reply": {"status": "done", "notes": "n", "tests": [], "declines": []}, "same_head": {}},
                 "stale": {"verdict": "real", "reran": [], "notes": "n"}}},
             {"advance_main": 1, "rollups": [RED, GREEN], "replies": {"presync": SYNCED}},
             {"rollup": UNNAMED},
