@@ -6,6 +6,7 @@ and a stubbed launcher (`tests/engine_stubbed_world.py`), and reads what the run
 
 from __future__ import annotations
 
+import io
 import json
 import shutil
 import subprocess
@@ -32,6 +33,7 @@ FIXTURES = AdoptedFixtures()
 def setUpModule() -> None:
     install_platform_manifest_in_environ()
     unittest.addModuleCleanup(FIXTURES.close)
+    STEPS.begin()
 
 
 def tearDownModule() -> None:
@@ -110,13 +112,13 @@ def model_of(launch: dict) -> str:
 
 
 class Scenario(unittest.TestCase):
-    def setUp(self) -> None:
-        super().setUp()
-        STEPS.started(self.id())
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        STEPS.select(self.id())  # the runner builds a test only when it selects it
 
     def stubbed(self, **members) -> StubbedRun:
         run = StubbedRun(test_case=self, fixtures=FIXTURES, **members)
-        self.addCleanup(lambda: STEPS.record(run.visited()))
+        self.addCleanup(lambda: STEPS.record(run.visited_steps()))
         return run
 
     def branch_here(self, run: StubbedRun, path: Path) -> str:
@@ -452,6 +454,8 @@ class ReviewRouteTest(Scenario):
         self.assertEqual(keys.count("full-fix"), 1)
         self.assertLess(keys.index("full-fix"), keys.index("full-rereview"))
         self.assertEqual([pull["state"] for pull in run.pulls()], ["MERGED"])
+        landed = run.world.git(run.fixture.root, "--git-dir", run.bare, "show", "main:fixture/second.py")
+        self.assertEqual(landed, "SECOND = 2\n")
 
     def test_findings_left_after_the_one_fix_round_stop_direct_review(self):
         run = self.stubbed(replies={
@@ -853,16 +857,16 @@ class StepCoverageTest(Scenario):
         module = sys.modules[type(self).__module__]
         coverage = StepCoverage(PROCEDURES)
         for test_id in test_ids(module):
-            coverage.started(test_id)
-        coverage.record(coverage.declared() - {"escalated-settled"})
+            coverage.select(test_id)
+        coverage.record(coverage.declared() - {("direct", "escalated-settled")})
 
         with mock.patch.object(module, "STEPS", coverage), self.assertRaises(AssertionError) as raised:
             module.tearDownModule()
 
         self.assertIn("escalated-settled", str(raised.exception))
 
-    def test_each_test_of_the_module_is_started_on_the_module_coverage(self):
-        self.assertIn(self.id(), STEPS.started_ids())
+    def test_each_test_the_runner_selects_is_selected_on_the_module_coverage(self):
+        self.assertIn(self.id(), STEPS.selected_ids())
 
     def test_every_test_class_of_the_module_is_a_scenario(self):
         module = sys.modules[type(self).__module__]
@@ -878,16 +882,16 @@ class StepCoverageTest(Scenario):
         coverage = StepCoverage(PROCEDURES)
 
         with mock.patch.object(module, "STEPS", coverage), \
-                mock.patch.object(StubbedRun, "visited", return_value={"contract"}):
+                mock.patch.object(StubbedRun, "visited_steps", return_value={("setup", "contract")}):
             self.stubbed()
             self.doCleanups()
 
-        self.assertEqual(coverage.recorded(), {"contract"})
+        self.assertEqual(coverage.recorded(), {("setup", "contract")})
 
     def test_a_declared_step_no_run_visited_fails_the_coverage_check(self):
         coverage = StepCoverage(PROCEDURES)
-        coverage.started(self.ID)
-        coverage.record(coverage.declared() - {"escalated-settled"})
+        coverage.select(self.ID)
+        coverage.record(coverage.declared() - {("direct", "escalated-settled")})
 
         with self.assertRaises(AssertionError) as raised:
             coverage.check([self.ID])
@@ -896,18 +900,61 @@ class StepCoverageTest(Scenario):
 
     def test_a_visited_step_no_procedure_declares_fails_the_coverage_check(self):
         coverage = StepCoverage(PROCEDURES)
-        coverage.started(self.ID)
-        coverage.record(coverage.declared() | {"retired-step"})
+        coverage.select(self.ID)
+        coverage.record(coverage.declared() | {("direct", "retired-step")})
 
         with self.assertRaises(AssertionError) as raised:
             coverage.check([self.ID])
 
         self.assertIn("retired-step", str(raised.exception))
 
+    def test_a_step_id_visited_in_one_procedure_does_not_cover_the_same_id_in_another(self):
+        coverage = StepCoverage(PROCEDURES)
+        coverage.select(self.ID)
+        coverage.record(coverage.declared() - {("land", "checks")})
+
+        self.assertIn(("verify", "checks"), coverage.recorded())
+        with self.assertRaises(AssertionError) as raised:
+            coverage.check([self.ID])
+
+        self.assertIn("land.checks", str(raised.exception))
+        self.assertNotIn("verify.checks", str(raised.exception))
+
+    def test_a_selected_test_whose_class_setup_skipped_does_not_silence_the_coverage_check(self):
+        module = sys.modules[type(self).__module__]
+        coverage = StepCoverage(PROCEDURES)
+
+        def skipping(cls) -> None:
+            raise unittest.SkipTest("the class cannot start")
+
+        fake = types.ModuleType("fake")
+        fake.T = type("T", (Scenario,), {"__module__": "fake", "setUpClass": classmethod(skipping),
+                                         "test_a": lambda self: None})
+        with mock.patch.object(module, "STEPS", coverage):
+            suite = unittest.TestLoader().loadTestsFromModule(fake)
+            coverage.begin()
+            result = unittest.TextTestRunner(stream=io.StringIO()).run(suite)
+            with self.assertRaises(AssertionError) as raised:
+                coverage.check(test_ids(fake))
+
+        self.assertEqual((result.testsRun, len(result.skipped)), (0, 1))
+        self.assertIn("direct.escalated-settled", str(raised.exception))
+
+    def test_a_test_built_after_the_run_began_is_not_selected(self):
+        module = sys.modules[type(self).__module__]
+        coverage = StepCoverage(PROCEDURES)
+        fake = types.ModuleType("fake")
+        fake.T = type("T", (Scenario,), {"__module__": "fake", "test_a": lambda self: None})
+        with mock.patch.object(module, "STEPS", coverage):
+            coverage.begin()
+            test_ids(fake)
+
+        self.assertEqual(coverage.selected_ids(), frozenset())
+
     def test_a_full_run_whose_runs_together_visit_every_declared_step_passes(self):
         coverage = StepCoverage(PROCEDURES)
         steps = sorted(coverage.declared())
-        coverage.started(self.ID)
+        coverage.select(self.ID)
         coverage.record(steps[::2])
         coverage.record(steps[1::2])
 
@@ -917,7 +964,7 @@ class StepCoverageTest(Scenario):
 
     def test_a_run_of_part_of_the_module_checks_no_coverage(self):
         coverage = StepCoverage(PROCEDURES)
-        coverage.started(self.ID)
+        coverage.select(self.ID)
 
         result = coverage.check([self.ID, "m.T.test_b"])
 
@@ -930,7 +977,7 @@ class StepCoverageTest(Scenario):
                                                   "test_b": unittest.skip("off")(lambda self: None)})
         fake.U = type("U", (unittest.TestCase,), {"__module__": "fake", "__unittest_skip__": True,
                                                   "test_c": lambda self: None})
-        coverage.started("fake.T.test_a")
+        coverage.select("fake.T.test_a")
 
         self.assertEqual(test_ids(fake), {"fake.T.test_a"})
         with self.assertRaises(AssertionError) as raised:

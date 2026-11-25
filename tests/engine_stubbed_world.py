@@ -16,10 +16,10 @@ The run installs the real lifecycle guard on a confirmed row for the fixture (th
 not an authorized owner, so only the row authorizes it): `guard(text, cwd)` runs the installed hook
 and `guard_log` holds every payload it judged. A fake pull-request forge
 (`tests/fixtures/engine-stubbed-run/gh_pulls.py`) fronts the tracker's `gh` over the bare origin;
-`pulls()`, `lock_refs()` and `origin_tip(branch)` read what it left, and `visited()` the steps every
-run entered. `required_checks` is the contract's `merge.required_checks` (`()` declares none and the
-member is absent), `rollup` the pull requests' `statusCheckRollup` (default: one green `Fixture Checks`
-run), `forge_events` the one-shot events that fire on the first `statusCheckRollup` read of a pull
+`pulls()`, `lock_refs()` and `origin_tip(branch)` read what it left, and `visited_steps()` the
+(procedure, step) pairs every run entered (`visited()` their step ids). `required_checks` is the
+contract's `merge.required_checks` (`()` declares none and the member is absent), `rollup` the pull
+requests' `statusCheckRollup` (default: one green `Fixture Checks` run), `forge_events` the one-shot events that fire on the first `statusCheckRollup` read of a pull
 request (`"move-head"` adds a commit to the head branch, `"steal-lock"` hands the land lock of `main` to
 a second open pull request headed at `stolen_sha`), and `lock_release_fails` makes every
 compare-and-swap delete of the land lock refused.
@@ -249,10 +249,15 @@ class StubbedRun:
         return [json.loads(line) for line in
                 (run / "events.jsonl").read_text(encoding="utf-8").splitlines() if line]
 
-    def visited(self) -> set[str]:
-        """The step of every `step_entered` and `transition_taken` event of every run, root and child."""
-        return {event["step"] for run in self._run_dirs() for event in self.events(run)
+    def visited_steps(self) -> set[tuple[str, str]]:
+        """The (procedure, step) of every `step_entered` and `transition_taken` event of every run, root and child."""
+        return {(json.loads((run / "run.json").read_text(encoding="utf-8"))["procedure"], event["step"])
+                for run in self._run_dirs() for event in self.events(run)
                 if event["event"] in ("step_entered", "transition_taken")}
+
+    def visited(self) -> set[str]:
+        """The step ids `visited_steps` holds, whatever procedure each belongs to."""
+        return {step for _, step in self.visited_steps()}
 
     def transitions(self, run: Path) -> list[tuple[str, str]]:
         return [(event["step"], event["outcome"]) for event in self.events(run)

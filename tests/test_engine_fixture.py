@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import subprocess
 import unittest
 from pathlib import Path
@@ -70,10 +71,6 @@ class FixtureTest(unittest.TestCase):
         self.assertFalse((world.home / ".agents/state/fleet/registry.json").exists())
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class AdoptedFixturesTest(unittest.TestCase):
     def fixtures(self) -> AdoptedFixtures:
         fixtures = AdoptedFixtures()
@@ -95,6 +92,23 @@ class AdoptedFixturesTest(unittest.TestCase):
         self.assertEqual(second.adoption, first.adoption)
         self.assertEqual(second.world.git(second.root, "rev-parse", "main").strip(),
                          first.adoption["commit"])
+
+    @staticmethod
+    def conditions() -> dict:
+        return {"lint": {"when_changed": ["a"], "skip_reason": "nothing to lint"}}
+
+    def test_a_test_that_changes_the_fixture_it_got_does_not_change_the_fixtures_copied_later(self):
+        fixtures = self.fixtures()
+        first = fixtures.project(self, GuardPolicyWorld(self), conditions=self.conditions())
+        first.adoption["commit"] = "0" * 40
+        first.conditions["lint"]["when_changed"].append("b")
+
+        second = fixtures.project(self, GuardPolicyWorld(self), conditions=self.conditions())
+        second.adoption["commit"] = "1" * 40
+        third = fixtures.project(self, GuardPolicyWorld(self), conditions=self.conditions())
+
+        self.assertEqual(third.adoption["commit"], third.world.git(third.root, "rev-parse", "main").strip())
+        self.assertEqual(third.conditions, self.conditions())
 
     def test_a_copy_starts_clean_at_the_adoption_commit_on_its_own_origin(self):
         fixtures = self.fixtures()
@@ -139,3 +153,17 @@ class AdoptedFixturesTest(unittest.TestCase):
 
         self.assertFalse(directory.exists())
         self.assertIsNone(fixtures.directory)
+
+
+class EntryPointTest(unittest.TestCase):
+    def test_the_direct_run_entry_point_follows_every_test_class(self):
+        tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+
+        last = tree.body[-1]
+
+        self.assertIsInstance(last, ast.If)
+        self.assertEqual(ast.unparse(last.test), "__name__ == '__main__'")
+
+
+if __name__ == "__main__":
+    unittest.main()

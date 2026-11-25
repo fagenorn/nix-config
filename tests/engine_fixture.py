@@ -14,11 +14,14 @@ a ready plan and a commit, the build fails with the command's own output.
 
 `AdoptedFixtures` adopts each distinct set of those options once and hands every later request a copy
 (`FixtureProject.copied`): the checkout is copied, re-published to its own bare `origin` in the
-requesting world and registered there again. `close` removes the cache directory.
+requesting world and registered there again. The cache keeps a snapshot of the first fixture's
+metadata (`FixtureProject.snapshot`), never the fixture a test holds, and each copy gets its own
+`adoption` and `conditions`. `close` removes the cache directory.
 """
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import shutil
@@ -87,14 +90,22 @@ class FixtureProject:
         world.provider(template.slug)
         fixture.slug = template.slug
         fixture.review_code = template.review_code
-        fixture.conditions = template.conditions
+        fixture.conditions = copy.deepcopy(template.conditions)
         fixture.required_checks = list(template.required_checks)
         fixture.before_pull_request = template.before_pull_request
-        fixture.adoption = template.adoption
+        fixture.adoption = copy.deepcopy(template.adoption)
         fixture.branch_pattern = template.branch_pattern
         fixture.worktree_prefix = template.worktree_prefix
         fixture.worktree_root = fixture.root / os.path.relpath(template.worktree_root, template.root)
         return fixture
+
+    def snapshot(self) -> FixtureProject:
+        """The metadata of this fixture as it is now, sharing no mutable member with it."""
+        template = copy.copy(self)
+        template.conditions = copy.deepcopy(self.conditions)
+        template.required_checks = list(self.required_checks)
+        template.adoption = copy.deepcopy(self.adoption)
+        return template
 
     def _draft(self) -> dict:
         draft = self.world.contract(self.slug, self.slug, publication_free=True)
@@ -209,7 +220,7 @@ class AdoptedFixtures:
         fixture = FixtureProject(test_case, world, **options)
         source = self.directory / str(len(self._templates)) / "fixture"
         shutil.copytree(fixture.root, source, symlinks=True)
-        self._templates[key] = (source, fixture)
+        self._templates[key] = (source, fixture.snapshot())
         return fixture
 
     def close(self) -> None:
