@@ -144,6 +144,8 @@ BROKEN_CHILDREN = (
     "import sys; print('{\"breaches\":[],\"refusals\":[null],\"verdict\":\"refused\"}'); sys.exit(1)",
     "import sys; print('{\"breaches\":[],\"refusals\":[{\"defect\":\"x\",\"procedure\":\"p\","
     "\"step\":\"s\"}],\"verdict\":\"refused\"}'); sys.exit(1)",
+    "import sys; print('{\"breaches\":[],\"refusals\":[{\"defect\":\"x\",\"detail\":\"d\","
+    "\"procedure\":\"p\"}],\"verdict\":\"refused\"}'); sys.exit(1)",
     "import sys; print('{\"breaches\":[{\"cap\":8000,\"size\":\"big\",\"thing\":\"t\","
     "\"unit\":\"lines\"}],\"refusals\":[],\"verdict\":\"refused\"}'); sys.exit(1)",
     "print('{\"procedures\":[1],\"verdict\":\"ok\"}')",
@@ -198,6 +200,26 @@ class VerdictTest(unittest.TestCase):
                 with self.assertRaises(engine_check.CheckError):
                     engine_check.verdict(PROCEDURES, (), caps=True)
 
+    def test_a_valid_reply_with_a_byte_that_is_not_text_inside_a_name_is_a_check_error(self):
+        script = ("import sys; sys.stdout.buffer.write(b'{\"procedures\":[\"a\\xff\"],\"verdict\":\"ok\"}'); "
+                  "sys.exit(0)")
+        with fake_child(script), self.assertRaises(engine_check.CheckError):
+            engine_check.verdict(PROCEDURES, (), caps=True)
+
+    def test_a_reply_nested_past_the_parsers_depth_is_a_check_error(self):
+        with fake_child("print('[' * 200000)"), self.assertRaises(engine_check.CheckError):
+            engine_check.verdict(PROCEDURES, (), caps=True)
+
+    BREACH_ONLY = ("import json; print(json.dumps({'breaches': [{'cap': 8000, 'size': 8001, 'thing': 't', "
+                   "'unit': 'lines'}], 'refusals': [], 'verdict': 'refused'})); raise SystemExit(1)")
+
+    def test_breaches_are_a_check_error_when_the_caps_were_left_unmeasured(self):
+        with fake_child(self.BREACH_ONLY):
+            code, document = engine_check.verdict(PROCEDURES, (), caps=True)
+            self.assertEqual((code, len(document["breaches"])), (1, 1))
+            with self.assertRaises(engine_check.CheckError):
+                engine_check.verdict(PROCEDURES, (), caps=False)
+
     def test_a_child_past_its_time_is_a_check_error(self):
         with mock.patch.object(engine_check, "CHECK_SECONDS", 1), fake_child("import time; time.sleep(30)"):
             with self.assertRaises(engine_check.CheckError) as raised:
@@ -214,12 +236,11 @@ class PreRunTest(unittest.TestCase):
         self.assertEqual(str(raised.exception), f"procedure p, step s: x, --procedures={PROCEDURES} "
                                                 "--project-command=standin-json --without-caps")
 
-    def test_a_breach_alone_does_not_refuse_a_run(self):
-        breach = {"cap": 8000, "size": 8001, "thing": "engine package", "unit": "lines"}
-        script = f"import json; print(json.dumps({{'breaches': [{breach!r}], 'refusals': [], 'verdict': 'refused'}})); raise SystemExit(1)"
-        with fake_child(script), mock.patch.object(engine_shell, "_refuse_unrunnable"):
-            procedure = engine_shell._validate(PROCEDURES, self.table)
-        self.assertIsInstance(procedure["steps"], list)
+    def test_a_breach_reply_to_a_run_that_measured_no_caps_refuses_the_run(self):
+        with fake_child(VerdictTest.BREACH_ONLY), mock.patch.object(engine_shell, "_load") as load_entry, \
+                self.assertRaises(Refused):
+            engine_shell._validate(PROCEDURES, self.table)
+        load_entry.assert_not_called()
 
     def test_a_check_error_refuses_the_run(self):
         with fake_child("import sys; sys.exit(3)"), self.assertRaises(Refused) as raised:

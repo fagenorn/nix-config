@@ -1,14 +1,20 @@
 """Scenario tests for the land procedures' recovery: the probe, the sync under the lock, the conflict
 resolution outside it and its review, each run as a whole stubbed `engine deliver` on the fixture project
-(`tests/engine_stubbed_world.py`), plus the shape of `land.json` and `land-attempt.json` read as data."""
+(`tests/engine_stubbed_world.py`), plus the shape of `land.json` and `land-attempt.json` read as data.
+The module checks `land-attempt` coverage from its own runs: every step of that procedure is visited by
+a run of this module, and the module's runs take their fixtures from its own `FIXTURES`."""
 
 from __future__ import annotations
 
 import json
+import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from agent_tools.delivery import size_caps, land_tally, landing
+from tests.engine_fixture import AdoptedFixtures
+from tests.engine_step_coverage import StepCoverage, test_ids
 from tests.engine_stubbed_world import StubbedRun
 from tests.guard_policy_world import install_platform_manifest_in_environ
 from tests.test_engine_stubbed_run import (
@@ -17,7 +23,18 @@ from tests.test_engine_stubbed_run import (
 
 TIER = "integration"  # every run case builds a repository and runs the engine as a child process
 
-setUpModule = install_platform_manifest_in_environ
+FIXTURES = AdoptedFixtures()
+STEPS = StepCoverage(PROCEDURES, ("land-attempt",))
+
+
+def setUpModule() -> None:
+    install_platform_manifest_in_environ()
+    unittest.addModuleCleanup(FIXTURES.close)
+
+
+def tearDownModule() -> None:
+    STEPS.finish(sys.modules[__name__], Scenario)
+
 
 PASS = {"verdict": "pass", "findings": []}
 FINDINGS = {"verdict": "findings", "findings": [FINDING]}
@@ -69,13 +86,13 @@ class Landing(Scenario):
         return run.world.git(run.fixture.root, "--git-dir", run.bare, "show", f"main:{path}")
 
     def probe_conflict(self, **replies) -> StubbedRun:
-        return StubbedRun(self, replies={
+        return self.stubbed(replies={
             "implement": UPSTREAM_IMPLEMENTED, "resolve": RESOLVED, "merge-review": PASS, **replies})
 
 
 class SyncTest(Landing):
     def test_a_branch_behind_at_the_lock_is_synced_pushed_and_merged(self):
-        run = StubbedRun(self, advance_main=1, replies={"lock-sync": SYNCED})
+        run = self.stubbed(advance_main=1, replies={"lock-sync": SYNCED})
 
         self.finish(run, "done")
 
@@ -90,7 +107,7 @@ class SyncTest(Landing):
         self.assertEqual(run.forge.issue()["state"], "closed")
 
     def test_a_third_sync_at_the_lock_stops_sync_contention_with_the_lock_released(self):
-        run = StubbedRun(self, advance_main=3, replies={"lock-sync": SYNCED})
+        run = self.stubbed(advance_main=3, replies={"lock-sync": SYNCED})
 
         self.finish(run, "sync-contention", "retry")
 
@@ -116,7 +133,7 @@ class ConflictTest(Landing):
         self.assertEqual(self.main_file(run, "fixture/farewell.py"), RESOLVED_TEXT)
 
     def test_a_conflict_at_the_lock_is_aborted_released_resolved_outside_it_and_relocked(self):
-        run = StubbedRun(self, advance_main=1, main_change=CONFLICTING_MAIN, replies={
+        run = self.stubbed(advance_main=1, main_change=CONFLICTING_MAIN, replies={
             "lock-sync": CONFLICTED, "resolve": RESOLVED, "merge-review": PASS})
 
         self.finish(run, "done")
@@ -173,7 +190,7 @@ class RedCheckTest(Landing):
         return {"ci-fix": FIXED, "ci-review": PASS, **replies}
 
     def test_one_red_check_gets_one_fix_and_its_review_and_then_merges(self):
-        run = StubbedRun(self, rollups=[RED, GREEN], replies=self.fixing())
+        run = self.stubbed(rollups=[RED, GREEN], replies=self.fixing())
 
         self.finish(run, "done")
 
@@ -188,7 +205,7 @@ class RedCheckTest(Landing):
         self.assertEqual(run.lock_refs(), {})
 
     def test_a_second_red_poll_stops_checks_after_the_one_fix(self):
-        run = StubbedRun(self, rollups=[RED, RED], replies=self.fixing())
+        run = self.stubbed(rollups=[RED, RED], replies=self.fixing())
 
         self.finish(run, "checks", "owner-decision")
 
@@ -197,7 +214,7 @@ class RedCheckTest(Landing):
         self.assertEqual(run.lock_refs(), {})
 
     def test_a_rerun_answer_spends_the_one_fix_and_a_second_red_stops_checks(self):
-        run = StubbedRun(self, rollups=[RED], replies={
+        run = self.stubbed(rollups=[RED], replies={
             "ci-fix": RERAN, "stale": {"verdict": "real", "reran": [], "notes": "n"}})
 
         self.finish(run, "checks", "owner-decision")
@@ -207,7 +224,7 @@ class RedCheckTest(Landing):
         self.assertEqual(self.count(run, "ci-fix"), 1)
 
     def test_a_stale_answer_polls_once_more_without_counting_a_red_read(self):
-        run = StubbedRun(self, rollups=[RED], replies={
+        run = self.stubbed(rollups=[RED], replies={
             "ci-fix": RERAN, "stale": {"verdict": "stale", "reran": [7], "notes": "n"}})
 
         self.finish(run, "checks", "owner-decision")
@@ -218,7 +235,7 @@ class RedCheckTest(Landing):
         self.assertEqual(self.count(run, "stale"), 1)
 
     def test_a_fix_with_no_test_recorded_stops_checks_fix_and_is_not_pushed(self):
-        run = StubbedRun(self, rollups=[RED, GREEN], replies=self.fixing(
+        run = self.stubbed(rollups=[RED, GREEN], replies=self.fixing(
             **{"ci-fix": committing("fixture/fix.py", "FIXED = 1\n", tests=[])}))
 
         self.finish(run, "checks-fix", "owner-decision")
@@ -229,7 +246,7 @@ class RedCheckTest(Landing):
         self.assertEqual(self.count(run, "ci-review"), 0)
 
     def test_review_findings_on_the_fix_stop_checks_fix_review(self):
-        run = StubbedRun(self, rollups=[RED, GREEN], replies=self.fixing(**{"ci-review": FINDINGS}))
+        run = self.stubbed(rollups=[RED, GREEN], replies=self.fixing(**{"ci-review": FINDINGS}))
 
         self.finish(run, "checks-fix-review", "owner-decision")
 
@@ -237,7 +254,7 @@ class RedCheckTest(Landing):
         self.assertEqual(run.lock_refs(), {})
 
     def test_the_one_fix_per_delivery_holds_across_a_continue(self):
-        run = StubbedRun(self, rollups=[RED, RED], replies=self.fixing())
+        run = self.stubbed(rollups=[RED, RED], replies=self.fixing())
         procedures = keeping_the_run(run.tmp)
         self.stopped(run, run.deliver(procedures), "checks", "owner-decision")
         first = self.attempt(run)
@@ -251,7 +268,7 @@ class RedCheckTest(Landing):
         self.assertIn(("red", "checks"), run.transitions(second))
 
     def test_a_red_check_at_a_head_behind_its_base_is_synced_before_the_lock(self):
-        run = StubbedRun(self, advance_main=1, rollups=[RED, GREEN], replies={"presync": PRESYNCED})
+        run = self.stubbed(advance_main=1, rollups=[RED, GREEN], replies={"presync": PRESYNCED})
 
         self.finish(run, "done")
 
@@ -262,7 +279,7 @@ class RedCheckTest(Landing):
         self.assertEqual(self.count(run, "ci-fix"), 0)
 
     def test_a_third_presync_stops_sync_contention(self):
-        run = StubbedRun(self, advance_main=3, rollups=[RED], replies={"presync": PRESYNCED})
+        run = self.stubbed(advance_main=3, rollups=[RED], replies={"presync": PRESYNCED})
 
         self.finish(run, "sync-contention", "retry")
 
@@ -271,7 +288,7 @@ class RedCheckTest(Landing):
 
 class PendingTest(Landing):
     def test_three_pending_waits_stop_checks_pending(self):
-        run = StubbedRun(self, rollup=[])
+        run = self.stubbed(rollup=[])
 
         self.finish(run, "checks-pending", "retry")
 
@@ -280,7 +297,7 @@ class PendingTest(Landing):
         self.assertNotIn("lock", {step for step, _ in walk})
 
     def test_a_passed_poll_naming_no_passing_check_counts_as_pending(self):
-        run = StubbedRun(self, rollup=OTHER)
+        run = self.stubbed(rollup=OTHER)
 
         self.finish(run, "checks-pending", "retry")
 
@@ -288,7 +305,7 @@ class PendingTest(Landing):
 
 class MergeRefusalTest(Landing):
     def test_three_merge_refusals_for_being_behind_stop_merge(self):
-        run = StubbedRun(self, merge_behind=3, replies={"resync": SYNCED})
+        run = self.stubbed(merge_behind=3, replies={"resync": SYNCED})
 
         self.finish(run, "merge", "owner-decision")
 
@@ -300,7 +317,7 @@ class MergeRefusalTest(Landing):
         self.assertEqual([p["state"] for p in run.pulls()], ["OPEN"])
 
     def test_a_merge_refused_for_being_behind_is_resynced_and_merged(self):
-        run = StubbedRun(self, merge_behind=1, replies={"resync": SYNCED})
+        run = self.stubbed(merge_behind=1, replies={"resync": SYNCED})
 
         self.finish(run, "done")
 
@@ -308,7 +325,7 @@ class MergeRefusalTest(Landing):
                              ("merge-state", "behind"), ("resync", "done"), ("merge-pr", "ok"))
 
     def test_a_policy_refusal_is_polled_once_more_and_then_merges(self):
-        run = StubbedRun(self, merge_policy=1)
+        run = self.stubbed(merge_policy=1)
 
         self.finish(run, "done")
 
@@ -316,7 +333,7 @@ class MergeRefusalTest(Landing):
                              ("merge-pr", "ok"))
 
     def test_a_second_policy_refusal_stops_merge(self):
-        run = StubbedRun(self, merge_policy=2)
+        run = self.stubbed(merge_policy=2)
 
         self.finish(run, "merge", "owner-decision")
 
@@ -328,7 +345,7 @@ class MergeRefusalTest(Landing):
 
 class LockTest(Landing):
     def test_a_lock_another_pull_request_holds_is_waited_for_within_the_budget_and_stops_land_contended(self):
-        run = StubbedRun(self, forge_events=("steal-lock",))
+        run = self.stubbed(forge_events=("steal-lock",))
 
         self.finish(run, "land-contended", "retry")
 
@@ -341,7 +358,7 @@ class LockTest(Landing):
         self.assertEqual(run.lock_refs(), {"refs/agent-locks/land/main": run.stolen_sha})
 
     def test_a_lock_lost_at_the_re_check_is_waited_for_again(self):
-        run = StubbedRun(self, forge_events=("steal-lock-at-head",))
+        run = self.stubbed(forge_events=("steal-lock-at-head",))
 
         self.finish(run, "land-contended", "retry")
 
@@ -351,14 +368,14 @@ class LockTest(Landing):
         self.assertEqual(run.lock_refs(), {"refs/agent-locks/land/main": run.stolen_sha})
 
     def test_a_re_check_that_took_the_lock_again_polls_once_more_and_merges(self):
-        run = StubbedRun(self, forge_events=("drop-lock-at-head",))
+        run = self.stubbed(forge_events=("drop-lock-at-head",))
 
         self.finish(run, "done")
 
         self.assert_in_order(self.walk(run), ("recheck", "retaken"), ("retake", "green"), ("recheck", "held"))
 
     def test_a_second_retake_stops_land_contended(self):
-        run = StubbedRun(self, forge_events=("drop-lock-at-head", "drop-lock-at-head"))
+        run = self.stubbed(forge_events=("drop-lock-at-head", "drop-lock-at-head"))
 
         self.finish(run, "land-contended", "retry")
 
@@ -383,7 +400,7 @@ class ReleaseSweepTest(Landing):
     def test_every_stop_after_the_lock_was_taken_leaves_no_land_lock_of_this_delivery(self):
         for stop, scenario in self.scenarios():
             with self.subTest(stop=stop, scenario=sorted(scenario)):
-                run = StubbedRun(self, **scenario)
+                run = self.stubbed(**scenario)
 
                 done = run.deliver()
 
@@ -394,6 +411,40 @@ class ReleaseSweepTest(Landing):
                 held = land_tally.held_shas(holder, run.world.home / ".agents/state/engine/runs")
                 self.assertTrue(held)
                 self.assertFalse(held & set(run.lock_refs().values()), run.lock_refs())
+
+
+class CoverageWiringTest(Scenario):
+    def test_the_module_teardown_fails_naming_a_land_attempt_step_no_run_visited(self):
+        module = sys.modules[__name__]
+        scope = {procedure for procedure, _ in module.STEPS.declared()}
+        self.assertEqual(scope, {"land-attempt"})
+        coverage = StepCoverage(PROCEDURES, tuple(sorted(scope)))
+        for test_id in test_ids(module, Scenario):
+            coverage.select(test_id)
+        coverage.record(coverage.declared() - {("land-attempt", "merge-rereview")})
+
+        with mock.patch.object(module, "STEPS", coverage), self.assertRaises(AssertionError) as raised:
+            module.tearDownModule()
+
+        self.assertIn("land-attempt.merge-rereview", str(raised.exception))
+
+    def test_a_land_recovery_run_records_its_steps_and_takes_its_fixture_from_this_module(self):
+        module = sys.modules[__name__]
+        coverage = StepCoverage(PROCEDURES, ("land-attempt",))
+        fixtures = AdoptedFixtures()
+        self.addCleanup(fixtures.close)
+
+        with mock.patch.object(module, "STEPS", coverage), mock.patch.object(module, "FIXTURES", fixtures), \
+                mock.patch.object(StubbedRun, "visited_steps", return_value={("land-attempt", "renew")}):
+            self.stubbed()
+            directory = fixtures.directory
+            self.doCleanups()
+
+        self.assertIsNotNone(directory)
+        self.assertEqual(coverage.recorded(), {("land-attempt", "renew")})
+
+    def test_this_test_is_selected_on_the_land_recovery_coverage(self):
+        self.assertIn(self.id(), sys.modules[__name__].STEPS.selected_ids())
 
 
 BOUNDS = {

@@ -12,8 +12,9 @@ The check's wire format is the contract. Exit 0 prints one JSON object whose
 `verdict` is `refused`, with `breaches` and `refusals` lists holding at least one
 entry between them; exit 2 prints one stderr line, `procedure-check: <reason>`.
 `verdict` returns `(exit, document)` for exit 0 and 1. Anything else, a usage
-exit, a timeout, a child that does not start, an unknown exit code or a document
-that breaks these shapes, raises `CheckError` carrying the reason.
+exit, a timeout, a child that does not start, an unknown exit code, a document
+that breaks these shapes or is not strict UTF-8 JSON, or a `caps` false reply that
+carries breaches, raises `CheckError` carrying the reason.
 """
 
 from __future__ import annotations
@@ -50,7 +51,7 @@ def _is_strings(value: object) -> bool:
 def _refusal_ok(item: object) -> bool:
     return (isinstance(item, dict)
             and all(isinstance(item.get(key), str) for key in ("procedure", "defect", "detail"))
-            and (item.get("step") is None or isinstance(item.get("step"), str)))
+            and "step" in item and (item["step"] is None or isinstance(item["step"], str)))
 
 
 def _breach_ok(item: object) -> bool:
@@ -77,20 +78,21 @@ def verdict(directory: Path, project_commands: Sequence[str], *, caps: bool) -> 
             *(f"--project-command={name}" for name in project_commands),
             *(() if caps else ("--without-caps",))]
     try:
-        done = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, encoding="utf-8",
-                              errors="replace", timeout=CHECK_SECONDS)
+        done = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, timeout=CHECK_SECONDS)
     except subprocess.TimeoutExpired:
         raise CheckError(f"the procedure check did not finish within {CHECK_SECONDS} seconds") from None
     except (OSError, subprocess.SubprocessError) as error:
         raise CheckError(f"the procedure check did not start: {error}") from error
-    last = _last_line(done.stderr)
+    last = _last_line(done.stderr.decode("utf-8", errors="replace"))
     if done.returncode == 2:
         raise CheckError(last.removeprefix(_PREFIX) or _NO_REASON)
     if done.returncode in (0, 1):
         try:
-            document = json.loads(done.stdout)
-        except ValueError:
+            document = json.loads(done.stdout.decode("utf-8"))  # strict: a replaced byte would alter a name
+        except (ValueError, RecursionError):  # a UnicodeDecodeError is a ValueError
             document = None
         if _shaped(done.returncode, document):
+            if not caps and document.get("breaches"):
+                raise CheckError("the procedure check reported cap breaches although it was told to leave caps unmeasured")
             return done.returncode, document
     raise CheckError(f"the procedure check exited {done.returncode} without a verdict: {last}")
