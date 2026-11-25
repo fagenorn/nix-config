@@ -1304,6 +1304,28 @@ class ManagerContractTest(unittest.TestCase):
             sprints.refused_reason("merge refused: required checks are not green"),
             "required checks are not green")
 
+    def test_the_contract_and_the_delivery_skills_raise_a_card_for_a_held_item(self):
+        text = CONTRACT.read_text(encoding="utf-8")
+        flat = " ".join(text.split())
+        self.assertIn("## Holding work for someone", text)
+        self.assertLess(text.index("## Questions"), text.index("## Holding work for someone"))
+        self.assertLess(text.index("## Holding work for someone"), text.index("## A live fault"))
+        for needle in (
+            "raise a card for whoever it waits on at the moment you hold it",
+            "names what is held, why it is held and the one action that releases it",
+            "A status line, a report's `inbox` or `next`, or a reply is not an ask",
+            "A merge the guard refuses is not such a hold",
+        ):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, flat)
+        rule = ("A stop that holds work for the owner or the lead raises a card for whoever it"
+                " waits on at once, on the caller's ask channel, naming what is held, why and"
+                " the one action that releases it; a status line or a report is not an ask.")
+        for skill in ("deliver-standard", "deliver-batch"):
+            path = REPO_ROOT / "home/common/claude-code/skills" / skill / "SKILL.md"
+            with self.subTest(skill=skill):
+                self.assertIn(rule, " ".join(path.read_text(encoding="utf-8").split()))
+
     def test_the_contract_names_needs_words_and_the_owners_words(self):
         text = " ".join(CONTRACT.read_text().split())
         section = text.partition("## Questions")[2].partition(" ## ")[0]

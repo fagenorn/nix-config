@@ -15,3 +15,5 @@ Render by `stage`:
 - `done` or `breaker`: on `breaker`, report it first. Render `table` as one Markdown table (issue, outcome, PR, reason), then `questions` by issue and `owner_actions`.
 
 Run a non-null `relaunch` with `scriptPath` and `child_script` newly placed, adding user answers as `decisions` `{"<issue>": answer}`, unless its args, `reasons` aside, equal the previous run's: then stop, reporting open rows as awaiting the owner. Only a run cut off before returning resumes with `resumeFromRunId` and its original `args`.
+
+A stop that holds work for the owner or the lead raises a card for whoever it waits on at once, on the caller's ask channel, naming what is held, why and the one action that releases it; a status line or a report is not an ask.
