@@ -558,6 +558,14 @@ class HookTest(Case):
             svc, hook = self.permission_hook(svc)
         self.assertIsInstance(hook, int)
 
+    def test_a_held_publish_that_the_reader_never_met_fails_the_test(self):
+        svc = self.start(self.ITEMS)
+        with self.assertRaisesRegex(AssertionError, "was not held until the reader reached"):
+            with support.hold_the_publish(svc, "session.hook", wait=0.2):
+                support.post_hook(svc.address, support.hook_body("finished turn"))
+                wait_rows(self.store, "session.hook", 1)
+                time.sleep(0.6)
+
     def test_a_hook_moves_the_projects_activity(self):
         svc = self.start(self.ITEMS)
         with support.hold_the_publish(svc, "session.hook"):

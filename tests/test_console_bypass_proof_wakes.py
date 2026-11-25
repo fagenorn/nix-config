@@ -159,8 +159,21 @@ class BypassProofWakesTest(unittest.TestCase):
             env={"FAKE_CLIENT_HOLD_AFTER": "1", "FAKE_CLIENT_LATE_INBOX": "1"})
 
         self.assertEqual(verdicts(report), ["delivered", "not_delivered"])
-        self.assertEqual([w["inbox_calls"] for w in report["wakes"]], [1, 2])
+        first, second = [w["inbox_calls"] for w in report["wakes"]]
+        self.assertEqual(second, 2)
+        self.assertIn(first, (1, 2))  # 2 when the proof sampled the first wake after the late call
         self.assertEqual(report["outcome"], "failed")
+        self.assertEqual(code, 1)
+
+    def test_a_late_inbox_call_made_at_once_still_leaves_the_second_wake_undelivered(self):
+        world = WakeProofWorld(self)
+
+        code, report, _, _ = world.run(
+            "--wake-wait", "2",
+            env={"FAKE_CLIENT_HOLD_AFTER": "1", "FAKE_CLIENT_LATE_INBOX": "0"})
+
+        self.assertEqual(verdicts(report), ["delivered", "not_delivered"])
+        self.assertEqual(report["wakes"][1]["inbox_calls"], 2)
         self.assertEqual(code, 1)
 
     def test_a_manager_that_never_goes_idle_gets_no_wake(self):
@@ -178,7 +191,7 @@ class BypassProofWakesTest(unittest.TestCase):
         world = WakeProofWorld(self)
 
         code, report, _, seconds = world.run("--time-limit", "4", "--teardown-reserve", "2",
-                                             env={"FAKE_GIT_DELAY": "2"})
+                                             env={"FAKE_GIT_DELAY": "30"})
 
         self.assertEqual(report["outcome"], "failed")
         self.assertEqual(report["reason"], bypass_proof.OUT_OF_TIME)
@@ -197,6 +210,7 @@ class BypassProofWakesTest(unittest.TestCase):
 
         self.assertEqual(report["reason"], bypass_proof.OUT_OF_TIME)
         self.assertEqual(verdicts(report), ["not_sent"])
+        self.assertEqual(len(world.relay_argvs()), 1, "the relay was cut before it started")
         steps = teardown(report)
         self.assertTrue(steps["stop_manager"]["ok"] and steps["remove_manager"]["ok"])
         self.assertEqual(stops_and_removals(world), [["run", "stop", "m1aaaaaa"],

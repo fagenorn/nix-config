@@ -87,15 +87,20 @@ def wait_until(condition):
 
 
 @contextlib.contextmanager
-def hold_the_publish(svc, kind):
+def hold_the_publish(svc, kind, wait=5):
     """Hold a hook's republish until the reading thread is at the ingest lock.
 
     The hook route answers before it ingests, and the ingest commits the row before it republishes the view,
     all under `svc._ingest`. The publisher waits, still holding the lock, for this thread to reach the lock,
     so a view read made outside the lock sees the stale view and one made inside it sees the republish.
+    The publisher gives the reader `wait` seconds; one that never arrived in time lets the publisher go
+    on, so on leaving the block (when the block itself raised nothing) this thread fails the test then,
+    as a read the held publish did not order proves nothing.
     """
     reader = threading.current_thread()
     arrived = threading.Event()
+    settled = threading.Event()
+    waited = []
     real = svc._ingest
     append = EventLog.append
 
@@ -116,11 +121,15 @@ def hold_the_publish(svc, kind):
     def late(log, entries):
         rows = append(log, entries)
         if any(entry[0] == kind for entry in entries):
-            arrived.wait(5)
+            waited.append(arrived.wait(wait))
+            settled.set()
         return rows
 
     with mock.patch.object(svc, "_ingest", Fence()), mock.patch.object(EventLog, "append", late):
         yield
+        if not settled.wait(wait + 5) or waited != [True]:
+            raise AssertionError(
+                f"the publish of a {kind} row was not held until the reader reached the lock: {waited}")
 
 
 def request(address, method, path, host=None):
