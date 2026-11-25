@@ -151,6 +151,11 @@ class TicketTest(unittest.TestCase):
         reserve(t1, now=1000)
         self.assertEqual([w.seq for w in waiters(self.dir, t2, 1000)], [2])
         self.assertTrue(t1.path.exists())
+        t3 = self.join("k")
+        reserved = {"key": "k", "live": False, "repository": None, "reserved_until": 5000}
+        os.pwrite(t3.descriptor, json.dumps(reserved).encode(), 0)
+        os.ftruncate(t3.descriptor, len(json.dumps(reserved)))
+        self.assertEqual([w.seq for w in waiters(self.dir, t2, 1000)], [2])
 
     def test_a_reserved_ticket_is_taken_back_by_the_same_key_within_the_window(self):
         t1 = self.join("k", now=1000)
@@ -211,6 +216,8 @@ class TicketTest(unittest.TestCase):
         (self.dir / "ticket-000000000001.lock").symlink_to(victim)
         ticket = self.join()
         self.assertEqual(ticket.seq, 2)
+        with self.assertRaises(OSError):
+            open_shared(self.dir / "ticket-000000000001.lock")
         self.assertEqual(victim.read_text(), "victim-original")
         self.assertEqual([w.seq for w in waiters(self.dir, ticket, 0)], [2])
         self.assertEqual(victim.read_text(), "victim-original")
