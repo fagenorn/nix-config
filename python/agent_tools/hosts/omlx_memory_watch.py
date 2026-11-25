@@ -922,11 +922,14 @@ def sample(args) -> int:
     directory = args.state_dir
     try:
         previous = read_state(directory / STATE_NAME)
-        recover_sample(directory, previous)
         reading = take_reading(args, previous)
     except ReadingError as error:
         print(f"{PROG}: {error}", file=sys.stderr)
         return 1
+    try:
+        recover_sample(directory, previous)
+    except OSError as error:
+        print(f"{PROG}: the last sample line was not recovered ({type(error).__name__}: {error})", file=sys.stderr)
     state, line, record = decide(
         previous, reading, now, args.floor_gib * GIB, args.others_budget_gib * GIB, args.unowned_alert_gib * GIB)
     failed = deliver_pending(state, args, now)

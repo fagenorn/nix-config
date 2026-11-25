@@ -227,6 +227,24 @@ class UnownedAlertTest(RecordsCase):
             ["2026-11-24T12:00:00", "2026-11-24T12:01:00", "2026-11-24T12:02:00"])
         self.assertEqual(self.read_state()["samples"], 3)
 
+    def test_a_sample_file_that_stays_unwritable_does_not_stop_the_next_runs_alerts(self):
+        self.settings_on()
+        self.put_census(census(unowned_bytes=6 * GIB))
+        (self.state_dir / "samples" / f"{DAY}.jsonl").mkdir(parents=True)
+        self.assertNotEqual(self.sample(now="2026-11-24T12:00:00").returncode, 0)
+        self.assertEqual(len(self.bot.requests), 1)
+        self.put_census(census(at="2026-11-25T00:00:30", unowned_bytes=GIB))
+        resumed = self.sample(now="2026-11-25T00:01:00")
+        self.assertEqual(resumed.returncode, 0, resumed.stderr)
+        self.assertIn("not recovered", resumed.stderr)
+        self.assertIs(self.read_state()["unowned_open"], False)
+        self.put_census(census(at="2026-11-25T00:01:30", unowned_bytes=6 * GIB))
+        self.samples_ok("2026-11-25T00:02:00")
+        self.assertEqual(len(self.bot.requests), 2)
+        self.assertEqual(
+            [line["at"] for line in self.sample_lines("2026-11-25")],
+            ["2026-11-25T00:01:00", "2026-11-25T00:02:00"])
+
     def test_unowned_at_the_threshold_does_not_alert(self):
         self.settings_on()
         self.put_census(census(unowned_bytes=5 * GIB))
