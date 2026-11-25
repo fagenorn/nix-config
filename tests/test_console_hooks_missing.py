@@ -296,9 +296,12 @@ class HooksMissingPictureTest(unittest.TestCase):
         console_screenshots._seed_registration(seed, state, str(root))
         return seed.ended()
 
-    def test_the_register_apply_state_seeds_the_installing_line_first(self):
-        self.assertEqual(self.seeded("register-apply")["lines"],
-                         [register.HOOKS_LINE, *console_screenshots.REGISTER_PLAN_LINES])
+    def test_the_drafted_states_seed_the_dev_shell_and_installing_lines_first(self):
+        for state in ("register-apply", "register-draft"):
+            with self.subTest(state=state):
+                self.assertEqual(self.seeded(state)["lines"],
+                                 ["commits run in its development shell: devenv shell", register.HOOKS_LINE,
+                                  *console_screenshots.REGISTER_PLAN_LINES])
 
     def test_the_reconcile_states_keep_today_s_lines(self):
         self.assertEqual(self.seeded("register-reconcile-apply")["lines"],
