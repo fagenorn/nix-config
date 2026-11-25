@@ -158,7 +158,9 @@ Contract:
   under the 2 MiB a picture may be, and `main` prints each sheet's path after the shots. `--states a,b`
   shoots only the named states (each a member of `STATES`; the default is every state), and `--composite NAME`
   (only with `--sheets`) writes `NAME` after the last state: the named states' sheets side by side in one
-  PNG under the same 2 MiB, which `main` prints after the sheets. Each
+  PNG under the same 2 MiB, which `main` prints after the sheets. `--widths a,b` shoots those viewport
+  widths instead of `WIDTHS` (distinct positive pixel widths), so a look can picture a phone width such as
+  390; the style rows are read only at the widths they name, so a width outside `STYLE_WIDTHS` reads none. Each
   width waits for what the owner judges to be visible, which fails the run when it is not:
   `guest-steer` the door check of `guest-page`, then `.started-by`, `Answered by`, `.guest-wait` and
   `#inbox button.approve`; `owner-actors` `.started-by` and `Answered by`. The rows are seeded
@@ -3555,6 +3557,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="also write <state>-sheet.png, the state's widths side by side")
     parser.add_argument("--states", help="a comma list of the states to shoot (default every state)")
     parser.add_argument("--composite", help="with --sheets, also write NAME, the shot states' sheets side by side")
+    parser.add_argument("--widths", help="a comma list of the viewport widths to shoot, in pixels "
+                                         f"(default {','.join(map(str, WIDTHS))})")
     args = parser.parse_args(argv)
     states = STATES
     if args.states is not None:
@@ -3562,6 +3566,13 @@ def main(argv: list[str] | None = None) -> int:
         unknown = [state for state in states if state not in STATES]
         if unknown:
             parser.error(f"--states names {', '.join(unknown)}, which are not states")
+    widths = WIDTHS
+    if args.widths is not None:
+        members = args.widths.split(",")
+        if (not all(member.isascii() and member.isdigit() and int(member) > 0 for member in members)
+                or len(set(map(int, members))) != len(members)):
+            parser.error(f"--widths takes distinct positive whole pixel widths, not {args.widths!r}")
+        widths = tuple(int(member) for member in members)
     if args.composite is not None and not args.sheets:
         parser.error("--composite goes with --sheets")
     if (args.question is None) != (args.answer_file is None):
@@ -3573,9 +3584,9 @@ def main(argv: list[str] | None = None) -> int:
     with tempfile.TemporaryDirectory(prefix="console-shots-env-") as tmp:
         os.environ.update(sandbox_environ(Path(tmp).resolve()))
         try:
-            taken = (capture(Path(args.out), states=("question-read",), read=(args.question, text),
-                             sheets=args.sheets, composite=args.composite)
-                     if real else capture(Path(args.out), states=states, sheets=args.sheets,
+            taken = (capture(Path(args.out), states=("question-read",), widths=widths,
+                             read=(args.question, text), sheets=args.sheets, composite=args.composite)
+                     if real else capture(Path(args.out), states=states, widths=widths, sheets=args.sheets,
                                           composite=args.composite))
         except Unavailable as error:
             print(f"console-screenshots: {error}", file=sys.stderr)
