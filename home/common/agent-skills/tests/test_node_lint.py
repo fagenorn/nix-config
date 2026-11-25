@@ -15,12 +15,15 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
 
 from agent_tools.delivery import never_rise, node_lint, rule_ids
 from agent_tools.delivery.never_rise import EnforcerFailed, HistoryUnavailable, Violation
+
+from agent_tools.project_contract.conformance_registry import CHILD_TIMEOUT_SECONDS
 
 from .conformance_test_support import (
     HERMETIC_ENV, INTEGRATION_REF, REAL_GIT, REPO_ROOT, ReportAssertions, commit_all, doctor,
@@ -83,6 +86,18 @@ def make_repo(tmp: Path, files: dict[str, str]) -> tuple[Path, str]:
         target.write_text(text, encoding="utf-8")
     commit_all(root, "fixture")
     return root, git(root, "rev-parse", "HEAD").strip()
+
+
+def program_root(tmp: Path, files: dict[str, str]) -> Path:
+    """A contract root whose integration tip and head both hold `files` (merge base == head)."""
+    root = make_root(tmp)
+    for relative, text in files.items():
+        target = root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+    commit_all(root, "programs")
+    git(root, "update-ref", INTEGRATION_REF, "HEAD")
+    return root
 
 
 def run_command(root: Path, tools: str | None, *args: str) -> subprocess.CompletedProcess:
@@ -361,11 +376,7 @@ class NodeNeverRiseTest(ReportAssertions, unittest.TestCase):
 
     def branch(self, tmp: Path, base_text: str, branch_text: str) -> tuple[Path, str]:
         """A root whose integration tip holds `base_text` as a program, then a branch commit."""
-        root = make_root(tmp)
-        (root / "src").mkdir()
-        (root / "src" / "p.js").write_text(base_text, encoding="utf-8")
-        commit_all(root, "program")
-        git(root, "update-ref", INTEGRATION_REF, "HEAD")
+        root = program_root(tmp, {"src/p.js": base_text})
         base = git(root, "rev-parse", "HEAD").strip()
         if branch_text != base_text:
             (root / "src" / "p.js").write_text(branch_text, encoding="utf-8")
@@ -473,8 +484,8 @@ os.execv(PINNED, [PINNED, *sys.argv[1:]])
 """
 
 
-class ThisRepositoryNodeTest(unittest.TestCase):
-    """This repository's two programs reach both tools, as the executable boundary shows."""
+class NodeDoctorTest(unittest.TestCase):
+    """The doctor lints this repository's two programs with both tools, on a fixture holding their committed text."""
 
     PROGRAMS = ("home/common/claude-code/skills/deliver-standard/deliver-standard.js",
                 "home/common/claude-code/skills/deliver-standard/deliver-batch.js")
@@ -494,22 +505,23 @@ class ThisRepositoryNodeTest(unittest.TestCase):
         log = Path(directory) / f"{name}.jsonl"
         return [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
 
-    def never_rise_check(self, directory: str) -> dict:
-        """The doctor's never-rise check on this repository, run with the tools in `directory`."""
-        _, by_id = doctor(self, REPO_ROOT, "--offline", env=tools_env(directory))
+    def never_rise_check(self, root: Path, directory: str) -> dict:
+        """The doctor's never-rise check on the fixture `root`, run with the tools in `directory`."""
+        _, by_id = doctor(self, root, "--offline", env=tools_env(directory))
         return by_id["verification.violations.never_rise"]
 
     def assert_never_rise_passed(self, check: dict) -> None:
         self.assertEqual(check["status"], "passed", check)
 
-    def test_doctor_on_this_repository_lints_both_programs_with_both_tools(self) -> None:
+    def test_doctor_lints_this_repositorys_programs_with_both_tools(self) -> None:
         with fixture() as tmp:
+            texts = {path: git(REPO_ROOT, "show", f"HEAD:{path}") for path in self.PROGRAMS}
+            root = program_root(tmp, texts)
             directory = self.recording_tools(tmp)
             expected = {
-                hashlib.sha256(node_lint.wrap(git(REPO_ROOT, "show", f"HEAD:{path}")).text
-                               .encode()).hexdigest()
-                for path in self.PROGRAMS}
-            self.assert_never_rise_passed(self.never_rise_check(directory))
+                hashlib.sha256(node_lint.wrap(text).text.encode()).hexdigest()
+                for text in texts.values()}
+            self.assert_never_rise_passed(self.never_rise_check(root, directory))
             seen =lambda name, flag: {  # noqa: E731
                 d for call in self.calls(directory, name) if flag(call["argv"]) for d in call["digests"]}
             self.assertLessEqual(expected, seen(
@@ -522,18 +534,27 @@ class ThisRepositoryNodeTest(unittest.TestCase):
     def test_the_doctor_test_fails_when_the_doctor_reports_a_broken_tool(self) -> None:
         broken = {"node": ("exit 3\n", "node_failed"), "eslint": ("exit 2\n", "eslint_failed")}
         for tool, (script, reason) in broken.items():
-            with self.subTest(tool):
-                check = self.never_rise_check(tools_dir(self, **{tool: script}))
+            with self.subTest(tool), fixture() as tmp:
+                root = program_root(tmp, {"src/p.js": META})
+                check = self.never_rise_check(root, tools_dir(self, **{tool: script}))
                 self.assertEqual(
                     [check["status"], check["reason_code"], check["facts"]],
                     ["failed", "enforcer_failed", {"enforcer": "node-lint", "reason": reason}])
                 with self.assertRaises(AssertionError):
                     self.assert_never_rise_passed(check)
 
-    def test_doctor_on_a_runner_that_takes_over_a_minute_still_completes(self) -> None:
-        slowed = {name: f'/bin/sleep 10\nexec {pinned(name)} "$@"\n' for name in ("node", "eslint")}
-        directory = tools_dir(self, **slowed)
-        self.assert_never_rise_passed(self.never_rise_check(directory))
+    def test_doctor_on_a_slow_runner_passes_while_its_tool_calls_outlast_one_child_timeout(self) -> None:
+        # One program at one revision makes three tool calls, each under the child timeout, together over it.
+        slow = CHILD_TIMEOUT_SECONDS * 2 // 5
+        slowed = {name: f'/bin/sleep {slow}\nexec {pinned(name)} "$@"\n' for name in ("node", "eslint")}
+        with fixture() as tmp:
+            root = program_root(tmp, {"src/p.js": META})
+            directory = tools_dir(self, **slowed)
+            started = time.monotonic()
+            check = self.never_rise_check(root, directory)
+            elapsed = time.monotonic() - started
+        self.assert_never_rise_passed(check)
+        self.assertGreater(elapsed, CHILD_TIMEOUT_SECONDS)
 
 
 if __name__ == "__main__":
