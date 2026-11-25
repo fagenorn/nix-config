@@ -1750,11 +1750,13 @@ def sprint_held_since(state: SprintState, now_ms: int | None, ball: str | None,
     is held exactly when its `ball` is `nobody` (so no card, question, stall, stated pause or
     wait still ahead names anyone), no stop is requested, its manager's profile is not out of
     usage (`quota` is None: a sprint waiting on a reset waits on no person, though `sprint_ball`
-    never reads quota), `sprint_open_issues` finds an issue not yet landed, held, dropped or closed
+    never reads quota) and is not recorded waiting on quota (a `waiting` manager row, written when
+    no profile had room), `sprint_open_issues` finds an issue not yet landed, held, dropped or closed
     out, and `sprint_quiet_for` reads it quiet for at least `HELD_SPRINT_AFTER_MS`; the answer is
     then `now_ms` less that quiet time. Derived from the same reading as the ball, so it clears the
     moment the sprint moves or anything is asked."""
     if (now_ms is None or ball != BALL_NOBODY or state.stop_at is not None or quota is not None
+            or (state.manager is not None and state.manager.state == WAITING)
             or not sprint_open_issues(state)):
         return None
     quiet_for = sprint_quiet_for(state, now_ms, listed, waits)

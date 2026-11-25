@@ -2322,6 +2322,16 @@ class HeldSprintViewTest(unittest.TestCase):
                              (0, view.ALL_OUT_HEADLINE, view.ALL_OUT_SENTENCE))
         with self.subTest("another profile out"):
             self.assertEqual(len(self.cards(line(self.held, now, capacity=out("home")))), 1)
+        with self.subTest("a manager waiting on quota, every profile out"):
+            waiting = dataclasses.replace(
+                self.held, manager=Manager("waiting", T0, until=U, takeover=True))
+            shown = line(waiting, now, capacity={**out(), "all_out": True})
+            self.assertEqual(shown["inbox"]["open"], [])
+            self.assertIsNone(entry(shown)["held_since"])
+            self.assertEqual(shown["statement"]["headline"], view.ALL_OUT_HEADLINE)
+        with self.subTest("a manager waiting on quota, no profile out"):
+            waiting = dataclasses.replace(self.held, manager=Manager("waiting", T0, until=U))
+            self.assertEqual(self.cards(line(waiting, now)), [])
 
 
 def moving(**kw):
