@@ -69,7 +69,10 @@ test the recipe does not list runs and is reported but is never checked. It is s
 does not name it, or names it at under a third of its time: more than `STALE_FACTOR` (3) times
 its recorded seconds times the run's speed. The speed is suite_timing's `median_speed` of the
 other passed members' measured seconds over their recorded seconds, so a member never sets its
-own speed, a failed member never sets it, and a uniformly slower host is not stale.
+own speed, a failed member never sets it, and a uniformly slower host is not stale. Only a Linux host
+enforces the check (`enforces_stale_timings`): the file records the hosted Linux runner, and on
+another platform the members' costs differ member by member, not by one speed, so no run there
+is checked.
 
 Output. In parallel mode each member's stdout and stderr are captured together and printed
 as one block when it exits, from `suite-runner: begin <member>` to
@@ -156,6 +159,8 @@ TIMINGS_FILE = Path(__file__).with_name("suite_timings.json")
 # when its time is over this factor times its recorded seconds at the run's speed.
 STALE_FLOOR_SECONDS = 30.0
 STALE_FACTOR = 3.0
+# The platform the timings file records (the hosted runner); only it checks a run against the file.
+STALE_PLATFORM = "linux"
 INTERRUPTED = f"{PREFIX} interrupted, waiting for running members"
 INTERRUPT_EXIT = 130
 # Where the members' temporary files go (issue 1283): unset picks MEMORY_ROOT when it is a
@@ -447,6 +452,11 @@ def stale_timings(results: Sequence[MemberResult], timings: Mapping[str, float],
     return lines
 
 
+def enforces_stale_timings(platform: str) -> bool:
+    """Whether a run on `platform` (a `sys.platform` value) is checked against the timings."""
+    return platform.startswith(STALE_PLATFORM)
+
+
 def report_lines(results: Sequence[MemberResult], *, jobs: int,
                  wall_seconds: float, stale: Sequence[str] = ()) -> list[str]:
     ordered = sorted(results, key=lambda result: result.index)
@@ -695,9 +705,11 @@ def write_report(path: Path, report: dict) -> None:
 
 def run_suite(members: Sequence[str], *, jobs: int, out: BinaryIO,
               timings: Mapping[str, float] | None = None,
-              registered: Collection[str] | None = None) -> int:
+              registered: Collection[str] | None = None,
+              enforce_stale: bool = True) -> int:
     """Run every member and write the report; 0 when all passed and no timing is stale
-    (`stale_timings` against `timings` and `registered`), else 1.
+    (`stale_timings` against `timings` and `registered`, checked only with `enforce_stale`),
+    else 1.
     Parallel runs start members in `schedule_order(members, timings)`, serial
     runs in list order.
 
@@ -735,7 +747,7 @@ def run_suite(members: Sequence[str], *, jobs: int, out: BinaryIO,
         if missing:
             raise RuntimeError(f"members left without a result: {', '.join(missing)}")
         wall = time.monotonic() - started
-        stale = stale_timings(results, timings or {}, registered)
+        stale = stale_timings(results, timings or {}, registered) if enforce_stale else []
         report = report_lines(results, jobs=jobs, wall_seconds=wall, stale=stale)
         output.write(b"".join(_line(line) for line in report))
         if report_path is not None:
@@ -782,7 +794,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error(str(error))
     try:
         return run_suite(args.members, jobs=args.jobs, out=sys.stdout.buffer,
-                         timings=load_timings(), registered=registered_members(Path.cwd()))
+                         timings=load_timings(), registered=registered_members(Path.cwd()),
+                         enforce_stale=enforces_stale_timings(sys.platform))
     except KeyboardInterrupt:
         return INTERRUPT_EXIT
 

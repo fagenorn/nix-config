@@ -626,6 +626,16 @@ class StaleTimingsTest(RunnerCase):
                              + r": \d+\.\ds measured, not in suite_timings\.json$")
         self.assertFalse([line for line in lines if line.startswith("suite-runner: failed ")])
 
+    def test_a_run_that_does_not_enforce_stale_timings_neither_checks_nor_fails_them(self):
+        with mock.patch.object(suite_runner, "STALE_FLOOR_SECONDS", 0.0):
+            code, _, lines = self.run_two_passing_members(timings={}, enforce_stale=False)
+        self.assertEqual(code, 0, "\n".join(lines))
+        self.assertFalse([line for line in lines if line.startswith("suite-runner: stale timing")])
+
+    def test_only_the_platform_the_timings_were_recorded_on_enforces_them(self):
+        self.assertTrue(suite_runner.enforces_stale_timings("linux"))
+        self.assertFalse(suite_runner.enforces_stale_timings("darwin"))
+
     def test_a_run_with_current_timings_passes(self):
         with mock.patch.object(suite_timing, "FACTOR_FLOOR_SECONDS", 1e9):
             code, names, lines = self.run_two_passing_members(
