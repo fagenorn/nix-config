@@ -11,14 +11,20 @@ declared. `before_pull_request=True` also declares the touched-only test
 command and binds `BEFORE_PULL_REQUEST`, over a `suite.just` of two checks of which one imports nothing
 from the fixture. When the adoption cannot reach
 a ready plan and a commit, the build fails with the command's own output.
+
+`AdoptedFixtures` adopts each distinct set of those options once and hands every later request a copy
+(`FixtureProject.copied`): the checkout is copied, re-published to its own bare `origin` in the
+requesting world and registered there again. `close` removes the cache directory.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -67,6 +73,28 @@ class FixtureProject:
         self.branch_pattern: str = vcs["branch_pattern"]
         self.worktree_root: Path = self.root / vcs["worktree"]["root"]
         self.worktree_prefix: str = vcs["worktree"]["prefix"]
+
+    @classmethod
+    def copied(cls, world: GuardPolicyWorld, source: Path, template: FixtureProject) -> FixtureProject:
+        """A fixture of `template`'s variant: `source` copied into `world` and published there again."""
+        fixture = cls.__new__(cls)
+        fixture.world = world
+        fixture.root = world.tmp / "fixture"
+        shutil.copytree(source, fixture.root, symlinks=True)
+        world.git(fixture.root, "update-index", "-q", "--refresh")
+        world.publish(fixture.root, ["main"])
+        world.identity(fixture.root, f"git@github.com:{template.slug}.git")
+        world.provider(template.slug)
+        fixture.slug = template.slug
+        fixture.review_code = template.review_code
+        fixture.conditions = template.conditions
+        fixture.required_checks = list(template.required_checks)
+        fixture.before_pull_request = template.before_pull_request
+        fixture.adoption = template.adoption
+        fixture.branch_pattern = template.branch_pattern
+        fixture.worktree_prefix = template.worktree_prefix
+        fixture.worktree_root = fixture.root / os.path.relpath(template.worktree_root, template.root)
+        return fixture
 
     def _draft(self) -> dict:
         draft = self.world.contract(self.slug, self.slug, publication_free=True)
@@ -162,3 +190,30 @@ class FixtureProject:
         if code != 0 or not isinstance(adoption, dict) or "commit" not in adoption:
             raise AssertionError(f"the fixture's adoption did not apply:\n{output}")
         return adoption
+
+
+class AdoptedFixtures:
+    """Each variant of `FixtureProject` adopted once, then copied into every later world."""
+
+    def __init__(self) -> None:
+        self.directory: Path | None = None
+        self._templates: dict[str, tuple[Path, FixtureProject]] = {}
+
+    def project(self, test_case: unittest.TestCase, world: GuardPolicyWorld, **options) -> FixtureProject:
+        key = json.dumps(options, sort_keys=True)
+        if key in self._templates:
+            source, template = self._templates[key]
+            return FixtureProject.copied(world, source, template)
+        if self.directory is None:
+            self.directory = Path(tempfile.mkdtemp(prefix="adopted-fixtures-"))
+        fixture = FixtureProject(test_case, world, **options)
+        source = self.directory / str(len(self._templates)) / "fixture"
+        shutil.copytree(fixture.root, source, symlinks=True)
+        self._templates[key] = (source, fixture)
+        return fixture
+
+    def close(self) -> None:
+        if self.directory is not None:
+            shutil.rmtree(self.directory, ignore_errors=True)
+        self.directory = None
+        self._templates = {}

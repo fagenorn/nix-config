@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import subprocess
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from agent_tools.project_contract import resolve_project
-from tests.engine_fixture import FixtureProject
+from tests.engine_fixture import AdoptedFixtures, FixtureProject
 from tests.guard_policy_world import GuardPolicyWorld, install_platform_manifest_in_environ
 
 TIER = "integration"  # every case builds a repository and runs the adoption command
@@ -71,3 +72,70 @@ class FixtureTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AdoptedFixturesTest(unittest.TestCase):
+    def fixtures(self) -> AdoptedFixtures:
+        fixtures = AdoptedFixtures()
+        self.addCleanup(fixtures.close)
+        return fixtures
+
+    def test_a_second_fixture_of_one_variant_is_copied_and_not_adopted_again(self):
+        fixtures = self.fixtures()
+        first = fixtures.project(self, GuardPolicyWorld(self))
+
+        with mock.patch.object(FixtureProject, "_adopt", side_effect=AssertionError("adopted again")):
+            second = fixtures.project(self, GuardPolicyWorld(self))
+        snapshot = resolve_project.resolve(str(second.root))
+
+        self.assertNotEqual(second.root, first.root)
+        self.assertEqual(snapshot["project"]["id"], "example/fixture")
+        self.assertEqual(snapshot["bindings"]["vcs"]["merge"]["required_checks"],
+                         FixtureProject.REQUIRED_CHECKS)
+        self.assertEqual(second.adoption, first.adoption)
+        self.assertEqual(second.world.git(second.root, "rev-parse", "main").strip(),
+                         first.adoption["commit"])
+
+    def test_a_copy_starts_clean_at_the_adoption_commit_on_its_own_origin(self):
+        fixtures = self.fixtures()
+        first = fixtures.project(self, GuardPolicyWorld(self))
+        (first.root / "moved.txt").write_text("moved\n", encoding="utf-8")
+        first.world.git(first.root, "add", "moved.txt")
+        first.world.git(first.root, "commit", "--quiet", "-m", "moved")
+        first.world.git(first.root, "push", "--quiet", "origin", "main")
+
+        world = GuardPolicyWorld(self)
+        second = fixtures.project(self, world)
+        origin = Path(world.git(second.root, "remote", "get-url", "origin").strip())
+
+        self.assertEqual(world.git(second.root, "rev-parse", "main").strip(), first.adoption["commit"])
+        self.assertEqual(world.git(second.root, "status", "--porcelain"), "")
+        self.assertFalse((second.root / "moved.txt").exists())
+        self.assertTrue(origin.is_relative_to(world.tmp))
+        self.assertEqual(world.git(second.root, "--git-dir", str(origin), "rev-parse", "main").strip(),
+                         first.adoption["commit"])
+
+    def test_fixtures_of_different_options_are_adopted_apart(self):
+        fixtures = self.fixtures()
+        fixtures.project(self, GuardPolicyWorld(self))
+
+        bare = fixtures.project(self, GuardPolicyWorld(self), required_checks=())
+        again = fixtures.project(self, GuardPolicyWorld(self))
+
+        self.assertNotIn("required_checks",
+                         resolve_project.resolve(str(bare.root))["bindings"]["vcs"]["merge"])
+        self.assertEqual(resolve_project.resolve(str(again.root))["bindings"]["vcs"]["merge"]["required_checks"],
+                         FixtureProject.REQUIRED_CHECKS)
+        self.assertEqual(bare.required_checks, [])
+
+    def test_closing_the_fixtures_leaves_no_copy_behind(self):
+        fixtures = self.fixtures()
+        fixtures.project(self, GuardPolicyWorld(self))
+        directory = fixtures.directory
+        self.assertTrue(directory.is_dir())
+
+        fixtures.close()
+        fixtures.close()
+
+        self.assertFalse(directory.exists())
+        self.assertIsNone(fixtures.directory)

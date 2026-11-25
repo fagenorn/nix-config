@@ -15,14 +15,19 @@ from pathlib import Path
 from agent_tools.claims import forge_markers
 from agent_tools.delivery import engine_session
 from agent_tools.project_contract import resolve_project
-from tests.engine_fixture import FixtureProject
+from tests.engine_fixture import AdoptedFixtures, FixtureProject
 from tests.engine_guards import payloads
 from tests.engine_stubbed_world import APPLIES, CLEAN_LITE, GREEN, IMPLEMENTED, ROLES, StubbedRun
 from tests.guard_policy_world import REAL_GIT, install_platform_manifest_in_environ
 
 TIER = "integration"  # every case builds a repository and runs the engine as a child process
 
-setUpModule = install_platform_manifest_in_environ
+FIXTURES = AdoptedFixtures()
+
+
+def setUpModule() -> None:
+    install_platform_manifest_in_environ()
+    unittest.addModuleCleanup(FIXTURES.close)
 
 PROCEDURES = Path(__file__).resolve().parents[1] / "python/agent_tools/delivery/procedures"
 LOOK_BODY = ("Add a greet() function.\n\n## Acceptance criteria\n\n"
@@ -96,6 +101,9 @@ def model_of(launch: dict) -> str:
 
 
 class Scenario(unittest.TestCase):
+    def stubbed(self, **members) -> StubbedRun:
+        return StubbedRun(test_case=self, fixtures=FIXTURES, **members)
+
     def branch_here(self, run: StubbedRun, path: Path) -> str:
         return run.world.git(path, "branch", "--show-current").strip()
 
@@ -149,7 +157,7 @@ class Scenario(unittest.TestCase):
 
 class StubbedRunTest(Scenario):
     def test_a_stubbed_delivery_lands_a_merged_pull_request_and_closes_the_issue(self):
-        run = StubbedRun(self)
+        run = self.stubbed()
 
         done = run.deliver()
 
@@ -202,7 +210,7 @@ class LaneTest(Scenario):
     OVER_THE_RULE = "Add greet().\n\n## Acceptance criteria\n\n" + "".join(f"- [ ] c{i}\n" for i in range(4))
 
     def test_a_body_over_the_rule_stops_at_standard_not_on_engine_with_no_lane_agent(self):
-        run = StubbedRun(self, body=self.OVER_THE_RULE)
+        run = self.stubbed(body=self.OVER_THE_RULE)
 
         done = run.deliver()
 
@@ -213,7 +221,7 @@ class LaneTest(Scenario):
         self.assertEqual(self.branch_here(run, run.worktree_path), run.branch)
 
     def test_a_body_naming_a_lane_path_stops_at_standard_not_on_engine(self):
-        run = StubbedRun(self, body="Fix `secrets/x.yaml`.\n\n## Acceptance criteria\n\n- [ ] c\n")
+        run = self.stubbed(body="Fix `secrets/x.yaml`.\n\n## Acceptance criteria\n\n- [ ] c\n")
 
         self.stopped(run, run.deliver(), "standard-not-on-engine", "nothing")
 
@@ -222,7 +230,7 @@ class LaneTest(Scenario):
     def test_a_continued_standard_stop_reads_the_issue_again(self):
         # The behaviour, not the stop's `reenter` value: the live `start` step is stale on every continue and is
         # re-entered first, so only test_engine_check's structural assertion on the three stops pins `reenter`.
-        run = StubbedRun(self, body=self.OVER_THE_RULE)
+        run = self.stubbed(body=self.OVER_THE_RULE)
         self.stopped(run, run.deliver(), "standard-not-on-engine", "nothing")
 
         self.stopped(run, run.deliver(), "standard-not-on-engine", "nothing")
@@ -233,7 +241,7 @@ class LaneTest(Scenario):
         self.assertEqual(len([e for e in events if e["event"] == "step_entered" and e.get("step") == "issue"]), 2)
 
     def test_an_issue_with_a_look_marker_stops_at_look_not_on_engine_and_never_asks_the_lane(self):
-        run = StubbedRun(self, body=LOOK_BODY)
+        run = self.stubbed(body=LOOK_BODY)
 
         self.stopped(run, run.deliver(), "look-not-on-engine", "nothing")
 
@@ -241,7 +249,7 @@ class LaneTest(Scenario):
         self.assertEqual(self.keys(run), ["applies"])
 
     def test_a_continued_run_reattaches_a_worktree_left_on_a_clean_detached_head_at_the_tip(self):
-        run = StubbedRun(self, body=LOOK_BODY)
+        run = self.stubbed(body=LOOK_BODY)
         self.stopped(run, run.deliver(), "look-not-on-engine", "nothing")
         run.world.git(run.worktree_path, "checkout", "--detach")
         self.assertEqual(self.branch_here(run, run.worktree_path), "")
@@ -258,7 +266,7 @@ class RefusalTest(Scenario):
         self.assertEqual(self.branches(run), "")
 
     def test_setup_refuses_a_closed_issue_and_makes_no_worktree(self):
-        run = StubbedRun(self, state="closed")
+        run = self.stubbed(state="closed")
 
         self.stopped(run, run.deliver(), "setup", "owner-decision")
 
@@ -268,7 +276,7 @@ class RefusalTest(Scenario):
 
     def test_setup_refuses_an_issue_with_an_open_pull_request_and_makes_no_worktree(self):
         pull = {"number": 12, "state": "OPEN", "headRefName": "someone-else", "closingIssuesReferences": []}
-        run = StubbedRun(self, pulls=[pull])
+        run = self.stubbed(pulls=[pull])
 
         self.stopped(run, run.deliver(), "setup", "owner-decision")
 
@@ -278,7 +286,7 @@ class RefusalTest(Scenario):
     def test_setup_refuses_an_issue_that_no_longer_applies_comments_the_evidence_and_makes_no_worktree(self):
         evidence = "greet() already returns the greeting at origin/main."
         gone = {"verdict": "no-longer-applies", "details": "d", "evidence": evidence}
-        run = StubbedRun(self, replies={"applies": gone})
+        run = self.stubbed(replies={"applies": gone})
 
         self.stopped(run, run.deliver(), "setup", "owner-decision")
 
@@ -290,7 +298,7 @@ class RefusalTest(Scenario):
         self.nothing_started(run)
 
     def test_a_worktree_path_on_another_branch_stops_at_setup_and_takes_no_claim(self):
-        run = StubbedRun(self)
+        run = self.stubbed()
         run.world.git(run.fixture.root, "worktree", "add", "--no-track", "-b", "other",
                       str(run.worktree_path), "origin/main")
 
@@ -312,7 +320,7 @@ class ClaimTest(Scenario):
         held = {"id": 5, "created_at": clock, "updated_at": clock,
                 "body": forge_markers.render("claim", {"issue": "41", "holder": other},
                                              f"Claimed by {other}.")}
-        run = StubbedRun(self, comments=[held])
+        run = self.stubbed(comments=[held])
 
         self.stopped(run, run.deliver(), "claimed", "owner-decision")
 
@@ -321,7 +329,7 @@ class ClaimTest(Scenario):
         self.assertFalse(run.worktree_path.exists())
 
     def test_a_dirty_adopted_worktree_stops_at_dirty_and_keeps_the_change(self):
-        run = StubbedRun(self)
+        run = self.stubbed()
         run.world.git(run.fixture.root, "worktree", "add", "--no-track", "-b", run.branch,
                       str(run.worktree_path), "origin/main")
         (run.worktree_path / "scratch.txt").write_text("keep\n", encoding="utf-8")
@@ -337,7 +345,7 @@ class ClaimTest(Scenario):
         self.assertEqual([claim.fields["holder"] for claim in run.claims()], [holder])
 
     def test_an_incomplete_claim_stops_at_claim_and_a_continued_run_completes_it(self):
-        run = StubbedRun(self)
+        run = self.stubbed()
         run.worktree_path.parent.mkdir(parents=True, exist_ok=True)
         run.worktree_path.write_text("in the way\n", encoding="utf-8")
 
@@ -370,7 +378,7 @@ class ReviewRouteTest(Scenario):
 
     def test_a_change_marked_sensitive_is_reviewed_under_the_full_reviewer(self):
         implemented = dict(IMPLEMENTED, reply=dict(IMPLEMENTED["reply"], sensitive=True))
-        run = StubbedRun(self, replies={"implement": implemented, "full-review": CLEAN_FULL})
+        run = self.stubbed(replies={"implement": implemented, "full-review": CLEAN_FULL})
 
         self.finish(run, "done")
 
@@ -382,8 +390,8 @@ class ReviewRouteTest(Scenario):
         self.assertEqual(model_of(self.launch(run, "full-review")), self.reviewer_model(run))
 
     def test_an_escalate_reply_is_followed_by_the_full_reviewer(self):
-        run = StubbedRun(self, replies={"lite-review": dict(CLEAN_LITE, escalate=True),
-                                        "escalated": CLEAN_FULL})
+        run = self.stubbed(replies={"lite-review": dict(CLEAN_LITE, escalate=True),
+                                     "escalated": CLEAN_FULL})
 
         self.finish(run, "done")
 
@@ -395,7 +403,7 @@ class ReviewRouteTest(Scenario):
         self.assertEqual(model_of(self.launch(run, "escalated")), self.reviewer_model(run))
 
     def test_findings_left_after_the_one_fix_round_stop_direct_review(self):
-        run = StubbedRun(self, replies={
+        run = self.stubbed(replies={
             "lite-review": lite_findings(),
             "lite-fix": committing("fixture/second.py", "SECOND = 2\n"),
             "lite-rereview": {"verdict": "findings", "findings": [FINDING]}})
@@ -409,7 +417,7 @@ class ReviewRouteTest(Scenario):
     def test_an_ineligible_reply_stops_with_no_review_started(self):
         refused = {"status": "blocked", "start_head": SHA, "commit": SHA, "notes": "n", "acceptance": [],
                    "sensitive": False, "ineligible": True, "tests": []}
-        run = StubbedRun(self, replies={"implement": refused})
+        run = self.stubbed(replies={"implement": refused})
 
         self.finish(run, "ineligible", "owner-decision")
 
@@ -420,7 +428,7 @@ class ReviewRouteTest(Scenario):
         self.assertEqual(self.branch_commits(run), [])
 
     def test_a_configured_independent_review_that_is_unavailable_stops_codex_unavailable(self):
-        run = StubbedRun(self, review_code=[CODEX_LIMIT])
+        run = self.stubbed(review_code=[CODEX_LIMIT])
 
         self.finish(run, "codex-unavailable", "retry")
 
@@ -428,7 +436,7 @@ class ReviewRouteTest(Scenario):
         self.assertIn("lite-review", self.keys(run))
 
     def test_a_project_that_configures_no_independent_review_runs_the_review_alone(self):
-        run = StubbedRun(self)
+        run = self.stubbed()
 
         self.finish(run, "done")
 
@@ -440,7 +448,7 @@ class ReviewRouteTest(Scenario):
         self.assertEqual(self.keys(run).count("lite-review"), 1)
 
     def test_an_unusable_review_is_asked_once_more_and_its_second_reply_is_used(self):
-        run = StubbedRun(self, replies={"lite-review": UNNAMED_LITE, "lite-review.2": CLEAN_LITE})
+        run = self.stubbed(replies={"lite-review": UNNAMED_LITE, "lite-review.2": CLEAN_LITE})
 
         self.finish(run, "done")
 
@@ -449,7 +457,7 @@ class ReviewRouteTest(Scenario):
         self.assertEqual(tallies, [("lite-tally", "unusable"), ("lite-tally", "clean")])
 
     def test_a_second_unusable_review_stops_direct_review(self):
-        run = StubbedRun(self, replies={"lite-review": UNNAMED_LITE})
+        run = self.stubbed(replies={"lite-review": UNNAMED_LITE})
 
         self.finish(run, "direct-review", "owner-decision")
 
@@ -458,7 +466,7 @@ class ReviewRouteTest(Scenario):
 
     def test_a_fix_that_reports_no_commit_stops_direct_fix(self):
         unfixed = {"status": "done", "start_head": SHA, "commit": "", "notes": "n", "tests": []}
-        run = StubbedRun(self, replies={"lite-review": lite_findings(), "lite-fix": unfixed})
+        run = self.stubbed(replies={"lite-review": lite_findings(), "lite-fix": unfixed})
 
         self.finish(run, "direct-fix", "owner-decision")
 
@@ -469,7 +477,7 @@ class ReviewRouteTest(Scenario):
 class VerifyTest(Scenario):
     def test_a_failing_verification_id_stops_verify(self):
         broken = implementing("fixture/greet.py", 'def greet(name: str) -> str:\n    return f"Hi, {name}."\n')
-        run = StubbedRun(self, replies={"implement": broken})
+        run = self.stubbed(replies={"implement": broken})
 
         self.finish(run, "verify", "owner-decision")
 
@@ -479,7 +487,7 @@ class VerifyTest(Scenario):
 
     def test_an_id_whose_condition_matches_no_changed_path_is_recorded_skipped_with_its_reason(self):
         conditions = {"lint": {"when_changed": ["docs/**"], "skip_reason": "no documentation changed"}}
-        run = StubbedRun(self, conditions=conditions)
+        run = self.stubbed(conditions=conditions)
 
         self.finish(run, "done")
 
@@ -491,8 +499,8 @@ class VerifyTest(Scenario):
 
     def test_before_a_pull_request_verify_runs_lint_and_the_touched_checks_and_records_the_selection_and_slot_seconds(self):
         greet = 'def greet(name: str) -> str:\n    return "Hello, " + name + "."\n'
-        run = StubbedRun(self, before_pull_request=True,
-                         replies={"implement": implementing("fixture/greet.py", greet)})
+        run = self.stubbed(before_pull_request=True,
+                           replies={"implement": implementing("fixture/greet.py", greet)})
 
         self.finish(run, "done")
 
@@ -513,7 +521,7 @@ class VerifyTest(Scenario):
         self.assertEqual(len(run.slot_history()), 2)
 
     def test_a_continued_run_after_a_clean_sync_that_changes_none_of_the_pull_requests_files_runs_no_verification(self):
-        run = StubbedRun(self, before_pull_request=True)
+        run = self.stubbed(before_pull_request=True)
         procedures = stopping_after_verify(run.tmp)
         self.stopped(run, run.deliver(procedures), "verified", "owner-decision")
         first = self.stored(self.child(run, "verify"), "checks")
@@ -539,7 +547,7 @@ class VerifyTest(Scenario):
 
 
     def test_a_continued_run_that_skips_verification_after_a_clean_sync_still_lands(self):
-        run = StubbedRun(self, before_pull_request=True, rollup=RED)
+        run = self.stubbed(before_pull_request=True, rollup=RED)
         procedures = keeping_the_run(run.tmp)
         self.stopped(run, run.deliver(procedures), "checks", "owner-decision")
         held = len(run.slot_history())
@@ -581,7 +589,7 @@ class Landing(Scenario):
 
 class LandGuardTest(Landing):
     def test_the_real_guard_allowed_the_push_the_pull_request_and_the_merge(self):
-        run = StubbedRun(self)
+        run = self.stubbed()
 
         self.finish(run, "done")
 
@@ -600,7 +608,7 @@ class LandGuardTest(Landing):
             self.assertEqual(outcomes[step], "ok", step)
 
     def test_without_declared_required_checks_the_merge_is_refused_and_nothing_merges(self):
-        run = StubbedRun(self, required_checks=())
+        run = self.stubbed(required_checks=())
         before = run.origin_tip("main")
 
         self.finish(run, "merge", "owner-decision")
@@ -617,7 +625,7 @@ class LandGuardTest(Landing):
 
 class LandStopTest(Landing):
     def test_a_head_that_moves_after_the_lock_stops_head_moved_with_the_lock_released(self):
-        run = StubbedRun(self, forge_events=("move-head",))
+        run = self.stubbed(forge_events=("move-head",))
 
         self.finish(run, "head-moved", "owner-decision")
 
@@ -630,7 +638,7 @@ class LandStopTest(Landing):
         self.assertFalse({"recheck", "merge"} & self.entered(run))
 
     def test_a_red_required_check_stops_checks_with_the_lock_released(self):
-        run = StubbedRun(self, rollup=RED)
+        run = self.stubbed(rollup=RED)
 
         self.finish(run, "checks", "owner-decision")
 
@@ -639,7 +647,7 @@ class LandStopTest(Landing):
         self.assertEqual([p["state"] for p in run.pulls()], ["OPEN"])
 
     def test_a_lock_taken_by_another_pull_request_stops_land_contended(self):
-        run = StubbedRun(self, forge_events=("steal-lock",))
+        run = self.stubbed(forge_events=("steal-lock",))
 
         self.finish(run, "land-contended", "retry")
 
@@ -651,7 +659,7 @@ class LandStopTest(Landing):
         self.assertEqual(run.lock_refs(), {"refs/agent-locks/land/main": run.stolen_sha})
 
     def test_a_failed_release_stops_unreleased_lock(self):
-        run = StubbedRun(self, lock_release_fails=True)
+        run = self.stubbed(lock_release_fails=True)
 
         self.finish(run, "unreleased-lock", "owner-decision")
 
@@ -660,7 +668,7 @@ class LandStopTest(Landing):
         self.assertEqual(run.lock_refs(), {"refs/agent-locks/land/main": self.prepared_head(run)})
 
     def test_an_unreadable_rollup_stops_land_with_the_lock_released(self):
-        run = StubbedRun(self, rollup=UNNAMED)
+        run = self.stubbed(rollup=UNNAMED)
 
         self.finish(run, "land", "owner-decision")
 
@@ -670,7 +678,7 @@ class LandStopTest(Landing):
 
 class LandWaitTest(Landing):
     def test_the_land_run_records_a_started_and_ended_wait_for_the_lock_and_the_checks(self):
-        run = StubbedRun(self)
+        run = self.stubbed()
 
         self.finish(run, "done")
 
@@ -700,7 +708,7 @@ class SettledTest(Landing):
         return git(bare, "commit-tree", tree, "-p", main, "-p", side, "-m", "earlier merge").strip(), side
 
     def test_an_earlier_merged_pull_request_at_another_head_does_not_settle_the_landing(self):
-        run = StubbedRun(self)
+        run = self.stubbed()
         merge, side = self.earlier_merge(run)
         state = json.loads(run.pulls_state.read_text(encoding="utf-8"))
         state["pulls"].append({"number": 1, "state": "MERGED", "baseRefName": "main",
@@ -725,7 +733,7 @@ class CloseOutTest(Landing):
     def test_an_issue_with_a_criterion_no_test_shows_merges_with_refs_and_stops_hold(self):
         body = ("Add a greet() function.\n\n## Acceptance criteria\n\n- [ ] [code] greet() returns the greeting\n"
                 "- [ ] [evidence] the owner has seen the greeting\n")
-        run = StubbedRun(self, body=body)
+        run = self.stubbed(body=body)
 
         self.finish(run, "hold", "owner-decision")
 
@@ -740,7 +748,7 @@ class CloseOutTest(Landing):
     def test_a_continue_after_hold_reenters_close_out_and_redoes_no_earlier_step(self):
         body = ("Add a greet() function.\n\n## Acceptance criteria\n\n- [ ] [code] greet() returns the greeting\n"
                 "- [ ] [evidence] the owner has seen the greeting\n")
-        run = StubbedRun(self, body=body)
+        run = self.stubbed(body=body)
         self.finish(run, "hold", "owner-decision")
         root = run.runs()[0]
         before = run.transitions(root)
@@ -759,7 +767,7 @@ class CloseOutTest(Landing):
         self.assertEqual(len(run.pulls()), 1)
 
     def test_a_continue_after_a_failed_release_resumes_landing_and_closes_out(self):
-        run = StubbedRun(self, lock_release_fails=True)
+        run = self.stubbed(lock_release_fails=True)
         self.finish(run, "unreleased-lock", "owner-decision")
         root = run.runs()[0]
         run.forge.ref_store(run.fixture.slug, run.forge.refs())
@@ -802,7 +810,7 @@ class CoverageTest(Landing):
     def test_every_step_of_the_shipped_procedures_is_visited_by_a_stubbed_run(self):
         visited: set[str] = set()
         for scenario in self.scenarios():
-            run = StubbedRun(self, **scenario)
+            run = self.stubbed(**scenario)
             run.deliver()
             if scenario.get("lock_release_fails"):
                 run.forge.ref_store(run.fixture.slug, run.forge.refs())
@@ -853,7 +861,7 @@ class GuardWorldTest(Scenario):
         return json.loads(done.stdout)
 
     def test_the_real_guard_of_the_stubbed_world_allows_the_fixtures_push_creation_and_pinned_merge(self):
-        run = StubbedRun(self)
+        run = self.stubbed()
         head = self.pushed(run)
         self.pushed(run, "issue-41-second")
         created = self.create(run)
@@ -875,14 +883,14 @@ class GuardWorldTest(Scenario):
                          texts)
 
     def test_a_run_without_required_checks_resolves_with_the_member_absent(self):
-        run = StubbedRun(self, required_checks=())
+        run = self.stubbed(required_checks=())
 
         snapshot = resolve_project.resolve(run.fixture.root)
 
         self.assertNotIn("required_checks", snapshot["bindings"]["vcs"]["merge"])
 
     def test_without_declared_required_checks_the_real_guard_refuses_the_merge(self):
-        run = StubbedRun(self, required_checks=())
+        run = self.stubbed(required_checks=())
         head = self.pushed(run)
         self.assertEqual(self.create(run).returncode, 0)
 
@@ -892,7 +900,7 @@ class GuardWorldTest(Scenario):
         self.assertIn("protection lookup failed", done.stderr)
 
     def test_the_fake_merge_lands_only_the_pinned_head_and_deletes_the_branch(self):
-        run = StubbedRun(self)
+        run = self.stubbed()
         head = self.pushed(run)
         self.assertEqual(self.create(run).returncode, 0)
         args = ("pr", "merge", "1", "--repo", "example/fixture", "--merge", "--delete-branch",
@@ -913,7 +921,7 @@ class GuardWorldTest(Scenario):
         self.assertIsNone(run.origin_tip(self.BRANCH))
 
     def test_a_move_head_event_moves_the_branch_on_the_first_rollup_read(self):
-        run = StubbedRun(self, forge_events=("move-head",))
+        run = self.stubbed(forge_events=("move-head",))
         head = self.pushed(run)
         self.assertEqual(self.create(run).returncode, 0)
 
@@ -928,7 +936,7 @@ class GuardWorldTest(Scenario):
         self.assertEqual(run.origin_tip(self.BRANCH), moved)
 
     def test_a_steal_lock_event_hands_the_lock_to_a_second_open_pull_request(self):
-        run = StubbedRun(self, forge_events=("steal-lock",))
+        run = self.stubbed(forge_events=("steal-lock",))
         self.pushed(run)
         self.assertEqual(self.create(run).returncode, 0)
 

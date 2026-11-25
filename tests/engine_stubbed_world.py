@@ -9,7 +9,8 @@ claim comments and the launches. `replies` overrides the default replies by step
 `<step>.<visit>` answers that visit only); `review_code` is the answer list of the `codex-companion`
 stand-in that makes the independent code review supported; `conditions` is the contract's
 `verification_conditions`; `before_pull_request` makes the fixture declare the pre-pull-request commands
-(lint and the touched-only test), and `slot_history()` reads the slot's history lines.
+(lint and the touched-only test), and `slot_history()` reads the slot's history lines. `fixtures` is an `AdoptedFixtures` that
+supplies the fixture as a copy of one adopted once; `None` adopts a new one.
 
 The run installs the real lifecycle guard on a confirmed row for the fixture (the fixture's owner is
 not an authorized owner, so only the row authorizes it): `guard(text, cwd)` runs the installed hook
@@ -38,7 +39,7 @@ from pathlib import Path
 from agent_tools.claims import forge_markers
 from agent_tools.delivery import issue_branch
 from agent_tools.delivery.engine_guard import payload
-from tests.engine_fixture import FixtureProject
+from tests.engine_fixture import AdoptedFixtures, FixtureProject
 from tests.engine_guards import script, standin_guard, write_settings
 from tests.forge_world import ForgeWorld
 from tests.guard_policy_world import REAL_GIT, REPO_ROOT, GuardPolicyWorld
@@ -78,7 +79,7 @@ class StubbedRun:
                  replies: dict | None = None, review_code: list | None = None,
                  conditions: dict | None = None, required_checks=FixtureProject.REQUIRED_CHECKS,
                  rollup: list | None = None, forge_events=(), lock_release_fails: bool = False,
-                 before_pull_request: bool = False) -> None:
+                 before_pull_request: bool = False, fixtures: AdoptedFixtures | None = None) -> None:
         self.test = test_case
         self.issue = issue
         self.title = title
@@ -86,9 +87,10 @@ class StubbedRun:
         self.companion_log = self.world.tmp / "companion.log"
         if review_code is not None:
             self._install_companion(review_code)
-        self.fixture = FixtureProject(test_case, self.world, review_code=review_code is not None,
-                                      conditions=conditions, required_checks=required_checks,
-                                      before_pull_request=before_pull_request)
+        options = {"review_code": review_code is not None, "conditions": conditions,
+                   "required_checks": required_checks, "before_pull_request": before_pull_request}
+        self.fixture = (FixtureProject(test_case, self.world, **options) if fixtures is None
+                        else fixtures.project(test_case, self.world, **options))
         self.forge = ForgeWorld(test_case)
         slug = self.fixture.slug
         self.forge.comment_store(slug, issue, comments, labels=list(labels))
