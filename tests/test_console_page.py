@@ -188,8 +188,8 @@ class PageTest(unittest.TestCase):
         # Raised from 71 KB by #1432: a sprint's declared live fault line, its Withdraw and the same line on an
         # ended sprint's finished line (about 0.5 KB compressed) did not fit the 279 bytes the cap had left.
         # Raised from 72 KB by the merge of #1274 with #1432 and #1424: each side fit under its cap, and merged the
-        # page is 74199 bytes. Raised from 73 KB: a long command's permission card summary and fold did not fit.
-        self.assertLess(len(gzip.compress(self.data, 9)), 75264)
+        # page is 74199 bytes. Raised from 73 KB: a long command's permission card summary and fold did not fit. Raised by #1809: tap sizes and the End the sprint fold.
+        self.assertLess(len(gzip.compress(self.data, 9)), 75520)
 
     def test_the_top_bar_carries_one_spend_link(self) -> None:
         header = self.text[self.text.index('<header class="top">'):self.text.index("</header>")]
@@ -5109,7 +5109,7 @@ class PageSprintControlsTest(unittest.TestCase):
         bare, telling, more = render([
             START, {"frame": with_sprints([SPRINT])}, {"snapshot": True},
             {"click": "tell-open"}, {"snapshot": True},
-            {"open": MORE_KEY}, {"snapshot": True},
+            {"open": DETAIL_KEY}, {"open": MORE_KEY}, {"snapshot": True},
         ])
         (line,) = sprint_lines(bare)
         self.assertEqual([n for n in visible(line) if n["tag"] == "textarea"], [])
@@ -5139,7 +5139,7 @@ class PageSprintControlsTest(unittest.TestCase):
             stated_at=utc(3 * 60 * 1000))
         (snap,) = render([
             {"start": {"focused": False, "clock": NOW_MS}}, {"frame": frame},
-            {"open": MORE_KEY}, {"click": "stop"}, {"snapshot": True},
+            {"open": DETAIL_KEY}, {"open": MORE_KEY}, {"click": "stop"}, {"snapshot": True},
         ])
         shown = " ".join(visible_text(snap["projects"]).split())
         self.assertIn("goal set 3 min ago", shown)
@@ -5217,7 +5217,7 @@ class PageSprintControlsTest(unittest.TestCase):
     def test_more_keeps_withdraw_and_its_failure_shows_closed(self) -> None:
         refusal = {"status": 409, "text": "this sprint is not open\n"}
         sending, streamed, failed = render([
-            START, {"frame": with_sprints([SPRINT])}, {"open": MORE_KEY}, {"hold": True},
+            START, {"frame": with_sprints([SPRINT])}, {"open": DETAIL_KEY}, {"open": MORE_KEY}, {"hold": True},
             {"click": "withdraw"}, {"snapshot": True},
             {"frame": with_sprints([SPRINT])}, {"snapshot": True},
             {"release": refusal}, {"snapshot": True},
@@ -5230,7 +5230,7 @@ class PageSprintControlsTest(unittest.TestCase):
             (withdraw,) = in_line(line, "button", "withdraw")
             self.assertEqual(withdraw["disabled"], disabled)
         closed, failed = render([
-            START, {"frame": with_sprints([SPRINT])}, {"open": MORE_KEY}, {"hold": True},
+            START, {"frame": with_sprints([SPRINT])}, {"open": DETAIL_KEY}, {"open": MORE_KEY}, {"hold": True},
             {"click": "withdraw"}, {"close": MORE_KEY},
             {"frame": with_sprints([SPRINT])}, {"snapshot": True},
             {"release": refusal}, {"snapshot": True},
@@ -5279,7 +5279,7 @@ class PageSprintControlsTest(unittest.TestCase):
         (line,) = sprint_lines(single)
         self.assertIn(TELL_TEXT, visible_text(line))
         (fold,) = [n for n in nodes(line) if n["key"] == DETAIL_KEY]
-        self.assertEqual([c["cls"] for c in fold["children"]], ["", "sprint-goal-full"])
+        self.assertEqual([c["cls"] for c in fold["children"]], ["", "sprint-goal-full", "sprint-more"])
 
 
 STALL = {
@@ -5885,7 +5885,7 @@ class PageSprintReportTest(unittest.TestCase):
             for expected in ("#12", "building task 2 of 4", "#13", "landed",
                              "Next: start the resume slice", "Milestone: Importer resumes"):
                 self.assertIn(expected, full(fold))
-            last = fold["children"][-1]
+            last = fold["children"][-2]
             self.assertEqual((last["tag"], last["cls"], full(last)),
                              ("a", "tracker", "Open on the tracker"))
             self.assertEqual(full(fold["children"][0]), "Show the report")
@@ -5930,7 +5930,7 @@ class PageSprintReportTest(unittest.TestCase):
         (snap,) = render([START, {"frame": with_sprints([SPRINT])}, {"snapshot": True}])
         (line,) = sprint_lines(snap)
         (fold,) = detail_nodes(line)
-        self.assertEqual([c["cls"] for c in fold["children"]], ["", "sprint-goal-full"])
+        self.assertEqual([c["cls"] for c in fold["children"]], ["", "sprint-goal-full", "sprint-more"])
         self.assertEqual(full(fold["children"][0]), "Show the goal")
         for cls in ("progress", "status", "report-status"):
             self.assertEqual([n for n in nodes(line) if has_class(n, cls)], [])
@@ -5944,7 +5944,7 @@ class PageSprintReportTest(unittest.TestCase):
             {"frame": with_sprints([closing])}, {"snapshot": True}])
         (fold,) = detail_nodes(sprint_lines(open_sprint)[0])
         self.assertEqual([c["cls"] for c in fold["children"]],
-                         ["", "sprint-goal-full", "permission"])
+                         ["", "sprint-goal-full", "permission", "sprint-more"])
         self.assertEqual(full(fold["children"][2]),
                          "Permission mode bypass: production rules in place")
         (closed_fold,) = detail_nodes(sprint_lines(closed_sprint)[0])
@@ -6082,7 +6082,7 @@ class PageSprintBlockTest(unittest.TestCase):
         a = running_sprint("a")
         b = running_sprint("b", retry=True)
         (snap,) = render([
-            START, {"frame": two_projects([a], [b])}, {"open": "more:" + "a" * 16},
+            START, {"frame": two_projects([a], [b])}, {"open": "sprint:" + "a" * 16}, {"open": "more:" + "a" * 16},
             {"snapshot": True},
         ])
         projects = snap["projects"]
