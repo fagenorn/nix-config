@@ -11,6 +11,6 @@ Run `program-copies --repo-root <checkout> --from <this skill dir>`, then the Wo
 
 Returns `{stage, ...}`. `done`, `planned`, `ready` succeed; keep `cont` for a later `mode`. No `cont`: report it. Else fix the cause (`needs_user`: ask, set `decisions`; `awaiting-look`: show the owner `pr`, set `look`), rerun with `args.cont`.
 
-A stop that holds work for the owner or the lead raises a card for whoever it waits on at once, on the caller's ask channel, naming what is held, why and the one action that releases it; a status line or a report is not an ask.
+A stop holding work raises a card at once for whoever it waits on: what is held, why and the action that releases it.
 
-Batch of issues: the `deliver-batch` skill.
+Batches: `deliver-batch`.
