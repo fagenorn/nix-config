@@ -135,12 +135,17 @@ def _new_tests(worktree: str, base: str, head: str, run_git: RunGit) -> list[tup
 def _python_path(scratch: str, worktree: str, inherited: str, run_git: RunGit) -> str:
     tracked = run_git("-C", scratch, "ls-files", "-z", "--", "*__init__.py")
     inits = {name for name in tracked.stdout.decode(errors="replace").split("\0") if name}
-    roots = set()
+    taken = set(os.listdir(scratch))
+    roots: dict[str, set[str]] = {}
     for name in inits:
         package = os.path.dirname(name)
         parent = os.path.dirname(package)
         if parent and os.path.join(parent, "__init__.py") not in inits:
-            roots.add(parent)
+            roots.setdefault(parent, set()).add(os.path.relpath(package, parent).split(os.sep)[0])
+    # A root whose package shares a name with a top-level entry of the scratch root would shadow it
+    # (a regular package beats a namespace directory whatever the path order), so the scratch root's own
+    # names stay ahead of every added root.
+    roots = {root: names for root, names in roots.items() if not names & taken}
     run = os.path.realpath(worktree)
     kept = [entry for entry in inherited.split(os.pathsep)
             if entry and os.path.realpath(entry) != run and not os.path.realpath(entry).startswith(run + os.sep)]

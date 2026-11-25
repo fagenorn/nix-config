@@ -212,6 +212,17 @@ class CheckTest(unittest.TestCase):
         self.assertEqual(len(result["new_tests"]), 3)
         self.assertEqual(repository.snapshot(), before)
 
+    def test_a_package_root_does_not_shadow_a_top_level_name_of_the_scratch_root(self):
+        repository = FixtureRepository(self, {
+            "tests/check_old.py": "", "nested/tests/__init__.py": "", "nested/tests/helper.py": "VALUE = 1\n"})
+        repository.commit({"tests/check_new.py": (
+            "import unittest\n\n\nclass NewCheck(unittest.TestCase):\n"
+            "    def test_new(self):\n        self.assertTrue(True)\n")})
+        result = check(str(repository.worktree), "main", scratch_root=scratch_directory(self),
+                       environ=os.environ)
+        self.assertEqual(result["new_tests"], ["tests.check_new.NewCheck.test_new"])
+        self.assertEqual(result["still_passing"], ["tests.check_new.NewCheck.test_new"])
+
     def test_a_new_test_that_outlives_its_bound_is_not_listed(self):
         repository = FixtureRepository(self)
         repository.commit({"checks/check_slow.py": (
