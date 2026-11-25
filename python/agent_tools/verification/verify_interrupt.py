@@ -83,11 +83,10 @@ def parse_line(text: str) -> dict | None:
 
 @contextlib.contextmanager
 def survive() -> Iterator[list[int]]:
-    """Catch `SURVIVED` for the length of the block, yielding the signal numbers received, in order.
+    """Catch `SURVIVED` for the block, yielding the signal numbers received, in order.
 
-    The handler only records, so a blocked wait or child read resumes. Main thread only: `signal.signal`
-    refuses any other. Nothing is ignored (an ignored signal would stay ignored in every check child),
-    and the previous handlers return on leaving.
+    The handler only records, so a blocked wait resumes. Main thread only: `signal.signal` refuses any other.
+    Nothing is ignored (it would stay ignored in every check child); the previous handlers return on leaving.
     """
     received: list[int] = []
     saved = {number: signal.getsignal(number) for number in SURVIVED}
