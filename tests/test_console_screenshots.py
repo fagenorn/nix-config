@@ -160,7 +160,7 @@ def fake_browser(present):
                 return 0.0
             if expression == "document.documentElement.scrollWidth":
                 return 480
-            if expression == shots.SHORT_CONTROLS:
+            if expression in (shots.SHORT_CONTROLS, shots.SMALL_TARGETS):
                 return []
             return 0
 
@@ -2155,7 +2155,7 @@ class ScreenshotFixtureTest(unittest.TestCase):
                         return self.y
                     if expression == "document.documentElement.scrollWidth":
                         return 480
-                    if expression in (shots.SHORT_CONTROLS, shots.ACTS_ROW):
+                    if expression in (shots.SHORT_CONTROLS, shots.ACTS_ROW, shots.SMALL_TARGETS):
                         return []
                     return 0
 
@@ -2207,7 +2207,7 @@ class ScreenshotFixtureTest(unittest.TestCase):
                     return 0.0
                 if expression == "document.documentElement.scrollWidth":
                     return 480
-                if expression in (shots.SHORT_CONTROLS, shots.ACTS_ROW):
+                if expression in (shots.SHORT_CONTROLS, shots.ACTS_ROW, shots.SMALL_TARGETS):
                     return []
                 return 0
 
@@ -2392,7 +2392,7 @@ class ScreenshotFixtureTest(unittest.TestCase):
                     return 0.0
                 if expression == "document.documentElement.scrollWidth":
                     return 480
-                if expression in (shots.SHORT_CONTROLS, shots.ACTS_ROW):
+                if expression in (shots.SHORT_CONTROLS, shots.ACTS_ROW, shots.SMALL_TARGETS):
                     return []
                 return 0
 
@@ -3747,8 +3747,8 @@ class ScreenshotCaptureTest(unittest.TestCase):
 
 
 class ScreenshotReadingTest(unittest.TestCase):
-    def read_pages(self, htmls, expression):
-        """Load each markup alone in one 1440x900 Chromium page and return what `expression` reads."""
+    def read_pages(self, htmls, expression, width=1440):
+        """Load each markup alone in one `width`x900 Chromium page and return what `expression` reads."""
         try:
             from playwright.sync_api import Error, sync_playwright
         except ImportError:
@@ -3759,7 +3759,7 @@ class ScreenshotReadingTest(unittest.TestCase):
             except Error as err:
                 self.skipTest(f"no Chromium to launch: {err}")
             try:
-                page = browser.new_page(viewport={"width": 1440, "height": 900})
+                page = browser.new_page(viewport={"width": width, "height": 900})
                 found = []
                 for html in htmls:
                     page.set_content(html)

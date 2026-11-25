@@ -227,8 +227,8 @@ Contract:
   shot has a visible project line whose Ask a question button sits on another row than its Give it
   a goal button (their vertical centres differ by more than 4 px, `ACTS_ROW`); or when any shot is not taken from the top of the
   page (`window.scrollY` is not 0 right before its full-page capture); or when any shot has a
-  rendered, visible button, input, textarea, select, `btn-` link or `btn-` summary under 32 px
-  tall (`SHORT_CONTROLS`, read after the state is drawn). When any shot misses a `STYLE_CHECKS`
+  control under 32 px tall, under 24 by 24 px, or (card answer, Tell the manager) under 44 px
+  while `PHONE_MEDIA` matches (`console_screenshot_controls.control_report`). When any shot misses a `STYLE_CHECKS`
   row, the line names each miss: the row's computed style is read after the capture, with probes
   and steps as `StyleCheck` and `STYLE_STEPS` say (`look-card` is shot with its viewer closed,
   then opens its first picture, so the viewer rows read it open). The style reading and its steps run only when
@@ -290,6 +290,7 @@ from agent_tools.console.sprints import TELL_MINUTE_TEXT, Question, SprintState,
 from agent_tools.system.forge_api import ForgeError
 
 from .console_land_queue import land_queue_reader
+from .console_screenshot_controls import ACTS_ROW, CONTROL_SELECTOR, SHORT_CONTROLS, SMALL_TARGETS, control_report
 from .console_screenshot_permissions import HELD_PROMPTS, PERMISSION_MANAGER, hold_permission, keep_permission
 from .console_test_support import hook_body, write_registry
 
@@ -1365,7 +1366,6 @@ STYLE_CHECKS += (
     _narrow("viewer-pair-direction", _LOOK, ".viewer-pair", "flex-direction", "equals", "column",
             "row"),
 )
-CONTROL_SELECTOR = 'button, input, textarea, select, a[class*="btn-"], summary[class*="btn-"]'
 KINDS = ("btn-primary", "btn-quiet", "btn-danger", "btn-option", "field-line", "field-area",
          "field-code")
 BUTTON_KINDS = KINDS[:4]
@@ -2115,6 +2115,7 @@ class Shot:
     tell: tuple[bool, str | None, str | None, bool] | None = None
     scroll_y: float = 0.0
     short: tuple[str, ...] = ()
+    small: tuple[str, ...] = ()
     ask: tuple[bool, str | None, str | None] | None = None
     goal: tuple[bool, str | None, str | None, bool | None] | None = None
     acts: tuple[str, ...] = ()
@@ -3240,17 +3241,6 @@ GOAL_READING = """(() => {
           field ? shown && field.scrollHeight <= field.clientHeight + 1 : null];
 })()"""
 
-ACTS_ROW = """Array.from(document.querySelectorAll('li[data-project]')).filter((line) => {
-  const give = line.querySelector('button.give-goal');
-  const ask = line.querySelector('button.ask-open');
-  if (!give || !ask || line.getClientRects().length === 0) return false;
-  const centre = (node) => {
-    const rect = node.getBoundingClientRect();
-    return rect.top + rect.height / 2;
-  };
-  return Math.abs(centre(give) - centre(ask)) > 4;
-}).map((line) => line.dataset.project)"""
-
 THREAD_READING = f"""(() => {{
   const fold = document.querySelector('details[data-key="questions:owner/web"]');
   const homes = Array.from(document.querySelectorAll(
@@ -3298,11 +3288,6 @@ JARGON_COUNT = r"""(() => {
 })()"""
 
 
-SHORT_CONTROLS = f"""Array.from(document.querySelectorAll({json.dumps(CONTROL_SELECTOR)})).filter(
-  (n) => n.getClientRects().length > 0 && getComputedStyle(n).visibility !== "hidden").map(
-  (n) => [n, n.getBoundingClientRect().height]).filter(([n, h]) => h < 32).map(
-  ([n, h]) => n.tagName.toLowerCase() + "." + (n.getAttribute("class") || "").split(/\\s+/)[0]
-    + " " + Math.round(h * 100) / 100 + "px")"""
 SCROLL_TOP = "window.scrollTo(0, 0)"
 SCROLL_Y = "window.scrollY"
 
@@ -3507,6 +3492,7 @@ def _shoot(browser, url: str, state: str, width: int, out: Path, *,
         jargon = page.evaluate(JARGON_COUNT)
         scroll_y = page.evaluate(SCROLL_Y)
         short = tuple(page.evaluate(SHORT_CONTROLS))
+        small = tuple(page.evaluate(SMALL_TARGETS))
         acts = tuple(page.evaluate(ACTS_ROW))
         path = out / f"{state}-{width}.png"
         page.screenshot(path=str(path), full_page=True)
@@ -3544,7 +3530,7 @@ def _shoot(browser, url: str, state: str, width: int, out: Path, *,
     return Shot(state, width, path, scroll_width, squeezed, jargon, tell, scroll_y=scroll_y,
                 short=short, ask=ask, goal=goal, acts=acts, thread=thread, reading=reading,
                 card=card, activation=activation, register=register, style=style, checked=checked, broke=broke,
-                deeper=deeper)
+                deeper=deeper, small=small)
 
 
 def sheet(browser, paths: Sequence[Path], out: Path) -> Path:
@@ -3693,16 +3679,15 @@ def main(argv: list[str] | None = None) -> int:
     for shot in scrolled:
         print(f"console-screenshots: {shot.path.name} is not taken from the top of the page "
               f"(scrolled {shot.scroll_y:g} px)")
-    short = [shot for shot in taken if shot.short]
-    for shot in short:
-        print(f"console-screenshots: {shot.path.name} has a control under 32 px "
-              f"({', '.join(shot.short)})")
+    controlled = control_report(taken)
+    for line in controlled:
+        print(line)
     broken = [shot for shot in taken if shot.style]
     for shot in broken:
         print(f"console-screenshots: {shot.path.name} breaks a page style "
               f"({'; '.join(shot.style)})")
     return 1 if (wide or squeezed or jargon or closed or unasked or unfilled or unthreaded or unread
-                 or undeep or unlined or proposals or uncarded or offrow or scrolled or short or broken) else 0
+                 or undeep or unlined or proposals or uncarded or offrow or scrolled or controlled or broken) else 0
 
 
 if __name__ == "__main__":
