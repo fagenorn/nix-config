@@ -196,6 +196,7 @@ agent-workflow-tests *args:
     tests/test_land_tally.py \
     tests/test_verify_rounds.py \
     tests/test_engine_land_recovery.py \
+    tests/test_engine_verify_rounds.py \
     tests/test_plan_amend.py \
     tests/test_verify_block.py \
     tests/test_verify_pending.py \

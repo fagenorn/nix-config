@@ -5,14 +5,44 @@
   "stops": {
     "setup": {"need": "owner-decision", "reenter": "preflight"},
     "claim-lost": {"need": "owner-decision", "reenter": "preflight"},
-    "verify": {"need": "owner-decision", "reenter": "checks"}
+    "verify": {"need": "owner-decision", "reenter": "checks"},
+    "verify-unrelated": {"need": "owner-decision", "reenter": "checks"},
+    "verify-fix": {"need": "owner-decision", "reenter": "checks"},
+    "verify-fix-review": {"need": "owner-decision", "reenter": "checks"}
   },
   "steps": [
     {"id": "preflight", "stage": "verifying", "kind": "command", "command": "issue-setup", "subcommand": "preflight", "holds": "live",
      "in": ["run.repo_root", "run.issue"],
      "on": {"clear": "checks", "closed": "setup", "parked": "setup", "duplicate": "setup", "open-pr": "setup", "error": "setup", "refused": "setup"}},
-    {"id": "checks", "stage": "verifying", "kind": "command", "command": "verified-tree", "subcommand": "run", "holds": "live",
+    {"id": "checks", "stage": "verifying", "kind": "command", "command": "verified-tree", "subcommand": "run", "holds": "live", "max_visits": 3,
      "in": ["preflight.worktree_path"],
-     "on": {"passed": "done", "failed": "verify", "dirty": "verify", "error": "verify", "refused": "verify", "out-of-bounds": "verify"}}
+     "on": {"passed": "round", "failed": "round", "dirty": "round", "error": "verify", "refused": "verify", "out-of-bounds": "verify", "exhausted": "verify"}},
+    {"id": "round", "stage": "verifying", "kind": "command", "command": "verify-rounds", "subcommand": "round", "holds": "live", "max_visits": 3,
+     "in": ["run.holder", "preflight.worktree_path"],
+     "on": {"passed": "done", "retest": "retest", "fix": "fix", "spent": "verify", "verify": "verify", "error": "verify", "refused": "verify", "out-of-bounds": "verify", "exhausted": "verify"}},
+    {"id": "fix", "stage": "verifying", "kind": "agent", "role": "implementer", "prompt": "verify-fix.md", "reply": "verify-fix.reply.json", "outcome_from": "status", "holds": "run", "mutates": true, "max_visits": 2,
+     "in": ["run.issue", "preflight.worktree_path", "preflight.branch", "preflight.integration_branch", "round.problems", "round.guards"],
+     "on": {"done": "fixed", "blocked": "fixed", "no-reply": "verify-fix", "out-of-bounds": "verify-fix", "exhausted": "verify"}},
+    {"id": "fixed", "stage": "verifying", "kind": "decide", "grader": "verify-fixed", "holds": "run", "max_visits": 2,
+     "in": ["fix.status", "fix.start_head", "fix.commit", "fix.unrelated"],
+     "on": {"unrelated": "verify-unrelated", "not-done": "verify-fix", "done": "ws-check", "exhausted": "verify"}},
+    {"id": "ws-check", "stage": "verifying", "kind": "command", "command": "verify-rounds", "subcommand": "fix-range", "holds": "live", "max_visits": 2,
+     "in": ["preflight.worktree_path", "round.head"],
+     "on": {"read": "fix-review", "unread": "fix-review", "error": "verify", "refused": "verify", "out-of-bounds": "verify", "exhausted": "verify"}},
+    {"id": "fix-review", "stage": "verifying", "kind": "agent", "role": "reviewer", "prompt": "verify-fix-review.md", "reply": "verify-fix-review.reply.json", "outcome_from": "verdict", "holds": "run", "max_visits": 2,
+     "in": ["preflight.worktree_path", "round.head", "round.problems", "fix.notes", "fix.outside_diff", "ws-check.whitespace_only", "ws-check.changed_paths"],
+     "on": {"pass": "narrowing", "findings": "narrowing", "no-reply": "verify-fix-review", "out-of-bounds": "verify-fix-review", "exhausted": "verify"}},
+    {"id": "narrowing", "stage": "verifying", "kind": "decide", "grader": "verify-narrowing", "holds": "run", "max_visits": 2,
+     "in": ["fix-review.findings", "round.clean", "round.results", "ws-check.whitespace_only", "ws-check.changed_paths", "fix-review.whitespace_insignificant", "fix-review.whitespace_evidence"],
+     "on": {"findings": "verify-fix-review", "rerun-failed-only": "rerun", "rerun-all": "checks", "exhausted": "verify"}},
+    {"id": "rerun", "stage": "verifying", "kind": "command", "command": "verified-tree", "subcommand": "run", "holds": "live", "max_visits": 2,
+     "in": ["preflight.worktree_path", "round.head", "ws-check.commit"],
+     "on": {"passed": "round", "failed": "round", "dirty": "round", "error": "verify", "refused": "verify", "out-of-bounds": "verify", "exhausted": "verify"}},
+    {"id": "retest", "stage": "verifying", "kind": "agent", "role": "implementer", "prompt": "verify-retest.md", "reply": "verify-retest.reply.json", "outcome_from": "status", "holds": "run",
+     "in": ["run.issue", "preflight.worktree_path", "round.start_head", "round.head", "round.guards"],
+     "on": {"done": "retested", "blocked": "retested", "no-reply": "verify-fix", "out-of-bounds": "verify-fix"}},
+    {"id": "retested", "stage": "verifying", "kind": "command", "command": "verify-rounds", "subcommand": "retested", "holds": "live",
+     "in": ["run.holder", "preflight.worktree_path"],
+     "on": {"done": "done", "untested": "verify-fix", "dirty": "verify-fix", "error": "verify", "refused": "verify", "out-of-bounds": "verify"}}
   ]
 }

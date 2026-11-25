@@ -84,6 +84,44 @@ def implementing(path: str, text: str, **members) -> dict:
     return {"reply": {**IMPLEMENTED["reply"], **members}, "commit": {"path": path, "text": text}}
 
 
+NO_UNRELATED = {"test": "", "evidence": ""}
+CHECK_FORMAT = r"""import json
+import unittest
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+class FormatTest(unittest.TestCase):
+    def test_each_fixture_json_is_two_space_indented(self):
+        for path in sorted((ROOT / "fixture").glob("*.json")):
+            text = path.read_text(encoding="utf-8")
+            relative = path.relative_to(ROOT).as_posix()
+            self.assertEqual(text, json.dumps(json.loads(text), indent=2) + "\n",
+                             f"{relative} is not two-space indented")
+"""
+FORMAT = {"checks/check_format.py": CHECK_FORMAT}
+FOUR_SPACES = '{\n    "greeting": "hello"\n}\n'
+TWO_SPACES = '{\n  "greeting": "hello"\n}\n'
+FOUR = implementing("fixture/greeting.json", FOUR_SPACES)
+ATTESTED = {"whitespace_insignificant": True, "whitespace_evidence": "fixture/greeting.json: indentation only"}
+PASS_ATTESTED = {"verdict": "pass", "findings": [], **ATTESTED}
+PASS_PLAIN = {"verdict": "pass", "findings": [], "whitespace_insignificant": False,
+              "whitespace_evidence": "not whitespace-only"}
+RETESTED = {"reply": {"status": "done", "notes": "n", "tests": ["checks/check_format.py"], "clean": True},
+            "same_head": {}}
+
+
+def fixing(path: str, text: str, **reply) -> dict:
+    """A verify fix reply that commits `text` to `path`, naming no file outside the diff and no unrelated test."""
+    return {"reply": {"status": "done", "notes": "n", "tests": [], "outside_diff": [], "unrelated": NO_UNRELATED,
+                      **reply},
+            "commit": {"path": path, "text": text}}
+
+
+TWO = fixing("fixture/greeting.json", TWO_SPACES, tests=["checks/check_format.py"])
+
+
 def stopping_after_verify(tmp: Path) -> Path:
     """A copy of the shipped procedures whose run is kept across a continue and stops once verified."""
     copy = tmp / "procedures"
@@ -648,15 +686,28 @@ class ReviewRouteTest(Scenario):
 
 
 class VerifyTest(Scenario):
-    def test_a_failing_verification_id_stops_verify(self):
+    def test_a_failing_verification_id_with_no_fix_reply_stops_verify_fix(self):
         broken = implementing("fixture/greet.py", 'def greet(name: str) -> str:\n    return f"Hi, {name}."\n')
         run = self.stubbed(replies={"implement": broken})
 
-        self.finish(run, "verify", "owner-decision")
+        self.finish(run, "verify-fix", "owner-decision")
 
         checks = self.stored(self.child(run, "verify"), "checks")
         self.assertEqual(checks["verdict"], "failed")
         self.assertEqual({r["id"]: r["status"] for r in checks["results"]}, {"lint": "pass", "test": "fail"})
+        self.assertIs(next(r for r in checks["results"] if r["id"] == "test")["reran"], True)
+
+    def test_an_untested_fix_is_reviewed_narrowed_and_retested(self):
+        run = self.stubbed(extra_files=FORMAT, replies={
+            "implement": FOUR, "fix": fixing("fixture/greeting.json", TWO_SPACES), "fix-review": PASS_ATTESTED,
+            "retest": RETESTED})
+
+        self.finish(run, "done")
+
+        walk = run.transitions(self.child(run, "verify"))
+        for edge in (("round", "fix"), ("fixed", "done"), ("ws-check", "read"), ("fix-review", "pass"),
+                     ("narrowing", "rerun-failed-only"), ("round", "retest"), ("retested", "done")):
+            self.assertIn(edge, walk)
 
     def test_an_id_whose_condition_matches_no_changed_path_is_recorded_skipped_with_its_reason(self):
         conditions = {"lint": {"when_changed": ["docs/**"], "skip_reason": "no documentation changed"}}
