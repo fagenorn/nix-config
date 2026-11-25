@@ -164,6 +164,11 @@
       "resolve": []
     }
   },
+  "revert-check": {
+    "verdicts": [
+      "ok"
+    ]
+  },
   "router": null,
   "ruff-lint": null,
   "size-lint": null,

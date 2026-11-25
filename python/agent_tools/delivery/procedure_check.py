@@ -136,6 +136,7 @@ PLATFORM_LISTS: Mapping[str, frozenset[str]] = {
     "landing": frozenset(),
     "look-approval": frozenset({"acs", "covers"}),
     "resolve-project": frozenset(),
+    "revert-check": frozenset({"new_tests", "still_passing"}),
     "verified-tree": frozenset({"results"}),
 }
 

@@ -97,6 +97,7 @@ let
     "release" = "release.release";
     "release-card" = "console.release_card";
     "resolve-project" = "project_contract.resolve_project";
+    "revert-check" = "delivery.revert_check";
     "router" = "delivery.router";
     "ruff-lint" = "delivery.ruff_lint";
     "size-lint" = "delivery.size_lint";

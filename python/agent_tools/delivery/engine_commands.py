@@ -71,6 +71,7 @@ PLATFORM_MODULES: Mapping[str, str] = MappingProxyType({
     "landing": "delivery.landing",
     "look-approval": "delivery.look_approval",
     "resolve-project": "project_contract.resolve_project",
+    "revert-check": "delivery.revert_check",
     "verified-tree": "verification.verified_tree",
 })
 LIFECYCLE_ARGV: Mapping[str, tuple[str, ...]] = MappingProxyType({
@@ -93,6 +94,7 @@ PLATFORM_WALL_SECONDS: Mapping[str, float] = MappingProxyType({
     "landing": 3600,
     "look-approval": 300,
     "resolve-project": 300,
+    "revert-check": 1800,
     "verified-tree": 14400,
 })
 PROJECT_WALL_SECONDS = 3600
