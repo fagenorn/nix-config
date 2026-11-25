@@ -81,7 +81,8 @@ key blocks, a `Bearer` value, a JWT, a `token`/`secret`/`password`-style assignm
 quoted or not, with a real value, the console's own page token, and a long base64 run that is not
 an SRI hash or a path, a path being slash-separated parts that are each a word holding three lowercase letters in a row,
 a label of up to four characters, or a short CamelCase or acronym name such as `README`, `HTTP2` or `Vec3D`)
-searches it. The refusal text never holds any of the question's text.
+searches it, in time linear in its length (#1726: the three shapes a regex would backtrack on, `jwt`, `assignment` and
+`base64_run`, are code that reads each run of characters once). The refusal text never holds any of the question's text.
 Limits (#1272): the shapes judge text as a paste gives it. A credential split by spaces or invisible
 characters, encoded (URL encoding, hex, or base64 of a token), a password shorter than eight characters
 or written with no `token`, `secret`, `password`-style name before it, or a console token with fewer
@@ -198,6 +199,7 @@ import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import Protocol
 
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
 from agent_tools.console import manager, question_records
@@ -336,39 +338,137 @@ CREDENTIAL = "this looks like a password, token or key, so it was not kept or se
 THREAD_CREDENTIAL = (
     "this thread holds a password, token or key, so it was not continued: delete the thread and ask again")
 
-CREDENTIAL_SHAPES: tuple[tuple[str, "re.Pattern[str]"], ...] = tuple(
-    (name, re.compile(pattern, re.ASCII)) for name, pattern in (
-        ("github", r"\bgh[pousr]_[A-Za-z0-9]{36,}"),
-        ("github_pat", r"\bgithub_pat_[A-Za-z0-9_]{22,}"),
-        ("hugging_face", r"\bhf_[A-Za-z0-9]{30,}"),
-        ("sk_key", r"\bsk-[A-Za-z0-9_-]{32,}"),
-        ("age_secret_key", r"AGE-SECRET-KEY-1[0-9A-Z]{50,}"),
-        ("private_key_block", r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----"),
-        ("bearer", r"\bBearer\s+[A-Za-z0-9._~+/=-]{20,}"),
-        ("aws_key_id", r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"),
-        ("slack", r"\bxox[abposr]-[A-Za-z0-9-]{10,}"),
-        ("gitlab", r"\bglpat-[A-Za-z0-9_-]{20,}"),
-        ("jwt", r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"),
-        ("assignment",
-         r"\b[A-Za-z0-9_.-]*(?i:TOKEN|SECRET|PASSWORD|PASSWD|API[_-]?KEY|ACCESS[_-]?KEY)(?:"
-         r"[\"']?\s*=\s*[\"'](?![$<{])(?=[^\s\"']*[A-Za-z])[^\s\"']{8,}"
-         r"|[\"']?\s*=\s*(?![$<{])(?![^\s\"']*[(\[])(?!(?![^\s\"']*[0-9])[^\s\"']*\.[A-Za-z_])"
-         r"(?=[^\s\"']*[0-9-])"
-         r"(?=[^\s\"']*[A-Za-z])[^\s\"']{8,}"
-         r"|[\"']\s*:\s*[\"']?(?![$<{])(?=[^\s\"']*[A-Za-z])[^\s\"']{8,}"
-         r"|\s*:\s*[\"']?(?![$<{])(?=[^\s\"']*[0-9])(?=[^\s\"']*[A-Za-z])[^\s\"']{8,})"),
-        ("console_token",
-         r"(?<![A-Za-z0-9_-])(?=(?:[A-Za-z0-9_-]*?[A-Z]){2})(?=(?:[A-Za-z0-9_-]*?[a-z]){2})"
-         r"[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])"),
-        ("base64_run",
-         r"(?<![A-Za-z0-9+/=])(?<!sha1-)(?<!sha256-)(?<!sha384-)(?<!sha512-)"
-         r"(?!(?:(?:[A-Za-z0-9+]*[a-z]{3}[A-Za-z0-9+]*|[A-Za-z0-9+]{0,4}"
-         r"|(?=[A-Za-z0-9+]{1,10}(?![A-Za-z0-9+]))(?:[A-Z][a-z]{0,2}|[0-9][a-z]?)+)/)+"
-         r"(?:[A-Za-z0-9+]*[a-z]{3}[A-Za-z0-9+]*|[A-Za-z0-9+]{0,4}"
-         r"|(?=[A-Za-z0-9+]{1,10}(?![A-Za-z0-9+]))(?:[A-Z][a-z]{0,2}|[0-9][a-z]?)+)(?![A-Za-z0-9+/=]))"
-         r"(?=(?:[A-Za-z0-9+/]*?[A-Z]){2})(?=(?:[A-Za-z0-9+/]*?[a-z]){2})"
-         r"(?=(?:[A-Za-z0-9+/]*?[0-9]){2})[A-Za-z0-9+/]{32,}={0,2}(?![A-Za-z0-9+/=])"),
-    ))
+class _Searchable(Protocol):
+    def search(self, text: str, /) -> object: ...
+
+
+class _LinearShape:
+    """A shape judged by code in time linear in the text, where one regex would backtrack (#1726).
+
+    `search` answers like `re.Pattern.search`: something truthy when the text holds the shape."""
+
+    def __init__(self, search: Callable[[str], bool]) -> None:
+        self.search = search
+
+
+_JWT_HEAD = re.compile(r"\beyJ[A-Za-z0-9_-]*", re.ASCII)
+_JWT_TAIL = re.compile(r"\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}", re.ASCII)
+
+
+def _jwt_search(text: str) -> bool:
+    # Every `eyJ` head in one run of token characters ends at the same place, so the first one,
+    # which has the most characters, decides for the run: each run is read once as a head.
+    return any(
+        head.end() - head.start() >= 11 and _JWT_TAIL.match(text, head.end())
+        for head in _JWT_HEAD.finditer(text))
+
+
+_ASSIGNMENT_NAME = re.compile(
+    r"(?i:TOKEN|SECRET|PASSWORD|PASSWD|API[_-]?KEY|ACCESS[_-]?KEY)(?=[\"']?\s*=|[\"']\s*:|\s*:)", re.ASCII)
+_ASSIGNMENT_VALUES = (
+    ("quoted", re.compile(r"[\"']?\s*=\s*[\"']", re.ASCII)),
+    ("bare", re.compile(r"[\"']?\s*=\s*", re.ASCII)),
+    ("json", re.compile(r"[\"']\s*:\s*[\"']?", re.ASCII)),
+    ("colon", re.compile(r"\s*:\s*[\"']?", re.ASCII)),
+)
+_VALUE_RUN = re.compile(r"[^\s\"']*", re.ASCII)
+_LAST_OF = {
+    kind: re.compile(r"(?s:.*)(" + shape + ")", re.ASCII)
+    for kind, shape in (
+        ("letter", "[A-Za-z]"), ("digit", "[0-9]"), ("digit_or_hyphen", "[0-9-]"),
+        ("bracket", r"[(\[]"), ("dot_word", r"\.[A-Za-z_]"))}
+
+
+class _ValueRun:
+    """The run of non-space, non-quote characters from `start`, with where each class last occurs.
+
+    A value that begins later in the same run sees the same characters from its own start on, so
+    the run is read once for all the names that sit in it."""
+
+    def __init__(self, text: str, start: int) -> None:
+        self.start = start
+        self.end = _VALUE_RUN.match(text, start).end()
+        run = text[start:self.end]
+        self.last = {}
+        for kind, pattern in _LAST_OF.items():
+            found = pattern.match(run)
+            self.last[kind] = start + found.start(1) if found else -1
+
+
+def _assignment_search(text: str) -> bool:
+    run = None
+    for name in _ASSIGNMENT_NAME.finditer(text):
+        for kind, opening in _ASSIGNMENT_VALUES:
+            opened = opening.match(text, name.end())
+            if opened is None:
+                continue
+            value = opened.end()
+            if value >= len(text) or text[value] in "$<{":
+                continue
+            if run is None or not run.start <= value < run.end:
+                run = _ValueRun(text, value)
+            if run.end - value < 8:
+                continue
+            last = run.last
+            if last["letter"] < value:
+                continue
+            if kind in ("quoted", "json"):
+                return True
+            if kind == "colon":
+                if last["digit"] >= value:
+                    return True
+            elif (last["digit_or_hyphen"] >= value and last["bracket"] < value
+                  and not (last["dot_word"] >= value and last["digit"] < value)):
+                return True
+    return False
+
+
+_BASE64_RUN = re.compile(
+    r"(?<![A-Za-z0-9+/=])(?<!sha1-)(?<!sha256-)(?<!sha384-)(?<!sha512-)"
+    r"([A-Za-z0-9+/]{32,})(={0,2})(?![A-Za-z0-9+/=])", re.ASCII)
+_TWO_UPPER = re.compile(r"[^A-Z]*[A-Z][^A-Z]*[A-Z]", re.ASCII)
+_TWO_LOWER = re.compile(r"[^a-z]*[a-z][^a-z]*[a-z]", re.ASCII)
+_TWO_DIGITS = re.compile(r"[^0-9]*[0-9][^0-9]*[0-9]", re.ASCII)
+_THREE_LOWER = re.compile(r"[a-z]{3}", re.ASCII)
+_SHORT_CAMEL = re.compile(r"(?:[A-Z][a-z]{0,2}|[0-9][a-z]?)+", re.ASCII)
+
+
+def _path_part(part: str) -> bool:
+    return (len(part) <= 4 or _THREE_LOWER.search(part) is not None
+            or (len(part) <= 10 and _SHORT_CAMEL.fullmatch(part) is not None))
+
+
+def _base64_run_search(text: str) -> bool:
+    for found in _BASE64_RUN.finditer(text):
+        run = found.group(1)
+        if not (_TWO_UPPER.match(run) and _TWO_LOWER.match(run) and _TWO_DIGITS.match(run)):
+            continue
+        parts = run.split("/")
+        # A path is parts separated by slashes that are each a word, a short label or a short CamelCase
+        # name, with no padding after it; the last part is not one when padding follows the run.
+        if found.group(2) or len(parts) < 2 or not all(_path_part(part) for part in parts):
+            return True
+    return False
+
+
+CREDENTIAL_SHAPES: tuple[tuple[str, _Searchable], ...] = (
+    ("github", re.compile(r"\bgh[pousr]_[A-Za-z0-9]{36,}", re.ASCII)),
+    ("github_pat", re.compile(r"\bgithub_pat_[A-Za-z0-9_]{22,}", re.ASCII)),
+    ("hugging_face", re.compile(r"\bhf_[A-Za-z0-9]{30,}", re.ASCII)),
+    ("sk_key", re.compile(r"\bsk-[A-Za-z0-9_-]{32,}", re.ASCII)),
+    ("age_secret_key", re.compile(r"AGE-SECRET-KEY-1[0-9A-Z]{50,}", re.ASCII)),
+    ("private_key_block", re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----", re.ASCII)),
+    ("bearer", re.compile(r"\bBearer\s+[A-Za-z0-9._~+/=-]{20,}", re.ASCII)),
+    ("aws_key_id", re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b", re.ASCII)),
+    ("slack", re.compile(r"\bxox[abposr]-[A-Za-z0-9-]{10,}", re.ASCII)),
+    ("gitlab", re.compile(r"\bglpat-[A-Za-z0-9_-]{20,}", re.ASCII)),
+    ("jwt", _LinearShape(_jwt_search)),
+    ("assignment", _LinearShape(_assignment_search)),
+    ("console_token", re.compile(
+        r"(?<![A-Za-z0-9_-])(?=(?:[A-Za-z0-9_-]*?[A-Z]){2})(?=(?:[A-Za-z0-9_-]*?[a-z]){2})"
+        r"[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])", re.ASCII)),
+    ("base64_run", _LinearShape(_base64_run_search)),
+)
 
 
 def credential_shaped(text: str) -> bool:
