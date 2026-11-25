@@ -6,6 +6,8 @@ import unittest
 
 from .test_console_sprint_command import run_sprint
 
+TIER = "fast"
+
 
 class ContractPlainWordsTest(unittest.TestCase):
     def test_the_contract_says_status_lines_cards_and_questions_follow_the_plain_words_rule(self):
