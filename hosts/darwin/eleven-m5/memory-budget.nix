@@ -37,6 +37,8 @@ rec {
   floorMarginGiB = 16;
   # A fall in available memory between two samples that also earns the fast interval.
   floorFallGiB = 2;
+  # The smallest workload the floor daemon may end: a smaller tree frees too little to matter.
+  floorMinTreeGiB = 1;
   # The floor daemon's sampling interval near the floor or while memory falls.
   fastSampleSeconds = 2;
   # The floor daemon's sampling interval otherwise.

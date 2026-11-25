@@ -109,6 +109,7 @@ owner's capacity number: whether it holds is a question for the lead.
 | `floorGraceSeconds` | 5 | How long a workload has to exit on SIGTERM before SIGKILL. | The owner's choice. |
 | `floorMarginGiB` | 16 | How far above `floorGiB` `memory-floor` samples at the fast interval. | The owner's choice. |
 | `floorFallGiB` | 2 | A fall in available memory between two samples that also earns the fast interval. | The owner's choice. |
+| `floorMinTreeGiB` | 1 | The smallest workload `memory-floor` ends under the floor; a smaller tree frees too little to matter. | The owner's choice; on 25 Nov the floor ended 47 trees of 0.0 to 0.1 GiB that freed nothing. |
 | `fastSampleSeconds` | 2 | `memory-floor`'s sampling interval near the floor or while memory falls, and the relaunch gate's polling interval. | The owner's choice. |
 | `slowSampleSeconds` | 10 | `memory-floor`'s sampling interval otherwise. | The owner's choice. |
 | `runBoundGiB` | 24 | The footprint over which one workload is ended whatever memory is free: over `verifyRunGiB` and `ciJobGiB`, at most `othersBudgetGiB`. | Leaves a verification run or CI job its allowance several times over, and stops one workload from taking the whole others budget. |
@@ -181,13 +182,19 @@ started, and each service process the host runs for the system.
 It samples available memory every `fastSampleSeconds` when it is under
 `floorGiB` + `floorMarginGiB`, or fell by `floorFallGiB` since the last sample,
 or is under the floor; otherwise every `slowSampleSeconds`. After
-`floorSamples` samples in a row under the floor it ends the largest workload.
+`floorSamples` samples in a row under the floor it ends the largest workload, but
+only one that can help: a workload under `floorMinTreeGiB`, or one whose
+footprint added to available memory still leaves memory under the floor, is
+never ended.
 It signals the workload's processes with SIGTERM, deepest in the process tree
 first (leaves first), waits `floorGraceSeconds`, and sends SIGKILL to what is
 left, then reads memory again. If memory is still under the floor, it ends the
 next largest. A workload over
-`runBoundGiB` is ended at once, whatever memory is free. With no workload left
-to end, it logs `floor_breached no agent workload to end` once per episode.
+`runBoundGiB` is ended at once, whatever memory is free. When no workload
+it may end would bring memory over the floor, it ends nothing and logs one
+`floor_unmet available_gib=<n> largest_gib=<n>` line per episode (`largest_gib` is the largest
+candidate, 0.0 with none), keeps it in its record, and the sampler sends one `floor_unmet`
+alert. It logs again only when memory has been over the floor and a new episode starts.
 
 Each kill is one line:
 
@@ -253,7 +260,7 @@ the error is logged in `~/.omlx/logs/memory-watch.log`, and the watcher exits 3
 on every sample until the alert is sent. With `enabled` false, alerts are
 recorded in the alerts log only.
 
-There are seven kinds:
+There are eight kinds:
 
 - `jetsam`: the kernel's memory killer ended oMLX.
 - `low_memory`: available memory fell under `floorGiB` while a model was loaded
@@ -264,6 +271,8 @@ There are seven kinds:
 - `fseventsd_restart_failed`: the restart's kill failed, so fseventsd stays over
   its limit (once per episode).
 - `memory_kill`: `memory-floor` ended an agent or CI workload; one alert per kill.
+- `floor_unmet`: memory stayed under `floorGiB` and `memory-floor` had no
+  workload it may end that would bring it over (once per episode).
 - `jetsam_priority_unset`: `memory-floor` could not set oMLX's kernel jetsam
   priority, or the value did not hold after a set (once per episode).
 

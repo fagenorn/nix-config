@@ -478,6 +478,28 @@ class FloorRecordTest(WatchCase):
         self.assertEqual((self.bot.requests, done.stdout), ([], ""))
         self.assertEqual(self.read_state()["floor_kills_seen"], 5)
 
+    def test_one_alert_per_floor_unmet_episode_in_the_floor_record(self):
+        self.put_state(state(floor_unmet_seen=1))
+        unmet = {"seq": 2, "at": "2026-11-24T12:33:05+00:00", "available_bytes": 13 * GIB, "largest_bytes": 2 * GIB}
+        self.floor(floor_unmets=2, floor_unmet=unmet)
+        self.health()
+        self.settings_on()
+        first = self.sample()
+        second = self.sample()
+        self.assertEqual((first.returncode, second.returncode), (0, 0), first.stderr + second.stderr)
+        self.assertEqual(self.texts(), [
+            "eleven-m5: the memory floor has no workload it may end that would bring available memory over "
+            "the 16 GiB floor. Available 13.0 GiB, largest candidate 2.0 GiB. " + SEE])
+        self.assertEqual(self.read_state()["floor_unmet_seen"], 2)
+
+    def test_the_first_sample_only_records_the_floor_unmet_count(self):
+        self.floor(floor_unmets=3, floor_unmet={"seq": 3, "available_bytes": 13 * GIB, "largest_bytes": 0})
+        self.health()
+        self.settings_on()
+        done = self.sample()
+        self.assertEqual((done.returncode, self.bot.requests), (0, []), done.stderr)
+        self.assertEqual(self.read_state()["floor_unmet_seen"], 3)
+
     def test_a_run_bound_kill_names_the_bound(self):
         self.put_state(state(floor_kills_seen=0))
         self.floor(kills=1, recent=[kill(1, reason="run_bound", owner="_github-runner", processes=9,

@@ -61,7 +61,7 @@ def table_of(*procs):
     return {p.pid: p for p in procs}
 
 
-LIMITS = Limits(16 * GIB, 3, 5, 16 * GIB, 2 * GIB, 2, 10, 24 * GIB, 190)
+LIMITS = Limits(16 * GIB, 3, 5, 16 * GIB, 2 * GIB, 2, 10, 24 * GIB, 190, GIB)
 KILL_LINE = re.compile(
     r"^2026-11-24T12:33:05\+00:00 memory_kill reason=(floor|run_bound) owner=anis root_pid=300"
     r' root="node vitest run" processes=3 tree_gib=\d+\.\d available_before_gib=\d+\.\d'
@@ -353,9 +353,61 @@ class FloorTest(unittest.TestCase):
         self.assertEqual(daemon.fake.signals, [])
         self.assertEqual(len(daemon.lines), 2)
         for line in daemon.lines:
-            self.assertRegex(
-                line, r"^2026-11-24T12:33:05\+00:00 floor_breached no agent workload to end available_gib=10\.0\n$"
-            )
+            self.assertRegex(line, UNMET_LINE.format(available="10.0", largest="0.0"))
+
+
+W3 = "/Users/anis/Projects/jarbird/.worktrees/w3"
+W4 = "/Users/anis/Projects/jarbird/.worktrees/w4"
+UNMET_LINE = r"^2026-11-24T12:33:05\+00:00 floor_unmet available_gib={available} largest_gib={largest}\n$"
+
+
+def trees(*sizes):
+    roots = (W1, W2, W3, W4)
+    return table_of(*(proc(300 + 10 * i, 1, 501, roots[i], gib) for i, gib in enumerate(sizes)))
+
+
+class UsefulKillTest(unittest.TestCase):
+    def test_no_tree_under_the_declared_minimum_is_ended_even_when_it_would_reach_the_floor(self):
+        rows = {
+            "small_trees_at_13": ([13], (0.1, 0.5, 0.9)),
+            "small_tree_that_would_reach_the_floor": ([15.5], (0.6,)),
+        }
+        for name, (readings, sizes) in rows.items():
+            with self.subTest(name):
+                daemon = Daemon(readings, trees(*sizes))
+                daemon.sample(3)
+                self.assertEqual(daemon.fake.signals, [])
+                self.assertEqual(daemon.record.get("kills", 0), 0)
+
+    def test_a_tree_whose_end_still_leaves_memory_under_the_floor_is_not_ended(self):
+        rows = {
+            "just_short": ([13, 13, 13, 40], (0.1, 0.5, 2.9), []),
+            "exactly_over": ([13, 13, 13, 40], (0.1, 0.5, 3.0), [320]),
+            "largest_ends_not_a_smaller": ([13, 13, 13, 40], (1.5, 4.0, 2.0), [310]),
+            "a_four_gib_tree_among_small_ones": ([13, 13, 13, 40], (0.1, 0.5, 2.0, 4.0), [330]),
+        }
+        for name, (readings, sizes, expected) in rows.items():
+            with self.subTest(name):
+                daemon = Daemon(readings, trees(*sizes))
+                daemon.sample(3)
+                termed = [pid for sig, pid in daemon.fake.signals if sig == signal.SIGTERM]
+                self.assertEqual(termed, expected)
+                self.assertEqual([e["root_pid"] for e in daemon.record.get("recent", [])], expected)
+
+    def test_an_episode_with_no_candidate_that_helps_logs_and_records_once(self):
+        daemon = Daemon([13] * 8 + [50] + [13] * 4, trees(0.1, 0.5, 2.0))
+        daemon.sample(8)
+        self.assertEqual(daemon.fake.signals, [])
+        (line,) = daemon.lines
+        self.assertRegex(line, UNMET_LINE.format(available="13.0", largest="2.0"))
+        self.assertEqual(daemon.record["floor_unmets"], 1)
+        self.assertEqual(daemon.record["floor_unmet"]["seq"], 1)
+        self.assertEqual(daemon.record["floor_unmet"]["available_bytes"], 13 * GIB)
+        self.assertEqual(daemon.record["floor_unmet"]["largest_bytes"], 2 * GIB)
+        daemon.sample(5)
+        self.assertEqual(len(daemon.lines), 2)
+        self.assertEqual(daemon.record["floor_unmets"], 2)
+        self.assertEqual(daemon.record["floor_unmet"]["seq"], 2)
 
 
 class OmlxPidReadingTest(unittest.TestCase):

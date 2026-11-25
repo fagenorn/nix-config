@@ -54,7 +54,7 @@ class MemoryBudgetTest(unittest.TestCase):
         self.assertLessEqual(allowances, b["othersBudgetGiB"])
         for key, value in (
             ("floorSamples", 3), ("floorGraceSeconds", 5), ("fastSampleSeconds", 2), ("slowSampleSeconds", 10),
-            ("floorMarginGiB", 16), ("floorFallGiB", 2), ("runBoundGiB", 24), ("agentSessionsGiB", 5),
+            ("floorMarginGiB", 16), ("floorFallGiB", 2), ("floorMinTreeGiB", 1), ("runBoundGiB", 24), ("agentSessionsGiB", 5),
             ("verifyRunGiB", 4),
         ):
             with self.subTest(key=key):
@@ -197,7 +197,7 @@ class FloorDaemonTest(unittest.TestCase):
         self.assertRegex(command, r"^/nix/store/[0-9a-z]{32}-agent-platform/bin/memory-floor enforce ")
         for flag, key in (
             ("floor-gib", "floorGiB"), ("floor-samples", "floorSamples"), ("grace-seconds", "floorGraceSeconds"),
-            ("margin-gib", "floorMarginGiB"), ("fall-gib", "floorFallGiB"), ("fast-seconds", "fastSampleSeconds"),
+            ("margin-gib", "floorMarginGiB"), ("fall-gib", "floorFallGiB"), ("min-tree-gib", "floorMinTreeGiB"), ("fast-seconds", "fastSampleSeconds"),
             ("slow-seconds", "slowSampleSeconds"), ("run-bound-gib", "runBoundGiB"),
             ("omlx-jetsam-priority", "omlxJetsamPriority"),
         ):
@@ -291,11 +291,11 @@ class GuideTest(unittest.TestCase):
             "~/.omlx/logs/memory-watch.log", "/var/log/memory-floor.log", "/var/db/memory-watch/floor.json",
             "memory_kill", "reason=", "owner=", "root_pid=", "tree_gib=", "available_before_gib=",
             "available_after_gib=", "signals=", "launchd ignores", "without a restart",
-            "JETSAM_PRIORITY_DEFAULT", "launchd's own", "never lowers",
+            "JETSAM_PRIORITY_DEFAULT", "launchd's own", "never lowers", "floor_unmet", "floorMinTreeGiB",
         ):
             with self.subTest(needle=needle):
                 self.assertIn(needle, floor)
-        for needle in ("memory_kill", "jetsam_priority_unset"):
+        for needle in ("memory_kill", "floor_unmet", "jetsam_priority_unset"):
             with self.subTest(alert=needle):
                 self.assertIn(f"- `{needle}`:", self.alerts)
 

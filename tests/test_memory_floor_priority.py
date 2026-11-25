@@ -184,7 +184,7 @@ class PriorityTest(unittest.TestCase):
 
     def test_enforce_refuses_a_declared_priority_outside_the_bands_above_the_default(self):
         base = [
-            "enforce", "--floor-gib", "16", "--run-bound-gib", "24", "--agent-user", "x",
+            "enforce", "--floor-gib", "16", "--run-bound-gib", "24", "--min-tree-gib", "1", "--agent-user", "x",
             "--agent-root", "/r/*", "--record", "/nonexistent/floor.json", "--omlx-jetsam-priority",
         ]
         self.assertEqual(JETSAM_PRIORITY_DEFAULT, 180)
