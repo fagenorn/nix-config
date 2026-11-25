@@ -137,7 +137,7 @@
           omlx-adapter = import ./lib/omlx-check.nix {
             inherit pkgs;
             omlxSource = inputs.omlx-tap;
-            inherit (configure) modelSettings serverSettings steering;
+            inherit (configure) modelSettings serverSettings;
           };
           agent-platform = import ./lib/agent-platform-check.nix {
             inherit pkgs;

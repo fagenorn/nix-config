@@ -86,7 +86,9 @@ let
     "lint-time" = "delivery.lint_time";
     "look-approval" = "delivery.look_approval";
     "look-lint" = "delivery.look_lint";
+    "memory-floor" = "hosts.memory_floor";
     "node-lint" = "delivery.node_lint";
+    "omlx-memory-watch" = "hosts.omlx_memory_watch";
     "owner-actions" = "claims.owner_actions";
     "plan-amend" = "delivery.plan_amend";
     "program-copies" = "delivery.program_copies";
@@ -95,6 +97,7 @@ let
     "release" = "release.release";
     "release-card" = "console.release_card";
     "resolve-project" = "project_contract.resolve_project";
+    "router" = "delivery.router";
     "ruff-lint" = "delivery.ruff_lint";
     "size-lint" = "delivery.size_lint";
     "skill-lint" = "skill_lint";

@@ -143,7 +143,9 @@
     }
   },
   "look-lint": null,
+  "memory-floor": null,
   "node-lint": null,
+  "omlx-memory-watch": null,
   "owner-actions": null,
   "plan-amend": null,
   "pr-create": {
@@ -162,6 +164,7 @@
       "resolve": []
     }
   },
+  "router": null,
   "ruff-lint": null,
   "size-lint": null,
   "skill-lint": null,

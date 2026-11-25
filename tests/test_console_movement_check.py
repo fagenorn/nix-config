@@ -27,7 +27,7 @@ def iso(seconds):
 
 def sprint(sid, *, state="on_track", ball="manager", status_age=40 * MIN, base_age=40 * MIN,
            now_text="building 1 of 7: Importer resumes", sessions=(), issues=(4,), assoc=(),
-           nudged_at=None, ended_at=None, waits=None):
+           nudged_at=None, ended_at=None, waits=None, engine=None):
     return {
         "type": "sprint", "sprint_id": sid, "state": state, "ball": ball, "now_text": now_text,
         "status_at": iso(NOW - status_age), "ended_at": ended_at,
@@ -39,7 +39,8 @@ def sprint(sid, *, state="on_track", ball="manager", status_age=40 * MIN, base_a
             "nudged_at": None if nudged_at is None else iso(nudged_at),
             "base_at": iso(NOW - base_age),
             "waits": {"ci_at": None, "commit_at": None, "release_at": None, "lock_at": None,
-                      **{k: iso(NOW - v) for k, v in (waits or {}).items()}}},
+                      **{k: iso(NOW - v) for k, v in (waits or {}).items()}},
+            "engine": {"moving": False, "waits": []} if engine is None else engine},
     }
 
 
@@ -88,6 +89,17 @@ class MovementCheckTest(unittest.TestCase):
         kw.setdefault("sessions", [session("s1")])
         kw.setdefault("assoc", [("s1", True, NOW - MIN)])
         return sprint("a", **kw)
+
+    def test_an_engine_reading_the_console_publishes_keeps_met_away(self):
+        missing = self.moving()
+        del missing["movement"]["engine"]
+        for label, case in (("moving", self.moving(engine={"moving": True, "waits": []})),
+                            ("waiting", self.moving(engine={"moving": False, "waits": ["checks"]})),
+                            ("missing", missing)):
+            with self.subTest(label):
+                code, out = self.check(view(project(case)))
+                self.assertEqual((75, "waiting"), (code, out["status"]))
+        self.assertEqual(0, self.check(view(project(self.moving())))[0])
 
     def test_a_fresh_sprint_that_reads_moving_with_old_base_signals_is_met(self):
         code, out = self.check(view(project(self.moving())))

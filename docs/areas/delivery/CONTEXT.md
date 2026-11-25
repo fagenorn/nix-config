@@ -73,6 +73,13 @@ The one named result a step's grade produces; the only thing a transition reads.
 **Procedure**:
 One JSON file in the platform package that describes a delivery as a finite state machine: a header (its `format`, an optional keep-alive command, its stops) and a flat list of steps, with no expression and no code. Its prompts are sibling Markdown files.
 
+**Router**:
+The platform command `router` that computes, with no model and no network, the routed set one change is given at one stage: from the change's paths at plan stage and from its diff from implementation on (issue 1509).
+_Avoid_: loader
+
+**Routed set**:
+The router's answer for one change at one stage: the bar, the stack shards its file extensions choose, the project shards whose `governs` globs match its paths, the stage's hint file, the decision records its changed files cite, a one-line index (id and title) of the records of each context-map area its paths match, each routed shard's rule ids, the platform revision and the total size in bytes. It names files and pastes none, and a wide change is never cut (issue 1509).
+
 **Standard**:
 One rule under one heading in a layer file, with a stable id, applied to every change within its layer file's scope: the bar to every change, a stack or project shard to the changes its globs match (issue 1412).
 

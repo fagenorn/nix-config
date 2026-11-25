@@ -23,9 +23,9 @@ Transcripts are large: extract with `jq`/`grep` (user turns, tool calls with the
 - **Navigation**: the agent took long to find information; would a **navigation pointer** or an explicit dependency between files help?
 - **Automated checks**: the agent made a mistake a check could catch. Read the repo's own check command and CI first, so an unwired or broken existing check is the finding. A repo with no **guardrail** (no pre-commit hook and no CI job running lint/typecheck/test) is itself a finding.
 - **Coding standards**: the reviewer missed a mistake. A **mechanical** violation (fixed syntactic pattern, banned API, import shape, file location) gets a deterministic check in the repo's linter, a pre-commit hook or CI, whichever is cheapest. Reserve a written standard for **judgement calls** no check could replace.
-- **Always-loaded guidance**: a large `CLAUDE.md`/`AGENTS.md` (repo or global) holds steering that belongs in standards, a skill or a check.
+- **Always-loaded guidance**: a large `CLAUDE.md`/`AGENTS.md` (repo or global) holds instructions that belong in standards, a skill or a check.
 - **Tool economy**: an expensive tool call, or token-inefficient custom tooling (CLIs, MCPs, `~/.agents/bin` helpers).
-- **No-ops**: instructions in steering files and skills that change no behavior.
+- **No-ops**: instructions in guidance files and skills that change no behavior.
 - **Information access**: crucial information was unavailable (dev server logs, read-only access to a third-party service).
 - **Workflow friction**: a skill or lifecycle helper cost turns: a repeated phase, a refused input, a stall or suspension, a handoff that lost state, or a guard or permission block on a legitimate command.
 

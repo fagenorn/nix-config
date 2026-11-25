@@ -40,3 +40,45 @@ class OmlxDeclarationTest(unittest.TestCase):
         self.assertIn("kickstart system/org.nixos.omlx-models", self.got["activation"])
         self.assertIn(' added" >> ', self.got["fetch"])
         self.assertIn(".restart-needed", self.got["fetch"])
+
+    def test_the_declared_models_are_the_served_set(self):
+        self.assertEqual(
+            set(self.got["models"]),
+            {
+                "GLM-5.3-Flash-MLX-oQ4-MTP",
+                "Qwen3.8-Flash-Next-oQ4e-mtp",
+                "Qwen3.8-Flash-Next-UD-Q4_K_XL",
+                "Qwen3.8-Flash-Next-DFlash2",
+                JARBIRD,
+            },
+        )
+
+    def test_the_downloader_restarts_without_reconfiguring(self):
+        self.assertNotIn("/bin/omlx-configure", self.got["fetch"])
+        self.assertIn("/bin/omlx-restart", self.got["fetch"])
+
+    def test_the_serve_script_gates_the_start_on_the_floor(self):
+        serve = self.got["serve"]
+        gate = next(line for line in serve.splitlines() if " gate " in line)
+        self.assertRegex(gate, r"^/nix/store/[0-9a-z]{32}-agent-platform/bin/memory-floor gate ")
+        self.assertIn("--floor-gib 16 ", gate + " ")
+        self.assertIn("--interval-seconds 2", gate)
+        self.assertLess(serve.index(" gate "), serve.index("sops"))
+        self.assertLess(serve.index(" gate "), serve.index("exec /opt/homebrew/bin/omlx serve"))
+        for forbidden in ("pkill", "kill", "launchctl", "kickstart"):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, gate)
+
+    def test_a_restart_reloads_the_omlx_job_as_root_only_through_the_wrapper(self):
+        self.assertEqual(
+            self.got["reload"].splitlines(),
+            [
+                "/usr/bin/sudo -n /bin/launchctl unload /Library/LaunchDaemons/org.nixos.omlx.plist || true",
+                "/usr/bin/sudo -n /bin/launchctl load -w /Library/LaunchDaemons/org.nixos.omlx.plist || exit",
+                "exec /usr/bin/sudo -n /bin/rm -f /nix/var/nix/gcroots/omlx-held-serve",
+            ],
+        )
+        for forbidden in ("pkill", "kickstart"):
+            self.assertNotIn(forbidden, self.got["reload"])
+        self.assertRegex(self.got["restart"], r"--reload-bin /nix/store/[0-9a-z]{32}-omlx-reload")
+        self.assertIn("--restart-bin /nix/store/", self.got["restart"])

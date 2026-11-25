@@ -567,7 +567,7 @@ class GoalRouteTest(Case):
             "now_until": None,
             "stated_at": at, "started_by": None,
             "age_text": "goal set just now", "manager_text": "managers are not available on this host yet",
-            "manager_state": "unavailable", "manager_until": None, "retry": False,
+            "manager_state": "unavailable", "manager_until": None, "retry": False, "move": False,
             "progress": None, "progress_text": None, "status": None, "status_at": None,
             "next": None, "milestone": None, "tracker_url": None, "issues": [], "waiting": 0,
             "sessions": [], "messages": [], "approval": None,
@@ -577,7 +577,7 @@ class GoalRouteTest(Case):
             "live_faults": [], "permission_text": None,
             "movement": {"sessions": [], "nudged_at": None,
                          "base_at": stated.replace(microsecond=stated.microsecond // 1000 * 1000).isoformat(),
-                         "issues": [],
+                         "issues": [], "engine": {"moving": False, "waits": []},
                          "waits": {"ci_at": None, "commit_at": None, "release_at": None,
                                    "lock_at": None}}}])
         self.assertEqual(view_of(svc)["recent_projects"][0], "owner/p01")

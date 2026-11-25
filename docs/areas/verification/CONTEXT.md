@@ -10,7 +10,7 @@ Verification is what happens after a merge for an issue whose evidence only the 
 ## Language
 
 **Check**:
-One named test a verify block asks a host to settle for a held issue. A check runs a contract command, a committed script or a built-in probe, or puts a question or action for the owner. The runner runs one unattended only when it is evidence with no effects and any command it names is a declared verification command; every other check waits for the owner.
+One named test a verify block asks a host to settle for a held issue. A check runs a contract command, a committed script or a built-in probe, or puts a question or action for the owner. The runner runs one unattended only when it is evidence with no effects and any command it names is a declared verification command; every other check waits for the owner. A run a signal ended is neither a pass nor a fail: the runner starts it once more after a back-off and then holds the check until the next pass, with a longer back-off each pass it stays interrupted.
 _Avoid_: assertion
 
 **Held issue**:

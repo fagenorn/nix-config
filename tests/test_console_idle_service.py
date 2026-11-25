@@ -97,6 +97,55 @@ class IdleCase(ReviveCase):
         self.listed_now(sid)
         return svc, sid
 
+    def record_stop(self, session_id, profile):
+        """Note one stop: its profile, the launches so far, and whether the ingest lock was free."""
+        self.stops.append((session_id, profile, len(self.launches.calls)))
+        if self.svc is not None:
+            got = self.svc._ingest.acquire(blocking=False)
+            self.held.append(got)
+            if got:
+                self.svc._ingest.release()
+
+    def stopper(self, session_id, profile):
+        self.record_stop(session_id, profile)
+        self.listed.pop(session_id, None)
+
+    def listed_out(self, stopper=None, **overrides):
+        """`start_out` with a stopper and `s-1` listed on the profile the manager was launched on."""
+        svc, sid = self.start_out(stopper=stopper or self.stopper, **overrides)
+        self.svc = svc
+        if "s-1" in self.listed:
+            self.listed["s-1"] = sessions.Observation(
+                "s-1", "/srv/p01", 1, "idle", None, self.name(sid), None, "work")
+        return svc, sid
+
+    def seen_row(self, svc, sid, session_id="s-1", state="idle"):
+        self.append(svc, [("session.seen", "owner/p01", {
+            "session_id": session_id, "cwd": "/srv/p01", "repo": "/srv/p01", "state": state,
+            "name": self.name(sid)})])
+
+    def hooked_listing(self):
+        """A listing that runs `on_listing` once, then answers as `listed` stands."""
+        def listing():
+            hook, self.on_listing = self.on_listing, None
+            if hook is not None:
+                hook()
+            return dict(self.listed)
+        return listing
+
+    def observed(self, session_id="s-1", sid=None, status="idle", name=True, profile="work",
+                 updated_ms=None):
+        return sessions.Observation(session_id, "/srv/p01", 1, status, None,
+                                    self.name(sid or self.sid) if name else None, updated_ms,
+                                    profile)
+
+    def assert_move_ended(self, svc, sid, cancelled=True):
+        self.assertEqual([c.profile for c in self.launches.calls], ["work"])
+        self.assertEqual(len(self.rows("manager.started")), 1)
+        self.assertEqual(sid in svc._move_cancelled, cancelled)
+        self.assertNotIn(sid, svc._launching)
+        self.assertNotIn(MOVED, self.said(svc))
+
 
 class IdleServiceTest(IdleCase):
     def test_an_idle_continue_to_a_bypass_manager_comes_from_a_bypass_sender(self):
@@ -614,33 +663,6 @@ class IdleServiceTest(IdleCase):
 
 
 class IdleQuotaTest(IdleCase):
-    def record_stop(self, session_id, profile):
-        """Note one stop: its profile, the launches so far, and whether the ingest lock was free."""
-        self.stops.append((session_id, profile, len(self.launches.calls)))
-        if self.svc is not None:
-            got = self.svc._ingest.acquire(blocking=False)
-            self.held.append(got)
-            if got:
-                self.svc._ingest.release()
-
-    def stopper(self, session_id, profile):
-        self.record_stop(session_id, profile)
-        self.listed.pop(session_id, None)
-
-    def listed_out(self, stopper=None, **overrides):
-        """`start_out` with a stopper and `s-1` listed on the profile the manager was launched on."""
-        svc, sid = self.start_out(stopper=stopper or self.stopper, **overrides)
-        self.svc = svc
-        if "s-1" in self.listed:
-            self.listed["s-1"] = sessions.Observation(
-                "s-1", "/srv/p01", 1, "idle", None, self.name(sid), None, "work")
-        return svc, sid
-
-    def seen_row(self, svc, sid, session_id="s-1", state="idle"):
-        self.append(svc, [("session.seen", "owner/p01", {
-            "session_id": session_id, "cwd": "/srv/p01", "repo": "/srv/p01", "state": state,
-            "name": self.name(sid)})])
-
     def test_a_listed_manager_waiting_on_quota_is_stopped_and_taken_over_on_an_account_with_room(self):
         svc, sid = self.listed_out()
         self.poll(svc, 300)
@@ -740,28 +762,6 @@ class IdleQuotaTest(IdleCase):
                 if name == "the target loses room during the stop":
                     self.gone(svc)
                     self.assert_waits_to_wake(svc, sid)
-
-    def hooked_listing(self):
-        """A listing that runs `on_listing` once, then answers as `listed` stands."""
-        def listing():
-            hook, self.on_listing = self.on_listing, None
-            if hook is not None:
-                hook()
-            return dict(self.listed)
-        return listing
-
-    def observed(self, session_id="s-1", sid=None, status="idle", name=True, profile="work",
-                 updated_ms=None):
-        return sessions.Observation(session_id, "/srv/p01", 1, status, None,
-                                    self.name(sid or self.sid) if name else None, updated_ms,
-                                    profile)
-
-    def assert_move_ended(self, svc, sid, cancelled=True):
-        self.assertEqual([c.profile for c in self.launches.calls], ["work"])
-        self.assertEqual(len(self.rows("manager.started")), 1)
-        self.assertEqual(sid in svc._move_cancelled, cancelled)
-        self.assertNotIn(sid, svc._launching)
-        self.assertNotIn(MOVED, self.said(svc))
 
     def test_a_move_whose_listing_after_the_stop_cannot_be_read_completely_starts_no_second_manager(self):
         def registry(directories, *args, strict=False, **kwargs):
@@ -936,6 +936,26 @@ class IdleQuotaTest(IdleCase):
         self.assertEqual(self.revives(), [])
         self.assertEqual([call.profile for call in self.launches.calls], ["work", "home"])
         self.assertIs(self.launches.calls[-1].takeover, True)
+
+    def test_a_manager_whose_record_lost_its_name_to_a_gone_row_and_a_resume_hook_is_moved(self):
+        """A gone row drops the folded session and the next hook rebuilds it with no name.
+
+        The registry readings that follow are older than that hook, so they were skipped before
+        the name was compared and the manager stayed unlisted.
+        """
+        svc, sid = self.listed_out()
+        self.listed["s-1"] = replace(self.listed["s-1"], updated_ms=int((T0 + 100) * 1000))
+        self.gone(svc)
+        self.append(svc, [("session.hook", "owner/p01", {
+            "event": "SessionStart", "source": "resume", "session_id": "s-1", "cwd": "/srv/p01",
+            "repo": "/srv/p01", "received_ms": int((T0 + 200) * 1000)})])
+        with mock.patch.object(sessions, "read_session_registry",
+                               lambda *args, **kwargs: dict(self.listed)):
+            svc.poll_sessions()
+        self.poll(svc, 300)
+        self.assertEqual(self.stops, [("s-1", "work", 1)])
+        self.assertEqual([c.profile for c in self.launches.calls], ["work", "home"])
+        self.assertIs(self.rows("manager.started")[-1]["moved"], True)
 
     def test_a_gone_manager_waits_when_the_other_account_gives_no_reason_to_move(self):
         cases = {

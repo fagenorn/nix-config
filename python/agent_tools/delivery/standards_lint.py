@@ -68,6 +68,13 @@ characters, over 100`, and `no planning rule` when the section holds none.
    A marker naming no id is no problem here. `lint(repo, platform)`, which the conformance
    check runs, returns the first four checks and these suppression problems (the checks that
    need no enforcer), so every caller fails an unknown id.
+6. The routed-set enforcer of rule `standard:B26`, which only the never-rise check
+   (`never_rise_enforcers`) runs: `lint` and this command never judge it. A path of the
+   snapshot whose routed set (`routing.single_path_bytes`: the bar, its stack and
+   project shards and its areas' decision index) is over 24,576 bytes is a violation
+   `B26 <path>:<bytes>` of measure 1, so a path already over on the merge base does not rise
+   when it grows. A snapshot with no path reads nothing; a platform standards directory with
+   no bar, or a routed stack shard it lacks, raises `EnforcerFailed`.
 
 With `--index` the problems still print and set exit status 1, and the rule index
 follows them on stdout, computed on the run and written to no file: for each rule
@@ -89,14 +96,18 @@ import re
 import sys
 from pathlib import Path
 
-from agent_tools.delivery import citation_lint, hint_phases
+from agent_tools.delivery import citation_lint, hint_phases, routing
 from agent_tools.delivery.context_map_lint import CODE_RE, LINK_RE
+from agent_tools.delivery.never_rise import Enforcer, EnforcerFailed, Snapshot, Violation
+from agent_tools.delivery.routing import index_table
 from agent_tools.delivery.rule_ids import (
     HEADING_LINE, REASON_NO_ID, REASON_TWO_IDS, SECOND_ID, layer_problems, numbered_items,
     prefix_table, scan)
 from agent_tools.project_contract import agent_platform
 
 COMMAND = "standards-lint"
+ROUTED_SET_RULE = "B26"
+ROUTED_SET_BUDGET = 24576
 INDEX_MAX_LINES = 40
 SHARD_MAX_BYTES = 8192
 HEADING_MAX_CHARS = 100
@@ -201,26 +212,6 @@ def governs_problems(shard: str, cell: str) -> list[str]:
     return problems
 
 
-def index_table(text: str) -> list[list[str]]:
-    """The rows of the first run of rendered `|` lines, separator rows dropped, the header first.
-
-    A line inside a fence or an HTML block (a comment included) is not rendered and breaks the run.
-    """
-    rows: list[list[str]] = []
-    previous = None
-    for number, line, _ in scan(text):
-        line = line.strip()
-        if not line.startswith("|") or (previous is not None and number != previous + 1):
-            if rows:
-                break
-            continue
-        previous = number
-        cells = [cell.strip() for cell in line.strip("|").split("|")]
-        if not all(set(cell) <= set("-: ") for cell in cells):
-            rows.append(cells)
-    return rows
-
-
 def index_problems(repo: Path) -> list[str]:
     directory = repo / LAYER2_DIR
     if not directory.is_dir():
@@ -302,6 +293,33 @@ def lint(repo: Path, platform: Path) -> list[str]:
     """The problems that need no registered enforcer: the layers' shapes, then each suppression
     naming an id in no applicable layer. Raises `ValueError` for a root `git` cannot list."""
     return shape_problems(repo, platform) + citation_lint.suppression_problems(repo, platform)
+
+
+def routed_set_violations(snapshot: Snapshot) -> list[Violation]:
+    if not snapshot.paths:
+        return []
+    try:
+        platform = routing.load_platform(agent_platform.standards_dir())
+        project = routing.read_project(
+            {path: content for path, content in snapshot.contents.items() if routing.is_input(path)})
+        sizes: dict[tuple, int] = {}
+        found = []
+        for path in sorted(snapshot.paths):
+            key = (routing.stack_shards(path),
+                   tuple(s.path for s in project.shards
+                         if any(routing.glob_matches(g, path) for g in s.globs)),
+                   tuple(a.name for a in project.areas
+                         if any(routing.glob_matches(g, path) for g in a.globs)))
+            if key not in sizes:
+                sizes[key] = routing.single_path_bytes(project, platform, path)
+            if sizes[key] > ROUTED_SET_BUDGET:
+                found.append(Violation(ROUTED_SET_RULE, path, sizes[key], 1))
+    except ValueError as error:
+        raise EnforcerFailed(ROUTED_SET_RULE, str(error)) from error
+    return found
+
+
+ROUTED_SET_ENFORCER = Enforcer(ROUTED_SET_RULE, routed_set_violations, per_file=True)
 
 
 def main(argv: list[str] | None = None) -> int:

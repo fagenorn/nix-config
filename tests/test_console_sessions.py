@@ -498,6 +498,23 @@ class PollTest(unittest.TestCase):
             self.poll(states, {"s1": observation("s1", "busy", 2500)}),
             ([seen("s1", "working")], frozenset()))
 
+    def test_an_older_reading_restores_a_missing_or_changed_name_and_keeps_the_folded_state(self):
+        for folded in (None, "old"):
+            for updated in (1500, 2000, None):
+                with self.subTest(name=folded, updated=updated):
+                    states = {"s1": SessionState("s1", "/srv/p00", "/srv/p00", "waiting_permission",
+                                                 folded, 1, "t1", 2000)}
+                    obs = Observation("s1", "/srv/p01", 10, "busy", None, "n", updated)
+                    self.assertEqual(
+                        self.poll(states, {"s1": obs}),
+                        ([(SEEN, "owner/p00", {"session_id": "s1", "cwd": "/srv/p00",
+                                               "repo": "/srv/p00", "state": "waiting_permission",
+                                               "name": "n"})], frozenset()))
+        with self.subTest(state="ended"):
+            states = {"s1": SessionState("s1", "/srv/p00", "/srv/p00", ENDED, None, 1, "t1", 2000)}
+            obs = Observation("s1", "/srv/p00", 10, "idle", None, "n", 1999)
+            self.assertEqual(self.poll(states, {"s1": obs}), ([], frozenset()))
+
     def test_an_ended_session_is_not_brought_back_by_an_older_reading(self):
         states = {"s1": sstate("s1", ENDED, 2000)}
         self.assertEqual(self.poll(states, {"s1": observation("s1", "idle", 1999)}),
