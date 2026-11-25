@@ -169,6 +169,7 @@ agent-workflow-tests *args:
     tests/test_engine_check.py \
     tests/test_engine_direct_procedures.py \
     tests/test_engine_graders.py \
+    tests/test_engine_findings.py \
     tests/test_engine_ledger.py \
     tests/test_engine_core.py \
     tests/test_engine_commands.py \

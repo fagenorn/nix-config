@@ -32,9 +32,9 @@ SETUP_WALK = [("contract", "ok"), ("review", "clear"), ("preflight", "clear"), (
 
 
 FINDING = {"severity": "important", "file": "fixture/farewell.py:2", "failing_input": "farewell('')",
-           "summary": "s"}
+           "summary": "s", "kind": "other"}
 UNNAMED_LITE = dict(CLEAN_LITE, verdict="findings",
-                    findings=[{"severity": "important", "file": "", "failing_input": "", "summary": "s"}])
+                    findings=[{"severity": "important", "file": "", "failing_input": "", "summary": "s", "kind": "other"}])
 CLEAN_FULL = {key: value for key, value in CLEAN_LITE.items() if key != "escalate"}
 CLEAN_REREVIEW = {"verdict": "pass", "findings": []}
 SHA = "a" * 40
@@ -58,7 +58,7 @@ def full_findings() -> dict:
 
 def committing(path: str, text: str, **reply) -> dict:
     """A fix reply that commits `text` to `path`: the stub reports the commit it made."""
-    return {"reply": {"status": "done", "notes": "n", "tests": [], **reply},
+    return {"reply": {"status": "done", "notes": "n", "tests": [], "declines": [], **reply},
             "commit": {"path": path, "text": text}}
 
 
@@ -464,7 +464,7 @@ class ReviewRouteTest(Scenario):
         self.assertNotIn("lite-fix", self.keys(run))
 
     def test_a_fix_that_reports_no_commit_stops_direct_fix(self):
-        unfixed = {"status": "done", "start_head": SHA, "commit": "", "notes": "n", "tests": []}
+        unfixed = {"status": "done", "start_head": SHA, "commit": "", "notes": "n", "tests": [], "declines": []}
         run = StubbedRun(self, replies={"lite-review": lite_findings(), "lite-fix": unfixed})
 
         self.finish(run, "direct-fix", "owner-decision")
@@ -818,7 +818,7 @@ class CoverageTest(Landing):
             {"rollup": []},
             {"rollups": [RED, GREEN], "replies": {"ci-fix": sync_fix, "ci-review": CLEAN_REREVIEW}},
             {"rollups": [RED], "replies": {
-                "ci-fix": {"reply": {"status": "done", "notes": "n", "tests": []}, "same_head": {}},
+                "ci-fix": {"reply": {"status": "done", "notes": "n", "tests": [], "declines": []}, "same_head": {}},
                 "stale": {"verdict": "real", "reran": [], "notes": "n"}}},
             {"advance_main": 1, "rollups": [RED, GREEN], "replies": {"presync": SYNCED}},
             {"rollup": UNNAMED},
