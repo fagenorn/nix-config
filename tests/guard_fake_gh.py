@@ -136,7 +136,7 @@ def check_run_refusals(slug, head):
 
 
 def check_run_reads(slug, run_id=55, branch="main"):
-    """The `gh` arguments the check makes, in order, for run `run_id` of `slug` and pull request 7."""
+    """The `gh` arguments the check makes, in order, for run `run_id` of `slug` and its one listed pull request."""
     base = f"repos/{slug}"
     return [["api", f"{base}/actions/runs/{run_id}"], ["api", f"{base}/actions/runs/{run_id}/jobs?per_page=100"],
             ["api", f"{base}/pulls/7"],
