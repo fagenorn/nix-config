@@ -13,7 +13,7 @@ import unittest
 from pathlib import Path
 
 from agent_tools.claims import forge_markers
-from agent_tools.delivery import engine_session
+from agent_tools.delivery import engine_session, holding
 from agent_tools.project_contract import resolve_project
 from agent_tools.verification import verify_block
 from tests.engine_fixture import FixtureProject
@@ -727,6 +727,11 @@ HOLD_STEPS = {"hold-facts", "hold-look", "hold-draft", "hold-gate", "regrade", "
               "hold-post", "hold-label", "once-run", "close"}
 
 
+HUMAN_CHECK = {"ac": "AC3", "kind": "human", "host": "any", "when": NOT_BEFORE,
+               "run": {"ask": "Does the greeting read well?"}, "reason": "taste"}
+SPLIT_BODY = EVIDENCE_BODY + "- [ ] [human] the greeting reads well\n"
+
+
 def hold_comments(run: StubbedRun) -> list[dict]:
     """The stored comments of the issue that carry a verify fence."""
     return [comment for comment in run.forge.stored() if "```verify" in comment["body"]]
@@ -832,6 +837,57 @@ class CloseOutTest(Landing):
         self.assertTrue([e for entry in lint["lints"] for e in entry["errors"]
                          if "checks[0].when.not_before" in json.dumps(e)], lint)
         self.assertFalse([t for t in walk if t[0] in ("split", "hold-post")])
+
+    def test_a_run_cut_after_the_hold_comment_and_continued_leaves_one_hold_comment_and_one_split_issue(self):
+        run = StubbedRun(self, body=SPLIT_BODY, blocks=(50,), fail_once=("add_label:needs-verification",),
+                         replies={"hold-draft": drafted(EVIDENCE_CHECK, HUMAN_CHECK)})
+
+        self.finish(run, "hold", "owner-decision")
+
+        merge = run.pulls()[0]["mergeCommit"]["oid"]
+        evidence = {"v": 1, "merge": merge, "checks": [EVIDENCE_CHECK]}
+        self.assertEqual(len(hold_comments(run)), 1)
+        self.assertEqual(verify_block.parse_block(hold_comments(run)[0]["body"]), (evidence, []))
+        self.assertFalse(held_label(run))
+        created = run.forge.issue()["created"]
+        self.assertEqual(len(created), 1)
+        self.assertEqual(created[0]["body"].split("\n", 1)[0], holding.split_line(41, "AC3", merge))
+        self.assertEqual(created[0]["labels"], ["needs-verification"])
+        self.assertEqual(len(created[0]["comments"]), 1)
+        self.assertEqual(verify_block.parse_block(created[0]["comments"][0]["body"]),
+                         ({"v": 1, "merge": merge, "checks": [HUMAN_CHECK]}, []))
+        first = self.child(run, "close-out")
+        walk = run.transitions(first)
+        for transition in (("split", "split"), ("hold-post", "posted"), ("hold-label", "error")):
+            self.assertIn(transition, walk)
+        self.assertEqual(len(run.claims()), 1)
+
+        self.finish(run, "done")
+
+        self.assertEqual(len(run.runs()), 1)
+        root = run.runs()[0]
+        continued = [e for e in run.events(root) if e["event"] == "run_continued"]
+        self.assertEqual([e["step"] for e in continued], ["closing"])
+        self.assertEqual(run.transitions(root)[-2:], [("closing", "hold"), ("closing", "done")])
+        self.assertEqual(len(hold_comments(run)), 1)
+        self.assertEqual(verify_block.parse_block(hold_comments(run)[0]["body"]), (evidence, []))
+        self.assertEqual(len(run.forge.issue()["created"]), 1)
+        self.assertEqual(len(run.forge.issue()["created"][0]["comments"]), 1)
+        self.assertTrue(held_label(run))
+        second = self.child(run, "close-out", last=True)
+        self.assertNotEqual(second, first)
+        children = [{"ac": "AC3", "issue": created[0]["number"]}]
+        self.assertEqual(self.stored(second, "split")["children"], children)
+        self.assertEqual(self.stored(first, "split")["children"], children)
+        self.assertEqual(self.stored(second, "hold-post")["comment_id"], self.stored(first, "hold-post")["comment_id"])
+        second_walk = run.transitions(second)
+        for transition in (("hold-label", "labelled"), ("once-run", "ran"), ("close", "open-criteria")):
+            self.assertIn(transition, second_walk)
+        self.assertEqual([r["issue"] for r in self.stored(second, "once-run")["runs"]], [created[0]["number"], 41])
+        self.assertEqual(len(run.pulls()), 1)
+        self.assertEqual(run.forge.issue()["state"], "open")
+        self.assertEqual(run.claims(), [])
+        self.assertFalse(run.worktree_path.exists())
 
     def test_a_continue_after_a_failed_release_resumes_landing_and_closes_out(self):
         run = StubbedRun(self, lock_release_fails=True)

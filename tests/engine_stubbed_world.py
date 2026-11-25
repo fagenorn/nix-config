@@ -24,7 +24,8 @@ at `stolen_sha`), and `lock_release_fails` makes every compare-and-swap delete o
 
 `blocks` is the issue numbers the issue blocks (the answer to the hold path's blocking read; none by
 default). The world also answers the `needs-verification` label creation of the hold path and of its
-split children, and registers no `gh auth status`, so the close-out's `verify-pending run` does nothing.
+split children, and registers no `gh auth status`, so the close-out's `verify-pending run` does nothing. `fail_once` is the tracker's one-shot
+failures, as `ForgeWorld.comment_store` takes them (a bare operation kind, or `add_label:<label>` for one label).
 """
 
 from __future__ import annotations
@@ -99,7 +100,7 @@ class StubbedRun:
                  replies: dict | None = None, review_code: list | None = None,
                  conditions: dict | None = None, required_checks=FixtureProject.REQUIRED_CHECKS,
                  rollup: list | None = None, forge_events=(), lock_release_fails: bool = False,
-                 before_pull_request: bool = False, blocks=()) -> None:
+                 before_pull_request: bool = False, blocks=(), fail_once=()) -> None:
         self.test = test_case
         self.issue = issue
         self.title = title
@@ -112,7 +113,7 @@ class StubbedRun:
                                       before_pull_request=before_pull_request)
         self.forge = ForgeWorld(test_case)
         slug = self.fixture.slug
-        self.forge.comment_store(slug, issue, comments, labels=list(labels))
+        self.forge.comment_store(slug, issue, comments, labels=list(labels), fail_once=list(fail_once))
         self._respond(slug, issue, title, state, labels, body, list(pulls), list(blocks))
         self.tmp = self.world.tmp / "stubbed-run"
         self.tmp.mkdir()

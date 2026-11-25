@@ -50,7 +50,9 @@ number (its `comments`, ids from the store's one counter, kept in that created e
 `comments` member is left to the registered responses), and the GraphQL listing also returns each open created issue
 labelled `needs-verification` with its comments; `fail_once` names operations
 (`graphql`, `add_label`, `remove_label`, `close`, `create_issue`, `list_issues`, `post`, `edit`)
-that each answer `HTTP 502` once and change nothing; a created issue can be closed by number
+that each answer `HTTP 502` once and change nothing (a bare kind is matched first; `add_label:<label>` and
+`remove_label:<label>` fail only that operation on that label, so the claim's own `in-progress` add is left
+alone); a created issue can be closed by number
 and keeps its `state`; the GraphQL comment nodes carry `fullDatabaseId` (a BigInt, so a string) and no `databaseId`,
 which is a 32-bit Int the forge cannot fill for today's comment ids. The GraphQL issue node carries `comments.totalCount` (every stored comment) and only the last 100
 comment nodes, as the forge does for `comments(last: 100)`, and the issues object carries a `pageInfo` with no next page. `host_clock`
@@ -439,8 +441,10 @@ if tool == "gh" and (state / "store.json").exists():
                 if matches:
                     store["cursor"] = cursor + 1
                 name = {"patch": "edit"}.get(kind, kind)
-                if name in store.get("fail_once", []):
-                    store["fail_once"].remove(name)
+                fails = store.get("fail_once", [])
+                hit = next((f for f in (name, name + ":" + str(target)) if f in fails), None)
+                if hit is not None:
+                    fails.remove(hit)
                     save(store)
                     sys.stderr.write("gh: Server Error (HTTP 502)\\n")
                     sys.exit(1)

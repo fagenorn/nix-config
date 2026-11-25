@@ -17,6 +17,7 @@ from io import StringIO
 from unittest import mock
 
 from agent_tools.delivery import closing, holding
+from agent_tools.system import forge_api
 from agent_tools.verification import verify_block
 
 from .forge_world import ForgeWorld
@@ -546,6 +547,22 @@ class HoldLabelTest(WriteTest):
         self.assertEqual(self.hold("hold-labelled", repo=SLUG, issue=ISSUE), (0, {"verdict": "labelled"}))
         self.assertEqual(self.forge.issue()["labels"], ["needs-verification"])
         self.assertEqual(len(self.posts(f"issues/{ISSUE}/labels")), 1)
+
+
+    def test_a_label_scoped_fail_once_fails_only_that_label(self):
+        self.forge.comment_store(SLUG, ISSUE, [], labels=[], fail_once=["add_label:needs-verification"])
+        self.forge.respond("gh", LABEL_CREATE)
+        self.env = store_gh(self.forge, SPLIT_BODY)
+
+        with mock.patch.dict(os.environ, self.env):
+            forge_api.add_label(SLUG, ISSUE, "in-progress")
+        failed = self.hold("hold-label", repo=SLUG, issue=ISSUE)
+        again = self.hold("hold-label", repo=SLUG, issue=ISSUE)
+
+        self.assertEqual(failed[0], 1)
+        self.assertEqual(failed[1]["verdict"], "error")
+        self.assertEqual(again, (0, {"verdict": "labelled"}))
+        self.assertEqual(self.forge.issue()["labels"], ["in-progress", "needs-verification"])
 
 
 class HoldSplitTest(WriteTest):
