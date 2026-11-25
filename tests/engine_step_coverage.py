@@ -6,9 +6,10 @@ closes it, when the first test is about to run) and which steps the module's run
 a union across calls). `check` compares the visited steps with the steps the shipped procedures
 declare, but only when the runner selected every test of the module: a run of part of the module
 checks nothing, while a selected test that never ran (a `setUpClass` that skipped) still counts.
+A check judges only the procedures it names: a visited step of another procedure is ignored.
 `test_ids` names the module's tests with a fresh loader, so a `-k` filter on the shared default loader
 cannot narrow it, and leaves out each test a decorator skips: a decorator skip is part of the module's
-shape, so the check then fails if the skip lost a step.
+shape, so the check then fails if the skip lost a step. It names only the tests of `base`.
 """
 
 from __future__ import annotations
@@ -56,7 +57,8 @@ class StepCoverage:
             return
         declared = self.declared()
         unvisited = sorted(f"{procedure}.{step}" for procedure, step in declared - self._recorded)
-        undeclared = sorted(f"{procedure}.{step}" for procedure, step in self._recorded - declared)
+        undeclared = sorted(f"{procedure}.{step}" for procedure, step in self._recorded - declared
+                             if procedure in self._names)
         if unvisited or undeclared:
             raise AssertionError(f"steps no run visited: {unvisited}; steps no procedure declares: {undeclared}")
 
@@ -69,10 +71,11 @@ def _flattened(suite: unittest.TestSuite) -> Iterable[unittest.TestCase]:
             yield test
 
 
-def test_ids(module: types.ModuleType) -> set[str]:
+def test_ids(module: types.ModuleType, base: type[unittest.TestCase] = unittest.TestCase) -> set[str]:
     ids = set()
     for test in _flattened(unittest.TestLoader().loadTestsFromModule(module)):
         method = getattr(test, test._testMethodName, None)
-        if not (getattr(test, "__unittest_skip__", False) or getattr(method, "__unittest_skip__", False)):
+        skipped = getattr(test, "__unittest_skip__", False) or getattr(method, "__unittest_skip__", False)
+        if isinstance(test, base) and not skipped:
             ids.add(test.id())
     return ids

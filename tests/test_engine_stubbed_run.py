@@ -37,7 +37,7 @@ def setUpModule() -> None:
 
 
 def tearDownModule() -> None:
-    STEPS.check(test_ids(sys.modules[__name__]))
+    STEPS.check(test_ids(sys.modules[__name__], Scenario))
 
 PROCEDURES = Path(__file__).resolve().parents[1] / "python/agent_tools/delivery/procedures"
 STEPS = StepCoverage(PROCEDURES)
@@ -855,7 +855,9 @@ class StepCoverageTest(Scenario):
 
     def test_the_module_teardown_fails_naming_a_declared_step_no_run_visited(self):
         module = sys.modules[type(self).__module__]
-        coverage = StepCoverage(PROCEDURES)
+        scope = {procedure for procedure, _ in module.STEPS.declared()}
+        self.assertEqual(scope, {"setup", "deliver", "direct", "verify", "land", "close-out"})
+        coverage = StepCoverage(PROCEDURES, tuple(sorted(scope)))
         for test_id in test_ids(module):
             coverage.select(test_id)
         coverage.record(coverage.declared() - {("direct", "escalated-settled")})
@@ -907,6 +909,27 @@ class StepCoverageTest(Scenario):
             coverage.check([self.ID])
 
         self.assertIn("retired-step", str(raised.exception))
+
+    def test_a_visited_step_of_a_procedure_the_coverage_does_not_name_is_ignored(self):
+        coverage = StepCoverage(PROCEDURES, ("direct",))
+        coverage.select(self.ID)
+        coverage.record(coverage.declared() | {("land-attempt", "renew")})
+
+        result = coverage.check([self.ID])
+
+        self.assertIsNone(result)
+
+    def test_the_module_test_ids_leave_out_a_test_not_of_the_given_base(self):
+        fake = types.ModuleType("fake")
+        base = type("Base", (unittest.TestCase,), {"__module__": "fake"})
+        fake.T = type("T", (base,), {"__module__": "fake", "test_a": lambda self: None})
+        fake.U = type("U", (unittest.TestCase,), {"__module__": "fake", "test_b": lambda self: None})
+
+        kept = test_ids(fake, base)
+        every = test_ids(fake)
+
+        self.assertEqual(kept, {"fake.T.test_a"})
+        self.assertEqual(every, {"fake.T.test_a", "fake.U.test_b"})
 
     def test_a_step_id_visited_in_one_procedure_does_not_cover_the_same_id_in_another(self):
         coverage = StepCoverage(PROCEDURES)
