@@ -77,6 +77,31 @@ class SuiteTestFailuresTest(unittest.TestCase):
         code, report = failures(world, "test_x")
         self.assertEqual((code, report["failures"], report["unattributed"]), (1, [105], []))
 
+    def test_a_summary_that_disagrees_with_its_rows_is_not_a_pass(self):
+        world = SuiteWorld()
+        world.fail(105, log=world.log(rows=(("tests/a.py", True),), summary=(2, 1, 1)))
+        code, report = failures(world, "test_x")
+        self.assertEqual((code, report["failures"], report["unattributed"]), (1, [], [105]))
+
+    def test_a_timing_row_inside_a_member_block_is_not_read(self):
+        world = SuiteWorld()
+        stamp = "2026-11-18T00:00:01.1234567Z "
+        inside = stamp + "suite-runner:     1.0s wall     1.0s cpu failed tests/b.py\n"
+        text = world.log().replace(stamp + "tests/a.py output\n",
+                                   stamp + "tests/a.py output\n" + inside, 1)
+        world.fail(106, log=text)
+        code, report = failures(world, "test_x")
+        self.assertEqual((code, report["failures"], report["unattributed"]), (0, [], []))
+
+    def test_a_run_before_the_merge_run_at_the_same_instant_is_not_counted(self):
+        world = SuiteWorld()
+        world.after_ids = [99, *world.after_ids]
+        created = world.after_created
+        world.after_created = lambda run_id: world.STAMP if run_id == 99 else created(run_id)
+        world.fail(100, log=failure_log("ERROR: test_x (tests.b.T.test_x)"))
+        code, report = failures(world, "test_x", n=1)
+        self.assertEqual((code, report["after"], report["failures"]), (1, [100], [100]))
+
     def test_a_subtest_failure_names_the_test(self):
         world = SuiteWorld()
         world.fail(107, log=failure_log("FAIL: test_x (tests.b.T.test_x) (tool='node')"))

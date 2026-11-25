@@ -1,5 +1,4 @@
 """`agent_tools.verification.verify_checks`: the committed verify checks of issue 638."""
-import ast
 import contextlib
 import dataclasses
 import http.server
@@ -7,6 +6,7 @@ import io
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import socket
@@ -48,46 +48,67 @@ def committed_mode(path):
                           capture_output=True, text=True, check=True).stdout.split(" ")[0]
 
 
-MODULE_RUN = re.compile(r"-m (agent_tools(?:\.[A-Za-z_]\w*)+)(?:[ \t]+([a-z][a-z0-9-]*))?")
-SUBCOMMAND = re.compile(r"[a-z][a-z0-9-]*")
+COMMAND_ASSIGNMENT = re.compile(r"[A-Za-z_]\w*=")
+INTERPRETER = re.compile(r"python[\d.]*|\$\{?\w+\}?")
 
 
 def launcher_table(nix_text: str) -> dict[str, str]:
     return dict(re.findall(r'^\s*"([a-z0-9-]+)" = "([a-z_]+\.[a-z_0-9]+)";', nix_text, re.M))
 
 
-def _named_module(lines: list[str], launchers: Mapping[str, str]):
-    found = MODULE_RUN.search("\n".join(lines))
-    if found:
-        return found.group(1), found.group(2)
-    for line in lines:
-        tokens = line.split()
-        for index, token in enumerate(tokens):
-            if token in launchers:
-                after = tokens[index + 1] if index + 1 < len(tokens) else ""
-                return (f"agent_tools.{launchers[token]}",
-                        after if SUBCOMMAND.fullmatch(after) else None)
+def _invocation(line: str, launchers: Mapping[str, str]):
+    """(module, arguments) of the agent_tools command a shell line runs, or None.
+
+    The command is the first word once leading assignments and `exec` are dropped: a launcher
+    from the table, or an interpreter run with `-m agent_tools.<module>`."""
+    try:
+        words = shlex.split(line, comments=True)
+    except ValueError:
+        return None
+    while words and (COMMAND_ASSIGNMENT.match(words[0]) or words[0] == "exec"):
+        words.pop(0)
+    if not words:
+        return None
+    if words[0] in launchers:
+        return f"agent_tools.{launchers[words[0]]}", words[1:]
+    if INTERPRETER.fullmatch(words[0]) and "-m" in words:
+        at = words.index("-m")
+        if at + 1 < len(words) and words[at + 1].startswith("agent_tools."):
+            return words[at + 1], words[at + 2:]
+    return None
+
+
+def _named_module(text: str, launchers: Mapping[str, str]):
+    """(module, subcommand) of a script's first agent_tools command; a first argument that is an
+    option or a shell expansion names no subcommand."""
+    for line in text.replace("\\\n", " ").splitlines():
+        found = _invocation(line, launchers)
+        if found:
+            module, arguments = found
+            first = arguments[0] if arguments else ""
+            return module, (None if not first or first[0] in "-$" else first)
     return None, None
+
+
+def accepts_subcommand(python_root: Path, module: str, subcommand: str) -> bool:
+    """Whether the module's own parser registers `subcommand`: its help for it exits 0."""
+    env = {**os.environ, "PYTHONPATH": str(python_root)}
+    done = subprocess.run([sys.executable, "-m", module, subcommand, "--help"],
+                          env=env, capture_output=True, text=True, timeout=60)
+    return done.returncode == 0
 
 
 def script_problems(checks: Path, python_root: Path, launchers: Mapping[str, str]) -> list[str]:
     problems = []
     for script in sorted(path for path in checks.iterdir() if path.is_file()):
-        lines = [line for line in script.read_text().splitlines()
-                 if not line.lstrip().startswith("#")]
-        module, subcommand = _named_module(lines, launchers)
+        module, subcommand = _named_module(script.read_text(), launchers)
         if module is None:
             problems.append(f"{script.name}: no agent_tools module")
             continue
-        source = python_root / (module.replace(".", "/") + ".py")
-        if not source.is_file():
+        if not (python_root / (module.replace(".", "/") + ".py")).is_file():
             problems.append(f"{script.name}: {module} has no source")
             continue
-        if subcommand is None:
-            continue
-        constants = {node.value for node in ast.walk(ast.parse(source.read_text()))
-                     if isinstance(node, ast.Constant) and isinstance(node.value, str)}
-        if subcommand not in constants:
+        if subcommand is not None and not accepts_subcommand(python_root, module, subcommand):
             problems.append(f"{script.name}: {module} has no subcommand {subcommand}")
     return problems
 
@@ -152,6 +173,32 @@ class CheckScriptResolutionTest(unittest.TestCase):
         problems = self.problems(
             bare="#!/bin/sh\n# -m agent_tools.verification.verify_checks host-prompts\nexit 0\n")
         self.assertEqual(problems, ["bare: no agent_tools module"])
+
+    def test_a_probe_value_of_the_module_is_not_a_subcommand(self):
+        problems = self.problems(wrap="#!/bin/sh\nPYTHONPATH=python exec python3 -m "
+                                      "agent_tools.verification.verify_checks commit \"$@\"\n")
+        self.assertEqual(problems, [
+            "wrap: agent_tools.verification.verify_checks has no subcommand commit"])
+
+    def test_a_command_that_only_names_a_launcher_runs_nothing(self):
+        problems = self.problems(
+            echoed="#!/bin/sh\necho resolve-project platform-status\n",
+            piped="#!/bin/sh\nprintf '%s\\n' agent_tools.verification.verify_checks host-prompts\n")
+        self.assertEqual(problems, ["echoed: no agent_tools module", "piped: no agent_tools module"])
+
+    def test_a_quoted_subcommand_of_a_direct_module_run_is_checked(self):
+        problems = self.problems(quoted="#!/bin/sh\nPYTHONPATH=python exec python3 -m "
+                                        "agent_tools.verification.verify_checks \"no-such-check\"\n")
+        self.assertEqual(problems, [
+            "quoted: agent_tools.verification.verify_checks has no subcommand no-such-check"])
+
+    def test_a_real_subcommand_and_an_interpreter_variable_resolve(self):
+        problems = self.problems(
+            kept="#!/bin/sh\nPYTHONPATH=python exec python3 -m "
+                 "agent_tools.verification.verify_checks host-prompts \"$@\"\n",
+            variable='#!/bin/sh\nPYTHONPATH=python exec "$python" -m '
+                     'agent_tools.verification.verify_checks owner-services "$@"\n')
+        self.assertEqual(problems, [])
 
     def test_every_committed_check_script_resolves(self):
         launchers = launcher_table((ROOT / "lib/agent-tools.nix").read_text())

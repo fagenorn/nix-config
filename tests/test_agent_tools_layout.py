@@ -117,6 +117,12 @@ ALLOWED_IMPORTS: dict[str, frozenset[str]] = {
 }
 
 
+def delivery_targets(targets) -> list[str]:
+    """The targets that are the delivery package or a module under it."""
+    return sorted(t for t in targets if t == "agent_tools.delivery"
+                  or t.startswith("agent_tools.delivery."))
+
+
 def area_packages(areas_dir: Path) -> frozenset[str]:
     """The area names a subpackage may carry: one per docs/areas directory."""
     return frozenset(d.name.replace("-", "_") for d in areas_dir.iterdir() if d.is_dir())
@@ -354,9 +360,13 @@ class SyntheticLayoutTest(unittest.TestCase):
 
 class LayoutRuleTest(unittest.TestCase):
     def test_verification_imports_nothing_from_delivery(self):
+        self.assertEqual(delivery_targets(ALLOWED_IMPORTS["verification"]), [])
+
+    def test_the_delivery_package_itself_counts_as_delivery(self):
         self.assertEqual(
-            sorted(t for t in ALLOWED_IMPORTS["verification"]
-                   if t.startswith("agent_tools.delivery.")), [])
+            delivery_targets({"agent_tools.delivery", "agent_tools.delivery.x",
+                              "agent_tools.deliveryx", "agent_tools.claims.forge_markers"}),
+            ["agent_tools.delivery", "agent_tools.delivery.x"])
 
     def test_the_flat_allowance_is_the_closure_of_instruction_load_and_skill_lint(self):
         self.assertEqual(

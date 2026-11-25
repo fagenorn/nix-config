@@ -4,7 +4,8 @@
 (`suite_test_failures`), run through the wrapper `home/common/verify-pending/checks/suite-test-failures`
 as `python -m agent_tools.verification.suite_test_failures`, is met when no counted run of the first N
 from the merge's run on has a failed attempt of job J whose log names the test NAME as failed. The
-after runs are the push runs of the workflow on the branch, from the merge's run on (the merge's run is the earliest push run
+after runs are the push runs of the workflow on the branch, in (created_at, run id) order from the
+merge's run on: a run ordered before the merge's run is skipped (the merge's run is the earliest push run
 listed at `--merge`, none: 75; fewer than N counted: 75), no before run is read, and only the log of a
 `failure` attempt is read. A log line names the test when, after the leading BOM and the line's
 timestamp are dropped, it reads `ERROR: NAME (` or `FAIL: NAME (` with NAME exactly the test (a name
@@ -49,6 +50,8 @@ def suite_test_failures(repo: str, workflow: str, job: str, branch: str, merge: 
     pages = _counted_pages(forge_api.api_pages(f"{listing}&created=>={at_merge[0][3]}&per_page=100"),
                            "workflow_runs", "run listing")
     for run in sorted(_suite_run(entry) for entry in pages):
+        if run[:2] < at_merge[0][:2]:
+            continue
         pending, counted = _suite_attempts(repo, job, run)
         if pending:
             break
