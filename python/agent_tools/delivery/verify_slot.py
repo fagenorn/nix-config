@@ -116,7 +116,6 @@ from __future__ import annotations
 
 import argparse
 import fcntl
-import hashlib
 import json
 import os
 from datetime import datetime, timedelta, timezone
@@ -127,7 +126,7 @@ import subprocess
 import sys
 import time
 
-from agent_tools.delivery import host_admission, verify_history
+from agent_tools.delivery import host_admission, verify_history, verify_queue
 from agent_tools.project_contract.derived_values import normalize_remote_url
 
 NO_SLOT_LINE = "verify-slot: no verify slot came free within {limit}s; nothing ran"
@@ -138,7 +137,6 @@ SAME_REPOSITORY_LINE = "verify-slot: a verify run of this repository holds a ver
 HISTORY_FAILED_LINE = "verify-slot: cannot record this run in {path}: {error}"
 REPORT_FAILED_LINE = "verify-slot: cannot write the report {path}: {error}"
 REPORT_SKIPPED_LINE = "verify-slot: skipped {count} unreadable lines of {path}"
-GROUP_LOCK = "repo-{digest}.lock"
 GIT_TIMEOUT_SECONDS = 10
 LIVE_MARKER = "live-waiting.lock"
 LIVE_PROBE = "live-probe.lock"
@@ -152,6 +150,11 @@ DEFAULT_SLOT_DIR = "/tmp/agent-verify-slots"
 SLOT_DIR_ENV = "VERIFY_SLOT_DIR"
 USAGE_EXIT = 2
 CANNOT_START_EXIT = 127
+
+_open_slot = verify_queue.open_shared
+_held = verify_queue.held
+GROUP_LOCK = verify_queue.GROUP_LOCK
+group_lock_name = verify_queue.group_lock_name
 
 _WAIT_LINES = {"taken": WAITING_LINE, "deferred": DEFERRING_LINE,
                "same_repository": SAME_REPOSITORY_LINE}
@@ -195,25 +198,6 @@ def _prepare_dir(directory: Path) -> None:
         os.chmod(directory, 0o1777)
 
 
-def _open_slot(path: Path) -> int:
-    """Open a slot file, creating it with mode 0666 when it does not exist.
-
-    An existing file is opened without `O_CREAT`: a sticky directory refuses an `O_CREAT`
-    open of another account's file on hosts that protect regular files.
-    """
-    try:
-        return os.open(path, os.O_RDWR)
-    except FileNotFoundError:
-        pass
-    old = os.umask(0)
-    try:
-        return os.open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o666)
-    except FileExistsError:
-        return os.open(path, os.O_RDWR)
-    finally:
-        os.umask(old)
-
-
 def repository_group(cwd: Path) -> str | None:
     """The repository `cwd` belongs to: its normalized, lowercased `origin` remote, else None."""
     try:
@@ -226,11 +210,6 @@ def repository_group(cwd: Path) -> str | None:
     if result.returncode != 0 or not url:
         return None
     return (normalize_remote_url(url) or url).lower()
-
-
-def group_lock_name(group: str) -> str:
-    """The name of the lock file in the slot directory that one repository's holders share."""
-    return GROUP_LOCK.format(digest=hashlib.sha256(group.encode("utf-8")).hexdigest()[:16])
 
 
 def _say(line: str) -> None:
@@ -252,23 +231,6 @@ class _Run:
                 self.child.send_signal(signum)
             except (OSError, ProcessLookupError):
                 pass
-
-
-def _held(path: Path) -> bool:
-    """Whether a live process holds the slot file (a file that cannot be probed counts as held)."""
-    try:
-        descriptor = os.open(path, os.O_RDWR)
-    except FileNotFoundError:
-        return False
-    except OSError:
-        return True
-    try:
-        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        return True
-    finally:
-        os.close(descriptor)
-    return False
 
 
 def _live_waiting(directory: Path) -> bool | None:

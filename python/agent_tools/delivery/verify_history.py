@@ -71,7 +71,7 @@ def entry(repository: str | None, argv: Sequence[str], started: datetime, waited
     }
 
 
-def _regular(descriptor: int, path: Path) -> int:
+def regular_descriptor(descriptor: int, path: Path) -> int:
     """`descriptor` when it is a regular file with one link; otherwise close it and raise `OSError`.
 
     A second link is another account's hard link to a file that is not ours to append to.
@@ -94,14 +94,14 @@ def _open_history(path: Path) -> int:
     """
     flags = os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK
     try:
-        return _regular(os.open(path, flags), path)
+        return regular_descriptor(os.open(path, flags), path)
     except FileNotFoundError:
         pass
     old = os.umask(0)
     try:
-        return _regular(os.open(path, flags | os.O_CREAT | os.O_EXCL, 0o666), path)
+        return regular_descriptor(os.open(path, flags | os.O_CREAT | os.O_EXCL, 0o666), path)
     except FileExistsError:
-        return _regular(os.open(path, flags), path)
+        return regular_descriptor(os.open(path, flags), path)
     finally:
         os.umask(old)
 
@@ -154,7 +154,7 @@ def _readable(line: bytes) -> dict | None:
 def read(path: Path) -> tuple[list[dict], int]:
     """The readable records of `path` and the count of unreadable lines; absent is `([], 0)`."""
     try:
-        descriptor = _regular(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), path)
+        descriptor = regular_descriptor(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), path)
     except FileNotFoundError:
         return [], 0
     with os.fdopen(descriptor, "rb") as handle:
