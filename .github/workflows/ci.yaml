@@ -97,7 +97,7 @@ jobs:
         # The runner also writes the run's suite time and every member's time, slowest
         # first, for the next step to upload (issue 1385, ADR-delivery-015).
         env:
-          SUITE_RUNNER_JOBS: "4"
+          SUITE_RUNNER_JOBS: "6"
           SUITE_RUNNER_REPORT: suite-timing/suite-timing.json
         run: WORKFLOW_POLICY_SURFACE=source nix shell --inputs-from . nixpkgs#just nixpkgs#nodejs --command just agent-workflow-tests
       # The one step `if:` a required job may carry (ADR-delivery-015 D8): it runs after
