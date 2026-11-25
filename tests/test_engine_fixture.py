@@ -193,23 +193,28 @@ class AdoptedFixturesTest(unittest.TestCase):
         self.assertEqual(len(attempts), 2)
         self.assertEqual([p.read_text("utf-8") for p in fixtures.directory.rglob("greet.txt")], ["hello\n"])
 
-    @unittest.skipIf(os.geteuid() == 0, "root deletes a read-only directory's entries")
     def test_a_close_that_cannot_delete_the_cache_raises_and_a_second_close_retries(self):
         fixtures = self.fixtures()
         self.stubbed_adoption()
         fixtures.project(self, mock.sentinel.world)
         directory = fixtures.directory
-        locked = next(path for path in directory.iterdir() if path.is_dir())
-        locked.chmod(0o555)
-        self.addCleanup(lambda: locked.exists() and locked.chmod(0o755))
+        real = shutil.rmtree
+        refusals = []
 
-        with self.assertRaises(OSError):
+        def rmtree(path, *args, **options):
+            if not refusals:
+                refusals.append(path)
+                raise PermissionError(errno.EACCES, "Permission denied", str(path))
+            return real(path, *args, **options)
+
+        with mock.patch.object(shutil, "rmtree", rmtree):
+            with self.assertRaises(OSError):
+                fixtures.close()
+            survived = (fixtures.directory, directory.exists())
             fixtures.close()
-        survived = (fixtures.directory, directory.exists())
-        locked.chmod(0o755)
-        fixtures.close()
 
         self.assertEqual(survived, (directory, True))
+        self.assertEqual(refusals, [directory])
         self.assertFalse(directory.exists())
         self.assertIsNone(fixtures.directory)
 
