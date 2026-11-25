@@ -60,21 +60,10 @@ MASK: dict[str, str] = {"GIT_CONFIG_GLOBAL": os.devnull}
 INSTALL_COMMAND: tuple[str, ...] = ("true",)
 TEXT_LIMIT: int = 1 << 20
 
-DECLARATION = re.compile(
-    r"(?<![\w.'\"-])(?:config\s*\.\s*)?(?:git-hooks|pre-commit)\s*[.=]")
-TOKEN = re.compile(
-    rf"(?P<decl>{DECLARATION.pattern})|(?P<kw>(?<![\w.'\"-])(?:let|in|inherit)(?![\w'-]))"
-    r"|(?P<open>[({\[])|(?P<close>[)}\]])")
-SEGMENT = re.compile(r"\s*([\w'-]+|\"_*\")")
-DOT = re.compile(r"\s*\.")
-NONBLANK = re.compile(r"\s*\S")
-EQUALS = re.compile(r"\s*=(?!=)")
-KEYED = re.compile(r"((?:[\w'-]+|\"_*\")(?:\s*\.\s*(?:[\w'-]+|\"_*\"))*)\s*=(?!=)(.*)$", re.S)
-BODY_TAIL = re.compile(
-    r"(?<![\w.'-])(?:rec|in|then|else)$|//$|(?<![\w.'-])with\s[^;]*;$"
-    r"|(?<![\w.'-])(?:\w+\.)*(?:mk(?:If|Merge|Default|Force|Override|Before|After|Order|OptionDefault)"
-    r"|optionalAttrs)(?![\w'-])[^;{}]*$")
+TOKEN = re.compile(r"""[\w'-]+|"_*"|==|[{}()\[\];=:@.?,]|\S""")
 OPENERS, CLOSERS = "({[", ")}]"
+NAME = re.compile(r"""[\w'-]+|"_*\"""")
+MODULE_LEAD = (None, ":", "@", "in", "rec", ";")
 HOOKS_PATH = "core.hooksPath"
 ROOTS = ("git-hooks", "pre-commit")
 
@@ -154,200 +143,123 @@ def _code(text: str) -> str:
     return "".join(out)
 
 
-def _path(text: str, pos: int) -> tuple[list[str], int]:
-    """The dotted attribute path at `pos` and the index after it."""
-    names: list[str] = []
-    while (found := SEGMENT.match(text, pos)):
-        names.append(found.group(1))
-        pos = found.end()
-        dot = DOT.match(text, pos)
-        if not dot:
-            break
-        pos = dot.end()
-    return names, pos
-
-
-def _value_end(text: str, pos: int) -> int:
-    """The index of the `;` that ends the value starting at `pos`, or the text's end."""
+def _group_end(tokens: list[str], pos: int) -> int:
+    """The index after the bracketed group that opens at `pos`, or the end of `tokens`."""
     depth = 0
-    for i in range(pos, len(text)):
-        if text[i] in OPENERS:
+    for i in range(pos, len(tokens)):
+        depth += tokens[i] in OPENERS
+        depth -= tokens[i] in CLOSERS
+        if depth <= 0:
+            return i + 1
+    return len(tokens)
+
+
+def _value_end(tokens: list[str], pos: int) -> int:
+    """The index of the `;` that ends the value at `pos`, or of the `}` that closes its set.
+
+    A bracketed group and a `let ... in` are part of the value, whatever they hold.
+    """
+    depth = lets = 0
+    for i in range(pos, len(tokens)):
+        token = tokens[i]
+        if token in OPENERS:
             depth += 1
-        elif text[i] in CLOSERS:
+        elif token in CLOSERS:
+            if depth == 0:
+                return i
             depth -= 1
-        elif text[i] == ";" and depth <= 0:
+        elif token == "let":
+            lets += 1
+        elif token == "in":
+            lets = max(lets - 1, 0)
+        elif token == ";" and depth == 0 and lets == 0:
             return i
-    return len(text)
+    return len(tokens)
 
 
-def _bindings(body: str) -> list[tuple[list[str], str]]:
-    """The `path = value;` bindings of an attribute set's body; an unreadable one has no path."""
-    found: list[tuple[list[str], str]] = []
-    pos = 0
-    while NONBLANK.match(body, pos):
-        names, after = _path(body, pos)
-        equals = EQUALS.match(body, after) if names else None
-        end = _value_end(body, equals.end() if equals else pos)
-        found.append((names, body[equals.end():end].strip()) if equals else ([], ""))
-        pos = end + 1
-    return found
+def _let_end(tokens: list[str], pos: int) -> int:
+    """The index after the `in` that ends the `let` whose keyword sits before `pos`."""
+    lets = 1
+    for i in range(pos, len(tokens)):
+        lets += tokens[i] == "let"
+        lets -= tokens[i] == "in"
+        if lets == 0:
+            return i + 1
+    return len(tokens)
 
 
-def _attribute_set(value: str) -> str | None:
-    """The inside of `value` when it is exactly one `{ ... }`, else None."""
-    if not value.startswith("{"):
-        return None
-    depth = 0
-    for i, char in enumerate(value):
-        depth += char in OPENERS
-        depth -= char in CLOSERS
-        if depth == 0:
-            return value[1:i] if i == len(value) - 1 else None
-    return None
+def _path(tokens: list[str], pos: int) -> tuple[tuple[str, ...], int]:
+    """The dotted attribute path at `pos` (empty when there is none) and the index after it."""
+    names: list[str] = []
+    while pos < len(tokens) and NAME.fullmatch(tokens[pos]):
+        names.append(tokens[pos])
+        pos += 1
+        if pos < len(tokens) and tokens[pos] == ".":
+            pos += 1
+        else:
+            return tuple(names), pos
+    return (), pos
 
 
-def _leaves(names: list[str], value: str, out: list[tuple[list[str], str]]) -> None:
-    """Append each leaf binding of `names = value`, an attribute set expanded to its bindings."""
-    body = _attribute_set(value)
-    bindings = _bindings(body) if body is not None else []
-    if not bindings:
-        out.append((names, value))
-    for path, inner in bindings:
-        _leaves([*names, *path], inner, out)
-
-
-def _active(leaves: list[tuple[list[str], str]]) -> bool:
-    """Whether some hook is not switched off, the settings of one hook taken together.
-
-    A hook is `<root>.hooks.<name>`; it is off when any of its settings is `enable = false`,
-    wherever the other settings of it sit. A setting outside `hooks` is its own group.
-    """
-    groups: dict[tuple[str, ...], bool] = {}
-    for names, value in leaves:
-        key = tuple(names[:3]) if len(names) >= 3 and names[1] == "hooks" else tuple(names)
-        off = bool(names) and names[-1] == "enable" and value == "false"
-        groups[key] = groups.get(key, False) or off
-    return not all(groups.values())
-
-
-def _events(text: str) -> list[tuple[int, str, bool]]:
-    """Each `DECLARATION` and `inherit` start in `text`, with one flag.
-
-    A declaration's flag is whether a `let` binds it (a local, not an option). An `inherit`'s is
-    whether it sits among a `let`'s bindings or in an attribute set that is no option set (an
-    argument to a function, a `let`-bound value): such an `inherit` builds data and exports nothing.
-    """
-    frames: list[str] = []
-    found: list[tuple[int, str, bool]] = []
-    for token in TOKEN.finditer(text):
-        kind, word = token.lastgroup, token.group()
-        in_let = bool(frames) and frames[-1] == "let"
-        if kind == "decl":
-            before = text[:token.start()].rstrip()
-            found.append((token.start(), "decl", in_let and before.endswith((";", "let"))))
-        elif kind == "kw" and word == "inherit":
-            found.append((token.start(), "inherit", bool(frames) and frames[-1] != "option"))
-        elif kind == "open" or (kind == "kw" and word == "let"):
-            frames.append("let" if kind == "kw" else _frame(text, token.start(), frames))
-        elif kind == "kw" and in_let:
-            frames.pop()
-        elif kind == "close":
-            while frames and frames.pop() == "let":
-                pass
-    return found
-
-
-def _lead(text: str, start: int) -> str:
-    """The text of the expression the bracket at `start` ends, back to the last `;`, `{`, `(` or `[`.
-
-    A `;` that ends a `with` is no boundary, and a bracketed group before `start` is kept whole.
-    """
-    depth = 0
-    for i in range(start - 1, -1, -1):
-        char = text[i]
-        if char in CLOSERS:
-            depth += 1
-        elif char in OPENERS:
-            if depth == 0:
-                return text[i + 1:start].strip()
-            depth -= 1
-        elif char == ";" and depth == 0:
-            window = text[text.rfind(";", 0, i) + 1:i]
-            if re.search(r"(?<![\w.'-])with\s[^;]*$", window) is None:
-                return text[i + 1:start].strip()
-    return text[:start].strip()
-
-
-def _frame(text: str, start: int, frames: list[str]) -> str:
-    """The kind of the bracket at `start`: `option` for an attribute set the module itself yields.
-
-    A set is one when it is the module body (the text's top, a `:` function body, after `rec`, `in`,
-    `with x;`, `//`, `then` or `else`, or an argument of `mkIf` and the like) or the value of a
-    top `config` binding, and sits in no data. A list or parenthesis there is a `wrap` the module
-    still reads through (`mkMerge [ ... ]`); any other bracket is `other`.
-    """
-    lead = _lead(text, start)
-    keyed = KEYED.match(lead)
-    if keyed:
-        expr = keyed.group(2).strip()
-        body = (keyed.group(1) == "config" and (not frames or frames[-1] == "option")
-                and (not expr or BODY_TAIL.search(expr) is not None))
-    elif frames:
-        body = frames[-1] == "wrap" and (not lead or lead.endswith(("}", "]", ")"))
-                                         or BODY_TAIL.search(lead) is not None)
-    else:
-        body = not lead or lead.endswith(":") or BODY_TAIL.search(lead) is not None
-    return ("option" if text[start] == "{" else "wrap") if body else "other"
-
-
-def _inherited(text: str, start: int) -> list[tuple[str, bool]]:
-    """The hook roots an `inherit` at `start` names, each with whether it takes them `(from a source)`."""
-    pos = start + len("inherit")
-    body = text[pos:_value_end(text, pos)].strip()
-    sourced = body.startswith("(")
-    if sourced:
-        depth = 0
-        for i, char in enumerate(body):
-            depth += char == "("
-            depth -= char == ")"
-            if depth == 0:
-                body = body[i + 1:]
-                break
-    return [(name, sourced) for name in re.findall(r"[\w'-]+", body) if name in ROOTS]
+def _switch(path: tuple[str, ...]) -> bool:
+    """Whether `path` is `<root>.hooks.<name>.enable`, a leading `config` aside."""
+    path = path[1:] if path[:1] == ("config",) else path
+    return len(path) == 4 and path[0] in ROOTS and path[1] == "hooks" and path[3] == "enable"
 
 
 def declares_hooks(text: str) -> bool:
-    """Whether a `devenv.nix` text sets devenv git hooks, wherever the setting sits in a line.
+    """Whether a `devenv.nix` text explicitly switches a devenv git hook on.
 
-    Comments and string literals are skipped, and so is a hook that is only switched off
-    (`enable = false`, in dotted or nested form, with its other settings), any read of a hook
-    name that assigns nothing (`pre-commit.out`, `config.git-hooks.package`), and a `let` binding
-    of one (a package alias, an `inherit` from a package set). A `let`-bound hook set counts
-    only when an attribute set `inherit`s it, in dotted, nested or imported form alike; an
-    `inherit` that takes it from a source or from nothing local counts as setting it.
+    One forward pass over the text, with comments and string literals skipped. It reads only
+    `git-hooks.hooks.<name>.enable = true;` and the same for `pre-commit`, written as a dotted
+    path or as nested sets (`git-hooks = { hooks.<name> = { enable = true; }; }`), in the module's
+    top set (the text's first set, or the one after a `:`, `in`, `rec` or `with ...;`), also
+    under `config`. Everything else reads as no hooks: an `inherit`, a `let`-bound or
+    `mkIf`-wrapped hook set, a package list, a path with a `${...}` segment, a hook only
+    switched off. A project this misses keeps today's behaviour, no commit environment proposed,
+    while a false positive would promise an install that does not exist.
     """
-    text = _code(text)
-    leaves: list[tuple[list[str], str]] = []
-    local: dict[str, list[tuple[list[str], str]]] = {}
-    exported: list[tuple[str, bool]] = []
-    for start, kind, in_let in _events(text):
-        if kind == "inherit":
-            if not in_let:
-                exported.extend(_inherited(text, start))
+    if not any(root in text for root in ROOTS):
+        return False
+    tokens = TOKEN.findall(_code(text))
+    n, i = len(tokens), 0
+    sets: list[tuple[str, ...]] = []  # the attribute path of each open set
+    previous: str | None = None
+    while i < n:
+        token = tokens[i]
+        if not sets:
+            if token == "let":
+                i, previous = _let_end(tokens, i + 1), "in"
+            elif token == "{" and previous in MODULE_LEAD:
+                sets.append(())
+                i, previous = i + 1, "{"
+            elif token in OPENERS:
+                i = _group_end(tokens, i)
+                previous = tokens[i - 1]
+            else:
+                i, previous = i + 1, token
             continue
-        names, after = _path(text, start)
-        prefixed = len(names) > 1 and names[0] == "config"
-        equals = EQUALS.match(text, after)
-        if not equals:
-            if not prefixed and text[:after].rstrip().endswith("."):
-                return True  # a path this reader cannot finish may still set a hook
+        if token == "}":
+            sets.pop()
+            previous = "}"
+            i += 1
             continue
-        names = names[1:] if prefixed else names
-        value = text[equals.end():_value_end(text, equals.end())].strip()
-        _leaves(names, value, local.setdefault(names[0], []) if in_let else leaves)
-    for name, sourced in exported:
-        leaves.extend(([] if sourced else local.get(name)) or [([name], "inherited")])
-    return _active(leaves)
+        names, after = _path(tokens, i)
+        if names and tokens[after:after + 1] == ["="]:
+            path, value = (*sets[-1], *names), after + 1
+            if tokens[value:value + 1] == ["{"]:
+                sets.append(path)
+                i = value + 1
+                continue
+            if tokens[value:value + 2] == ["true", ";"] and _switch(path):
+                return True
+        start = i
+        i = _value_end(tokens, i)
+        if i < n and tokens[i] == ";":
+            i += 1
+        elif i == start:
+            i += 1
+    return False
 
 
 def declared(worktree: Path) -> bool:

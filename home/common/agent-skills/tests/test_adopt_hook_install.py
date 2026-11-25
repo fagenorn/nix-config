@@ -13,6 +13,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -264,11 +265,14 @@ class HookInstallRuleTest(unittest.TestCase):
         self.assertFalse(hook_install.left_alone(None, empty))
         self.assertTrue(stat.S_IMODE((directory / "pre-commit").stat().st_mode) & 0o100)
 
-    def test_declares_hooks_reads_a_devenv_git_hooks_setting(self):
-        for text in ("{\n  git-hooks.hooks.x.enable = true;\n}", "git-hooks = {",
-                     "  pre-commit.hooks.y.enable = true;",
+    def test_declares_hooks_reads_only_explicit_hook_switches(self):
+        for text in ("{\n  git-hooks.hooks.x.enable = true;\n}",
+                     "{ ... }: { pre-commit.hooks.y.enable = true; }",
                      "{ ... }: { git-hooks.hooks.shellcheck.enable = true; }",
                      "{ git-hooks = { hooks.x.enable = true; }; }",
+                     "{ git-hooks.hooks = { x.enable = true; }; }",
+                     "{ git-hooks.hooks.x = { enable = true; }; }",
+                     "{ pre-commit = { hooks = { x = { enable = true; }; }; }; }",
                      "{ git-hooks.hooks.x.enable = false; git-hooks.hooks.y.enable = true; }",
                      "/* c */ { git-hooks.hooks.x.enable = true; }",
                      "{ pkgs, ... }:\n{\n  scripts.clean.exec = \"rm -rf build/*\";\n"
@@ -277,61 +281,61 @@ class HookInstallRuleTest(unittest.TestCase):
                      '{ ... }: { env.U = "http://x/#a"; git-hooks.hooks.x.enable = true; }',
                      "{ s = ''\n  echo # not a comment /*\n  ''${x}\n''; git-hooks.hooks.x.enable = true; /* a */ }",
                      '{ s = "a ${"b /*" + c} d"; git-hooks.hooks.x.enable = true; /* a */ }',
-                     "{ git-hooks.hooks.x = { enable = false; }; git-hooks.hooks.y = { enable = true; }; }",
-                     "{ git-hooks.hooks.x = { entry = \"a\"; }; }",
                      "{ ... }: { config.git-hooks.hooks.shellcheck.enable = true; }",
                      "{ config.git-hooks = { hooks.x.enable = true; }; }",
+                     "{ config = { git-hooks.hooks.x.enable = true; }; }",
                      "{ pkgs, ... }: let pre-commit = pkgs.pre-commit; in { packages = [ pre-commit ]; "
                      "git-hooks.hooks.x.enable = true; }",
-                     "{ git-hooks.hooks.a.enable = false; git-hooks.hooks.a.entry = \"t\"; "
-                     "git-hooks.hooks.b.entry = \"t\"; }",
-                     "let h = { hooks.x.enable = true; }; in { git-hooks = h; }",
-                     "let cfg = { hooks.x.enable = true; }; in { pre-commit = cfg; }",
-                     "let git-hooks = { hooks.x.enable = true; }; in { inherit git-hooks; }",
-                     "let git-hooks = import ./hooks.nix { inherit pkgs; }; in { inherit git-hooks; }",
-                     "let git-hooks.hooks.shellcheck.enable = true; in { inherit git-hooks; }",
-                     "let pre-commit.hooks.x = { enable = true; }; in { config = { inherit pre-commit; }; }",
-                     "{ pkgs, ... }: { inherit pkgs git-hooks; }",
-                     "{ cfg, ... }: { inherit (cfg) git-hooks; }",
-                     "{ git-hooks.hooks.${name}.enable = true; }",
-                     "{ cfg, ... }: rec { inherit (cfg) git-hooks; }",
-                     "{ cfg, lib, ... }: with lib; { inherit (cfg) git-hooks; }",
-                     "{ cfg, lib, ... }: { config = lib.mkIf true { inherit (cfg) git-hooks; }; }",
-                     "{ cfg, lib, ... }: lib.mkMerge [ { inherit (cfg) git-hooks; } ]",
-                     "{ cfg, lib, ... }: { config = lib.mkMerge [ { x = 1; } { inherit (cfg) pre-commit; } ]; }"):
+                     "{ pkgs ? { }, ... }: { packages = [ { } ]; git-hooks.hooks.x.enable = true; }",
+                     "{ pkgs, ... }: rec { git-hooks.hooks.x.enable = true; }",
+                     "{ lib, ... }@args: with lib; { git-hooks.hooks.x.enable = true; }"):
             self.assertTrue(hook_install.declares_hooks(text), text)
-        for text in ("# git-hooks.hooks.x", 'scripts.a.exec = "pre-commit run";', "{ }",
+        for text in ("# git-hooks.hooks.x", 'scripts.a.exec = "pre-commit run";', "{ }", "",
+                     "git-hooks = {", "pre-commit.hooks.y.enable = true;",
                      "{\n  git-hooks.hooks.shellcheck.enable = false;\n}",
-                     "  git-hooks.hooks.shellcheck.enable = false;",
                      "{ pre-commit.hooks.x.enable =\n false; }",
                      "{ config.git-hooks.hooks.x.enable = false; }",
+                     "{ git-hooks.hooks.x = { entry = \"a\"; }; }",
+                     "{ git-hooks.hooks.check.enable = false; git-hooks.hooks.check.entry = \"true\"; }",
+                     "{\n  git-hooks.hooks.x = { enable = false; };\n}",
+                     "{ git-hooks = { hooks.x = { enable = false; entry = \"a\"; }; hooks.y.enable = false; }; }",
                      "{ packages = [ config.git-hooks.package ]; }",
                      "{ pkgs, ... }: let pre-commit = pkgs.pre-commit; in { packages = [ pre-commit ]; }",
-                     "{ pkgs, ... }: let pre-commit = pkgs.pre-commit; in { packages = [ pre-commit.out ]; }",
-                     "let pre-commit = pkgs.callPackage ./pc.nix { }; in { packages = [ pre-commit ]; }",
-                     "let pre-commit = pkgs.pre-commit.override { x = 1; }; in { packages = [ pre-commit ]; }",
-                     "{ pkgs, ... }: let inherit (pkgs) pre-commit; in { packages = [ pre-commit.out ]; }",
-                     "{ pkgs, ... }: { packages = with pkgs; [ pre-commit.out ]; }",
                      "{ pkgs, ... }: { packages = [ pkgs.pre-commit ]; env.X = pre-commit.out; }",
+                     "{ pkgs, ... }: { packages = with pkgs; [ pre-commit.out ]; }",
+                     "{ pkgs, ... }: { packages = [ pkgs.git-hooks ]; foo = { git-hooks.hooks.x.enable = true; }; }",
+                     "{ pkgs, ... }: { packages = [ { git-hooks.hooks.x.enable = true; } ]; }",
+                     "{ pkgs, ... }: { env.hooks = { git-hooks.hooks.x.enable = true; }; }",
                      "let git-hooks.hooks.x.enable = true; in { }",
-                     "let git-hooks = { hooks.x.enable = false; }; in { inherit git-hooks; }",
+                     "let h = { git-hooks.hooks.x.enable = true; }; in { }",
+                     "let git-hooks = { hooks.x.enable = true; }; in { inherit git-hooks; }",
+                     "let git-hooks = import ./hooks.nix { inherit pkgs; }; in { inherit git-hooks; }",
+                     "{ pkgs, ... }: { inherit pkgs git-hooks; }",
+                     "{ cfg, ... }: { inherit (cfg) git-hooks; }",
+                     "{ cfg, lib, ... }: { config = lib.mkIf true { git-hooks.hooks.x.enable = true; }; }",
+                     "{ cfg, lib, ... }: lib.mkMerge [ { git-hooks.hooks.x.enable = true; } ]",
+                     "{ cfg, lib, ... }: lib.mkIf cfg.on { git-hooks.hooks.x.enable = true; }",
+                     "{ git-hooks.hooks.${name}.enable = true; }",
                      "{ pkgs, ... }: { packages = builtins.attrValues { inherit (pkgs) jq pre-commit; }; }",
-                     "let tools = { inherit (pkgs) pre-commit nixfmt; }; in { packages = builtins.attrValues tools; }",
-                     "{ pkgs, ... }: { packages = with pkgs; builtins.attrValues { inherit pre-commit; }; }",
                      "{ pkgs, ... }: { outputs = { inherit (pkgs) pre-commit; }; }",
-                     "{ pkgs, ... }: { env = { inherit (pkgs) pre-commit; }; }",
-                     "{ pkgs, ... }: { foo = x: { inherit (pkgs) pre-commit; }; }",
-                     "let git-hooks = import ./h.nix { }; in { packages = [ git-hooks.package ]; }",
-                     "{ git-hooks.hooks.check.enable = false; git-hooks.hooks.check.entry = \"true\"; }",
-                     "{ git-hooks.hooks.check.entry = \"true\"; git-hooks.hooks.check.enable = false; }",
-                     "{ git-hooks.hooks.check = { entry = \"a\"; }; git-hooks.hooks.check.enable = false; }",
                      "/* git-hooks.hooks.x.enable = true; */ { }",
-                     "{\n  git-hooks.hooks.x = { enable = false; };\n}",
-                     "{\n  git-hooks = { hooks.x.enable = false; };\n}",
-                     "{ git-hooks = { hooks.x = { enable = false; entry = \"a\"; }; hooks.y.enable = false; }; }",
                      '{ s = "git-hooks.hooks.x.enable = true;"; t = "/*"; } /* c */',
                      "{ s = ''\n  git-hooks.hooks.x.enable = true;\n''; }"):
             self.assertFalse(hook_install.declares_hooks(text), text)
+
+    def test_declares_hooks_reads_generated_nested_text_in_linear_time(self):
+        enabled = " git-hooks.hooks.x.enable = true;"
+        off = " git-hooks.hooks.x.enable = false;"
+        for size in (80_000, 1 << 20):
+            for body in ("{ } ", "[ ] ", "( ) ", "{ a = [ { } ]; } "):
+                filler = body * (size // len(body))
+                for text, expected in (
+                        ("{ pkgs, ... }: { packages = [ " + filler + "];" + off + " }", False),
+                        ("{ pkgs, ... }: {" + off + " packages = [ " + filler + "];" + enabled + " }", True),
+                        ("{ pkgs, ... }: { x = " + "[ " * (size // 2) + "]; " + off + " }", False)):
+                    started = time.monotonic()
+                    self.assertEqual(hook_install.declares_hooks(text), expected)
+                    self.assertLess(time.monotonic() - started, 1.0, (size, body))
 
 
 if __name__ == "__main__":
