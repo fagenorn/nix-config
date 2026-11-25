@@ -24,9 +24,11 @@ last stored visit of a step that is asked again). A procedure that files a
 follow-up issue from a finding writes the finding's rule and kind into the issue
 body and passes its name in that round's `filed`.
 
-`usable` copies the rule of the re-review route (`engine_graders`) rather than
+`usable` copies the rule of the direct re-review route (`engine_graders`) rather than
 importing it, so this module imports no engine module; a test holds the copy to
-the grader. Nothing here reads a file, starts a process or reads a clock, and an
+the grader. The landing route's re-review (`LANDING_REREVIEWS`) takes any `pass` or `findings`
+verdict and stops on `findings`, so it is judged by that verdict, not by `usable`. A minor
+finding a re-review restates as a blocker keeps the restatement as its own finding. Nothing here reads a file, starts a process or reads a clock, and an
 odd shape never raises.
 """
 
@@ -38,6 +40,9 @@ from dataclasses import dataclass
 KINDS: tuple[str, ...] = (
     "edge-or-failure-path", "weak-test", "missing-test", "contract-mismatch", "stale-docs", "security",
     "concurrency", "plan-step-not-executable", "other")
+
+# Re-review steps of a route that stops on `findings` (the landing route) instead of looping on a usable reply.
+LANDING_REREVIEWS: frozenset[str] = frozenset({"merge-rereview"})
 
 DISPOSITIONS: tuple[str, ...] = ("fixed", "declined", "filed", "dropped", "open")
 
@@ -86,6 +91,12 @@ def usable(rereview: object) -> bool:
                    for f in findings)
 
 
+def _answered(rereview: object) -> bool:
+    """Whether the landing route took this re-review's verdict, which it does for any `pass` or `findings`."""
+    return (isinstance(rereview, Mapping) and rereview.get("verdict") in ("pass", "findings")
+            and isinstance(rereview.get("findings"), list))
+
+
 def _named(step: str, result: object) -> list[tuple[str, Mapping[str, object]]]:
     findings = result.get("findings") if isinstance(result, Mapping) else None
     if not isinstance(findings, list):
@@ -107,7 +118,8 @@ def dispositions(rounds: Sequence[Round]) -> tuple[Disposed, ...]:
         reviewed = [item for step, result in one.reviews for item in _named(step, result)]
         names = {name for name, _ in reviewed}
         declined = _declined(one.fix)
-        closes = one.rereview is not None and usable(one.rereview[1])
+        closes = one.rereview is not None and (
+            _answered(one.rereview[1]) if one.rereview[0] in LANDING_REREVIEWS else usable(one.rereview[1]))
         again = _named(*one.rereview) if closes else []
         restated = {f["restates"] for _, f in again if isinstance(f.get("restates"), str)}
         for name, finding in reviewed:
@@ -120,8 +132,11 @@ def dispositions(rounds: Sequence[Round]) -> tuple[Disposed, ...]:
             else:
                 value = "open"
             disposed.append(Disposed(place, name, finding, value))
+        originals = dict(reviewed)
         for name, finding in again:
-            if isinstance(finding.get("restates"), str) and finding["restates"] in names:
+            restates = finding.get("restates")
+            original = originals.get(restates) if isinstance(restates, str) else None
+            if original is not None and (_minor(finding) or not _minor(original)):
                 continue
             value = "filed" if name in one.filed else "dropped" if _minor(finding) else "open"
             disposed.append(Disposed(place, name, finding, value))

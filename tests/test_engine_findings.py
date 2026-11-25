@@ -19,7 +19,8 @@ from pathlib import Path
 
 from agent_tools.delivery.engine_graders import GRADERS
 from agent_tools.delivery.engine_reply import cites_rules, without_unknown_rules
-from agent_tools.delivery.review_findings import DISPOSITIONS, KINDS, Round, dispositions, usable
+from agent_tools.delivery.review_findings import (
+    DISPOSITIONS, KINDS, LANDING_REREVIEWS, Round, dispositions, usable)
 
 TIER = "fast"
 
@@ -151,6 +152,13 @@ CASES = [
     ("a name filed in one round is not filed in the next",
      [Round(MERGED.reviews, MERGED.fix, MERGED.rereview, frozenset({"merge-review:1"})), MERGED],
      [(1, "merge-review:1", "filed"), (2, "merge-review:1", "fixed")]),
+    ("a merge re-review stopping on an unnamed blocker still names its findings",
+     [Round((MERGE,), FIX, ("merge-rereview", {"verdict": "findings", "findings": [UNNAMED["findings"][0], NEW["findings"][0]]}))],
+     [(1, "merge-review:1", "fixed"), (1, "merge-rereview:1", "open"), (1, "merge-rereview:2", "open")]),
+    ("a minor finding restated as important keeps its blocking restatement",
+     [Round((("lite-review", {"verdict": "findings", "findings": [MINOR]}),), FIX,
+            ("lite-rereview", RESTATING))],
+     [(1, "lite-review:1", "dropped"), (1, "lite-rereview:1", "open")]),
     ("a member with no reply contributes nothing", [Round((("lite-review", None),))], []),
 ]
 
@@ -178,6 +186,19 @@ class DispositionTest(unittest.TestCase):
             with self.subTest(reply=reply):
                 self.assertFalse(usable(reply))
 
+    def test_the_merge_re_review_is_judged_by_the_landing_route_not_the_direct_one(self):
+        landing = json.loads((PROCEDURES / "land-attempt.json").read_text("utf-8"))
+        steps = {step["id"]: step for step in landing["steps"]}
+
+        for name in LANDING_REREVIEWS:
+            with self.subTest(step=name):
+                self.assertEqual(steps[name]["outcome_from"], "verdict")
+                self.assertNotIn("unusable", steps[name]["on"])
+                self.assertEqual(steps[name]["on"]["findings"], "sync-review")
+                self.assertIn("sync-review", landing["stops"])
+        direct = json.loads((PROCEDURES / "direct.json").read_text("utf-8"))
+        self.assertTrue(all(step["id"] not in LANDING_REREVIEWS for step in direct["steps"]))
+
     def test_the_disposition_module_reads_nothing(self):
         tree = ast.parse((PROCEDURES.parents[0] / "review_findings.py").read_text("utf-8"))
         imported = {node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)}
@@ -190,7 +211,7 @@ class BlankingTest(unittest.TestCase):
     def test_a_made_up_rule_is_blanked_and_a_known_one_kept(self):
         reply = {"verdict": "findings", "findings": [
             {"kind": "other", "rule": "ZZ999"}, {"kind": "other", "rule": "B1"}, {"kind": "other"},
-            {"kind": "other", "rule": "standard:B1"}]}
+            {"kind": "other", "rule": "standard" + ":B1"}]}
 
         blanked = without_unknown_rules(reply, {"B1"})
 

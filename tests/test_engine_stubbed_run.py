@@ -404,14 +404,17 @@ class ReviewRouteTest(Scenario):
     def reviewer_model(self, run: StubbedRun, name: str = "reviewer") -> str:
         return engine_session.read_role(ROLES, name).model
 
+    def seed_bar(self, run: StubbedRun) -> None:
+        bar = run.world.home / ".agents/standards/the-bar.md"
+        bar.parent.mkdir(parents=True, exist_ok=True)
+        bar.write_text("# The bar\n\n### B1. Defense in depth\n\nBody.\n", encoding="utf-8")
+
     def test_a_finding_citing_a_made_up_rule_is_stored_blanked_and_graded_the_same(self):
         minor = {"severity": "minor", "file": "fixture/farewell.py:2", "failing_input": "farewell('')",
                  "summary": "s", "kind": "other"}
         run = StubbedRun(self, replies={"lite-review": dict(
             CLEAN_LITE, findings=[dict(minor, rule="ZZ999"), dict(minor, rule="B1"), minor])})
-        bar = run.world.home / ".agents/standards/the-bar.md"
-        bar.parent.mkdir(parents=True, exist_ok=True)
-        bar.write_text("# The bar\n\n### B1. Defense in depth\n\nBody.\n", encoding="utf-8")
+        self.seed_bar(run)
 
         self.finish(run, "done")
 
@@ -420,6 +423,23 @@ class ReviewRouteTest(Scenario):
         self.assertIn(("lite-review", "pass"), [(e["step"], e["outcome"]) for e in StubbedRun.events(direct)
                                                  if e["event"] == "outcome_graded"])
         self.assertIn(("lite-tally", "clean"), run.transitions(direct))
+
+    def test_a_schema_that_admits_only_one_rule_value_keeps_the_reply_unblanked(self):
+        minor = {"severity": "minor", "file": "fixture/farewell.py:2", "failing_input": "farewell('')",
+                 "summary": "s", "kind": "other", "rule": "local"}
+        run = StubbedRun(self, replies={"lite-review": dict(CLEAN_LITE, findings=[minor])})
+        copy = run.tmp / "local-rule-procedures"
+        shutil.copytree(PROCEDURES, copy)
+        path = copy / "direct-review-lite.reply.json"
+        schema = json.loads(path.read_text("utf-8"))
+        schema["properties"]["findings"]["items"]["properties"]["rule"] = {"enum": ["local"]}
+        path.write_text(json.dumps(schema) + "\n", encoding="utf-8")
+
+        done = run.deliver(copy)
+
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        stored = self.stored(self.child(run, "direct"), "lite-review")["findings"]
+        self.assertEqual([f.get("rule") for f in stored], ["local"])
 
     def test_a_declined_finding_takes_the_same_rounds_and_end_as_an_unstructured_one(self):
         reason = "farewell(None) is refused by the type checker at fixture/farewell.py:1"
@@ -438,12 +458,15 @@ class ReviewRouteTest(Scenario):
             "lite-fix": committing("fixture/second.py", "SECOND = 2\n",
                                    declines=[{"finding": "lite-review:2", "reason": reason}]),
             "lite-rereview": CLEAN_REREVIEW})
+        self.seed_bar(structured)
 
         done = plain.deliver(unstructured_procedures(plain.tmp))
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         self.assertEqual(plain.line(done)["end"], "done")
         self.finish(structured, "done")
 
+        stored = self.stored(self.child(structured, "direct"), "lite-review")["findings"]
+        self.assertEqual([f.get("rule") for f in stored], ["B1", None])
         self.assertEqual(self.keys(plain), self.keys(structured))
         self.assertEqual(plain.transitions(self.child(plain, "direct")),
                          structured.transitions(self.child(structured, "direct")))

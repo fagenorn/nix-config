@@ -42,7 +42,7 @@ import tokenize
 from typing import NamedTuple
 
 from agent_tools.delivery.context_map_lint import CODE_RE, section, table_rows
-from agent_tools.delivery.rule_reader import HEADING_LINE, RULE_ID_HEADING, scan
+from agent_tools.delivery.rule_reader import HEADING_LINE, RULE_ID_HEADING, SECOND_ID, rule_match, scan
 
 RULE_ID = re.compile(r"[A-Z]+[1-9][0-9]*")
 CITE = "standard:"
@@ -141,7 +141,6 @@ def without_rule_id(line: str) -> str:
 REASON_TWO_IDS = "more than one id"
 REASON_NO_ID = "no well-formed id"
 REASON_LEVEL = "a rule heading is ###"
-SECOND_ID = re.compile(r"(?<![A-Za-z0-9])[A-Z]+[0-9]+\.(?=\s|$)")
 NUMBERED_ITEM = re.compile(r"^[0-9]+[.)] ")
 
 
@@ -151,14 +150,6 @@ def unfenced(text: str):
     """`(line number, line)` of every line `scan` keeps."""
     for number, line, _ in scan(text):
         yield number, line
-
-
-def rule_match(line: str):
-    """The id match of a well-formed rule heading, else None."""
-    found = RULE_ID_HEADING.match(line)
-    if found and found["hashes"] == "###" and not SECOND_ID.search(found["title"]):
-        return found
-    return None
 
 
 def rule_headings(text: str) -> tuple[list[tuple[str, int, int]], list[str]]:

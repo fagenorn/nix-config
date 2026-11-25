@@ -8,8 +8,10 @@ project rule is a heading with a `P` id, none a numbered list item).
 
 import ast
 import collections
+import os
 import re
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -355,6 +357,27 @@ class RuleReaderTest(unittest.TestCase):
         (platform / "the-bar.md").write_bytes(b"\xff\xfe### B1. x\n")
         self.assertEqual(rule_reader.known_ids(platform, project), frozenset({"P2"}))
 
+    def test_a_heading_with_a_second_id_defines_no_id(self):
+        platform, project = self.layers()
+        (project / "b.md").write_text("# B\n\n### P98. P99. Example\n\nbody\n\n### P97. Fine\n", "utf-8")
+
+        self.assertEqual(rule_reader.known_ids(platform, project), frozenset({"B1", "PY3", "P2", "P97"}))
+
+    def test_only_a_regular_file_is_read_as_a_shard(self):
+        platform, project = self.layers()
+        os.mkfifo(project / "pipe.md")
+        os.mkfifo(platform / "stacks/pipe.md")
+        (project / "dir.md").mkdir()
+        found = []
+        reader = threading.Thread(
+            target=lambda: found.append(rule_reader.known_ids(platform, project)), daemon=True)
+
+        reader.start()
+        reader.join(5)
+
+        self.assertFalse(reader.is_alive(), "known_ids blocked on a pipe")
+        self.assertEqual(found, [frozenset({"B1", "PY3", "P2"})])
+
     def test_the_reader_imports_nothing_from_the_package(self):
         tree = ast.parse((REPO_ROOT / "python/agent_tools/delivery/rule_reader.py").read_text("utf-8"))
         names = set()
@@ -368,6 +391,8 @@ class RuleReaderTest(unittest.TestCase):
 
     def test_the_scan_the_fence_and_the_layer_readers_have_one_home(self):
         self.assertIs(rule_ids.scan, rule_reader.scan)
+        self.assertIs(rule_ids.rule_match, rule_reader.rule_match)
+        self.assertIs(rule_ids.SECOND_ID, rule_reader.SECOND_ID)
         self.assertIs(look_marker.FENCE_OPEN, rule_reader.FENCE_OPEN)
         # re caches equal patterns, so identity alone cannot tell a copy from the import
         tree = ast.parse((REPO_ROOT / "python/agent_tools/delivery/look_marker.py").read_text("utf-8"))

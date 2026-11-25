@@ -10,7 +10,9 @@ module into the engine package.
 blocks, so a rule commented out or shown as an example defines nothing. The platform layer is
 `the-bar.md` and each `stacks/*.md` of the platform standards directory (`platform_rules`); the
 project layer is each `*.md` of the project's standards directory except `README.md`
-(`project_rules`).
+(`project_rules`). A shard is read only when it is a regular file, so a pipe or a directory named
+`*.md` is never opened. A heading names a rule only when it has one id (`rule_match`): one whose
+title opens with a second id (`### P98. P99. Example`) defines none.
 
 `known_ids` is the ids a citation may name: the platform layer's ids that do not carry the project
 prefix (`P`), united with the project layer's ids that do. A layer whose read raises `OSError` or
@@ -26,6 +28,7 @@ from typing import NamedTuple
 
 RULE_ID_HEADING = re.compile(
     r"^(?P<hashes>#{1,6}) (?P<prefix>[A-Z]+)(?P<number>[1-9][0-9]*)\. (?P<title>\S.*)$")
+SECOND_ID = re.compile(r"(?<![A-Za-z0-9])[A-Z]+[0-9]+\.(?=\s|$)")
 PROJECT_PREFIX = "P"
 PROJECT_STANDARDS = "docs/standards"
 FENCE_OPEN = re.compile(r"^ {0,3}(`{3,}|~{3,})")
@@ -131,6 +134,14 @@ def scan(text: str):
         yield number, line, content
 
 
+def rule_match(line: str):
+    """The id match of a well-formed rule heading (a `###` heading with one id), else None."""
+    found = RULE_ID_HEADING.match(line)
+    if found and found["hashes"] == "###" and not SECOND_ID.search(found["title"]):
+        return found
+    return None
+
+
 class Rule(NamedTuple):
     id: str
     title: str
@@ -139,8 +150,8 @@ class Rule(NamedTuple):
 def _headings(path: Path) -> list[Rule]:
     rules = []
     for _, _, line in scan(path.read_text("utf-8")):
-        match = RULE_ID_HEADING.match(line)
-        if match and match["hashes"] == "###":
+        match = rule_match(line)
+        if match:
             rules.append(Rule(match["prefix"] + match["number"], match["title"]))
     return rules
 
@@ -152,7 +163,8 @@ def platform_rules(directory: Path) -> list[Rule]:
         raise ValueError(f"{directory} has no the-bar.md")
     rules = _headings(bar)
     for shard in sorted((directory / "stacks").glob("*.md")):
-        rules += _headings(shard)
+        if shard.is_file():
+            rules += _headings(shard)
     return rules
 
 
@@ -160,7 +172,7 @@ def project_rules(directory: Path) -> list[Rule]:
     """The rules of each `*.md` of `directory` but `README.md`, by name, in file order."""
     rules: list[Rule] = []
     for shard in sorted(directory.glob("*.md")):
-        if shard.name != "README.md":
+        if shard.name != "README.md" and shard.is_file():
             rules += _headings(shard)
     return rules
 
