@@ -9,14 +9,18 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import sys
+import types
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from agent_tools.claims import forge_markers
 from agent_tools.delivery import engine_session
 from agent_tools.project_contract import resolve_project
 from tests.engine_fixture import AdoptedFixtures, FixtureProject
 from tests.engine_guards import payloads
+from tests.engine_step_coverage import StepCoverage, test_ids
 from tests.engine_stubbed_world import APPLIES, CLEAN_LITE, GREEN, IMPLEMENTED, ROLES, StubbedRun
 from tests.guard_policy_world import REAL_GIT, install_platform_manifest_in_environ
 
@@ -29,7 +33,12 @@ def setUpModule() -> None:
     install_platform_manifest_in_environ()
     unittest.addModuleCleanup(FIXTURES.close)
 
+
+def tearDownModule() -> None:
+    STEPS.check(test_ids(sys.modules[__name__]))
+
 PROCEDURES = Path(__file__).resolve().parents[1] / "python/agent_tools/delivery/procedures"
+STEPS = StepCoverage(PROCEDURES)
 LOOK_BODY = ("Add a greet() function.\n\n## Acceptance criteria\n\n"
              "- [ ] [human] before merge: the greeting text — measured: the owner, on the pull request\n")
 SETUP_WALK = [("contract", "ok"), ("review", "clear"), ("preflight", "clear"), ("existing", "absent"),
@@ -101,8 +110,14 @@ def model_of(launch: dict) -> str:
 
 
 class Scenario(unittest.TestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        STEPS.started(self.id())
+
     def stubbed(self, **members) -> StubbedRun:
-        return StubbedRun(test_case=self, fixtures=FIXTURES, **members)
+        run = StubbedRun(test_case=self, fixtures=FIXTURES, **members)
+        self.addCleanup(lambda: STEPS.record(run.visited()))
+        return run
 
     def branch_here(self, run: StubbedRun, path: Path) -> str:
         return run.world.git(path, "branch", "--show-current").strip()
@@ -163,6 +178,7 @@ class StubbedRunTest(Scenario):
 
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         self.assertEqual(run.line(done)["end"], "done")
+        self.assertLessEqual({"contract", "implement", "merge", "close", "closing"}, run.visited())
         root = run.runs()[0]
         setup = run.children(root)[0]
         self.assertEqual(run.transitions(setup), SETUP_WALK)
@@ -401,6 +417,41 @@ class ReviewRouteTest(Scenario):
         keys = self.keys(run)
         self.assertLess(keys.index("lite-review"), keys.index("escalated"))
         self.assertEqual(model_of(self.launch(run, "escalated")), self.reviewer_model(run))
+
+    def test_findings_of_the_escalated_review_are_fixed_once_and_land_after_a_clean_rereview(self):
+        fix = committing("fixture/second.py", "SECOND = 2\n")
+        run = self.stubbed(replies={"lite-review": dict(CLEAN_LITE, escalate=True), "escalated": full_findings(),
+                                     "escalated-fix": fix, "escalated-rereview": CLEAN_REREVIEW})
+
+        self.finish(run, "done")
+
+        transitions = run.transitions(self.child(run, "direct"))
+        for edge in (("escalated-tally", "findings"), ("escalated-fixed", "done"), ("escalated-settled", "clean")):
+            self.assertIn(edge, transitions)
+        keys = self.keys(run)
+        self.assertEqual(keys.count("escalated-fix"), 1)
+        self.assertLess(keys.index("escalated"), keys.index("escalated-fix"))
+        self.assertLess(keys.index("escalated-fix"), keys.index("escalated-rereview"))
+        landed = run.world.git(run.fixture.root, "--git-dir", run.bare, "show", "main:fixture/second.py")
+        self.assertEqual(landed, "SECOND = 2\n")
+
+    def test_findings_of_the_full_review_of_a_sensitive_change_are_fixed_once_and_land_after_a_clean_rereview(self):
+        fix = committing("fixture/second.py", "SECOND = 2\n")
+        sensitive = dict(IMPLEMENTED, reply=dict(IMPLEMENTED["reply"], sensitive=True))
+        run = self.stubbed(replies={"implement": sensitive, "full-review": full_findings(), "full-fix": fix,
+                                     "full-rereview": CLEAN_REREVIEW})
+
+        self.finish(run, "done")
+
+        transitions = run.transitions(self.child(run, "direct"))
+        for edge in (("implemented", "full"), ("full-tally", "findings"), ("full-fixed", "done"),
+                     ("full-settled", "clean")):
+            self.assertIn(edge, transitions)
+        keys = self.keys(run)
+        self.assertNotIn("lite-review", keys)
+        self.assertEqual(keys.count("full-fix"), 1)
+        self.assertLess(keys.index("full-fix"), keys.index("full-rereview"))
+        self.assertEqual([pull["state"] for pull in run.pulls()], ["MERGED"])
 
     def test_findings_left_after_the_one_fix_round_stop_direct_review(self):
         run = self.stubbed(replies={
@@ -787,41 +838,127 @@ class CloseOutTest(Landing):
         self.assertEqual(self.branches(run), "")
 
 
-class CoverageTest(Landing):
-    def scenarios(self):
-        gone = {"verdict": "no-longer-applies", "details": "d", "evidence": "already done at origin/main."}
-        sensitive = dict(IMPLEMENTED, reply=dict(IMPLEMENTED["reply"], sensitive=True))
-        fix = committing("fixture/second.py", "SECOND = 2\n")
-        return (
-            {},
-            {"replies": {"applies": gone}},
-            {"replies": {"lite-review": lite_findings(), "lite-fix": fix, "lite-rereview": CLEAN_REREVIEW}},
-            {"replies": {"lite-review": dict(CLEAN_LITE, escalate=True), "escalated": full_findings(),
-                         "escalated-fix": fix, "escalated-rereview": CLEAN_REREVIEW}},
-            {"replies": {"implement": sensitive, "full-review": full_findings(), "full-fix": fix,
-                         "full-rereview": CLEAN_REREVIEW}},
-            {"rollup": RED},
-            {"rollup": UNNAMED},
-            {"forge_events": ("move-head",)},
-            {"forge_events": ("steal-lock",)},
-            {"required_checks": ()},
-            {"lock_release_fails": True})
+def flattened(suite):
+    for test in suite:
+        if isinstance(test, unittest.TestSuite):
+            yield from flattened(test)
+        else:
+            yield test
 
-    def test_every_step_of_the_shipped_procedures_is_visited_by_a_stubbed_run(self):
-        visited: set[str] = set()
-        for scenario in self.scenarios():
-            run = self.stubbed(**scenario)
-            run.deliver()
-            if scenario.get("lock_release_fails"):
-                run.forge.ref_store(run.fixture.slug, run.forge.refs())
-                run.deliver()
-            for directory in run.runs() + [c for r in run.runs() for c in run.children(r)]:
-                visited |= {e["step"] for e in run.events(directory)
-                            if e["event"] in ("step_entered", "transition_taken")}
 
-        declared = {step["id"] for name in ("setup", "deliver", "direct", "verify", "land", "close-out")
-                    for step in json.loads((PROCEDURES / f"{name}.json").read_text("utf-8"))["steps"]}
-        self.assertEqual(visited, declared)
+class StepCoverageTest(Scenario):
+    ID = "m.T.test_a"
+
+    def test_the_module_teardown_fails_naming_a_declared_step_no_run_visited(self):
+        module = sys.modules[type(self).__module__]
+        coverage = StepCoverage(PROCEDURES)
+        for test_id in test_ids(module):
+            coverage.started(test_id)
+        coverage.record(coverage.declared() - {"escalated-settled"})
+
+        with mock.patch.object(module, "STEPS", coverage), self.assertRaises(AssertionError) as raised:
+            module.tearDownModule()
+
+        self.assertIn("escalated-settled", str(raised.exception))
+
+    def test_each_test_of_the_module_is_started_on_the_module_coverage(self):
+        self.assertIn(self.id(), STEPS.started_ids())
+
+    def test_every_test_class_of_the_module_is_a_scenario(self):
+        module = sys.modules[type(self).__module__]
+
+        loaded = list(flattened(unittest.TestLoader().loadTestsFromModule(module)))
+
+        self.assertTrue(loaded)
+        for test in loaded:
+            self.assertIsInstance(test, Scenario, test.id())
+
+    def test_a_stubbed_run_records_the_steps_it_visited_on_the_module_coverage(self):
+        module = sys.modules[type(self).__module__]
+        coverage = StepCoverage(PROCEDURES)
+
+        with mock.patch.object(module, "STEPS", coverage), \
+                mock.patch.object(StubbedRun, "visited", return_value={"contract"}):
+            self.stubbed()
+            self.doCleanups()
+
+        self.assertEqual(coverage.recorded(), {"contract"})
+
+    def test_a_declared_step_no_run_visited_fails_the_coverage_check(self):
+        coverage = StepCoverage(PROCEDURES)
+        coverage.started(self.ID)
+        coverage.record(coverage.declared() - {"escalated-settled"})
+
+        with self.assertRaises(AssertionError) as raised:
+            coverage.check([self.ID])
+
+        self.assertIn("escalated-settled", str(raised.exception))
+
+    def test_a_visited_step_no_procedure_declares_fails_the_coverage_check(self):
+        coverage = StepCoverage(PROCEDURES)
+        coverage.started(self.ID)
+        coverage.record(coverage.declared() | {"retired-step"})
+
+        with self.assertRaises(AssertionError) as raised:
+            coverage.check([self.ID])
+
+        self.assertIn("retired-step", str(raised.exception))
+
+    def test_a_full_run_whose_runs_together_visit_every_declared_step_passes(self):
+        coverage = StepCoverage(PROCEDURES)
+        steps = sorted(coverage.declared())
+        coverage.started(self.ID)
+        coverage.record(steps[::2])
+        coverage.record(steps[1::2])
+
+        result = coverage.check([self.ID])
+
+        self.assertIsNone(result)
+
+    def test_a_run_of_part_of_the_module_checks_no_coverage(self):
+        coverage = StepCoverage(PROCEDURES)
+        coverage.started(self.ID)
+
+        result = coverage.check([self.ID, "m.T.test_b"])
+
+        self.assertIsNone(result)
+
+    def test_a_test_skipped_by_a_decorator_does_not_silence_the_coverage_check(self):
+        coverage = StepCoverage(PROCEDURES)
+        fake = types.ModuleType("fake")
+        fake.T = type("T", (unittest.TestCase,), {"__module__": "fake", "test_a": lambda self: None,
+                                                  "test_b": unittest.skip("off")(lambda self: None)})
+        fake.U = type("U", (unittest.TestCase,), {"__module__": "fake", "__unittest_skip__": True,
+                                                  "test_c": lambda self: None})
+        coverage.started("fake.T.test_a")
+
+        self.assertEqual(test_ids(fake), {"fake.T.test_a"})
+        with self.assertRaises(AssertionError) as raised:
+            coverage.check(test_ids(fake))
+
+        self.assertIn("escalated-settled", str(raised.exception))
+
+    def test_a_name_filter_on_the_command_line_does_not_narrow_the_module_test_ids(self):
+        fake = types.ModuleType("fake")
+        fake.T = type("T", (unittest.TestCase,), {"__module__": "fake", "test_a": lambda self: None,
+                                                  "test_b": lambda self: None})
+
+        with mock.patch.object(unittest.defaultTestLoader, "testNamePatterns", ["*.test_a"]):
+            ids = test_ids(fake)
+
+        self.assertEqual(ids, {"fake.T.test_a", "fake.T.test_b"})
+
+    def test_the_module_test_ids_name_the_tests_of_the_module(self):
+        module = sys.modules[type(self).__module__]
+        landing = (f"{StubbedRunTest.__module__}.StubbedRunTest."
+                   "test_a_stubbed_delivery_lands_a_merged_pull_request_and_closes_the_issue")
+
+        ids = test_ids(module)
+
+        self.assertIn(self.id(), ids)
+        self.assertIn(landing, ids)
+        for test_id in ids:
+            self.assertTrue(test_id.rsplit(".", 1)[-1].startswith("test_"), test_id)
 
 
 class GuardWorldTest(Scenario):
