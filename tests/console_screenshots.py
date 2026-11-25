@@ -3,7 +3,7 @@
 Run: just console-screenshots [out]   (Playwright and its Chromium come from nixpkgs)
 
 Contract:
-- `STATES` names the fifty-seven screens the sprint block, the finished list, the message life, the
+- `STATES` names the fifty-nine screens the sprint block, the finished list, the message life, the
   Spend page, the notices fold, the desk's spend figures and the controls must read well on (`tell-box-open` is
   the sprint block with its Tell box opened; `owner-check` is the sprint block with a held
   issue's owner check beside it; `spend-page` is the `/spend` page over seeded transcripts: a
@@ -47,7 +47,9 @@ Contract:
   landed one, each with a manager session on two or more days, and an outside-sprint session
   with one batch delivery run, with the sprint block, the finished line and the run line open
   so the spend figures show; `failed-start` is a sprint whose first launch was refused, with its
-  card carrying the reason and the Retry and Drop the sprint buttons; `goal-open` is the sprint block of `tell-box-open` with the top
+  card carrying the reason and the Retry and Drop the sprint buttons; `seven-sprints` is the desk with one card
+  (`owner/web`'s question) and seven running sprints over the three projects, the Work column's full-width case
+  (#1807), shot at any widths with `--widths`; `goal-open` is the sprint block of `tell-box-open` with the top
   bar's goal field focused so its box is open; `goal-near` is `goal-open` with 1900
   characters typed, so the count reads near the limit; `goal-over` is it with 2100 characters
   typed, so the count reads over the limit, Send is unavailable and the hint beside it says how much to cut (#1214);
@@ -289,6 +291,7 @@ from agent_tools.console.service import ConsoleService
 from agent_tools.console.sprints import TELL_MINUTE_TEXT, Question, SprintState, create_secret
 from agent_tools.system.forge_api import ForgeError
 
+from . import console_screenshot_desk as desk
 from .console_land_queue import land_queue_reader
 from .console_screenshot_permissions import HELD_PROMPTS, PERMISSION_MANAGER, hold_permission, keep_permission
 from .console_test_support import hook_body, write_registry
@@ -298,7 +301,7 @@ STATES = ("live-several", "waiting-on-you", "stuck", "tell-box-open", "message-s
           "nothing-running", "waiting-its-turn", "manager-cannot-hear", "permission-stale", "permission-card",
           "permission-long", "waiting-until", "paused",
           "owner-check", "spend-page", "notices-fold",
-          "notice-post-open", "live-fault", "desk-spend", "failed-start", "goal-open", "goal-near", "goal-over",
+          "notice-post-open", "live-fault", "desk-spend", "failed-start", "seven-sprints", "goal-open", "goal-near", "goal-over",
           "inbox-card", "question-words", "question-refused", "look-card", "look-moved",
           "look-failed", "accounts-panel", "ask-box", "questions-closed", "questions-open",
           "ask-goal", "question-read", "deeper-offer", "deeper-answer", "activation-tooling", "activation-host", "register-apply",
@@ -367,7 +370,7 @@ MILESTONES = {"Add resumable uploads": "the upload form",
               "Fix the settings page": "the settings form",
               "Keep the importer fast": "the batch reader",
               "Retire the old exporter": "the last export path",
-              "Try a new cache": "the cache layer"}
+              "Try a new cache": "the cache layer", **desk.MILESTONES}
 OPEN_TELL = (True, "Send", TELL_MINUTE_TEXT, True)
 ASK_ANSWERED_QUESTION = "What does the build check?"
 ASK_WORKING_QUESTION = "Is the importer deployed on this host?"
@@ -2499,6 +2502,8 @@ def _seed_state(seed: _Seed, state: str, web_root: str = "",
                     report_extra={"paused": PAUSE_REASON})
     elif state == "failed-start":
         seed.failed_start(web, "Add resumable uploads", 3 * MINUTE)
+    elif state == desk.SEVEN_SPRINTS:
+        desk.seed_seven_sprints(seed, PROJECTS, MINUTE)
     elif state in (*SHARING_STATES, "owner-actors", "owner-accounts"):
         seed.put(3 * MINUTE, SHARING_TAILNET, None, {"tailnet": TAILNET})
         if state == "sharing-off":
@@ -3588,18 +3593,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--sheets", action="store_true",
                         help="also write <state>-sheet.png, the state's widths side by side")
     parser.add_argument("--states", help="a comma list of the states to shoot (default every state)")
+    parser.add_argument("--widths", help="a comma list of the widths in px to shoot (default 1440,480)")
     parser.add_argument("--composite", help="with --sheets, also write NAME, the shot states' sheets side by side")
     args = parser.parse_args(argv)
-    states = STATES
-    if args.states is not None:
-        states = tuple(args.states.split(","))
-        unknown = [state for state in states if state not in STATES]
-        if unknown:
-            parser.error(f"--states names {', '.join(unknown)}, which are not states")
-    if args.composite is not None and not args.sheets:
-        parser.error("--composite goes with --sheets")
-    if (args.question is None) != (args.answer_file is None):
-        parser.error("--question and --answer-file go together")
+    states, widths = desk.chosen(parser, args, STATES, WIDTHS)
     real = args.question is not None
     if real:
         text = Path(args.answer_file).read_text(encoding="utf-8")
@@ -3608,9 +3605,9 @@ def main(argv: list[str] | None = None) -> int:
         os.environ.update(sandbox_environ(Path(tmp).resolve()))
         try:
             taken = (capture(Path(args.out), states=("question-read",), read=(args.question, text),
-                             sheets=args.sheets, composite=args.composite)
+                             sheets=args.sheets, composite=args.composite, widths=widths)
                      if real else capture(Path(args.out), states=states, sheets=args.sheets,
-                                          composite=args.composite))
+                                          composite=args.composite, widths=widths))
         except Unavailable as error:
             print(f"console-screenshots: {error}", file=sys.stderr)
             return 2
