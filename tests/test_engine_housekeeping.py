@@ -563,6 +563,38 @@ class SweepTest(unittest.TestCase):
         self.assertFalse(expired.exists())
         self.assertEqual(captured.getvalue(), "")
 
+    def test_a_removal_that_loses_every_path_to_a_concurrent_one_still_succeeds(self):
+        run = seed(self.root, 101)
+        expired = self.root / f".{run.name}.expired"
+        real = shutil.rmtree
+        calls = []
+        lost = []
+
+        def racing(path, *args, **kwargs):
+            # the patched rmtree is the other remover, taking each path of the directory first
+            calls.append(path)
+            if Path(path) != expired:
+                return real(path, *args, **kwargs)
+            children = sorted(expired.iterdir())
+            if children:
+                child = children[0]
+                real(child) if child.is_dir() else child.unlink()
+                lost.append(child.name)
+                raise FileNotFoundError(2, "No such file or directory", str(child))
+            os.rmdir(expired)
+            lost.append(".")
+            raise FileNotFoundError(2, "No such file or directory", str(expired))
+
+        captured = io.StringIO()
+        with mock.patch("agent_tools.delivery.engine_housekeeping.shutil.rmtree", side_effect=racing), \
+                contextlib.redirect_stderr(captured):
+            swept = self.sweep(FakeTracker({101: ago(20)}))
+        self.assertEqual(swept, [run.name])
+        self.assertEqual(captured.getvalue(), "")
+        self.assertFalse(expired.exists())
+        self.assertEqual(lost, ["events.jsonl", "lock", "procedure", "results", "run.json", "."])
+        self.assertEqual(calls, [expired] * 6)
+
     def test_a_run_of_another_tracker_or_of_none_is_kept_whatever_that_tracker_says(self):
         other = seed(self.root, 101, tracker="github:other/repo")
         mine = seed(self.root, 103)

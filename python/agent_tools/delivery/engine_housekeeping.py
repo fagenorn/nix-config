@@ -30,8 +30,9 @@ under an exclusive run lock, so a reader holding the lock keeps it. Before a fin
 stopped) is renamed, its complete history line (all eight members) is appended if the history holds none
 for it and the run ended within the history's 180 days, and a run whose line cannot be appended is kept. The tracker budget (`SWEEP_SECONDS`) starts after the run directories are listed and read. A run is
 renamed to `.<run id>.expired` before it is removed, so a removal that fails is finished by the next
-sweep. `.sweep-cursor.json` remembers the last issue asked per project so that a sweep cut short by its
-time budget resumes after it.
+sweep. Two removals of the same directory at once both succeed: a path the other already removed counts as
+removed, and each goes on until the directory is gone. `.sweep-cursor.json` remembers the last issue asked
+per project so that a sweep cut short by its time budget resumes after it.
 """
 
 from __future__ import annotations
@@ -294,15 +295,21 @@ def _line(error: BaseException) -> str:
 
 
 def _remove(path: Path) -> bool:
+    """Remove `path`, whoever else is removing it: a concurrent removal of the same directory may take any
+    path first. A path it took counts as removed and the removal goes on until the directory is gone.
+    Nothing is added under a renamed-aside run, so the loop ends. Any other failure is one stderr line
+    and False."""
     try:
-        try:
-            shutil.rmtree(path)
-        except FileNotFoundError:  # a concurrent sweep removes the same directory: finish what it left
-            shutil.rmtree(path, ignore_errors=not path.exists())
+        while True:
+            try:
+                shutil.rmtree(path)
+                return True
+            except FileNotFoundError:
+                if not os.path.lexists(path):
+                    return True
     except OSError as error:
         sys.stderr.write(f"engine: housekeeping could not remove {path}: {_line(error)}\n")
         return False
-    return True
 
 
 def _candidates(root: Path, entries: list[Path], project: str, tracker_id: str,
