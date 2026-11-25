@@ -1,4 +1,4 @@
-"""The console's credential check stays fast on a 96 KiB answer (#1726), whatever its shape.
+"""The console's credential check stays fast on a 96 KiB answer, whatever its shape.
 
 Run: just agent-workflow-tests
 """
@@ -7,6 +7,10 @@ import time
 import unittest
 
 from agent_tools.console import project_question
+
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures
+
+TIER = "fast"
 
 GITHUB_TOKEN = "gh" + "p_" + "a1b2c3" * 6
 SIZE = 96 * 1024

@@ -81,7 +81,7 @@ key blocks, a `Bearer` value, a JWT, a `token`/`secret`/`password`-style assignm
 quoted or not, with a real value, the console's own page token, and a long base64 run that is not
 an SRI hash or a path, a path being slash-separated parts that are each a word holding three lowercase letters in a row,
 a label of up to four characters, or a short CamelCase or acronym name such as `README`, `HTTP2` or `Vec3D`)
-searches it, in time linear in its length (#1726: the three shapes a regex would backtrack on, `jwt`, `assignment` and
+searches it, in time linear in its length (the three shapes a regex would backtrack on, `jwt`, `assignment` and
 `base64_run`, are code that reads each run of characters once). The refusal text never holds any of the question's text.
 Limits (#1272): the shapes judge text as a paste gives it. A credential split by spaces or invisible
 characters, encoded (URL encoding, hex, or base64 of a token), a password shorter than eight characters
@@ -343,7 +343,7 @@ class _Searchable(Protocol):
 
 
 class _LinearShape:
-    """A shape judged by code in time linear in the text, where one regex would backtrack (#1726).
+    """A shape judged by code in time linear in the text, where one regex would backtrack.
 
     `search` answers like `re.Pattern.search`: something truthy when the text holds the shape."""
 
