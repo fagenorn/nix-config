@@ -3,9 +3,11 @@
 Run: just console-screenshots [out]   (Playwright and its Chromium come from nixpkgs)
 
 Contract:
-- `STATES` names the fifty-seven screens the sprint block, the finished list, the message life, the
+- `STATES` names the fifty-nine screens the sprint block, the finished list, the message life, the
   Spend page, the notices fold, the desk's spend figures and the controls must read well on (`tell-box-open` is
-  the sprint block with its Tell box opened; `owner-check` is the sprint block with a held
+  the sprint block with its Tell box opened; `sprint-fold-open` is the sprint block of `tell-box-open`
+  with its own fold and its End the sprint fold opened (`open_end_fold`); on a base console End the
+  sprint opens beside Tell the manager, the before picture; `owner-check` is the sprint block with a held
   issue's owner check beside it; `spend-page` is the `/spend` page over seeded transcripts: a
   running sprint's manager session, an outside-sprint session and one workflow run, with spend on
   at least four of the last seven days; `notices-fold` is `owner/web`'s open Notices fold
@@ -290,13 +292,14 @@ from agent_tools.console.sprints import TELL_MINUTE_TEXT, Question, SprintState,
 from agent_tools.system.forge_api import ForgeError
 
 from .console_land_queue import land_queue_reader
-from .console_screenshot_controls import ACTS_ROW, CONTROL_SELECTOR, SHORT_CONTROLS, SMALL_TARGETS, control_report
+from .console_screenshot_controls import (ACTS_ROW, CONTROL_SELECTOR, SHORT_CONTROLS, SMALL_TARGETS,
+                                          control_report, open_end_fold)
 from .console_screenshot_permissions import HELD_PROMPTS, PERMISSION_MANAGER, hold_permission, keep_permission
 from .console_test_support import hook_body, write_registry
 
-STATES = ("live-several", "waiting-on-you", "stuck", "tell-box-open", "message-sent",
-          "message-picked-up", "message-replied", "message-not-picked-up", "finished-list",
-          "nothing-running", "waiting-its-turn", "manager-cannot-hear", "permission-stale", "permission-card",
+STATES = ("live-several", "waiting-on-you", "stuck", "tell-box-open", "sprint-fold-open",
+          "message-sent", "message-picked-up", "message-replied", "message-not-picked-up",
+          "finished-list", "nothing-running", "waiting-its-turn", "manager-cannot-hear", "permission-stale", "permission-card",
           "permission-long", "waiting-until", "paused",
           "owner-check", "spend-page", "notices-fold",
           "notice-post-open", "live-fault", "desk-spend", "failed-start", "goal-open", "goal-near", "goal-over",
@@ -2526,7 +2529,7 @@ def _seed_state(seed: _Seed, state: str, web_root: str = "",
             seed.account("colleague-1", 0.95, session=0.5, week_in=2 * 86400, session_in=3 * 3600)
     elif state == "waiting-its-turn":
         seed.sprint(web, "Add resumable uploads", started=60 * MINUTE, report=45 * MINUTE)
-    elif state in ("tell-box-open", "goal-open", "goal-near", "goal-over"):
+    elif state in ("tell-box-open", "sprint-fold-open", "goal-open", "goal-near", "goal-over"):
         seed.sprint(web, "Add resumable uploads", started=20 * MINUTE, report=2 * MINUTE)
     elif state.startswith("message-"):
         sid, goal = seed.sprint(web, "Add resumable uploads", started=20 * MINUTE,
@@ -3414,6 +3417,8 @@ def _shoot(browser, url: str, state: str, width: int, out: Path, *,
             page.click("button.tell-open")
             page.wait_for_selector(".tell-hint")
             tell = tuple(page.evaluate(TELL_READING))
+        if state == "sprint-fold-open":
+            open_end_fold(page)
         paneled = (state in ("ask-box", "ask-goal", "questions-open", "question-read",
                              *DEEPER_STATES)
                    and page.query_selector(READING_PANEL) is not None)

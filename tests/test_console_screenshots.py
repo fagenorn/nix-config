@@ -1040,8 +1040,8 @@ def uncovered(moved, rows) -> list[str]:
 
 
 class ScreenshotFixtureTest(unittest.TestCase):
-    def test_the_set_is_fifty_eight_states_at_two_widths(self) -> None:
-        self.assertEqual(len(shots.STATES), 58)
+    def test_the_set_is_fifty_nine_states_at_two_widths(self) -> None:
+        self.assertEqual(len(shots.STATES), 59)
         self.assertEqual(shots.STATES[shots.STATES.index("manager-cannot-hear") + 1:][:5],
                          ("permission-stale", "permission-card", "permission-long", "waiting-until",
                           "paused"))
@@ -2728,7 +2728,7 @@ class ScreenshotFixtureTest(unittest.TestCase):
                     self.assertEqual((running[0]["ball"], running[0]["ball_text"]),
                                      ("paused", "paused"))
                     self.assertIsNone(running[0]["now_until"])
-                elif state == "tell-box-open":
+                elif state in ("tell-box-open", "sprint-fold-open"):
                     self.assertEqual(len(running), 1)
                     self.assertEqual(running[0]["messages"], [])
                     self.assertIsInstance(running[0]["tell_text"], str)

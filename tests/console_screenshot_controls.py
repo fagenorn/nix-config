@@ -61,6 +61,17 @@ SMALL_TARGETS = r"""(() => {
 })()""".replace("__MEDIA__", json.dumps(PHONE_MEDIA)).replace(
     "__TALL__", json.dumps(PHONE_TALL)).replace("__TARGETS__", json.dumps(TARGET_SELECTOR))
 
+SPRINT_FOLD = "#projects li.sprint details.sprint-detail > summary"
+END_FOLD = "#projects li.sprint summary.more-open"
+END_OPEN = "#projects li.sprint details.sprint-more[open] button.withdraw"
+
+
+def open_end_fold(page) -> None:
+    """Open the sprint's own fold, then its End the sprint fold, and wait for Drop the sprint."""
+    page.click(SPRINT_FOLD)
+    page.click(END_FOLD)
+    page.wait_for_selector(END_OPEN)
+
 
 def control_report(taken) -> list[str]:
     """The failure lines for the shots' control readings: a short one, then a small one."""

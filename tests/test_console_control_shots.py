@@ -62,3 +62,25 @@ class PhoneTargetTest(unittest.TestCase):
         self.assertIn("console-screenshots: p.png has a control under 24 by 24 px or a phone "
                       "answer under 44 px (a.nav 39x20px, button.tell-open 32px under 44)",
                       out.getvalue())
+
+
+class SprintFoldShotTest(unittest.TestCase):
+    def test_the_sprint_fold_shot_opens_the_sprints_fold_then_end_the_sprint(self) -> None:
+        fake = screenshot_tests.fake_browser
+        for state in ("sprint-fold-open", "tell-box-open", "live-several"):
+            with self.subTest(state=state), tempfile.TemporaryDirectory() as tmp:
+                browser, page = fake(set())
+                read = page.evaluate
+                page.evaluate = lambda e, arg=None: [] if e == shots.TELL_READING else read(e, arg)
+                shots._shoot(browser, "http://console.test/", state, 480, Path(tmp))
+                folds = [c for c in page.clicks if c in (targets.SPRINT_FOLD, targets.END_FOLD)]
+                if state == "sprint-fold-open":
+                    self.assertEqual(folds, [targets.SPRINT_FOLD, targets.END_FOLD])
+                    self.assertIn(targets.END_OPEN, page.waits)
+                else:
+                    self.assertEqual(folds, [])
+                    self.assertNotIn(targets.END_OPEN, page.waits)
+
+    def test_the_sprint_fold_state_follows_the_tell_box_state(self) -> None:
+        self.assertEqual(shots.STATES.index("sprint-fold-open"),
+                         shots.STATES.index("tell-box-open") + 1)
