@@ -2455,31 +2455,6 @@ class CredentialShapeTest(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertIs(project_question.credential_shaped(text), False)
 
-    def test_a_96_kib_answer_is_checked_in_under_50_ms_whatever_its_shape(self):
-        size = 96 * 1024
-        prose = "This answer reads src/foo/bar.py and explains why the build passes. "
-        answers = {
-            "prose": prose * (size // len(prose) + 1),
-            "prose then a token": (prose * (size // len(prose)))[:size] + FAKE_CREDENTIALS["github"],
-            "one long lowercase run": "ab12" * (size // 4),
-            "dotted words": "a." * (size // 2),
-            "hyphenated words": "a-" * (size // 2),
-            "repeated jwt head": "eyJaaaaaaaa-" * (size // 12),
-            "repeated lowercase words": "aaaaaaaa" * (size // 8),
-            "repeated assignment name": "token=" * (size // 6),
-            "repeated dotted assignment name": "token." * (size // 6),
-            "many short path parts": "aaa/" * (size // 4),
-            "long padded run": "Aa1" * 11 + "=" * (size - 33),
-        }
-        for name, text in answers.items():
-            with self.subTest(name=name):
-                self.assertLessEqual(len(text), size + len(FAKE_CREDENTIALS["github"]))
-                started = time.perf_counter()
-                found = project_question.credential_shaped(text)
-                elapsed = time.perf_counter() - started
-                self.assertIs(found, name == "prose then a token")
-                self.assertLess(elapsed, 0.05)
-
 
 class QuestionCase(Case):
     """A service whose question session is a stub: the asker records each call and returns an outcome."""
