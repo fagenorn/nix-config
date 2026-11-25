@@ -9,6 +9,7 @@ Run: just agent-workflow-tests
 import http.server
 import json
 import os
+import plistlib
 import socketserver
 import stat
 import subprocess
@@ -18,7 +19,7 @@ import threading
 import unittest
 from pathlib import Path
 
-from agent_tools.hosts import omlx_memory_watch
+from agent_tools.hosts import omlx_memory_events, omlx_memory_watch
 from agent_tools.hosts.omlx_memory_watch import kill_line
 from tests.test_host_alerts import PROXY_VARIABLES, SETTINGS, Bot
 
@@ -40,8 +41,10 @@ Pages occupied by compressor:              105539.
 """
 VM_STAT_LOW = VM_STAT.replace("12906856.", "15400000.")
 HEALTH_LOADED = {"status": "healthy", "engine_pool": {"loaded_count": 1, "current_model_memory": 195219083423}}
-PS_IDLE = "/sbin/launchd\n(Runner.Listener)\n(bash)\n"
-PS_BUSY = PS_IDLE + "(Runner.Worker)\n/Users/runner/actions-runner/bin/Runner.Worker\n"
+PS_IDLE = "1 /sbin/launchd\n487 (Runner.Listener)\n390 (bash)\n"
+PS_BUSY = PS_IDLE + (
+    "9001 (Runner.Worker)\n9002 /Users/runner/actions-runner/bin/Runner.Worker spawnclient 103 106\n")
+EMPTY_PLIST = plistlib.dumps({"images": []}).decode()
 FOOTPRINT = """======================================================================
 Python [73552]: 64-bit    Footprint: 187360249992 B (16384 bytes per page)
 ======================================================================
@@ -87,6 +90,12 @@ DAY_LINE = {
     "peak_ci_jobs": 2, "samples": 1440, "loaded_samples": 1400, "min_loaded_available_gib": 28.0,
     "floor_gib": 16, "omlx_jetsam_priority": 100, "declared_jetsam_priority": 100,
     "peak_fseventsd_gib": None, "fseventsd_restarts": 0,
+    "peak_sys_footprint_gib": None, "peak_sys_footprint_at": None,
+    "peak_process_footprint_gib": None, "peak_process_footprint_at": None,
+    "peak_unowned_gib": None, "peak_unowned_at": None, "peak_wired_gib": None, "peak_wired_at": None,
+    "peak_anonymous_gib": None, "peak_anonymous_at": None,
+    "peak_compressions_gib": None, "peak_compressions_at": None,
+    "peak_owners": [], "census_samples": 0, "records_since": None,
 }
 
 
@@ -103,6 +112,8 @@ class WatchCase(unittest.TestCase):
         self.launchctl(launchctl(7, "(none)"))
         self.ps(PS_IDLE)
         self.fake("sysctl", f"echo {TOTAL}\n")
+        (self.d / "hdiutil.plist").write_text(EMPTY_PLIST)
+        self.fake("hdiutil", f'if [ -e "{self.d}/hdiutil.fail" ]; then exit 1; fi\ncat "{self.d}/hdiutil.plist"\n')
         self.footprint_text = self.d / "footprint.out"
         self.footprint_text.write_text(FOOTPRINT)
         self.fake("footprint", self.logging_script("footprint.log") +
@@ -150,7 +161,7 @@ class WatchCase(unittest.TestCase):
     def sample(self, *extra, now="2026-11-24T12:00:00", env=None):
         argv = [
             sys.executable, "-m", "agent_tools.hosts.omlx_memory_watch", "sample",
-            "--state-dir", str(self.state_dir), "--floor-gib", "16", "--others-budget-gib", "46",
+            "--state-dir", str(self.state_dir), "--floor-gib", "16", "--others-budget-gib", "46", "--unowned-alert-gib", "5",
             "--omlx-jetsam-priority", "100", "--host", "eleven-m5",
             "--vm-stat", str(self.d / "vm_stat"), "--sysctl", str(self.d / "sysctl"),
             "--launchctl", str(self.d / "launchctl"), "--ps", str(self.d / "ps"),
@@ -158,6 +169,9 @@ class WatchCase(unittest.TestCase):
             "--health-url", (self.d / "health.json").as_uri(),
             "--alert-settings", str(self.settings), "--alert-log", str(self.alert_log),
             "--telegram-api", self.bot.api, "--floor-record", str(self.d / "floor.json"),
+            "--census-record", str(self.d / "census.json"), "--fseventsd-record", str(self.d / "fseventsd.json"),
+            "--hdiutil", str(self.d / "hdiutil"), "--slot-history", str(self.d / "history.jsonl"),
+            "--colima-pid-file", str(self.d / "vz.pid"),
             "--now", now, *extra,
         ]
         return subprocess.run(argv, capture_output=True, text=True, env=env or self.env, timeout=60)
@@ -272,16 +286,17 @@ class SampleTest(WatchCase):
         self.assertIn("vm_stat", result.stderr)
         self.assertEqual(self.state_file.read_bytes(), before)
         self.assertFalse(self.peaks_file.exists())
+        self.assertFalse((self.state_dir / "samples").exists())
 
     def test_the_day_keeps_the_most_ci_jobs_seen(self):
-        self.assertEqual(omlx_memory_watch.count_ci_jobs(PS_BUSY), 2)
-        self.assertEqual(omlx_memory_watch.count_ci_jobs(PS_IDLE), 0)
+        self.assertEqual(omlx_memory_events.ci_pids(omlx_memory_events.parse_listing(PS_BUSY)), [9001, 9002])
+        self.assertEqual(omlx_memory_events.ci_pids(omlx_memory_events.parse_listing(PS_IDLE)), [])
         self.ps(PS_BUSY)
         self.sample()
         self.ps(PS_IDLE)
         self.sample()
         self.assertEqual(self.read_state()["peak_ci_jobs"], 2)
-        self.assertEqual(self.log_json("ps.log"), [["-axo", "comm="], ["-axo", "comm="]])
+        self.assertEqual(self.log_json("ps.log"), [["-axwwo", "pid=,args="], ["-axwwo", "pid=,args="]])
 
     def test_the_health_read_ignores_proxy_variables(self):
         body = json.dumps(HEALTH_LOADED).encode()
@@ -373,6 +388,12 @@ class ParseTest(unittest.TestCase):
         self.assertEqual(
             omlx_memory_watch.parse_launchctl(launchctl(7, "OS_REASON_JETSAM")),
             {"runs": 7, "pid": 73552, "jetsam_priority": 40, "last_exit_reason": "OS_REASON_JETSAM"})
+
+
+    def test_compressions_are_read_when_vm_stat_prints_them(self):
+        self.assertIsNone(omlx_memory_watch.parse_vm_stat(VM_STAT)["compressions"])
+        text = VM_STAT + "Compressions:                             11842405.\n"
+        self.assertEqual(omlx_memory_watch.parse_vm_stat(text)["compressions"], 11842405)
 
 
 class AlertTest(WatchCase):
