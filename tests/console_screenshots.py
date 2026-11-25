@@ -140,14 +140,14 @@ Contract:
   `account.added` row `{"by": COLLEAGUE, "profile": "colleague-1", "identity": <the mark of its directory>}` written straight to the log, the identity without which his row has no token and the page no Sign out or Remove) and
   whose week is the tightest of the three (5% left against `work-spare`'s 10% and `work-main`'s 60%);
   every manager runs on `work-main`, so the guest page shows `yours`, `Account 2` and `Account 3` and
-  the sprint's account, `Account 2`, and the owner's strip shows COLLEAGUE beside `colleague-1` in
-  its tightest node, the one the 480 px width keeps. On a page with `#pool` the
+  the sprint's account, `Account 2`, and the owner's strip names no account since the one-word top bar
+  (the panel's `colleague-1` row carries COLLEAGUE). On a page with `#pool` the
   guest shots wait for the pool, a session reset and the sprint's account (`.sprint-account`); on a
   page without it they wait for none of them. On a page with `.pool-add` the `guest-page` and
   `guest-steer` shots click it at each width and wait for `.guest-consent` and a disabled
   `.guest-signin` (the consent open, nothing ticked, nothing posted); on a page without it they click
-  nothing. `owner-actors` also waits for `.cap-tightest .cap-owner` on a page that has a `.cap-owner`
-  and for none on a page that has not. `owner-accounts` waits for the opened panel (`#accounts:not([hidden])`)
+  nothing. `owner-actors` also waits for `.cap-tightest .cap-owner` only on an earlier page that has a
+  `.cap-owner` (the before pictures), and for none on a page that has not. `owner-accounts` waits for the opened panel (`#accounts:not([hidden])`)
   and, on a page that has an `.acct-owner`, for `.acct-row .acct-owner`. `offers_account_changes()`
   (`ConsoleService` has `sign_out_account`) keys the account controls on the code being shot, never on
   the page: when it is true `owner-accounts` also waits for `.acct-row .acct-signout` and `guest-page` for
@@ -953,20 +953,6 @@ STYLE_CHECKS += (
          _RGB),
     _row("cap-child-flex", "accounts-panel", ".cap > *", "flex", "equals", "0 0 auto", "1 1 auto",
          every=True),
-    _row("cap-acct-max-width", "accounts-panel", ".cap-acct", "max-width", "equals", "100%",
-         "none"),
-    _row("cap-acct-white-space", "accounts-panel", ".cap-acct", "white-space", "equals", "nowrap",
-         "normal"),
-    *_group("cap-acct-name", "accounts-panel", ".cap-acct b", (
-        ("overflow", "equals", "hidden", "visible"), ("text-overflow", "equals", "ellipsis", "clip"),
-        ("white-space", "equals", "nowrap", "normal"), ("max-width", "max", "160", "none"))),
-    _colour("cap-excl-color", "accounts-panel", ".cap-excl", "--ov2", host="#capacity",
-            probe='<span class="cap-excl" data-style-probe>x</span>'),
-    _colour("cap-pin-mark-color", "accounts-panel", ".cap-pin-mark", "--ov2", host="#capacity",
-            probe='<span class="cap-pin-mark" data-style-probe>x</span>'),
-    _row("cap-extra-display", "accounts-panel", ".cap-extra", "display", "equals", "none", "block",
-         widths=(480,), probe='<span class="cap-extra" data-style-probe>x</span>',
-         host="#capacity"),
     _row("brand-white-space", _NOTHING, ".brand", "white-space", "equals", "nowrap", "normal"),
     _row("top-fit-width", _NOTHING, ".top-in > *", "width", "max", "448", "600px", widths=(480,),
          every=True),
@@ -974,26 +960,6 @@ STYLE_CHECKS += (
          widths=(480,), every=True),
     _row("top-fit-flex-basis", _NOTHING, ".goal-bar", "flex-basis", "max", "448", "600px",
          widths=(480,)),
-    _row("top-fit-meter-width", "accounts-panel", ".meter", "width", "max", "448", "600px",
-         widths=(480,), every=True),
-    _row("top-fit-meter-min-width", "accounts-panel", ".meter", "min-width", "in", "auto|0px",
-         "600px", widths=(480,), every=True),
-    _row("top-fit-meter-flex-basis", "accounts-panel", ".meter", "flex-basis", "equals", "auto",
-         "600px", widths=(480,), every=True),
-    _row("meter-fill-background-color", _NOTHING, ".meter i", "background-color", "equals",
-         PALETTE["--sub0"], _RGB, probe='<span class="meter" data-style-probe><i></i></span>',
-         host="#capacity"),
-    _row("meter-fill-background-image", _NOTHING, ".meter i", "background-image", "equals", "none",
-         "linear-gradient(red, red)",
-         probe='<span class="meter" data-style-probe><i></i></span>', host="#capacity"),
-    _row("meter-excluded-background-color", _NOTHING, ".cap-excluded .meter i", "background-color",
-         "equals", PALETTE["--s2"], _RGB,
-         probe='<span class="cap-acct cap-excluded" data-style-probe><span class="meter"><i></i>'
-               '</span></span>', host="#capacity"),
-    _row("meter-excluded-background-image", _NOTHING, ".cap-excluded .meter i",
-         "background-image", "equals", "none", "linear-gradient(red, red)",
-         probe='<span class="cap-acct cap-excluded" data-style-probe><span class="meter"><i></i>'
-               '</span></span>', host="#capacity"),
     StyleCheck("lead-type-font-size", _DESK_STATES, _BOTH, "body", "font-size", "largest_type",
                "24|" + _DISPLAY_LEAD, ".brand { font-size: 30px !important }", fixture=True),
     _row("lead-type-card-font-size", "inbox-card", ".card .q", "font-size", "equals", "24px",

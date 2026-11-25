@@ -359,9 +359,6 @@ _DIGEST = f"{PAGE}::PageDigestTest::test_each_digest_line_is_its_age_then_its_se
 _STRIP_NEVER = (f"{PAGE}::StripPageTest::"
                 "test_at_1440_the_strip_never_shrinks_and_the_goal_placeholder_stays_one_line")
 _STRIP_THREE = f"{PAGE}::StripPageTest::test_three_accounts_fit_one_line_at_1440"
-_STRIP_480 = (f"{PAGE}::StripPageTest::"
-              "test_at_480_only_the_summary_word_and_the_tightest_account_show")
-_STRIP_DIM = f"{PAGE}::StripPageTest::test_an_excluded_accounts_bar_is_dimmed"
 _FOCUS = f"{PAGE}::PageStandingRulesTest::test_the_goal_field_shows_one_border_in_focus"
 _LEAD_CARD = f"{PAGE}::PageStandingRulesTest::test_the_lead_card_narrows_under_900"
 _REG = f"{PAGE}::RegisterCardKeysPageTest::test_register_asks_are_set_small_enough_to_read_at_480"
@@ -404,15 +401,9 @@ MOVED += (
     moved(_TOP_BAR, ".top-in", "flex-wrap", NARROW, "top-wrap-flex-wrap"),
     moved(_TOP_BAR, ".goal-bar", "flex", NARROW, "goal-bar-flex-480"),
     moved(_TOP_BAR, ".goal-box", "width", BOTH, "goal-box-width-1440", "goal-box-width-480"),
-    moved(_TOP_BAR, ".cap-acct b", "overflow", BOTH, "cap-acct-name-overflow"),
-    moved(_TOP_BAR, ".cap-acct b", "text-overflow", BOTH, "cap-acct-name-text-overflow"),
-    moved(_TOP_BAR, ".cap-acct b", "white-space", BOTH, "cap-acct-name-white-space"),
-    moved(_TOP_BAR, ".cap-acct b", "max-width", BOTH, "cap-acct-name-max-width"),
     moved(_TOP_BAR, ".cap", "min-width", BOTH, "cap-min-width"),
     moved(_TOP_BAR, ".cap", "max-width", BOTH, "cap-max-width"),
     moved(_TOP_BAR, ".cap", "white-space", BOTH, "cap-white-space"),
-    moved(_TOP_BAR, ".cap-acct", "max-width", BOTH, "cap-acct-max-width"),
-    moved(_TOP_BAR, ".cap-acct", "white-space", BOTH, "cap-acct-white-space"),
     moved(_TOP_BAR, ".brand", "white-space", BOTH, "brand-white-space"),
     moved(_TOP_BAR, ".goal-in .goal-text::placeholder", "white-space", BOTH,
           "placeholder-white-space", via=PLACEHOLDER_VIA),
@@ -420,10 +411,6 @@ MOVED += (
     *(moved(_TOP_BAR, selector, prop, NARROW, *_FIT,
             via="no top bar rule asks for more than the 480 column: its widths are read rendered")
       for selector in (".top", ".conn", ".cap", ".goal-bar", ".nav", ".brand")
-      for prop in ("width", "min-width", "flex-basis")),
-    # The meter sits inside the clipped `.cap`, so no row above reads it: its own rows do.
-    *(moved(_TOP_BAR, ".meter", prop, NARROW, f"top-fit-meter-{prop}",
-            via="the meter sits inside the clipped `.cap`, so its own rendered value is read")
       for prop in ("width", "min-width", "flex-basis")),
     # The notices.
     moved(_NOTICE_BLOCKS, ".notice + .notice", "margin-top", BOTH, "notice-margin-top"),
@@ -577,13 +564,6 @@ MOVED += (
                     "cap-font-family")),
           ("background", ("cap-background-color", "cap-background-image")))),
     moved(_STRIP_THREE, ".cap > *", "flex", WIDE, "cap-child-flex"),
-    moved(_STRIP_THREE, ".cap-excl", "color", WIDE, "cap-excl-color"),
-    moved(_STRIP_THREE, ".cap-pin-mark", "color", WIDE, "cap-pin-mark-color"),
-    moved(_STRIP_480, ".cap-extra", "display", NARROW, "cap-extra-display"),
-    moved(_STRIP_DIM, ".cap-excluded .meter i", "background", BOTH, "meter-excluded-background-color",
-          "meter-excluded-background-image"),
-    moved(_STRIP_DIM, ".meter i", "background", BOTH, "meter-fill-background-color",
-          "meter-fill-background-image"),
 )
 _NEW_MARK = f"{PAGE}::PageMessageLifeTest::test_a_new_reply_mark_in_a_summary_is_set_off_from_the_words_before_it"
 _CHECK_LINE = (f"{PAGE}::PageSprintBlockTest::"
@@ -978,7 +958,7 @@ STRIPPED: frozenset[str] = frozenset({
     f"{PAGE}::PanelSigninPageTest::test_the_panel_never_draws_peach",
     f"{PAGE}::PageSpendFigureTest::test_the_figure_is_quiet_overlay_2_and_never_peach",
     "tests/test_console_controls.py::ControlStateTest::test_peach_is_only_on_the_primary_kind",
-    _TOP_BAR, _ARROW, _BREAKS, _BLOCKS, _HEADINGS, _DIGEST, _STRIP_THREE, _STRIP_480, _STRIP_DIM,
+    _TOP_BAR, _ARROW, _BREAKS, _BLOCKS, _HEADINGS, _DIGEST, _STRIP_THREE,
     _NOW_CLAMP, _PIPS, _WAIT, _PROJECT, _ANSWERED, _VIEWER_ARROWS, _VIEWER_BAR, _PRESSED,
     _GUEST_HIDE,
 })
