@@ -72,7 +72,7 @@ never None. The checks run in this order, the first that applies deciding:
   skipped dependents of a failed job, but not a skipped job whose own `if` can never hold for a pull
   request event, `read_run`'s business) or one not named by `read_required(slug, base)` is
   `NOT_CHECK_RUN`. A head that `grant.reruns` already counts `MAX_RERUNS` (two) allowed reruns for is
-  `RERUN_LIMIT` (#1712, ADR-console-106). Else `ALLOW` with target `{"run", "pr", "head", "count",
+  `RERUN_LIMIT`, which names the two reruns, each by run and failing members (#1712, ADR-console-106). Else `ALLOW` with target `{"run", "pr", "head", "count",
   "members"}`: `count` is the number of allowed reruns of that head with this one, and `members` the
   suite members the run's failed jobs reported as failed.
 - Release: the plain run is `ALLOW` with its target; any other leading run is `RELEASE_SPELLING`.
@@ -121,8 +121,9 @@ keeps its secret-bearing body (ADR-console-094, unchanged).
 `verb_of(command)` is the verb `mentions` found (`merge`, `rerun` or one of the three release verbs), None
 when it found none.
 
-`rerun_counts(events, held)` is the count of allowed reruns of each `(project, head)` that the
-`permit.judged` rows say, which the console folds and hands to a `Grant` as `reruns` (head to count).
+`rerun_record(events, held)` is the allowed reruns of each `(project, head)` that the `permit.judged`
+rows say, each a `Rerun` (its run and failing suite members), which the console folds and hands to a
+`Grant` as `reruns` (head to its `Rerun`s); `RERUN_LIMIT` names the two reruns from them.
 
 `memoized(forge)` caches each reader's result, or the `ForgeUnreadable` it raised, by its arguments;
 its `.frozen()` is a `Forge` over the same cache that raises `ForgeUnreadable("not read before")`
@@ -176,8 +177,8 @@ DEPLOY_RERUN = "Run {run} is a {event} run, not a pull request check run, so it 
 NOT_OWN_RUN = "Run {run} is not a check run of this sprint's own pull request."
 STALE_RUN = "Run {run} is not at the head of its pull request."
 NOT_CHECK_RUN = "Run {run} would rerun a job that is not a required check."
-RERUN_LIMIT = ("Pull request {pr} has had its head {head} rerun twice, and a third rerun is refused: "
-               "the head must be reported or fixed.")
+RERUN_LIMIT = ("Pull request {pr} has had its head {head} rerun twice, by {reruns}, and a third rerun is "
+               "refused: the head must be reported or fixed.")
 STALE_HEAD = "Pull request {pr} is not at the head the merge names."
 FORGE_UNREADABLE = "The forge could not be read to judge this command: {reason}"
 NOT_ACTIVE = "This sprint is not active."
@@ -244,6 +245,17 @@ class ForgeUnreadable(Exception):
 
 
 @dataclass(frozen=True)
+class Rerun:
+    """One allowed rerun of a head, as its `permit.judged` row says: the run and the failing suite members."""
+    run: object
+    members: tuple[str, ...] = ()
+
+    def describe(self) -> str:
+        failing = ", ".join(self.members) if self.members else "no members reported"
+        return f"run {self.run} (failing: {failing})"
+
+
+@dataclass(frozen=True)
 class Grant:
     slug: str | None
     root: str
@@ -252,7 +264,7 @@ class Grant:
     branch_pattern: str | None
     issues: frozenset[int]
     others: frozenset[int]
-    reruns: Mapping[str, int] = field(default_factory=dict, compare=True)
+    reruns: Mapping[str, Sequence["Rerun"]] = field(default_factory=dict, compare=True)
 
 
 @dataclass(frozen=True)
@@ -361,8 +373,8 @@ def _pages(path: str, what: str) -> list:
 
 
 _NEVER_CALLS = re.compile(r"\b(?:cancelled|always|success|failure)\(\)")
-_EVENT_IS = re.compile(r"github\.event_name\s*==\s*'([A-Za-z_]+)'")
-_EVENT_IS_NOT = re.compile(r"github\.event_name\s*!=\s*'([A-Za-z_]+)'")
+_EVENT_IS = re.compile(r"github\.event_name\s*==\s*'([A-Za-z_]+)'", re.IGNORECASE)
+_EVENT_IS_NOT = re.compile(r"github\.event_name\s*!=\s*'([A-Za-z_]+)'", re.IGNORECASE)
 _EXPRESSION = re.compile(r"\$\{\{\s*(.*?)\s*\}\}")
 _JOB_KEY = re.compile(r"^  [A-Za-z0-9_-]+:\s*$")
 _JOB_NAME = re.compile(r"^    name:\s*(\S.*?)\s*$")
@@ -378,8 +390,8 @@ def never_on_pull_request(condition: str) -> bool:
     if "||" in text or "(" in text or ")" in text:
         return False
     for term in (term.strip() for term in text.split("&&")):
-        for pattern, holds_for in ((_EVENT_IS, lambda event: event != "pull_request"),
-                                   (_EVENT_IS_NOT, lambda event: event == "pull_request")):
+        for pattern, holds_for in ((_EVENT_IS, lambda event: event.lower() != "pull_request"),
+                                   (_EVENT_IS_NOT, lambda event: event.lower() == "pull_request")):
             match = pattern.fullmatch(term)
             if match and holds_for(match[1]):
                 return True
@@ -503,18 +515,21 @@ def read_required(slug: str, base: str) -> frozenset[str]:
 FORGE = Forge(read_pr, read_run, read_required)
 
 
-def rerun_counts(events: Sequence, held: Mapping[tuple[str | None, str], int] | None = None
-                 ) -> dict[tuple[str | None, str], int]:
-    """`held` plus, for each `permit.judged` row of an allowed rerun, one more for its `(project, head)`."""
-    counts = dict(held or {})
+def rerun_record(events: Sequence, held: Mapping[tuple[str | None, str], tuple[Rerun, ...]] | None = None
+                 ) -> dict[tuple[str | None, str], tuple[Rerun, ...]]:
+    """`held` plus, for each `permit.judged` row of an allowed rerun, its `Rerun` for its `(project, head)`."""
+    record = dict(held or {})
     for event in events:
         payload = event.payload
         target = payload.get("target") if isinstance(payload, dict) else None
         head = target.get("head") if isinstance(target, dict) else None
         if (event.kind == PERMIT_JUDGED and payload.get("verb") == RERUN
                 and payload.get("decision") == ALLOW and isinstance(head, str)):
-            counts[(event.project, head)] = counts.get((event.project, head), 0) + 1
-    return counts
+            members = target.get("members")
+            rerun = Rerun(target.get("run"), tuple(m for m in members if isinstance(m, str))
+                          if isinstance(members, list) else ())
+            record[(event.project, head)] = record.get((event.project, head), ()) + (rerun,)
+    return record
 
 
 def merge_binding(root: str) -> tuple[str | None, bool]:
@@ -786,10 +801,11 @@ def _judge_rerun(parts: list[str], grant: Grant, forge: Forge) -> Verdict:
         return _deny(RERUN, STALE_RUN.format(run=run_id))
     if not run["rerun"] or not set(run["rerun"]) <= forge.read_required(slug, pull["base"]):
         return _deny(RERUN, NOT_CHECK_RUN.format(run=run_id))
-    done = grant.reruns.get(run["head"], 0)
-    if done >= MAX_RERUNS:
-        return _deny(RERUN, RERUN_LIMIT.format(pr=number, head=run["head"]))
-    return _allow(RERUN, {"run": run_id, "pr": number, "head": run["head"], "count": done + 1,
+    done = grant.reruns.get(run["head"], ())
+    if len(done) >= MAX_RERUNS:
+        return _deny(RERUN, RERUN_LIMIT.format(
+            pr=number, head=run["head"], reruns=" and ".join(rerun.describe() for rerun in done)))
+    return _allow(RERUN, {"run": run_id, "pr": number, "head": run["head"], "count": len(done) + 1,
                           "members": list(run.get("members", []))})
 
 

@@ -1743,8 +1743,8 @@ class PermitServiceTest(PermitCase):
                               "members": ["tests/test_a.py"]},
                              self.rows("permit.judged")[-1]["target"])
         third = self.judge(svc, sid, rerun, call="t-3")
-        self.assertEqual((third.decision, third.reason),
-                         ("deny", permit.RERUN_LIMIT.format(pr=7, head=SHA)))
+        self.assertEqual((third.decision, third.reason), ("deny", permit.RERUN_LIMIT.format(
+            pr=7, head=SHA, reruns="run 55 (failing: tests/test_a.py) and run 55 (failing: tests/test_a.py)")))
         self.assertEqual([("allow", "allow", "deny")], [tuple(
             row["decision"] for row in self.rows("permit.judged"))])
         self.fake.pr = {**self.fake.pr, "head": HEAD}
@@ -1762,8 +1762,8 @@ class PermitServiceTest(PermitCase):
             merge_binding_of=lambda root: ("merge", True),
             branch_pattern_of=lambda root: "issue-<num>-<slug>", permit_forge=self.fake.forge())
         verdict = again.permit(sid, self.secret(sid), "s-1", "t-3", rerun)
-        self.assertEqual((verdict.decision, verdict.reason),
-                         ("deny", permit.RERUN_LIMIT.format(pr=7, head=SHA)))
+        self.assertEqual((verdict.decision, verdict.reason), ("deny", permit.RERUN_LIMIT.format(
+            pr=7, head=SHA, reruns="run 55 (failing: no members reported) and run 55 (failing: no members reported)")))
 
     def test_a_merge_behind_the_documented_prefix_is_allowed_and_lands(self):
         svc, sid = self.boot()

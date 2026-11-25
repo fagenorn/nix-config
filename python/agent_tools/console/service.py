@@ -1096,7 +1096,7 @@ closing, no stop request, no stop, and not ended by a done report), and `permit.
 delivery of the manager's own session carries, as `SprintState.delivered` records them, so a delivery run the
 console has since cleaned up still counts; `others`: the issues the newest report of every other open sprint of the
 project lists) and, off the lock, the project's slug (`slug_of`), branch pattern (`branch_pattern_of`) and merge
-binding (`merge_binding_of`), and from its own `permit.judged` rows (`permit.rerun_counts`, folded) each head's allowed
+binding (`merge_binding_of`), and from its own `permit.judged` rows (`permit.rerun_record`, folded) each head's allowed
 reruns in the project (`Grant.reruns`, ADR-console-106), judges with `permit.judge` over `permit.memoized(permit_forge)`, then under the lock
 again takes the sprint, its checks and the grant afresh and judges once more over the memo's frozen replay: any
 refusal, any difference or any read the memo did not hold is `permit.MOVED`. Each decided verdict appends one
@@ -4822,7 +4822,7 @@ class ConsoleService(ActionPermit):
         self._permit_forge = permit_forge
         self._merge_binding_of = merge_binding_of
         self._permit_allows: dict[tuple[str, str, str, object, int, object], float] = {}
-        self._rerun_counts: dict[tuple[str | None, str], int] = {}
+        self._rerun_record: dict[tuple[str | None, str], tuple[permit.Rerun, ...]] = {}
         self._patterns: dict[str, str] = {}
         self._activity = activity
         self._clock = clock
@@ -4907,7 +4907,7 @@ class ConsoleService(ActionPermit):
             events = self.log.events()
             self._sweep_pictures(events)
             self._states = project_states(events)
-            self._rerun_counts = permit.rerun_counts(events)
+            self._rerun_record = permit.rerun_record(events)
             self._sessions = sessions.session_states(events)
             self._use = manager.profile_use(events)
             self._spend_profiles = spend.session_profiles(events)
@@ -9633,9 +9633,9 @@ class ConsoleService(ActionPermit):
                   for number, _ in other.report.issues}
         return frozenset(reported & sprint.delivered), frozenset(others)
 
-    def _permit_reruns(self, sprint: sprints.SprintState) -> dict[str, int]:
+    def _permit_reruns(self, sprint: sprints.SprintState) -> dict[str, tuple[permit.Rerun, ...]]:
         """Under the ingest lock: the allowed reruns of each head in the sprint's project (#1712)."""
-        return {head: count for (project, head), count in self._rerun_counts.items()
+        return {head: reruns for (project, head), reruns in self._rerun_record.items()
                 if project == sprint.project_id}
 
     def _permit_reads(self, root: str | None) -> tuple[str | None, str | None, str | None, bool]:
@@ -10357,7 +10357,7 @@ class ConsoleService(ActionPermit):
         new = digest.moments(appended, self._sessions, self._inbox, self._sprints)
         self._looked = digest.last_looked(appended, self._looked)
         self._states = project_states(appended, self._states)
-        self._rerun_counts = permit.rerun_counts(appended, self._rerun_counts)
+        self._rerun_record = permit.rerun_record(appended, self._rerun_record)
         self._sessions = sessions.session_states(appended, self._sessions)
         self._use = manager.profile_use(appended, self._use)
         self._spend_profiles = spend.session_profiles(appended, self._spend_profiles)
