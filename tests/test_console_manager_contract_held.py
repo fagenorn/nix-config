@@ -28,7 +28,11 @@ class HeldContractTest(unittest.TestCase):
         ):
             with self.subTest(needle=needle):
                 self.assertIn(needle, flat)
-        rule = "A stop that holds work for someone raises a card for them at once; a status line is not an ask."
+        rule = (
+            "A stop that holds work for the owner or the lead raises a card for whoever it waits on at once,"
+            " on the caller's ask channel, naming what is held, why and the one action that releases it;"
+            " a status line or a report is not an ask."
+        )
         for skill in ("deliver-standard", "deliver-batch"):
             path = REPO_ROOT / "home/common/claude-code/skills" / skill / "SKILL.md"
             with self.subTest(skill=skill):
