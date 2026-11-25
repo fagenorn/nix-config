@@ -228,8 +228,9 @@ def _active(leaves: list[tuple[list[str], str]]) -> bool:
 def _events(text: str) -> list[tuple[int, str, bool]]:
     """Each `DECLARATION` and `inherit` start in `text`, with one flag.
 
-    A declaration's flag is whether a `let` binds it (a local, not an option); an
-    `inherit`'s is whether it sits among a `let`'s bindings (a local) and not in an attribute set.
+    A declaration's flag is whether a `let` binds it (a local, not an option). An `inherit`'s is
+    whether it sits among a `let`'s bindings or in an attribute set that is no option set (an
+    argument to a function, a `let`-bound value): such an `inherit` builds data and exports nothing.
     """
     frames: list[str] = []
     found: list[tuple[int, str, bool]] = []
@@ -240,15 +241,27 @@ def _events(text: str) -> list[tuple[int, str, bool]]:
             before = text[:token.start()].rstrip()
             found.append((token.start(), "decl", in_let and before.endswith((";", "let"))))
         elif kind == "kw" and word == "inherit":
-            found.append((token.start(), "inherit", in_let))
+            found.append((token.start(), "inherit", bool(frames) and frames[-1] != "option"))
         elif kind == "open" or (kind == "kw" and word == "let"):
-            frames.append("let" if kind == "kw" else "bracket")
+            frames.append("let" if kind == "kw" else _frame(text, token.start(), frames))
         elif kind == "kw" and in_let:
             frames.pop()
         elif kind == "close":
-            while frames and frames.pop() != "bracket":
+            while frames and frames.pop() == "let":
                 pass
     return found
+
+
+def _frame(text: str, start: int, frames: list[str]) -> str:
+    """The kind of the bracket at `start`: `option` for an attribute set the module itself yields.
+
+    That is a `{` met at the top or inside such a set, as a binding's value, a function's body, the
+    right side of `//` or a `let`'s body; any other bracket is `other`.
+    """
+    before = text[:start].rstrip()
+    value = (not before or before.endswith(("=", ":", "//"))
+             or re.search(r"(?<![\w.'-])in$", before) is not None)
+    return "option" if text[start] == "{" and value and (not frames or frames[-1] == "option") else "other"
 
 
 def _inherited(text: str, start: int) -> list[tuple[str, bool]]:
