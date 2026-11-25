@@ -11,6 +11,7 @@ import hashlib
 import importlib.util
 import io
 import os
+import re
 import subprocess
 import tempfile
 import time
@@ -747,6 +748,13 @@ class JudgeTest(unittest.TestCase):
         self.assertEqual(permit.FORGE_UNREADABLE.format(reason="pull request 7 could not be read"),
                          verdict.reason)
         self.assertEqual((1, []), (len(calls), sleeps))
+
+    def test_the_documented_port_exhaustion_retry_names_no_issue_or_pull_request(self):
+        """The comment rule counts a header line naming one, so the retry paragraph must not add a line."""
+        start = permit.__doc__.index("A lookup failing with address")
+        paragraph = permit.__doc__[start:permit.__doc__.index("unchanged.", start)]
+        self.assertIn("PORTS_EXHAUSTED", paragraph)
+        self.assertIsNone(re.search(r"#\d+", paragraph), paragraph)
 
     def test_a_command_naming_no_granted_verb_has_no_decision(self):
         for command in ("git status", "gh pr view 7", "release transaction preview --repo-root r",

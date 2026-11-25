@@ -92,7 +92,7 @@ never None. The checks run in this order, the first that applies deciding:
   exhaustion (the host out of local ports) is retried `LOOKUP_ATTEMPTS` times in all with a short doubling
   back-off, the pauses of all the lookups of one judgement together within `LOOKUP_BUDGET` seconds so the
   hook's ten-second request still gets its verdict, and when it still fails the reason is
-  `PORTS_EXHAUSTED` (#1747). The budget counts only those pauses: a lookup that succeeds, however slowly,
+  `PORTS_EXHAUSTED`. The budget counts only those pauses: a lookup that succeeds, however slowly,
   and any other failure are unchanged.
 
 `ALONE` and `NOT_GRANTED` for a merge or rerun are composed by `spelling_refusal(sentence, verb, grant,
