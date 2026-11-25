@@ -965,6 +965,35 @@ class RunTest(ProjectCase):
         test = self.answer(self.run_verified())["results"][1]
         self.assertEqual((test["status"], test["flaky"]), ("pass", line))
 
+    def test_a_suite_runner_line_of_a_passing_changed_test_does_not_name_it(self):
+        output = ("suite-runner: start tests/test_a.py\\nsuite-runner: begin tests/test_a.py\\n"
+                  "suite-runner: end tests/test_a.py passed exit=0 1.0s\\n"
+                  "suite-runner: begin tests/test_b.py\\nFAIL: test_flaky\\n"
+                  "suite-runner: end tests/test_b.py failed exit=1 1.0s\\n"
+                  "suite-runner:     1.0s wall     1.0s cpu passed tests/test_a.py\\n"
+                  "suite-runner: summary members=2 passed=1 failed=1 jobs=1 wall=2.0s cpu=2.0s\\n")
+        self.declare({"lint": "", "test": self.once(output)})
+        self.branch_change({"tests/test_a.py": "x\\n", "python/x.py": "x\\n"})
+        test = self.answer(self.run_verified())["results"][1]
+        self.assertEqual(test["status"], "pass")
+        self.assertIn("flaky", test)
+        self.assertEqual(self.logged().count(f"{self.worktree.resolve()} test"), 2)
+
+    def named_by_suite_runner_line(self, line):
+        self.declare({"lint": "", "test": f"print({line!r});sys.exit(1)"})
+        self.branch_change({"tests/test_a.py": "x\\n"})
+        test = self.answer(self.run_verified())["results"][1]
+        self.assertEqual((test["named"], test["outside_diff"]), (["tests/test_a.py"], False))
+
+    def test_a_suite_runner_end_line_of_a_failed_changed_test_names_it(self):
+        self.named_by_suite_runner_line("suite-runner: end tests/test_a.py failed exit=1 1.0s")
+
+    def test_a_suite_runner_timing_row_of_a_failed_changed_test_names_it(self):
+        self.named_by_suite_runner_line("suite-runner:     1.0s wall     1.0s cpu failed tests/test_a.py")
+
+    def test_a_suite_runner_failed_line_of_a_changed_test_names_it(self):
+        self.named_by_suite_runner_line("suite-runner: failed tests/test_a.py")
+
     def test_a_path_relative_to_the_commands_cwd_is_named(self):
         self.declare({"lint": "", "test": "print('notes.txt:1: broken');sys.exit(1)"},
                      cwds={"test": "sub"})

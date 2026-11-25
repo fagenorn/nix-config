@@ -109,7 +109,10 @@ when the command's cwd is a directory under the root other than the root and `p`
 `p` relative to that cwd. So `notes.txt:12`, `notes.txt.` at a sentence end and `/abs/notes.txt`
 name `notes.txt`, and `notes.txt.bak` does not. A line of the output that starts with `test-touched: `
 is the test wrapper's own status line (it names the path that made it build or the members it runs), so it
-names nothing.
+names nothing. A line that starts with `suite-runner: ` is the suite runner's status or report line, which
+names every member it ran, a passing changed test file included, so it names nothing either, except the
+lines that record a failed member (`end <member> failed`, a timing row of a `failed` member and `failed
+<member>`): those name the failing member.
 
 After every planned id ran, one rerun happens only when at least one result is `fail`, every `fail`
 has `outside_diff` true (a `no_slot` result has none, so it blocks), the tree is clean and HEAD
@@ -241,6 +244,9 @@ RUN_RECORD_NAME = "verified-tree-run.json"
 LAST_SCHEMA = "verified-tree-last/v1"
 LAST_NAME = "verified-tree-last.json"
 WRAPPER_PREFIX = "test-touched: "
+SUITE_PREFIX = "suite-runner: "
+# The suite runner's lines that record a failed member: its `end` line, its timing row and its `failed` line.
+SUITE_FAILURE = re.compile(re.escape(SUITE_PREFIX) + r"(?:end \S+ failed |\s*[\d.]+s wall\s+[\d.]+s cpu failed |failed )")
 # Copied from deliver-standard.js: the file types whose meaning a whitespace-only change keeps.
 WS_INSENSITIVE = re.compile(
     r"\.(c|cc|cpp|cxx|h|hh|hpp|cs|css|scss|less|dart|go|java|js|jsx|mjs|cjs|ts|tsx|mts|cts|json|kt|kts"
@@ -685,7 +691,9 @@ def _under(root: Path, cwd: str) -> str | None:
 
 def _named(output: str, changed: Sequence[str], root: Path, cwd: str) -> list[str]:
     """The sorted `changed` paths `output` names, as the path or relative to the command's `cwd`."""
-    output = "".join(line for line in output.splitlines(keepends=True) if not line.startswith(WRAPPER_PREFIX))
+    output = "".join(line for line in output.splitlines(keepends=True)
+                     if not line.startswith(WRAPPER_PREFIX)
+                     and (not line.startswith(SUITE_PREFIX) or SUITE_FAILURE.match(line)))
     prefix = _under(root, cwd)
     named = []
     for path in changed:

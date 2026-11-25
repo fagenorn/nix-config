@@ -14,7 +14,8 @@ may be `None` (a group member that sent no reply reads as `None`, D6).
 - `direct-settled`: a re-review reply -> unusable, findings or clean (keys on
   the suffixes).
 - `verify-fixed`: a verify fix reply -> unrelated (a test and its evidence), not-done or done.
-- `verify-narrowing`: the fix review, the round and the fix's range -> unusable (a finding that is not minor
+- `verify-narrowing`: the fix review (read by the suffixes `.findings`, `.whitespace_insignificant` and
+  `.whitespace_evidence`, so a second ask of the review is graded the same), the round and the fix's range -> unusable (a finding that is not minor
   and names neither a file nor a failing input), findings, rerun-failed-only or rerun-all (a rerun of only the
   failing ids needs every condition, else all).
 - `lane-rule`: the issue step's body, marker and lane paths -> direct or
@@ -164,12 +165,12 @@ def _failed_only(results: Mapping[str, object]) -> bool:
     paths = results.get("ws-check.changed_paths")
     return (results.get("ws-check.whitespace_only") is True and isinstance(paths, list) and bool(paths)
             and all(isinstance(p, str) and p in {x for n in named for x in n} for p in paths)
-            and results.get("fix-review.whitespace_insignificant") is True
-            and not _blank(results.get("fix-review.whitespace_evidence")))
+            and _suffixed(results, ".whitespace_insignificant") is True
+            and not _blank(_suffixed(results, ".whitespace_evidence")))
 
 
 def _verify_narrowing(results: Mapping[str, object]) -> str:
-    findings = results.get("fix-review.findings")
+    findings = _suffixed(results, ".findings")
     if not isinstance(findings, list) or any(
             not isinstance(f, Mapping) or f.get("severity") != "minor" for f in findings):
         return "unusable" if _unusable(findings) else "findings"

@@ -1186,8 +1186,9 @@ SHIPPED_MEMBERS = {
                            {"id": "test", "status": "fail", "named": ["a.json"]}]},),
     "ws-check": ({"start_head": "s", "commit": "c", "whitespace_only": True, "changed_paths": ["a.json"]},),
     "fix": ({}, {"unrelated": {"test": "", "evidence": ""}}),
-    "fix-review": ({}, {"findings": []}, UNNAMED,
-                   {"findings": [], "whitespace_insignificant": True, "whitespace_evidence": "e"}),
+    **{review: ({}, {"findings": []}, UNNAMED,
+                {"findings": [], "whitespace_insignificant": True, "whitespace_evidence": "e"})
+       for review in ("fix-review", "fix-review-again")},
 }
 
 
@@ -1197,7 +1198,7 @@ UNREACHABLE_EXHAUSTED = {
     "direct": tuple((f"{route}-{kind}", "exhausted")
                     for kind in ("tally", "settled") for route in ("lite", "escalated", "full")),
     "verify": tuple((name, "exhausted") for name in (
-        "checks", "round", "fixed", "ws-check", "narrowing", "rerun")),
+        "checks", "round", "fixed", "ws-check", "fix-review", "narrowing", "narrowing-again", "rerun")),
 }
 
 

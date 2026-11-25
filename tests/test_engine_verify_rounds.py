@@ -52,9 +52,10 @@ NEW_FILE_FIX = {
     "fix.1": fixing("fixture/second.py", "SECOND = 1\n", tests=["checks/check_format.py"]),
     "fix.2": fixing("fixture/third.py", "THIRD = 1\n", tests=["checks/check_format.py"])}
 STOPS = ("verify", "verify-unrelated", "verify-fix", "verify-fix-review")
-VERIFY_STEPS = ("round", "fix", "fixed", "ws-check", "fix-review", "narrowing", "rerun", "retest", "retested")
+VERIFY_STEPS = ("round", "fix", "fixed", "ws-check", "fix-review", "narrowing", "fix-review-again",
+                "narrowing-again", "rerun", "retest", "retested")
 BOUNDS = (("checks", 3), ("round", 3), ("fix", 2), ("fixed", 2), ("ws-check", 2), ("fix-review", 4),
-          ("narrowing", 4), ("rerun", 2))
+          ("narrowing", 4), ("fix-review-again", 4), ("narrowing-again", 2), ("rerun", 2))
 
 
 def procedure(name: str) -> dict:
@@ -172,13 +173,27 @@ class RoundsTest(Scenario):
 
     def test_a_finding_naming_no_file_and_no_input_is_discarded_and_the_review_runs_once_more(self):
         run = self.stubbed(extra_files=FORMAT, replies={
-            "implement": FOUR, "fix": TWO, "fix-review.1": UNUSABLE, "fix-review.2": PASS_ATTESTED})
+            "implement": FOUR, "fix": TWO, "fix-review": UNUSABLE, "fix-review-again": PASS_ATTESTED})
 
         self.finish(run, "done")
 
         self.assertIn(("narrowing", "unusable"), self.walk(run))
-        self.assertEqual(self.count(run, "fix-review"), 2)
+        self.assertEqual(self.count(run, "fix-review"), 1)
+        self.assertEqual(self.count(run, "fix-review-again"), 1)
+        self.assertIn(("narrowing-again", "rerun-failed-only"), self.walk(run))
         self.merged(run)
+
+    def test_a_second_unusable_review_stops_verify_fix_review(self):
+        run = self.stubbed(extra_files=FORMAT, replies={
+            "implement": FOUR, "fix": TWO, "fix-review": UNUSABLE, "fix-review-again": UNUSABLE})
+
+        self.finish(run, "verify-fix-review", "owner-decision")
+
+        self.assertIn(("narrowing-again", "unusable"), self.walk(run))
+        self.assertEqual(self.count(run, "fix-review"), 1)
+        self.assertEqual(self.count(run, "fix-review-again"), 1)
+        self.assertEqual(self.entered(run, "rerun"), 0)
+        self.nothing_pushed(run)
 
     def test_a_fix_review_with_only_minor_findings_goes_on(self):
         run = self.stubbed(extra_files=FORMAT, replies={

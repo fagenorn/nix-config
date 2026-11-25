@@ -709,6 +709,21 @@ class VerifyTest(Scenario):
                      ("narrowing", "rerun-failed-only"), ("round", "retest"), ("retested", "done")):
             self.assertIn(edge, walk)
 
+    def test_an_unusable_fix_review_is_asked_once_more_and_the_second_reply_is_narrowed(self):
+        unusable = {"verdict": "findings", **ATTESTED,
+                    "findings": [{"severity": "important", "file": "", "failing_input": "",
+                                  "summary": "s", "kind": "other"}]}
+        run = self.stubbed(extra_files=FORMAT, replies={
+            "implement": FOUR, "fix": fixing("fixture/greeting.json", TWO_SPACES),
+            "fix-review": unusable, "fix-review-again": PASS_ATTESTED, "retest": RETESTED})
+
+        self.finish(run, "done")
+
+        walk = run.transitions(self.child(run, "verify"))
+        for edge in (("narrowing", "unusable"), ("fix-review-again", "pass"),
+                     ("narrowing-again", "rerun-failed-only")):
+            self.assertIn(edge, walk)
+
     def test_an_id_whose_condition_matches_no_changed_path_is_recorded_skipped_with_its_reason(self):
         conditions = {"lint": {"when_changed": ["docs/**"], "skip_reason": "no documentation changed"}}
         run = self.stubbed(conditions=conditions)

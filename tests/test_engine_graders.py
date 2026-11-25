@@ -73,6 +73,11 @@ def narrowing(**over):
     return results
 
 
+def again(results):
+    """`results` with the fix review's members under the second ask's step id."""
+    return {key.replace("fix-review.", "fix-review-again."): value for key, value in results.items()}
+
+
 def settled(verdict, findings):
     return {"lite-rereview.verdict": verdict, "lite-rereview.findings": findings}
 
@@ -122,6 +127,10 @@ class GraderTest(unittest.TestCase):
         ("verify-narrowing", narrowing(**{"fix-review.findings": [UNNAMED]}), "unusable"),
         ("verify-narrowing", narrowing(**{"fix-review.findings": [UNNAMED, MINOR]}), "unusable"),
         ("verify-narrowing", narrowing(), "rerun-failed-only"),
+        ("verify-narrowing", again(narrowing(**{"fix-review.findings": [UNNAMED]})), "unusable"),
+        ("verify-narrowing", again(narrowing(**{"fix-review.findings": [NAMED]})), "findings"),
+        ("verify-narrowing", again(narrowing()), "rerun-failed-only"),
+        ("verify-narrowing", again(narrowing(**{"fix-review.whitespace_insignificant": False})), "rerun-all"),
         ("verify-narrowing", narrowing(**{"round.clean": False}), "rerun-all"),
         ("direct-settled", settled("findings", [MINOR]), "clean"),
         ("direct-settled", settled("findings", [NAMED]), "findings"),
