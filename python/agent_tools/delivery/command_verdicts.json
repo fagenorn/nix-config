@@ -125,7 +125,22 @@
       "lock": ["held", "contended", "no-pull", "error"],
       "checks": ["green", "red", "pending", "moved", "error"],
       "held": ["held", "retaken", "contended", "no-pull", "error"],
-      "unlock": ["released", "unreleased"]
+      "pending": ["wait", "spent", "error"],
+      "red": ["stale", "presync", "sync", "fix", "checks", "error"],
+      "lock-budget": ["again", "spent", "error"],
+      "sync-fixes": ["fix", "spent", "error"],
+      "head": ["clean", "dirty", "error"],
+      "probe": ["clean", "behind", "conflicted", "error"],
+      "merge-of": ["clean", "review", "none", "error"],
+      "fixed": ["committed", "untested", "unchanged", "silent", "not-done"],
+      "merge-state": ["behind", "blocked", "other", "error"],
+      "pr-head": ["pushed", "head-moved", "error"],
+      "free": ["released", "unreleased"],
+      "release": [
+        "done", "land", "claim-lost", "claim", "head-moved", "checks", "checks-pending", "checks-fix",
+        "checks-fix-review", "sync", "sync-contention", "sync-review", "sync-fix", "land-contended", "merge",
+        "unreleased-lock", "unreleased"
+      ]
     }
   },
   "lint-time": null,
@@ -139,7 +154,9 @@
     }
   },
   "look-lint": null,
+  "memory-floor": null,
   "node-lint": null,
+  "omlx-memory-watch": null,
   "owner-actions": null,
   "plan-amend": null,
   "pr-create": {
@@ -158,6 +175,7 @@
       "resolve": []
     }
   },
+  "router": null,
   "ruff-lint": null,
   "size-lint": null,
   "skill-lint": null,

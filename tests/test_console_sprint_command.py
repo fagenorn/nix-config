@@ -1579,11 +1579,6 @@ class PermitCommandTest(unittest.TestCase):
                 self.assertTrue(hook["permissionDecisionReason"].startswith(
                     "the console could not judge this command: "), hook)
 
-    def test_permit_is_silent_on_a_command_it_does_not_judge(self):
-        for command in ("npm test", "git status", "gh pr view 7"):
-            with self.subTest(command):
-                self.assertEqual(self.run_permit(self.hook(command), "{}"), (0, "", []))
-
     def test_permit_denies_a_bad_hook_input(self):
         for name, stdin in (("not json", "not json"), ("an array", "[]"),
                             ("no session", json.dumps({"tool_input": {"command": GREEN}})),

@@ -209,33 +209,68 @@ class ConfigureMarkerTest(unittest.TestCase):
         self.assertIn("cannot verify applied noop.patch", result.stderr)
         self.assertEqual(self.marker_lines(), ["patch noop.patch applied"])
 
-    def test_a_failure_after_a_settings_write_and_a_steering_change_keeps_both_reasons(self):
+    def legacy_directory(self, name, *entries):
+        directory = self.state / "models" / name
+        directory.mkdir(parents=True)
+        (directory / ".omlx-old-preset").touch()
+        for entry in entries:
+            (directory / entry).write_text("{}")
+        return directory
+
+    def test_a_legacy_preset_directory_is_removed_and_reported(self):
+        models = self.state / "models"
+        target = self.root / "weights.safetensors"
+        target.write_text("weights")
+        old = self.legacy_directory("Old-preset", "spec.json")
+        (old / "model.safetensors").symlink_to(target)
+        kept = models / "Kept"
+        kept.mkdir()
+        (kept / "config.json").write_text("{}")
+        result = self.run_configure()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["removed_presets"], ["Old-preset"])
+        self.assertFalse(old.exists())
+        self.assertTrue((kept / "config.json").is_file())
+        self.assertTrue(target.exists())
+        self.assertEqual(self.reasons_of(result), [])
+        self.assertEqual(self.marker_lines(), [])
+
+    def test_a_legacy_preset_directory_holding_a_real_file_is_refused(self):
         settings = self.read_json(self.server)
         settings["memory"]["memory_guard_tier"] = "balanced"
         self.write_json(self.server, settings)
-        self.write_json(self.root / "steering.json", {
-            "P": {"base": "Base", "neurons": [{"layer": 1, "neuron": 2, "dose": 0.5}]},
-        })
-        self.extra = ["--steering", str(self.root / "steering.json")]
-        base = self.state / "models/Base"
-        base.mkdir(parents=True)
-        (base / ".omlx-download-complete").touch()
-        (base / "config.json").write_text("{}")
-        preset = self.state / "models/P"
-        preset.mkdir()
-        (preset / ".omlx-steering-preset").touch()
-        # A link the base does not want is unlinked first; the regular file then
-        # collides with the wanted config.json link, so symlink_to raises.
-        (preset / "old.json").symlink_to(base / "gone.json")
-        (preset / "config.json").write_text("{}")
+        before = self.server.read_bytes()
+        old = self.legacy_directory("Old-preset", "weights.safetensors")
         result = self.run_configure()
         self.assertEqual(result.returncode, 1)
-        self.assertIn("FileExistsError", result.stderr)
-        self.assertFalse(os.path.lexists(preset / "old.json"))
-        self.assertEqual(
-            self.marker_lines(),
-            ["settings.json memory/memory_guard_tier", "steering preset P changed"],
-        )
+        self.assertIn("legacy preset", result.stderr)
+        self.assertIn("holds weights.safetensors", result.stderr)
+        self.assertTrue((old / "weights.safetensors").is_file())
+        self.assertEqual(self.server.read_bytes(), before)
+        self.assertEqual(self.marker_lines(), [])
+
+    def test_a_legacy_preset_directory_holding_a_subdirectory_is_refused(self):
+        old = self.legacy_directory("Old-preset")
+        (old / "nested.json").mkdir()
+        (old / "nested.json" / "weights.safetensors").write_text("weights")
+        result = self.run_configure()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("holds nested.json", result.stderr)
+        self.assertTrue((old / "nested.json" / "weights.safetensors").exists())
+
+    def test_a_failure_after_a_settings_write_keeps_its_reason(self):
+        settings = self.read_json(self.server)
+        settings["memory"]["memory_guard_tier"] = "balanced"
+        self.write_json(self.server, settings)
+        old = self.legacy_directory("Old-preset")
+        (old / "config.json").symlink_to(self.root / "anywhere")
+        old.chmod(0o500)
+        self.addCleanup(old.chmod, 0o700)
+        result = self.run_configure()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("PermissionError", result.stderr)
+        self.assertEqual(self.marker_lines(), ["settings.json memory/memory_guard_tier"])
+        self.assertEqual(self.read_json(self.server)["memory"]["memory_guard_tier"], "custom")
 
 
 class HealthHandler(http.server.BaseHTTPRequestHandler):
@@ -261,6 +296,7 @@ def serving(count):
 
 class RestartGateTest(unittest.TestCase):
     REASONS = "settings.json memory/memory_guard_tier\nmodel GLM-New added\n"
+    RELOAD = "launchd plist changed: org.nixos.omlx"
 
     def setUp(self):
         scratch = tempfile.TemporaryDirectory()
@@ -278,6 +314,12 @@ class RestartGateTest(unittest.TestCase):
             '[ -e "$here/rc" ] && exit "$(cat "$here/rc")"\nexit 0\n'
         )
         self.stub.chmod(0o755)
+        self.reload_stub = self.root / "reload"
+        self.reload_stub.write_text(
+            '#!/bin/sh\nhere="$(dirname "$0")"\necho reload >> "$here/reload-calls"\n'
+            '[ -e "$here/reload-rc" ] && exit "$(cat "$here/reload-rc")"\nexit 0\n'
+        )
+        self.reload_stub.chmod(0o755)
         self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), HealthHandler)
         self.server.requests = 0
         self.server.status = 200
@@ -299,6 +341,7 @@ class RestartGateTest(unittest.TestCase):
             sys.executable, str(RESTART),
             "--state-dir", str(self.state),
             "--restart-bin", str(self.stub),
+            "--reload-bin", str(self.reload_stub),
             "--health-url", url or self.url,
             *self.extra,
         ]
@@ -322,11 +365,62 @@ class RestartGateTest(unittest.TestCase):
     def stub_calls(self):
         return len(self.calls.read_text().splitlines()) if self.calls.exists() else 0
 
+    def reload_calls(self):
+        path = self.root / "reload-calls"
+        return len(path.read_text().splitlines()) if path.exists() else 0
+
     def marker_bytes(self):
         return self.marker.read_bytes()
 
     def deferral_lines(self, result):
         return [line for line in result.stderr.splitlines() if line.startswith("oMLX: restart deferred (")]
+
+    def test_a_changed_plist_reason_reloads_the_job_instead_of_killing_the_server(self):
+        self.marker.write_text(self.RELOAD + "\nmodel GLM-New added\n")
+        result = self.run_gate()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.reload_calls(), 1)
+        self.assertEqual(self.stub_calls(), 0)
+        self.assertFalse(self.marker.exists())
+        self.assertIn(
+            "oMLX: reloaded its launchd job for: launchd plist changed: org.nixos.omlx; model GLM-New added",
+            result.stderr,
+        )
+
+    def test_a_changed_plist_reason_waits_while_a_model_is_loaded(self):
+        self.marker.write_text(self.RELOAD + "\n")
+        self.answer(200, serving(1))
+        before = self.marker_bytes()
+        result = self.run_gate()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.reload_calls(), self.stub_calls()), (0, 0))
+        self.assertEqual(self.marker_bytes(), before)
+        (line,) = self.deferral_lines(result)
+        self.assertIn("1 model loaded", line)
+        self.assertIn("pending: launchd plist changed: org.nixos.omlx.", line)
+
+    def test_now_reloads_a_serving_server_for_a_changed_plist(self):
+        self.marker.write_text(self.RELOAD + "\n")
+        self.answer(200, serving(1))
+        self.extra = ["--now"]
+        result = self.run_gate()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.reload_calls(), 1)
+        self.assertEqual(self.stub_calls(), 0)
+        self.assertFalse(self.marker.exists())
+        self.assertEqual(self.server.requests, 0)
+
+    def test_a_failed_reload_keeps_the_marker_and_fails(self):
+        self.marker.write_text(self.RELOAD + "\n")
+        (self.root / "reload-rc").write_text("3")
+        before = self.marker_bytes()
+        result = self.run_gate()
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(self.marker_bytes(), before)
+        self.assertIn(
+            "oMLX: reload failed (exit 3); .restart-needed retained for the next activation",
+            result.stderr,
+        )
 
     def test_a_loaded_model_defers_the_restart_and_reports_it(self):
         self.answer(200, serving(1))
@@ -349,6 +443,7 @@ class RestartGateTest(unittest.TestCase):
         result = self.run_gate()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.stub_calls(), 1)
+        self.assertEqual(self.reload_calls(), 0)
         self.assertFalse(self.marker.exists())
         self.assertIn(
             "oMLX: restarted for: settings.json memory/memory_guard_tier; model GLM-New added",

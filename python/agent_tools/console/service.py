@@ -35,7 +35,7 @@ stream `Content-Length`):
     POST /api/pin   204, a JSON body, the page pins or unpins a profile (below)
     POST /api/approve 204, a JSON body, the page approves a brief (below)
     POST /api/reply 204, a JSON body, the page asks a brief for changes (below)
-    POST /api/retry-manager 204, a JSON body, the page starts a sprint's manager again (below)
+    POST /api/retry-manager 204, a JSON body, the page starts a sprint's manager again or moves it (below)
     POST /api/message 204, a JSON body, the page sends the owner's message to a sprint (below)
     POST /api/stop  204, a JSON body, the page stops a sprint (below)
     POST /api/register-project 204, a JSON body, the page names a repository to adopt (below)
@@ -62,7 +62,7 @@ stream `Content-Length`):
     POST /api/withdraw-notice 200 application/json, a manager takes back one of its notices (below)
     POST /api/live-fault 200 application/json, a manager declares an issue a fault live in production (below)
     POST /api/live-fault-withdraw 204, a JSON body, the page withdraws a live fault (below)
-    POST /api/permit 200 application/json, the console judges a manager session's merge or rerun (below)
+    POST /api/permit 200 application/json, the console judges a manager's merge, rerun or approved action (below)
     POST /api/permission-prompt 200 application/json, a manager's hook holds one Bash prompt on the console (below)
     POST /api/permission-answer 204, a JSON body, the page allows or refuses a manager's held prompt (below)
     POST /api/picture 200 application/json, a manager sends one PNG picture (below)
@@ -624,14 +624,12 @@ drafts the plan again from the changed fields as a registration does, appending 
 or the plan's row. An answer of any other question to a row that holds a draft plans it with the
 draft file the same way, and the plan's row carries the draft.
 
-A checkout that already has a contract proposes the commit environment a stranded hook needs
-(ADR-console-083). A fresh run (no draft, no answers, not confirmed) reads its hooks once
-(`hook_reader`, `contract_draft.read_hooks` by default); when
-`contract_draft.reconcile_fields` is non-empty the run plans with the one `commit-environment`
-record: the adopter's `--commit-environment` command, never a draft file, and the row carries the
-record as its draft only when the plan took the command (`contract_draft.carried`). An answer run
-and a confirm run read no hooks and resend the command the row's draft holds. A `contract-draft`
-answer to such a row changes the record through `contract_draft.set_value`; `none` plans as
+A checkout that already has a contract proposes the commit environment a stranded hook needs (ADR-console-083). A fresh run (no draft, no
+answers, not confirmed) reads its hooks once (`hook_reader`, `contract_draft.read_hooks` by default); when `contract_draft.reconcile_fields`
+is non-empty the run plans with the one `commit-environment` record: the adopter's `--commit-environment` command, never a draft file, and
+the row carries the record as its draft only when the plan took the command (`contract_draft.carried`). An answer run and a confirm run read
+no hooks and resend the command the row's draft holds. Every planned row of a checkout is also checked for uninstalled devenv hooks
+(`register.hooks_noted`). A `contract-draft` answer to such a row changes the record through `contract_draft.set_value`; `none` plans as
 today, and the run never writes a draft file.
 
 `POST /api/plan-approve` (#1054, ADR-console-030) runs the same checks with `MAX_PLAN_APPROVE_BYTES`
@@ -1029,96 +1027,89 @@ Success is 200 `application/json` (sorted keys, compact): `{"notice":<id>}` for 
 `seq`) and a withdrawal (the withdrawn id), `{"notices":[<sprints.notice_entry>...],"overlaps":
 [<sprints.claim_overlaps of those entries>...]}` for the list.
 `post_notice(sprint_id, secret, notice)`, under the ingest lock, is `_manager_sprint` (`NOT_OPEN`, then
-`SecretRefused`), then `sprints.postable_notice` against every other folded sprint, with a folder
-test built from the sprint's project root (a stat per part of a claim's `what`, so a claim naming a
-directory is refused; a project not registered has no folder); it appends exactly
-one `notice.posted` row (project the sprint's project) `{"sprint_id", "goal", "notice": <checked>}`,
-folds, publishes and returns the row's `seq`. `withdraw_notice` is `_manager_sprint` then
-`sprints.withdrawable_notice`; it appends exactly one `notice.withdrawn` row `{"sprint_id", "goal",
-"notice": <id>}` and returns the id. `list_notices` is `_manager_sprint` then
-`sprints.project_notices` over every folded sprint of the project, and appends and publishes
-nothing. None of the three nudges anybody, and none calls `tick`, `owner_path` or any other tracker
-writer; a refusal appends and publishes nothing.
+`SecretRefused`), then `sprints.postable_notice` against every other folded sprint, with a folder test built from the
+sprint's project root (a stat per part of a claim's `what`, so a claim naming a directory is refused; a project not
+registered has no folder); it appends exactly one `notice.posted` row (project the sprint's project) `{"sprint_id",
+"goal", "notice": <checked>}`, folds, publishes and returns the row's `seq`. `withdraw_notice` is `_manager_sprint`
+then `sprints.withdrawable_notice`; it appends exactly one `notice.withdrawn` row `{"sprint_id", "goal", "notice":
+<id>}` and returns the id. `list_notices` is `_manager_sprint` then `sprints.project_notices` over every folded sprint
+of the project, and appends and publishes nothing. None of the three nudges anybody, and none calls `tick`,
+`owner_path` or any other tracker writer; a refusal appends and publishes nothing.
 
-Live faults (#1432): `POST /api/live-fault` is a manager write dispatched like `/api/notice`, before
-`PAGE_WRITES`, through `_checked_length(MAX_LIVE_FAULT_BYTES)` (16384: any `Origin` 403 `origin
-refused`, 415, 411, 413 `too large`), so it is owner-only on the guest port. A body
-`sprints.parse_live_fault_request` (`sprint_id`, `secret`, `fault`) does not accept is 400 `bad live
-fault`; a `sprints.SecretRefused` is `console: live_fault_refused <sprint_id> secret refused` and 403
-`secret refused`; any other `sprints.Refused` is the same prefix with the reason and 409 with the
-reason (a fixed `sprints.py` text: neither the secret nor the evidence text is printed); any other
-exception is `console: live_fault_failed <Type>: <message>` and 500 `live fault failed`. Success is
-200 `application/json` (sorted keys, compact) `{"fault":<id>}`, the new row's `seq`.
-`declare_live_fault(sprint_id, secret, fault)`, under the ingest lock, is `_manager_sprint`
-(`NOT_OPEN`, then `SecretRefused`), then `sprints.declarable_fault`; it appends exactly one
-`fault.declared` row (project the sprint's project) `{"sprint_id", "goal", "fault": <checked>}`,
-folds, publishes and returns the row's `seq`. It nudges nobody and calls no tracker writer; a
-refusal appends and publishes nothing.
+Live faults (#1432): `POST /api/live-fault` is a manager write dispatched like `/api/notice`, before `PAGE_WRITES`,
+through `_checked_length(MAX_LIVE_FAULT_BYTES)` (16384: any `Origin` 403 `origin refused`, 415, 411, 413 `too large`),
+so it is owner-only on the guest port. A body `sprints.parse_live_fault_request` (`sprint_id`, `secret`, `fault`) does
+not accept is 400 `bad live fault`; a `sprints.SecretRefused` is `console: live_fault_refused <sprint_id> secret
+refused` and 403 `secret refused`; any other `sprints.Refused` is the same prefix with the reason and 409 with the
+reason (a fixed `sprints.py` text: neither the secret nor the evidence text is printed); any other exception is
+`console: live_fault_failed <Type>: <message>` and 500 `live fault failed`. Success is 200 `application/json` (sorted
+keys, compact) `{"fault":<id>}`, the new row's `seq`. `declare_live_fault(sprint_id, secret, fault)`, under the ingest
+lock, is `_manager_sprint` (`NOT_OPEN`, then `SecretRefused`), then `sprints.declarable_fault`; it appends exactly one
+`fault.declared` row (project the sprint's project) `{"sprint_id", "goal", "fault": <checked>}`, folds, publishes and
+returns the row's `seq`. It nudges nobody and calls no tracker writer; a refusal appends and publishes nothing.
 
-The owner withdraws a live fault (#1432): `POST /api/live-fault-withdraw` (`{"project_id", "sprint_id",
-"fault"}`, at most `MAX_LIVE_FAULT_WITHDRAW_BYTES` 4096) is a page write, so it passes `_page_write`'s guard
-before any body is read (no or a foreign `Origin` 403 `origin refused`, a missing or wrong token 403 `token
-refused`, nothing appended) and is owner-only on the guest port. A body `sprints.parse_live_fault_withdrawal`
-does not accept is 400 `bad live fault withdrawal`; a `sprints.Refused` is 409 with the reason and the one
-line `console: live_fault_withdraw_refused <sprint_id> <reason>`, where `<sprint_id>` is the id the parser
-checked as 16 lowercase hex and `<reason>` a fixed `sprints.py` text: the request's `project_id`, which may
-hold any text, is never printed; any other exception is `console: live_fault_withdraw_failed <Type>:
-<message>` and 500 `live fault withdrawal failed`. Success is 204.
-`withdraw_live_fault(project_id, sprint_id, fault_id)`, under the ingest lock, takes the folded sprint
-(`NOT_OPEN` when there is none or its project is not `project_id`), then `sprints.withdrawable_fault`
-(unknown or already withdrawn), and appends exactly one `fault.withdrawn` row (project the sprint's project)
-`{"sprint_id", "goal", "fault": <id>}`, folds, publishes and returns the id. It applies no stop or end gate:
-the owner withdraws a declaration of an ended sprint too. It nudges nobody and sends no message; a refusal
-appends and publishes nothing.
+The owner withdraws a live fault (#1432): `POST /api/live-fault-withdraw` (`{"project_id", "sprint_id", "fault"}`, at
+most `MAX_LIVE_FAULT_WITHDRAW_BYTES` 4096) is a page write, so it passes `_page_write`'s guard before any body is read
+(no or a foreign `Origin` 403 `origin refused`, a missing or wrong token 403 `token refused`, nothing appended) and is
+owner-only on the guest port. A body `sprints.parse_live_fault_withdrawal` does not accept is 400 `bad live fault
+withdrawal`; a `sprints.Refused` is 409 with the reason and the one line `console: live_fault_withdraw_refused
+<sprint_id> <reason>`, where `<sprint_id>` is the id the parser checked as 16 lowercase hex and `<reason>` a fixed
+`sprints.py` text: the request's `project_id`, which may hold any text, is never printed; any other exception is
+`console: live_fault_withdraw_failed <Type>: <message>` and 500 `live fault withdrawal failed`. Success is 204.
+`withdraw_live_fault(project_id, sprint_id, fault_id)`, under the ingest lock, takes the folded sprint (`NOT_OPEN` when
+there is none or its project is not `project_id`), then `sprints.withdrawable_fault` (unknown or already withdrawn),
+and appends exactly one `fault.withdrawn` row (project the sprint's project) `{"sprint_id", "goal", "fault": <id>}`,
+folds, publishes and returns the id. It applies no stop or end gate: the owner withdraws a declaration of an ended
+sprint too. It nudges nobody and sends no message; a refusal appends and publishes nothing.
 
-Owner notice nudges (#1120, ADR-console-044): with a nudger, `post_owner_notice` records, still under the
-lock, in `_notice_due[sprint_id]` the new row's seq for each sprint of the project with `sprints.takes_notices`
-and `_reachable` (every `_nudgeable` condition but the unread message), and reserves in `_nudging` and
-dispatches `_dispatch_notice_nudge` after the lock each of them not already reserved; a reserved sprint keeps
-the due notice for later. `_nudge` and `_notice_nudge` pop the due id (`covered`) in their first lock block, so
-a nudge started after the post covers it: one relay carries a queued message and a notice together, and a
-notice posted after that start is due again. A failed message send puts `covered` back. Wherever either ends a
-reservation without scheduling a message re-nudge, `_notice_follow` reserves the sprint again when a notice is
-still due (and drops it for a stopping service, no nudger or a sprint no longer reachable), and the notice
-nudge is dispatched; `renudge` drains `_notice_due` the same way for a sprint another holder (a wake, an idle
-nudge, a takeover) released without looking. `_notice_nudge` sends the same fixed sentence through `_reach`,
-the routing `_nudge` shares (listing, wake settings, quota recheck, relay or wake, `UNKNOWN_SESSION`), then
-appends one `notice.nudged {sprint_id, notice, route, ok[, reason][, listing_failed]}` row for the sprint's
-project (a failure also prints `console: notice_nudge_failed <sprint_id> <reason>`); the row is not kept and
-nothing folds it. A notice nudge is never retried after its own attempt, counts no `failed_nudges`, sets no
-`last_nudge_at` and delivers no message; one that cannot be dispatched is the same row with route null and the
+Owner notice nudges (#1120, ADR-console-044): with a nudger, `post_owner_notice` records, still under the lock, in
+`_notice_due[sprint_id]` the new row's seq for each sprint of the project with `sprints.takes_notices` and `_reachable`
+(every `_nudgeable` condition but the unread message), and reserves in `_nudging` and dispatches
+`_dispatch_notice_nudge` after the lock each of them not already reserved; a reserved sprint keeps the due notice for
+later. `_nudge` and `_notice_nudge` pop the due id (`covered`) in their first lock block, so a nudge started after the
+post covers it: one relay carries a queued message and a notice together, and a notice posted after that start is due
+again. A failed message send puts `covered` back. Wherever either ends a reservation without scheduling a message
+re-nudge, `_notice_follow` reserves the sprint again when a notice is still due (and drops it for a stopping service,
+no nudger or a sprint no longer reachable), and the notice nudge is dispatched; `renudge` drains `_notice_due` the same
+way for a sprint another holder (a wake, an idle nudge, a takeover) released without looking. `_notice_nudge` sends the
+same fixed sentence through `_reach`, the routing `_nudge` shares (listing, wake settings, quota recheck, relay or
+wake, `UNKNOWN_SESSION`), then appends one `notice.nudged {sprint_id, notice, route, ok[, reason][, listing_failed]}`
+row for the sprint's project (a failure also prints `console: notice_nudge_failed <sprint_id> <reason>`); the row is
+not kept and nothing folds it. A notice nudge is never retried after its own attempt, counts no `failed_nudges`, sets
+no `last_nudge_at` and delivers no message; one that cannot be dispatched is the same row with route null and the
 reason `the nudge could not start: <Type>: <message>`, and the post still answers 204.
 
 Permit (#1377, #1401, ADR-console-094): `POST /api/permit` is a manager write dispatched beside `/api/notices`
-through `_checked_length(MAX_PERMIT_BYTES)` (16384). Its body is `sprints.parse_permit_request`'s
-`{"sprint_id", "secret", "phase": "judge" | "landed", "session_id", "tool_use_id", "command"}`, else 400 `bad permit`;
-a `sprints.SecretRefused` is 403 `secret refused`, any other `sprints.Refused` 409 with its reason, any
-other exception 500 `permit failed`, each with one stderr line `console: permit_refused <sprint_id>
-<reason>` or `console: permit_failed <Type>: <message>`. Success is 200: phase `judge` answers
-`{"decision": "allow" | "deny" | null, "reason": <str>}` and phase `landed` `{"recorded": <bool>}`.
-`permit(sprint_id, secret, session_id, tool_use_id, command)` answers a `permit.Verdict`: under the ingest lock it
-checks the secret (`_manager_sprint`), returns no decision (`decision` None, no row) for a command
-`permit.mentions` rejects (a command running a release is a mention: the plain `release transaction run`
-is `allow` with verb `release` and target `{"commit", "version"}` and reads no forge; abandon and dispose are
-`deny` with `permit.NO_ABANDON` and `permit.NO_DISPOSE`, whatever the program is named), and denies `permit.NOT_ACTIVE` unless the sprint is `STARTING` and
-`sprints.takes_questions` (no closing, no stop request, no stop, and not ended by a done report), and
-`permit.NOT_MANAGER` unless `session_id` is the sprint's
-`manager_session`. It takes the grant from the sprint (`issues`: the newest report's issues that a
-delivery of the manager's own session carries, as `SprintState.delivered` records them, so a delivery
-run the console has since cleaned up still counts; `others`: the issues the newest report of every other
-open sprint of the project lists) and, off the lock,
-the project's slug (`slug_of`), branch pattern (`branch_pattern_of`) and merge binding
-(`merge_binding_of`), judges with `permit.judge` over `permit.memoized(permit_forge)`, then under the
-lock again takes the sprint, its checks and the grant afresh and judges once more over the memo's
-frozen replay: any refusal, any difference or any read the memo did not hold is `permit.MOVED`. Each
-decided verdict appends one `permit.judged` row under that lock `{"sprint_id", "session_id",
-"tool_use_id", "repo", "verb", "decision", "reason", "target"}`; an allowed merge is also remembered in
-memory as `(sprint_id, session_id, tool_use_id, repo, pr, head)` with the service's clock.
-`permit_landed(sprint_id, secret, session_id, tool_use_id, command)` is True, and
-appends one `permit.landed` row `{"sprint_id", "session_id", "tool_use_id", "repo", "verb": "merge",
-"target": {"pr", "head"}}`, only when the command is exactly such a merge (`permit.merge_target`) and
-the allow of that same tool call was judged at most `PERMIT_LANDED_SECONDS` (30 minutes) ago;
-otherwise it is False and appends nothing.
+through `_checked_length(MAX_PERMIT_BYTES)` (16384). Its body is `sprints.parse_permit_request`'s `{"sprint_id",
+"secret", "phase": "judge" | "landed", "session_id", "tool_use_id", "command"}`, else 400 `bad permit`; a
+`sprints.SecretRefused` is 403 `secret refused`, any other `sprints.Refused` 409 with its reason, any other
+exception 500 `permit failed`, each with one stderr line `console: permit_refused <sprint_id> <reason>` or `console:
+permit_failed <Type>: <message>`. Success is 200: phase `judge` answers `{"decision": "allow" | "deny" | null,
+"reason": <str>}` and phase `landed` `{"recorded": <bool>}`. `permit(sprint_id, secret, session_id, tool_use_id,
+command)` answers a `permit.Verdict`: under the ingest lock it checks the secret (`_manager_sprint`), returns no
+decision (`decision` None, no row) for a command `permit.mentions` rejects (a command running a release is a mention:
+the plain `release transaction run` is `allow` with verb `release` and target `{"commit", "version"}` and reads no
+forge; abandon and dispose are `deny` with `permit.NO_ABANDON` and `permit.NO_DISPOSE`, whatever the program is named),
+and denies `permit.NOT_ACTIVE` unless the sprint is `STARTING` and `sprints.takes_questions` (no closing, no stop
+request, no stop, and not ended by a done report), and `permit.NOT_MANAGER` unless `manager.is_manager_session` admits
+`session_id`. It takes the grant from the sprint (`issues`: the newest report's issues that a delivery of the manager's
+own session carries, as `SprintState.delivered` records them, so a delivery run the console has since cleaned up still
+counts; `others`: the issues the newest report of every other open sprint of the project lists) and, off the lock, the
+project's slug (`slug_of`), branch pattern (`branch_pattern_of`) and merge binding (`merge_binding_of`), and from its
+own `permit.judged` rows (`permit.rerun_record`, folded) each head's allowed reruns in the project (`Grant.reruns`,
+ADR-console-106), judges with `permit.judge` over `permit.memoized(permit_forge)`, then under the lock again takes the
+sprint, its checks and the grant afresh and judges once more over the memo's frozen replay: any refusal, any difference
+or any read the memo did not hold is `permit.MOVED`. Each decided verdict appends one `permit.judged` row under that
+lock `{"sprint_id", "session_id", "tool_use_id", "repo", "verb", "decision", "reason", "target"}`; an allowed merge is
+also remembered in memory as `(sprint_id, session_id, tool_use_id, repo, pr, head)` with the service's clock.
+`permit_landed(sprint_id, secret, session_id, tool_use_id, command)` is True, and appends one `permit.landed` row
+`{"sprint_id", "session_id", "tool_use_id", "repo", "verb": "merge", "target": {"pr", "head"}}`, only when the command
+is exactly such a merge (`permit.merge_target`) and the allow of that same tool call was judged at most
+`PERMIT_LANDED_SECONDS` (30 minutes) ago; otherwise it is False and appends nothing.
+
+An approved action (`action_permit`): a body with a `nonce` is a signed body that carries no secret and no
+command text, which `action_permit.reply` answers through `permit_action` and `permit_action_landed`; only
+that body decides an action: `permit` for a command that names no granted verb still has no decision and no row.
 
 Permission card (#1424, `prompt_card`): `POST /api/permission-prompt` is a manager write dispatched beside
 `/api/permit` through `_checked_length(MAX_PROMPT_BYTES)` (262144: twelve bytes for each of the
@@ -1550,8 +1541,8 @@ folded from the log's session rows (`manager.profile_use`, kept after a session 
 #1028), which `capacity_view` leaves out of the room, and the pinned profile (#1029), which it
 answers first while it has room, with the sprint's starter and `_waiting_logins()` so that a colleague's account serves his own sprints first (#1344, ADR-console-087), and `Wait` appends `manager.waiting`. Otherwise the launcher is called outside the lock, and then,
 under it, a sprint that was withdrawn meanwhile has its secret and settings file removed again and
-no row appended, and otherwise, unless the service is stopping, `manager.started {sprint_id, profile, session_name}`
-or `manager.failed {sprint_id, reason}` is appended (the reason of a `LaunchFailed`, else `<Type>:
+no row appended, and otherwise, unless the service is stopping, `manager.started {sprint_id, profile, session_name,
+short_id?}` or `manager.failed {sprint_id, reason}` is appended (the reason of a `LaunchFailed`, else `<Type>:
 <message>`, the secret shown as `<secret>`), a failure is one stderr line `console: manager_failed
 <sprint_id> <reason>`, and the view is published. `withdraw_goal` also removes the manager's
 settings file. The sprint's secret appears in no row, view or stderr line. `_prepared_launch`
@@ -1775,14 +1766,15 @@ sprint is open and the service not stopping; a failure also prints `console: wak
 `manager_seen_seq`) while the command ran; the reservation's end after a wake was sent, or one that could not start, also sets `_settled`, so a stop that waited out the wake defers for the resumed session. A takeover job reads the listing off the lock (one that
 raises ends the reservation and appends nothing), then launches only while the sprint is open,
 neither the fresh listing nor the folded sessions show the manager and `_revive_step` is still a
-takeover; otherwise it appends nothing. A takeover the bring-back reserves because the manager's
+takeover; a release because only the fresh listing shows the manager appends `manager.held {sprint_id, goal, reason}` and prints
+`console: takeover_held <sprint_id> <reason>` once per run of releases (`_unmatched`, cleared when the folded sessions list the manager), any other release appends nothing. A takeover the bring-back reserves because the manager's
 account is out (`_quota_target`: out, and the step would otherwise be a wake) carries the profile it
 chose as `target` on its `_TakeoverReservation`. The launch is prepared on that profile without
 choosing again, and with the account identity (its sign-in account and its counted reading's account
 id) and the owner's pin as they were when it was reserved. When it is prepared, and again after the
 permission read (`_unexcluded_launch`), it must pass `_move_holds`: the manager's account still out
 (`_quota_wait`, which reads the sign-in history, so a late reply from an account the profile left
-does not count), the pin and the account identity unchanged, and `_room_for_move`: another account
+does not count), the pin and the account identity unchanged, and `capacity.room_for_move`: another account
 than the manager's, by sign-in and by the account ids the counted readings of the target and its
 sign-in aliases carry, not a duplicate of any profile, not kept for another login's waiting sprint,
 and room by `manager.has_room` (reads `ok` or `reset`, not signed out, not excluded). It must also
@@ -1800,7 +1792,10 @@ every listed one is on the profile the sprint's record gives (else the move is c
 every listed session carrying the manager's name through `_stop_one`, off the lock, and reads the
 conclusive listing again. It launches only when that listing shows neither the name nor a session it
 stopped, no folded session of that name is left unstopped, and the move still holds; the same is checked
-again after the permission read, with a fresh conclusive listing. Nothing listed to stop only releases it.
+again after the permission read, with a fresh conclusive listing. Nothing listed to stop only releases it, unless the owner asked for the move.
+`revive()` keeps in `_move_notes` a `capacity.MoveNote` for each sprint whose move would be due but for the cancel mark and says why it is not moving:
+no other account has room (no move offered), its session is unmatched (`_unmatched`) or its move was called off (a move is offered). The sprint line shows the note and, with a move offered, `POST /api/retry-manager` moves the manager, not retries it: it clears the marks and reserves a
+`_ListedMoveReservation` with `asked` set on `_move_target`, refusing with `capacity.NO_ROOM_REFUSAL` when none is left.
 Any other outcome cancels the move as #1279 does and a failed stop or listing writes
 `console: quota_move_failed <sprint_id> <reason>`. The takeover's
 `manager.started` row carries `"moved": true` and the sprint leaves `_quota_held`, so the digest says the
@@ -1930,9 +1925,10 @@ the read health, the deliveries, the sprints, the withdrawn ids and the pending 
 the view; sample the registry's signature; `refresh()`; `poll_sessions()`; `poll_deliveries()`. The
 absent set starts empty, so a restart drops a session only after two polls miss
 it. On any failure after the bind, what was opened is closed and the exception
-re-raised. `start()` serves on a daemon thread named `console-http` and starts the spend thread; `close()`
-sets the stop flag, then `closing`, wakes every waiter, joins the watcher, the session poll, the probe loop, the
-tracker, movement, retention, digest and spend threads and the folder-trust start thread and tears the rest down; it is idempotent.
+re-raised. `start()` serves on daemon threads named `console-http` and, with a guest socket, `console-guest-http`, each
+polling for shutdown every `SERVE_POLL_SECONDS`, and starts the spend thread; `close()` sets the stop flag, then
+`closing`, wakes every waiter, joins the watcher, the session poll, the probe loop, the tracker, movement,
+retention, digest and spend threads and the folder-trust start thread, shuts both servers down together and tears the rest down; it is idempotent.
 
 `POST /api/project-question` (#1176, ADR-console-058) carries one JSON body of `project_id` and
 `question`, and optionally a non-empty string `thread_id` (#1178, ADR-console-062), an optional
@@ -2024,11 +2020,12 @@ from urllib.parse import parse_qsl
 
 from agent_tools.claims import owner_actions
 from agent_tools.console import (
-    project_question, account_add, account_remove, activation, checkout_remote, activation_run, answer, approve, capacity, contract_draft, deliveries, digest, engine_runs, exclusion, idle, inbox,
+    action_permit, project_question, account_add, account_remove, activation, checkout_remote, activation_run, answer, approve, capacity, contract_draft, deliveries, digest, engine_runs, exclusion, idle, inbox,
     folder_trust, guest, manager, movement, nudge, peer, permission, permit, pin, plan_questions, probe, question_records, prompt_card, register, release_card, revive, pictures, sessions, signin, signin_run, spend, sprints, transcript_digest, write_guard)
+from agent_tools.console.action_permit import PERMIT_LANDED_SECONDS, ActionPermit
 from agent_tools.console.event_log import (
     BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, FAULT_DECLARED, FAULT_WITHDRAWN, GOAL_STATED, GOAL_WITHDRAWN, MANAGER_FAILED,
-    MANAGER_NO_PROGRESS, MANAGER_NUDGED, MANAGER_STALLED, MANAGER_STARTED, MANAGER_STOP_FAILED,
+    MANAGER_HELD, MANAGER_NO_PROGRESS, MANAGER_NUDGED, MANAGER_STALLED, MANAGER_STARTED, MANAGER_STOP_FAILED,
     MANAGER_STOPPED, MANAGER_WAITING, MANAGER_WOKEN, NOTICE_NUDGED, NOTICE_POSTED, NOTICE_WITHDRAWN,
     LOOK_RECORDED, PERMIT_JUDGED, PERMIT_LANDED, PROJECT_QUESTION_ANSWERED, PROJECT_QUESTION_ASKED, PROJECT_QUESTION_KEYED,
     QUESTION_ANSWERED, QUESTION_WITHDRAWN, QUESTIONS_ASKED,
@@ -2070,6 +2067,8 @@ GUEST_PAGE: bytes = PAGE.replace(DOOR_OWNER, DOOR_GUEST)
 SPEND_PAGE: bytes = Path(__file__).with_name("spend.html").read_bytes()
 BACKLOG = 16
 POLL_SECONDS = 0.25
+# serve_forever's poll: each shutdown() waits up to one poll for its loop to see the request.
+SERVE_POLL_SECONDS = 0.05
 DRAIN_POLL_SECONDS = 0.25
 KEEPALIVE_SECONDS = 15.0
 WATCH_THREAD = "console-registry-watch"
@@ -2203,7 +2202,6 @@ MAX_PERMIT_BYTES = 16384
 # astral one is two `\uXXXX` escapes), so a command of `MAX_COMMAND_CHARS` characters needs that many.
 MAX_PROMPT_BYTES = 12 * prompt_card.MAX_COMMAND_CHARS + 65536
 MAX_PROMPT_ANSWER_BYTES = 1024
-PERMIT_LANDED_SECONDS = 30 * 60
 MAX_WITHDRAW_NOTICE_BYTES = 4096
 MAX_OWNER_NOTICE_BYTES = 4096
 MAX_OWNER_NOTICE_WITHDRAW_BYTES = 4096
@@ -3354,7 +3352,9 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         except ValueError:
             return self._refuse(400, "bad permit")
         try:
-            if request.phase == "judge":
+            if isinstance(request, sprints.ActionPermitRequest):
+                reply = action_permit.reply(self.server.console, request)
+            elif request.phase == "judge":
                 verdict = self.server.console.permit(
                     request.sprint_id, request.secret, request.session_id, request.tool_use_id,
                     request.command)
@@ -4531,9 +4531,10 @@ class _ListedMoveReservation(_TakeoverReservation):
     """
 
     def __init__(self, target: str, account: tuple[str | None, str | None],
-                 pinned: str | None) -> None:
+                 pinned: str | None, asked: bool = False) -> None:
         super().__init__(target, account, pinned)
         self.stopped: set[str] = set()
+        self.asked = asked
 
 
 MOVE_NOT_STARTED = "the manager could not be started again after its account was signed out or removed"
@@ -4560,7 +4561,7 @@ def _retry_line(project_id: str, key: str) -> Callable[[int, ForgeError], None]:
     return on_retry
 
 
-class ConsoleService:
+class ConsoleService(ActionPermit):
     def __init__(self, store: Path, registry: Path, *, port: int = DEFAULT_PORT,
                  poll_seconds: float = POLL_SECONDS,
                  session_dirs: Callable[[], Iterable[Path]] = default_session_dirs,
@@ -4599,7 +4600,7 @@ class ConsoleService:
                  look_reader: Callable[[str, int], tuple[str, str | None]] = answer.look_head,
                  look_recorder: Callable[[str, int, int, str, str, Sequence[tuple[str | None, str]]], int] = answer.record_look,
                  look_ender: Callable[[str, int, int], None] = answer.end_look,
-                 launcher: Callable[[manager.Launch], None] | None = None,
+                 launcher: Callable[[manager.Launch], str | None] | None = None,
                  dispatch: Callable[[Callable[[], None]], None] | None = None,
                  nudger: Callable[[nudge.Nudge], None] | None = None,
                  listing: Callable[[], Mapping[str, sessions.Observation]] | None = None,
@@ -4719,6 +4720,8 @@ class ConsoleService:
         self._settled: dict[str, int] = {}
         self._quota_held: set[str] = set()
         self._move_cancelled: set[str] = set()
+        self._unmatched: set[str] = set()
+        self._move_notes: dict[str, capacity.MoveNote] = {}
         self._moved: dict[str, int] = {}
         self._listing = (
             (lambda: sessions.read_session_registry(self._session_dirs()))
@@ -4821,7 +4824,8 @@ class ConsoleService:
         self._branch_pattern_of = branch_pattern_of
         self._permit_forge = permit_forge
         self._merge_binding_of = merge_binding_of
-        self._permit_allows: dict[tuple[str, str, str, str | None, int, str], float] = {}
+        self._permit_allows: dict[tuple[str, str, str, object, int, object], float] = {}
+        self._rerun_record: dict[tuple[str | None, str], tuple[permit.Rerun, ...]] = {}
         self._patterns: dict[str, str] = {}
         self._activity = activity
         self._clock = clock
@@ -4906,6 +4910,7 @@ class ConsoleService:
             events = self.log.events()
             self._sweep_pictures(events)
             self._states = project_states(events)
+            self._rerun_record = permit.rerun_record(events)
             self._sessions = sessions.session_states(events)
             self._use = manager.profile_use(events)
             self._spend_profiles = spend.session_profiles(events)
@@ -5199,7 +5204,8 @@ class ConsoleService:
                 cap, self._use.last, None, self._waiting_logins())),
             pin_launches=self._pin_launches.launched,
             managers=self._launcher is not None, pending=self._pending,
-            nudges=self._nudger is not None, looked=self._looked, movement=self._movement, engine_runs=self._engine_states)
+            nudges=self._nudger is not None, looked=self._looked, movement=self._movement, engine_runs=self._engine_states,
+            moves=self._move_notes)
         return inputs
 
     def _publish(self, *, guests: bool = True) -> None:
@@ -6612,6 +6618,7 @@ class ConsoleService:
                                           "detail": str(error)})
             traceback.print_exception(error, file=sys.stderr)
             payload = register.failed(root, type(error).__name__, verb)
+        payload = register.hooks_noted(payload, self._stop)
         if unread:
             payload = register.unread(payload)
         elif remote is not None:
@@ -6803,6 +6810,7 @@ class ConsoleService:
                 {"root": root, "exception": type(error).__name__, "detail": str(error)})
             traceback.print_exception(error, file=sys.stderr)
             text = plan_questions.rerun_failed(register.UNEXPECTED)
+        payload = register.hooks_noted(payload, self._stop)
         with self._ingest:
             try:
                 if payload is not None and not self._closed:
@@ -7769,11 +7777,23 @@ class ConsoleService:
             if sprint_id in self._launching or sprint_id in self._nudging:
                 raise sprints.Refused(sprints.LAUNCHING)
             state, _, retry = self._manager_state(sprint)
-            if not retry:
+            offered = self._move_notes.get(sprint_id)
+            if not retry and offered is not None and offered.offer:
+                target = self._move_target(sprint)
+                if target is None:
+                    raise sprints.Refused(capacity.NO_ROOM_REFUSAL)
+                self._move_cancelled.discard(sprint_id)
+                self._unmatched.discard(sprint_id)
+                self._move_notes.pop(sprint_id)
+                self._launching[sprint_id] = _ListedMoveReservation(
+                    target, capacity.move_account(self._move_view(), self._capacity, self._signins, target),
+                    self._pinned, asked=True)
+            elif not retry:
                 raise sprints.Refused(
                     sprints.HAS_MANAGER if state in (sprints.STARTED, sprints.STALLED)
                     else sprints.TOO_SOON)
-            self._launching[sprint_id] = _RetryReservation()
+            else:
+                self._launching[sprint_id] = _RetryReservation()
         self._dispatch_launch(sprint_id)
 
     def _launch_reserved(self, sprint_id: str) -> None:
@@ -7821,13 +7841,13 @@ class ConsoleService:
             if launch is None:
                 return
             try:
-                reason = None
+                reason = printed = None
                 try:
-                    self._launcher(launch)
+                    printed = self._launcher(launch)
                 except Exception as error:
                     reason = (str(error) if isinstance(error, manager.LaunchFailed)
                               else f"{type(error).__name__}: {error}")
-                self._record_launch(launch, reason, token)
+                self._record_launch(launch, reason, token, printed)
             finally:
                 with self._ingest:
                     self._client_live[launch.profile] -= 1
@@ -7860,6 +7880,11 @@ class ConsoleService:
             if shown:
                 self._last_listed[sprint_id] = now
             if shown or self._manager_listed(sprint):
+                if shown and not self._manager_listed(sprint) and sprint_id not in self._unmatched:
+                    self._unmatched.add(sprint_id)
+                    self._apply(self.log.append([(MANAGER_HELD, sprint.project_id, {
+                        "sprint_id": sprint_id, "goal": sprint.goal, "reason": capacity.UNMATCHED_REASON})]))
+                    print(f"console: takeover_held {sprint_id} {capacity.UNMATCHED_REASON}", file=sys.stderr)
                 self._release(sprint_id, token)
                 return None
             if self._revive_step(sprint, now) != sprints.TAKEOVER:
@@ -7958,7 +7983,7 @@ class ConsoleService:
         self._release(payload["sprint_id"], token)
         self._apply(self.log.append([(kind, project_id, payload)]))
 
-    def _record_launch(self, launch: manager.Launch, reason: str | None, token: object) -> None:
+    def _record_launch(self, launch: manager.Launch, reason: str | None, token: object, printed: object = None) -> None:
         secret = launch.env[manager.SECRET_ENV]
         with self._ingest:
             self._settled[launch.sprint_id] = int(self._clock() * 1000)
@@ -7977,7 +8002,7 @@ class ConsoleService:
                 self._append_manager(MANAGER_STARTED, launch.project_id, {
                     "sprint_id": launch.sprint_id, "profile": launch.profile,
                     "session_name": launch.session_name, "seen_after": launch.seen_after,
-                    "permission": launch.permission.payload(), **marks}, token)
+                    "permission": launch.permission.payload(), **marks, **manager.short_id_mark(printed)}, token)
                 return
             if secret:
                 reason = reason.replace(secret, "<secret>")
@@ -8830,23 +8855,27 @@ class ConsoleService:
             return self._move_target(sprint)
         return None
 
+    def _move_view(self) -> Mapping:
+        """Under the ingest lock: the capacity view a quota move reads its target and accounts from."""
+        return capacity.capacity_view(self._profiles - self._removing, self._capacity, self._clock(),
+                                      self._signins, excluded=self._excluded, pinned=self._pinned,
+                                      owners=self._owners_now())
+
     def _takeover_reservation(self, sprint: sprints.SprintState, now: int) -> "_TakeoverReservation":
         """Under the ingest lock: the reservation of a takeover, a quota move carrying its target, account and pin."""
         target = self._quota_target(sprint, now)
         if target is None:
             return _TakeoverReservation()
-        view = capacity.capacity_view(self._profiles - self._removing, self._capacity, self._clock(),
-                                      self._signins, excluded=self._excluded, pinned=self._pinned,
-                                      owners=self._owners_now())
-        return _TakeoverReservation(target, self._move_account(view, target), self._pinned)
+        view = self._move_view()
+        return _TakeoverReservation(target, capacity.move_account(view, self._capacity, self._signins, target), self._pinned)
 
-    def _listed_move_due(self, sprint: sprints.SprintState, now: int) -> bool:
+    def _listed_move_due(self, sprint: sprints.SprintState, now: int, cancelled: bool = False) -> bool:
         """Under the ingest lock: whether a listed manager of the sprint waits on quota and may be moved (#1378).
 
         Everything the move needs but the session's own state: a launcher and a stopper, a started
         manager on an open sprint that is not stalled and has no open no-progress item, work to do,
         fewer than `revive.LIMIT` counted revivals in the window, an account that is out and no
-        cancelled move for it.
+        cancelled move for it (`cancelled=True` does not read that mark).
         """
         return (self._launcher is not None and self._stopper is not None
                 and sprint.manager is not None and sprint.manager.state == sprints.STARTED
@@ -8856,7 +8885,14 @@ class ConsoleService:
                 and revive.has_work(sprint, self._waiting(sprint))
                 and revive.counted(sprint, now) < revive.LIMIT
                 and self._quota_wait(sprint) is not None
-                and sprint.sprint_id not in self._move_cancelled)
+                and (cancelled or sprint.sprint_id not in self._move_cancelled))
+
+    def _move_note(self, sprint: sprints.SprintState, now: int) -> "capacity.MoveNote | None":
+        """Under the ingest lock: why a manager whose listed move would be due but for the cancel mark is not moving."""
+        if not self._listed_move_due(sprint, now, cancelled=True):
+            return None
+        return capacity.move_note(self._move_target(sprint), sprint.sprint_id in self._move_cancelled,
+                                  sprint.sprint_id in self._unmatched)
 
     def _listed_move_reservation(self, sprint: sprints.SprintState,
                                  now: int) -> "_ListedMoveReservation | None":
@@ -8869,10 +8905,8 @@ class ConsoleService:
         target = self._move_target(sprint)
         if target is None:
             return None
-        view = capacity.capacity_view(self._profiles - self._removing, self._capacity, self._clock(),
-                                      self._signins, excluded=self._excluded, pinned=self._pinned,
-                                      owners=self._owners_now())
-        return _ListedMoveReservation(target, self._move_account(view, target), self._pinned)
+        view = self._move_view()
+        return _ListedMoveReservation(target, capacity.move_account(view, self._capacity, self._signins, target), self._pinned)
 
     def _unstopped_manager(self, sprint: sprints.SprintState, stopped: set[str]) -> bool:
         """Under the ingest lock: whether a folded session carrying the manager's name is not one the move stopped."""
@@ -8966,7 +9000,7 @@ class ConsoleService:
                     return None
                 name = manager.session_name(sprint.project_id, sprint_id)
             manager.stop_listed([name], lambda: listed, stop)
-            if not token.stopped:
+            if not token.stopped and not token.asked:
                 with self._ingest:
                     self._release(sprint_id, token)
                 return None
@@ -8994,59 +9028,17 @@ class ConsoleService:
         """
         return (token.target is not None and self._quota_wait(sprint) is not None
                 and self._pinned == token.pinned
-                and self._move_account(view, token.target) == token.account
-                and self._room_for_move(view, sprint, token.target))
-
-    def _move_account(self, view: Mapping, profile: str) -> tuple[str | None, str | None]:
-        """Under the ingest lock: the identity of `profile`'s account, its sign-in account and its counted reading's account id."""
-        entry = {e["profile"]: e for e in view["profiles"]}.get(profile)
-        own = capacity.counted_reading(self._capacity, profile, self._signins.get(profile))
-        return (entry["account"] if entry is not None else None,
-                own.account if own is not None else None)
-
-    def _account_ids(self, by_name: Mapping[str, Mapping], profile: str) -> set[str]:
-        """Under the ingest lock: the account ids the counted readings of `profile` and its sign-in aliases carry."""
-        entry = by_name.get(profile)
-        names = [profile, *(entry["same_account_as"] if entry is not None else ())]
-        held = (capacity.counted_reading(self._capacity, name, self._signins.get(name))
-                for name in names)
-        return {reading.account for reading in held
-                if reading is not None and reading.account is not None}
+                and capacity.move_account(view, self._capacity, self._signins, token.target) == token.account
+                and capacity.room_for_move(view, self._capacity, self._signins,
+                                           self._waiting_logins(), sprint, token.target))
 
     def _move_target(self, sprint: sprints.SprintState) -> str | None:
         """Under the ingest lock: the profile a quota move would take over on, else None."""
-        view = capacity.capacity_view(self._profiles - self._removing, self._capacity, self._clock(),
-                                      self._signins, excluded=self._excluded, pinned=self._pinned,
-                                      owners=self._owners_now())
+        view = self._move_view()
         choice = manager.choose_profile(view, self._use.last, sprint.started_by,
                                         self._waiting_logins())
-        return choice if self._room_for_move(view, sprint, choice) else None
-
-    def _room_for_move(self, view: Mapping, sprint: sprints.SprintState, choice: object) -> bool:
-        """Under the ingest lock: whether `choice` is another account with room (#1279).
-
-        The reading behind the entry may be an alias's (profiles on one sign-in share the newest),
-        so the account ids of the readings of `choice` and its aliases are compared with the
-        manager's. A duplicate of any profile is not a move, and a colleague's account kept for a
-        waiting sprint of another login is not either (the rule `manager.choose_profile` applies).
-        """
-        mine = sprint.manager.profile if sprint.manager else None
-        if not isinstance(choice, str) or choice == mine:
-            return False
-        by_name = {entry["profile"]: entry for entry in view["profiles"]}
-        chosen = by_name.get(choice)
-        if chosen is None or not manager.has_room(chosen) or chosen.get("duplicate_of") is not None:
-            return False
-        if mine in chosen["same_account_as"]:
-            return False
-        starter = sprint.started_by
-        owners = {owner for name in (choice, *chosen["same_account_as"])
-                  if (owner := (by_name.get(name) or {}).get("owner")) is not None}
-        if any(login in self._waiting_logins() and login != starter for login in owners):
-            return False
-        if mine is None:
-            return True
-        return not (self._account_ids(by_name, mine) & self._account_ids(by_name, choice))
+        return choice if capacity.room_for_move(view, self._capacity, self._signins,
+                                                self._waiting_logins(), sprint, choice) else None
 
     def revive(self) -> None:
         """Bring back each manager that is gone while its sprint has work (#893)."""
@@ -9060,9 +9052,14 @@ class ConsoleService:
             for sprint_id in [key for key in self._last_listed if key not in self._sprints]:
                 del self._last_listed[sprint_id]
             self._move_cancelled.intersection_update(self._sprints)
+            self._unmatched.intersection_update(self._sprints)
+            notes = {}
             for sprint_id, sprint in list(self._sprints.items()):
+                if (note := self._move_note(sprint, now)) is not None:
+                    notes[sprint_id] = note
                 if self._manager_listed(sprint):
                     self._last_listed[sprint_id] = now
+                    self._unmatched.discard(sprint_id)
                     if (sprint_id not in self._launching and sprint_id not in self._nudging
                             and sprint_id not in self._stopping):
                         moved = self._listed_move_reservation(sprint, now)
@@ -9083,6 +9080,9 @@ class ConsoleService:
                 elif step == sprints.TAKEOVER:
                     self._launching[sprint_id] = self._takeover_reservation(sprint, now)
                     jobs.append((step, sprint_id))
+            if notes != self._move_notes:
+                self._move_notes = notes
+                self._publish()
         for step, sprint_id in jobs:
             try:
                 if step == sprints.WAKE:
@@ -9621,34 +9621,25 @@ class ConsoleService:
         """Under the ingest lock: the verdict that refuses the caller before a grant is judged, else None."""
         if not self._permit_active(sprint):
             return permit.Verdict(permit.DENY, permit.NOT_ACTIVE, verb, {})
-        if session_id != sprint.manager_session:
+        if not manager.is_manager_session(sprint, session_id):
             return permit.Verdict(permit.DENY, permit.NOT_MANAGER, verb, {})
         if sprint.project_id not in self._states:
             return permit.Verdict(permit.DENY, permit.NOT_GRANTED, verb, {})
         return None
 
-    def _permit_sets(self, sprint: sprints.SprintState) -> tuple[frozenset[int], frozenset[int]]:
-        """Under the ingest lock: the issues the sprint may merge and its siblings' issues."""
+    def _permit_sets(self, sprint: sprints.SprintState) -> tuple[frozenset[int], frozenset[int], Mapping]:
+        """Under the ingest lock: the issues the sprint may merge, its siblings' issues, the project's reruns."""
         reported = {number for number, _ in sprint.report.issues} if sprint.report else set()
         others = {number for key, other in self._sprints.items()
                   if key != sprint.sprint_id and other.project_id == sprint.project_id
                   and sprints.takes_questions(other) and other.report is not None
                   for number, _ in other.report.issues}
-        return frozenset(reported & sprint.delivered), frozenset(others)
+        return (frozenset(reported & sprint.delivered), frozenset(others),
+                permit.reruns_of(self._rerun_record, sprint.project_id))
 
     def _permit_reads(self, root: str | None) -> tuple[str | None, str | None, str | None, bool]:
         """Off the lock: the project's slug, branch pattern, merge strategy and whether a merge deletes its branch."""
-        if root is None:
-            return None, None, None, False
-
-        def read(source, default):
-            try:
-                return source(root)
-            except Exception:
-                return default
-        strategy, delete_branch = read(self._merge_binding_of, (None, False))
-        return (read(self._slug_of, None), read(self._branch_pattern_of, None), strategy,
-                delete_branch)
+        return permit.reads(root, self._slug_of, self._branch_pattern_of, self._merge_binding_of)
 
     def _allow_rules(self, root: str | None) -> tuple[str, ...]:
         """Off the lock: the allow rules the project's slug and merge binding give a manager's settings (ADR-console-102)."""
@@ -9676,8 +9667,7 @@ class ConsoleService:
             state = self._states.get(sprint.project_id)
             root = None if state is None else state.root
             sets = None if refusal is not None else self._permit_sets(sprint)
-        reads = self._permit_reads(root)
-        slug, pattern, strategy, delete_branch = reads
+        slug, pattern, strategy, delete_branch = self._permit_reads(root)
         if refusal is not None:
             with self._ingest:
                 return self._permit_record(sprint, session_id, tool_use_id, slug, refusal)
@@ -10353,6 +10343,7 @@ class ConsoleService:
         new = digest.moments(appended, self._sessions, self._inbox, self._sprints)
         self._looked = digest.last_looked(appended, self._looked)
         self._states = project_states(appended, self._states)
+        self._rerun_record = permit.rerun_record(appended, self._rerun_record)
         self._sessions = sessions.session_states(appended, self._sessions)
         self._use = manager.profile_use(appended, self._use)
         self._spend_profiles = spend.session_profiles(appended, self._spend_profiles)
@@ -10669,9 +10660,12 @@ class ConsoleService:
             self._apply(self.log.append([activation_run.finished_row(root, outcome)]))
 
     def _wait_for_activation(self, run: activation_run.Run) -> None:
-        self._activate_thread = threading.Thread(
-            target=self._await_activation, args=(run,), name=ACTIVATE_THREAD, daemon=True)
-        self._activate_thread.start()
+        with self._ingest:
+            if self._stop.is_set():
+                return  # close() has read the worker handle; the stopped wait would only return
+            self._activate_thread = threading.Thread(
+                target=self._await_activation, args=(run,), name=ACTIVATE_THREAD, daemon=True)
+            self._activate_thread.start()
 
     def _await_activation(self, run: activation_run.Run) -> None:
         try:
@@ -11273,11 +11267,13 @@ class ConsoleService:
                 target=self._grant_at_start, name=TRUST_START_THREAD, daemon=True)
             self._trust_start_thread.start()
         self._thread = threading.Thread(
-            target=self._server.serve_forever, name="console-http", daemon=True)
+            target=self._server.serve_forever, kwargs={"poll_interval": SERVE_POLL_SECONDS},
+            name="console-http", daemon=True)
         self._thread.start()
         if self._guest_server is not None:
             self._guest_thread = threading.Thread(
-                target=self._guest_server.serve_forever, name="console-guest-http", daemon=True)
+                target=self._guest_server.serve_forever, kwargs={"poll_interval": SERVE_POLL_SECONDS},
+                name="console-guest-http", daemon=True)
             self._guest_thread.start()
         if self._serve_reader is not None or self._status_reader is not None:
             self._serve_thread = threading.Thread(
@@ -11292,34 +11288,16 @@ class ConsoleService:
         with self._published:
             self._closing = True
             self._published.notify_all()
-        if self._watcher is not None:
-            self._watcher.join()
-        if self._session_poller is not None:
-            self._session_poller.join()
-        if self._tracker_thread is not None:
-            self._tracker_thread.join()
-        if self._activation_thread is not None:
-            self._activation_thread.join()
-        if self._activate_thread is not None:
-            self._activate_thread.join()
-        if self._adoption_thread is not None:
-            self._adoption_thread.join()
-        if self._movement_thread is not None:
-            self._movement_thread.join()
-        if self._retention_thread is not None:
-            self._retention_thread.join()
-        if self._digest_thread is not None:
-            self._digest_thread.join()
-        if self._spend_thread is not None:
-            self._spend_thread.join()
-        if self._serve_thread is not None:
-            self._serve_thread.join()
-        if self._probe_thread is not None:
-            self._probe_thread.join()
-        if self._signin_thread is not None:
-            self._signin_thread.join()
-        if self._trust_start_thread is not None:
-            self._trust_start_thread.join()
+        with self._ingest:  # a worker registers under this lock and not once the stop is set
+            activate = self._activate_thread
+        for thread in (
+            self._watcher, self._session_poller, self._tracker_thread, self._activation_thread, activate,
+            self._adoption_thread, self._movement_thread, self._retention_thread, self._digest_thread,
+            self._spend_thread, self._serve_thread, self._probe_thread, self._signin_thread,
+            self._trust_start_thread,
+        ):
+            if thread is not None:
+                thread.join()
         if self._signin_runs is not None:
             self._signin_runs.close()
         with self._ingest:
@@ -11339,12 +11317,22 @@ class ConsoleService:
             workers = list(self._project_question_workers)
         for worker in workers:
             worker.join()
-        if self._thread is not None:
-            self._server.shutdown()
+        # Both shutdown requests go out before either wait, so close pays one poll, not one per server.
+        stoppers = []
+        for server, thread in ((self._server, self._thread), (self._guest_server, self._guest_thread)):
+            if thread is None:
+                continue
+            stopper = threading.Thread(target=server.shutdown, daemon=True)
+            try:
+                stopper.start()
+            except RuntimeError:
+                server.shutdown()  # no thread to start: stop it here, then finish the cleanup below
+            else:
+                stoppers.append(stopper)
+        for stopper in stoppers:
+            stopper.join()
         self._server.server_close()
         if self._guest_server is not None:
-            if self._guest_thread is not None:
-                self._guest_server.shutdown()
             self._guest_server.server_close()
         manager.reap_stops()
         with self._ingest:

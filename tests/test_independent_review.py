@@ -28,7 +28,7 @@ SKILL = REPO_ROOT / "home/common/claude-code/skills/codex-collaboration/SKILL.md
 SLUG = "example/review"
 ACCEPTANCE = '[{"id": "AC1", "text": "t", "kind": "code"}]'
 COMPANION = ["codex-companion", "task", "--fresh", "--reviewer", "diff-review"]
-RUNTIME = {"model": "gpt-6.2-astra", "reasoningEffort": "xhigh"}
+RUNTIME = {"model": "gpt-6.2-astra", "reasoningEffort": "high"}
 FINDING = "I1 src/a.py:3 add() drops the carry. confidence: high; unknowns: none"
 CLEAN = "## Critical\nNone.\n## Important\nNone.\n## Minor\nNone.\n"
 
@@ -99,7 +99,7 @@ class ReviewTest(ReviewCase):
         self.assertEqual(reply["findings"], [{"failing_input": "", "file": "src/a.py:3",
                                               "severity": "important", "summary": FINDING}])
         (call,) = self.calls()
-        self.assertEqual(call["argv"][-7:], ["--model", "gpt-6.2-astra", "--effort", "xhigh",
+        self.assertEqual(call["argv"][-7:], ["--model", "gpt-6.2-astra", "--effort", "high",
                                              "--cwd", str(self.root), "--json"])
         for text in (self.base, self.head, "AC1", "diff-review"):
             self.assertIn(text, call["stdin"])
@@ -137,6 +137,16 @@ class ReviewTest(ReviewCase):
 
         self.assertEqual((code, reply["verdict"]), (0, "pass"), reply)
         self.assertEqual(len(self.calls()), 2)
+
+    def test_a_reply_reporting_effort_xhigh_is_a_schema_failure(self):
+        stale = json.dumps({"status": 0, "touchedFiles": [],
+                            "runtime": {**RUNTIME, "reasoningEffort": "xhigh"}, "rawOutput": CLEAN})
+        self.arrange([{"stdout": stale, "exit": 0}, {"stdout": stale, "exit": 0}])
+
+        code, reply = self.run_review()
+
+        self.assertEqual((code, reply["verdict"]), (0, "unavailable"), reply)
+        self.assertTrue(reply["detail"].startswith("payload:"), reply["detail"])
 
     def test_a_reply_missing_a_heading_is_a_schema_failure(self):
         headless = {"stdout": payload("## Critical\nNone.\n## Important\nNone.\n"), "exit": 0}

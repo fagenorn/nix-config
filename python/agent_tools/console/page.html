@@ -130,7 +130,8 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .more { font-size: .8125rem; color: var(--ov2); }
 .card .more { display: block; margin-top: 4px; }
 .card .context { margin-top: 8px; font-size: .9375rem; line-height: 1.5; color: var(--sub0); overflow-wrap: anywhere; }
-.card .look-line { margin-top: 8px; font-size: .9375rem; line-height: 1.5; color: var(--text); overflow-wrap: anywhere; }
+.action-command { margin: 6px 0 0; direction: ltr; unicode-bidi: bidi-override; white-space: pre-wrap; overflow-wrap: anywhere; font-family: ui-monospace, monospace; font-size: .875rem; }
+.card .look-line, .card .action-line { margin-top: 8px; font-size: .9375rem; line-height: 1.5; color: var(--text); overflow-wrap: anywhere; }
 .card .opts { margin-top: 6px; padding-left: 18px; list-style: disc; color: var(--sub0); font-size: .84375rem; }
 .rest .opts, .done .opts { flex-basis: 100%; margin: 0; padding-left: 18px; list-style: disc; color: var(--sub0); font-size: .84375rem; }
 .rest .meta, .done .meta { flex-basis: 100%; margin: 0; font-size: .8125rem; color: var(--ov2); }
@@ -1128,18 +1129,18 @@ function drawSprint(item, entry, sprint) {
   if (sprint.manager_text !== null && sprint.manager_text !== undefined) {
     item.appendChild(el("span", "manager", sprint.manager_text));
   }
-  if (typeof sprint.manager_until === "string") {
-    item.appendChild(timeEl("weekday", sprint.manager_until, "until"));
-  }
+  if (typeof sprint.manager_until === "string") item.appendChild(timeEl("weekday", sprint.manager_until, "until"));
   const retrying = retries.get(sprint.sprint_id);
-  if (sprint.retry === true && !guestDoor) {
-    const again = actionButton("retry btn-quiet", "Retry", () => retry(item, entry, sprint));
+  const [verb, label] = sprint.retry === true ? ["retry", "Retry"]
+    : sprint.move === true ? ["move", "Move to another account"] : [null, null];
+  if (verb !== null && !guestDoor) {
+    const again = actionButton(verb + " btn-quiet", label, () => retry(item, entry, sprint));
     if (retrying !== undefined && retrying.phase === "sending") again.setAttribute("disabled", "");
     markBusy(again, retrying !== undefined && retrying.phase === "sending");
     item.appendChild(again);
   }
-  if (sprint.retry === true && retrying !== undefined && retrying.phase === "failed") {
-    item.appendChild(el("span", "fail", "Could not retry: " + retrying.reason));
+  if (verb !== null && retrying !== undefined && retrying.phase === "failed") {
+    item.appendChild(el("span", "fail", "Could not " + verb + ": " + retrying.reason));
   }
   const stopButton = sprint.stoppable === true && !guestDoor ? stopControls(item, entry, sprint) : null;
   if (typeof sprint.stop_text === "string") {
@@ -3921,8 +3922,9 @@ function lookOf(item) {
   return isQuestion(item) && item.look !== null && typeof item.look === "object" ? item.look : null;
 }
 function lookLine(node, item) {
-  const look = lookOf(item);
+  const look = lookOf(item), action = isQuestion(item) ? item.action : null;
   if (look !== null && typeof look.line === "string") node.appendChild(el("p", "look-line", look.line));
+  if (action && typeof action.line === "string" && typeof action.command === "string") [el("p", "action-line", action.line), el("pre", "action-command", action.command)].forEach((part) => node.appendChild(part));
 }
 function isLookCard(item) {
   return item.answered === true && lookOf(item) !== null;
@@ -4626,9 +4628,7 @@ function sprintGoal(sprintId) {
       const finished = project.finished_sprints;
       const shown = (project.sprints || []).concat(
         finished !== null && finished !== undefined && Array.isArray(finished.sprints) ? finished.sprints : []);
-      for (const sprint of shown) {
-        if (sprint.sprint_id === sprintId && typeof sprint.goal === "string") return sprint.goal;
-      }
+      for (const sprint of shown) if (sprint.sprint_id === sprintId && typeof sprint.goal === "string") return sprint.goal;
     }
   }
   return null;
@@ -5648,7 +5648,7 @@ function drawProjects(view) {
   const stoppable = new Set();
   for (const { sprint } of running) {
     live.add(sprint.sprint_id);
-    if (sprint.retry === true) retryable.add(sprint.sprint_id);
+    if (sprint.retry === true || sprint.move === true) retryable.add(sprint.sprint_id);
     if (sprint.stoppable === true) stoppable.add(sprint.sprint_id);
   }
   for (const sprint of ended) live.add(sprint.sprint_id);

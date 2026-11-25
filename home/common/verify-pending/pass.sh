@@ -8,7 +8,10 @@
 # while a round is running, because the service manager ignores a start of a
 # running job. Each round then runs the cleanup command's fix-only run for this
 # project, which opens a fix change the workflow token deferred. A pass never
-# fails: it exits 0 whatever its children do.
+# fails: it exits 0 whatever its children do. `verify-pending run` writes an `interrupted` line on
+# stderr for each run a signal ended, which the redirect below appends to the log. The pass traps TERM
+# and HUP, so a signal sent to every process of the account lets the round finish, while a stop by the
+# service manager still ends it with SIGKILL.
 # Placeholders (@...@) are substituted by home/common/verify-pending/default.nix.
 set -u
 if [ "$#" -ne 1 ]; then
@@ -33,6 +36,9 @@ if [ -f "$log" ] && [ "$(wc -c < "$log")" -gt 1048576 ]; then
 fi
 exec >>"$log" 2>&1
 stamp() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+# A sweep of the account's processes must not end the round: bash runs this trap once the running child ends, keeps
+# its exit status, and a child it execs gets the default action back (an ignored signal would stay ignored there).
+trap ':' TERM HUP
 while :; do
   target=
   if mv -f "$request" "$request.taken" 2>/dev/null; then

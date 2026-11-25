@@ -1,0 +1,6 @@
+#!/bin/sh
+# Verify check for verify-pending's interrupted runs: in every pass of runner.log, each check a signal
+# ended was started again at most once and then held. verify-pending runs it from the repository root
+# at the commit the block names, so `python` below is that commit's agent_tools source.
+# Exit 0 met, 1 not met, 75 not yet.
+PYTHONPATH=python exec python3 -m agent_tools.verification.interrupted_reruns_check "$@"

@@ -27,3 +27,7 @@ class SystemPackagesTest(unittest.TestCase):
         for host, names in self.names.items():
             with self.subTest(host):
                 self.assertNotIn("railway", names, host)
+
+    def test_eleven_m5_installs_only_the_configure_and_restart_omlx_commands(self):
+        got = sorted(name for name in self.names["eleven-m5"] if name.startswith("omlx"))
+        self.assertEqual(got, ["omlx-configure", "omlx-restart"])

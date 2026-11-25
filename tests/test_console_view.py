@@ -2657,7 +2657,7 @@ class SessionSignalViewTest(unittest.TestCase):
                          {"session_id": "s1", "manager": True, "read_at": None}],
             "nudged_at": iso(now - 30 * MIN),
             "base_at": utc(R),
-            "issues": [1, 2, 3, 4, 5, 6, 7],
+            "issues": [1, 2, 3, 4, 5, 6, 7], "engine": {"moving": False, "waits": []},
             "waits": {"ci_at": None, "commit_at": None, "release_at": None, "lock_at": None}})
         self.assertEqual(self.shown(None, sprint_state=s)["movement"]["sessions"], [])
 
@@ -2938,7 +2938,7 @@ class SprintViewTest(unittest.TestCase):
             "ball": "manager", "ball_text": "manager working", "now_text": "drafting the brief",
             "now_until": None,
             "stated_at": T0, "started_by": None, "age_text": "goal set 3 min ago", "manager_text": "no manager has picked this up",
-            "manager_state": "none", "manager_until": None, "retry": True,
+            "manager_state": "none", "manager_until": None, "retry": True, "move": False,
             "progress": None, "progress_text": None, "status": None, "status_at": None,
             "next": None, "milestone": None, "tracker_url": None, "issues": [], "waiting": 0,
             "checks": [], "waits": [], "live_faults": [],
@@ -2948,7 +2948,7 @@ class SprintViewTest(unittest.TestCase):
             "state_until": None, "pictures": [], "permission_text": None,
         "movement": {"sessions": [], "nudged_at": None,
                      "base_at": "2026-11-12T10:00:00+00:00",
-                     "issues": [],
+                     "issues": [], "engine": {"moving": False, "waits": []},
                      "waits": {"ci_at": None, "commit_at": None, "release_at": None,
                                "lock_at": None}}}])
 

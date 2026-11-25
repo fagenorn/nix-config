@@ -96,7 +96,10 @@ one pair of short rows per registration is all that is kept.
 Three more rows record an idle manager's nudges (#929): `MANAGER_NUDGED` (`manager.nudged`, one
 nudge to a manager session that sat idle), `MANAGER_NO_PROGRESS` (`manager.no_progress`, the
 console's give-up that opens an item for the owner) and `SPRINT_CONTINUED` (`sprint.continued`, the
-owner's answer to it). Like the other manager rows they are not in `KEPT_KINDS`.
+owner's answer to it). Like the other manager rows they are not in `KEPT_KINDS`. `MANAGER_HELD`
+(`manager.held`, `{sprint_id, goal, reason}`) says why a takeover was dropped when only the fresh
+registry listing, and no session the console holds, carries the manager's name; the digest and the
+sprint fold ignore it.
 
 Two kinds are kept in part (#1193): `ACTIVATION_STARTED` (`activation.started`) and
 `ACTIVATION_FINISHED` (`activation.finished`) are not in `KEPT_KINDS`, but the retention pass leaves
@@ -105,11 +108,18 @@ activation's state at construction and a failed activation must still show its r
 while its commit stays pending (ADR-system-004).
 
 Two rows record a manager's permit (#1377, ADR-console-094): `PERMIT_JUDGED` (`permit.judged`, one per
-decided verdict on a merge or rerun command: payload `sprint_id`, `session_id`, `repo` (the
-project's slug, null when unknown), `verb`, `decision`, `reason` and `target`) and `PERMIT_LANDED`
-(`permit.landed`, one per merge the manager's session ran after the console allowed it: `sprint_id`,
-`session_id`, `repo`, `verb` `merge` and `target` `{"pr", "head"}`). Neither is in `KEPT_KINDS`, so
-retention removes them like any other row, and no fold reads them.
+decided verdict on a merge, rerun or action command: payload `sprint_id`, `session_id`, `repo` (the
+project's slug, null when unknown, and null for an `action`), `verb`, `decision`, `reason` and `target`,
+`{"round", "index"}` for an `action`) and `PERMIT_LANDED` (`permit.landed`, one per merge or `action`
+the manager's session ran after the console allowed it: `sprint_id`, `session_id`, `repo`, `verb` and
+`target`, `{"pr", "head"}` for a `merge`). Neither is in `KEPT_KINDS`, so retention removes them like
+any other row, and only `sprints.sprint_states` reads a row: an `action` allow of `permit.judged`
+marks its question's approval used, and retention removing it later changes nothing an approval at
+most an hour old needs.
+The `target` of an allowed `rerun` is `{"run", "pr", "head", "count", "members"}`: `count` is the allowed reruns
+of that head with this one and `members` the failing suite members (ADR-console-106). An allowed rerun of
+the project's release pull request run or of its release candidate's push run also carries `release`, that run's
+event (`pull_request` or `push`); a rerun at the tip of a single-branch project carries no `pr`.
 
 Two rows record a release card outside any sprint (#1401): `RELEASE_CARD_POSTED` (`release_card.posted`)
 carries payload `commit`, `version`, with a null project column, and `RELEASE_CARD_ANSWERED`
@@ -240,6 +250,7 @@ MANAGER_WOKEN = "manager.woken"
 MANAGER_STALLED = "manager.stalled"
 MANAGER_NUDGED = "manager.nudged"
 MANAGER_NO_PROGRESS = "manager.no_progress"
+MANAGER_HELD = "manager.held"
 SPRINT_CONTINUED = "sprint.continued"
 SPRINT_REPORTED = "sprint.reported"
 SPRINT_MESSAGED = "sprint.messaged"

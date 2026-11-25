@@ -1,0 +1,3 @@
+#!/bin/sh
+# Verify check: a sprint's manager was allowed to rerun a release run's failed jobs, after activation.
+PYTHONPATH=python exec python3 -m agent_tools.verification.console_release_rerun "$@"

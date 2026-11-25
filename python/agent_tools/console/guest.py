@@ -70,7 +70,8 @@ takes the keyword inputs of `view.derive_view` and a guest's project ids and ret
 hold only those projects: `states`, `records`, `health`, `movement`, `owner_notices`, `sprints` and
 `pending` keep the members of a listed project; `sessions` keep only those whose repository is a
 kept project's root (so no unmanaged entry, no other repository); `deliveries` keep only those of a
-kept session. `PASSED_INPUTS` pass as given and every `OWNER_ONLY_INPUTS` key is reset to its listed
+kept session; `engine_runs` keeps the runs of a listed project, and `engine_lines` is reset so a guest
+sees no engine run line while its sprint reads their movement. `PASSED_INPUTS` pass as given and every `OWNER_ONLY_INPUTS` key is reset to its listed
 empty value whether or not it was given. The input set is closed: a key of none of the three sets
 is refused with `ValueError("unscoped view input <name>")`, so a view input added later must be
 classified before a guest can see it. `scrub(view, pool, sprint_accounts)` then drops what the inputs
@@ -240,10 +241,11 @@ OWNER_ONLY_INPUTS: Mapping[str, object] = MappingProxyType({
     "activation_run": None, "signin_runs": None, "accounts_added": (), "pin": None,
     "pin_launches": (), "registration": None, "adoption_items": (), "release_items": (), "prompt_items": (), "retry_items": (),
     "apply_items": (), "confirm_items": (), "trust_items": (), "failure_items": (),
-    "project_questions": None, "sharing": None, "engine_runs": ()})
+    "project_questions": None, "sharing": None, "engine_lines": False,
+    "moves": None})
 PASSED_INPUTS = frozenset({"now_ms", "managers", "nudges", "looked"})
 FILTERED_INPUTS = frozenset({"states", "records", "health", "sessions", "deliveries", "sprints",
-                             "pending", "movement", "owner_notices"})
+                             "pending", "movement", "owner_notices", "engine_runs"})
 SERVE_TIMEOUT_SECONDS = 15.0
 SERVE_STATES = ("off", "unreadable", "unchecked", "not_proxying", "serving")
 DOOR_WIDER = "door_wider"
@@ -641,6 +643,8 @@ def scoped(inputs: Mapping[str, object], projects: frozenset[str]) -> dict:
     keep("sprints", lambda _, value: value.project_id in projects)
     keep("pending", lambda _, value: value.project_id in projects)
     keep("deliveries", lambda _, value: value.session_id in session_ids)
+    if "engine_runs" in inputs:
+        result["engine_runs"] = tuple(s for s in inputs["engine_runs"] or () if s.project in projects)
     return result
 
 

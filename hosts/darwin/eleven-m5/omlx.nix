@@ -1,4 +1,5 @@
 {
+  inputs,
   lib,
   pkgs,
   username,
@@ -7,6 +8,7 @@
 let
   home = "/Users/${username}";
   modelDir = "${home}/.omlx/models";
+  budget = import ./memory-budget.nix;
 
   # The models oMLX serves. Each is downloaded into its own directory under modelDir (oMLX names
   # a model by that directory) and is also reachable by its alias. None of these is pinned (the
@@ -21,7 +23,7 @@ let
   #
   # Optional keys: `include` limits the download to those globs (one variant of a GGUF repo),
   # `id` is the model's oMLX name when it is not its directory's (a GGUF is named by its file),
-  # `settings` adds model settings, and `steer` declares steering presets (see `presets`).
+  # `settings` adds model settings.
   models = [
     {
       repo = "TensorFold/GLM-5.3-Flash-MLX-oQ4-MTP"; # 185 GB; 321B MoE, ~18B active
@@ -58,47 +60,8 @@ let
       repo = "incoai/Qwen3.8-Flash-Next-DFlash2";
       settings.is_hidden = true;
     }
-    # 8.4 GB; dense 4B, bf16 so the steering below sees the unquantized weights it was found on.
-    {
-      repo = "mlx-community/Qwen3.5-4B-bf16";
-      alias = "qwen3.5-4b";
-      # At ±1 replies often collapse into repetition loops; 0.6 keeps them coherent.
-      steer.evil = [
-        "L14 N8949 +0.6"
-        "L13 N7956 -0.6"
-      ];
-    }
   ];
   modelName = m: baseNameOf m.repo;
-
-  # `steer.<preset>` serves the model a second time as `<alias>-<preset>`, with constant neuron
-  # steering (patches/omlx/neuron-steering.patch): each "L<layer> N<neuron> <dose>" adds `dose`
-  # median residual norms along that neuron's down_proj column at every position. A preset is its
-  # own directory of symlinks to the downloaded weights plus a steering.json, synced by
-  # omlx-configure; editing or adding a preset is one line here plus a switch.
-  parseNeuron =
-    spec:
-    let
-      m = builtins.match "L([0-9]+) N([0-9]+) ([+-]?)([0-9]+(\\.[0-9]+)?)" spec;
-    in
-    if m == null then
-      throw "oMLX steering entry \"${spec}\" is not \"L<layer> N<neuron> <dose>\""
-    else
-      {
-        layer = lib.toInt (builtins.elemAt m 0);
-        neuron = lib.toInt (builtins.elemAt m 1);
-        dose = (if builtins.elemAt m 2 == "-" then -1 else 1) * builtins.fromJSON (builtins.elemAt m 3);
-      };
-  presets = lib.concatMap (
-    m:
-    lib.mapAttrsToList (preset: neurons: {
-      dir = "${modelName m}-${preset}";
-      alias = "${m.alias}-${preset}";
-      base = modelName m;
-      neurons = map parseNeuron neurons;
-      settings = m.settings or { };
-    }) (m.steer or { })
-  ) models;
 
   # Routine Claude Code turns should not inherit Qwen's unbounded xhigh
   # template default. This is a default budget, so explicit request budgets and
@@ -110,31 +73,35 @@ let
   };
 
   # 240 of 256 GB may be wired for the GPU; macOS's default (~75%) is too small for the
-  # 185 GB model plus its KV cache. The sysctl resets on reboot, hence a boot daemon. The ~16 GB
-  # left over also holds Colima's 8 GiB VM (docker.nix), so raising this squeezes macOS.
+  # 185 GB model plus its KV cache. The sysctl resets on reboot, hence a boot daemon. What the
+  # limit leaves is shared as memory-budget.nix sets out, so raising this squeezes macOS.
   wiredLimitMb = 240 * 1024;
 
+  floorLauncher =
+    inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.agent-platform.launchers.memory-floor;
   # Teammates reach the server over the tailnet, so it listens on every interface behind an
   # API key. The key is passed in the environment, never argv, where `ps` would show it to
   # every account on the machine.
-  serve = pkgs.writeShellScript "omlx-serve" ''
+  # The gate holds a starting server until memory is back over the floor; it only reads memory.
+  serveText = ''
     set -euo pipefail
+    ${floorLauncher} gate --floor-gib ${toString budget.floorGiB} --interval-seconds ${toString budget.fastSampleSeconds}
     OMLX_API_KEY=$(SOPS_AGE_KEY_FILE=${home}/.config/sops/age/keys.txt \
       ${lib.getExe pkgs.sops} -d --extract '["omlx_api_key"]' ${../../../secrets/secrets.yaml})
     export OMLX_API_KEY
     exec /opt/homebrew/bin/omlx serve --host 0.0.0.0 --port 8000 --model-dir ${modelDir}
   '';
+  serve = pkgs.writeShellScript "omlx-serve" serveText;
 
   # Fetches every listed model that has not finished downloading. It downloads into a staging
   # directory (`hf download` resumes a partial copy and verifies each file) and moves the model
   # into modelDir only once complete, so oMLX never sees half a model, then restarts the server
   # (launchd's KeepAlive brings it back) so it discovers the new one. A model already in modelDir
   # without the marker is verified in place. A moved model is recorded as a reason in the restart
-  # marker. After any completed download it runs omlx-configure, which mirrors steering presets
-  # onto the new weights, then omlx-restart, which restarts the server only while it is idle and
-  # otherwise keeps the marker for the next activation or download. Runs at boot, and activation
-  # starts it whenever a listed model is missing, so a failed download is retried on the next
-  # boot or switch.
+  # marker. After any completed download it runs omlx-restart, which restarts the server only
+  # while it is idle and otherwise keeps the marker for the next activation or download. Runs at
+  # boot, and activation starts it whenever a listed model is missing, so a failed download is
+  # retried on the next boot or switch.
   # Every glob follows a single `--include`, which this hf (argparse, nargs) reads as one list;
   # a repeated `--include` would keep only the last.
   fetchText = ''
@@ -162,7 +129,6 @@ let
       fi
     '') models}
     if [ "$completed" != 0 ]; then
-      ${configure}/bin/omlx-configure || status=1
       ${restart}/bin/omlx-restart || status=1
     fi
     exit $status
@@ -180,7 +146,6 @@ let
   # updating the patch or removing it after the fix ships.
   glm5Fix = ../../../patches/omlx/glm5-next-mtp-tail.patch;
   anthropicEffort = ../../../patches/omlx/anthropic-effort.patch;
-  neuronSteering = ../../../patches/omlx/neuron-steering.patch;
 
   # Models installed by oMLX's admin downloader under modelDir/grant-ai/ rather than by the
   # downloader above, so no `models` entry exists for them. GLM-5.3-Flash-Abliterated-MLX-4bit is
@@ -206,26 +171,8 @@ let
           }
           // m.settings or { };
       }) models
-      ++ map (p: {
-        name = p.dir;
-        value = {
-          model_alias = p.alias;
-          is_default = false;
-          is_pinned = false;
-          mtp_enabled = false;
-        }
-        // p.settings;
-      }) presets
     )
     // adminModels
-  );
-  steering = builtins.toJSON (
-    lib.listToAttrs (
-      map (p: {
-        name = p.dir;
-        value = { inherit (p) base neurons; };
-      }) presets
-    )
   );
 
   # Server settings deep-merged into settings.json, which the admin UI also writes and which holds
@@ -248,9 +195,9 @@ let
     server.burst_decode_mode = "aggressive";
     integrations.splash_max_memory_gb = 200;
     # The pinned 182 GB JarBird model did not fit under the dynamic ceiling (175.66 GB) on
-    # 23 Nov, so the guard is custom with a fixed ceiling of 192 GB.
+    # 23 Nov, so the guard is custom with the fixed ceiling memory-budget.nix sets.
     memory.memory_guard_tier = "custom";
-    memory.memory_guard_custom_ceiling_gb = 192;
+    memory.memory_guard_custom_ceiling_gb = budget.omlxCeilingGiB;
   };
 
   # Restart the server only through the idle gate, and start the downloader when a listed model
@@ -280,17 +227,22 @@ let
         --state-dir ${home}/.omlx \
         --site-packages /opt/homebrew/opt/omlx/libexec/lib/python3*/site-packages \
         --patch-bin ${lib.getExe pkgs.patch} \
-        --patch ${glm5Fix} --patch ${anthropicEffort} --patch ${neuronSteering} \
+        --patch ${glm5Fix} --patch ${anthropicEffort} \
         --model-settings ${pkgs.writeText "omlx-model-settings.json" settings} \
-        --server-settings ${pkgs.writeText "omlx-server-settings.json" serverSettings} \
-        --steering ${pkgs.writeText "omlx-steering.json" steering}
+        --server-settings ${pkgs.writeText "omlx-server-settings.json" serverSettings}
     '').overrideAttrs
       (_: {
         passthru = {
           modelSettings = settings;
-          inherit serverSettings steering;
+          inherit serverSettings;
           activation = activationText;
           fetch = fetchText;
+          serve = serveText;
+          reload = reloadText;
+          restart = restartText;
+          hold = holdText;
+          unhold = unholdText;
+          inherit holdReason;
         };
       });
   # The kill omlx-restart runs once the gate allows a restart; launchd's KeepAlive brings the
@@ -301,24 +253,73 @@ let
     [ "$status" -le 1 ] && exit 0
     exit "$status"
   '';
-  # Restarts the server for the pending marker only while it is idle; --now skips that check.
-  restart = pkgs.writeShellScriptBin "omlx-restart" ''
+  # A kill only relaunches the job definition launchd holds, so a changed plist needs an unload and
+  # load. A failed load keeps the root, because launchd may still hold the old definition.
+  heldRoot = "/nix/var/nix/gcroots/omlx-held-serve";
+  reloadText = ''
+    /usr/bin/sudo -n /bin/launchctl unload /Library/LaunchDaemons/org.nixos.omlx.plist || true
+    /usr/bin/sudo -n /bin/launchctl load -w /Library/LaunchDaemons/org.nixos.omlx.plist || exit
+    exec /usr/bin/sudo -n /bin/rm -f ${heldRoot}
+  '';
+  reloadServer = pkgs.writeShellScript "omlx-reload" reloadText;
+
+  # nix-darwin unloads and loads a daemon whose plist changed, which would end the requests a
+  # loaded oMLX is serving. While oMLX is loaded, the launchd step installs the new plist, roots
+  # the serve script launchctl print shows launchd running and records the reload for omlx-restart.
+  # Every other call reaches launchctl unchanged. The functions live in one eval body, so the
+  # activate script's shellcheck sees no unused variable or function.
+  holdReason = "launchd plist changed: org.nixos.omlx";
+  holdText = ''
+    eval 'omlx_hold_root() {
+      set -- "$(command launchctl print system/org.nixos.omlx 2>/dev/null | grep -o "/nix/store/[0-9a-z]\{32\}-omlx-serve" | head -n 1)"
+      [ -n "$1" ] || set -- "$(grep -o "/nix/store/[0-9a-z]\{32\}-omlx-serve" /Library/LaunchDaemons/org.nixos.omlx.plist | head -n 1)"
+      if [ -z "$1" ]; then
+        echo "oMLX: neither launchd nor the installed plist names an omlx-serve store path, so none is kept for the running job" >&2
+        return 0
+      fi
+      [ "$(readlink ${heldRoot} 2>/dev/null)" = "$1" ] && return 0
+      ln -sfn "$1" ${heldRoot}
+    }
+    omlx_hold_record() {
+      sudo --user=${username} -- grep -qxF "${holdReason}" ${home}/.omlx/.restart-needed 2>/dev/null && return 0
+      printf "%s\n" "${holdReason}" | sudo --user=${username} -- tee -a ${home}/.omlx/.restart-needed >/dev/null
+    }
+    launchctl() {
+      if [ "''${1:-}" = unload ] && [ "''${2:-}" = /Library/LaunchDaemons/org.nixos.omlx.plist ]; then
+        omlxProbe=0
+        command launchctl print system/org.nixos.omlx >/dev/null 2>&1 || omlxProbe=$?
+        if [ "$omlxProbe" = 113 ]; then
+          rm -f ${heldRoot}
+        else
+          if ! { omlx_hold_root && omlx_hold_record; }; then
+            echo "oMLX: could not keep the running job or record the pending restart in ${home}/.omlx/.restart-needed; activation stopped before the new plist was installed" >&2
+            exit 1
+          fi
+          omlxHeld=1
+          echo "oMLX: org.nixos.omlx is loaded, so its new plist is installed without unloading it; pending for omlx-restart: ${holdReason}" >&2
+          return 0
+        fi
+      elif [ "''${1:-}" = load ] && [ "''${2:-}" = -w ] && [ "''${3:-}" = /Library/LaunchDaemons/org.nixos.omlx.plist ] && [ -n "''${omlxHeld:-}" ]; then
+        return 0
+      fi
+      command launchctl "$@"
+    }'
+  '';
+  unholdText = "unset -f launchctl omlx_hold_record omlx_hold_root\n";
+  restartText = ''
     exec ${lib.getExe pkgs.python3} ${./omlx-restart.py} \
       --state-dir ${home}/.omlx \
       --restart-bin ${killServer} \
+      --reload-bin ${reloadServer} \
       --health-url http://127.0.0.1:8000/health "$@"
   '';
-  # Tries candidate neurons on oMLX's own Python and patched steering module before they are
-  # declared as a preset (it needs the patch applied, i.e. one activation).
-  steerCli = pkgs.writeShellScriptBin "omlx-steer" ''
-    exec /opt/homebrew/opt/omlx/libexec/bin/python ${./omlx-steer.py} "$@"
-  '';
+  # Restarts the server for the pending marker only while it is idle; --now skips that check.
+  restart = pkgs.writeShellScriptBin "omlx-restart" restartText;
 in
 {
   environment.systemPackages = [
     configure
     restart
-    steerCli
   ];
   system.build.omlxConfigure = configure;
 
@@ -361,8 +362,13 @@ in
     StandardErrorPath = "${home}/.omlx/logs/models.log";
   };
 
-  # Restart the server only when a settings merge, a patch or a steering preset changed something, and start the
+  # Restart the server only when a settings merge or a patch changed something, and start the
   # downloader when a listed model is missing. ~/.omlx is private: its logs can hold other
   # people's prompts, and teammates share the staff group.
   system.activationScripts.postActivation.text = activationText;
+
+  system.activationScripts.launchd.text = lib.mkMerge [
+    (lib.mkBefore holdText)
+    (lib.mkAfter unholdText)
+  ];
 }

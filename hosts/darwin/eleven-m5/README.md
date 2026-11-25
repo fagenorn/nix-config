@@ -5,8 +5,11 @@ patches required by the Homebrew oMLX installation. `omlx-configure` is generate
 as a user command and called by system activation. It checks every patch before
 applying any, recursively merges owned settings, preserves unrelated UI settings
 and server secrets, and writes one reason line to `.omlx/.restart-needed` for each
-change the server reads only at start: an applied patch, a changed declared key, a
-created file or a steering preset. It prints the reasons as `restart_reasons`.
+change the server reads only at start: an applied patch, a changed declared key or a
+created file. It prints the reasons as `restart_reasons`.
+It also removes the preset directories an earlier version created (each marked by a
+`.omlx-*-preset` file) and lists them as `removed_presets`; it refuses one that holds
+anything but symlinks and JSON files.
 Incompatible patches fail activation. It leaves the entries of undeclared models
 untouched. When the admin UI makes an undeclared model (or the JarBird model) the
 default, the declared default yields to it so there stays one default, and returns
@@ -23,19 +26,38 @@ Applying `omlx-configure` alone does not restart active work.
 The JarBird model `GLM-5.3-Flash-Abliterated-MLX-4bit`, installed by oMLX's admin
 downloader under `models/grant-ai/`, is pinned so it loads at start and is never
 evicted, and the memory guard is `custom` at a 192 GB ceiling, because the pinned
-182 GB model did not fit under the dynamic ceiling (175.66 GB). Both are declared in
-`omlx.nix`.
+182 GB model did not fit under the dynamic ceiling (175.66 GB). The pin is declared
+in `omlx.nix`; the 192 GB ceiling is read from `memory-budget.nix`.
 
 ## What else an activation restarts
 
-nix-darwin reloads every launchd daemon whose plist changed, so an activation
-restarts oMLX outside the gate whenever its serve script changes. That script
-embeds the store path of `secrets/secrets.yaml`, so any secrets edit does it. The
-same holds for `omlx-models`, `iogpu-wired-limit` (which re-runs the sysctl),
-`colima` and `docker-socket`, the GitHub runners, and the owner's `agent-console`,
-`verify-pending`, `claude-cache-proxy` and `sops-nix` daemons when their plists
-change. Homebrew's `onActivation.upgrade` can replace the oMLX install; the running
-server keeps its loaded code, and the re-applied patches become a deferred restart.
+nix-darwin reloads every launchd daemon whose plist changed, but an activation
+never unloads `org.nixos.omlx` while it is loaded. It installs the changed plist
+(the serve script embeds the store path of `secrets/secrets.yaml`, so any secrets
+edit changes it) and adds `launchd plist changed: org.nixos.omlx` to
+`.restart-needed`. `omlx-restart` applies it as an unload and `load -w` of the job
+only while the server is idle, or with `omlx-restart --now`. While the reload is
+pending, launchd keeps running the old generation's serve script. Each held
+activation roots the script `launchctl print` shows launchd running (a reboot or a
+manual unload and load changes it) at `/nix/var/nix/gcroots/omlx-held-serve`, so `just gc` cannot remove the
+script KeepAlive relaunches after a crash or a jetsam kill. The reload removes the
+root. A pending reload with a model loaded waits for an idle server, and
+`omlx-restart --now` applies it at once.
+
+oMLX is the only held daemon. Every other daemon still reloads when its plist
+changes: `omlx-models`, `iogpu-wired-limit` (which re-runs the sysctl),
+`colima` and `docker-socket`, the GitHub runners, `fseventsd-trim`, `memory-floor`, and the owner's
+`agent-console`, `verify-pending`, `claude-cache-proxy`, `omlx-memory-watch` and
+`sops-nix` daemons. The serve script carries the relaunch gate, so a changed
+`floorGiB` or `fastSampleSeconds` becomes a pending oMLX reload at the next
+activation; a changed `omlxJetsamPriority` restarts only `memory-floor`. Homebrew's
+`onActivation.upgrade` can replace the oMLX install; the running server keeps its
+loaded code, and the re-applied patches become a deferred restart.
+
+`verify-pending`: a changed plist is unloaded and loaded with `load -w`. That loads a
+job that was booted out and clears a `launchctl disable`, and RunAtLoad starts a pass.
+An unchanged plist leaves a booted-out job out, and the postActivation kick's
+`kickstart` of it fails harmlessly.
 
 The Anthropic patch accepts Claude Code's `output_config.effort` and preserves
 valid explicit `chat_template_kwargs.reasoning_effort`. Qwen4-exp templates
@@ -52,30 +74,242 @@ budget. This bounds routine reasoning while preserving an explicit request's
 default budget is attached to generation parameters. GLM's reasoning settings
 are not changed. A budget is a reasoning-token bound, not a latency guarantee.
 
-## Neuron steering presets
+## Memory budget
 
-A model entry's `steer.<preset>` list serves that model a second time as
-`<alias>-<preset>` (for example `qwen3.5-4b-evil`). Each entry,
-`"L<layer> N<neuron> <dose>"`, adds a constant `a` to neuron n's down_proj input
-at every position:
-`a = dose × median(‖residual leaving L‖, tokens 1:) / ‖W_down[:, n]‖`. The patch
-wraps the decoder layer, since oMLX substitutes kernels for the MLP projections.
-That matches adding to the MLP output only when the output joins the residual
-unnormalised, so a model with a `post_feedforward_layernorm` (Gemma, for example)
-is refused at load. The patch adds a steering digest to the engine's cache identity,
-so a changed preset never restores cached state. It measures the medians once at load on five fixed chat prompts, where they
-vary by about ±5%. `omlx-configure` keeps one directory per preset, holding
-symlinks to the downloaded weights and a `steering.json`. It removes the
-directories of presets that are no longer declared, and refuses to replace a
-directory it did not create. A preset waits until its base model finishes
-downloading; the downloader syncs it after any completed download. Each loaded preset costs its base
-model's memory again.
+The host has 256 GiB. oMLX is held to a fixed ceiling, 16 GiB is kept back as a
+floor, and everything else (the Colima VM, verification runs, CI jobs and macOS)
+must fit in what is left. `memory-budget.nix` declares every number below, and
+oMLX, Colima and the watcher read theirs from it. `tests/test_memory_budget.py`
+fails when the allowances no longer sum to at most the others budget, so a
+number changed in one place cannot drift from the rest.
 
-To try candidate neurons before declaring them, run
-`omlx-steer "L14 N8949 +1" "L13 N7956 -1"`. Optional flags are `--model`,
-`--scale`, `--prompt`, `--max-tokens` and `--no-baseline`. For each prompt it
-prints the baseline reply and then the steered one. It loads the model itself, outside the server, using oMLX's
-Python and the patched module, so its output matches what a preset serves.
+The budget is `totalGiB` - `omlxCeilingGiB` - `omlxOverCeilingGiB` - `floorGiB`
+= 256 - 192 - 2 - 16 = 46 GiB for everything but the model. The allowances add
+up to 8 + 1 + 2 x 4 + 4 x 3 + 12 + 5 = 46 GiB, so nothing is unallocated. The
+5 GiB for the agent's Claude sessions had to come from somewhere, and
+`verifyRunGiB` went from 6 to 4 to pay for it. The 46 GiB others budget is the
+owner's capacity number: whether it holds is a question for the lead.
+
+| Name | Value | What it bounds | Source |
+|---|---|---|---|
+| `totalGiB` | 256 | The host's physical memory. | `sysctl -n hw.memsize` prints 274877906944. |
+| `omlxCeilingGiB` | 192 | The oMLX memory guard's fixed (`custom`) ceiling. | `/health` shows `final_ceiling` 206158430208, which is 192 GiB. |
+| `omlxOverCeilingGiB` | 2 | How far the server's footprint may pass its ceiling before the budget stops holding. | Estimate of the overshoot the guard allows; the server's footprint read 187360249992 B (174.5 GiB), under its ceiling. |
+| `colimaGiB` | 8 | The Colima VM's memory, passed as `--memory`. | `~/.colima/default/colima.yaml` shows `memory: 8`. |
+| `colimaOverheadGiB` | 1 | What the VM's host-side processes take beyond its memory. | Estimate, checked against the day line. |
+| `verifySlots` | 2 | Verification runs that may hold a slot at once. | Read from `verify_slots` in `home/common/agent-skills/host-declarations/eleven-m5.json`. |
+| `verifyRunGiB` | 4 | One verification run's memory (provisional). | Estimate; `peak_others_gib` in the day line tests it. |
+| `agentSessionsGiB` | 5 | What the agent's Claude sessions take together. | 4.5 GiB of Claude sessions at the 24 Nov panic. |
+| `ciRunners` | 4 | CI jobs that may run at once, one per runner. | Counted in `default.nix` from `config.services.github-runners`, not declared in `memory-budget.nix`. |
+| `ciJobGiB` | 3 | One CI job's memory (provisional). | Estimate; `peak_others_gib` in the day line tests it. |
+| `macosGiB` | 12 | What macOS and its daemons take, fseventsd included (provisional). | Estimate; `peak_others_gib` in the day line tests it. |
+| `fseventsdLimitGiB` | 4 | fseventsd's share inside `macosGiB`, enforced by `fseventsd-trim`. | See "What makes fseventsd grow". |
+| `floorGiB` | 16 | Memory held back from every other use; a loaded sample with less available raises `low_memory`. | The owner's choice. |
+| `floorSamples` | 3 | Consecutive samples under `floorGiB` before `memory-floor` ends a workload. | The owner's choice. |
+| `floorGraceSeconds` | 5 | How long a workload has to exit on SIGTERM before SIGKILL. | The owner's choice. |
+| `floorMarginGiB` | 16 | How far above `floorGiB` `memory-floor` samples at the fast interval. | The owner's choice. |
+| `floorFallGiB` | 2 | A fall in available memory between two samples that also earns the fast interval. | The owner's choice. |
+| `fastSampleSeconds` | 2 | `memory-floor`'s sampling interval near the floor or while memory falls, and the relaunch gate's polling interval. | The owner's choice. |
+| `slowSampleSeconds` | 10 | `memory-floor`'s sampling interval otherwise. | The owner's choice. |
+| `runBoundGiB` | 24 | The footprint over which one workload is ended whatever memory is free: over `verifyRunGiB` and `ciJobGiB`, at most `othersBudgetGiB`. | Leaves a verification run or CI job its allowance several times over, and stops one workload from taking the whole others budget. |
+| `othersBudgetGiB` | 46 | What the model and the floor leave for the rows above. | Computed: `totalGiB` - `omlxCeilingGiB` - `omlxOverCeilingGiB` - `floorGiB`. |
+| `omlxJetsamPriority` | 190 | oMLX's jetsam priority; the kernel ends the lowest band first. 180 is its default band (`JETSAM_PRIORITY_DEFAULT`), where unmanaged processes such as the agents' test workers run. `memory-floor` raises the running pid to 190 and never lowers a higher value. | The xnu `kern_memorystatus.h` and `kern_memorystatus.c` sources linked in "The memory floor", and the 24 Nov `jetsam_priority ... from=180` line of `/var/log/memory-floor.log`. |
+| `fseventsdRestartMinutes` | 60 | The shortest time between two `fseventsd-trim` restarts. | See "What makes fseventsd grow". |
+
+`verifyRunGiB`, `ciJobGiB` and `macosGiB` are provisional: nobody has measured
+them. The day line shows whether they hold.
+
+### How the numbers were measured
+
+Read on 2026-11-24, with nothing restarted:
+
+- Memory: `sysctl -n hw.memsize` printed 274877906944. `curl` of the server's
+  `/health` showed `loaded_count` 1 and `final_ceiling` 206158430208.
+- The server's footprint: `footprint -p <omlx-server pid> -f bytes
+  --noCategories` printed `phys_footprint: 187360249992 B`. The pid is the one
+  `launchctl print system/org.nixos.omlx` shows.
+- Used and available memory: `vm_stat` (page size 16384) gave used 203.1 GiB and
+  available 52.9 GiB, so everything but oMLX held 28.6 GiB (used minus the
+  footprint above).
+- Colima: `~/.colima/default/colima.yaml` has `memory: 8`.
+- Jetsam priority: `launchctl print system/<label>` showed `jetsam priority =
+  40` for oMLX, Colima, the console, `verify-pending` and the runners before
+  this change, and 180 for `com.apple.fseventsd`. Those 40s are launchd's own
+  band for the job, not the kernel's value: the helper read 180 from the
+  kernel for the running oMLX.
+- The 19 Nov kill: `/Library/Logs/DiagnosticReports/JetsamEvent-2026-11-19-002938.ips`
+  lists oMLX at 174.82 GiB, then `dotnet` at 11.2 GiB, the VM at 7.63 GiB,
+  `JarBird.Gateway.Tests` at 5.42 GiB and another `dotnet` at 4.34 GiB. Test
+  processes of a CI job alone took 21 GiB.
+
+"Others" is the memory used minus oMLX's own `phys_footprint`. The watcher counts
+it only on samples with a model loaded and the footprint read. Each finished day
+is one line of `~/.omlx/memory/memory-peaks.jsonl`: `peak_others_gib` against
+`others_budget_gib` says whether the others budget held, and
+`omlx_jetsam_priority` against `declared_jetsam_priority` says whether the
+kernel held oMLX at or above the declared priority.
+`~/.omlx/memory/memory-watch.json` holds today's
+values so far.
+
+### When you add a workload
+
+1. Give it an allowance in `memory-budget.nix`. A VM gets a fixed memory flag
+   read from that file, as Colima's `--memory` is, so its size cannot grow
+   without changing the budget.
+2. Keep `tests/test_memory_budget.py` green. It fails when the allowances exceed
+   `othersBudgetGiB`; lower another allowance or the oMLX ceiling until it
+   passes.
+3. A new verification slot or CI runner is counted on its own: raise
+   `verify_slots` in the host declaration or add the runner, and the budget
+   counts one more of `verifyRunGiB` or `ciJobGiB`.
+4. Update the table above.
+5. Read the next day's line in `memory-peaks.jsonl`: `peak_others_gib` must stay
+   under `others_budget_gib`.
+
+### The memory floor
+
+`memory-floor` is a root daemon (`KeepAlive`) that ends agent and CI workloads
+when memory stays under `floorGiB`. It only ends a workload with a declared
+owner: the agent user (`--agent-user`), whose processes count when their working
+directory is under a worktree (`~/Projects/*/.worktrees/*`) or a verification
+run's temporary directory, and the CI runner accounts, whose `Runner.Worker`
+starts a job's workload. A process of any other user is never ended.
+
+Protected, whatever its owner: pids 0 and 1, the oMLX server and everything it
+started, and each service process the host runs for the system.
+
+It samples available memory every `fastSampleSeconds` when it is under
+`floorGiB` + `floorMarginGiB`, or fell by `floorFallGiB` since the last sample,
+or is under the floor; otherwise every `slowSampleSeconds`. After
+`floorSamples` samples in a row under the floor it ends the largest workload.
+It signals the workload's processes with SIGTERM, deepest in the process tree
+first (leaves first), waits `floorGraceSeconds`, and sends SIGKILL to what is
+left, then reads memory again. If memory is still under the floor, it ends the
+next largest. A workload over
+`runBoundGiB` is ended at once, whatever memory is free. With no workload left
+to end, it logs `floor_breached no agent workload to end` once per episode.
+
+Each kill is one line:
+
+```
+<time> memory_kill reason=<floor|run_bound> owner=<agent:dir|ci:user:pid> root_pid=<pid> root="<command>" processes=<n> tree_gib=<size> available_before_gib=<n> available_after_gib=<n> signals=<term|term+kill>
+```
+
+It lands at once in the root daemon's `/var/log/memory-floor.log`, and within a
+minute in `~/.omlx/logs/memory-watch.log`, where the owner's sampler writes it:
+the root daemon writes no path the agent user can write, so it cannot write the
+watcher log itself. The daemon keeps its record at
+`/var/db/memory-watch/floor.json` (the kill count, the last fifty kills and
+oMLX's priority); the sampler reads it, queues one `memory_kill` alert for each
+new kill, and sends it through the owner's alert settings.
+
+A gate also holds oMLX's start: the serve script runs `memory-floor gate`
+before it decrypts the key, and the gate waits, polling every
+`fastSampleSeconds`, while available memory is under `floorGiB`. It only reads
+memory and signals nothing, so a serving oMLX is never held, and launchd's
+`KeepAlive` still owns the relaunch.
+
+launchd ignores the `JetsamProperties` key in the oMLX plist: `launchctl print
+system/org.nixos.omlx` shows `jetsam priority = 40` and `jetsamproperties
+category = daemon` while the plist carried 100, and launchd takes a daemon's
+priority from the category in the sealed
+`/System/Library/LaunchDaemons/com.apple.jetsamproperties.Mac.plist`, whose
+entries are Apple's labels. That 40 is launchd's own band for the job, not the
+kernel's value for the running process. So the plist no longer carries the key,
+and `memory-floor` sets `omlxJetsamPriority` on the running pid with
+`memorystatus_control`, which needs root. It sets it on the first sample and
+after each relaunch, so a changed `omlxJetsamPriority` needs a restart of
+`memory-floor` only, and oMLX gets it without a restart.
+
+The kernel ends the lowest band first, and a process nobody manages sits in its
+default band, 180 (`JETSAM_PRIORITY_DEFAULT`), as the agents' test workers do.
+`memory-floor` therefore only raises: it sets the priority when the kernel's
+value is below `omlxJetsamPriority` and never lowers a higher one, which it logs
+once per pid as `jetsam_priority_kept`. `memory-floor` refuses a declared value
+outside 181 to 210, the highest band the kernel accepts. Each set logs the
+value before it, the declared one and the value read back right after it
+(`jetsam_priority ... from=180 to=190 after=190`). Sources:
+[the bands](https://github.com/apple-oss-distributions/xnu/blob/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/bsd/sys/kern_memorystatus.h#L45-L84),
+[the order jetsam ends them in](https://github.com/apple-oss-distributions/xnu/blob/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/bsd/kern/kern_memorystatus.c#L6497-L6551)
+and [the set validation](https://github.com/apple-oss-distributions/xnu/blob/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/bsd/kern/kern_memorystatus.c#L3080-L3101).
+
+The record keeps the priority it read at the start of each sample, before any
+set, and counts how often it found the value below the declared one again after
+a successful set (`omlx_priority_resets`). The read-back in the log line shows
+the set took; the record's value is what the kernel held between samples. The
+sampler puts the record's value in `omlx_jetsam_priority`, so the day line shows
+whether the kernel kept it, and queues `jetsam_priority_unset` when the call
+failed or the resets are above zero.
+
+### Alerts
+
+Alerts go to the owner's Telegram bot. The owner sets it up on the console page,
+which writes `~/.config/host-alerts/telegram.json` (mode `0600`, owned by the
+owner) with `enabled`, `bot_token` and `chat_id`.
+
+When the file is missing, unreadable, too open or incomplete, or when Telegram
+does not accept the post, the alert goes to `~/.local/state/host-alerts/alerts.log`,
+the error is logged in `~/.omlx/logs/memory-watch.log`, and the watcher exits 3
+on every sample until the alert is sent. With `enabled` false, alerts are
+recorded in the alerts log only.
+
+There are seven kinds:
+
+- `jetsam`: the kernel's memory killer ended oMLX.
+- `low_memory`: available memory fell under `floorGiB` while a model was loaded
+  (once per episode).
+- `fseventsd_restarted`: `fseventsd-trim` restarted fseventsd.
+- `fseventsd_held`: fseventsd was over its limit again inside the restart
+  interval and was left running.
+- `fseventsd_restart_failed`: the restart's kill failed, so fseventsd stays over
+  its limit (once per episode).
+- `memory_kill`: `memory-floor` ended an agent or CI workload; one alert per kill.
+- `jetsam_priority_unset`: `memory-floor` could not set oMLX's kernel jetsam
+  priority, or the value did not hold after a set (once per episode).
+
+### What makes fseventsd grow
+
+`fseventsd` is the macOS file-event daemon. `fseventsd-trim` runs as root every
+minute, reads its `phys_footprint`, and restarts it when it passes 4 GiB, at most
+once an hour (`fseventsdRestartMinutes`). Over the limit again inside that hour
+it does not restart it and the `fseventsd_held` alert is sent. It writes the
+size to `/var/db/memory-watch/fseventsd.json`, and the watcher puts the largest
+in the day line as `peak_fseventsd_gib`. A restart is safe: launchd runs it with
+`KeepAlive`, so it comes straight back, and its clients rescan.
+
+Its jetsam priority, 180, is the kernel's default band and below oMLX's 190, so
+under memory pressure the kernel ends fseventsd before oMLX. That is why a
+growing fseventsd is ended before the model is.
+
+What was read, re-read on 2026-11-24 with the same read-only commands
+(`launchctl print system/com.apple.fseventsd`, `sudo -n /usr/bin/footprint -p
+<pid> -f bytes --noCategories` and `find ~/Projects -name node_modules`):
+
+- `phys_footprint: 5210544 B` at 10.5 h after the lead's restart, with 149
+  `node_modules` directories and 116 worktree directories present. At 11.7 h
+  it read `phys_footprint: 6504904 B` (peak 11796936 B) with 160 and 121.
+- The lead's reading was 17.7 GB after 35 h and 10 MB after the restart.
+- `JetsamEvent-2026-11-20-002944.ips` lists fseventsd as the largest process,
+  at 51.53 GiB.
+- Diagnostic reports exist for the 22 Nov `disk writes` and the 23 Nov `cpu usage`
+  resource limits.
+- About 110 `fsevent_add_client` registrations a minute came from command-line
+  clients (`claude` among them).
+- `/System/Volumes/Data/.fseventsd` held 2.1 GB.
+
+The directory count is not the cause: the same directories were present at 5 MB
+and at 51 GiB. So no exclusion is applied. An exclusion changes which paths are
+indexed or logged, not fseventsd's buffering for each client. The trim's
+record and `peak_fseventsd_gib` date the next growth, which is what to compare
+with the clients running then.
+
+## Retiring a model
+
+Deleting a `models` entry stops its download and its declared settings, but leaves
+its weights on the host: delete `~/.omlx/models/<directory>` (the repository name
+after the slash, or the admin UI's directory) by hand, then apply the change with
+`omlx-restart --now` when the server may pause. Its entry in `model_settings.json`
+is left as the admin UI keeps it.
 
 Run `nix build --no-link .#checks.aarch64-darwin.omlx-adapter` for the portable
 adapter/configuration tests, then `just build eleven-m5` for the host. The restart
@@ -88,6 +322,7 @@ the real schema and executing the real Anthropic endpoint to engine preflight.
 GPU inference is covered separately by deployed Claude-shaped smoke requests.
 
 After a Homebrew update, incompatible patches require checking upstream before
-regenerating or removing them. The GLM fix tracks upstream PR4644; the effort
-patch is the local compatibility change for nix-config issue410; the steering patch is
-local to nix-config issue457.
+regenerating or removing them. Two patches are applied: the GLM fix tracks
+upstream PR4644, and the effort patch is the local compatibility change for
+nix-config issue410. Both were last checked against oMLX 0.8.3, which still
+needs both.

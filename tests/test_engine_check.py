@@ -40,7 +40,7 @@ def compact(value: object) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n"
 
 
-SHIPPED_OK = compact({"procedures": ["close-out", "deliver", "direct", "land", "setup", "toy", "toy-child", "verify"], "verdict": "ok"})
+SHIPPED_OK = compact({"procedures": ["close-out", "deliver", "direct", "land", "land-attempt", "setup", "toy", "toy-child", "verify"], "verdict": "ok"})
 
 
 def load(directory: Path, name: str) -> dict:

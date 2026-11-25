@@ -40,6 +40,13 @@ UNNAMED_LITE = dict(CLEAN_LITE, verdict="findings",
 CLEAN_FULL = {key: value for key, value in CLEAN_LITE.items() if key != "escalate"}
 CLEAN_REREVIEW = {"verdict": "pass", "findings": []}
 SHA = "a" * 40
+SYNCED = {"reply": {"status": "done", "notes": "n", "tests": ["checks/check_greet.py"]}, "merge": {}}
+CONFLICTED = {"reply": {"status": "conflicted", "notes": "n", "tests": []}, "merge": {}}
+RESOLVED_TEXT = IMPLEMENTED["commit"]["text"] + "OTHER = 1\n"
+RESOLVED = {"reply": {"status": "done", "notes": "n", "tests": ["checks/check_greet.py"]},
+            "merge": {"resolve": {"fixture/farewell.py": RESOLVED_TEXT}}}
+UPSTREAM_IMPLEMENTED = {**IMPLEMENTED, "upstream": {"path": "fixture/farewell.py", "text": "OTHER = 1\n"}}
+CONFLICTING_MAIN = {"path": "fixture/farewell.py", "text": "OTHER = 1\n"}
 CODEX_LIMIT = {"stdout": json.dumps({"status": 1, "error": "You've hit your usage limit."}), "exit": 1}
 
 
@@ -543,7 +550,7 @@ class VerifyTest(Scenario):
     def test_a_continued_run_that_skips_verification_after_a_clean_sync_still_lands(self):
         run = StubbedRun(self, before_pull_request=True, rollup=RED)
         procedures = keeping_the_run(run.tmp)
-        self.stopped(run, run.deliver(procedures), "checks", "owner-decision")
+        self.stopped(run, run.deliver(procedures), "checks-fix", "owner-decision")
         held = len(run.slot_history())
         state = json.loads(run.pulls_state.read_text("utf-8"))
         state["rollup"] = GREEN
@@ -571,14 +578,23 @@ UNNAMED = [{"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "SUCC
 
 
 class Landing(Scenario):
+    def attempt(self, run: StubbedRun) -> Path:
+        """The last child of the land run that runs `land-attempt`."""
+        found = [child for child in run.children(self.child(run, "land"))
+                 if json.loads((child / "run.json").read_text("utf-8"))["procedure"] == "land-attempt"]
+        return found[-1]
+
     def land_transitions(self, run: StubbedRun) -> list[tuple[str, str]]:
+        return run.transitions(self.attempt(run))
+
+    def release_transitions(self, run: StubbedRun) -> list[tuple[str, str]]:
         return run.transitions(self.child(run, "land"))
 
     def prepared_head(self, run: StubbedRun) -> str:
-        return self.stored(self.child(run, "land"), "prepare")["head"]
+        return self.stored(self.attempt(run), "prepare")["head"]
 
     def entered(self, run: StubbedRun) -> set[str]:
-        return {e["step"] for e in run.events(self.child(run, "land")) if e["event"] == "step_entered"}
+        return {e["step"] for e in run.events(self.attempt(run)) if e["event"] == "step_entered"}
 
 
 class LandGuardTest(Landing):
@@ -598,7 +614,7 @@ class LandGuardTest(Landing):
             with self.subTest(text):
                 self.assertEqual(commands.count(text), 1, commands)
         outcomes = dict(self.land_transitions(run))
-        for step in ("push", "create", "merge"):
+        for step in ("push", "create", "merge-pr"):
             self.assertEqual(outcomes[step], "ok", step)
 
     def test_without_declared_required_checks_the_merge_is_refused_and_nothing_merges(self):
@@ -607,36 +623,38 @@ class LandGuardTest(Landing):
 
         self.finish(run, "merge", "owner-decision")
 
-        land = self.child(run, "land")
-        merge = self.stored(land, "merge")
+        merge = self.stored(self.attempt(run), "merge-pr")
         self.assertEqual(merge["verdict"], "refused")
         self.assertIn("protection lookup failed", merge["reason"])
-        self.assertIn(("unlock-merge", "released"), run.transitions(land))
+        self.assertEqual(self.land_transitions(run)[-2:], [("merge-pr", "refused"), ("merge-state", "other")])
+        self.assertEqual(self.release_transitions(run)[-2:], [("attempt", "merge"), ("release", "merge")])
         self.assertEqual([p["state"] for p in run.pulls()], ["OPEN"])
         self.assertEqual(run.origin_tip("main"), before)
         self.assertEqual(run.forge.issue()["state"], "open")
 
 
 class LandStopTest(Landing):
-    def test_a_head_that_moves_after_the_lock_stops_head_moved_with_the_lock_released(self):
+    def test_a_head_that_moves_after_the_check_poll_stops_head_moved_and_merges_nothing(self):
         run = StubbedRun(self, forge_events=("move-head",))
 
         self.finish(run, "head-moved", "owner-decision")
 
         transitions = self.land_transitions(run)
-        for edge in (("lock", "held"), ("checks", "green"), ("head", "head-moved"),
-                     ("unlock-moved", "released")):
+        for edge in (("gate", "green"), ("lock", "no-pull"), ("head", "head-moved")):
             self.assertIn(edge, transitions)
+        self.assertIn(("release", "head-moved"), self.release_transitions(run))
         self.assertEqual(run.lock_refs(), {})
         self.assertEqual([p["state"] for p in run.pulls()], ["OPEN"])
         self.assertFalse({"recheck", "merge"} & self.entered(run))
 
-    def test_a_red_required_check_stops_checks_with_the_lock_released(self):
+    def test_a_red_required_check_with_no_fix_answer_stops_checks_fix_with_the_lock_free(self):
         run = StubbedRun(self, rollup=RED)
 
-        self.finish(run, "checks", "owner-decision")
+        self.finish(run, "checks-fix", "owner-decision")
 
-        self.assertIn(("unlock-checks", "released"), self.land_transitions(run))
+        self.assertIn(("gate", "red"), self.land_transitions(run))
+        self.assertIn(("red", "fix"), self.land_transitions(run))
+        self.assertIn(("release", "checks-fix"), self.release_transitions(run))
         self.assertEqual(run.lock_refs(), {})
         self.assertEqual([p["state"] for p in run.pulls()], ["OPEN"])
 
@@ -646,10 +664,12 @@ class LandStopTest(Landing):
         self.finish(run, "land-contended", "retry")
 
         transitions = self.land_transitions(run)
-        for edge in (("head", "pushed"), ("recheck", "contended"), ("unlock-contended", "released")):
-            self.assertIn(edge, transitions)
+        self.assertIn(("lock", "contended"), transitions)
+        self.assertIn(("lock-wait", "again"), transitions)
+        self.assertEqual([o for s, o in transitions if s == "lock-wait"][-1], "spent")
+        self.assertIn(("release", "land-contended"), self.release_transitions(run))
         self.assertEqual(run.pulls()[0]["state"], "OPEN")
-        self.assertNotIn("merge", self.entered(run))
+        self.assertNotIn("merge-pr", self.entered(run))
         self.assertEqual(run.lock_refs(), {"refs/agent-locks/land/main": run.stolen_sha})
 
     def test_a_failed_release_stops_unreleased_lock(self):
@@ -657,7 +677,7 @@ class LandStopTest(Landing):
 
         self.finish(run, "unreleased-lock", "owner-decision")
 
-        self.assertIn(("unlock", "unreleased"), self.land_transitions(run))
+        self.assertIn(("release", "unreleased"), self.release_transitions(run))
         self.assertEqual(run.pulls()[0]["state"], "MERGED")
         self.assertEqual(run.lock_refs(), {"refs/agent-locks/land/main": self.prepared_head(run)})
 
@@ -666,7 +686,8 @@ class LandStopTest(Landing):
 
         self.finish(run, "land", "owner-decision")
 
-        self.assertIn(("unlock-failed", "released"), self.land_transitions(run))
+        self.assertIn(("gate", "error"), self.land_transitions(run))
+        self.assertIn(("release", "land"), self.release_transitions(run))
         self.assertEqual(run.lock_refs(), {})
 
 
@@ -676,20 +697,20 @@ class LandWaitTest(Landing):
 
         self.finish(run, "done")
 
-        events = run.events(self.child(run, "land"))
+        events = run.events(self.attempt(run))
 
         def at(kind: str, **match) -> list[int]:
             return [i for i, e in enumerate(events)
                     if e["event"] == kind and all(e.get(k) == v for k, v in match.items())]
 
         spans = {}
-        for step in ("lock", "checks"):
-            started, ended = at("wait_started", wait=step), at("wait_ended", wait=step)
+        for step, wait in (("gate", "checks"), ("lock", "lock")):
+            started, ended = at("wait_started", wait=wait), at("wait_ended", wait=wait)
             self.assertEqual((len(started), len(ended)), (1, 1), step)
             entered, stored = at("step_entered", step=step)[0], at("result_stored", step=step)[0]
             self.assertTrue(entered < started[0] < ended[0] < stored, step)
             spans[step] = (started[0], ended[0])
-        self.assertLess(spans["lock"][1], spans["checks"][0])
+        self.assertLess(spans["gate"][1], spans["lock"][0])
 
 
 class SettledTest(Landing):
@@ -716,7 +737,7 @@ class SettledTest(Landing):
 
         walk = self.land_transitions(run)
         self.assertIn(("settled", "unmerged"), walk)
-        self.assertIn(("merge", "ok"), walk)
+        self.assertIn(("merge-pr", "ok"), walk)
         self.assertEqual([pull["number"] for pull in run.pulls()], [1, 2])
         landed = run.pulls()[1]
         self.assertEqual((landed["state"], landed["headRefOid"]), ("MERGED", self.prepared_head(run)))
@@ -915,6 +936,7 @@ class CoverageTest(Landing):
         gone = {"verdict": "no-longer-applies", "details": "d", "evidence": "already done at origin/main."}
         sensitive = dict(IMPLEMENTED, reply=dict(IMPLEMENTED["reply"], sensitive=True))
         fix = committing("fixture/second.py", "SECOND = 2\n")
+        sync_fix = committing("fixture/second.py", "SECOND = 2\n", tests=["checks/check_greet.py"])
         return (
             {},
             {"replies": {"applies": gone}},
@@ -924,9 +946,25 @@ class CoverageTest(Landing):
             {"replies": {"implement": sensitive, "full-review": full_findings(), "full-fix": fix,
                          "full-rereview": CLEAN_REREVIEW}},
             {"rollup": RED},
+            {"rollup": []},
+            {"rollups": [RED, GREEN], "replies": {"ci-fix": sync_fix, "ci-review": CLEAN_REREVIEW}},
+            {"rollups": [RED], "replies": {
+                "ci-fix": {"reply": {"status": "done", "notes": "n", "tests": []}, "same_head": {}},
+                "stale": {"verdict": "real", "reran": [], "notes": "n"}}},
+            {"advance_main": 1, "rollups": [RED, GREEN], "replies": {"presync": SYNCED}},
             {"rollup": UNNAMED},
+            {"advance_main": 1, "replies": {"lock-sync": SYNCED}},
+            {"advance_main": 1, "main_change": CONFLICTING_MAIN,
+             "replies": {"lock-sync": CONFLICTED, "resolve": RESOLVED, "merge-review": CLEAN_REREVIEW}},
+            {"replies": {"implement": UPSTREAM_IMPLEMENTED, "resolve": RESOLVED,
+                         "merge-review": {"verdict": "findings", "findings": [FINDING]}, "merge-fix": sync_fix,
+                         "merge-rereview": CLEAN_REREVIEW}},
             {"forge_events": ("move-head",)},
             {"forge_events": ("steal-lock",)},
+            {"forge_events": ("steal-lock-at-head",)},
+            {"forge_events": ("drop-lock-at-head",)},
+            {"merge_behind": 1, "replies": {"resync": SYNCED}},
+            {"merge_policy": 1},
             {"required_checks": ()},
             {"lock_release_fails": True},
             {"body": EVIDENCE_BODY})
@@ -939,11 +977,11 @@ class CoverageTest(Landing):
             if scenario.get("lock_release_fails"):
                 run.forge.ref_store(run.fixture.slug, run.forge.refs())
                 run.deliver()
-            for directory in run.runs() + [c for r in run.runs() for c in run.children(r)]:
+            for directory in run._run_dirs():
                 visited |= {e["step"] for e in run.events(directory)
                             if e["event"] in ("step_entered", "transition_taken")}
 
-        declared = {step["id"] for name in ("setup", "deliver", "direct", "verify", "land", "close-out")
+        declared = {step["id"] for name in ("setup", "deliver", "direct", "verify", "land", "land-attempt", "close-out")
                     for step in json.loads((PROCEDURES / f"{name}.json").read_text("utf-8"))["steps"]}
         self.assertEqual(visited, declared)
 

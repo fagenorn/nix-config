@@ -4,17 +4,21 @@
 and calls it directly: the two granted shapes, each refusal reason, the literal-word grammar, the
 memo the console re-judges with, and the readers' fail-closed parsing.
 """
+import base64
 import contextlib
+import dataclasses
+import hashlib
 import importlib.util
 import io
 import os
 import tempfile
 import time
 import unittest
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.console import permit
+from agent_tools.console import permit, prompt_card, sprints
 from agent_tools.release import release
 from agent_tools.console.permit import (ALLOW, DENY, Forge, ForgeUnreadable, Grant, judge,
                                         memoized, mentions, merge_target, words)
@@ -36,6 +40,8 @@ class FakeForge:
                     "prs": [7], "rerun": ["Nix Eval"]}
         self.required = frozenset({"Nix Eval"})
         self.pr_error = None
+        self.release_pr = None
+        self.release_error = None
 
     def read_pr(self, slug, number):
         self.calls.append(("pr", slug, number))
@@ -51,8 +57,14 @@ class FakeForge:
         self.calls.append(("required", slug, base))
         return self.required
 
-    def forge(self):
-        return Forge(self.read_pr, self.read_run, self.read_required)
+    def read_release_pr(self, slug, root, branch):
+        self.calls.append(("release", slug, root, branch))
+        if self.release_error is not None:
+            raise self.release_error
+        return self.release_pr if self.release_pr is not None and self.release_pr["branch"] == branch else None
+
+    def forge(self, read_pr=None):
+        return Forge(read_pr or self.read_pr, self.read_run, self.read_required, self.read_release_pr)
 
 
 class JudgeTest(unittest.TestCase):
@@ -246,9 +258,144 @@ class JudgeTest(unittest.TestCase):
         verdict = self.judge(self.rerun)
         self.assertEqual(ALLOW, verdict.decision)
         self.assertEqual("rerun", verdict.verb)
-        self.assertEqual({"run": 55, "pr": 7}, dict(verdict.target))
+        self.assertEqual({"run": 55, "pr": 7, "head": SHA, "count": 1, "members": []},
+                         dict(verdict.target))
         self.assertEqual([("run", "o/r", 55), ("pr", "o/r", 7), ("required", "o/r", "main")],
                          self.fake.calls)
+
+    def release_run(self, event, **change):
+        """A run of the open release pull request (`pull_request`) or of the candidate's push (`push`)."""
+        self.fake.release_pr = {"pr": 9, "branch": "develop", "head": SHA, "base": "main"}
+        self.fake.run = {"event": event, "branch": "develop", "repo": "o/r", "head": SHA,
+                         "prs": [9] if event == "pull_request" else [], "rerun": ["Nix Eval"], **change}
+        self.fake.calls = []
+
+    def test_a_rerun_of_the_release_pull_request_run_and_of_the_candidates_push_run_is_allowed(self):
+        for event in ("pull_request", "push"):
+            with self.subTest(event):
+                self.release_run(event)
+                verdict = self.judge(self.rerun)
+                self.assertEqual((ALLOW, "rerun"), (verdict.decision, verdict.verb))
+                self.assertEqual({"run": 55, "pr": 9, "head": SHA, "count": 1, "members": [],
+                                  "release": event}, dict(verdict.target))
+                self.assertEqual([("run", "o/r", 55), ("release", "o/r", self.root, "develop"),
+                                  ("required", "o/r", "main")], self.fake.calls)
+
+    def test_release_reruns_share_the_per_head_cap_and_name_the_release_pull_request(self):
+        for event in ("pull_request", "push"):
+            with self.subTest(event):
+                self.release_run(event)
+                one = dataclasses.replace(self.grant, reruns={SHA: (permit.Rerun(53),)})
+                verdict = self.judge(self.rerun, one)
+                self.assertEqual((ALLOW, 2), (verdict.decision, verdict.target["count"]))
+                two = dataclasses.replace(self.grant, reruns={SHA: (permit.Rerun(53), permit.Rerun(54))})
+                self.assertRefused(self.rerun, permit.RERUN_LIMIT.format(
+                    pr=9, head=SHA, reruns="run 53 (failing: no members reported) and "
+                                           "run 54 (failing: no members reported)"), two)
+
+    def test_a_rerun_of_a_run_that_is_no_release_run_of_this_project_is_refused(self):
+        deploy = permit.DEPLOY_RERUN.format(run=55, event="push")
+        not_own = permit.NOT_OWN_RUN.format(run=55)
+        rows = {
+            "a": ("push", {}, permit.OTHER_REPO, "no read"),
+            "b": ("push", {"release": {"head": "d" * 40}}, deploy, None),
+            "c": ("push", {"release": None}, deploy, None),
+            "d": ("push", {"branch": "main"}, deploy, "read main"),
+            "e": ("workflow_dispatch", {}, permit.DEPLOY_RERUN.format(run=55, event="workflow_dispatch"),
+                  "no read"),
+            "f": ("push", {"repo": "fork/r"}, deploy, "no read"),
+            "g": ("push", {"release_error": ForgeUnreadable("x")},
+                  permit.FORGE_UNREADABLE.format(reason="x"), None),
+            "h": ("pull_request", {"release": None}, not_own, None),
+            "i": ("pull_request", {"prs": [8]}, not_own, None),
+            "j": ("pull_request", {"repo": "fork/r"}, not_own, "no read"),
+            "k": ("pull_request", {"release": {"head": "d" * 40}}, permit.STALE_RUN.format(run=55), None),
+            "l": ("pull_request", {"rerun": ["deploy-preview"]}, permit.NOT_CHECK_RUN.format(run=55), None),
+            "m": ("push", {"rerun": ["Nix Eval", "deploy"]}, permit.NOT_CHECK_RUN.format(run=55), None),
+            "n": ("pull_request", {"branch": "issue-13-x"}, permit.SHARED_ISSUE.format(issue=13), "no read"),
+        }
+        for row, (event, change, reason, note) in rows.items():
+            with self.subTest(row):
+                self.fake = FakeForge()
+                change = dict(change)
+                release = change.pop("release", ...)
+                error = change.pop("release_error", None)
+                self.release_run(event, **change)
+                if release is None:
+                    self.fake.release_pr = None
+                elif release is not ...:
+                    self.fake.release_pr = {**self.fake.release_pr, **release}
+                self.fake.release_error = error
+                command = self.rerun.replace("--repo o/r", "--repo x/y") if row == "a" else self.rerun
+                self.assertRefused(command, reason)
+                if row == "a":
+                    self.assertEqual([], self.fake.calls)
+                if note == "no read":
+                    self.assertFalse([call for call in self.fake.calls if call[0] == "release"])
+                if note == "read main":
+                    self.assertIn(("release", "o/r", self.root, "main"), self.fake.calls)
+
+    def test_a_release_run_with_a_job_that_has_not_finished_is_refused_and_takes_no_slot(self):
+        for event in ("pull_request", "push"):
+            with self.subTest(event):
+                self.release_run(event, pending=True)
+                self.assertRefused(self.rerun, permit.RUN_PENDING.format(run=55))
+                self.assertNotIn(("required", "o/r", "main"), self.fake.calls)
+                self.release_run(event, pending=False)
+                self.assertEqual(ALLOW, self.judge(self.rerun).decision)
+
+    def test_a_rerun_of_the_push_run_at_the_tip_of_a_single_branch_project_is_allowed_within_the_cap(self):
+        self.release_run("push", branch="main", prs=[])
+        self.fake.release_pr = {"pr": None, "branch": "main", "head": SHA, "base": "main"}
+        verdict = self.judge(self.rerun)
+        self.assertEqual((ALLOW, "rerun"), (verdict.decision, verdict.verb))
+        self.assertEqual({"run": 55, "head": SHA, "count": 1, "members": [], "release": "push"},
+                         dict(verdict.target))
+        two = dataclasses.replace(self.grant, reruns={SHA: (permit.Rerun(53), permit.Rerun(54))})
+        self.assertRefused(self.rerun, permit.RERUN_LIMIT_TIP.format(
+            branch="main", head=SHA, reruns="run 53 (failing: no members reported) and "
+                                            "run 54 (failing: no members reported)"), two)
+        self.fake.release_pr = {**self.fake.release_pr, "head": "d" * 40}
+        self.assertRefused(self.rerun, permit.DEPLOY_RERUN.format(run=55, event="push"))
+        self.release_run("pull_request", branch="main", prs=[9])
+        self.fake.release_pr = {"pr": None, "branch": "main", "head": SHA, "base": "main"}
+        self.assertRefused(self.rerun, permit.NOT_OWN_RUN.format(run=55))
+
+    def test_a_sprint_rerun_keeps_its_target_and_reads_no_release_pull_request(self):
+        self.fake.release_pr = {"pr": 9, "branch": "issue-12-x", "head": SHA, "base": "main"}
+        verdict = self.judge(self.rerun)
+        self.assertEqual({"run": 55, "pr": 7, "head": SHA, "count": 1, "members": []}, dict(verdict.target))
+        self.assertEqual([("run", "o/r", 55), ("pr", "o/r", 7), ("required", "o/r", "main")],
+                         self.fake.calls)
+
+    def test_an_allowed_rerun_names_its_head_its_count_so_far_and_the_failing_suite_members(self):
+        self.fake.run = {**self.fake.run, "members": ["tests/test_a.py", "tests/test_b.py"]}
+        first = self.judge(self.rerun)
+        self.assertEqual({"run": 55, "pr": 7, "head": SHA, "count": 1,
+                          "members": ["tests/test_a.py", "tests/test_b.py"]}, dict(first.target))
+        second = self.judge(self.rerun, dataclasses.replace(self.grant, reruns={SHA: (permit.Rerun(54),)}))
+        self.assertEqual((ALLOW, 2), (second.decision, second.target["count"]))
+
+    def test_a_third_rerun_of_one_head_is_refused_naming_the_two_reruns_and_a_new_head_starts_at_zero(self):
+        two = (permit.Rerun(53, ("tests/test_a.py", "tests/test_b.py")), permit.Rerun(54))
+        grant = dataclasses.replace(self.grant, reruns={SHA: two, "d" * 40: two})
+        verdict = self.assertRefused(self.rerun, permit.RERUN_LIMIT.format(
+            pr=7, head=SHA, reruns="run 53 (failing: tests/test_a.py, tests/test_b.py) and "
+                                   "run 54 (failing: no members reported)"), grant)
+        self.assertIn("twice", verdict.reason)
+        self.assertIn("run 53", verdict.reason)
+        self.assertIn("tests/test_b.py", verdict.reason)
+        self.assertIn("run 54", verdict.reason)
+        self.assertIn("reported or fixed", verdict.reason)
+        self.fake.pr = {**self.fake.pr, "head": "e" * 40}
+        self.fake.run = {**self.fake.run, "head": "e" * 40}
+        fresh = self.judge(self.rerun, grant)
+        self.assertEqual((ALLOW, 1), (fresh.decision, fresh.target["count"]))
+
+    def test_the_rerun_limit_does_not_hide_an_earlier_refusal(self):
+        grant = dataclasses.replace(self.grant, reruns={SHA: (permit.Rerun(53), permit.Rerun(54))})
+        self.fake.run = {**self.fake.run, "rerun": ["deploy-preview"]}
+        self.assertRefused(self.rerun, permit.NOT_CHECK_RUN.format(run=55), grant)
 
     def test_a_deploy_rerun_is_refused(self):
         for event in ("push", "workflow_dispatch"):
@@ -542,6 +689,23 @@ class MemoTest(unittest.TestCase):
             memo.frozen().read_pr("o/r", 7)
         self.assertEqual([("pr", "o/r", 7)], fake.calls)
 
+    def test_a_frozen_memo_replays_the_release_pull_request_read(self):
+        fake = FakeForge()
+        fake.release_pr = {"pr": 9, "branch": "develop", "head": SHA, "base": "main"}
+        memo = memoized(fake.forge())
+        self.assertEqual(memo.read_release_pr("o/r", "/r", "develop"),
+                         memo.read_release_pr("o/r", "/r", "develop"))
+        self.assertEqual(fake.release_pr, memo.frozen().read_release_pr("o/r", "/r", "develop"))
+        self.assertEqual(1, fake.calls.count(("release", "o/r", "/r", "develop")))
+        with self.assertRaises(ForgeUnreadable) as caught:
+            memo.frozen().read_release_pr("o/r", "/r", "main")
+        self.assertEqual("not read before", str(caught.exception))
+        none = FakeForge()
+        none.release_pr = None
+        again = memoized(none.forge())
+        self.assertIsNone(again.read_release_pr("o/r", "/r", "develop"))
+        self.assertIsNone(again.frozen().read_release_pr("o/r", "/r", "develop"))
+
 
 class ReaderTest(unittest.TestCase):
     PULL = {"head": {"ref": "issue-12-x", "sha": HEAD, "repo": {"full_name": "o/r"}},
@@ -605,6 +769,266 @@ class ReaderTest(unittest.TestCase):
                 with self.assertRaises(ForgeUnreadable):
                     permit.read_run("o/r", 55)
 
+    WORKFLOW = """name: CI
+on:
+  pull_request:
+  push:
+jobs:
+  suite:
+    name: Agent Workflow Tests
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-24.04
+  baseline:
+    name: Suite Timing Baseline
+    needs: suite
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+  timing:
+    name: Suite Timing
+    needs: suite
+    if: ${{ !cancelled() && github.event_name == 'pull_request' }}
+    runs-on: ubuntu-24.04
+  cased:
+    name: Cased Event
+    needs: suite
+    if: github.event_name == 'Pull_Request'
+    runs-on: ubuntu-24.04
+  casedpush:
+    name: Cased Push
+    needs: suite
+    if: github.event_name == 'PUSH'
+    runs-on: ubuntu-24.04
+  either:
+    name: Either Or
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+  guarded:
+    name: Guarded
+    if: ${{ !(github.event_name == 'push' && github.ref == 'x') }}
+    runs-on: ubuntu-24.04
+  pushed:
+    name: Pushed Only
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04
+"""
+    WORKFLOW_PATH = f"repos/o/r/contents/.github/workflows/ci.yaml?ref={HEAD}"
+    LOG = ("2026-11-24T10:00:00.1234567Z suite-runner: end tests/test_a.py failed exit=1 3.0s\n"
+           "2026-11-24T10:00:01.0000000Z suite-runner: 3.0s wall 3.0s cpu failed tests/test_a.py\n"
+           "2026-11-24T10:00:02.0000000Z suite-runner: failed tests/test_a.py\n"
+           "2026-11-24T10:00:02.0000001Z suite-runner: failed tests/test_b.py\n"
+           "2026-11-24T10:00:03.0000000Z suite-runner: summary members=9 passed=7 failed=2 jobs=4\n"
+           "suite-runner: failed tests/test_a.py\n")
+
+    def run_payloads(self, jobs, path=".github/workflows/ci.yaml", workflow=None):
+        """The forge's answers for run 55, its jobs and its workflow file."""
+        text = self.WORKFLOW if workflow is None else workflow
+        run = {**self.RUN} if path is None else {**self.RUN, "path": path}
+        return {"repos/o/r/actions/runs/55": run, self.JOBS_PATH: [{"jobs": jobs}],
+                self.WORKFLOW_PATH: {"encoding": "base64",
+                                     "content": base64.encodebytes(text.encode()).decode()}}
+
+    def forge_reads(self, payloads, log=None):
+        """Patch the GitHub reads with `payloads` and every job log with `log`; returns the context."""
+        stack = self.reply(payloads)
+        stack.enter_context(mock.patch.object(
+            permit.forge_api, "run_gh",
+            side_effect=lambda argv, *a, **k: (0, self.LOG if log is None else log)))
+        return stack
+
+    def test_a_skipped_job_whose_own_condition_never_holds_on_a_pull_request_is_not_rerun(self):
+        jobs = [{"id": 900, "name": "Agent Workflow Tests", "conclusion": "failure"},
+                {"id": 901, "name": "Suite Timing Baseline", "conclusion": "skipped"},
+                {"id": 902, "name": "Suite Timing", "conclusion": "success"}]
+        with self.forge_reads(self.run_payloads(jobs)):
+            run = permit.read_run("o/r", 55)
+        self.assertEqual(["Agent Workflow Tests"], run["rerun"])
+
+    def test_a_skipped_job_that_could_hold_on_a_pull_request_or_is_not_provable_still_counts(self):
+        for name in ("Either Or", "Guarded", "Suite Timing", "No Such Job"):
+            with self.subTest(name):
+                jobs = [{"id": 900, "name": "Agent Workflow Tests", "conclusion": "failure"},
+                        {"id": 901, "name": name, "conclusion": "skipped"}]
+                with self.forge_reads(self.run_payloads(jobs)):
+                    self.assertEqual(["Agent Workflow Tests", name], permit.read_run("o/r", 55)["rerun"])
+
+    def test_the_event_name_in_a_condition_is_compared_without_regard_to_case(self):
+        for condition, never in (("github.event_name == 'Pull_Request'", False),
+                                 ("github.event_name == 'PULL_REQUEST'", False),
+                                 ("github.event_name != 'Pull_Request'", True),
+                                 ("github.event_name == 'PUSH'", True),
+                                 ("GitHub.Event_Name == 'Push'", True)):
+            with self.subTest(condition):
+                self.assertIs(never, permit.never_on_pull_request(condition))
+        jobs = [{"id": 900, "name": "Agent Workflow Tests", "conclusion": "failure"},
+                {"id": 901, "name": "Cased Event", "conclusion": "skipped"},
+                {"id": 902, "name": "Cased Push", "conclusion": "skipped"}]
+        with self.forge_reads(self.run_payloads(jobs)):
+            self.assertEqual(["Agent Workflow Tests", "Cased Event"], permit.read_run("o/r", 55)["rerun"])
+
+    def test_a_failed_job_never_counts_as_skipped_whatever_its_condition(self):
+        jobs = [{"id": 900, "name": "Pushed Only", "conclusion": "failure"}]
+        with self.forge_reads(self.run_payloads(jobs)):
+            self.assertEqual(["Pushed Only"], permit.read_run("o/r", 55)["rerun"])
+
+    def test_a_run_with_no_workflow_path_counts_every_skipped_job(self):
+        jobs = [{"id": 900, "name": "Agent Workflow Tests", "conclusion": "failure"},
+                {"id": 901, "name": "Suite Timing Baseline", "conclusion": "skipped"}]
+        with self.forge_reads(self.run_payloads(jobs, path=None)):
+            self.assertEqual(["Agent Workflow Tests", "Suite Timing Baseline"],
+                             permit.read_run("o/r", 55)["rerun"])
+
+    def test_an_unreadable_workflow_makes_a_run_with_a_skipped_job_unreadable(self):
+        jobs = [{"id": 901, "name": "Suite Timing Baseline", "conclusion": "skipped"}]
+        for broken in ({"content": 3}, {}, {"encoding": "base64", "content": "%%%"}):
+            with self.subTest(broken):
+                payloads = {**self.run_payloads(jobs), self.WORKFLOW_PATH: broken}
+                with self.forge_reads(payloads), self.assertRaises(ForgeUnreadable):
+                    permit.read_run("o/r", 55)
+
+    def test_the_failing_suite_members_are_read_from_the_failed_jobs_log_once_each(self):
+        jobs = [{"id": 900, "name": "Agent Workflow Tests", "conclusion": "failure"},
+                {"id": 903, "name": "Other", "conclusion": "failure"}]
+        with self.forge_reads(self.run_payloads(jobs)):
+            run = permit.read_run("o/r", 55)
+            asked = [call.args[0] for call in permit.forge_api.run_gh.call_args_list]
+        self.assertEqual(["tests/test_a.py", "tests/test_b.py"], run["members"])
+        self.assertEqual([["api", "repos/o/r/actions/jobs/900/logs"],
+                          ["api", "repos/o/r/actions/jobs/903/logs"]], asked)
+
+    def test_a_log_that_cannot_be_read_leaves_the_members_empty(self):
+        jobs = [{"id": 900, "name": "Agent Workflow Tests", "conclusion": "failure"}]
+        with self.forge_reads(self.run_payloads(jobs)) as stack:
+            stack.enter_context(mock.patch.object(
+                permit.forge_api, "run_gh",
+                side_effect=permit.forge_api.ForgeError("gh_failed", "HTTP 410")))
+            run = permit.read_run("o/r", 55)
+        self.assertEqual((["Agent Workflow Tests"], []), (run["rerun"], run["members"]))
+
+    def test_a_manager_reruns_the_required_failure_of_its_pull_request_twice_and_not_a_third_time(self):
+        """The demo end to end (ADR-console-106): the push-only timing job does not block, the members are
+        recorded, and the third rerun of one head is refused."""
+        jobs = [{"id": 900, "name": "Agent Workflow Tests", "conclusion": "failure"},
+                {"id": 901, "name": "Suite Timing Baseline", "conclusion": "skipped"}]
+        payloads = {**self.run_payloads(jobs), "repos/o/r/pulls/7": self.PULL,
+                    "repos/o/r/branches/main/protection/required_status_checks": {
+                        "checks": [{"context": "Agent Workflow Tests", "app_id": 15368}], "contexts": []}}
+        grant = Grant(slug="o/r", root="/r", strategy="merge", delete_branch=True,
+                      branch_pattern="issue-<num>-<slug>", issues=frozenset({12}), others=frozenset())
+        forge = Forge(permit.read_pr, permit.read_run, permit.read_required, permit.read_release_pr)
+        command = "gh run rerun 55 --failed --repo o/r"
+        with self.forge_reads(payloads):
+            earlier = (permit.Rerun(53, ("tests/test_a.py",)), permit.Rerun(54, ("tests/test_b.py",)))
+            for before in (0, 1):
+                verdict = judge(command, dataclasses.replace(grant, reruns={HEAD: earlier[:before]}), forge)
+                self.assertEqual((ALLOW, {"run": 55, "pr": 7, "head": HEAD, "count": before + 1,
+                                          "members": ["tests/test_a.py", "tests/test_b.py"]}),
+                                 (verdict.decision, dict(verdict.target)))
+            third = judge(command, dataclasses.replace(grant, reruns={HEAD: earlier}), forge)
+            self.assertEqual((DENY, permit.RERUN_LIMIT.format(
+                pr=7, head=HEAD, reruns="run 53 (failing: tests/test_a.py) and run 54 (failing: tests/test_b.py)")),
+                             (third.decision, third.reason))
+        for name, change in (("event", {"event": "push"}), ):
+            deploy_payloads = {**payloads, "repos/o/r/actions/runs/55": {
+                **payloads["repos/o/r/actions/runs/55"], **change}}
+            with self.forge_reads(deploy_payloads):
+                deploy = judge(command, grant, forge)
+            self.assertEqual((DENY, permit.DEPLOY_RERUN.format(run=55, event="push")),
+                             (deploy.decision, deploy.reason))
+        cased_on_pull_request = [{"id": 900, "name": "Agent Workflow Tests", "conclusion": "failure"},
+                                 {"id": 901, "name": "Cased Event", "conclusion": "skipped"}]
+        with self.forge_reads({**payloads, **self.run_payloads(cased_on_pull_request)}):
+            cased = judge(command, grant, forge)
+        self.assertEqual((DENY, permit.NOT_CHECK_RUN.format(run=55)), (cased.decision, cased.reason))
+        skipped_on_pull_request = [{"id": 900, "name": "Agent Workflow Tests", "conclusion": "failure"},
+                           {"id": 901, "name": "Suite Timing", "conclusion": "skipped"}]
+        with self.forge_reads({**payloads, **self.run_payloads(skipped_on_pull_request)}):
+            refused = judge(command, grant, forge)
+        self.assertEqual((DENY, permit.NOT_CHECK_RUN.format(run=55)), (refused.decision, refused.reason))
+
+    def test_the_release_pull_request_is_the_one_open_pull_request_from_integration_into_default(self):
+        contract = {"bindings": {"vcs": {"integration_branch": "develop", "default_branch": "main"}},
+                    "capabilities": {"release": {"state": "available"}}}
+        path = "repos/o/r/pulls?state=open&base=main&head=o:develop&per_page=2"
+        entry = {"number": 9, "head": {"ref": "develop", "sha": HEAD, "repo": {"full_name": "o/r"}},
+                 "base": {"ref": "main"}}
+        with mock.patch.object(permit.resolve_project, "resolve", return_value=contract):
+            with self.subTest("one"), self.reply({path: [entry]}):
+                self.assertEqual({"pr": 9, "branch": "develop", "head": HEAD, "base": "main"},
+                                 permit.read_release_pr("o/r", "/r", "develop"))
+            with self.subTest("none"), self.reply({path: []}):
+                self.assertIsNone(permit.read_release_pr("o/r", "/r", "develop"))
+            broken = ([entry, entry], {}, [{**entry, "number": "9"}],
+                      [{**entry, "number": 0}], [{**entry, "number": -3}],
+                      [{**entry, "head": {**entry["head"], "sha": "x"}}],
+                      [{**entry, "head": {**entry["head"], "ref": "feature"}}],
+                      [{**entry, "head": {**entry["head"], "repo": {"full_name": "fork/r"}}}],
+                      [{**entry, "base": {"ref": "staging"}}])
+            for reply in broken:
+                with self.subTest(reply), self.reply({path: reply}):
+                    with self.assertRaises(ForgeUnreadable):
+                        permit.read_release_pr("o/r", "/r", "develop")
+            error = permit.forge_api.ForgeError("gh_failed", "HTTP 502 secret detail")
+            with self.subTest("forge error"), mock.patch.object(
+                    permit.forge_api, "api_get", side_effect=error):
+                with self.assertRaises(ForgeUnreadable) as caught:
+                    permit.read_release_pr("o/r", "/r", "develop")
+                self.assertNotIn("secret", str(caught.exception))
+            with self.subTest("another branch"), mock.patch.object(permit.forge_api, "api_get") as get:
+                self.assertIsNone(permit.read_release_pr("o/r", "/r", "feature"))
+                get.assert_not_called()
+        same = {"bindings": {"vcs": {"integration_branch": "main", "default_branch": "main"}},
+                "capabilities": {"release": {"state": "available"}}}
+        tip = "repos/o/r/git/ref/heads/main"
+        with mock.patch.object(permit.resolve_project, "resolve", return_value=same):
+            with self.subTest("equal branches: the candidate is the tip"), self.reply({tip: {"object": {"sha": HEAD}}}):
+                self.assertEqual({"pr": None, "branch": "main", "head": HEAD, "base": "main"},
+                                 permit.read_release_pr("o/r", "/r", "main"))
+            for reply in ({}, {"object": {}}, {"object": {"sha": "x"}}, {"object": {"sha": 7}}, []):
+                with self.subTest(reply), self.reply({tip: reply}):
+                    with self.assertRaises(ForgeUnreadable):
+                        permit.read_release_pr("o/r", "/r", "main")
+            with self.subTest("equal branches: another branch"), mock.patch.object(
+                    permit.forge_api, "api_get") as get:
+                self.assertIsNone(permit.read_release_pr("o/r", "/r", "feature"))
+                get.assert_not_called()
+        for state in ("unsupported", None, "bogus"):
+            for branches in (("develop", "main"), ("main", "main")):
+                undeclared = {"bindings": {"vcs": {"integration_branch": branches[0], "default_branch": "main"}},
+                              "capabilities": {"release": {"state": state}}}
+                with self.subTest(("no release declared", state, branches)), mock.patch.object(
+                        permit.resolve_project, "resolve", return_value=undeclared), \
+                        mock.patch.object(permit.forge_api, "api_get") as get:
+                    self.assertIsNone(permit.read_release_pr("o/r", "/r", branches[0]))
+                    get.assert_not_called()
+        with self.subTest("no contract"), mock.patch.object(
+                permit.resolve_project, "resolve", side_effect=ValueError("x")), \
+                mock.patch.object(permit.forge_api, "api_get") as get:
+            self.assertIsNone(permit.read_release_pr("o/r", "/r", "develop"))
+            get.assert_not_called()
+
+    def test_a_run_is_pending_while_a_job_has_no_conclusion(self):
+        for jobs, pending in (([{"id": 900, "name": "Agent Workflow Tests", "conclusion": "failure"}], False),
+                              ([{"id": 900, "name": "Agent Workflow Tests", "conclusion": "failure"},
+                                {"id": 901, "name": "Nix Eval", "conclusion": None}], True),
+                              ([{"id": 900, "name": "Nix Eval", "conclusion": None}], True)):
+            with self.subTest(jobs), self.forge_reads(self.run_payloads(jobs)):
+                self.assertIs(pending, permit.read_run("o/r", 55)["pending"])
+
+    def test_a_skipped_job_whose_condition_never_holds_for_the_runs_own_event_is_not_rerun(self):
+        for skipped, expected in (("Suite Timing", ["Agent Workflow Tests"]),
+                                  ("Suite Timing Baseline", ["Agent Workflow Tests", "Suite Timing Baseline"])):
+            with self.subTest(skipped):
+                jobs = [{"id": 900, "name": "Agent Workflow Tests", "conclusion": "failure"},
+                        {"id": 901, "name": skipped, "conclusion": "skipped"}]
+                payloads = self.run_payloads(jobs)
+                payloads["repos/o/r/actions/runs/55"] = {**payloads["repos/o/r/actions/runs/55"],
+                                                          "event": "push"}
+                with self.forge_reads(payloads):
+                    self.assertEqual(expected, permit.read_run("o/r", 55)["rerun"])
+        self.assertIs(True, permit.never_on("github.event_name == 'pull_request'", "push"))
+        self.assertIs(True, permit.never_on("github.event_name != 'push'", "push"))
+        self.assertIs(False, permit.never_on("github.event_name == 'push'", "push"))
+
     def test_readers_return_the_documented_shapes(self):
         payloads = {
             "repos/o/r/pulls/7": self.PULL,
@@ -616,7 +1040,8 @@ class ReaderTest(unittest.TestCase):
             self.assertEqual({"branch": "issue-12-x", "repo": "o/r", "head": HEAD, "base": "main"},
                              permit.read_pr("o/r", 7))
             self.assertEqual({"event": "pull_request", "branch": "issue-12-x", "repo": "o/r",
-                              "head": HEAD, "prs": [7], "rerun": ["Other", "deploy", "Late"]},
+                              "head": HEAD, "prs": [7], "rerun": ["Other", "deploy", "Late"],
+                              "members": [], "pending": True},
                              permit.read_run("o/r", 55))
             self.assertEqual(frozenset({"Nix Eval", "Budget", "Any", "Legacy"}),
                              permit.read_required("o/r", "main"))
@@ -643,6 +1068,89 @@ class MergeBindingTest(unittest.TestCase):
         with mock.patch.object(permit.resolve_project, "resolve",
                                return_value={"bindings": {"vcs": {"merge": {"strategy": 3}}}}):
             self.assertEqual((None, False), permit.merge_binding("/r"))
+
+    def test_the_release_branches_are_the_contracts_or_none(self):
+        def contract(integration, state="available"):
+            return {"bindings": {"vcs": {"integration_branch": integration, "default_branch": "main"}},
+                    "capabilities": {"release": {"state": state}}}
+        for state, expected in (("blocked", ("develop", "main")), ("unsupported", (None, None)),
+                                (None, (None, None))):
+            with mock.patch.object(permit.resolve_project, "resolve", return_value=contract("develop", state)):
+                self.assertEqual(expected, permit.release_branches("/r"), state)
+        bare = {"bindings": {"vcs": {"integration_branch": "develop", "default_branch": "main"}}}
+        with mock.patch.object(permit.resolve_project, "resolve", return_value=bare):
+            self.assertEqual((None, None), permit.release_branches("/r"))
+        with mock.patch.object(permit.resolve_project, "resolve", return_value=contract("develop")) as resolve:
+            self.assertEqual(("develop", "main"), permit.release_branches("/r"))
+            resolve.reset_mock()
+            self.assertEqual((None, None), permit.release_branches(None))
+            resolve.assert_not_called()
+        with mock.patch.object(permit.resolve_project, "resolve", side_effect=ValueError("x")):
+            self.assertEqual((None, None), permit.release_branches("/r"))
+        for integration in (3, ""):
+            with mock.patch.object(permit.resolve_project, "resolve", return_value=contract(integration)):
+                self.assertEqual((None, None), permit.release_branches("/r"), integration)
+
+
+ANSWERED = "2026-11-23T10:00:00.000000+00:00"
+
+
+class ActionJudgeTest(unittest.TestCase):
+    """`permit.judge_action`: an owner-only card's approved command, once, within an hour."""
+
+    CARD = sprints.Question(
+        41, 0, "2026-11-23T10:00:00.000000+00:00", False, "May it run?", "the check",
+        ("Run it once", "Do not run it"), "Run it once", answer="Run it once", chosen="Run it once",
+        answered_at=ANSWERED, owner_only=True, action=sprints.QuestionAction("curl x", "Run it once"))
+    DIGEST = permit.command_digest("curl x")
+
+    def now(self, seconds):
+        return datetime.fromisoformat(ANSWERED) + timedelta(seconds=seconds)
+
+    def judged(self, *cards, digest=None, seconds=1):
+        verdict = permit.judge_action(digest or self.DIGEST, cards, self.now(seconds))
+        return verdict.decision, verdict.reason, verdict.verb, dict(verdict.target)
+
+    def test_only_the_owners_own_answer_on_an_owner_only_card_approves(self):
+        for changes in ({"answered_by": "colleague-login"}, {"owner_only": False}):
+            with self.subTest(changes=changes):
+                card = dataclasses.replace(self.CARD, **changes)
+                self.assertEqual(self.judged(card)[:2], ("deny", permit.ACTION_NOT_OWNERS))
+        self.assertEqual(self.judged(self.CARD),
+                         ("allow", "", "action", {"round": 41, "index": 0}))
+
+    def test_the_expiry_boundary_is_sixty_minutes(self):
+        self.assertEqual(self.judged(self.CARD, seconds=3599)[0], "allow")
+        self.assertEqual(self.judged(self.CARD, seconds=3600)[:2], ("deny", permit.ACTION_EXPIRED))
+        for stamp in ("not a time", "2026-11-23T10:00:00"):
+            with self.subTest(stamp=stamp):
+                card = dataclasses.replace(self.CARD, answered_at=stamp)
+                self.assertEqual(self.judged(card)[:2], ("deny", permit.ACTION_EXPIRED))
+
+    def test_a_withdrawn_card_names_nothing_and_a_live_card_wins(self):
+        withdrawn = dataclasses.replace(self.CARD, withdrawn_at=ANSWERED)
+        self.assertEqual(self.judged(withdrawn), (None, "", None, {}))
+        self.assertEqual(self.judged(self.CARD, digest=permit.command_digest("curl y")),
+                         (None, "", None, {}))
+        used = dataclasses.replace(self.CARD, action_used_at=ANSWERED)
+        live = dataclasses.replace(self.CARD, round_id=42)
+        self.assertEqual(self.judged(used, live),
+                         ("allow", "", "action", {"round": 42, "index": 0}))
+        self.assertEqual(self.judged(used, dataclasses.replace(used, round_id=42))[:2],
+                         ("deny", permit.ACTION_USED))
+
+    def test_the_proof_binds_each_member_and_is_its_own_domain(self):
+        self.assertEqual(permit.command_digest("curl x"), hashlib.sha256(b"curl x").hexdigest())
+        base = ("s", "0" * 16, "b" * 32, "d" * 64, "allow", "")
+        wanted = permit.action_reply_mac(*base)
+        for index, changed in ((1, "1" * 16), (2, "c" * 32), (3, "e" * 64), (4, "deny"), (4, None),
+                               (5, "r")):
+            with self.subTest(member=index, changed=changed):
+                other = list(base)
+                other[index] = changed
+                self.assertNotEqual(permit.action_reply_mac(*other), wanted)
+        self.assertNotEqual(permit.action_request_auth("s", b"x"), prompt_card.request_auth("s", b"x"))
+        self.assertEqual(permit.signed_bytes({"b": 1, "a": 2, "auth": "z"}), b'{"a":2,"b":1}')
 
 
 if __name__ == "__main__":

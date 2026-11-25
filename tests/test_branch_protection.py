@@ -1043,7 +1043,8 @@ class CleanupIssueWorkflowTest(unittest.TestCase):
                 "        run: |",
                 "          tools=\"$(nix build --no-link --print-out-paths '.#agent-platform.tools')\"",
                 "          test -n \"$tools\"",
-                "          AGENT_PLATFORM_TOOLS=\"$tools/bin\" PYTHONPATH=python python3 -m"
+                "          AGENT_PLATFORM_ROOT=\"$GITHUB_WORKSPACE/home/common/agent-skills\""
+                " AGENT_PLATFORM_TOOLS=\"$tools/bin\" PYTHONPATH=python python3 -m"
                 " agent_tools.delivery.cleanup_issue file"
                 " --repo-root \"$GITHUB_WORKSPACE\" --repo \"$GITHUB_REPOSITORY\""
                 " --branch \"$GITHUB_REF_NAME\"",

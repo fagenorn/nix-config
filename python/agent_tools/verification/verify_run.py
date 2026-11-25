@@ -68,6 +68,11 @@ for each held issue, then `pass_repo` reconciles the open issues carrying either
 (issue 636), and the sweep only ends a marker of these reasons that carries `block` and `check`, so
 it never settles another writer's owner-action. `approve_all_live` is the owner's bulk tick of the
 live approve prompts of a repository, outside any pass.
+
+A run a signal ended is `interrupted`, never a result: the pass starts that check once more after the
+back-off `verify_interrupt` computes, still under the lease, and a second interruption holds the check
+`interrupted_twice` until the next pass, whose back-off is longer. Any run that ends without a signal
+clears the streak, and each interrupted run writes one stderr line.
 """
 import json
 import re
@@ -79,8 +84,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-from agent_tools.verification import (verify_answer, verify_block, verify_exec, verify_facts, verify_issues,
-                                      verify_owner)
+from agent_tools.verification import (verify_answer, verify_block, verify_exec, verify_facts, verify_interrupt,
+                                      verify_issues, verify_owner)
 from agent_tools.claims import forge_markers, forge_owner_action
 from agent_tools.claims.forge_markers import Marker
 from agent_tools.system import forge_api
@@ -113,7 +118,7 @@ APPROVE_QUERY = (
     'nodes { fullDatabaseId authorAssociation body createdAt updatedAt } } } } } }'
 )
 FINAL = ("pass", "hit", "miss", "expired", "rejected")
-PENDING_OUTCOMES = ("not_yet", "timeout", "exit_unexpected")
+PENDING_OUTCOMES = ("not_yet", "timeout", "exit_unexpected", "interrupted", "interrupted_twice")
 OWNER_GATES = ("owner_check", "effects_live", "effects_paid")
 DEFAULT_EXPIRY_DAYS = 21
 LEASE = timedelta(minutes=30)
@@ -282,7 +287,8 @@ def effective_host(host: str | list[str], takeable: Callable[[], bool],
 
 def pass_repo(project: Project, host: str, refs: verify_block.References, *,
               issue: int | None = None, report: bool = False,
-              retired: Mapping[str, str] = RETIRED_HOSTS) -> list[dict]:
+              retired: Mapping[str, str] = RETIRED_HOSTS,
+              interruptions: verify_interrupt.Interruptions | None = None) -> list[dict]:
     """One pass over every listed issue (only `issue` when given); a listing failure propagates.
 
     A pass that writes first checks the runner's own account is trusted and otherwise ends with
@@ -291,9 +297,11 @@ def pass_repo(project: Project, host: str, refs: verify_block.References, *,
         return [{"repo": project.slug, "issue": None, "check": None, "ac": None,
                  "state": "skipped", "reason": "runner_untrusted"}]
     lines: list[dict] = []
+    interruptions = interruptions or verify_interrupt.Interruptions.at_home()
     for node in list_held(project.slug):
         if issue is None or node.get("number") == issue:
-            lines.extend(pass_issue(project, host, node, refs, report=report, retired=retired))
+            lines.extend(pass_issue(project, host, node, refs, report=report, retired=retired,
+                                    interruptions=interruptions))
     if not report:
         try:
             lines.extend(forge_owner_action.reconcile(project.slug, issue=issue))
@@ -304,9 +312,11 @@ def pass_repo(project: Project, host: str, refs: verify_block.References, *,
 
 
 def pass_issue(project: Project, host: str, node: dict, refs: verify_block.References, *,
-               report: bool = False, retired: Mapping[str, str] = RETIRED_HOSTS) -> list[dict]:
+               report: bool = False, retired: Mapping[str, str] = RETIRED_HOSTS,
+               interruptions: verify_interrupt.Interruptions | None = None) -> list[dict]:
     """The report lines of one issue's pass; a forge failure ends it with one `forge_error` line."""
-    run = _Pass(project, host, node, refs, report, retired)
+    run = _Pass(project, host, node, refs, report, retired,
+                interruptions or verify_interrupt.Interruptions.at_home())
     try:
         run.execute()
     except ForgeError:
@@ -332,9 +342,11 @@ def _fenced_of(body: str) -> str:
 
 class _Pass:
     def __init__(self, project: Project, host: str, node: dict, refs: verify_block.References,
-                 report: bool, retired: Mapping[str, str] = RETIRED_HOSTS) -> None:
+                 report: bool, retired: Mapping[str, str] = RETIRED_HOSTS,
+                 interruptions: verify_interrupt.Interruptions | None = None) -> None:
         self.project, self.host, self.refs, self.report = project, host, refs, report
         self.retired = retired
+        self.interruptions = interruptions
         self.scripts: dict[tuple[str, str], bool | None] = {}
         self.slug = project.slug
         self.number = node["number"]
@@ -583,7 +595,7 @@ class _Pass:
                 for p in verify_owner.prompts(self.markers, verify_owner.DECISION, self.block_key, index)):
             self.prompt(verify_owner.DECISION, index, {"on": "expire"}, f"{ac} expired: the owner decides.",
                         self.decision_boxes(), ("on",))
-        outcome, code, output, command, facts = self.run(check)
+        outcome, code, output, command, facts = self.run_interruptible(index, check, ac)
         if outcome in PENDING_OUTCOMES:
             if waiting is None:
                 self.write(verify_issues.DUE, {**key, "host": self.host},
@@ -608,6 +620,30 @@ class _Pass:
             self.follow_up(index, ac, key, posted, _fenced_of(posted.body))
 
     # --- running ---------------------------------------------------------------
+
+    def run_interruptible(self, index: int, check: Mapping,
+                          ac: str) -> tuple[str, int | None, str, str, dict[str, str]]:
+        """`run`, started once more after the back-off when a signal ended it; a second signal holds it."""
+        first = self.run(check)
+        key = verify_interrupt.key(self.slug, self.number, self.block_key, index)
+        if first[0] != "interrupted":
+            self.interruptions.clear(key)
+            return first
+        wait = self.interruptions.backoff(key)
+        self.interruptions.note(
+            host=self.host, repo=self.slug, issue=self.number, check=index, ac=ac,
+            signal=verify_exec.signal_of(first[1]),
+            next_at=self.interruptions.clock() + timedelta(seconds=wait), then="rerun")
+        self.interruptions.sleep(wait)
+        second = self.run(check)
+        if second[0] != "interrupted":
+            self.interruptions.clear(key)
+            return second
+        self.interruptions.hold(key)
+        self.interruptions.note(
+            host=self.host, repo=self.slug, issue=self.number, check=index, ac=ac,
+            signal=verify_exec.signal_of(second[1]), next_at=self.interruptions.next_pass(), then="held")
+        return ("interrupted_twice", *second[1:])
 
     def run(self, check: Mapping) -> tuple[str, int | None, str, str, dict[str, str]]:
         """The outcome, exit, trimmed output, command line and facts of one run."""

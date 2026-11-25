@@ -15,10 +15,8 @@
   # Port 5433 could also be held by a Colima container or by a teammate's own
   # `devenv up` on this host, so a Tests job that needs it can fail for that reason.
   #
-  # Capacity, a hand-off note for elevenyellow/jarbird#516: oMLX may wire up to
-  # 240 of 256 GB and Colima holds 8 GiB, so about 8 GB is left for macOS,
-  # teammates and every runner. Whether a Tests job fits is observed on the
-  # first JarBird job.
+  # Capacity: memory-budget.nix sets what the runners may take alongside oMLX, Colima,
+  # verification runs and macOS.
   githubRunners.repos = [
     {
       owner = "elevenyellow";

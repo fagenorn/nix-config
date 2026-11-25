@@ -286,6 +286,39 @@ PARTS: dict[str, Part] = {
   server = (builtins.fromJSON o.serverSettings);
   activation = o.activation;
   fetch = o.fetch;
+  serve = o.serve;
+  reload = o.reload;
+  restart = o.restart;
+  launchd = c.system.activationScripts.launchd.text;
+  hold = o.hold;
+  unhold = o.unhold;
+  holdReason = o.holdReason;
+}""", ("eleven-m5",)),
+    # jetsamElsewhere is every daemon plist but oMLX's that carries a jetsam priority.
+    "memory-budget": Part("""c: u: {
+  budget = c.system.build.memoryBudget;
+  colimaFlags = c.system.build.colimaStartFlags;
+  omlxCeiling = (builtins.fromJSON c.system.build.omlxConfigure.serverSettings).memory.memory_guard_custom_ceiling_gb;
+  runners = builtins.attrNames c.services.github-runners;
+  omlxPlist = c.environment.launchDaemons."org.nixos.omlx.plist".text;
+  jetsamElsewhere = builtins.filter (n: n != "org.nixos.omlx.plist" && builtins.length (builtins.split "JetsamProperties" c.environment.launchDaemons.${n}.text) > 1) (builtins.attrNames c.environment.launchDaemons);
+  watch = let d = c.launchd.daemons.omlx-memory-watch; in {
+    inherit (d) command;
+    inherit (d.serviceConfig) UserName StartInterval RunAtLoad KeepAlive;
+    home = d.serviceConfig.EnvironmentVariables.HOME;
+  };
+  trim = let d = c.launchd.daemons.fseventsd-trim; in {
+    inherit (d) command;
+    inherit (d.serviceConfig) UserName StartInterval KeepAlive;
+  };
+  floor = let d = c.launchd.daemons.memory-floor; in {
+    inherit (d) command;
+    inherit (d.serviceConfig) KeepAlive RunAtLoad StandardOutPath;
+    UserName = d.serviceConfig.UserName or null;
+  };
+  runnerUsers = map (r: r.user) (builtins.attrValues c.services.github-runners);
+  owner = u.home.username;
+  sopsSecrets = builtins.attrNames u.sops.secrets;
 }""", ("eleven-m5",)),
 }
 
