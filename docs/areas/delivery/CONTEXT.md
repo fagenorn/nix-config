@@ -27,9 +27,6 @@ _Avoid_: context file, index
 **Delivery**:
 The work of carrying one issue from claim to merge on its own branch and worktree. A delivery ends when the integration branch holds the change and its evidence criteria are met or handed to a Verify block.
 
-**Disposition**:
-What became of one review finding, computed by a pure function from a run's stored results and never set by hand or asked of a model: fixed (a re-review closed it), declined (the implementer declined it and the re-reviewer accepted), filed (it became a follow-up issue, whose body carries the finding's rule and kind), dropped (a minor finding not acted on) or open (still open when the run stopped). A finding is named by its review step and its place in that step's list, as lite-review:2, unique within one review round (issue 1535).
-
 **Enforcer**:
 A test or lint that fails when a standard is broken (issue 1412).
 _Avoid_: check (a check is the Verification area's)
@@ -84,7 +81,7 @@ _Avoid_: loader
 The router's answer for one change at one stage: the bar, the stack shards its file extensions choose, the project shards whose `governs` globs match its paths, the stage's hint file, the decision records its changed files cite, a one-line index (id and title) of the records of each context-map area its paths match, each routed shard's rule ids, the platform revision and the total size in bytes. It names files and pastes none, and a wide change is never cut (issue 1509).
 
 **Standard**:
-One rule under one heading in a layer file, with a stable id, applied to every change within its layer file's scope: the bar to every change, a stack or project shard to the changes its globs match (issue 1412).
+One rule under one heading in a layer file, with a stable id, applied to every change within its layer file's scope: the bar to every change, a stack or project shard to the changes its globs match (issue 1412). The disposition of a review finding is what became of it, computed by a pure function from a run's stored results and never set by hand or asked of a model: fixed (a re-review closed it), declined (the implementer declined it and the re-reviewer accepted), filed (it became a follow-up issue, whose body carries the finding's rule and kind), dropped (a minor finding not acted on) or open (still open when the run stopped). A finding is named by its review step and its place in that step's list, as lite-review:2, unique within one review round (issue 1535).
 
 **Step**:
 One entry of a procedure: an id, a stage, a kind (`command`, `agent`, `decide`, `group` or `call`), what it reads, a map from each outcome to the next step, a stop or `done`, a visit bound, whether it changes something, how long its result holds (`run`, `head` or `live`) and, on a command step that changes something, the `check` command that reads whether its effect already happened (issue 1516).

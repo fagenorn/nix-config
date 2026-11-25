@@ -116,7 +116,6 @@ def dispositions(rounds: Sequence[Round]) -> tuple[Disposed, ...]:
     disposed: list[Disposed] = []
     for place, one in enumerate(rounds, 1):
         reviewed = [item for step, result in one.reviews for item in _named(step, result)]
-        names = {name for name, _ in reviewed}
         declined = _declined(one.fix)
         closes = one.rereview is not None and (
             _answered(one.rereview[1]) if one.rereview[0] in LANDING_REREVIEWS else usable(one.rereview[1]))
