@@ -8,7 +8,8 @@ error is exit 2 with `error` `usage`.
 `prepare --repo-root <path> --issue <n> --repo <owner/name>` prints `{verdict, branch,
 worktree_path, integration_branch, head, title, body, closes, detail}`. The branch and the
 worktree are `issue-branch`'s. The verdict is `ready` exactly when the worktree is clean
-(`git status --porcelain` prints nothing) and its current tree equals the tree in its
+(`git status --porcelain --untracked-files=no` prints nothing: an untracked file is no edit of the
+task, and the verified tree leaves it out) and its current tree equals the tree in its
 `verified-tree.json` record, so `ready` is never said for a tree that was not verified or for
 a dirty worktree; else `unverified`. `head` is the worktree's `HEAD`. `title` is the issue
 title with `"`, `'`, `$`, a backtick, a backslash, `!` and line breaks removed and runs of
@@ -63,7 +64,7 @@ what an earlier one took): `released` (freed, free already, at another sha, or t
 <owner/name> --holder <h> --items <json>` frees it the same way after a call of the attempt and answers
 `items[0].end` when it is one of `RELEASE_ENDS` (else `land`), or `unreleased`; it never answers `error` either.
 
-`head --worktree-path <w>` prints `clean` or `dirty` (`git status --porcelain` prints anything) with `head`, the
+`head --worktree-path <w>` prints `clean` or `dirty` (`git status --porcelain --untracked-files=no` prints anything, so an untracked file the fix left is not dirty) with `head`, the
 worktree's `HEAD`. `probe --worktree-path <w> --integration-branch <i>` fetches `origin`, then runs `git merge-tree
 --write-tree --name-only --no-messages HEAD origin/<i>` and prints `clean` (exit 0, `origin/<i>` an ancestor of
 `HEAD`), `behind` (exit 0, not an ancestor) or `conflicted` (exit 1 whose first line is a 40 hex tree id; `files`
@@ -241,7 +242,7 @@ def prepare(args: argparse.Namespace) -> dict:
     closes = criteria_close(body if isinstance(body, str) else "")
     path = place["worktree_path"]
     head = _git(path, "rev-parse", "HEAD").strip()
-    clean = not _git(path, "status", "--porcelain").strip()
+    clean = not _git(path, "status", "--porcelain", "--untracked-files=no").strip()
     try:
         with _own_repository():
             recorded = verified_tree.read_record(verified_tree.record_path(Path(path)))
@@ -546,7 +547,7 @@ def checks(args: argparse.Namespace) -> dict:
 
 def head(args: argparse.Namespace) -> dict:
     sha = _git(args.worktree_path, "rev-parse", "HEAD").strip()
-    dirty = bool(_git(args.worktree_path, "status", "--porcelain").strip())
+    dirty = bool(_git(args.worktree_path, "status", "--porcelain", "--untracked-files=no").strip())
     return {"verdict": "dirty" if dirty else "clean", "head": sha}
 
 

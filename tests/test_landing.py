@@ -315,8 +315,19 @@ class PrepareTest(unittest.TestCase):
         worktree = land.worktree()
         with mock.patch.dict(os.environ, land.env):
             verified_tree.run(worktree)
-        (worktree / "stray.txt").write_text("x\n", encoding="utf-8")
+        tracked = next(iter(land.world.git(worktree, "ls-files").split()))
+        with (worktree / tracked).open("a", encoding="utf-8") as handle:
+            handle.write("edit\n")
         self.assertEqual(land.prepare()[1]["verdict"], "unverified")
+
+    def test_prepare_is_ready_with_an_untracked_file_the_verified_tree_leaves_out(self):
+        land = LandingWorld(self)
+        worktree = land.worktree()
+        with mock.patch.dict(os.environ, land.env):
+            verified_tree.run(worktree)
+        (worktree / "stray.txt").write_text("x\n", encoding="utf-8")
+        code, answer = land.prepare()
+        self.assertEqual((code, answer["verdict"]), (0, "ready"), answer)
 
     def test_prepare_ignores_git_variables_naming_another_repository(self):
         land = LandingWorld(self)
@@ -568,13 +579,17 @@ def commit_text(land: LandingWorld, root: Path, name: str, text: str) -> str:
 
 
 class HeadTest(unittest.TestCase):
-    def test_head_answers_clean_with_the_head_and_dirty_for_an_untracked_file(self):
+    def test_head_answers_clean_for_an_untracked_file_and_dirty_for_a_tracked_edit(self):
         land = LandingWorld(self)
         worktree = land.worktree()
         head = land.world.git(worktree, "rev-parse", "HEAD").strip()
         args = ("head", "--worktree-path", str(worktree))
         self.assertEqual(land.call(*args), (0, {"verdict": "clean", "head": head}))
         (worktree / "stray.txt").write_text("x\n", encoding="utf-8")
+        self.assertEqual(land.call(*args), (0, {"verdict": "clean", "head": head}))
+        tracked = next(iter(land.world.git(worktree, "ls-files").split()))
+        with (worktree / tracked).open("a", encoding="utf-8") as handle:
+            handle.write("edit\n")
         self.assertEqual(land.call(*args), (0, {"verdict": "dirty", "head": head}))
 
 
