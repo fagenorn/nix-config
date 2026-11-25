@@ -68,8 +68,9 @@ def is_transport(stderr: str) -> bool:
 
 def is_address_exhaustion(stderr: str) -> bool:
     """Whether a `gh` failure's stderr shows the host ran out of local ports: the socket error after
-    `connect`, never a repository name or other text of the diagnostic that happens to spell it."""
-    return ADDRESS_EXHAUSTION.search(stderr) is not None
+    `connect`, never a repository name or other text of the diagnostic that happens to spell it. A failure
+    where `gh` reports an HTTP response is the server's, whatever its body says, and is never exhaustion."""
+    return HTTP_STATUS.search(stderr) is None and ADDRESS_EXHAUSTION.search(stderr) is not None
 
 
 class ForgeError(Exception):
