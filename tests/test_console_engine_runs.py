@@ -476,7 +476,7 @@ class NeedsYouTest(unittest.TestCase):
         for state in states:
             with self.subTest(reading=engine_runs.reading(state)):
                 statement = self.derive(state)["statement"]
-                self.assertEqual((statement["inbox_items"], statement["headline"]), (0, view.HEADLINE))
+                self.assertEqual((statement["inbox_items"], statement["headline"]), (0, view.DONE_HEADLINE))
 
     def test_a_run_of_an_unregistered_project_counts_none(self):
         stopped = bare_state(project="other/app", stage="landing", last_event=LAST_AT,

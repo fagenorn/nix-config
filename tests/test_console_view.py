@@ -197,17 +197,18 @@ class FoldTableTest(unittest.TestCase):
 
 class StatementTest(unittest.TestCase):
     def test_the_statement_says_nothing_needs_you(self):
+        done = "No sprint is working; we'll put anything that needs you here."
         table = [
-            (0, "No project is registered yet."),
-            (1, "1 registered project, and nothing is waiting on you."),
-            (5, "5 registered projects, and nothing is waiting on you."),
+            (0, "Nothing needs you", "No project is registered yet."),
+            (1, "You're done for now", done),
+            (5, "You're done for now", done),
         ]
-        for n, sentence in table:
+        for n, headline, sentence in table:
             with self.subTest(projects=n):
                 result = derive_view(state(f"p{i}", i) for i in range(n))
                 self.assertEqual(result["statement"], {
                     "inbox_items": 0,
-                    "headline": "Nothing needs you",
+                    "headline": headline,
                     "sentence": sentence,
                     "stale": False,
                 })
@@ -262,8 +263,8 @@ class RegistryChangesTest(unittest.TestCase):
 
 class SessionViewTest(unittest.TestCase):
     NO_SESSION_STATEMENT = {
-        "inbox_items": 0, "headline": "Nothing needs you",
-        "sentence": "1 registered project, and nothing is waiting on you.",
+        "inbox_items": 0, "headline": "You're done for now",
+        "sentence": "No sprint is working; we'll put anything that needs you here.",
         "stale": False}
 
     def test_a_projects_sessions_form_its_outside_sprints_line(self):
@@ -778,7 +779,7 @@ class InboxStatementTest(unittest.TestCase):
         self.assertIsNone(result["open"][0]["answered_at"])
 
     def test_the_headline_counts_open_items(self):
-        table = [(0, "Nothing needs you"), (1, "1 thing needs you"),
+        table = [(0, "You're done for now"), (1, "1 thing needs you"),
                  (3, "3 things need you")]
         for n, headline in table:
             with self.subTest(open=n):
@@ -852,7 +853,7 @@ class InboxStatementTest(unittest.TestCase):
         self.assertIs(fresh["stale"], False)
         self.assertEqual(fresh["read_at"], "r2")
         quiet = derive_view(states, None, healthy)["statement"]
-        self.assertEqual(quiet["headline"], "Nothing needs you")
+        self.assertEqual(quiet["headline"], "You're done for now")
         self.assertIs(quiet["stale"], False)
 
     def test_items_of_unregistered_projects_are_not_shown(self):
@@ -1147,7 +1148,7 @@ class BriefViewTest(unittest.TestCase):
         self.assertNotEqual(sprint_ball(stopping, T0_MS, 0, ()), "owner")
         self.assertEqual(sprint_ball(briefed(sprint(sid)), T0_MS, 0, ()), "owner")
         self.assertEqual(view["statement"]["inbox_items"], 0)
-        self.assertEqual(view["statement"]["headline"], "Nothing needs you")
+        self.assertEqual(view["statement"]["headline"], "You're done for now")
 
     def test_a_brief_of_a_closed_or_stopped_sprint_is_no_item(self):
         a, b = "a" * 16, "b" * 16
@@ -1163,7 +1164,10 @@ class BriefViewTest(unittest.TestCase):
             b: briefed(sprint(b), decision=CHANGES, reply="shrink it"),
             c: briefed(sprint(c, pid="p09"))})
         self.assertEqual(view["inbox"]["open"], [])
-        self.assertEqual(view["statement"], derive_view([state("p00", 1)])["statement"])
+        self.assertEqual(view["statement"], {
+            "inbox_items": 0, "headline": "You're done for now",
+            "sentence": "2 sprints are working; we'll put anything that needs you here.",
+            "stale": False})
 
     def test_an_approved_brief_makes_the_sprint_starting(self):
         sid = "a" * 16
@@ -1428,7 +1432,7 @@ def permission_item(sid=A, prompt=7, title="make the importer resumable"):
 
 
 class HeadingCountsOwnerBallTest(unittest.TestCase):
-    """The heading never says "Nothing needs you" beside a sprint whose ball is the owner's (#1247)."""
+    """The heading never says "You're done for now" beside a sprint whose ball is the owner's (#1247)."""
 
     def shown(self, sprint_state, sessions=(), records=None, prompts=()):
         return derive_view([state("p00", 1)], records, sprints={A: sprint_state},
@@ -1482,7 +1486,7 @@ class PermissionPromptViewTest(unittest.TestCase):
                 shown = self.shown(waiting)
                 self.assertNotEqual(entry(shown)["ball"], "owner")
                 self.assertEqual(shown["statement"]["inbox_items"], 0)
-                self.assertEqual(shown["statement"]["headline"], "Nothing needs you")
+                self.assertEqual(shown["statement"]["headline"], "You're done for now")
                 self.assertNotIn("permission", entry(shown)["now_text"])
                 self.assertNotIn("answer", entry(shown)["now_text"])
 
@@ -1616,7 +1620,7 @@ class PermissionPromptViewTest(unittest.TestCase):
                 shown = self.shown(waiting, sprint_state=stopping)
                 self.assertEqual(entry(shown)["now_text"], view.NOW_STOPPING_TEXT)
                 self.assertEqual(shown["statement"]["inbox_items"], 0)
-                self.assertEqual(shown["statement"]["headline"], "Nothing needs you")
+                self.assertEqual(shown["statement"]["headline"], "You're done for now")
 
     def test_a_deaf_manager_beside_an_open_card_reads_both(self):
         B = "b" * 16
@@ -1636,7 +1640,7 @@ class PermissionPromptViewTest(unittest.TestCase):
         shown = self.shown("working")
         self.assertEqual(entry(shown)["ball"], "manager")
         self.assertEqual(shown["statement"]["inbox_items"], 0)
-        self.assertEqual(shown["statement"]["headline"], "Nothing needs you")
+        self.assertEqual(shown["statement"]["headline"], "You're done for now")
 
 
 class SprintReportViewTest(unittest.TestCase):
@@ -2866,6 +2870,78 @@ class SprintEndViewTest(unittest.TestCase):
         self.assertEqual(derive_view([state("p00", 1)])["unstopped"], [])
 
 
+class DoneForNowViewTest(unittest.TestCase):
+    def waiting(self, sid, until_ms):
+        it = reported(started(sid), R)
+        return dataclasses.replace(it, report=dataclasses.replace(it.report, wait_until=iso(until_ms)))
+
+    def test_with_nothing_open_the_statement_says_the_owner_is_done_for_now(self):
+        B = "b" * 16
+        result = derive_view([state("p00", 1)],
+                             sprints={A: reported(started(A), R), B: reported(started(B), R)},
+                             now_ms=R + MIN)
+        self.assertEqual(result["statement"], {
+            "inbox_items": 0, "headline": "You're done for now",
+            "sentence": "2 sprints are working; we'll put anything that needs you here.",
+            "stale": False})
+        self.assertEqual(set(result["statement"]), {"inbox_items", "headline", "sentence", "stale"})
+
+    def test_the_working_count_reads_only_running_sprints(self):
+        B, C = "b" * 16, "c" * 16
+        running = reported(started(A), R)
+        table = {
+            "one running": (
+                [state("p00", 1)], {A: running}, R + MIN, "You're done for now",
+                "1 sprint is working; we'll put anything that needs you here."),
+            "closed and stopping sprints are not working": (
+                [state("p00", 1)],
+                {A: running,
+                 B: closed(reported(started(B), R), R + 2 * MIN, ((12, "landed"),)),
+                 C: stopped(reported(started(C), R), R + 2 * MIN)},
+                R + 3 * MIN, "You're done for now",
+                "1 sprint is working; we'll put anything that needs you here."),
+            "no sprint": (
+                [state("p00", 1)], {}, R + MIN, "You're done for now",
+                "No sprint is working; we'll put anything that needs you here."),
+            "no project": ([], {}, R + MIN, "Nothing needs you", "No project is registered yet."),
+        }
+        for name, (states, sprints, now_ms, headline, sentence) in table.items():
+            with self.subTest(name):
+                shown = derive_view(states, sprints=sprints, now_ms=now_ms)["statement"]
+                self.assertEqual((shown["headline"], shown["sentence"]), (headline, sentence))
+
+    def test_the_done_for_now_view_names_the_earliest_stated_wait(self):
+        B = "b" * 16
+        result = derive_view(
+            [state("p00", 1)],
+            sprints={A: self.waiting(A, R + 120 * MIN), B: self.waiting(B, R + 60 * MIN)},
+            now_ms=R + MIN)
+        self.assertEqual(result["next_expected"], iso(R + 60 * MIN))
+        self.assertEqual(result["statement"]["headline"], "You're done for now")
+
+    def test_next_expected_is_null_unless_the_owner_is_done_for_now(self):
+        paused = reported(started(A), R)
+        paused = dataclasses.replace(
+            paused, report=dataclasses.replace(paused.report, paused="the vendor answers tomorrow"))
+        ahead = self.waiting(A, R + 60 * MIN)
+        table = {
+            "the wait has passed": dict(
+                states=[state("p00", 1)], sprints={A: ahead}, now_ms=R + 61 * MIN),
+            "a pause": dict(states=[state("p00", 1)], sprints={A: paused}, now_ms=R + MIN),
+            "an open item": dict(
+                states=[state("p00", 1)], sprints={A: ahead}, now_ms=R + MIN,
+                records={("p00", "k1"): open_item("p00", "k1", 1)}),
+            "a stale tracker": dict(
+                states=[state("p00", 1)], sprints={A: ahead}, now_ms=R + MIN,
+                health={"p00": ReadState(False, None)}),
+            "no sprint": dict(states=[state("p00", 1)]),
+        }
+        for name, kwargs in table.items():
+            with self.subTest(name):
+                shown = derive_view(kwargs.pop("states"), **kwargs)
+                self.assertIsNone(shown["next_expected"])
+
+
 class ActorViewTest(unittest.TestCase):
     GUEST = "colleague@example.invalid"
 
@@ -3111,7 +3187,7 @@ class NoticeViewTest(unittest.TestCase):
         self.assertEqual(with_["statement"], without["statement"])
         self.assertEqual(with_["inbox"], without["inbox"])
         self.assertEqual(with_["statement"]["inbox_items"], 0)
-        self.assertEqual(with_["statement"]["headline"], "Nothing needs you")
+        self.assertEqual(with_["statement"]["headline"], "You're done for now")
 
         owner = {"p00": (Notice(9, at_min(9), "heads-up", "routes are frozen until Friday"),)}
         owned = derive_view([state("p00", 1)], sprints={A: sa}, owner_notices=owner,
@@ -3423,7 +3499,7 @@ class SigninViewTest(unittest.TestCase):
                              ends_at="2026-12-13T09:00:00+00:00")
         shown = derive_view([state("p00", 1)], capacity=signin_capacity(home, fresh))
         self.assertEqual(shown["inbox"]["open"], [])
-        self.assertEqual(shown["statement"]["headline"], "Nothing needs you")
+        self.assertEqual(shown["statement"]["headline"], "You're done for now")
 
     def test_a_signed_out_profile_a_colleague_added_raises_no_sign_in_item(self):
         """#1361, ADR-console-087: signing a colleague's account in is his, never the owner's."""
@@ -3435,7 +3511,7 @@ class SigninViewTest(unittest.TestCase):
         self.assertEqual(shown["statement"]["inbox_items"], 2)
         alone = derive_view([state("p00", 1)], capacity=signin_capacity(his))
         self.assertEqual(alone["inbox"]["open"], [])
-        self.assertEqual(alone["statement"]["headline"], "Nothing needs you")
+        self.assertEqual(alone["statement"]["headline"], "You're done for now")
 
     def test_a_never_signed_in_profile_is_offered_sign_in_not_sign_in_again(self):
         fresh = signin_entry("fresh", "signed_out", True, since="t1")
@@ -4029,7 +4105,7 @@ class WaitingLineTest(unittest.TestCase):
     def test_a_waiting_check_is_a_line_under_its_sprint_and_not_counted(self):
         shown = self.view_of(self.waiting())
         self.assertEqual(shown["statement"]["inbox_items"], 0)
-        self.assertEqual(shown["statement"]["headline"], "Nothing needs you")
+        self.assertEqual(shown["statement"]["headline"], "You're done for now")
         self.assertEqual(shown["inbox"]["open"], [])
         self.assertEqual(entry(shown)["waits"], [{
             "key": "k-wait", "issue": 619, "url": "https://example.test/k-wait", "until": self.UNTIL,
