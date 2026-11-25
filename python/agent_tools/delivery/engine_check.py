@@ -77,8 +77,8 @@ def verdict(directory: Path, project_commands: Sequence[str], *, caps: bool) -> 
             *(f"--project-command={name}" for name in project_commands),
             *(() if caps else ("--without-caps",))]
     try:
-        done = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, text=True,
-                              timeout=CHECK_SECONDS)
+        done = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, encoding="utf-8",
+                              errors="replace", timeout=CHECK_SECONDS)
     except subprocess.TimeoutExpired:
         raise CheckError(f"the procedure check did not finish within {CHECK_SECONDS} seconds") from None
     except (OSError, subprocess.SubprocessError) as error:

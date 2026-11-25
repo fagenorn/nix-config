@@ -187,6 +187,13 @@ class VerdictTest(unittest.TestCase):
                 with self.assertRaises(engine_check.CheckError):
                     engine_check.verdict(PROCEDURES, (), caps=True)
 
+    def test_a_child_that_writes_bytes_that_are_not_text_is_a_check_error(self):
+        for exit_code, stream in ((1, "stdout"), (2, "stderr"), (0, "stdout")):
+            script = f"import sys; sys.{stream}.buffer.write(bytes([255])); sys.exit({exit_code})"
+            with self.subTest(stream=stream, exit_code=exit_code), fake_child(script):
+                with self.assertRaises(engine_check.CheckError):
+                    engine_check.verdict(PROCEDURES, (), caps=True)
+
     def test_a_child_past_its_time_is_a_check_error(self):
         with mock.patch.object(engine_check, "CHECK_SECONDS", 1), fake_child("import time; time.sleep(30)"):
             with self.assertRaises(engine_check.CheckError) as raised:
