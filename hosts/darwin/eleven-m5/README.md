@@ -117,6 +117,7 @@ owner's capacity number: whether it holds is a question for the lead.
 | `othersBudgetGiB` | 52 | What the model and the floor leave for the rows above. | Computed: `totalGiB` - `omlxCeilingGiB` - `omlxOverCeilingGiB` - `floorGiB`. |
 | `omlxJetsamPriority` | 190 | oMLX's jetsam priority; the kernel ends the lowest band first. 180 is its default band (`JETSAM_PRIORITY_DEFAULT`), where unmanaged processes such as the agents' test workers run. `memory-floor` raises the running pid to 190 and never lowers a higher value. | The xnu `kern_memorystatus.h` and `kern_memorystatus.c` sources linked in "The memory floor", and the 24 Nov `jetsam_priority ... from=180` line of `/var/log/memory-floor.log`. |
 | `fseventsdRestartMinutes` | 60 | The shortest time between two `fseventsd-trim` restarts. | See "What makes fseventsd grow". |
+| `unownedAlertGiB` | 5 | Unowned memory over which the watcher sends `unowned_memory`, once per episode. | The lead's 25 Nov reading: 35 GiB unowned before an oMLX restart, about 0 after. |
 
 `verifyRunGiB`, `ciJobGiB` and `macosGiB` are provisional: nobody has measured
 them. The day line shows whether they hold.
@@ -310,7 +311,7 @@ the error is logged in `~/.omlx/logs/memory-watch.log`, and the watcher exits 3
 on every sample until the alert is sent. With `enabled` false, alerts are
 recorded in the alerts log only.
 
-There are eight kinds:
+There are nine kinds:
 
 - `jetsam`: the kernel's memory killer ended oMLX.
 - `low_memory`: available memory fell under `floorGiB` while a model was loaded
@@ -325,6 +326,7 @@ There are eight kinds:
   workload it may end that would bring it over (once per episode).
 - `jetsam_priority_unset`: `memory-floor` could not set oMLX's kernel jetsam
   priority, or the value did not hold after a set (once per episode).
+- `unowned_memory`: unowned memory passed `unownedAlertGiB` (once per episode).
 
 ### What makes fseventsd grow
 

@@ -156,7 +156,7 @@ class WatchCase(unittest.TestCase):
     def sample(self, *extra, now="2026-11-24T12:00:00", env=None):
         argv = [
             sys.executable, "-m", "agent_tools.hosts.omlx_memory_watch", "sample",
-            "--state-dir", str(self.state_dir), "--floor-gib", "16", "--others-budget-gib", "46",
+            "--state-dir", str(self.state_dir), "--floor-gib", "16", "--others-budget-gib", "46", "--unowned-alert-gib", "5",
             "--omlx-jetsam-priority", "100", "--host", "eleven-m5",
             "--vm-stat", str(self.d / "vm_stat"), "--sysctl", str(self.d / "sysctl"),
             "--launchctl", str(self.d / "launchctl"), "--ps", str(self.d / "ps"),

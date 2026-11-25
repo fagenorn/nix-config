@@ -1,7 +1,7 @@
 """`omlx-memory-watch`: the eleven-m5 memory watcher, one sample per run.
 
 `omlx-memory-watch sample --state-dir DIR --floor-gib N --others-budget-gib N
---omlx-jetsam-priority N --host NAME [--label org.nixos.omlx] [--health-url URL] [--vm-stat PATH]
+--unowned-alert-gib N --omlx-jetsam-priority N --host NAME [--label org.nixos.omlx] [--health-url URL] [--vm-stat PATH]
 [--sysctl PATH] [--launchctl PATH] [--ps PATH] [--footprint PATH] [--alert-settings FILE]
 [--alert-log FILE] [--telegram-api URL] [--census-record FILE] [--now ISO8601]` takes one reading of the host and
 records it. Used memory is (anonymous pages - purgeable pages + wired pages + compressor pages)
@@ -42,7 +42,10 @@ carried across days, so a day rolled over from a state without it reports null.
 
 An alert is queued when the service's `runs` changed and its last exit reason is the memory
 killer's (`jetsam`), and when available memory falls under the floor while a model is loaded
-(`low_memory`, once per episode). The first sample only records a baseline. Each queued alert
+(`low_memory`, once per episode). `unowned_memory` is queued once per episode when a fresh census's
+unowned memory is over `--unowned-alert-gib` (strictly); an unowned figure at or under the line closes
+the episode, and a sample without a fresh census changes nothing. The first sample only records a
+baseline for the other alerts. Each queued alert
 is delivered through `agent_tools.hosts.host_alerts`, in order, before the state is written;
 one that fails stays queued, is logged once and is retried by the next sample.
 
@@ -129,7 +132,9 @@ CENSUS_FRESH_SECONDS = 150
 SAMPLE_DAYS = 14
 SAMPLES_DIR = "samples"
 PEAK_FIGURES = ("sys_footprint", "process_footprint", "unowned", "wired", "anonymous", "compressions")
-CENSUS_DEFAULTS = {"census_peaks": {}, "peak_owners": [], "census_samples": 0, "records_since": None}
+CENSUS_DEFAULTS = {
+    "census_peaks": {}, "peak_owners": [], "census_samples": 0, "records_since": None, "unowned_open": False,
+}
 TOP_OWNERS = 5
 FLOOR_RECORD = "/var/db/memory-watch/floor.json"
 FLOOR_DEFAULTS = {"floor_kills_seen": None, "floor_unmet_seen": None, "priority_unset_open": False, "floor_log": []}
@@ -472,7 +477,26 @@ def _fold_floor(state: dict, found: dict | None, reading: dict) -> None:
         state["priority_unset_open"] = False
 
 
-def decide(state, reading: dict, now: datetime, floor_bytes: int, others_budget_bytes: int):
+def _fold_unowned(state: dict, census: dict | None, reading: dict, alert_bytes: int) -> None:
+    if census is None:
+        return
+    unowned = census["unowned_bytes"]
+    if unowned <= alert_bytes:
+        state["unowned_open"] = False
+    elif not state["unowned_open"]:
+        state["unowned_open"] = True
+        state["pending"].append({
+            "kind": "unowned_memory", "logged": False,
+            "text": f"{reading['host']}: {unowned / GIB:.1f} GiB of memory is in use but held by no process, "
+                    f"over the {alert_bytes // GIB} GiB alert line (system footprint "
+                    f"{census['sys_footprint_bytes'] / GIB:.1f} GiB, process footprints "
+                    f"{census['process_footprint_bytes'] / GIB:.1f} GiB, wired {reading['wired_bytes'] / GIB:.1f} GiB, "
+                    f"anonymous {reading['anonymous_bytes'] / GIB:.1f} GiB). {SEE}",
+        })
+
+
+def decide(state, reading: dict, now: datetime, floor_bytes: int, others_budget_bytes: int,
+           unowned_alert_bytes: int):
     """Fold one reading into the state; answer the new state, the finished day's line or None, and the sample line."""
     day = now.date().isoformat()
     line = None
@@ -488,7 +512,7 @@ def decide(state, reading: dict, now: datetime, floor_bytes: int, others_budget_
             for key in ("omlx_runs", "omlx_jetsam_priority", "low_memory_open", "pending",
                         "fseventsd_restarts_seen", "fseventsd_held_open", "fseventsd_failed_open",
                         "floor_kills_seen", "floor_unmet_seen", "priority_unset_open", "floor_log",
-                        "records_since"):
+                        "records_since", "unowned_open"):
                 carried[key] = state[key]
             state = carried
     if state["records_since"] is None:
@@ -541,6 +565,7 @@ def decide(state, reading: dict, now: datetime, floor_bytes: int, others_budget_
         state["low_memory_open"] = False
     _fold_fseventsd(state, reading["fseventsd"], reading["host"])
     _fold_floor(state, reading["floor"], reading)
+    _fold_unowned(state, census, reading, unowned_alert_bytes)
     return state, line, _sample_line(reading, now, census)
 
 
@@ -812,7 +837,8 @@ def sample(args) -> int:
     except ReadingError as error:
         print(f"{PROG}: {error}", file=sys.stderr)
         return 1
-    state, line, record = decide(previous, reading, now, args.floor_gib * GIB, args.others_budget_gib * GIB)
+    state, line, record = decide(
+        previous, reading, now, args.floor_gib * GIB, args.others_budget_gib * GIB, args.unowned_alert_gib * GIB)
     failed = deliver_pending(state, args, now)
     for entry in state["floor_log"]:
         print(entry, end="", flush=True)
@@ -828,6 +854,7 @@ def build_parser() -> argparse.ArgumentParser:
     one.add_argument("--state-dir", type=Path, required=True)
     one.add_argument("--floor-gib", type=int, required=True)
     one.add_argument("--others-budget-gib", type=int, required=True)
+    one.add_argument("--unowned-alert-gib", type=int, required=True)
     one.add_argument("--omlx-jetsam-priority", type=int, required=True)
     one.add_argument("--host", required=True)
     one.add_argument("--label", default="org.nixos.omlx")

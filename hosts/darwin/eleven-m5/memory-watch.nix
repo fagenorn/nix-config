@@ -34,7 +34,7 @@ in
   # Samples memory every minute as the owner and records the day's peaks. Its alerts go through
   # the owner's host-alerts settings file, so no secret is declared here.
   launchd.daemons.omlx-memory-watch = {
-    command = "${launcher} sample --state-dir ${home}/.omlx/memory --floor-gib ${toString budget.floorGiB} --others-budget-gib ${toString budget.othersBudgetGiB} --omlx-jetsam-priority ${toString budget.omlxJetsamPriority} --host ${config.networking.hostName} --fseventsd-record ${record}";
+    command = "${launcher} sample --state-dir ${home}/.omlx/memory --floor-gib ${toString budget.floorGiB} --others-budget-gib ${toString budget.othersBudgetGiB} --omlx-jetsam-priority ${toString budget.omlxJetsamPriority} --host ${config.networking.hostName} --unowned-alert-gib ${toString budget.unownedAlertGiB} --fseventsd-record ${record}";
     serviceConfig = {
       UserName = username;
       EnvironmentVariables.HOME = home;

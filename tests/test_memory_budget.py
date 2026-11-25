@@ -159,6 +159,10 @@ class WatcherDeclarationTest(unittest.TestCase):
                 self.assertIn(needle, command)
         self.assertTrue(command.endswith("--fseventsd-record /var/db/memory-watch/fseventsd.json"))
 
+    def test_the_watcher_passes_the_unowned_alert_line(self):
+        self.assertEqual(self.budget["unownedAlertGiB"], 5)
+        self.assertIn(f"--unowned-alert-gib {self.budget['unownedAlertGiB']} ", self.watch["command"])
+
     def test_the_watcher_leaves_the_alert_settings_to_the_shared_module(self):
         for needle in ("--alert-settings", "--alert-log", "--telegram-api", "telegram.json", "sops", "--gh", "--repo"):
             with self.subTest(needle=needle):
@@ -296,6 +300,10 @@ class GuideTest(unittest.TestCase):
         for needle in ("sops", "gh issue"):
             with self.subTest(needle=needle):
                 self.assertNotIn(needle, self.alerts)
+
+    def test_the_guide_lists_the_unowned_alert(self):
+        self.assertIn("- `unowned_memory`:", self.alerts)
+        self.assertIn("There are nine kinds", self.alerts)
 
     def test_the_guide_states_what_makes_fseventsd_grow(self):
         for needle in (

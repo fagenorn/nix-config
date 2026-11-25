@@ -188,5 +188,61 @@ class RecordsTest(RecordsCase):
         self.assertEqual(self.read_state()["records_since"], "2026-11-24")
 
 
+class UnownedAlertTest(RecordsCase):
+    def samples_ok(self, *nows):
+        for now in nows:
+            result = self.sample(now=now)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_unowned_over_the_threshold_alerts_once_per_episode(self):
+        self.settings_on()
+        self.put_census(census())
+        self.samples_ok("2026-11-24T12:00:00", "2026-11-24T12:00:00")
+        self.assertEqual(
+            [request["body"]["text"] for request in self.bot.requests],
+            ["eleven-m5: 8.5 GiB of memory is in use but held by no process, over the 5 GiB alert line "
+             "(system footprint 199.4 GiB, process footprints 190.9 GiB, wired 4.6 GiB, anonymous 196.9 GiB). "
+             "See hosts/darwin/eleven-m5/README.md, Memory budget."])
+        self.put_census(census(unowned_bytes=GIB))
+        self.samples_ok("2026-11-24T12:00:00")
+        self.assertIs(self.read_state()["unowned_open"], False)
+        self.put_census(census(unowned_bytes=6 * GIB))
+        self.samples_ok("2026-11-24T12:00:00")
+        self.assertEqual(len(self.bot.requests), 2)
+
+    def test_unowned_at_the_threshold_does_not_alert(self):
+        self.settings_on()
+        self.put_census(census(unowned_bytes=5 * GIB))
+        self.samples_ok("2026-11-24T12:00:00")
+        self.assertEqual(self.bot.requests, [])
+        self.assertIs(self.read_state()["unowned_open"], False)
+
+    def test_a_stale_census_neither_opens_nor_closes_the_episode(self):
+        self.settings_on()
+        self.put_state(state(unowned_open=True))
+        self.put_census(census(at="2026-11-24T11:50:00", unowned_bytes=GIB))
+        self.samples_ok("2026-11-24T12:00:00")
+        self.assertIs(self.read_state()["unowned_open"], True)
+        self.put_census(census())
+        self.samples_ok("2026-11-24T12:00:00")
+        self.assertEqual(self.bot.requests, [])
+
+    def test_an_open_episode_carries_over_the_day(self):
+        self.settings_on()
+        self.put_state(state(day="2026-11-24", unowned_open=True))
+        self.put_census(census(at="2026-11-25T00:00:30"))
+        self.samples_ok("2026-11-25T00:01:00")
+        self.assertEqual(self.bot.requests, [])
+        self.assertIs(self.read_state()["unowned_open"], True)
+
+    def test_wired_memory_far_below_the_model_queues_no_alert(self):
+        self.settings_on()
+        self.health()
+        self.put_census(census(unowned_bytes=0))
+        self.samples_ok("2026-11-24T12:00:00", "2026-11-24T12:00:00")
+        self.assertEqual(self.bot.requests, [])
+        self.assertEqual(self.read_state()["pending"], [])
+
+
 if __name__ == "__main__":
     unittest.main()
