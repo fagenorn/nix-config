@@ -192,6 +192,7 @@ agent-workflow-tests *args:
     tests/test_independent_review.py \
     tests/test_issue_setup.py \
     tests/test_closing.py \
+    tests/test_holding.py \
     tests/test_landing.py \
     tests/test_land_tally.py \
     tests/test_engine_land_recovery.py \
