@@ -563,6 +563,92 @@ class SweepTest(unittest.TestCase):
         self.assertFalse(expired.exists())
         self.assertEqual(captured.getvalue(), "")
 
+    def test_a_removal_that_loses_every_path_to_a_concurrent_one_still_succeeds(self):
+        run = seed(self.root, 101)
+        expired = self.root / f".{run.name}.expired"
+        real = shutil.rmtree
+        entries = []  # the renamed run's entries when the first removal starts: the sweep adds its lock
+        lost = []
+
+        def racing(path, *args, **kwargs):
+            # the patched rmtree is the other remover, taking each path of the directory first
+            if Path(path) != expired:
+                return real(path, *args, **kwargs)
+            if not lost:
+                entries.extend(sorted(child.name for child in expired.iterdir()))
+            children = sorted(expired.iterdir())
+            if children:
+                child = children[0]
+                real(child) if child.is_dir() else child.unlink()
+                lost.append(child.name)
+                raise FileNotFoundError(2, "No such file or directory", str(child))
+            os.rmdir(expired)
+            lost.append(".")
+            raise FileNotFoundError(2, "No such file or directory", str(expired))
+
+        captured = io.StringIO()
+        with mock.patch("agent_tools.delivery.engine_housekeeping.shutil.rmtree", side_effect=racing), \
+                contextlib.redirect_stderr(captured):
+            swept = self.sweep(FakeTracker({101: ago(20)}))
+        self.assertEqual(swept, [run.name])
+        self.assertEqual(captured.getvalue(), "")
+        self.assertFalse(expired.exists())
+        self.assertEqual(lost, entries + ["."])
+
+    def test_a_lost_child_followed_by_a_failed_lstat_keeps_the_directory_for_the_next_sweep(self):
+        run = seed(self.root, 101)
+        expired = self.root / f".{run.name}.expired"
+        real_rmtree, real_lstat = shutil.rmtree, Path.lstat
+        broken = []
+
+        def racing(path, *args, **kwargs):
+            if broken:
+                raise AssertionError("the removal went on after the directory could not be examined")
+            real_rmtree(Path(path) / "results")
+            broken.append(True)  # from here on the directory cannot be examined
+            raise FileNotFoundError(2, "No such file or directory", "results")
+
+        def lstat(path, *args, **kwargs):
+            if broken and path == expired:
+                raise PermissionError(13, "Permission denied", str(path))
+            return real_lstat(path, *args, **kwargs)
+
+        captured = io.StringIO()
+        with mock.patch("agent_tools.delivery.engine_housekeeping.shutil.rmtree", side_effect=racing), \
+                mock.patch.object(Path, "lstat", lstat), contextlib.redirect_stderr(captured):
+            self.assertEqual(self.sweep(FakeTracker({101: ago(20)})), [])
+        self.assertTrue(expired.exists())
+        lines = captured.getvalue().splitlines()
+        self.assertEqual(len(lines), 1)
+        self.assertTrue(lines[0].startswith("engine: housekeeping could not remove "))
+        self.assertIn("PermissionError", lines[0])
+
+    def test_a_leftover_symlink_whose_target_vanishes_is_reported_once_and_the_sweep_ends(self):
+        self.root.mkdir()
+        target = self.tmp / "target"
+        target.mkdir()
+        link = self.root / ".101-20261101T000000Z-a1b2.expired"
+        link.symlink_to(target)
+        calls = []
+
+        def racing(path, *args, **kwargs):
+            calls.append(path)
+            if len(calls) > 3:
+                raise AssertionError("the removal of a surviving non-directory entry did not end")
+            if target.exists():
+                target.rmdir()
+            raise FileNotFoundError(2, "No such file or directory", str(path))  # the dangling link
+
+        captured = io.StringIO()
+        with mock.patch("agent_tools.delivery.engine_housekeeping.shutil.rmtree", side_effect=racing), \
+                contextlib.redirect_stderr(captured):
+            self.assertEqual(self.sweep(FakeTracker({})), [])
+        self.assertTrue(link.is_symlink())
+        lines = captured.getvalue().splitlines()
+        self.assertEqual(len(lines), 1)
+        self.assertTrue(lines[0].startswith("engine: housekeeping could not remove "))
+        self.assertIn(link.name, lines[0])
+
     def test_a_run_of_another_tracker_or_of_none_is_kept_whatever_that_tracker_says(self):
         other = seed(self.root, 101, tracker="github:other/repo")
         mine = seed(self.root, 103)
