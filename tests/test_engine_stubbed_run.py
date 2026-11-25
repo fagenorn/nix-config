@@ -15,9 +15,11 @@ from pathlib import Path
 from agent_tools.claims import forge_markers
 from agent_tools.delivery import engine_session
 from agent_tools.project_contract import resolve_project
+from agent_tools.verification import verify_block
 from tests.engine_fixture import FixtureProject
 from tests.engine_guards import payloads
-from tests.engine_stubbed_world import APPLIES, CLEAN_LITE, GREEN, IMPLEMENTED, ROLES, StubbedRun
+from tests.engine_stubbed_world import (CLEAN_LITE, EVIDENCE_BODY, EVIDENCE_CHECK, GREEN, IMPLEMENTED, NOT_BEFORE,
+                                        ROLES, StubbedRun, drafted)
 from tests.guard_policy_world import REAL_GIT, install_platform_manifest_in_environ
 
 TIER = "integration"  # every case builds a repository and runs the engine as a child process
@@ -721,42 +723,115 @@ class SettledTest(Landing):
         self.assertNotEqual(self.prepared_head(run), side)
 
 
-class CloseOutTest(Landing):
-    def test_an_issue_with_a_criterion_no_test_shows_merges_with_refs_and_stops_hold(self):
-        body = ("Add a greet() function.\n\n## Acceptance criteria\n\n- [ ] [code] greet() returns the greeting\n"
-                "- [ ] [evidence] the owner has seen the greeting\n")
-        run = StubbedRun(self, body=body)
+HOLD_STEPS = {"hold-facts", "hold-look", "hold-draft", "hold-gate", "regrade", "hold-lint", "split",
+              "hold-post", "hold-label", "once-run", "close"}
 
-        self.finish(run, "hold", "owner-decision")
+
+def hold_comments(run: StubbedRun) -> list[dict]:
+    """The stored comments of the issue that carry a verify fence."""
+    return [comment for comment in run.forge.stored() if "```verify" in comment["body"]]
+
+
+def held_label(run: StubbedRun) -> bool:
+    return "needs-verification" in run.forge.issue()["labels"]
+
+
+class CloseOutTest(Landing):
+    def posted_nothing(self, run: StubbedRun) -> None:
+        """A refused hold or an unmet code criterion posts nothing and keeps the claim and worktree."""
+        self.assertEqual(hold_comments(run), [])
+        bodies = [comment["body"] for comment in run.forge.stored()]
+        self.assertFalse([b for b in bodies if b.startswith(("Held after the merge", "Delivered by PR"))],
+                         bodies)
+        self.assertFalse(held_label(run))
+        self.assertEqual(run.forge.issue()["created"], [])
+        self.assertEqual(len(run.claims()), 1)
+        self.assertTrue(run.worktree_path.exists())
+
+    def test_an_issue_with_one_evidence_criterion_ends_done_open_labelled_with_one_hold_comment(self):
+        run = StubbedRun(self, body=EVIDENCE_BODY)
+
+        self.finish(run, "done")
 
         pulls = run.pulls()
         self.assertEqual(pulls[0]["state"], "MERGED")
         self.assertTrue(pulls[0]["body"].startswith("Refs #41."), pulls[0]["body"])
+        merge = pulls[0]["mergeCommit"]["oid"]
         self.assertEqual(run.forge.issue()["state"], "open")
+        self.assertTrue(held_label(run))
+        comments = hold_comments(run)
+        self.assertEqual(len(comments), 1)
+        block = {"v": 1, "merge": merge, "checks": [EVIDENCE_CHECK]}
+        self.assertEqual(verify_block.parse_block(comments[0]["body"]), (block, []))
+        self.assertEqual(run.forge.issue()["created"], [])
+        child = self.child(run, "close-out")
+        self.assertEqual([t for t in run.transitions(child) if t[0] in HOLD_STEPS],
+                         [("hold-facts", "open"), ("hold-look", "clear"), ("hold-draft", "drafted"),
+                          ("hold-gate", "ready"), ("regrade", "met"), ("hold-lint", "valid"),
+                          ("split", "none"), ("hold-post", "posted"), ("hold-label", "labelled"),
+                          ("once-run", "ran"), ("close", "open-criteria")])
+        self.assertEqual(self.stored(child, "hold-post")["block"], block)
+        self.assertEqual(self.stored(child, "once-run")["runs"], [{"issue": 41, "exit": 0}])
+        self.assertEqual(run.transitions(run.runs()[0])[-1], ("closing", "done"))
         self.assertEqual(run.claims(), [])
         self.assertFalse(run.worktree_path.exists())
-        self.assertEqual(self.branches(run), "")
 
-    def test_a_continue_after_hold_reenters_close_out_and_redoes_no_earlier_step(self):
-        body = ("Add a greet() function.\n\n## Acceptance criteria\n\n- [ ] [code] greet() returns the greeting\n"
-                "- [ ] [evidence] the owner has seen the greeting\n")
-        run = StubbedRun(self, body=body)
+    def test_an_unmet_code_criterion_stops_code_unmet_and_posts_nothing(self):
+        unmet = {"verdict": "unmet", "code_unmet": ["AC1"],
+                 "acceptance": [{"id": "AC1", "met": False, "evidence": "no test shows it"}]}
+        run = StubbedRun(self, body=EVIDENCE_BODY, replies={"regrade": unmet})
+
+        self.finish(run, "code-unmet", "owner-decision")
+
+        self.posted_nothing(run)
+        child = self.child(run, "close-out")
+        walk = run.transitions(child)
+        self.assertLess(walk.index(("hold-gate", "ready")), walk.index(("regrade", "unmet")))
+        self.assertFalse([t for t in walk if t[0] in ("hold-lint", "split", "hold-post")])
+        self.assertEqual(run.transitions(run.runs()[0])[-1], ("closing", "code-unmet"))
+
+    def refused(self, replies: dict, verdict: str) -> tuple:
+        run = StubbedRun(self, body=EVIDENCE_BODY, replies=replies)
+
         self.finish(run, "hold", "owner-decision")
-        root = run.runs()[0]
-        before = run.transitions(root)
-        claims = len(self.released_claims(run))
+
+        self.posted_nothing(run)
+        child = self.child(run, "close-out")
+        gate = self.stored(child, "hold-gate")
+        self.assertEqual((gate["verdict"], gate["acs"]), (verdict, ["AC2"]))
+        return run, child
+
+    def test_a_drafted_owner_check_for_an_evidence_criterion_stops_hold_posting_nothing(self):
+        ask = {"ac": "AC2", "kind": "human", "host": "any", "when": NOT_BEFORE,
+               "run": {"ask": "Have you seen the greeting?"}, "reason": "senses"}
+
+        run, child = self.refused({"hold-draft": drafted(ask)}, "human-checks")
+
+        self.assertNotIn("regrade", [step for step, _ in run.transitions(child)])
+
+    def test_a_drafted_command_outside_the_verification_ids_stops_hold_posting_nothing(self):
+        self.refused({"hold-draft": drafted(dict(EVIDENCE_CHECK, run={"command": "deploy"}))},
+                     "unattended")
+
+    def test_a_criterion_left_without_a_drafted_check_stops_hold_posting_nothing(self):
+        self.refused({"hold-draft": drafted()}, "missing-checks")
+
+    def test_a_verify_block_failing_the_lint_stops_hold_posting_nothing(self):
+        bad = dict(EVIDENCE_CHECK, when={"not_before": "not-a-time"})
+        run = StubbedRun(self, body=EVIDENCE_BODY, replies={"hold-draft": drafted(bad)})
 
         self.finish(run, "hold", "owner-decision")
 
-        self.assertEqual(len(run.runs()), 1)
-        continued = [e for e in run.events(root) if e["event"] == "run_continued"]
-        self.assertEqual([e["step"] for e in continued], ["closing"])
-        self.assertEqual(run.transitions(root)[len(before):], [("closing", "hold")])
-        self.assertEqual(len(self.released_claims(run)), claims)
-        self.assertEqual(run.claims(), [])
-        self.assertFalse(run.worktree_path.exists())
-        self.assertEqual(run.pulls()[0]["state"], "MERGED")
-        self.assertEqual(len(run.pulls()), 1)
+        self.posted_nothing(run)
+        child = self.child(run, "close-out")
+        walk = run.transitions(child)
+        order = [walk.index(t) for t in (("hold-gate", "ready"), ("regrade", "met"), ("hold-lint", "invalid"))]
+        self.assertEqual(order, sorted(order))
+        lint = self.stored(child, "hold-lint")
+        self.assertEqual(lint["verdict"], "invalid")
+        self.assertTrue([e for entry in lint["lints"] for e in entry["errors"]
+                         if "checks[0].when.not_before" in json.dumps(e)], lint)
+        self.assertFalse([t for t in walk if t[0] in ("split", "hold-post")])
 
     def test_a_continue_after_a_failed_release_resumes_landing_and_closes_out(self):
         run = StubbedRun(self, lock_release_fails=True)
@@ -797,7 +872,8 @@ class CoverageTest(Landing):
             {"forge_events": ("move-head",)},
             {"forge_events": ("steal-lock",)},
             {"required_checks": ()},
-            {"lock_release_fails": True})
+            {"lock_release_fails": True},
+            {"body": EVIDENCE_BODY})
 
     def test_every_step_of_the_shipped_procedures_is_visited_by_a_stubbed_run(self):
         visited: set[str] = set()
