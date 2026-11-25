@@ -23,7 +23,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.delivery import engine_caps, engine_commands
+from agent_tools.delivery import size_caps, engine_commands
 from agent_tools.delivery.engine_commands import (
     LIFECYCLE_ARGV, LIFECYCLE_WALL_SECONDS, PLATFORM_MODULES, PLATFORM_WALL_SECONDS, PROJECT_WALL_SECONDS, CommandTable, Invocation,
     UnknownCommand, argument, command_text, grade, run)
@@ -415,7 +415,7 @@ class SpawnSiteTest(unittest.TestCase):
     def sources(self) -> dict[str, str]:
         package = Path(engine_commands.__file__).parent
         return {path.name: path.read_text(encoding="utf-8")
-                for path in engine_caps.engine_modules(package)}
+                for path in size_caps.engine_modules(package)}
 
     def test_only_the_command_guard_and_session_modules_start_processes(self):
         sources = self.sources()

@@ -14,7 +14,7 @@ no process and opening no socket:
 The procedure format and every refusal code are `procedure_check`'s contract. In a directory
 an onboarded project owns, the command ids checked are the platform's plus the project's,
 the ones `engine deliver` accepts; elsewhere they are the platform's. The check also lists
-in `breaches` each cap of `engine_caps` the core, the engine package, a procedure, the
+in `breaches` each cap of `size_caps` the core, the engine package, a procedure, the
 graders or a prompt file exceeds; nothing changes a cap.
 
 `engine status <issue> [--project <slug>]` reads the newest run of the issue under
@@ -76,12 +76,12 @@ import sys
 from pathlib import Path
 
 from agent_tools.delivery import (
-    engine_caps,
     engine_graders,
     engine_ledger,
     engine_shell,
     procedure_check,
     procedure_terms,
+    size_caps,
 )
 
 ENGINE_DIR = Path(importlib.resources.files("agent_tools.delivery"))
@@ -211,7 +211,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         commands = engine_shell.check_declarations()
         result = procedure_check.check_directory(args.procedures, commands)
-        breaches = engine_caps.breaches(ENGINE_DIR, args.procedures, engine_graders.GRADERS)
+        breaches = size_caps.breaches(ENGINE_DIR, args.procedures, engine_graders.GRADERS)
     except (procedure_terms.DeclarationError, engine_shell.Refused, ValueError) as error:
         return _usage(str(error))
     if result.refusals or breaches:

@@ -337,6 +337,7 @@ class RecipeTest(unittest.TestCase):
                        f"{DELIVERY}/host_admission.py",
                        f"{DELIVERY}/procedure_check.py",
                        f"{DELIVERY}/procedure_terms.py",
+                       f"{DELIVERY}/size_caps.py",
                        f"{DELIVERY}/lane_rule.py",
                        f"{DELIVERY}/rule_reader.py",
                        f"{DELIVERY}/procedures/*",
@@ -348,7 +349,7 @@ class RecipeTest(unittest.TestCase):
     def test_the_recipe_covers_every_engine_module_with_the_engine_tier(self):
         words = shlex.split(self.recipe.splitlines()[-1])
         covers = [words[i + 1].split("=", 1) for i, w in enumerate(words) if w == "--cover"]
-        caps = importlib.import_module("agent_tools.delivery.engine_caps")
+        caps = importlib.import_module("agent_tools.delivery.size_caps")
         modules = [p.relative_to(REPO_ROOT).as_posix()
                    for p in caps.engine_modules(REPO_ROOT / "python/agent_tools/delivery")]
         self.assertIn(f"{DELIVERY}/procedure_check.py", modules)

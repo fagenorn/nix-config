@@ -41,6 +41,7 @@ def compact(value: object) -> str:
 
 
 SHIPPED_OK = compact({"procedures": ["close-out", "deliver", "direct", "land", "land-attempt", "setup", "toy", "toy-child", "verify"], "verdict": "ok"})
+REPEAT_SCOPE_REFUSED = compact({"breaches": [], "refusals": [{"defect": "duplicate_step", "detail": "the step id 'scope' is used more than once.", "procedure": "toy", "step": "scope"}], "verdict": "refused"})
 
 
 def load(directory: Path, name: str) -> dict:
@@ -1095,7 +1096,7 @@ class NoSideEffectTest(unittest.TestCase):
 
     def test_the_check_modules_import_no_process_or_socket_module(self):
         for name in ("engine.py", "procedure_check.py", "procedure_terms.py", "engine_graders.py",
-                     "engine_caps.py", "engine_reply.py"):
+                     "size_caps.py", "engine_reply.py"):
             tree = ast.parse((DELIVERY / name).read_text(encoding="utf-8"))
             for node in ast.walk(tree):
                 if isinstance(node, ast.Import):

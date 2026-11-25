@@ -84,20 +84,45 @@ its `in` paths; skipped when the prompt is missing) and `each_not_a_list` (a `ca
 no refusal above and reads a value that is not a list: a run input, a decide step's `verdict`, an agent reply member
 whose property schema has no `"type": "array"`, or a member of a platform command's output that
 `PLATFORM_LISTS` does not name; a path that did not resolve keeps its own refusal alone, and a producer of any other
-kind, a project command, or an agent whose reply did not resolve, declares no schema and is not list-checked)."""
+kind, a project command, or an agent whose reply did not resolve, declares no schema and is not list-checked).
+
+Command. `python -m agent_tools.delivery.procedure_check --procedures=<dir> [--project-command=<id>]... [--without-caps]`
+checks a procedure directory and prints one line of compact sorted-key JSON. `--procedures` is required;
+`--project-command` repeats and names a project command id, declared with the default verdicts and overriding a platform
+declaration of the same id (`declarations`); `--without-caps` measures nothing, so `breaches` is empty. The engine passes
+each value as `--option=<value>`, so a value that starts with `-` is never read as an option. Nothing else is an option.
+The line is the one `engine check` prints:
+
+- exit 0: `{"procedures": [<names>], "verdict": "ok"}`;
+- exit 1: `{"breaches": [...], "refusals": [...], "verdict": "refused"}`, both lists always present, at least one not empty,
+  the breaches of `size_caps.breaches` and the refusals of `check_directory` in their order;
+- exit 2, stdout empty and one stderr line `procedure-check: <reason>`: a usage error, `--procedures` not a directory, a
+  directory with no procedure file, an invalid `command_verdicts.json`, or a file the measure cannot read.
+
+The check is a process of its own: the engine runs it, it starts no process, opens no socket and reads no environment
+variable."""
 
 from __future__ import annotations
 
+import argparse
+import importlib.resources
+import json
 import re
+import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping
+from typing import Mapping, Sequence
 
+from agent_tools.delivery import engine_graders, size_caps
 from agent_tools.delivery.engine_graders import GRADERS
 from agent_tools.delivery.engine_reply import schema_problem
 from agent_tools.delivery.procedure_terms import (
     CLAIM_LOST, EXHAUSTED, FORMAT, INPUT_RE, NAME_RE, NEEDS, NO_REPLY, OUT_OF_BOUNDS, PLACEHOLDER_RE, QUOTA_WAIT,
-    ROLES, STAGES, SUPERSEDED, WAITS, CommandDeclaration, _inside, _strict_load, readable_format)
+    ROLES, STAGES, SUPERSEDED, WAITS, CommandDeclaration, DeclarationError, _inside, _strict_load, load_commands,
+    readable_format)
+
+ENGINE_DIR = Path(importlib.resources.files("agent_tools.delivery"))
+PROJECT_DECLARATION = CommandDeclaration((), {})
 
 KINDS = ("command", "agent", "decide", "group", "call")
 DEFECTS = ("unreadable_procedure", "undefined_field", "invalid_field",
@@ -1002,3 +1027,62 @@ def check_graph(name: str, doc: dict, resolved: Resolved) -> list[Refusal]:
     position = {item["id"]: index for index, item in enumerate(doc["steps"])}
     return sorted(found.refusals,
                   key=lambda r: (-1 if r.step is None else position[r.step]))
+
+
+def declarations(project_commands: Sequence[str]) -> dict[str, CommandDeclaration | None]:
+    """The platform's declarations, with each project command declared with the default verdicts in their place."""
+    declared = dict(load_commands())
+    for command in project_commands:
+        declared[command] = PROJECT_DECLARATION
+    return declared
+
+
+class _Parser(argparse.ArgumentParser):
+    def error(self, message: str):
+        raise _Usage(message)
+
+
+class _Usage(Exception):
+    pass
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = _Parser(prog="procedure-check", description=__doc__)
+    parser.add_argument("--procedures", type=Path, required=True)
+    parser.add_argument("--project-command", action="append", dest="project_command")
+    parser.add_argument("--without-caps", action="store_true", dest="without_caps")
+    return parser
+
+
+def _usage(reason: str) -> int:
+    sys.stderr.write(f"procedure-check: {' '.join(reason.split())}\n")
+    return 2
+
+
+def _line(value: object) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n"
+
+
+def main(argv: list[str] | None = None) -> int:
+    try:
+        args = build_parser().parse_args(argv)
+    except _Usage as error:
+        return _usage(str(error))
+    if not args.procedures.is_dir():
+        return _usage(f"--procedures is not a directory: {args.procedures}")
+    try:
+        result = check_directory(args.procedures, declarations(args.project_command or ()))
+        breaches = () if args.without_caps else size_caps.breaches(ENGINE_DIR, args.procedures, engine_graders.GRADERS)
+    except (DeclarationError, ValueError, OSError) as error:
+        return _usage(str(error))
+    if result.refusals or breaches:
+        sys.stdout.write(_line({"breaches": [b.as_json() for b in breaches],
+                                "refusals": [r.as_json() for r in result.refusals],
+                                "verdict": "refused"}))
+        return 1
+    sys.stdout.write(_line({"procedures": list(result.procedures), "verdict": "ok"}))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
