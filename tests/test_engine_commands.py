@@ -419,7 +419,8 @@ class SpawnSiteTest(unittest.TestCase):
 
     def test_only_the_command_guard_and_session_modules_start_processes(self):
         sources = self.sources()
-        expected = [("engine_commands.py", "run", "subprocess.Popen"),
+        expected = [("engine_check.py", "verdict", "subprocess.run"),
+                    ("engine_commands.py", "run", "subprocess.Popen"),
                     ("engine_guard.py", "_descendants", "subprocess.run"),
                     ("engine_guard.py", "judge", "subprocess.Popen"),
                     ("engine_session.py", "launch", "subprocess.Popen"),

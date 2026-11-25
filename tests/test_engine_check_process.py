@@ -13,7 +13,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.delivery import engine_graders, procedure_check, procedure_terms, size_caps
+from agent_tools.delivery import engine_check, engine_graders, procedure_check, procedure_terms, size_caps
 from agent_tools.delivery.size_caps import Breach
 from tests.guard_policy_world import install_platform_manifest_in_environ
 from tests.test_engine_check import (
@@ -126,6 +126,72 @@ class CheckProcessTest(unittest.TestCase):
     def test_the_check_process_has_only_its_options(self):
         actions = [a for a in procedure_check.build_parser()._actions if a.option_strings != ["-h", "--help"]]
         self.assertEqual({a.dest for a in actions}, {"procedures", "project_command", "without_caps"})
+
+ECHO_ARGV = ("import json, sys; print(json.dumps({'breaches': [], 'refusals': [{'defect': 'x', "
+             "'detail': ' '.join(sys.argv[1:]), 'procedure': 'p', 'step': 's'}], "
+             "'verdict': 'refused'})); sys.exit(1)")
+
+BROKEN_CHILDREN = (
+    "print('x')",
+    "import sys; print('{\"procedures\":[],\"verdict\":\"ok\"}'); sys.exit(1)",
+    "import sys; sys.exit(3)",
+    "import sys; print('{\"verdict\":\"refused\",\"refusals\":[]}'); sys.exit(1)",
+    "import sys; print('{\"breaches\":[],\"refusals\":[],\"verdict\":\"refused\"}'); sys.exit(1)",
+    "import sys; print('{\"breaches\":[],\"refusals\":[null],\"verdict\":\"refused\"}'); sys.exit(1)",
+    "import sys; print('{\"breaches\":[],\"refusals\":[{\"defect\":\"x\",\"procedure\":\"p\","
+    "\"step\":\"s\"}],\"verdict\":\"refused\"}'); sys.exit(1)",
+    "import sys; print('{\"breaches\":[{\"cap\":8000,\"size\":\"big\",\"thing\":\"t\","
+    "\"unit\":\"lines\"}],\"refusals\":[],\"verdict\":\"refused\"}'); sys.exit(1)",
+    "print('{\"procedures\":[1],\"verdict\":\"ok\"}')",
+)
+
+
+def fake_child(script: str):
+    return mock.patch.object(engine_check, "sibling_argv", return_value=[sys.executable, "-c", script])
+
+
+class VerdictTest(unittest.TestCase):
+    def test_verdict_reads_the_check_process_verdict(self):
+        self.assertEqual(engine_check.verdict(PROCEDURES, (), caps=True), (0, json.loads(SHIPPED_OK)))
+        broken = broken_copy(editing("toy", _repeat_scope))
+        self.assertEqual(engine_check.verdict(broken, (), caps=True),
+                         (1, json.loads(REPEAT_SCOPE_REFUSED)))
+
+    def test_the_arguments_reach_the_child_unambiguously(self):
+        with fake_child(ECHO_ARGV):
+            for caps, detail in ((False, "--procedures=-fixtures --project-command=-a "
+                                         "--project-command=b --without-caps"),
+                                 (True, "--procedures=-fixtures --project-command=-a --project-command=b")):
+                with self.subTest(caps=caps):
+                    code, document = engine_check.verdict(Path("-fixtures"), ("-a", "b"), caps=caps)
+                    self.assertEqual(code, 1)
+                    self.assertEqual([r["detail"] for r in document["refusals"]], [detail])
+
+    def test_project_commands_reach_the_check(self):
+        copy = broken_copy(editing("toy", _standin_project))
+        _, declared = engine_check.verdict(copy, ("standin-project",), caps=True)
+        self.assertNotIn("unknown_command", {r["defect"] for r in declared.get("refusals", [])})
+        _, undeclared = engine_check.verdict(copy, (), caps=True)
+        self.assertIn(("toy", "scope"), {(r["procedure"], r["step"]) for r in undeclared["refusals"]
+                                          if r["defect"] == "unknown_command"})
+
+    def test_a_usage_exit_is_a_check_error_with_the_bare_reason(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(engine_check.CheckError) as raised:
+                engine_check.verdict(Path(tmp), (), caps=True)
+            self.assertEqual(str(raised.exception), f"{tmp} holds no procedure file")
+
+    def test_a_child_that_breaks_the_contract_is_a_check_error(self):
+        for script in BROKEN_CHILDREN:
+            with self.subTest(script), fake_child(script):
+                with self.assertRaises(engine_check.CheckError):
+                    engine_check.verdict(PROCEDURES, (), caps=True)
+
+    def test_a_child_past_its_time_is_a_check_error(self):
+        with mock.patch.object(engine_check, "CHECK_SECONDS", 1), fake_child("import time; time.sleep(30)"):
+            with self.assertRaises(engine_check.CheckError) as raised:
+                engine_check.verdict(PROCEDURES, (), caps=True)
+        self.assertIn("did not finish", str(raised.exception))
 
 
 if __name__ == "__main__":
