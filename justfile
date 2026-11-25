@@ -381,6 +381,7 @@ agent-workflow-tests *args:
     tests/test_console_controls.py \
     tests/test_console_goal_box.py \
     tests/test_console_service.py \
+    tests/test_console_close.py \
     tests/test_console_stream.py \
     tests/test_console_sessions.py \
     tests/test_console_session_start.py \
