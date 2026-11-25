@@ -7,14 +7,12 @@ per test, and waits that wake on the console's own publish.
 from __future__ import annotations
 
 import shutil
-import socketserver
 import tempfile
 import time
 import unittest
 from pathlib import Path
-from unittest import mock
 
-from agent_tools.console import event_log, service
+from agent_tools.console import event_log
 
 from .test_console_register_service import PID_B, git, reconcile_repository
 
@@ -52,14 +50,6 @@ def reconciled(parent: Path, *, contract: bool = False) -> Path:
     return copy.resolve()
 
 
-SERVER_POLL_SECONDS = 0.01
-
-
-def quick_serve_forever(server, poll_interval=SERVER_POLL_SECONDS):
-    "The stdlib serve loop with a short selector poll, so a console's shutdown returns at once."
-    return socketserver.BaseServer.serve_forever(server, poll_interval)
-
-
 PENDING = object()
 
 
@@ -87,13 +77,7 @@ def awaited(svc, probe, bound: float, recheck: float):
 
 
 class PublishWaits:
-    "The approve case's prompt shutdown and the wait helpers woken by the service's publish."
-
-    def setUp(self):
-        super().setUp()
-        patch = mock.patch.object(service.ConsoleServer, "serve_forever", quick_serve_forever)
-        patch.start()
-        self.addCleanup(patch.stop)
+    "The approve case's wait helpers woken by the service's publish."
 
     def wait_done(self, root, bound=120):
         def probe():

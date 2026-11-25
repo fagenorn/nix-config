@@ -10,14 +10,13 @@ import sys
 import threading
 import time
 import types
-import unittest
 from unittest import mock
 
 from agent_tools.console import service
 
 from . import approve_case_support as case_support
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1052)
-from .approve_case_support import PENDING, SERVER_POLL_SECONDS, awaited, quick_serve_forever, reconciled
+from .approve_case_support import PENDING, awaited, reconciled
 from .test_console_approve_service import ApproveCase
 from .test_console_register_service import READY, Case, Fake, git, reconcile_repository
 
@@ -46,15 +45,15 @@ class QuickShutdownTest(ApproveCase):
                 return [timeout for obj, timeout in seen if obj is server]
         return served
 
-    def test_a_case_console_serves_with_the_quick_shutdown_poll(self):
+    def test_the_console_serves_with_the_quick_shutdown_poll(self):
         served = self.watch_polls()
         self.start(Fake(plan=READY))
         server = self.svc._server
         timeouts = served(server)
         self.svc.close()
         self.assertTrue(timeouts)
-        self.assertEqual(set(timeouts), {SERVER_POLL_SECONDS})
-        self.assertLess(SERVER_POLL_SECONDS, 0.5)
+        self.assertEqual(set(timeouts), {service.SERVE_POLL_SECONDS})
+        self.assertLess(service.SERVE_POLL_SECONDS, 0.5)
 
     def test_a_restarted_console_serves_with_the_quick_shutdown_poll(self):
         served = self.watch_polls()
@@ -64,20 +63,7 @@ class QuickShutdownTest(ApproveCase):
         timeouts = served(server)
         self.svc.close()
         self.assertTrue(timeouts)
-        self.assertEqual(set(timeouts), {SERVER_POLL_SECONDS})
-
-
-class QuickShutdownPatchTest(unittest.TestCase):
-    def test_the_quick_poll_patch_ends_with_the_test(self):
-        class Probe(ApproveCase):
-            def test_probe(self):
-                self.start(Fake(plan=READY))
-                self.assertIs(service.ConsoleServer.serve_forever, quick_serve_forever)
-
-        result = unittest.TestResult()
-        Probe("test_probe").run(result)
-        self.assertTrue(result.wasSuccessful(), result.failures + result.errors)
-        self.assertIs(service.ConsoleServer.serve_forever, socketserver.BaseServer.serve_forever)
+        self.assertEqual(set(timeouts), {service.SERVE_POLL_SECONDS})
 
 
 class PublishWaitTest(ApproveCase):
