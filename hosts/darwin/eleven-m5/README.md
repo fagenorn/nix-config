@@ -178,6 +178,17 @@ kernel held oMLX at or above the declared priority.
 `~/.omlx/memory/memory-watch.json` holds today's
 values so far.
 
+Each sample also appends one line to `~/.omlx/memory/samples/<day>.jsonl`: the
+used, available, wired, anonymous and compressed bytes, and, from a census no
+older than 150 s, the system and process footprints, the unowned bytes and the
+top owners. The files of the last 14 days are kept. The day's line in
+`memory-peaks.jsonl` gains a `peak_<figure>_gib` and a `peak_<figure>_at` for
+`sys_footprint`, `process_footprint`, `unowned`, `wired`, `anonymous` and
+`compressions` (for example `peak_unowned_gib` and `peak_unowned_at`), the
+`peak_owners` of the day, `census_samples` (how many samples had a census) and
+`records_since`, the day the records began, so an earlier line without them is
+not a day with no peak.
+
 ### When you add a workload
 
 1. Give it an allowance in `memory-budget.nix`. A VM gets a fixed memory flag

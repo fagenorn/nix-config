@@ -87,6 +87,12 @@ DAY_LINE = {
     "peak_ci_jobs": 2, "samples": 1440, "loaded_samples": 1400, "min_loaded_available_gib": 28.0,
     "floor_gib": 16, "omlx_jetsam_priority": 100, "declared_jetsam_priority": 100,
     "peak_fseventsd_gib": None, "fseventsd_restarts": 0,
+    "peak_sys_footprint_gib": None, "peak_sys_footprint_at": None,
+    "peak_process_footprint_gib": None, "peak_process_footprint_at": None,
+    "peak_unowned_gib": None, "peak_unowned_at": None, "peak_wired_gib": None, "peak_wired_at": None,
+    "peak_anonymous_gib": None, "peak_anonymous_at": None,
+    "peak_compressions_gib": None, "peak_compressions_at": None,
+    "peak_owners": [], "census_samples": 0, "records_since": None,
 }
 
 
@@ -158,6 +164,7 @@ class WatchCase(unittest.TestCase):
             "--health-url", (self.d / "health.json").as_uri(),
             "--alert-settings", str(self.settings), "--alert-log", str(self.alert_log),
             "--telegram-api", self.bot.api, "--floor-record", str(self.d / "floor.json"),
+            "--census-record", str(self.d / "census.json"), "--fseventsd-record", str(self.d / "fseventsd.json"),
             "--now", now, *extra,
         ]
         return subprocess.run(argv, capture_output=True, text=True, env=env or self.env, timeout=60)
@@ -272,6 +279,7 @@ class SampleTest(WatchCase):
         self.assertIn("vm_stat", result.stderr)
         self.assertEqual(self.state_file.read_bytes(), before)
         self.assertFalse(self.peaks_file.exists())
+        self.assertFalse((self.state_dir / "samples").exists())
 
     def test_the_day_keeps_the_most_ci_jobs_seen(self):
         self.assertEqual(omlx_memory_watch.count_ci_jobs(PS_BUSY), 2)
@@ -373,6 +381,12 @@ class ParseTest(unittest.TestCase):
         self.assertEqual(
             omlx_memory_watch.parse_launchctl(launchctl(7, "OS_REASON_JETSAM")),
             {"runs": 7, "pid": 73552, "jetsam_priority": 40, "last_exit_reason": "OS_REASON_JETSAM"})
+
+
+    def test_compressions_are_read_when_vm_stat_prints_them(self):
+        self.assertIsNone(omlx_memory_watch.parse_vm_stat(VM_STAT)["compressions"])
+        text = VM_STAT + "Compressions:                             11842405.\n"
+        self.assertEqual(omlx_memory_watch.parse_vm_stat(text)["compressions"], 11842405)
 
 
 class AlertTest(WatchCase):

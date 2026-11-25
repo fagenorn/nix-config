@@ -277,6 +277,14 @@ class GuideTest(unittest.TestCase):
             with self.subTest(needle=needle):
                 self.assertIn(needle, self.section)
 
+    def test_the_guide_names_the_sample_records(self):
+        for needle in (
+            "~/.omlx/memory/samples/<day>.jsonl", "peak_unowned_gib", "peak_unowned_at", "census_samples",
+            "records_since", "14 days",
+        ):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, self.section)
+
     def test_the_guide_names_the_alert_settings_file(self):
         self.assertTrue(self.alerts, "the guide has no `### Alerts` subsection")
         for needle in (

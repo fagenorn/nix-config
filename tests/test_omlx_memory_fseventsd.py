@@ -220,7 +220,9 @@ class SampleTest(FakeHost):
             "--footprint", str(self.d / "footprint"),
             "--health-url", (self.d / "health.json").as_uri(),
             "--alert-settings", str(self.settings), "--alert-log", str(self.d / "alerts.log"),
-            "--telegram-api", self.bot.api, "--fseventsd-record", str(self.record_file), "--now", now])
+            "--telegram-api", self.bot.api, "--fseventsd-record", str(self.record_file),
+            "--census-record", str(self.d / "census.json"), "--floor-record", str(self.d / "floor.json"),
+            "--now", now])
 
     def read_state(self):
         return json.loads(self.state_file.read_text())
