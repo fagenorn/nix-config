@@ -898,7 +898,7 @@ class RunTest(ProjectCase):
             cwd=self.repo, capture_output=True, text=True, check=False, env=self.env)
         self.assertEqual(self.answer(done, 1)["verdict"], "error")
 
-    # Issue 1536: a failure outside the branch's files is rerun once, at one head.
+    # A failure outside the branch's files is rerun once, at one head.
 
     def branch_change(self, files):
         """Commit `files` (path -> text) in the worktree: the branch's changed paths."""
