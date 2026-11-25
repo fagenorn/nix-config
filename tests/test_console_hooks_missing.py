@@ -134,20 +134,25 @@ class HooksMissingCardTest(GlobalHooksPath, unittest.TestCase):
         self.assertEqual(register.hooks_noted(noted), noted)
 
 
-    def test_a_drafted_contract_installs_the_hooks_and_says_so_on_every_surface(self):
+    def test_a_drafted_contract_names_the_dev_shell_and_says_apply_installs_the_hooks_on_every_surface(self):
         root = hooked_repo(self.parent / "r", contract=False)
         fields = contract_draft.draft(str(root), {**contract_draft.read(str(root)),
                                                   "default_branch": "main", "branches": ["main"]})
         row = register.hooks_noted(register.summary(str(root), READY, draft=fields))
-        self.assertEqual(row["lines"], [register.HOOKS_LINE, *register.plan_lines(READY)])
         shown, _entry = card(row)
-        self.assertEqual(shown["lines"][0], register.HOOKS_LINE)
+        latest = {**row, "at": "2026-11-24T08:00:00+00:00", "headline": "H", "plan_id": PID_A}
+        named = ["commits run in its development shell: devenv shell", register.HOOKS_LINE]
+        self.assertEqual(row["lines"], [*named, *register.plan_lines(READY)])
+        self.assertEqual(contract_draft.DRAFTED_ENVIRONMENT_LINE, named[0])
+        self.assertEqual(shown["lines"][:2], named)
         self.assertNotIn(register.HOOKS_LEFT_LINE, shown["lines"])
-        for line in (*shown["lines"], *row["lines"]):
-            self.assertFalse(line.startswith("commits run in its development shell"), line)
-        deferred = register.view_entry(None, {**row, "at": "2026-11-24T08:00:00+00:00"})
-        self.assertEqual(deferred["lines"], [register.HOOKS_LINE, *register.plan_lines(READY)])
+        self.assertEqual(register.view_entry(None, latest)["lines"], row["lines"])
         self.assertEqual(register.hooks_noted(row), row)
+        text = approve.body(latest)
+        for line in named:
+            self.assertNotIn(line, text)
+        for line in register.plan_lines(READY):
+            self.assertIn(f"- {line}", text)
 
     def test_a_ready_plan_of_a_schema_three_contract_installs_the_hooks(self):
         root = hooked_repo(self.parent / "r", project=SCHEMA_THREE)
