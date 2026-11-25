@@ -337,6 +337,7 @@ class RecipeTest(unittest.TestCase):
                        f"{DELIVERY}/host_admission.py",
                        f"{DELIVERY}/procedure_check.py",
                        f"{DELIVERY}/lane_rule.py",
+                       f"{DELIVERY}/rule_reader.py",
                        f"{DELIVERY}/procedures/*",
                        "tests/engine_*.py", "tests/fixtures/engine-*"]:
             self.assertIn(f"--cover '{source}=tests/test_engine_*.py'", self.recipe)

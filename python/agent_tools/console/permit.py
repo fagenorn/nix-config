@@ -88,7 +88,12 @@ never None. The checks run in this order, the first that applies deciding:
   the run's failed jobs reported as failed. A release run's target also carries `release`, `pull_request`
   or `push`, and a tip candidate's has no `pr`.
 - Release: the plain run is `ALLOW` with its target; any other leading run is `RELEASE_SPELLING`.
-- A reader raising `ForgeUnreadable` is `DENY` with `FORGE_UNREADABLE`.
+- A reader raising `ForgeUnreadable` is `DENY` with `FORGE_UNREADABLE`. A lookup failing with address
+  exhaustion (the host out of local ports) is retried `LOOKUP_ATTEMPTS` times in all with a short doubling
+  back-off, and no retry is begun once its pause would end more than `LOOKUP_BUDGET` seconds after the
+  judgement began, the time of the lookups themselves counted, so the hook's ten-second request still gets
+  its verdict; when it still fails the reason is `PORTS_EXHAUSTED`. A lookup that succeeds, however
+  slowly, and any other failure are unchanged.
 
 `ALONE` and `NOT_GRANTED` for a merge or rerun are composed by `spelling_refusal(sentence, verb, grant,
 missing)`: the sentence, ` Missing: <flags>.` when `missing` is not empty, and ` Accepted: <form>; <prefix
@@ -160,11 +165,14 @@ member that is no non-empty string or when `capabilities.release.state` is neith
 `read_run`'s `pending` is whether any job of the run has no conclusion yet.
 """
 import base64
+import contextlib
+import contextvars
 import hashlib
 import hmac
 import json
 import os
 import re
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -199,6 +207,12 @@ RERUN_LIMIT_TIP = ("The head {head} of {branch} has had its release rerun twice,
                    "rerun is refused: the head must be reported or fixed.")
 STALE_HEAD = "Pull request {pr} is not at the head the merge names."
 FORGE_UNREADABLE = "The forge could not be read to judge this command: {reason}"
+PORTS_EXHAUSTED = ("the host ran out of local network ports, so the lookup could not connect; this is a "
+                   "passing host condition, not a refusal of the command, and it can be tried again")
+LOOKUP_ATTEMPTS = 4
+LOOKUP_BACKOFF = 0.5
+LOOKUP_BUDGET = 6.0
+_STARTED: contextvars.ContextVar[float | None] = contextvars.ContextVar("lookup_started", default=None)
 NOT_ACTIVE = "This sprint is not active."
 NOT_MANAGER = "Only the sprint's manager session may run this command."
 MOVED = "The sprint changed while the command was judged."
@@ -358,11 +372,38 @@ def memoized(forge: Forge) -> Memoized:
                     cached("release", forge.read_release_pr), cache)
 
 
-def _get(path: str, what: str):
+@contextlib.contextmanager
+def lookup_budget():
+    """Start the clock that bounds the retries of every forge lookup of this block: none is begun that would
+    end past `LOOKUP_BUDGET` seconds from here, the hook's own request timing out at ten and the verdict
+    still having to be delivered. A lookup that is not retried is never cut short by it."""
+    token = _STARTED.set(time.monotonic())
     try:
-        return forge_api.api_get(path)
-    except forge_api.ForgeError:
-        raise ForgeUnreadable(f"{what} could not be read") from None
+        yield
+    finally:
+        _STARTED.reset(token)
+
+
+def _lookup(read: Callable[[], object], what: str):
+    """One forge lookup: address exhaustion is retried `LOOKUP_ATTEMPTS` times in all, with a doubling
+    back-off from `LOOKUP_BACKOFF` seconds, and none that the `lookup_budget` leaves no time for;
+    then it is said plainly. Any other failure is `could not be read`."""
+    for attempt in range(LOOKUP_ATTEMPTS):
+        try:
+            return read()
+        except forge_api.ForgeError as error:
+            if not error.exhausted:
+                raise ForgeUnreadable(f"{what} could not be read") from None
+            pause = LOOKUP_BACKOFF * 2 ** attempt
+            started = _STARTED.get()
+            if attempt == LOOKUP_ATTEMPTS - 1 or (
+                    started is not None and time.monotonic() - started + pause > LOOKUP_BUDGET):
+                raise ForgeUnreadable(PORTS_EXHAUSTED) from None
+        time.sleep(pause)
+
+
+def _get(path: str, what: str):
+    return _lookup(lambda: forge_api.api_get(path), what)
 
 
 def _member(mapping, key: str, kind: type, what: str):
@@ -386,10 +427,7 @@ def read_pr(slug: str, number: int) -> Mapping:
 
 
 def _pages(path: str, what: str) -> list:
-    try:
-        return forge_api.api_pages(path)
-    except forge_api.ForgeError:
-        raise ForgeUnreadable(f"{what} could not be read") from None
+    return _lookup(lambda: forge_api.api_pages(path), what)
 
 
 _NEVER_CALLS = re.compile(r"\b(?:cancelled|always|success|failure)\(\)")
@@ -958,10 +996,11 @@ def judge(command: str, grant: Grant, forge: Forge) -> Verdict:
     if parts is None:
         return _deny(verb, spelling_refusal(ALONE, verb, grant))
     try:
-        if parts[:3] == _OPENING[MERGE]:
-            return _judge_merge(parts, grant, forge)
-        if parts[:3] == _OPENING[RERUN]:
-            return _judge_rerun(parts, grant, forge)
+        with lookup_budget():
+            if parts[:3] == _OPENING[MERGE]:
+                return _judge_merge(parts, grant, forge)
+            if parts[:3] == _OPENING[RERUN]:
+                return _judge_rerun(parts, grant, forge)
     except ForgeUnreadable as error:
         return _deny(verb, FORGE_UNREADABLE.format(reason=error))
     opening = _OPENING[verb]

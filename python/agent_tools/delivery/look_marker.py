@@ -155,6 +155,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from agent_tools.claims import forge_markers
+from agent_tools.delivery.rule_reader import FENCE_OPEN
 
 KIND = "look"
 CARRY_KIND = "look-carry"
@@ -176,7 +177,6 @@ FILE_STATUSES: tuple[str, ...] = ("added", "removed", "modified", "renamed", "co
 FIX_WORDS_LIMIT = 2000
 
 LINE = re.compile(r"- \[[ xX]\] \[human\] before merge: (?P<what>\S.*?) — measured: (?P<measured>\S.*)")
-FENCE_OPEN = re.compile(r"^ {0,3}(`{3,}|~{3,})")
 HEAD_PATTERN = re.compile(r"[0-9a-f]{40}")
 PICTURES_PATTERN = re.compile(r"[0-9a-f]{64}")
 NEAR = re.compile(r"before[\s_-]*merg", re.IGNORECASE)

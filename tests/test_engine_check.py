@@ -1146,7 +1146,7 @@ SHIPPED_INPUTS = {"holder": "h/41-20261122T000000Z-abcd", "issue": 41, "repo": "
 
 
 CLEAN = {"findings": [], "acceptance": [{"id": "x", "met": True, "evidence": "e"}]}
-UNNAMED = {"findings": [{"severity": "critical", "file": "", "failing_input": "", "summary": "s"}]}
+UNNAMED = {"findings": [{"severity": "critical", "file": "", "failing_input": "", "summary": "s", "kind": "other"}]}
 SHIPPED_MEMBERS = {
     "contract": ({"capabilities": {"review.code": {"state": "available"}, "review.plan": {"state": "available"}}},
                  {"capabilities": {"review.code": {"state": "blocked"}, "review.plan": {"state": "available"}}}),

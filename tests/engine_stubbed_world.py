@@ -8,14 +8,17 @@ the other methods read what the run left: its result line, its run directories a
 claim comments and the launches. `replies` overrides the default replies by step id (an entry
 `<step>.<visit>` answers that visit only); `review_code` is the answer list of the `codex-companion`
 stand-in that makes the independent code review supported; `conditions` is the contract's
-`verification_conditions`; `before_pull_request` makes the fixture declare the pre-pull-request commands
-(lint and the touched-only test), and `slot_history()` reads the slot's history lines.
+`verification_conditions`; `before_pull_request` makes the fixture declare the pre-pull-request
+commands (lint and the touched-only test), and `slot_history()` reads the slot's history lines.
+`fixtures` is an `AdoptedFixtures` that supplies the fixture as a copy of one adopted once; `None`
+adopts a new one.
 
 The run installs the real lifecycle guard on a confirmed row for the fixture (the fixture's owner is
 not an authorized owner, so only the row authorizes it): `guard(text, cwd)` runs the installed hook
 and `guard_log` holds every payload it judged. A fake pull-request forge
 (`tests/fixtures/engine-stubbed-run/gh_pulls.py`) fronts the tracker's `gh` over the bare origin;
-`pulls()`, `lock_refs()` and `origin_tip(branch)` read what it left. `required_checks` is the
+`pulls()`, `lock_refs()` and `origin_tip(branch)` read what it left, and `visited_steps()` the
+(procedure, step) pairs every run entered (`visited()` their step ids). `required_checks` is the
 contract's `merge.required_checks` (`()` declares none and the member is absent), `rollup` the pull
 requests' `statusCheckRollup` (default: one green `Fixture Checks` run), `forge_events` the one-shot
 events that fire on the first `statusCheckRollup` read of a pull request (`"move-head"` adds a commit
@@ -56,7 +59,7 @@ from pathlib import Path
 from agent_tools.claims import forge_markers
 from agent_tools.delivery import issue_branch
 from agent_tools.delivery.engine_guard import payload
-from tests.engine_fixture import FixtureProject
+from tests.engine_fixture import AdoptedFixtures, FixtureProject
 from tests.engine_guards import script, standin_guard, write_settings
 from tests.forge_world import ForgeWorld
 from tests.guard_policy_world import REAL_GIT, REPO_ROOT, GuardPolicyWorld
@@ -115,7 +118,8 @@ class StubbedRun:
                  rollup: list | None = None, forge_events=(), lock_release_fails: bool = False,
                  before_pull_request: bool = False, rollups: list[list] | None = None,
                  advance_main: int = 0, main_change: dict | None = None, merge_behind: int = 0,
-                 merge_policy: int = 0, blocks=(), fail_once=()) -> None:
+                 merge_policy: int = 0, blocks=(), fail_once=(),
+                 fixtures: AdoptedFixtures | None = None) -> None:
         self.test = test_case
         self.issue = issue
         self.title = title
@@ -123,9 +127,10 @@ class StubbedRun:
         self.companion_log = self.world.tmp / "companion.log"
         if review_code is not None:
             self._install_companion(review_code)
-        self.fixture = FixtureProject(test_case, self.world, review_code=review_code is not None,
-                                      conditions=conditions, required_checks=required_checks,
-                                      before_pull_request=before_pull_request)
+        options = {"review_code": review_code is not None, "conditions": conditions,
+                   "required_checks": required_checks, "before_pull_request": before_pull_request}
+        self.fixture = (FixtureProject(test_case, self.world, **options) if fixtures is None
+                        else fixtures.project(test_case, self.world, **options))
         self.forge = ForgeWorld(test_case)
         slug = self.fixture.slug
         self.forge.comment_store(slug, issue, comments, labels=list(labels), fail_once=list(fail_once))
@@ -296,6 +301,16 @@ class StubbedRun:
     def events(run: Path) -> list[dict]:
         return [json.loads(line) for line in
                 (run / "events.jsonl").read_text(encoding="utf-8").splitlines() if line]
+
+    def visited_steps(self) -> set[tuple[str, str]]:
+        """The (procedure, step) of every `step_entered` and `transition_taken` event of every run, root and child."""
+        return {(json.loads((run / "run.json").read_text(encoding="utf-8"))["procedure"], event["step"])
+                for run in self._run_dirs() for event in self.events(run)
+                if event["event"] in ("step_entered", "transition_taken")}
+
+    def visited(self) -> set[str]:
+        """The step ids `visited_steps` holds, whatever procedure each belongs to."""
+        return {step for _, step in self.visited_steps()}
 
     def transitions(self, run: Path) -> list[tuple[str, str]]:
         return [(event["step"], event["outcome"]) for event in self.events(run)

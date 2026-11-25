@@ -11,6 +11,7 @@ import hashlib
 import importlib.util
 import io
 import os
+import subprocess
 import tempfile
 import time
 import unittest
@@ -18,7 +19,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.console import permit, prompt_card, sprints
+from agent_tools.console import permit, prompt_card, sprint, sprints
 from agent_tools.release import release
 from agent_tools.console.permit import (ALLOW, DENY, Forge, ForgeUnreadable, Grant, judge,
                                         memoized, mentions, merge_target, words)
@@ -628,6 +629,157 @@ class JudgeTest(unittest.TestCase):
         self.fake.pr_error = ForgeUnreadable("boom")
         self.assertRefused(self.merge, permit.FORGE_UNREADABLE.format(reason="boom"))
 
+    EXHAUSTED = ("Post \"https://api.github.com/x\": dial tcp 140.82.112.5:443: "
+                 "connect: can't assign requested address")
+    PULL_JSON = ('{"head": {"ref": "issue-12-x", "sha": "' + SHA + '", "repo": {"full_name": "o/r"}}, '
+                 '"base": {"ref": "main"}}')
+
+    def gh_answering(self, *stderrs, took=0.0, clock=None):
+        """The real readers over the `gh` subprocess boundary: each stderr in turn as a failed call, then
+        the open pull request. Each call lasts `took` seconds on `clock` when one is given."""
+        answers = [*stderrs]
+        calls = []
+
+        def run(argv, **kwargs):
+            calls.append(argv)
+            if clock is not None:
+                clock[0] += took
+            if answers:
+                return mock.Mock(returncode=1, stdout="", stderr=answers.pop(0))
+            return mock.Mock(returncode=0, stdout=self.PULL_JSON, stderr="")
+        sleeps = []
+
+        def sleep(seconds):
+            sleeps.append(seconds)
+            if clock is not None:
+                clock[0] += seconds
+        stack = contextlib.ExitStack()
+        stack.enter_context(mock.patch.object(permit.forge_api.subprocess, "run", side_effect=run))
+        stack.enter_context(mock.patch("time.sleep", side_effect=sleep))
+        if clock is not None:
+            stack.enter_context(mock.patch("time.monotonic", side_effect=lambda: clock[0]))
+        return stack, calls, sleeps
+
+    def test_a_lookup_that_hits_port_exhaustion_and_then_answers_is_judged_normally(self):
+        stack, calls, sleeps = self.gh_answering(self.EXHAUSTED, self.EXHAUSTED)
+        with stack:
+            verdict = judge(self.merge, self.grant, permit.FORGE)
+        self.assertEqual((ALLOW, {"pr": 7, "head": SHA}), (verdict.decision, dict(verdict.target)))
+        self.assertEqual(3, len(calls))
+        self.assertEqual(2, len(sleeps))
+        self.assertTrue(all(0 < pause <= 5 for pause in sleeps), sleeps)
+
+    def test_a_lookup_that_keeps_hitting_port_exhaustion_is_refused_in_plain_words(self):
+        stack, calls, sleeps = self.gh_answering(*[self.EXHAUSTED] * 20)
+        with stack:
+            verdict = judge(self.merge, self.grant, permit.FORGE)
+        self.assertEqual(DENY, verdict.decision)
+        self.assertEqual(permit.FORGE_UNREADABLE.format(reason=permit.PORTS_EXHAUSTED), verdict.reason)
+        self.assertIn("local network ports", verdict.reason)
+        self.assertIn("again", verdict.reason)
+        self.assertNotIn("dial tcp", verdict.reason)
+        self.assertGreater(len(calls), 1)
+        self.assertLess(len(calls), 10)
+        self.assertEqual(len(calls) - 1, len(sleeps))
+
+    def test_the_retries_of_one_judgement_end_before_the_hook_request_times_out(self):
+        """Four failed lookups of 2 s each and the pauses between them would outlast the ten seconds."""
+        clock = [100.0]
+        stack, calls, sleeps = self.gh_answering(*[self.EXHAUSTED] * 20, took=2.0, clock=clock)
+        with stack:
+            verdict = judge(self.merge, self.grant, permit.FORGE)
+        self.assertEqual(DENY, verdict.decision)
+        self.assertEqual(permit.FORGE_UNREADABLE.format(reason=permit.PORTS_EXHAUSTED), verdict.reason)
+        self.assertLess(clock[0] - 100.0, sprint.TIMEOUT_SECONDS)
+        self.assertLess(permit.LOOKUP_BUDGET, sprint.TIMEOUT_SECONDS)
+
+    def test_the_retry_pauses_of_two_lookups_of_one_judgement_share_the_budget(self):
+        """The first lookup recovers after pauses of 0.5, 1 and 2 s; the second, failing throughout, may not
+        pause as long again."""
+        clock = [100.0]
+        sleeps = []
+        outcomes = [True] * 3 + [False] + [True] * 20
+
+        def api_get(path):
+            if outcomes.pop(0):
+                raise permit.forge_api.ForgeError("gh_failed", "exhausted", exhausted=True)
+            return {}
+
+        def pause(seconds):
+            sleeps.append(seconds)
+            clock[0] += seconds
+
+        def reader(read):
+            def call(*args):
+                permit._get("path", "thing")
+                return read(*args)
+            return call
+        forge = Forge(reader(self.fake.read_pr), reader(self.fake.read_run), reader(self.fake.read_required),
+                      reader(self.fake.read_release_pr))
+        with mock.patch.object(permit.forge_api, "api_get", side_effect=api_get), \
+                mock.patch("time.sleep", side_effect=pause), \
+                mock.patch("time.monotonic", side_effect=lambda: clock[0]):
+            verdict = judge(self.rerun, self.grant, forge)
+        self.assertEqual(DENY, verdict.decision)
+        self.assertEqual(permit.FORGE_UNREADABLE.format(reason=permit.PORTS_EXHAUSTED), verdict.reason)
+        self.assertGreater(len(sleeps), 3)
+        self.assertLessEqual(sum(sleeps), permit.LOOKUP_BUDGET)
+
+    def test_slow_lookups_that_succeed_together_past_the_retry_budget_are_judged_normally(self):
+        """A rerun's three reads of 3 s each end at 9 s, past the retry budget and inside the hook's 10 s:
+        every call is made and the verdict is the normal one."""
+        clock = [100.0]
+        gh_calls = []
+
+        def run(argv, timeout, **kwargs):
+            gh_calls.append(timeout)
+            clock[0] += 3.0
+            return mock.Mock(returncode=0, stdout="{}", stderr="")
+
+        def reader(read):
+            def call(*args):
+                permit.forge_api.run_gh(["api", "x"])
+                return read(*args)
+            return call
+        forge = Forge(reader(self.fake.read_pr), reader(self.fake.read_run), reader(self.fake.read_required),
+                      reader(self.fake.read_release_pr))
+        with mock.patch.object(permit.forge_api.subprocess, "run", side_effect=run), \
+                mock.patch("time.monotonic", side_effect=lambda: clock[0]):
+            verdict = judge(self.rerun, self.grant, forge)
+        self.assertEqual(ALLOW, verdict.decision, verdict.reason)
+        self.assertGreater(clock[0] - 100.0, permit.LOOKUP_BUDGET)
+        self.assertEqual([permit.forge_api.TIMEOUT] * len(gh_calls), gh_calls)
+
+    def test_a_call_is_not_cut_short_by_the_retry_budget(self):
+        seen = []
+
+        def run(argv, timeout, **kwargs):
+            seen.append(timeout)
+            raise subprocess.TimeoutExpired(argv, timeout)
+        with mock.patch.object(permit.forge_api.subprocess, "run", side_effect=run):
+            verdict = judge(self.merge, self.grant, permit.FORGE)
+        self.assertEqual(DENY, verdict.decision)
+        self.assertEqual([permit.forge_api.TIMEOUT], seen)
+
+    def test_another_lookup_error_is_not_retried(self):
+        stack, calls, sleeps = self.gh_answering("HTTP 502 secret detail")
+        with stack:
+            verdict = judge(self.merge, self.grant, permit.FORGE)
+        self.assertEqual(DENY, verdict.decision)
+        self.assertEqual(permit.FORGE_UNREADABLE.format(reason="pull request 7 could not be read"),
+                         verdict.reason)
+        self.assertEqual((1, []), (len(calls), sleeps))
+
+    def test_a_repository_named_like_the_socket_error_does_not_change_how_another_error_is_handled(self):
+        stderr = ('Get "https://api.github.com/repos/o/EADDRNOTAVAIL/pulls/7": dial tcp 1.2.3.4:443: '
+                  'connect: connection refused')
+        stack, calls, sleeps = self.gh_answering(stderr)
+        with stack:
+            verdict = judge(self.merge, self.grant, permit.FORGE)
+        self.assertEqual(permit.FORGE_UNREADABLE.format(reason="pull request 7 could not be read"),
+                         verdict.reason)
+        self.assertEqual((1, []), (len(calls), sleeps))
+
     def test_a_command_naming_no_granted_verb_has_no_decision(self):
         for command in ("git status", "gh pr view 7", "release transaction preview --repo-root r",
                         "echo hi"):
@@ -747,6 +899,26 @@ class ReaderTest(unittest.TestCase):
                 with self.subTest(name), self.assertRaises(ForgeUnreadable) as caught:
                     getattr(permit, name)(*args)
                 self.assertNotIn("secret", str(caught.exception))
+
+    def test_gh_stderr_showing_address_exhaustion_marks_the_forge_error(self):
+        for stderr, exhausted in (
+                ("Get \"https://api.github.com/x\": dial tcp 1.2.3.4:443: connect: can't assign requested address",
+                 True),
+                ("dial tcp 1.2.3.4:443: connect: cannot assign requested address", True),
+                ("connect EADDRNOTAVAIL 1.2.3.4:443", True),
+                ("Get \"https://api.github.com/repos/o/EADDRNOTAVAIL/pulls/7\": dial tcp 1.2.3.4:443: "
+                 "connect: connection refused", False),
+                ("HTTP 404: repos/o/cannot assign requested address/pulls/7", False),
+                ("gh: upstream connect: cannot assign requested address (HTTP 502)", False),
+                ("HTTP 502: upstream connect: cannot assign requested address", False),
+                ("dial tcp 1.2.3.4:443: connect: connection refused", False),
+                ("HTTP 502 Bad Gateway", False)):
+            done = mock.Mock(returncode=1, stdout="", stderr=stderr)
+            with self.subTest(stderr), mock.patch.object(permit.forge_api.subprocess, "run",
+                                                         return_value=done):
+                with self.assertRaises(permit.forge_api.ForgeError) as caught:
+                    permit.forge_api.run_gh(["api", "x"])
+                self.assertEqual(exhausted, caught.exception.exhausted)
 
     def test_a_pull_request_with_a_missing_member_is_unreadable(self):
         for broken in ({**self.PULL, "head": {**self.PULL["head"], "repo": None}},

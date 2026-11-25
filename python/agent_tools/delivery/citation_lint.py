@@ -23,7 +23,7 @@ problem here. `suppression_problems` is that check alone, which `standards_lint.
 every caller of the lint, the conformance check included, fails an unknown id.
 
 A rule is a `###` rule-id heading outside a fence and an HTML comment or block
-(`agent_tools.delivery.rule_ids.scan`, the reading the heading test uses), so a rule commented
+(`agent_tools.delivery.rule_reader.scan`, the reading the heading test uses), so a rule commented
 out or shown as an example defines nothing. The platform layer is `the-bar.md` and each
 `stacks/*.md` of the platform standards directory; the project layer is each `*.md` of the
 repository's `docs/standards` except `README.md`. A well-formed citation resolves against
@@ -61,52 +61,16 @@ from __future__ import annotations
 import os
 import subprocess
 from pathlib import Path
-from typing import NamedTuple
 
 from agent_tools.delivery.context_map_lint import CITATION_RE
 from agent_tools.delivery.never_rise import BINARY_PROBE_BYTES, SELECTION_VARIABLES
-from agent_tools.delivery.rule_ids import (
-    CITATION, CITE, PROJECT_PREFIX, RULE_ID_HEADING, Marker, citations, is_python, markers, prefix_of,
-    scan)
+from agent_tools.delivery.rule_ids import CITATION, CITE, Marker, citations, is_python, markers
+from agent_tools.delivery.rule_reader import (
+    PROJECT_PREFIX, PROJECT_STANDARDS, Rule, platform_rules, prefix_of, project_rules)
 from agent_tools.delivery.suite_runner import SUITE_RECIPE, suite_members
 from agent_tools.delivery.verification_command import members
 
 PACKAGE_SOURCE = "python"
-PROJECT_STANDARDS = "docs/standards"
-
-
-class Rule(NamedTuple):
-    id: str
-    title: str
-
-
-def _headings(path: Path) -> list[Rule]:
-    rules = []
-    for _, _, line in scan(path.read_text("utf-8")):
-        match = RULE_ID_HEADING.match(line)
-        if match and match["hashes"] == "###":
-            rules.append(Rule(match["prefix"] + match["number"], match["title"]))
-    return rules
-
-
-def platform_rules(directory: Path) -> list[Rule]:
-    """The rules of `the-bar.md`, then of each `stacks/*.md` by name, in file order."""
-    bar = directory / "the-bar.md"
-    if not bar.is_file():
-        raise ValueError(f"{directory} has no the-bar.md")
-    rules = _headings(bar)
-    for shard in sorted((directory / "stacks").glob("*.md")):
-        rules += _headings(shard)
-    return rules
-
-
-def project_rules(directory: Path) -> list[Rule]:
-    """The rules of each `*.md` of `directory` but `README.md`, by name, in file order."""
-    rules: list[Rule] = []
-    for shard in sorted(directory.glob("*.md")):
-        if shard.name != "README.md":
-            rules += _headings(shard)
-    return rules
 
 
 def enforcers(root: Path) -> list[str]:
