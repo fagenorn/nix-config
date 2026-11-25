@@ -53,8 +53,8 @@ descendant still running after the run ends may recreate part of the removed dir
 Jobs and order (issue 604). At most `--jobs N` members run at once. The default is
 `SUITE_RUNNER_JOBS` when that variable is set and non-empty, else `min(8, CPUs - 2)` with a
 floor of 1 (also when the CPU count is unknown); an explicit `--jobs` wins over both, and a
-bad `SUITE_RUNNER_JOBS` is a usage error (exit 2); the hosted CI job sets it to 4, the vCPUs
-of its runner (`.github/workflows/ci.yaml:101`). In parallel mode members start
+bad `SUITE_RUNNER_JOBS` is a usage error (exit 2); the hosted CI job sets it to 6, the count
+measured fastest on its runner (`.github/workflows/ci.yaml:100`). In parallel mode members start
 longest-first (LPT): the order comes from `python/agent_tools/delivery/suite_timings.json`, a
 committed map of member path to wall seconds, refreshed from main's CI `suite-timing`
 artifacts (the median per member over up to three runs, registered members only; the newest
