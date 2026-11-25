@@ -62,7 +62,9 @@ TEXT_LIMIT: int = 1 << 20
 
 DECLARATION = re.compile(
     r"(?<![\w.'\"-])(?:config\s*\.\s*)?(?:git-hooks|pre-commit)\s*[.=]")
-ALIAS = re.compile(r"[\w'-]+(?:\s*\.\s*[\w'-]+)*")
+TOKEN = re.compile(
+    rf"(?P<decl>{DECLARATION.pattern})|(?P<kw>(?<![\w.'\"-])(?:let|in)(?![\w'-]))"
+    r"|(?P<open>[({\[])|(?P<close>[)}\]])")
 SEGMENT = re.compile(r"\s*([\w'-]+|\"_*\")")
 DOT = re.compile(r"\s*\.")
 NONBLANK = re.compile(r"\s*\S")
@@ -222,26 +224,48 @@ def _active(leaves: list[tuple[list[str], str]]) -> bool:
     return not all(groups.values())
 
 
+def _declarations(text: str) -> list[tuple[int, bool]]:
+    """Each `DECLARATION` start in `text` and whether a `let` binds it (a local, not an option)."""
+    frames: list[str] = []
+    found: list[tuple[int, bool]] = []
+    for token in TOKEN.finditer(text):
+        kind = token.lastgroup
+        if kind == "decl":
+            before = text[:token.start()].rstrip()
+            binds = bool(frames) and frames[-1] == "let" and before.endswith((";", "let"))
+            found.append((token.start(), binds))
+        elif kind == "open" or (kind == "kw" and token.group() == "let"):
+            frames.append("let" if kind == "kw" else "bracket")
+        elif kind == "kw" and frames and frames[-1] == "let":
+            frames.pop()
+        elif kind == "close":
+            while frames and frames.pop() != "bracket":
+                pass
+    return found
+
+
 def declares_hooks(text: str) -> bool:
     """Whether a `devenv.nix` text sets devenv git hooks, wherever the setting sits in a line.
 
     Comments and string literals are skipped, and so is a hook that is only switched off
-    (`enable = false`, in dotted or nested form, with its other settings), a name that
-    is only a `let` alias of another value, and a `config.` read that assigns nothing.
+    (`enable = false`, in dotted or nested form, with its other settings), a `let` binding
+    that is not an attribute set, any read of one, and a `config.` read that assigns nothing.
     """
     text = _code(text)
+    found = _declarations(text)
+    bound = {_path(text, start)[0][0] for start, binds in found if binds}
     leaves: list[tuple[list[str], str]] = []
-    for match in DECLARATION.finditer(text):
-        names, after = _path(text, match.start())
+    for start, binds in found:
+        names, after = _path(text, start)
         prefixed = len(names) > 1 and names[0] == "config"
         equals = EQUALS.match(text, after)
-        if not equals and prefixed:
-            continue
         if not equals:
+            if prefixed or names[0] in bound:
+                continue
             return True
         names = names[1:] if prefixed else names
         value = text[equals.end():_value_end(text, equals.end())].strip()
-        if len(names) == 1 and ALIAS.fullmatch(value):
+        if binds and _attribute_set(value) is None:
             continue
         _leaves(names, value, leaves)
     return _active(leaves)

@@ -284,7 +284,10 @@ class HookInstallRuleTest(unittest.TestCase):
                      "{ pkgs, ... }: let pre-commit = pkgs.pre-commit; in { packages = [ pre-commit ]; "
                      "git-hooks.hooks.x.enable = true; }",
                      "{ git-hooks.hooks.a.enable = false; git-hooks.hooks.a.entry = \"t\"; "
-                     "git-hooks.hooks.b.entry = \"t\"; }"):
+                     "git-hooks.hooks.b.entry = \"t\"; }",
+                     "let h = { hooks.x.enable = true; }; in { git-hooks = h; }",
+                     "let cfg = { hooks.x.enable = true; }; in { pre-commit = cfg; }",
+                     "let git-hooks = { hooks.x.enable = true; }; in { inherit git-hooks; }"):
             self.assertTrue(hook_install.declares_hooks(text), text)
         for text in ("# git-hooks.hooks.x", 'scripts.a.exec = "pre-commit run";', "{ }",
                      "{\n  git-hooks.hooks.shellcheck.enable = false;\n}",
@@ -293,6 +296,9 @@ class HookInstallRuleTest(unittest.TestCase):
                      "{ config.git-hooks.hooks.x.enable = false; }",
                      "{ packages = [ config.git-hooks.package ]; }",
                      "{ pkgs, ... }: let pre-commit = pkgs.pre-commit; in { packages = [ pre-commit ]; }",
+                     "{ pkgs, ... }: let pre-commit = pkgs.pre-commit; in { packages = [ pre-commit.out ]; }",
+                     "let pre-commit = pkgs.callPackage ./pc.nix { }; in { packages = [ pre-commit ]; }",
+                     "let pre-commit = pkgs.pre-commit.override { x = 1; }; in { packages = [ pre-commit ]; }",
                      "{ git-hooks.hooks.check.enable = false; git-hooks.hooks.check.entry = \"true\"; }",
                      "{ git-hooks.hooks.check.entry = \"true\"; git-hooks.hooks.check.enable = false; }",
                      "{ git-hooks.hooks.check = { entry = \"a\"; }; git-hooks.hooks.check.enable = false; }",
