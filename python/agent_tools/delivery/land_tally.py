@@ -166,7 +166,7 @@ def entered(runs: Sequence[Path], step: str) -> int:
                if event["event"] == "step_entered" and event["step"] == step)
 
 
-def _stored(run_dir: Path, step: str, visit: int) -> dict:
+def stored(run_dir: Path, step: str, visit: int) -> dict:
     path = Path(run_dir) / "results" / f"{step}.{visit}.json"
     try:
         loaded = json.loads(path.read_text(encoding="utf-8"))
@@ -189,7 +189,7 @@ def lock_answers(run_dir: Path) -> list[list[dict]]:
         if step not in LOCK_WAIT_STEPS:
             continue
         if outcome == "contended":
-            lock = _stored(run_dir, step, visit).get("lock")
+            lock = stored(run_dir, step, visit).get("lock")
             runs[-1].append(lock if isinstance(lock, dict) else {})
         elif outcome == "held" and runs[-1]:
             runs.append([])
@@ -225,7 +225,7 @@ def locked_shas(run_dir: Path) -> set[str]:
     shas: set[str] = set()
     for step, visit, outcome in _graded(run_dir):
         if outcome in HOLDS:
-            lock = _stored(run_dir, step, visit).get("lock")
+            lock = stored(run_dir, step, visit).get("lock")
             sha = lock.get("lock_sha") if isinstance(lock, dict) else None
             if isinstance(sha, str):
                 shas.add(sha)
@@ -240,4 +240,4 @@ def held_shas(holder: str, root: Path | None = None) -> set[str]:
 def latest_result(run_dir: Path, steps: Sequence[str]) -> dict | None:
     """The stored result of the latest graded visit among `steps`; None when none was graded."""
     graded = [(step, visit) for step, visit, _ in _graded(run_dir) if step in steps]
-    return _stored(run_dir, *graded[-1]) if graded else None
+    return stored(run_dir, *graded[-1]) if graded else None

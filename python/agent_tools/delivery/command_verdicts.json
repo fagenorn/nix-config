@@ -177,5 +177,12 @@
     }
   },
   "verify-pending": null,
+  "verify-rounds": {
+    "subcommands": {
+      "round": ["passed", "retest", "fix", "spent", "verify", "error"],
+      "fix-range": ["read", "unread", "error"],
+      "retested": ["done", "untested", "dirty", "error"]
+    }
+  },
   "verify-slot": null
 }
