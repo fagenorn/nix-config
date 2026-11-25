@@ -71,6 +71,10 @@ to the waiters whose repository holds fewer slots than `REPOSITORY_LIMIT`; only 
 admitted waiter takes a slot, so no later waiter takes one before it. A waiter that its
 repository holds back keeps its place and blocks no one. An ordinary run still probes the live
 marker when it takes a slot, so it defers to a waiting live run of an older `verify-slot`.
+A run that reaches `--wait-limit` keeps its ticket reserved, unlocked and holding back no
+waiter; the same argv in the same working directory takes the place back while the reservation is
+under `RESUME_SECONDS` old or while a waiter that joined after it still waits. A run ended by a
+signal or an error gives its ticket up.
 
 History. Every run that got past setup appends one line to `history.jsonl` in the slot directory
 (see `agent_tools.delivery.verify_history`), after it gave its slot and repository lock back:
@@ -117,7 +121,7 @@ Exit codes (D8). The command's own code when it ran; a command ended by signal `
 `128 + s`. 2 for a usage or setup error (no `--`, no command after it, a bad `--wait-limit`,
 an unset or empty `HOME`, an invalid declaration, a slot directory that cannot be made),
 with nothing run. 75 (`NO_SLOT_EXIT`) when no slot came free within `--wait-limit`, with
-nothing run. 127 when the command cannot start; the slot is freed.
+nothing run and its place in line reserved. 127 when the command cannot start; the slot is freed.
 
 Signals. SIGTERM, SIGHUP and SIGINT are handled. While the command runs, the signal is
 forwarded to it and the exit code is `128 + signal` once it has ended (SIGTERM gives 143).
@@ -421,7 +425,8 @@ def _acquire(directory: Path, count: int, wait_limit: int | None, run: _Run, liv
 
     `place` is the place the run joined the queue at, None when it never joined. A live run holds
     the marker while it waits with its repository under the limit and drops it on every exit; a
-    run that leaves without a slot gives its ticket up.
+    run that reaches the wait limit reserves its ticket, without the queue lock, and any other run
+    that leaves without a slot gives its ticket up.
     """
     marker = None
     ticket = None
@@ -439,6 +444,9 @@ def _acquire(directory: Path, count: int, wait_limit: int | None, run: _Run, liv
             if ((waiting or contended or registering) and wait_limit is not None
                     and time.monotonic() - start >= wait_limit):
                 _say(NO_SLOT_LINE.format(limit=wait_limit))
+                if ticket is not None:
+                    reserved, ticket = ticket, None
+                    verify_queue.reserve(reserved, time.time())
                 return None, NO_SLOT_EXIT, joined_place
             if registering:
                 marker = _register_live(directory)

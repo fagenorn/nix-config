@@ -842,6 +842,79 @@ class VerifySlotTest(SlotHarness, unittest.TestCase):
         self.assertGreaterEqual(float(self.mark("c", "start").read_text()),
                                 float(self.mark("b", "end").read_text()))
 
+    def plain_directory(self, name):
+        directory = Path(self.home) / name
+        directory.mkdir()
+        return str(directory)
+
+    def queue_with_a_waiter_in_each_directory(self, *b_options):
+        """`a` holds the one slot; `b` waits first in `db` and `c` second in `dc`; both are released."""
+        holder = self.start("a")
+        self.assertTrue(wait_for(self.mark("a", "start")))
+        for name in ("b", "c"):
+            self.release(name)
+        first = self.start("b", *b_options, cwd=self.plain_directory("db"))
+        self.assertEqual(read_place(first)[0], 1)
+        second = self.start("c", cwd=self.plain_directory("dc"))
+        self.assertEqual(read_place(second)[0], 2)
+        return holder, first, second
+
+    def test_a_timed_out_request_asked_again_resumes_its_earlier_place(self):
+        holder, first, second = self.queue_with_a_waiter_in_each_directory("--wait-limit", "2")
+        self.assertEqual(self.finish(first)[0], NO_SLOT_EXIT)
+        again = self.start("b", cwd=str(Path(self.home) / "db"))
+        self.assertEqual(read_place(again)[0], 1)
+        self.release("a")
+        for proc in (holder, again, second):
+            self.assertEqual(self.finish(proc)[0], 0)
+        self.assertGreaterEqual(float(self.mark("b", "start").read_text()),
+                                float(self.mark("a", "end").read_text()))
+        self.assertGreaterEqual(float(self.mark("c", "start").read_text()),
+                                float(self.mark("b", "end").read_text()))
+
+    def test_a_request_that_times_out_while_the_queue_lock_is_busy_keeps_its_place(self):
+        holder, first, second = self.queue_with_a_waiter_in_each_directory("--wait-limit", "3")
+        lock = None
+        end = time.monotonic() + 20
+        while lock is None and time.monotonic() < end:
+            lock = verify_queue.lock_queue(self.slots)
+        self.assertIsNotNone(lock)
+        try:
+            self.assertEqual(self.finish(first)[0], NO_SLOT_EXIT)
+        finally:
+            os.close(lock)
+        again = self.start("b", cwd=str(Path(self.home) / "db"))
+        self.assertEqual(read_place(again)[0], 1)
+        self.release("a")
+        for proc in (holder, again, second):
+            self.assertEqual(self.finish(proc)[0], 0)
+        self.assertGreaterEqual(float(self.mark("c", "start").read_text()),
+                                float(self.mark("b", "end").read_text()))
+
+    def test_another_command_in_the_same_directory_does_not_take_a_timed_out_place(self):
+        holder, first, second = self.queue_with_a_waiter_in_each_directory("--wait-limit", "2")
+        self.assertEqual(self.finish(first)[0], NO_SLOT_EXIT)
+        self.release("e")
+        other = self.start("e", cwd=str(Path(self.home) / "db"))
+        self.assertEqual(read_place(other)[0], 2)
+        self.release("a")
+        for proc in (holder, second, other):
+            self.assertEqual(self.finish(proc)[0], 0)
+        self.assertLessEqual(float(self.mark("c", "start").read_text()),
+                             float(self.mark("e", "start").read_text()))
+
+    def test_a_signalled_waiter_does_not_keep_its_place(self):
+        holder, first, second = self.queue_with_a_waiter_in_each_directory()
+        first.send_signal(signal.SIGTERM)
+        self.assertEqual(self.finish(first)[0], 143)
+        again = self.start("b", cwd=str(Path(self.home) / "db"))
+        self.assertEqual(read_place(again)[0], 2)
+        self.release("a")
+        for proc in (holder, second, again):
+            self.assertEqual(self.finish(proc)[0], 0)
+        self.assertLessEqual(float(self.mark("c", "start").read_text()),
+                             float(self.mark("b", "start").read_text()))
+
     def test_a_slot_file_that_is_a_symlink_is_never_written_through(self):
         victim = Path(self.home) / "victim-original"
         victim.write_text("victim-original")
