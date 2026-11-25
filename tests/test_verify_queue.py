@@ -5,6 +5,7 @@ file description of a lock file stands in for another process.
 Run: just agent-workflow-tests
 """
 
+import errno
 import fcntl
 import json
 import os
@@ -169,6 +170,7 @@ class TicketTest(unittest.TestCase):
     def test_a_reservation_outlives_its_window_while_a_later_waiter_waits(self):
         t1 = self.join("k", now=1000)
         t2 = self.join()
+        self.join()
         reserve(t1, 1000)
         late = 1000 + RESUME_SECONDS + 100
         waiters(self.dir, t2, late)
@@ -176,16 +178,53 @@ class TicketTest(unittest.TestCase):
         self.assertEqual(self.join("k", now=late).seq, 1)
 
     def test_a_reservation_expires_after_its_window_once_no_later_waiter_waits(self):
-        t0 = self.join("z")
         t1 = self.join("k", now=1000)
+        t2 = self.join()
+        leave(t2)
         reserve(t1, 1000)
         late = 1000 + RESUME_SECONDS + 1
         t3 = self.join("k", now=late)
-        self.assertEqual(t3.seq, 3)
+        self.assertEqual(t3.seq, 2)
         self.assertNotEqual(t3.path, t1.path)
-        leave(t3)
-        waiters(self.dir, t0, late)
+        waiters(self.dir, t3, late)
         self.assertFalse(t1.path.exists())
+
+    def test_a_waiter_that_joined_after_the_window_does_not_keep_the_expired_reservation(self):
+        t1 = self.join("k", now=1000)
+        reserve(t1, 1000)
+        late = 1000 + RESUME_SECONDS + 3600
+        x = self.join("x", now=late)
+        self.assertEqual(x.seq, 2)
+        waiters(self.dir, x, late)
+        self.assertFalse(t1.path.exists())
+        again = self.join("k", now=late + 60)
+        self.assertEqual(again.seq, 3)
+        self.assertEqual([w.seq for w in waiters(self.dir, again, late + 60)], [2, 3])
+
+    def test_a_ticket_without_a_reserved_until_is_no_waiter_and_never_stops_a_join(self):
+        broken = self.dir / "ticket-000000000001.lock"
+        broken.write_text(json.dumps({"key": "k", "live": False, "repository": None}))
+        ticket = self.join("k", now=0)
+        self.assertEqual(ticket.seq, 2)
+        self.assertEqual([w.seq for w in waiters(self.dir, ticket, 0)], [2])
+        self.assertFalse(broken.exists())
+
+    def test_a_scan_that_runs_out_of_descriptors_removes_no_ticket(self):
+        t1, t2 = self.join("one"), self.join("two")
+        refused = OSError(errno.EMFILE, "Too many open files")
+        real = verify_queue.open_shared
+
+        def open_shared_but_for_t1(path):
+            if path == t1.path:
+                raise refused
+            return real(path)
+
+        with mock.patch.object(verify_queue, "open_shared", side_effect=open_shared_but_for_t1):
+            with self.assertRaises(OSError):
+                waiters(self.dir, t2, 0)
+            with self.assertRaises(OSError):
+                self.join("three")
+        self.assertTrue(t1.path.exists())
 
     def test_another_key_never_takes_a_reserved_ticket(self):
         t1 = self.join("k")
@@ -241,6 +280,14 @@ class HolderFileTest(unittest.TestCase):
             os.close(descriptor)
         except OSError:
             pass
+
+    def test_a_long_command_still_leaves_a_description_the_reader_parses(self):
+        descriptor = self.lock("slot-0.lock")
+        record_holder(descriptor, "o/r", "just " + "x" * 5000)
+        (holder,) = read_holders(self.dir)
+        self.assertTrue(holder.known)
+        self.assertEqual(holder.repository, "o/r")
+        self.assertTrue(holder.command.startswith("just xxx"))
 
     def test_a_held_slot_file_describes_its_holder(self):
         fd1 = self.lock("slot-1.lock")

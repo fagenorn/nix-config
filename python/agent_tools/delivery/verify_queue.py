@@ -18,7 +18,8 @@ Reservation. A waiter that is about to run its command's retry gives its place b
 the ticket keeps its number and carries `reserved_until`, unlocked. A reserved ticket is never a
 waiter. The same request (`request_key`: working directory and argv) takes it back with `join`
 while `reserved_until` has not passed, or later while some other waiter with a higher number still
-waits; any other request numbers a new ticket one past every ticket name present.
+waits (a waiter polling its own ticket is not another waiter, so an expired reservation goes at the
+first poll of a waiter that joined after it); any other request numbers a new ticket one past every ticket name present.
 
 Admission. Waiters are served live first, then by ticket number (`service_order`). `admitted` walks
 that order: a waiter whose repository already has `repository_limit` holders is skipped and takes no
@@ -32,6 +33,7 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
+import errno
 import fcntl
 import hashlib
 import json
@@ -56,6 +58,8 @@ _SLOT_NAME = re.compile(r"^slot-(\d+)\.lock$")
 _OPEN_FLAGS = os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK
 _READ_BYTES = 4096
 _LOCK_NOW = fcntl.LOCK_EX | fcntl.LOCK_NB
+_NO_DESCRIPTOR = (errno.EMFILE, errno.ENFILE)
+MAX_COMMAND_CHARS = 200
 
 
 @dataclass(frozen=True)
@@ -227,7 +231,9 @@ def _parse(descriptor: int) -> dict | None:
     if not isinstance(record, dict):
         return None
     key, live, repository = record.get("key"), record.get("live"), record.get("repository")
-    until = record.get("reserved_until")
+    if "reserved_until" not in record:
+        return None
+    until = record["reserved_until"]
     if not isinstance(key, str) or not isinstance(live, bool):
         return None
     if repository is not None and not isinstance(repository, str):
@@ -254,10 +260,16 @@ def _unlink(path: Path) -> None:
 
 
 def _probe(path: Path) -> tuple[int, bool] | None:
-    """Open a ticket and try its lock: `(descriptor, locked_by_another)`, or None when it is refused."""
+    """Open a ticket and try its lock: `(descriptor, locked_by_another)`, or None when it is refused.
+
+    A process that has run out of descriptors learns nothing about the ticket, so that error is
+    raised rather than read as a refusal: a refused ticket is removed.
+    """
     try:
         descriptor = open_shared(path)
-    except OSError:
+    except OSError as error:
+        if error.errno in _NO_DESCRIPTOR:
+            raise
         return None
     try:
         fcntl.flock(descriptor, _LOCK_NOW)
@@ -269,15 +281,24 @@ def _probe(path: Path) -> tuple[int, bool] | None:
     return descriptor, False
 
 
+def _close_probed(probed: Sequence[tuple[int, Path, int, bool]]) -> None:
+    for _seq, _path, descriptor, _other in probed:
+        os.close(descriptor)
+
+
 def join(directory: Path, key: str, live: bool, repository: str | None, now: float) -> Ticket:
     """Take back this request's reserved ticket or number a new one; the caller holds the queue lock."""
     probed: list[tuple[int, Path, int, bool]] = []
     highest = 0
-    for seq, path in _tickets(directory):
-        highest = max(highest, seq)
-        result = _probe(path)
-        if result is not None:
-            probed.append((seq, path, result[0], result[1]))
+    try:
+        for seq, path in _tickets(directory):
+            highest = max(highest, seq)
+            result = _probe(path)
+            if result is not None:
+                probed.append((seq, path, result[0], result[1]))
+    except BaseException:
+        _close_probed(probed)
+        raise
     locked = [seq for seq, _path, _descriptor, other in probed if other]
     taken: tuple[int, Path, int] | None = None
     try:
@@ -315,16 +336,22 @@ def join(directory: Path, key: str, live: bool, repository: str | None, now: flo
 def waiters(directory: Path, own: Ticket, now: float) -> list[Waiter]:
     """The waiters now, `own` included; the caller holds the queue lock. Dead tickets are removed."""
     probed: list[tuple[int, Path, int, bool]] = []
-    for seq, path in _tickets(directory):
-        if path == own.path:
-            continue
-        result = _probe(path)
-        if result is None:
-            _unlink(path)
-            continue
-        probed.append((seq, path, result[0], result[1]))
+    try:
+        for seq, path in _tickets(directory):
+            if path == own.path:
+                continue
+            result = _probe(path)
+            if result is None:
+                _unlink(path)
+                continue
+            probed.append((seq, path, result[0], result[1]))
+    except BaseException:
+        _close_probed(probed)
+        raise
     listed = [Waiter(own.seq, own.live, own.repository, own.key)]
-    locked = [own.seq] + [seq for seq, _path, _descriptor, other in probed if other]
+    # The poller's own ticket is no waiter behind a reservation: a reservation that expired before
+    # the poller joined must not outlive its window because of the poller that finds it.
+    locked = [seq for seq, _path, _descriptor, other in probed if other]
     try:
         for seq, path, descriptor, other in probed:
             record = _parse(descriptor)
@@ -361,8 +388,11 @@ def leave(ticket: Ticket) -> None:
 
 
 def record_holder(descriptor: int, repository: str | None, command: str) -> None:
-    """Describe this process as the holder of the slot file `descriptor` locks."""
-    data = json.dumps({"command": command, "pid": os.getpid(), "repository": repository},
+    """Describe this process as the holder of the slot file `descriptor` locks.
+
+    The command is cut to `MAX_COMMAND_CHARS` so the record always fits the reader's `_READ_BYTES`.
+    """
+    data = json.dumps({"command": command[:MAX_COMMAND_CHARS], "pid": os.getpid(), "repository": repository},
                       sort_keys=True).encode("utf-8")
     _write(descriptor, data)
 

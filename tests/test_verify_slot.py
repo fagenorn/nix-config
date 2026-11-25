@@ -777,6 +777,51 @@ class VerifySlotTest(SlotHarness, unittest.TestCase):
         self.assertIsNotNone(held[1])
         self.assertEqual(take(1), (None, "same_repository"))
 
+    def test_a_waiter_behind_a_paused_earlier_waiter_prints_the_holders_that_left(self):
+        self.declare(verify_slots=2)
+        holders = [self.start("x"), self.start("y")]
+        self.assertTrue(wait_for(self.mark("x", "start")))
+        self.assertTrue(wait_for(self.mark("y", "start")))
+        second = self.start("b")
+        self.assertEqual(read_place(second)[0], 1)
+        os.kill(second.pid, signal.SIGSTOP)
+        third = self.start("c")
+        _, shown, _ = read_place(third)
+        self.assertNotEqual(shown, "nothing")
+        self.release("x")
+        self.release("y")
+        read_until(third, is_place(2, lambda text: text == "nothing"), deadline=10)
+        os.kill(second.pid, signal.SIGCONT)
+        self.release("b")
+        self.release("c")
+        for proc in (*holders, second, third):
+            self.assertEqual(self.finish(proc)[0], 0)
+
+    def test_an_ordinary_run_takes_the_slot_a_live_waiter_held_back_by_its_repository_leaves(self):
+        self.declare(verify_slots=2)
+        one = self.repository("alpha-one", "git@github.com:example/alpha.git")
+        two = self.repository("alpha-two", "https://github.com/Example/alpha")
+        beta = self.repository("beta", "git@github.com:example/beta.git")
+        holders = [self.start("x"), self.start("y")]
+        self.assertTrue(wait_for(self.mark("x", "start")))
+        self.assertTrue(wait_for(self.mark("y", "start")))
+        first = self.start("a", "--live", cwd=one)
+        self.assertEqual(read_place(first)[0], 1)
+        second = self.start("b", "--live", cwd=two)
+        self.assertEqual(read_place(second)[0], 2)
+        other = self.start("c", cwd=beta)
+        self.assertEqual(read_place(other)[0], 3)
+        os.kill(second.pid, signal.SIGSTOP)
+        self.release("x")
+        self.assertTrue(wait_for(self.mark("a", "start")))
+        self.release("y")
+        self.assertTrue(wait_for(self.mark("c", "start")))
+        os.kill(second.pid, signal.SIGCONT)
+        for name in ("a", "b", "c"):
+            self.release(name)
+        for proc in (*holders, first, second, other):
+            self.assertEqual(self.finish(proc)[0], 0)
+
     def test_a_waiter_prints_its_place_again_when_it_changes(self):
         first = self.start("a")
         self.assertTrue(wait_for(self.mark("a", "start")))

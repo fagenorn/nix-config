@@ -70,7 +70,9 @@ repository. Free slots go one at a time, in service order (live waiters, then ti
 to the waiters whose repository holds fewer slots than `REPOSITORY_LIMIT`; only the first
 admitted waiter takes a slot, so no later waiter takes one before it. A waiter that its
 repository holds back keeps its place and blocks no one. An ordinary run still probes the live
-marker when it takes a slot, so it defers to a waiting live run of an older `verify-slot`.
+marker when it takes a slot, so it defers to a waiting live run of an older `verify-slot`; while
+a live ticket is queued the marker is not probed, since the queue already serves live waiters first
+and a queued live waiter that its repository holds back may hold the marker until its next poll.
 A run that reaches `--wait-limit` keeps its ticket reserved, unlocked and holding back no
 waiter; the same argv in the same working directory takes the place back while the reservation is
 under `RESUME_SECONDS` old or while a waiter that joined after it still waits. A run ended by a
@@ -321,8 +323,8 @@ def _take_repository(directory: Path, group: str, repository_limit: int) -> int 
     return None
 
 
-def _try_slots(directory: Path, count: int, live: bool, group: str | None,
-               repository_limit: int) -> tuple[tuple[int, int | None] | None, str | None]:
+def _try_slots(directory: Path, count: int, live: bool, group: str | None, repository_limit: int,
+               probe_marker: bool = True) -> tuple[tuple[int, int | None] | None, str | None]:
     """`((slot, group lock or None), None)` on a slot kept, else `(None, reason)` with nothing taken.
 
     A slot file that cannot be opened counts as taken, as it does for every holder count. A taken
@@ -330,7 +332,8 @@ def _try_slots(directory: Path, count: int, live: bool, group: str | None,
     `count`: a count lowered beneath a still-held higher slot is honoured (`taken`). Then, when
     `group` is set, it also takes one of the repository's `repository_limit` locks, and gives the
     slot back while every one is held (`same_repository`). An ordinary run lastly gives both back
-    while a live waiter holds the marker (`deferred`); a live run skips that check.
+    while a live waiter holds the marker (`deferred`); a live run skips that check, and so does a
+    caller that passes `probe_marker=False`.
     """
     for index in range(count):
         path = directory / f"slot-{index}.lock"
@@ -359,7 +362,7 @@ def _try_slots(directory: Path, count: int, live: bool, group: str | None,
             if held_group is None:
                 os.close(descriptor)
                 return None, "same_repository"
-        if not live:
+        if not live and probe_marker:
             try:
                 waiting = _live_waiting(directory)
             except BaseException:
@@ -405,7 +408,11 @@ def _decide(directory: Path, count: int, live: bool, group: str | None, key: str
     place = verify_queue.place(queue, ticket.seq)
     reason = None
     if admitted and admitted[0].seq == ticket.seq:
-        held, reason = _try_slots(directory, count, live, group, REPOSITORY_LIMIT)
+        # A live waiter in the queue is ordered ahead by `admitted`, and one held back by its
+        # repository may still hold a marker it drops only at its next poll, so the marker speaks
+        # only for a live waiter of an older `verify-slot`, which no ticket shows.
+        held, reason = _try_slots(directory, count, live, group, REPOSITORY_LIMIT,
+                                  probe_marker=not any(waiter.live for waiter in queue))
         if held is not None:
             try:
                 verify_queue.record_holder(held[0], group, command)
@@ -481,6 +488,7 @@ def _acquire(directory: Path, count: int, wait_limit: int | None, run: _Run, liv
                 if reason not in said:
                     said.add(reason)
                     _say(_WAIT_LINES[reason].format(count=count))
+            if waiting:
                 text = (place, verify_queue.holders_text(holders))
                 if text != last_place:
                     last_place = text
