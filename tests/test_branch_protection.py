@@ -473,7 +473,7 @@ class WorkflowShape(unittest.TestCase):
         suite = steps["Run agent workflow tests"]
         self.assertIn(f"        run: {SUITE_INVOCATION}", suite)
         self.assertEqual(
-            ['SUITE_RUNNER_JOBS: "8"', "SUITE_RUNNER_REPORT: suite-timing/suite-timing.json"],
+            ['SUITE_RUNNER_JOBS: "4"', "SUITE_RUNNER_REPORT: suite-timing/suite-timing.json"],
             step_env(suite),
         )
         self.assertEqual([], [line for line in suite if line.startswith("        if:")])
