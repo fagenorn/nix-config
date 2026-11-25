@@ -37,7 +37,7 @@ from agent_tools.verification.verify_checks import required_checks, self_hosted_
 
 from . import console_test_support as support
 from . import railway_world
-from .guard_policy_world import GuardPolicyWorld
+from .guard_fleet_world import CANDIDATE_BRANCH, GuardFleetWorld, build_candidate
 from .pre_push_world import PrePushWorld
 from .railway_world import MERGE, deployment
 from .test_railway_deploy_adapter import request as railway_request
@@ -1339,7 +1339,6 @@ class PreflightVerdictTest(unittest.TestCase):
 
 
 MANIFEST = "home/common/agent-skills/platform-manifest.json"
-CANDIDATE_BRANCH = "cutover-130-candidate"
 
 CANDIDATE_RESOLVER = """import json, os, sys
 if os.path.realpath(__file__).split(os.sep)[:len(os.path.realpath(os.getcwd()).split(os.sep))] \
@@ -1850,58 +1849,15 @@ class SelfHostedRunnerCommandTest(unittest.TestCase):
         self.assertEqual(committed_mode(f"{CHECKS}/self-hosted-runner"), "100755")
 
 
-class GuardFleetWorld(GuardPolicyWorld):
-    """A hermetic fleet plus a clone whose origin carries the cutover candidate: the real
-    `python/` tree and platform manifest, committed on `cutover-130-candidate`."""
-
-    def __init__(self, test_case):
-        super().__init__(test_case)
-        bare = self.tmp / "candidate-origin.git"
-        pusher = self.tmp / "candidate-pusher"
-        self.clone = self.tmp / "candidate-clone"
-        self.git(self.tmp, "init", "--quiet", "--bare", "-b", "main", str(bare))
-        self.git(self.tmp, "init", "--quiet", "-b", "main", str(pusher))
-        self.git(pusher, "config", "commit.gpgsign", "false")
-        self.git(pusher, "remote", "add", "origin", str(bare))
-        (pusher / "README").write_text("main\n", encoding="utf-8")
-        self.git(pusher, "add", "-A")
-        self.git(pusher, "commit", "--quiet", "-m", "main")
-        self.git(pusher, "push", "--quiet", "origin", "main")
-        self.git(pusher, "checkout", "--quiet", "-b", CANDIDATE_BRANCH)
-        shutil.copytree(ROOT / "python", pusher / "python",
-                        ignore=shutil.ignore_patterns("__pycache__"))
-        (pusher / verify_checks.MANIFEST_PATH).parent.mkdir(parents=True)
-        shutil.copy(ROOT / verify_checks.MANIFEST_PATH, pusher / verify_checks.MANIFEST_PATH)
-        self.git(pusher, "add", "-A")
-        self.git(pusher, "commit", "--quiet", "-m", "candidate")
-        self.git(pusher, "push", "--quiet", "origin", f"HEAD:refs/heads/{CANDIDATE_BRANCH}")
-        self.git(self.tmp, "clone", "--quiet", str(bare), str(self.clone))
-
-    def fleet(self, registry=None):
-        # The host's own PYTHONPATH must not decide whose code derives: the check does.
-        environ = {key: value for key, value in self.env.items() if key != "PYTHONPATH"}
-        return verify_checks.guard_policy_fleet(
-            self.clone, CANDIDATE_BRANCH, environ=environ, registry=registry)
-
-    def lagging_default(self, project_id, slug, *, override):
-        """The anis-desktop nodocom entry: `main` is a schema-1 contract, `dev` a schema-2 one,
-        and the registry entry carries the `branch_override` only when `override` is true."""
-        root = self.project(project_id, slug, integration_branch="dev", register=False)
-        self.git(root, "checkout", "--quiet", "main")
-        old = self.contract(project_id, slug)
-        old["schema_version"] = 1
-        self.commit_contract(root, old, "the project's schema-1 default branch", render=False)
-        self.publish(root, ["main", "dev"])
-        entry = {"project_id": project_id, "root": str(root)}
-        if override:
-            entry["branch_override"] = {"branch": "dev", "default_branch": "main",
-                                        "reason": "default_contract_unresolved"}
-        self.register(entry)
-
-
 class GuardPolicyFleetTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        tmp = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(tmp.cleanup)
+        cls.template = build_candidate(Path(tmp.name).resolve())
+
     def setUp(self):
-        self.world = GuardFleetWorld(self)
+        self.world = GuardFleetWorld(self, self.template)
 
     def test_every_registered_slug_deriving_is_green(self):
         self.world.project("fixture/one", "fagenorn/one")
