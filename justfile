@@ -115,6 +115,7 @@ agent-workflow-tests *args:
     home/common/agent-skills/tests/test_host_admission.py \
     home/common/agent-skills/tests/test_inprocess_cli.py \
     home/common/agent-skills/tests/test_workflow_skill_contracts.py \
+    home/common/agent-skills/tests/test_codex_review_effort.py \
     home/common/agent-skills/tests/test_dispatch_contracts.py \
     home/common/agent-skills/tests/test_shell_example_contracts.py \
     home/common/agent-skills/tests/test_ship_release_contracts.py \
