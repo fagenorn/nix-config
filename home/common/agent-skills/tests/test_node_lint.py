@@ -15,7 +15,6 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -513,16 +512,26 @@ class NodeDoctorTest(unittest.TestCase):
     def assert_never_rise_passed(self, check: dict) -> None:
         self.assertEqual(check["status"], "passed", check)
 
-    def test_doctor_lints_this_repositorys_programs_with_both_tools(self) -> None:
+    def programs_branch(self, tmp: Path, texts: dict[str, str]) -> Path:
+        """A root whose integration tip holds recognizable programs at their paths, then a branch commit of `texts`."""
+        root = program_root(tmp, {path: META for path in texts})
+        for path, text in texts.items():
+            (root / path).write_text(text, encoding="utf-8")
+        commit_all(root, "branch")
+        return root
+
+    def assert_both_tools_read(self, texts: dict[str, str]) -> None:
+        """The doctor hands every branch text to both tools; a count rise is excused, no other failure."""
         with fixture() as tmp:
-            texts = {path: git(REPO_ROOT, "show", f"HEAD:{path}") for path in self.PROGRAMS}
-            root = program_root(tmp, texts)
+            root = self.programs_branch(tmp, texts)
             directory = self.recording_tools(tmp)
             expected = {
                 hashlib.sha256(node_lint.wrap(text).text.encode()).hexdigest()
                 for text in texts.values()}
-            self.assert_never_rise_passed(self.never_rise_check(root, directory))
-            seen =lambda name, flag: {  # noqa: E731
+            check = self.never_rise_check(root, directory)
+            if check["status"] != "passed":
+                self.assertEqual([check["status"], check["reason_code"]], ["failed", "violation_count_rose"], check)
+            seen = lambda name, flag: {  # noqa: E731
                 d for call in self.calls(directory, name) if flag(call["argv"]) for d in call["digests"]}
             self.assertLessEqual(expected, seen(
                 "node", lambda argv: argv[:1] == ["--check"]))
@@ -530,6 +539,15 @@ class NodeDoctorTest(unittest.TestCase):
                 "eslint", lambda argv: node_lint.CONFIG in argv))
             self.assertLessEqual(expected, seen(
                 "eslint", lambda argv: node_lint.INLINE_CONFIG in argv))
+
+    def test_doctor_lints_this_repositorys_programs_with_both_tools(self) -> None:
+        texts = {path: git(REPO_ROOT, "show", f"HEAD:{path}") for path in self.PROGRAMS}
+        self.assert_both_tools_read(texts)
+
+    def test_doctor_still_lints_both_programs_when_a_branch_breaks_their_meta_declaration(self) -> None:
+        texts = {path: git(REPO_ROOT, "show", f"HEAD:{path}").replace("export const meta", "export const", 1)
+                 for path in self.PROGRAMS}
+        self.assert_both_tools_read(texts)
 
     def test_the_doctor_test_fails_when_the_doctor_reports_a_broken_tool(self) -> None:
         broken = {"node": ("exit 3\n", "node_failed"), "eslint": ("exit 2\n", "eslint_failed")}
@@ -546,15 +564,15 @@ class NodeDoctorTest(unittest.TestCase):
     def test_doctor_on_a_slow_runner_passes_while_its_tool_calls_outlast_one_child_timeout(self) -> None:
         # One program at one revision makes three tool calls, each under the child timeout, together over it.
         slow = CHILD_TIMEOUT_SECONDS * 2 // 5
-        slowed = {name: f'/bin/sleep {slow}\nexec {pinned(name)} "$@"\n' for name in ("node", "eslint")}
+        slowed = {name: f'/bin/sleep {slow}\necho {slow} >> "${{0%/*}}/slept"\nexec {pinned(name)} "$@"\n'
+                  for name in ("node", "eslint")}
         with fixture() as tmp:
             root = program_root(tmp, {"src/p.js": META})
             directory = tools_dir(self, **slowed)
-            started = time.monotonic()
             check = self.never_rise_check(root, directory)
-            elapsed = time.monotonic() - started
+        slept = [int(line) for line in (Path(directory) / "slept").read_text(encoding="utf-8").split()]
         self.assert_never_rise_passed(check)
-        self.assertGreater(elapsed, CHILD_TIMEOUT_SECONDS)
+        self.assertGreater(sum(slept), CHILD_TIMEOUT_SECONDS)
 
 
 if __name__ == "__main__":
