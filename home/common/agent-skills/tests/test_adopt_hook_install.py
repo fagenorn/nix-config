@@ -323,6 +323,19 @@ class HookInstallRuleTest(unittest.TestCase):
                      "{ s = ''\n  git-hooks.hooks.x.enable = true;\n''; }"):
             self.assertFalse(hook_install.declares_hooks(text), text)
 
+    def test_declares_hooks_reads_deeply_nested_attribute_sets_in_linear_time(self):
+        off = " git-hooks.hooks.x.enable = false;"
+        enabled = " git-hooks.hooks.x.enable = true;"
+        for size in (80_000, 1 << 20):
+            depth = size // len("a = { ")
+            nest = "a = { " * depth + "}; " * depth
+            for text, expected in (
+                    ("{ pkgs, ... }: {" + off + " " + nest + " }", False),
+                    ("{ pkgs, ... }: {" + off + " " + nest + enabled + " }", True)):
+                started = time.monotonic()
+                self.assertEqual(hook_install.declares_hooks(text), expected)
+                self.assertLess(time.monotonic() - started, 1.0, size)
+
     def test_declares_hooks_reads_generated_nested_text_in_linear_time(self):
         enabled = " git-hooks.hooks.x.enable = true;"
         off = " git-hooks.hooks.x.enable = false;"

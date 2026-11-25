@@ -66,6 +66,8 @@ NAME = re.compile(r"""[\w'-]+|"_*\"""")
 MODULE_LEAD = (None, ":", "@", "in", "rec", ";")
 HOOKS_PATH = "core.hooksPath"
 ROOTS = ("git-hooks", "pre-commit")
+DEEPEST = 5  # `config.<root>.hooks.<name>.enable`, the longest path `_switch` reads
+BEYOND = ("",) * (DEEPEST + 1)  # stands for any path longer than `DEEPEST`
 
 
 def installed(hooks_dir: Path) -> list[str]:
@@ -247,6 +249,8 @@ def declares_hooks(text: str) -> bool:
         names, after = _path(tokens, i)
         if names and tokens[after:after + 1] == ["="]:
             path, value = (*sets[-1], *names), after + 1
+            if len(path) > DEEPEST:
+                path = BEYOND  # no switch lies below it, and a nested set stores no ancestor copy
             if tokens[value:value + 1] == ["{"]:
                 sets.append(path)
                 i = value + 1
