@@ -339,6 +339,14 @@ class JudgeTest(unittest.TestCase):
                 if note == "read main":
                     self.assertIn(("release", "o/r", self.root, "main"), self.fake.calls)
 
+    def test_a_sprint_run_with_a_job_that_has_not_finished_is_refused_and_takes_no_slot(self):
+        self.fake.run = {**self.fake.run, "pending": True, "rerun": ["Nix Eval", "Optional Lint"],
+                         "failed": ["Nix Eval"]}
+        self.assertRefused(self.rerun, permit.RUN_PENDING.format(run=55))
+        self.assertNotIn(("required", "o/r", "main"), self.fake.calls)
+        self.fake.run = {**self.fake.run, "pending": False}
+        self.assertEqual(ALLOW, self.judge(self.rerun).decision)
+
     def test_a_release_run_with_a_job_that_has_not_finished_is_refused_and_takes_no_slot(self):
         for event in ("pull_request", "push"):
             with self.subTest(event):

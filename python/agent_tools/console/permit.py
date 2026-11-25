@@ -80,7 +80,7 @@ never None. The checks run in this order, the first that applies deciding:
   none named by `read_required(slug, base)`, is `NOT_CHECK_RUN`, and a run with no failed job is
   refused before `read_required` is read; GitHub's failed-jobs rerun reruns every failed job of the
   run together and cannot pick one, so the run is judged whole and a failed job that is no required
-  check reruns beside a required one. A release run with a job that has no conclusion yet is
+  check reruns beside a required one. A run (a sprint run too) with a job that has no conclusion yet is
   `RUN_PENDING`, judged before that. A head that `grant.reruns` already counts `MAX_RERUNS` (two) allowed reruns for is
   `RERUN_LIMIT`, which names the two reruns, each by run and failing members (ADR-console-106); the
   release pull request run and the candidate's push run share that one head's cap, and the refusal
@@ -966,7 +966,7 @@ def _judge_rerun(parts: list[str], grant: Grant, forge: Forge) -> Verdict:
         if pull["head"] != run["head"]:
             return _deny(RERUN, STALE_RUN.format(run=run_id))
         base = pull["base"]
-    if release is not None and run.get("pending"):
+    if run.get("pending"):
         return _deny(RERUN, RUN_PENDING.format(run=run_id))
     failed = set(run["failed"])
     if not failed or not failed & forge.read_required(slug, base):
