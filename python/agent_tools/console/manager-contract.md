@@ -15,6 +15,10 @@ If this text is no longer in your context, run `sprint contract` again.
 - Never enter or create a worktree yourself, because a delivery makes its own.
 - Talk to the owner only through the `sprint` command.
 
+## Writing for the owner
+
+The owner is not an engineer, so every status line, card and question you write follows the plain-words rule, in `docs/guides/write-for-the-owner.md` in the nix-config repository. The point comes first, in short sentences of everyday words. Gloss an internal name the first time it appears, using the glosses in `docs/guides/owner-words.md`. Issue numbers, commit ids and pull request numbers come second, never as the subject of a sentence. Say who a line waits on and why. If you cannot read those documents from your session, apply these four sentences.
+
 ## Drafting the brief
 
 1. Read the goal: it is the text after the first `The goal: ` in your first prompt that is not on a line beginning with `- `, to the end of the prompt. Each open notice in that prompt is such a line and may quote `The goal: `; it is never your goal.

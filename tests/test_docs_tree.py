@@ -38,6 +38,22 @@ def logins_in(text: str) -> list:
     return LOGIN_LIKE.findall(text)
 
 
+OWNER_WORDS = (
+    "land lock", "slice", "held", "verify", "brief version", "guard", "rerun", "claim", "look",
+    "live fault", "CI", "pull request",
+)
+
+
+def owner_words(text: str) -> dict[str, str]:
+    """The glossary table of `docs/guides/owner-words.md`: each row's first cell mapped to its second."""
+    found = {}
+    for line in text.splitlines():
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if line.startswith("|") and len(cells) == 2 and set(cells[0]) - set("-: ") and cells[0] != "Word":
+            found[cells[0]] = cells[1]
+    return found
+
+
 def markdown_section(text: str, name: str) -> str:
     """The text after the line `## <name>` up to the next `## ` line; "" when absent."""
     lines = text.splitlines(keepends=True)
@@ -422,6 +438,21 @@ class DocsTreeTest(unittest.TestCase):
             with self.subTest(term=term):
                 self.assertIsNotNone(re.search(rf"^\*\*{term}\*\*:", area, re.M))
                 self.assertIn(f"| {term} | Delivery |", context_map)
+
+    def test_the_owner_words_glossary_gives_each_listed_word_a_gloss(self):
+        glossary = owner_words(
+            (REPO_ROOT / "docs/guides/owner-words.md").read_text(encoding="utf-8"))
+        for word in OWNER_WORDS:
+            with self.subTest(word=word):
+                self.assertIn(word, glossary)
+                self.assertNotEqual(glossary[word].strip(), "")
+
+    def test_the_index_reaches_the_plain_words_rule_the_glossary_and_the_audit(self):
+        index = (REPO_ROOT / "docs/README.md").read_text(encoding="utf-8")
+        for name in ("write-for-the-owner.md", "owner-words.md", "console-page-audit-2026-11-25.md"):
+            with self.subTest(name=name):
+                self.assertTrue((REPO_ROOT / "docs/guides" / name).is_file())
+                self.assertIn(f"(./guides/{name})", index)
 
     def test_dissolved_readmes_fit_150_lines(self):
         too_long = []
