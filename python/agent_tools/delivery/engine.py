@@ -54,7 +54,9 @@ child once one faults; `engine status` reads the root run, never a child:
 - exit 2, stdout empty and one stderr line: a usage error, a host whose settings load no
   lifecycle guard hook, a host declaration that does not admit the engine route (printed with its
   reason code first), or a refusal before any run is created or continued (two open runs of the
-  issue included), which creates no run directory.
+  issue included), which creates no run directory;
+- exit 2 with one stdout line and nothing on stderr: the procedure set the verdict refuses prints
+  `engine check`'s refused line instead, a new run's before any run directory is created.
 
 `engine stop <issue> [--project <slug>]` asks the run of the issue that is running on this host
 to stop: it writes the run's `stop-request` file naming the lock holder, signals no process,
@@ -181,9 +183,17 @@ def _stop_run(issue: int, project: str | None) -> int:
     return 1
 
 
+def _refused_line(refusals, breaches) -> str:
+    return compact({"breaches": [b.as_json() for b in breaches],
+                    "refusals": [r.as_json() for r in refusals], "verdict": "refused"})
+
+
 def _deliver(issue: int, procedures: Path) -> int:
     try:
         code, line = engine_shell.deliver(issue, procedures)
+    except engine_shell.ProcedureRefused as error:
+        sys.stdout.write(_refused_line(error.refusals, error.breaches))
+        return engine_shell.EXIT_REFUSED
     except engine_shell.Refused as error:
         return _usage(str(error))
     except engine_shell.Fault as error:
@@ -212,9 +222,7 @@ def main(argv: list[str] | None = None) -> int:
     except (procedure_check.DeclarationError, engine_shell.Refused, ValueError) as error:
         return _usage(str(error))
     if result.refusals or breaches:
-        sys.stdout.write(compact({"breaches": [b.as_json() for b in breaches],
-                                  "refusals": [r.as_json() for r in result.refusals],
-                                  "verdict": "refused"}))
+        sys.stdout.write(_refused_line(result.refusals, breaches))
         return 1
     sys.stdout.write(compact({"procedures": list(result.procedures), "verdict": "ok"}))
     return 0
