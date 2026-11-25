@@ -187,10 +187,13 @@ agent-workflow-tests *args:
     tests/test_engine_slots.py \
     tests/test_engine_fixture.py \
     tests/test_engine_stubbed_run.py \
+    tests/test_engine_stubbed_world.py \
     tests/test_independent_review.py \
     tests/test_issue_setup.py \
     tests/test_closing.py \
     tests/test_landing.py \
+    tests/test_land_tally.py \
+    tests/test_engine_land_recovery.py \
     tests/test_plan_amend.py \
     tests/test_verify_block.py \
     tests/test_verify_pending.py \
@@ -227,6 +230,7 @@ agent-workflow-tests *args:
     tests/test_protection_tree.py \
     tests/test_console_approved_action_check.py \
     tests/test_console_takeover_merge_check.py \
+    tests/test_console_release_rerun_check.py \
     tests/test_issue_branch.py \
     tests/test_program_copies.py \
     tests/test_keepalive_end_turn_cap.py \

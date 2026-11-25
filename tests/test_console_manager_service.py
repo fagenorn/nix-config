@@ -1668,16 +1668,16 @@ class PermitCase(Case):
     def secret(self, sid):
         return (self.store.parent / "sprint-secrets" / sid).read_text().removesuffix("\n")
 
-    def sprint(self, svc, goal):
-        sid = svc.state_goal("owner/p01", goal)
+    def sprint(self, svc, goal, project="owner/p01"):
+        sid = svc.state_goal(project, goal)
         svc.send_brief(sid, self.secret(sid), PARTS)
-        svc.approve_brief("owner/p01", sid, 1)
+        svc.approve_brief(project, sid, 1)
         return sid
 
-    def seen(self, svc, sid, session_id):
+    def seen(self, svc, sid, session_id, project="owner/p01"):
         with svc._ingest:
-            svc._apply(svc.log.append([(SESSION_SEEN, "owner/p01", {
-                "name": manager.session_name("owner/p01", sid), "session_id": session_id})]))
+            svc._apply(svc.log.append([(SESSION_SEEN, project, {
+                "name": manager.session_name(project, sid), "session_id": session_id})]))
 
     def deliver(self, svc, session_id, *numbers, run="r-1"):
         state = deliveries.DeliveryState(
@@ -1814,7 +1814,7 @@ class PermitServiceTest(PermitCase):
                     act(svc, sid)
                     return found
 
-                svc._permit_forge = permit.Forge(moving, self.fake.read_run, self.fake.read_required)
+                svc._permit_forge = self.fake.forge(read_pr=moving)
                 verdict = self.judge(svc, sid, MERGE)
                 self.assertEqual((verdict.decision, verdict.reason), ("deny", permit.MOVED))
                 last = self.rows("permit.judged")[-1]

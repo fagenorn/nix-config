@@ -71,6 +71,7 @@ in
         "--fast-seconds ${toString budget.fastSampleSeconds}"
         "--slow-seconds ${toString budget.slowSampleSeconds}"
         "--run-bound-gib ${toString budget.runBoundGiB}"
+        "--min-tree-gib ${toString budget.floorMinTreeGiB}"
         "--omlx-jetsam-priority ${toString budget.omlxJetsamPriority}"
         "--agent-user ${username}"
       ]
