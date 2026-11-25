@@ -1087,25 +1087,25 @@ exception 500 `permit failed`, each with one stderr line `console: permit_refuse
 permit_failed <Type>: <message>`. Success is 200: phase `judge` answers `{"decision": "allow" | "deny" | null,
 "reason": <str>}` and phase `landed` `{"recorded": <bool>}`. `permit(sprint_id, secret, session_id, tool_use_id,
 command)` answers a `permit.Verdict`: under the ingest lock it checks the secret (`_manager_sprint`), returns no
-decision (`decision` None, no row) for a command `permit.mentions` rejects (a command running a release is a
-mention: the plain `release transaction run` is `allow` with verb `release` and target `{"commit", "version"}` and
-reads no forge; abandon and dispose are `deny` with `permit.NO_ABANDON` and `permit.NO_DISPOSE`, whatever the
-program is named), and denies `permit.NOT_ACTIVE` unless the sprint is `STARTING` and `sprints.takes_questions` (no
-closing, no stop request, no stop, and not ended by a done report), and `permit.NOT_MANAGER` unless `manager.is_manager_session` admits
-`session_id`. It takes the grant from the sprint (`issues`: the newest report's issues that a
-delivery of the manager's own session carries, as `SprintState.delivered` records them, so a delivery run the
-console has since cleaned up still counts; `others`: the issues the newest report of every other open sprint of the
-project lists) and, off the lock, the project's slug (`slug_of`), branch pattern (`branch_pattern_of`) and merge
-binding (`merge_binding_of`), and from its own `permit.judged` rows (`permit.rerun_record`, folded) each head's allowed
-reruns in the project (`Grant.reruns`, ADR-console-106), judges with `permit.judge` over `permit.memoized(permit_forge)`, then under the lock
-again takes the sprint, its checks and the grant afresh and judges once more over the memo's frozen replay: any
-refusal, any difference or any read the memo did not hold is `permit.MOVED`. Each decided verdict appends one
-`permit.judged` row under that lock `{"sprint_id", "session_id", "tool_use_id", "repo", "verb", "decision",
-"reason", "target"}`; an allowed merge is also remembered in memory as `(sprint_id, session_id, tool_use_id, repo,
-pr, head)` with the service's clock. `permit_landed(sprint_id, secret, session_id, tool_use_id, command)` is True,
-and appends one `permit.landed` row `{"sprint_id", "session_id", "tool_use_id", "repo", "verb": "merge", "target":
-{"pr", "head"}}`, only when the command is exactly such a merge (`permit.merge_target`) and the allow of that same
-tool call was judged at most `PERMIT_LANDED_SECONDS` (30 minutes) ago; otherwise it is False and appends nothing.
+decision (`decision` None, no row) for a command `permit.mentions` rejects (a command running a release is a mention:
+the plain `release transaction run` is `allow` with verb `release` and target `{"commit", "version"}` and reads no
+forge; abandon and dispose are `deny` with `permit.NO_ABANDON` and `permit.NO_DISPOSE`, whatever the program is named),
+and denies `permit.NOT_ACTIVE` unless the sprint is `STARTING` and `sprints.takes_questions` (no closing, no stop
+request, no stop, and not ended by a done report), and `permit.NOT_MANAGER` unless `manager.is_manager_session` admits
+`session_id`. It takes the grant from the sprint (`issues`: the newest report's issues that a delivery of the manager's
+own session carries, as `SprintState.delivered` records them, so a delivery run the console has since cleaned up still
+counts; `others`: the issues the newest report of every other open sprint of the project lists) and, off the lock, the
+project's slug (`slug_of`), branch pattern (`branch_pattern_of`) and merge binding (`merge_binding_of`), and from its
+own `permit.judged` rows (`permit.rerun_record`, folded) each head's allowed reruns in the project (`Grant.reruns`,
+ADR-console-106), judges with `permit.judge` over `permit.memoized(permit_forge)`, then under the lock again takes the
+sprint, its checks and the grant afresh and judges once more over the memo's frozen replay: any refusal, any difference
+or any read the memo did not hold is `permit.MOVED`. Each decided verdict appends one `permit.judged` row under that
+lock `{"sprint_id", "session_id", "tool_use_id", "repo", "verb", "decision", "reason", "target"}`; an allowed merge is
+also remembered in memory as `(sprint_id, session_id, tool_use_id, repo, pr, head)` with the service's clock.
+`permit_landed(sprint_id, secret, session_id, tool_use_id, command)` is True, and appends one `permit.landed` row
+`{"sprint_id", "session_id", "tool_use_id", "repo", "verb": "merge", "target": {"pr", "head"}}`, only when the command
+is exactly such a merge (`permit.merge_target`) and the allow of that same tool call was judged at most
+`PERMIT_LANDED_SECONDS` (30 minutes) ago; otherwise it is False and appends nothing.
 
 An approved action (`action_permit`): a body with a `nonce` is a signed body that carries no secret and no
 command text, which `action_permit.reply` answers through `permit_action` and `permit_action_landed`; only
@@ -9624,33 +9624,19 @@ class ConsoleService(ActionPermit):
             return permit.Verdict(permit.DENY, permit.NOT_GRANTED, verb, {})
         return None
 
-    def _permit_sets(self, sprint: sprints.SprintState) -> tuple[frozenset[int], frozenset[int]]:
-        """Under the ingest lock: the issues the sprint may merge and its siblings' issues."""
+    def _permit_sets(self, sprint: sprints.SprintState) -> tuple[frozenset[int], frozenset[int], Mapping]:
+        """Under the ingest lock: the issues the sprint may merge, its siblings' issues, the project's reruns."""
         reported = {number for number, _ in sprint.report.issues} if sprint.report else set()
         others = {number for key, other in self._sprints.items()
                   if key != sprint.sprint_id and other.project_id == sprint.project_id
                   and sprints.takes_questions(other) and other.report is not None
                   for number, _ in other.report.issues}
-        return frozenset(reported & sprint.delivered), frozenset(others)
-
-    def _permit_reruns(self, sprint: sprints.SprintState) -> dict[str, tuple[permit.Rerun, ...]]:
-        """Under the ingest lock: the allowed reruns of each head in the sprint's project (#1712)."""
-        return {head: reruns for (project, head), reruns in self._rerun_record.items()
-                if project == sprint.project_id}
+        return (frozenset(reported & sprint.delivered), frozenset(others),
+                permit.reruns_of(self._rerun_record, sprint.project_id))
 
     def _permit_reads(self, root: str | None) -> tuple[str | None, str | None, str | None, bool]:
         """Off the lock: the project's slug, branch pattern, merge strategy and whether a merge deletes its branch."""
-        if root is None:
-            return None, None, None, False
-
-        def read(source, default):
-            try:
-                return source(root)
-            except Exception:
-                return default
-        strategy, delete_branch = read(self._merge_binding_of, (None, False))
-        return (read(self._slug_of, None), read(self._branch_pattern_of, None), strategy,
-                delete_branch)
+        return permit.reads(root, self._slug_of, self._branch_pattern_of, self._merge_binding_of)
 
     def _allow_rules(self, root: str | None) -> tuple[str, ...]:
         """Off the lock: the allow rules the project's slug and merge binding give a manager's settings (ADR-console-102)."""
@@ -9678,15 +9664,13 @@ class ConsoleService(ActionPermit):
             state = self._states.get(sprint.project_id)
             root = None if state is None else state.root
             sets = None if refusal is not None else self._permit_sets(sprint)
-            reruns = None if refusal is not None else self._permit_reruns(sprint)
-        reads = self._permit_reads(root)
-        slug, pattern, strategy, delete_branch = reads
+        slug, pattern, strategy, delete_branch = self._permit_reads(root)
         if refusal is not None:
             with self._ingest:
                 return self._permit_record(sprint, session_id, tool_use_id, slug, refusal)
         memo = permit.memoized(self._permit_forge)
         first = permit.judge(command, permit.Grant(
-            slug, root, strategy, delete_branch, pattern, *sets, reruns), memo)
+            slug, root, strategy, delete_branch, pattern, *sets), memo)
         with self._ingest:
             verdict = first
             try:
@@ -9695,8 +9679,7 @@ class ConsoleService(ActionPermit):
                 if (self._permit_refusal(fresh, session_id, verb) is not None
                         or state is None or state.root != root
                         or permit.judge(command, permit.Grant(
-                            slug, root, strategy, delete_branch, pattern, *self._permit_sets(fresh),
-                            self._permit_reruns(fresh)),
+                            slug, root, strategy, delete_branch, pattern, *self._permit_sets(fresh)),
                             memo.frozen()) != first):
                     verdict = permit.Verdict(permit.DENY, permit.MOVED, verb, {})
             except sprints.Refused:

@@ -532,6 +532,27 @@ def rerun_record(events: Sequence, held: Mapping[tuple[str | None, str], tuple[R
     return record
 
 
+def reruns_of(record: Mapping[tuple[str | None, str], tuple[Rerun, ...]], project: str) -> dict[str, tuple[Rerun, ...]]:
+    """The allowed reruns of each head in one project, from `rerun_record`'s `(project, head)` keys."""
+    return {head: reruns for (owner, head), reruns in record.items() if owner == project}
+
+
+def reads(root: str | None, slug_of, branch_pattern_of, merge_binding_of
+          ) -> tuple[str | None, str | None, str | None, bool]:
+    """The project's slug, branch pattern, merge strategy and whether a merge deletes its branch; `root` None or a
+    reader that raises reads as unknown (None, and False for the branch deletion)."""
+    if root is None:
+        return None, None, None, False
+
+    def read(source, default):
+        try:
+            return source(root)
+        except Exception:
+            return default
+    strategy, delete_branch = read(merge_binding_of, (None, False))
+    return read(slug_of, None), read(branch_pattern_of, None), strategy, delete_branch
+
+
 def merge_binding(root: str) -> tuple[str | None, bool]:
     try:
         merge = resolve_project.resolve(root)["bindings"]["vcs"]["merge"]
