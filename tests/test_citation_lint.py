@@ -26,8 +26,8 @@ from pathlib import Path
 
 from agent_tools.delivery.citation_lint import enforcers
 from agent_tools.delivery.context_map_lint import CODE_RE, section, table_rows
-from agent_tools.delivery.rule_ids import (
-    CITATION, PROJECT_PREFIX, RULE_ID_HEADING, Citation, citations, prefix_of)
+from agent_tools.delivery.rule_ids import CITATION, RULE_ID_HEADING, Citation, citations
+from agent_tools.delivery.rule_reader import PROJECT_PREFIX, prefix_of
 from agent_tools.delivery.suite_runner import suite_members
 from agent_tools.delivery.verification_command import members
 
