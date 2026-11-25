@@ -25,9 +25,13 @@ from agent_tools.project_contract import resolve_project
 from agent_tools.verification import verify_block
 from tests.engine_fixture import AdoptedFixtures, FixtureProject
 from tests.engine_guards import payloads
+from tests.engine_procedure_copies import (PROCEDURES, keeping_the_run, stopping_after_verify,
+                                           unstructured_procedures)
 from tests.engine_step_coverage import StepCoverage, test_ids
 from tests.engine_stubbed_world import (CLEAN_LITE, EVIDENCE_BODY, EVIDENCE_CHECK, GREEN, IMPLEMENTED, NOT_BEFORE,
                                         ROLES, StubbedRun, drafted)
+from tests.engine_verify_fixtures import (ATTESTED, FORMAT, FOUR, PASS_ATTESTED, RETESTED, TWO_SPACES, fixing,
+                                          implementing)
 from tests.guard_policy_world import REAL_GIT, install_platform_manifest_in_environ
 
 TIER = "integration"  # every case builds a repository and runs the engine as a child process
@@ -43,7 +47,6 @@ def setUpModule() -> None:
 def tearDownModule() -> None:
     STEPS.finish(sys.modules[__name__], Scenario)
 
-PROCEDURES = Path(__file__).resolve().parents[1] / "python/agent_tools/delivery/procedures"
 STEPS = StepCoverage(PROCEDURES)
 LOOK_BODY = ("Add a greet() function.\n\n## Acceptance criteria\n\n"
              "- [ ] [human] before merge: the greeting text — measured: the owner, on the pull request\n")
@@ -80,108 +83,6 @@ def committing(path: str, text: str, **reply) -> dict:
     """A fix reply that commits `text` to `path`: the stub reports the commit it made."""
     return {"reply": {"status": "done", "notes": "n", "tests": [], "declines": [], **reply},
             "commit": {"path": path, "text": text}}
-
-
-def implementing(path: str, text: str, **members) -> dict:
-    return {"reply": {**IMPLEMENTED["reply"], **members}, "commit": {"path": path, "text": text}}
-
-
-NO_UNRELATED = {"test": "", "evidence": ""}
-CHECK_FORMAT = r"""import json
-import unittest
-from pathlib import Path
-
-ROOT = Path(__file__).resolve().parents[1]
-
-
-class FormatTest(unittest.TestCase):
-    def test_each_fixture_json_is_two_space_indented(self):
-        for path in sorted((ROOT / "fixture").glob("*.json")):
-            text = path.read_text(encoding="utf-8")
-            relative = path.relative_to(ROOT).as_posix()
-            self.assertEqual(text, json.dumps(json.loads(text), indent=2) + "\n",
-                             f"{relative} is not two-space indented")
-"""
-FORMAT = {"checks/check_format.py": CHECK_FORMAT}
-FOUR_SPACES = '{\n    "greeting": "hello"\n}\n'
-TWO_SPACES = '{\n  "greeting": "hello"\n}\n'
-FOUR = implementing("fixture/greeting.json", FOUR_SPACES)
-ATTESTED = {"whitespace_insignificant": True, "whitespace_evidence": "fixture/greeting.json: indentation only"}
-PASS_ATTESTED = {"verdict": "pass", "findings": [], **ATTESTED}
-PASS_PLAIN = {"verdict": "pass", "findings": [], "whitespace_insignificant": False,
-              "whitespace_evidence": "not whitespace-only"}
-RETESTED = {"reply": {"status": "done", "notes": "n", "tests": ["checks/check_format.py"], "clean": True},
-            "same_head": {}}
-
-
-def fixing(path: str, text: str, **reply) -> dict:
-    """A verify fix reply that commits `text` to `path`, naming no file outside the diff and no unrelated test."""
-    return {"reply": {"status": "done", "notes": "n", "tests": [], "outside_diff": [], "unrelated": NO_UNRELATED,
-                      **reply},
-            "commit": {"path": path, "text": text}}
-
-
-TWO = fixing("fixture/greeting.json", TWO_SPACES, tests=["checks/check_format.py"])
-
-
-def stopping_after_verify(tmp: Path) -> Path:
-    """A copy of the shipped procedures whose run is kept across a continue and stops once verified."""
-    copy = tmp / "procedures"
-    shutil.copytree(PROCEDURES, copy)
-    path = copy / "deliver.json"
-    document = json.loads(path.read_text("utf-8"))
-    for step in document["steps"]:
-        if step["id"] == "start":
-            step["holds"] = "run"
-        if step["id"] == "issue":
-            step["on"]["refused"] = "done"  # the check wants one reachable step that still ends the run
-        if step["id"] == "verification":
-            step["on"]["done"] = "verified"
-            step["on"]["verify"] = "landing"  # the check wants the landing step reachable too
-    document["stops"]["verified"] = {"need": "owner-decision", "reenter": "verification"}
-    path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
-    return copy
-
-
-def keeping_the_run(tmp: Path) -> Path:
-    """A copy of the shipped procedures whose run is kept across a continue and otherwise unchanged."""
-    copy = tmp / "kept-procedures"
-    shutil.copytree(PROCEDURES, copy)
-    path = copy / "deliver.json"
-    document = json.loads(path.read_text("utf-8"))
-    for step in document["steps"]:
-        if step["id"] == "start":
-            step["holds"] = "run"
-    path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
-    return copy
-
-
-def unstructured_procedures(tmp: Path) -> Path:
-    """A copy of the shipped procedures as they were before findings carried a kind, a rule and declines."""
-    copy = tmp / "unstructured-procedures"
-    shutil.copytree(PROCEDURES, copy)
-    for path in sorted(copy.glob("*.json")):
-        document = json.loads(path.read_text("utf-8"))
-        if path.name.endswith(".reply.json"):
-            items = document["properties"].get("findings", {}).get("items")
-            if items is not None:
-                for member in ("kind", "rule", "restates"):
-                    items["properties"].pop(member, None)
-                    if member in items["required"]:
-                        items["required"].remove(member)
-            if path.name == "direct-fix.reply.json":
-                document["properties"].pop("declines")
-                document["required"].remove("declines")
-            path.write_text(json.dumps(document) + "\n", encoding="utf-8")
-        else:
-            for step in document["steps"]:
-                if "in" in step:
-                    step["in"] = [name for name in step["in"] if not name.endswith(".declines")]
-            path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
-    for path in sorted(copy.glob("*.md")):
-        lines = path.read_text("utf-8").splitlines(keepends=True)
-        path.write_text("".join(line for line in lines if ".declines}}" not in line), encoding="utf-8")
-    return copy
 
 
 def model_of(launch: dict) -> str:

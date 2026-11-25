@@ -15,12 +15,13 @@ from pathlib import Path
 
 from agent_tools.delivery import engine_session
 from tests.engine_fixture import AdoptedFixtures
+from tests.engine_procedure_copies import PROCEDURES
 from tests.engine_step_coverage import StepCoverage
 from tests.engine_stubbed_world import ROLES, StubbedRun
+from tests.engine_verify_fixtures import (
+    ATTESTED, FORMAT, FOUR, PASS_ATTESTED, PASS_PLAIN, RETESTED, TWO, TWO_SPACES, fixing, implementing)
 from tests.guard_policy_world import install_platform_manifest_in_environ
-from tests.test_engine_stubbed_run import (
-    ATTESTED, FORMAT, FOUR, PASS_ATTESTED, PASS_PLAIN, PROCEDURES, RETESTED, TWO, TWO_SPACES, Scenario, fixing,
-    implementing)
+from tests.test_engine_stubbed_run import Scenario
 
 TIER = "integration"  # every run case builds a repository and runs the engine as a child process
 
