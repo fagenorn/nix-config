@@ -1,4 +1,4 @@
-"""Contract tests for `revert-check` (#1534): the new tests of a change that still pass at the merge base.
+"""Contract tests for `revert-check`: the new tests of a change that still pass at the merge base.
 
 Each case builds a real git repository from the engine fixture project and runs the command (or its
 `check` function) against a worktree of it; no stand-in is involved.

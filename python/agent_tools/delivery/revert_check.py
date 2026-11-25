@@ -7,7 +7,7 @@ merge base of the worktree's `HEAD` and `refs/remotes/origin/<branch>` and `head
 `HEAD` (each `""` when unread); `new_tests` lists the change's new test ids sorted by file path then
 id; `still_passing` is the subset whose run exited 0, in the same order; `reason` is `""` when every
 new test ran, else one sentence saying why the check did not run or did not finish. The result is
-information for a reviewer and never blocks (issue 1421). The decision is ADR-delivery-022.
+information for a reviewer and never blocks. The decision is ADR-delivery-022.
 
 A new test is a `test*` method (`def` or `async def`) directly in a top-level class whose bases reach
 a base named `TestCase` (a bare name or an attribute `x.TestCase`) through classes defined in the
@@ -77,7 +77,7 @@ WATCH_SECONDS = 0.1
 # Both helpers take the checker's pid in argv rather than reading their parent's: a checker stopped before the
 # helper's interpreter has started leaves the helper a parent that is already init, and the pid in argv still
 # tells them it is gone.
-#
+
 # Runs as `python -I -c GUARD <checker pid> <scratch root>`, in a session of its own (an engine stop kills only
 # the checker's group): it makes the scratch directory, tells the checker its path on one line (`!<error>` when
 # it cannot be made) and, once the checker is gone, removes the directory again until it is gone, so a stop at
@@ -176,7 +176,7 @@ def _read(run_git: RunGit, worktree: str, revision: str, path: str) -> bytes | N
 
 
 def _new_tests(worktree: str, base: str, head: str, run_git: RunGit) -> tuple[list[tuple[str, str]], dict[str, bytes]]:
-    """The `(path, id)` of each new test of the change, sorted by path then id, and the head blob of each file holding one."""
+    """The `(path, id)` of each new test, sorted by path then id, and the head blob of each file holding one."""
     done = run_git("-C", worktree, "diff", "--no-renames", "--name-only", "--diff-filter=AM", "-z", base, head)
     if done.returncode:
         raise RuntimeError(f"git diff: {_last_line(done)}")
