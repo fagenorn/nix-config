@@ -1259,6 +1259,12 @@ class ManagerContractTest(unittest.TestCase):
                       "picture is an owner's look and a colleague who started the sprint cannot "
                       "answer it. Reserve `pair` for the owner's review before a merge.", text)
 
+    def test_the_contract_lets_a_manager_rerun_a_run_with_one_failed_required_check(self):
+        text = " ".join(CONTRACT.read_text(encoding="utf-8").split())
+        self.assertIn("`gh run rerun <id> --failed --repo <project>` of a run with at least one failed job "
+                      "that is a required check", text)
+        self.assertNotIn("whose failed jobs are all required checks", text)
+
     def test_the_contract_does_not_say_the_owner_stated_every_goal(self):
         text = " ".join(CONTRACT.read_text(encoding="utf-8").split())
         self.assertNotIn("one goal the owner stated", text)

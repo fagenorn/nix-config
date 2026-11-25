@@ -38,7 +38,7 @@ class FakeForge:
         self.calls = []
         self.pr = {"branch": "issue-12-x", "repo": "o/r", "head": SHA, "base": "main"}
         self.run = {"event": "pull_request", "branch": "issue-12-x", "repo": "o/r", "head": SHA,
-                    "prs": [7], "rerun": ["Nix Eval"]}
+                    "prs": [7], "rerun": ["Nix Eval"], "failed": ["Nix Eval"]}
         self.required = frozenset({"Nix Eval"})
         self.pr_error = None
         self.release_pr = None
@@ -268,7 +268,8 @@ class JudgeTest(unittest.TestCase):
         """A run of the open release pull request (`pull_request`) or of the candidate's push (`push`)."""
         self.fake.release_pr = {"pr": 9, "branch": "develop", "head": SHA, "base": "main"}
         self.fake.run = {"event": event, "branch": "develop", "repo": "o/r", "head": SHA,
-                         "prs": [9] if event == "pull_request" else [], "rerun": ["Nix Eval"], **change}
+                         "prs": [9] if event == "pull_request" else [], "rerun": ["Nix Eval"],
+                         "failed": ["Nix Eval"], **change}
         self.fake.calls = []
 
     def test_a_rerun_of_the_release_pull_request_run_and_of_the_candidates_push_run_is_allowed(self):
@@ -311,8 +312,10 @@ class JudgeTest(unittest.TestCase):
             "i": ("pull_request", {"prs": [8]}, not_own, None),
             "j": ("pull_request", {"repo": "fork/r"}, not_own, "no read"),
             "k": ("pull_request", {"release": {"head": "d" * 40}}, permit.STALE_RUN.format(run=55), None),
-            "l": ("pull_request", {"rerun": ["deploy-preview"]}, permit.NOT_CHECK_RUN.format(run=55), None),
-            "m": ("push", {"rerun": ["Nix Eval", "deploy"]}, permit.NOT_CHECK_RUN.format(run=55), None),
+            "l": ("pull_request", {"rerun": ["deploy-preview"], "failed": ["deploy-preview"]},
+                  permit.NOT_CHECK_RUN.format(run=55), None),
+            "m": ("push", {"rerun": ["deploy"], "failed": ["deploy"]},
+                  permit.NOT_CHECK_RUN.format(run=55), None),
             "n": ("pull_request", {"branch": "issue-13-x"}, permit.SHARED_ISSUE.format(issue=13), "no read"),
         }
         for row, (event, change, reason, note) in rows.items():
@@ -395,7 +398,7 @@ class JudgeTest(unittest.TestCase):
 
     def test_the_rerun_limit_does_not_hide_an_earlier_refusal(self):
         grant = dataclasses.replace(self.grant, reruns={SHA: (permit.Rerun(53), permit.Rerun(54))})
-        self.fake.run = {**self.fake.run, "rerun": ["deploy-preview"]}
+        self.fake.run = {**self.fake.run, "rerun": ["deploy-preview"], "failed": ["deploy-preview"]}
         self.assertRefused(self.rerun, permit.NOT_CHECK_RUN.format(run=55), grant)
 
     def test_a_deploy_rerun_is_refused(self):
@@ -405,17 +408,87 @@ class JudgeTest(unittest.TestCase):
                 self.assertRefused(self.rerun, permit.DEPLOY_RERUN.format(run=55, event=event))
 
     def test_a_pull_request_triggered_deploy_run_is_refused(self):
-        self.fake.run = {**self.fake.run, "rerun": ["deploy-preview"]}
+        self.fake.run = {**self.fake.run, "rerun": ["deploy-preview"], "failed": ["deploy-preview"]}
         self.assertRefused(self.rerun, permit.NOT_CHECK_RUN.format(run=55))
 
-    def test_a_rerun_that_would_also_run_a_job_that_is_no_required_check_is_refused(self):
-        self.fake.run = {**self.fake.run, "rerun": ["Nix Eval", "deploy-preview"]}
-        self.assertRefused(self.rerun, permit.NOT_CHECK_RUN.format(run=55))
-        self.fake.run = {**self.fake.run, "rerun": []}
-        self.assertRefused(self.rerun, permit.NOT_CHECK_RUN.format(run=55))
-        self.fake.required = frozenset({"Nix Eval", "Budget"})
-        self.fake.run = {**self.fake.run, "rerun": ["Nix Eval", "Budget"]}
-        self.assertEqual(ALLOW, self.judge(self.rerun).decision)
+    def test_a_run_whose_failed_jobs_are_all_optional_is_refused(self):
+        optional = {"rerun": ["deploy-preview"], "failed": ["deploy-preview"]}
+        late = {"rerun": ["deploy-preview", "Late Optional"], "failed": ["deploy-preview", "Late Optional"]}
+        skipped_dependent = {"rerun": ["deploy-preview", "Nix Eval"], "failed": ["deploy-preview"]}
+        for name, change in (("optional", optional), ("two optional", late),
+                             ("required only a skipped dependent", skipped_dependent)):
+            with self.subTest(name):
+                self.fake = FakeForge()
+                self.fake.run = {**self.fake.run, **change}
+                self.assertRefused(self.rerun, permit.NOT_CHECK_RUN.format(run=55))
+        for event in ("push", "pull_request"):
+            with self.subTest(event):
+                self.release_run(event, rerun=["deploy"], failed=["deploy"])
+                self.assertRefused(self.rerun, permit.NOT_CHECK_RUN.format(run=55))
+
+    def test_a_run_with_no_failed_job_is_refused_without_reading_the_required_checks(self):
+        def unreadable(slug, base):
+            raise ForgeUnreadable("x")
+
+        forge = Forge(self.fake.read_pr, self.fake.read_run, unreadable, self.fake.read_release_pr)
+        self.fake.run = {**self.fake.run, "rerun": [], "failed": []}
+        first = judge(self.rerun, self.grant, forge)
+        self.release_run("push", rerun=[], failed=[])
+        second = judge(self.rerun, self.grant, forge)
+        for verdict in (first, second):
+            self.assertEqual((DENY, permit.NOT_CHECK_RUN.format(run=55)), (verdict.decision, verdict.reason))
+
+    def test_a_run_with_a_failed_required_job_of_another_project_or_at_a_stale_head_is_refused(self):
+        both = {"rerun": ["Nix Eval", "deploy-preview"], "failed": ["Nix Eval", "deploy-preview"]}
+        release = {"rerun": ["Nix Eval", "deploy"], "failed": ["Nix Eval", "deploy"]}
+        stale = {"head": "d" * 40}
+        rows = (
+            ("other project", self.rerun.replace("--repo o/r", "--repo x/y"), both, None, permit.OTHER_REPO),
+            ("fork run", self.rerun, {**both, "repo": "fork/r"}, None, permit.NOT_OWN_RUN.format(run=55)),
+            ("not own branch", self.rerun, {**both, "branch": "issue-99-x"}, None,
+             permit.NOT_OWN_RUN.format(run=55)),
+            ("stale pull request", self.rerun, both, ("pr", stale), permit.STALE_RUN.format(run=55)),
+            ("push deploy", self.rerun, ("push", release), ("release_pr", stale),
+             permit.DEPLOY_RERUN.format(run=55, event="push")),
+            ("stale release", self.rerun, ("pull_request", release), ("release_pr", stale),
+             permit.STALE_RUN.format(run=55)),
+        )
+        for name, command, change, moved, reason in rows:
+            with self.subTest(name):
+                self.fake = FakeForge()
+                if isinstance(change, tuple):
+                    self.release_run(change[0], **change[1])
+                else:
+                    self.fake.run = {**self.fake.run, **change}
+                if moved is not None:
+                    attribute, update = moved
+                    setattr(self.fake, attribute, {**getattr(self.fake, attribute), **update})
+                self.assertRefused(command, reason)
+
+    def test_not_check_run_says_the_run_has_no_failed_required_job(self):
+        self.assertEqual("Run 55 has no failed job that is a required check, so it is not rerun.",
+                         permit.NOT_CHECK_RUN.format(run=55))
+
+    def test_a_run_with_a_failed_required_job_and_a_failed_optional_job_is_rerun_within_the_cap(self):
+        self.fake.run = {**self.fake.run, "rerun": ["Nix Eval", "deploy-preview"],
+                         "failed": ["Nix Eval", "deploy-preview"]}
+        verdict = self.judge(self.rerun)
+        self.assertEqual((ALLOW, "rerun"), (verdict.decision, verdict.verb))
+        self.assertEqual({"run": 55, "pr": 7, "head": SHA, "count": 1, "members": []}, dict(verdict.target))
+        for event in ("pull_request", "push"):
+            with self.subTest(event):
+                self.release_run(event, rerun=["deploy", "Nix Eval"], failed=["deploy", "Nix Eval"])
+                verdict = self.judge(self.rerun)
+                self.assertEqual((ALLOW, "rerun"), (verdict.decision, verdict.verb))
+                self.assertEqual({"run": 55, "pr": 9, "head": SHA, "count": 1, "members": [],
+                                  "release": event}, dict(verdict.target))
+                one = dataclasses.replace(self.grant, reruns={SHA: (permit.Rerun(53),)})
+                verdict = self.judge(self.rerun, one)
+                self.assertEqual((ALLOW, 2), (verdict.decision, verdict.target["count"]))
+                two = dataclasses.replace(self.grant, reruns={SHA: (permit.Rerun(53), permit.Rerun(54))})
+                self.assertRefused(self.rerun, permit.RERUN_LIMIT.format(
+                    pr=9, head=SHA, reruns="run 53 (failing: no members reported) and "
+                                           "run 54 (failing: no members reported)"), two)
 
     def test_a_rerun_of_every_job_or_of_another_pull_request_is_refused(self):
         self.assertRefused("gh run rerun 55 --repo o/r",
@@ -1076,6 +1149,21 @@ jobs:
             run = permit.read_run("o/r", 55)
         self.assertEqual((["Agent Workflow Tests"], []), (run["rerun"], run["members"]))
 
+    def test_failed_names_the_failed_jobs_of_every_page(self):
+        page_one = [{"id": 900, "name": "Optional Lint", "conclusion": "failure"},
+                    {"id": 901, "name": "B", "conclusion": "cancelled"},
+                    {"id": 902, "name": "E", "conclusion": "success"},
+                    {"id": 903, "name": "F", "conclusion": "skipped"}]
+        page_two = [{"id": 904, "name": "Nix Eval", "conclusion": "failure"},
+                    {"id": 905, "name": "C", "conclusion": "timed_out"},
+                    {"id": 906, "name": "D", "conclusion": "startup_failure"},
+                    {"id": 907, "name": "G", "conclusion": "neutral"},
+                    {"id": 908, "name": "H", "conclusion": None}]
+        payloads = {**self.run_payloads([]), self.JOBS_PATH: [{"jobs": page_one}, {"jobs": page_two}]}
+        with self.forge_reads(payloads):
+            failed = permit.read_run("o/r", 55)["failed"]
+        self.assertEqual(["Optional Lint", "B", "Nix Eval", "C", "D"], failed)
+
     def test_a_manager_reruns_the_required_failure_of_its_pull_request_twice_and_not_a_third_time(self):
         """The demo end to end (ADR-console-106): the push-only timing job does not block, the members are
         recorded, and the third rerun of one head is refused."""
@@ -1110,12 +1198,23 @@ jobs:
                                  {"id": 901, "name": "Cased Event", "conclusion": "skipped"}]
         with self.forge_reads({**payloads, **self.run_payloads(cased_on_pull_request)}):
             cased = judge(command, grant, forge)
-        self.assertEqual((DENY, permit.NOT_CHECK_RUN.format(run=55)), (cased.decision, cased.reason))
+        self.assertEqual((ALLOW, 1), (cased.decision, cased.target["count"]))
         skipped_on_pull_request = [{"id": 900, "name": "Agent Workflow Tests", "conclusion": "failure"},
                            {"id": 901, "name": "Suite Timing", "conclusion": "skipped"}]
         with self.forge_reads({**payloads, **self.run_payloads(skipped_on_pull_request)}):
             refused = judge(command, grant, forge)
-        self.assertEqual((DENY, permit.NOT_CHECK_RUN.format(run=55)), (refused.decision, refused.reason))
+        self.assertEqual((ALLOW, 1), (refused.decision, refused.target["count"]))
+        optional_failure = [{"id": 900, "name": "Agent Workflow Tests", "conclusion": "failure"},
+                            {"id": 902, "name": "Optional Lint", "conclusion": "failure"}]
+        with self.forge_reads({**payloads, **self.run_payloads(optional_failure)}):
+            beside = judge(command, grant, forge)
+        self.assertEqual((ALLOW, 1), (beside.decision, beside.target["count"]))
+        required_passed = [{"id": 900, "name": "Agent Workflow Tests", "conclusion": "success"},
+                           {"id": 902, "name": "Optional Lint", "conclusion": "failure"}]
+        with self.forge_reads({**payloads, **self.run_payloads(required_passed)}):
+            only_optional = judge(command, grant, forge)
+        self.assertEqual((DENY, permit.NOT_CHECK_RUN.format(run=55)),
+                         (only_optional.decision, only_optional.reason))
 
     def test_the_release_pull_request_is_the_one_open_pull_request_from_integration_into_default(self):
         contract = {"bindings": {"vcs": {"integration_branch": "develop", "default_branch": "main"}},
@@ -1213,7 +1312,7 @@ jobs:
                              permit.read_pr("o/r", 7))
             self.assertEqual({"event": "pull_request", "branch": "issue-12-x", "repo": "o/r",
                               "head": HEAD, "prs": [7], "rerun": ["Other", "deploy", "Late"],
-                              "members": [], "pending": True},
+                              "failed": ["Other"], "members": [], "pending": True},
                              permit.read_run("o/r", 55))
             self.assertEqual(frozenset({"Nix Eval", "Budget", "Any", "Legacy"}),
                              permit.read_required("o/r", "main"))

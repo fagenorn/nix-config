@@ -75,11 +75,12 @@ never None. The checks run in this order, the first that applies deciding:
   the release pull request's run (`SHARED_ISSUE` for an issue in `others`, whatever it is); for an own
   issue's branch, no pull request among the run's whose `read_pr` has the slug as repository and the
   run's branch is `NOT_OWN_RUN`; the pull request's head (the release pull request's too) other than
-  the run's head is `STALE_RUN`. A release run's checks are the default branch's. No job that the
-  rerun would run (every job of the run's latest attempt, all pages, whose conclusion is not
-  `success`: a failed rerun also runs the skipped dependents of a failed job, but not a skipped job
-  whose own `if` can never hold for the run's own event, `read_run`'s business) or one not named by
-  `read_required(slug, base)` is `NOT_CHECK_RUN`; a release run with a job that has no conclusion yet is
+  the run's head is `STALE_RUN`. A release run's checks are the default branch's. A run with no
+  failed job (a job of its latest attempt, all pages, whose conclusion is in `FAILED_CONCLUSIONS`), or
+  none named by `read_required(slug, base)`, is `NOT_CHECK_RUN`, and a run with no failed job is
+  refused before `read_required` is read; GitHub's failed-jobs rerun reruns every failed job of the
+  run together and cannot pick one, so the run is judged whole and a failed job that is no required
+  check reruns beside a required one. A release run with a job that has no conclusion yet is
   `RUN_PENDING`, judged before that. A head that `grant.reruns` already counts `MAX_RERUNS` (two) allowed reruns for is
   `RERUN_LIMIT`, which names the two reruns, each by run and failing members (ADR-console-106); the
   release pull request run and the candidate's push run share that one head's cap, and the refusal
@@ -148,7 +149,8 @@ for a call not already cached, so the console judges again without a second forg
 
 Readers (`read_pr`, `read_run`, `read_required`, `read_release_pr`) read the forge once and raise `ForgeUnreadable` with
 a fixed sentence for a failed read or a missing or malformed member; no raw forge text reaches a
-reason. `read_run`'s `rerun` is the names of the jobs a failed-job rerun would run, read across every
+reason. `read_run`'s `failed` is the names of those failed jobs, read across every page of the run's
+jobs. Its `rerun` is the names of the jobs a failed-job rerun would run, read across every
 page of the run's jobs. A job whose conclusion is `skipped` is left out when the run's workflow file at
 the run's head (the run's `path`, read once, only when a job was skipped) gives that job, by name, an
 `if` that `never_on` proves false for the run's own event: a `&&` chain with a
@@ -200,7 +202,7 @@ DEPLOY_RERUN = "Run {run} is a {event} run, not a pull request check run, so it 
 NOT_OWN_RUN = "Run {run} is not a check run of this sprint's own pull request."
 STALE_RUN = "Run {run} is not at the head of its pull request."
 RUN_PENDING = "Run {run} has a job that has not finished, so it has no failed job to rerun yet."
-NOT_CHECK_RUN = "Run {run} would rerun a job that is not a required check."
+NOT_CHECK_RUN = "Run {run} has no failed job that is a required check, so it is not rerun."
 RERUN_LIMIT = ("Pull request {pr} has had its head {head} rerun twice, by {reruns}, and a third rerun is "
                "refused: the head must be reported or fixed.")
 RERUN_LIMIT_TIP = ("The head {head} of {branch} has had its release rerun twice, by {reruns}, and a third "
@@ -227,6 +229,7 @@ ACTION_EXPIRED = ("The owner's approval of this action expired 60 minutes after 
 
 MERGE, RERUN = "merge", "rerun"
 MAX_RERUNS = 2
+FAILED_CONCLUSIONS = ("failure", "cancelled", "timed_out", "startup_failure")
 MAX_MEMBERS = 50
 ACTION = "action"
 RELEASE, ABANDON, DISPOSE = "release", "release-abandon", "release-dispose"
@@ -546,13 +549,14 @@ def read_run(slug: str, run_id: int) -> Mapping:
     rerun = [name for name, conclusion, _ in jobs
              if conclusion != "success" and not (
                  conclusion == "skipped" and never_on(conditions.get(name, ""), event))]
-    failed = [job_id for _, conclusion, job_id in jobs
-              if conclusion == "failure" and isinstance(job_id, int) and not isinstance(job_id, bool)]
+    failed_ids = [job_id for _, conclusion, job_id in jobs
+                  if conclusion == "failure" and isinstance(job_id, int) and not isinstance(job_id, bool)]
     return {"event": event, "pending": any(conclusion is None for _, conclusion, _ in jobs),
             "branch": _member(run, "head_branch", str, what),
             "repo": _member(_member(run, "head_repository", dict, what), "full_name", str, what),
             "head": _member(run, "head_sha", str, what), "prs": numbers, "rerun": rerun,
-            "members": _failed_members(slug, failed)}
+            "failed": [name for name, conclusion, _ in jobs if conclusion in FAILED_CONCLUSIONS],
+            "members": _failed_members(slug, failed_ids)}
 
 
 def read_release_pr(slug: str, root: str | None, branch: str) -> Mapping | None:
@@ -964,7 +968,8 @@ def _judge_rerun(parts: list[str], grant: Grant, forge: Forge) -> Verdict:
         base = pull["base"]
     if release is not None and run.get("pending"):
         return _deny(RERUN, RUN_PENDING.format(run=run_id))
-    if not run["rerun"] or not set(run["rerun"]) <= forge.read_required(slug, base):
+    failed = set(run["failed"])
+    if not failed or not failed & forge.read_required(slug, base):
         return _deny(RERUN, NOT_CHECK_RUN.format(run=run_id))
     done = grant.reruns.get(run["head"], ())
     if len(done) >= MAX_RERUNS:
