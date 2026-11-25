@@ -25,7 +25,7 @@ not on `<i>`, or a tracked file has changes; untracked files do not count).
 closed, now as `completed` and read back, or already) or `open-criteria` (`--closes false`: the
 issue's criteria do not let the pull request close it, and nothing changed).
 
-The four `hold-*` subcommands read what the close-out hold decides from (issue 1541) and post, edit,
+The four `hold-*` subcommands read what the close-out hold decides from and post, edit,
 label, file and close nothing. Every flag is the member name of the procedure input that feeds it; a
 JSON-valued flag is strict JSON (no repeated key, no NaN), and one that does not parse is a usage error.
 
@@ -56,7 +56,7 @@ verdict (`missing-checks`, `human-checks`, `unattended`, `owner-checks`, `script
 answered criterion, else `--block`, skipped when null) and for each `--split` entry (the child's posted
 fence, else the entry's block, linted with no blocked issues).
 
-The write-side `hold-*` subcommands post, label, file, close and run (issue 1541). Each is idempotent by
+The write-side `hold-*` subcommands post, label, file, close and run. Each is idempotent by
 itself, because the engine owes a check only to an arrival a rewind discarded: a second call with the same
 flags posts, files, labels and closes nothing more. Each prints the members its check prints (the engine
 stores the check's document as the step's result), and its check changes nothing.

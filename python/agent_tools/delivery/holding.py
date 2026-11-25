@@ -1,4 +1,4 @@
-"""`holding`: the pure part of the close-out hold (issue 1541), a port of the program's close-out gates.
+"""`holding`: the pure part of the close-out hold, a port of the program's close-out gates.
 
 A merged issue whose criteria are not all proven at the merge is held: a hold comment carrying one
 ```verify fence is posted, the issue is labelled `needs-verification` and the runner is run once. This
@@ -351,7 +351,9 @@ def fences(repo: str, issue: int, merge: str | None) -> list[dict]:
 
 
 def posted_fences(repo: str, issue: int, merge: str) -> list[dict]:
-    """The posted fences of the issue and its split children for `merge`: `{issue, merge, checks, comment_id, results}`."""
+    """The posted fences of the issue and its split children for `merge`.
+
+    Each is `{issue, merge, checks, comment_id, results}`."""
     return [{key: entry[key] for key in ("issue", "merge", "checks", "comment_id", "results")}
             for entry in fences(repo, issue, merge)]
 
@@ -449,7 +451,8 @@ def lint_all(*, repo_root: str, repo: str, issue: int, pr_head: str, pr_branch: 
 def split_child(repo: str, issue: int, merge: str, ac: str) -> dict | None:
     """The split child of `issue` for `ac` at `merge` as `{issue, fence}` (`fence` None until it holds one).
 
-    An open child is preferred; a child the runner has closed since still counts, so a continued hold files no second."""
+    An open child is preferred; a child the runner has closed since still counts, so a continued hold
+    files no second."""
     number = next((found for found, spelled in split_children(repo, issue, merge) if spelled == ac), None)
     if number is None:
         number = next((found for found, spelled in closed_children(repo, issue, merge) if spelled == ac), None)
