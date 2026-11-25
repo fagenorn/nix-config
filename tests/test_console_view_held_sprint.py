@@ -2,7 +2,7 @@
 import dataclasses
 import unittest
 
-from agent_tools.console import held_sprint, view
+from agent_tools.console import card_entries, view
 from agent_tools.console.sprints import Manager
 
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures
@@ -38,8 +38,8 @@ class HeldSprintViewTest(unittest.TestCase):
             "waiting_since": self.since}])
         self.assertEqual(shown["statement"]["inbox_items"], 1)
         self.assertEqual(shown["statement"]["headline"], "1 thing needs you")
-        self.assertEqual(shown["statement"]["sentence"], held_sprint.SENTENCE)
-        self.assertEqual(held_sprint.SENTENCE,
+        self.assertEqual(shown["statement"]["sentence"], card_entries.HELD_SENTENCE)
+        self.assertEqual(card_entries.HELD_SENTENCE,
                          "Tell the manager what to do from its sprint, or drop the sprint.")
         self.assertEqual(entry(shown)["held_since"], self.since)
         self.assertEqual((entry(shown)["state"], entry(shown)["ball"]), ("quiet", "nobody"))
@@ -150,9 +150,9 @@ class HeldSprintViewTest(unittest.TestCase):
     def test_the_held_sentence_is_used_only_when_held_cards_are_all_that_is_counted(self):
         shown = line(self.held, R + 61 * MIN, {("p00", "k9"): open_item("p00", "k9", 99)})
         self.assertEqual(shown["statement"]["inbox_items"], 2)
-        self.assertEqual(shown["statement"]["sentence"], held_sprint.MIXED_SENTENCE)
-        self.assertNotEqual(held_sprint.MIXED_SENTENCE, view.NEEDS_SENTENCE)
-        self.assertNotIn("links to the tracker, where", held_sprint.MIXED_SENTENCE)
+        self.assertEqual(shown["statement"]["sentence"], card_entries.HELD_MIXED_SENTENCE)
+        self.assertNotEqual(card_entries.HELD_MIXED_SENTENCE, view.NEEDS_SENTENCE)
+        self.assertNotIn("links to the tracker, where", card_entries.HELD_MIXED_SENTENCE)
 
     def test_a_sprint_waiting_on_quota_raises_none_even_when_every_profile_is_out(self):
         now = R + 120 * MIN
