@@ -628,6 +628,62 @@ class JudgeTest(unittest.TestCase):
         self.fake.pr_error = ForgeUnreadable("boom")
         self.assertRefused(self.merge, permit.FORGE_UNREADABLE.format(reason="boom"))
 
+    EXHAUSTED = ("Post \"https://api.github.com/x\": dial tcp 140.82.112.5:443: "
+                 "connect: can't assign requested address")
+
+    def exhaustion(self):
+        return permit.forge_api.ForgeError("gh_failed", self.EXHAUSTED, transient=True, exhausted=True)
+
+    def real_forge_answering(self, *failures):
+        """The real readers over a fake `api_get`: each failure in turn, then the open pull request."""
+        pull = {"head": {"ref": "issue-12-x", "sha": SHA, "repo": {"full_name": "o/r"}},
+                "base": {"ref": "main"}}
+        answers = [*failures]
+        calls = []
+
+        def api_get(path, *args):
+            calls.append(path)
+            if answers:
+                raise answers.pop(0)
+            return pull
+        stack = contextlib.ExitStack()
+        stack.enter_context(mock.patch.object(permit.forge_api, "api_get", side_effect=api_get))
+        sleeps = []
+        stack.enter_context(mock.patch.object(permit.time, "sleep", side_effect=sleeps.append))
+        return stack, calls, sleeps
+
+    def test_a_lookup_that_hits_port_exhaustion_and_then_answers_is_judged_normally(self):
+        stack, calls, sleeps = self.real_forge_answering(self.exhaustion(), self.exhaustion())
+        with stack:
+            verdict = judge(self.merge, self.grant, permit.FORGE)
+        self.assertEqual((ALLOW, {"pr": 7, "head": SHA}), (verdict.decision, dict(verdict.target)))
+        self.assertEqual(3, len(calls))
+        self.assertEqual(2, len(sleeps))
+        self.assertTrue(all(0 < pause <= 5 for pause in sleeps), sleeps)
+
+    def test_a_lookup_that_keeps_hitting_port_exhaustion_is_refused_in_plain_words(self):
+        stack, calls, sleeps = self.real_forge_answering(*[self.exhaustion() for _ in range(20)])
+        with stack:
+            verdict = judge(self.merge, self.grant, permit.FORGE)
+        self.assertEqual(DENY, verdict.decision)
+        self.assertEqual(permit.FORGE_UNREADABLE.format(reason=permit.PORTS_EXHAUSTED), verdict.reason)
+        self.assertIn("local network ports", verdict.reason)
+        self.assertIn("again", verdict.reason)
+        self.assertNotIn("dial tcp", verdict.reason)
+        self.assertGreater(len(calls), 1)
+        self.assertLess(len(calls), 10)
+        self.assertEqual(len(calls) - 1, len(sleeps))
+
+    def test_another_lookup_error_is_not_retried(self):
+        other = permit.forge_api.ForgeError("gh_failed", "HTTP 502 secret detail", transient=True)
+        stack, calls, sleeps = self.real_forge_answering(other)
+        with stack:
+            verdict = judge(self.merge, self.grant, permit.FORGE)
+        self.assertEqual(DENY, verdict.decision)
+        self.assertEqual(permit.FORGE_UNREADABLE.format(reason="pull request 7 could not be read"),
+                         verdict.reason)
+        self.assertEqual((1, []), (len(calls), sleeps))
+
     def test_a_command_naming_no_granted_verb_has_no_decision(self):
         for command in ("git status", "gh pr view 7", "release transaction preview --repo-root r",
                         "echo hi"):
@@ -747,6 +803,20 @@ class ReaderTest(unittest.TestCase):
                 with self.subTest(name), self.assertRaises(ForgeUnreadable) as caught:
                     getattr(permit, name)(*args)
                 self.assertNotIn("secret", str(caught.exception))
+
+    def test_gh_stderr_showing_address_exhaustion_marks_the_forge_error(self):
+        for stderr, exhausted in (
+                ("Get \"https://api.github.com/x\": dial tcp 1.2.3.4:443: connect: can't assign requested address",
+                 True),
+                ("dial tcp 1.2.3.4:443: connect: cannot assign requested address", True),
+                ("dial tcp 1.2.3.4:443: connect: connection refused", False),
+                ("HTTP 502 Bad Gateway", False)):
+            done = mock.Mock(returncode=1, stdout="", stderr=stderr)
+            with self.subTest(stderr), mock.patch.object(permit.forge_api.subprocess, "run",
+                                                         return_value=done):
+                with self.assertRaises(permit.forge_api.ForgeError) as caught:
+                    permit.forge_api.run_gh(["api", "x"])
+                self.assertEqual(exhausted, caught.exception.exhausted)
 
     def test_a_pull_request_with_a_missing_member_is_unreadable(self):
         for broken in ({**self.PULL, "head": {**self.PULL["head"], "repo": None}},
