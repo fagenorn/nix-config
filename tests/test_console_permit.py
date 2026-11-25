@@ -1111,17 +1111,26 @@ class ReaderTest(unittest.TestCase):
                 deploy = judge(command, grant, forge)
             self.assertEqual((DENY, permit.DEPLOY_RERUN.format(run=55, event="push")),
                              (deploy.decision, deploy.reason))
-        optional_failure = [{"id": 900, "name": "Agent Workflow Tests", "conclusion": "failure"},
-                            {"id": 902, "name": "Optional Lint", "conclusion": "failure"}]
-        with self.forge_reads({**payloads, **self.run_payloads(optional_failure)}):
-            beside = judge(command, grant, forge)
-        self.assertEqual((ALLOW, 1), (beside.decision, beside.target["count"]))
         required_passed = [{"id": 900, "name": "Agent Workflow Tests", "conclusion": "success"},
                            {"id": 902, "name": "Optional Lint", "conclusion": "failure"}]
         with self.forge_reads({**payloads, **self.run_payloads(required_passed)}):
             only_optional = judge(command, grant, forge)
         self.assertEqual((DENY, permit.NOT_CHECK_RUN.format(run=55)),
                          (only_optional.decision, only_optional.reason))
+
+    def test_a_failed_optional_job_beside_a_failed_required_job_does_not_block_the_rerun_read_from_the_forge(self):
+        """The same raw job payload the starting commit refused (its reader named every job a rerun would run)."""
+        jobs = [{"id": 900, "name": "Agent Workflow Tests", "conclusion": "failure"},
+                {"id": 902, "name": "Optional Lint", "conclusion": "failure"}]
+        payloads = {**self.run_payloads(jobs), "repos/o/r/pulls/7": self.PULL,
+                    "repos/o/r/branches/main/protection/required_status_checks": {
+                        "checks": [{"context": "Agent Workflow Tests", "app_id": 15368}], "contexts": []}}
+        grant = Grant(slug="o/r", root="/r", strategy="merge", delete_branch=True,
+                      branch_pattern="issue-<num>-<slug>", issues=frozenset({12}), others=frozenset())
+        forge = Forge(permit.read_pr, permit.read_run, permit.read_required, permit.read_release_pr)
+        with self.forge_reads(payloads):
+            verdict = judge("gh run rerun 55 --failed --repo o/r", grant, forge)
+        self.assertEqual((ALLOW, 1), (verdict.decision, verdict.target["count"]))
 
     def test_the_release_pull_request_is_the_one_open_pull_request_from_integration_into_default(self):
         contract = {"bindings": {"vcs": {"integration_branch": "develop", "default_branch": "main"}},
