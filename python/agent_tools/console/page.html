@@ -3300,7 +3300,11 @@ function renderCapacity(view) {
   } else if (cap.profiles.some(excludedProfile) && cap.profiles.every((p) => excludedProfile(p) || signedOut(p))) {
     nodes.push(el("span", "cap-none", "every profile excluded"));
   } else if (need === 0) {
-    nodes.push(el("span", "cap-none", cap.no_reading ? cap.no_reading : cap.profiles.some(counted) ? "no reading yet" : "no accounts"));
+    // Only signed-out profiles stand in the pool (a colleague's, since the owner's would count in need): the pool waits on a sign-in, it is not unread.
+    const standing = cap.profiles.filter((p) => counted(p) && !excludedProfile(p));
+    nodes.push(el("span", "cap-none", cap.no_reading ? cap.no_reading
+      : standing.length && standing.every(signedOut) ? "waits for a sign-in"
+      : cap.profiles.some(counted) ? "no reading yet" : "no accounts"));
   }
   if (need > 0) {
     nodes.push(el("span", "cap-need", (nodes.length ? ", " : "") + need + (need === 1 ? " needs sign-in" : " need sign-in")));
@@ -3326,11 +3330,10 @@ function accountRow(shown, view) {
   const out = p.state === "out";
   if (signedOut(p)) detail.appendChild(el("span", "acct-week", "signed out"));
   else if (p.state === "unknown") detail.appendChild(el("span", "acct-week", "no reading yet"));
-  else if (out) {
-    detail.appendChild(outWords(p, "acct-week"));
+  else if (out || p.state === "reset") {
+    detail.appendChild(out ? outWords(p, "acct-week") : el("span", "acct-week", "reset, not yet used"));
     if (known(p.week_left)) detail.appendChild(el("span", "acct-week-left", p.week_left + "% of the week left"));
-  } else if (p.state === "reset") detail.appendChild(el("span", "acct-week", "reset, not yet used"));
-  else detail.appendChild(el("span", "acct-week", known(p.week_left) ? p.week_left + "% of the week left" : "week unknown"));
+  } else detail.appendChild(el("span", "acct-week", known(p.week_left) ? p.week_left + "% of the week left" : "week unknown"));
   if (known(p.five_hour_left)) detail.appendChild(el("span", "acct-five", p.five_hour_left + "% of 5 hours"));
   if (known(p.next_reset) && !out && Number.isFinite(Date.parse(p.next_reset))) {
     detail.appendChild(phrase("span", "acct-reset", "resets ", timeEl("weekday", p.next_reset, "")));

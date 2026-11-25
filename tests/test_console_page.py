@@ -875,7 +875,8 @@ class CapacityPageTest(unittest.TestCase):
         self.assertEqual(classes(capacity_snap(cap)), ["cap-state cap-fine"])
         snap = opened({**view([]), "capacity": cap})
         self.assertTrue(details(row_of(snap, "c"))[0].startswith("reset, not yet used"))
-        self.assertTrue(details(row_of(snap, "d"))[0].startswith("reset, not yet used"))
+        self.assertEqual(details(row_of(snap, "d")),
+                         ["reset, not yet used", "100% of the week left", "100% of 5 hours"])
 
     def test_profiles_without_a_reading_add_nothing_beside_the_word(self) -> None:
         frame = {**view([]), "capacity": capacity(
@@ -8315,6 +8316,20 @@ class SigninPageTest(unittest.TestCase):
         words = lambda name: [full(n) for n in nodes(row_of(shown, name)) if has_class(n, "acct-signin-words")]
         self.assertEqual(words("colleague-1"), ["waits for ana@corp.invalid to sign in"])
         self.assertEqual(words("work"), ["signed out"])
+
+    def test_a_pool_of_only_a_colleagues_signed_out_profile_waits_for_a_sign_in_not_for_a_reading(self) -> None:
+        cap = capacity([
+            profile("colleague-1", "ok", week_left=40, signin=si("signed_out", None, ask=True),
+                    owner="ana@corp.invalid")])
+        self.assertEqual(full(capacity_snap(cap)["capacity"]), "waits for a sign-in")
+        shown = opened({**view([]), "capacity": cap})
+        row = row_of(shown, "colleague-1")
+        self.assertEqual([full(n) for n in nodes(row) if has_class(n, "acct-owner")], ["ana@corp.invalid"])
+        self.assertEqual([full(n) for n in nodes(row) if has_class(n, "acct-signin-words")],
+                         ["waits for ana@corp.invalid to sign in"])
+        mixed = capacity_snap(capacity([
+            *cap["profiles"], profile("b", "unknown")], no_reading="1 with no reading yet"))
+        self.assertEqual(full(mixed["capacity"]), "1 with no reading yet")
 
     def test_only_signed_out_profiles_show_without_a_state_word(self) -> None:
         snap = capacity_snap(capacity([

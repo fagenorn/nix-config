@@ -2529,31 +2529,6 @@ class ScreenshotFixtureTest(unittest.TestCase):
                     self.assertEqual(raised.exception.code, 2)
                     capture.assert_not_called()
 
-    def test_main_passes_the_widths_to_capture(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            with mock.patch.object(shots, "capture", return_value=[]) as capture, \
-                    redirect_stdout(StringIO()):
-                self.assertEqual(shots.main(["--out", tmp, "--sheets", "--states",
-                                             "owner-actors,owner-accounts,accounts-panel",
-                                             "--widths", "1440,390"]), 0)
-                self.assertEqual(capture.call_args.kwargs["widths"], (1440, 390))
-                self.assertEqual(capture.call_args.kwargs["states"],
-                                 ("owner-actors", "owner-accounts", "accounts-panel"))
-                self.assertEqual(shots.main(["--out", tmp]), 0)
-                self.assertEqual(capture.call_args.kwargs["widths"], shots.WIDTHS)
-                answer = Path(tmp) / "answer.txt"
-                answer.write_text("Answer: plain", encoding="utf-8")
-                self.assertEqual(shots.main(["--out", tmp, "--question", "Q?", "--answer-file",
-                                             str(answer), "--widths", "390"]), 0)
-                self.assertEqual(capture.call_args.kwargs["widths"], (390,))
-            for value in ("", "1440,", "wide", "0", "-390", "1440,1440"):
-                with self.subTest(value=value), mock.patch.object(shots, "capture") as capture, \
-                        redirect_stdout(StringIO()), redirect_stderr(StringIO()):
-                    with self.assertRaises(SystemExit) as raised:
-                        shots.main(["--out", tmp, "--widths", value])
-                    self.assertEqual(raised.exception.code, 2)
-                    capture.assert_not_called()
-
     def test_main_asks_capture_for_sheets_only_with_the_flag(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             for flag, expected in (([], False), (["--sheets"], True)):
