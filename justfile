@@ -345,6 +345,7 @@ agent-workflow-tests *args:
     tests/test_console_trust_start.py \
     tests/test_console_plan_questions.py \
     tests/test_console_project_question.py \
+    tests/test_console_credential_timing.py \
     tests/test_console_question_records.py \
     tests/test_console_question_check.py \
     tests/test_console_contract_draft.py \
