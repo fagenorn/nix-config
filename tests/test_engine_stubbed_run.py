@@ -14,6 +14,7 @@ from pathlib import Path
 
 from agent_tools.claims import forge_markers
 from agent_tools.delivery import engine_session
+from agent_tools.delivery.review_findings import Round, dispositions
 from agent_tools.project_contract import resolve_project
 from tests.engine_fixture import FixtureProject
 from tests.engine_guards import payloads
@@ -95,6 +96,34 @@ def keeping_the_run(tmp: Path) -> Path:
         if step["id"] == "start":
             step["holds"] = "run"
     path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+    return copy
+
+
+def unstructured_procedures(tmp: Path) -> Path:
+    """A copy of the shipped procedures as they were before findings carried a kind, a rule and declines."""
+    copy = tmp / "unstructured-procedures"
+    shutil.copytree(PROCEDURES, copy)
+    for path in sorted(copy.glob("*.json")):
+        document = json.loads(path.read_text("utf-8"))
+        if path.name.endswith(".reply.json"):
+            items = document["properties"].get("findings", {}).get("items")
+            if items is not None:
+                for member in ("kind", "rule", "restates"):
+                    items["properties"].pop(member, None)
+                    if member in items["required"]:
+                        items["required"].remove(member)
+            if path.name == "direct-fix.reply.json":
+                document["properties"].pop("declines")
+                document["required"].remove("declines")
+            path.write_text(json.dumps(document) + "\n", encoding="utf-8")
+        else:
+            for step in document["steps"]:
+                if "in" in step:
+                    step["in"] = [name for name in step["in"] if not name.endswith(".declines")]
+            path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+    for path in sorted(copy.glob("*.md")):
+        lines = path.read_text("utf-8").splitlines(keepends=True)
+        path.write_text("".join(line for line in lines if ".declines}}" not in line), encoding="utf-8")
     return copy
 
 
@@ -391,6 +420,45 @@ class ReviewRouteTest(Scenario):
         self.assertIn(("lite-review", "pass"), [(e["step"], e["outcome"]) for e in StubbedRun.events(direct)
                                                  if e["event"] == "outcome_graded"])
         self.assertIn(("lite-tally", "clean"), run.transitions(direct))
+
+    def test_a_declined_finding_takes_the_same_rounds_and_end_as_an_unstructured_one(self):
+        reason = "farewell(None) is refused by the type checker at fixture/farewell.py:1"
+        plain_finding = {k: v for k, v in FINDING.items() if k != "kind"}
+        plain_second = dict(plain_finding, file="fixture/farewell.py:1", failing_input="farewell(None)")
+        plain = StubbedRun(self, replies={
+            "lite-review": dict(CLEAN_LITE, verdict="findings", findings=[plain_finding, plain_second]),
+            "lite-fix": {"reply": {"status": "done", "notes": "the second finding is wrong: None never reaches it",
+                                   "tests": []},
+                         "commit": {"path": "fixture/second.py", "text": "SECOND = 2\n"}},
+            "lite-rereview": CLEAN_REREVIEW})
+        structured = StubbedRun(self, replies={
+            "lite-review": dict(CLEAN_LITE, verdict="findings", findings=[
+                dict(FINDING, kind="missing-test", rule="B1"),
+                dict(FINDING, file="fixture/farewell.py:1", failing_input="farewell(None)", kind="weak-test")]),
+            "lite-fix": committing("fixture/second.py", "SECOND = 2\n",
+                                   declines=[{"finding": "lite-review:2", "reason": reason}]),
+            "lite-rereview": CLEAN_REREVIEW})
+
+        done = plain.deliver(unstructured_procedures(plain.tmp))
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(plain.line(done)["end"], "done")
+        self.finish(structured, "done")
+
+        self.assertEqual(self.keys(plain), self.keys(structured))
+        self.assertEqual(plain.transitions(self.child(plain, "direct")),
+                         structured.transitions(self.child(structured, "direct")))
+        rendered = self.launch(structured, "lite-rereview")["prompt"]
+        control = self.launch(plain, "lite-rereview")["prompt"]
+        self.assertIn(reason, rendered)
+        self.assertNotIn(reason, control)
+        self.assertEqual(rendered.count("lite-review:2"), control.count("lite-review:2") + 1)
+        direct = self.child(structured, "direct")
+        round_ = Round(reviews=(("lite-review", self.stored(direct, "lite-review")),
+                                ("lite-independent", self.stored(direct, "lite-independent"))),
+                       fix=self.stored(direct, "lite-fix"),
+                       rereview=("lite-rereview", self.stored(direct, "lite-rereview")))
+        self.assertEqual([(d.name, d.disposition) for d in dispositions([round_])],
+                         [("lite-review:1", "fixed"), ("lite-review:2", "declined")])
 
     def test_a_change_marked_sensitive_is_reviewed_under_the_full_reviewer(self):
         implemented = dict(IMPLEMENTED, reply=dict(IMPLEMENTED["reply"], sensitive=True))

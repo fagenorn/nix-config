@@ -11,13 +11,15 @@ Run: just agent-workflow-tests
 
 from __future__ import annotations
 
+import ast
 import json
 import re
 import unittest
 from pathlib import Path
 
+from agent_tools.delivery.engine_graders import GRADERS
 from agent_tools.delivery.engine_reply import cites_rules, without_unknown_rules
-from agent_tools.delivery.review_findings import KINDS
+from agent_tools.delivery.review_findings import DISPOSITIONS, KINDS, Round, dispositions, usable
 
 TIER = "fast"
 
@@ -104,6 +106,84 @@ class ShippedPromptTest(unittest.TestCase):
                 self.assertEqual(len(lines), 1)
                 self.assertEqual(len(re.findall(r"\{\{", lines[0])), 1)
                 self.assertIn(f"{fix}.declines", step["in"])
+
+
+IMPORTANT = {"severity": "important", "file": "a.py:1", "failing_input": "f('')", "summary": "s", "kind": "other"}
+MINOR = dict(IMPORTANT, severity="minor")
+FIX = {"status": "done", "start_head": "a" * 40, "commit": "b" * 40, "notes": "n", "tests": [], "declines": []}
+DECLINED = dict(FIX, declines=[{"finding": "lite-review:1", "reason": "r"}])
+PASS = {"verdict": "pass", "findings": []}
+REVIEWED = ("lite-review", {"verdict": "findings", "findings": [IMPORTANT]})
+RESTATING = {"verdict": "findings", "findings": [dict(IMPORTANT, restates="lite-review:1")]}
+NEW = {"verdict": "findings", "findings": [IMPORTANT]}
+STALE = {"verdict": "findings", "findings": [dict(IMPORTANT, restates="lite-review:99")]}
+UNNAMED = {"verdict": "findings", "findings": [dict(IMPORTANT, file="", failing_input=" ")]}
+MERGE = ("merge-review", {"verdict": "findings", "findings": [IMPORTANT]})
+MERGED = Round((MERGE,), FIX, ("merge-rereview", PASS))
+CASES = [
+    ("fixed", [Round((REVIEWED,), FIX, ("lite-rereview", PASS))], [(1, "lite-review:1", "fixed")]),
+    ("declined", [Round((REVIEWED,), DECLINED, ("lite-rereview", PASS))], [(1, "lite-review:1", "declined")]),
+    ("filed", [Round((("lite-review", {"verdict": "pass", "findings": [MINOR]}),),
+                     filed=frozenset({"lite-review:1"}))], [(1, "lite-review:1", "filed")]),
+    ("dropped", [Round((("lite-review", {"verdict": "pass", "findings": [MINOR]}),))],
+     [(1, "lite-review:1", "dropped")]),
+    ("open", [Round((REVIEWED,))], [(1, "lite-review:1", "open")]),
+    ("a declined finding the re-review restates stays open",
+     [Round((REVIEWED,), DECLINED, ("lite-rereview", RESTATING))], [(1, "lite-review:1", "open")]),
+    ("a new re-review finding is open", [Round((REVIEWED,), FIX, ("lite-rereview", NEW))],
+     [(1, "lite-review:1", "fixed"), (1, "lite-rereview:1", "open")]),
+    ("a restates that names nothing keeps the item", [Round((REVIEWED,), FIX, ("lite-rereview", STALE))],
+     [(1, "lite-review:1", "fixed"), (1, "lite-rereview:1", "open")]),
+    ("an unusable re-review closes nothing", [Round((REVIEWED,), FIX, ("lite-rereview", {}))],
+     [(1, "lite-review:1", "open")]),
+    ("a re-review with an unnamed blocking finding closes nothing",
+     [Round((REVIEWED,), DECLINED, ("lite-rereview", UNNAMED))], [(1, "lite-review:1", "open")]),
+    ("filed wins over fixed", [Round((REVIEWED,), FIX, ("lite-rereview", PASS), frozenset({"lite-review:1"}))],
+     [(1, "lite-review:1", "filed")]),
+    ("a minor finding is dropped even when declined",
+     [Round((("lite-review", {"verdict": "findings", "findings": [MINOR]}),), DECLINED, ("lite-rereview", PASS))],
+     [(1, "lite-review:1", "dropped")]),
+    ("two reviews are named by their steps",
+     [Round((("lite-review", {"verdict": "findings", "findings": [MINOR, IMPORTANT]}),
+             ("lite-independent", {"verdict": "findings", "findings": [IMPORTANT]})),
+            dict(FIX, declines=[{"finding": "lite-independent:1", "reason": "r"}]), ("lite-rereview", PASS))],
+     [(1, "lite-review:1", "dropped"), (1, "lite-review:2", "fixed"), (1, "lite-independent:1", "declined")]),
+    ("a name filed in one round is not filed in the next",
+     [Round(MERGED.reviews, MERGED.fix, MERGED.rereview, frozenset({"merge-review:1"})), MERGED],
+     [(1, "merge-review:1", "filed"), (2, "merge-review:1", "fixed")]),
+    ("a member with no reply contributes nothing", [Round((("lite-review", None),))], []),
+]
+
+
+class DispositionTest(unittest.TestCase):
+    def test_each_disposition_comes_from_the_stored_results_built_for_it(self):
+        for label, rounds, expected in CASES:
+            with self.subTest(label):
+                self.assertEqual([(d.round, d.name, d.disposition) for d in dispositions(rounds)], expected)
+
+    def test_every_declared_disposition_is_produced(self):
+        self.assertEqual({d for _, _, expected in CASES for _, _, d in expected}, set(DISPOSITIONS))
+
+    def test_usable_is_the_re_review_routes_own_rule(self):
+        replies = [PASS, NEW, {"verdict": "findings", "findings": [MINOR]},
+                   {"verdict": "findings", "findings": [dict(IMPORTANT, file="")]},
+                   {"verdict": "findings", "findings": [dict(IMPORTANT, file="", failing_input="")]},
+                   {"verdict": "findings", "findings": [dict(MINOR, file="", failing_input="")]}]
+        for reply in replies:
+            with self.subTest(reply=reply):
+                graded = GRADERS["direct-settled"].grade({"lite-rereview.verdict": reply["verdict"],
+                                                          "lite-rereview.findings": reply["findings"]})
+                self.assertIs(usable(reply), graded != "unusable")
+        for reply in ({}, None, {"verdict": "unavailable", "findings": []}, {"verdict": "pass", "findings": "x"}):
+            with self.subTest(reply=reply):
+                self.assertFalse(usable(reply))
+
+    def test_the_disposition_module_reads_nothing(self):
+        tree = ast.parse((PROCEDURES.parents[0] / "review_findings.py").read_text("utf-8"))
+        imported = {node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)}
+        imported |= {alias.name for node in ast.walk(tree) if isinstance(node, ast.Import) for alias in node.names}
+
+        self.assertLessEqual(imported, {"__future__", "dataclasses", "typing", "collections.abc"})
 
 
 class BlankingTest(unittest.TestCase):
