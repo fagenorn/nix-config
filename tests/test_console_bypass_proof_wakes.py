@@ -85,7 +85,7 @@ class BypassProofWakesTest(unittest.TestCase):
     def test_a_wake_held_after_the_first_fails_the_proof(self):
         world = WakeProofWorld(self)
 
-        code, report, _, _ = world.run("--wake-wait", "2", env={"FAKE_CLIENT_HOLD_AFTER": "1"})
+        code, report, _, _ = world.run("--wake-wait", "0.25", env={"FAKE_CLIENT_HOLD_AFTER": "1"})
 
         self.assertEqual(code, 1)
         self.assertEqual(report["outcome"], "failed")
@@ -98,7 +98,7 @@ class BypassProofWakesTest(unittest.TestCase):
     def test_a_wake_from_a_prompting_sender_is_held_by_the_bypass_manager(self):
         world = WakeProofWorld(self)
 
-        code, report, _, _ = world.run("--wake-wait", "2",
+        code, report, _, _ = world.run("--wake-wait", "0.25",
                                        env={"FAKE_CLIENT_FORCE_DEFAULT_SENDER": "1"})
 
         self.assertEqual(verdicts(report), ["not_delivered", "not_delivered"])
@@ -117,7 +117,7 @@ class BypassProofWakesTest(unittest.TestCase):
     def test_a_manager_that_never_reads_its_contract_gets_no_wake_and_is_still_removed(self):
         world = WakeProofWorld(self)
 
-        code, report, _, _ = world.run("--ready-wait", "2", env={"FAKE_CLIENT_NOT_READY": "1"})
+        code, report, _, _ = world.run("--ready-wait", "0.25", env={"FAKE_CLIENT_NOT_READY": "1"})
 
         self.assertIs(report["manager"]["ready"], False)
         self.assertEqual(report["wakes"], [])
@@ -155,8 +155,8 @@ class BypassProofWakesTest(unittest.TestCase):
         world = WakeProofWorld(self)
 
         code, report, _, _ = world.run(
-            "--wake-wait", "6",
-            env={"FAKE_CLIENT_HOLD_AFTER": "1", "FAKE_CLIENT_LATE_INBOX": "3"})
+            "--wake-wait", "2",
+            env={"FAKE_CLIENT_HOLD_AFTER": "1", "FAKE_CLIENT_LATE_INBOX": "1"})
 
         self.assertEqual(verdicts(report), ["delivered", "not_delivered"])
         self.assertEqual([w["inbox_calls"] for w in report["wakes"]], [1, 2])
@@ -166,7 +166,7 @@ class BypassProofWakesTest(unittest.TestCase):
     def test_a_manager_that_never_goes_idle_gets_no_wake(self):
         world = WakeProofWorld(self)
 
-        code, report, _, _ = world.run("--idle-wait", "2", env={"FAKE_CLIENT_STAYS_BUSY": "1"})
+        code, report, _, _ = world.run("--idle-wait", "0.25", env={"FAKE_CLIENT_STAYS_BUSY": "1"})
 
         self.assertEqual(verdicts(report), ["not_idle", "not_idle"])
         self.assertEqual([w["sent"] for w in report["wakes"]], [False, False])
@@ -177,7 +177,7 @@ class BypassProofWakesTest(unittest.TestCase):
     def test_a_slow_setup_stops_at_the_time_limit_and_still_tears_down(self):
         world = WakeProofWorld(self)
 
-        code, report, _, seconds = world.run("--time-limit", "8", "--teardown-reserve", "4",
+        code, report, _, seconds = world.run("--time-limit", "4", "--teardown-reserve", "2",
                                              env={"FAKE_GIT_DELAY": "2"})
 
         self.assertEqual(report["outcome"], "failed")
@@ -187,12 +187,12 @@ class BypassProofWakesTest(unittest.TestCase):
         self.assertTrue(all(entry["ok"] for entry in report["teardown"]), report["teardown"])
         self.assertEqual(world.scratch_entries(), [])
         self.assertEqual(code, 1)
-        self.assertLess(seconds, 8)
+        self.assertLess(seconds, 4)
 
     def test_a_relay_that_hangs_is_cut_at_the_time_limit_and_the_manager_is_still_removed(self):
         world = WakeProofWorld(self)
 
-        code, report, _, seconds = world.run("--time-limit", "12", "--teardown-reserve", "6",
+        code, report, _, seconds = world.run("--time-limit", "5", "--teardown-reserve", "2.5",
                                              env={"FAKE_CLIENT_RELAY_DELAY": "60"})
 
         self.assertEqual(report["reason"], bypass_proof.OUT_OF_TIME)
@@ -203,7 +203,7 @@ class BypassProofWakesTest(unittest.TestCase):
                                                      ["run", "rm", "m1aaaaaa"]])
         self.assertEqual(world.live_daemons(), [])
         self.assertEqual(code, 1)
-        self.assertLess(seconds, 12)
+        self.assertLess(seconds, 5)
 
     def test_a_relay_cut_during_the_last_wake_gives_the_time_limit_as_the_reason(self):
         world = WakeProofWorld(self)
@@ -245,20 +245,21 @@ class BypassProofWakesTest(unittest.TestCase):
         world = WakeProofWorld(self)
         self.addCleanup(lambda: world.stop_child() and _kill(world.stop_child()))
 
-        code, report, _, _ = world.run("--time-limit", "10", "--teardown-reserve", "5",
-                                       env={"FAKE_CLIENT_STOP_HANGS": "1"})
+        code, report, _, seconds = world.run("--time-limit", "10", "--teardown-reserve", "5",
+                                             env={"FAKE_CLIENT_STOP_HANGS": "1"})
 
         child = world.stop_child()
         self.assertIsNotNone(child)
         self.assertFalse(world._running(child), "the stop's client child outlived teardown")
         self.assertIs(teardown(report)["stop_manager"]["ok"], False)
         self.assertEqual(code, 1)
+        self.assertLess(seconds, 11)
 
     def test_a_session_that_cannot_be_found_fails_teardown_with_the_recovery(self):
         world = WakeProofWorld(self)
 
         code, report, _, _ = world.run(
-            "--ready-wait", "2",
+            "--ready-wait", "0.25",
             env={"FAKE_CLIENT_LISTING_FAILS": "1", "FAKE_CLIENT_NO_REGISTRY": "1"})
 
         self.assertIs(report["manager"]["ready"], False)
@@ -275,14 +276,15 @@ class BypassProofWakesTest(unittest.TestCase):
     def test_a_launch_cut_at_the_time_limit_takes_its_unregistered_client_child_with_it(self):
         world = WakeProofWorld(self)
 
-        code, report, _, seconds = world.run("--time-limit", "8", "--teardown-reserve", "4",
+        code, report, _, seconds = world.run("--time-limit", "6", "--teardown-reserve", "3",
                                              env={"FAKE_CLIENT_LATE_REGISTER": "30"})
 
         self.assertEqual(report["reason"], bypass_proof.OUT_OF_TIME)
         self.assertEqual(report["wakes"], [])
+        self.assertEqual(len(world.daemons()), 1, "the launch's client child never started")
         self.assertEqual(world.live_daemons(), [])
         self.assertEqual(code, 1)
-        self.assertLess(seconds, 8)
+        self.assertLess(seconds, 6)
 
     def test_a_profile_named_default_is_refused_before_anything_starts(self):
         world = WakeProofWorld(self)
