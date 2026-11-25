@@ -1315,6 +1315,9 @@ class ManagerContractTest(unittest.TestCase):
             "names what is held, why it is held and the one action that releases it",
             "A status line, a report's `inbox` or `next`, or a reply is not an ask",
             "A merge the guard refuses is not such a hold",
+            "when ten are open, first take back the one whose answer matters least with"
+            " `sprint withdraw-question`, then send the round of nine replacements and the held"
+            " question",
         ):
             with self.subTest(needle=needle):
                 self.assertIn(needle, flat)
