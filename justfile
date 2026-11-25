@@ -198,6 +198,7 @@ agent-workflow-tests *args:
     tests/test_verify_answer.py \
     tests/test_verify_pending_pass.py \
     tests/test_verify_pending_units.py \
+    tests/test_verify_pending_interrupted.py \
     tests/test_host_readings.py \
     tests/test_platform_package_hosts.py \
     tests/test_fleet_preflight_recipes.py \
@@ -219,6 +220,7 @@ agent-workflow-tests *args:
     tests/test_memory_floor_priority.py \
     tests/test_memory_floor_gate.py \
     tests/test_memory_floor_check.py \
+    tests/test_interrupted_reruns_check.py \
     tests/test_verify_checks.py \
     tests/test_cleanup_fix_check.py \
     tests/test_suite_test_failures.py \
