@@ -16,6 +16,7 @@ import re
 import unittest
 from pathlib import Path
 
+from agent_tools.delivery.engine_reply import cites_rules, without_unknown_rules
 from agent_tools.delivery.review_findings import KINDS
 
 TIER = "fast"
@@ -103,6 +104,32 @@ class ShippedPromptTest(unittest.TestCase):
                 self.assertEqual(len(lines), 1)
                 self.assertEqual(len(re.findall(r"\{\{", lines[0])), 1)
                 self.assertIn(f"{fix}.declines", step["in"])
+
+
+class BlankingTest(unittest.TestCase):
+    def test_a_made_up_rule_is_blanked_and_a_known_one_kept(self):
+        reply = {"verdict": "findings", "findings": [
+            {"kind": "other", "rule": "ZZ999"}, {"kind": "other", "rule": "B1"}, {"kind": "other"},
+            {"kind": "other", "rule": "standard:B1"}]}
+
+        blanked = without_unknown_rules(reply, {"B1"})
+
+        self.assertEqual([f.get("rule", "<absent>") for f in blanked["findings"]], ["", "B1", "<absent>", ""])
+        self.assertEqual(blanked["verdict"], "findings")
+        self.assertEqual(reply["findings"][0]["rule"], "ZZ999")
+
+    def test_only_a_finding_with_a_non_empty_rule_cites_one(self):
+        for reply in ({}, {"findings": []}, {"findings": "x"}, {"findings": [{"rule": ""}]},
+                      {"findings": [{"kind": "other"}]}, {"findings": ["x"]}, None):
+            with self.subTest(reply=reply):
+                self.assertFalse(cites_rules(reply))
+        self.assertTrue(cites_rules({"findings": [{"rule": "B1"}]}))
+
+    def test_odd_shapes_pass_through_unchanged(self):
+        self.assertEqual(without_unknown_rules({"findings": "x"}, set()), {"findings": "x"})
+        self.assertEqual(without_unknown_rules({"findings": ["x", {"rule": 3}]}, set()),
+                         {"findings": ["x", {"rule": 3}]})
+        self.assertEqual(without_unknown_rules({"status": "done"}, set()), {"status": "done"})
 
 
 if __name__ == "__main__":

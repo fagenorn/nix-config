@@ -375,6 +375,23 @@ class ReviewRouteTest(Scenario):
     def reviewer_model(self, run: StubbedRun, name: str = "reviewer") -> str:
         return engine_session.read_role(ROLES, name).model
 
+    def test_a_finding_citing_a_made_up_rule_is_stored_blanked_and_graded_the_same(self):
+        minor = {"severity": "minor", "file": "fixture/farewell.py:2", "failing_input": "farewell('')",
+                 "summary": "s", "kind": "other"}
+        run = StubbedRun(self, replies={"lite-review": dict(
+            CLEAN_LITE, findings=[dict(minor, rule="ZZ999"), dict(minor, rule="B1"), minor])})
+        bar = run.world.home / ".agents/standards/the-bar.md"
+        bar.parent.mkdir(parents=True, exist_ok=True)
+        bar.write_text("# The bar\n\n### B1. Defense in depth\n\nBody.\n", encoding="utf-8")
+
+        self.finish(run, "done")
+
+        direct = self.child(run, "direct")
+        self.assertEqual([f.get("rule") for f in self.stored(direct, "lite-review")["findings"]], ["", "B1", None])
+        self.assertIn(("lite-review", "pass"), [(e["step"], e["outcome"]) for e in StubbedRun.events(direct)
+                                                 if e["event"] == "outcome_graded"])
+        self.assertIn(("lite-tally", "clean"), run.transitions(direct))
+
     def test_a_change_marked_sensitive_is_reviewed_under_the_full_reviewer(self):
         implemented = dict(IMPLEMENTED, reply=dict(IMPLEMENTED["reply"], sensitive=True))
         run = StubbedRun(self, replies={"implement": implemented, "full-review": CLEAN_FULL})

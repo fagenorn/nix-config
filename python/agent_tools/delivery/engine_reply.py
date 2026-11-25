@@ -16,12 +16,16 @@ The subset. The root is an object node. A node is one of:
 
 Anything else (`number`, `null`, a type list, `const`, `oneOf`, `$ref`, `description`,
 `pattern`, ...) is outside the subset. `reply_problem` fails closed on such a node: it
-returns a problem, never `None`. This module imports nothing from the engine.
+returns a problem, never `None`.
+
+The engine blanks a finding's rule id that no standards layer defines when it stores the reply
+(issue 1535): `cites_rules` says whether a reply cites any rule and `without_unknown_rules` is the
+reply with each unknown id set to `""`. This module imports nothing from the engine.
 """
 
 from __future__ import annotations
 
-from typing import Mapping
+from typing import Collection, Mapping
 
 _SCALARS = {
     "string": lambda v: isinstance(v, str),
@@ -45,6 +49,23 @@ def reply_problem(schema: Mapping, value: object, where: str = "reply") -> str |
     if problem:
         return f"the schema uses {problem}"
     return _value_problem(schema, value, where)
+
+
+def cites_rules(reply: object) -> bool:
+    """True when `reply` has a finding whose `rule` is a non-empty string."""
+    findings = reply.get("findings") if isinstance(reply, dict) else None
+    return isinstance(findings, list) and any(
+        isinstance(f, dict) and isinstance(f.get("rule"), str) and f["rule"] != "" for f in findings)
+
+
+def without_unknown_rules(reply: Mapping, known: Collection[str]) -> dict:
+    """A copy of `reply` whose findings' `rule` strings outside `known` are blank; `reply` is not mutated."""
+    findings = reply.get("findings")
+    if not isinstance(findings, list):
+        return dict(reply)
+    return {**reply, "findings": [
+        {**f, "rule": ""} if isinstance(f, dict) and isinstance(f.get("rule"), str) and f["rule"] not in known else f
+        for f in findings]}
 
 
 def _enum_problem(node: dict, where: str) -> str | None:

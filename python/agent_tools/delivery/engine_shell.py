@@ -32,7 +32,8 @@ run's `sessions/`, the session holds one of the engine route's agent slots (`eng
 `session_starting` to the end of its last launch, waiting with `wait_started` and `wait_ended` (`host-slot`; a command step's declared `wait` brackets its process the same way)
 when none is free, `session_starting` is on disk before the process is spawned,
 and a session that ends normally is graded only by the `outcome_from` member of its
-structured reply, so neither the prose nor the exit code selects an outcome. A reading with no
+structured reply, so neither the prose nor the exit code selects an outcome. A stored reply's finding whose `rule` names no id of the
+platform or project standards layer is stored with `rule` blank, and the outcome is unchanged (issue 1535). A reading with no
 usable reply (none, or one that breaks the schema) is a miss when `engine_session.is_miss` accepts
 its stdout: the same session is then resumed once (`session_resuming`, `--resume <session>`,
 `REASK_PROMPT`) and a second miss grades `no-reply` with `{}` stored, its measurements the sums of
@@ -184,11 +185,11 @@ from typing import Callable, Mapping
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
 from agent_tools.delivery import (
     engine_commands, engine_core, engine_guard, engine_housekeeping, engine_ledger, engine_reply,
-    engine_session, engine_slots, engine_stop, host_admission, procedure_check,
+    engine_session, engine_slots, engine_stop, host_admission, procedure_check, rule_reader,
 )
 from agent_tools.delivery.engine_commands import CommandTable, UnknownCommand
 from agent_tools.delivery.engine_ledger import creation_lock_path
-from agent_tools.project_contract import resolve_project
+from agent_tools.project_contract import agent_platform, resolve_project
 
 EXIT_DONE = 0
 EXIT_FAULT = 1
@@ -1299,6 +1300,9 @@ def _visit_session(run_dir: Path, root: str, step: dict, action: engine_core.Sta
         raise Fault(f"step {name} gave no structured reply, exit {launched.exit_code}"
                     + (f": {reason}" if reason else ""))
     problem = engine_reply.reply_problem(schema, reply)
+    if problem is None and engine_reply.cites_rules(reply):
+        reply = engine_reply.without_unknown_rules(reply, rule_reader.known_ids(
+            agent_platform.standards_dir(), Path(root) / rule_reader.PROJECT_STANDARDS))
     outcome = reply.get(step["outcome_from"])
     store(reply, outcome if problem is None and isinstance(outcome, str) else None)
     if problem is not None:
