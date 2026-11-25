@@ -156,6 +156,20 @@ class EventSampleTest(RecordsCase):
         self.assertEqual(again["events"], [])
         self.assertEqual(self.read_state()["history_seen"]["offset"], len(line.encode()))
 
+    def test_a_hold_too_large_to_be_a_time_is_skipped_and_the_sample_goes_on(self):
+        self.history.write_text("")
+        self.take("2026-11-24T12:00:00")
+        huge_hold = held_line("2026-11-24T12:00:10Z", 0.0, 1e300)
+        huge_wait = held_line("9999-12-31T00:00:00Z", 1e9, 60.0)
+        good = held_line("2026-11-24T12:00:20Z", 0.0, 10.0)
+        with self.history.open("a") as handle:
+            handle.write(huge_hold + huge_wait + good)
+        line = self.take("2026-11-24T12:01:00")
+        [event] = [event for event in line["events"] if event["kind"] == "verify_run"]
+        self.assertEqual(event["held_from"], "2026-11-24T12:00:20+00:00")
+        self.assertEqual(
+            self.read_state()["history_seen"]["offset"], len((huge_hold + huge_wait + good).encode()))
+
     def test_an_unreadable_pid_file_leaves_the_vm_as_it_was(self):
         self.ps(PS_IDLE + f"{HOSTAGENT}\n")
         self.pid_file.write_text("71379\n")

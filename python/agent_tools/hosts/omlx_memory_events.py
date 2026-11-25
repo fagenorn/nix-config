@@ -139,12 +139,13 @@ def verify_events(runs: list[dict]) -> list[dict]:
             continue
         try:
             held_from = _started(run["started"]) + timedelta(seconds=run["waited_seconds"])
-        except ValueError:
+            held_until = held_from + timedelta(seconds=run["held_seconds"])
+        except (ValueError, OverflowError):
             continue
         events.append({
             "kind": "verify_run", "repository": run["repository"], "command": run["command"], "exit": run["exit"],
             "held_from": held_from.isoformat(),
-            "held_until": (held_from + timedelta(seconds=run["held_seconds"])).isoformat(),
+            "held_until": held_until.isoformat(),
         })
     return events
 
