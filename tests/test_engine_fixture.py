@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
+import errno
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest import mock
 
 from agent_tools.project_contract import resolve_project
+from tests import engine_fixture
 from tests.engine_fixture import AdoptedFixtures, FixtureProject
 from tests.guard_policy_world import GuardPolicyWorld, install_platform_manifest_in_environ
 
@@ -152,6 +157,59 @@ class AdoptedFixturesTest(unittest.TestCase):
         fixtures.close()
         fixtures.close()
 
+        self.assertFalse(directory.exists())
+        self.assertIsNone(fixtures.directory)
+
+    def stubbed_adoption(self):
+        """Patch the adoption itself: the project it returns is a directory of one file."""
+        root = Path(tempfile.mkdtemp(prefix="stub-fixture-"))
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        (root / "greet.txt").write_text("hello\n", encoding="utf-8")
+        project = types.SimpleNamespace(root=root, snapshot=lambda: "snapshot")
+        patch = mock.patch.object(engine_fixture, "FixtureProject", return_value=project)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def test_a_copy_that_runs_out_of_space_part_way_leaves_nothing_and_the_next_adoption_succeeds(self):
+        fixtures = self.fixtures()
+        self.stubbed_adoption()
+        real = shutil.copytree
+        attempts = []
+
+        def copytree(source, destination, **options):
+            attempts.append(destination)
+            if len(attempts) == 1:
+                Path(destination).mkdir(parents=True)
+                (Path(destination) / "partial.txt").write_text("half", encoding="utf-8")
+                raise OSError(errno.ENOSPC, "No space left on device")
+            return real(source, destination, **options)
+
+        with mock.patch.object(shutil, "copytree", copytree):
+            with self.assertRaises(OSError):
+                fixtures.project(self, mock.sentinel.world)
+            self.assertEqual(list(fixtures.directory.iterdir()), [])
+            fixtures.project(self, mock.sentinel.world)
+
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual([p.read_text("utf-8") for p in fixtures.directory.rglob("greet.txt")], ["hello\n"])
+
+    @unittest.skipIf(os.geteuid() == 0, "root deletes a read-only directory's entries")
+    def test_a_close_that_cannot_delete_the_cache_raises_and_a_second_close_retries(self):
+        fixtures = self.fixtures()
+        self.stubbed_adoption()
+        fixtures.project(self, mock.sentinel.world)
+        directory = fixtures.directory
+        locked = next(path for path in directory.iterdir() if path.is_dir())
+        locked.chmod(0o555)
+        self.addCleanup(lambda: locked.exists() and locked.chmod(0o755))
+
+        with self.assertRaises(OSError):
+            fixtures.close()
+        survived = (fixtures.directory, directory.exists())
+        locked.chmod(0o755)
+        fixtures.close()
+
+        self.assertEqual(survived, (directory, True))
         self.assertFalse(directory.exists())
         self.assertIsNone(fixtures.directory)
 

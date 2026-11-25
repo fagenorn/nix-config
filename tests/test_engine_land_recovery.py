@@ -30,11 +30,10 @@ STEPS = StepCoverage(PROCEDURES, ("land-attempt",))
 def setUpModule() -> None:
     install_platform_manifest_in_environ()
     unittest.addModuleCleanup(FIXTURES.close)
-    STEPS.begin()
 
 
 def tearDownModule() -> None:
-    STEPS.check(test_ids(sys.modules[__name__], Scenario))
+    STEPS.finish(sys.modules[__name__], Scenario)
 
 
 PASS = {"verdict": "pass", "findings": []}

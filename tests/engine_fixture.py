@@ -16,7 +16,8 @@ a ready plan and a commit, the build fails with the command's own output.
 (`FixtureProject.copied`): the checkout is copied, re-published to its own bare `origin` in the
 requesting world and registered there again. The cache keeps a snapshot of the first fixture's
 metadata (`FixtureProject.snapshot`), never the fixture a test holds, and each copy gets its own
-`adoption` and `conditions`. `close` removes the cache directory.
+`adoption` and `conditions`. A copy that fails part-way leaves nothing behind. `close` removes the cache
+directory: a deletion that fails is raised and keeps the directory, so the next `close` retries it.
 """
 
 from __future__ import annotations
@@ -218,13 +219,18 @@ class AdoptedFixtures:
         if self.directory is None:
             self.directory = Path(tempfile.mkdtemp(prefix="adopted-fixtures-"))
         fixture = FixtureProject(test_case, world, **options)
-        source = self.directory / str(len(self._templates)) / "fixture"
-        shutil.copytree(fixture.root, source, symlinks=True)
+        holder = Path(tempfile.mkdtemp(dir=self.directory))
+        source = holder / "fixture"
+        try:
+            shutil.copytree(fixture.root, source, symlinks=True)
+        except BaseException:
+            shutil.rmtree(holder, ignore_errors=True)  # an incomplete copy is no template: free its space
+            raise
         self._templates[key] = (source, fixture.snapshot())
         return fixture
 
     def close(self) -> None:
-        if self.directory is not None:
-            shutil.rmtree(self.directory, ignore_errors=True)
-        self.directory = None
         self._templates = {}
+        if self.directory is not None:
+            shutil.rmtree(self.directory)  # a failure surfaces and keeps the directory, so a close retries it
+            self.directory = None

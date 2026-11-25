@@ -34,11 +34,10 @@ FIXTURES = AdoptedFixtures()
 def setUpModule() -> None:
     install_platform_manifest_in_environ()
     unittest.addModuleCleanup(FIXTURES.close)
-    STEPS.begin()
 
 
 def tearDownModule() -> None:
-    STEPS.check(test_ids(sys.modules[__name__], Scenario))
+    STEPS.finish(sys.modules[__name__], Scenario)
 
 PROCEDURES = Path(__file__).resolve().parents[1] / "python/agent_tools/delivery/procedures"
 STEPS = StepCoverage(PROCEDURES)
@@ -120,10 +119,10 @@ def model_of(launch: dict) -> str:
 
 
 class Scenario(unittest.TestCase):
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        # the runner builds a test only when it selects it, on the coverage of the test's own module
+    def run(self, result=None):
+        # the runner runs only the tests it selected: select on the coverage of the test's own module
         sys.modules[type(self).__module__].STEPS.select(self.id())
+        return super().run(result)
 
     def stubbed(self, **members) -> StubbedRun:
         module = sys.modules[type(self).__module__]
@@ -980,28 +979,73 @@ class StepCoverageTest(Scenario):
         fake.T = type("T", (Scenario,), {"__module__": "fake", "setUpClass": classmethod(skipping),
                                          "test_a": lambda self: None})
         home, directory = os.environ["HOME"], FIXTURES.directory
-        with mock.patch.dict(sys.modules, {"fake": fake}):
-            suite = unittest.TestLoader().loadTestsFromModule(fake)
-            coverage.begin()
-            ids = test_ids(fake)
-        result = unittest.TextTestRunner(stream=io.StringIO()).run(suite)
+        result = self.run_fake(fake)
         with self.assertRaises(AssertionError) as raised:
-            coverage.check(ids)
+            coverage.finish(fake, Scenario)
 
         self.assertEqual((result.testsRun, len(result.skipped)), (0, 1))
         self.assertIn("direct.escalated-settled", str(raised.exception))
         self.assertEqual((os.environ["HOME"], FIXTURES.directory), (home, directory))
 
-    def test_a_test_built_after_the_run_began_is_not_selected(self):
+    def test_a_test_the_runner_built_and_did_not_run_is_not_selected(self):
         coverage = StepCoverage(PROCEDURES)
         fake = types.ModuleType("fake")
         fake.STEPS = coverage
         fake.T = type("T", (Scenario,), {"__module__": "fake", "test_a": lambda self: None})
         with mock.patch.dict(sys.modules, {"fake": fake}):
-            coverage.begin()
+            unittest.TestLoader().loadTestsFromModule(fake)
             test_ids(fake)
 
         self.assertEqual(coverage.selected_ids(), frozenset())
+
+    def fake_module(self, coverage: StepCoverage, visits: list) -> types.ModuleType:
+        fake = types.ModuleType("fake")
+        fake.STEPS = coverage
+        fake.A = type("A", (Scenario,), {"__module__": "fake", "test_a": lambda self: coverage.record(visits)})
+        fake.B = type("B", (Scenario,), {"__module__": "fake", "test_b": lambda self: None})
+        return fake
+
+    def run_fake(self, fake: types.ModuleType, only: type | None = None) -> unittest.TestResult:
+        """Load the fake module whole, then run the tests of `only` (all of them without it)."""
+        with mock.patch.dict(sys.modules, {"fake": fake}):
+            loaded = flattened(unittest.TestLoader().loadTestsFromModule(fake))
+            suite = unittest.TestSuite(test for test in loaded if only is None or isinstance(test, only))
+            return unittest.TextTestRunner(stream=io.StringIO()).run(suite)
+
+    def test_a_class_run_from_a_module_loaded_whole_checks_no_coverage(self):
+        coverage = StepCoverage(PROCEDURES)
+        fake = self.fake_module(coverage, [])
+
+        result = self.run_fake(fake, fake.B)
+
+        self.assertEqual(result.testsRun, 1)
+        self.assertIsNone(coverage.finish(fake, Scenario))
+
+    def test_a_second_suite_of_the_module_checks_its_coverage_after_a_first_suite_did(self):
+        coverage = StepCoverage(PROCEDURES)
+        visits = list(coverage.declared())
+        fake = self.fake_module(coverage, visits)
+        self.run_fake(fake)
+        self.assertIsNone(coverage.finish(fake, Scenario))
+        visits.clear()
+
+        self.run_fake(fake)
+        with self.assertRaises(AssertionError) as raised:
+            coverage.finish(fake, Scenario)
+
+        self.assertIn("direct.escalated-settled", str(raised.exception))
+
+    def test_a_full_suite_checks_its_coverage_after_a_suite_of_part_of_the_module(self):
+        coverage = StepCoverage(PROCEDURES)
+        fake = self.fake_module(coverage, [])
+        self.run_fake(fake, fake.B)
+        self.assertIsNone(coverage.finish(fake, Scenario))
+
+        self.run_fake(fake)
+        with self.assertRaises(AssertionError) as raised:
+            coverage.finish(fake, Scenario)
+
+        self.assertIn("direct.escalated-settled", str(raised.exception))
 
     def test_a_full_run_whose_runs_together_visit_every_declared_step_passes(self):
         coverage = StepCoverage(PROCEDURES)
