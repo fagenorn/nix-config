@@ -113,7 +113,7 @@ and so is each open question of the registration's plan, and each retry, apply, 
 failure or trust card, see below, and each running sprint whose `ball` is `owner` and that no item
 above already counts: its manager cannot hear the console, #1229; it has no card, so the heading
 and its `DEAF_SENTENCE` are all that name it, #1247; and each open permission card, below, counts
-once. A manager's waiting state alone (a session waiting for an answer or a permission) counts
+once, and each held sprint card, below. A manager's waiting state alone (a session waiting for an answer or a permission) counts
 nothing, #1424: only an open permission card does), else
 `ALL_OUT_HEADLINE` when every profile is out of usage, else `STALE_HEADLINE` when a registered
 project's tracker cannot be read, else "Nothing needs you". The sentence is `ALL_OUT_SENTENCE`
@@ -125,7 +125,7 @@ when a profile's sign-in asks, else `ADOPTION_SENTENCE` when an adoption's pull 
 merge, else `QUESTION_SENTENCE` when any manager question is open, else `PERMISSION_SENTENCE` when any permission card is open (a
 held prompt is refused when its ten minutes run out, so it outranks every item below, a tracker
 item that waits included), else, when only sprints whose managers cannot hear the console are
-counted, `DEAF_SENTENCE`, else
+counted, `DEAF_SENTENCE`, else `HELD_SPRINT_SENTENCE` when only held sprint cards are counted, else
 `REGISTER_SENTENCE` when a plan question, a retry, apply, confirm, failure or trust item offers an option (the page
 can answer it), else
 `REGISTER_TYPE_SENTENCE` when a plan question takes a typed answer (`text`), else
@@ -222,6 +222,21 @@ one entry of `inbox.open`, after the stalls and the failed starts and before the
 
 `PROGRESS_SENTENCE` says what the page offers. The sentence precedence is all out, stale, briefs,
 stalls, progress, sign-in, questions, then the existing ones.
+
+A held sprint (#1784, `sprint_held_since`) is one entry of `inbox.open`, after the progress entries
+and before the sign-ins, ordered by `(held_since, sprint_id)`, and counts in `inbox_items` and the
+headline. It is derived: a running sprint whose ball is `nobody`, with no stop requested, whose
+manager's profile is not out of usage (a sprint waiting on quota is never held: it waits on a reset,
+not a person), with an issue not landed, held, dropped or closed out, and with nothing moving for
+`HELD_SPRINT_AFTER_MS` (one hour). It clears when the sprint moves or any card or question opens,
+and the sprint's `state`, `ball`, `ball_text` and `now_text` stay as they are. Its entry is
+
+    {"type": "inbox_item", "reason": "held_sprint", "key": "held-sprint/<sprint id>", "project_id",
+     "sprint_id", "title", "headline": "<title> is holding work and has asked nobody for it",
+     "last_status": <the sprint entry's status> | null, "answered": false,
+     "waiting_since": "<time the sprint last moved>"}
+
+`HELD_SPRINT_SENTENCE` says what the page offers, used only when held cards are all that is counted.
 
 A profile whose sign-in asks (#1010: `capacity["profiles"][i]["signin"]["ask"]` is true, a read of
 `entry.get("signin")` so a capacity without that member shows none) and that no colleague added (#1361,
@@ -513,7 +528,8 @@ only. `unmanaged` is always present, possibly empty, sorted by `root`.
                                | "closing" | "done" | "stopping" | "stopped",
                       "state_text": "<text>",
                       "ball": "manager" | "owner" | "nobody" | "waiting" | "paused" | null,
-                      "ball_text": "<text>" | null, "now_text": "<sentence>" | null,
+                      "ball_text": "<text>" | null, "held_since": "<ISO time>" | null,
+                      "now_text": "<sentence>" | null,
                       "now_until": "<time>" | null,
                       "stated_at", "started_by": "<login>" | null, "age_text",
                       "manager_text": <text> | null,
@@ -1030,6 +1046,9 @@ BRIEF_SENTENCE = "Press Enter to approve the brief, or write a reply to ask for 
 QUESTION_SENTENCE = "Choose an option with its number and press Enter, or answer in your own words."
 MANAGER_SENTENCE = "Try again to start a new manager, or drop the sprint."
 PROGRESS_SENTENCE = "Tell the manager to continue, or drop the sprint."
+HELD_SPRINT_AFTER_MS = 3_600_000
+HELD_SPRINT_HEADLINE = "{title} is holding work and has asked nobody for it"
+HELD_SPRINT_SENTENCE = "Tell the manager what to do from its sprint, or drop the sprint."
 FAILED_START_HEADLINE = "The manager for {title} failed to start."
 SENTENCE_STOPS = " .!?"
 FAILED_START_SENTENCE = "Retry to start the manager, or drop the sprint."
@@ -1724,6 +1743,26 @@ def sprint_ball(state: SprintState, now_ms: int | None, waiting: int,
     return BALL_MANAGER if quiet_for is None else BALL_NOBODY
 
 
+def sprint_held_since(state: SprintState, now_ms: int | None, ball: str | None,
+                      quota: Wait | None, listed: Collection[str],
+                      waits: WaitSignals = NO_WAITS) -> int | None:
+    """The milliseconds-since-epoch of a held sprint's latest movement, else None (#1784). A sprint
+    is held exactly when its `ball` is `nobody` (so no card, question, stall, stated pause or
+    wait still ahead names anyone), no stop is requested, its manager's profile is not out of
+    usage (`quota` is None: a sprint waiting on a reset waits on no person, though `sprint_ball`
+    never reads quota), `sprint_open_issues` finds an issue not yet landed, held, dropped or closed
+    out, and `sprint_quiet_for` reads it quiet for at least `HELD_SPRINT_AFTER_MS`; the answer is
+    then `now_ms` less that quiet time. Derived from the same reading as the ball, so it clears the
+    moment the sprint moves or anything is asked."""
+    if (now_ms is None or ball != BALL_NOBODY or state.stop_at is not None or quota is not None
+            or not sprint_open_issues(state)):
+        return None
+    quiet_for = sprint_quiet_for(state, now_ms, listed, waits)
+    if quiet_for is None or quiet_for < HELD_SPRINT_AFTER_MS:
+        return None
+    return now_ms - quiet_for
+
+
 def _stage_phrase(stages: Sequence[tuple[int, str, str]], milestone: str) -> str:
     """The stage a running sprint leads with, its issue count, the total and the whole milestone;
     just the milestone when the report names no issue. The stage is the non-final, non-queued one
@@ -1902,6 +1941,7 @@ def _sprint_entry(state: SprintState, now_ms: int | None, managers: bool, sessio
     deaf = any(m.held and m.session_id in manager_ids for m in own)
     ball = sprint_ball(state, now_ms, waiting, listed, waits, failed_start=failed, deaf=deaf,
                        prompted=prompted)
+    held = sprint_held_since(state, now_ms, ball, quota, listed, waits)
     hold = stated_hold(state, now_ms)
     now_text = move.text if move is not None else sprint_now(
         state, quota, listed, waiting, stages, ball, sprint_wait(state, now_ms, listed, waits),
@@ -1916,6 +1956,7 @@ def _sprint_entry(state: SprintState, now_ms: int | None, managers: bool, sessio
         "state_text": text,
         "ball": ball,
         "ball_text": None if ball is None else BALL_TEXT[ball],
+        "held_since": None if held is None else _utc(held),
         "now_text": now_text,
         "now_until": (hold[1] if hold is not None and hold[0] == WAIT_UNTIL
                       and now_text == NOW_WAIT_TEXT
@@ -2290,6 +2331,15 @@ def _progress_entry(sprint: SprintState) -> dict:
             "answered": False, "waiting_since": sprint.no_progress_at}
 
 
+def _held_sprint_entry(project_id: str, sprint: Mapping) -> dict:
+    title = sprint["title"]
+    return {"type": "inbox_item", "reason": "held_sprint", "key": f"held-sprint/{sprint['sprint_id']}",
+            "project_id": project_id, "sprint_id": sprint["sprint_id"], "title": title,
+            "headline": HELD_SPRINT_HEADLINE.format(title=title.rstrip(SENTENCE_STOPS)),
+            "last_status": sprint["status"], "answered": False,
+            "waiting_since": sprint["held_since"]}
+
+
 def _signin_entry(entry: Mapping, runs: Mapping[str, Mapping]) -> dict:
     profile = entry["profile"]
     signin = entry["signin"]
@@ -2506,10 +2556,13 @@ def derive_view(
     counted.update(prompted)
     deaf = [sprint["sprint_id"] for project in (*entries, *quiet_entries) for sprint in project["sprints"]
             if sprint["ball"] == BALL_OWNER and not sprint["waiting"] and sprint["sprint_id"] not in counted]
+    held = sorted(((project["project_id"], sprint) for project in entries for sprint in project["sprints"]
+                   if sprint["held_since"] is not None),
+                  key=lambda pair: (datetime.fromisoformat(pair[1]["held_since"]), pair[1]["sprint_id"]))
     stopped_runs = [run for project in entries for run in project["engine_runs"] if run["need"] not in (None, "nothing")]
     open_count = (len(briefs) + len(stalls) + len(starts) + len(unprogressed) + len(signins) + len(adoptions)
                   + len(releases) + len(prompts) + len(asked) + len(retries) + len(registering) + len(applies) + len(confirms)
-                  + len(failures) + len(trusts) + len(open_items) + len(deaf) + len(stopped_runs))
+                  + len(failures) + len(trusts) + len(open_items) + len(deaf) + len(held) + len(stopped_runs))
     all_out = bool(capacity["all_out"])
     if all_out:
         sentence = ALL_OUT_SENTENCE
@@ -2533,6 +2586,8 @@ def derive_view(
         sentence = PERMISSION_SENTENCE
     elif deaf and open_count == len(deaf):
         sentence = DEAF_SENTENCE
+    elif held and open_count == len(held):
+        sentence = HELD_SPRINT_SENTENCE
     elif stopped_runs and open_count == len(stopped_runs):
         sentence = ENGINE_SENTENCE
     elif retries or applies or confirms or failures or trusts or any(e["questions"] for e in registering):
@@ -2579,6 +2634,7 @@ def derive_view(
         "inbox": {"open": [_brief_entry(s) for s in briefs] + [_stall_entry(s) for s in stalls]
                           + [_failed_start_entry(s) for s in starts]
                           + [_progress_entry(s) for s in unprogressed]
+                          + [_held_sprint_entry(pid, s) for pid, s in held]
                           + [_signin_entry(e, signin_runs) for e in signins]
                           + adoptions
                           + releases
