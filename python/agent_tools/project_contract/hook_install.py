@@ -84,9 +84,8 @@ def left_alone(local_hooks_path: str | None, hooks_dir: Path) -> bool:
 def _code(text: str) -> str:
     """`text` with each comment a space and each string literal's inside `_` characters.
 
-    Nix strings (`"..."` and `''...''`, with their `${...}` interpolations) are skipped
-    as strings, so a `/*` or a `#` inside one starts no comment and a setting named
-    inside one is no setting.
+    Nix strings (`"..."` and `''...''`, with `${...}`) are strings, so a `/*` or a `#`
+    inside one starts no comment and a setting named inside one is no setting.
     """
     out: list[str] = []
     strings: list[tuple[str, int]] = []  # (opening quote, brace depth of the code around it)
@@ -213,10 +212,8 @@ def _switched_off(names: list[str], value: str) -> bool:
 def declares_hooks(text: str) -> bool:
     """Whether a `devenv.nix` text sets devenv git hooks, wherever the setting sits in a line.
 
-    Comments and string literals are skipped, and so is a hook setting that only
-    switches a hook off, whether written as the dotted
-    `git-hooks.hooks.<name>.enable = false;` or inside an attribute set
-    (`git-hooks.hooks.<name> = { enable = false; };`).
+    Comments and string literals are skipped, and so is a hook setting that only switches a
+    hook off: `git-hooks.hooks.<name>.enable = false;` or `<name> = { enable = false; };`.
     """
     text = _code(text)
     for match in DECLARATION.finditer(text):
