@@ -4,7 +4,7 @@
 (`suite_test_failures`), run through the wrapper `home/common/verify-pending/checks/suite-test-failures`
 as `python -m agent_tools.verification.suite_test_failures`, is met when no counted run of the first N
 from the merge's run on has a failed attempt of job J whose log names the test NAME as failed. The
-after runs are those of `verify_checks.suite_regressions` (the merge's run is the earliest push run
+after runs are the push runs of the workflow on the branch, from the merge's run on (the merge's run is the earliest push run
 listed at `--merge`, none: 75; fewer than N counted: 75), no before run is read, and only the log of a
 `failure` attempt is read. A log line names the test when, after the leading BOM and the line's
 timestamp are dropped, it reads `ERROR: NAME (` or `FAIL: NAME (` with NAME exactly the test (a name

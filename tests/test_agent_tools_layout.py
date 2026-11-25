@@ -105,12 +105,10 @@ ALLOWED_IMPORTS: dict[str, frozenset[str]] = {
     "verification": frozenset({
         "agent_tools.project_contract.resolve_project",  # verified_tree, verify_pending
         "agent_tools.project_contract.agent_platform",  # verify_checks, verify_pending, adopt_hook_check
-        "agent_tools.project_contract.fleet_preflight",  # verify_checks
         "agent_tools.claims.forge_markers",  # verify_facts, verify_issues, verify_owner, verify_run
         "agent_tools.claims.forge_claim",  # verify_owner
         "agent_tools.claims.forge_owner_action",  # verify_run
         "agent_tools.claims.owner_actions",  # verify_pending
-        "agent_tools.guard.push_fixture",  # verify_checks
         "agent_tools.guard.guard_policy",  # verify_exec
         "agent_tools.project_contract.adopt_inspection",  # verify_exec
         "agent_tools.project_contract.adopt_verify",  # verify_exec
