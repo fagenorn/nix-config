@@ -192,6 +192,7 @@ agent-workflow-tests *args:
     tests/test_independent_review.py \
     tests/test_issue_setup.py \
     tests/test_closing.py \
+    tests/test_holding.py \
     tests/test_landing.py \
     tests/test_land_tally.py \
     tests/test_engine_land_recovery.py \
@@ -220,6 +221,10 @@ agent-workflow-tests *args:
     tests/test_omlx_memory_fseventsd.py \
     tests/test_memory_budget.py \
     tests/test_omlx_memory_day.py \
+    tests/test_omlx_memory_census.py \
+    tests/test_omlx_memory_records.py \
+    tests/test_omlx_memory_events.py \
+    tests/test_omlx_memory_census_day.py \
     tests/test_memory_floor.py \
     tests/test_memory_floor_priority.py \
     tests/test_memory_floor_gate.py \
