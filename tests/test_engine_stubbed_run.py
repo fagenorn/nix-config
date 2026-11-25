@@ -58,6 +58,9 @@ CLEAN_REREVIEW = {"verdict": "pass", "findings": []}
 KEPT = ('import unittest\n\nfrom fixture.greet import greet\n\n\nclass KeptCheck(unittest.TestCase):\n'
         '    def test_greet_still_greets(self):\n        self.assertEqual(greet("Ada"), "Hello, Ada.")\n')
 KEPT_ID = "checks.check_kept.KeptCheck.test_greet_still_greets"
+SECOND = ('import unittest\n\n\nclass SecondCheck(unittest.TestCase):\n'
+          '    def test_second_runs(self):\n        self.assertTrue(True)\n')
+SECOND_ID = "checks.check_second.SecondCheck.test_second_runs"
 SHA = "a" * 40
 SYNCED = {"reply": {"status": "done", "notes": "n", "tests": ["checks/check_greet.py"]}, "merge": {}}
 CONFLICTED = {"reply": {"status": "conflicted", "notes": "n", "tests": []}, "merge": {}}
@@ -669,7 +672,7 @@ class RevertCheckTest(Scenario):
         run = self.stubbed(replies={
             "implement": implementing("checks/check_kept.py", KEPT),
             "lite-review": lite_findings(),
-            "lite-fix": committing("fixture/second.py", "SECOND = 2\n"),
+            "lite-fix": committing("checks/check_second.py", SECOND),
             "lite-rereview": CLEAN_REREVIEW})
 
         self.finish(run, "done")
@@ -684,8 +687,12 @@ class RevertCheckTest(Scenario):
         self.assertEqual(first["head"], self.stored(direct, "implement")["commit"])
         self.assertEqual(second["head"], self.stored(direct, "lite-fix")["commit"])
         self.assertNotEqual(second["head"], first["head"])
-        self.assertEqual(second["still_passing"], [KEPT_ID])
-        self.assertIn(KEPT_ID, self.launch(run, "lite-rereview")["prompt"])
+        self.assertEqual(first["still_passing"], [KEPT_ID])
+        self.assertEqual(second["new_tests"], [KEPT_ID, SECOND_ID])
+        self.assertEqual(second["still_passing"], [KEPT_ID, SECOND_ID])
+        prompt = self.launch(run, "lite-rereview")["prompt"]
+        self.assertIn(KEPT_ID, prompt)
+        self.assertIn(SECOND_ID, prompt)
 
 
 class VerifyTest(Scenario):

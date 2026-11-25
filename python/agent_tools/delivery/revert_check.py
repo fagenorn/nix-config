@@ -14,33 +14,40 @@ a base named `TestCase` (a bare name or an attribute `x.TestCase`) through class
 same file. Its id is `<module>.<Class>.<method>`, `<module>` being the file's path relative to the
 worktree root with `.py` dropped and `/` replaced by `.`. It is new when the file at the merge base
 (absent counts as empty) lacks `<Class>.<method>`. Only `.py` files changed `A` or `M` between the
-merge base and `HEAD` (`git diff --no-renames`) are read. A change with no new test returns empty
-lists and `reason ""` and creates nothing.
+merge base and `HEAD` (`git diff --no-renames`) are read, as the blob bytes (so a byte-order mark or a
+coding declaration is the parser's). A blob git cannot read ends the check with its error in `reason`.
+A change with no new test returns empty lists and `reason ""` and creates nothing.
 
-The check adds a detached scratch worktree at the merge base, made under
-`tempfile.mkdtemp(prefix="revert-check-", dir=<scratch root>)` with hooks off, and writes into it the
-`HEAD` version (bytes) of each file holding a new test, nothing else of the change. The scratch root
-is `$REVERT_CHECK_SCRATCH` or the system temporary directory. Each new test then runs once as
-`python -m unittest <id>` with the scratch as the working directory, no standard stream inherited, in
-its own session, the process group killed after `TEST_SECONDS`; exit 0 is still passing, any other
-exit or a timeout is not. The tests' `PYTHONPATH` is the scratch root, then `<scratch>/<D>` for each
-distinct non-empty `D` that is the parent of a top-level package tracked in the scratch (a tracked
+The check makes a scratch directory with `tempfile.mkdtemp(prefix="revert-check-", dir=<scratch
+root>)`, `$REVERT_CHECK_SCRATCH` or else the system temporary directory, holding a checkout of the
+merge base (`read-tree` into a private index file, then `checkout-index`; no worktree is registered,
+so no repository-wide `git worktree` command runs) and, per test, a fresh checkout with the `HEAD`
+version (bytes) of each file holding a new test written over it, nothing else of the change, so no
+test sees what an earlier one left. A write refuses a path that passes through a symlink of the merge
+base (it would lead out of the scratch), and a new test's top-level directory that holds no
+`__init__.py` gets an empty one, so a regular package of that name on the inherited `PYTHONPATH` cannot
+shadow it. Each new test then runs once as `python -m unittest <id>` with the scratch checkout as the
+working directory, no standard stream inherited, in its own session behind a small watcher that kills
+the session and removes the scratch directory when the checker dies (an engine stop kills only the
+checker's group); the group is also killed after `TEST_SECONDS`. Exit 0 is still passing, any other
+exit or a timeout is not. The tests' `PYTHONPATH` is the checkout, then `<checkout>/<D>` for each
+distinct non-empty `D` that is the parent of a top-level package tracked at the merge base (a tracked
 `<pkg>/__init__.py` whose parent directory holds no `__init__.py`), sorted, then the inherited entries
 whose real path is not the run's worktree or inside it, so the reverted source is what a test
-imports. The git variables of `engine_shell.REPOSITORY_ENV` are dropped from every child.
+imports; `PYTHONPYCACHEPREFIX` is the scratch directory's own, so no bytecode lands elsewhere. The git
+variables of `engine_shell.REPOSITORY_ENV` are dropped from every child.
 
-The scratch is always removed (`git worktree remove --force`, the directory, `git worktree prune`);
-a removal that fails adds `the scratch worktree <path> could not be removed: <git's last stderr
-line>` to `reason`. The run's worktree, index and branch are never written: every git command run
-against it is read-only except `worktree add`, `remove` and `prune`.
+The scratch directory is always removed; a removal that fails adds `the scratch worktree <path> could
+not be removed: <error>` to `reason`. The run's worktree, index, refs and worktree list are never
+written: the only git commands run against it are reads.
 
 Every failure is still `ok` with exit 0 and a `reason`: an unreadable `HEAD` or merge base is `the
 merge base of HEAD and origin/<branch> could not be read: <git's last stderr line>`; a scratch that
-cannot be made is `the scratch worktree could not be made: <error>`; a test that cannot be started
-is `a test could not be started: <error>` and stops the run; any other exception is `the check
-failed: <ExceptionType>: <error>`. `still_passing` then holds only the tests that already passed.
-Before each test, once `BUDGET_SECONDS` have passed since the start, no further test runs and `reason`
-is `the check ran out of its <budget> s budget after <k> of <n> new tests`.
+cannot be made (a temporary directory included) is `the scratch worktree could not be made: <error>`;
+a test that cannot be started is `a test could not be started: <error>` and stops the run; any other
+exception is `the check failed: <ExceptionType>: <error>`. `still_passing` then holds only the tests
+that already passed. Before each test, once `BUDGET_SECONDS` have passed since the start, no further
+test runs and `reason` is `the check ran out of its <budget> s budget after <k> of <n> new tests`.
 """
 
 from __future__ import annotations
@@ -55,7 +62,6 @@ import subprocess
 import sys
 import tempfile
 import time
-from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
 from agent_tools.delivery.engine_shell import REPOSITORY_ENV
@@ -64,6 +70,22 @@ TEST_SECONDS = 300
 BUDGET_SECONDS = 1200
 SCRATCH_ENV = "REVERT_CHECK_SCRATCH"
 GIT_SECONDS = 120
+WATCH_SECONDS = 0.1
+
+# Runs as `python -I -c WATCHER <id> <scratch directory>`: the test's session leader. It runs the test and,
+# once its own parent (the checker) is gone, removes the scratch directory and kills its whole session.
+WATCHER = """
+import os, shutil, signal, subprocess, sys, threading, time
+parent = os.getppid()
+child = subprocess.Popen([sys.executable, "-m", "unittest", sys.argv[1]])
+def watch():
+    while os.getppid() == parent:
+        time.sleep(%s)
+    shutil.rmtree(sys.argv[2], ignore_errors=True)
+    os.killpg(0, signal.SIGKILL)
+threading.Thread(target=watch, daemon=True).start()
+sys.exit(child.wait())
+""" % WATCH_SECONDS
 
 RunGit = Callable[..., "subprocess.CompletedProcess[bytes]"]
 
@@ -81,8 +103,8 @@ def _reaches_testcase(name: str, classes: Mapping[str, ast.ClassDef], seen: froz
     return False
 
 
-def case_ids(source: str) -> frozenset[str]:
-    """The `<Class>.<method>` ids of the test methods of one Python file's text."""
+def case_ids(source: str | bytes) -> frozenset[str]:
+    """The `<Class>.<method>` ids of the test methods of one Python file's text or bytes."""
     try:
         tree = ast.parse(source)
     except (SyntaxError, ValueError):
@@ -103,38 +125,55 @@ def _last_line(done: "subprocess.CompletedProcess[bytes]") -> str:
 def _git_runner(environ: Mapping[str, str]) -> RunGit:
     env = {name: value for name, value in environ.items() if name not in REPOSITORY_ENV}
 
-    def run_git(*args: str) -> "subprocess.CompletedProcess[bytes]":
-        return subprocess.run(["git", *args], capture_output=True, env=env, stdin=subprocess.DEVNULL,
-                              timeout=GIT_SECONDS)
+    def run_git(*args: str, index: str | None = None) -> "subprocess.CompletedProcess[bytes]":
+        return subprocess.run(["git", *args], capture_output=True, stdin=subprocess.DEVNULL, timeout=GIT_SECONDS,
+                              env={**env, "GIT_INDEX_FILE": index} if index else env)
     return run_git
 
 
-def _show(run_git: RunGit, worktree: str, revision: str, path: str) -> bytes | None:
+def _read(run_git: RunGit, worktree: str, revision: str, path: str) -> bytes | None:
+    """The blob of `path` at `revision`; None when the revision has no such path; an unreadable blob raises."""
+    listed = run_git("-C", worktree, "ls-tree", "-z", "--name-only", revision, "--", path)
+    if listed.returncode:
+        raise RuntimeError(f"git ls-tree {revision} {path}: {_last_line(listed)}")
+    if not listed.stdout:
+        return None
     done = run_git("-C", worktree, "show", f"{revision}:{path}")
-    return done.stdout if done.returncode == 0 else None
+    if done.returncode:
+        raise RuntimeError(f"git show {revision}:{path}: {_last_line(done)}")
+    return done.stdout
 
 
-def _new_tests(worktree: str, base: str, head: str, run_git: RunGit) -> list[tuple[str, str]]:
-    """The `(path, id)` of each new test of the change, sorted by path then id."""
+def _new_tests(worktree: str, base: str, head: str, run_git: RunGit) -> tuple[list[tuple[str, str]], dict[str, bytes]]:
+    """The `(path, id)` of each new test of the change, sorted by path then id, and the head blob of each file holding one."""
     done = run_git("-C", worktree, "diff", "--no-renames", "--name-only", "--diff-filter=AM", "-z", base, head)
     if done.returncode:
         raise RuntimeError(f"git diff: {_last_line(done)}")
     found: list[tuple[str, str]] = []
+    blobs: dict[str, bytes] = {}
     for path in sorted(name for name in done.stdout.decode(errors="replace").split("\0") if name.endswith(".py")):
-        text = _show(run_git, worktree, head, path)
+        text = _read(run_git, worktree, head, path)
         if text is None:
-            continue
-        before = _show(run_git, worktree, base, path)
-        old = case_ids(before.decode(errors="replace")) if before is not None else frozenset()
+            raise RuntimeError(f"{path} is not in {head}")
+        before = _read(run_git, worktree, base, path)
+        old = case_ids(before) if before is not None else frozenset()
         module = path[:-len(".py")].replace("/", ".")
-        found.extend((path, f"{module}.{case}")
-                     for case in sorted(case_ids(text.decode(errors="replace")) - old))
-    return found
+        added = sorted(case_ids(text) - old)
+        if added:
+            blobs[path] = text
+            found.extend((path, f"{module}.{case}") for case in added)
+    return found, blobs
 
 
-def _python_path(scratch: str, worktree: str, inherited: str, run_git: RunGit) -> str:
-    tracked = run_git("-C", scratch, "ls-files", "-z", "--", "*__init__.py")
-    inits = {name for name in tracked.stdout.decode(errors="replace").split("\0") if name}
+def _tracked_inits(worktree: str, base: str, run_git: RunGit) -> set[str]:
+    tracked = run_git("-C", worktree, "ls-tree", "-r", "-z", "--name-only", base)
+    if tracked.returncode:
+        raise RuntimeError(f"git ls-tree {base}: {_last_line(tracked)}")
+    return {name for name in tracked.stdout.decode(errors="replace").split("\0")
+            if name == "__init__.py" or name.endswith("/__init__.py")}
+
+
+def _python_path(scratch: str, worktree: str, inherited: str, inits: set[str]) -> str:
     taken = set(os.listdir(scratch))
     roots: dict[str, set[str]] = {}
     for name in inits:
@@ -152,9 +191,37 @@ def _python_path(scratch: str, worktree: str, inherited: str, run_git: RunGit) -
     return os.pathsep.join([scratch, *(os.path.join(scratch, root) for root in sorted(roots)), *kept])
 
 
-def _passes(identifier: str, scratch: str, env: Mapping[str, str], test_seconds: float) -> bool:
+def _write(root: str, path: str, data: bytes) -> None:
+    """Write `data` at `path` under `root`, refusing a path that passes through a symlink."""
+    parts = path.split("/")
+    current = root
+    for part in parts[:-1]:
+        current = os.path.join(current, part)
+        if os.path.islink(current):
+            raise RuntimeError(f"{path} passes through the symlink {os.path.relpath(current, root)} of the merge base")
+        if not os.path.isdir(current):
+            os.mkdir(current)
+    descriptor = os.open(os.path.join(current, parts[-1]), os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o644)
+    with os.fdopen(descriptor, "wb") as handle:
+        handle.write(data)
+
+
+def _checkout(worktree: str, holder: str, tree: str, blobs: Mapping[str, bytes], run_git: RunGit) -> None:
+    """A fresh checkout of the merge base at `tree` with the head version of each new-test file over it."""
+    shutil.rmtree(tree, ignore_errors=True)
+    done = run_git("-C", worktree, "checkout-index", "-a", "-f", f"--prefix={tree}/", index=os.path.join(holder, "index"))
+    if done.returncode:
+        raise OSError(f"git checkout-index: {_last_line(done)}")
+    for path, data in sorted(blobs.items()):
+        _write(tree, path, data)
+    for top in sorted({path.split("/")[0] for path in blobs if "/" in path}):
+        if not os.path.exists(os.path.join(tree, top, "__init__.py")):
+            _write(tree, f"{top}/__init__.py", b"")
+
+
+def _passes(identifier: str, scratch: str, holder: str, env: Mapping[str, str], test_seconds: float) -> bool:
     process = subprocess.Popen(
-        [sys.executable, "-m", "unittest", identifier], cwd=scratch, env=dict(env),
+        [sys.executable, "-I", "-c", WATCHER, identifier, holder], cwd=scratch, env=dict(env),
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         start_new_session=True)
     try:
@@ -169,7 +236,7 @@ def _passes(identifier: str, scratch: str, env: Mapping[str, str], test_seconds:
         process.wait()
 
 
-def check(worktree: str, integration_branch: str, *, environ: Mapping[str, str], scratch_root: str,
+def check(worktree: str, integration_branch: str, *, environ: Mapping[str, str], scratch_root: str | None,
           test_seconds: float = TEST_SECONDS, budget_seconds: float = BUDGET_SECONDS) -> dict:
     started = time.monotonic()
     result: dict = {"verdict": "ok", "base": "", "head": "", "new_tests": [], "still_passing": [], "reason": ""}
@@ -185,48 +252,42 @@ def check(worktree: str, integration_branch: str, *, environ: Mapping[str, str],
                                 f"could not be read: {_last_line(failed)}")
             return result
         result["base"] = base.stdout.decode().strip()
-        found = _new_tests(worktree, result["base"], result["head"], run_git)
+        found, blobs = _new_tests(worktree, result["base"], result["head"], run_git)
         result["new_tests"] = [identifier for _, identifier in found]
         if found:
-            _run_in_scratch(worktree, result, found, run_git, environ, scratch_root,
+            _run_in_scratch(worktree, result, found, blobs, run_git, environ, scratch_root,
                             test_seconds, budget_seconds, started)
     except Exception as error:
         result["reason"] = f"the check failed: {type(error).__name__}: {error}"
     return result
 
 
-def _run_in_scratch(worktree: str, result: dict, found: list[tuple[str, str]], run_git: RunGit,
-                    environ: Mapping[str, str], scratch_root: str, test_seconds: float,
+def _run_in_scratch(worktree: str, result: dict, found: list[tuple[str, str]], blobs: Mapping[str, bytes],
+                    run_git: RunGit, environ: Mapping[str, str], scratch_root: str | None, test_seconds: float,
                     budget_seconds: float, started: float) -> None:
-    scratch = None
-    added = False
+    holder = None
     try:
         try:
-            scratch = os.path.realpath(tempfile.mkdtemp(prefix="revert-check-", dir=scratch_root))
-            done = run_git("-C", worktree, "-c", "core.hooksPath=/dev/null", "worktree", "add",
-                           "--detach", "--quiet", scratch, result["base"])
+            holder = os.path.realpath(tempfile.mkdtemp(prefix="revert-check-", dir=scratch_root or tempfile.gettempdir()))
+            done = run_git("-C", worktree, "read-tree", result["base"], index=os.path.join(holder, "index"))
             if done.returncode:
-                raise OSError(_last_line(done))
-            added = True
+                raise OSError(f"git read-tree: {_last_line(done)}")
         except (OSError, subprocess.SubprocessError) as error:
             result["reason"] = f"the scratch worktree could not be made: {error}"
             return
-        for path in sorted({path for path, _ in found}):
-            text = _show(run_git, worktree, result["head"], path)
-            if text is None:
-                raise RuntimeError(f"{path} is not readable at {result['head']}")
-            target = Path(scratch, path)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(text)
+        tree = os.path.join(holder, "tree")
+        inits = _tracked_inits(worktree, result["base"], run_git)
         env = {name: value for name, value in environ.items() if name not in REPOSITORY_ENV}
-        env["PYTHONPATH"] = _python_path(scratch, worktree, environ.get("PYTHONPATH", ""), run_git)
+        env["PYTHONPYCACHEPREFIX"] = os.path.join(holder, "pycache")
         for ran, (_, identifier) in enumerate(found):
             if time.monotonic() - started >= budget_seconds:
                 result["reason"] = (f"the check ran out of its {budget_seconds:g} s budget "
                                     f"after {ran} of {len(found)} new tests")
                 break
+            _checkout(worktree, holder, tree, blobs, run_git)
+            env["PYTHONPATH"] = _python_path(tree, worktree, environ.get("PYTHONPATH", ""), inits)
             try:
-                passed = _passes(identifier, scratch, env, test_seconds)
+                passed = _passes(identifier, tree, holder, env, test_seconds)
             except OSError as error:
                 result["reason"] = f"a test could not be started: {error}"
                 break
@@ -235,26 +296,21 @@ def _run_in_scratch(worktree: str, result: dict, found: list[tuple[str, str]], r
     except Exception as error:
         result["reason"] = f"the check failed: {type(error).__name__}: {error}"
     finally:
-        if scratch is not None:
-            _remove(worktree, scratch, added, result, run_git)
+        if holder is not None:
+            _remove(holder, result)
 
 
-def _remove(worktree: str, scratch: str, added: bool, result: dict, run_git: RunGit) -> None:
+def _remove(holder: str, result: dict) -> None:
     problem = ""
     try:
-        if added:
-            done = run_git("-C", worktree, "worktree", "remove", "--force", scratch)
-            if done.returncode:
-                problem = _last_line(done)
-    except Exception as error:
-        problem = f"{type(error).__name__}: {error}"
-    shutil.rmtree(scratch, ignore_errors=True)
-    try:
-        run_git("-C", worktree, "worktree", "prune")
-    except Exception:
+        shutil.rmtree(holder)
+    except FileNotFoundError:
         pass
+    except OSError as error:
+        problem = f"{type(error).__name__}: {error}"
+        shutil.rmtree(holder, ignore_errors=True)
     if problem:
-        message = f"the scratch worktree {scratch} could not be removed: {problem}"
+        message = f"the scratch worktree {holder} could not be removed: {problem}"
         result["reason"] = f"{result['reason']} {message}".strip()
 
 
@@ -263,8 +319,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--worktree-path", required=True)
     parser.add_argument("--integration-branch", required=True)
     args = parser.parse_args(argv)
-    scratch_root = os.environ.get(SCRATCH_ENV) or tempfile.gettempdir()
-    result = check(args.worktree_path, args.integration_branch, environ=os.environ, scratch_root=scratch_root)
+    result = check(args.worktree_path, args.integration_branch, environ=os.environ,
+                   scratch_root=os.environ.get(SCRATCH_ENV) or None)
     print(json.dumps(result, sort_keys=True, separators=(",", ":")))
     return 0
 

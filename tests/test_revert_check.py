@@ -6,19 +6,23 @@ Each case builds a real git repository from the engine fixture project and runs 
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
+import io
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from agent_tools.delivery.engine_commands import PLATFORM_WALL_SECONDS
-from agent_tools.delivery.revert_check import BUDGET_SECONDS, TEST_SECONDS, case_ids, check
+from agent_tools.delivery.revert_check import BUDGET_SECONDS, TEST_SECONDS, case_ids, check, main
 
 TIER = "integration"  # every case starts git and the tests as processes
 
@@ -43,6 +47,14 @@ PROOF_CHANGE = {FAREWELL_PATH: FAREWELL_SOURCE, FAREWELL_CHECK_PATH: FAREWELL_CH
 FAREWELL_ID = "checks.check_farewell.FarewellCheck.test_farewell_says_goodbye"
 GREET_ID = "checks.check_greet.GreetCheck.test_greet_keeps_the_name"
 BRANCH = "issue-1-topic"
+SLEEPER = ("import os\nimport time\nimport unittest\n\n\nclass SleepCheck(unittest.TestCase):\n"
+           "    def test_sleeps(self):\n        open({marker!r}, 'w').write(str(os.getpid()))\n        time.sleep(30)\n")
+BOM_CHECK = "import unittest\n\n\nclass BomCheck(unittest.TestCase):\n    def test_passes(self):\n        self.assertTrue(True)\n"
+STATEFUL = (
+    "import os\nimport unittest\n\n\nclass StateCheck(unittest.TestCase):\n"
+    "    def test_a_writes(self):\n        os.makedirs('data', exist_ok=True)\n"
+    "        open('data/flag.txt', 'w').write('x')\n\n"
+    "    def test_b_needs(self):\n        self.assertTrue(os.path.exists('data/flag.txt'))\n")
 
 
 class FixtureRepository:
@@ -106,6 +118,23 @@ class FixtureRepository:
             digest.update(str(path.relative_to(self.worktree)).encode() + b"\0" + path.read_bytes() + b"\0")
         return (digest.hexdigest(), self.git(self.main, "rev-parse", f"refs/heads/{BRANCH}"),
                 self.git(self.main, "worktree", "list", "--porcelain"))
+
+
+def eventually(condition, seconds: float = 20) -> bool:
+    deadline = time.monotonic() + seconds
+    while not condition():
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(0.05)
+    return True
+
+
+def alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
 
 
 def scratch_directory(test_case: unittest.TestCase) -> str:
@@ -222,6 +251,121 @@ class CheckTest(unittest.TestCase):
                        environ=os.environ)
         self.assertEqual(result["new_tests"], ["tests.check_new.NewCheck.test_new"])
         self.assertEqual(result["still_passing"], ["tests.check_new.NewCheck.test_new"])
+
+    def test_a_symlink_of_the_merge_base_is_never_written_through(self):
+        repository = FixtureRepository(self)
+        linked = repository.worktree / "linked"
+        repository.git(repository.main, "rm", "-rq", "checks")
+        os.symlink(linked, repository.main / "checks")
+        repository.commit_in(repository.main, "checks becomes a link")
+        repository.git(repository.main, "push", "-q", "origin", "main")
+        repository.git(repository.main, "fetch", "-q", "origin")
+        repository.git(repository.worktree, "merge", "-q", "--ff-only", "main")
+        repository.write(repository.worktree, "linked/check_greet.py", "UNCOMMITTED EDIT\n")
+        repository.git(repository.worktree, "rm", "-q", "checks")
+        repository.write(repository.worktree, GREET_CHECK_PATH, GREET_CHECK_PLUS)
+        repository.git(repository.worktree, "add", "checks")
+        repository.git(repository.worktree, "-c", "commit.gpgsign=false", "commit", "-q", "-m", "checks is a directory")
+        before = repository.snapshot()
+        result = check(str(repository.worktree), "main", scratch_root=scratch_directory(self), environ=os.environ)
+        self.assertEqual(result["still_passing"], [])
+        self.assertIn("symlink", result["reason"])
+        self.assertEqual(repository.snapshot(), before)
+        self.assertEqual((linked / "check_greet.py").read_text(), "UNCOMMITTED EDIT\n")
+
+    def test_an_unrelated_worktree_whose_path_is_gone_stays_registered(self):
+        repository = FixtureRepository(self)
+        repository.commit(PROOF_CHANGE)
+        other = repository.tmp / "other"
+        repository.git(repository.main, "worktree", "add", "-q", "--detach", str(other), "main")
+        other.rename(repository.tmp / "unmounted")
+        result = check(str(repository.worktree), "main", scratch_root=scratch_directory(self), environ=os.environ)
+        self.assertEqual(result["still_passing"], [GREET_ID])
+        self.assertIn(f"worktree {other}", repository.git(repository.main, "worktree", "list", "--porcelain"))
+
+    def test_an_engine_stop_during_a_test_leaves_no_test_and_no_scratch_behind(self):
+        repository = FixtureRepository(self)
+        marker = repository.tmp / "test-pid"
+        repository.commit({"checks/check_sleep.py": SLEEPER.format(marker=str(marker))})
+        scratch = scratch_directory(self)
+        before = repository.snapshot()
+        checker = subprocess.Popen(
+            [sys.executable, "-m", "agent_tools.delivery.revert_check", "--worktree-path", str(repository.worktree),
+             "--integration-branch", "main"],
+            cwd=repository.worktree, start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            env={**repository.env, "PYTHONPATH": str(REPO_ROOT / "python"), "REVERT_CHECK_SCRATCH": scratch})
+        self.addCleanup(checker.wait)
+        self.addCleanup(lambda: checker.poll() is None and os.killpg(checker.pid, signal.SIGKILL))
+        self.assertTrue(eventually(lambda: marker.exists() and marker.read_text().isdigit()))
+        pid = int(marker.read_text())
+        self.addCleanup(lambda: alive(pid) and os.kill(pid, signal.SIGKILL))
+        os.killpg(checker.pid, signal.SIGKILL)
+        checker.wait()
+        self.assertTrue(eventually(lambda: not alive(pid)), "the test outlived the checker")
+        self.assertTrue(eventually(lambda: os.listdir(scratch) == []), os.listdir(scratch))
+        self.assertEqual(repository.snapshot(), before)
+
+    def test_bytecode_goes_to_the_scratch_whatever_the_inherited_cache_prefix(self):
+        repository = FixtureRepository(self)
+        repository.commit(PROOF_CHANGE)
+        before = repository.snapshot()
+        result = check(str(repository.worktree), "main", scratch_root=scratch_directory(self), environ={
+            **os.environ, "PYTHONPYCACHEPREFIX": str(repository.worktree / "pycache")})
+        self.assertEqual(result["still_passing"], [GREET_ID])
+        self.assertFalse((repository.worktree / "pycache").exists())
+        self.assertEqual(repository.snapshot(), before)
+
+    def test_each_test_runs_on_a_fresh_checkout_of_the_merge_base(self):
+        repository = FixtureRepository(self)
+        repository.commit({"checks/check_state.py": STATEFUL, "data/flag.txt": "x"})
+        result = check(str(repository.worktree), "main", scratch_root=scratch_directory(self), environ=os.environ)
+        self.assertEqual(result["new_tests"], ["checks.check_state.StateCheck.test_a_writes",
+                                               "checks.check_state.StateCheck.test_b_needs"])
+        self.assertEqual(result["still_passing"], ["checks.check_state.StateCheck.test_a_writes"])
+
+    def test_a_module_with_a_byte_order_mark_is_discovered(self):
+        repository = FixtureRepository(self)
+        (repository.worktree / FAREWELL_CHECK_PATH).write_bytes(b"\xef\xbb\xbf" + BOM_CHECK.encode())
+        repository.commit_in(repository.worktree, "bom")
+        result = check(str(repository.worktree), "main", scratch_root=scratch_directory(self), environ=os.environ)
+        self.assertEqual(result["new_tests"], ["checks.check_farewell.BomCheck.test_passes"])
+        self.assertEqual(result["still_passing"], result["new_tests"])
+        self.assertEqual(result["reason"], "")
+
+    def test_a_regular_package_of_the_inherited_path_does_not_shadow_the_checks_directory(self):
+        repository = FixtureRepository(self)
+        repository.commit(PROOF_CHANGE)
+        other = Path(scratch_directory(self))
+        repository.write(other, "checks/__init__.py", "")
+        result = check(str(repository.worktree), "main", scratch_root=scratch_directory(self), environ={
+            **os.environ, "PYTHONPATH": f"{other}{os.pathsep}{REPO_ROOT / 'python'}"})
+        self.assertEqual(result["new_tests"], [FAREWELL_ID, GREET_ID])
+        self.assertEqual(result["still_passing"], [GREET_ID])
+
+    def test_a_head_blob_git_cannot_read_is_the_reason_not_a_silent_skip(self):
+        repository = FixtureRepository(self)
+        repository.commit({GREET_CHECK_PATH: GREET_CHECK_PLUS})
+        blob = repository.git(repository.worktree, "rev-parse", f"HEAD:{GREET_CHECK_PATH}").strip()
+        (repository.main / ".git/objects" / blob[:2] / blob[2:]).unlink()
+        result = check(str(repository.worktree), "main", scratch_root=scratch_directory(self), environ=os.environ)
+        self.assertEqual((result["new_tests"], result["still_passing"]), ([], []))
+        self.assertTrue(result["reason"].startswith("the check failed: RuntimeError: git show "), result["reason"])
+        self.assertIn(GREET_CHECK_PATH, result["reason"])
+
+    def test_no_usable_temporary_directory_is_a_reason_not_a_crash(self):
+        repository = FixtureRepository(self)
+        repository.commit(PROOF_CHANGE)
+        argv = ["--worktree-path", str(repository.worktree), "--integration-branch", "main"]
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, {}, clear=False) as environ, \
+                mock.patch("tempfile.gettempdir", side_effect=FileNotFoundError("no usable temporary directory")), \
+                contextlib.redirect_stdout(out):
+            environ.pop("REVERT_CHECK_SCRATCH", None)
+            code = main(argv)
+        result = json.loads(out.getvalue())
+        self.assertEqual((code, result["verdict"], result["still_passing"]), (0, "ok", []))
+        self.assertEqual(result["new_tests"], [FAREWELL_ID, GREET_ID])
+        self.assertTrue(result["reason"].startswith("the scratch worktree could not be made: "), result["reason"])
 
     def test_a_new_test_that_outlives_its_bound_is_not_listed(self):
         repository = FixtureRepository(self)
