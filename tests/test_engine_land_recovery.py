@@ -8,7 +8,7 @@ import json
 import unittest
 from pathlib import Path
 
-from agent_tools.delivery import landing
+from agent_tools.delivery import engine_caps, land_tally, landing
 from tests.engine_stubbed_world import StubbedRun
 from tests.guard_policy_world import install_platform_manifest_in_environ
 from tests.test_engine_stubbed_run import (
@@ -275,6 +275,115 @@ class PendingTest(Landing):
 
         self.assertIn(("gate", "pending"), self.walk(run))
 
+class MergeRefusalTest(Landing):
+    def test_three_merge_refusals_for_being_behind_stop_merge(self):
+        run = StubbedRun(self, merge_behind=3, replies={"resync": SYNCED})
+
+        self.finish(run, "merge", "owner-decision")
+
+        walk = self.walk(run)
+        self.assertEqual(walk.count(("merge-state", "behind")), 3)
+        self.assertEqual(self.count(run, "resync"), 2)
+        self.assertEqual(run.transitions(self.land_run(run))[-1], ("release", "merge"))
+        self.assertEqual(run.lock_refs(), {})
+        self.assertEqual([p["state"] for p in run.pulls()], ["OPEN"])
+
+    def test_a_merge_refused_for_being_behind_is_resynced_and_merged(self):
+        run = StubbedRun(self, merge_behind=1, replies={"resync": SYNCED})
+
+        self.finish(run, "done")
+
+        self.assert_in_order(self.walk(run), ("merge-pr", "failed"), ("merged", "open"),
+                             ("merge-state", "behind"), ("resync", "done"), ("merge-pr", "ok"))
+
+    def test_a_policy_refusal_is_polled_once_more_and_then_merges(self):
+        run = StubbedRun(self, merge_policy=1)
+
+        self.finish(run, "done")
+
+        self.assert_in_order(self.walk(run), ("merge-state", "blocked"), ("policy", "green"),
+                             ("merge-pr", "ok"))
+
+    def test_a_second_policy_refusal_stops_merge(self):
+        run = StubbedRun(self, merge_policy=2)
+
+        self.finish(run, "merge", "owner-decision")
+
+        walk = self.walk(run)
+        self.assertEqual(walk.count(("policy", "green")), 1)
+        self.assertEqual(walk.count(("merge-state", "blocked")), 2)
+        self.assertEqual(run.lock_refs(), {})
+
+
+class LockTest(Landing):
+    def test_a_lock_another_pull_request_holds_is_waited_for_within_the_budget_and_stops_land_contended(self):
+        run = StubbedRun(self, forge_events=("steal-lock",))
+
+        self.finish(run, "land-contended", "retry")
+
+        waits = [outcome for step, outcome in self.walk(run) if step == "lock-wait"]
+        self.assertEqual(waits[-1], "spent")
+        self.assertIn("again", waits)
+        answers = land_tally.lock_answers(self.attempt(run))
+        self.assertIs(land_tally.lock_budget(answers), False)
+        self.assertIs(land_tally.lock_budget(answers[:-1] + [answers[-1][:-1]]), True)
+        self.assertEqual(run.lock_refs(), {"refs/agent-locks/land/main": run.stolen_sha})
+
+    def test_a_lock_lost_at_the_re_check_is_waited_for_again(self):
+        run = StubbedRun(self, forge_events=("steal-lock-at-head",))
+
+        self.finish(run, "land-contended", "retry")
+
+        walk = self.walk(run)
+        self.assert_in_order(walk, ("recheck", "contended"), ("relock", "contended"), ("lock-wait", "again"))
+        self.assertEqual([o for s, o in walk if s == "lock-wait"][-1], "spent")
+        self.assertEqual(run.lock_refs(), {"refs/agent-locks/land/main": run.stolen_sha})
+
+    def test_a_re_check_that_took_the_lock_again_polls_once_more_and_merges(self):
+        run = StubbedRun(self, forge_events=("drop-lock-at-head",))
+
+        self.finish(run, "done")
+
+        self.assert_in_order(self.walk(run), ("recheck", "retaken"), ("retake", "green"), ("recheck", "held"))
+
+    def test_a_second_retake_stops_land_contended(self):
+        run = StubbedRun(self, forge_events=("drop-lock-at-head", "drop-lock-at-head"))
+
+        self.finish(run, "land-contended", "retry")
+
+        self.assertEqual(self.walk(run).count(("retake", "green")), 1)
+        self.assertEqual(run.lock_refs(), {})
+
+
+class ReleaseSweepTest(Landing):
+    def scenarios(self):
+        findings = {"verdict": "findings", "findings": [FINDING]}
+        untested = committing("fixture/fix.py", "FIX = 1\n", tests=[])
+        return (
+            ("sync-contention", {"advance_main": 3, "replies": {"lock-sync": SYNCED}}),
+            ("merge", {"merge_behind": 3, "replies": {"resync": SYNCED}}),
+            ("merge", {"merge_policy": 2}),
+            ("land-contended", {"forge_events": ("drop-lock-at-head", "drop-lock-at-head")}),
+            ("land-contended", {"forge_events": ("steal-lock-at-head",)}),
+            ("sync-fix", {"advance_main": 1, "main_change": CONFLICTING_MAIN, "replies": {
+                "lock-sync": CONFLICTED, "resolve": RESOLVED, "merge-review": findings,
+                "merge-fix": untested}}))
+
+    def test_every_stop_after_the_lock_was_taken_leaves_no_land_lock_of_this_delivery(self):
+        for stop, scenario in self.scenarios():
+            with self.subTest(stop=stop, scenario=sorted(scenario)):
+                run = StubbedRun(self, **scenario)
+
+                done = run.deliver()
+
+                self.assertEqual(run.line(done)["end"], stop, done.stdout + done.stderr)
+                self.assertEqual(run.transitions(self.land_run(run))[-1], ("release", stop))
+                root = run.runs()[0]
+                holder = json.loads((root / "run.json").read_text("utf-8"))["inputs"]["holder"]
+                held = land_tally.held_shas(holder, run.world.home / ".agents/state/engine/runs")
+                self.assertTrue(held)
+                self.assertFalse(held & set(run.lock_refs().values()), run.lock_refs())
+
 
 BOUNDS = {
     "expect": (12, "land"), "push": (12, "land"), "pushed": (12, "land"), "find-pull": (12, "land"),
@@ -287,13 +396,15 @@ BOUNDS = {
     "pending": (12, "checks-pending"), "red": (12, "checks"), "stale": (1, "checks"),
     "presync": (2, "sync-contention"), "fix-unlock": (2, "checks"), "ci-fix": (1, "checks"),
     "ci-fixed": (1, "checks-fix"), "ci-review": (1, "checks-fix-review"),
+    "lock-wait": (12, "land-contended"), "relock": (3, "land-contended"), "retake": (1, "land-contended"),
+    "merge-state": (6, "merge"), "policy": (1, "merge"), "resync": (2, "merge"),
 }
 STOP_TARGETS = {
     "renew": ("claim-lost", "claim"), "prepare": ("land",), "settled": (), "expect": ("land",),
     "pushed": ("head-moved", "land"), "find-pull": ("land",), "opened": ("land",),
     "probe": ("land",), "gate": ("head-moved", "land"),
-    "lock": ("land-contended", "land"), "fresh": ("land",), "head": ("head-moved", "land"),
-    "recheck": ("land-contended", "land"), "merge-pr": ("merge",), "merged": ("merge",),
+    "lock": ("land",), "fresh": ("land",), "head": ("head-moved", "land"),
+    "recheck": ("land",), "merge-pr": ("merge",), "merged": ("merge",),
     "lock-sync": ("sync", "sync-contention"), "resolve-unlock": ("unreleased-lock", "sync"),
     "resolve": ("sync",), "merge-of": ("sync", "land"), "merge-review": ("sync-review",),
     "merge-fixes": ("sync-review", "land"), "merge-fix": ("sync-fix", "sync-review"),
@@ -302,17 +413,25 @@ STOP_TARGETS = {
     "presync": ("sync", "sync-contention"), "fix-unlock": ("unreleased-lock", "checks"),
     "ci-fix": ("checks-fix", "checks"), "ci-fixed": ("checks-fix", "land"),
     "ci-review": ("checks-fix-review",),
+    "lock-wait": ("land-contended", "land"), "relock": ("land-contended", "land"),
+    "retake": ("head-moved", "land-contended", "land"), "merge-state": ("merge",),
+    "policy": ("head-moved", "merge", "land"), "resync": ("sync", "merge"),
 }
 
 
 class ShapeTest(unittest.TestCase):
     def test_each_bound_of_the_attempt_is_the_programs(self):
         steps = steps_of("land-attempt")
-        self.assertEqual(len(steps), 34)
         for step, (bound, stop) in BOUNDS.items():
             with self.subTest(step):
                 self.assertEqual(steps[step].get("max_visits"), bound)
                 self.assertEqual(steps[step]["on"]["exhausted"], stop)
+
+    def test_the_attempt_has_exactly_the_step_cap(self):
+        self.assertEqual(len(procedure("land-attempt")["steps"]), engine_caps.PROCEDURE_STEPS)
+
+    def test_every_counted_step_is_a_step_of_the_attempt(self):
+        self.assertLessEqual(set(land_tally.COUNTED_STEPS) - {land_tally.ATTEMPT}, set(steps_of("land-attempt")))
 
     def test_a_red_check_fix_is_entered_only_through_the_release(self):
         steps = steps_of("land-attempt")

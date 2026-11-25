@@ -722,6 +722,76 @@ class PrHeadTest(unittest.TestCase):
         self.assertEqual((status, answer["verdict"]), (1, "error"), answer)
 
 
+class FakeClock:
+    """`monotonic` and `sleep` for forge_land_lock; `on_sleep(elapsed)` runs after each sleep."""
+
+    def __init__(self, on_sleep=None):
+        self.start = self.now = 1000.0
+        self.on_sleep = on_sleep
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds
+        if self.on_sleep:
+            self.on_sleep(self.now - self.start)
+
+
+class LockClockTest(LedgerMaker, unittest.TestCase):
+    """The lock budget against real lock answers of whole waits on a fake clock. The holder stays live for the
+    wait through its beat ref (D11); an unrefreshed lock is taken over by the idle watch (D4)."""
+
+    def arrange(self, on_sleep=None):
+        land = LandingWorld(self)
+        self.use_home(Path(land.env["HOME"]))
+        land.forge.answer_in_process(forge_api)
+        register_lock(land.forge, OTHER, {SHA: 7, OTHER: 8})
+        land.forge.respond_json("gh", ["api", f"repos/{SLUG}/pulls/8"], {"state": "open"})
+        land.env.pop("LANDING_BOUND_SECONDS", None)
+        clock = FakeClock(on_sleep)
+        for name, value in (("BOUND", 3000), ("FAST_POLL", forge_land_lock.POLL),
+                            ("monotonic", clock.monotonic), ("sleep", clock.sleep)):
+            patcher = mock.patch.object(forge_land_lock, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        return land
+
+    def lock(self, land: LandingWorld) -> tuple[int, dict]:
+        return land.call("lock", "--repo", SLUG, "--integration-branch", "main", "--head", SHA)
+
+    def test_contended_waits_on_a_fake_clock_stop_at_the_six_hour_ceiling(self):
+        counter = iter(range(1, 10_000))
+        land = self.arrange(lambda elapsed: land.forge.set_ref(
+            forge_land_lock.beat_ref("main"), f"{next(counter):040x}"))
+        root, _, _, _, attempt = self.delivery()
+        holder = f"host-a/{root.name}"
+        budget = []
+
+        for i in range(1, 8):
+            _, answer = self.lock(land)
+            self.assertEqual(answer["verdict"], "contended", answer)
+            self.assertEqual(answer["lock"]["verdict"], "land-contended")
+            self.assertIsNone(answer["lock"].get("took_over"))
+            self.assertEqual((answer["lock"]["waited_s"], answer["lock"]["position"]), (3000, 1))
+            self.visit(attempt, "lock", i, "contended", answer)
+            budget.append(land.call("lock-budget", "--holder", holder)[1]["verdict"])
+
+        self.assertEqual(budget, ["again"] * 6 + ["spent"])
+        self.assertEqual(land.forge.refs()[LOCK_REF], OTHER)
+
+    def test_an_unrefreshed_holder_is_taken_over_by_the_idle_watch(self):
+        land = self.arrange()
+
+        _, answer = self.lock(land)
+
+        self.assertEqual(answer["verdict"], "held", answer)
+        self.assertEqual(answer["lock"]["took_over"], "idle")
+        self.assertLessEqual(forge_land_lock.IDLE_AFTER, answer["lock"]["waited_s"])
+        self.assertLess(answer["lock"]["waited_s"], forge_land_lock.BOUND)
+        self.assertEqual(land.forge.refs()[LOCK_REF], SHA)
+
+
 class BoundSeamTest(unittest.TestCase):
     def setUp(self):
         for module, name in ((landing, "CHECK_BOUND_SECONDS"), (forge_land_lock, "BOUND")):

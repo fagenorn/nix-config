@@ -624,7 +624,7 @@ class LandGuardTest(Landing):
         merge = self.stored(self.attempt(run), "merge-pr")
         self.assertEqual(merge["verdict"], "refused")
         self.assertIn("protection lookup failed", merge["reason"])
-        self.assertEqual(self.land_transitions(run)[-1], ("merge-pr", "refused"))
+        self.assertEqual(self.land_transitions(run)[-2:], [("merge-pr", "refused"), ("merge-state", "other")])
         self.assertEqual(self.release_transitions(run)[-2:], [("attempt", "merge"), ("release", "merge")])
         self.assertEqual([p["state"] for p in run.pulls()], ["OPEN"])
         self.assertEqual(run.origin_tip("main"), before)
@@ -663,6 +663,8 @@ class LandStopTest(Landing):
 
         transitions = self.land_transitions(run)
         self.assertIn(("lock", "contended"), transitions)
+        self.assertIn(("lock-wait", "again"), transitions)
+        self.assertEqual([o for s, o in transitions if s == "lock-wait"][-1], "spent")
         self.assertIn(("release", "land-contended"), self.release_transitions(run))
         self.assertEqual(run.pulls()[0]["state"], "OPEN")
         self.assertNotIn("merge-pr", self.entered(run))
@@ -828,6 +830,10 @@ class CoverageTest(Landing):
                          "merge-rereview": CLEAN_REREVIEW}},
             {"forge_events": ("move-head",)},
             {"forge_events": ("steal-lock",)},
+            {"forge_events": ("steal-lock-at-head",)},
+            {"forge_events": ("drop-lock-at-head",)},
+            {"merge_behind": 1, "replies": {"resync": SYNCED}},
+            {"merge_policy": 1},
             {"required_checks": ()},
             {"lock_release_fails": True})
 
