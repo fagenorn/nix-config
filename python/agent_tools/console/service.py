@@ -10666,9 +10666,12 @@ class ConsoleService(ActionPermit):
             self._apply(self.log.append([activation_run.finished_row(root, outcome)]))
 
     def _wait_for_activation(self, run: activation_run.Run) -> None:
-        self._activate_thread = threading.Thread(
-            target=self._await_activation, args=(run,), name=ACTIVATE_THREAD, daemon=True)
-        self._activate_thread.start()
+        with self._ingest:
+            if self._stop.is_set():
+                return  # close() has read the worker handle; the stopped wait would only return
+            self._activate_thread = threading.Thread(
+                target=self._await_activation, args=(run,), name=ACTIVATE_THREAD, daemon=True)
+            self._activate_thread.start()
 
     def _await_activation(self, run: activation_run.Run) -> None:
         try:
@@ -11291,20 +11294,12 @@ class ConsoleService(ActionPermit):
         with self._published:
             self._closing = True
             self._published.notify_all()
+        with self._ingest:  # a worker registers under this lock and not once the stop is set
+            activate = self._activate_thread
         for thread in (
-            self._watcher,
-            self._session_poller,
-            self._tracker_thread,
-            self._activation_thread,
-            self._activate_thread,
-            self._adoption_thread,
-            self._movement_thread,
-            self._retention_thread,
-            self._digest_thread,
-            self._spend_thread,
-            self._serve_thread,
-            self._probe_thread,
-            self._signin_thread,
+            self._watcher, self._session_poller, self._tracker_thread, self._activation_thread, activate,
+            self._adoption_thread, self._movement_thread, self._retention_thread, self._digest_thread,
+            self._spend_thread, self._serve_thread, self._probe_thread, self._signin_thread,
             self._trust_start_thread,
         ):
             if thread is not None:
@@ -11329,12 +11324,17 @@ class ConsoleService(ActionPermit):
         for worker in workers:
             worker.join()
         # Both shutdown requests go out before either wait, so close pays one poll, not one per server.
-        stoppers = [
-            threading.Thread(target=server.shutdown, daemon=True)
-            for server, thread in ((self._server, self._thread), (self._guest_server, self._guest_thread))
-            if thread is not None]
-        for stopper in stoppers:
-            stopper.start()
+        stoppers = []
+        for server, thread in ((self._server, self._thread), (self._guest_server, self._guest_thread)):
+            if thread is None:
+                continue
+            stopper = threading.Thread(target=server.shutdown, daemon=True)
+            try:
+                stopper.start()
+            except RuntimeError:
+                server.shutdown()  # no thread to start: stop it here, then finish the cleanup below
+            else:
+                stoppers.append(stopper)
         for stopper in stoppers:
             stopper.join()
         self._server.server_close()
