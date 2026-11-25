@@ -54,9 +54,10 @@ stdout, the watch log, and empties it before the state is written. The first sig
 only sets `floor_kills_seen` to its `kills`. When the record's `omlx_pid` is launchctl's pid, its
 `omlx_kernel_priority` is an integer and `omlx_priority_resets` is 0, the kernel priority replaces
 launchctl's in `omlx_jetsam_priority`. `omlx_priority_error` or `omlx_priority_resets` above 0
-queues `jetsam_priority_unset` once per episode. When the record's `floor_unmets` is above `floor_unmet_seen`, one `floor_unmet` alert is queued for its
-`floor_unmet` entry (the first sight only sets `floor_unmet_seen`). A missing or non-JSON record queues
-nothing.
+queues `jetsam_priority_unset` once per episode. Each `floor_unmet_recent` entry whose `seq` is above
+`floor_unmet_seen` queues one `floor_unmet` alert, in `seq` order (the first sight only sets
+`floor_unmet_seen` to `floor_unmets`, which a record without it counts as 0, so the first episode after
+a healthy sample alerts). A missing or non-JSON record queues nothing.
 
 Exit 0: recorded, every alert delivered or recorded. 3: recorded, at least one alert not sent
 (stderr `host alert not sent: <reason>`). 1: `vm_stat`, `sysctl`, `launchctl` or `ps` failed
@@ -284,16 +285,21 @@ def _fold_floor(state: dict, found: dict | None, reading: dict) -> None:
                 })
         state["floor_kills_seen"] = kills
     unmets = _int(found.get("floor_unmets"))
+    if unmets is None and kills is not None:
+        unmets = 0
     if unmets is not None:
-        unmet = found.get("floor_unmet")
-        if state["floor_unmet_seen"] is not None and unmets > state["floor_unmet_seen"] and isinstance(unmet, dict):
-            state["pending"].append({
-                "kind": "floor_unmet", "logged": False,
-                "text": f"{host}: the memory floor has no workload it may end that would bring available "
-                        f"memory over the {found['floor_bytes'] // GIB} GiB floor. Available "
-                        f"{unmet['available_bytes'] / GIB:.1f} GiB, largest candidate "
-                        f"{unmet['largest_bytes'] / GIB:.1f} GiB. {SEE}",
-            })
+        seen = state["floor_unmet_seen"]
+        if seen is not None:
+            entries = [entry for entry in found.get("floor_unmet_recent") or []
+                       if isinstance(entry, dict) and _int(entry.get("seq")) is not None and entry["seq"] > seen]
+            for entry in sorted(entries, key=lambda entry: entry["seq"]):
+                state["pending"].append({
+                    "kind": "floor_unmet", "logged": False,
+                    "text": f"{host}: the memory floor has no workload it may end that would bring available "
+                            f"memory over the {found['floor_bytes'] // GIB} GiB floor. Available "
+                            f"{entry['available_bytes'] / GIB:.1f} GiB, largest candidate "
+                            f"{entry['largest_bytes'] / GIB:.1f} GiB. {SEE}",
+                })
         state["floor_unmet_seen"] = unmets
     error, resets = found.get("omlx_priority_error"), _int(found.get("omlx_priority_resets")) or 0
     if error or resets > 0:

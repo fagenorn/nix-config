@@ -478,22 +478,55 @@ class FloorRecordTest(WatchCase):
         self.assertEqual((self.bot.requests, done.stdout), ([], ""))
         self.assertEqual(self.read_state()["floor_kills_seen"], 5)
 
+    def unmet(self, seq, available=13, largest=2):
+        return {"seq": seq, "at": "2026-11-24T12:33:05+00:00", "available_bytes": available * GIB,
+                "largest_bytes": largest * GIB}
+
+    def unmet_text(self, available=13, largest=2):
+        return ("eleven-m5: the memory floor has no workload it may end that would bring available memory over "
+                f"the 16 GiB floor. Available {available:.1f} GiB, largest candidate {largest:.1f} GiB. " + SEE)
+
     def test_one_alert_per_floor_unmet_episode_in_the_floor_record(self):
         self.put_state(state(floor_unmet_seen=1))
-        unmet = {"seq": 2, "at": "2026-11-24T12:33:05+00:00", "available_bytes": 13 * GIB, "largest_bytes": 2 * GIB}
-        self.floor(floor_unmets=2, floor_unmet=unmet)
+        self.floor(floor_unmets=2, floor_unmet_recent=[self.unmet(1), self.unmet(2)])
         self.health()
         self.settings_on()
         first = self.sample()
         second = self.sample()
         self.assertEqual((first.returncode, second.returncode), (0, 0), first.stderr + second.stderr)
-        self.assertEqual(self.texts(), [
-            "eleven-m5: the memory floor has no workload it may end that would bring available memory over "
-            "the 16 GiB floor. Available 13.0 GiB, largest candidate 2.0 GiB. " + SEE])
+        self.assertEqual(self.texts(), [self.unmet_text()])
         self.assertEqual(self.read_state()["floor_unmet_seen"], 2)
 
+    def test_every_episode_between_two_samples_alerts_in_order(self):
+        self.put_state(state(floor_unmet_seen=1))
+        self.floor(floor_unmets=3, floor_unmet_recent=[self.unmet(3, largest=3), self.unmet(2, largest=1)])
+        self.health()
+        self.settings_on()
+        done = self.sample()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(self.texts(), [self.unmet_text(largest=1), self.unmet_text(largest=3)])
+        self.assertEqual(self.read_state()["floor_unmet_seen"], 3)
+
+    def test_the_first_episode_after_a_healthy_sample_alerts(self):
+        self.floor(floor_unmets=0, floor_unmet_recent=[])
+        self.health()
+        self.settings_on()
+        healthy = self.sample()
+        self.assertEqual((healthy.returncode, self.bot.requests, self.read_state()["floor_unmet_seen"]), (0, [], 0))
+        self.floor(floor_unmets=1, floor_unmet_recent=[self.unmet(1)])
+        breach = self.sample()
+        self.assertEqual(breach.returncode, 0, breach.stderr)
+        self.assertEqual(self.texts(), [self.unmet_text()])
+
+    def test_a_record_without_the_episode_count_is_zero_episodes(self):
+        self.floor()
+        self.health()
+        self.settings_on()
+        self.sample()
+        self.assertEqual(self.read_state()["floor_unmet_seen"], 0)
+
     def test_the_first_sample_only_records_the_floor_unmet_count(self):
-        self.floor(floor_unmets=3, floor_unmet={"seq": 3, "available_bytes": 13 * GIB, "largest_bytes": 0})
+        self.floor(floor_unmets=3, floor_unmet_recent=[self.unmet(3, largest=0)])
         self.health()
         self.settings_on()
         done = self.sample()
