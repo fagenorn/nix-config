@@ -4,9 +4,11 @@ Run: just agent-workflow-tests
 """
 
 import fcntl
+import itertools
 import json
 import os
 import re
+import select
 import signal
 import stat
 import subprocess
@@ -19,9 +21,10 @@ from pathlib import Path
 from unittest import mock
 
 from agent_tools.canonical import parse_rfc3339_utc
-from agent_tools.delivery import verify_history, verify_slot
+from agent_tools.delivery import verify_history, verify_queue, verify_slot
 from agent_tools.delivery.verify_slot import (
-    NO_SLOT_EXIT, NO_SLOT_LINE, REPORT_SKIPPED_LINE, SLOT_DIR_ENV, WAITING_LINE)
+    NO_SLOT_EXIT, NO_SLOT_LINE, PLACE_LINE, QUEUED_LINE, REPORT_SKIPPED_LINE, SAME_REPOSITORY_LINE,
+    SLOT_DIR_ENV, WAITING_LINE)
 from .process_liveness import process_alive
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -44,6 +47,57 @@ while not os.path.exists(release) and time.monotonic() < deadline:
 put("end", repr(time.time()))
 sys.exit(code)
 """
+
+
+PLACE_PATTERN = re.compile(
+    r"^verify-slot: this run is number (\d+) in line for a verify slot; now running: (.*)$")
+COMMAND = " ".join(f"{sys.executable} -c {CHILD}".split()[:3])
+
+
+def places(err):
+    """The places of the place lines in `err`, in order."""
+    return [int(match.group(1)) for line in err.splitlines() if (match := PLACE_PATTERN.match(line))]
+
+
+def read_line(proc, end):
+    """One stderr line of a running process, read byte by byte so nothing is buffered ahead."""
+    descriptor = proc.stderr.fileno()
+    data = b""
+    while True:
+        remaining = end - time.monotonic()
+        if remaining <= 0 or not select.select([descriptor], [], [], remaining)[0]:
+            raise AssertionError(f"no stderr line before the deadline; read so far: {data!r}")
+        byte = os.read(descriptor, 1)
+        if not byte:
+            raise AssertionError(f"stderr closed; read so far: {data!r}")
+        if byte == b"\n":
+            return data.decode()
+        data += byte
+
+
+def read_until(proc, predicate, deadline=20):
+    """Read stderr lines of a running process until one satisfies `predicate`; every line read."""
+    end = time.monotonic() + deadline
+    lines = []
+    while True:
+        lines.append(read_line(proc, end))
+        if predicate(lines[-1]):
+            return lines
+
+
+def is_place(place=None, holders=None):
+    def predicate(line):
+        match = PLACE_PATTERN.match(line)
+        return bool(match) and (place is None or int(match.group(1)) == place) and (
+            holders is None or holders(match.group(2)))
+    return predicate
+
+
+def read_place(proc, deadline=20):
+    """The place, the holders text and the lines read up to the first place line."""
+    lines = read_until(proc, is_place(), deadline)
+    match = PLACE_PATTERN.match(lines[-1])
+    return int(match.group(1)), match.group(2), lines
 
 
 def wait_for(path, timeout=20):
@@ -288,6 +342,7 @@ class VerifySlotTest(SlotHarness, unittest.TestCase):
             code, err = self.finish(proc)
             self.assertEqual(code, 0)
             self.assertIsNone(WAITED_PATTERN.search(err))
+            self.assertNotIn("verify-slot:", err)
 
     def test_a_slot_held_by_a_killed_process_is_given_back(self):
         first = self.start("a")
@@ -327,6 +382,7 @@ class VerifySlotTest(SlotHarness, unittest.TestCase):
         self.assertEqual(third.stderr.readline().rstrip("\n"), waiting)
         live = self.start("d", "--live")
         self.assertEqual(live.stderr.readline().rstrip("\n"), waiting)
+        self.assertEqual(places(live.stderr.readline()), [1])
         self.release("a")
         codes = [self.finish(proc) for proc in (first, second, third, live)]
         self.assertEqual([code for code, _ in codes], [0, 0, 0, 0])
@@ -570,6 +626,232 @@ class VerifySlotTest(SlotHarness, unittest.TestCase):
                 else:
                     target.unlink()
 
+
+    def test_waiters_take_a_freed_slot_in_arrival_order(self):
+        first = self.start("a")
+        self.assertTrue(wait_for(self.mark("a", "start")))
+        for name in ("b", "c", "d"):
+            self.release(name)
+        procs, first_places = [first], []
+        for name in ("b", "c", "d"):
+            proc = self.start(name)
+            procs.append(proc)
+            first_places.append(read_place(proc)[0])
+        self.assertEqual(first_places, [1, 2, 3])
+        self.release("a")
+        self.assertEqual([self.finish(proc)[0] for proc in procs], [0, 0, 0, 0])
+        for earlier, later in (("a", "b"), ("b", "c"), ("c", "d")):
+            self.assertGreaterEqual(float(self.mark(later, "start").read_text()),
+                                    float(self.mark(earlier, "end").read_text()))
+
+    def test_three_runs_of_one_repository_and_one_of_another_share_two_slots_in_order(self):
+        self.declare(verify_slots=2)
+        one = self.repository("alpha-one", "git@github.com:example/alpha.git")
+        two = self.repository("alpha-two", "https://github.com/Example/alpha")
+        three = self.repository("alpha-three", "ssh://git@github.com/example/alpha.git")
+        beta = self.repository("beta", "git@github.com:example/beta.git")
+        first = self.start("a1", cwd=one)
+        self.assertTrue(wait_for(self.mark("a1", "start")))
+        second = self.start("a2", cwd=two)
+        place, holders, lines = read_place(second)
+        self.assertEqual((lines[0], place, holders), (SAME_REPOSITORY_LINE, 1, f"example/alpha ({COMMAND})"))
+        self.assertEqual(lines[-1], PLACE_LINE.format(place=1, holders=f"example/alpha ({COMMAND})"))
+        third = self.start("a3", cwd=three)
+        self.assertEqual(read_place(third)[0], 2)
+        other = self.start("b", cwd=beta)
+        self.assertTrue(wait_for(self.mark("b", "start")))
+        self.assertFalse(self.mark("a1", "end").exists())
+        both = {f"example/alpha ({COMMAND})", f"example/beta ({COMMAND})"}
+        read_until(second, is_place(1, lambda text: set(text.split(", ")) == both))
+        self.release("b")
+        self.release("a1")
+        self.assertTrue(wait_for(self.mark("a2", "start")))
+        self.assertGreaterEqual(float(self.mark("a2", "start").read_text()),
+                                float(self.mark("a1", "end").read_text()))
+        read_until(third, is_place(1))
+        self.release("a2")
+        self.assertTrue(wait_for(self.mark("a3", "start")))
+        self.assertGreaterEqual(float(self.mark("a3", "start").read_text()),
+                                float(self.mark("a2", "end").read_text()))
+        self.release("a3")
+        for proc in (first, second, third):
+            self.assertEqual(self.finish(proc)[0], 0)
+        other_code, other_err = self.finish(other)
+        self.assertEqual(other_code, 0)
+        self.assertNotIn("verify-slot:", other_err)
+
+    def test_a_live_run_held_back_by_its_repository_leaves_a_free_slot_to_another_repository(self):
+        self.declare(verify_slots=2)
+        one = self.repository("alpha-one", "git@github.com:example/alpha.git")
+        two = self.repository("alpha-two", "https://github.com/Example/alpha")
+        beta = self.repository("beta", "git@github.com:example/beta.git")
+        first = self.start("a", cwd=one)
+        self.assertTrue(wait_for(self.mark("a", "start")))
+        live = self.start("b", "--live", cwd=two)
+        place, _, lines = read_place(live)
+        self.assertEqual((lines[0], place), (SAME_REPOSITORY_LINE, 1))
+        other = self.start("c", cwd=beta)
+        self.assertTrue(wait_for(self.mark("c", "start")))
+        self.assertFalse(self.mark("a", "end").exists())
+        self.release("c")
+        self.release("a")
+        other_code, other_err = self.finish(other)
+        self.assertEqual(other_code, 0)
+        self.assertNotIn(verify_slot.DEFERRING_LINE, other_err)
+        self.assertTrue(wait_for(self.mark("b", "start")))
+        self.assertGreaterEqual(float(self.mark("b", "start").read_text()),
+                                float(self.mark("a", "end").read_text()))
+        self.release("b")
+        self.assertEqual((self.finish(first)[0], self.finish(live)[0]), (0, 0))
+
+    def test_two_free_slots_go_to_the_waiters_one_at_a_time_in_order(self):
+        self.declare(verify_slots=2)
+        holders = [self.start("x"), self.start("y")]
+        self.assertTrue(wait_for(self.mark("x", "start")))
+        self.assertTrue(wait_for(self.mark("y", "start")))
+        second = self.start("b")
+        self.assertEqual(read_place(second)[0], 1)
+        os.kill(second.pid, signal.SIGSTOP)
+        third = self.start("c")
+        self.assertEqual(read_place(third)[0], 2)
+        self.release("x")
+        self.release("y")
+        self.assertTrue(wait_for(self.mark("x", "end")))
+        self.assertTrue(wait_for(self.mark("y", "end")))
+        time.sleep(2)
+        self.assertFalse(self.mark("c", "start").exists())
+        os.kill(second.pid, signal.SIGCONT)
+        self.assertTrue(wait_for(self.mark("b", "start")))
+        self.assertTrue(wait_for(self.mark("c", "start")))
+        self.release("b")
+        self.release("c")
+        for proc in (*holders, second, third):
+            self.assertEqual(self.finish(proc)[0], 0)
+
+    def test_a_holder_without_a_description_still_holds_back_its_repository(self):
+        self.declare(verify_slots=2)
+        one = self.repository("alpha-one", "git@github.com:example/alpha.git")
+        beta = self.repository("beta", "git@github.com:example/beta.git")
+        self.slots.mkdir()
+        old = [verify_queue.open_shared(self.slots / "slot-0.lock"),
+               verify_queue.open_shared(self.slots / verify_slot.group_lock_name("example/alpha"))]
+        try:
+            for descriptor in old:
+                fcntl.flock(descriptor, fcntl.LOCK_EX)
+            first = self.start("a", cwd=one)
+            _, holders, lines = read_place(first)
+            self.assertEqual((lines[0], holders), (SAME_REPOSITORY_LINE, "a verify run"))
+            other = self.start("b", cwd=beta)
+            self.assertTrue(wait_for(self.mark("b", "start")))
+            self.assertFalse(self.mark("a", "start").exists())
+        finally:
+            for descriptor in old:
+                os.close(descriptor)
+        self.assertTrue(wait_for(self.mark("a", "start")))
+        self.release("a")
+        self.release("b")
+        self.assertEqual((self.finish(first)[0], self.finish(other)[0]), (0, 0))
+
+    def test_a_repository_limit_of_two_lets_two_runs_of_one_repository_hold_their_locks(self):
+        self.slots.mkdir()
+        group = "example/alpha"
+        taken = []
+        self.addCleanup(lambda: [os.close(fd) for fd in taken])
+
+        def take(limit):
+            held, reason = verify_slot._try_slots(self.slots, 3, True, group, limit)
+            if held is not None:
+                taken.extend(fd for fd in held if fd is not None)
+            return held, reason
+
+        first, second = take(2), take(2)
+        for held, reason in (first, second):
+            self.assertIsNone(reason)
+            self.assertIsNotNone(held[0])
+            self.assertIsNotNone(held[1])
+        self.assertEqual(take(2), (None, "same_repository"))
+        while taken:
+            os.close(taken.pop())
+        held, reason = take(1)
+        self.assertIsNone(reason)
+        self.assertIsNotNone(held[1])
+        self.assertEqual(take(1), (None, "same_repository"))
+
+    def test_a_waiter_prints_its_place_again_when_it_changes(self):
+        first = self.start("a")
+        self.assertTrue(wait_for(self.mark("a", "start")))
+        second = self.start("b")
+        self.assertEqual(read_place(second)[0], 1)
+        third = self.start("c")
+        _, _, seen = read_place(third)
+        self.release("a")
+        self.assertTrue(wait_for(self.mark("b", "start")))
+        seen += read_until(third, is_place(1))
+        self.release("b")
+        self.assertTrue(wait_for(self.mark("c", "start")))
+        self.release("c")
+        for proc in (first, second):
+            self.assertEqual(self.finish(proc)[0], 0)
+        code, err = self.finish(third)
+        self.assertEqual(code, 0)
+        lines = [line for line in seen + err.splitlines() if PLACE_PATTERN.match(line)]
+        numbers = places("\n".join(lines))
+        collapsed = [number for index, number in enumerate(numbers)
+                     if index == 0 or number != numbers[index - 1]]
+        self.assertEqual(collapsed, [2, 1])
+        for earlier, later in itertools.pairwise(lines):
+            self.assertNotEqual(earlier, later)
+        self.assertGreaterEqual(float(self.mark("c", "start").read_text()),
+                                float(self.mark("b", "end").read_text()))
+
+    def test_a_killed_waiter_frees_its_place_at_once(self):
+        first = self.start("a")
+        self.assertTrue(wait_for(self.mark("a", "start")))
+        second = self.start("b")
+        self.assertEqual(read_place(second)[0], 1)
+        third = self.start("c")
+        self.assertEqual(read_place(third)[0], 2)
+        os.kill(second.pid, signal.SIGKILL)
+        second.wait()
+        second.stderr.close()
+        read_until(third, is_place(1), deadline=5)
+        self.release("a")
+        self.assertTrue(wait_for(self.mark("c", "start")))
+        self.release("c")
+        self.assertEqual((self.finish(first)[0], self.finish(third)[0]), (0, 0))
+        self.assertGreaterEqual(float(self.mark("c", "start").read_text()),
+                                float(self.mark("a", "end").read_text()))
+
+    def test_a_run_that_waits_its_turn_behind_an_earlier_waiter_says_so(self):
+        first = self.start("a")
+        self.assertTrue(wait_for(self.mark("a", "start")))
+        second = self.start("b")
+        read_place(second)
+        os.kill(second.pid, signal.SIGSTOP)
+        third = self.start("c")
+        self.assertEqual(read_place(third)[0], 2)
+        self.release("a")
+        self.assertTrue(wait_for(self.mark("a", "end")))
+        read_until(third, lambda line: line == QUEUED_LINE, deadline=5)
+        self.assertFalse(self.mark("c", "start").exists())
+        os.kill(second.pid, signal.SIGCONT)
+        self.release("b")
+        self.release("c")
+        for proc in (first, second, third):
+            self.assertEqual(self.finish(proc)[0], 0)
+        self.assertGreaterEqual(float(self.mark("c", "start").read_text()),
+                                float(self.mark("b", "end").read_text()))
+
+    def test_a_slot_file_that_is_a_symlink_is_never_written_through(self):
+        victim = Path(self.home) / "victim-original"
+        victim.write_text("victim-original")
+        self.slots.mkdir()
+        (self.slots / "slot-0.lock").symlink_to(victim)
+        self.release("a")
+        code, _ = self.finish(self.start("a", "--wait-limit", "1"))
+        self.assertEqual(code, NO_SLOT_EXIT)
+        self.assertFalse(self.mark("a", "start").exists())
+        self.assertEqual(victim.read_text(), "victim-original")
 
     def test_a_run_that_waited_then_held_a_slot_records_both_durations(self):
         alpha = self.repository("alpha", "git@github.com:example/alpha.git")
