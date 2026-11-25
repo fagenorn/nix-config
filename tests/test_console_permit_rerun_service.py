@@ -7,7 +7,7 @@ import unittest
 from agent_tools.console import permit
 
 from . import console_test_support as support
-from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures
 from .test_console_manager_service import SLUG, PermitCase
 from .test_console_permit import HEAD, SHA
 
