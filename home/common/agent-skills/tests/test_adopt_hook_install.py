@@ -18,6 +18,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from agent_tools.delivery import comment_lint, never_rise
 from agent_tools.project_contract import adopt_apply, adopt_inspection, hook_install
 
 from .test_adopt_apply import ApplyTestCase, apply_repo
@@ -349,6 +350,13 @@ class HookInstallRuleTest(unittest.TestCase):
                     started = time.monotonic()
                     self.assertEqual(hook_install.declares_hooks(text), expected)
                     self.assertLess(time.monotonic() - started, 1.0, (size, body))
+
+    def test_hook_install_source_carries_no_over_long_comment_block(self):
+        path = Path(hook_install.__file__)
+        snapshot = never_rise.Snapshot("a" * 40, {}, contents={path.name: path.read_bytes()})
+        enforcer = comment_lint.enforcers(None)[1]
+        self.assertEqual(enforcer.rule, comment_lint.LENGTH_RULE)
+        self.assertEqual(enforcer.find(snapshot), [])
 
 
 if __name__ == "__main__":

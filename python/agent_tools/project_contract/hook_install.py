@@ -212,14 +212,8 @@ def _switch(path: tuple[str, ...]) -> bool:
 def declares_hooks(text: str) -> bool:
     """Whether a `devenv.nix` text explicitly switches a devenv git hook on.
 
-    One forward pass over the text, with comments and string literals skipped. It reads only
-    `git-hooks.hooks.<name>.enable = true;` and the same for `pre-commit`, written as a dotted
-    path or as nested sets (`git-hooks = { hooks.<name> = { enable = true; }; }`), in the module's
-    top set (the text's first set, or the one after a `:`, `in`, `rec` or `with ...;`), also
-    under `config`. Everything else reads as no hooks: an `inherit`, a `let`-bound or
-    `mkIf`-wrapped hook set, a package list, a path with a `${...}` segment, a hook only
-    switched off. A project this misses keeps today's behaviour, no commit environment proposed,
-    while a false positive would promise an install that does not exist.
+    Reads only `git-hooks.hooks.<name>.enable = true;` (or `pre-commit`), dotted or nested, in the top
+    set (also under `config`); all else reads as no hooks, as a false positive promises a missing install.
     """
     if not any(root in text for root in ROOTS):
         return False
