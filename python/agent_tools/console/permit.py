@@ -66,8 +66,10 @@ never None. The checks run in this order, the first that applies deciding:
 - Rerun: another `--repo` is `OTHER_REPO`; other words are `NOT_GRANTED`. Then `read_run`. Two kinds of
   run are the project's release runs, read through `read_release_pr` (the one open pull request from
   the contract's integration branch into its default branch, for a run of the slug's own repository on
-  the integration branch): a `push` run whose head is that pull request's head (the release
-  candidate), and a `pull_request` run of the integration branch that lists that pull request. Any
+  the integration branch, of a project whose contract declares a release): a `push` run whose head is
+  that pull request's head (the release candidate), and a `pull_request` run of the integration branch
+  that lists that pull request. A project whose integration and default branch are one has no pull
+  request: its candidate is the branch's tip, and only the `push` run at that tip is a release run. Any
   other `push` run, and any event but `pull_request`, is `DEPLOY_RERUN`. For a `pull_request` run:
   another repository is `NOT_OWN_RUN`; a branch that is no own issue's is `NOT_OWN_RUN` unless it is
   the release pull request's run (`SHARED_ISSUE` for an issue in `others`, whatever it is); for an own
@@ -77,13 +79,14 @@ never None. The checks run in this order, the first that applies deciding:
   rerun would run (every job of the run's latest attempt, all pages, whose conclusion is not
   `success`: a failed rerun also runs the skipped dependents of a failed job, but not a skipped job
   whose own `if` can never hold for the run's own event, `read_run`'s business) or one not named by
-  `read_required(slug, base)` is `NOT_CHECK_RUN`. A head that `grant.reruns` already counts `MAX_RERUNS` (two) allowed reruns for is
+  `read_required(slug, base)` is `NOT_CHECK_RUN`; a release run with a job that has no conclusion yet is
+  `RUN_PENDING`, judged before that. A head that `grant.reruns` already counts `MAX_RERUNS` (two) allowed reruns for is
   `RERUN_LIMIT`, which names the two reruns, each by run and failing members (ADR-console-106); the
   release pull request run and the candidate's push run share that one head's cap, and the refusal
-  names the release pull request. Else `ALLOW` with target `{"run", "pr", "head", "count", "members"}`:
+  names the release pull request (the branch, for a tip candidate). Else `ALLOW` with target `{"run", "pr", "head", "count", "members"}`:
   `count` is the number of allowed reruns of that head with this one, and `members` the suite members
   the run's failed jobs reported as failed. A release run's target also carries `release`, `pull_request`
-  or `push`.
+  or `push`, and a tip candidate's has no `pr`.
 - Release: the plain run is `ALLOW` with its target; any other leading run is `RELEASE_SPELLING`.
 - A reader raising `ForgeUnreadable` is `DENY` with `FORGE_UNREADABLE`.
 
@@ -152,8 +155,9 @@ conclusion is `failure`, in order and once each (at most `MAX_MEMBERS`); a log t
 none, because the members are evidence and gate nothing. `read_required` names only the checks a GitHub Actions job can satisfy: a
 check bound to another app is left out, even when the legacy `contexts` list repeats its name. `merge_binding(root)` is the project contract's `bindings.vcs.merge` `strategy` and
 `delete_branch`, `(None, False)` on any failure. `release_branches(root)` is the contract's
-`bindings.vcs.integration_branch` and `default_branch`, `(None, None)` for no root, on any failure or for a
-member that is no non-empty string.
+`bindings.vcs.integration_branch` and `default_branch`, `(None, None)` for no root, on any failure, for a
+member that is no non-empty string or when `capabilities.release.state` is neither `available` nor `blocked`.
+`read_run`'s `pending` is whether any job of the run has no conclusion yet.
 """
 import base64
 import hashlib
@@ -187,9 +191,12 @@ SHARED_ISSUE = "Issue {issue} belongs to another open sprint."
 DEPLOY_RERUN = "Run {run} is a {event} run, not a pull request check run, so it is not rerun."
 NOT_OWN_RUN = "Run {run} is not a check run of this sprint's own pull request."
 STALE_RUN = "Run {run} is not at the head of its pull request."
+RUN_PENDING = "Run {run} has a job that has not finished, so it has no failed job to rerun yet."
 NOT_CHECK_RUN = "Run {run} would rerun a job that is not a required check."
 RERUN_LIMIT = ("Pull request {pr} has had its head {head} rerun twice, by {reruns}, and a third rerun is "
                "refused: the head must be reported or fixed.")
+RERUN_LIMIT_TIP = ("The head {head} of {branch} has had its release rerun twice, by {reruns}, and a third "
+                   "rerun is refused: the head must be reported or fixed.")
 STALE_HEAD = "Pull request {pr} is not at the head the merge names."
 FORGE_UNREADABLE = "The forge could not be read to judge this command: {reason}"
 NOT_ACTIVE = "This sprint is not active."
@@ -503,7 +510,7 @@ def read_run(slug: str, run_id: int) -> Mapping:
                  conclusion == "skipped" and never_on(conditions.get(name, ""), event))]
     failed = [job_id for _, conclusion, job_id in jobs
               if conclusion == "failure" and isinstance(job_id, int) and not isinstance(job_id, bool)]
-    return {"event": event,
+    return {"event": event, "pending": any(conclusion is None for _, conclusion, _ in jobs),
             "branch": _member(run, "head_branch", str, what),
             "repo": _member(_member(run, "head_repository", dict, what), "full_name", str, what),
             "head": _member(run, "head_sha", str, what), "prs": numbers, "rerun": rerun,
@@ -512,10 +519,18 @@ def read_run(slug: str, run_id: int) -> Mapping:
 
 def read_release_pr(slug: str, root: str | None, branch: str) -> Mapping | None:
     """The one open pull request from the integration branch into the default branch, None when `branch`
-    is not the integration branch or the project has no such pair."""
+    is not the integration branch, the project declares no release or no such pair. A project whose two
+    branches are one has no pull request: its candidate is the branch's tip, `{"pr": None, ...}`."""
     integration, default = release_branches(root)
-    if integration is None or default is None or integration == default or branch != integration:
+    if integration is None or default is None or branch != integration:
         return None
+    if integration == default:
+        what = f"the tip of {integration} in {slug}"
+        tip = _member(_get(f"repos/{slug}/git/ref/heads/{integration}", what), "object", dict, what)
+        sha = _member(tip, "sha", str, what)
+        if not _SHA.fullmatch(sha):
+            raise ForgeUnreadable(f"{what} has no readable sha")
+        return {"pr": None, "branch": integration, "head": sha, "base": default}
     what = f"the release pull request of {slug}"
     owner = slug.split("/")[0]
     listing = _get(f"repos/{slug}/pulls?state=open&base={default}&head={owner}:{integration}&per_page=2", what)
@@ -535,7 +550,7 @@ def read_release_pr(slug: str, root: str | None, branch: str) -> Mapping | None:
         base = _member(_member(entry, "base", dict, what), "ref", str, what)
     except ForgeUnreadable:
         raise ForgeUnreadable(f"{what} has no readable head") from None
-    if not _SHA.fullmatch(sha) or ref != integration or repo != slug or base != default:
+    if not _SHA.fullmatch(sha) or number < 1 or ref != integration or repo != slug or base != default:
         raise ForgeUnreadable(f"{what} has no readable head")
     return {"pr": number, "branch": integration, "head": sha, "base": default}
 
@@ -604,15 +619,19 @@ def reads(root: str | None, slug_of, branch_pattern_of, merge_binding_of
 
 
 def release_branches(root: str | None) -> tuple[str | None, str | None]:
-    """The project contract's `(integration_branch, default_branch)`, `(None, None)` on any failure."""
+    """The project contract's `(integration_branch, default_branch)`, `(None, None)` on any failure and for a
+    project whose `capabilities.release.state` is not `available` or `blocked` (no release declared)."""
     if root is None:
         return None, None
     try:
-        vcs = resolve_project.resolve(root)["bindings"]["vcs"]
+        snapshot = resolve_project.resolve(root)
+        vcs = snapshot["bindings"]["vcs"]
         integration, default = vcs["integration_branch"], vcs["default_branch"]
+        declared = snapshot["capabilities"]["release"]["state"] in ("available", "blocked")
     except Exception:
         return None, None
-    if isinstance(integration, str) and integration and isinstance(default, str) and default:
+    if (declared and isinstance(integration, str) and integration and isinstance(default, str)
+            and default):
         return integration, default
     return None, None
 
@@ -905,14 +924,19 @@ def _judge_rerun(parts: list[str], grant: Grant, forge: Forge) -> Verdict:
         if pull["head"] != run["head"]:
             return _deny(RERUN, STALE_RUN.format(run=run_id))
         base = pull["base"]
+    if release is not None and run.get("pending"):
+        return _deny(RERUN, RUN_PENDING.format(run=run_id))
     if not run["rerun"] or not set(run["rerun"]) <= forge.read_required(slug, base):
         return _deny(RERUN, NOT_CHECK_RUN.format(run=run_id))
     done = grant.reruns.get(run["head"], ())
     if len(done) >= MAX_RERUNS:
-        return _deny(RERUN, RERUN_LIMIT.format(
-            pr=number, head=run["head"], reruns=" and ".join(rerun.describe() for rerun in done)))
+        reruns = " and ".join(rerun.describe() for rerun in done)
+        return _deny(RERUN, RERUN_LIMIT.format(pr=number, head=run["head"], reruns=reruns) if number is not None
+                     else RERUN_LIMIT_TIP.format(branch=run["branch"], head=run["head"], reruns=reruns))
     target = {"run": run_id, "pr": number, "head": run["head"], "count": len(done) + 1,
               "members": list(run.get("members", []))}
+    if number is None:
+        del target["pr"]
     return _allow(RERUN, target if release is None else {**target, "release": release})
 
 

@@ -119,7 +119,7 @@ most an hour old needs.
 The `target` of an allowed `rerun` is `{"run", "pr", "head", "count", "members"}`: `count` is the allowed reruns
 of that head with this one and `members` the failing suite members (ADR-console-106). An allowed rerun of
 the project's release pull request run or of its release candidate's push run also carries `release`, that run's
-event (`pull_request` or `push`).
+event (`pull_request` or `push`); a rerun at the tip of a single-branch project carries no `pr`.
 
 Two rows record a release card outside any sprint (#1401): `RELEASE_CARD_POSTED` (`release_card.posted`)
 carries payload `commit`, `version`, with a null project column, and `RELEASE_CARD_ANSWERED`

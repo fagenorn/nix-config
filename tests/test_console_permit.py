@@ -335,6 +335,32 @@ class JudgeTest(unittest.TestCase):
                 if note == "read main":
                     self.assertIn(("release", "o/r", self.root, "main"), self.fake.calls)
 
+    def test_a_release_run_with_a_job_that_has_not_finished_is_refused_and_takes_no_slot(self):
+        for event in ("pull_request", "push"):
+            with self.subTest(event):
+                self.release_run(event, pending=True)
+                self.assertRefused(self.rerun, permit.RUN_PENDING.format(run=55))
+                self.assertNotIn(("required", "o/r", "main"), self.fake.calls)
+                self.release_run(event, pending=False)
+                self.assertEqual(ALLOW, self.judge(self.rerun).decision)
+
+    def test_a_rerun_of_the_push_run_at_the_tip_of_a_single_branch_project_is_allowed_within_the_cap(self):
+        self.release_run("push", branch="main", prs=[])
+        self.fake.release_pr = {"pr": None, "branch": "main", "head": SHA, "base": "main"}
+        verdict = self.judge(self.rerun)
+        self.assertEqual((ALLOW, "rerun"), (verdict.decision, verdict.verb))
+        self.assertEqual({"run": 55, "head": SHA, "count": 1, "members": [], "release": "push"},
+                         dict(verdict.target))
+        two = dataclasses.replace(self.grant, reruns={SHA: (permit.Rerun(53), permit.Rerun(54))})
+        self.assertRefused(self.rerun, permit.RERUN_LIMIT_TIP.format(
+            branch="main", head=SHA, reruns="run 53 (failing: no members reported) and "
+                                            "run 54 (failing: no members reported)"), two)
+        self.fake.release_pr = {**self.fake.release_pr, "head": "d" * 40}
+        self.assertRefused(self.rerun, permit.DEPLOY_RERUN.format(run=55, event="push"))
+        self.release_run("pull_request", branch="main", prs=[9])
+        self.fake.release_pr = {"pr": None, "branch": "main", "head": SHA, "base": "main"}
+        self.assertRefused(self.rerun, permit.NOT_OWN_RUN.format(run=55))
+
     def test_a_sprint_rerun_keeps_its_target_and_reads_no_release_pull_request(self):
         self.fake.release_pr = {"pr": 9, "branch": "issue-12-x", "head": SHA, "base": "main"}
         verdict = self.judge(self.rerun)
@@ -920,7 +946,8 @@ jobs:
         self.assertEqual((DENY, permit.NOT_CHECK_RUN.format(run=55)), (refused.decision, refused.reason))
 
     def test_the_release_pull_request_is_the_one_open_pull_request_from_integration_into_default(self):
-        contract = {"bindings": {"vcs": {"integration_branch": "develop", "default_branch": "main"}}}
+        contract = {"bindings": {"vcs": {"integration_branch": "develop", "default_branch": "main"}},
+                    "capabilities": {"release": {"state": "available"}}}
         path = "repos/o/r/pulls?state=open&base=main&head=o:develop&per_page=2"
         entry = {"number": 9, "head": {"ref": "develop", "sha": HEAD, "repo": {"full_name": "o/r"}},
                  "base": {"ref": "main"}}
@@ -931,6 +958,7 @@ jobs:
             with self.subTest("none"), self.reply({path: []}):
                 self.assertIsNone(permit.read_release_pr("o/r", "/r", "develop"))
             broken = ([entry, entry], {}, [{**entry, "number": "9"}],
+                      [{**entry, "number": 0}], [{**entry, "number": -3}],
                       [{**entry, "head": {**entry["head"], "sha": "x"}}],
                       [{**entry, "head": {**entry["head"], "ref": "feature"}}],
                       [{**entry, "head": {**entry["head"], "repo": {"full_name": "fork/r"}}}],
@@ -948,17 +976,43 @@ jobs:
             with self.subTest("another branch"), mock.patch.object(permit.forge_api, "api_get") as get:
                 self.assertIsNone(permit.read_release_pr("o/r", "/r", "feature"))
                 get.assert_not_called()
-        same = {"bindings": {"vcs": {"integration_branch": "main", "default_branch": "main"}}}
-        with self.subTest("equal branches"), mock.patch.object(
-                permit.resolve_project, "resolve", return_value=same), \
-                mock.patch.object(permit.forge_api, "api_get") as get:
-            self.assertIsNone(permit.read_release_pr("o/r", "/r", "main"))
-            get.assert_not_called()
+        same = {"bindings": {"vcs": {"integration_branch": "main", "default_branch": "main"}},
+                "capabilities": {"release": {"state": "available"}}}
+        tip = "repos/o/r/git/ref/heads/main"
+        with mock.patch.object(permit.resolve_project, "resolve", return_value=same):
+            with self.subTest("equal branches: the candidate is the tip"), self.reply({tip: {"object": {"sha": HEAD}}}):
+                self.assertEqual({"pr": None, "branch": "main", "head": HEAD, "base": "main"},
+                                 permit.read_release_pr("o/r", "/r", "main"))
+            for reply in ({}, {"object": {}}, {"object": {"sha": "x"}}, {"object": {"sha": 7}}, []):
+                with self.subTest(reply), self.reply({tip: reply}):
+                    with self.assertRaises(ForgeUnreadable):
+                        permit.read_release_pr("o/r", "/r", "main")
+            with self.subTest("equal branches: another branch"), mock.patch.object(
+                    permit.forge_api, "api_get") as get:
+                self.assertIsNone(permit.read_release_pr("o/r", "/r", "feature"))
+                get.assert_not_called()
+        for state in ("unsupported", None, "bogus"):
+            for branches in (("develop", "main"), ("main", "main")):
+                undeclared = {"bindings": {"vcs": {"integration_branch": branches[0], "default_branch": "main"}},
+                              "capabilities": {"release": {"state": state}}}
+                with self.subTest(("no release declared", state, branches)), mock.patch.object(
+                        permit.resolve_project, "resolve", return_value=undeclared), \
+                        mock.patch.object(permit.forge_api, "api_get") as get:
+                    self.assertIsNone(permit.read_release_pr("o/r", "/r", branches[0]))
+                    get.assert_not_called()
         with self.subTest("no contract"), mock.patch.object(
                 permit.resolve_project, "resolve", side_effect=ValueError("x")), \
                 mock.patch.object(permit.forge_api, "api_get") as get:
             self.assertIsNone(permit.read_release_pr("o/r", "/r", "develop"))
             get.assert_not_called()
+
+    def test_a_run_is_pending_while_a_job_has_no_conclusion(self):
+        for jobs, pending in (([{"id": 900, "name": "Agent Workflow Tests", "conclusion": "failure"}], False),
+                              ([{"id": 900, "name": "Agent Workflow Tests", "conclusion": "failure"},
+                                {"id": 901, "name": "Nix Eval", "conclusion": None}], True),
+                              ([{"id": 900, "name": "Nix Eval", "conclusion": None}], True)):
+            with self.subTest(jobs), self.forge_reads(self.run_payloads(jobs)):
+                self.assertIs(pending, permit.read_run("o/r", 55)["pending"])
 
     def test_a_skipped_job_whose_condition_never_holds_for_the_runs_own_event_is_not_rerun(self):
         for skipped, expected in (("Suite Timing", ["Agent Workflow Tests"]),
@@ -987,7 +1041,7 @@ jobs:
                              permit.read_pr("o/r", 7))
             self.assertEqual({"event": "pull_request", "branch": "issue-12-x", "repo": "o/r",
                               "head": HEAD, "prs": [7], "rerun": ["Other", "deploy", "Late"],
-                              "members": []},
+                              "members": [], "pending": True},
                              permit.read_run("o/r", 55))
             self.assertEqual(frozenset({"Nix Eval", "Budget", "Any", "Legacy"}),
                              permit.read_required("o/r", "main"))
@@ -1016,8 +1070,16 @@ class MergeBindingTest(unittest.TestCase):
             self.assertEqual((None, False), permit.merge_binding("/r"))
 
     def test_the_release_branches_are_the_contracts_or_none(self):
-        def contract(integration):
-            return {"bindings": {"vcs": {"integration_branch": integration, "default_branch": "main"}}}
+        def contract(integration, state="available"):
+            return {"bindings": {"vcs": {"integration_branch": integration, "default_branch": "main"}},
+                    "capabilities": {"release": {"state": state}}}
+        for state, expected in (("blocked", ("develop", "main")), ("unsupported", (None, None)),
+                                (None, (None, None))):
+            with mock.patch.object(permit.resolve_project, "resolve", return_value=contract("develop", state)):
+                self.assertEqual(expected, permit.release_branches("/r"), state)
+        bare = {"bindings": {"vcs": {"integration_branch": "develop", "default_branch": "main"}}}
+        with mock.patch.object(permit.resolve_project, "resolve", return_value=bare):
+            self.assertEqual((None, None), permit.release_branches("/r"))
         with mock.patch.object(permit.resolve_project, "resolve", return_value=contract("develop")) as resolve:
             self.assertEqual(("develop", "main"), permit.release_branches("/r"))
             resolve.reset_mock()
