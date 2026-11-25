@@ -17,7 +17,7 @@ TIER = "fast"
 
 class HeldSprintViewTest(unittest.TestCase):
     """A sprint holding unlanded work with nothing moving and nothing asked for an hour is one
-    derived card (#1784); its ball, state and now-sentence stay as they were."""
+    derived card; its ball, state and now-sentence stay as they were."""
 
     held = with_manager(reported(started(A), R, issues=((12, "landing"), (13, "landed")),
                                  status="the last slice waits on the lead's go"))

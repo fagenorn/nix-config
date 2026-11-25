@@ -16,4 +16,4 @@ Render by `stage`:
 
 Run a non-null `relaunch` with `scriptPath` and `child_script` newly placed, adding user answers as `decisions` `{"<issue>": answer}`, unless its args, `reasons` aside, equal the previous run's: then stop, reporting open rows as awaiting the owner. Only a run cut off before returning resumes with `resumeFromRunId` and its original `args`.
 
-A stop that holds work for the owner or the lead raises a card for whoever it waits on at once, on the caller's ask channel, naming what is held, why and the one action that releases it; a status line or a report is not an ask.
+A stop that holds work for someone raises a card for them at once; a status line is not an ask.

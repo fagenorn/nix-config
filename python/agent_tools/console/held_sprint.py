@@ -1,4 +1,4 @@
-"""The held-sprint card of the desk (#1784): a derived inbox item with no event row.
+"""The held-sprint card of the desk: a derived inbox item with no event row.
 
 A running sprint is held when its ball is `nobody`, no stop is requested, its manager's profile is
 not out of usage and not recorded waiting on quota (a sprint waiting on a reset waits on no

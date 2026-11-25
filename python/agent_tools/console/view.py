@@ -223,7 +223,7 @@ one entry of `inbox.open`, after the stalls and the failed starts and before the
 `PROGRESS_SENTENCE` says what the page offers. The sentence precedence is all out, stale, briefs,
 stalls, progress, sign-in, questions, then the existing ones.
 
-A held sprint (#1784) is one entry of `inbox.open`, derived as the `held_sprint` module docstring says.
+A held sprint is one entry of `inbox.open`, derived as the `held_sprint` module docstring says.
 
 A profile whose sign-in asks (#1010: `capacity["profiles"][i]["signin"]["ask"]` is true, a read of
 `entry.get("signin")` so a capacity without that member shows none) and that no colleague added (#1361,
