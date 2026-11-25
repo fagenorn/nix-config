@@ -96,7 +96,10 @@ one pair of short rows per registration is all that is kept.
 Three more rows record an idle manager's nudges (#929): `MANAGER_NUDGED` (`manager.nudged`, one
 nudge to a manager session that sat idle), `MANAGER_NO_PROGRESS` (`manager.no_progress`, the
 console's give-up that opens an item for the owner) and `SPRINT_CONTINUED` (`sprint.continued`, the
-owner's answer to it). Like the other manager rows they are not in `KEPT_KINDS`.
+owner's answer to it). Like the other manager rows they are not in `KEPT_KINDS`. `MANAGER_HELD`
+(`manager.held`, `{sprint_id, goal, reason}`) says why a takeover was dropped when only the fresh
+registry listing, and no session the console holds, carries the manager's name; the digest and the
+sprint fold ignore it.
 
 Two kinds are kept in part (#1193): `ACTIVATION_STARTED` (`activation.started`) and
 `ACTIVATION_FINISHED` (`activation.finished`) are not in `KEPT_KINDS`, but the retention pass leaves
@@ -243,6 +246,7 @@ MANAGER_WOKEN = "manager.woken"
 MANAGER_STALLED = "manager.stalled"
 MANAGER_NUDGED = "manager.nudged"
 MANAGER_NO_PROGRESS = "manager.no_progress"
+MANAGER_HELD = "manager.held"
 SPRINT_CONTINUED = "sprint.continued"
 SPRINT_REPORTED = "sprint.reported"
 SPRINT_MESSAGED = "sprint.messaged"

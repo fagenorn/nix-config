@@ -2938,7 +2938,7 @@ class SprintViewTest(unittest.TestCase):
             "ball": "manager", "ball_text": "manager working", "now_text": "drafting the brief",
             "now_until": None,
             "stated_at": T0, "started_by": None, "age_text": "goal set 3 min ago", "manager_text": "no manager has picked this up",
-            "manager_state": "none", "manager_until": None, "retry": True,
+            "manager_state": "none", "manager_until": None, "retry": True, "move": False,
             "progress": None, "progress_text": None, "status": None, "status_at": None,
             "next": None, "milestone": None, "tracker_url": None, "issues": [], "waiting": 0,
             "checks": [], "waits": [], "live_faults": [],

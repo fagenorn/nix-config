@@ -224,6 +224,7 @@ agent-workflow-tests *args:
     tests/test_suite_test_failures.py \
     tests/test_protection_tree.py \
     tests/test_console_approved_action_check.py \
+    tests/test_console_takeover_merge_check.py \
     tests/test_issue_branch.py \
     tests/test_program_copies.py \
     tests/test_keepalive_end_turn_cap.py \
@@ -373,6 +374,7 @@ agent-workflow-tests *args:
     tests/test_pr_green.py \
     tests/test_console_page.py \
     tests/test_console_page_action.py \
+    tests/test_console_page_move.py \
     tests/test_console_long_permission_card.py \
     tests/test_console_controls.py \
     tests/test_console_goal_box.py \
@@ -387,6 +389,7 @@ agent-workflow-tests *args:
     tests/test_console_writes.py \
     tests/test_console_answer.py \
     tests/test_console_sprints.py \
+    tests/test_console_manager_identity.py \
     tests/test_console_action_card.py \
     tests/test_console_revive.py \
     tests/test_console_idle.py \
@@ -402,6 +405,7 @@ agent-workflow-tests *args:
     tests/test_console_sprint_action.py \
     tests/test_console_pictures.py \
     tests/test_console_manager.py \
+    tests/test_console_launch_short_id.py \
     tests/test_console_permission.py \
     tests/test_console_manager_service.py \
     tests/test_console_permit.py \
@@ -412,6 +416,7 @@ agent-workflow-tests *args:
     tests/test_console_stops.py \
     tests/test_console_revive_service.py \
     tests/test_console_idle_service.py \
+    tests/test_console_quota_move.py \
     tests/test_console_nudge.py \
     tests/test_console_deliveries.py \
     tests/test_console_engine_runs.py \

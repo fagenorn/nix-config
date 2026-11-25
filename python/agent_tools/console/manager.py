@@ -110,15 +110,25 @@ not decide is held by its hook for `PROMPT_HOLD_SECONDS`, polled every `PROMPT_P
 whole.
 
 Runner. On macOS `run_launch` runs it with `run_in_own_group`, so a launch that times out ends the
-wrapper and the client it waits for together, not the wrapper alone. `run_launch` starts the command with no terminal (`stdin` and `stdout` to the null
-device, stderr to a temporary file, never a pipe, so a detached child that keeps the descriptors
-open cannot hold the launch), in its own session, in the project root, within `LAUNCH_TIMEOUT`
-seconds. The client's environment (`client_environment(profile, environ)`, shared with the nudge
+wrapper and the client it waits for together, not the wrapper alone. `run_launch` starts the command with no terminal (`stdin` to the null
+device, stdout and stderr each to a temporary file, never a pipe, so a detached child that keeps the
+descriptors open cannot hold the launch), in its own session, in the project root, within
+`LAUNCH_TIMEOUT` seconds. On success it returns `printed_short_id` of the launch's stdout, the
+background session's short id (the first `SHORT_ID_LENGTH` characters of its session id, in
+`SHORT_ID`'s form) from the one line `backgrounded · <id>` or `backgrounded · <id> · <name>` that
+`claude --bg` prints, read after removing terminal escape sequences and surrounding whitespace; None
+when no such line appears or two different ids do. The client's environment (`client_environment(profile, environ)`, shared with the nudge
 commands) is the console's without `CLAUDE_CONFIG_DIR`, `CONSOLE_SPRINT_ID`
 and `CONSOLE_SPRINT_SECRET`, plus `CLAUDE_ACCOUNT=<profile>` and `$HOME/.agents/bin` first on
 `PATH` (where `sprint` and `resolve-project` are installed). `LAUNCH_TOOLS` names every program the
 Linux launch runs by name on `PATH`; `launch_tools(platform)` is that tuple on Linux, without
 `systemd-run` on macOS and empty elsewhere.
+
+Identity. The launch record names the manager: the sprint's latest valid `manager.started` row's
+`short_id` (`short_id_mark` writes it from what the launch printed, `launched_short_id` reads it back,
+`SprintState.manager_short_id` holds it). When it is set, `is_manager_session` admits only a session
+whose id starts with it, whatever a listing names; when it is not, it admits the listed
+`manager_session`. The permit's refusal and the delivered fold both decide through it.
 
 Failures are `LaunchFailed` with a one-line reason, the secret shown as `<secret>`: the host is
 neither Linux nor macOS (`UNAVAILABLE_TEXT`), `the project root <root> is not a directory`, `cannot write the
@@ -172,6 +182,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import shlex
 import signal
 import subprocess
@@ -183,12 +194,16 @@ from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from agent_tools.claims import owner_actions
 from agent_tools.console import permission as permissions
 from agent_tools.console import permit
 from agent_tools.console.event_log import Event
 from agent_tools.console.sessions import DEFAULT_PROFILE, GONE, HOOK, PROFILE, SEEN
+
+if TYPE_CHECKING:
+    from agent_tools.console.sprints import SprintState
 
 CHOICE_FILE = "chosen-profile"
 
@@ -209,6 +224,9 @@ REMOVE_TIMEOUT = 60
 FINISH_LIMIT = 590
 FINISH_SECONDS = 50
 SHORT_ID_LENGTH = 8
+SHORT_ID = re.compile(r"[0-9a-f]{8}")
+_BACKGROUNDED = re.compile(r"backgrounded · ([0-9a-f]{8})(?: · .*)?")
+_ESCAPE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 SETTINGS_SUFFIX = ".settings.json"
 PERMIT_COMMAND = "sprint permit"
 LANDED_COMMAND = "sprint permit --landed"
@@ -533,7 +551,7 @@ def stopper_for(platform: str) -> Callable[[str, str], None] | None:
     return stop_session if supported(platform) else None
 
 
-def launcher_for(platform: str) -> Callable[[Launch], None] | None:
+def launcher_for(platform: str) -> Callable[[Launch], str | None] | None:
     return run_launch if supported(platform) else None
 
 
@@ -695,8 +713,33 @@ def reap_stops(wait: float = 2.0) -> None:
         time.sleep(0.02)
 
 
+def printed_short_id(text: str) -> str | None:
+    """The short id of the one `backgrounded · <id>` line `claude --bg` printed, else None."""
+    found = {match[1] for line in text.splitlines()
+             if (match := _BACKGROUNDED.fullmatch(_ESCAPE.sub("", line).strip()))}
+    return found.pop() if len(found) == 1 else None
+
+
+def launched_short_id(value: object) -> str | None:
+    """`value` when it is a short id in `SHORT_ID`'s form, else None."""
+    return value if isinstance(value, str) and SHORT_ID.fullmatch(value) else None
+
+
+def short_id_mark(printed: object) -> dict[str, str]:
+    """The `short_id` member of a `manager.started` row for what the launch printed, else none."""
+    launched = launched_short_id(printed)
+    return {} if launched is None else {"short_id": launched}
+
+
+def is_manager_session(sprint: "SprintState", session_id: str) -> bool:
+    """Whether `session_id` is the sprint's manager: the launched short id decides, else the listing."""
+    if sprint.manager_short_id is not None:
+        return isinstance(session_id, str) and short_id(session_id) == sprint.manager_short_id
+    return sprint.manager_session is not None and session_id == sprint.manager_session
+
+
 def run_launch(launch: Launch, *, platform: str = sys.platform, run=None,
-               environ: Mapping[str, str] = os.environ) -> None:
+               environ: Mapping[str, str] = os.environ) -> str | None:
     secret = launch.env[SECRET_ENV]
 
     def fail(reason: str) -> LaunchFailed:
@@ -716,20 +759,23 @@ def run_launch(launch: Launch, *, platform: str = sys.platform, run=None,
         # On macOS the account wrapper waits for its client; a timeout must end that whole group,
         # or the client could still start a manager after the failure is recorded.
         run = run_in_own_group if platform == "darwin" else subprocess.run
-    with tempfile.TemporaryFile() as err:
+    with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
         try:
             result = run(argv, cwd=launch.cwd, env=env, stdin=subprocess.DEVNULL,
-                         stdout=subprocess.DEVNULL, stderr=err, start_new_session=True,
+                         stdout=out, stderr=err, start_new_session=True,
                          timeout=LAUNCH_TIMEOUT, check=False)
         except FileNotFoundError as error:
             raise fail(f"{argv[0]} is not installed") from error
         except subprocess.TimeoutExpired as error:
             raise fail(f"the launch did not return within {LAUNCH_TIMEOUT} s") from error
+        out.seek(0)
+        stdout = out.read().decode("utf-8", errors="replace")
         err.seek(0)
         stderr = err.read().decode("utf-8", errors="replace")
     if result.returncode != 0:
         lines = [line.strip() for line in stderr.splitlines() if line.strip()]
         raise fail(lines[-1] if lines else f"the launch exited {result.returncode}")
+    return printed_short_id(stdout)
 
 
 def short_id(session_id: str) -> str:

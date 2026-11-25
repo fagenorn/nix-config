@@ -22,7 +22,8 @@ Three more kinds record the sprint's manager (#888), none of them kept (`event_l
 its bring-back (#893; `event_log.MANAGER_WOKEN`, `MANAGER_STALLED`, not kept either):
 
     manager.started  {"sprint_id", "profile": <str>, "session_name": <str>, "seen_after"?: <int>,
-                      "takeover"?: true, "moved"?: true, "permission"?: {"mode", "reason"}}
+                      "takeover"?: true, "moved"?: true, "permission"?: {"mode", "reason"},
+                      "short_id"?: <8 hex>}
     manager.failed   {"sprint_id", "reason": <str>, "takeover"?: true}
     manager.waiting  {"sprint_id", "until": <str> | null, "takeover"?: true}
     manager.woken    {"sprint_id", "session_id": <str>, "ok": <bool>, "reason"?: <str>,
@@ -145,7 +146,8 @@ failed or waiting row says `"takeover": true` (exactly true; any other value or 
 says so. A valid `manager.started` that is a takeover appends `Revival(at, TAKEOVER, True)` and a
 valid `manager.failed` that is a takeover appends `Revival(at, TAKEOVER, False, reason)`; a
 `manager.waiting` appends none (a wait started nothing). Every valid `manager.started` also clears
-`stalled` and `stalled_at`. A `manager.stalled` with a string `reason` sets `stalled` to it and
+`stalled` and `stalled_at` and sets `manager_short_id` to `manager.launched_short_id` of its `short_id`,
+which no other row changes (`manager.is_manager_session` reads it). A `manager.stalled` with a string `reason` sets `stalled` to it and
 `stalled_at` to the row's `at`; while the sprint is stalled a valid `manager.failed` replaces
 `stalled` with its reason and keeps `stalled_at`. `revive` (which this module does not import)
 reads these fields to decide the next step.
@@ -248,7 +250,7 @@ and the run moved after it (`moved_ms` greater than the report's `at` in millise
 run's stages for an issue in the report's `issues` becomes that issue's `Observed(issue, moved_ms,
 session_id, run_id, stage)` when `(moved_ms, session_id, run_id)` is at least the kept one's.
 `delivery.gone` changes nothing: the last stage and movement outlive the run. A run of the sprint's
-manager session also adds each of its issues to `SprintState.delivered` (#1377), which only grows, so
+manager session (`manager.is_manager_session`) also adds each of its issues to `SprintState.delivered`, which only grows, so
 the record that the manager delivered an issue outlives the run and its cleanup.
 `SprintState.observed` is ordered by issue. Folding `a + b` equals folding `b` onto the fold of `a`.
 
@@ -743,7 +745,7 @@ from agent_tools.console.event_log import (BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_
                                            SPRINT_MESSAGED, SPRINT_NUDGED, SPRINT_READ,
                                            SPRINT_REPORTED, SPRINT_STOP_REQUESTED, Event)
 from agent_tools.console.manager import FAILED_TEXT, MISSING_TEXT, UNAVAILABLE_TEXT, plain_reason
-from agent_tools.console.manager import WAITING_TEXT as MANAGER_WAITING_TEXT
+from agent_tools.console.manager import WAITING_TEXT as MANAGER_WAITING_TEXT, is_manager_session, launched_short_id
 from agent_tools.console.permission import Permission, from_payload
 from agent_tools.console.pictures import PICTURE_ID
 from agent_tools.console.sessions import SEEN
@@ -1264,6 +1266,7 @@ class SprintState:
     started_by: str | None = None
     delivered: frozenset[int] = frozenset()
     faults: tuple[LiveFault, ...] = ()
+    manager_short_id: str | None = None
 
     @property
     def state(self) -> str:
@@ -2930,25 +2933,22 @@ def _folded_manager(state: SprintState, event: Event) -> SprintState:
             seen_after = payload.get("seen_after")
             current = (_id(seen_after) and state.manager_seen_seq is not None
                        and state.manager_seen_seq > seen_after)
-            return replace(state, manager=Manager(STARTED, event.at, profile, name,
-                                                  takeover=takeover),
+            return replace(state, manager=Manager(STARTED, event.at, profile, name, takeover=takeover),
                            manager_session=state.manager_session if current else None,
+                           manager_short_id=launched_short_id(payload.get("short_id")),
                            revivals=revivals, stalled=None, stalled_at=None,
                            permission=from_payload(payload.get("permission")))
     elif event.kind == MANAGER_FAILED:
         reason = payload.get("reason")
         if isinstance(reason, str):
-            revivals = state.revivals + (
-                (Revival(event.at, TAKEOVER, False, reason),) if takeover else ())
-            return replace(state, manager=Manager(FAILED, event.at, reason=reason,
-                                                  takeover=takeover),
+            revivals = state.revivals + ((Revival(event.at, TAKEOVER, False, reason),) if takeover else ())
+            return replace(state, manager=Manager(FAILED, event.at, reason=reason, takeover=takeover),
                            revivals=revivals,
                            stalled=reason if state.stalled is not None else None)
     elif event.kind == MANAGER_WAITING and "until" in payload:
         until = payload["until"]
         if until is None or isinstance(until, str):
-            return replace(state, manager=Manager(WAITING, event.at, until=until,
-                                                  takeover=takeover))
+            return replace(state, manager=Manager(WAITING, event.at, until=until, takeover=takeover))
     elif event.kind == MANAGER_WOKEN:
         ok, back = payload.get("ok"), payload.get("back", False)
         if isinstance(payload.get("session_id"), str) and isinstance(ok, bool) \
@@ -3050,7 +3050,7 @@ def _observed(folded: dict[str, SprintState], event: Event) -> None:
             report = state.report
             named = ({issue for issue, _ in report.issues} | set(report.inbox)
                      if report is not None else set())
-            own = state.manager_session is not None and run.session_id == state.manager_session
+            own = is_manager_session(state, run.session_id)
             if not own and not any(stage.issue in named for stage in run.issues):
                 continue
             moved = max(state.moved_ms or 0, run.moved_ms)
