@@ -91,7 +91,9 @@ with the repository resolved again when the directory moved.
 
 Hooks win over older readings: when the session's newest hook has a time
 (`hook_ms`), a registry reading whose `updatedAt` is missing or not newer
-changes nothing.
+changes nothing, except that it still writes back a missing or changed name
+with the folded directory, repository and state, never for an ended session:
+a gone row followed by a hook folds the session with no name.
 
 Main checkout (`main_checkout`): the directory holding the first `.git` found
 walking up from the realpath of `cwd`; for a linked worktree, the main
@@ -515,6 +517,12 @@ def poll_changes(
             seen(obs, reading or IDLE, repo_of(obs.cwd), None)
         elif newest(known) is not None and (obs.updated_ms is None
                                             or obs.updated_ms <= newest(known)):
+            if known.state != ENDED and isinstance(obs.name, str) and obs.name != known.name:
+                payload = {"session_id": obs.session_id, "cwd": known.cwd, "repo": known.repo,
+                           "state": known.state, "name": obs.name}
+                if isinstance(obs.profile, str):
+                    payload["profile"] = obs.profile
+                changes.append((SEEN, project_of(known.repo), payload))
             continue
         elif known.state == ENDED:
             seen(obs, reading or IDLE, repo_of(obs.cwd), known)

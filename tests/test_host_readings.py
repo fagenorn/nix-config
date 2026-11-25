@@ -771,6 +771,7 @@ class RunReadsEachHostOnce(unittest.TestCase):
         "tests.test_github_runners": ("runners", "runner-triples"),
         "tests.test_platform_package_hosts": ("agent-platform",),
         "tests.test_omlx_declaration": ("omlx",),
+        "tests.test_omlx_activation_hold": ("omlx",),
         "tests.test_memory_budget": ("memory-budget",),
     }
     # test ids the sweep does not run because they evaluate for real

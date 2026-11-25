@@ -10,12 +10,14 @@ import threading
 from datetime import datetime, timezone
 from unittest import mock
 
-from agent_tools.console import (capacity, manager, nudge, permission, revive, service, sessions,
-                                 sprints)
+from agent_tools.console import (capacity, deliveries, manager, nudge, permission, permit, revive,
+                                 service, sessions, sprints)
+from agent_tools.console.deliveries import DELIVERY_SEEN
 
 from . import console_test_support as support
 from .test_console_messages import GOAL_TEXT, PARTS
 from .test_console_notices import CLAIM, HEADS_UP
+from .test_console_permit import SHA, FakeForge
 from .test_console_reports import REPORT
 from .test_console_writes import Case
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
@@ -557,12 +559,36 @@ class ReviveServiceTest(ReviveCase):
                     self.listed_now(sid)
                 self.queued.run_next()
                 self.assertEqual(len(self.launches.calls), 1)
-                self.assertEqual(self.manager_rows(), before)
+                self.assertEqual([r for r in self.manager_rows() if r[2] != "manager.held"], before)
+                self.assertEqual(len(self.rows("manager.held")), 1 if name == "listing" else 0)
                 self.assertEqual(svc._launching, {})
                 if name == "listing":
                     self.reserve(svc, 239)
                     self.assertEqual(self.queued.jobs, [])
                     self.assertEqual(len(self.launches.calls), 1)
+
+    def test_a_takeover_dropped_because_only_the_listing_shows_the_manager_writes_why_once(self):
+        svc = self.begin(nudger=None)
+        sid = self.on_track(svc, seen=False)
+        self.reserve(svc, 120)
+        self.listed_now(sid)
+        self.queued.run_next()
+        held = {"sprint_id": sid, "goal": GOAL, "reason": capacity.UNMATCHED_REASON}
+        line = f"console: takeover_held {sid} {capacity.UNMATCHED_REASON}"
+        self.assertEqual(self.rows("manager.held"), [held])
+        self.assertEqual(self.stderr.getvalue().count(line), 1)
+        self.assertEqual(len(self.launches.calls), 1)
+        self.assertEqual(svc._launching, {})
+        self.reserve(svc, 240)
+        self.drain()
+        self.assertEqual(self.rows("manager.held"), [held])
+        self.assertEqual(self.stderr.getvalue().count(line), 1)
+        self.seen(svc, sid)
+        self.reserve(svc, 241)
+        self.gone(svc)
+        self.reserve(svc, 361)
+        self.drain()
+        self.assertEqual(self.rows("manager.held"), [held, held])
 
     def waiting_takeover(self):
         """A sprint with an unknown session whose takeover waited for quota until `until`."""
@@ -730,3 +756,95 @@ class ReviveViewServiceTest(ReviveCase):
         said = [m["sentence"] for m in live["digest"]["recent"]]
         self.assertEqual(said.count("The manager of " + PARTS["title"] + " was restarted"), 1)
         self.assertEqual([i for i in live["inbox"]["open"] if i["reason"] == "manager"], [])
+
+
+FIRST = "aaaaaaaa-1111-4111-8111-111111111111"
+TAKEOVER = "bbbbbbbb-2222-4222-8222-222222222222"
+NAMESAKE = "cccccccc-3333-4333-8333-333333333333"
+SLUG = "o/r"
+MERGE = f"gh pr merge 7 --repo {SLUG} --merge --match-head-commit {SHA} --delete-branch"
+
+
+class TakeoverPermitTest(ReviveCase):
+    def setUp(self):
+        super().setUp()
+        self.launches = support.Launches(ids=["aaaaaaaa", "bbbbbbbb"])
+        self.fake = FakeForge()
+
+    def deliver(self, svc, session_id, run="r-1"):
+        state = deliveries.DeliveryState(session_id, run, 1, (deliveries.IssueStage(12, "building"),))
+        self.append(svc, [(DELIVERY_SEEN, "owner/p01", deliveries.seen_payload(state))])
+
+    def judge(self, svc, sid, session_id, call):
+        return svc.permit(sid, self.secret(sid), session_id, call, MERGE)
+
+    def started_on_work(self):
+        dirs = self.profiles(work=0, home=0)
+        svc = self.begin(
+            profile_dirs=list(dirs.values()), permit_forge=self.fake.forge(),
+            slug_of=lambda root: SLUG, merge_binding_of=lambda root: ("merge", True),
+            branch_pattern_of=lambda root: "issue-<num>-<slug>")
+        self.readings(svc, lambda p: self.weekly(0.1 if p == "work" else 0.9))
+        sid = self.on_track(svc, seen=False)
+        svc.send_report(sid, self.secret(sid),
+                        {**REPORT, "issues": [{"issue": 12, "stage": "building"}], "inbox": []})
+        return svc, sid
+
+    def take_over(self, svc):
+        self.readings(svc, lambda p: self.weekly(0.9 if p == "work" else 0.1))
+        self.tick(svc, 120)
+        first, takeover = self.rows("manager.started")
+        self.assertEqual((first["profile"], takeover["profile"]), ("work", "home"))
+        self.assertIs(takeover["takeover"], True)
+
+    def test_a_takeover_the_console_launched_on_another_account_merges_its_own_pull_request(self):
+        svc, sid = self.started_on_work()
+        self.take_over(svc)
+        self.deliver(svc, TAKEOVER)
+        verdict = self.judge(svc, sid, TAKEOVER, "t-1")
+        self.assertEqual((verdict.decision, verdict.verb, dict(verdict.target)),
+                         ("allow", "merge", {"pr": 7, "head": SHA}))
+        self.assertEqual(self.rows("manager.started")[-1]["short_id"], "bbbbbbbb")
+        judged = self.rows("permit.judged")[-1]
+        self.assertEqual((judged["session_id"], judged["decision"]), (TAKEOVER, "allow"))
+
+    def test_a_session_carrying_the_sprints_name_is_refused_beside_the_launched_takeover(self):
+        svc, sid = self.started_on_work()
+        self.take_over(svc)
+        self.deliver(svc, TAKEOVER)
+        self.append(svc, [("session.seen", "owner/p01", {
+            "session_id": NAMESAKE, "cwd": "/srv/p01", "repo": "/srv/p01", "state": "idle",
+            "name": self.name(sid)})])
+        self.deliver(svc, NAMESAKE, run="r-2")
+        refused = self.judge(svc, sid, NAMESAKE, "t-2")
+        self.assertEqual((refused.decision, refused.reason), ("deny", permit.NOT_MANAGER))
+        self.assertEqual(self.judge(svc, sid, TAKEOVER, "t-3").decision, "allow")
+
+    def test_the_previous_managers_session_is_refused_after_the_takeover(self):
+        svc, sid = self.started_on_work()
+        self.deliver(svc, FIRST)
+        before = self.judge(svc, sid, FIRST, "t-0")
+        self.assertEqual(before.decision, "allow")
+        self.take_over(svc)
+        after = self.judge(svc, sid, FIRST, "t-1")
+        self.assertEqual((after.decision, after.reason), ("deny", permit.NOT_MANAGER))
+
+    def test_the_started_row_records_only_a_valid_printed_short_id(self):
+        for ids in (["aaaaaaaa"], [None], ["AAAAAAAA"], ["aaaaaaa"], ["aaaaaaaa-1111"]):
+            with self.subTest(ids=ids):
+                self.setUp()
+                self.launches = support.Launches(ids=ids)
+                svc = self.begin()
+                svc.state_goal("owner/p01", GOAL)
+                self.queued.run_next()
+                row = self.rows("manager.started")[-1]
+                if ids == ["aaaaaaaa"]:
+                    self.assertEqual(row["short_id"], "aaaaaaaa")
+                else:
+                    self.assertNotIn("short_id", row)
+        self.setUp()
+        self.launches = support.Launches(fail=["boom"], ids=["aaaaaaaa"])
+        svc = self.begin()
+        svc.state_goal("owner/p01", GOAL)
+        self.queued.run_next()
+        self.assertNotIn("short_id", self.rows("manager.failed")[-1])

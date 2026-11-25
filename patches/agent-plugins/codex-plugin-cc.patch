@@ -4455,7 +4455,7 @@ index ab68038..4217fce 100644
 +});
 diff --git a/tests/reviewer-detach.test.mjs b/tests/reviewer-detach.test.mjs
 new file mode 100644
-index 0000000..ee0c4bc
+index 0000000..3715cb0
 --- /dev/null
 +++ b/tests/reviewer-detach.test.mjs
 @@ -0,0 +1,311 @@
@@ -4737,20 +4737,20 @@ index 0000000..ee0c4bc
 +    const ran = run(
 +      "node",
 +      [SCRIPT, "task", "--fresh", "--reviewer", operation,
-+        "--model", "gpt-6.2-astra", "--effort", "xhigh", "--cwd", repo, "--json"],
++        "--model", "gpt-6.2-astra", "--effort", "high", "--cwd", repo, "--json"],
 +      { cwd: repo, env, input: packet }
 +    );
 +    assert.equal(ran.status, 0, ran.stderr);
 +    const payload = JSON.parse(ran.stdout);
 +    assert.equal(payload.status, 0);
 +    assert.deepEqual(payload.touchedFiles, []);
-+    assert.deepEqual(payload.runtime, { model: "gpt-6.2-astra", reasoningEffort: "xhigh" });
++    assert.deepEqual(payload.runtime, { model: "gpt-6.2-astra", reasoningEffort: "high" });
 +    assert.equal(payload.rawOutput, "Handled the requested task.\nTask prompt accepted.");
 +
 +    const fakeState = JSON.parse(fs.readFileSync(path.join(binDir, "fake-codex-state.json"), "utf8"));
 +    // The packet, not an argument tail, is the thread's first prompt.
 +    assert.equal(fakeState.lastTurnStart.prompt, packet.trim());
-+    assert.deepEqual(fakeState.lastThreadStart.config, { model_reasoning_effort: "xhigh" });
++    assert.deepEqual(fakeState.lastThreadStart.config, { model_reasoning_effort: "high" });
 +  });
 +}
 +

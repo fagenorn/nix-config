@@ -773,11 +773,64 @@ class CarryVerbTest(unittest.TestCase):
         self.assertEqual((code, out["verdict"], out["error"]), (1, "error", "payload_invalid"))
         self.assertEqual(self.posted(), [])
 
-    def test_a_pictured_approval_with_no_picture_given_carries_nothing(self):
-        self.seed([self.pics(5)])
-        self.assert_look_needed("pictures-missing", "pictures")
-        for argv in self.world.argvs("gh"):
-            self.assertFalse(any("pulls/" in part or "compare/" in part for part in argv), argv)
+    OWN = "docs/own.md"
+    TOOL = "tests/console_screenshots.py"
+
+    def manager_run(self, ah_files, h_files=(OWN,)):
+        """A manager-pictured approval and a carry with no picture given; the pull request's own file is OWN."""
+        self.seed([self.pics(5)], self.files((self.OWN,), h_files, ah_files=ah_files))
+        return self.look_files_run()
+
+    def test_a_manager_pictured_approval_carries_when_the_merges_change_no_own_file_and_no_picture_input(self):
+        code, out = self.manager_run(("docs/x.md",))
+        self.assertEqual((code, out["verdict"], out["from"], out["reason"], out["rule"], out["pictures"],
+                          out["comment_id"]), (0, "carried", A, None, "own-files", None, 100))
+        line = self.world.stored()[-1]["body"]
+        self.assertEqual(line.splitlines()[0],
+                         f"<!-- agent:look-carry v1 issue=7 pr=12 from={A} to={HEAD} rule=own-files -->")
+        self.assertIn("picture", line.splitlines()[1])
+        self.assertEqual(len(self.posted()), 1)
+        code, out = run(*STATUS)
+        self.assertEqual((code, out["verdict"], out["comment_id"], out["kept_from"]), (0, "approved", 5, A))
+
+    def test_a_manager_pictured_carry_names_the_page_file_a_merge_changed(self):
+        code, out = self.manager_run((PAGE,))
+        self.assertEqual((code, out["verdict"], out["reason"], out["rule"], out["comment_id"]),
+                         (0, "needed", f"picture-input-changed: {PAGE}", "own-files", None))
+        self.assertEqual(self.posted(), [])
+
+    def test_a_manager_pictured_carry_names_the_picture_tool_a_merge_changed(self):
+        code, out = self.manager_run(("docs/x.md", self.TOOL))
+        self.assertEqual((code, out["verdict"], out["reason"]), (0, "needed", f"picture-input-changed: {self.TOOL}"))
+        self.assertEqual(self.posted(), [])
+
+    def test_a_manager_pictured_carry_names_the_own_file_a_merge_changed(self):
+        code, out = self.manager_run((self.OWN,))
+        self.assertEqual((code, out["verdict"], out["reason"]), (0, "needed", f"own-files-touched: {self.OWN}"))
+        self.assertEqual(self.posted(), [])
+
+    def test_a_manager_pictured_carry_names_the_file_a_merge_added_to_the_pull_request(self):
+        code, out = self.manager_run(("docs/x.md",), h_files=(self.OWN, "docs/new.md"))
+        self.assertEqual((code, out["verdict"], out["reason"]), (0, "needed", "own-files-touched: docs/new.md"))
+
+    def test_a_manager_pictured_carry_with_a_non_merge_commit_carries_nothing(self):
+        self.seed([self.pics(5)], self.files((self.OWN,), (self.OWN,), tail=[(A, [FORK]), (HEAD, [A])]))
+        code, out = self.look_files_run()
+        self.assertEqual((code, out["verdict"], out["reason"]), (0, "needed", "not-merges"))
+
+    def test_a_manager_pictured_carry_with_an_absent_look_file_set_carries_nothing(self):
+        compares = self.files((self.OWN,), (self.OWN,))
+        del compares[self.TESTCONTENTS]
+        self.seed([self.pics(5)], compares)
+        self.world.not_found("gh", ["api", f"repos/{SLUG}/{self.TESTCONTENTS}"])
+        code, out = self.look_files_run()
+        self.assertEqual((code, out["verdict"], out["reason"]), (0, "needed", "no-look-files"))
+        self.assertEqual(self.posted(), [])
+
+    def test_a_pictured_approval_with_the_wrong_pictures_still_carries_nothing(self):
+        self.seed([self.pics(5, pictures="0" * 64)], self.files((self.OWN,), (self.OWN,)))
+        code, out = run(*self.carry_args())
+        self.assertEqual((code, out["verdict"], out["reason"]), (0, "needed", "pictures-differ"))
 
     def test_a_repeat_look_files_carry_posts_nothing_new(self):
         self.seed([self.plain(5), comment(6, lm.carry_body(7, 12, A, HEAD, None))], self.files())

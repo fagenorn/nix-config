@@ -567,7 +567,7 @@ class GoalRouteTest(Case):
             "now_until": None,
             "stated_at": at, "started_by": None,
             "age_text": "goal set just now", "manager_text": "managers are not available on this host yet",
-            "manager_state": "unavailable", "manager_until": None, "retry": False,
+            "manager_state": "unavailable", "manager_until": None, "retry": False, "move": False,
             "progress": None, "progress_text": None, "status": None, "status_at": None,
             "next": None, "milestone": None, "tracker_url": None, "issues": [], "waiting": 0,
             "sessions": [], "messages": [], "approval": None,

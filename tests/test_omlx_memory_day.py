@@ -79,6 +79,14 @@ class CheckTest(unittest.TestCase):
         self.assertEqual(answer["peak_ci_jobs"], 1)
         self.assertEqual(answer["omlx_jetsam_priority"], 100)
 
+    def test_omlx_above_its_declared_jetsam_priority_counts_as_held(self):
+        self.write([LINE("2026-11-25", priority=180)], TWO_RUNS)
+        result = self.run_check()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        answer = self.verdict(result)
+        self.assertEqual(answer["verdict"], "met")
+        self.assertEqual(answer["omlx_jetsam_priority"], 180)
+
     def test_the_first_partial_day_never_counts(self):
         self.write([LINE("2026-11-24")], [RUN("2026-11-24T10:00:00Z", 600.0), RUN("2026-11-24T10:05:00Z", 600.0)])
         result = self.run_check()

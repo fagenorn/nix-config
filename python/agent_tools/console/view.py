@@ -519,7 +519,7 @@ only. `unmanaged` is always present, possibly empty, sorted by `root`.
                       "manager_text": <text> | null,
                       "manager_state": "none" | "started" | "missing" | "failed" | "waiting"
                                        | "stalled" | "unavailable",
-                      "manager_until": "<time>" | null, "retry": <bool>,
+                      "manager_until": "<time>" | null, "retry": <bool>, "move": <bool>,
                       "permission_text": "<bypass|auto>: <reason>" | null,
                       "progress": {"landed", "in_delivery", "queued", "held", "total"} | null,
                       "progress_text": "<text>" | null,
@@ -707,7 +707,9 @@ reads them from its `pending` argument (default none).
 `manager_state`, `manager_text` and `retry` are all `sprints.manager_status` (its docstring holds
 the rules, so the view and the service's retry agree) over the sprint, whether it has a listed
 session of its own (below) and `now_ms`; `manager_until` is the `until` of a `waiting` manager, else
-null. `permission_text` (always present) is the mode the manager's settings file was last written
+null. A `moves` note (`capacity.MoveNote`) for the sprint replaces `now_text` with its text and makes
+`move` (always present) true when it offers a move: the sprint's manager is out of quota and not moving.
+`permission_text` (always present) is the mode the manager's settings file was last written
 with and its reason (`SprintState.permission`, ADR-console-060), null when the sprint has none
 logged. `derive_view(..., managers=False)` is a host that cannot start managers: every sprint is `unavailable` with `UNAVAILABLE_TEXT` and no retry, and the view's top-level `managers` is the flag
 (default true).
@@ -817,7 +819,7 @@ from agent_tools.console import (
     question_records, spend as spend_module)
 from agent_tools.console.activation import Activation
 from agent_tools.console.activation_run import LastRun
-from agent_tools.console.capacity import EMPTY
+from agent_tools.console.capacity import EMPTY, MoveNote
 from agent_tools.console.deliveries import (
     DONE as RUN_DONE,
     QUEUED,
@@ -1865,7 +1867,8 @@ def _sprint_entry(state: SprintState, now_ms: int | None, managers: bool, sessio
                   capacity: Mapping = EMPTY, nudges: bool = True, looked: str | None = None,
                   movement: ProjectMovement | None = None, wait_lines: Sequence[Mapping] = (),
                   waits_of: Callable[[DeliveryState], WaitSignals | None] = lambda run: None, prompted: bool = False,
-                  engine: engine_runs_module.SprintEngine = engine_runs_module.NO_ENGINE) -> dict:
+                  engine: engine_runs_module.SprintEngine = engine_runs_module.NO_ENGINE,
+                  move: MoveNote | None = None) -> dict:
     stated_ms = _millis(state.stated_at)
     elapsed = 0 if now_ms is None else now_ms - stated_ms
     report = state.report
@@ -1900,9 +1903,9 @@ def _sprint_entry(state: SprintState, now_ms: int | None, managers: bool, sessio
     ball = sprint_ball(state, now_ms, waiting, listed, waits, failed_start=failed, deaf=deaf,
                        prompted=prompted)
     hold = stated_hold(state, now_ms)
-    now_text = sprint_now(state, quota, listed, waiting, stages, ball,
-                          sprint_wait(state, now_ms, listed, waits), failed_start=failed,
-                          deaf=deaf, prompted=prompted, hold=hold)
+    now_text = move.text if move is not None else sprint_now(
+        state, quota, listed, waiting, stages, ball, sprint_wait(state, now_ms, listed, waits),
+        failed_start=failed, deaf=deaf, prompted=prompted, hold=hold)
     minute = nudges and state.manager is not None and state.manager.state == STARTED
     return {
         "type": "sprint",
@@ -1925,7 +1928,7 @@ def _sprint_entry(state: SprintState, now_ms: int | None, managers: bool, sessio
         "permission_text": None if state.permission is None else state.permission.text,
         "manager_until": (state.manager.until
                           if manager_state == WAITING and state.manager is not None else None),
-        "retry": retry,
+        "retry": retry, "move": move is not None and move.offer,
         "progress": counts if progressing else None,
         "progress_text": progress_text(
             counts["landed"], counts["total"], counts["in_delivery"], counts["queued"],
@@ -1987,8 +1990,8 @@ def _project_entry(state: ProjectState, sessions: Sequence[SessionState],
                    sprint_waits: Mapping[str, Sequence[Mapping]] | None = None,
                    waits: Sequence[Mapping] = (), read: ReadState | None = None,
                    questions: Mapping | None = None, prompted: Collection[str] = (),
-                   engine_runs: Sequence[Mapping] = (),
-                   engine_states: Sequence[engine_runs_module.RunState] = ()) -> dict:
+                   engine_runs: Sequence[Mapping] = (), engine_states: Sequence[engine_runs_module.RunState] = (),
+                   moves: Mapping[str, MoveNote] | None = None) -> dict:
     manager_ids: dict[str, set[str]] = {}
     for sprint in sprints:
         ids = {s.session_id for s in (sprint_sessions or {}).get(sprint.sprint_id, ())}
@@ -2009,7 +2012,8 @@ def _project_entry(state: ProjectState, sessions: Sequence[SessionState],
                               (sprint_waits or {}).get(s.sprint_id, ()), waits_of,
                               prompted=s.sprint_id in prompted,
                               engine=engine_runs_module.sprint_engine(
-                                  engine_states, s.project_id, sprint_issue_numbers(s), now_ms))
+                                  engine_states, s.project_id, sprint_issue_numbers(s), now_ms),
+                              move=(moves or {}).get(s.sprint_id))
                 for s in group]
 
     return {
@@ -2364,21 +2368,17 @@ def derive_view(
     accounts_added: Iterable[str] = (),
     pin: Mapping | None = None, pin_launches: Iterable[str] = (),
     registration: Mapping | None = None,
-    adoption_items: Iterable[Mapping] = (),
-    release_items: Iterable[Mapping] = (),
-    prompt_items: Iterable[Mapping] = (),
-    retry_items: Iterable[Mapping] = (),
-    apply_items: Iterable[Mapping] = (),
-    confirm_items: Iterable[Mapping] = (),
-    trust_items: Iterable[Mapping] = (),
-    failure_items: Iterable[Mapping] = (),
+    adoption_items: Iterable[Mapping] = (), release_items: Iterable[Mapping] = (),
+    prompt_items: Iterable[Mapping] = (), retry_items: Iterable[Mapping] = (),
+    apply_items: Iterable[Mapping] = (), confirm_items: Iterable[Mapping] = (),
+    trust_items: Iterable[Mapping] = (), failure_items: Iterable[Mapping] = (),
     nudges: bool = True, looked: str | None = None,
     movement: Mapping[str, ProjectMovement] | None = None,
     activation: Activation | None = None, activation_run: LastRun | None = None,
     owner_notices: Mapping[str, tuple[Notice, ...]] | None = None,
     spend: Mapping | None = None,
     project_questions: Mapping[str, Sequence[project_question.AskedQuestion]] | None = None,
-    sharing: Mapping | None = None,
+    sharing: Mapping | None = None, moves: Mapping[str, MoveNote] | None = None,
     engine_runs: Iterable[engine_runs_module.RunState] | None = None, engine_lines: bool = True,
 ) -> dict:
     states = list(states)
@@ -2493,7 +2493,7 @@ def derive_view(
                               notice_post=notice_post[s.project_id], overlaps=overlaps[s.project_id],
                               sprint_waits=sprint_waits, waits=project_waits.get(s.project_id, ()),
                               read=health.get(s.project_id), questions=asks[s.project_id], prompted=prompted,
-                              engine_runs=lines.get(s.project_id, ()), engine_states=engine_states)
+                              engine_runs=lines.get(s.project_id, ()), engine_states=engine_states, moves=moves)
                for s in active]
     quiet_entries = [_project_entry(s, (), runs, now_ms, (), managers, in_sprint,
                                     finished=finished.get(s.project_id, ()), capacity=capacity,

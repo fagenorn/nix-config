@@ -296,6 +296,7 @@ def serving(count):
 
 class RestartGateTest(unittest.TestCase):
     REASONS = "settings.json memory/memory_guard_tier\nmodel GLM-New added\n"
+    RELOAD = "launchd plist changed: org.nixos.omlx"
 
     def setUp(self):
         scratch = tempfile.TemporaryDirectory()
@@ -313,6 +314,12 @@ class RestartGateTest(unittest.TestCase):
             '[ -e "$here/rc" ] && exit "$(cat "$here/rc")"\nexit 0\n'
         )
         self.stub.chmod(0o755)
+        self.reload_stub = self.root / "reload"
+        self.reload_stub.write_text(
+            '#!/bin/sh\nhere="$(dirname "$0")"\necho reload >> "$here/reload-calls"\n'
+            '[ -e "$here/reload-rc" ] && exit "$(cat "$here/reload-rc")"\nexit 0\n'
+        )
+        self.reload_stub.chmod(0o755)
         self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), HealthHandler)
         self.server.requests = 0
         self.server.status = 200
@@ -334,6 +341,7 @@ class RestartGateTest(unittest.TestCase):
             sys.executable, str(RESTART),
             "--state-dir", str(self.state),
             "--restart-bin", str(self.stub),
+            "--reload-bin", str(self.reload_stub),
             "--health-url", url or self.url,
             *self.extra,
         ]
@@ -357,11 +365,62 @@ class RestartGateTest(unittest.TestCase):
     def stub_calls(self):
         return len(self.calls.read_text().splitlines()) if self.calls.exists() else 0
 
+    def reload_calls(self):
+        path = self.root / "reload-calls"
+        return len(path.read_text().splitlines()) if path.exists() else 0
+
     def marker_bytes(self):
         return self.marker.read_bytes()
 
     def deferral_lines(self, result):
         return [line for line in result.stderr.splitlines() if line.startswith("oMLX: restart deferred (")]
+
+    def test_a_changed_plist_reason_reloads_the_job_instead_of_killing_the_server(self):
+        self.marker.write_text(self.RELOAD + "\nmodel GLM-New added\n")
+        result = self.run_gate()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.reload_calls(), 1)
+        self.assertEqual(self.stub_calls(), 0)
+        self.assertFalse(self.marker.exists())
+        self.assertIn(
+            "oMLX: reloaded its launchd job for: launchd plist changed: org.nixos.omlx; model GLM-New added",
+            result.stderr,
+        )
+
+    def test_a_changed_plist_reason_waits_while_a_model_is_loaded(self):
+        self.marker.write_text(self.RELOAD + "\n")
+        self.answer(200, serving(1))
+        before = self.marker_bytes()
+        result = self.run_gate()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.reload_calls(), self.stub_calls()), (0, 0))
+        self.assertEqual(self.marker_bytes(), before)
+        (line,) = self.deferral_lines(result)
+        self.assertIn("1 model loaded", line)
+        self.assertIn("pending: launchd plist changed: org.nixos.omlx.", line)
+
+    def test_now_reloads_a_serving_server_for_a_changed_plist(self):
+        self.marker.write_text(self.RELOAD + "\n")
+        self.answer(200, serving(1))
+        self.extra = ["--now"]
+        result = self.run_gate()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.reload_calls(), 1)
+        self.assertEqual(self.stub_calls(), 0)
+        self.assertFalse(self.marker.exists())
+        self.assertEqual(self.server.requests, 0)
+
+    def test_a_failed_reload_keeps_the_marker_and_fails(self):
+        self.marker.write_text(self.RELOAD + "\n")
+        (self.root / "reload-rc").write_text("3")
+        before = self.marker_bytes()
+        result = self.run_gate()
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(self.marker_bytes(), before)
+        self.assertIn(
+            "oMLX: reload failed (exit 3); .restart-needed retained for the next activation",
+            result.stderr,
+        )
 
     def test_a_loaded_model_defers_the_restart_and_reports_it(self):
         self.answer(200, serving(1))
@@ -384,6 +443,7 @@ class RestartGateTest(unittest.TestCase):
         result = self.run_gate()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.stub_calls(), 1)
+        self.assertEqual(self.reload_calls(), 0)
         self.assertFalse(self.marker.exists())
         self.assertIn(
             "oMLX: restarted for: settings.json memory/memory_guard_tier; model GLM-New added",

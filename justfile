@@ -115,6 +115,7 @@ agent-workflow-tests *args:
     home/common/agent-skills/tests/test_host_admission.py \
     home/common/agent-skills/tests/test_inprocess_cli.py \
     home/common/agent-skills/tests/test_workflow_skill_contracts.py \
+    home/common/agent-skills/tests/test_codex_review_effort.py \
     home/common/agent-skills/tests/test_dispatch_contracts.py \
     home/common/agent-skills/tests/test_shell_example_contracts.py \
     home/common/agent-skills/tests/test_ship_release_contracts.py \
@@ -151,6 +152,7 @@ agent-workflow-tests *args:
     home/common/agent-skills/tests/test_adopt_migrate.py \
     home/common/agent-skills/tests/test_adopt_project_boundaries.py \
     home/common/agent-skills/tests/test_adopt_apply.py \
+    home/common/agent-skills/tests/test_adopt_hook_install.py \
     home/common/agent-skills/tests/test_adopt_apply_formatting.py \
     home/common/agent-skills/tests/test_adopt_entries.py \
     home/common/agent-skills/tests/test_adopt_conformance.py \
@@ -203,6 +205,7 @@ agent-workflow-tests *args:
     tests/test_darwin_user_agent_reload.py \
     tests/test_omlx_restart.py \
     tests/test_omlx_declaration.py \
+    tests/test_omlx_activation_hold.py \
     tests/test_darwin_path_order.py \
     tests/test_pinned_file.py \
     tests/test_github_runners.py \
@@ -223,6 +226,7 @@ agent-workflow-tests *args:
     tests/test_suite_test_failures.py \
     tests/test_protection_tree.py \
     tests/test_console_approved_action_check.py \
+    tests/test_console_takeover_merge_check.py \
     tests/test_issue_branch.py \
     tests/test_program_copies.py \
     tests/test_keepalive_end_turn_cap.py \
@@ -284,6 +288,7 @@ agent-workflow-tests *args:
     tests/test_docs_tree.py \
     tests/test_standard_ids.py \
     tests/test_standards_lint.py \
+    tests/test_router.py \
     tests/test_citation_lint.py \
     tests/test_never_rise.py \
     tests/test_comment_lint.py \
@@ -337,6 +342,7 @@ agent-workflow-tests *args:
     tests/test_console_question_records.py \
     tests/test_console_question_check.py \
     tests/test_console_contract_draft.py \
+    tests/test_console_hooks_missing.py \
     tests/test_console_checkout_remote.py \
     tests/test_console_register.py \
     tests/test_console_register_service.py \
@@ -360,6 +366,7 @@ agent-workflow-tests *args:
     tests/test_console_message_check.py \
     tests/test_console_revive_check.py \
     tests/test_console_cleanup_check.py \
+    tests/test_adopt_hook_check.py \
     tests/test_console_lock_wait_check.py \
     tests/test_console_serve_probe_check.py \
     tests/test_console_run_line_check.py \
@@ -369,6 +376,7 @@ agent-workflow-tests *args:
     tests/test_pr_green.py \
     tests/test_console_page.py \
     tests/test_console_page_action.py \
+    tests/test_console_page_move.py \
     tests/test_console_long_permission_card.py \
     tests/test_console_controls.py \
     tests/test_console_goal_box.py \
@@ -383,6 +391,7 @@ agent-workflow-tests *args:
     tests/test_console_writes.py \
     tests/test_console_answer.py \
     tests/test_console_sprints.py \
+    tests/test_console_manager_identity.py \
     tests/test_console_action_card.py \
     tests/test_console_revive.py \
     tests/test_console_idle.py \
@@ -398,6 +407,7 @@ agent-workflow-tests *args:
     tests/test_console_sprint_action.py \
     tests/test_console_pictures.py \
     tests/test_console_manager.py \
+    tests/test_console_launch_short_id.py \
     tests/test_console_permission.py \
     tests/test_console_manager_service.py \
     tests/test_console_permit.py \
@@ -408,6 +418,7 @@ agent-workflow-tests *args:
     tests/test_console_stops.py \
     tests/test_console_revive_service.py \
     tests/test_console_idle_service.py \
+    tests/test_console_quota_move.py \
     tests/test_console_nudge.py \
     tests/test_console_deliveries.py \
     tests/test_console_engine_runs.py \

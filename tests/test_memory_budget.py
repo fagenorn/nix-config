@@ -14,6 +14,7 @@ except ImportError:  # run directly: no parent package, and tests/ is sys.path[0
     import host_readings
 
 from agent_tools.hosts import host_alerts
+from agent_tools.hosts.memory_floor import JETSAM_PRIORITY_DEFAULT, JETSAM_PRIORITY_MAX
 
 TIER = "integration"
 
@@ -107,8 +108,12 @@ class MemoryBudgetTest(unittest.TestCase):
     def test_the_omlx_plist_drops_the_ignored_jetsam_key_and_the_floor_daemon_applies_it(self):
         self.assertNotIn("JetsamProperties", self.got["omlxPlist"])
         self.assertEqual(self.got["jetsamElsewhere"], [])
-        self.assertGreater(self.budget["omlxJetsamPriority"], 40)
         self.assertIn(f"--omlx-jetsam-priority {self.budget['omlxJetsamPriority']} ", self.got["floor"]["command"])
+
+    def test_the_declared_jetsam_priority_sits_above_the_kernel_default_band(self):
+        declared = self.budget["omlxJetsamPriority"]
+        self.assertTrue(JETSAM_PRIORITY_DEFAULT < declared <= JETSAM_PRIORITY_MAX, declared)
+        self.assertEqual(declared, 190)
 
     def test_the_omlx_plist_keeps_its_launchd_job(self):
         plist = self.got["omlxPlist"]
@@ -286,6 +291,7 @@ class GuideTest(unittest.TestCase):
             "~/.omlx/logs/memory-watch.log", "/var/log/memory-floor.log", "/var/db/memory-watch/floor.json",
             "memory_kill", "reason=", "owner=", "root_pid=", "tree_gib=", "available_before_gib=",
             "available_after_gib=", "signals=", "launchd ignores", "without a restart",
+            "JETSAM_PRIORITY_DEFAULT", "launchd's own", "never lowers",
         ):
             with self.subTest(needle=needle):
                 self.assertIn(needle, floor)

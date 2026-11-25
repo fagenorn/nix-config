@@ -2,7 +2,7 @@
 
 ### B1. Defense in depth
 
-Every trust boundary is checked on both sides. The outer check exists for experience — fail fast, say something useful; the inner check exists for correctness, because a malicious or buggy caller must not be able to bypass it. "The other side has it covered" never justifies dropping either.
+Every trust boundary is checked on both sides. The outer check exists for experience — fail fast, say something useful; the inner check exists for correctness, because a malicious or buggy caller must not be able to bypass it.
 
 ### B2. Production-grade by default
 
@@ -14,7 +14,7 @@ No catch to mute an error, no sleep to paper over a race, no special case to hid
 
 ### B4. Single responsibility
 
-One file, module or function, one reason to change. Split **when the second concern arrives, not when the file hurts** — every deferral makes the split costlier. Boundaries follow domain operations, not code kinds; a `helpers` or `utils` module is a missing boundary.
+One file, module or function, one reason to change. Split **when the second concern arrives, not when the file hurts**. Boundaries follow domain operations, not code kinds; a `helpers` or `utils` module is a missing boundary.
 
 ### B5. DRY — knowledge, not keystrokes
 
@@ -34,11 +34,11 @@ Name for intent, not implementation. Keep units short enough to read without scr
 
 ### B9. Moves keep their history
 
-Relocate and rename through the VCS's own move so `--follow` still works, and re-point every *living* document in the same commit. Point-in-time records — accepted decisions, past plans, published reports — keep their original paths: a citation into an accepted record is part of that record.
+Relocate and rename through the VCS's own move so `--follow` still works, and re-point every *living* document in the same commit. Point-in-time records — accepted decisions, past plans, published reports — keep their original paths.
 
 ### B10. Truthful terminal states
 
-A run that did no work is Failed, not Completed — status surfaces are truth, not progress bars, and a swallowed inner failure must not present as success. Log the original error object before any swallow, translate or rethrow.
+A run that did no work is Failed, not Completed, and a swallowed inner failure must not present as success. Log the original error object before any swallow, translate or rethrow.
 
 ### B11. The log stream is the debugger
 
@@ -46,7 +46,7 @@ If diagnosing a failure needed a temporary print statement or an attached debugg
 
 ### B12. Fail loud
 
-At a closed-set dispatch site — an enum switch, a discriminated union, a registry lookup, a parsed variant — the default branch throws. A silent fallback there turns a near-compile-time bug into a runtime mystery.
+At a closed-set dispatch site — an enum switch, a discriminated union, a registry lookup, a parsed variant — the default branch throws.
 
 ### B13. Token economy
 
@@ -101,3 +101,7 @@ A test whose body, minus comments and whitespace, repeats another's adds cost wi
 ### B25. Instruction surfaces stay in budget
 
 No instruction surface may grow past its platform budget, which no project sets, and one already over it may not grow at all. ([decision](https://github.com/fagenorn/nix-config/issues/1422))
+
+### B26. A path's routed set stays within 24 KB
+
+The bar, the shards and the area decision index routed for one path total at most 24 KB. A change may not add a path over it, judged against its merge base. ([decision](https://github.com/fagenorn/nix-config/issues/1419))

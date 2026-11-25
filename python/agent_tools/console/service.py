@@ -35,7 +35,7 @@ stream `Content-Length`):
     POST /api/pin   204, a JSON body, the page pins or unpins a profile (below)
     POST /api/approve 204, a JSON body, the page approves a brief (below)
     POST /api/reply 204, a JSON body, the page asks a brief for changes (below)
-    POST /api/retry-manager 204, a JSON body, the page starts a sprint's manager again (below)
+    POST /api/retry-manager 204, a JSON body, the page starts a sprint's manager again or moves it (below)
     POST /api/message 204, a JSON body, the page sends the owner's message to a sprint (below)
     POST /api/stop  204, a JSON body, the page stops a sprint (below)
     POST /api/register-project 204, a JSON body, the page names a repository to adopt (below)
@@ -624,14 +624,12 @@ drafts the plan again from the changed fields as a registration does, appending 
 or the plan's row. An answer of any other question to a row that holds a draft plans it with the
 draft file the same way, and the plan's row carries the draft.
 
-A checkout that already has a contract proposes the commit environment a stranded hook needs
-(ADR-console-083). A fresh run (no draft, no answers, not confirmed) reads its hooks once
-(`hook_reader`, `contract_draft.read_hooks` by default); when
-`contract_draft.reconcile_fields` is non-empty the run plans with the one `commit-environment`
-record: the adopter's `--commit-environment` command, never a draft file, and the row carries the
-record as its draft only when the plan took the command (`contract_draft.carried`). An answer run
-and a confirm run read no hooks and resend the command the row's draft holds. A `contract-draft`
-answer to such a row changes the record through `contract_draft.set_value`; `none` plans as
+A checkout that already has a contract proposes the commit environment a stranded hook needs (ADR-console-083). A fresh run (no draft, no
+answers, not confirmed) reads its hooks once (`hook_reader`, `contract_draft.read_hooks` by default); when `contract_draft.reconcile_fields`
+is non-empty the run plans with the one `commit-environment` record: the adopter's `--commit-environment` command, never a draft file, and
+the row carries the record as its draft only when the plan took the command (`contract_draft.carried`). An answer run and a confirm run read
+no hooks and resend the command the row's draft holds. Every planned row of a checkout is also checked for uninstalled devenv hooks
+(`register.hooks_noted`). A `contract-draft` answer to such a row changes the record through `contract_draft.set_value`; `none` plans as
 today, and the run never writes a draft file.
 
 `POST /api/plan-approve` (#1054, ADR-console-030) runs the same checks with `MAX_PLAN_APPROVE_BYTES`
@@ -1093,8 +1091,8 @@ decision (`decision` None, no row) for a command `permit.mentions` rejects (a co
 mention: the plain `release transaction run` is `allow` with verb `release` and target `{"commit", "version"}` and
 reads no forge; abandon and dispose are `deny` with `permit.NO_ABANDON` and `permit.NO_DISPOSE`, whatever the
 program is named), and denies `permit.NOT_ACTIVE` unless the sprint is `STARTING` and `sprints.takes_questions` (no
-closing, no stop request, no stop, and not ended by a done report), and `permit.NOT_MANAGER` unless `session_id` is
-the sprint's `manager_session`. It takes the grant from the sprint (`issues`: the newest report's issues that a
+closing, no stop request, no stop, and not ended by a done report), and `permit.NOT_MANAGER` unless `manager.is_manager_session` admits
+`session_id`. It takes the grant from the sprint (`issues`: the newest report's issues that a
 delivery of the manager's own session carries, as `SprintState.delivered` records them, so a delivery run the
 console has since cleaned up still counts; `others`: the issues the newest report of every other open sprint of the
 project lists) and, off the lock, the project's slug (`slug_of`), branch pattern (`branch_pattern_of`) and merge
@@ -1542,8 +1540,8 @@ folded from the log's session rows (`manager.profile_use`, kept after a session 
 #1028), which `capacity_view` leaves out of the room, and the pinned profile (#1029), which it
 answers first while it has room, with the sprint's starter and `_waiting_logins()` so that a colleague's account serves his own sprints first (#1344, ADR-console-087), and `Wait` appends `manager.waiting`. Otherwise the launcher is called outside the lock, and then,
 under it, a sprint that was withdrawn meanwhile has its secret and settings file removed again and
-no row appended, and otherwise, unless the service is stopping, `manager.started {sprint_id, profile, session_name}`
-or `manager.failed {sprint_id, reason}` is appended (the reason of a `LaunchFailed`, else `<Type>:
+no row appended, and otherwise, unless the service is stopping, `manager.started {sprint_id, profile, session_name,
+short_id?}` or `manager.failed {sprint_id, reason}` is appended (the reason of a `LaunchFailed`, else `<Type>:
 <message>`, the secret shown as `<secret>`), a failure is one stderr line `console: manager_failed
 <sprint_id> <reason>`, and the view is published. `withdraw_goal` also removes the manager's
 settings file. The sprint's secret appears in no row, view or stderr line. `_prepared_launch`
@@ -1767,14 +1765,15 @@ sprint is open and the service not stopping; a failure also prints `console: wak
 `manager_seen_seq`) while the command ran; the reservation's end after a wake was sent, or one that could not start, also sets `_settled`, so a stop that waited out the wake defers for the resumed session. A takeover job reads the listing off the lock (one that
 raises ends the reservation and appends nothing), then launches only while the sprint is open,
 neither the fresh listing nor the folded sessions show the manager and `_revive_step` is still a
-takeover; otherwise it appends nothing. A takeover the bring-back reserves because the manager's
+takeover; a release because only the fresh listing shows the manager appends `manager.held {sprint_id, goal, reason}` and prints
+`console: takeover_held <sprint_id> <reason>` once per run of releases (`_unmatched`, cleared when the folded sessions list the manager), any other release appends nothing. A takeover the bring-back reserves because the manager's
 account is out (`_quota_target`: out, and the step would otherwise be a wake) carries the profile it
 chose as `target` on its `_TakeoverReservation`. The launch is prepared on that profile without
 choosing again, and with the account identity (its sign-in account and its counted reading's account
 id) and the owner's pin as they were when it was reserved. When it is prepared, and again after the
 permission read (`_unexcluded_launch`), it must pass `_move_holds`: the manager's account still out
 (`_quota_wait`, which reads the sign-in history, so a late reply from an account the profile left
-does not count), the pin and the account identity unchanged, and `_room_for_move`: another account
+does not count), the pin and the account identity unchanged, and `capacity.room_for_move`: another account
 than the manager's, by sign-in and by the account ids the counted readings of the target and its
 sign-in aliases carry, not a duplicate of any profile, not kept for another login's waiting sprint,
 and room by `manager.has_room` (reads `ok` or `reset`, not signed out, not excluded). It must also
@@ -1792,7 +1791,10 @@ every listed one is on the profile the sprint's record gives (else the move is c
 every listed session carrying the manager's name through `_stop_one`, off the lock, and reads the
 conclusive listing again. It launches only when that listing shows neither the name nor a session it
 stopped, no folded session of that name is left unstopped, and the move still holds; the same is checked
-again after the permission read, with a fresh conclusive listing. Nothing listed to stop only releases it.
+again after the permission read, with a fresh conclusive listing. Nothing listed to stop only releases it, unless the owner asked for the move.
+`revive()` keeps in `_move_notes` a `capacity.MoveNote` for each sprint whose move would be due but for the cancel mark and says why it is not moving:
+no other account has room (no move offered), its session is unmatched (`_unmatched`) or its move was called off (a move is offered). The sprint line shows the note and, with a move offered, `POST /api/retry-manager` moves the manager, not retries it: it clears the marks and reserves a
+`_ListedMoveReservation` with `asked` set on `_move_target`, refusing with `capacity.NO_ROOM_REFUSAL` when none is left.
 Any other outcome cancels the move as #1279 does and a failed stop or listing writes
 `console: quota_move_failed <sprint_id> <reason>`. The takeover's
 `manager.started` row carries `"moved": true` and the sprint leaves `_quota_held`, so the digest says the
@@ -2021,7 +2023,7 @@ from agent_tools.console import (
 from agent_tools.console.action_permit import PERMIT_LANDED_SECONDS, ActionPermit
 from agent_tools.console.event_log import (
     BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, FAULT_DECLARED, FAULT_WITHDRAWN, GOAL_STATED, GOAL_WITHDRAWN, MANAGER_FAILED,
-    MANAGER_NO_PROGRESS, MANAGER_NUDGED, MANAGER_STALLED, MANAGER_STARTED, MANAGER_STOP_FAILED,
+    MANAGER_HELD, MANAGER_NO_PROGRESS, MANAGER_NUDGED, MANAGER_STALLED, MANAGER_STARTED, MANAGER_STOP_FAILED,
     MANAGER_STOPPED, MANAGER_WAITING, MANAGER_WOKEN, NOTICE_NUDGED, NOTICE_POSTED, NOTICE_WITHDRAWN,
     LOOK_RECORDED, PERMIT_JUDGED, PERMIT_LANDED, PROJECT_QUESTION_ANSWERED, PROJECT_QUESTION_ASKED, PROJECT_QUESTION_KEYED,
     QUESTION_ANSWERED, QUESTION_WITHDRAWN, QUESTIONS_ASKED,
@@ -4525,9 +4527,10 @@ class _ListedMoveReservation(_TakeoverReservation):
     """
 
     def __init__(self, target: str, account: tuple[str | None, str | None],
-                 pinned: str | None) -> None:
+                 pinned: str | None, asked: bool = False) -> None:
         super().__init__(target, account, pinned)
         self.stopped: set[str] = set()
+        self.asked = asked
 
 
 MOVE_NOT_STARTED = "the manager could not be started again after its account was signed out or removed"
@@ -4593,7 +4596,7 @@ class ConsoleService(ActionPermit):
                  look_reader: Callable[[str, int], tuple[str, str | None]] = answer.look_head,
                  look_recorder: Callable[[str, int, int, str, str, Sequence[tuple[str | None, str]]], int] = answer.record_look,
                  look_ender: Callable[[str, int, int], None] = answer.end_look,
-                 launcher: Callable[[manager.Launch], None] | None = None,
+                 launcher: Callable[[manager.Launch], str | None] | None = None,
                  dispatch: Callable[[Callable[[], None]], None] | None = None,
                  nudger: Callable[[nudge.Nudge], None] | None = None,
                  listing: Callable[[], Mapping[str, sessions.Observation]] | None = None,
@@ -4713,6 +4716,8 @@ class ConsoleService(ActionPermit):
         self._settled: dict[str, int] = {}
         self._quota_held: set[str] = set()
         self._move_cancelled: set[str] = set()
+        self._unmatched: set[str] = set()
+        self._move_notes: dict[str, capacity.MoveNote] = {}
         self._moved: dict[str, int] = {}
         self._listing = (
             (lambda: sessions.read_session_registry(self._session_dirs()))
@@ -5193,7 +5198,8 @@ class ConsoleService(ActionPermit):
                 cap, self._use.last, None, self._waiting_logins())),
             pin_launches=self._pin_launches.launched,
             managers=self._launcher is not None, pending=self._pending,
-            nudges=self._nudger is not None, looked=self._looked, movement=self._movement, engine_runs=self._engine_states)
+            nudges=self._nudger is not None, looked=self._looked, movement=self._movement, engine_runs=self._engine_states,
+            moves=self._move_notes)
         return inputs
 
     def _publish(self, *, guests: bool = True) -> None:
@@ -6606,6 +6612,7 @@ class ConsoleService(ActionPermit):
                                           "detail": str(error)})
             traceback.print_exception(error, file=sys.stderr)
             payload = register.failed(root, type(error).__name__, verb)
+        payload = register.hooks_noted(payload, self._stop)
         if unread:
             payload = register.unread(payload)
         elif remote is not None:
@@ -6797,6 +6804,7 @@ class ConsoleService(ActionPermit):
                 {"root": root, "exception": type(error).__name__, "detail": str(error)})
             traceback.print_exception(error, file=sys.stderr)
             text = plan_questions.rerun_failed(register.UNEXPECTED)
+        payload = register.hooks_noted(payload, self._stop)
         with self._ingest:
             try:
                 if payload is not None and not self._closed:
@@ -7763,11 +7771,23 @@ class ConsoleService(ActionPermit):
             if sprint_id in self._launching or sprint_id in self._nudging:
                 raise sprints.Refused(sprints.LAUNCHING)
             state, _, retry = self._manager_state(sprint)
-            if not retry:
+            offered = self._move_notes.get(sprint_id)
+            if not retry and offered is not None and offered.offer:
+                target = self._move_target(sprint)
+                if target is None:
+                    raise sprints.Refused(capacity.NO_ROOM_REFUSAL)
+                self._move_cancelled.discard(sprint_id)
+                self._unmatched.discard(sprint_id)
+                self._move_notes.pop(sprint_id)
+                self._launching[sprint_id] = _ListedMoveReservation(
+                    target, capacity.move_account(self._move_view(), self._capacity, self._signins, target),
+                    self._pinned, asked=True)
+            elif not retry:
                 raise sprints.Refused(
                     sprints.HAS_MANAGER if state in (sprints.STARTED, sprints.STALLED)
                     else sprints.TOO_SOON)
-            self._launching[sprint_id] = _RetryReservation()
+            else:
+                self._launching[sprint_id] = _RetryReservation()
         self._dispatch_launch(sprint_id)
 
     def _launch_reserved(self, sprint_id: str) -> None:
@@ -7815,13 +7835,13 @@ class ConsoleService(ActionPermit):
             if launch is None:
                 return
             try:
-                reason = None
+                reason = printed = None
                 try:
-                    self._launcher(launch)
+                    printed = self._launcher(launch)
                 except Exception as error:
                     reason = (str(error) if isinstance(error, manager.LaunchFailed)
                               else f"{type(error).__name__}: {error}")
-                self._record_launch(launch, reason, token)
+                self._record_launch(launch, reason, token, printed)
             finally:
                 with self._ingest:
                     self._client_live[launch.profile] -= 1
@@ -7854,6 +7874,11 @@ class ConsoleService(ActionPermit):
             if shown:
                 self._last_listed[sprint_id] = now
             if shown or self._manager_listed(sprint):
+                if shown and not self._manager_listed(sprint) and sprint_id not in self._unmatched:
+                    self._unmatched.add(sprint_id)
+                    self._apply(self.log.append([(MANAGER_HELD, sprint.project_id, {
+                        "sprint_id": sprint_id, "goal": sprint.goal, "reason": capacity.UNMATCHED_REASON})]))
+                    print(f"console: takeover_held {sprint_id} {capacity.UNMATCHED_REASON}", file=sys.stderr)
                 self._release(sprint_id, token)
                 return None
             if self._revive_step(sprint, now) != sprints.TAKEOVER:
@@ -7952,7 +7977,7 @@ class ConsoleService(ActionPermit):
         self._release(payload["sprint_id"], token)
         self._apply(self.log.append([(kind, project_id, payload)]))
 
-    def _record_launch(self, launch: manager.Launch, reason: str | None, token: object) -> None:
+    def _record_launch(self, launch: manager.Launch, reason: str | None, token: object, printed: object = None) -> None:
         secret = launch.env[manager.SECRET_ENV]
         with self._ingest:
             self._settled[launch.sprint_id] = int(self._clock() * 1000)
@@ -7971,7 +7996,7 @@ class ConsoleService(ActionPermit):
                 self._append_manager(MANAGER_STARTED, launch.project_id, {
                     "sprint_id": launch.sprint_id, "profile": launch.profile,
                     "session_name": launch.session_name, "seen_after": launch.seen_after,
-                    "permission": launch.permission.payload(), **marks}, token)
+                    "permission": launch.permission.payload(), **marks, **manager.short_id_mark(printed)}, token)
                 return
             if secret:
                 reason = reason.replace(secret, "<secret>")
@@ -8824,23 +8849,27 @@ class ConsoleService(ActionPermit):
             return self._move_target(sprint)
         return None
 
+    def _move_view(self) -> Mapping:
+        """Under the ingest lock: the capacity view a quota move reads its target and accounts from."""
+        return capacity.capacity_view(self._profiles - self._removing, self._capacity, self._clock(),
+                                      self._signins, excluded=self._excluded, pinned=self._pinned,
+                                      owners=self._owners_now())
+
     def _takeover_reservation(self, sprint: sprints.SprintState, now: int) -> "_TakeoverReservation":
         """Under the ingest lock: the reservation of a takeover, a quota move carrying its target, account and pin."""
         target = self._quota_target(sprint, now)
         if target is None:
             return _TakeoverReservation()
-        view = capacity.capacity_view(self._profiles - self._removing, self._capacity, self._clock(),
-                                      self._signins, excluded=self._excluded, pinned=self._pinned,
-                                      owners=self._owners_now())
-        return _TakeoverReservation(target, self._move_account(view, target), self._pinned)
+        view = self._move_view()
+        return _TakeoverReservation(target, capacity.move_account(view, self._capacity, self._signins, target), self._pinned)
 
-    def _listed_move_due(self, sprint: sprints.SprintState, now: int) -> bool:
+    def _listed_move_due(self, sprint: sprints.SprintState, now: int, cancelled: bool = False) -> bool:
         """Under the ingest lock: whether a listed manager of the sprint waits on quota and may be moved (#1378).
 
         Everything the move needs but the session's own state: a launcher and a stopper, a started
         manager on an open sprint that is not stalled and has no open no-progress item, work to do,
         fewer than `revive.LIMIT` counted revivals in the window, an account that is out and no
-        cancelled move for it.
+        cancelled move for it (`cancelled=True` does not read that mark).
         """
         return (self._launcher is not None and self._stopper is not None
                 and sprint.manager is not None and sprint.manager.state == sprints.STARTED
@@ -8850,7 +8879,14 @@ class ConsoleService(ActionPermit):
                 and revive.has_work(sprint, self._waiting(sprint))
                 and revive.counted(sprint, now) < revive.LIMIT
                 and self._quota_wait(sprint) is not None
-                and sprint.sprint_id not in self._move_cancelled)
+                and (cancelled or sprint.sprint_id not in self._move_cancelled))
+
+    def _move_note(self, sprint: sprints.SprintState, now: int) -> "capacity.MoveNote | None":
+        """Under the ingest lock: why a manager whose listed move would be due but for the cancel mark is not moving."""
+        if not self._listed_move_due(sprint, now, cancelled=True):
+            return None
+        return capacity.move_note(self._move_target(sprint), sprint.sprint_id in self._move_cancelled,
+                                  sprint.sprint_id in self._unmatched)
 
     def _listed_move_reservation(self, sprint: sprints.SprintState,
                                  now: int) -> "_ListedMoveReservation | None":
@@ -8863,10 +8899,8 @@ class ConsoleService(ActionPermit):
         target = self._move_target(sprint)
         if target is None:
             return None
-        view = capacity.capacity_view(self._profiles - self._removing, self._capacity, self._clock(),
-                                      self._signins, excluded=self._excluded, pinned=self._pinned,
-                                      owners=self._owners_now())
-        return _ListedMoveReservation(target, self._move_account(view, target), self._pinned)
+        view = self._move_view()
+        return _ListedMoveReservation(target, capacity.move_account(view, self._capacity, self._signins, target), self._pinned)
 
     def _unstopped_manager(self, sprint: sprints.SprintState, stopped: set[str]) -> bool:
         """Under the ingest lock: whether a folded session carrying the manager's name is not one the move stopped."""
@@ -8960,7 +8994,7 @@ class ConsoleService(ActionPermit):
                     return None
                 name = manager.session_name(sprint.project_id, sprint_id)
             manager.stop_listed([name], lambda: listed, stop)
-            if not token.stopped:
+            if not token.stopped and not token.asked:
                 with self._ingest:
                     self._release(sprint_id, token)
                 return None
@@ -8988,59 +9022,17 @@ class ConsoleService(ActionPermit):
         """
         return (token.target is not None and self._quota_wait(sprint) is not None
                 and self._pinned == token.pinned
-                and self._move_account(view, token.target) == token.account
-                and self._room_for_move(view, sprint, token.target))
-
-    def _move_account(self, view: Mapping, profile: str) -> tuple[str | None, str | None]:
-        """Under the ingest lock: the identity of `profile`'s account, its sign-in account and its counted reading's account id."""
-        entry = {e["profile"]: e for e in view["profiles"]}.get(profile)
-        own = capacity.counted_reading(self._capacity, profile, self._signins.get(profile))
-        return (entry["account"] if entry is not None else None,
-                own.account if own is not None else None)
-
-    def _account_ids(self, by_name: Mapping[str, Mapping], profile: str) -> set[str]:
-        """Under the ingest lock: the account ids the counted readings of `profile` and its sign-in aliases carry."""
-        entry = by_name.get(profile)
-        names = [profile, *(entry["same_account_as"] if entry is not None else ())]
-        held = (capacity.counted_reading(self._capacity, name, self._signins.get(name))
-                for name in names)
-        return {reading.account for reading in held
-                if reading is not None and reading.account is not None}
+                and capacity.move_account(view, self._capacity, self._signins, token.target) == token.account
+                and capacity.room_for_move(view, self._capacity, self._signins,
+                                           self._waiting_logins(), sprint, token.target))
 
     def _move_target(self, sprint: sprints.SprintState) -> str | None:
         """Under the ingest lock: the profile a quota move would take over on, else None."""
-        view = capacity.capacity_view(self._profiles - self._removing, self._capacity, self._clock(),
-                                      self._signins, excluded=self._excluded, pinned=self._pinned,
-                                      owners=self._owners_now())
+        view = self._move_view()
         choice = manager.choose_profile(view, self._use.last, sprint.started_by,
                                         self._waiting_logins())
-        return choice if self._room_for_move(view, sprint, choice) else None
-
-    def _room_for_move(self, view: Mapping, sprint: sprints.SprintState, choice: object) -> bool:
-        """Under the ingest lock: whether `choice` is another account with room (#1279).
-
-        The reading behind the entry may be an alias's (profiles on one sign-in share the newest),
-        so the account ids of the readings of `choice` and its aliases are compared with the
-        manager's. A duplicate of any profile is not a move, and a colleague's account kept for a
-        waiting sprint of another login is not either (the rule `manager.choose_profile` applies).
-        """
-        mine = sprint.manager.profile if sprint.manager else None
-        if not isinstance(choice, str) or choice == mine:
-            return False
-        by_name = {entry["profile"]: entry for entry in view["profiles"]}
-        chosen = by_name.get(choice)
-        if chosen is None or not manager.has_room(chosen) or chosen.get("duplicate_of") is not None:
-            return False
-        if mine in chosen["same_account_as"]:
-            return False
-        starter = sprint.started_by
-        owners = {owner for name in (choice, *chosen["same_account_as"])
-                  if (owner := (by_name.get(name) or {}).get("owner")) is not None}
-        if any(login in self._waiting_logins() and login != starter for login in owners):
-            return False
-        if mine is None:
-            return True
-        return not (self._account_ids(by_name, mine) & self._account_ids(by_name, choice))
+        return choice if capacity.room_for_move(view, self._capacity, self._signins,
+                                                self._waiting_logins(), sprint, choice) else None
 
     def revive(self) -> None:
         """Bring back each manager that is gone while its sprint has work (#893)."""
@@ -9054,9 +9046,14 @@ class ConsoleService(ActionPermit):
             for sprint_id in [key for key in self._last_listed if key not in self._sprints]:
                 del self._last_listed[sprint_id]
             self._move_cancelled.intersection_update(self._sprints)
+            self._unmatched.intersection_update(self._sprints)
+            notes = {}
             for sprint_id, sprint in list(self._sprints.items()):
+                if (note := self._move_note(sprint, now)) is not None:
+                    notes[sprint_id] = note
                 if self._manager_listed(sprint):
                     self._last_listed[sprint_id] = now
+                    self._unmatched.discard(sprint_id)
                     if (sprint_id not in self._launching and sprint_id not in self._nudging
                             and sprint_id not in self._stopping):
                         moved = self._listed_move_reservation(sprint, now)
@@ -9077,6 +9074,9 @@ class ConsoleService(ActionPermit):
                 elif step == sprints.TAKEOVER:
                     self._launching[sprint_id] = self._takeover_reservation(sprint, now)
                     jobs.append((step, sprint_id))
+            if notes != self._move_notes:
+                self._move_notes = notes
+                self._publish()
         for step, sprint_id in jobs:
             try:
                 if step == sprints.WAKE:
@@ -9615,7 +9615,7 @@ class ConsoleService(ActionPermit):
         """Under the ingest lock: the verdict that refuses the caller before a grant is judged, else None."""
         if not self._permit_active(sprint):
             return permit.Verdict(permit.DENY, permit.NOT_ACTIVE, verb, {})
-        if session_id != sprint.manager_session:
+        if not manager.is_manager_session(sprint, session_id):
             return permit.Verdict(permit.DENY, permit.NOT_MANAGER, verb, {})
         if sprint.project_id not in self._states:
             return permit.Verdict(permit.DENY, permit.NOT_GRANTED, verb, {})

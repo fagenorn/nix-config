@@ -241,7 +241,8 @@ OWNER_ONLY_INPUTS: Mapping[str, object] = MappingProxyType({
     "activation_run": None, "signin_runs": None, "accounts_added": (), "pin": None,
     "pin_launches": (), "registration": None, "adoption_items": (), "release_items": (), "prompt_items": (), "retry_items": (),
     "apply_items": (), "confirm_items": (), "trust_items": (), "failure_items": (),
-    "project_questions": None, "sharing": None, "engine_lines": False})
+    "project_questions": None, "sharing": None, "engine_lines": False,
+    "moves": None})
 PASSED_INPUTS = frozenset({"now_ms", "managers", "nudges", "looked"})
 FILTERED_INPUTS = frozenset({"states", "records", "health", "sessions", "deliveries", "sprints",
                              "pending", "movement", "owner_notices", "engine_runs"})

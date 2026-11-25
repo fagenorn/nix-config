@@ -7,6 +7,8 @@ another status, a body that is not the expected JSON) also defers: a restart tha
 costs one more activation, a restart that does not wait can cut off a running request.
 `--now` skips the check. The marker `<state-dir>/.restart-needed` holds one reason per line;
 it is removed only by a restart that succeeded, so a deferral and a failure both keep it.
+A reason starting with `launchd plist changed: ` is applied by `--reload-bin` (an unload and load
+of the job) instead of a kill, because a kill only relaunches the job definition launchd holds.
 """
 
 import argparse
@@ -22,6 +24,7 @@ HEALTH_TIMEOUT_SECONDS = 5
 # The server is on this host: a proxy from the environment must never answer for it.
 DIRECT = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 UNRECORDED = "unrecorded change"
+RELOAD_PREFIX = "launchd plist changed: "
 
 
 def read_reasons(marker):
@@ -73,16 +76,18 @@ def classify(url):
     return f"server state unknown: status {status} with an unexpected body"
 
 
-def restart(restart_bin, marker, reasons):
-    returncode = subprocess.run([restart_bin]).returncode
+def restart(restart_bin, reload_bin, marker, reasons):
+    reloading = any(reason.startswith(RELOAD_PREFIX) for reason in reasons)
+    verb, done = ("reload", "reloaded its launchd job") if reloading else ("restart", "restarted")
+    returncode = subprocess.run([reload_bin if reloading else restart_bin]).returncode
     if returncode != 0:
         print(
-            f"oMLX: restart failed (exit {returncode}); .restart-needed retained for the next activation",
+            f"oMLX: {verb} failed (exit {returncode}); .restart-needed retained for the next activation",
             file=sys.stderr,
         )
         return 1
     marker.unlink(missing_ok=True)
-    print(f"oMLX: restarted for: {'; '.join(reasons)}", file=sys.stderr)
+    print(f"oMLX: {done} for: {'; '.join(reasons)}", file=sys.stderr)
     return 0
 
 
@@ -90,6 +95,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--state-dir", type=Path, required=True)
     parser.add_argument("--restart-bin", required=True)
+    parser.add_argument("--reload-bin", required=True)
     parser.add_argument("--health-url", default="http://127.0.0.1:8000/health")
     parser.add_argument("--now", action="store_true", help="restart without reading /health")
     args = parser.parse_args(argv)
@@ -100,7 +106,7 @@ def main(argv=None):
     reasons = read_reasons(marker)
     why = None if args.now else classify(args.health_url)
     if why is None:
-        return restart(args.restart_bin, marker, reasons)
+        return restart(args.restart_bin, args.reload_bin, marker, reasons)
     print(
         f"oMLX: restart deferred ({why}); pending: {'; '.join(reasons)}. "
         "Apply it with omlx-restart --now when the server may drop its requests.",

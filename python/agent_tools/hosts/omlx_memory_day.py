@@ -14,10 +14,10 @@ most runs holding at one instant within that local day. A loaded day has `sample
 
 Full days are taken in order and the first decision wins. A day with `jetsam_exits > 0` is not met
 (`jetsam`); then `over_budget` (`over_budget`); then a `min_loaded_available_gib` that is not null
-and under `floor_gib` (`floor`); then an `omlx_jetsam_priority` that is not null and differs from
+and under `floor_gib` (`floor`); then an `omlx_jetsam_priority` that is not null and is below
 `declared_jetsam_priority` (`jetsam_priority`); each prints `{"verdict": "not_met", "day",
 "reason"}`. Otherwise the first loaded day with a `peak_others_gib`, an `omlx_jetsam_priority`
-equal to the declared one, `peak_verify_runs >= 2` and `peak_ci_jobs >= 1` is met, with the
+at least the declared one, `peak_verify_runs >= 2` and `peak_ci_jobs >= 1` is met, with the
 figures `day`, `peak_others_gib`, `others_budget_gib`, `loaded_samples`, `samples`,
 `peak_verify_runs`, `peak_ci_jobs` and `omlx_jetsam_priority`; none is `{"verdict": "not_yet",
 "full_days": n}`.
@@ -73,7 +73,7 @@ def _not_met(line: dict) -> str | None:
         return "over_budget"
     if minimum is not None and minimum < floor:
         return "floor"
-    if priority is not None and priority != line["declared_jetsam_priority"]:
+    if priority is not None and priority < line["declared_jetsam_priority"]:
         return "jetsam_priority"
     return None
 
@@ -88,7 +88,8 @@ def decide_day(since: str, lines: list[dict], runs: list[dict]) -> tuple[int, di
     for line in days:
         peak_runs = peak_overlap(runs, line["day"])
         if (_loaded(line) and line["peak_others_gib"] is not None
-                and line["omlx_jetsam_priority"] == line["declared_jetsam_priority"]
+                and line["omlx_jetsam_priority"] is not None
+                and line["omlx_jetsam_priority"] >= line["declared_jetsam_priority"]
                 and peak_runs >= PEAK_RUNS and line["peak_ci_jobs"] >= PEAK_CI_JOBS):
             return MET, {
                 "verdict": "met", "day": line["day"], "peak_others_gib": line["peak_others_gib"],

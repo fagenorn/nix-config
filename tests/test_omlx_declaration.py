@@ -68,3 +68,17 @@ class OmlxDeclarationTest(unittest.TestCase):
         for forbidden in ("pkill", "kill", "launchctl", "kickstart"):
             with self.subTest(forbidden=forbidden):
                 self.assertNotIn(forbidden, gate)
+
+    def test_a_restart_reloads_the_omlx_job_as_root_only_through_the_wrapper(self):
+        self.assertEqual(
+            self.got["reload"].splitlines(),
+            [
+                "/usr/bin/sudo -n /bin/launchctl unload /Library/LaunchDaemons/org.nixos.omlx.plist || true",
+                "/usr/bin/sudo -n /bin/launchctl load -w /Library/LaunchDaemons/org.nixos.omlx.plist || exit",
+                "exec /usr/bin/sudo -n /bin/rm -f /nix/var/nix/gcroots/omlx-held-serve",
+            ],
+        )
+        for forbidden in ("pkill", "kickstart"):
+            self.assertNotIn(forbidden, self.got["reload"])
+        self.assertRegex(self.got["restart"], r"--reload-bin /nix/store/[0-9a-z]{32}-omlx-reload")
+        self.assertIn("--restart-bin /nix/store/", self.got["restart"])
