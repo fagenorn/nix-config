@@ -2,8 +2,9 @@
 
 The console drafts a schema-3 contract for such a project; its commit environment is the platform's
 `devenv shell --`, never an authored member. These cases plan the draft, put the registration row's
-words on it, and apply it with a fake `devenv` on `PATH`, so the registration's claim (the row names
-the dev shell and Apply installs the hooks) is held to what the adoption commit does.
+words on it, and apply it with a fake `devenv` and a never-run stand-in for each platform review command
+on `PATH`, so the capability gate resolves on a host without the review tool and the registration's claim
+(the row names the dev shell and Apply installs the hooks) is held to what the adoption commit does.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ from pathlib import Path
 from unittest import mock
 
 from agent_tools.console import approve, contract_draft, register
+from agent_tools.project_contract import agent_platform
 
 from .test_adopt_apply import ApplyTestCase
 from .test_adopt_conformance_apply import DEFAULT_PROTECTION, stub_forge
@@ -35,6 +37,7 @@ TIER = "integration"  # git sandboxes, spawned sh and git
 
 FAKE_DEVENV = ('#!/bin/sh\n[ "$1" = shell ] && [ "$2" = -- ] || '
                '{ echo "fake devenv: unexpected arguments" >&2; exit 64; }\nshift 2\n' + INSTALLER_SCRIPT)
+FAKE_REVIEW = '#!/bin/sh\necho "fake review command: resolved by the capability gate, never run" >&2\nexit 64\n'
 SIGNER = ("#!/bin/sh\ncat >/dev/null\n"
           "printf '\\n[GNUPG:] SIG_CREATED D 1 8 00 1700000000 X\\n' >&2\n"
           "printf -- '-----BEGIN PGP SIGNATURE-----\\n\\nx\\n-----END PGP SIGNATURE-----\\n'\n")
@@ -62,6 +65,10 @@ class DraftedHookInstallTest(ApplyTestCase):
         devenv = Path(bin_dir) / "devenv"
         devenv.write_text(FAKE_DEVENV, encoding="utf-8")
         devenv.chmod(0o755)
+        for name in {command["argv"][0] for command in agent_platform.PLATFORM_COMMANDS.values()}:
+            review = Path(bin_dir) / name
+            review.write_text(FAKE_REVIEW, encoding="utf-8")
+            review.chmod(0o755)
         self.signer = directory / "signer"
         self.signer.write_text(SIGNER, encoding="utf-8")
         self.signer.chmod(0o755)
