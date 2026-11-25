@@ -176,10 +176,10 @@
       "support": "supported"
     },
     "review.plan": {
-      "support": "unsupported"
+      "support": "supported"
     },
     "review.code": {
-      "support": "unsupported"
+      "support": "supported"
     }
   },
   "projections": [
