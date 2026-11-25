@@ -63,7 +63,7 @@ TEXT_LIMIT: int = 1 << 20
 DECLARATION = re.compile(
     r"(?<![\w.'\"-])(?:config\s*\.\s*)?(?:git-hooks|pre-commit)\s*[.=]")
 TOKEN = re.compile(
-    rf"(?P<decl>{DECLARATION.pattern})|(?P<kw>(?<![\w.'\"-])(?:let|in)(?![\w'-]))"
+    rf"(?P<decl>{DECLARATION.pattern})|(?P<kw>(?<![\w.'\"-])(?:let|in|inherit)(?![\w'-]))"
     r"|(?P<open>[({\[])|(?P<close>[)}\]])")
 SEGMENT = re.compile(r"\s*([\w'-]+|\"_*\")")
 DOT = re.compile(r"\s*\.")
@@ -71,6 +71,7 @@ NONBLANK = re.compile(r"\s*\S")
 EQUALS = re.compile(r"\s*=(?!=)")
 OPENERS, CLOSERS = "({[", ")}]"
 HOOKS_PATH = "core.hooksPath"
+ROOTS = ("git-hooks", "pre-commit")
 
 
 def installed(hooks_dir: Path) -> list[str]:
@@ -224,19 +225,25 @@ def _active(leaves: list[tuple[list[str], str]]) -> bool:
     return not all(groups.values())
 
 
-def _declarations(text: str) -> list[tuple[int, bool]]:
-    """Each `DECLARATION` start in `text` and whether a `let` binds it (a local, not an option)."""
+def _events(text: str) -> list[tuple[int, str, bool]]:
+    """Each `DECLARATION` and `inherit` start in `text`, with one flag.
+
+    A declaration's flag is whether a `let` binds it (a local, not an option); an
+    `inherit`'s is whether it sits among a `let`'s bindings (a local) and not in an attribute set.
+    """
     frames: list[str] = []
-    found: list[tuple[int, bool]] = []
+    found: list[tuple[int, str, bool]] = []
     for token in TOKEN.finditer(text):
-        kind = token.lastgroup
+        kind, word = token.lastgroup, token.group()
+        in_let = bool(frames) and frames[-1] == "let"
         if kind == "decl":
             before = text[:token.start()].rstrip()
-            binds = bool(frames) and frames[-1] == "let" and before.endswith((";", "let"))
-            found.append((token.start(), binds))
-        elif kind == "open" or (kind == "kw" and token.group() == "let"):
+            found.append((token.start(), "decl", in_let and before.endswith((";", "let"))))
+        elif kind == "kw" and word == "inherit":
+            found.append((token.start(), "inherit", in_let))
+        elif kind == "open" or (kind == "kw" and word == "let"):
             frames.append("let" if kind == "kw" else "bracket")
-        elif kind == "kw" and frames and frames[-1] == "let":
+        elif kind == "kw" and in_let:
             frames.pop()
         elif kind == "close":
             while frames and frames.pop() != "bracket":
@@ -244,30 +251,53 @@ def _declarations(text: str) -> list[tuple[int, bool]]:
     return found
 
 
+def _inherited(text: str, start: int) -> list[tuple[str, bool]]:
+    """The hook roots an `inherit` at `start` names, each with whether it takes them `(from a source)`."""
+    pos = start + len("inherit")
+    body = text[pos:_value_end(text, pos)].strip()
+    sourced = body.startswith("(")
+    if sourced:
+        depth = 0
+        for i, char in enumerate(body):
+            depth += char == "("
+            depth -= char == ")"
+            if depth == 0:
+                body = body[i + 1:]
+                break
+    return [(name, sourced) for name in re.findall(r"[\w'-]+", body) if name in ROOTS]
+
+
 def declares_hooks(text: str) -> bool:
     """Whether a `devenv.nix` text sets devenv git hooks, wherever the setting sits in a line.
 
     Comments and string literals are skipped, and so is a hook that is only switched off
-    (`enable = false`, in dotted or nested form, with its other settings), a `let` binding
-    that is not an attribute set, any read of one, and a `config.` read that assigns nothing.
+    (`enable = false`, in dotted or nested form, with its other settings), any read of a hook
+    name that assigns nothing (`pre-commit.out`, `config.git-hooks.package`), and a `let` binding
+    of one (a package alias, an `inherit` from a package set). A `let`-bound hook set counts
+    only when an attribute set `inherit`s it, in dotted, nested or imported form alike; an
+    `inherit` that takes it from a source or from nothing local counts as setting it.
     """
     text = _code(text)
-    found = _declarations(text)
-    bound = {_path(text, start)[0][0] for start, binds in found if binds}
     leaves: list[tuple[list[str], str]] = []
-    for start, binds in found:
+    local: dict[str, list[tuple[list[str], str]]] = {}
+    exported: list[tuple[str, bool]] = []
+    for start, kind, in_let in _events(text):
+        if kind == "inherit":
+            if not in_let:
+                exported.extend(_inherited(text, start))
+            continue
         names, after = _path(text, start)
         prefixed = len(names) > 1 and names[0] == "config"
         equals = EQUALS.match(text, after)
         if not equals:
-            if prefixed or names[0] in bound:
-                continue
-            return True
+            if not prefixed and text[:after].rstrip().endswith("."):
+                return True  # a path this reader cannot finish may still set a hook
+            continue
         names = names[1:] if prefixed else names
         value = text[equals.end():_value_end(text, equals.end())].strip()
-        if binds and _attribute_set(value) is None:
-            continue
-        _leaves(names, value, leaves)
+        _leaves(names, value, local.setdefault(names[0], []) if in_let else leaves)
+    for name, sourced in exported:
+        leaves.extend(([] if sourced else local.get(name)) or [([name], "inherited")])
     return _active(leaves)
 
 
