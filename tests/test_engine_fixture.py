@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-import ast
+import os
 import subprocess
+import sys
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -156,13 +157,16 @@ class AdoptedFixturesTest(unittest.TestCase):
 
 
 class EntryPointTest(unittest.TestCase):
-    def test_the_direct_run_entry_point_follows_every_test_class(self):
-        tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+    def test_running_the_file_directly_runs_a_test_defined_near_its_end(self):
+        root = Path(__file__).resolve().parents[1]
+        env = {**os.environ, "PYTHONPATH": os.pathsep.join([str(root / "python"), str(root)])}
+        target = "AdoptedFixturesTest.test_closing_the_fixtures_leaves_no_copy_behind"
 
-        last = tree.body[-1]
+        done = subprocess.run([sys.executable, __file__, target], cwd=root, env=env,
+                              capture_output=True, text=True, timeout=600)
 
-        self.assertIsInstance(last, ast.If)
-        self.assertEqual(ast.unparse(last.test), "__name__ == '__main__'")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("Ran 1 test", done.stderr)
 
 
 if __name__ == "__main__":
