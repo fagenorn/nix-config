@@ -53,7 +53,10 @@ class GuardFleetWorld(GuardPolicyWorld):
     def __init__(self, test_case, template: Path):
         super().__init__(test_case)
         for name in REPOSITORIES:
-            shutil.copytree(template / name, self.tmp / name, symlinks=True)
+            # `copy` keeps the file modes git tracks and skips the per-file timestamp and attribute
+            # copying of `copy2`, which dominated the copy; the refresh below re-reads the index.
+            shutil.copytree(template / name, self.tmp / name, symlinks=True,
+                            copy_function=shutil.copy)
         bare = self.tmp / "candidate-origin.git"
         self.clone = self.tmp / "candidate-clone"
         for working in (self.tmp / "candidate-pusher", self.clone):
