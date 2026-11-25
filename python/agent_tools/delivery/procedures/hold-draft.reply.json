@@ -1,0 +1,1 @@
+{"type": "object", "properties": {"verdict": {"enum": ["drafted", "blocked"]}, "written": {"type": "array", "items": {"type": "object", "properties": {"ac": {"type": "string"}, "check": {"type": "string"}}, "required": ["ac", "check"], "additionalProperties": false}}, "detail": {"type": "string"}}, "required": ["verdict", "written", "detail"], "additionalProperties": false}
