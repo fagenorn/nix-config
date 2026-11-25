@@ -107,13 +107,10 @@ def payloads(log: Path) -> list[dict]:
 
 @contextlib.contextmanager
 def interrupt_main_when(ready, patience: float = 20):
-    """Send SIGINT to the calling thread once `ready()` returns something truthy.
+    """Send SIGINT to the calling thread once ready() is truthy, and yield what it returned.
 
-    Yields a list that holds what `ready()` returned when readiness succeeded and
-    stays empty when it did not: past `patience` seconds the interrupt is sent
-    anyway so the tested call cannot hang, and the test then fails on the empty
-    list. The watcher is cancelled and joined when the block exits, so an early
-    return of the tested call can never interrupt a later test.
+    The list stays empty when readiness failed: past patience the interrupt is sent anyway
+    so the call cannot hang. The watcher is joined on exit, so it never outlives its test.
     """
     main = threading.get_ident()
     cancelled = threading.Event()
