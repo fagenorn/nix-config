@@ -6,11 +6,16 @@ standards README names one prefix per layer file) and criterion 2 (every
 project rule is a heading with a `P` id, none a numbered list item).
 """
 
+import ast
 import collections
+import os
 import re
+import tempfile
+import threading
 import unittest
 from pathlib import Path
 
+from agent_tools.delivery import citation_lint, look_marker, rule_ids, rule_reader
 from agent_tools.delivery.context_map_lint import MAP_BUDGET, TERM_DEF_RE, section, table_rows
 from agent_tools.delivery.rule_ids import (
     layer_problems, numbered_items, prefix_table, rule_headings, sections)
@@ -316,6 +321,92 @@ class LiveStandardsTest(unittest.TestCase):
             for clause in clauses:
                 with self.subTest(rule=name, clause=clause):
                     self.assertIn(clause, rules[name])
+
+
+class RuleReaderTest(unittest.TestCase):
+    BAR_TEXT = "# Bar\n\n### B1. One\n\nbody\n\n### P5. Misplaced\n\nbody\n\n```\n### B9. Fenced\n```\n"
+    STACK_TEXT = "# Py\n\n### PY3. Three\n\nbody\n"
+    SHARD_TEXT = "# A\n\n### P2. Two\n\nbody\n\n### B4. Misplaced\n\nbody\n"
+    README_TEXT = "# Readme\n\n### P7. Index\n\nbody\n"
+
+    def layers(self, bar=True, shard=True):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        platform, project = Path(tmp.name) / "platform", Path(tmp.name) / "project"
+        (platform / "stacks").mkdir(parents=True)
+        project.mkdir()
+        if bar:
+            (platform / "the-bar.md").write_text(self.BAR_TEXT, "utf-8")
+        (platform / "stacks/python.md").write_text(self.STACK_TEXT, "utf-8")
+        if shard:
+            (project / "a.md").write_text(self.SHARD_TEXT, "utf-8")
+            (project / "README.md").write_text(self.README_TEXT, "utf-8")
+        return platform, project
+
+    def test_known_ids_are_the_platform_ids_and_the_project_p_ids(self):
+        platform, project = self.layers()
+        self.assertEqual(rule_reader.known_ids(platform, project), frozenset({"B1", "PY3", "P2"}))
+
+    def test_a_missing_or_unreadable_layer_adds_no_id(self):
+        platform, project = self.layers(bar=False)
+        self.assertEqual(rule_reader.known_ids(platform, project), frozenset({"P2"}))
+        platform, project = self.layers()
+        self.assertEqual(
+            rule_reader.known_ids(platform, project / "absent"), frozenset({"B1", "PY3"}))
+        self.assertEqual(rule_reader.known_ids(platform / "absent", project / "absent"), frozenset())
+        (platform / "the-bar.md").write_bytes(b"\xff\xfe### B1. x\n")
+        self.assertEqual(rule_reader.known_ids(platform, project), frozenset({"P2"}))
+
+    def test_a_heading_with_a_second_id_defines_no_id(self):
+        platform, project = self.layers()
+        (project / "b.md").write_text("# B\n\n### P98. P99. Example\n\nbody\n\n### P97. Fine\n", "utf-8")
+
+        self.assertEqual(rule_reader.known_ids(platform, project), frozenset({"B1", "PY3", "P2", "P97"}))
+
+    def test_only_a_regular_file_is_read_as_a_shard(self):
+        platform, project = self.layers()
+        os.mkfifo(project / "pipe.md")
+        os.mkfifo(platform / "stacks/pipe.md")
+        (project / "dir.md").mkdir()
+        found = []
+        reader = threading.Thread(
+            target=lambda: found.append(rule_reader.known_ids(platform, project)), daemon=True)
+
+        reader.start()
+        reader.join(5)
+
+        self.assertFalse(reader.is_alive(), "known_ids blocked on a pipe")
+        self.assertEqual(found, [frozenset({"B1", "PY3", "P2"})])
+
+    def test_the_reader_imports_nothing_from_the_package(self):
+        tree = ast.parse((REPO_ROOT / "python/agent_tools/delivery/rule_reader.py").read_text("utf-8"))
+        names = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                names |= {alias.name for alias in node.names}
+            elif isinstance(node, ast.ImportFrom):
+                self.assertEqual(node.level, 0)
+                names.add(node.module)
+        self.assertLessEqual(names, {"__future__", "re", "typing", "pathlib"})
+
+    def test_the_scan_the_fence_and_the_layer_readers_have_one_home(self):
+        self.assertIs(rule_ids.scan, rule_reader.scan)
+        self.assertIs(rule_ids.rule_match, rule_reader.rule_match)
+        self.assertIs(rule_ids.SECOND_ID, rule_reader.SECOND_ID)
+        self.assertIs(look_marker.FENCE_OPEN, rule_reader.FENCE_OPEN)
+        # re caches equal patterns, so identity alone cannot tell a copy from the import
+        tree = ast.parse((REPO_ROOT / "python/agent_tools/delivery/look_marker.py").read_text("utf-8"))
+        assigned = {t.id for n in tree.body if isinstance(n, ast.Assign) for t in n.targets
+                    if isinstance(t, ast.Name)}
+        self.assertNotIn("FENCE_OPEN", assigned)
+        self.assertIs(citation_lint.platform_rules, rule_reader.platform_rules)
+        self.assertIs(citation_lint.project_rules, rule_reader.project_rules)
+        self.assertIs(citation_lint.Rule, rule_reader.Rule)
+
+    def test_the_shipped_layers_have_known_ids(self):
+        ids = rule_reader.known_ids(GLOBAL, PROJECT)
+        self.assertLessEqual({"B1", "P15"}, ids)
+        self.assertEqual({i for i in ids if rule_reader.prefix_of(i) == "R"}, set())
 
 
 class GlossaryTest(unittest.TestCase):

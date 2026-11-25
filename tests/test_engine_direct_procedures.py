@@ -11,7 +11,7 @@ from tests.test_engine_check import PROCEDURES, SHIPPED_INPUTS, UNNAMED, load, s
 TIER = "fast"
 
 SHA = "a" * 40
-NAMED = [{"severity": "important", "file": "a.py:1", "failing_input": "f('')", "summary": "s"}]
+NAMED = [{"severity": "important", "file": "a.py:1", "failing_input": "f('')", "summary": "s", "kind": "other"}]
 GRADING = [{"id": "AC1", "met": True, "evidence": "test_x"}]
 PREFLIGHT = {"branch": "b", "worktree_path": "/w", "integration_branch": "main", "issue_text": "t"}
 IMPLEMENTED = {"status": "done", "start_head": SHA, "commit": SHA, "notes": "n", "tests": [],
@@ -105,7 +105,7 @@ class DirectProcedureTest(unittest.TestCase):
     def test_an_unusable_escalated_or_re_review_reply_is_asked_once_more(self):
         unnamed = UNNAMED["findings"]
         escalate = {**lite_review("pass", []), "escalate": True}
-        fix = {"status": "done", "start_head": SHA, "commit": "b" * 40, "notes": "n", "tests": []}
+        fix = {"status": "done", "start_head": SHA, "commit": "b" * 40, "notes": "n", "tests": [], "declines": []}
         unusable = lite_review("pass", unnamed)
         routes = {
             "escalated": to_the_lite_group() + lite_round(escalate) + reported("escalated", "pass", unusable),
@@ -123,7 +123,7 @@ class DirectProcedureTest(unittest.TestCase):
                 self.assertEqual((type(twice.action), twice.action.name), (Stop, "direct-review"))
 
     def test_a_fix_with_no_commit_stops_direct_fix(self):
-        fix = {"status": "done", "start_head": SHA, "commit": "", "notes": "n", "tests": []}
+        fix = {"status": "done", "start_head": SHA, "commit": "", "notes": "n", "tests": [], "declines": []}
         done = replayed(to_the_lite_group() + lite_round(lite_review("findings", NAMED))
                         + reported("lite-fix", "done", fix))
         self.assertIsInstance(done.action, Stop)
