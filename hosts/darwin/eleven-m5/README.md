@@ -76,7 +76,7 @@ are not changed. A budget is a reasoning-token bound, not a latency guarantee.
 
 ## Memory budget
 
-The host has 256 GiB. oMLX is held to a fixed ceiling, 16 GiB is kept back as a
+The host has 256 GiB. oMLX is held to a fixed ceiling, 10 GiB is kept back as a
 floor, and everything else (the Colima VM, verification runs, CI jobs and macOS)
 must fit in what is left. `memory-budget.nix` declares every number below, and
 oMLX, Colima and the watcher read theirs from it. `tests/test_memory_budget.py`
@@ -84,10 +84,11 @@ fails when the allowances no longer sum to at most the others budget, so a
 number changed in one place cannot drift from the rest.
 
 The budget is `totalGiB` - `omlxCeilingGiB` - `omlxOverCeilingGiB` - `floorGiB`
-= 256 - 192 - 2 - 16 = 46 GiB for everything but the model. The allowances add
-up to 8 + 1 + 2 x 4 + 4 x 3 + 12 + 5 = 46 GiB, so nothing is unallocated. The
+= 256 - 192 - 2 - 10 = 52 GiB for everything but the model. The allowances add
+up to 8 + 1 + 2 x 4 + 4 x 3 + 12 + 5 = 46 GiB, so 6 GiB are unallocated (the 6 GiB the
+floor gave up, see "Why the floor is 10 GiB"). The
 5 GiB for the agent's Claude sessions had to come from somewhere, and
-`verifyRunGiB` went from 6 to 4 to pay for it. The 46 GiB others budget is the
+`verifyRunGiB` went from 6 to 4 to pay for it. The 52 GiB others budget is the
 owner's capacity number: whether it holds is a question for the lead.
 
 | Name | Value | What it bounds | Source |
@@ -104,20 +105,46 @@ owner's capacity number: whether it holds is a question for the lead.
 | `ciJobGiB` | 3 | One CI job's memory (provisional). | Estimate; `peak_others_gib` in the day line tests it. |
 | `macosGiB` | 12 | What macOS and its daemons take, fseventsd included (provisional). | Estimate; `peak_others_gib` in the day line tests it. |
 | `fseventsdLimitGiB` | 4 | fseventsd's share inside `macosGiB`, enforced by `fseventsd-trim`. | See "What makes fseventsd grow". |
-| `floorGiB` | 16 | Memory held back from every other use; a loaded sample with less available raises `low_memory`. | The owner's choice. |
+| `floorGiB` | 10 | Memory held back from every other use; a loaded sample with less available raises `low_memory`. | The owner's choice of 25 Nov, the lead's recommendation; see "Why the floor is 10 GiB". |
 | `floorSamples` | 3 | Consecutive samples under `floorGiB` before `memory-floor` ends a workload. | The owner's choice. |
 | `floorGraceSeconds` | 5 | How long a workload has to exit on SIGTERM before SIGKILL. | The owner's choice. |
 | `floorMarginGiB` | 16 | How far above `floorGiB` `memory-floor` samples at the fast interval. | The owner's choice. |
 | `floorFallGiB` | 2 | A fall in available memory between two samples that also earns the fast interval. | The owner's choice. |
+| `floorMinTreeGiB` | 1 | The smallest workload `memory-floor` ends under the floor; a smaller tree frees too little to matter. | The owner's choice; on 25 Nov the floor ended 47 trees of 0.0 to 0.1 GiB that freed nothing. |
 | `fastSampleSeconds` | 2 | `memory-floor`'s sampling interval near the floor or while memory falls, and the relaunch gate's polling interval. | The owner's choice. |
 | `slowSampleSeconds` | 10 | `memory-floor`'s sampling interval otherwise. | The owner's choice. |
 | `runBoundGiB` | 24 | The footprint over which one workload is ended whatever memory is free: over `verifyRunGiB` and `ciJobGiB`, at most `othersBudgetGiB`. | Leaves a verification run or CI job its allowance several times over, and stops one workload from taking the whole others budget. |
-| `othersBudgetGiB` | 46 | What the model and the floor leave for the rows above. | Computed: `totalGiB` - `omlxCeilingGiB` - `omlxOverCeilingGiB` - `floorGiB`. |
+| `othersBudgetGiB` | 52 | What the model and the floor leave for the rows above. | Computed: `totalGiB` - `omlxCeilingGiB` - `omlxOverCeilingGiB` - `floorGiB`. |
 | `omlxJetsamPriority` | 190 | oMLX's jetsam priority; the kernel ends the lowest band first. 180 is its default band (`JETSAM_PRIORITY_DEFAULT`), where unmanaged processes such as the agents' test workers run. `memory-floor` raises the running pid to 190 and never lowers a higher value. | The xnu `kern_memorystatus.h` and `kern_memorystatus.c` sources linked in "The memory floor", and the 24 Nov `jetsam_priority ... from=180` line of `/var/log/memory-floor.log`. |
 | `fseventsdRestartMinutes` | 60 | The shortest time between two `fseventsd-trim` restarts. | See "What makes fseventsd grow". |
 
 `verifyRunGiB`, `ciJobGiB` and `macosGiB` are provisional: nobody has measured
 them. The day line shows whether they hold.
+
+### Why the floor is 10 GiB
+
+The pinned model holds 175 of the host's 256 GiB, so an idle host has about 21 GiB
+available. A 16 GiB floor left 5 GiB for every test, lint and CI run of the three
+projects that share the host, and on 25 Nov it ended 47 workloads between 05:45 and
+07:20 UTC. On 25 Nov the owner chose 10 GiB, the lead's recommendation, which leaves
+about 11 GiB above the floor on an idle host.
+
+The floor exists to act before the kernel's compressor fills and the watchdog
+panics the host, as it did on 24 Nov. The fastest fall in available memory seen so far is about 39 GiB in one minute,
+0.65 GiB a second, an average over that minute; a shorter burst can fall faster. At
+its fast interval, `memory-floor` nominally needs about 11 s from the first sample
+under the floor to SIGKILL: three samples 2 s apart (`floorSamples` x
+`fastSampleSeconds`, 6 s) and a 5 s SIGTERM grace (`floorGraceSeconds`). That is
+about 7 GiB at the fastest one-minute rate, so for a steady decline with an eligible
+workload a 10 GiB floor leaves an estimated 3 GiB of margin where 16 GiB left 9.
+
+The margin is an estimate, not a guarantee. A burst that drains more than 7 GiB in
+under 11 s outruns it, and so does a fall with no eligible workload, one of at least
+`floorMinTreeGiB` that frees enough to matter. The daemon also sleeps after each
+sample, and it scans processes after each sample, so a scan slow under load adds to
+the 11 s; peak sub-minute drain and scan latency under load are unmeasured. If a
+fall is ever seen that is faster than 39 GiB in one minute, or the reaction time
+grows, raise the floor again in `memory-budget.nix`.
 
 ### How the numbers were measured
 
@@ -181,13 +208,19 @@ started, and each service process the host runs for the system.
 It samples available memory every `fastSampleSeconds` when it is under
 `floorGiB` + `floorMarginGiB`, or fell by `floorFallGiB` since the last sample,
 or is under the floor; otherwise every `slowSampleSeconds`. After
-`floorSamples` samples in a row under the floor it ends the largest workload.
+`floorSamples` samples in a row under the floor it ends the largest workload, but
+only one that can help: a workload under `floorMinTreeGiB`, or one whose
+footprint added to available memory still leaves memory under the floor, is
+never ended.
 It signals the workload's processes with SIGTERM, deepest in the process tree
 first (leaves first), waits `floorGraceSeconds`, and sends SIGKILL to what is
 left, then reads memory again. If memory is still under the floor, it ends the
 next largest. A workload over
-`runBoundGiB` is ended at once, whatever memory is free. With no workload left
-to end, it logs `floor_breached no agent workload to end` once per episode.
+`runBoundGiB` is ended at once, whatever memory is free. When no workload
+it may end would bring memory over the floor, it ends nothing and logs one
+`floor_unmet available_gib=<n> largest_gib=<n>` line per episode (`largest_gib` is the largest
+candidate, 0.0 with none), keeps it in its record, and the sampler sends one `floor_unmet`
+alert. It logs again only when memory has been over the floor and a new episode starts.
 
 Each kill is one line:
 
@@ -253,7 +286,7 @@ the error is logged in `~/.omlx/logs/memory-watch.log`, and the watcher exits 3
 on every sample until the alert is sent. With `enabled` false, alerts are
 recorded in the alerts log only.
 
-There are seven kinds:
+There are eight kinds:
 
 - `jetsam`: the kernel's memory killer ended oMLX.
 - `low_memory`: available memory fell under `floorGiB` while a model was loaded
@@ -264,6 +297,8 @@ There are seven kinds:
 - `fseventsd_restart_failed`: the restart's kill failed, so fseventsd stays over
   its limit (once per episode).
 - `memory_kill`: `memory-floor` ended an agent or CI workload; one alert per kill.
+- `floor_unmet`: memory stayed under `floorGiB` and `memory-floor` had no
+  workload it may end that would bring it over (once per episode).
 - `jetsam_priority_unset`: `memory-floor` could not set oMLX's kernel jetsam
   priority, or the value did not hold after a set (once per episode).
 
