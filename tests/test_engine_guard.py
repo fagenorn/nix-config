@@ -14,7 +14,6 @@ import signal
 import subprocess
 import sys
 import tempfile
-import threading
 import time
 import unittest
 from pathlib import Path
@@ -22,7 +21,8 @@ from unittest import mock
 
 from agent_tools.delivery.engine_guard import (
     Hook, Unavailable, Verdict, judge, locate, settings_path)
-from tests.engine_guards import REPO_ROOT, payloads, standin_guard, write_settings
+from tests.engine_guards import (
+    REPO_ROOT, interrupt_main_when, payloads, standin_guard, write_settings)
 
 TIER = "fast"
 
@@ -172,20 +172,13 @@ class JudgeTest(unittest.TestCase):
 
     def test_an_interrupted_guard_is_killed_with_its_group_before_the_interrupt_propagates(self):
         hook = self.hook("sleep", str(self.d / "pids"), timeout=60)
-        main = threading.get_ident()
 
-        def interrupt_when_started():
-            deadline = time.monotonic() + 20
-            while time.monotonic() < deadline:
-                try:
-                    if len(self.pids()) == 2:
-                        break
-                except (FileNotFoundError, ValueError):
-                    pass
-                time.sleep(0.05)
-            signal.pthread_kill(main, signal.SIGINT)
-
-        threading.Thread(target=interrupt_when_started, daemon=True).start()
+        def both_started():
+            try:
+                pids = self.pids()
+            except (FileNotFoundError, ValueError):
+                return None
+            return pids if len(pids) == 2 else None
 
         def kill_both():
             try:
@@ -195,9 +188,11 @@ class JudgeTest(unittest.TestCase):
                 pass
 
         self.addCleanup(kill_both)
-        with self.assertRaises(KeyboardInterrupt):
-            judge(hook, "true", str(self.d))
-        for pid in self.pids():
+        with interrupt_main_when(both_started) as started:
+            with self.assertRaises(KeyboardInterrupt):
+                judge(hook, "true", str(self.d))
+        self.assertEqual(len(started), 1, "the guard never wrote both process ids")
+        for pid in started[0]:
             gone(self, pid, "process")
 
     def test_a_guard_that_cannot_be_run_is_refused_with_its_path(self):
@@ -221,6 +216,27 @@ class JudgeTest(unittest.TestCase):
                               cwd=REPO_ROOT, env={**os.environ, "PYTHONPATH": "python"},
                               check=False)
         self.assertEqual((done.stdout, done.stderr, done.returncode), ("", "", 0))
+
+
+class InterruptMainWhenTest(unittest.TestCase):
+    def test_a_watcher_outlived_by_its_call_never_interrupts_afterwards(self):
+        with interrupt_main_when(lambda: None, patience=0.3) as seen:
+            pass
+        time.sleep(0.6)
+        self.assertEqual(seen, [])
+
+    def test_a_readiness_that_never_comes_still_interrupts_but_records_nothing(self):
+        with interrupt_main_when(lambda: None, patience=0.2) as seen:
+            with self.assertRaises(KeyboardInterrupt):
+                time.sleep(10)
+        self.assertEqual(seen, [])
+
+    def test_readiness_is_recorded_and_interrupts(self):
+        began = time.monotonic()
+        with interrupt_main_when(lambda: [1, 2] if time.monotonic() - began > 0.2 else None) as seen:
+            with self.assertRaises(KeyboardInterrupt):
+                time.sleep(10)
+        self.assertEqual(seen, [[1, 2]])
 
 
 class LocateTest(unittest.TestCase):

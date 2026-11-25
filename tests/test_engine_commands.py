@@ -16,7 +16,6 @@ import signal
 import subprocess
 import sys
 import tempfile
-import threading
 import time
 import unittest
 from pathlib import Path
@@ -30,7 +29,8 @@ from agent_tools.delivery.engine_guard import Hook, Unavailable, locate
 from agent_tools.delivery.procedure_check import load_commands
 from agent_tools.system.siblings import sibling_argv
 from tests.engine_guards import (
-    GUARD_NAME, STANDIN_GUARD, payloads, script, standin_guard, write_settings)
+    GUARD_NAME, STANDIN_GUARD, interrupt_main_when, payloads, script, standin_guard,
+    write_settings)
 
 TIER = "fast"
 
@@ -554,22 +554,19 @@ class GradeTest(unittest.TestCase):
         pidfile = os.path.join(self.tmp, "grandchild")
         entry = project("hold", pidfile, "0", cwd=self.tmp)
         pids: list[int] = []
-        main = threading.get_ident()
 
-        def interrupt_when_started():
-            deadline = time.monotonic() + 20
-            while time.monotonic() < deadline:
-                try:
-                    int(Path(pidfile).read_text())
-                    break
-                except (FileNotFoundError, ValueError):
-                    time.sleep(0.05)
-            signal.pthread_kill(main, signal.SIGINT)
+        def grandchild_started():
+            try:
+                return int(Path(pidfile).read_text())
+            except (FileNotFoundError, ValueError):
+                return None
 
-        threading.Thread(target=interrupt_when_started, daemon=True).start()
-        with self.assertRaises(KeyboardInterrupt):
-            run(table(hold=entry), "hold", None, (), guard=self.allow, on_start=pids.append, timeout=60)
-        grandchild = int(Path(pidfile).read_text())
+        with interrupt_main_when(grandchild_started) as started:
+            with self.assertRaises(KeyboardInterrupt):
+                run(table(hold=entry), "hold", None, (), guard=self.allow,
+                    on_start=pids.append, timeout=60)
+        self.assertEqual(len(started), 1, "the command never wrote its grandchild id")
+        grandchild = started[0]
         deadline = time.monotonic() + 5
         for pid in (pids[0], grandchild):
             while time.monotonic() < deadline:

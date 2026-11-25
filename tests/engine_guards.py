@@ -6,12 +6,16 @@ the generated wrapper's name, so `engine_guard.locate` accepts it.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shlex
 import shutil
+import signal
 import stat
 import sys
+import threading
+import time
 from pathlib import Path
 
 from tests.guard_policy_world import REAL_GIT
@@ -99,3 +103,38 @@ def payloads(log: Path) -> list[dict]:
     if not log.exists():
         return []
     return [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines() if line]
+
+
+@contextlib.contextmanager
+def interrupt_main_when(ready, patience: float = 20):
+    """Send SIGINT to the calling thread once `ready()` returns something truthy.
+
+    Yields a list that holds what `ready()` returned when readiness succeeded and
+    stays empty when it did not: past `patience` seconds the interrupt is sent
+    anyway so the tested call cannot hang, and the test then fails on the empty
+    list. The watcher is cancelled and joined when the block exits, so an early
+    return of the tested call can never interrupt a later test.
+    """
+    main = threading.get_ident()
+    cancelled = threading.Event()
+    seen: list = []
+
+    def watch() -> None:
+        deadline = time.monotonic() + patience
+        while time.monotonic() < deadline:
+            value = ready()
+            if value:
+                seen.append(value)
+                break
+            if cancelled.wait(0.05):
+                return
+        if not cancelled.is_set():
+            signal.pthread_kill(main, signal.SIGINT)
+
+    watcher = threading.Thread(target=watch, daemon=True)
+    watcher.start()
+    try:
+        yield seen
+    finally:
+        cancelled.set()
+        watcher.join()
