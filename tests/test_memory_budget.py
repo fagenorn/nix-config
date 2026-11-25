@@ -68,8 +68,8 @@ class MemoryBudgetTest(unittest.TestCase):
     def test_the_others_budget_is_what_the_model_and_floor_leave(self):
         b = self.budget
         self.assertEqual(b["othersBudgetGiB"], b["totalGiB"] - b["omlxCeilingGiB"] - b["omlxOverCeilingGiB"] - b["floorGiB"])
-        self.assertEqual(b["othersBudgetGiB"], 46)
-        self.assertEqual(b["floorGiB"], 16)
+        self.assertEqual(b["othersBudgetGiB"], 52)
+        self.assertEqual(b["floorGiB"], 10)
 
     def test_colima_starts_with_the_budgeted_memory(self):
         flags = self.got["colimaFlags"]
@@ -298,6 +298,19 @@ class GuideTest(unittest.TestCase):
         for needle in ("memory_kill", "floor_unmet", "jetsam_priority_unset"):
             with self.subTest(alert=needle):
                 self.assertIn(f"- `{needle}`:", self.alerts)
+
+    def test_the_guide_states_the_floor_with_the_fastest_fall_and_the_reaction_time(self):
+        floor = self.between(self.section, "### Why the floor is 10 GiB", "\n### ")
+        self.assertTrue(floor, "the guide has no `### Why the floor is 10 GiB` subsection")
+        for needle in (
+            "10 GiB", "39 GiB in one minute", "about 11 s", "three samples 2 s apart", "5 s SIGTERM grace",
+            "about 7 GiB", "24 Nov", "256 - 192 - 2 - 10 = 52 GiB",
+        ):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, floor + self.section)
+        self.assertIn("| `floorGiB` | 10 |", self.section)
+        self.assertIn("| `othersBudgetGiB` | 52 |", self.section)
+        self.assertNotIn("16 GiB is kept back", self.section)
 
     def test_the_guide_lists_the_new_daemons_among_restarts(self):
         self.assertTrue(self.restarts)

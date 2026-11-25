@@ -28,7 +28,7 @@ rec {
   # What the agent's Claude sessions take together (4.5 GiB at the 24 Nov panic).
   agentSessionsGiB = 5;
   # Memory held back from every other use.
-  floorGiB = 16;
+  floorGiB = 10;
   # Consecutive samples under the floor before the floor daemon ends a workload.
   floorSamples = 3;
   # Seconds a workload gets to exit on SIGTERM before SIGKILL.
