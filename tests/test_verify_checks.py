@@ -1,4 +1,5 @@
 """`agent_tools.verification.verify_checks`: the committed verify checks of issue 638."""
+import ast
 import contextlib
 import dataclasses
 import http.server
@@ -16,6 +17,7 @@ import tempfile
 import threading
 import time
 import unittest
+from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
@@ -46,6 +48,50 @@ def committed_mode(path):
                           capture_output=True, text=True, check=True).stdout.split(" ")[0]
 
 
+MODULE_RUN = re.compile(r"-m (agent_tools(?:\.[A-Za-z_]\w*)+)(?:[ \t]+([a-z][a-z0-9-]*))?")
+SUBCOMMAND = re.compile(r"[a-z][a-z0-9-]*")
+
+
+def launcher_table(nix_text: str) -> dict[str, str]:
+    return dict(re.findall(r'^\s*"([a-z0-9-]+)" = "([a-z_]+\.[a-z_0-9]+)";', nix_text, re.M))
+
+
+def _named_module(lines: list[str], launchers: Mapping[str, str]):
+    found = MODULE_RUN.search("\n".join(lines))
+    if found:
+        return found.group(1), found.group(2)
+    for line in lines:
+        tokens = line.split()
+        for index, token in enumerate(tokens):
+            if token in launchers:
+                after = tokens[index + 1] if index + 1 < len(tokens) else ""
+                return (f"agent_tools.{launchers[token]}",
+                        after if SUBCOMMAND.fullmatch(after) else None)
+    return None, None
+
+
+def script_problems(checks: Path, python_root: Path, launchers: Mapping[str, str]) -> list[str]:
+    problems = []
+    for script in sorted(path for path in checks.iterdir() if path.is_file()):
+        lines = [line for line in script.read_text().splitlines()
+                 if not line.lstrip().startswith("#")]
+        module, subcommand = _named_module(lines, launchers)
+        if module is None:
+            problems.append(f"{script.name}: no agent_tools module")
+            continue
+        source = python_root / (module.replace(".", "/") + ".py")
+        if not source.is_file():
+            problems.append(f"{script.name}: {module} has no source")
+            continue
+        if subcommand is None:
+            continue
+        constants = {node.value for node in ast.walk(ast.parse(source.read_text()))
+                     if isinstance(node, ast.Constant) and isinstance(node.value, str)}
+        if subcommand not in constants:
+            problems.append(f"{script.name}: {module} has no subcommand {subcommand}")
+    return problems
+
+
 KEPT_CHECKS = ("console-failed-start", "console-manager-merge", "console-notice-lists",
                "devenv-shell", "host-mentions", "host-prompts", "owner-services")
 DELETED_CHECKS = ("required-checks", "managed-pre-push-hook", "cutover-manifest",
@@ -71,6 +117,50 @@ class VerifyChecksSubcommandsTest(unittest.TestCase):
                     self.assertRaises(SystemExit) as raised:
                 verify_checks.main([name, "--help"])
             self.assertEqual(raised.exception.code, 2)
+
+
+class CheckScriptResolutionTest(unittest.TestCase):
+    LAUNCHERS = {"resolve-project": "project_contract.resolve_project"}
+
+    def problems(self, **scripts):
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, text in scripts.items():
+                path = Path(tmp) / name
+                path.write_text(text)
+                path.chmod(0o755)
+            return script_problems(Path(tmp), ROOT / "python", self.LAUNCHERS)
+
+    def test_a_script_naming_a_missing_subcommand_is_unresolved(self):
+        problems = self.problems(gone="#!/bin/sh\nPYTHONPATH=python exec python3 -m "
+                                      "agent_tools.verification.verify_checks no-such-check \"$@\"\n")
+        self.assertEqual(problems, [
+            "gone: agent_tools.verification.verify_checks has no subcommand no-such-check"])
+
+    def test_a_script_naming_a_missing_module_is_unresolved(self):
+        problems = self.problems(lost="#!/bin/sh\nPYTHONPATH=python exec python3 -m "
+                                      "agent_tools.verification.no_such_module \"$@\"\n")
+        self.assertEqual(problems, ["lost: agent_tools.verification.no_such_module has no source"])
+
+    def test_a_launcher_script_resolves_through_the_launcher_table(self):
+        problems = self.problems(
+            status='#!/bin/sh\nPATH="$HOME/.agents/bin:$PATH" exec resolve-project platform-status\n',
+            bad="#!/bin/sh\nexec resolve-project no-such-verb\n")
+        self.assertEqual(problems, [
+            "bad: agent_tools.project_contract.resolve_project has no subcommand no-such-verb"])
+
+    def test_a_script_running_no_module_is_unresolved(self):
+        problems = self.problems(
+            bare="#!/bin/sh\n# -m agent_tools.verification.verify_checks host-prompts\nexit 0\n")
+        self.assertEqual(problems, ["bare: no agent_tools module"])
+
+    def test_every_committed_check_script_resolves(self):
+        launchers = launcher_table((ROOT / "lib/agent-tools.nix").read_text())
+        self.assertEqual(script_problems(ROOT / CHECKS, ROOT / "python", launchers), [])
+
+    def test_the_launcher_table_reads_the_nix_rows(self):
+        self.assertEqual(
+            launcher_table('    "host-readiness" = "project_contract.host_readiness";\n'),
+            {"host-readiness": "project_contract.host_readiness"})
 
 
 def forge(gets, pages):
