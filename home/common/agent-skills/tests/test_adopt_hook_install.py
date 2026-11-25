@@ -293,7 +293,12 @@ class HookInstallRuleTest(unittest.TestCase):
                      "let pre-commit.hooks.x = { enable = true; }; in { config = { inherit pre-commit; }; }",
                      "{ pkgs, ... }: { inherit pkgs git-hooks; }",
                      "{ cfg, ... }: { inherit (cfg) git-hooks; }",
-                     "{ git-hooks.hooks.${name}.enable = true; }"):
+                     "{ git-hooks.hooks.${name}.enable = true; }",
+                     "{ cfg, ... }: rec { inherit (cfg) git-hooks; }",
+                     "{ cfg, lib, ... }: with lib; { inherit (cfg) git-hooks; }",
+                     "{ cfg, lib, ... }: { config = lib.mkIf true { inherit (cfg) git-hooks; }; }",
+                     "{ cfg, lib, ... }: lib.mkMerge [ { inherit (cfg) git-hooks; } ]",
+                     "{ cfg, lib, ... }: { config = lib.mkMerge [ { x = 1; } { inherit (cfg) pre-commit; } ]; }"):
             self.assertTrue(hook_install.declares_hooks(text), text)
         for text in ("# git-hooks.hooks.x", 'scripts.a.exec = "pre-commit run";', "{ }",
                      "{\n  git-hooks.hooks.shellcheck.enable = false;\n}",
@@ -313,6 +318,9 @@ class HookInstallRuleTest(unittest.TestCase):
                      "{ pkgs, ... }: { packages = builtins.attrValues { inherit (pkgs) jq pre-commit; }; }",
                      "let tools = { inherit (pkgs) pre-commit nixfmt; }; in { packages = builtins.attrValues tools; }",
                      "{ pkgs, ... }: { packages = with pkgs; builtins.attrValues { inherit pre-commit; }; }",
+                     "{ pkgs, ... }: { outputs = { inherit (pkgs) pre-commit; }; }",
+                     "{ pkgs, ... }: { env = { inherit (pkgs) pre-commit; }; }",
+                     "{ pkgs, ... }: { foo = x: { inherit (pkgs) pre-commit; }; }",
                      "let git-hooks = import ./h.nix { }; in { packages = [ git-hooks.package ]; }",
                      "{ git-hooks.hooks.check.enable = false; git-hooks.hooks.check.entry = \"true\"; }",
                      "{ git-hooks.hooks.check.entry = \"true\"; git-hooks.hooks.check.enable = false; }",

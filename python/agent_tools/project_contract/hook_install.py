@@ -69,6 +69,11 @@ SEGMENT = re.compile(r"\s*([\w'-]+|\"_*\")")
 DOT = re.compile(r"\s*\.")
 NONBLANK = re.compile(r"\s*\S")
 EQUALS = re.compile(r"\s*=(?!=)")
+KEYED = re.compile(r"((?:[\w'-]+|\"_*\")(?:\s*\.\s*(?:[\w'-]+|\"_*\"))*)\s*=(?!=)(.*)$", re.S)
+BODY_TAIL = re.compile(
+    r"(?<![\w.'-])(?:rec|in|then|else)$|//$|(?<![\w.'-])with\s[^;]*;$"
+    r"|(?<![\w.'-])(?:\w+\.)*(?:mk(?:If|Merge|Default|Force|Override|Before|After|Order|OptionDefault)"
+    r"|optionalAttrs)(?![\w'-])[^;{}]*$")
 OPENERS, CLOSERS = "({[", ")}]"
 HOOKS_PATH = "core.hooksPath"
 ROOTS = ("git-hooks", "pre-commit")
@@ -252,16 +257,47 @@ def _events(text: str) -> list[tuple[int, str, bool]]:
     return found
 
 
+def _lead(text: str, start: int) -> str:
+    """The text of the expression the bracket at `start` ends, back to the last `;`, `{`, `(` or `[`.
+
+    A `;` that ends a `with` is no boundary, and a bracketed group before `start` is kept whole.
+    """
+    depth = 0
+    for i in range(start - 1, -1, -1):
+        char = text[i]
+        if char in CLOSERS:
+            depth += 1
+        elif char in OPENERS:
+            if depth == 0:
+                return text[i + 1:start].strip()
+            depth -= 1
+        elif char == ";" and depth == 0:
+            window = text[text.rfind(";", 0, i) + 1:i]
+            if re.search(r"(?<![\w.'-])with\s[^;]*$", window) is None:
+                return text[i + 1:start].strip()
+    return text[:start].strip()
+
+
 def _frame(text: str, start: int, frames: list[str]) -> str:
     """The kind of the bracket at `start`: `option` for an attribute set the module itself yields.
 
-    That is a `{` met at the top or inside such a set, as a binding's value, a function's body, the
-    right side of `//` or a `let`'s body; any other bracket is `other`.
+    A set is one when it is the module body (the text's top, a `:` function body, after `rec`, `in`,
+    `with x;`, `//`, `then` or `else`, or an argument of `mkIf` and the like) or the value of a
+    top `config` binding, and sits in no data. A list or parenthesis there is a `wrap` the module
+    still reads through (`mkMerge [ ... ]`); any other bracket is `other`.
     """
-    before = text[:start].rstrip()
-    value = (not before or before.endswith(("=", ":", "//"))
-             or re.search(r"(?<![\w.'-])in$", before) is not None)
-    return "option" if text[start] == "{" and value and (not frames or frames[-1] == "option") else "other"
+    lead = _lead(text, start)
+    keyed = KEYED.match(lead)
+    if keyed:
+        expr = keyed.group(2).strip()
+        body = (keyed.group(1) == "config" and (not frames or frames[-1] == "option")
+                and (not expr or BODY_TAIL.search(expr) is not None))
+    elif frames:
+        body = frames[-1] == "wrap" and (not lead or lead.endswith(("}", "]", ")"))
+                                         or BODY_TAIL.search(lead) is not None)
+    else:
+        body = not lead or lead.endswith(":") or BODY_TAIL.search(lead) is not None
+    return ("option" if text[start] == "{" else "wrap") if body else "other"
 
 
 def _inherited(text: str, start: int) -> list[tuple[str, bool]]:
