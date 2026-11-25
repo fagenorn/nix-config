@@ -79,11 +79,12 @@ signal or an error gives its ticket up.
 History. Every run that got past setup appends one line to `history.jsonl` in the slot directory
 (see `agent_tools.delivery.verify_history`), after it gave its slot and repository lock back:
 a run that took a slot, one that reached `--wait-limit` and one signalled while it waited. A run
-that held no slot records `held_seconds: null`. A setup or usage error records nothing. A failed
-append prints `HISTORY_FAILED_LINE` once and leaves the exit code alone. `--report PATH` writes
-the run's history entry, the same JSON object as its `history.jsonl` line, to PATH. A caller reads
-it to learn the run's wait and hold, and a path that cannot be written is reported and changes
-nothing.
+that held no slot records `held_seconds: null`. The line's `place` is the place the run joined the
+queue at, the place it took back for a resumed request, or null when it never joined. A setup or
+usage error records nothing. A failed append prints `HISTORY_FAILED_LINE` once and leaves the exit
+code alone. `--report PATH` writes the run's history entry, the same JSON object as its
+`history.jsonl` line, to PATH. A caller reads it to learn the run's wait and hold, and a path that
+cannot be written is reported and changes nothing.
 
 Report. `verify-slot report [--hours N]` reads `history.jsonl` and prints one stdout line per
 repository whose runs started in the last N hours (`DEFAULT_REPORT_HOURS`, 24; a positive
@@ -550,6 +551,7 @@ def run_command(argv: list[str], wait_limit: int | None, live: bool = False,
     run = _Run()
     previous = {number: signal.signal(number, run.handle) for number in _HANDLED_SIGNALS}
     held = None
+    joined = None
     acquired = False
     code = USAGE_EXIT
     started = datetime.now(timezone.utc)
@@ -557,7 +559,7 @@ def run_command(argv: list[str], wait_limit: int | None, live: bool = False,
     waited, held_seconds = 0.0, None
     try:
         try:
-            held, code, _joined = _acquire(directory, count, wait_limit, run, live, group, key, command)
+            held, code, joined = _acquire(directory, count, wait_limit, run, live, group, key, command)
         except OSError as error:
             raise SlotError(f"cannot take a slot in {directory}: {error}") from None
         acquired = True
@@ -578,7 +580,7 @@ def run_command(argv: list[str], wait_limit: int | None, live: bool = False,
         for number, handler in previous.items():
             signal.signal(number, handler)
         if acquired:
-            entry = verify_history.entry(group, argv, started, waited, held_seconds, code)
+            entry = verify_history.entry(group, argv, started, waited, held_seconds, code, joined)
             _record(directory, entry)
             if report is not None:
                 _report(Path(report), entry)

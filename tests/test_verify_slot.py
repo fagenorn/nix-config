@@ -926,6 +926,23 @@ class VerifySlotTest(SlotHarness, unittest.TestCase):
         self.assertFalse(self.mark("a", "start").exists())
         self.assertEqual(victim.read_text(), "victim-original")
 
+    def test_the_history_line_records_the_place_each_run_joined_at(self):
+        first = self.start("a", code=0)
+        self.assertTrue(wait_for(self.mark("a", "start")))
+        second = self.start("b", code=3)
+        read_place(second)
+        third = self.start("c", code=4)
+        self.assertEqual(read_place(third)[0], 2)
+        fourth = self.start("d", "--wait-limit", "1")
+        self.assertEqual(read_place(fourth)[0], 3)
+        self.assertEqual(self.finish(fourth)[0], NO_SLOT_EXIT)
+        for name in ("a", "b", "c"):
+            self.release(name)
+        for proc in (first, second, third):
+            self.finish(proc)
+        self.assertEqual({entry["exit"]: entry["place"] for entry in self.history()},
+                         {0: 1, 3: 1, 4: 2, 75: 3})
+
     def test_a_run_that_waited_then_held_a_slot_records_both_durations(self):
         alpha = self.repository("alpha", "git@github.com:example/alpha.git")
         beta = self.repository("beta", "git@github.com:example/beta.git")
@@ -942,7 +959,7 @@ class VerifySlotTest(SlotHarness, unittest.TestCase):
         entries = {entry["repository"]: entry for entry in self.history()}
         self.assertEqual(len(self.history()), 2)
         for entry in entries.values():
-            self.assertEqual(set(entry), {"command", "exit", "held_seconds", "repository",
+            self.assertEqual(set(entry), {"command", "exit", "held_seconds", "place", "repository",
                                           "started", "waited_seconds"})
         command = " ".join(" ".join([sys.executable, "-c", CHILD]).split()[:3])
         beta_entry, alpha_entry = entries["example/beta"], entries["example/alpha"]
@@ -1096,6 +1113,19 @@ class VerifySlotReportTest(SlotHarness, unittest.TestCase):
         started = datetime.now(timezone.utc) - timedelta(hours=hours_ago)
         return {"command": "just test", "exit": code, "held_seconds": held, "repository": repository,
                 "started": started.strftime("%Y-%m-%dT%H:%M:%SZ"), "waited_seconds": waited}
+
+    def test_a_line_without_a_place_or_with_a_malformed_one(self):
+        old = [self.rec("example/alpha", 30, 2), self.rec("example/alpha", 40, 3)]
+        template = ('{"command":"just test","exit":0,"held_seconds":5,"place":%s,'
+                    '"repository":"example/alpha","started":"2026-11-23T00:00:00Z","waited_seconds":1}')
+        malformed = [template % bad for bad in ("0", '"1"', "true", "1.5")]
+        self.write_history(*old, raw=malformed)
+        code, lines, err = self.report("--hours", "100000")
+        self.assertEqual(code, 0)
+        self.assertEqual(len(lines), 1)
+        self.assertTrue(lines[0].startswith("example/alpha runs=2 "), lines)
+        self.assertIn(REPORT_SKIPPED_LINE.format(count=4, path=self.slots / "history.jsonl"),
+                      err.splitlines())
 
     def report(self, *opts):
         result = subprocess.run(
