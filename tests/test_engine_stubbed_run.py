@@ -970,8 +970,10 @@ class StepCoverageTest(Scenario):
     def test_a_selected_test_whose_class_setup_skipped_does_not_silence_the_coverage_check(self):
         coverage = StepCoverage(PROCEDURES)
 
+        cannot_start = unittest.SkipTest("the class cannot start")
+
         def skipping(cls) -> None:
-            raise unittest.SkipTest("the class cannot start")
+            raise cannot_start
 
         fake = types.ModuleType("fake")
         fake.STEPS = coverage
