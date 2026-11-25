@@ -25,6 +25,7 @@ from agent_tools.hosts.memory_floor import (
     Io,
     Limits,
     Loop,
+    restore_loop,
     Owners,
     Proc,
     enforce_once,
@@ -61,7 +62,7 @@ def table_of(*procs):
     return {p.pid: p for p in procs}
 
 
-LIMITS = Limits(16 * GIB, 3, 5, 16 * GIB, 2 * GIB, 2, 10, 24 * GIB, 190)
+LIMITS = Limits(16 * GIB, 3, 5, 16 * GIB, 2 * GIB, 2, 10, 24 * GIB, 190, GIB)
 KILL_LINE = re.compile(
     r"^2026-11-24T12:33:05\+00:00 memory_kill reason=(floor|run_bound) owner=anis root_pid=300"
     r' root="node vitest run" processes=3 tree_gib=\d+\.\d available_before_gib=\d+\.\d'
@@ -353,9 +354,92 @@ class FloorTest(unittest.TestCase):
         self.assertEqual(daemon.fake.signals, [])
         self.assertEqual(len(daemon.lines), 2)
         for line in daemon.lines:
-            self.assertRegex(
-                line, r"^2026-11-24T12:33:05\+00:00 floor_breached no agent workload to end available_gib=10\.0\n$"
-            )
+            self.assertRegex(line, UNMET_LINE.format(available="10.0", largest="0.0"))
+
+
+W3 = "/Users/anis/Projects/jarbird/.worktrees/w3"
+W4 = "/Users/anis/Projects/jarbird/.worktrees/w4"
+UNMET_LINE = r"^2026-11-24T12:33:05\+00:00 floor_unmet available_gib={available} largest_gib={largest}\n$"
+
+
+def trees(*sizes):
+    roots = (W1, W2, W3, W4)
+    return table_of(*(proc(300 + 10 * i, 1, 501, roots[i], gib) for i, gib in enumerate(sizes)))
+
+
+class UsefulKillTest(unittest.TestCase):
+    def test_no_tree_under_the_declared_minimum_is_ended_even_when_it_would_reach_the_floor(self):
+        rows = {
+            "small_trees_at_13": ([13], (0.1, 0.5, 0.9)),
+            "small_tree_that_would_reach_the_floor": ([15.5], (0.6,)),
+        }
+        for name, (readings, sizes) in rows.items():
+            with self.subTest(name):
+                daemon = Daemon(readings, trees(*sizes))
+                daemon.sample(3)
+                self.assertEqual(daemon.fake.signals, [])
+                self.assertEqual(daemon.record.get("kills", 0), 0)
+
+    def test_a_tree_whose_end_still_leaves_memory_under_the_floor_is_not_ended(self):
+        rows = {
+            "just_short": ([13, 13, 13, 40], (0.1, 0.5, 2.9), []),
+            "exactly_over": ([13, 13, 13, 40], (0.1, 0.5, 3.0), [320]),
+            "largest_of_two_that_help_ends_not_the_smaller": ([13, 13, 13, 40], (4.0, 5.0, 1.5), [310]),
+            "a_four_gib_tree_among_small_ones": ([13, 13, 13, 40], (0.1, 0.5, 2.0, 4.0), [330]),
+        }
+        for name, (readings, sizes, expected) in rows.items():
+            with self.subTest(name):
+                daemon = Daemon(readings, trees(*sizes))
+                daemon.sample(3)
+                termed = [pid for sig, pid in daemon.fake.signals if sig == signal.SIGTERM]
+                self.assertEqual(termed, expected)
+                self.assertEqual([e["root_pid"] for e in daemon.record.get("recent", [])], expected)
+
+    def test_an_episode_with_no_candidate_that_helps_logs_and_records_once(self):
+        daemon = Daemon([13] * 8 + [50] + [13] * 4, trees(0.1, 0.5, 2.0))
+        daemon.sample(8)
+        self.assertEqual(daemon.fake.signals, [])
+        (line,) = daemon.lines
+        self.assertRegex(line, UNMET_LINE.format(available="13.0", largest="2.0"))
+        self.assertEqual(daemon.record["floor_unmets"], 1)
+        (entry,) = daemon.record["floor_unmet_recent"]
+        self.assertEqual((entry["seq"], entry["available_bytes"], entry["largest_bytes"]), (1, 13 * GIB, 2 * GIB))
+        daemon.sample(5)
+        self.assertEqual(len(daemon.lines), 2)
+        self.assertEqual(daemon.record["floor_unmets"], 2)
+        self.assertEqual([e["seq"] for e in daemon.record["floor_unmet_recent"]], [1, 2])
+
+    def test_a_healthy_sample_records_no_episodes_so_the_first_one_is_countable(self):
+        daemon = Daemon([20], trees(2.0))
+        daemon.sample()
+        self.assertEqual((daemon.record["floor_unmets"], daemon.record["floor_unmet_recent"]), (0, []))
+
+    def test_a_breach_after_a_kill_and_a_recovery_is_a_new_episode(self):
+        daemon = Daemon([13, 13, 13, 13, 40, 13, 13, 13], trees(2.0))
+        daemon.sample(3)
+        self.assertEqual(daemon.record["floor_unmets"], 1)
+        # A tree that helps arrives and is ended, memory recovers, then falls again.
+        daemon.fake.base = trees(2.0, 4.0)
+        daemon.sample(1)
+        self.assertEqual(daemon.record["kills"], 1)
+        daemon.sample(3)
+        self.assertEqual(daemon.record["floor_unmets"], 2)
+        self.assertEqual(len(daemon.lines), 3)
+
+    def test_a_restart_in_an_open_episode_does_not_open_another(self):
+        daemon = Daemon([13], trees(2.0))
+        daemon.sample(3)
+        self.assertEqual(daemon.record["floor_unmets"], 1)
+        again = Daemon([13], trees(2.0))
+        again.record = json.loads(json.dumps(daemon.record))
+        again.loop = restore_loop(again.record)
+        again.sample(3)
+        self.assertEqual((again.lines, again.record["floor_unmets"]), ([], 1))
+        again.fake.readings = [40]
+        again.sample(1)
+        again.fake.readings = [13]
+        again.sample(3)
+        self.assertEqual(again.record["floor_unmets"], 2)
 
 
 class OmlxPidReadingTest(unittest.TestCase):

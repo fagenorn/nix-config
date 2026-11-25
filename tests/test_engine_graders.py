@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import unittest
+from collections.abc import Mapping
 from pathlib import Path
 
 from agent_tools.delivery import lane_rule
@@ -124,6 +125,24 @@ class GraderTest(unittest.TestCase):
         for name, results, expected in self.GRADER_CASES:
             with self.subTest(name=name, results=results):
                 self.assertEqual(GRADERS[name].grade(results), expected)
+
+    def test_a_rule_a_kind_or_a_decline_never_changes_a_grade(self):
+        review_graders = ("direct-lite-tally", "direct-full-tally", "direct-escalated-tally", "direct-settled")
+        exercised = set()
+        for name, results, expected in self.GRADER_CASES:
+            if name in review_graders:
+                carrying = {key: [{**item, "rule": "B1", "kind": "security", "restates": "lite-review:1"}
+                                  if isinstance(item, Mapping) else item for item in value]
+                            if key.endswith(".findings") and isinstance(value, list) else value
+                            for key, value in results.items()}
+            elif name == "direct-fixed":
+                carrying = {**results, "fix.declines": [{"finding": "lite-review:1", "reason": "r"}]}
+            else:
+                continue
+            with self.subTest(name=name, results=results):
+                self.assertEqual(GRADERS[name].grade(carrying), expected)
+                exercised.add(name)
+        self.assertEqual(exercised, {*review_graders, "direct-fixed"})
 
     def test_every_declared_grader_outcome_is_produced(self):
         for name in GRADERS:

@@ -42,6 +42,9 @@ TRANSPORT = re.compile(
     r"\bHTTP 5\d\d\b|error connecting to|dial tcp|network is unreachable|connection refused"
     r"|connection reset|no such host|i/o timeout|TLS handshake timeout|unexpected EOF",
     re.IGNORECASE)
+HTTP_STATUS_PREFIX = re.compile(r"\bHTTP \d{3}\b")
+ADDRESS_EXHAUSTION = re.compile(
+    r"\bconnect:?\s+(?:(?:can'?t|cannot|unable to) assign requested address|EADDRNOTAVAIL)\b", re.IGNORECASE)
 TIMEOUT = 30
 CANCEL_POLL_SECONDS = 0.2
 DETAIL_LIMIT = 240
@@ -64,17 +67,28 @@ def is_transport(stderr: str) -> bool:
     return TRANSPORT.search(stderr) is not None
 
 
+def is_address_exhaustion(stderr: str) -> bool:
+    """Whether a `gh` failure's stderr shows the host ran out of local ports: the socket error after
+    `connect`, never a repository name or other text of the diagnostic that happens to spell it. A failure
+    where `gh` reports an HTTP response, in either of its spellings, is the server's, whatever its body
+    says, and is never exhaustion."""
+    return HTTP_STATUS.search(stderr) is None and HTTP_STATUS_PREFIX.search(stderr) is None and ADDRESS_EXHAUSTION.search(stderr) is not None
+
+
 class ForgeError(Exception):
     """A forge call failed: `code` is gh_missing, gh_failed, gh_timeout or payload_invalid.
 
     `transient` is true for a transport error (issue 740 D2): a `gh_timeout`, or a `gh_failed`
-    whose stderr shows HTTP 5xx or a connection failure."""
+    whose stderr shows HTTP 5xx or a connection failure. `exhausted` is true when the stderr shows
+    the host ran out of local network ports (address exhaustion)."""
 
-    def __init__(self, code: str, detail: str = "", transient: bool | None = None) -> None:
+    def __init__(self, code: str, detail: str = "", transient: bool | None = None,
+                 exhausted: bool = False) -> None:
         super().__init__(f"{code}: {detail}" if detail else code)
         self.code = code
         self.detail = detail[:DETAIL_LIMIT]
         self.transient = code == "gh_timeout" if transient is None else bool(transient)
+        self.exhausted = bool(exhausted)
 
 
 def _run_cancellable(command: list[str], timeout: float, env: dict[str, str],
@@ -129,7 +143,8 @@ def run_gh(argv: list[str], allow: Iterable[int] = (),
     status = int(found[1]) if found else 0
     if status and status in set(allow):
         return status, done.stdout
-    raise ForgeError("gh_failed", done.stderr.strip(), transient=is_transport(done.stderr))
+    raise ForgeError("gh_failed", done.stderr.strip(), transient=is_transport(done.stderr),
+                     exhausted=is_address_exhaustion(done.stderr))
 
 
 def logged_in() -> bool:

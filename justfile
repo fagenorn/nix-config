@@ -107,7 +107,7 @@ test:
 
 # Run the suite members this branch touches, or the whole suite when a build input changes (the `test-touched` command).
 test-touched:
-  tools="$(nix build --no-link --print-out-paths '{{justfile_directory()}}#agent-platform.tools')" && test -n "$tools" && AGENT_PLATFORM_TOOLS="$tools/bin" WORKFLOW_POLICY_SURFACE=source PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.delivery.touched_tests --base origin/main --source-root python --pair home/common/claude-code/lifecycle_guard.py=tests/test_claude_permission_guard.py --cover 'python/agent_tools/delivery/engine*.py=tests/test_engine_*.py' --cover 'python/agent_tools/delivery/host_admission.py=tests/test_engine_*.py' --cover 'python/agent_tools/delivery/procedure_check.py=tests/test_engine_*.py' --cover 'python/agent_tools/delivery/lane_rule.py=tests/test_engine_*.py' --cover 'python/agent_tools/delivery/procedures/*=tests/test_engine_*.py' --cover 'tests/engine_*.py=tests/test_engine_*.py' --cover 'tests/fixtures/engine-*=tests/test_engine_*.py' --build-command 'just build' --build-when '*.nix' --build-when flake.lock --build-when .sops.yaml --build-when 'data/*' --build-when 'homebrew/*' --build-when 'patches/*' --build-when 'secrets/*' --build-when 'vars/*'
+  tools="$(nix build --no-link --print-out-paths '{{justfile_directory()}}#agent-platform.tools')" && test -n "$tools" && AGENT_PLATFORM_TOOLS="$tools/bin" WORKFLOW_POLICY_SURFACE=source PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.delivery.touched_tests --base origin/main --source-root python --pair home/common/claude-code/lifecycle_guard.py=tests/test_claude_permission_guard.py --cover 'python/agent_tools/delivery/engine*.py=tests/test_engine_*.py' --cover 'python/agent_tools/delivery/host_admission.py=tests/test_engine_*.py' --cover 'python/agent_tools/delivery/procedure_check.py=tests/test_engine_*.py' --cover 'python/agent_tools/delivery/lane_rule.py=tests/test_engine_*.py' --cover 'python/agent_tools/delivery/rule_reader.py=tests/test_engine_*.py' --cover 'python/agent_tools/delivery/procedures/*=tests/test_engine_*.py' --cover 'tests/engine_*.py=tests/test_engine_*.py' --cover 'tests/fixtures/engine-*=tests/test_engine_*.py' --build-command 'just build' --build-when '*.nix' --build-when flake.lock --build-when .sops.yaml --build-when 'data/*' --build-when 'homebrew/*' --build-when 'patches/*' --build-when 'secrets/*' --build-when 'vars/*'
 
 # Verify durable workflow lifecycle and skill contracts, min(8, CPUs - 2) test files at a time, longest first (SUITE_RUNNER_JOBS or --jobs N sets the cap; --jobs 1 runs them serially with live output). The suite gets the platform package's pinned tools.
 agent-workflow-tests *args:
@@ -170,6 +170,7 @@ agent-workflow-tests *args:
     tests/test_engine_check.py \
     tests/test_engine_direct_procedures.py \
     tests/test_engine_graders.py \
+    tests/test_engine_findings.py \
     tests/test_engine_ledger.py \
     tests/test_engine_core.py \
     tests/test_engine_commands.py \

@@ -2,12 +2,20 @@
 
 from __future__ import annotations
 
+import errno
+import os
+import shutil
 import subprocess
+import sys
+import tempfile
+import types
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from agent_tools.project_contract import resolve_project
-from tests.engine_fixture import FixtureProject
+from tests import engine_fixture
+from tests.engine_fixture import AdoptedFixtures, FixtureProject
 from tests.guard_policy_world import GuardPolicyWorld, install_platform_manifest_in_environ
 
 TIER = "integration"  # every case builds a repository and runs the adoption command
@@ -67,6 +75,161 @@ class FixtureTest(unittest.TestCase):
             FixtureProject(self, world)
 
         self.assertFalse((world.home / ".agents/state/fleet/registry.json").exists())
+
+
+class AdoptedFixturesTest(unittest.TestCase):
+    def fixtures(self) -> AdoptedFixtures:
+        fixtures = AdoptedFixtures()
+        self.addCleanup(fixtures.close)
+        return fixtures
+
+    def test_a_second_fixture_of_one_variant_is_copied_and_not_adopted_again(self):
+        fixtures = self.fixtures()
+        first = fixtures.project(self, GuardPolicyWorld(self))
+
+        with mock.patch.object(FixtureProject, "_adopt", side_effect=AssertionError("adopted again")):
+            second = fixtures.project(self, GuardPolicyWorld(self))
+        snapshot = resolve_project.resolve(str(second.root))
+
+        self.assertNotEqual(second.root, first.root)
+        self.assertEqual(snapshot["project"]["id"], "example/fixture")
+        self.assertEqual(snapshot["bindings"]["vcs"]["merge"]["required_checks"],
+                         FixtureProject.REQUIRED_CHECKS)
+        self.assertEqual(second.adoption, first.adoption)
+        self.assertEqual(second.world.git(second.root, "rev-parse", "main").strip(),
+                         first.adoption["commit"])
+
+    @staticmethod
+    def conditions() -> dict:
+        return {"lint": {"when_changed": ["a"], "skip_reason": "nothing to lint"}}
+
+    def test_a_test_that_changes_the_fixture_it_got_does_not_change_the_fixtures_copied_later(self):
+        fixtures = self.fixtures()
+        first = fixtures.project(self, GuardPolicyWorld(self), conditions=self.conditions())
+        first.adoption["commit"] = "0" * 40
+        first.conditions["lint"]["when_changed"].append("b")
+
+        second = fixtures.project(self, GuardPolicyWorld(self), conditions=self.conditions())
+        second.adoption["commit"] = "1" * 40
+        third = fixtures.project(self, GuardPolicyWorld(self), conditions=self.conditions())
+
+        self.assertEqual(third.adoption["commit"], third.world.git(third.root, "rev-parse", "main").strip())
+        self.assertEqual(third.conditions, self.conditions())
+
+    def test_a_copy_starts_clean_at_the_adoption_commit_on_its_own_origin(self):
+        fixtures = self.fixtures()
+        first = fixtures.project(self, GuardPolicyWorld(self))
+        (first.root / "moved.txt").write_text("moved\n", encoding="utf-8")
+        first.world.git(first.root, "add", "moved.txt")
+        first.world.git(first.root, "commit", "--quiet", "-m", "moved")
+        first.world.git(first.root, "push", "--quiet", "origin", "main")
+
+        world = GuardPolicyWorld(self)
+        second = fixtures.project(self, world)
+        origin = Path(world.git(second.root, "remote", "get-url", "origin").strip())
+
+        self.assertEqual(world.git(second.root, "rev-parse", "main").strip(), first.adoption["commit"])
+        self.assertEqual(world.git(second.root, "status", "--porcelain"), "")
+        self.assertFalse((second.root / "moved.txt").exists())
+        self.assertTrue(origin.is_relative_to(world.tmp))
+        self.assertEqual(world.git(second.root, "--git-dir", str(origin), "rev-parse", "main").strip(),
+                         first.adoption["commit"])
+
+    def test_fixtures_of_different_options_are_adopted_apart(self):
+        fixtures = self.fixtures()
+        fixtures.project(self, GuardPolicyWorld(self))
+
+        bare = fixtures.project(self, GuardPolicyWorld(self), required_checks=())
+        again = fixtures.project(self, GuardPolicyWorld(self))
+
+        self.assertNotIn("required_checks",
+                         resolve_project.resolve(str(bare.root))["bindings"]["vcs"]["merge"])
+        self.assertEqual(resolve_project.resolve(str(again.root))["bindings"]["vcs"]["merge"]["required_checks"],
+                         FixtureProject.REQUIRED_CHECKS)
+        self.assertEqual(bare.required_checks, [])
+
+    def test_closing_the_fixtures_leaves_no_copy_behind(self):
+        fixtures = self.fixtures()
+        fixtures.project(self, GuardPolicyWorld(self))
+        directory = fixtures.directory
+        self.assertTrue(directory.is_dir())
+
+        fixtures.close()
+        fixtures.close()
+
+        self.assertFalse(directory.exists())
+        self.assertIsNone(fixtures.directory)
+
+    def stubbed_adoption(self):
+        """Patch the adoption itself: the project it returns is a directory of one file."""
+        root = Path(tempfile.mkdtemp(prefix="stub-fixture-"))
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        (root / "greet.txt").write_text("hello\n", encoding="utf-8")
+        project = types.SimpleNamespace(root=root, snapshot=lambda: "snapshot")
+        patch = mock.patch.object(engine_fixture, "FixtureProject", return_value=project)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def test_a_copy_that_runs_out_of_space_part_way_leaves_nothing_and_the_next_adoption_succeeds(self):
+        fixtures = self.fixtures()
+        self.stubbed_adoption()
+        real = shutil.copytree
+        attempts = []
+
+        def copytree(source, destination, **options):
+            attempts.append(destination)
+            if len(attempts) == 1:
+                Path(destination).mkdir(parents=True)
+                (Path(destination) / "partial.txt").write_text("half", encoding="utf-8")
+                raise OSError(errno.ENOSPC, "No space left on device")
+            return real(source, destination, **options)
+
+        with mock.patch.object(shutil, "copytree", copytree):
+            with self.assertRaises(OSError):
+                fixtures.project(self, mock.sentinel.world)
+            self.assertEqual(list(fixtures.directory.iterdir()), [])
+            fixtures.project(self, mock.sentinel.world)
+
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual([p.read_text("utf-8") for p in fixtures.directory.rglob("greet.txt")], ["hello\n"])
+
+    def test_a_close_that_cannot_delete_the_cache_raises_and_a_second_close_retries(self):
+        fixtures = self.fixtures()
+        self.stubbed_adoption()
+        fixtures.project(self, mock.sentinel.world)
+        directory = fixtures.directory
+        real = shutil.rmtree
+        refusals = []
+
+        def rmtree(path, *args, **options):
+            if not refusals:
+                refusals.append(path)
+                raise PermissionError(errno.EACCES, "Permission denied", str(path))
+            return real(path, *args, **options)
+
+        with mock.patch.object(shutil, "rmtree", rmtree):
+            with self.assertRaises(OSError):
+                fixtures.close()
+            survived = (fixtures.directory, directory.exists())
+            fixtures.close()
+
+        self.assertEqual(survived, (directory, True))
+        self.assertEqual(refusals, [directory])
+        self.assertFalse(directory.exists())
+        self.assertIsNone(fixtures.directory)
+
+
+class EntryPointTest(unittest.TestCase):
+    def test_running_the_file_directly_runs_a_test_defined_near_its_end(self):
+        root = Path(__file__).resolve().parents[1]
+        env = {**os.environ, "PYTHONPATH": os.pathsep.join([str(root / "python"), str(root)])}
+        target = "AdoptedFixturesTest.test_closing_the_fixtures_leaves_no_copy_behind"
+
+        done = subprocess.run([sys.executable, __file__, target], cwd=root, env=env,
+                              capture_output=True, text=True, timeout=600)
+
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("Ran 1 test", done.stderr)
 
 
 if __name__ == "__main__":
