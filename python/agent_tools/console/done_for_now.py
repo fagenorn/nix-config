@@ -1,4 +1,4 @@
-"""The desk's done-for-now heading: its words, the working count and the next expected time (#1810).
+"""The desk's done-for-now heading: its words, the working count and the next expected time.
 
 With a project registered and nothing open (no item, no all-out or stale statement), the
 statement's headline is `HEADLINE` ("You're done for now") and its sentence is `sentence(working)`:

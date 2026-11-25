@@ -1,4 +1,4 @@
-"""The desk page's done-for-now heading and the finished line's wrap-up (#1810); the fixtures are those of `test_console_page`."""
+"""The desk page's done-for-now heading and the finished line's wrap-up; the fixtures are those of `test_console_page`."""
 import unittest
 
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures

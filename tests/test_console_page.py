@@ -188,7 +188,8 @@ class PageTest(unittest.TestCase):
         # Raised from 71 KB by #1432: a sprint's declared live fault line, its Withdraw and the same line on an
         # ended sprint's finished line (about 0.5 KB compressed) did not fit the 279 bytes the cap had left.
         # Raised from 72 KB by the merge of #1274 with #1432 and #1424: each side fit under its cap, and merged the
-        # page is 74199 bytes. Raised from 73 KB: a long command's permission card summary and fold did not fit. Raised from 73.5 KB by #1810: the done-for-now line and the wrap-up did not fit.
+        # page is 74199 bytes. Raised from 73 KB: a long command's permission card summary and fold did not fit.
+        # Raised from 73.5 KB: the done-for-now line and the wrap-up did not fit.
         self.assertLess(len(gzip.compress(self.data, 9)), 75776)
 
     def test_the_top_bar_carries_one_spend_link(self) -> None:

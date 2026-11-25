@@ -1,11 +1,14 @@
-"""The done-for-now heading of the view: its working count, sentence and next expected time (#1810); the fixtures are those of `test_console_view`."""
+"""The done-for-now heading of the view: its working count, sentence and next expected time; the fixtures are those of `test_console_view`."""
 import dataclasses
 import unittest
 from datetime import datetime
+from pathlib import Path
 
 from agent_tools.console.view import ReadState, derive_view
+from agent_tools.delivery import comment_lint
+from agent_tools.delivery.never_rise import Snapshot
 
-from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures
 from .test_console_view import A, MIN, R, closed, iso, open_item, reported, started, state, stopped
 
 TIER = "fast"
@@ -93,3 +96,18 @@ class DoneForNowViewTest(unittest.TestCase):
             with self.subTest(name):
                 shown = derive_view(kwargs.pop("states"), **kwargs)
                 self.assertIsNone(shown["next_expected"])
+
+
+class DoneForNowCommentsTest(unittest.TestCase):
+    CHANGED = (
+        "python/agent_tools/console/done_for_now.py",
+        "tests/test_console_done_for_now.py",
+        "tests/test_console_page_done_for_now.py",
+    )
+
+    def test_the_new_files_carry_no_issue_reference_in_a_comment(self):
+        root = Path(__file__).resolve().parents[1]
+        snapshot = Snapshot("a" * 40, {}, contents={
+            path: (root / path).read_bytes() for path in self.CHANGED})
+        (reference, _length, _marker) = comment_lint.enforcers("fagenorn/nix-config")
+        self.assertEqual(reference.find(snapshot), [])
