@@ -19,7 +19,9 @@ coding declaration is the parser's). A blob git cannot read ends the check with 
 A change with no new test returns empty lists and `reason ""` and creates nothing.
 
 The check makes a scratch directory with `tempfile.mkdtemp(prefix="revert-check-", dir=<scratch
-root>)`, `$REVERT_CHECK_SCRATCH` or else the system temporary directory, holding a checkout of the
+root>)`, `$REVERT_CHECK_SCRATCH` or else the system temporary directory, made by a guard process in a
+session of its own that removes it again once the checker is gone, whenever that happens (an engine stop
+kills only the checker's group). The directory holds a checkout of the
 merge base (`read-tree` into a private index file, then `checkout-index`; no worktree is registered,
 so no repository-wide `git worktree` command runs) and, per test, a fresh checkout with the `HEAD`
 version (bytes) of each file holding a new test written over it, nothing else of the change, so no
@@ -28,8 +30,8 @@ base (it would lead out of the scratch), and a new test's top-level directory th
 `__init__.py` gets an empty one, so a regular package of that name on the inherited `PYTHONPATH` cannot
 shadow it. Each new test then runs once as `python -m unittest <id>` with the scratch checkout as the
 working directory, no standard stream inherited, in its own session behind a small watcher that kills
-the session and removes the scratch directory when the checker dies (an engine stop kills only the
-checker's group); the group is also killed after `TEST_SECONDS`. Exit 0 is still passing, any other
+the session when the checker dies; the guard and the watcher are given the checker's pid, so a checker
+that dies before they start is noticed too; the group is also killed after `TEST_SECONDS`. Exit 0 is still passing, any other
 exit or a timeout is not. The tests' `PYTHONPATH` is the checkout, then `<checkout>/<D>` for each
 distinct non-empty `D` that is the parent of a top-level package tracked at the merge base (a tracked
 `<pkg>/__init__.py` whose parent directory holds no `__init__.py`), sorted, then the inherited entries
@@ -72,19 +74,48 @@ SCRATCH_ENV = "REVERT_CHECK_SCRATCH"
 GIT_SECONDS = 120
 WATCH_SECONDS = 0.1
 
-# Runs as `python -I -c WATCHER <id> <scratch directory>`: the test's session leader. It runs the test and,
-# once its own parent (the checker) is gone, removes the scratch directory and kills its whole session.
+# Both helpers take the checker's pid in argv rather than reading their parent's: a checker stopped before the
+# helper's interpreter has started leaves the helper a parent that is already init, and the pid in argv still
+# tells them it is gone.
+#
+# Runs as `python -I -c GUARD <checker pid> <scratch root>`, in a session of its own (an engine stop kills only
+# the checker's group): it makes the scratch directory, tells the checker its path on one line (`!<error>` when
+# it cannot be made) and, once the checker is gone, removes the directory again until it is gone, so a stop at
+# any point of the scratch's life leaves nothing behind.
+GUARD = """
+import os, shutil, sys, tempfile, time
+parent = int(sys.argv[1])
+try:
+    holder = os.path.realpath(tempfile.mkdtemp(prefix="revert-check-", dir=sys.argv[2]))
+    line = holder
+except OSError as error:
+    holder, line = None, "!" + str(error).replace("\\n", " ")
+try:
+    print(line, flush=True)
+except OSError:
+    pass
+if holder is None:
+    sys.exit(1)
+while os.getppid() == parent:
+    time.sleep(%s)
+for _ in range(100):
+    shutil.rmtree(holder, ignore_errors=True)
+    if not os.path.exists(holder):
+        break
+    time.sleep(%s)
+""" % (WATCH_SECONDS, WATCH_SECONDS)
+
+# Runs as `python -I -c WATCHER <id> <checker pid>`: the test's session leader. It runs the test and, once the
+# checker is gone, kills its whole session.
 WATCHER = """
-import os, shutil, signal, subprocess, sys, threading, time
-parent = os.getppid()
-child = subprocess.Popen([sys.executable, "-m", "unittest", sys.argv[1]])
+import os, signal, subprocess, sys, threading, time
+parent = int(sys.argv[2])
 def watch():
     while os.getppid() == parent:
         time.sleep(%s)
-    shutil.rmtree(sys.argv[2], ignore_errors=True)
     os.killpg(0, signal.SIGKILL)
 threading.Thread(target=watch, daemon=True).start()
-sys.exit(child.wait())
+sys.exit(subprocess.Popen([sys.executable, "-m", "unittest", sys.argv[1]]).wait())
 """ % WATCH_SECONDS
 
 RunGit = Callable[..., "subprocess.CompletedProcess[bytes]"]
@@ -219,9 +250,22 @@ def _checkout(worktree: str, holder: str, tree: str, blobs: Mapping[str, bytes],
             _write(tree, f"{top}/__init__.py", b"")
 
 
-def _passes(identifier: str, scratch: str, holder: str, env: Mapping[str, str], test_seconds: float) -> bool:
+def _guard(scratch_root: str | None) -> tuple["subprocess.Popen[str]", str]:
+    """Start the guard of the scratch directory and return it with the directory it made."""
+    guard = subprocess.Popen(
+        [sys.executable, "-I", "-c", GUARD, str(os.getpid()), scratch_root or tempfile.gettempdir()],
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+        start_new_session=True)
+    line = guard.stdout.readline().strip() if guard.stdout else ""
+    if not line or line.startswith("!"):
+        guard.wait()
+        raise OSError(line[1:] or "the scratch guard exited without making a directory")
+    return guard, line
+
+
+def _passes(identifier: str, scratch: str, env: Mapping[str, str], test_seconds: float) -> bool:
     process = subprocess.Popen(
-        [sys.executable, "-I", "-c", WATCHER, identifier, holder], cwd=scratch, env=dict(env),
+        [sys.executable, "-I", "-c", WATCHER, identifier, str(os.getpid())], cwd=scratch, env=dict(env),
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         start_new_session=True)
     try:
@@ -265,10 +309,10 @@ def check(worktree: str, integration_branch: str, *, environ: Mapping[str, str],
 def _run_in_scratch(worktree: str, result: dict, found: list[tuple[str, str]], blobs: Mapping[str, bytes],
                     run_git: RunGit, environ: Mapping[str, str], scratch_root: str | None, test_seconds: float,
                     budget_seconds: float, started: float) -> None:
-    holder = None
+    guard = holder = None
     try:
         try:
-            holder = os.path.realpath(tempfile.mkdtemp(prefix="revert-check-", dir=scratch_root or tempfile.gettempdir()))
+            guard, holder = _guard(scratch_root)
             done = run_git("-C", worktree, "read-tree", result["base"], index=os.path.join(holder, "index"))
             if done.returncode:
                 raise OSError(f"git read-tree: {_last_line(done)}")
@@ -287,7 +331,7 @@ def _run_in_scratch(worktree: str, result: dict, found: list[tuple[str, str]], b
             _checkout(worktree, holder, tree, blobs, run_git)
             env["PYTHONPATH"] = _python_path(tree, worktree, environ.get("PYTHONPATH", ""), inits)
             try:
-                passed = _passes(identifier, tree, holder, env, test_seconds)
+                passed = _passes(identifier, tree, env, test_seconds)
             except OSError as error:
                 result["reason"] = f"a test could not be started: {error}"
                 break
@@ -298,6 +342,11 @@ def _run_in_scratch(worktree: str, result: dict, found: list[tuple[str, str]], b
     finally:
         if holder is not None:
             _remove(holder, result)
+        if guard is not None:
+            guard.kill()
+            guard.wait()
+            if guard.stdout:
+                guard.stdout.close()
 
 
 def _remove(holder: str, result: dict) -> None:

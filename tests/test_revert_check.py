@@ -22,7 +22,7 @@ from pathlib import Path
 from unittest import mock
 
 from agent_tools.delivery.engine_commands import PLATFORM_WALL_SECONDS
-from agent_tools.delivery.revert_check import BUDGET_SECONDS, TEST_SECONDS, case_ids, check, main
+from agent_tools.delivery.revert_check import BUDGET_SECONDS, TEST_SECONDS, WATCHER, case_ids, check, main
 
 TIER = "integration"  # every case starts git and the tests as processes
 
@@ -304,6 +304,48 @@ class CheckTest(unittest.TestCase):
         self.assertTrue(eventually(lambda: not alive(pid)), "the test outlived the checker")
         self.assertTrue(eventually(lambda: os.listdir(scratch) == []), os.listdir(scratch))
         self.assertEqual(repository.snapshot(), before)
+
+    def test_a_watcher_whose_checker_is_already_gone_runs_no_test(self):
+        directory = Path(scratch_directory(self))
+        marker = directory / "ran"
+        (directory / "probe_ran.py").write_text(
+            "import unittest\n\n\nclass Probe(unittest.TestCase):\n    def test_ran(self):\n"
+            f"        open({str(marker)!r}, 'w').write('x')\n")
+        gone = subprocess.Popen([sys.executable, "-c", "pass"])
+        gone.wait()
+        watcher = subprocess.Popen(
+            [sys.executable, "-I", "-c", WATCHER, "probe_ran.Probe.test_ran", str(gone.pid)], cwd=directory,
+            env={**os.environ, "PYTHONPATH": str(directory)}, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, start_new_session=True)
+        self.addCleanup(lambda: watcher.poll() is None and os.killpg(watcher.pid, signal.SIGKILL))
+        self.assertNotEqual(watcher.wait(timeout=20), 0)
+        time.sleep(1)
+        self.assertFalse(marker.exists(), "the test ran although its checker was already gone")
+
+    def test_an_engine_stop_while_the_scratch_is_being_filled_leaves_no_scratch_behind(self):
+        repository = FixtureRepository(self)
+        repository.commit(PROOF_CHANGE)
+        scratch = scratch_directory(self)
+        stub = Path(scratch_directory(self))
+        marker = stub / "filling"
+        real_git = shutil.which("git", path=repository.env.get("PATH"))
+        (stub / "git").write_text(
+            "#!/bin/sh\nfor argument in \"$@\"; do\n  if [ \"$argument\" = checkout-index ]; then\n"
+            f"    echo x > {marker}\n    sleep 30\n  fi\ndone\nexec {real_git} \"$@\"\n")
+        (stub / "git").chmod(0o755)
+        checker = subprocess.Popen(
+            [sys.executable, "-m", "agent_tools.delivery.revert_check", "--worktree-path", str(repository.worktree),
+             "--integration-branch", "main"],
+            cwd=repository.worktree, start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            env={**repository.env, "PYTHONPATH": str(REPO_ROOT / "python"), "REVERT_CHECK_SCRATCH": scratch,
+                 "PATH": f"{stub}{os.pathsep}{repository.env.get('PATH', '')}"})
+        self.addCleanup(checker.wait)
+        self.addCleanup(lambda: checker.poll() is None and os.killpg(checker.pid, signal.SIGKILL))
+        self.assertTrue(eventually(lambda: marker.exists()))
+        self.assertTrue(os.listdir(scratch), "the scratch directory was not made before the checkout")
+        os.killpg(checker.pid, signal.SIGKILL)
+        checker.wait()
+        self.assertTrue(eventually(lambda: os.listdir(scratch) == []), os.listdir(scratch))
 
     def test_bytecode_goes_to_the_scratch_whatever_the_inherited_cache_prefix(self):
         repository = FixtureRepository(self)
