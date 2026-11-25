@@ -6,6 +6,7 @@ and a stubbed launcher (`tests/engine_stubbed_world.py`), and reads what the run
 
 from __future__ import annotations
 
+import ast
 import io
 import json
 import os
@@ -440,7 +441,7 @@ class ReviewRouteTest(Scenario):
     def test_a_finding_citing_a_made_up_rule_is_stored_blanked_and_graded_the_same(self):
         minor = {"severity": "minor", "file": "fixture/farewell.py:2", "failing_input": "farewell('')",
                  "summary": "s", "kind": "other"}
-        run = StubbedRun(self, replies={"lite-review": dict(
+        run = self.stubbed(replies={"lite-review": dict(
             CLEAN_LITE, findings=[dict(minor, rule="ZZ999"), dict(minor, rule="B1"), minor])})
         self.seed_bar(run)
 
@@ -455,7 +456,7 @@ class ReviewRouteTest(Scenario):
     def test_a_schema_that_admits_only_one_rule_value_keeps_the_reply_unblanked(self):
         minor = {"severity": "minor", "file": "fixture/farewell.py:2", "failing_input": "farewell('')",
                  "summary": "s", "kind": "other", "rule": "local"}
-        run = StubbedRun(self, replies={"lite-review": dict(CLEAN_LITE, findings=[minor])})
+        run = self.stubbed(replies={"lite-review": dict(CLEAN_LITE, findings=[minor])})
         copy = run.tmp / "local-rule-procedures"
         shutil.copytree(PROCEDURES, copy)
         path = copy / "direct-review-lite.reply.json"
@@ -473,13 +474,13 @@ class ReviewRouteTest(Scenario):
         reason = "farewell(None) is refused by the type checker at fixture/farewell.py:1"
         plain_finding = {k: v for k, v in FINDING.items() if k != "kind"}
         plain_second = dict(plain_finding, file="fixture/farewell.py:1", failing_input="farewell(None)")
-        plain = StubbedRun(self, replies={
+        plain = self.stubbed(replies={
             "lite-review": dict(CLEAN_LITE, verdict="findings", findings=[plain_finding, plain_second]),
             "lite-fix": {"reply": {"status": "done", "notes": "the second finding is wrong: None never reaches it",
                                    "tests": []},
                          "commit": {"path": "fixture/second.py", "text": "SECOND = 2\n"}},
             "lite-rereview": CLEAN_REREVIEW})
-        structured = StubbedRun(self, replies={
+        structured = self.stubbed(replies={
             "lite-review": dict(CLEAN_LITE, verdict="findings", findings=[
                 dict(FINDING, kind="missing-test", rule="B1"),
                 dict(FINDING, file="fixture/farewell.py:1", failing_input="farewell(None)", kind="weak-test")]),
@@ -1009,6 +1010,19 @@ class StepCoverageTest(Scenario):
         self.assertTrue(loaded)
         for test in loaded:
             self.assertIsInstance(test, Scenario, test.id())
+
+    def test_every_run_of_the_module_is_built_through_the_shared_helper(self):
+        module = sys.modules[type(self).__module__]
+        tree = ast.parse(Path(module.__file__).read_text("utf-8"))
+        allowed = {id(call) for function in ast.walk(tree)
+                   if isinstance(function, ast.FunctionDef) and function.name == "stubbed"
+                   for call in ast.walk(function)}
+
+        direct = [call.lineno for call in ast.walk(tree)
+                  if isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+                  and call.func.id == "StubbedRun" and id(call) not in allowed]
+
+        self.assertEqual(direct, [], "build a run with self.stubbed so it adopts the shared fixture and records its steps")
 
     def test_a_stubbed_run_records_the_steps_it_visited_on_the_module_coverage(self):
         module = sys.modules[type(self).__module__]
