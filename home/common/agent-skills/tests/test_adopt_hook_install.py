@@ -266,9 +266,18 @@ class HookInstallRuleTest(unittest.TestCase):
 
     def test_declares_hooks_reads_a_devenv_git_hooks_setting(self):
         for text in ("{\n  git-hooks.hooks.x.enable = true;\n}", "git-hooks = {",
-                     "  pre-commit.hooks.y.enable = true;"):
+                     "  pre-commit.hooks.y.enable = true;",
+                     "{ ... }: { git-hooks.hooks.shellcheck.enable = true; }",
+                     "{ git-hooks = { hooks.x.enable = true; }; }",
+                     "{ git-hooks.hooks.x.enable = false; git-hooks.hooks.y.enable = true; }",
+                     "/* c */ { git-hooks.hooks.x.enable = true; }"):
             self.assertTrue(hook_install.declares_hooks(text), text)
-        for text in ("# git-hooks.hooks.x", 'scripts.a.exec = "pre-commit run";', "{ }"):
+        for text in ("# git-hooks.hooks.x", 'scripts.a.exec = "pre-commit run";', "{ }",
+                     "{\n  git-hooks.hooks.shellcheck.enable = false;\n}",
+                     "  git-hooks.hooks.shellcheck.enable = false;",
+                     "{ pre-commit.hooks.x.enable =\n false; }",
+                     "{ config.git-hooks.hooks.x.enable = true; }",
+                     "/* git-hooks.hooks.x.enable = true; */ { }"):
             self.assertFalse(hook_install.declares_hooks(text), text)
 
 

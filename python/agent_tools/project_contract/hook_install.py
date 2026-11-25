@@ -60,7 +60,11 @@ MASK: dict[str, str] = {"GIT_CONFIG_GLOBAL": os.devnull}
 INSTALL_COMMAND: tuple[str, ...] = ("true",)
 TEXT_LIMIT: int = 1 << 20
 
-DECLARATION = re.compile(r"(?m)^[ \t]*(?:git-hooks|pre-commit)[ \t]*[.=]")
+COMMENT = re.compile(r"/\*.*?\*/|#[^\n]*", re.DOTALL)
+DECLARATION = re.compile(r"(?<![\w.'\"-])(?:git-hooks|pre-commit)\s*[.=]")
+DISABLED = re.compile(
+    r"(?<![\w.'\"-])(?:git-hooks|pre-commit)(?:\s*\.\s*[\w'\"-]+)*"
+    r"\s*\.\s*enable\s*=\s*false\s*;")
 HOOKS_PATH = "core.hooksPath"
 
 
@@ -77,8 +81,15 @@ def left_alone(local_hooks_path: str | None, hooks_dir: Path) -> bool:
 
 
 def declares_hooks(text: str) -> bool:
-    """Whether some line of a `devenv.nix` text sets devenv git hooks."""
-    return DECLARATION.search(text) is not None
+    """Whether a `devenv.nix` text sets devenv git hooks, wherever the setting sits in a line.
+
+    Comments are ignored, and so is a hook setting that only switches a hook off
+    (`git-hooks.hooks.<name>.enable = false;`).
+    """
+    text = COMMENT.sub(" ", text)
+    switched_off = {match.start() for match in DISABLED.finditer(text)}
+    return any(match.start() not in switched_off
+               for match in DECLARATION.finditer(text))
 
 
 def declared(worktree: Path) -> bool:
