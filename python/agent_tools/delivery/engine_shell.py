@@ -12,7 +12,8 @@ Every refusal raises `Refused`, before a run directory exists and before any
 process starts: the project contract must resolve from the current directory; a
 held run lock answers `EXIT_RUNNING` first; the host's settings must name the lifecycle guard as the one
 unconditional Bash hook with no hook switch on (`engine_guard.locate`), checked after that answer;
-the procedure must pass `procedure_check.check_directory` against the platform
+the procedure must pass the procedure check, run as its own process through `engine_check` without
+measuring the caps, against the platform
 declarations plus every project command, hold only `command`, `agent`, `decide`, `group` and `call` steps,
 a `mutates: true` step only as a `command` or `agent` step, no input the run does not supply, no `call` member
 of a group, no procedure that calls itself and no agent step whose role file does not read
@@ -184,8 +185,8 @@ from typing import Callable, Mapping
 
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
 from agent_tools.delivery import (
-    engine_commands, engine_core, engine_guard, engine_housekeeping, engine_ledger, engine_reply,
-    engine_session, engine_slots, engine_stop, host_admission, procedure_check, procedure_terms,
+    engine_check, engine_commands, engine_core, engine_guard, engine_housekeeping, engine_ledger,
+    engine_reply, engine_session, engine_slots, engine_stop, host_admission, procedure_terms,
     rule_reader,
 )
 from agent_tools.delivery.engine_commands import CommandTable, UnknownCommand
@@ -358,15 +359,16 @@ def _admitted() -> int:
                       f"{host_admission.ENGINE_ROUTE} route, so no run starts") from error
 
 
-def check_declarations() -> dict[str, procedure_terms.CommandDeclaration | None]:
-    """The declarations `engine check` checks against: `engine deliver`'s inside an onboarded project."""
+def check_project_commands() -> tuple[str, ...]:
+    """The project command ids `engine check` adds to the platform's: `engine deliver`'s inside an onboarded project."""
     try:
         snapshot = resolve_project.resolve(None)
     except resolve_project.ContractError as error:
         if error.code == "not_onboarded":
-            return procedure_terms.load_commands()
+            procedure_terms.load_commands()  # a DeclarationError propagates
+            return ()
         raise Refused(f"{error.code}: {error.repair_id}") from error
-    return CommandTable.from_snapshot(snapshot).declarations()
+    return CommandTable.from_snapshot(snapshot).project_ids()
 
 
 def _validate(directory: Path, table: CommandTable) -> dict:
@@ -374,13 +376,13 @@ def _validate(directory: Path, table: CommandTable) -> dict:
     if not directory.is_dir() or not (directory / f"{ENTRY}.json").is_file():
         raise Refused(f"no {ENTRY}.json in the procedures directory {directory}")
     try:
-        result = procedure_check.check_directory(directory, table.declarations())
-    except (ValueError, OSError) as error:
+        _, document = engine_check.verdict(directory, table.project_ids(), caps=False)
+    except engine_check.CheckError as error:
         raise Refused(str(error)) from error
-    if result.refusals:
-        first = result.refusals[0]
-        raise Refused(f"procedure {first.procedure}, step {first.step}: "
-                      f"{first.defect}, {first.detail}")
+    if document.get("refusals"):
+        first = document["refusals"][0]
+        raise Refused(f"procedure {first['procedure']}, step {first['step']}: "
+                      f"{first['defect']}, {first['detail']}")
     try:
         procedure = _load(directory / f"{ENTRY}.json")
     except (ValueError, OSError) as error:

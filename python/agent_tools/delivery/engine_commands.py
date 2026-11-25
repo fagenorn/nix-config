@@ -59,7 +59,6 @@ from typing import Callable, Mapping, Sequence
 
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
 from agent_tools.delivery import engine_guard, engine_stop, procedure_terms
-from agent_tools.delivery.procedure_terms import CommandDeclaration
 from agent_tools.system.siblings import sibling_argv
 
 PLATFORM_MODULES: Mapping[str, str] = MappingProxyType({
@@ -96,7 +95,6 @@ PLATFORM_WALL_SECONDS: Mapping[str, float] = MappingProxyType({
     "verified-tree": 14400,
 })
 PROJECT_WALL_SECONDS = 3600
-PROJECT_DECLARATION = CommandDeclaration((), {})
 NOT_STARTED = 127
 TIMED_OUT = "timeout"
 DRAIN_SECONDS = 5
@@ -159,13 +157,9 @@ class CommandTable:
         return cls(PLATFORM_MODULES, snapshot["bindings"]["commands"],
                    snapshot["project"]["root"])
 
-    def declarations(self) -> dict[str, CommandDeclaration | None]:
-        """Every runnable id's declaration; `invocation`'s lookup order: the platform table first."""
-        declared: dict[str, CommandDeclaration | None] = dict(procedure_terms.load_commands())
-        for name in self.project:
-            if name not in self.platform:
-                declared[name] = PROJECT_DECLARATION
-        return declared
+    def project_ids(self) -> tuple[str, ...]:
+        """The project commands the platform does not run, which `invocation` resolves from the snapshot."""
+        return tuple(sorted(name for name in self.project if name not in self.platform))
 
     def invocation(self, command: str, subcommand: str | None,
                    args: Sequence[tuple[str, object]]) -> Invocation:

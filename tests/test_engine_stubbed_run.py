@@ -293,6 +293,22 @@ class RefusalTest(Scenario):
         self.assertFalse(run.worktree_path.exists())
         self.assertEqual(self.branches(run), "")
 
+    def test_a_procedure_that_fails_the_check_is_refused_before_its_first_step_with_the_validator_unimportable(self):
+        run = StubbedRun(self)
+        copy = run.tmp / "unchecked-procedures"
+        shutil.copytree(PROCEDURES, copy)
+        deliver = json.loads((copy / "deliver.json").read_text(encoding="utf-8"))
+        next(item for item in deliver["steps"] if item["id"] == "issue")["stage"] = "testing"
+        (copy / "deliver.json").write_text(json.dumps(deliver, indent=2) + "\n", encoding="utf-8")
+
+        blocked = run.deliver(copy, validator_unimportable=True)
+
+        self.assertEqual((blocked.returncode, blocked.stdout, blocked.stderr), (2, "", (
+            "engine: procedure deliver, step issue: unknown_stage, stage 'testing' is not one of the ten stages.\n")))
+        self.assertEqual(run.runs(), [])
+        self.assertEqual(run.launches(), [])
+        self.assertEqual(run.claims(), [])
+
     def test_setup_refuses_a_closed_issue_and_makes_no_worktree(self):
         run = StubbedRun(self, state="closed")
 

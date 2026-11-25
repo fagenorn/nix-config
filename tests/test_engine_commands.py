@@ -93,21 +93,17 @@ class TableTest(unittest.TestCase):
         with self.assertRaises(UnknownCommand):
             table(**{"standin-json": project("json", "0")}).invocation("standin-json", "x", ())
 
-    def test_declarations_grade_project_ids_ok_or_failed_under_the_platform_table(self):
-        declarations = table(**{"standin-json": project("json", "0"),
-                                "diff-scope": project("json", "0"),
-                                "forge-claim": project("json", "0")}).declarations()
-        platform = load_commands()
-        self.assertEqual(set(declarations), set(platform) | {"standin-json"})
-        self.assertEqual(declarations["standin-json"].outcomes(None), ("ok", "failed"))
-        self.assertIsNone(declarations["standin-json"].outcomes("x"))
-        self.assertEqual(declarations["forge-claim"], platform["forge-claim"])
-        self.assertEqual(declarations["diff-scope"], platform["diff-scope"])
+    def test_project_ids_are_the_project_commands_the_platform_does_not_run(self):
+        built = table(**{"standin-json": project("json", "0"), "forge-claim": project("json", "0"),
+                         "release": project("json", "0")})
+        self.assertEqual(built.project_ids(), ("release", "standin-json"))
+        self.assertFalse(hasattr(engine_commands, "PROJECT_DECLARATION"))
+        self.assertFalse(hasattr(CommandTable, "declarations"))
 
     def test_a_project_id_the_platform_declares_without_a_table_row_is_a_runnable_project_id(self):
         self.assertIsNone(load_commands()["release"])
         built = table(release=project("json", "0"))
-        self.assertEqual(built.declarations()["release"].outcomes(None), ("ok", "failed"))
+        self.assertEqual(built.project_ids(), ("release",))
         self.assertEqual(built.invocation("release", None, ()).argv[-2:], ("json", "0"))
 
     def test_from_snapshot_reads_the_commands_and_the_root(self):

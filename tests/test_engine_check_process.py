@@ -6,6 +6,8 @@ import ast
 import contextlib
 import io
 import json
+import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -13,11 +15,13 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.delivery import engine_check, engine_graders, procedure_check, procedure_terms, size_caps
+from agent_tools.delivery import engine_check, engine_graders, engine_shell, procedure_check, procedure_terms, size_caps
+from agent_tools.delivery.engine_commands import PLATFORM_MODULES, CommandTable
+from agent_tools.delivery.engine_shell import Refused
 from agent_tools.delivery.size_caps import Breach
 from tests.guard_policy_world import install_platform_manifest_in_environ
 from tests.test_engine_check import (
-    PROCEDURES, REPEAT_SCOPE_REFUSED, SHIPPED_OK, _repeat_scope, broken_copy, compact, editing, load, run_check, save,
+    PROCEDURES, REPEAT_SCOPE_REFUSED, REPO_ROOT, SHIPPED_OK, _repeat_scope, broken_copy, compact, editing, load, run_check, save,
     step)
 
 setUpModule = install_platform_manifest_in_environ
@@ -199,6 +203,65 @@ class VerdictTest(unittest.TestCase):
             with self.assertRaises(engine_check.CheckError) as raised:
                 engine_check.verdict(PROCEDURES, (), caps=True)
         self.assertIn("did not finish", str(raised.exception))
+
+
+class PreRunTest(unittest.TestCase):
+    table = CommandTable(PLATFORM_MODULES, {"standin-json": {}, "forge-claim": {}}, "/r")
+
+    def test_the_pre_run_check_measures_nothing_and_names_the_project_commands(self):
+        with fake_child(ECHO_ARGV), self.assertRaises(Refused) as raised:
+            engine_shell._validate(PROCEDURES, self.table)
+        self.assertEqual(str(raised.exception), f"procedure p, step s: x, --procedures={PROCEDURES} "
+                                                "--project-command=standin-json --without-caps")
+
+    def test_a_breach_alone_does_not_refuse_a_run(self):
+        breach = {"cap": 8000, "size": 8001, "thing": "engine package", "unit": "lines"}
+        script = f"import json; print(json.dumps({{'breaches': [{breach!r}], 'refusals': [], 'verdict': 'refused'}})); raise SystemExit(1)"
+        with fake_child(script), mock.patch.object(engine_shell, "_refuse_unrunnable"):
+            procedure = engine_shell._validate(PROCEDURES, self.table)
+        self.assertIsInstance(procedure["steps"], list)
+
+    def test_a_check_error_refuses_the_run(self):
+        with fake_child("import sys; sys.exit(3)"), self.assertRaises(Refused) as raised:
+            engine_shell._validate(PROCEDURES, self.table)
+        self.assertIn("3", str(raised.exception))
+
+
+POPEN_SCRIPT = r"""
+import contextlib, io, json, socket, subprocess, sys
+from unittest import mock
+
+import agent_tools.delivery.engine as engine
+
+with mock.patch.object(subprocess, "Popen", wraps=subprocess.Popen) as popen, \
+        mock.patch.object(socket, "socket", side_effect=AssertionError("socket")) as opened, \
+        contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+    codes = [engine.main(["check"]), engine.main(["check", "--procedures", sys.argv[1]])]
+sys.__stdout__.write(json.dumps({"argv": [call.args[0][-3:] for call in popen.call_args_list],
+                                 "codes": codes, "socket": opened.called}) + "\n")
+"""
+
+
+class EngineCheckProcessTest(unittest.TestCase):
+    def test_engine_check_reads_a_directory_named_like_an_option(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            shutil.copytree(PROCEDURES, Path(tmp) / "-fixtures")
+            done = subprocess.run([sys.executable, "-m", "agent_tools.delivery.engine", "check",
+                                   "--procedures=-fixtures"], cwd=tmp, capture_output=True, text=True, timeout=60,
+                                  env={**os.environ, "PYTHONPATH": str(REPO_ROOT / "python")})
+        self.assertEqual((done.returncode, done.stdout, done.stderr), (0, SHIPPED_OK, ""))
+
+    def test_engine_check_starts_only_the_procedure_check_and_opens_no_socket(self):
+        broken = broken_copy(editing("toy", _repeat_scope))
+        with tempfile.TemporaryDirectory() as tmp:  # outside an onboarded project, so no project command joins the argv
+            done = subprocess.run([sys.executable, "-c", POPEN_SCRIPT, str(broken)], cwd=tmp,
+                                  env={**os.environ, "PYTHONPATH": str(REPO_ROOT / "python")},
+                                  capture_output=True, text=True, timeout=120)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        tail = ["-m", "agent_tools.delivery.procedure_check"]
+        self.assertEqual(json.loads(done.stdout), {
+            "argv": [[*tail, f"--procedures={PROCEDURES}"], [*tail, f"--procedures={broken}"]],
+            "codes": [0, 1], "socket": False})
 
 
 if __name__ == "__main__":

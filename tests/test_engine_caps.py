@@ -383,7 +383,7 @@ class ShippedTreeTest(unittest.TestCase):
         self.assertEqual(size_caps.breaches(DELIVERY, PROCEDURES, engine_graders.GRADERS), ())
         names = {p.name for p in size_caps.engine_modules(DELIVERY)}
         self.assertLessEqual(
-            {"engine.py", "size_caps.py", "engine_core.py", "engine_graders.py", "engine_ledger.py", "procedure_check.py"},
+            {"engine.py", "engine_check.py", "engine_core.py", "engine_graders.py", "engine_ledger.py", "procedure_terms.py"},
             names,
         )
         result = subprocess.run(
@@ -394,6 +394,19 @@ class ShippedTreeTest(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.stdout, '{"procedures":["close-out","deliver","direct","land","land-attempt","setup","toy","toy-child","verify"],"verdict":"ok"}\n')
+
+    def test_the_package_measure_leaves_out_the_check_process(self):
+        names = {p.name for p in size_caps.engine_modules(DELIVERY)}
+        self.assertEqual(names & {"procedure_check.py", "size_caps.py"}, set())
+        self.assertLessEqual({"engine.py", "engine_check.py", "engine_core.py", "engine_graders.py",
+                              "engine_ledger.py", "procedure_terms.py"}, names)
+        self.assertEqual(size_caps.breaches(DELIVERY, PROCEDURES, engine_graders.GRADERS), ())
+        self.assertEqual((size_caps.PACKAGE_LINES, size_caps.CORE_LINES), (8000, 600))
+
+    def test_no_engine_module_imports_the_validator_or_the_cap_checker(self):
+        for path in size_caps.engine_modules(DELIVERY):
+            with self.subTest(module=path.name):
+                self.assertEqual(size_caps._imports(path, DELIVERY) & {"procedure_check", "size_caps"}, set())
 
     def test_the_engine_reads_rule_ids_only_through_the_reader(self):
         names = {p.name for p in size_caps.engine_modules(DELIVERY)}
@@ -617,7 +630,7 @@ class ImmunityTest(unittest.TestCase):
         code, out, _ = run_copy(self.root, extra_env=extra_env)
         self.assertEqual(code, 1)
         self.assertIn(CORE_BREACH, json.loads(out)["breaches"])
-        for module in ("engine.py", "procedure_check.py", "size_caps.py"):
+        for module in ("engine.py", "engine_check.py", "procedure_check.py", "size_caps.py"):
             tree = ast.parse((DELIVERY / module).read_text(encoding="utf-8"))
             names = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
             attrs = {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
@@ -637,6 +650,7 @@ class PackageLocationTest(unittest.TestCase):
         used = {n.id for n in ast.walk(assigns[0].value) if isinstance(n, ast.Name)}
         self.assertNotIn("__file__", used)
         self.assertEqual(procedure_check.ENGINE_DIR.resolve(), DELIVERY.resolve())
+        self.assertFalse(hasattr(engine, "ENGINE_DIR"))
 
 
 if __name__ == "__main__":

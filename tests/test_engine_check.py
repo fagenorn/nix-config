@@ -27,6 +27,7 @@ from agent_tools.delivery import engine, engine_reply, procedure_check, procedur
 from agent_tools.delivery.engine_commands import LIFECYCLE_ARGV
 from agent_tools.delivery.procedure_terms import CommandDeclaration, load_commands
 from tests.engine_walks import reply_schemas, step_outcomes, walk_edges
+from tests.engine_stubbed_world import VALIDATOR_UNIMPORTABLE_ENGINE
 from tests.guard_policy_world import install_platform_manifest_in_environ
 
 setUpModule = install_platform_manifest_in_environ
@@ -639,11 +640,11 @@ mocks = {}
 for name, (owner, attribute) in targets.items():
     mocks[name] = mock.patch.object(owner, attribute, side_effect=AssertionError("side effect")).start()
 
-import agent_tools.delivery.engine as engine
+import agent_tools.delivery.procedure_check as procedure_check
 
 with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-    first = engine.main(["check"])
-    second = engine.main(["check", "--procedures", sys.argv[1]])
+    first = procedure_check.main([f"--procedures={sys.argv[1]}"])
+    second = procedure_check.main([f"--procedures={sys.argv[2]}"])
 sys.__stdout__.write(json.dumps({"called": sorted(n for n, m in mocks.items() if m.called),
                                  "codes": [first, second]}) + "\n")
 """
@@ -1087,9 +1088,9 @@ class RoleTest(unittest.TestCase):
 
 
 class NoSideEffectTest(unittest.TestCase):
-    def test_check_starts_no_process_and_opens_no_socket(self):
+    def test_the_check_process_starts_no_process_and_opens_no_socket(self):
         broken = broken_copy(editing("toy", _repeat_scope))
-        done = subprocess.run([sys.executable, "-c", SIDE_EFFECT_SCRIPT, str(broken)],
+        done = subprocess.run([sys.executable, "-c", SIDE_EFFECT_SCRIPT, str(PROCEDURES), str(broken)],
                               capture_output=True, text=True, timeout=60)
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertEqual(json.loads(done.stdout), {"called": [], "codes": [0, 1]})
@@ -1109,6 +1110,22 @@ class NoSideEffectTest(unittest.TestCase):
                     self.assertNotIn(module.split(".")[0], ("subprocess", "socket"), name)
 
 
+class ProcessSeamTest(unittest.TestCase):
+    def test_engine_check_runs_with_the_validator_unimportable_in_its_process(self):
+        broken = broken_copy(editing("toy", _repeat_scope))
+        empty = tempfile.mkdtemp(prefix="engine-check-")
+        unittest.addModuleCleanup(shutil.rmtree, empty, ignore_errors=True)
+
+        def blocked(*args: str) -> tuple[int, str, str]:
+            done = subprocess.run([sys.executable, "-c", VALIDATOR_UNIMPORTABLE_ENGINE, "check", *args],
+                                  capture_output=True, text=True, timeout=60)
+            return done.returncode, done.stdout, done.stderr
+
+        self.assertEqual(blocked(), (0, SHIPPED_OK, ""))
+        self.assertEqual(blocked("--procedures", str(broken)), (1, REPEAT_SCOPE_REFUSED, ""))
+        self.assertEqual(blocked("--procedures", empty), (2, "", f"engine: {empty} holds no procedure file\n"))
+
+
 class UsageTest(unittest.TestCase):
     def test_a_missing_directory_is_usage(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1120,7 +1137,7 @@ class UsageTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             code, out, err = run_check("--procedures", tmp)
         self.assertEqual((code, out), (2, ""))
-        self.assertEqual(len(err.splitlines()), 1)
+        self.assertEqual(err, f"engine: {tmp} holds no procedure file\n")
 
     def test_a_bad_argument_returns_2_with_one_stderr_line(self):
         for argv in (["check", "--bogus"], [], ["check", "--procedures"]):

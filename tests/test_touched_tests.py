@@ -352,7 +352,7 @@ class RecipeTest(unittest.TestCase):
         caps = importlib.import_module("agent_tools.delivery.size_caps")
         modules = [p.relative_to(REPO_ROOT).as_posix()
                    for p in caps.engine_modules(REPO_ROOT / "python/agent_tools/delivery")]
-        self.assertIn(f"{DELIVERY}/procedure_check.py", modules)
+        self.assertIn(f"{DELIVERY}/procedure_terms.py", modules)
         for module in modules:
             with self.subTest(module=module):
                 self.assertTrue(any(fnmatch.fnmatchcase(module, source)
