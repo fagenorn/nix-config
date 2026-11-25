@@ -8,7 +8,7 @@ from agent_tools.console import permit
 
 from . import console_test_support as support
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures
-from .test_console_manager_service import ROOT, SLUG, PermitCase
+from .test_console_manager_service import MERGE, NOW, ROOT, SLUG, PermitCase
 from .test_console_permit import HEAD, SHA
 
 TIER = "fast"  # a local service on a free port and the standard library
@@ -108,6 +108,54 @@ class PermitRerunServiceTest(PermitCase):
         verdict = again.permit(sid, self.secret(sid), "s-1", "t-3", rerun)
         self.assertEqual((verdict.decision, verdict.reason), ("deny", permit.RERUN_LIMIT.format(
             pr=7, head=SHA, reruns="run 55 (failing: no members reported) and run 55 (failing: no members reported)")))
+
+    RERUN = f"gh run rerun 55 --failed --repo {SLUG}"
+
+    def landed_row(self, sid, call="t-1"):
+        return {"sprint_id": sid, "session_id": "s-1", "tool_use_id": call, "repo": SLUG, "verb": "rerun",
+                "target": {"run": 55}}
+
+    def test_a_rerun_the_manager_ran_after_its_allow_is_recorded_as_landed(self):
+        svc, sid = self.boot()
+        verdict = self.judge(svc, sid, self.RERUN, call="t-1")
+        self.assertEqual((verdict.decision, verdict.verb), ("allow", "rerun"))
+        self.assertTrue(svc.permit_landed(sid, self.secret(sid), "s-1", "t-1", self.RERUN))
+        self.assertEqual(self.rows("permit.landed"), [self.landed_row(sid)])
+        with self.subTest("prefixed"):
+            svc, sid = self.boot()
+            prefixed = "env -u GITHUB_TOKEN -u GH_TOKEN " + self.RERUN
+            self.assertEqual(self.judge(svc, sid, prefixed, call="t-1").decision, "allow")
+            self.assertTrue(svc.permit_landed(sid, self.secret(sid), "s-1", "t-1", prefixed))
+            self.assertEqual(self.rows("permit.landed")[-1], self.landed_row(sid))
+
+    def test_a_rerun_lands_only_for_its_own_allowed_call_of_the_same_run_within_thirty_minutes(self):
+        now = [NOW]
+        svc, sid = self.boot(clock=lambda: now[0])
+        secret = self.secret(sid)
+        with self.subTest("before the allow"):
+            self.assertFalse(svc.permit_landed(sid, secret, "s-1", "t-1", self.RERUN))
+        self.assertEqual(self.judge(svc, sid, self.RERUN, call="t-1").decision, "allow")
+        for name, session, call, command in (
+                ("other session", "s-2", "t-1", self.RERUN),
+                ("other call", "s-1", "t-9", self.RERUN),
+                ("other run", "s-1", "t-1", f"gh run rerun 56 --failed --repo {SLUG}"),
+                ("extra flag", "s-1", "t-1", self.RERUN + " --job 9"),
+                ("other repository", "s-1", "t-1", "gh run rerun 55 --failed --repo o/other"),
+                ("merge text on the rerun's call", "s-1", "t-1", MERGE)):
+            with self.subTest(name):
+                self.assertFalse(svc.permit_landed(sid, secret, session, call, command))
+        self.assertEqual(self.rows("permit.landed"), [])
+        self.assertEqual(self.judge(svc, sid, self.RERUN, call="t-2").decision, "allow")
+        with self.subTest("denied third rerun"):
+            third = self.judge(svc, sid, self.RERUN, call="t-3")
+            self.assertEqual(third.decision, "deny")
+            self.assertFalse(svc.permit_landed(sid, secret, "s-1", "t-3", self.RERUN))
+        with self.subTest("thirty minutes"):
+            now[0] = NOW + 30 * 60
+            self.assertTrue(svc.permit_landed(sid, secret, "s-1", "t-1", self.RERUN))
+            now[0] = NOW + 30 * 60 + 1
+            self.assertFalse(svc.permit_landed(sid, secret, "s-1", "t-2", self.RERUN))
+        self.assertEqual(self.rows("permit.landed"), [self.landed_row(sid)])
 
 
 if __name__ == "__main__":

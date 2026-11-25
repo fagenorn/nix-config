@@ -794,6 +794,33 @@ def merge_target(command: str, grant: Grant) -> dict | None:
     return None if parts is None else _merge_shape(parts, grant)
 
 
+def rerun_landing(command: str, grant: Grant) -> int | None:
+    """The run id of exactly the rerun `_judge_rerun` grants, else None."""
+    parts = words(strip_scrub(command))
+    if (grant.slug is None or parts is None or len(parts) != 7 or not _NUMBER.fullmatch(parts[3])
+            or parts[:3] + parts[4:] != ["gh", "run", "rerun", "--failed", "--repo", grant.slug]):
+        return None
+    return int(parts[3])
+
+
+def landing_key(verdict: Verdict) -> tuple | None:
+    """What an allowed merge or rerun is remembered by until it lands, else None."""
+    if verdict.decision != ALLOW:
+        return None
+    if verdict.verb == MERGE:
+        return (verdict.target["pr"], verdict.target["head"])
+    return (RERUN, verdict.target["run"]) if verdict.verb == RERUN else None
+
+
+def landing_of(command: str, grant: Grant) -> tuple[str, tuple, dict] | None:
+    """The verb, `landing_key` and row target of a command that is exactly a granted merge or rerun."""
+    target = merge_target(command, grant)
+    if target is not None:
+        return (MERGE, (target["pr"], target["head"]), {"pr": target["pr"], "head": target["head"]})
+    run = rerun_landing(command, grant)
+    return None if run is None else (RERUN, (RERUN, run), {"run": run})
+
+
 def _own_issue(grant: Grant, branch: str, refusal: str) -> Verdict | None:
     """The refusal for a branch that is not an own issue's, else None."""
     issue = deliveries.branch_issue(grant.branch_pattern, branch)
