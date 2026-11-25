@@ -775,7 +775,7 @@ jobs:
         self.assertEqual((["Agent Workflow Tests"], []), (run["rerun"], run["members"]))
 
     def test_a_manager_reruns_the_required_failure_of_its_pull_request_twice_and_not_a_third_time(self):
-        """The demo of #1712 end to end: the push-only timing job does not block, the members are
+        """The demo end to end (ADR-console-106): the push-only timing job does not block, the members are
         recorded, and the third rerun of one head is refused."""
         jobs = [{"id": 900, "name": "Agent Workflow Tests", "conclusion": "failure"},
                 {"id": 901, "name": "Suite Timing Baseline", "conclusion": "skipped"}]

@@ -72,7 +72,7 @@ never None. The checks run in this order, the first that applies deciding:
   skipped dependents of a failed job, but not a skipped job whose own `if` can never hold for a pull
   request event, `read_run`'s business) or one not named by `read_required(slug, base)` is
   `NOT_CHECK_RUN`. A head that `grant.reruns` already counts `MAX_RERUNS` (two) allowed reruns for is
-  `RERUN_LIMIT`, which names the two reruns, each by run and failing members (#1712, ADR-console-106). Else `ALLOW` with target `{"run", "pr", "head", "count",
+  `RERUN_LIMIT`, which names the two reruns, each by run and failing members (ADR-console-106). Else `ALLOW` with target `{"run", "pr", "head", "count",
   "members"}`: `count` is the number of allowed reruns of that head with this one, and `members` the
   suite members the run's failed jobs reported as failed.
 - Release: the plain run is `ALLOW` with its target; any other leading run is `RELEASE_SPELLING`.

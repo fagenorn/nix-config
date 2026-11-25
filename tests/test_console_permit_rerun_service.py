@@ -1,4 +1,4 @@
-"""A manager's reruns of one head are counted from the event log and a third is refused (#1712, ADR-console-106).
+"""A manager's reruns of one head are counted from the event log and a third is refused (ADR-console-106).
 
 Run: just agent-workflow-tests
 """
