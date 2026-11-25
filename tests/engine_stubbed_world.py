@@ -8,14 +8,17 @@ the other methods read what the run left: its result line, its run directories a
 claim comments and the launches. `replies` overrides the default replies by step id (an entry
 `<step>.<visit>` answers that visit only); `review_code` is the answer list of the `codex-companion`
 stand-in that makes the independent code review supported; `conditions` is the contract's
-`verification_conditions`; `before_pull_request` makes the fixture declare the pre-pull-request commands
-(lint and the touched-only test), and `slot_history()` reads the slot's history lines.
+`verification_conditions`; `before_pull_request` makes the fixture declare the pre-pull-request
+commands (lint and the touched-only test), and `slot_history()` reads the slot's history lines.
+`fixtures` is an `AdoptedFixtures` that supplies the fixture as a copy of one adopted once; `None`
+adopts a new one.
 
 The run installs the real lifecycle guard on a confirmed row for the fixture (the fixture's owner is
 not an authorized owner, so only the row authorizes it): `guard(text, cwd)` runs the installed hook
 and `guard_log` holds every payload it judged. A fake pull-request forge
 (`tests/fixtures/engine-stubbed-run/gh_pulls.py`) fronts the tracker's `gh` over the bare origin;
-`pulls()`, `lock_refs()` and `origin_tip(branch)` read what it left. `required_checks` is the
+`pulls()`, `lock_refs()` and `origin_tip(branch)` read what it left, and `visited_steps()` the
+(procedure, step) pairs every run entered (`visited()` their step ids). `required_checks` is the
 contract's `merge.required_checks` (`()` declares none and the member is absent), `rollup` the pull
 requests' `statusCheckRollup` (default: one green `Fixture Checks` run), `forge_events` the one-shot
 events that fire on the first `statusCheckRollup` read of a pull request (`"move-head"` adds a commit
@@ -34,6 +37,11 @@ request's `mergeStateStatus` is `BEHIND` while `main` is not an ancestor of its 
 The environment always sets `LANDING_BOUND_SECONDS` to 0 (no wait on a lock or a pending check).
 The replies' `merge`, `same_head` and `upstream` effects (see the launcher stand-in) are given the
 run's worktree and bare origin when they name none.
+
+`blocks` is the issue numbers the issue blocks (the answer to the hold path's blocking read; none by
+default). The world also answers the `needs-verification` label creation of the hold path and of its
+split children, and registers no `gh auth status`, so the close-out's `verify-pending run` does nothing. `fail_once` is the tracker's one-shot
+failures, as `ForgeWorld.comment_store` takes them (a bare operation kind, or `add_label:<label>` for one label).
 """
 
 from __future__ import annotations
@@ -51,7 +59,7 @@ from pathlib import Path
 from agent_tools.claims import forge_markers
 from agent_tools.delivery import issue_branch
 from agent_tools.delivery.engine_guard import payload
-from tests.engine_fixture import FixtureProject
+from tests.engine_fixture import AdoptedFixtures, FixtureProject
 from tests.engine_guards import script, standin_guard, write_settings
 from tests.forge_world import ForgeWorld
 from tests.guard_policy_world import REAL_GIT, REPO_ROOT, GuardPolicyWorld
@@ -77,7 +85,24 @@ IMPLEMENTED = {
               "sensitive": False, "ineligible": False, "tests": ["checks/check_greet.py"]},
     "commit": {"path": "fixture/farewell.py",
                "text": 'def farewell(name: str) -> str:\n    return f"Goodbye, {name}."\n'}}
-DEFAULT_REPLIES = {"applies": APPLIES, "implement": IMPLEMENTED, "lite-review": CLEAN_LITE}
+NOT_BEFORE = {"not_before": "2099-01-01T00:00:00Z"}
+EVIDENCE_CHECK = {"ac": "AC2", "kind": "evidence", "host": "any", "when": NOT_BEFORE,
+                  "run": {"command": "test"}}
+EVIDENCE_BODY = ("Add a greet() function.\n\n## Acceptance criteria\n\n"
+                 "- [ ] [code] greet() returns the greeting\n"
+                 "- [ ] [evidence] the owner has seen the greeting\n")
+REGRADED = {"verdict": "met", "code_unmet": [],
+            "acceptance": [{"id": "AC1", "met": True, "evidence": "checks/check_greet.py:8"}]}
+
+
+def drafted(*checks: dict) -> dict:
+    """A `hold-draft` reply that drafted `checks`, each written under its criterion id."""
+    return {"verdict": "drafted", "written": [{"ac": c["ac"], "check": json.dumps(c)} for c in checks],
+            "detail": ""}
+
+
+DEFAULT_REPLIES = {"applies": APPLIES, "implement": IMPLEMENTED, "lite-review": CLEAN_LITE,
+                   "hold-draft": drafted(EVIDENCE_CHECK), "regrade": REGRADED}
 DEFAULT_BODY = ("Add a greet() function to the fixture module.\n\n"
                 "## Acceptance criteria\n\n- [ ] [code] greet() returns the greeting\n")
 PULL_FIELDS = "number,state,headRefName,closingIssuesReferences"
@@ -93,7 +118,8 @@ class StubbedRun:
                  rollup: list | None = None, forge_events=(), lock_release_fails: bool = False,
                  before_pull_request: bool = False, rollups: list[list] | None = None,
                  advance_main: int = 0, main_change: dict | None = None, merge_behind: int = 0,
-                 merge_policy: int = 0) -> None:
+                 merge_policy: int = 0, blocks=(), fail_once=(),
+                 fixtures: AdoptedFixtures | None = None) -> None:
         self.test = test_case
         self.issue = issue
         self.title = title
@@ -101,13 +127,14 @@ class StubbedRun:
         self.companion_log = self.world.tmp / "companion.log"
         if review_code is not None:
             self._install_companion(review_code)
-        self.fixture = FixtureProject(test_case, self.world, review_code=review_code is not None,
-                                      conditions=conditions, required_checks=required_checks,
-                                      before_pull_request=before_pull_request)
+        options = {"review_code": review_code is not None, "conditions": conditions,
+                   "required_checks": required_checks, "before_pull_request": before_pull_request}
+        self.fixture = (FixtureProject(test_case, self.world, **options) if fixtures is None
+                        else fixtures.project(test_case, self.world, **options))
         self.forge = ForgeWorld(test_case)
         slug = self.fixture.slug
-        self.forge.comment_store(slug, issue, comments, labels=list(labels))
-        self._respond(slug, issue, title, state, labels, body, list(pulls))
+        self.forge.comment_store(slug, issue, comments, labels=list(labels), fail_once=list(fail_once))
+        self._respond(slug, issue, title, state, labels, body, list(pulls), list(blocks))
         self.tmp = self.world.tmp / "stubbed-run"
         self.tmp.mkdir()
         self.branch: str = issue_branch.render(self.fixture.branch_pattern, issue,
@@ -180,7 +207,7 @@ class StubbedRun:
         self.world.env["PATH"] = os.pathsep.join([str(shims), self.world.env["PATH"]])
 
     def _respond(self, slug: str, issue: int, title: str, state: str, labels, body: str,
-                 pulls: list) -> None:
+                 pulls: list, blocks: list) -> None:
         names = [{"name": name} for name in labels]
         issue_json = {"number": issue, "title": title, "state": state, "labels": names, "body": body}
         respond = self.forge.respond_json
@@ -194,6 +221,10 @@ class StubbedRun:
                        "-f", "color=FBCA04"], {"name": "in-progress"})
         respond("gh", ["pr", "list", "--repo", slug, "--state", "all", "--search", str(issue),
                        "--json", PULL_FIELDS], pulls)
+        respond("gh", ["api", f"repos/{slug}/issues/{issue}/dependencies/blocking"],
+                [{"number": n} for n in blocks])
+        respond("gh", ["api", "-X", "POST", f"repos/{slug}/labels", "-f", "name=needs-verification",
+                       "-f", "color=1D76DB"], {"name": "needs-verification"})
 
     def _install_home(self, gh_bin: Path, slug: str) -> None:
         home = self.world.home
@@ -270,6 +301,16 @@ class StubbedRun:
     def events(run: Path) -> list[dict]:
         return [json.loads(line) for line in
                 (run / "events.jsonl").read_text(encoding="utf-8").splitlines() if line]
+
+    def visited_steps(self) -> set[tuple[str, str]]:
+        """The (procedure, step) of every `step_entered` and `transition_taken` event of every run, root and child."""
+        return {(json.loads((run / "run.json").read_text(encoding="utf-8"))["procedure"], event["step"])
+                for run in self._run_dirs() for event in self.events(run)
+                if event["event"] in ("step_entered", "transition_taken")}
+
+    def visited(self) -> set[str]:
+        """The step ids `visited_steps` holds, whatever procedure each belongs to."""
+        return {step for _, step in self.visited_steps()}
 
     def transitions(self, run: Path) -> list[tuple[str, str]]:
         return [(event["step"], event["outcome"]) for event in self.events(run)
