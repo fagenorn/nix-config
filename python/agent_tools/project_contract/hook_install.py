@@ -60,7 +60,9 @@ MASK: dict[str, str] = {"GIT_CONFIG_GLOBAL": os.devnull}
 INSTALL_COMMAND: tuple[str, ...] = ("true",)
 TEXT_LIMIT: int = 1 << 20
 
-DECLARATION = re.compile(r"(?<![\w.'\"-])(?:git-hooks|pre-commit)\s*[.=]")
+DECLARATION = re.compile(
+    r"(?<![\w.'\"-])(?:config\s*\.\s*)?(?:git-hooks|pre-commit)\s*[.=]")
+ALIAS = re.compile(r"[\w'-]+(?:\s*\.\s*[\w'-]+)*")
 SEGMENT = re.compile(r"\s*([\w'-]+|\"_*\")")
 DOT = re.compile(r"\s*\.")
 NONBLANK = re.compile(r"\s*\S")
@@ -196,35 +198,53 @@ def _attribute_set(value: str) -> str | None:
     return None
 
 
-def _switched_off(names: list[str], value: str) -> bool:
-    """Whether the binding `names = value` only switches hooks off (`enable = false`)."""
-    if names and names[-1] == "enable" and value == "false":
-        return True
+def _leaves(names: list[str], value: str, out: list[tuple[list[str], str]]) -> None:
+    """Append each leaf binding of `names = value`, an attribute set expanded to its bindings."""
     body = _attribute_set(value)
-    if body is None:
-        return False
-    bindings = _bindings(body)
-    if any(path == ["enable"] and inner == "false" for path, inner in bindings):
-        return True
-    return bool(bindings) and all(_switched_off(path, inner) for path, inner in bindings)
+    bindings = _bindings(body) if body is not None else []
+    if not bindings:
+        out.append((names, value))
+    for path, inner in bindings:
+        _leaves([*names, *path], inner, out)
+
+
+def _active(leaves: list[tuple[list[str], str]]) -> bool:
+    """Whether some hook is not switched off, the settings of one hook taken together.
+
+    A hook is `<root>.hooks.<name>`; it is off when any of its settings is `enable = false`,
+    wherever the other settings of it sit. A setting outside `hooks` is its own group.
+    """
+    groups: dict[tuple[str, ...], bool] = {}
+    for names, value in leaves:
+        key = tuple(names[:3]) if len(names) >= 3 and names[1] == "hooks" else tuple(names)
+        off = bool(names) and names[-1] == "enable" and value == "false"
+        groups[key] = groups.get(key, False) or off
+    return not all(groups.values())
 
 
 def declares_hooks(text: str) -> bool:
     """Whether a `devenv.nix` text sets devenv git hooks, wherever the setting sits in a line.
 
-    Comments and string literals are skipped, and so is a hook setting that only switches a
-    hook off: `git-hooks.hooks.<name>.enable = false;` or `<name> = { enable = false; };`.
+    Comments and string literals are skipped, and so is a hook that is only switched off
+    (`enable = false`, in dotted or nested form, with its other settings), a name that
+    is only a `let` alias of another value, and a `config.` read that assigns nothing.
     """
     text = _code(text)
+    leaves: list[tuple[list[str], str]] = []
     for match in DECLARATION.finditer(text):
         names, after = _path(text, match.start())
+        prefixed = len(names) > 1 and names[0] == "config"
         equals = EQUALS.match(text, after)
+        if not equals and prefixed:
+            continue
         if not equals:
             return True
+        names = names[1:] if prefixed else names
         value = text[equals.end():_value_end(text, equals.end())].strip()
-        if not _switched_off(names, value):
-            return True
-    return False
+        if len(names) == 1 and ALIAS.fullmatch(value):
+            continue
+        _leaves(names, value, leaves)
+    return _active(leaves)
 
 
 def declared(worktree: Path) -> bool:

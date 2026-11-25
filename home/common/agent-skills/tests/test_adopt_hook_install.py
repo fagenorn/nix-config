@@ -278,13 +278,24 @@ class HookInstallRuleTest(unittest.TestCase):
                      "{ s = ''\n  echo # not a comment /*\n  ''${x}\n''; git-hooks.hooks.x.enable = true; /* a */ }",
                      '{ s = "a ${"b /*" + c} d"; git-hooks.hooks.x.enable = true; /* a */ }',
                      "{ git-hooks.hooks.x = { enable = false; }; git-hooks.hooks.y = { enable = true; }; }",
-                     "{ git-hooks.hooks.x = { entry = \"a\"; }; }"):
+                     "{ git-hooks.hooks.x = { entry = \"a\"; }; }",
+                     "{ ... }: { config.git-hooks.hooks.shellcheck.enable = true; }",
+                     "{ config.git-hooks = { hooks.x.enable = true; }; }",
+                     "{ pkgs, ... }: let pre-commit = pkgs.pre-commit; in { packages = [ pre-commit ]; "
+                     "git-hooks.hooks.x.enable = true; }",
+                     "{ git-hooks.hooks.a.enable = false; git-hooks.hooks.a.entry = \"t\"; "
+                     "git-hooks.hooks.b.entry = \"t\"; }"):
             self.assertTrue(hook_install.declares_hooks(text), text)
         for text in ("# git-hooks.hooks.x", 'scripts.a.exec = "pre-commit run";', "{ }",
                      "{\n  git-hooks.hooks.shellcheck.enable = false;\n}",
                      "  git-hooks.hooks.shellcheck.enable = false;",
                      "{ pre-commit.hooks.x.enable =\n false; }",
-                     "{ config.git-hooks.hooks.x.enable = true; }",
+                     "{ config.git-hooks.hooks.x.enable = false; }",
+                     "{ packages = [ config.git-hooks.package ]; }",
+                     "{ pkgs, ... }: let pre-commit = pkgs.pre-commit; in { packages = [ pre-commit ]; }",
+                     "{ git-hooks.hooks.check.enable = false; git-hooks.hooks.check.entry = \"true\"; }",
+                     "{ git-hooks.hooks.check.entry = \"true\"; git-hooks.hooks.check.enable = false; }",
+                     "{ git-hooks.hooks.check = { entry = \"a\"; }; git-hooks.hooks.check.enable = false; }",
                      "/* git-hooks.hooks.x.enable = true; */ { }",
                      "{\n  git-hooks.hooks.x = { enable = false; };\n}",
                      "{\n  git-hooks = { hooks.x.enable = false; };\n}",
