@@ -149,24 +149,17 @@ for a call not already cached, so the console judges again without a second forg
 
 Readers (`read_pr`, `read_run`, `read_required`, `read_release_pr`) read the forge once and raise `ForgeUnreadable` with
 a fixed sentence for a failed read or a missing or malformed member; no raw forge text reaches a
-reason. `read_run`'s `failed` is the names of those failed jobs, read across every page of the run's
-jobs. Its `rerun` is the names of the jobs a failed-job rerun would run, read across every
-page of the run's jobs. A job whose conclusion is `skipped` is left out when the run's workflow file at
-the run's head (the run's `path`, read once, only when a job was skipped) gives that job, by name, an
-`if` that `never_on` proves false for the run's own event: a `&&` chain with a
-`github.event_name == '<event>'` term for an event but the run's (or `!= '<the run's event>'`), no `||`
-and no call but `!cancelled()`, `always()`, `success()` and `failure()`. Anything else, a run with no
-`path` or a job the file does not name counts as it did; a workflow file that cannot be read is
-`ForgeUnreadable`. `members` is the `suite-runner: failed <member>` lines of the log of each job whose
-conclusion is `failure`, in order and once each (at most `MAX_MEMBERS`); a log that cannot be read adds
-none, because the members are evidence and gate nothing. `read_required` names only the checks a GitHub Actions job can satisfy: a
+reason. `read_run`'s `failed` is the names of the jobs whose conclusion is in `FAILED_CONCLUSIONS`, read across
+every page of the run's jobs; the run's workflow file is not read. `members` is the
+`suite-runner: failed <member>` lines of the log of each job whose conclusion is `failure`, in order
+and once each (at most `MAX_MEMBERS`); a log that cannot be read adds none, because the members are
+evidence and gate nothing. `read_required` names only the checks a GitHub Actions job can satisfy: a
 check bound to another app is left out, even when the legacy `contexts` list repeats its name. `merge_binding(root)` is the project contract's `bindings.vcs.merge` `strategy` and
 `delete_branch`, `(None, False)` on any failure. `release_branches(root)` is the contract's
 `bindings.vcs.integration_branch` and `default_branch`, `(None, None)` for no root, on any failure, for a
 member that is no non-empty string or when `capabilities.release.state` is neither `available` nor `blocked`.
 `read_run`'s `pending` is whether any job of the run has no conclusion yet.
 """
-import base64
 import contextlib
 import contextvars
 import hashlib
@@ -433,84 +426,7 @@ def _pages(path: str, what: str) -> list:
     return _lookup(lambda: forge_api.api_pages(path), what)
 
 
-_NEVER_CALLS = re.compile(r"\b(?:cancelled|always|success|failure)\(\)")
-_EVENT_IS = re.compile(r"github\.event_name\s*==\s*'([A-Za-z_]+)'", re.IGNORECASE)
-_EVENT_IS_NOT = re.compile(r"github\.event_name\s*!=\s*'([A-Za-z_]+)'", re.IGNORECASE)
-_EXPRESSION = re.compile(r"\$\{\{\s*(.*?)\s*\}\}")
-_JOB_KEY = re.compile(r"^  [A-Za-z0-9_-]+:\s*$")
-_JOB_NAME = re.compile(r"^    name:\s*(\S.*?)\s*$")
-_JOB_IF = re.compile(r"^    if:\s*(\S.*?)\s*$")
 _FAILED_MEMBER = re.compile(r"^(?:\S+Z )?suite-runner: failed (\S+)\s*$", re.MULTILINE)
-
-
-def never_on(condition: str, event: str) -> bool:
-    """Whether a job's `if` is provably false for a run of `event` (see the module docstring)."""
-    event = event.lower()
-    found = _EXPRESSION.fullmatch(condition)
-    text = (found[1] if found else condition).strip()
-    text = _NEVER_CALLS.sub("", text)
-    if "||" in text or "(" in text or ")" in text:
-        return False
-    for term in (term.strip() for term in text.split("&&")):
-        for pattern, holds_for in ((_EVENT_IS, lambda named: named.lower() != event),
-                                   (_EVENT_IS_NOT, lambda named: named.lower() == event)):
-            match = pattern.fullmatch(term)
-            if match and holds_for(match[1]):
-                return True
-    return False
-
-
-def never_on_pull_request(condition: str) -> bool:
-    """Whether a job's `if` is provably false for a pull request event (see the module docstring)."""
-    return never_on(condition, "pull_request")
-
-
-def _unquoted(value: str) -> str:
-    return value[1:-1] if len(value) > 1 and value[0] == value[-1] and value[0] in "'\"" else value
-
-
-def _job_conditions(workflow: str) -> dict[str, str]:
-    """Each job's display name, its `name:` else its key, mapped to its job-level `if:` (only jobs with one)."""
-    conditions: dict[str, str] = {}
-    key = name = condition = None
-    inside = False
-
-    def close():
-        if key is not None and condition is not None:
-            conditions[key if name is None else name] = condition
-
-    for line in workflow.splitlines():
-        if line.startswith("jobs:"):
-            inside = True
-        elif inside and re.match(r"^[A-Za-z]", line):
-            inside = False
-        if not inside:
-            continue
-        if _JOB_KEY.match(line):
-            close()
-            key, name, condition = line.strip()[:-1].strip(), None, None
-        elif (match := _JOB_NAME.match(line)):
-            name = _unquoted(match[1])
-        elif (match := _JOB_IF.match(line)):
-            condition = _unquoted(match[1])
-    close()
-    return conditions
-
-
-def _workflow_conditions(slug: str, run: Mapping, what: str) -> dict[str, str]:
-    """The job `if:` conditions of the run's workflow file at the run's head; none when the run has no path."""
-    path = run.get("path")
-    if not isinstance(path, str) or not path:
-        return {}
-    head = _member(run, "head_sha", str, what)
-    reply = _get(f"repos/{slug}/contents/{path.partition('@')[0]}?ref={head}", f"the workflow of {what}")
-    content = reply.get("content") if isinstance(reply, dict) else None
-    if not isinstance(content, str):
-        raise ForgeUnreadable(f"the workflow of {what} has no readable content")
-    try:
-        return _job_conditions(base64.b64decode("".join(content.split()), validate=True).decode("utf-8"))
-    except (ValueError, UnicodeDecodeError):
-        raise ForgeUnreadable(f"the workflow of {what} has no readable content") from None
 
 
 def _failed_members(slug: str, job_ids: Sequence[int]) -> list[str]:
@@ -544,17 +460,12 @@ def read_run(slug: str, run_id: int) -> Mapping:
                 raise ForgeUnreadable(f"{what} has no readable conclusion")
             jobs.append((name, conclusion, job.get("id")))
     event = _member(run, "event", str, what)
-    conditions = (_workflow_conditions(slug, run, what)
-                  if any(conclusion == "skipped" for _, conclusion, _ in jobs) else {})
-    rerun = [name for name, conclusion, _ in jobs
-             if conclusion != "success" and not (
-                 conclusion == "skipped" and never_on(conditions.get(name, ""), event))]
     failed_ids = [job_id for _, conclusion, job_id in jobs
                   if conclusion == "failure" and isinstance(job_id, int) and not isinstance(job_id, bool)]
     return {"event": event, "pending": any(conclusion is None for _, conclusion, _ in jobs),
             "branch": _member(run, "head_branch", str, what),
             "repo": _member(_member(run, "head_repository", dict, what), "full_name", str, what),
-            "head": _member(run, "head_sha", str, what), "prs": numbers, "rerun": rerun,
+            "head": _member(run, "head_sha", str, what), "prs": numbers,
             "failed": [name for name, conclusion, _ in jobs if conclusion in FAILED_CONCLUSIONS],
             "members": _failed_members(slug, failed_ids)}
 

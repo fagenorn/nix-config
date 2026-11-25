@@ -36,7 +36,7 @@ class PermitRerunServiceTest(PermitCase):
         self.assertEqual((fresh.decision, fresh.target["count"]), ("allow", 1))
 
     PR_RUN = {"event": "pull_request", "branch": "develop", "repo": SLUG, "head": SHA, "prs": [9],
-              "rerun": ["Nix Eval"], "failed": ["Nix Eval"]}
+              "failed": ["Nix Eval"]}
     PUSH_RUN = {**PR_RUN, "event": "push", "prs": []}
 
     @staticmethod
