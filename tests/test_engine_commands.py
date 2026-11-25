@@ -7,7 +7,6 @@ for a project command (agent-helpers rule 5).
 
 from __future__ import annotations
 
-import _thread
 import ast
 import json
 import os
@@ -555,9 +554,19 @@ class GradeTest(unittest.TestCase):
         pidfile = os.path.join(self.tmp, "grandchild")
         entry = project("hold", pidfile, "0", cwd=self.tmp)
         pids: list[int] = []
-        interrupt = threading.Timer(1.5, _thread.interrupt_main)
-        interrupt.start()
-        self.addCleanup(interrupt.cancel)
+        main = threading.get_ident()
+
+        def interrupt_when_started():
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline:
+                try:
+                    int(Path(pidfile).read_text())
+                    break
+                except (FileNotFoundError, ValueError):
+                    time.sleep(0.05)
+            signal.pthread_kill(main, signal.SIGINT)
+
+        threading.Thread(target=interrupt_when_started, daemon=True).start()
         with self.assertRaises(KeyboardInterrupt):
             run(table(hold=entry), "hold", None, (), guard=self.allow, on_start=pids.append, timeout=60)
         grandchild = int(Path(pidfile).read_text())

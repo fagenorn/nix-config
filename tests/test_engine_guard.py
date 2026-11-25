@@ -8,7 +8,6 @@ program, which is never imported.
 
 from __future__ import annotations
 
-import _thread
 import json
 import os
 import signal
@@ -173,9 +172,20 @@ class JudgeTest(unittest.TestCase):
 
     def test_an_interrupted_guard_is_killed_with_its_group_before_the_interrupt_propagates(self):
         hook = self.hook("sleep", str(self.d / "pids"), timeout=60)
-        interrupt = threading.Timer(1.5, _thread.interrupt_main)
-        interrupt.start()
-        self.addCleanup(interrupt.cancel)
+        main = threading.get_ident()
+
+        def interrupt_when_started():
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline:
+                try:
+                    if len(self.pids()) == 2:
+                        break
+                except (FileNotFoundError, ValueError):
+                    pass
+                time.sleep(0.05)
+            signal.pthread_kill(main, signal.SIGINT)
+
+        threading.Thread(target=interrupt_when_started, daemon=True).start()
 
         def kill_both():
             try:
