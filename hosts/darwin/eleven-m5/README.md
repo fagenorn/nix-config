@@ -130,14 +130,21 @@ projects that share the host, and on 25 Nov it ended 47 workloads between 05:45 
 about 11 GiB above the floor on an idle host.
 
 The floor exists to act before the kernel's compressor fills and the watchdog
-panics the host, as it did on 24 Nov. The fastest fall in available memory seen so
-far is about 39 GiB in one minute, 0.65 GiB a second. At its fast interval,
-`memory-floor` needs about 11 s to act: three samples 2 s apart
-(`floorSamples` x `fastSampleSeconds`, 6 s) and a 5 s SIGTERM grace
-(`floorGraceSeconds`). That is about 7 GiB at the fastest rate, so a 10 GiB floor
-leaves about 3 GiB of margin where 16 GiB left 9. If a fall is ever seen that is
-faster than 39 GiB in one minute, or the reaction time grows, raise the floor again
-in `memory-budget.nix`.
+panics the host, as it did on 24 Nov. The fastest fall in available memory seen so far is about 39 GiB in one minute,
+0.65 GiB a second, an average over that minute; a shorter burst can fall faster. At
+its fast interval, `memory-floor` nominally needs about 11 s from the first sample
+under the floor to SIGKILL: three samples 2 s apart (`floorSamples` x
+`fastSampleSeconds`, 6 s) and a 5 s SIGTERM grace (`floorGraceSeconds`). That is
+about 7 GiB at the fastest one-minute rate, so for a steady decline with an eligible
+workload a 10 GiB floor leaves an estimated 3 GiB of margin where 16 GiB left 9.
+
+The margin is an estimate, not a guarantee. A burst that drains more than 7 GiB in
+under 11 s outruns it, and so does a fall with no eligible workload, one of at least
+`floorMinTreeGiB` that frees enough to matter. The daemon also sleeps after each
+sample, and it scans processes after each sample, so a scan slow under load adds to
+the 11 s; peak sub-minute drain and scan latency under load are unmeasured. If a
+fall is ever seen that is faster than 39 GiB in one minute, or the reaction time
+grows, raise the floor again in `memory-budget.nix`.
 
 ### How the numbers were measured
 

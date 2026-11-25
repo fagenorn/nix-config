@@ -5,6 +5,7 @@ Reads the host through tests/host_readings.py, so it runs on any machine; new fi
 Run: just agent-workflow-tests
 """
 import json
+import re
 import unittest
 from pathlib import Path
 
@@ -302,12 +303,32 @@ class GuideTest(unittest.TestCase):
     def test_the_guide_states_the_floor_with_the_fastest_fall_and_the_reaction_time(self):
         floor = self.between(self.section, "### Why the floor is 10 GiB", "\n### ")
         self.assertTrue(floor, "the guide has no `### Why the floor is 10 GiB` subsection")
+        prose = " ".join(floor.split())
         for needle in (
-            "10 GiB", "39 GiB in one minute", "about 11 s", "three samples 2 s apart", "5 s SIGTERM grace",
-            "about 7 GiB", "24 Nov", "256 - 192 - 2 - 10 = 52 GiB",
+            "10 GiB", "three samples 2 s apart", "5 s SIGTERM grace", "24 Nov", "256 - 192 - 2 - 10 = 52 GiB",
         ):
             with self.subTest(needle=needle):
                 self.assertIn(needle, floor + self.section)
+        # Each figure is read from the sentence that owns it, so a later sentence repeating it cannot satisfy the check.
+        sentences = re.split(r"(?<=\.) ", prose.replace("`", ""))
+        for anchor, figures in (
+            ("The fastest fall in available memory", ("39 GiB in one minute", "an average over that minute")),
+            ("nominally needs", ("about 11 s", "to SIGKILL")),
+            ("That is about", ("about 7 GiB", "one-minute rate")),
+            ("estimated", ("steady decline", "eligible workload", "10 GiB floor", "estimated 3 GiB of margin")),
+        ):
+            owners = [sentence for sentence in sentences if anchor in sentence]
+            self.assertEqual(len(owners), 1, f"expected one sentence with {anchor!r}, got {owners}")
+            for figure in figures:
+                with self.subTest(anchor=anchor, figure=figure):
+                    self.assertIn(figure, owners[0])
+        for caveat in (
+            "a shorter burst can fall faster", "more than 7 GiB in under 11 s", "no eligible workload",
+            "scans processes after each sample",
+        ):
+            with self.subTest(caveat=caveat):
+                self.assertIn(caveat, prose)
+        self.assertNotRegex(prose, r"leaves about 3 GiB of margin")
         self.assertIn("| `floorGiB` | 10 |", self.section)
         self.assertIn("| `othersBudgetGiB` | 52 |", self.section)
         self.assertNotIn("16 GiB is kept back", self.section)
