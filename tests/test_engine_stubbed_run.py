@@ -744,8 +744,8 @@ class SettledTest(Landing):
         self.assertNotEqual(self.prepared_head(run), side)
 
 
-HOLD_STEPS = {"hold-facts", "hold-look", "hold-draft", "hold-gate", "regrade", "hold-lint", "split",
-              "hold-post", "hold-label", "once-run", "close"}
+HOLD_STEPS = {"hold-facts", "hold-look", "hold-draft", "hold-gate", "regrade", "graded", "hold-lint",
+              "split", "hold-post", "hold-label", "once-run", "close"}
 
 
 HUMAN_CHECK = {"ac": "AC3", "kind": "human", "host": "any", "when": NOT_BEFORE,
@@ -765,12 +765,11 @@ def held_label(run: StubbedRun) -> bool:
 class CloseOutTest(Landing):
     def posted_nothing(self, run: StubbedRun) -> None:
         """A refused hold or an unmet code criterion posts nothing and keeps the claim and worktree."""
-        self.assertEqual(hold_comments(run), [])
-        bodies = [comment["body"] for comment in run.forge.stored()]
-        self.assertFalse([b for b in bodies if b.startswith(("Held after the merge", "Delivered by PR"))],
-                         bodies)
-        self.assertFalse(held_label(run))
-        self.assertEqual(run.forge.issue()["created"], [])
+        stored = run.forge.stored()
+        self.assertEqual(len(stored), 1, [comment["body"] for comment in stored])
+        self.assertTrue(stored[0]["body"].startswith("<!-- agent:claim v1 issue=41 "), stored[0]["body"])
+        issue = run.forge.issue()
+        self.assertEqual((issue["state"], issue["labels"], issue["created"]), ("open", ["in-progress"], []))
         self.assertEqual(len(run.claims()), 1)
         self.assertTrue(run.worktree_path.exists())
 
@@ -793,7 +792,7 @@ class CloseOutTest(Landing):
         child = self.child(run, "close-out")
         self.assertEqual([t for t in run.transitions(child) if t[0] in HOLD_STEPS],
                          [("hold-facts", "open"), ("hold-look", "clear"), ("hold-draft", "drafted"),
-                          ("hold-gate", "ready"), ("regrade", "met"), ("hold-lint", "valid"),
+                          ("hold-gate", "ready"), ("regrade", "met"), ("graded", "met"), ("hold-lint", "valid"),
                           ("split", "none"), ("hold-post", "posted"), ("hold-label", "labelled"),
                           ("once-run", "ran"), ("close", "open-criteria")])
         self.assertEqual(self.stored(child, "hold-post")["block"], block)
@@ -813,6 +812,20 @@ class CloseOutTest(Landing):
         child = self.child(run, "close-out")
         walk = run.transitions(child)
         self.assertLess(walk.index(("hold-gate", "ready")), walk.index(("regrade", "unmet")))
+        self.assertFalse([t for t in walk if t[0] in ("hold-lint", "split", "hold-post")])
+        self.assertEqual(run.transitions(run.runs()[0])[-1], ("closing", "code-unmet"))
+
+    def test_a_met_verdict_naming_an_unmet_code_criterion_stops_code_unmet_and_posts_nothing(self):
+        contradictory = {"verdict": "met", "code_unmet": ["AC1"],
+                         "acceptance": [{"id": "AC1", "met": False, "evidence": "no test shows it"}]}
+        run = StubbedRun(self, body=EVIDENCE_BODY, replies={"regrade": contradictory})
+
+        self.finish(run, "code-unmet", "owner-decision")
+
+        self.posted_nothing(run)
+        walk = run.transitions(self.child(run, "close-out"))
+        self.assertIn(("regrade", "met"), walk)
+        self.assertIn(("graded", "unmet"), walk)
         self.assertFalse([t for t in walk if t[0] in ("hold-lint", "split", "hold-post")])
         self.assertEqual(run.transitions(run.runs()[0])[-1], ("closing", "code-unmet"))
 
@@ -851,7 +864,8 @@ class CloseOutTest(Landing):
         self.posted_nothing(run)
         child = self.child(run, "close-out")
         walk = run.transitions(child)
-        order = [walk.index(t) for t in (("hold-gate", "ready"), ("regrade", "met"), ("hold-lint", "invalid"))]
+        order = [walk.index(t) for t in (("hold-gate", "ready"), ("regrade", "met"), ("graded", "met"),
+                                         ("hold-lint", "invalid"))]
         self.assertEqual(order, sorted(order))
         lint = self.stored(child, "hold-lint")
         self.assertEqual(lint["verdict"], "invalid")

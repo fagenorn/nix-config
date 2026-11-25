@@ -75,6 +75,11 @@ def _object(value: object) -> bool:
     return isinstance(value, dict)
 
 
+def _in(check: object, gone: set) -> bool:
+    """Whether the check names a criterion of `gone` (upper-cased ids); a check whose `ac` is no string names none."""
+    return _object(check) and isinstance(check.get("ac"), str) and check["ac"].upper() in gone
+
+
 def _run(check: object) -> dict | None:
     run = check.get("run") if _object(check) else None
     return run if _object(run) else None
@@ -241,7 +246,8 @@ def stale(posted: list[dict], answered: list[str], issue: int, criteria: list[di
     no_hold = not any(item["kind"] in OPEN_KINDS and _up(item["id"]) not in gone for item in criteria)
     entries = []
     for entry in posted:
-        named = {_up(check.get("ac")) for check in entry["checks"] if _object(check)}
+        named = {check["ac"].upper() for check in entry["checks"]
+                 if _object(check) and isinstance(check.get("ac"), str)}
         acs = [name for name in answered if _up(name) in named]
         if acs and (entry["issue"] != issue or no_hold or entry["results"] is True):
             entries.append({**entry, "acs": acs})
@@ -298,22 +304,35 @@ def _comments(repo: str, number: int) -> list[verify_issues.Comment]:
     return _forge(lambda: verify_issues.comments_from_rest(pages))
 
 
-def split_children(repo: str, issue: int, merge: str) -> list[tuple[int, str]]:
-    """`(number, ac)` of each open `needs-verification` issue split from `issue` for `merge`, ascending."""
+def _split_issues(repo: str, issue: int, merge: str, path: str, state: str) -> list[tuple[int, str]]:
+    """`(number, ac)` of each `state` issue of the listing `path` whose body starts with the split identity line."""
     identity = re.compile(rf"Split from #{issue}: (\S+) after the merge {re.escape(merge)}\.")
     children = []
-    for page in _pages(f"repos/{repo}/issues?labels={LABEL}"):
+    for page in _pages(path):
         for item in page if isinstance(page, list) else []:
             number = item.get("number") if _object(item) else None
             body = item.get("body") if _object(item) else None
             if (not isinstance(number, int) or isinstance(number, bool) or number == issue
-                    or "pull_request" in item or item.get("state", "open") != "open"
+                    or "pull_request" in item or item.get("state", "open") != state
                     or not isinstance(body, str)):
                 continue
             matched = identity.fullmatch(body.split("\n", 1)[0].removesuffix("\r"))
             if matched:
                 children.append((number, matched[1]))
     return sorted(set(children))
+
+
+def split_children(repo: str, issue: int, merge: str) -> list[tuple[int, str]]:
+    """`(number, ac)` of each open `needs-verification` issue split from `issue` for `merge`, ascending."""
+    return _split_issues(repo, issue, merge, f"repos/{repo}/issues?labels={LABEL}", "open")
+
+
+def closed_children(repo: str, issue: int, merge: str) -> list[tuple[int, str]]:
+    """`(number, ac)` of each closed issue split from `issue` for `merge`, ascending.
+
+    The runner removes `needs-verification` when it closes a verified issue, so a closed child is found by its
+    identity line among the closed issues, not by the label."""
+    return _split_issues(repo, issue, merge, f"repos/{repo}/issues?state=closed&per_page=100", "closed")
 
 
 def fences(repo: str, issue: int, merge: str | None) -> list[dict]:
@@ -414,22 +433,26 @@ def lint_all(*, repo_root: str, repo: str, issue: int, pr_head: str, pr_branch: 
     lints = []
     own = next((entry for entry in found if entry["issue"] == issue), None)
     if own and _object(own["block"]) and isinstance(own["block"].get("checks"), list):
-        parent = {**own["block"], "checks": [check for check in own["checks"]
-                                             if not (_object(check) and _up(check.get("ac")) in gone)]}
+        parent = {**own["block"], "checks": [check for check in own["checks"] if not _in(check, gone)]}
     else:
         parent = own["block"] if own else block
     if own or parent is not None:
         lints.append({"issue": issue, "ac": None, **lint(repo_root, parent, blocks=blocks, **context)})
     for entry in split:
-        child = next((item for item in found if item["issue"] != issue and item["ac"] == entry["ac"]), None)
+        child = split_child(repo, issue, merge, entry["ac"]) if merge else None
+        fence = child["fence"] if child else None
         lints.append({"issue": child["issue"] if child else None, "ac": entry["ac"],
-                      **lint(repo_root, child["block"] if child else entry["block"], blocks=(), **context)})
+                      **lint(repo_root, fence["block"] if fence else entry["block"], blocks=(), **context)})
     return {"verdict": "valid" if all(item["ok"] for item in lints) else "invalid", "lints": lints}
 
 
 def split_child(repo: str, issue: int, merge: str, ac: str) -> dict | None:
-    """The open split child of `issue` for `ac` at `merge` as `{issue, fence}` (`fence` None until it holds one)."""
+    """The split child of `issue` for `ac` at `merge` as `{issue, fence}` (`fence` None until it holds one).
+
+    An open child is preferred; a child the runner has closed since still counts, so a continued hold files no second."""
     number = next((found for found, spelled in split_children(repo, issue, merge) if spelled == ac), None)
+    if number is None:
+        number = next((found for found, spelled in closed_children(repo, issue, merge) if spelled == ac), None)
     if number is None:
         return None
     return {"issue": number, "fence": _fence(number, ac, _comments(repo, number))}
@@ -484,7 +507,7 @@ def file_split(repo: str, issue: int, pr: int, merge: str, split: list[dict]) ->
 def _drop_answered(text: str, block: dict, answered: list[str]) -> tuple[str, dict]:
     """The hold comment `text` and its fence `block` without the checks naming an answered criterion."""
     gone = {_up(name) for name in answered}
-    kept = [check for check in block["checks"] if not (_object(check) and _up(check.get("ac")) in gone)]
+    kept = [check for check in block["checks"] if not _in(check, gone)]
     reduced = {**block, "checks": kept}
     lines = [line for line in text.replace("\r\n", "\n").split("\n")
              if not any(re.match(rf"- {re.escape(name)}(\s|$)", line, re.IGNORECASE) for name in answered)]
@@ -497,7 +520,7 @@ def _drop_answered(text: str, block: dict, answered: list[str]) -> tuple[str, di
 def _answers(block: object, answered: list[str]) -> bool:
     gone = {_up(name) for name in answered}
     checks = block.get("checks") if _object(block) else None
-    return isinstance(checks, list) and any(_object(check) and _up(check.get("ac")) in gone for check in checks)
+    return isinstance(checks, list) and any(_in(check, gone) for check in checks)
 
 
 def post_state(repo: str, issue: int, answered: list[str], block: object) -> dict:
@@ -520,6 +543,8 @@ def post_hold(repo: str, issue: int, pr: int, merge: str, criteria_: list[dict],
     Otherwise the issue's one fence comment is never posted twice."""
     comments = _comments(repo, issue)
     if block is None:
+        if not children:
+            raise Failure("nothing_held", "no check is held and no criterion was split, so there is nothing to close on")
         lead = f"Delivered by PR #{pr}"
         if not any(item.body.startswith(lead) for item in comments):
             held = ", ".join(f"#{child['issue']}" for child in children)
@@ -533,6 +558,9 @@ def post_hold(repo: str, issue: int, pr: int, merge: str, criteria_: list[dict],
         comment_id = _forge(lambda: forge_markers.post(repo, issue, hold_body(pr, merge, held, block)))
         return {"verdict": "posted", "comment_id": comment_id, "block": block}
     if _answers(own["block"], answered):
+        if own["results"]:
+            raise Failure("results_recorded", "the hold comment has a recorded result; editing its checks would "
+                                              "invalidate it")
         text = next(item.body for item in comments if item.id == own["comment_id"])
         text, reduced = _drop_answered(text, own["block"], answered)
         _forge(lambda: forge_markers.edit(repo, own["comment_id"], text))

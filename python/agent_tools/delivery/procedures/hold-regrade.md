@@ -1,3 +1,4 @@
+lane: direct.
 Issue {{run.issue}} was merged as {{read.merge_commit}} (pull request {{read.pr}}), which passed its required checks at landing. Regrade its code criteria once against that merge commit. Change nothing.
 The criteria, each with its id, kind and text: {{hold-facts.criteria}}
 

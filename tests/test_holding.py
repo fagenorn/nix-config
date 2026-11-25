@@ -184,6 +184,15 @@ class StaleTest(unittest.TestCase):
         self.assertEqual(holding.stale([entry], ["AC2"], 41, CRITERIA), [{**entry, "acs": ["AC2"]}])
 
 
+    def test_a_posted_check_whose_ac_is_not_a_string_names_no_criterion(self):
+        for check in ({"ac": []}, {"ac": None}, {"ac": 3}, {"kind": "evidence"}):
+            with self.subTest(check=check):
+                entry = fence(50, check, EVIDENCE)
+                self.assertEqual(holding.stale([entry], ["AC2"], 41, HUMAN_CRITERIA),
+                                 [{**entry, "acs": ["AC2"]}])
+                self.assertEqual(holding.stale([fence(50, check)], ["AC2"], 41, HUMAN_CRITERIA), [])
+
+
 class TextTest(unittest.TestCase):
     def test_hold_body_holds_one_fence_that_parses_back_to_the_block(self):
         block = holding.block_of([EVIDENCE], MERGE)

@@ -45,7 +45,7 @@ reaches it, and one that matches no entry at or past the cursor runs unscheduled
 reads the comments now and `wait_cursor(n)` blocks until `n` entries have run. Given `labels`
 (issue 630) the store also holds the issue's state, labels and created issues, posted comments
 carry `author_association` `OWNER`, and the fake serves the GraphQL listing, label add and
-remove, close, issue creation and the labelled issue listing, and the comment list and POST of a created issue
+remove, close, issue creation, the labelled issue listing and the closed issue listing (`issues?state=closed&per_page=100`), and the comment list and POST of a created issue
 number (its `comments`, ids from the store's one counter, kept in that created entry; a seeded entry without a
 `comments` member is left to the registered responses), and the GraphQL listing also returns each open created issue
 labelled `needs-verification` with its comments; `fail_once` names operations
@@ -280,7 +280,7 @@ if tool == "gh" and (state / "store.json").exists():
     from urllib.parse import unquote
 
     ISSUE_KINDS = ("graphql", "add_label", "remove_label", "close", "create_issue", "list_issues",
-                   "child_list", "child_post")
+                   "child_list", "child_post", "list_closed")
 
     def st_created(store):
         return [made for made in store["issue_state"]["created"] if "comments" in made]
@@ -309,6 +309,8 @@ if tool == "gh" and (state / "store.json").exists():
                     and argv[7].startswith("body=")
                     and all(a == "-f" for a in argv[8::2]) and all(a.startswith("labels[]=") for a in argv[9::2])):
                 return "create_issue", (argv[5][6:], argv[7][5:], [a[len("labels[]="):] for a in argv[9::2]]), None
+            if argv == ["api", "--paginate", "--slurp", "repos/" + slug + "/issues?state=closed&per_page=100"]:
+                return "list_closed", None, None
             if (len(argv) == 4 and argv[:3] == ["api", "--paginate", "--slurp"]
                     and argv[3].startswith("repos/" + slug + "/issues?labels=")):
                 query = argv[3].split("?labels=", 1)[1].split("&")
@@ -409,6 +411,8 @@ if tool == "gh" and (state / "store.json").exists():
                    "created_at": store["clock"], "updated_at": store["clock"]}
             store["next_id"] += 1
             made["comments"].append(out)
+        elif kind == "list_closed":
+            out = [[c for c in st["created"] if c["state"] == "closed"]]
         elif target[1]:
             label = target[0]
             rows = [{"number": c["number"], "state": "open", "labels": [{"name": n} for n in c["labels"]]}

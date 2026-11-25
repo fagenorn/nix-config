@@ -1197,7 +1197,7 @@ class ShippedProcedureTest(unittest.TestCase):
     def test_close_out_holds_in_the_programs_order_with_a_check_on_each_mutating_step(self):
         close_out = load(PROCEDURES, "close-out")
         steps = close_out["steps"]
-        follow = ("merged", "open", "clear", "drafted", "ready", "met", "valid", "none",
+        follow = ("merged", "open", "clear", "drafted", "ready", "met", "met", "valid", "none",
                   "posted", "labelled", "ran")
         visited, current, taken = [], "read", iter(follow)
         while current != "done":
@@ -1210,8 +1210,8 @@ class ShippedProcedureTest(unittest.TestCase):
             if current in close_out["stops"]:
                 break
         self.assertEqual(visited, [
-            "read", "hold-facts", "hold-look", "hold-draft", "hold-gate", "regrade", "hold-lint",
-            "split", "hold-post", "hold-label", "once-run", "remove", "forward", "delete", "gone",
+            "read", "hold-facts", "hold-look", "hold-draft", "hold-gate", "regrade", "graded",
+            "hold-lint", "split", "hold-post", "hold-label", "once-run", "remove", "forward", "delete", "gone",
             "release", "close"])
         self.assertEqual([s["id"] for s in steps], visited)
         self.assertEqual(step(close_out, "close")["on"]["open-criteria"], "done")
@@ -1236,11 +1236,31 @@ class ShippedProcedureTest(unittest.TestCase):
         self.assertEqual(step(close_out, "hold-facts")["on"]["absent-merge"], "hold")
         self.assertEqual(step(close_out, "hold-look")["on"]["stale"], "hold")
         self.assertEqual(step(close_out, "regrade")["on"]["unmet"], "code-unmet")
+        self.assertEqual(step(close_out, "regrade")["on"]["met"], "graded")
+        graded = step(close_out, "graded")
+        self.assertEqual((graded["on"]["unmet"], graded["on"]["met"]), ("code-unmet", "hold-lint"))
+        self.assertEqual((graded["on"]["error"], graded["on"]["refused"]), ("hold", "hold"))
+        self.assertEqual(graded["in"], ["regrade.verdict", "regrade.code_unmet", "regrade.acceptance"])
         self.assertEqual(close_out["stops"]["code-unmet"],
                          {"need": "owner-decision", "reenter": "read"})
         self.assertEqual(step(deliver, "closing")["on"]["code-unmet"], "code-unmet")
         self.assertEqual(deliver["stops"]["code-unmet"],
                          {"need": "owner-decision", "reenter": "closing", "pinned": True})
+
+    def test_the_close_step_closes_by_the_criteria_the_hold_read_not_the_first_read(self):
+        close = step(load(PROCEDURES, "close-out"), "close")
+        self.assertEqual(close["in"], ["run.repo", "run.issue", "hold-facts.closes"])
+
+    def test_each_hold_agent_prompt_meets_its_roles_brief(self):
+        close_out = load(PROCEDURES, "close-out")
+        self.assertEqual(step(close_out, "hold-draft")["role"], "reviewer")
+        regrade = step(close_out, "regrade")
+        self.assertEqual(regrade["role"], "reviewer-lite")
+        prompt = (PROCEDURES / "hold-regrade.md").read_text(encoding="utf-8")
+        self.assertEqual(prompt.splitlines()[0], "lane: direct.")
+        self.assertIn("git diff {{read.merge_commit}}^1 {{read.merge_commit}}", prompt)
+        self.assertIn("git show {{read.merge_commit}}",
+                      (PROCEDURES / "hold-draft.md").read_text(encoding="utf-8"))
 
     def test_no_shipped_prompt_asks_for_a_forge_command(self):
         names = ["setup-applies.md", "hold-draft.md", "hold-regrade.md"] + [

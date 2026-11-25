@@ -236,7 +236,7 @@ class HoldFactsTest(HoldTest):
         status, facts = self.facts(merge)
         evidence = {"id": "AC2", "kind": "evidence", "text": "The greeting reads well in production."}
         self.assertEqual(status, 0)
-        self.assertEqual(facts["verdict"], "open")
+        self.assertEqual((facts["verdict"], facts["closes"]), ("open", False))
         self.assertEqual(facts["criteria"], [{"id": "AC1", "kind": "code", "text": "The greeting is printed."},
                                              evidence])
         self.assertEqual(facts["open"], [evidence])
@@ -274,7 +274,7 @@ class HoldFactsTest(HoldTest):
             {"issue": 50, "merge": merge, "checks": [ASK], "comment_id": 250, "results": False}])
 
     def test_hold_facts_on_an_all_code_body_answers_closes_after_one_read(self):
-        self.assertEqual(self.facts(self.merge()), (0, {"verdict": "closes"}))
+        self.assertEqual(self.facts(self.merge()), (0, {"verdict": "closes", "closes": True}))
         self.assertEqual(self.landing.forge.argvs("gh"), [ISSUE_READ])
 
     def test_hold_facts_on_an_untagged_criterion_answers_bad_kinds(self):
@@ -325,6 +325,12 @@ class HoldLookTest(HoldTest):
         with mock.patch.object(holding, "look_status", return_value={"verdict": "needed"}):
             self.assertEqual(self.look([]), (0, {"verdict": "clear", "answered": []}))
 
+    def test_a_posted_check_with_an_empty_ac_list_still_answers_a_verdict(self):
+        self.respond_body(OPEN_BODY + LOOK_LINE)
+        odd = {"issue": 50, "merge": self.merge(), "checks": [{"ac": []}], "comment_id": 9, "results": False}
+        with self.approved():
+            self.assertEqual(self.look([odd]), (0, {"verdict": "clear", "answered": ["AC3"]}))
+
     def test_a_posted_that_is_not_json_is_a_usage_error(self):
         usage = self.usage("hold-look", "--repo", SLUG, "--issue", "41", "--pr", "7", "--pr-head", HEAD,
                            "--merge-commit", SHA, "--posted", "{")
@@ -354,6 +360,32 @@ class HoldGateTest(HoldTest):
         usage = self.usage("hold-gate", "--repo-root", str(self.root), "--issue", "41", "--merge-commit", SHA,
                            "--criteria", "[", "--posted", "[]", "--blocks", "[]", "--answered", "[]",
                            "--written", "[]")
+        self.assertEqual(usage["error"], "usage")
+
+
+class HoldGradedTest(HoldTest):
+    def graded(self, verdict: str, code_unmet: list, acceptance: list) -> tuple[int, dict]:
+        return self.call("hold-graded", "--verdict", verdict, "--code-unmet", json.dumps(code_unmet),
+                         "--acceptance", json.dumps(acceptance))
+
+    def test_a_met_reply_with_every_criterion_met_is_met(self):
+        self.assertEqual(self.graded("met", [], [{"id": "AC1", "met": True, "evidence": "t.py:1"}]),
+                         (0, {"verdict": "met", "code_unmet": []}))
+
+    def test_a_met_verdict_naming_an_unmet_code_criterion_is_unmet(self):
+        self.assertEqual(self.graded("met", ["AC1"], [{"id": "AC1", "met": False, "evidence": "none"}]),
+                         (0, {"verdict": "unmet", "code_unmet": ["AC1"]}))
+
+    def test_a_met_verdict_with_a_criterion_graded_unmet_is_unmet_naming_it(self):
+        self.assertEqual(self.graded("met", [], [{"id": "AC1", "met": True, "evidence": "a"},
+                                                 {"id": "AC4", "met": False, "evidence": "b"}]),
+                         (0, {"verdict": "unmet", "code_unmet": ["AC4"]}))
+
+    def test_an_unmet_verdict_is_unmet_even_with_nothing_named(self):
+        self.assertEqual(self.graded("unmet", [], []), (0, {"verdict": "unmet", "code_unmet": []}))
+
+    def test_an_acceptance_member_that_is_not_graded_criteria_is_a_usage_error(self):
+        usage = self.usage("hold-graded", "--verdict", "met", "--code-unmet", "[]", "--acceptance", "[{}]")
         self.assertEqual(usage["error"], "usage")
 
 
@@ -421,8 +453,21 @@ class HoldLintTest(HoldTest):
         self.assertEqual((status, lint["verdict"]), (0, "valid"))
         self.assertEqual([(entry["issue"], entry["ac"]) for entry in lint["lints"]], [(50, "AC3")])
 
+    def test_a_split_child_whose_fence_is_not_json_is_linted_invalid_not_the_entrys_block(self):
+        child = {"number": 50, "title": "t", "labels": ["needs-verification"], "state": "open",
+                 "body": holding.split_line(ISSUE, "AC3", self.merge()) + "\nbody"}
+        broken = "held\n```verify\n" + json.dumps(holding.block_of([ASK], self.merge()))[:-2] + "\n```"
+        self.landing.forge.respond_json(
+            "gh", ["api", "--paginate", "--slurp", f"repos/{SLUG}/issues/50/comments?per_page=100"],
+            [[comment(250, broken)]])
+        status, lint = self.lint(None, split=[{"ac": "AC3", "block": holding.block_of([ASK], self.merge())}],
+                                 created=[child])
+        self.assertEqual((status, lint["verdict"]), (0, "invalid"))
+        self.assertEqual([(entry["issue"], entry["ac"], entry["ok"]) for entry in lint["lints"]],
+                         [(50, "AC3", False)])
 
-READ_HOLDS = ("hold-facts", "hold-look", "hold-gate", "hold-lint")
+
+READ_HOLDS = ("hold-facts", "hold-look", "hold-graded", "hold-gate", "hold-lint")
 
 
 class DeclarationTest(unittest.TestCase):
@@ -433,6 +478,7 @@ class DeclarationTest(unittest.TestCase):
         self.assertEqual({name: subcommands[name] for name in READ_HOLDS}, {
             "hold-facts": ["closes", "open", "bad-kinds", "absent-merge", "error"],
             "hold-look": ["clear", "stale", "error"],
+            "hold-graded": ["met", "unmet", "error"],
             "hold-gate": ["ready", "missing-checks", "human-checks", "unattended", "owner-checks",
                           "script-checks", "note-checks", "error"],
             "hold-lint": ["valid", "invalid", "error"]})
@@ -538,6 +584,34 @@ class HoldPostTest(WriteTest):
         self.assertEqual(again, (0, {"verdict": "closed", "comment_id": None, "block": None}))
 
 
+    NOTHING_HELD = {"repo": SLUG, "issue": ISSUE, "pr": 7, "merge_commit": MERGE, "criteria": [], "answered": [],
+                    "block": "null", "children": []}
+
+    def test_hold_post_with_no_block_and_no_split_issue_posts_and_closes_nothing(self):
+        self.store()
+        status, refused = self.hold("hold-post", **self.NOTHING_HELD)
+        self.assertEqual((status, refused["verdict"], refused["error"]), (1, "error", "nothing_held"))
+        self.assertEqual(self.forge.stored(), [])
+        self.assertEqual(self.forge.issue()["state"], "open")
+        self.assertEqual(self.hold("hold-posted", **self.NOTHING_HELD), (0, {"verdict": "absent"}))
+
+    def test_hold_post_does_not_edit_a_fence_that_has_a_recorded_result(self):
+        marker = comment(101, "<!-- agent:verify-result v1 block=100.abc -->\nresult")
+        self.store([comment(100, card(holding.block_of([EVIDENCE, ASK], MERGE))), marker])
+        status, refused = self.post(answered=["AC3"])
+        self.assertEqual((status, refused["verdict"], refused["error"]), (1, "error", "results_recorded"))
+        self.assertEqual([argv for argv in self.forge.argvs("gh") if argv[:3] == ["api", "-X", "PATCH"]], [])
+        self.assertEqual(verify_block.parse_block(self.forge.stored()[0]["body"]),
+                         (holding.block_of([EVIDENCE, ASK], MERGE), []))
+
+    def test_hold_post_edits_a_fence_holding_a_check_whose_ac_is_not_a_string(self):
+        odd = {"ac": [], "kind": "evidence"}
+        self.store([comment(100, card(holding.block_of([EVIDENCE, odd, ASK], MERGE)))])
+        status, edited = self.post(answered=["AC3"])
+        self.assertEqual((status, edited["verdict"]), (0, "posted"))
+        self.assertEqual(edited["block"], holding.block_of([EVIDENCE, odd], MERGE))
+
+
 class HoldLabelTest(WriteTest):
     def test_hold_label_adds_the_label_once_and_its_check_reads_it(self):
         self.store()
@@ -595,6 +669,26 @@ class HoldSplitTest(WriteTest):
         created = self.forge.issue()["created"]
         self.assertEqual((len(created), len(created[0]["comments"])), (1, 1))
         self.assertEqual(self.split("hold-split-check")[1]["verdict"], "split")
+
+    def test_a_split_child_the_runner_closed_is_found_again_and_no_second_is_filed(self):
+        closed = {"number": 500, "title": "t", "labels": [], "state": "closed",
+                  "body": holding.split_line(ISSUE, "AC3", MERGE) + "\nbody",
+                  "comments": [comment(300, card(holding.block_of([ASK], MERGE)))]}
+        self.store(created=[closed])
+        found = (0, {"verdict": "split", "children": [{"ac": "AC3", "issue": 500}]})
+        self.assertEqual(self.split("hold-split-check"), found)
+        self.assertEqual(self.split(), found)
+        created = self.forge.issue()["created"]
+        self.assertEqual((len(created), len(created[0]["comments"])), (1, 1))
+
+    def test_an_open_split_child_is_preferred_to_a_closed_one(self):
+        line = holding.split_line(ISSUE, "AC3", MERGE) + "\nbody"
+        fenced = [comment(300, card(holding.block_of([ASK], MERGE)))]
+        self.store(created=[{"number": 499, "title": "t", "labels": [], "state": "closed", "body": line,
+                             "comments": fenced},
+                            {"number": 500, "title": "t", "labels": ["needs-verification"], "state": "open",
+                             "body": line, "comments": fenced}])
+        self.assertEqual(self.split("hold-split-check")[1]["children"], [{"ac": "AC3", "issue": 500}])
 
     def test_an_empty_split_is_none(self):
         self.store()

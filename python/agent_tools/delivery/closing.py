@@ -34,6 +34,12 @@ issue body: `bad-kinds` (`acs`) when a criterion's kind is not code, evidence, h
 `landing.criteria_close` holds, after that one read; else it fetches origin and checks the merge commit
 (`absent-merge` when the checkout lacks it) and prints `open` with `criteria`, `open` (evidence and human
 ones), `verification`, `blocks`, `pr_head`, `pr_branch`, `workflows` and `posted` (`holding.posted_fences`).
+Both verdicts carry `closes` (true for `closes`, false for `open`): the criteria the close step goes by, read
+now, since an issue edited after `read` must not be closed on the earlier answer.
+
+`hold-graded --verdict <v> --code-unmet <json> --acceptance <json>` re-reads the regrade's whole reply: `unmet`
+(`code_unmet`: the ids it names and every graded criterion with `met` false) when the verdict is not `met` or
+any id is unmet, else `met`.
 
 `hold-look --repo <owner/name> --issue <n> --pr <n> --pr-head <sha> --merge-commit <sha> --posted <json>`
 prints `stale` (`answered`, `stale`) when the owner's approved look answers a criterion that a posted fence
@@ -216,16 +222,22 @@ def hold_facts(args: argparse.Namespace) -> dict:
     if bad:
         return {"verdict": "bad-kinds", "acs": bad}
     if landing.criteria_close(body):
-        return {"verdict": "closes"}
+        return {"verdict": "closes", "closes": True}
     _git(args.repo_root, "fetch", "origin")
     if _run(args.repo_root, "cat-file", "-e", f"{args.merge_commit}^{{commit}}").returncode != 0:
         return {"verdict": "absent-merge"}
-    return {"verdict": "open", "criteria": every,
+    return {"verdict": "open", "closes": False, "criteria": every,
             "open": [item for item in every if item["kind"] in holding.OPEN_KINDS],
             "verification": holding.verification(args.repo_root),
             "blocks": holding.blocking(args.repo, args.issue),
             **holding.pr_facts(args.repo, args.pr),
             "posted": holding.posted_fences(args.repo, args.issue, args.merge_commit)}
+
+
+def hold_graded(args: argparse.Namespace) -> dict:
+    refused = [entry["id"] for entry in args.acceptance if entry["met"] is not True]
+    unmet = list(dict.fromkeys([*args.code_unmet, *refused]))
+    return {"verdict": "unmet" if args.verdict != "met" or unmet else "met", "code_unmet": unmet}
 
 
 def hold_look(args: argparse.Namespace) -> dict:
@@ -329,6 +341,10 @@ def _is_posted(value) -> bool:
             and isinstance(value.get("results"), bool) and (value.get("merge") is None or _text(value.get("merge"))))
 
 
+def _is_graded(value) -> bool:
+    return isinstance(value, dict) and _text(value.get("id")) and isinstance(value.get("met"), bool)
+
+
 def _is_written(value) -> bool:
     return isinstance(value, dict) and _text(value.get("ac")) and _text(value.get("check"))
 
@@ -387,6 +403,10 @@ def build_parser() -> argparse.ArgumentParser:
     hold.add_argument("--issue", required=True, type=number)
     hold.add_argument("--pr", required=True, type=number)
     hold.add_argument("--merge-commit", required=True)
+    hold = commands.add_parser("hold-graded")
+    hold.add_argument("--verdict", required=True)
+    hold.add_argument("--code-unmet", required=True, type=texts)
+    hold.add_argument("--acceptance", required=True, type=_shaped("list of graded criteria", _each(_is_graded)))
     hold = commands.add_parser("hold-look")
     hold.add_argument("--repo", required=True)
     hold.add_argument("--issue", required=True, type=number)
@@ -448,7 +468,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 COMMANDS = {"read": read, "worktree": worktree, "forward": forward, "branch": branch, "issue": issue,
-            "hold-facts": hold_facts, "hold-look": hold_look, "hold-gate": hold_gate, "hold-lint": hold_lint,
+            "hold-facts": hold_facts, "hold-graded": hold_graded, "hold-look": hold_look, "hold-gate": hold_gate, "hold-lint": hold_lint,
             "hold-split": hold_split, "hold-split-check": hold_split_check, "hold-post": hold_post,
             "hold-posted": hold_posted, "hold-label": hold_label, "hold-labelled": hold_labelled,
             "hold-run": hold_run}
