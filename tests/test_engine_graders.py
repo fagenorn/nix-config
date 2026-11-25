@@ -119,6 +119,8 @@ class GraderTest(unittest.TestCase):
         ("verify-fixed", verify_fixed(status="blocked", unrelated={"test": "t", "evidence": " "}), "not-done"),
         ("verify-fixed", verify_fixed(), "done"),
         ("verify-narrowing", narrowing(**{"fix-review.findings": [NAMED]}), "findings"),
+        ("verify-narrowing", narrowing(**{"fix-review.findings": [UNNAMED]}), "unusable"),
+        ("verify-narrowing", narrowing(**{"fix-review.findings": [UNNAMED, MINOR]}), "unusable"),
         ("verify-narrowing", narrowing(), "rerun-failed-only"),
         ("verify-narrowing", narrowing(**{"round.clean": False}), "rerun-all"),
         ("direct-settled", settled("findings", [MINOR]), "clean"),
@@ -143,6 +145,7 @@ class GraderTest(unittest.TestCase):
             "whitespace_only 1": {"ws-check.whitespace_only": 1},
             "changed_paths empty": {"ws-check.changed_paths": []},
             "a path no failure named": {"ws-check.changed_paths": ["fixture/a.json", "fixture/c.json"]},
+            "a path that differs by a leading space": {"ws-check.changed_paths": [" fixture/a.json"]},
             "not attested": {"fix-review.whitespace_insignificant": False},
             "blank evidence": {"fix-review.whitespace_evidence": "  "},
         }
@@ -153,7 +156,7 @@ class GraderTest(unittest.TestCase):
 
     def test_a_fix_review_with_a_blocking_finding_is_findings_whatever_its_verdict(self):
         grade = GRADERS["verify-narrowing"].grade
-        important = {"severity": "important", "summary": "s"}
+        important = {"severity": "important", "file": "a.py", "failing_input": "x", "summary": "s"}
         self.assertEqual(grade(narrowing(**{"fix-review.findings": [important]})), "findings")
         self.assertEqual(grade(narrowing(**{"fix-review.findings": [MINOR]})), "rerun-failed-only")
         self.assertEqual(grade(narrowing(**{"fix-review.findings": None})), "findings")

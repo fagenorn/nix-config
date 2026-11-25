@@ -41,6 +41,7 @@ IMPORTANT = {"severity": "important", "file": "fixture/greeting.json:2", "failin
              "summary": "s", "kind": "other"}
 MINOR = dict(IMPORTANT, severity="minor")
 FOUND = {"verdict": "findings", "findings": [IMPORTANT], **ATTESTED}
+UNUSABLE = {"verdict": "findings", "findings": [dict(IMPORTANT, file="", failing_input="")], **ATTESTED}
 CHANGED = fixing("fixture/greeting.json", '{\n  "greeting": "hi"\n}\n', tests=["checks/check_format.py"])
 BROKEN = ("import unittest\n\n\nclass BrokenTest(unittest.TestCase):\n    def test_broken(self):\n"
           "        self.fail('always')\n")
@@ -52,8 +53,8 @@ NEW_FILE_FIX = {
     "fix.2": fixing("fixture/third.py", "THIRD = 1\n", tests=["checks/check_format.py"])}
 STOPS = ("verify", "verify-unrelated", "verify-fix", "verify-fix-review")
 VERIFY_STEPS = ("round", "fix", "fixed", "ws-check", "fix-review", "narrowing", "rerun", "retest", "retested")
-BOUNDS = (("checks", 3), ("round", 3), ("fix", 2), ("fixed", 2), ("ws-check", 2), ("fix-review", 2),
-          ("narrowing", 2), ("rerun", 2))
+BOUNDS = (("checks", 3), ("round", 3), ("fix", 2), ("fixed", 2), ("ws-check", 2), ("fix-review", 4),
+          ("narrowing", 4), ("rerun", 2))
 
 
 def procedure(name: str) -> dict:
@@ -169,6 +170,16 @@ class RoundsTest(Scenario):
         self.assertEqual(self.entered(run, "rerun"), 0)
         self.nothing_pushed(run)
 
+    def test_a_finding_naming_no_file_and_no_input_is_discarded_and_the_review_runs_once_more(self):
+        run = self.stubbed(extra_files=FORMAT, replies={
+            "implement": FOUR, "fix": TWO, "fix-review.1": UNUSABLE, "fix-review.2": PASS_ATTESTED})
+
+        self.finish(run, "done")
+
+        self.assertIn(("narrowing", "unusable"), self.walk(run))
+        self.assertEqual(self.count(run, "fix-review"), 2)
+        self.merged(run)
+
     def test_a_fix_review_with_only_minor_findings_goes_on(self):
         run = self.stubbed(extra_files=FORMAT, replies={
             "implement": FOUR, "fix": TWO, "fix-review": dict(FOUND, findings=[MINOR])})
@@ -208,7 +219,7 @@ class RoundsTest(Scenario):
         self.assertIn(("retested", "untested"), self.walk(run))
         self.nothing_pushed(run)
 
-    def test_a_retest_reporting_a_dirty_tree_stops_verify_fix(self):
+    def test_a_retest_that_leaves_the_tree_dirty_stops_verify_fix(self):
         run = self.untested(self.retest_reply(clean=False))
 
         self.finish(run, "verify-fix", "owner-decision")

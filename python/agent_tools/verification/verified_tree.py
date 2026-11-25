@@ -107,7 +107,9 @@ with no character of `[A-Za-z0-9_.-]` right before it and, right after it, neith
 `[A-Za-z0-9_-]` nor a `.` followed by a character of `[A-Za-z0-9_]`; the candidates are `p` and,
 when the command's cwd is a directory under the root other than the root and `p` lies under it,
 `p` relative to that cwd. So `notes.txt:12`, `notes.txt.` at a sentence end and `/abs/notes.txt`
-name `notes.txt`, and `notes.txt.bak` does not.
+name `notes.txt`, and `notes.txt.bak` does not. A line of the output that starts with `test-touched: `
+is the test wrapper's own status line (it names the path that made it build or the members it runs), so it
+names nothing.
 
 After every planned id ran, one rerun happens only when at least one result is `fail`, every `fail`
 has `outside_diff` true (a `no_slot` result has none, so it blocks), the tree is clean and HEAD
@@ -129,20 +131,24 @@ exactly {"head", "results", "schema": "verified-tree-last/v1", "tree"}, the fina
 latest run that ran its plan (verdict `passed`, `failed` or `dirty` after the runs, narrowed runs
 included, its HEAD not moved); a dirty-before run, a sync skip and an error never write it.
 
-`verified-tree run --worktree-path <path> --head <sha> --commit <sha>` is the narrowed run, the
-flags given together or not at all (else a usage error). HEAD must equal `--commit`, else the verdict
+`verified-tree run --worktree-path <path> --head <sha> --commit <sha> --digest <hex>` is the narrowed run,
+the three flags given together or not at all (else a usage error); `--digest` is `results_digest` of the
+results the caller graded (the SHA-256 of their canonical JSON), so another run at the same head that
+rewrote the last verification file carries nothing. HEAD must equal `--commit`, else the verdict
 is `error` with detail `the narrowed verification would run at <HEAD>, not at the fix <commit>, so
 no result was carried` and nothing runs. A passed result is carried instead of run, as that result
 plus `"carried_from"` (its own when it has one, else `--head`), only when all of these hold of the
 last verification file, never of the caller: it parses (that schema, a 40-hex `head`, a list
-`results`); its `head` equals `--head`; `--head` differs from `--commit`; some stored result is
-`pass`; every stored `fail` has a non-empty `named` and none is `no_slot`; `fix_range(root, --head,
+`results`); its `head` equals `--head` and the `results_digest` of its `results` equals `--digest`; `--head` differs from `--commit`; some stored result is
+`pass`; every stored `fail` has a non-empty `named` list of strings and none is `no_slot`; `fix_range(root, --head,
 --commit)` is `whitespace_only`; and every path of its `changed_paths` is among the `named` paths
 of the stored failures. When any fails, every planned id runs as in a plain run. The sync skip
 never applies to a narrowed run, and a passed run records every `pass` id, carried ones included.
 `fix_range` answers {"whitespace_only", "changed_paths"}: the paths of `git diff --no-renames
---name-only <start> <commit>`, and true only when `git diff -b --ignore-blank-lines --quiet`
-exits 0, there is a path and each path, stripped, matches `WS_INSENSITIVE`; a git failure raises.
+--name-only <start> <commit>`, and true only when there is a path and each path, stripped, matches `WS_INSENSITIVE` and has the same
+lines at both commits once each line is stripped of its leading and trailing whitespace and the blank
+lines are dropped (a path absent at one commit has none; a change inside a line, such as `a b` to `a  b`,
+is not whitespace-only); a git failure on the names raises.
 
 A `passed` run writes the record below for the tree it ran, its `verification` the ids whose
 status is `pass` (a run that passed no id writes none, the record's list being non-empty), so
@@ -209,6 +215,7 @@ from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 import fcntl
+import hashlib
 import json
 import math
 import os
@@ -233,6 +240,7 @@ RUN_RECORD_SCHEMA = "verified-tree-run/v1"
 RUN_RECORD_NAME = "verified-tree-run.json"
 LAST_SCHEMA = "verified-tree-last/v1"
 LAST_NAME = "verified-tree-last.json"
+WRAPPER_PREFIX = "test-touched: "
 # Copied from deliver-standard.js: the file types whose meaning a whitespace-only change keeps.
 WS_INSENSITIVE = re.compile(
     r"\.(c|cc|cpp|cxx|h|hh|hpp|cs|css|scss|less|dart|go|java|js|jsx|mjs|cjs|ts|tsx|mts|cts|json|kt|kts"
@@ -450,19 +458,25 @@ def changed_paths(root: Path, integration_branch: str, tree: str) -> list[str]:
     return _tree_diff(root, base, tree)
 
 
+def _stripped(root: Path, revision: str, path: str) -> list[str] | None:
+    """The non-blank lines of `path` at `revision`, each stripped; `[]` when absent, None when not UTF-8."""
+    try:
+        text = _git_bytes(["show", f"{revision}:{path}"], root).decode("utf-8")
+    except VerifiedTreeError:
+        return []
+    except UnicodeDecodeError:
+        return None
+    return [line.strip() for line in text.split("\n") if line.strip()]
+
+
 def fix_range(root: Path, start: str, commit: str) -> dict:
     """{"whitespace_only", "changed_paths"} of the fix `start`..`commit`; VerifiedTreeError on a git failure."""
     names = _git_bytes(["diff", "--no-renames", "--name-only", "-z", start, commit], root)
     paths = [os.fsdecode(name) for name in names.split(b"\0") if name]
-    try:
-        quiet = subprocess.run(["git", "diff", "-b", "--ignore-blank-lines", "--quiet", start, commit],
-                               cwd=root, capture_output=True, check=False).returncode
-    except OSError as error:
-        raise VerifiedTreeError(f"git diff: {error}") from error
-    if quiet not in (0, 1):
-        raise VerifiedTreeError(f"git diff: exit {quiet}")
-    return {"whitespace_only": quiet == 0 and bool(paths)
-            and all(WS_INSENSITIVE.search(path.strip()) for path in paths),
+    return {"whitespace_only": bool(paths)
+            and all(WS_INSENSITIVE.search(path.strip()) for path in paths)
+            and all(before is not None and before == _stripped(root, commit, path)
+                    for path in paths for before in [_stripped(root, start, path)]),
             "changed_paths": paths}
 
 
@@ -671,6 +685,7 @@ def _under(root: Path, cwd: str) -> str | None:
 
 def _named(output: str, changed: Sequence[str], root: Path, cwd: str) -> list[str]:
     """The sorted `changed` paths `output` names, as the path or relative to the command's `cwd`."""
+    output = "".join(line for line in output.splitlines(keepends=True) if not line.startswith(WRAPPER_PREFIX))
     prefix = _under(root, cwd)
     named = []
     for path in changed:
@@ -776,9 +791,15 @@ def _record_pass(root: Path, head: str, run_ids: Sequence[str]) -> None:
 
 @dataclass(frozen=True)
 class Narrowing:
-    """The head a first run measured and the fix commit a narrowed run verifies."""
+    """The head a first run measured, the fix commit a narrowed run verifies and the digest of the results graded."""
     head: str
     commit: str
+    digest: str
+
+
+def results_digest(results: Sequence[Mapping]) -> str:
+    """The SHA-256 of the canonical JSON of `results`: what binds a narrowed run to the results graded."""
+    return hashlib.sha256(json.dumps(results, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
 def _read_last(root: Path) -> dict | None:
@@ -799,19 +820,21 @@ def _read_last(root: Path) -> dict | None:
     return document
 
 
-def _carried(root: Path, head: str, commit: str) -> list[dict] | None:
+def _carried(root: Path, head: str, commit: str, digest: str) -> list[dict] | None:
     """The stored passes a narrowed run carries, or None when the stored evidence does not bind.
 
     They bind only when the last verification file is at `head`, every stored failure named its
-    changed paths, and the fix `head`..`commit` is whitespace-only and touches only those paths."""
+    changed paths, the results are the ones graded (`digest`), and the fix `head`..`commit` is
+    whitespace-only and touches only those paths."""
     last = _read_last(root)
-    if last is None or last["head"] != head or head == commit:
+    if last is None or last["head"] != head or head == commit or results_digest(last["results"]) != digest:
         return None
     results = last["results"]
     passes = [entry for entry in results if entry["status"] == "pass"]
     fails = [entry for entry in results if entry["status"] == "fail"]
     if not passes or any(entry.get("no_slot") or not isinstance(entry.get("named"), list)
-                         or not entry["named"] for entry in fails):
+                         or not entry["named"] or not all(isinstance(name, str) for name in entry["named"])
+                         for entry in fails):
         return None
     try:
         fix = fix_range(root, head, commit)
@@ -889,7 +912,7 @@ def run(worktree: Path, narrowing: Narrowing | None = None) -> tuple[int, dict]:
             changed = None
         carried = ({} if narrowing is None else
                    {entry["id"]: entry for entry in
-                    _carried(root, narrowing.head, narrowing.commit) or []})
+                    _carried(root, narrowing.head, narrowing.commit, narrowing.digest) or []})
         results = []
         for verification_id in ids:
             if verification_id in reasons:
@@ -954,14 +977,15 @@ def _run_main(argv: Sequence[str]) -> int:
     parser.add_argument("--worktree-path", required=True)
     parser.add_argument("--head")
     parser.add_argument("--commit")
+    parser.add_argument("--digest")
     try:
         args = parser.parse_args(argv)
-        if (args.head is None) != (args.commit is None):
-            raise _UsageError("--head and --commit come together")
+        if len({args.head is None, args.commit is None, args.digest is None}) != 1:
+            raise _UsageError("--head, --commit and --digest come together")
     except _UsageError as error:
         status, result = 1, {"detail": f"usage: {error}", "verdict": "error"}
     else:
-        narrowing = None if args.head is None else Narrowing(args.head, args.commit)
+        narrowing = None if args.head is None else Narrowing(args.head, args.commit, args.digest)
         status, result = run(Path(args.worktree_path), narrowing)
     print(_canonical(result))
     return status

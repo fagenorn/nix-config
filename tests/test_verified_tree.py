@@ -958,6 +958,13 @@ class RunTest(ProjectCase):
                 test = self.answer(self.run_verified())["results"][1]
                 self.assertEqual((test["status"], test["flaky"]), ("pass", output))
 
+    def test_a_wrapper_status_line_naming_a_changed_path_does_not_name_it(self):
+        line = "test-touched: building with just build: notes.txt changed"
+        self.declare({"lint": "", "test": self.once(line)})
+        self.branch_change({"notes.txt": "x\n"})
+        test = self.answer(self.run_verified())["results"][1]
+        self.assertEqual((test["status"], test["flaky"]), ("pass", line))
+
     def test_a_path_relative_to_the_commands_cwd_is_named(self):
         self.declare({"lint": "", "test": "print('notes.txt:1: broken');sys.exit(1)"},
                      cwds={"test": "sub"})
@@ -1107,7 +1114,8 @@ class RunTest(ProjectCase):
 
     def narrowed(self, first):
         head = self.git("rev-parse", "HEAD", cwd=self.worktree)
-        return self.run_verified("--head", first["head"], "--commit", head)
+        return self.run_verified("--head", first["head"], "--commit", head,
+                                 "--digest", verified_tree.results_digest(first["results"]))
 
     def test_a_narrowed_run_runs_only_the_failed_ids_and_carries_the_passes(self):
         first = self.first_failed()
@@ -1127,12 +1135,9 @@ class RunTest(ProjectCase):
 
     def test_a_carried_pass_keeps_its_first_carried_from(self):
         first = self.first_failed()
-        last = verified_tree.last_path(self.worktree)
-        document = json.loads(last.read_text())
-        document["results"][0]["carried_from"] = "c" * 40
-        last.write_text(json.dumps(document) + "\n")
+        document = self.rewritten(lambda document: document["results"][0].update(carried_from="c" * 40))
         self.branch_change({"data.json": self.indented(2)})
-        lint = self.answer(self.narrowed(first))["results"][0]
+        lint = self.answer(self.narrowed({**first, "results": document["results"]}))["results"][0]
         self.assertEqual(lint["carried_from"], "c" * 40)
 
     def test_a_narrowed_run_whose_evidence_or_range_does_not_bind_runs_every_id(self):
@@ -1173,18 +1178,53 @@ class RunTest(ProjectCase):
                 last.write_text(stored)
                 self.log.unlink(missing_ok=True)
                 head = arrange()
+                stored_results = json.loads(last.read_text())["results"] if last.exists() else []
                 done = self.run_verified("--head", head or fix_base, "--commit",
-                                         self.git("rev-parse", "HEAD", cwd=self.worktree))
+                                         self.git("rev-parse", "HEAD", cwd=self.worktree),
+                                         "--digest", verified_tree.results_digest(stored_results))
                 answer = self.answer(done)
                 self.assertEqual(self.logged(), [f"{where} lint", f"{where} test"])
                 for entry in answer["results"]:
                     self.assertNotIn("carried_from", entry)
 
+    def rewritten(self, change):
+        """The last verification file after `change(document)`, as another run at the same head would leave it."""
+        last = verified_tree.last_path(self.worktree)
+        document = json.loads(last.read_text())
+        change(document)
+        last.write_text(json.dumps(document) + "\n")
+        return document
+
+    def test_a_narrowed_run_carries_nothing_when_the_stored_results_are_not_the_ones_graded(self):
+        first = self.first_failed()
+        self.rewritten(lambda document: document["results"][0].update(summary="another run"))
+        self.branch_change({"data.json": self.indented(2)})
+        logged = self.logged()
+        answer = self.answer(self.narrowed(first))
+        where = str(self.worktree.resolve())
+        self.assertEqual(self.logged(), logged + [f"{where} lint", f"{where} test"])
+        for entry in answer["results"]:
+            self.assertNotIn("carried_from", entry)
+
+    def test_a_stored_failure_naming_something_that_is_not_a_path_runs_every_id(self):
+        first = self.first_failed()
+        document = self.rewritten(lambda document: document["results"][1].update(named=[{}]))
+        self.branch_change({"data.json": self.indented(2)})
+        head = self.git("rev-parse", "HEAD", cwd=self.worktree)
+        logged = self.logged()
+        answer = self.answer(self.run_verified("--head", first["head"], "--commit", head, "--digest",
+                                               verified_tree.results_digest(document["results"])))
+        where = str(self.worktree.resolve())
+        self.assertEqual(self.logged(), logged + [f"{where} lint", f"{where} test"])
+        for entry in answer["results"]:
+            self.assertNotIn("carried_from", entry)
+
     def test_a_narrowed_run_at_another_head_than_the_fix_is_an_error(self):
         first = self.first_failed()
         self.branch_change({"data.json": self.indented(2)})
         logged = self.logged()
-        answer = self.answer(self.run_verified("--head", first["head"], "--commit", first["head"]), 1)
+        answer = self.answer(self.run_verified("--head", first["head"], "--commit", first["head"],
+                                               "--digest", verified_tree.results_digest(first["results"])), 1)
         self.assertEqual(answer["verdict"], "error")
         self.assertTrue(answer["detail"].startswith("the narrowed verification would run at"))
         self.assertEqual(self.logged(), logged)
@@ -1413,6 +1453,10 @@ class FixRangeTest(ProjectCase):
     def test_a_reindented_json_file_is_whitespace_only(self):
         self.assertEqual(self.fix("a.json", '{\n    "a": 1\n}\n', '{\n  "a": 1\n}\n'),
                          {"whitespace_only": True, "changed_paths": ["a.json"]})
+
+    def test_a_change_of_the_spaces_inside_a_json_string_is_not_whitespace_only(self):
+        fixed = self.fix("a.json", '{\n    "a": "a b"\n}\n', '{\n  "a": "a  b"\n}\n')
+        self.assertEqual(fixed, {"whitespace_only": False, "changed_paths": ["a.json"]})
 
     def test_a_content_change_is_not_whitespace_only(self):
         fixed = self.fix("a.json", '{\n    "a": 1\n}\n', '{\n  "a": 2\n}\n')

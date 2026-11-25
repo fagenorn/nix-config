@@ -7,6 +7,7 @@ the contract or the worktree run against the committed fixture repository.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -187,11 +188,54 @@ class RoundTest(LedgerCase):
         self.visit(run, "rerun", 1, "passed", document("passed", head=C))
         self.assertEqual(self.round()["start_head"], S)
 
-    def test_a_fix_with_no_ws_check_anchor_is_not_marked_untested(self):
+    def test_a_fix_whose_ws_check_recorded_nothing_is_untested_from_the_failed_verifications_head(self):
         run = self.verified(FAILED)
         self.fix(run, start_head=C, commit=C)
         self.visit(run, "rerun", 1, "passed", document("passed", head=C))
+        answer = self.round()
+        self.assertEqual((answer["verdict"], answer["start_head"]), ("retest", H))
+
+    def test_a_fix_agent_that_never_replied_is_untested_across_a_continue(self):
+        first = self.verified(FAILED)
+        self.enter(first, "fix")
+        later = self.verify_run()
+        self.visit(later, "checks", 1, "passed", document("passed", head=C))
+        answer = self.round()
+        self.assertEqual((answer["verdict"], answer["start_head"]), ("retest", H))
+
+    def test_a_ws_check_with_no_start_falls_back_to_the_failed_verifications_head(self):
+        run = self.verified(FAILED)
+        self.fix(run)
+        self.ws_check(run, "", "")
+        self.visit(run, "rerun", 1, "passed", document("passed", head=C))
+        self.assertEqual(self.round()["start_head"], H)
+
+    def test_a_fix_that_left_the_head_where_the_failure_was_needs_no_retest(self):
+        run = self.verified(FAILED)
+        self.fix(run)
+        later = self.verify_run()
+        self.visit(later, "checks", 1, "passed", document("passed", head=H))
         self.assertEqual(self.round()["verdict"], "passed")
+
+    def test_a_verification_at_a_head_other_than_the_reviewed_fix_answers_verify(self):
+        run = self.verified(FAILED)
+        self.fix(run, tests=["just test"])
+        self.ws_check(run, S, C)
+        self.visit(run, "checks", 2, "passed", document("passed", head=H))
+        self.assertEqual(self.round()["verdict"], "verify")
+
+    def test_a_verification_at_the_reviewed_fix_is_not_unreviewed(self):
+        run = self.verified(FAILED)
+        self.fix(run, tests=["just test"])
+        self.ws_check(run, S, C)
+        self.visit(run, "checks", 2, "passed", document("passed", head=C))
+        self.assertEqual(self.round()["verdict"], "passed")
+
+    def test_the_answer_carries_the_digest_of_its_results(self):
+        self.verified(FAILED)
+        expected = hashlib.sha256(json.dumps(FAILED["results"], sort_keys=True, separators=(",", ":"))
+                                  .encode("utf-8")).hexdigest()
+        self.assertEqual(self.round()["digest"], expected)
 
     def test_an_unread_fix_range_with_no_test_is_untested(self):
         run = self.verified(FAILED)
@@ -257,7 +301,7 @@ class CommandLineTest(RoundCase):
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertEqual(done.stdout.count("\n"), 1)
         self.assertEqual(sorted(json.loads(done.stdout)),
-                         ["clean", "guards", "head", "problems", "results", "start_head", "verdict"])
+                         ["clean", "digest", "guards", "head", "problems", "results", "start_head", "verdict"])
 
     def test_a_missing_flag_is_a_usage_error_with_exit_1(self):
         for argv in (("round", "--holder", "h/x"), ("fix-range", "--worktree-path", str(self.repo)),
@@ -368,6 +412,11 @@ class RetestedTest(RoundCase):
     def test_a_reply_that_says_dirty_is_dirty(self):
         answer = self.reread(clean=False)
         self.assertEqual((answer["verdict"], answer["detail"]), ("dirty", verify_rounds.RETEST_DIRTY))
+
+    def test_an_untracked_file_is_dirty_when_git_is_set_to_hide_untracked_files(self):
+        self.git("config", "status.showUntrackedFiles", "no")
+        (self.repo / "scratch.txt").write_text("x\n")
+        self.assertEqual(self.reread(clean=True)["verdict"], "dirty")
 
     def test_an_untracked_file_is_dirty_whatever_the_reply_says(self):
         (self.repo / "scratch.txt").write_text("x\n")

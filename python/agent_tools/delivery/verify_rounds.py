@@ -18,8 +18,10 @@ run is the last. Each command prints one compact JSON line; a failure prints `{"
 
 - no verify run is `no_verify_run`; the latest result of `VERIFICATION_STEPS` of the current run is the
   verification read, and none is `no_verification`.
-- a read whose verdict is `passed` is `retest` with `start_head = untested_start(runs)` when that is not None,
-  else `passed` (`deliver-standard.js:2941-2946`, the retest after the loop).
+- a read at a head other than the commit the last `ws-check` of the run read (the reviewed fix) is `verify`: the
+  full rerun is bound to the reviewed commit, so a commit made after the review never lands unreviewed.
+- a read whose verdict is `passed` is `retest` with `start_head = untested_start(runs)` when that is not None
+  and not the read's own head, else `passed` (`deliver-standard.js:2941-2946`, the retest after the loop).
 - any other verdict than `failed` or `dirty` is `verify` (`deliver-standard.js:2937`).
 - any `fail` result with `no_slot` true is `verify`, before the dirty problem is looked at, so slot exhaustion
   never reaches a fix (`deliver-standard.js:2912`).
@@ -34,16 +36,22 @@ run is the last. Each command prints one compact JSON line; a failure prints `{"
 `untested_start(runs)` (the program never marks a verify fix; `deliver-standard.js:922-934` marks the others): at
 each `ws-check` result of a verify run, with the latest `fix` result graded before it, no start pending, no
 non-blank `tests` in that fix and the `ws-check` commit blank or other than its `start_head`, the pending start
-becomes the `ws-check` `start_head`: the verified head before the fix, never a sha the fix reply names. A
-`retested` transition with outcome `done` clears it.
+becomes the `ws-check` `start_head`: the verified head before the fix, never a sha the fix reply names. A fix
+entered whose `ws-check` recorded no result (the run stopped first, or the fix agent never replied) counts as
+recording no test, and its start is the latest verification head before it (a `ws-check` result with no
+`start_head` falls back to the same head). A `retested` transition with outcome `done` clears it.
 
 `fix-range` (`deliver-standard.js:2738-2744`): `commit` is the worktree's HEAD and the range is read by
 `verified_tree.fix_range`; a range or head git cannot read answers `unread`, which disables narrowing.
 
 `retested` (`deliver-standard.js:2942-2944`): `untested` unless the latest `retest` reply is `done`, names the
 latest `round` result's head as its start and commit, the worktree's HEAD is that head and its `tests` hold a
-non-blank string; then `dirty` unless the reply says `clean` and `git status --porcelain` prints nothing
-(untracked files included, so the reply's word is not taken); else `done`.
+non-blank string; then `dirty` unless the reply says `clean` and `git status --porcelain --untracked-files=all`
+prints nothing (untracked files included whatever `status.showUntrackedFiles` says, so the reply's word is not
+taken); else `done`.
+
+`round` also answers `digest`, `verified_tree.results_digest` of the read's results: the narrowed `rerun` passes it
+back, so only the results this round graded can be carried.
 """
 
 from __future__ import annotations
@@ -93,22 +101,54 @@ def _tested(reply: Mapping) -> bool:
 
 
 def untested_start(runs: Sequence[Path]) -> str | None:
-    """The verified head before the earliest fix no `retested` done has covered and that recorded no test."""
+    """The verified head before the earliest fix no `retested` done has covered and that recorded no test.
+
+    A fix whose `ws-check` never recorded its result (the run stopped first, or the fix agent never replied) is
+    read from the latest verification head before it, and a reply-less fix counts as recording no test."""
     pending: str | None = None
+    head: str | None = None
     for run in runs:
         fix: dict | None = None
+        anchor: str | None = None
+        unchecked = False
         for event in _events(run):
-            if event["event"] == "transition_taken" and event["step"] == RETESTED and event["outcome"] == "done":
+            step = event.get("step")
+            if event["event"] == "step_entered" and step == FIX:
+                fix, anchor, unchecked = {}, head, True
+            elif event["event"] == "transition_taken" and step == RETESTED and event["outcome"] == "done":
                 pending = None
-            elif event["event"] == "outcome_graded" and event["step"] == FIX:
+            elif event["event"] == "outcome_graded" and step in VERIFICATION_STEPS:
+                seen = land_tally.stored(run, step, event["visit"]).get("head")
+                head = seen if isinstance(seen, str) and seen else head
+            elif event["event"] == "outcome_graded" and step == FIX:
                 fix = land_tally.stored(run, FIX, event["visit"])
-            elif event["event"] == "outcome_graded" and event["step"] == WS_CHECK and fix is not None:
+            elif event["event"] == "outcome_graded" and step == WS_CHECK and fix is not None:
                 check = land_tally.stored(run, WS_CHECK, event["visit"])
-                start, commit = check.get("start_head"), check.get("commit")
+                start, commit = check.get("start_head") or anchor, check.get("commit")
+                unchecked = False
                 if (pending is None and not _tested(fix) and isinstance(start, str) and start
                         and (not commit or commit != start)):
                     pending = start
+        if unchecked and pending is None and fix is not None and not _tested(fix) and anchor:
+            pending = anchor
     return pending
+
+
+def _unreviewed(run: Path) -> bool:
+    """Whether the latest verification of the run is at a head other than the fix `ws-check` last read."""
+    reviewed: str | None = None
+    moved = False
+    for event in _events(run):
+        step = event.get("step")
+        if event["event"] != "outcome_graded":
+            continue
+        if step == WS_CHECK:
+            commit = land_tally.stored(run, WS_CHECK, event["visit"]).get("commit")
+            reviewed = commit if isinstance(commit, str) and commit else None
+        elif step in VERIFICATION_STEPS and reviewed is not None:
+            head = land_tally.stored(run, step, event["visit"]).get("head")
+            moved = isinstance(head, str) and head != reviewed
+    return moved
 
 
 def _problems(read: Mapping) -> list[dict]:
@@ -149,9 +189,11 @@ def answer(holder: str, worktree: str, root: Path | None = None) -> dict:
     results = read.get("results") if isinstance(read.get("results"), list) else []
     start = ""
     verdict = read.get("verdict")
-    if verdict == "passed":
+    if _unreviewed(runs[-1]):
+        verdict = "verify"
+    elif verdict == "passed":
         found = untested_start(runs)
-        verdict, start = ("passed", "") if found is None else ("retest", found)
+        verdict, start = ("passed", "") if found is None or found == read.get("head") else ("retest", found)
     elif verdict not in ("failed", "dirty") or any(
             isinstance(r, dict) and r.get("status") == "fail" and r.get("no_slot") for r in results):
         verdict = "verify"
@@ -160,7 +202,8 @@ def answer(holder: str, worktree: str, root: Path | None = None) -> dict:
     else:
         verdict = "fix"
     return {"verdict": verdict, "head": read.get("head", ""), "clean": read.get("clean"), "results": results,
-            "problems": problems, "start_head": start, "guards": guards}
+            "digest": verified_tree.results_digest(results), "problems": problems, "start_head": start,
+            "guards": guards}
 
 
 def fix_range(worktree: str, start_head: str) -> dict:
@@ -191,7 +234,7 @@ def retested(holder: str, worktree: str, root: Path | None = None) -> dict:
             and _tested(reply)):
         return {"verdict": "untested", "detail": UNTESTED}
     try:
-        changed = verified_tree._git(["status", "--porcelain"], Path(worktree))
+        changed = verified_tree._git(["status", "--porcelain", "--untracked-files=all"], Path(worktree))
     except verified_tree.VerifiedTreeError:
         changed = "?"
     if reply.get("clean") is not True or changed:
