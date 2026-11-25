@@ -157,6 +157,13 @@ class PermitRerunServiceTest(PermitCase):
             self.assertFalse(svc.permit_landed(sid, secret, "s-1", "t-2", self.RERUN))
         self.assertEqual(self.rows("permit.landed"), [self.landed_row(sid)])
 
+    def test_the_same_landed_notification_delivered_twice_records_one_row(self):
+        svc, sid = self.boot()
+        self.assertEqual(self.judge(svc, sid, self.RERUN, call="t-1").decision, "allow")
+        self.assertTrue(svc.permit_landed(sid, self.secret(sid), "s-1", "t-1", self.RERUN))
+        self.assertFalse(svc.permit_landed(sid, self.secret(sid), "s-1", "t-1", self.RERUN))
+        self.assertEqual(self.rows("permit.landed"), [self.landed_row(sid)])
+
 
 if __name__ == "__main__":
     unittest.main()

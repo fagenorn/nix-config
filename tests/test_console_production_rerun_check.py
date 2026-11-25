@@ -233,6 +233,27 @@ class ConsoleProductionRerunTest(unittest.TestCase):
         self.landed()
         self.assertEqual(self.run_check(Attempts(self.started()), late)[0], 75)
 
+    def test_a_paired_rerun_the_forge_no_longer_has_is_skipped_and_a_later_one_is_examined(self):
+        self.activated()
+        self.judged(self.HOUR, call="t-1", target={**self.TARGET, "run": 54})
+        self.landed(target={"run": 54})
+        self.judged(2 * self.HOUR, call="t-2")
+        self.landed(2 * self.HOUR + timedelta(seconds=20), tool_use_id="t-2")
+        started = (self.T0 + 2 * self.HOUR + timedelta(seconds=30)).isoformat()
+
+        def api_get(path, allow=(), cli="gh"):
+            if path.endswith("/runs/54"):
+                if 404 not in allow:
+                    raise forge_api.ForgeError("gh_failed", "HTTP 404")
+                return None
+            if path.endswith("/runs/55"):
+                return {"run_attempt": 2}
+            return {"run_started_at": started}
+
+        with mock.patch.object(forge_api, "api_get", api_get):
+            code, report = self.run_check(console_production_rerun.attempt_starts)
+        self.assertEqual((code, report["verdict"], report["run"]), (0, "met", 55))
+
     def test_an_unreadable_forge_is_a_tool_failure(self):
         self.activated()
         self.judged(self.HOUR)

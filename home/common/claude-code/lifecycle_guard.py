@@ -650,9 +650,9 @@ branch, from a branch that is neither long-lived branch, at the run's head and b
 required set is the forge's protection of the integration branch, read as the console permit reads it, not the checks
 the contract declares. The reads inherit the session's environment minus the token variables. A read that fails, times
 out or answers another shape leaves the rule in place, and a deadline too near refuses. Only the narrowed hits of the
-named project are dropped, decided once per command; a broader rule and every other hit still refuse. The rerun then
-goes to whatever judges `gh run rerun` next: in a manager session, the console permit, with its per-head cap and
-refusals.
+named project are dropped, each row by its own integration branch, with every read made once per command; a
+broader rule and every other hit still refuse. The rerun then goes to whatever judges `gh run rerun` next: in a manager
+session, the console permit, with its per-head cap and refusals.
 
 Known limits: a production command reached by another name (a bare `just` that runs the default recipe, a script or
 alias), words fed on stdin, a program's own directory option (`env -C`, `make -C`) and a one-word command handed to a
@@ -4055,7 +4055,7 @@ def gh_named_repository(run, cut):
 
 
 PULL_REQUEST_RERUN = re.compile(
-    r"gh run rerun ([1-9][0-9]*) --failed --repo ([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+)")
+    r"gh run rerun ([1-9][0-9]{0,17}) --failed --repo ([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+)")
 # The permit's FAILED_CONCLUSIONS, ANY_APP and ACTIONS_APP, copied: the guard imports nothing
 # from `agent_tools`. A check bound to no app (None) counts as the permit counts it.
 JOB_FAILED_CONCLUSIONS = ("failure", "cancelled", "timed_out", "startup_failure")
@@ -4067,7 +4067,8 @@ def pull_request_rerun_form(command):
 
     The form is `gh run rerun <id> --failed --repo <owner>/<repo>`, single-spaced, after at
     most one credential-scrub prefix. No other character, operator, assignment or word is
-    allowed, and the repository carries no host and no `.git` suffix."""
+    allowed, the run id has at most 18 digits, and the repository carries no host and no `.git`
+    suffix."""
     found = PULL_REQUEST_RERUN.fullmatch(strip_scrub_prefix(command))
     if found is None or found.group(3).endswith(".git"):
         return None
@@ -4084,7 +4085,7 @@ def forge_read(gh_bin, path, deadline, child_timeout):
             [gh_bin, "api", path], capture_output=True, text=True, check=False,
             env=gh_lookup_env(), timeout=timeout)
         return json.loads(done.stdout) if done.returncode == 0 else None
-    except (subprocess.TimeoutExpired, OSError, ValueError):
+    except (subprocess.TimeoutExpired, OSError, ValueError, RecursionError):
         return None
 
 
@@ -4145,6 +4146,8 @@ def failed_job_names(document):
     for job in jobs:
         if not isinstance(job, dict) or not isinstance(job.get("name"), str):
             return None
+        if job.get("conclusion") is not None and not isinstance(job["conclusion"], str):
+            return None
         if job.get("conclusion") in JOB_FAILED_CONCLUSIONS:
             names.add(job["name"])
     return names
@@ -4171,13 +4174,19 @@ def is_own_open_pull_request(document, slug, head, branch, row):
     )
 
 
-def pull_request_check_run(gh_bin, slug, run_id, row, deadline, child_timeout):
+def pull_request_check_run(gh_bin, slug, run_id, row, deadline, child_timeout, memo=None):
     """Whether run `run_id` of `slug` is a pull request check run of its own open issue pull
     request at that pull request's head whose failed job is a check the forge requires of
     the row's integration branch. Any read that fails, or any other shape, is False. The
-    row's declared `required_checks` are never consulted."""
+    row's declared `required_checks` are never consulted. `memo`, a dict shared by the calls
+    of one command, holds each read once."""
+    memo = {} if memo is None else memo
+
     def read(path):
-        return forge_read(gh_bin, f"repos/{slug}/{path}", deadline, child_timeout)
+        key = (slug.lower(), path)
+        if key not in memo:
+            memo[key] = forge_read(gh_bin, f"repos/{slug}/{path}", deadline, child_timeout)
+        return memo[key]
 
     run = run_document_facts(read(f"actions/runs/{run_id}"), slug)
     if run is None:
@@ -4347,8 +4356,9 @@ def production_problem_for(command, rows, cwd, git_bin, gh_bin, deadline, child_
     names its repository (`--repo`, `-R`) is judged against that repository's rules from any
     directory, and by the checkout only when some run of the command is not narrowed (issue
     1375). When the whole command is the permit's own rerun form and the forge shows it to
-    be a pull request check run (`pull_request_check_run`), the narrowed hits of the named
-    project are dropped, decided once per command. Each child is bounded when it starts.
+    be a pull request check run (`pull_request_check_run`), the narrowed hits of each row that
+    names the project are dropped, each row decided by its own integration branch. Each child
+    is bounded when it starts.
     Inside a row the first rule in `changes` order that hits names the refusal.
     """
     rules = {
@@ -4363,9 +4373,12 @@ def production_problem_for(command, rows, cwd, git_bin, gh_bin, deadline, child_
         exempt = sorted(
             hit for hit, (named, by_checkout) in hits.items()
             if hit[0].lower() == form[0] and not by_checkout and named == frozenset({form[0]}))
-        if exempt and pull_request_check_run(
-                gh_bin, exempt[0][0], form[1], rows[exempt[0][0]], deadline, child_timeout):
-            for hit in exempt:
+        memo, verdicts = {}, {}
+        for hit in exempt:
+            if hit[0] not in verdicts:
+                verdicts[hit[0]] = pull_request_check_run(
+                    gh_bin, hit[0], form[1], rows[hit[0]], deadline, child_timeout, memo)
+            if verdicts[hit[0]]:
                 del hits[hit]
     if not hits:
         return None

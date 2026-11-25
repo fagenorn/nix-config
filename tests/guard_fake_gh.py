@@ -105,6 +105,9 @@ def check_run_refusals(slug, head):
         ("pull-request deploy run", forge(FAKE_JOBS_JSON=jobs_facts(failed=("deploy-preview",)))),
         ("no failed job", forge(FAKE_JOBS_JSON=jobs_facts(failed=(), passed=("Tests",)))),
         ("truncated jobs", forge(FAKE_JOBS_JSON=jobs_facts(total=101))),
+        ("sibling job with a malformed conclusion", forge(FAKE_JOBS_JSON=json.dumps({"total_count": 2, "jobs": [
+            {"name": "Tests", "conclusion": "failure"}, {"name": "Lint", "conclusion": 42}]}))),
+        ("run nested past the recursion limit", forge(FAKE_RUN_JSON="[" * 30000 + "]" * 30000)),
         ("not a required check", forge(FAKE_REQUIRED_JSON=required_facts(contexts=("Lint",)))),
         ("check bound to another app", forge(FAKE_REQUIRED_JSON=required_facts(
             contexts=(), checks=(("Tests", 999),)))),
@@ -132,6 +135,8 @@ def check_run_refusals(slug, head):
         ("declared by the row only", forge(FAKE_REQUIRED_JSON=required_facts(contexts=("Lint",))),
          {"required_checks": ["Tests"]}, ()),
         ("run timeout", forge(FAKE_RUN_MODE="timeout"), {}, ("--child-timeout-seconds", "0.5")),
+        ("case-spelled row of another integration branch", forge(), {"integration_branch": "dev", "also": (
+            ("Acme/Deployer", {}),)}, ()),
     ]
 
 
@@ -166,6 +171,7 @@ def check_run_spellings(slug):
         ("--job", f"gh run rerun 55 --failed --job 9 --repo {slug}"),
         ("consumed --failed", f"gh run rerun 55 --job --failed --repo {slug}"),
         ("leading zero", f"gh run rerun 055 --failed --repo {slug}"),
+        ("run id past the digit limit", f"gh run rerun {'1' * 4301} --failed --repo {slug}"),
         ("hosted value", f"gh run rerun 55 --failed --repo github.com/{slug}"),
         (".git value", f"gh run rerun 55 --failed --repo {slug}.git"),
         ("path to gh", f"/usr/bin/{exempt}"),

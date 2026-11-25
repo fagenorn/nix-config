@@ -53,15 +53,21 @@ _RULE = ["gh", "run", "rerun"]
 
 
 def attempt_starts(slug: str, run_id: int) -> list[datetime]:
-    """The start times of the reruns (attempts 2 and later) of a run, as the forge records them."""
+    """The start times of the reruns (attempts 2 and later) of a run, as the forge records them.
+
+    A run or attempt the forge no longer has (HTTP 404) shows no rerun, so it is skipped, not a failure."""
     try:
-        run = forge_api.api_get(f"repos/{slug}/actions/runs/{run_id}")
+        run = forge_api.api_get(f"repos/{slug}/actions/runs/{run_id}", allow=(404,))
+        if run is None:
+            return []
         count = run.get("run_attempt") if isinstance(run, dict) else None
         if not _is_int(count) or count < 1:
             raise forge_api.ForgeError("payload_invalid", "run_attempt is not a positive integer")
         starts = []
         for number in range(2, count + 1):
-            attempt = forge_api.api_get(f"repos/{slug}/actions/runs/{run_id}/attempts/{number}")
+            attempt = forge_api.api_get(f"repos/{slug}/actions/runs/{run_id}/attempts/{number}", allow=(404,))
+            if attempt is None:
+                continue
             if not isinstance(attempt, dict):
                 raise forge_api.ForgeError("payload_invalid", "an attempt is not an object")
             starts.append(_forge_time(attempt.get("run_started_at"), "run_started_at"))

@@ -2079,8 +2079,8 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         both = rerun_production(("deploy-rerun", ["gh", "run", "rerun"]), ("deploy-run", ["gh", "run"]))
         default = check_run_forge(PROD, self.CHECK_HEAD)
 
-        def world(**changes):
-            return {self.OWN: NODO_ROW, PROD: {**self.RERUN_ROW, **changes}}
+        def world(also=(), **changes):
+            return {self.OWN: NODO_ROW, PROD: {**self.RERUN_ROW, **changes}, **{k: {**self.RERUN_ROW, **v} for k, v in also}}
 
         table = [(name, self.CHECK_RERUN, forge, world(**rows), extra, self.RERUN)
                  for name, forge, rows, extra in check_run_refusals(PROD, self.CHECK_HEAD)]

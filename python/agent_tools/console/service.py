@@ -1101,11 +1101,11 @@ ADR-console-106), judges with `permit.judge` over `permit.memoized(permit_forge)
 sprint, its checks and the grant afresh and judges once more over the memo's frozen replay: any refusal, any difference
 or any read the memo did not hold is `permit.MOVED`. Each decided verdict appends one `permit.judged` row under that
 lock `{"sprint_id", "session_id", "tool_use_id", "repo", "verb", "decision", "reason", "target"}`; an allowed merge or
-rerun is also remembered in memory by `permit.landing_key` with the service's clock. `permit_landed(sprint_id, secret,
-session_id, tool_use_id, command)` is True, and appends one `permit.landed` row `{"sprint_id", "session_id",
-"tool_use_id", "repo", "verb": "merge", "target": {"pr", "head"}}`, or `"verb": "rerun", "target": {"run"}`, only when
-the command is exactly such a merge or the granted rerun of that run (`permit.landing_of`) and the allow of that same
-tool call was judged at most `PERMIT_LANDED_SECONDS` (30 minutes) ago; otherwise it is False and appends nothing.
+rerun is also remembered by `permit.landing_key` with the service's clock. `permit_landed(sprint_id, secret, session_id,
+tool_use_id, command)` is True, and appends one `permit.landed` row `{"sprint_id", "session_id", "tool_use_id", "repo",
+"verb": "merge", "target": {"pr", "head"}}`, or `"verb": "rerun", "target": {"run"}`, only when the command is exactly
+such a merge or the granted rerun of that run (`permit.landing_of`) and the allow of that same tool call was judged at
+most `PERMIT_LANDED_SECONDS` (30 minutes) ago and has not landed; otherwise it is False and appends nothing.
 
 An approved action (`action_permit`): a body with a `nonce` is a signed body that carries no secret and no
 command text, which `action_permit.reply` answers through `permit_action` and `permit_action_landed`; only
@@ -9709,7 +9709,7 @@ class ConsoleService(ActionPermit):
         key = (sprint_id, session_id, tool_use_id, slug, *landing[1])
         with self._ingest:
             self._manager_sprint(sprint_id, secret)
-            judged = self._permit_allows.get(key)
+            judged = self._permit_allows.pop(key, None)
             if judged is None or self._clock() - judged > PERMIT_LANDED_SECONDS:
                 return False
             self._apply(self.log.append([(PERMIT_LANDED, sprint.project_id, {
