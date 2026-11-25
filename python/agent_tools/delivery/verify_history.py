@@ -192,7 +192,7 @@ def read_from(path: Path, identity: list[int] | None, offset: int, baseline: boo
               limit: int = READ_LIMIT) -> tuple[list[dict], list[int] | None, int]:
     """The readable records of `path` after the consumed position, the file's identity and the new offset."""
     try:
-        descriptor = _regular(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), path)
+        descriptor = regular_descriptor(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), path)
     except FileNotFoundError:
         return [], None, 0
     with os.fdopen(descriptor, "rb") as handle:
