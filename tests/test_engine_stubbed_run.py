@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -121,11 +122,13 @@ def model_of(launch: dict) -> str:
 class Scenario(unittest.TestCase):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        STEPS.select(self.id())  # the runner builds a test only when it selects it
+        # the runner builds a test only when it selects it, on the coverage of the test's own module
+        sys.modules[type(self).__module__].STEPS.select(self.id())
 
     def stubbed(self, **members) -> StubbedRun:
-        run = StubbedRun(test_case=self, fixtures=FIXTURES, **members)
-        self.addCleanup(lambda: STEPS.record(run.visited_steps()))
+        module = sys.modules[type(self).__module__]
+        run = StubbedRun(test_case=self, fixtures=module.FIXTURES, **members)
+        self.addCleanup(lambda: module.STEPS.record(run.visited_steps()))
         return run
 
     def branch_here(self, run: StubbedRun, path: Path) -> str:
@@ -965,31 +968,34 @@ class StepCoverageTest(Scenario):
         self.assertNotIn("close-out.release", str(raised.exception))
 
     def test_a_selected_test_whose_class_setup_skipped_does_not_silence_the_coverage_check(self):
-        module = sys.modules[type(self).__module__]
         coverage = StepCoverage(PROCEDURES)
 
         def skipping(cls) -> None:
             raise unittest.SkipTest("the class cannot start")
 
         fake = types.ModuleType("fake")
+        fake.STEPS = coverage
         fake.T = type("T", (Scenario,), {"__module__": "fake", "setUpClass": classmethod(skipping),
                                          "test_a": lambda self: None})
-        with mock.patch.object(module, "STEPS", coverage):
+        home, directory = os.environ["HOME"], FIXTURES.directory
+        with mock.patch.dict(sys.modules, {"fake": fake}):
             suite = unittest.TestLoader().loadTestsFromModule(fake)
             coverage.begin()
-            result = unittest.TextTestRunner(stream=io.StringIO()).run(suite)
-            with self.assertRaises(AssertionError) as raised:
-                coverage.check(test_ids(fake))
+            ids = test_ids(fake)
+        result = unittest.TextTestRunner(stream=io.StringIO()).run(suite)
+        with self.assertRaises(AssertionError) as raised:
+            coverage.check(ids)
 
         self.assertEqual((result.testsRun, len(result.skipped)), (0, 1))
         self.assertIn("direct.escalated-settled", str(raised.exception))
+        self.assertEqual((os.environ["HOME"], FIXTURES.directory), (home, directory))
 
     def test_a_test_built_after_the_run_began_is_not_selected(self):
-        module = sys.modules[type(self).__module__]
         coverage = StepCoverage(PROCEDURES)
         fake = types.ModuleType("fake")
+        fake.STEPS = coverage
         fake.T = type("T", (Scenario,), {"__module__": "fake", "test_a": lambda self: None})
-        with mock.patch.object(module, "STEPS", coverage):
+        with mock.patch.dict(sys.modules, {"fake": fake}):
             coverage.begin()
             test_ids(fake)
 
