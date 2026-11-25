@@ -32,6 +32,13 @@ and of the hold over the runs that held a slot, plus the sum of those holds. Its
 
 with each figure rounded to whole seconds, the hold medians `-` and the total `0s` when no run held
 a slot, and ` over budget <budget>s` appended when the hold median is strictly above the budget.
+
+`read_from(path, identity, offset)` reads only what a caller has not consumed. It answers the readable
+records after `offset`, the file's identity `[st_dev, st_ino]` and the new offset. It reads from
+`offset` while `identity` is the file's and the file is not shorter than `offset`, and from the first
+byte otherwise (a replaced or shrunk file); it seeks there and never reads the bytes before it. It
+consumes only through the last newline, so a torn last line is read whole by a later call, and skips
+an unreadable consumed line. An absent file answers `([], None, 0)`; the open is `read`'s.
 """
 from __future__ import annotations
 
@@ -164,6 +171,24 @@ def read(path: Path) -> tuple[list[dict], int]:
         pieces.pop()
     records = [_readable(piece) for piece in pieces]
     return [record for record in records if record is not None], records.count(None)
+
+
+def read_from(path: Path, identity: list[int] | None, offset: int) -> tuple[list[dict], list[int] | None, int]:
+    """The readable records of `path` after the consumed position, the file's identity and the new offset."""
+    try:
+        descriptor = _regular(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), path)
+    except FileNotFoundError:
+        return [], None, 0
+    with os.fdopen(descriptor, "rb") as handle:
+        status = os.fstat(handle.fileno())
+        found = [status.st_dev, status.st_ino]
+        start = offset if identity == found and status.st_size >= offset else 0
+        handle.seek(start)
+        data = handle.read()
+    consumed = data.rfind(b"\n") + 1
+    pieces = data[:consumed].split(b"\n")[:-1]
+    records = [_readable(piece) for piece in pieces]
+    return [record for record in records if record is not None], found, start + consumed
 
 
 def nearest_rank_p90(values: Sequence[float]) -> float:

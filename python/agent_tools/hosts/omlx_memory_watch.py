@@ -2,16 +2,18 @@
 
 `omlx-memory-watch sample --state-dir DIR --floor-gib N --others-budget-gib N
 --unowned-alert-gib N --omlx-jetsam-priority N --host NAME [--label org.nixos.omlx] [--health-url URL] [--vm-stat PATH]
-[--sysctl PATH] [--launchctl PATH] [--ps PATH] [--footprint PATH] [--alert-settings FILE]
-[--alert-log FILE] [--telegram-api URL] [--census-record FILE] [--now ISO8601]` takes one reading of the host and
+[--sysctl PATH] [--launchctl PATH] [--ps PATH] [--footprint PATH] [--hdiutil PATH] [--slot-history FILE]
+[--colima-pid-file FILE] [--alert-settings FILE] [--alert-log FILE] [--telegram-api URL] [--census-record FILE]
+[--now ISO8601]` takes one reading of the host and
 records it. Used memory is (anonymous pages - purgeable pages + wired pages + compressor pages)
 x the page size of `vm_stat`; available is `hw.memsize` minus used. A model is loaded when the
 health URL (read without any proxy, 5 s) answers `engine_pool.loaded_count >= 1`. The oMLX
 footprint is `phys_footprint` of `footprint -p <pid>` for the pid `launchctl print
 system/<label>` shows, unknown when that is missing or fails; the memory of everything else is
 used minus that footprint, counted only on a loaded sample whose footprint is known. CI jobs
-are the `Runner.Worker` processes of `ps -axo comm=`, every user's, since a job runs under a
-runner account.
+are the `Runner.Worker` processes of `ps -axwwo pid=,args=` (the `ww` keeps a ps whose output is not a
+terminal from cutting the args), every user's, since a job runs under a runner account and other accounts'
+processes show as `(name)`.
 
 `DIR/memory-watch.json` (mode 0600 in a 0700 directory, replaced atomically) holds the day's
 `since`, `day`, `peak_used_bytes`, `peak_others_bytes`, `peak_omlx_bytes`,
@@ -31,7 +33,15 @@ Each successful sample also appends one line to `DIR/samples/<day>.jsonl` (direc
 `at`, `used_bytes`, `available_bytes`, `loaded`, `omlx_bytes`, `ci_jobs`, `wired_bytes`,
 `anonymous_bytes`, `compressions_bytes` (null when `vm_stat` prints no `Compressions` line), then
 `sys_footprint_bytes`, `process_footprint_bytes`, `unowned_bytes`, `top_owners`, `census_at` and
-`census_seconds`, which are null without a fresh census. A census is fresh when its `error` is null,
+`census_seconds`, which are null without a fresh census, and last `events`, the list of changes since the previous
+sample (RAM disks from `hdiutil info -plist`, the Colima VM from the pid in `--colima-pid-file`, default
+`~/.colima/_lima/colima/vz.pid`, CI jobs and live `verify-slot run` processes from the ps listing, finished
+verify runs from `--slot-history`, default the verify-slot history of the slot directory, and the floor kills
+of the floor record). Their shapes and the baseline, unreadable-source and history-offset rules are in
+`agent_tools.hosts.omlx_memory_events`; the watcher never takes a slot's lock. The state keeps what each
+source last showed in `ci_pids_seen`, `vm_seen`, `ram_disks_seen`, `verify_live_seen` and `history_seen`.
+RAM disks, CI jobs and live verify runs are snapshots: one that starts and ends between two samples is not
+recorded. A failed `hdiutil`, an unreadable pid file or an unreadable history is not a failed reading. A census is fresh when its `error` is null,
 its three figures are integers and its `at` is within 150 s of the sample. A finished day deletes the
 files more than 14 days older than the new day. The state holds `census_peaks` (each figure's largest
 `{bytes, at}`; a later equal value keeps the earlier time; the three vm figures fold on every sample,
@@ -115,7 +125,8 @@ import urllib.request
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from agent_tools.hosts import host_alerts
+from agent_tools.delivery import verify_history, verify_slot
+from agent_tools.hosts import host_alerts, omlx_memory_events
 
 GIB = 1024**3
 PROG = "omlx-memory-watch"
@@ -138,6 +149,8 @@ CENSUS_DEFAULTS = {
 TOP_OWNERS = 5
 FLOOR_RECORD = "/var/db/memory-watch/floor.json"
 FLOOR_DEFAULTS = {"floor_kills_seen": None, "floor_unmet_seen": None, "priority_unset_open": False, "floor_log": []}
+COLIMA_PID_FILE = ".colima/_lima/colima/vz.pid"
+PID_FILE_BYTES = 64
 STATE_NAME = "memory-watch.json"
 PEAKS_NAME = "memory-peaks.jsonl"
 RUN_TIMEOUT = 30
@@ -203,11 +216,6 @@ def parse_launchctl(text: str) -> dict:
     return found
 
 
-def count_ci_jobs(text: str) -> int:
-    names = (line.strip().strip("()") for line in text.splitlines())
-    return sum(1 for name in names if name.rsplit("/", 1)[-1] == "Runner.Worker")
-
-
 class CensusIncomplete(ValueError):
     def __init__(self, errors: int):
         super().__init__(f"footprint census incomplete (errors: {errors})")
@@ -264,6 +272,7 @@ def fresh_day(since: str, day: str) -> dict:
         "min_loaded_available_bytes": None, "peak_ci_jobs": 0, "jetsam_exits": 0, "omlx_runs": None,
         "omlx_jetsam_priority": None, "low_memory_open": False, "pending": [],
         **FSEVENTSD_DEFAULTS, **FLOOR_DEFAULTS, "floor_log": [], **copy.deepcopy(CENSUS_DEFAULTS),
+        **omlx_memory_events.EVENT_DEFAULTS,
     }
 
 
@@ -350,7 +359,7 @@ def _fold_owners(state: dict, owners, at: str) -> None:
     state["peak_owners"] = sorted(kept.values(), key=lambda owner: (-owner["bytes"], owner["pid"]))[:TOP_OWNERS]
 
 
-def _sample_line(reading: dict, now: datetime, census: dict | None) -> dict:
+def _sample_line(reading: dict, now: datetime, census: dict | None, events: list) -> dict:
     keys = ("sys_footprint_bytes", "process_footprint_bytes", "unowned_bytes", "top_owners")
     found = census or {}
     return {
@@ -359,7 +368,7 @@ def _sample_line(reading: dict, now: datetime, census: dict | None) -> dict:
         "wired_bytes": reading["wired_bytes"], "anonymous_bytes": reading["anonymous_bytes"],
         "compressions_bytes": reading["compressions_bytes"],
         **{key: found.get(key) for key in keys},
-        "census_at": found.get("at"), "census_seconds": found.get("seconds"),
+        "census_at": found.get("at"), "census_seconds": found.get("seconds"), "events": events,
     }
 
 
@@ -420,7 +429,7 @@ def _fold_fseventsd(state: dict, found: dict | None, host: str) -> None:
         state["fseventsd_failed_open"] = False
 
 
-def _fold_floor(state: dict, found: dict | None, reading: dict) -> None:
+def _fold_floor(state: dict, found: dict | None, reading: dict, events: list) -> None:
     found = found or {}
     host = reading["host"]
     kills = _int(found.get("kills"))
@@ -434,6 +443,11 @@ def _fold_floor(state: dict, found: dict | None, reading: dict) -> None:
                 why = (f"over the {found['run_bound_bytes'] // GIB} GiB run bound" if bound
                        else f"under the {found['floor_bytes'] // GIB} GiB floor")
                 state["floor_log"].append(kill_line(entry))
+                events.append({
+                    "kind": "floor_kill", "at": entry["at"], "reason": entry["reason"], "owner": entry["owner"],
+                    "root_pid": entry["root_pid"], "signals": entry["signals"],
+                    "tree_gib": round(entry["tree_bytes"] / GIB, 1),
+                })
                 state["pending"].append({
                     "kind": "memory_kill", "logged": False,
                     "text": f"{host}: the memory floor ended {entry['owner']}'s workload "
@@ -503,7 +517,8 @@ def decide(state, reading: dict, now: datetime, floor_bytes: int, others_budget_
     if state is None:
         state = fresh_day(day, day)
     else:
-        state = {**FSEVENTSD_DEFAULTS, **FLOOR_DEFAULTS, **copy.deepcopy(CENSUS_DEFAULTS), **state,
+        state = {**FSEVENTSD_DEFAULTS, **FLOOR_DEFAULTS, **copy.deepcopy(CENSUS_DEFAULTS),
+                 **omlx_memory_events.EVENT_DEFAULTS, **state,
                  "pending": [dict(entry) for entry in state["pending"]]}
         state["floor_log"] = list(state["floor_log"])
         if state["day"] != day:
@@ -512,7 +527,7 @@ def decide(state, reading: dict, now: datetime, floor_bytes: int, others_budget_
             for key in ("omlx_runs", "omlx_jetsam_priority", "low_memory_open", "pending",
                         "fseventsd_restarts_seen", "fseventsd_held_open", "fseventsd_failed_open",
                         "floor_kills_seen", "floor_unmet_seen", "priority_unset_open", "floor_log",
-                        "records_since", "unowned_open"):
+                        "records_since", "unowned_open", *omlx_memory_events.EVENT_DEFAULTS):
                 carried[key] = state[key]
             state = carried
     if state["records_since"] is None:
@@ -564,9 +579,10 @@ def decide(state, reading: dict, now: datetime, floor_bytes: int, others_budget_
     else:
         state["low_memory_open"] = False
     _fold_fseventsd(state, reading["fseventsd"], reading["host"])
-    _fold_floor(state, reading["floor"], reading)
+    events = omlx_memory_events.fold_events(state, reading["observed"])
+    _fold_floor(state, reading["floor"], reading, events)
     _fold_unowned(state, census, reading, unowned_alert_bytes)
-    return state, line, _sample_line(reading, now, census)
+    return state, line, _sample_line(reading, now, census, events)
 
 
 def read_health(url: str) -> bool:
@@ -733,23 +749,60 @@ def _run(name: str, argv: list[str]) -> str:
     return done.stdout
 
 
-def take_reading(args) -> dict:
+def _read_pid_file(path: Path) -> str | None:
+    """The first bytes of Colima's pid file, None when it is absent; `OSError` or `UnicodeDecodeError` when unreadable."""
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return None
+    try:
+        return os.read(descriptor, PID_FILE_BYTES).decode()
+    finally:
+        os.close(descriptor)
+
+
+def _observe(args, processes: dict[int, str], seen) -> dict:
+    """What the sources of `omlx_memory_events` show now; None (or `UNREAD`) for one that could not be read."""
+    try:
+        ram_disks = omlx_memory_events.parse_ram_disks(_run("hdiutil", [args.hdiutil, "info", "-plist"]))
+    except (ReadingError, ValueError):
+        ram_disks = None
+    pid_file = args.colima_pid_file or Path.home() / COLIMA_PID_FILE
+    try:
+        vm_pid = omlx_memory_events.colima_vm_pid(_read_pid_file(pid_file), processes)
+    except (OSError, UnicodeDecodeError):
+        vm_pid = omlx_memory_events.UNREAD
+    identity, offset = (seen["identity"], seen["offset"]) if seen else (None, 0)
+    path = args.slot_history or verify_history.history_path(verify_slot.slot_dir())
+    try:
+        records, found, consumed = verify_history.read_from(path, identity, offset)
+        history = {"records": records, "identity": found, "offset": consumed}
+    except (OSError, ValueError):
+        history = None
+    return {
+        "ci_pids": omlx_memory_events.ci_pids(processes), "ram_disks": ram_disks, "vm_pid": vm_pid,
+        "verify_live": omlx_memory_events.verify_runs_live(processes), "history": history,
+    }
+
+
+def take_reading(args, previous: dict | None = None) -> dict:
     try:
         vm = parse_vm_stat(_run("vm_stat", [args.vm_stat]))
         total = int(_run("sysctl", [args.sysctl, "-n", "hw.memsize"]).strip())
         service = parse_launchctl(_run("launchctl", [args.launchctl, "print", f"system/{args.label}"]))
     except ValueError as error:
         raise ReadingError(f"output not parseable ({error})") from None
-    listing = _run("ps", [args.ps, "-axo", "comm="])
+    listing = _run("ps", [args.ps, "-axwwo", "pid=,args="])
     if not listing.strip():
         raise ReadingError("ps printed nothing")
+    processes = omlx_memory_events.parse_listing(listing)
     used = used_bytes(vm)
     page = vm["page_size"]
     compressions = vm["compressions"]
     floor = read_fseventsd_record(args.floor_record)
     return {
         "host": args.host, "used_bytes": used, "available_bytes": total - used,
-        "loaded": read_health(args.health_url), "ci_jobs": count_ci_jobs(listing),
+        "loaded": read_health(args.health_url), "ci_jobs": len(omlx_memory_events.ci_pids(processes)),
         "omlx_bytes": read_footprint(args.footprint, service["pid"]),
         "runs": service["runs"], "last_exit_reason": service["last_exit_reason"],
         "jetsam_priority": kernel_priority(service, floor),
@@ -758,6 +811,7 @@ def take_reading(args) -> dict:
         "wired_bytes": vm["wired"] * page, "anonymous_bytes": vm["anonymous"] * page,
         "compressions_bytes": None if compressions is None else compressions * page,
         "census": read_fseventsd_record(args.census_record),
+        "observed": _observe(args, processes, (previous or {}).get("history_seen")),
     }
 
 
@@ -833,7 +887,7 @@ def sample(args) -> int:
     directory = args.state_dir
     try:
         previous = read_state(directory / STATE_NAME)
-        reading = take_reading(args)
+        reading = take_reading(args, previous)
     except ReadingError as error:
         print(f"{PROG}: {error}", file=sys.stderr)
         return 1
@@ -864,6 +918,9 @@ def build_parser() -> argparse.ArgumentParser:
     one.add_argument("--launchctl", default="/bin/launchctl")
     one.add_argument("--ps", default="/bin/ps")
     one.add_argument("--footprint", default="/usr/bin/footprint")
+    one.add_argument("--hdiutil", default="/usr/bin/hdiutil")
+    one.add_argument("--slot-history", type=Path, default=None)
+    one.add_argument("--colima-pid-file", type=Path, default=None)
     one.add_argument("--alert-settings", type=Path, default=None)
     one.add_argument("--alert-log", type=Path, default=None)
     one.add_argument("--telegram-api", default=None)

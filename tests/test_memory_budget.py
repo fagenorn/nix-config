@@ -289,6 +289,14 @@ class GuideTest(unittest.TestCase):
             with self.subTest(needle=needle):
                 self.assertIn(needle, self.section)
 
+    def test_the_guide_names_the_recorded_events(self):
+        for needle in (
+            "ram_disk_attached", "vm_started", "floor_kill", "verify_run", "verify_started", "ci_job_started",
+            "hdiutil info", "vz.pid", "between two samples",
+        ):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, self.section)
+
     def test_the_guide_names_the_alert_settings_file(self):
         self.assertTrue(self.alerts, "the guide has no `### Alerts` subsection")
         for needle in (

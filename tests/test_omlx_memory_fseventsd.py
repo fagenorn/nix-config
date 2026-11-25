@@ -8,6 +8,7 @@ Run: just agent-workflow-tests
 
 import json
 import os
+import plistlib
 import stat
 import subprocess
 import sys
@@ -194,7 +195,9 @@ class SampleTest(FakeHost):
         self.fake("sysctl", f"echo {TOTAL}\n")
         (self.d / "launchctl.txt").write_text("system/org.nixos.omlx = {\n\truns = 7\n\tpid = 73552\n}\n")
         self.fake("launchctl", f'cat "{self.d}/launchctl.txt"\n')
-        self.fake("ps", "echo /sbin/launchd\n")
+        self.fake("ps", "echo 1 /sbin/launchd\n")
+        (self.d / "hdiutil.plist").write_text(plistlib.dumps({"images": []}).decode())
+        self.fake("hdiutil", f'cat "{self.d}/hdiutil.plist"\n')
         self.fake("footprint", "exit 66\n")
         self.state_dir = self.d / "state"
         self.state_file = self.state_dir / "memory-watch.json"
@@ -222,6 +225,8 @@ class SampleTest(FakeHost):
             "--alert-settings", str(self.settings), "--alert-log", str(self.d / "alerts.log"),
             "--telegram-api", self.bot.api, "--fseventsd-record", str(self.record_file),
             "--census-record", str(self.d / "census.json"), "--floor-record", str(self.d / "floor.json"),
+            "--hdiutil", str(self.d / "hdiutil"), "--slot-history", str(self.d / "history.jsonl"),
+            "--colima-pid-file", str(self.d / "vz.pid"),
             "--now", now])
 
     def read_state(self):

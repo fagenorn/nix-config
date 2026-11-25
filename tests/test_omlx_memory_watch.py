@@ -9,6 +9,7 @@ Run: just agent-workflow-tests
 import http.server
 import json
 import os
+import plistlib
 import socketserver
 import stat
 import subprocess
@@ -18,7 +19,7 @@ import threading
 import unittest
 from pathlib import Path
 
-from agent_tools.hosts import omlx_memory_watch
+from agent_tools.hosts import omlx_memory_events, omlx_memory_watch
 from agent_tools.hosts.omlx_memory_watch import kill_line
 from tests.test_host_alerts import PROXY_VARIABLES, SETTINGS, Bot
 
@@ -40,8 +41,10 @@ Pages occupied by compressor:              105539.
 """
 VM_STAT_LOW = VM_STAT.replace("12906856.", "15400000.")
 HEALTH_LOADED = {"status": "healthy", "engine_pool": {"loaded_count": 1, "current_model_memory": 195219083423}}
-PS_IDLE = "/sbin/launchd\n(Runner.Listener)\n(bash)\n"
-PS_BUSY = PS_IDLE + "(Runner.Worker)\n/Users/runner/actions-runner/bin/Runner.Worker\n"
+PS_IDLE = "1 /sbin/launchd\n487 (Runner.Listener)\n390 (bash)\n"
+PS_BUSY = PS_IDLE + (
+    "9001 (Runner.Worker)\n9002 /Users/runner/actions-runner/bin/Runner.Worker spawnclient 103 106\n")
+EMPTY_PLIST = plistlib.dumps({"images": []}).decode()
 FOOTPRINT = """======================================================================
 Python [73552]: 64-bit    Footprint: 187360249992 B (16384 bytes per page)
 ======================================================================
@@ -109,6 +112,8 @@ class WatchCase(unittest.TestCase):
         self.launchctl(launchctl(7, "(none)"))
         self.ps(PS_IDLE)
         self.fake("sysctl", f"echo {TOTAL}\n")
+        (self.d / "hdiutil.plist").write_text(EMPTY_PLIST)
+        self.fake("hdiutil", f'if [ -e "{self.d}/hdiutil.fail" ]; then exit 1; fi\ncat "{self.d}/hdiutil.plist"\n')
         self.footprint_text = self.d / "footprint.out"
         self.footprint_text.write_text(FOOTPRINT)
         self.fake("footprint", self.logging_script("footprint.log") +
@@ -165,6 +170,8 @@ class WatchCase(unittest.TestCase):
             "--alert-settings", str(self.settings), "--alert-log", str(self.alert_log),
             "--telegram-api", self.bot.api, "--floor-record", str(self.d / "floor.json"),
             "--census-record", str(self.d / "census.json"), "--fseventsd-record", str(self.d / "fseventsd.json"),
+            "--hdiutil", str(self.d / "hdiutil"), "--slot-history", str(self.d / "history.jsonl"),
+            "--colima-pid-file", str(self.d / "vz.pid"),
             "--now", now, *extra,
         ]
         return subprocess.run(argv, capture_output=True, text=True, env=env or self.env, timeout=60)
@@ -282,14 +289,14 @@ class SampleTest(WatchCase):
         self.assertFalse((self.state_dir / "samples").exists())
 
     def test_the_day_keeps_the_most_ci_jobs_seen(self):
-        self.assertEqual(omlx_memory_watch.count_ci_jobs(PS_BUSY), 2)
-        self.assertEqual(omlx_memory_watch.count_ci_jobs(PS_IDLE), 0)
+        self.assertEqual(omlx_memory_events.ci_pids(omlx_memory_events.parse_listing(PS_BUSY)), [9001, 9002])
+        self.assertEqual(omlx_memory_events.ci_pids(omlx_memory_events.parse_listing(PS_IDLE)), [])
         self.ps(PS_BUSY)
         self.sample()
         self.ps(PS_IDLE)
         self.sample()
         self.assertEqual(self.read_state()["peak_ci_jobs"], 2)
-        self.assertEqual(self.log_json("ps.log"), [["-axo", "comm="], ["-axo", "comm="]])
+        self.assertEqual(self.log_json("ps.log"), [["-axwwo", "pid=,args="], ["-axwwo", "pid=,args="]])
 
     def test_the_health_read_ignores_proxy_variables(self):
         body = json.dumps(HEALTH_LOADED).encode()

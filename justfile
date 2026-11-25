@@ -222,6 +222,7 @@ agent-workflow-tests *args:
     tests/test_omlx_memory_day.py \
     tests/test_omlx_memory_census.py \
     tests/test_omlx_memory_records.py \
+    tests/test_omlx_memory_events.py \
     tests/test_memory_floor.py \
     tests/test_memory_floor_priority.py \
     tests/test_memory_floor_gate.py \
