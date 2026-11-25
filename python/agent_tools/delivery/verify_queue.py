@@ -18,8 +18,10 @@ Reservation. A waiter that is about to run its command's retry gives its place b
 the ticket keeps its number and carries `reserved_until`, unlocked. A reserved ticket is never a
 waiter. The same request (`request_key`: working directory and argv) takes it back with `join`
 while `reserved_until` has not passed, or later while some other waiter with a higher number still
-waits (a waiter polling its own ticket is not another waiter, so an expired reservation goes at the
-first poll of a waiter that joined after it); any other request numbers a new ticket one past every ticket name present.
+waits; any other request numbers a new ticket one past every ticket name present. `join` removes
+every expired reservation that no locked ticket with a higher number guards before it numbers the new
+ticket, so a request that joins after a reservation expired never keeps it alive, while a waiter that
+joined before it expired does.
 
 Admission. Waiters are served live first, then by ticket number (`service_order`). `admitted` walks
 that order: a waiter whose repository already has `repository_limit` holders is skipped and takes no
@@ -303,13 +305,16 @@ def join(directory: Path, key: str, live: bool, repository: str | None, now: flo
     taken: tuple[int, Path, int] | None = None
     try:
         for seq, path, descriptor, other in probed:
-            if other or taken is not None:
+            if other:
                 continue
             record = _parse(descriptor)
             until = None if record is None else record["reserved_until"]
-            if record is None or record["key"] != key or until is None:
+            if record is None or until is None:
                 continue
-            if until > now or any(number > seq for number in locked):
+            if until <= now and not any(number > seq for number in locked):
+                _unlink(path)  # expired, and no waiter stands behind it: this newcomer joined after it
+                continue
+            if taken is None and record["key"] == key:
                 taken = (seq, path, descriptor)
         if taken is None:
             seq = highest + 1
@@ -349,9 +354,7 @@ def waiters(directory: Path, own: Ticket, now: float) -> list[Waiter]:
         _close_probed(probed)
         raise
     listed = [Waiter(own.seq, own.live, own.repository, own.key)]
-    # The poller's own ticket is no waiter behind a reservation: a reservation that expired before
-    # the poller joined must not outlive its window because of the poller that finds it.
-    locked = [seq for seq, _path, _descriptor, other in probed if other]
+    locked = [own.seq] + [seq for seq, _path, _descriptor, other in probed if other]
     try:
         for seq, path, descriptor, other in probed:
             record = _parse(descriptor)

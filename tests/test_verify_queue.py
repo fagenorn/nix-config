@@ -170,12 +170,21 @@ class TicketTest(unittest.TestCase):
     def test_a_reservation_outlives_its_window_while_a_later_waiter_waits(self):
         t1 = self.join("k", now=1000)
         t2 = self.join()
-        self.join()
         reserve(t1, 1000)
         late = 1000 + RESUME_SECONDS + 100
         waiters(self.dir, t2, late)
         self.assertTrue(t1.path.exists())
         self.assertEqual(self.join("k", now=late).seq, 1)
+
+    def test_a_waiter_that_joined_before_the_window_ended_keeps_the_reservation_past_it_at_every_poll(self):
+        a, b = self.join("k", now=1000), self.join("b", now=1000)
+        reserve(a, 1000)
+        for polled in (1000 + RESUME_SECONDS + 60, 1000 + RESUME_SECONDS + 3600):
+            self.assertEqual([w.seq for w in waiters(self.dir, b, polled)], [2])
+            self.assertTrue(a.path.exists())
+        again = self.join("k", now=1000 + RESUME_SECONDS + 3600 + 5)
+        self.assertEqual(again.seq, 1)
+        self.assertEqual(again.path, a.path)
 
     def test_a_reservation_expires_after_its_window_once_no_later_waiter_waits(self):
         t1 = self.join("k", now=1000)
@@ -195,8 +204,8 @@ class TicketTest(unittest.TestCase):
         late = 1000 + RESUME_SECONDS + 3600
         x = self.join("x", now=late)
         self.assertEqual(x.seq, 2)
-        waiters(self.dir, x, late)
         self.assertFalse(t1.path.exists())
+        waiters(self.dir, x, late)
         again = self.join("k", now=late + 60)
         self.assertEqual(again.seq, 3)
         self.assertEqual([w.seq for w in waiters(self.dir, again, late + 60)], [2, 3])
