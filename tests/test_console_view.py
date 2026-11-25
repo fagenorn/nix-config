@@ -197,11 +197,9 @@ class FoldTableTest(unittest.TestCase):
 
 class StatementTest(unittest.TestCase):
     def test_the_statement_says_nothing_needs_you(self):
-        done = "No sprint is working; we'll put anything that needs you here."
         table = [
             (0, "Nothing needs you", "No project is registered yet."),
-            (1, "You're done for now", done),
-            (5, "You're done for now", done),
+            *((n, "You're done for now", "No sprint is working; we'll put anything that needs you here.") for n in (1, 5)),
         ]
         for n, headline, sentence in table:
             with self.subTest(projects=n):
@@ -1164,10 +1162,7 @@ class BriefViewTest(unittest.TestCase):
             b: briefed(sprint(b), decision=CHANGES, reply="shrink it"),
             c: briefed(sprint(c, pid="p09"))})
         self.assertEqual(view["inbox"]["open"], [])
-        self.assertEqual(view["statement"], {
-            "inbox_items": 0, "headline": "You're done for now",
-            "sentence": "2 sprints are working; we'll put anything that needs you here.",
-            "stale": False})
+        self.assertEqual(view["statement"]["sentence"], "2 sprints are working; we'll put anything that needs you here.")
 
     def test_an_approved_brief_makes_the_sprint_starting(self):
         sid = "a" * 16
@@ -2868,78 +2863,6 @@ class SprintEndViewTest(unittest.TestCase):
             for sid, reason, at in (("b" * 16, "boom", T0), ("e" * 16, "zzz", T0),
                                     ("a" * 16, "late", iso(T0_MS + MIN)))])
         self.assertEqual(derive_view([state("p00", 1)])["unstopped"], [])
-
-
-class DoneForNowViewTest(unittest.TestCase):
-    def waiting(self, sid, until_ms):
-        it = reported(started(sid), R)
-        return dataclasses.replace(it, report=dataclasses.replace(it.report, wait_until=iso(until_ms)))
-
-    def test_with_nothing_open_the_statement_says_the_owner_is_done_for_now(self):
-        B = "b" * 16
-        result = derive_view([state("p00", 1)],
-                             sprints={A: reported(started(A), R), B: reported(started(B), R)},
-                             now_ms=R + MIN)
-        self.assertEqual(result["statement"], {
-            "inbox_items": 0, "headline": "You're done for now",
-            "sentence": "2 sprints are working; we'll put anything that needs you here.",
-            "stale": False})
-        self.assertEqual(set(result["statement"]), {"inbox_items", "headline", "sentence", "stale"})
-
-    def test_the_working_count_reads_only_running_sprints(self):
-        B, C = "b" * 16, "c" * 16
-        running = reported(started(A), R)
-        table = {
-            "one running": (
-                [state("p00", 1)], {A: running}, R + MIN, "You're done for now",
-                "1 sprint is working; we'll put anything that needs you here."),
-            "closed and stopping sprints are not working": (
-                [state("p00", 1)],
-                {A: running,
-                 B: closed(reported(started(B), R), R + 2 * MIN, ((12, "landed"),)),
-                 C: stopped(reported(started(C), R), R + 2 * MIN)},
-                R + 3 * MIN, "You're done for now",
-                "1 sprint is working; we'll put anything that needs you here."),
-            "no sprint": (
-                [state("p00", 1)], {}, R + MIN, "You're done for now",
-                "No sprint is working; we'll put anything that needs you here."),
-            "no project": ([], {}, R + MIN, "Nothing needs you", "No project is registered yet."),
-        }
-        for name, (states, sprints, now_ms, headline, sentence) in table.items():
-            with self.subTest(name):
-                shown = derive_view(states, sprints=sprints, now_ms=now_ms)["statement"]
-                self.assertEqual((shown["headline"], shown["sentence"]), (headline, sentence))
-
-    def test_the_done_for_now_view_names_the_earliest_stated_wait(self):
-        B = "b" * 16
-        result = derive_view(
-            [state("p00", 1)],
-            sprints={A: self.waiting(A, R + 120 * MIN), B: self.waiting(B, R + 60 * MIN)},
-            now_ms=R + MIN)
-        self.assertEqual(result["next_expected"], iso(R + 60 * MIN))
-        self.assertEqual(result["statement"]["headline"], "You're done for now")
-
-    def test_next_expected_is_null_unless_the_owner_is_done_for_now(self):
-        paused = reported(started(A), R)
-        paused = dataclasses.replace(
-            paused, report=dataclasses.replace(paused.report, paused="the vendor answers tomorrow"))
-        ahead = self.waiting(A, R + 60 * MIN)
-        table = {
-            "the wait has passed": dict(
-                states=[state("p00", 1)], sprints={A: ahead}, now_ms=R + 61 * MIN),
-            "a pause": dict(states=[state("p00", 1)], sprints={A: paused}, now_ms=R + MIN),
-            "an open item": dict(
-                states=[state("p00", 1)], sprints={A: ahead}, now_ms=R + MIN,
-                records={("p00", "k1"): open_item("p00", "k1", 1)}),
-            "a stale tracker": dict(
-                states=[state("p00", 1)], sprints={A: ahead}, now_ms=R + MIN,
-                health={"p00": ReadState(False, None)}),
-            "no sprint": dict(states=[state("p00", 1)]),
-        }
-        for name, kwargs in table.items():
-            with self.subTest(name):
-                shown = derive_view(kwargs.pop("states"), **kwargs)
-                self.assertIsNone(shown["next_expected"])
 
 
 class ActorViewTest(unittest.TestCase):

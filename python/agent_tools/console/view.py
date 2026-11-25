@@ -46,8 +46,7 @@ than `FOLD_AFTER` quiet projects are replaced by one `quiet_group` entry.
 Wire format, one object:
 
     {"statement": {"inbox_items": <open items>, "headline": "<headline>",
-                   "sentence": "<sentence>", "stale": <bool>},
-     "next_expected": "<ISO time>" | null,
+                   "sentence": "<sentence>", "stale": <bool>}, "next_expected": "<ISO time>" | null,
      "new_replies": [{"project_id", "sprint_id", "title", "message_id", "reply_at"}, ...],
      "new_replies_text": "<text>" | null,
      "capacity": {"tight": <bool>, "all_out": <bool>, "resumes_at": <ISO time> | null,
@@ -117,9 +116,8 @@ and its `DEAF_SENTENCE` are all that name it, #1247; and each open permission ca
 once. A manager's waiting state alone (a session waiting for an answer or a permission) counts
 nothing, #1424: only an open permission card does), else
 `ALL_OUT_HEADLINE` when every profile is out of usage, else `STALE_HEADLINE` when a registered
-project's tracker cannot be read, else `DONE_HEADLINE` ("You're done for now") when a project is
-registered, else "Nothing needs you". The sentence is `ALL_OUT_SENTENCE`
-when every profile is out of usage, else `STALE_SENTENCE` naming those projects when any is
+project's tracker cannot be read, else `done_for_now.HEADLINE` when a project is registered, else "Nothing needs you".
+The sentence is `ALL_OUT_SENTENCE` when every profile is out of usage, else `STALE_SENTENCE` naming those projects when any is
 stale, else `BRIEF_SENTENCE` when any brief is open, else `MANAGER_SENTENCE` when a sprint is
 stalled, else `FAILED_START_SENTENCE` when a manager failed to start, else `PROGRESS_SENTENCE`
 when a manager stopped making progress, else `SIGNIN_SENTENCE`
@@ -136,14 +134,8 @@ can answer it), else
 `REGISTER_STEP_SENTENCE` when only plan questions with no offered answer are open, else
 `NEEDS_SENTENCE` when something is open, else, with no project registered, `ADOPTING_SENTENCE` ("An adoption is
 under way; nothing is waiting on you.") when the view's `registration` (below) is running or holds
-an adoption, else `DONE_SENTENCE` naming how many sprints are working ("No sprint is working",
-"1 sprint is working" or "<n> sprints are working"; a sprint is working when its `stoppable` is true,
-counted over every project's `sprints` before the quiet fold, so a finished sprint never counts). The
-all-out promotion never changes `inbox_items`, and the statement keeps exactly its four keys.
-`next_expected` is the `now_until` with the earliest time among the sprints whose `now_text` is
-`NOW_WAIT_TEXT` (a wait the sprint's report stated), copied as given; the engine's `later_until` is
-never read. It is null whenever the headline is not `DONE_HEADLINE` and when no sprint states a wait,
-and it is a member of the view, not of the statement.
+an adoption, else `done_for_now.sentence` (how many sprints are working). The
+all-out promotion never changes `inbox_items`, and the statement keeps exactly its four keys; `next_expected` is `done_for_now.next_expected`.
 `capacity` is the `capacity_view` the caller passes (`capacity.py` defines its members), else the
 empty capacity, the same bytes as `capacity_view` over no profile. `stale` is true
 when any registered project's last read failed. An inbox item is every stored member
@@ -823,7 +815,7 @@ from pathlib import PurePosixPath
 from types import MappingProxyType
 
 from agent_tools.console import (
-    card_entries, contract_draft, engine_runs as engine_runs_module, inbox, project_question,
+    card_entries, contract_draft, done_for_now, engine_runs as engine_runs_module, inbox, project_question,
     question_records, spend as spend_module)
 from agent_tools.console.activation import Activation
 from agent_tools.console.activation_run import LastRun
@@ -987,11 +979,6 @@ FOLD_AFTER = 3
 NEW_REPLY_TEXT = "New reply from the manager of {title}"
 NEW_REPLIES_TEXT = "{n} new replies from managers"
 HEADLINE = "Nothing needs you"
-DONE_HEADLINE = "You're done for now"
-DONE_SENTENCE = "{working}; we'll put anything that needs you here."
-DONE_NONE_TEXT = "No sprint is working"
-DONE_ONE_TEXT = "1 sprint is working"
-DONE_MANY_TEXT = "{n} sprints are working"
 OUTSIDE_LABEL = "Outside sprints"
 CLOSING_OUTCOME_TEXT = {LANDED: "landed", HELD: "held for verification", DROPPED: "dropped"}
 FINISHED_LABEL = "Finished sprints"
@@ -2193,11 +2180,7 @@ def _notice_entries(group: Iterable[SprintState], titles: Mapping[str, str],
 
 
 def _sentence(count: int, adopting: bool = False, working: int = 0) -> str:
-    if count == 0:
-        return ADOPTING_SENTENCE if adopting else "No project is registered yet."
-    text = (DONE_NONE_TEXT if working == 0 else DONE_ONE_TEXT if working == 1
-            else DONE_MANY_TEXT.format(n=working))
-    return DONE_SENTENCE.format(working=text)
+    return done_for_now.sentence(working) if count else ADOPTING_SENTENCE if adopting else "No project is registered yet."
 
 
 def item_headline(item: Mapping) -> tuple[str, int]:
@@ -2363,9 +2346,7 @@ def _headline(open_count: int, stale: bool, all_out: bool, registered: int) -> s
         return f"{open_count} things need you"
     if all_out:
         return ALL_OUT_HEADLINE
-    if stale:
-        return STALE_HEADLINE
-    return DONE_HEADLINE if registered > 0 else HEADLINE
+    return STALE_HEADLINE if stale else done_for_now.HEADLINE if registered else HEADLINE
 
 
 def derive_view(
@@ -2527,15 +2508,8 @@ def derive_view(
                   + len(releases) + len(prompts) + len(asked) + len(retries) + len(registering) + len(applies) + len(confirms)
                   + len(failures) + len(trusts) + len(open_items) + len(deaf) + len(stopped_runs))
     all_out = bool(capacity["all_out"])
-    shown_sprints = [sprint for project in (*entries, *quiet_entries) for sprint in project["sprints"]]
-    working = sum(1 for sprint in shown_sprints if sprint["stoppable"] is True)
     headline = _headline(open_count, bool(stale_projects), all_out, len(states))
-    next_expected = None
-    if headline == DONE_HEADLINE:
-        next_expected = min(
-            (sprint["now_until"] for sprint in shown_sprints
-             if sprint["now_text"] == NOW_WAIT_TEXT and isinstance(sprint["now_until"], str)),
-            key=_millis, default=None)
+    next_expected = done_for_now.next_expected(entries + quiet_entries, headline)
     if all_out:
         sentence = ALL_OUT_SENTENCE
     elif stale_projects:
@@ -2573,7 +2547,7 @@ def derive_view(
     elif open_count:
         sentence = NEEDS_SENTENCE
     else:
-        sentence = _sentence(len(states), adopting, working)
+        sentence = _sentence(len(states), adopting, done_for_now.working(entries + quiet_entries))
     new_replies = sorted(
         ({"project_id": project["project_id"], "sprint_id": sprint["sprint_id"],
           "title": sprint["title"], "message_id": message["id"], "reply_at": message["reply_at"]}
