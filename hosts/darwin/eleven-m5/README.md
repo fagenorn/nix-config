@@ -46,7 +46,7 @@ root. A pending reload with a model loaded waits for an idle server, and
 
 oMLX is the only held daemon. Every other daemon still reloads when its plist
 changes: `omlx-models`, `iogpu-wired-limit` (which re-runs the sysctl),
-`colima` and `docker-socket`, the GitHub runners, `fseventsd-trim`, `memory-floor`, and the owner's
+`colima` and `docker-socket`, the GitHub runners, `fseventsd-trim`, `memory-floor`, `memory-census`, and the owner's
 `agent-console`, `verify-pending`, `claude-cache-proxy`, `omlx-memory-watch` and
 `sops-nix` daemons. The serve script carries the relaunch gate, so a changed
 `floorGiB` or `fastSampleSeconds` becomes a pending oMLX reload at the next
@@ -117,6 +117,7 @@ owner's capacity number: whether it holds is a question for the lead.
 | `othersBudgetGiB` | 52 | What the model and the floor leave for the rows above. | Computed: `totalGiB` - `omlxCeilingGiB` - `omlxOverCeilingGiB` - `floorGiB`. |
 | `omlxJetsamPriority` | 190 | oMLX's jetsam priority; the kernel ends the lowest band first. 180 is its default band (`JETSAM_PRIORITY_DEFAULT`), where unmanaged processes such as the agents' test workers run. `memory-floor` raises the running pid to 190 and never lowers a higher value. | The xnu `kern_memorystatus.h` and `kern_memorystatus.c` sources linked in "The memory floor", and the 24 Nov `jetsam_priority ... from=180` line of `/var/log/memory-floor.log`. |
 | `fseventsdRestartMinutes` | 60 | The shortest time between two `fseventsd-trim` restarts. | See "What makes fseventsd grow". |
+| `unownedAlertGiB` | 5 | Unowned memory over which the watcher sends `unowned_memory`, once per episode. | The lead's 25 Nov reading: 35 GiB unowned before an oMLX restart, about 0 after. |
 
 `verifyRunGiB`, `ciJobGiB` and `macosGiB` are provisional: nobody has measured
 them. The day line shows whether they hold.
@@ -177,6 +178,17 @@ is one line of `~/.omlx/memory/memory-peaks.jsonl`: `peak_others_gib` against
 kernel held oMLX at or above the declared priority.
 `~/.omlx/memory/memory-watch.json` holds today's
 values so far.
+
+Each sample also appends one line to `~/.omlx/memory/samples/<day>.jsonl`: the
+used, available, wired, anonymous and compressed bytes, and, from a census no
+older than 150 s, the system and process footprints, the unowned bytes and the
+top owners. The files of the last 14 days are kept. The day's line in
+`memory-peaks.jsonl` gains a `peak_<figure>_gib` and a `peak_<figure>_at` for
+`sys_footprint`, `process_footprint`, `unowned`, `wired`, `anonymous` and
+`compressions` (for example `peak_unowned_gib` and `peak_unowned_at`), the
+`peak_owners` of the day, `census_samples` (how many samples had a census) and
+`records_since`, the day the records began, so an earlier line without them is
+not a day with no peak.
 
 ### When you add a workload
 
@@ -274,6 +286,32 @@ sampler puts the record's value in `omlx_jetsam_priority`, so the day line shows
 whether the kernel kept it, and queues `jetsam_priority_unset` when the call
 failed or the resets are above zero.
 
+### Unowned memory
+
+The `memory-census` daemon runs as root every minute and runs `footprint -a --sysFootprint
+--noCategories` (only root can read every process's footprint). It replaces
+`/var/db/memory-watch/census.json` (directory `0755`, file `0644`) and logs to
+`/var/log/memory-census.log`.
+
+Unowned memory is the `sys_footprint` of that report minus footprint's own `total footprint`, and may
+be negative. The watcher never adds up the processes' footprints itself, because that double-counts
+shared memory such as Postgres shared buffers. Each record carries `census_seconds`, the time
+`footprint -a` took. A report with a non-empty `errors` list is an incomplete census: it records an
+`error` and no figure, and so does a timeout, a failed run or output that is not parseable.
+
+Each sample line also ends with `events`, what changed since the previous sample. `ram_disk_attached` and
+`ram_disk_detached` come from `hdiutil info -plist` (the `ram://` images, named by their whole disk and
+size, so a disk replaced at the same device by one of another size is a detach and an attach).
+`vm_started` and `vm_stopped` come from the pid in Colima's own `~/.colima/_lima/colima/vz.pid`, counted while
+that pid is a live process: other Virtualization processes are not Colima's. `ci_job_started` and
+`ci_job_ended` come from the `Runner.Worker` pids of `ps -axwwo pid=,args=`, and `floor_kill` from the new
+entries of the floor record. `verify_started` and `verify_ended` come from the live `verify-slot run`
+local processes of that listing (not a remote run through `ssh`), and `verify_run` (when the slot was
+held, from `held_from` to `held_until`) from
+the lines the verify-slot history gains. The first sample of a source records a baseline and no event, and a
+source that could not be read changes nothing. A CI job or a RAM disk that starts and ends between two samples
+is not recorded, because those are read as a snapshot each minute.
+
 ### Alerts
 
 Alerts go to the owner's Telegram bot. The owner sets it up on the console page,
@@ -286,7 +324,7 @@ the error is logged in `~/.omlx/logs/memory-watch.log`, and the watcher exits 3
 on every sample until the alert is sent. With `enabled` false, alerts are
 recorded in the alerts log only.
 
-There are eight kinds:
+There are nine kinds:
 
 - `jetsam`: the kernel's memory killer ended oMLX.
 - `low_memory`: available memory fell under `floorGiB` while a model was loaded
@@ -301,6 +339,7 @@ There are eight kinds:
   workload it may end that would bring it over (once per episode).
 - `jetsam_priority_unset`: `memory-floor` could not set oMLX's kernel jetsam
   priority, or the value did not hold after a set (once per episode).
+- `unowned_memory`: unowned memory passed `unownedAlertGiB` (once per episode).
 
 ### What makes fseventsd grow
 
