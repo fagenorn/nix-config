@@ -8,7 +8,176 @@ FAKE_<STAGE>_JSON overrides the payload. Mode `http_error` replays a failed `gh 
 it: exit 1, the response body on stdout (FAKE_<STAGE>_JSON, else GitHub's plan-gated protection answer)
 and `gh: <message> (HTTP <status>)` on stderr, or `gh: HTTP 403` when the body holds no string message
 and status. It lives beside the suite to keep both files under the size budget (rule B17).
+
+The rerun check reads four more endpoints, one stage each: `run` (an Actions run), `jobs` (its jobs),
+`pull` (a pull request) and `required` (a branch's required status checks), answered from FAKE_RUN_JSON,
+FAKE_JOBS_JSON, FAKE_PULL_JSON and FAKE_REQUIRED_JSON, with FAKE_RUN_MODE, FAKE_JOBS_MODE,
+FAKE_PULL_MODE and FAKE_REQUIRED_MODE injecting failures. `run_facts`, `jobs_facts`, `pull_facts` and
+`required_facts` build those payloads; each defaults to a pull request check run that passes.
+`check_run_forge`, `check_run_accepts`, `check_run_refusals`, `check_run_spellings`, `check_run_reads`,
+`check_run_permit` and `rerun_production` hold the scenarios of that check, beside the
+suite to keep it under the size budget.
 """
+
+import json
+
+from agent_tools.console import permit
+
+
+def run_facts(slug, head, event="pull_request", numbers=(7,), head_repo=None, branch="issue-12-x"):
+    """The JSON of an Actions run of `slug` at `head`, listing the pull requests `numbers`."""
+    return json.dumps({
+        "event": event, "head_branch": branch, "head_sha": head,
+        "head_repository": {"full_name": head_repo or slug},
+        "pull_requests": [{"number": n} for n in numbers]})
+
+
+def jobs_facts(failed=("Tests",), passed=(), total=None):
+    """The JSON of a run's jobs, `failed` ones failing and `passed` ones succeeding."""
+    jobs = ([{"name": n, "conclusion": "failure"} for n in failed]
+            + [{"name": n, "conclusion": "success"} for n in passed])
+    return json.dumps({"total_count": total if total is not None else len(jobs), "jobs": jobs})
+
+
+def pull_facts(slug, head, state="open", head_repo=None, base_repo=None, branch="issue-12-x",
+               base="main"):
+    """The JSON of a pull request of `slug` whose head is `head` on `branch`."""
+    return json.dumps({
+        "state": state,
+        "head": {"sha": head, "ref": branch, "repo": {"full_name": head_repo or slug}},
+        "base": {"ref": base, "repo": {"full_name": base_repo or slug}}})
+
+
+def required_facts(contexts=("Tests",), checks=()):
+    """The JSON of a branch's required status checks: bare `contexts` and bound `checks`."""
+    return json.dumps({"contexts": list(contexts),
+                       "checks": [{"context": c, "app_id": a} for c, a in checks]})
+
+
+def check_run_forge(slug, head, **changes):
+    """The FAKE_* answers of a failed pull request check run of `slug` at `head`, with `changes`."""
+    return {"FAKE_RUN_JSON": run_facts(slug, head), "FAKE_JOBS_JSON": jobs_facts(),
+            "FAKE_PULL_JSON": pull_facts(slug, head), "FAKE_REQUIRED_JSON": required_facts(), **changes}
+
+
+def check_run_accepts(slug, head):
+    """`(name, command prefix, forge changes)` for each way the exempt rerun is allowed."""
+    required = required_facts(contexts=("Lint and tests",))
+    return [
+        ("plain", "", {}),
+        ("unset prefix", "unset GITHUB_TOKEN && ", {}),
+        ("env prefix", "env -u GITHUB_TOKEN -u GH_TOKEN ", {}),
+        ("tokens set", "", {"GITHUB_TOKEN": "x", "GH_TOKEN": "y"}),
+        ("Actions-bound check", "", {"FAKE_REQUIRED_JSON": required_facts(contexts=(), checks=(("Tests", 15368),))}),
+        ("any-app check", "", {"FAKE_REQUIRED_JSON": required_facts(contexts=(), checks=(("Tests", -1),))}),
+        ("failed job beside the required one", "", {
+            "FAKE_JOBS_JSON": jobs_facts(failed=("Tests", "Lint and tests")), "FAKE_REQUIRED_JSON": required}),
+    ]
+
+
+def rerun_production(*rules):
+    """A `production` member whose `changes` are the `(id, argv)` pairs `rules`."""
+    return {"changes": [{"id": name, "argv": argv} for name, argv in rules], "read_only": [],
+            "release_profile": "forge-main"}
+
+
+def check_run_refusals(slug, head):
+    """`(name, forge, row changes, extra guard arguments)` for each answer that leaves the rule in place."""
+    def forge(**changes):
+        return check_run_forge(slug, head, **changes)
+
+    other = "someone/deployer"
+    bound = required_facts(contexts=("Tests",), checks=(("Tests", 999),))
+    refusals = [
+        ("push", forge(FAKE_RUN_JSON=run_facts(slug, head, "push", ()))),
+        ("workflow_dispatch", forge(FAKE_RUN_JSON=run_facts(slug, head, "workflow_dispatch"))),
+        ("pull_request_target", forge(FAKE_RUN_JSON=run_facts(slug, head, "pull_request_target"))),
+        ("stale head", forge(FAKE_PULL_JSON=pull_facts(slug, "f" * 40))),
+        ("closed", forge(FAKE_PULL_JSON=pull_facts(slug, head, "closed"))),
+        ("fork pull request", forge(FAKE_PULL_JSON=pull_facts(slug, head, head_repo=other))),
+        ("other base repository", forge(FAKE_PULL_JSON=pull_facts(slug, head, base_repo="acme/other"))),
+        ("fork run", forge(FAKE_RUN_JSON=run_facts(slug, head, head_repo=other))),
+        ("no pull request", forge(FAKE_RUN_JSON=run_facts(slug, head, numbers=()))),
+        ("branch mismatch", forge(FAKE_PULL_JSON=pull_facts(slug, head, branch="issue-13-y"))),
+        ("other base branch", forge(FAKE_PULL_JSON=pull_facts(slug, head, base="release"))),
+        ("from the default branch", forge(FAKE_RUN_JSON=run_facts(slug, head, branch="main"),
+                                         FAKE_PULL_JSON=pull_facts(slug, head, branch="main"))),
+        ("pull-request deploy run", forge(FAKE_JOBS_JSON=jobs_facts(failed=("deploy-preview",)))),
+        ("no failed job", forge(FAKE_JOBS_JSON=jobs_facts(failed=(), passed=("Tests",)))),
+        ("truncated jobs", forge(FAKE_JOBS_JSON=jobs_facts(total=101))),
+        ("not a required check", forge(FAKE_REQUIRED_JSON=required_facts(contexts=("Lint",)))),
+        ("check bound to another app", forge(FAKE_REQUIRED_JSON=required_facts(
+            contexts=(), checks=(("Tests", 999),)))),
+        ("bound context", forge(FAKE_REQUIRED_JSON=bound)),
+        ("required nonzero", forge(FAKE_REQUIRED_MODE="nonzero")),
+        ("required nonzero with a valid body",
+         forge(FAKE_REQUIRED_MODE="http_error", FAKE_REQUIRED_JSON=required_facts())),
+        ("required invalid", forge(FAKE_REQUIRED_MODE="invalid")),
+        ("required malformed", forge(FAKE_REQUIRED_JSON='{"contexts": "Tests", "checks": []}')),
+        ("unprotected integration branch", forge(
+            FAKE_REQUIRED_MODE="http_error",
+            FAKE_REQUIRED_JSON='{"message":"Branch not protected","status":"404"}')),
+        ("run nonzero", forge(FAKE_RUN_MODE="nonzero")),
+        ("run invalid", forge(FAKE_RUN_MODE="invalid")),
+        ("run malformed", forge(FAKE_RUN_JSON='{"event": "pull_request"}')),
+        ("jobs nonzero", forge(FAKE_JOBS_MODE="nonzero")),
+        ("jobs invalid", forge(FAKE_JOBS_MODE="invalid")),
+        ("pull nonzero", forge(FAKE_PULL_MODE="nonzero")),
+        ("pull invalid", forge(FAKE_PULL_MODE="invalid")),
+    ]
+    return [(name, answers, {}, ()) for name, answers in refusals] + [
+        ("release pull request", forge(FAKE_RUN_JSON=run_facts(slug, head, branch="dev"),
+                                       FAKE_PULL_JSON=pull_facts(slug, head, branch="dev", base="main")),
+         {"integration_branch": "dev"}, ()),
+        ("declared by the row only", forge(FAKE_REQUIRED_JSON=required_facts(contexts=("Lint",))),
+         {"required_checks": ["Tests"]}, ()),
+        ("run timeout", forge(FAKE_RUN_MODE="timeout"), {}, ("--child-timeout-seconds", "0.5")),
+    ]
+
+
+def check_run_reads(slug, run_id=55, branch="main"):
+    """The `gh` arguments the check makes, in order, for run `run_id` of `slug` and pull request 7."""
+    base = f"repos/{slug}"
+    return [["api", f"{base}/actions/runs/{run_id}"], ["api", f"{base}/actions/runs/{run_id}/jobs?per_page=100"],
+            ["api", f"{base}/pulls/7"],
+            ["api", f"{base}/branches/{branch}/protection/required_status_checks"]]
+
+
+def check_run_permit(slug, head, root):
+    """`(forge, grant)` for the console permit judging a rerun of the check run of `slug` at `head`."""
+    run = {"event": "pull_request", "branch": "issue-12-x", "repo": slug, "head": head,
+           "prs": [7], "failed": ["Tests"], "pending": False, "members": []}
+    forge = permit.Forge(
+        lambda s, n: {"branch": "issue-12-x", "repo": slug, "head": head, "base": "main"},
+        lambda s, i: run, lambda s, b: frozenset({"Tests"}), lambda *a: None)
+    return forge, permit.Grant(slug, root, "merge", True, "issue-<num>-<slug>", frozenset({12}), frozenset())
+
+
+def check_run_spellings(slug):
+    """`(name, command)` for each spelling of the rerun that is not the one exempt form."""
+    exempt = f"gh run rerun 55 --failed --repo {slug}"
+    host = "GH_HOST=ghe.example.com "
+    return [
+        ("-R", f"gh run rerun 55 --failed -R {slug}"),
+        ("--repo=", f"gh run rerun 55 --failed --repo={slug}"),
+        ("flags reordered", f"gh run rerun 55 --repo {slug} --failed"),
+        ("no --failed", f"gh run rerun 55 --repo {slug}"),
+        ("--failed=false", f"gh run rerun 55 --failed=false --repo {slug}"),
+        ("--job", f"gh run rerun 55 --failed --job 9 --repo {slug}"),
+        ("consumed --failed", f"gh run rerun 55 --job --failed --repo {slug}"),
+        ("leading zero", f"gh run rerun 055 --failed --repo {slug}"),
+        ("hosted value", f"gh run rerun 55 --failed --repo github.com/{slug}"),
+        (".git value", f"gh run rerun 55 --failed --repo {slug}.git"),
+        ("path to gh", f"/usr/bin/{exempt}"),
+        ("double space", f"gh run rerun 55  --failed --repo {slug}"),
+        ("cd prefix", f"cd /tmp && {exempt}"),
+        ("operator after", f"{exempt}; echo done"),
+        ("chained", f"{exempt} && gh run rerun 56 --failed --repo {slug}"),
+        ("unnamed", "gh run rerun 55 --failed"),
+        ("command-local GH_HOST", host + exempt),
+        ("env GH_HOST", f"env {host}{exempt}"),
+    ]
+
 
 FAKE_GH_SCRIPT = '''
 import base64
@@ -61,6 +230,39 @@ elif (
 elif len(argv) == 2 and argv[0] == "api":
     parts = argv[1].split("/")
     if (
+        len(parts) == 6
+        and parts[0] == "repos"
+        and parts[3] == "actions"
+        and parts[4] == "runs"
+    ):
+        stage = "run"
+        slug = parts[1] + "/" + parts[2]
+        number = parts[5]
+    elif (
+        len(parts) == 7
+        and parts[0] == "repos"
+        and parts[3] == "actions"
+        and parts[4] == "runs"
+        and parts[6] == "jobs?per_page=100"
+    ):
+        stage = "jobs"
+        slug = parts[1] + "/" + parts[2]
+        number = parts[5]
+    elif len(parts) == 5 and parts[0] == "repos" and parts[3] == "pulls":
+        stage = "pull"
+        slug = parts[1] + "/" + parts[2]
+        number = parts[4]
+    elif (
+        len(parts) == 7
+        and parts[0] == "repos"
+        and parts[3] == "branches"
+        and parts[5] == "protection"
+        and parts[6] == "required_status_checks"
+    ):
+        stage = "required"
+        slug = parts[1] + "/" + parts[2]
+        branch = parts[4]
+    elif (
         len(parts) == 6
         and parts[0] == "repos"
         and parts[3] == "branches"
@@ -150,6 +352,19 @@ if stage == "pr":
         '"statusCheckRollup":[{"__typename":"CheckRun",'
         '"status":"COMPLETED","conclusion":"SUCCESS"}]}'
     )
+elif stage == "run":
+    default = json.dumps({
+        "event": "push", "head_branch": "main", "head_sha": "e" * 40,
+        "head_repository": {"full_name": slug}, "pull_requests": []})
+elif stage == "jobs":
+    default = json.dumps({"total_count": 1, "jobs": [{"name": "Tests", "conclusion": "failure"}]})
+elif stage == "pull":
+    default = json.dumps({
+        "state": "open",
+        "head": {"sha": "e" * 40, "ref": "issue-12-x", "repo": {"full_name": slug}},
+        "base": {"ref": "main", "repo": {"full_name": slug}}})
+elif stage == "required":
+    default = json.dumps({"contexts": ["Tests"], "checks": []})
 elif stage == "body":
     default = '{"title": "", "body": "", "closingIssuesReferences": []}'
 elif stage == "commits":

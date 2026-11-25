@@ -1,5 +1,6 @@
 import ast
 import concurrent.futures
+import dataclasses
 import hashlib
 import importlib.util
 import json
@@ -17,9 +18,13 @@ import types
 import unittest
 
 from agent_tools.claims import forge_markers
+from agent_tools.console import permit
 from agent_tools.delivery import look_marker
 
-from .guard_fake_gh import FAKE_GH_SCRIPT
+from .guard_fake_children import FAKE_DERIVE_SCRIPT, FAKE_GIT_SCRIPT
+from .guard_fake_gh import (
+    FAKE_GH_SCRIPT, check_run_accepts, check_run_forge, check_run_permit, check_run_reads, check_run_refusals,
+    check_run_spellings, jobs_facts, rerun_production, run_facts)
 from .guard_policy_world import GuardPolicyWorld
 
 
@@ -60,84 +65,8 @@ EXPECTED_ALLOW = [
     "Bash(forge-issue:*)", "Bash(~/.agents/bin/forge-issue:*)", "Agent",
 ]
 
-# Stand-in for the row check (`guard-policy derive`). Answers from a JSON object
-# of slug -> row: FAKE_DERIVE_ROWS names one, else the class default (Nodo's row).
-# FAKE_DERIVE_MODE: rows (default), refused_code (its refusals are FAKE_DERIVE_REFUSED,
-# a JSON list, else one fetch_failed), unavailable, garbage, hang, and
-# slow (sleeps until the time.time() instant FAKE_DERIVE_UNTIL, then answers as rows).
-# FAKE_DERIVE_LOG appends each slug asked; FAKE_DERIVE_PIDFILE receives the pid
-# of the grandchild `hang` leaves behind.
-FAKE_DERIVE_SCRIPT = '''
-import json
-import os
-import subprocess
-import sys
-import time
-
-argv = sys.argv[1:]
-if len(argv) != 2 or argv[0] != "--repository":
-    print("unexpected fake-derive argv: " + repr(argv), file=sys.stderr)
-    raise SystemExit(64)
-slug = argv[1]
-log = os.environ.get("FAKE_DERIVE_LOG")
-if log:
-    with open(log, "a", encoding="utf-8") as stream:
-        stream.write(slug + "\\n")
-mode = os.environ.get("FAKE_DERIVE_MODE", "rows")
-if mode == "hang":
-    sleeper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"])
-    with open(os.environ["FAKE_DERIVE_PIDFILE"], "w", encoding="utf-8") as stream:
-        stream.write(str(sleeper.pid))
-    time.sleep(600)
-if mode == "slow":
-    time.sleep(max(0.0, float(os.environ["FAKE_DERIVE_UNTIL"]) - time.time()))
-if mode == "garbage":
-    print("{")
-    raise SystemExit(0)
-report = {"schema_version": 1, "repository": slug, "row": None, "refused": [], "cause": None}
-if mode == "unavailable":
-    report.update(outcome="unavailable", cause={"reason_code": "registry_invalid", "detail": "x"})
-    print(json.dumps(report))
-    raise SystemExit(2)
-if mode == "refused_code":
-    report.update(outcome="refused", refused=json.loads(os.environ.get(
-        "FAKE_DERIVE_REFUSED", '[{"project_id": "p", "root": "/p", '
-        '"reason_code": "fetch_failed", "detail": "x"}]')))
-    print(json.dumps(report))
-    raise SystemExit(1)
-with open(os.environ.get("FAKE_DERIVE_ROWS", @ROWS@), encoding="utf-8") as stream:
-    rows = json.load(stream)
-if slug in rows:
-    report.update(outcome="derived", row=rows[slug])
-    print(json.dumps(report))
-    raise SystemExit(0)
-report.update(outcome="refused")
-print(json.dumps(report))
-raise SystemExit(1)
-'''
-
-
 GUARD_SOURCE = Path(__file__).resolve().parents[1] / "home/common/claude-code/lifecycle_guard.py"
 
-FAKE_GIT_SCRIPT = '''
-import os
-import sys
-import time
-
-REAL = @GIT@
-LOOKUP = ["remote", "get-url", "--push", "--all", "origin"]
-mode = os.environ.get("FAKE_PUSH_URL_MODE")
-if mode and sys.argv[-len(LOOKUP):] == LOOKUP:
-    if mode == "timeout":
-        time.sleep(5)
-    elif mode == "nonzero":
-        print("git@github.com:fagenorn/nix-config.git")
-        print("fake push URL failure", file=sys.stderr)
-        raise SystemExit(1)
-    elif mode == "empty":
-        raise SystemExit(0)
-os.execv(REAL, [REAL, *sys.argv[1:]])
-'''
 
 class ClaudePermissionGuardTest(unittest.TestCase):
     @classmethod
@@ -1961,9 +1890,7 @@ class ClaudePermissionGuardTest(unittest.TestCase):
     def test_a_rerun_naming_a_projects_own_repository_is_judged_by_that_projects_rules(self):
         """Issue 1375: a `--repo` rerun is judged only against the project that repository
         names, so another project's rerun rule never refuses a pull-request check rerun."""
-        guard_args = self.production_args({self.OWN: NODO_ROW, PROD: self.RERUN_ROW})
-        own = self.make_repo(f"git@github.com:{self.OWN}.git")
-        prod = self.make_repo(f"git@github.com:{PROD}.git")
+        guard_args, prod, own, _other = self.rerun_world()
         for cwd in (own, prod):
             for command in (
                     f"gh run rerun 123 --failed --repo {self.OWN}",
@@ -1977,10 +1904,7 @@ class ClaudePermissionGuardTest(unittest.TestCase):
 
     def test_a_rerun_naming_a_project_that_declares_reruns_is_refused_from_any_directory(self):
         """Issue 1375: the named project's rule refuses, whichever checkout the call runs in."""
-        guard_args = self.production_args({self.OWN: NODO_ROW, PROD: self.RERUN_ROW})
-        own = self.make_repo(f"git@github.com:{self.OWN}.git")
-        prod = self.make_repo(f"git@github.com:{PROD}.git")
-        other = self.make_repo("git@github.com:fagenorn/tool.git")
+        guard_args, prod, own, other = self.rerun_world()
         for cwd in (own, prod, other):
             for command in (
                     f"gh run rerun 9 --failed --repo {PROD}", f"gh run rerun 9 -R {PROD}",
@@ -2000,10 +1924,7 @@ class ClaudePermissionGuardTest(unittest.TestCase):
     def test_every_way_gh_reads_a_repository_flag_names_the_project_the_guard_judges(self):
         """Issue 1375 A2: a short flag group (`-dR`), `-R=...`, a redirection glued to the
         value and a later unnamed rerun never hide the project a rerun names."""
-        guard_args = self.production_args({self.OWN: NODO_ROW, PROD: self.RERUN_ROW})
-        own = self.make_repo(f"git@github.com:{self.OWN}.git")
-        prod = self.make_repo(f"git@github.com:{PROD}.git")
-        other = self.make_repo("git@github.com:fagenorn/tool.git")
+        guard_args, prod, own, other = self.rerun_world()
         for cwd in (own, prod, other):
             for command in (
                     f"gh run rerun 9 --repo {self.OWN} -dR {PROD}",
@@ -2024,10 +1945,7 @@ class ClaudePermissionGuardTest(unittest.TestCase):
     def test_a_repository_flag_inside_an_option_value_names_no_repository(self):
         """Issue 1375 I1: the word after a value-taking option is its value, so a job value
         that spells `--repo=...` never selects another project's rule."""
-        guard_args = self.production_args({self.OWN: NODO_ROW, PROD: self.RERUN_ROW})
-        own = self.make_repo(f"git@github.com:{self.OWN}.git")
-        prod = self.make_repo(f"git@github.com:{PROD}.git")
-        other = self.make_repo("git@github.com:fagenorn/tool.git")
+        guard_args, prod, own, other = self.rerun_world()
         for cwd in (own, prod, other):
             for command in (
                     f"gh run rerun 5 --repo {self.OWN} --job '--repo={PROD}'",
@@ -2046,8 +1964,7 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         substitution, a redirection glued to the flag, an unknown flag or a wildcard in the
         value may hide a later repository flag, so the checkout is judged too and every
         repository the words name is judged."""
-        guard_args = self.production_args({self.OWN: NODO_ROW, PROD: self.RERUN_ROW})
-        prod = self.make_repo(f"git@github.com:{PROD}.git")
+        guard_args, prod, _own, _other = self.rerun_world()
         for command in (
                 f"X='-R {PROD}'; gh run rerun 9 --repo {self.OWN} $X",
                 f"gh run rerun 9 --repo {self.OWN} $(echo -R) {PROD}",
@@ -2100,9 +2017,7 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         """Issue 1375: only an explicit `--repo` on a parsed run narrows the rules; every
         other reading keeps judging by the checkout, so a hidden or unnamed rerun still
         refuses in the declaring project's checkout."""
-        guard_args = self.production_args({self.OWN: NODO_ROW, PROD: self.RERUN_ROW})
-        own = self.make_repo(f"git@github.com:{self.OWN}.git")
-        prod = self.make_repo(f"git@github.com:{PROD}.git")
+        guard_args, prod, own, _other = self.rerun_world()
         for command in (
                 "gh run rerun 9", f"sh -c 'gh run rerun 9 --repo {self.OWN}'",
                 'gh run rerun 9 --repo "$TARGET"', f"echo 'gh run rerun 9 --repo {self.OWN}' | sh"):
@@ -2114,6 +2029,91 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             with self.subTest(cwd="own", command=command):
                 result = self.run_guard(command, cwd=own, guard_args=guard_args)
                 self.assertEqual(0, result.returncode, result.stderr)
+
+    def rerun_world(self):
+        """`(guard_args, prod, own, other)` for the pull request check rerun tests."""
+        prod, own, other = (self.make_repo(f"git@github.com:{slug}.git")
+                            for slug in (PROD, self.OWN, "fagenorn/tool"))
+        return self.production_args({self.OWN: NODO_ROW, PROD: self.RERUN_ROW}), prod, own, other
+
+    CHECK_RERUN = f"gh run rerun 55 --failed --repo {PROD}"
+    CHECK_HEAD = "c" * 40
+
+    def test_the_permits_rerun_of_an_own_open_pull_request_check_run_at_its_head_is_not_a_production_change(self):
+        """A `gh run rerun <id> --failed --repo <slug>` of a pull request check run of the
+        project's own open issue pull request, at its head, whose failed job is a check the
+        forge requires, is not a production change, though the project declares a rerun rule."""
+        guard_args, prod, _own, other = self.rerun_world()
+        command, log, reads = self.CHECK_RERUN, Path(self.fixture_dir.name) / "rerun.log", check_run_reads(PROD)
+        two = self.production_args({self.OWN: NODO_ROW, PROD: {**self.RERUN_ROW, "production": rerun_production(
+            ("deploy-rerun", ["gh", "run", "rerun"]), ("deploy-rerun-failed", ["gh", "run", "rerun", "--failed"]))}})
+
+        def run(text, cwd=prod, args=guard_args, **changes):
+            log.write_text("", encoding="utf-8")
+            env = {**check_run_forge(PROD, self.CHECK_HEAD), "FAKE_GH_LOG": str(log), **changes}
+            return self.run_guard(text, cwd=cwd, env=env, guard_args=args)
+
+        scenarios = [(name, prefix + command, prod, guard_args, changes)
+                     for name, prefix, changes in check_run_accepts(PROD, self.CHECK_HEAD)]
+        scenarios += [("other checkout", command, other, guard_args, {}), ("two rerun rules", command, prod, two, {})]
+        for name, text, cwd, args, changes in scenarios:
+            with self.subTest(name):
+                result = run(text, cwd, args, **changes)
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertEqual(reads, [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()])
+        with self.subTest("deadline"):
+            result = run(command, args=(*guard_args, "--child-timeout-seconds", "28"))
+            self.assertEqual(2, result.returncode, result.stderr)
+            self.assertIn("invocation deadline leaves too little time", result.stderr)
+            self.assertNotIn(self.RERUN, result.stderr)
+        with self.subTest("nix-config"):
+            result = run(f"gh run rerun 55 --failed --repo {self.OWN}")
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertEqual("", log.read_text(encoding="utf-8"))
+
+    def test_a_rerun_of_any_other_run_or_an_unread_one_still_meets_the_production_rule(self):
+        """A rerun that is not exactly the permit's form, or whose run, jobs, pull request or
+        required checks the forge does not show to be the project's own pull request check run
+        at its head, or that cannot be read, stays a production change."""
+        _args, prod, _own, _other = self.rerun_world()
+        both = rerun_production(("deploy-rerun", ["gh", "run", "rerun"]), ("deploy-run", ["gh", "run"]))
+        default = check_run_forge(PROD, self.CHECK_HEAD)
+
+        def world(**changes):
+            return {self.OWN: NODO_ROW, PROD: {**self.RERUN_ROW, **changes}}
+
+        table = [(name, self.CHECK_RERUN, forge, world(**rows), extra, self.RERUN)
+                 for name, forge, rows, extra in check_run_refusals(PROD, self.CHECK_HEAD)]
+        table += [(name, text, default, world(), (), self.RERUN) for name, text in check_run_spellings(PROD)]
+        table.append(("broader gh run rule", self.CHECK_RERUN, default, world(production=both), (),
+                      "changes the production of acme/deployer (production rule deploy-run)"))
+        for name, text, forge, rows, extra, expected in table:
+            with self.subTest(name):
+                result = self.run_guard(text, cwd=prod, env=forge, guard_args=self.production_args(rows) + extra)
+                self.assertEqual(2, result.returncode, result.stderr)
+                self.assertIn(expected, result.stderr)
+
+    def test_an_own_pull_request_rerun_in_a_declaring_project_reaches_the_permit_and_is_allowed_within_the_cap(self):
+        """The guard lets the check rerun through and the console permit then judges it: an
+        allow within the per-head cap, a refusal beyond it; a deploy run stays refused."""
+        guard_args, prod, _own, _other = self.rerun_world()
+        command, head = self.CHECK_RERUN, self.CHECK_HEAD
+        forge, grant = check_run_permit(PROD, head, self.fixture_dir.name)
+        result = self.run_guard(command, cwd=prod, env=check_run_forge(PROD, head), guard_args=guard_args)
+        self.assertEqual(0, result.returncode, result.stderr)
+        allowed = permit.judge(command, grant, forge)
+        self.assertEqual((permit.ALLOW, "rerun", 1), (allowed.decision, allowed.verb, allowed.target["count"]))
+        again = dataclasses.replace(grant, reruns={head: (permit.Rerun(55),)})
+        self.assertEqual(2, permit.judge(command, again, forge).target["count"])
+        full = dataclasses.replace(grant, reruns={head: (permit.Rerun(55), permit.Rerun(55))})
+        one, denied = "run 55 (failing: no members reported)", permit.judge(command, full, forge)
+        self.assertEqual((permit.DENY, permit.RERUN_LIMIT.format(pr=7, head=head, reruns=f"{one} and {one}")),
+                         (denied.decision, denied.reason))
+        deploy = check_run_forge(PROD, head, FAKE_RUN_JSON=run_facts(PROD, head, "push", ()),
+                                 FAKE_JOBS_JSON=jobs_facts(failed=("deploy",)))
+        refused = self.run_guard(command, cwd=prod, env=deploy, guard_args=guard_args)
+        self.assertEqual(2, refused.returncode, refused.stderr)
+        self.assertIn(self.RERUN, refused.stderr)
 
     def test_a_bad_compiled_policy_adds_no_production_refusal(self):
         """AC3: a compiled policy that does not load never refuses a command."""
