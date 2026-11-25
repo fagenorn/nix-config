@@ -2,14 +2,15 @@
 
 A rule heading is `### B12. Fail loud`: the heading hashes, one id (capital
 letters then a number with no leading zero), a full stop, then the title.
-`RULE_ID_HEADING` is the single home of that form and `without_rule_id` removes
+`agent_tools.delivery.rule_reader.RULE_ID_HEADING` is the single home of that form
+(with the fence-aware `scan`) and `without_rule_id` removes
 the one id from a matching `###` rule heading, leaving every other line (a
 heading of another level included) unchanged.
 
 An enforcer names a rule by the citation `standard:<id>`, as in `standard:B12`
 (#1442). `citations` returns every citation in a text with its 1-based line and
-whether its token is a well-formed id, and `PROJECT_PREFIX` is the prefix of the
-project shards' ids, which resolve against the project's own shards.
+whether its token is a well-formed id; the project shards' ids carry
+`rule_reader.PROJECT_PREFIX` and resolve against the project's own shards.
 
 A citation is `standard:` not glued to a word and followed with no space by a run of
 non-space characters. Its token is that run less the sentence punctuation closing it (`.`,
@@ -29,7 +30,7 @@ python=True)`) a marker is read only inside a comment token, so text in a string
 a docstring included, is no marker; a file the Python tokenizer rejects is read as far as
 it tokenized. Any other file is read by line.
 
-`scan` reads a Markdown file the way CommonMark renders it, skipping fences, indented
+`rule_reader.scan` reads a Markdown file the way CommonMark renders it, skipping fences, indented
 code and HTML blocks. `rule_headings` and `layer_problems` report each bad rule heading
 with one of three reasons (two ids, no well-formed id, a level other than
 `###`). `prefix_table` reads a README's `## Rule ids` table through `scan`.
@@ -41,18 +42,15 @@ import tokenize
 from typing import NamedTuple
 
 from agent_tools.delivery.context_map_lint import CODE_RE, section, table_rows
-from agent_tools.delivery.look_marker import FENCE_OPEN
+from agent_tools.delivery.rule_reader import HEADING_LINE, RULE_ID_HEADING, scan
 
 RULE_ID = re.compile(r"[A-Z]+[1-9][0-9]*")
-RULE_ID_HEADING = re.compile(
-    r"^(?P<hashes>#{1,6}) (?P<prefix>[A-Z]+)(?P<number>[1-9][0-9]*)\. (?P<title>\S.*)$")
 CITE = "standard:"
 CITATION = re.compile(r"(?<![A-Za-z0-9_-])standard:(?P<token>\S+)")
 SENTENCE_END = ".,;:!?)]}'\"`*"
 SUPPRESS = "suppress-standard:"
 SUPPRESSION = re.compile(r"(?<![A-Za-z0-9_-])suppress-standard:(?P<token>\S*)(?P<rest>.*)")
 COMMENT_CLOSERS = ("-->", "*/")
-PROJECT_PREFIX = "P"
 
 
 class Citation(NamedTuple):
@@ -132,9 +130,6 @@ def _token(run: str) -> str:
     return run.rstrip(SENTENCE_END) or run
 
 
-def prefix_of(rule_id: str) -> str:
-    """The leading capital letters of `rule_id` (`PY3` is `PY`)."""
-    return re.match(r"[A-Z]*", rule_id)[0]
 
 
 def without_rule_id(line: str) -> str:
@@ -147,102 +142,9 @@ REASON_TWO_IDS = "more than one id"
 REASON_NO_ID = "no well-formed id"
 REASON_LEVEL = "a rule heading is ###"
 SECOND_ID = re.compile(r"(?<![A-Za-z0-9])[A-Z]+[0-9]+\.(?=\s|$)")
-HEADING_LINE = re.compile(r"^ {0,3}(?:(?:>|[-*+]|[0-9]+[.)])[ \t]+ {0,3}|>)*#{1,6}(\s|$)")
 NUMBERED_ITEM = re.compile(r"^[0-9]+[.)] ")
 
 
-BLOCK_TAGS = (
-    "address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|"
-    "div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|"
-    "legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|search|section|summary|"
-    "table|tbody|td|tfoot|th|thead|title|tr|track|ul")
-ATTRIBUTE = r"""\s+[A-Za-z_:][\w:.-]*(?:\s*=\s*(?:[^\s"'=<>`]+|'[^']*'|"[^"]*"))?"""
-# CommonMark HTML blocks 1-5 end at a marker on a line; 6 and 7 end at a blank line (7 cannot
-# interrupt a paragraph).
-HTML_MARKED = (
-    (re.compile(r" {0,3}<(?:pre|script|style|textarea)(?:\s|>|$)", re.I),
-     re.compile(r"</(?:pre|script|style|textarea)>", re.I)),
-    (re.compile(r" {0,3}<!--"), re.compile(r"-->")),
-    (re.compile(r" {0,3}<\?"), re.compile(r"\?>")),
-    (re.compile(r" {0,3}<![A-Za-z]"), re.compile(r">")),
-    (re.compile(r" {0,3}<!\[CDATA\["), re.compile(r"\]\]>")),
-)
-HTML_BLANK_END = re.compile(rf" {{0,3}}</?(?:{BLOCK_TAGS})(?:\s|/?>|$)", re.I)
-HTML_LONE_TAG = re.compile(
-    rf" {{0,3}}(?:<[A-Za-z][A-Za-z0-9-]*(?:{ATTRIBUTE})*\s*/?>|</[A-Za-z][A-Za-z0-9-]*\s*>)\s*$")
-LIST_MARKER = re.compile(r"( *)([-*+]|[0-9]{1,9}[.)])( +|$)")
-THEMATIC_BREAK = re.compile(r" *([-*_])(?: *\1){2,} *")
-
-
-def scan(text: str):
-    """`(line number, line, content)` of every line outside a ``` or ~~~ fence, indented code and an HTML block.
-
-    The fence, indented-code and HTML lines are excluded. `content` is the line with the content column of the
-    list item it continues removed, which is how it reads when rendered; `line` is as written.
-    An HTML block opens at CommonMark's seven start conditions and ends at its end condition.
-    """
-    fence: tuple[str, int] | None = None
-    html: re.Pattern | None = None   # the end marker of an open block 1-5
-    until_blank = False              # an open block 6 or 7
-    paragraph = False
-    columns: list[int] = []
-    for number, raw in enumerate(text.removesuffix("\n").split("\n"), 1):
-        line = raw.rstrip()
-        indent = len(line) - len(line.lstrip(" "))
-        popped = False
-        if line:
-            while columns and indent < columns[-1]:
-                columns.pop()
-                popped = True
-            if popped:  # the list item ends, and with it any fence or HTML block it holds
-                fence, html, until_blank = None, None, False
-        content = line[min(columns[-1] if columns else 0, indent):]
-        if fence is not None:
-            char, size = fence
-            if re.fullmatch(rf" {{0,3}}{re.escape(char)}{{{size},}}[ \t]*", content):
-                fence = None
-            continue
-        if html is not None:
-            if html.search(line):
-                html, paragraph = None, False
-            continue
-        if until_blank:
-            if line:
-                continue
-            until_blank = False
-        if not line:
-            paragraph = False
-            continue
-        if not paragraph and len(content) - len(content.lstrip(" ")) >= 4:
-            continue   # indented code: four columns past the content column, not a paragraph continuation
-        rest, opens_item = content, False   # `rest` is what follows the list markers of the line
-        while True:
-            item = LIST_MARKER.match(rest)
-            if not item or THEMATIC_BREAK.fullmatch(rest):
-                break
-            if paragraph and not popped and not opens_item and (
-                    item.end() == len(rest) or (item[2][-1] in ".)" and int(item[2][:-1]) != 1)):
-                break  # an empty item or an ordered one not starting at 1 cannot interrupt a paragraph
-            spaces = len(item[3])
-            columns.append((columns[-1] if columns else 0) + len(item[1]) + len(item[2])
-                           + (spaces if 0 < spaces < 5 else 1))
-            rest = rest[len(item[1]) + len(item[2]) + (spaces if 0 < spaces < 5 else min(spaces, 1)):]
-            opens_item = True
-        opened = FENCE_OPEN.match(rest)
-        if opened:
-            fence, paragraph = (opened.group(1)[0], len(opened.group(1))), False
-            continue
-        marked = next((end for start, end in HTML_MARKED if start.match(rest)), None)
-        if marked:
-            paragraph = False
-            if not marked.search(rest):
-                html = marked
-            continue
-        if HTML_BLANK_END.match(rest) or ((opens_item or not paragraph) and HTML_LONE_TAG.match(rest)):
-            until_blank, paragraph = True, False
-            continue
-        paragraph = not HEADING_LINE.match(content)
-        yield number, line, content
 
 
 def unfenced(text: str):
