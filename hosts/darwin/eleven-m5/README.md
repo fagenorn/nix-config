@@ -46,7 +46,7 @@ root. A pending reload with a model loaded waits for an idle server, and
 
 oMLX is the only held daemon. Every other daemon still reloads when its plist
 changes: `omlx-models`, `iogpu-wired-limit` (which re-runs the sysctl),
-`colima` and `docker-socket`, the GitHub runners, `fseventsd-trim`, `memory-floor`, and the owner's
+`colima` and `docker-socket`, the GitHub runners, `fseventsd-trim`, `memory-floor`, `memory-census`, and the owner's
 `agent-console`, `verify-pending`, `claude-cache-proxy`, `omlx-memory-watch` and
 `sops-nix` daemons. The serve script carries the relaunch gate, so a changed
 `floorGiB` or `fastSampleSeconds` becomes a pending oMLX reload at the next
@@ -273,6 +273,19 @@ the set took; the record's value is what the kernel held between samples. The
 sampler puts the record's value in `omlx_jetsam_priority`, so the day line shows
 whether the kernel kept it, and queues `jetsam_priority_unset` when the call
 failed or the resets are above zero.
+
+### Unowned memory
+
+The `memory-census` daemon runs as root every minute and runs `footprint -a --sysFootprint
+--noCategories` (only root can read every process's footprint). It replaces
+`/var/db/memory-watch/census.json` (directory `0755`, file `0644`) and logs to
+`/var/log/memory-census.log`.
+
+Unowned memory is the `sys_footprint` of that report minus footprint's own `total footprint`, and may
+be negative. The watcher never adds up the processes' footprints itself, because that double-counts
+shared memory such as Postgres shared buffers. Each record carries `census_seconds`, the time
+`footprint -a` took. A report with a non-empty `errors` list is an incomplete census: it records an
+`error` and no figure, and so does a timeout, a failed run or output that is not parseable.
 
 ### Alerts
 

@@ -182,6 +182,18 @@ class WatcherDeclarationTest(unittest.TestCase):
         self.assertIn(f"--min-restart-minutes {budget['fseventsdRestartMinutes']}", command)
 
 
+    def test_the_census_runs_as_root_every_minute(self):
+        census = self.got["census"]
+        self.assertIsNone(census["UserName"])
+        self.assertEqual(census["StartInterval"], 60)
+        self.assertIs(census["RunAtLoad"], True)
+        self.assertIn(census["KeepAlive"], (None, False))
+        self.assertEqual(census["StandardOutPath"], "/var/log/memory-census.log")
+        self.assertRegex(
+            census["command"],
+            r"^/nix/store/[0-9a-z]{32}-agent-platform/bin/omlx-memory-watch census --record /var/db/memory-watch/census\.json$")
+
+
 class FloorDaemonTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -335,9 +347,19 @@ class GuideTest(unittest.TestCase):
 
     def test_the_guide_lists_the_new_daemons_among_restarts(self):
         self.assertTrue(self.restarts)
-        for needle in ("omlx-memory-watch", "fseventsd-trim", "memory-floor"):
+        for needle in ("omlx-memory-watch", "fseventsd-trim", "memory-floor", "memory-census"):
             with self.subTest(needle=needle):
                 self.assertIn(needle, self.restarts)
+
+    def test_the_guide_states_how_unowned_memory_is_measured(self):
+        unowned = self.between(self.section, "### Unowned memory", "\n### ")
+        self.assertTrue(unowned, "the guide has no `### Unowned memory` subsection")
+        for needle in (
+            "sys_footprint", "total footprint", "/var/db/memory-watch/census.json", "/var/log/memory-census.log",
+            "double-counts", "census_seconds", "incomplete census",
+        ):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, unowned)
 
 
 if __name__ == "__main__":

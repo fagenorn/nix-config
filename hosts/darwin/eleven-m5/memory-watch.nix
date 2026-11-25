@@ -15,6 +15,7 @@ let
   floorLauncher =
     inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.agent-platform.launchers.memory-floor;
   record = "/var/db/memory-watch/fseventsd.json";
+  censusRecord = "/var/db/memory-watch/census.json";
   # Matched against process cwds only; quoted because nix-darwin runs `command` through /bin/sh -c.
   agentRoots = [
     "${home}/Projects/*/.worktrees/*"
@@ -53,6 +54,18 @@ in
       StartInterval = 60;
       StandardOutPath = "/var/log/fseventsd-trim.log";
       StandardErrorPath = "/var/log/fseventsd-trim.log";
+    };
+  };
+
+  # Reads every process's footprint, which only root can, and records the system's unowned memory
+  # for the owner's sampler.
+  launchd.daemons.memory-census = {
+    command = "${launcher} census --record ${censusRecord}";
+    serviceConfig = {
+      RunAtLoad = true;
+      StartInterval = 60;
+      StandardOutPath = "/var/log/memory-census.log";
+      StandardErrorPath = "/var/log/memory-census.log";
     };
   };
 

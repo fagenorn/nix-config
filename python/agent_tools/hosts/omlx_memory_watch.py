@@ -45,6 +45,20 @@ shows no pid (no record). It never reads the alert settings and sends nothing: `
 `fseventsd_held` and `fseventsd_restart_failed` (the record says `restart_failed`) once per
 episode each. A missing or non-JSON record is not a failed reading.
 
+`census --record FILE [--footprint PATH] [--timeout-seconds N] [--now ISO8601]` runs as root: it
+runs `footprint -a --sysFootprint --noCategories -j <path>`, with `<path>` inside a fresh private
+temporary directory, and replaces FILE (default `/var/db/memory-watch/census.json`, directory 0755,
+file 0644, atomically) with `at`, `seconds` (how long footprint took), `footprint_exit` (null when it
+did not finish), `error` (null or text), `warnings` (the length of footprint's `warnings`),
+`sys_footprint_bytes`, `process_footprint_bytes`, `unowned_bytes`, `processes` and `top_owners` (at
+most five `{name, pid, bytes}`, largest first). Unowned memory is `sys_footprint` minus footprint's own
+`total footprint`, never a sum of the processes (which double-counts shared memory), and may be
+negative. A report is a census only when it is counted in bytes, carries both totals, has an empty
+`errors` list and at least one process; footprint's exit code never decides on its own. Any other
+outcome writes the record with `error` set and every figure null, prints `omlx-memory-watch: <error>`
+to stderr and exits 1: `footprint timed out after <N> s`, `footprint could not run (<class>)`,
+`footprint census incomplete (errors: <n>)` or `footprint output not parseable (exit <code>)`.
+
 `sample [--floor-record FILE]` (default `/var/db/memory-watch/floor.json`, written by the root memory
 floor daemon, which never writes this watcher's log or alerts) reads the floor record once per run
 and keeps `floor_kills_seen`, `floor_unmet_seen`, `priority_unset_open` and `floor_log` (kill lines not yet printed) in
@@ -72,6 +86,8 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
+import time
 import urllib.request
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -87,6 +103,9 @@ FSEVENTSD_DEFAULTS = {
     "fseventsd_bytes": None, "peak_fseventsd_bytes": None, "fseventsd_restarts_seen": None,
     "fseventsd_restarts_today": 0, "fseventsd_held_open": False, "fseventsd_failed_open": False,
 }
+CENSUS_RECORD = "/var/db/memory-watch/census.json"
+CENSUS_TIMEOUT = 50
+TOP_OWNERS = 5
 FLOOR_RECORD = "/var/db/memory-watch/floor.json"
 FLOOR_DEFAULTS = {"floor_kills_seen": None, "floor_unmet_seen": None, "priority_unset_open": False, "floor_log": []}
 STATE_NAME = "memory-watch.json"
@@ -152,6 +171,50 @@ def parse_launchctl(text: str) -> dict:
 def count_ci_jobs(text: str) -> int:
     names = (line.strip().strip("()") for line in text.splitlines())
     return sum(1 for name in names if name.rsplit("/", 1)[-1] == "Runner.Worker")
+
+
+class CensusIncomplete(ValueError):
+    def __init__(self, errors: int):
+        super().__init__(f"footprint census incomplete (errors: {errors})")
+        self.errors = errors
+
+
+def _is_int(value) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def parse_census(document) -> dict:
+    """The figures of a complete `footprint -a --sysFootprint -j` report, or ValueError (CensusIncomplete)."""
+    if not isinstance(document, dict) or document.get("unit") != "byte":
+        raise ValueError("footprint report is not counted in bytes")
+    per_unit = document.get("bytes per unit")
+    if not _is_int(per_unit) or per_unit != 1:
+        raise ValueError("footprint report is not counted in bytes")
+    auxiliary = document.get("auxiliary")
+    system = auxiliary.get("sys_footprint") if isinstance(auxiliary, dict) else None
+    total = document.get("total footprint")
+    if not _is_int(total) or not _is_int(system):
+        raise ValueError("footprint report has no system or process total")
+    errors, listed = document.get("errors"), document.get("processes")
+    if not isinstance(errors, list) or not isinstance(listed, list):
+        raise ValueError("footprint report has no errors or processes list")
+    if errors:
+        raise CensusIncomplete(len(errors))
+    owners = [
+        {"name": entry["name"], "pid": entry["pid"], "bytes": entry["footprint"]}
+        for entry in listed
+        if isinstance(entry, dict) and isinstance(entry.get("name"), str)
+        and _is_int(entry.get("pid")) and _is_int(entry.get("footprint"))
+    ]
+    if not owners:
+        raise ValueError("footprint report has no process")
+    owners.sort(key=lambda owner: (-owner["bytes"], owner["pid"]))
+    warnings = document.get("warnings")
+    return {
+        "warnings": len(warnings) if isinstance(warnings, list) else 0,
+        "sys_footprint_bytes": system, "process_footprint_bytes": total, "unowned_bytes": system - total,
+        "processes": len(owners), "top_owners": owners[:TOP_OWNERS],
+    }
 
 
 def parse_footprint(text: str) -> int | None:
@@ -498,6 +561,38 @@ def fseventsd(args) -> int:
     return status
 
 
+def census(args) -> int:
+    start = time.monotonic()
+    code, error, figures = None, None, {}
+    with tempfile.TemporaryDirectory() as scratch:
+        target = Path(scratch) / "footprint.json"
+        try:
+            done = subprocess.run(
+                [args.footprint, "-a", "--sysFootprint", "--noCategories", "-j", str(target)],
+                capture_output=True, text=True, timeout=args.timeout_seconds)
+            code = done.returncode
+            try:
+                figures = parse_census(json.loads(target.read_text()))
+            except CensusIncomplete as incomplete:
+                error = str(incomplete)
+            except (OSError, ValueError):
+                error = f"footprint output not parseable (exit {code})"
+        except subprocess.TimeoutExpired:
+            error = f"footprint timed out after {args.timeout_seconds} s"
+        except (OSError, subprocess.SubprocessError) as failure:
+            error = f"footprint could not run ({type(failure).__name__})"
+    seconds = round(time.monotonic() - start, 1)
+    at = args.now if args.now is not None else datetime.now().astimezone()
+    keys = ("warnings", "sys_footprint_bytes", "process_footprint_bytes", "unowned_bytes", "processes", "top_owners")
+    write_record(args.record, {
+        "at": at.isoformat(), "seconds": seconds, "footprint_exit": code, "error": error,
+        **{key: figures.get(key) for key in keys},
+    })
+    if error:
+        print(f"{PROG}: {error}", file=sys.stderr)
+    return 1 if error else 0
+
+
 def _run(name: str, argv: list[str]) -> str:
     try:
         done = subprocess.run(argv, capture_output=True, text=True, timeout=RUN_TIMEOUT)
@@ -628,12 +723,17 @@ def build_parser() -> argparse.ArgumentParser:
     trim.add_argument("--footprint", default="/usr/bin/footprint")
     trim.add_argument("--kill", default="/bin/kill")
     trim.add_argument("--now", type=datetime.fromisoformat, default=None)
+    count = commands.add_parser("census", help="record footprint -a's system and process footprints")
+    count.add_argument("--record", type=Path, required=True)
+    count.add_argument("--footprint", default="/usr/bin/footprint")
+    count.add_argument("--timeout-seconds", type=int, default=CENSUS_TIMEOUT)
+    count.add_argument("--now", type=datetime.fromisoformat, default=None)
     return parser
 
 
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
-    return fseventsd(args) if args.command == "fseventsd" else sample(args)
+    return {"fseventsd": fseventsd, "census": census}.get(args.command, sample)(args)
 
 
 if __name__ == "__main__":
