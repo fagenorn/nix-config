@@ -188,7 +188,7 @@ class JudgeOrderTest(Tree):
         # judge denies this one; the card-less allow sits in the later `PermissionRequest` hook, so the
         # rule alone would admit the read but never gets to run.
         self.assertTrue(permit.mentions(command))
-        self.assertEqual(permit.judge(command, grant, permit.Forge(unread, unread, unread)).decision,
+        self.assertEqual(permit.judge(command, grant, permit.Forge(unread, unread, unread, unread)).decision,
                          permit.DENY)
         self.assertTrue(own_reads.allowed(command, str(self.root), "s-1", str(self.root), (), {}))
 
