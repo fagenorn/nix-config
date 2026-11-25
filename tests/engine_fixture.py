@@ -9,7 +9,10 @@ contract's `verification_conditions`. `required_checks` is the draft's `merge.re
 one deletes the member, since the resolver refuses an empty list and an absent member means none
 declared. `before_pull_request=True` also declares the touched-only test
 command and binds `BEFORE_PULL_REQUEST`, over a `suite.just` of two checks of which one imports nothing
-from the fixture. When the adoption cannot reach
+from the fixture. `extra_files` maps relative paths to text: each is written under the fixture root and
+committed in one `fixture extra files` commit after the adoption is merged (the adoption gate runs every
+verification command, so a failing file cannot be in the adopted tree), so it is on `main` and
+`origin/main` and outside every branch diff. When the adoption cannot reach
 a ready plan and a commit, the build fails with the command's own output.
 
 `AdoptedFixtures` adopts each distinct set of those options once and hands every later request a copy
@@ -30,6 +33,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from collections.abc import Mapping
 from pathlib import Path
 
 from tests.guard_policy_world import REPO_ROOT, GuardPolicyWorld
@@ -51,8 +55,9 @@ class FixtureProject:
     def __init__(self, test_case: unittest.TestCase, world: GuardPolicyWorld, *,
                  slug: str = "example/fixture", review_code: bool = False,
                  conditions: dict | None = None, required_checks=REQUIRED_CHECKS,
-                 before_pull_request: bool = False) -> None:
+                 before_pull_request: bool = False, extra_files: Mapping[str, str] | None = None) -> None:
         self.world = world
+        self.extra_files = dict(extra_files or {})
         self.required_checks = list(required_checks)
         self.before_pull_request = before_pull_request
         self.slug = slug
@@ -72,6 +77,7 @@ class FixtureProject:
         plan = self._plan(draft_path)
         self.adoption = self._adopt(plan["plan"]["plan_id"])
         world.git(self.root, "merge", "--quiet", "--ff-only", self.adoption["commit"])
+        self._commit_extra_files()
         world.git(self.root, "push", "--quiet", "origin", "main")
         vcs = draft["bindings"]["vcs"]
         self.branch_pattern: str = vcs["branch_pattern"]
@@ -94,6 +100,7 @@ class FixtureProject:
         fixture.conditions = copy.deepcopy(template.conditions)
         fixture.required_checks = list(template.required_checks)
         fixture.before_pull_request = template.before_pull_request
+        fixture.extra_files = dict(template.extra_files)
         fixture.adoption = copy.deepcopy(template.adoption)
         fixture.branch_pattern = template.branch_pattern
         fixture.worktree_prefix = template.worktree_prefix
@@ -167,6 +174,18 @@ class FixtureProject:
                 "    def test_upper(self):\n        self.assertEqual(\"a\".upper(), \"A\")\n", "utf-8")
         self.world.git(self.root, "add", "-A")
         self.world.git(self.root, "commit", "--quiet", "-m", "fixture source")
+
+    def _commit_extra_files(self) -> None:
+        """Commit `extra_files` on `main` once the adoption is merged: the adoption gate runs every declared
+        verification command, so a file that makes one fail cannot be in the tree it adopts."""
+        if not self.extra_files:
+            return
+        for relative, text in self.extra_files.items():
+            target = self.root / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(text, "utf-8")
+        self.world.git(self.root, "add", "-A")
+        self.world.git(self.root, "commit", "--quiet", "-m", "fixture extra files")
 
     def _run(self, *args: str) -> tuple[int, dict | None, str]:
         done = subprocess.run([*ADOPT, *args], capture_output=True, text=True, timeout=TIMEOUT,
