@@ -757,7 +757,7 @@ def _run(name: str, argv: list[str]) -> str:
 
 
 def _read_pid_file(path: Path) -> str | None:
-    """The first bytes of Colima's pid file, None when it is absent; `OSError` or `UnicodeDecodeError` when unreadable."""
+    """The first bytes of Colima's pid file, None when absent; `OSError` or `UnicodeDecodeError` when unreadable."""
     try:
         descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except FileNotFoundError:
