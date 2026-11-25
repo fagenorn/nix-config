@@ -41,6 +41,10 @@ SIGNER = ("#!/bin/sh\ncat >/dev/null\n"
 DRAFTED_LINE = "commits run in its development shell: devenv shell"
 ONE_LINE = "{ ... }: { git-hooks.hooks.needs-dev-shell.enable = true; }\n"
 SWITCHED_OFF = "{ ... }: {\n  git-hooks.hooks.needs-dev-shell.enable = false;\n}\n"
+SWITCHED_OFF_IN_SET = "{ ... }: {\n  git-hooks.hooks.needs-dev-shell = { enable = false; };\n}\n"
+STRINGS_BEFORE = ('{ pkgs, ... }:\n{\n  scripts.clean.exec = "rm -rf build/*";\n'
+                  '  env.URL = "http://x/#a";\n  git-hooks.hooks.needs-dev-shell.enable = true;\n'
+                  '  /* formatting */\n  languages.nix.enable = true;\n}\n')
 READING = {"remotes": [("origin", "https://github.com/fixture/target.git")],
            "default_branch": "main", "branches": ["main"]}
 
@@ -126,12 +130,21 @@ class DraftedHookInstallTest(ApplyTestCase):
         row = self.registration(root, self.drafted_plan(root, fields), fields)
         self.assertEqual(self.card_lines(row)[:2], [DRAFTED_LINE, register.HOOKS_LINE])
 
-    def test_a_drafted_registration_whose_only_hook_setting_switches_it_off_names_no_dev_shell(self):
-        root = self.drafted_checkout(SWITCHED_OFF)
+    def test_a_drafted_registration_with_a_hook_setting_after_strings_holding_comment_openers_names_the_dev_shell(
+            self):
+        root = self.drafted_checkout(STRINGS_BEFORE)
         fields = self.drafted_fields(root)
-        doc = self.drafted_plan(root, fields)
-        row = self.registration(root, doc, fields)
-        self.assertEqual(self.card_lines(row), register.plan_lines(doc))
+        row = self.registration(root, self.drafted_plan(root, fields), fields)
+        self.assertEqual(self.card_lines(row)[:2], [DRAFTED_LINE, register.HOOKS_LINE])
+
+    def test_a_drafted_registration_whose_only_hook_setting_switches_it_off_names_no_dev_shell(self):
+        for text in (SWITCHED_OFF, SWITCHED_OFF_IN_SET):
+            with self.subTest(text=text):
+                root = self.drafted_checkout(text)
+                fields = self.drafted_fields(root)
+                doc = self.drafted_plan(root, fields)
+                row = self.registration(root, doc, fields)
+                self.assertEqual(self.card_lines(row), register.plan_lines(doc))
 
     def test_a_drafted_registration_without_dev_shell_hooks_names_no_commit_environment(self):
         root = self.drafted_checkout(UNDECLARED)

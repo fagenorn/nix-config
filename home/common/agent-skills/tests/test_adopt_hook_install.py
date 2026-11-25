@@ -270,14 +270,27 @@ class HookInstallRuleTest(unittest.TestCase):
                      "{ ... }: { git-hooks.hooks.shellcheck.enable = true; }",
                      "{ git-hooks = { hooks.x.enable = true; }; }",
                      "{ git-hooks.hooks.x.enable = false; git-hooks.hooks.y.enable = true; }",
-                     "/* c */ { git-hooks.hooks.x.enable = true; }"):
+                     "/* c */ { git-hooks.hooks.x.enable = true; }",
+                     "{ pkgs, ... }:\n{\n  scripts.clean.exec = \"rm -rf build/*\";\n"
+                     "  git-hooks.hooks.shellcheck.enable = true;\n  /* formatting */\n"
+                     "  languages.nix.enable = true;\n}\n",
+                     '{ ... }: { env.U = "http://x/#a"; git-hooks.hooks.x.enable = true; }',
+                     "{ s = ''\n  echo # not a comment /*\n  ''${x}\n''; git-hooks.hooks.x.enable = true; /* a */ }",
+                     '{ s = "a ${"b /*" + c} d"; git-hooks.hooks.x.enable = true; /* a */ }',
+                     "{ git-hooks.hooks.x = { enable = false; }; git-hooks.hooks.y = { enable = true; }; }",
+                     "{ git-hooks.hooks.x = { entry = \"a\"; }; }"):
             self.assertTrue(hook_install.declares_hooks(text), text)
         for text in ("# git-hooks.hooks.x", 'scripts.a.exec = "pre-commit run";', "{ }",
                      "{\n  git-hooks.hooks.shellcheck.enable = false;\n}",
                      "  git-hooks.hooks.shellcheck.enable = false;",
                      "{ pre-commit.hooks.x.enable =\n false; }",
                      "{ config.git-hooks.hooks.x.enable = true; }",
-                     "/* git-hooks.hooks.x.enable = true; */ { }"):
+                     "/* git-hooks.hooks.x.enable = true; */ { }",
+                     "{\n  git-hooks.hooks.x = { enable = false; };\n}",
+                     "{\n  git-hooks = { hooks.x.enable = false; };\n}",
+                     "{ git-hooks = { hooks.x = { enable = false; entry = \"a\"; }; hooks.y.enable = false; }; }",
+                     '{ s = "git-hooks.hooks.x.enable = true;"; t = "/*"; } /* c */',
+                     "{ s = ''\n  git-hooks.hooks.x.enable = true;\n''; }"):
             self.assertFalse(hook_install.declares_hooks(text), text)
 
 

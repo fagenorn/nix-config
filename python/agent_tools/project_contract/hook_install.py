@@ -60,11 +60,12 @@ MASK: dict[str, str] = {"GIT_CONFIG_GLOBAL": os.devnull}
 INSTALL_COMMAND: tuple[str, ...] = ("true",)
 TEXT_LIMIT: int = 1 << 20
 
-COMMENT = re.compile(r"/\*.*?\*/|#[^\n]*", re.DOTALL)
 DECLARATION = re.compile(r"(?<![\w.'\"-])(?:git-hooks|pre-commit)\s*[.=]")
-DISABLED = re.compile(
-    r"(?<![\w.'\"-])(?:git-hooks|pre-commit)(?:\s*\.\s*[\w'\"-]+)*"
-    r"\s*\.\s*enable\s*=\s*false\s*;")
+SEGMENT = re.compile(r"\s*([\w'-]+|\"_*\")")
+DOT = re.compile(r"\s*\.")
+NONBLANK = re.compile(r"\s*\S")
+EQUALS = re.compile(r"\s*=(?!=)")
+OPENERS, CLOSERS = "({[", ")}]"
 HOOKS_PATH = "core.hooksPath"
 
 
@@ -80,16 +81,153 @@ def left_alone(local_hooks_path: str | None, hooks_dir: Path) -> bool:
     return local_hooks_path is not None or bool(installed(hooks_dir))
 
 
+def _code(text: str) -> str:
+    """`text` with each comment a space and each string literal's inside `_` characters.
+
+    Nix strings (`"..."` and `''...''`, with their `${...}` interpolations) are skipped
+    as strings, so a `/*` or a `#` inside one starts no comment and a setting named
+    inside one is no setting.
+    """
+    out: list[str] = []
+    strings: list[tuple[str, int]] = []  # (opening quote, brace depth of the code around it)
+    in_string, depth, i, n = False, 0, 0, len(text)
+    while i < n:
+        char = text[i]
+        if not in_string:
+            if char == "#":
+                end = text.find("\n", i)
+                i = n if end < 0 else end
+                out.append(" ")
+            elif text.startswith("/*", i):
+                end = text.find("*/", i + 2)
+                i = n if end < 0 else end + 2
+                out.append(" ")
+            elif char == '"' or text.startswith("''", i):
+                quote = '"' if char == '"' else "''"
+                strings.append((quote, depth))
+                in_string, depth = True, 0
+                out.append(quote)
+                i += len(quote)
+            else:
+                if char == "{":
+                    depth += 1
+                elif char == "}" and depth == 0 and strings:
+                    in_string = True  # the end of a `${...}` interpolation
+                    i += 1
+                    continue
+                elif char == "}":
+                    depth = max(depth - 1, 0)
+                out.append(char)
+                i += 1
+            continue
+        quote = strings[-1][0]
+        if text.startswith("${", i):
+            in_string, depth = False, 0
+            out.append("_")
+            i += 2
+        elif quote == '"' and char == "\\":
+            out.append("__")
+            i += 2
+        elif quote == '"' and char == '"':
+            in_string, depth = False, strings.pop()[1]
+            out.append('"')
+            i += 1
+        elif quote != '"' and text.startswith(("'''", "''$", "''\\"), i):
+            out.append("___")
+            i += 3
+        elif quote != '"' and text.startswith("''", i):
+            in_string, depth = False, strings.pop()[1]
+            out.append("''")
+            i += 2
+        else:
+            out.append("_" if char != "\n" else "\n")
+            i += 1
+    return "".join(out)
+
+
+def _path(text: str, pos: int) -> tuple[list[str], int]:
+    """The dotted attribute path at `pos` and the index after it."""
+    names: list[str] = []
+    while (found := SEGMENT.match(text, pos)):
+        names.append(found.group(1))
+        pos = found.end()
+        dot = DOT.match(text, pos)
+        if not dot:
+            break
+        pos = dot.end()
+    return names, pos
+
+
+def _value_end(text: str, pos: int) -> int:
+    """The index of the `;` that ends the value starting at `pos`, or the text's end."""
+    depth = 0
+    for i in range(pos, len(text)):
+        if text[i] in OPENERS:
+            depth += 1
+        elif text[i] in CLOSERS:
+            depth -= 1
+        elif text[i] == ";" and depth <= 0:
+            return i
+    return len(text)
+
+
+def _bindings(body: str) -> list[tuple[list[str], str]]:
+    """The `path = value;` bindings of an attribute set's body; an unreadable one has no path."""
+    found: list[tuple[list[str], str]] = []
+    pos = 0
+    while NONBLANK.match(body, pos):
+        names, after = _path(body, pos)
+        equals = EQUALS.match(body, after) if names else None
+        end = _value_end(body, equals.end() if equals else pos)
+        found.append((names, body[equals.end():end].strip()) if equals else ([], ""))
+        pos = end + 1
+    return found
+
+
+def _attribute_set(value: str) -> str | None:
+    """The inside of `value` when it is exactly one `{ ... }`, else None."""
+    if not value.startswith("{"):
+        return None
+    depth = 0
+    for i, char in enumerate(value):
+        depth += char in OPENERS
+        depth -= char in CLOSERS
+        if depth == 0:
+            return value[1:i] if i == len(value) - 1 else None
+    return None
+
+
+def _switched_off(names: list[str], value: str) -> bool:
+    """Whether the binding `names = value` only switches hooks off (`enable = false`)."""
+    if names and names[-1] == "enable" and value == "false":
+        return True
+    body = _attribute_set(value)
+    if body is None:
+        return False
+    bindings = _bindings(body)
+    if any(path == ["enable"] and inner == "false" for path, inner in bindings):
+        return True
+    return bool(bindings) and all(_switched_off(path, inner) for path, inner in bindings)
+
+
 def declares_hooks(text: str) -> bool:
     """Whether a `devenv.nix` text sets devenv git hooks, wherever the setting sits in a line.
 
-    Comments are ignored, and so is a hook setting that only switches a hook off
-    (`git-hooks.hooks.<name>.enable = false;`).
+    Comments and string literals are skipped, and so is a hook setting that only
+    switches a hook off, whether written as the dotted
+    `git-hooks.hooks.<name>.enable = false;` or inside an attribute set
+    (`git-hooks.hooks.<name> = { enable = false; };`).
     """
-    text = COMMENT.sub(" ", text)
-    switched_off = {match.start() for match in DISABLED.finditer(text)}
-    return any(match.start() not in switched_off
-               for match in DECLARATION.finditer(text))
+    text = _code(text)
+    for match in DECLARATION.finditer(text):
+        names, after = _path(text, match.start())
+        equals = EQUALS.match(text, after)
+        if not equals:
+            return True
+        value = text[equals.end():_value_end(text, equals.end())].strip()
+        if not _switched_off(names, value):
+            return True
+    return False
 
 
 def declared(worktree: Path) -> bool:
