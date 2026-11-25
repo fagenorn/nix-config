@@ -61,7 +61,7 @@ class OmlxDeclarationTest(unittest.TestCase):
         serve = self.got["serve"]
         gate = next(line for line in serve.splitlines() if " gate " in line)
         self.assertRegex(gate, r"^/nix/store/[0-9a-z]{32}-agent-platform/bin/memory-floor gate ")
-        self.assertIn("--floor-gib 16 ", gate + " ")
+        self.assertIn("--floor-gib 10 ", gate + " ")
         self.assertIn("--interval-seconds 2", gate)
         self.assertLess(serve.index(" gate "), serve.index("sops"))
         self.assertLess(serve.index(" gate "), serve.index("exec /opt/homebrew/bin/omlx serve"))

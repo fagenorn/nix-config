@@ -47,14 +47,17 @@ episode each. A missing or non-JSON record is not a failed reading.
 
 `sample [--floor-record FILE]` (default `/var/db/memory-watch/floor.json`, written by the root memory
 floor daemon, which never writes this watcher's log or alerts) reads the floor record once per run
-and keeps `floor_kills_seen`, `priority_unset_open` and `floor_log` (kill lines not yet printed) in
+and keeps `floor_kills_seen`, `floor_unmet_seen`, `priority_unset_open` and `floor_log` (kill lines not yet printed) in
 the state. Each `recent` entry whose `seq` is above `floor_kills_seen` queues one `memory_kill`
 alert, in `seq` order, and puts its `kill_line` in `floor_log`; `sample` prints `floor_log` to
 stdout, the watch log, and empties it before the state is written. The first sight of the record
 only sets `floor_kills_seen` to its `kills`. When the record's `omlx_pid` is launchctl's pid, its
 `omlx_kernel_priority` is an integer and `omlx_priority_resets` is 0, the kernel priority replaces
 launchctl's in `omlx_jetsam_priority`. `omlx_priority_error` or `omlx_priority_resets` above 0
-queues `jetsam_priority_unset` once per episode. A missing or non-JSON record queues nothing.
+queues `jetsam_priority_unset` once per episode. Each `floor_unmet_recent` entry whose `seq` is above
+`floor_unmet_seen` queues one `floor_unmet` alert, in `seq` order (the first sight only sets
+`floor_unmet_seen` to `floor_unmets`, which a record without it counts as 0, so the first episode after
+a healthy sample alerts). A missing or non-JSON record queues nothing.
 
 Exit 0: recorded, every alert delivered or recorded. 3: recorded, at least one alert not sent
 (stderr `host alert not sent: <reason>`). 1: `vm_stat`, `sysctl`, `launchctl` or `ps` failed
@@ -85,7 +88,7 @@ FSEVENTSD_DEFAULTS = {
     "fseventsd_restarts_today": 0, "fseventsd_held_open": False, "fseventsd_failed_open": False,
 }
 FLOOR_RECORD = "/var/db/memory-watch/floor.json"
-FLOOR_DEFAULTS = {"floor_kills_seen": None, "priority_unset_open": False, "floor_log": []}
+FLOOR_DEFAULTS = {"floor_kills_seen": None, "floor_unmet_seen": None, "priority_unset_open": False, "floor_log": []}
 STATE_NAME = "memory-watch.json"
 PEAKS_NAME = "memory-peaks.jsonl"
 RUN_TIMEOUT = 30
@@ -281,6 +284,23 @@ def _fold_floor(state: dict, found: dict | None, reading: dict) -> None:
                             f"{entry['available_after_bytes'] / GIB:.1f} GiB after. {SEE}",
                 })
         state["floor_kills_seen"] = kills
+    unmets = _int(found.get("floor_unmets"))
+    if unmets is None and kills is not None:
+        unmets = 0
+    if unmets is not None:
+        seen = state["floor_unmet_seen"]
+        if seen is not None:
+            entries = [entry for entry in found.get("floor_unmet_recent") or []
+                       if isinstance(entry, dict) and _int(entry.get("seq")) is not None and entry["seq"] > seen]
+            for entry in sorted(entries, key=lambda entry: entry["seq"]):
+                state["pending"].append({
+                    "kind": "floor_unmet", "logged": False,
+                    "text": f"{host}: the memory floor has no workload it may end that would bring available "
+                            f"memory over the {found['floor_bytes'] // GIB} GiB floor. Available "
+                            f"{entry['available_bytes'] / GIB:.1f} GiB, largest candidate "
+                            f"{entry['largest_bytes'] / GIB:.1f} GiB. {SEE}",
+                })
+        state["floor_unmet_seen"] = unmets
     error, resets = found.get("omlx_priority_error"), _int(found.get("omlx_priority_resets")) or 0
     if error or resets > 0:
         if not state["priority_unset_open"]:
@@ -313,7 +333,7 @@ def decide(state, reading: dict, now: datetime, floor_bytes: int, others_budget_
             carried = fresh_day(state["since"], day)
             for key in ("omlx_runs", "omlx_jetsam_priority", "low_memory_open", "pending",
                         "fseventsd_restarts_seen", "fseventsd_held_open", "fseventsd_failed_open",
-                        "floor_kills_seen", "priority_unset_open", "floor_log"):
+                        "floor_kills_seen", "floor_unmet_seen", "priority_unset_open", "floor_log"):
                 carried[key] = state[key]
             state = carried
     used, available, loaded = reading["used_bytes"], reading["available_bytes"], reading["loaded"]

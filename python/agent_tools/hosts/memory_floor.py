@@ -17,7 +17,12 @@ it, and each service process the host runs for the system (the process only, not
 The selection is pure over a process table, so it runs against stubbed tables. The enforcement loop
 reaches the machine only through `Io`: it samples available memory, ends the largest workload while
 memory stays under the floor for the declared samples (and any workload over the run bound), and
-records each kill. The daemon runs as root and polices the agent uid, so it writes no path that uid
+records each kill. A floor kill must be able to help: the largest remaining workload is ended only
+when its footprint is at least the declared minimum and, added to available memory, reaches the
+floor. When it is not, nothing is ended, and the episode logs one `floor_unmet` line (available
+memory and the largest candidate's size) and keeps it in the record (`floor_unmets`, the count, and `floor_unmet_recent`, the last entries, each with
+its `seq`) for the owner's sampler to alert on; the next episode starts after memory is over the floor
+again, and `floor_unmet_open` keeps an uninterrupted episode one episode across a restart. The daemon runs as root and polices the agent uid, so it writes no path that uid
 can write: its only writes are its record (through `omlx_memory_watch.write_record`, which replaces a
 symlink rather than following it) and its lines on stdout, which launchd sends to the daemon's log.
 
@@ -244,6 +249,7 @@ class Limits:
     slow_seconds: float
     run_bound_bytes: int
     jetsam_priority: int
+    min_tree_bytes: int
 
 
 @dataclass
@@ -265,13 +271,18 @@ class Io:
 class Loop:
     streak: int = 0
     previous: int | None = None
-    no_workload_open: bool = False
+    unmet_open: bool = False
     priority_failed_pid: int | None = None
     priority_pid: int | None = None
     priority_reads: int = 0
     priority_resets: int = 0
     priority_set: bool = False
     priority_kept_pid: int | None = None
+
+
+def restore_loop(record: dict) -> Loop:
+    """A fresh loop that carries the one thing a restart must not forget: an episode still open."""
+    return Loop(unmet_open=record.get("floor_unmet_open") is True)
 
 
 def kernel_priority(pid: int, control: Callable[[int, int, int, bytearray], int]) -> int | None:
@@ -365,7 +376,7 @@ def enforce_once(
         return limits.fast_seconds
     loop.streak = loop.streak + 1 if available < limits.floor_bytes else 0
     if loop.streak == 0:
-        loop.no_workload_open = False
+        loop.unmet_open = False
     attempted: set[int] = set()
 
     def end(workload: Workload, reason: str) -> bool:
@@ -382,6 +393,7 @@ def enforce_once(
             readable = False
         if available >= limits.floor_bytes:
             loop.streak = 0
+            loop.unmet_open = False
         entry = {
             "seq": record.get("kills", 0) + 1, "at": io.now().isoformat(timespec="seconds"),
             "reason": reason, "owner": workload.owner, "root_pid": workload.root_pid,
@@ -405,13 +417,16 @@ def enforce_once(
         if again is None:
             break
         remaining = [w for w in again[0] if w.root_pid not in attempted]
-        if not remaining:
-            if not loop.no_workload_open:
-                loop.no_workload_open = True
-                out(
-                    f"{io.now().isoformat(timespec='seconds')} floor_breached no agent workload"
-                    f" to end available_gib={available / GIB:.1f}\n"
-                )
+        largest = remaining[0] if remaining else None
+        if (
+            largest is None
+            or largest.size < limits.min_tree_bytes
+            or available + largest.size < limits.floor_bytes
+        ):
+            # The largest candidate has the best chance, so when it cannot help nothing can.
+            if not loop.unmet_open:
+                loop.unmet_open = True
+                _unmet(io, record, available, largest.size if largest else 0, out)
             break
         unreadable = not end(remaining[0], "floor")
     if first is not None:
@@ -420,6 +435,16 @@ def enforce_once(
     loop.previous = available
     _stamp(limits, io, loop, record, available, interval)
     return interval
+
+
+def _unmet(io: Io, record: dict, available: int, largest: int, out: Callable[[str], None]) -> None:
+    """Log and record one floor_unmet episode: the sampler reads the record and sends the alert."""
+    at = io.now().isoformat(timespec="seconds")
+    seq = record.get("floor_unmets", 0) + 1
+    record["floor_unmets"] = seq
+    entry = {"seq": seq, "at": at, "available_bytes": available, "largest_bytes": largest}
+    record["floor_unmet_recent"] = [*record.get("floor_unmet_recent", []), entry][-RECENT:]
+    out(f"{at} floor_unmet available_gib={available / GIB:.1f} largest_gib={largest / GIB:.1f}\n")
 
 
 def _read_back(io: Io, pid: int) -> int | str:
@@ -475,9 +500,12 @@ def _stamp(limits: Limits, io: Io, loop: Loop, record: dict, available: int | No
     record.setdefault("since", at)
     record.setdefault("kills", 0)
     record.setdefault("recent", [])
+    record.setdefault("floor_unmets", 0)
+    record.setdefault("floor_unmet_recent", [])
     record.update(
         at=at, floor_bytes=limits.floor_bytes, run_bound_bytes=limits.run_bound_bytes,
-        streak=loop.streak, interval_seconds=interval,
+        min_tree_bytes=limits.min_tree_bytes,
+        streak=loop.streak, interval_seconds=interval, floor_unmet_open=loop.unmet_open,
     )
     if available is not None:
         record["available_bytes"] = available
@@ -629,6 +657,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--fast-seconds", type=float, default=2)
     run.add_argument("--slow-seconds", type=float, default=10)
     run.add_argument("--run-bound-gib", type=int, required=True)
+    run.add_argument("--min-tree-gib", type=int, required=True)
     run.add_argument("--omlx-jetsam-priority", type=_declared_priority, required=True)
     run.add_argument("--agent-user", required=True)
     run.add_argument("--agent-root", action="append", required=True)
@@ -673,10 +702,11 @@ def enforce(args) -> int:
     limits = Limits(
         args.floor_gib * GIB, args.floor_samples, args.grace_seconds, args.margin_gib * GIB,
         args.fall_gib * GIB, args.fast_seconds, args.slow_seconds, args.run_bound_gib * GIB,
-        args.omlx_jetsam_priority,
+        args.omlx_jetsam_priority, args.min_tree_gib * GIB,
     )
     io = build_io(args, owners)
-    loop, record = Loop(), read_record(args.record) or {}
+    record = read_record(args.record) or {}
+    loop = restore_loop(record)
     while True:
         interval = step(limits, owners, io, loop, record, args.record, _print_line)
         if args.once:

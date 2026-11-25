@@ -28,7 +28,7 @@ rec {
   # What the agent's Claude sessions take together (4.5 GiB at the 24 Nov panic).
   agentSessionsGiB = 5;
   # Memory held back from every other use.
-  floorGiB = 16;
+  floorGiB = 10;
   # Consecutive samples under the floor before the floor daemon ends a workload.
   floorSamples = 3;
   # Seconds a workload gets to exit on SIGTERM before SIGKILL.
@@ -37,6 +37,8 @@ rec {
   floorMarginGiB = 16;
   # A fall in available memory between two samples that also earns the fast interval.
   floorFallGiB = 2;
+  # The smallest workload the floor daemon may end: a smaller tree frees too little to matter.
+  floorMinTreeGiB = 1;
   # The floor daemon's sampling interval near the floor or while memory falls.
   fastSampleSeconds = 2;
   # The floor daemon's sampling interval otherwise.
