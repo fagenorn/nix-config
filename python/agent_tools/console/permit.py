@@ -63,18 +63,27 @@ never None. The checks run in this order, the first that applies deciding:
   carries no issue under `grant.branch_pattern`, or an issue not in `grant.issues` is `NOT_OWN_PR`,
   except that an issue in `grant.others` is `SHARED_ISSUE`; a pull request whose head differs from
   the command's `--match-head-commit` is `STALE_HEAD`. Else `ALLOW` with target `{"pr", "head"}`.
-- Rerun: another `--repo` is `OTHER_REPO`; other words are `NOT_GRANTED`. Then `read_run`: an event
-  other than `pull_request` is `DEPLOY_RERUN`; another repository or an issue not own is
-  `NOT_OWN_RUN` (`SHARED_ISSUE` for an issue in `others`); no pull request among the run's whose
-  `read_pr` has the slug as repository and the run's branch is `NOT_OWN_RUN`; that pull request's
-  head other than the run's head is `STALE_RUN`; no job that the rerun would run (every job of the
-  run's latest attempt, all pages, whose conclusion is not `success`: a failed rerun also runs the
-  skipped dependents of a failed job, but not a skipped job whose own `if` can never hold for a pull
-  request event, `read_run`'s business) or one not named by `read_required(slug, base)` is
-  `NOT_CHECK_RUN`. A head that `grant.reruns` already counts `MAX_RERUNS` (two) allowed reruns for is
-  `RERUN_LIMIT`, which names the two reruns, each by run and failing members (ADR-console-106). Else `ALLOW` with target `{"run", "pr", "head", "count",
-  "members"}`: `count` is the number of allowed reruns of that head with this one, and `members` the
-  suite members the run's failed jobs reported as failed.
+- Rerun: another `--repo` is `OTHER_REPO`; other words are `NOT_GRANTED`. Then `read_run`. Two kinds of
+  run are the project's release runs, read through `read_release_pr` (the one open pull request from
+  the contract's integration branch into its default branch, for a run of the slug's own repository on
+  the integration branch): a `push` run whose head is that pull request's head (the release
+  candidate), and a `pull_request` run of the integration branch that lists that pull request. Any
+  other `push` run, and any event but `pull_request`, is `DEPLOY_RERUN`. For a `pull_request` run:
+  another repository is `NOT_OWN_RUN`; a branch that is no own issue's is `NOT_OWN_RUN` unless it is
+  the release pull request's run (`SHARED_ISSUE` for an issue in `others`, whatever it is); for an own
+  issue's branch, no pull request among the run's whose `read_pr` has the slug as repository and the
+  run's branch is `NOT_OWN_RUN`; the pull request's head (the release pull request's too) other than
+  the run's head is `STALE_RUN`. A release run's checks are the default branch's. No job that the
+  rerun would run (every job of the run's latest attempt, all pages, whose conclusion is not
+  `success`: a failed rerun also runs the skipped dependents of a failed job, but not a skipped job
+  whose own `if` can never hold for the run's own event, `read_run`'s business) or one not named by
+  `read_required(slug, base)` is `NOT_CHECK_RUN`. A head that `grant.reruns` already counts `MAX_RERUNS` (two) allowed reruns for is
+  `RERUN_LIMIT`, which names the two reruns, each by run and failing members (ADR-console-106); the
+  release pull request run and the candidate's push run share that one head's cap, and the refusal
+  names the release pull request. Else `ALLOW` with target `{"run", "pr", "head", "count", "members"}`:
+  `count` is the number of allowed reruns of that head with this one, and `members` the suite members
+  the run's failed jobs reported as failed. A release run's target also carries `release`, `pull_request`
+  or `push`.
 - Release: the plain run is `ALLOW` with its target; any other leading run is `RELEASE_SPELLING`.
 - A reader raising `ForgeUnreadable` is `DENY` with `FORGE_UNREADABLE`.
 
@@ -129,20 +138,22 @@ rows say, each a `Rerun` (its run and failing suite members), which the console 
 its `.frozen()` is a `Forge` over the same cache that raises `ForgeUnreadable("not read before")`
 for a call not already cached, so the console judges again without a second forge read.
 
-Readers (`read_pr`, `read_run`, `read_required`) read the forge once and raise `ForgeUnreadable` with
+Readers (`read_pr`, `read_run`, `read_required`, `read_release_pr`) read the forge once and raise `ForgeUnreadable` with
 a fixed sentence for a failed read or a missing or malformed member; no raw forge text reaches a
 reason. `read_run`'s `rerun` is the names of the jobs a failed-job rerun would run, read across every
 page of the run's jobs. A job whose conclusion is `skipped` is left out when the run's workflow file at
 the run's head (the run's `path`, read once, only when a job was skipped) gives that job, by name, an
-`if` that `never_on_pull_request` proves false for a pull request event: a `&&` chain with a
-`github.event_name == '<event>'` term for an event but `pull_request` (or `!= 'pull_request'`), no `||`
+`if` that `never_on` proves false for the run's own event: a `&&` chain with a
+`github.event_name == '<event>'` term for an event but the run's (or `!= '<the run's event>'`), no `||`
 and no call but `!cancelled()`, `always()`, `success()` and `failure()`. Anything else, a run with no
 `path` or a job the file does not name counts as it did; a workflow file that cannot be read is
 `ForgeUnreadable`. `members` is the `suite-runner: failed <member>` lines of the log of each job whose
 conclusion is `failure`, in order and once each (at most `MAX_MEMBERS`); a log that cannot be read adds
 none, because the members are evidence and gate nothing. `read_required` names only the checks a GitHub Actions job can satisfy: a
 check bound to another app is left out, even when the legacy `contexts` list repeats its name. `merge_binding(root)` is the project contract's `bindings.vcs.merge` `strategy` and
-`delete_branch`, `(None, False)` on any failure.
+`delete_branch`, `(None, False)` on any failure. `release_branches(root)` is the contract's
+`bindings.vcs.integration_branch` and `default_branch`, `(None, None)` for no root, on any failure or for a
+member that is no non-empty string.
 """
 import base64
 import hashlib
@@ -298,6 +309,7 @@ class Forge:
     read_pr: Callable[[str, int], Mapping]
     read_run: Callable[[str, int], Mapping]
     read_required: Callable[[str, str], frozenset[str]]
+    read_release_pr: Callable[[str, str | None, str], Mapping | None]
 
 
 @dataclass(frozen=True)
@@ -309,7 +321,7 @@ class Memoized(Forge):
             def read(*args):
                 return _replay(self.cache.get((name, args)))
             return read
-        return Forge(cached("pr"), cached("run"), cached("required"))
+        return Forge(cached("pr"), cached("run"), cached("required"), cached("release"))
 
 
 def _replay(entry):
@@ -335,7 +347,8 @@ def memoized(forge: Forge) -> Memoized:
             return _replay(cache[key])
         return call
     return Memoized(cached("pr", forge.read_pr), cached("run", forge.read_run),
-                    cached("required", forge.read_required), cache)
+                    cached("required", forge.read_required),
+                    cached("release", forge.read_release_pr), cache)
 
 
 def _get(path: str, what: str):
@@ -382,20 +395,26 @@ _JOB_IF = re.compile(r"^    if:\s*(\S.*?)\s*$")
 _FAILED_MEMBER = re.compile(r"^(?:\S+Z )?suite-runner: failed (\S+)\s*$", re.MULTILINE)
 
 
-def never_on_pull_request(condition: str) -> bool:
-    """Whether a job's `if` is provably false for a pull request event (see the module docstring)."""
+def never_on(condition: str, event: str) -> bool:
+    """Whether a job's `if` is provably false for a run of `event` (see the module docstring)."""
+    event = event.lower()
     found = _EXPRESSION.fullmatch(condition)
     text = (found[1] if found else condition).strip()
     text = _NEVER_CALLS.sub("", text)
     if "||" in text or "(" in text or ")" in text:
         return False
     for term in (term.strip() for term in text.split("&&")):
-        for pattern, holds_for in ((_EVENT_IS, lambda event: event.lower() != "pull_request"),
-                                   (_EVENT_IS_NOT, lambda event: event.lower() == "pull_request")):
+        for pattern, holds_for in ((_EVENT_IS, lambda named: named.lower() != event),
+                                   (_EVENT_IS_NOT, lambda named: named.lower() == event)):
             match = pattern.fullmatch(term)
             if match and holds_for(match[1]):
                 return True
     return False
+
+
+def never_on_pull_request(condition: str) -> bool:
+    """Whether a job's `if` is provably false for a pull request event (see the module docstring)."""
+    return never_on(condition, "pull_request")
 
 
 def _unquoted(value: str) -> str:
@@ -476,18 +495,49 @@ def read_run(slug: str, run_id: int) -> Mapping:
             if conclusion is not None and not isinstance(conclusion, str):
                 raise ForgeUnreadable(f"{what} has no readable conclusion")
             jobs.append((name, conclusion, job.get("id")))
+    event = _member(run, "event", str, what)
     conditions = (_workflow_conditions(slug, run, what)
                   if any(conclusion == "skipped" for _, conclusion, _ in jobs) else {})
     rerun = [name for name, conclusion, _ in jobs
              if conclusion != "success" and not (
-                 conclusion == "skipped" and never_on_pull_request(conditions.get(name, "")))]
+                 conclusion == "skipped" and never_on(conditions.get(name, ""), event))]
     failed = [job_id for _, conclusion, job_id in jobs
               if conclusion == "failure" and isinstance(job_id, int) and not isinstance(job_id, bool)]
-    return {"event": _member(run, "event", str, what),
+    return {"event": event,
             "branch": _member(run, "head_branch", str, what),
             "repo": _member(_member(run, "head_repository", dict, what), "full_name", str, what),
             "head": _member(run, "head_sha", str, what), "prs": numbers, "rerun": rerun,
             "members": _failed_members(slug, failed)}
+
+
+def read_release_pr(slug: str, root: str | None, branch: str) -> Mapping | None:
+    """The one open pull request from the integration branch into the default branch, None when `branch`
+    is not the integration branch or the project has no such pair."""
+    integration, default = release_branches(root)
+    if integration is None or default is None or integration == default or branch != integration:
+        return None
+    what = f"the release pull request of {slug}"
+    owner = slug.split("/")[0]
+    listing = _get(f"repos/{slug}/pulls?state=open&base={default}&head={owner}:{integration}&per_page=2", what)
+    if not isinstance(listing, list):
+        raise ForgeUnreadable(f"{what} has no readable listing")
+    if not listing:
+        return None
+    if len(listing) > 1:
+        raise ForgeUnreadable(f"{what} is not one pull request")
+    entry = listing[0]
+    try:
+        number = _member(entry, "number", int, what)
+        head = _member(entry, "head", dict, what)
+        sha = _member(head, "sha", str, what)
+        ref = _member(head, "ref", str, what)
+        repo = _member(_member(head, "repo", dict, what), "full_name", str, what)
+        base = _member(_member(entry, "base", dict, what), "ref", str, what)
+    except ForgeUnreadable:
+        raise ForgeUnreadable(f"{what} has no readable head") from None
+    if not _SHA.fullmatch(sha) or ref != integration or repo != slug or base != default:
+        raise ForgeUnreadable(f"{what} has no readable head")
+    return {"pr": number, "branch": integration, "head": sha, "base": default}
 
 
 def read_required(slug: str, base: str) -> frozenset[str]:
@@ -512,7 +562,7 @@ def read_required(slug: str, base: str) -> frozenset[str]:
     return frozenset(found)
 
 
-FORGE = Forge(read_pr, read_run, read_required)
+FORGE = Forge(read_pr, read_run, read_required, read_release_pr)
 
 
 def rerun_record(events: Sequence, held: Mapping[tuple[str | None, str], tuple[Rerun, ...]] | None = None
@@ -551,6 +601,20 @@ def reads(root: str | None, slug_of, branch_pattern_of, merge_binding_of
             return default
     strategy, delete_branch = read(merge_binding_of, (None, False))
     return read(slug_of, None), read(branch_pattern_of, None), strategy, delete_branch
+
+
+def release_branches(root: str | None) -> tuple[str | None, str | None]:
+    """The project contract's `(integration_branch, default_branch)`, `(None, None)` on any failure."""
+    if root is None:
+        return None, None
+    try:
+        vcs = resolve_project.resolve(root)["bindings"]["vcs"]
+        integration, default = vcs["integration_branch"], vcs["default_branch"]
+    except Exception:
+        return None, None
+    if isinstance(integration, str) and integration and isinstance(default, str) and default:
+        return integration, default
+    return None, None
 
 
 def merge_binding(root: str) -> tuple[str | None, bool]:
@@ -795,6 +859,13 @@ def _judge_merge(parts: list[str], grant: Grant, forge: Forge) -> Verdict:
     return _allow(MERGE, target)
 
 
+def _release_pull(grant: Grant, forge: Forge, run: Mapping) -> Mapping | None:
+    """The project's open release pull request when the run is of the project's own repository, else None."""
+    if run["repo"] != grant.slug:
+        return None
+    return forge.read_release_pr(grant.slug, grant.root, run["branch"])
+
+
 def _judge_rerun(parts: list[str], grant: Grant, forge: Forge) -> Verdict:
     repo = _repo_value(parts)
     if grant.slug is not None and repo is not None and repo != grant.slug:
@@ -804,30 +875,45 @@ def _judge_rerun(parts: list[str], grant: Grant, forge: Forge) -> Verdict:
         return _deny(RERUN, spelling_refusal(NOT_GRANTED, RERUN, grant, _missing(RERUN, parts, grant)))
     slug, run_id = grant.slug, int(parts[3])
     run = forge.read_run(slug, run_id)
-    if run["event"] != "pull_request":
-        return _deny(RERUN, DEPLOY_RERUN.format(run=run_id, event=run["event"]))
-    not_own = NOT_OWN_RUN.format(run=run_id)
-    if run["repo"] != slug:
-        return _deny(RERUN, not_own)
-    refusal = _own_issue(grant, run["branch"], not_own)
-    if refusal:
-        return _with_verb(refusal, RERUN)
-    for number in run["prs"]:
-        pull = forge.read_pr(slug, number)
-        if pull["repo"] == slug and pull["branch"] == run["branch"]:
-            break
+    release = None
+    if run["event"] == "push":
+        pull = _release_pull(grant, forge, run)
+        if pull is None or pull["head"] != run["head"]:
+            return _deny(RERUN, DEPLOY_RERUN.format(run=run_id, event="push"))
+        number, base, release = pull["pr"], pull["base"], "push"
     else:
-        return _deny(RERUN, not_own)
-    if pull["head"] != run["head"]:
-        return _deny(RERUN, STALE_RUN.format(run=run_id))
-    if not run["rerun"] or not set(run["rerun"]) <= forge.read_required(slug, pull["base"]):
+        if run["event"] != "pull_request":
+            return _deny(RERUN, DEPLOY_RERUN.format(run=run_id, event=run["event"]))
+        not_own = NOT_OWN_RUN.format(run=run_id)
+        if run["repo"] != slug:
+            return _deny(RERUN, not_own)
+        refusal = _own_issue(grant, run["branch"], not_own)
+        if refusal and refusal.reason != not_own:
+            return _with_verb(refusal, RERUN)
+        if refusal:
+            pull = _release_pull(grant, forge, run)
+            if pull is None or pull["pr"] not in run["prs"]:
+                return _with_verb(refusal, RERUN)
+            number, release = pull["pr"], "pull_request"
+        else:
+            for number in run["prs"]:
+                pull = forge.read_pr(slug, number)
+                if pull["repo"] == slug and pull["branch"] == run["branch"]:
+                    break
+            else:
+                return _deny(RERUN, not_own)
+        if pull["head"] != run["head"]:
+            return _deny(RERUN, STALE_RUN.format(run=run_id))
+        base = pull["base"]
+    if not run["rerun"] or not set(run["rerun"]) <= forge.read_required(slug, base):
         return _deny(RERUN, NOT_CHECK_RUN.format(run=run_id))
     done = grant.reruns.get(run["head"], ())
     if len(done) >= MAX_RERUNS:
         return _deny(RERUN, RERUN_LIMIT.format(
             pr=number, head=run["head"], reruns=" and ".join(rerun.describe() for rerun in done)))
-    return _allow(RERUN, {"run": run_id, "pr": number, "head": run["head"], "count": len(done) + 1,
-                          "members": list(run.get("members", []))})
+    target = {"run": run_id, "pr": number, "head": run["head"], "count": len(done) + 1,
+              "members": list(run.get("members", []))}
+    return _allow(RERUN, target if release is None else {**target, "release": release})
 
 
 _OPENING = {MERGE: ["gh", "pr", "merge"], RERUN: ["gh", "run", "rerun"]}

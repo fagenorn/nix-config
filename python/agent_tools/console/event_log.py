@@ -117,7 +117,9 @@ any other row, and only `sprints.sprint_states` reads a row: an `action` allow o
 marks its question's approval used, and retention removing it later changes nothing an approval at
 most an hour old needs.
 The `target` of an allowed `rerun` is `{"run", "pr", "head", "count", "members"}`: `count` is the allowed reruns
-of that head with this one and `members` the failing suite members (ADR-console-106).
+of that head with this one and `members` the failing suite members (ADR-console-106). An allowed rerun of
+the project's release pull request run or of its release candidate's push run also carries `release`, that run's
+event (`pull_request` or `push`).
 
 Two rows record a release card outside any sprint (#1401): `RELEASE_CARD_POSTED` (`release_card.posted`)
 carries payload `commit`, `version`, with a null project column, and `RELEASE_CARD_ANSWERED`
