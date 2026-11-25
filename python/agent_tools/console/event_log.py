@@ -110,7 +110,9 @@ while its commit stays pending (ADR-system-004).
 Two rows record a manager's permit (#1377, ADR-console-094): `PERMIT_JUDGED` (`permit.judged`, one per
 decided verdict on a merge, rerun or action command: payload `sprint_id`, `session_id`, `repo` (the
 project's slug, null when unknown, and null for an `action`), `verb`, `decision`, `reason` and `target`,
-`{"round", "index"}` for an `action`) and `PERMIT_LANDED` (`permit.landed`, one per merge or `action`
+`{"round", "index"}` for an `action`, and `{"run", "pr", "head", "count", "members"}` for an allowed
+`rerun`: `count` is the allowed reruns of that head with this one and `members` the failing suite members, #1712)
+and `PERMIT_LANDED` (`permit.landed`, one per merge or `action`
 the manager's session ran after the console allowed it: `sprint_id`, `session_id`, `repo`, `verb` and
 `target`, `{"pr", "head"}` for a `merge`). Neither is in `KEPT_KINDS`, so retention removes them like
 any other row, and only `sprints.sprint_states` reads a row: an `action` allow of `permit.judged`
