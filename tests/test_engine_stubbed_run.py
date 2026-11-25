@@ -55,6 +55,9 @@ UNNAMED_LITE = dict(CLEAN_LITE, verdict="findings",
                     findings=[{"severity": "important", "file": "", "failing_input": "", "summary": "s", "kind": "other"}])
 CLEAN_FULL = {key: value for key, value in CLEAN_LITE.items() if key != "escalate"}
 CLEAN_REREVIEW = {"verdict": "pass", "findings": []}
+KEPT = ('import unittest\n\nfrom fixture.greet import greet\n\n\nclass KeptCheck(unittest.TestCase):\n'
+        '    def test_greet_still_greets(self):\n        self.assertEqual(greet("Ada"), "Hello, Ada.")\n')
+KEPT_ID = "checks.check_kept.KeptCheck.test_greet_still_greets"
 SHA = "a" * 40
 SYNCED = {"reply": {"status": "done", "notes": "n", "tests": ["checks/check_greet.py"]}, "merge": {}}
 CONFLICTED = {"reply": {"status": "conflicted", "notes": "n", "tests": []}, "merge": {}}
@@ -645,6 +648,44 @@ class ReviewRouteTest(Scenario):
 
         self.assertIn(("lite-fixed", "not-done"), run.transitions(self.child(run, "direct")))
         self.assertNotIn("lite-rereview", self.keys(run))
+
+
+class RevertCheckTest(Scenario):
+    def test_the_review_after_the_revert_check_names_a_new_test_that_passes_without_its_source(self):
+        run = self.stubbed(replies={"implement": implementing("checks/check_kept.py", KEPT)})
+
+        self.finish(run, "done")
+
+        direct = self.child(run, "direct")
+        checked = self.stored(direct, "revert-check")
+        self.assertEqual((checked["still_passing"], checked["new_tests"], checked["reason"]),
+                         ([KEPT_ID], [KEPT_ID], ""))
+        self.assertIn(KEPT_ID, self.launch(run, "lite-review")["prompt"])
+        transitions = run.transitions(direct)
+        self.assertIn(("revert-check", "ok"), transitions)
+        self.assertLess(transitions.index(("revert-check", "ok")), transitions.index(("implemented", "lite")))
+
+    def test_a_fix_that_moves_the_head_runs_the_check_again_before_the_re_review_and_adds_no_review_round(self):
+        run = self.stubbed(replies={
+            "implement": implementing("checks/check_kept.py", KEPT),
+            "lite-review": lite_findings(),
+            "lite-fix": committing("fixture/second.py", "SECOND = 2\n"),
+            "lite-rereview": CLEAN_REREVIEW})
+
+        self.finish(run, "done")
+
+        self.assertEqual(self.keys(run), ["applies", "implement", "lite-review", "lite-fix", "lite-rereview"])
+        direct = self.child(run, "direct")
+        wanted = {"implement", "revert-check", "lite-review", "lite-fix", "lite-revert-check", "lite-rereview"}
+        entered = [e["step"] for e in StubbedRun.events(direct) if e["event"] == "step_entered" and e["step"] in wanted]
+        self.assertEqual(entered, ["implement", "revert-check", "lite-review", "lite-fix", "lite-revert-check",
+                                   "lite-rereview"])
+        first, second = self.stored(direct, "revert-check"), self.stored(direct, "lite-revert-check")
+        self.assertEqual(first["head"], self.stored(direct, "implement")["commit"])
+        self.assertEqual(second["head"], self.stored(direct, "lite-fix")["commit"])
+        self.assertNotEqual(second["head"], first["head"])
+        self.assertEqual(second["still_passing"], [KEPT_ID])
+        self.assertIn(KEPT_ID, self.launch(run, "lite-rereview")["prompt"])
 
 
 class VerifyTest(Scenario):

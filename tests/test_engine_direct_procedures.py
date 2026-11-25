@@ -18,6 +18,7 @@ IMPLEMENTED = {"status": "done", "start_head": SHA, "commit": SHA, "notes": "n",
                "acceptance": [{"id": "AC1", "text": "t", "kind": "code", "result": "r"}],
                "sensitive": False, "ineligible": False}
 INDEPENDENT = {"verdict": "pass", "findings": []}
+CHECKED = {"verdict": "ok", "base": SHA, "head": SHA, "new_tests": [], "still_passing": [], "reason": ""}
 
 
 def reported(name: str, outcome: str, result: dict) -> list[dict]:
@@ -30,7 +31,8 @@ def lite_review(verdict: str, findings: list[dict]) -> dict:
 
 
 def to_the_lite_group() -> list[dict]:
-    return reported("preflight", "clear", PREFLIGHT) + reported("implement", "done", IMPLEMENTED)
+    return (reported("preflight", "clear", PREFLIGHT) + reported("implement", "done", IMPLEMENTED)
+            + reported("revert-check", "ok", CHECKED))
 
 
 def lite_round(review: dict, independent: bool = True) -> list[dict]:
@@ -65,21 +67,22 @@ class DirectProcedureTest(unittest.TestCase):
             "task": {"need": "owner-decision", "reenter": "implement"},
             "direct-review": {"need": "owner-decision", "reenter": "implemented"},
             "direct-fix": {"need": "owner-decision", "reenter": "implemented"},
-            "codex-unavailable": {"need": "retry", "reenter": "implemented"}})
+            "codex-unavailable": {"need": "retry", "reenter": "implemented"},
+            "revert-check-unavailable": {"need": "retry", "reenter": "revert-check"}})
         self.assertEqual(load(PROCEDURES, "verify")["stops"], {
             "setup": {"need": "owner-decision", "reenter": "preflight"},
             "claim-lost": {"need": "owner-decision", "reenter": "preflight"},
             "verify": {"need": "owner-decision", "reenter": "checks"}})
 
     def test_the_route_prompts_differ_only_by_their_producers(self):
-        producers = {"lite": ("lite-review", "lite-independent", "lite-fix"),
-                     "escalated": ("escalated", "lite-independent", "escalated-fix"),
-                     "full": ("full-review", "full-independent", "full-fix")}
+        producers = {"lite": ("lite-review", "lite-independent", "lite-fix", "lite-revert-check"),
+                     "escalated": ("escalated", "lite-independent", "escalated-fix", "escalated-revert-check"),
+                     "full": ("full-review", "full-independent", "full-fix", "full-revert-check")}
         for kind in ("fix", "rereview"):
             texts = set()
-            for route, (review, independent, fix) in producers.items():
+            for route, (review, independent, fix, check) in producers.items():
                 text = (PROCEDURES / f"direct-{kind}-{route}.md").read_text(encoding="utf-8")
-                texts.add(text.replace(fix, "FIX").replace(independent, "INDEPENDENT").replace(review, "REVIEW"))
+                texts.add(text.replace(check, "CHECK").replace(fix, "FIX").replace(independent, "INDEPENDENT").replace(review, "REVIEW"))
             self.assertEqual(len(texts), 1, kind)
 
     def test_a_blocked_group_reaches_its_tally(self):
@@ -110,7 +113,8 @@ class DirectProcedureTest(unittest.TestCase):
         routes = {
             "escalated": to_the_lite_group() + lite_round(escalate) + reported("escalated", "pass", unusable),
             "lite-rereview": to_the_lite_group() + lite_round(lite_review("findings", NAMED))
-            + reported("lite-fix", "done", fix) + reported("lite-rereview", "pass", unusable),
+            + reported("lite-fix", "done", fix) + reported("lite-revert-check", "ok", CHECKED)
+            + reported("lite-rereview", "pass", unusable),
         }
         for name, events in routes.items():
             with self.subTest(name=name):
@@ -121,6 +125,44 @@ class DirectProcedureTest(unittest.TestCase):
                 self.assertIsInstance(usable.action, engine_core.Done)
                 twice = replayed(events + reported(name, "pass", unusable))
                 self.assertEqual((type(twice.action), twice.action.name), (Stop, "direct-review"))
+
+    def test_each_review_reads_the_revert_check_on_its_route(self):
+        direct = load(PROCEDURES, "direct")
+        for review, check in (("lite-review", "revert-check"), ("full-review", "revert-check"),
+                              ("escalated", "revert-check"), ("lite-rereview", "lite-revert-check"),
+                              ("escalated-rereview", "escalated-revert-check"),
+                              ("full-rereview", "full-revert-check")):
+            with self.subTest(review=review):
+                prompt = (PROCEDURES / step(direct, review)["prompt"]).read_text(encoding="utf-8")
+                for member in ("still_passing", "reason"):
+                    self.assertIn(f"{check}.{member}", step(direct, review)["in"])
+                    self.assertIn("{{" + f"{check}.{member}" + "}}", prompt)
+        for check in ("revert-check", "lite-revert-check", "escalated-revert-check", "full-revert-check"):
+            with self.subTest(check=check):
+                one = step(direct, check)
+                self.assertEqual((one["kind"], one["command"], one["holds"]), ("command", "revert-check", "head"))
+                self.assertEqual(one["in"], ["preflight.worktree_path", "preflight.integration_branch"])
+                self.assertEqual((one["on"]["refused"], one["on"]["out-of-bounds"]),
+                                 ("revert-check-unavailable", "revert-check-unavailable"))
+        self.assertEqual(step(direct, "revert-check")["on"]["ok"], "implemented")
+        self.assertEqual(step(direct, "implement")["on"]["done"], "revert-check")
+        self.assertEqual(step(direct, "implement")["on"]["blocked"], "revert-check")
+        for route in ("lite", "escalated", "full"):
+            self.assertEqual(step(direct, f"{route}-revert-check")["on"]["ok"], f"{route}-rereview")
+            self.assertEqual(step(direct, f"{route}-fixed")["on"]["done"], f"{route}-revert-check")
+
+    def test_a_fix_runs_the_revert_check_again_before_its_re_review(self):
+        fix = {"status": "done", "start_head": SHA, "commit": "b" * 40, "notes": "n", "tests": [], "declines": []}
+        events = (to_the_lite_group() + lite_round(lite_review("findings", NAMED))
+                  + reported("lite-fix", "done", fix))
+        checking = replayed(events)
+        self.assertIsInstance(checking.action, engine_core.RunCommand)
+        self.assertEqual((checking.action.step, checking.action.command, checking.action.args),
+                         ("lite-revert-check", "revert-check",
+                          (("preflight.worktree_path", "/w"), ("preflight.integration_branch", "main"))))
+        reviewing = replayed(events + reported("lite-revert-check", "ok", CHECKED))
+        self.assertEqual((type(reviewing.action), reviewing.action.step, reviewing.action.visit),
+                         (engine_core.StartSession, "lite-rereview", 1))
 
     def test_a_fix_with_no_commit_stops_direct_fix(self):
         fix = {"status": "done", "start_head": SHA, "commit": "", "notes": "n", "tests": [], "declines": []}

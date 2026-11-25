@@ -8,4 +8,6 @@ Report any finding still unresolved and any new Important or Critical defect the
 
 Give each finding a kind, one of edge-or-failure-path, weak-test, missing-test, contract-mismatch, stale-docs, security, concurrency, plan-step-not-executable or other, and a rule only when the finding breaches a standard: that standard's id, as B12; leave rule out otherwise.
 
+The revert check ran again at the fix's head. These new tests still passed without the change's source (an empty list [] means none did): {{escalated-revert-check.still_passing}}. Judge each one as the review does: a test meant to show a criterion that passes without the change is an Important finding naming the test and its file. When the check could not run, its reason follows and the list shows nothing: {{escalated-revert-check.reason}}
+
 A reply with a critical or important finding that names neither a file nor a failing input is discarded and this step runs once more.

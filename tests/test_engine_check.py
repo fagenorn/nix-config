@@ -1161,6 +1161,8 @@ SHIPPED_MEMBERS = {
     "lite-independent": ({"findings": []},),
     "full-independent": ({"findings": []},),
     **{f"{route}-rereview": ({}, {"findings": []}, UNNAMED) for route in ("lite", "escalated", "full")},
+    **{name: ({"still_passing": [], "reason": ""},)
+       for name in ("revert-check", "lite-revert-check", "escalated-revert-check", "full-revert-check")},
 }
 
 
