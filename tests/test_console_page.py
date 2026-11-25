@@ -6508,6 +6508,37 @@ class PageSprintEndTest(unittest.TestCase):
                          "1 landed, 1 dropped"):
             self.assertIn(expected, shown)
 
+    def test_a_finished_line_shows_its_wrap_up_before_it_opens(self) -> None:
+        (snap,) = render([
+            START, {"frame": with_sprints([DONE_SPRINT])}, {"open": "finished"},
+            {"snapshot": True},
+        ])
+        (row,) = of_class(snap["projects"], "li", "finished-line")
+        (summary,) = [n for n in nodes(row) if n["tag"] == "summary"]
+        self.assertEqual([full(n) for n in of_class(summary, "span", "wrap-up")],
+                         ["Importer resumes after a crash"])
+        self.assertEqual([full(n) for n in of_class(summary, "span", "outcome")],
+                         ["1 landed, 1 dropped"])
+        (ended,) = of_class(summary, "span", "ended")
+        self.assertEqual(len([n for n in nodes(ended) if n["tag"] == "time"]), 1)
+        self.assertTrue(has_class(summary["children"][-1], "wrap-up"))
+        shown = visible_text(snap["projects"])
+        self.assertIn(CLOSING["first_line"], shown)
+        self.assertNotIn(CLOSING["summary"], shown)
+
+    def test_a_finished_line_without_a_closing_first_line_has_no_wrap_up(self) -> None:
+        cases = {
+            "stopped by the owner": ended_sprint("d", 3 * HOUR_MS, None, "stopped by you"),
+            "no first line": ended_sprint("e", 3 * HOUR_MS, {**CLOSING, "first_line": None}),
+        }
+        for name, sprint in cases.items():
+            with self.subTest(name):
+                (snap,) = render([START, {"frame": with_sprints([sprint])},
+                                  {"open": "finished"}, {"snapshot": True}])
+                (row,) = of_class(snap["projects"], "li", "finished-line")
+                (summary,) = [n for n in nodes(row) if n["tag"] == "summary"]
+                self.assertEqual(of_class(summary, "span", "wrap-up"), [])
+
     def test_an_opened_finished_report_reads_next_time(self) -> None:
         done = {**DONE_SPRINT, "closing": {
             **CLOSING, "differently": "Would split the second slice sooner."}}

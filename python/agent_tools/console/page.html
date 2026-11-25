@@ -315,6 +315,7 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .finished-line summary { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 10px; padding: 3px 0; cursor: pointer; color: var(--sub0); }
 .finished-line .title-line { color: var(--text); overflow-wrap: anywhere; }
 .finished-line .ended { color: var(--ov2); }
+.finished-line .wrap-up { flex: 1 0 100%; color: var(--text); overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; }
 .message-text { color: var(--lav); }
 .closing-report { margin-left: 4px; border-left: 1px solid var(--hair); padding: 2px 0 8px 16px; color: var(--sub0); overflow-wrap: anywhere; }
 .closing-report p { margin-top: 4px; white-space: pre-wrap; }
@@ -5484,6 +5485,9 @@ function finishedLine(sprint, projectId) {
   summary.appendChild(phrase("span", "ended", "ended ", timeEl("ago", sprint.ended_at, "")));
   if (typeof sprint.started_by === "string") summary.appendChild(el("span", "started-by", "started by " + sprint.started_by));
   if (hasNewReply(sprint)) summary.appendChild(el("span", "message-new", "new reply"));
+  if (closing !== null && typeof closing === "object" && typeof closing.first_line === "string" && closing.first_line !== "") {
+    summary.appendChild(el("span", "wrap-up", closing.first_line));
+  }
   fold.appendChild(summary);
   const spendBox = spendLine("sprint", sprint.sprint_id);
   if (spendBox !== null) fold.appendChild(spendBox);
