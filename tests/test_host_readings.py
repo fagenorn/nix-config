@@ -853,9 +853,11 @@ class RunReadsEachHostOnce(unittest.TestCase):
             self.assertEqual(refusals, "", "a reader ran a host evaluation of its own")
 
         paths = set(self.members()) | {f"tests/{path.name}" for path in (ROOT / "tests").glob("test_*.py")}
+        # A reader imports the module; a file that only names this test's path (a timing table) is no reader.
+        imports = re.compile(r"^\s*(from \. import [^\n]*\bhost_readings\b|import host_readings\b)", re.MULTILINE)
         readers = {
             path for path in paths
-            if path != "tests/test_host_readings.py" and "host_readings" in (ROOT / path).read_text(encoding="utf-8")
+            if path != "tests/test_host_readings.py" and imports.search((ROOT / path).read_text(encoding="utf-8"))
         }
         self.assertEqual(readers, {name.replace(".", "/") + ".py" for name in self.READERS})
 
