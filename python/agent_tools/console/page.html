@@ -1428,6 +1428,19 @@ function stallHeaders() {
 function stallBody(item) {
   return JSON.stringify({ project_id: item.project_id, sprint_id: item.sprint_id });
 }
+function stallAct(pairs) {
+  const act = el("div", "act");
+  for (const [button, state] of pairs) {
+    const sending = state !== undefined && state.phase === "sending";
+    if (sending) button.setAttribute("disabled", "");
+    markBusy(button, sending);
+    act.appendChild(button);
+  }
+  for (const [, state] of pairs) {
+    if (state !== undefined && state.phase === "failed") act.appendChild(el("span", "fail", state.failure + state.reason));
+  }
+  return act;
+}
 function stallCard(item) {
   const card = el("article", "card stall");
   card.appendChild(el("p", "q", item.headline));
@@ -1438,23 +1451,11 @@ function stallCard(item) {
     () => stallPost(item, "again", "Could not try again: ", () => fetch("/api/retry-manager", {
       method: "POST", headers: stallHeaders(), body: stallBody(item),
     })));
-  if (again !== undefined && again.phase === "sending") retry.setAttribute("disabled", "");
-  markBusy(retry, again !== undefined && again.phase === "sending");
-  const act = el("div", "act");
-  act.appendChild(retry);
   const withdrawn = actionButton("stall-withdraw btn-danger", "Drop the sprint",
     () => stallPost(item, "withdraw", "Could not drop: ", () => fetch("/api/withdraw", {
       method: "POST", headers: stallHeaders(), body: stallBody(item),
     })));
-  if (away !== undefined && away.phase === "sending") withdrawn.setAttribute("disabled", "");
-  markBusy(withdrawn, away !== undefined && away.phase === "sending");
-  act.appendChild(withdrawn);
-  for (const state of [again, away]) {
-    if (state !== undefined && state.phase === "failed") {
-      act.appendChild(el("span", "fail", state.failure + state.reason));
-    }
-  }
-  card.appendChild(act);
+  card.appendChild(stallAct([[retry, again], [withdrawn, away]]));
   return card;
 }
 function isFailedStart(item) {
@@ -1470,23 +1471,11 @@ function failedStartCard(item) {
     () => stallPost(item, "start-retry", "Could not retry: ", () => fetch("/api/retry-manager", {
       method: "POST", headers: stallHeaders(), body: stallBody(item),
     })));
-  if (again !== undefined && again.phase === "sending") retry.setAttribute("disabled", "");
-  markBusy(retry, again !== undefined && again.phase === "sending");
-  const act = el("div", "act");
-  act.appendChild(retry);
   const withdrawn = actionButton("start-withdraw btn-danger", "Drop the sprint",
     () => stallPost(item, "start-withdraw", "Could not drop: ", () => fetch("/api/withdraw", {
       method: "POST", headers: stallHeaders(), body: stallBody(item),
     })));
-  if (away !== undefined && away.phase === "sending") withdrawn.setAttribute("disabled", "");
-  markBusy(withdrawn, away !== undefined && away.phase === "sending");
-  act.appendChild(withdrawn);
-  for (const state of [again, away]) {
-    if (state !== undefined && state.phase === "failed") {
-      act.appendChild(el("span", "fail", state.failure + state.reason));
-    }
-  }
-  card.appendChild(act);
+  card.appendChild(stallAct([[retry, again], [withdrawn, away]]));
   return card;
 }
 function isProgress(item) {
@@ -1682,23 +1671,11 @@ function progressCard(item) {
     () => stallPost(item, "continue", "Could not continue: ", () => fetch("/api/continue", {
       method: "POST", headers: stallHeaders(), body: stallBody(item),
     })));
-  if (going !== undefined && going.phase === "sending") onward.setAttribute("disabled", "");
-  markBusy(onward, going !== undefined && going.phase === "sending");
-  const act = el("div", "act");
-  act.appendChild(onward);
   const withdrawn = actionButton("progress-withdraw btn-danger", "Drop the sprint",
     () => stallPost(item, "progress-withdraw", "Could not drop: ", () => fetch("/api/withdraw", {
       method: "POST", headers: stallHeaders(), body: stallBody(item),
     })));
-  if (away !== undefined && away.phase === "sending") withdrawn.setAttribute("disabled", "");
-  markBusy(withdrawn, away !== undefined && away.phase === "sending");
-  act.appendChild(withdrawn);
-  for (const state of [going, away]) {
-    if (state !== undefined && state.phase === "failed") {
-      act.appendChild(el("span", "fail", state.failure + state.reason));
-    }
-  }
-  card.appendChild(act);
+  card.appendChild(stallAct([[onward, going], [withdrawn, away]]));
   return card;
 }
 function isHeldSprint(item) { return item.reason === "held_sprint"; }

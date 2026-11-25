@@ -2470,26 +2470,22 @@ def _seed_state(seed: _Seed, state: str, web_root: str = "",
         seed.sprint(api, "Keep the importer fast", started=60 * MINUTE, report=45 * MINUTE)
         seed.sprint(api, "Retire the old exporter", started=5 * 60 * MINUTE,
                     report=3 * 60 * MINUTE, landed=True, close=2 * 60 * MINUTE)
-        seed.sprint(web, "Add resumable uploads", started=30 * MINUTE, report=6 * MINUTE,
-                    asks=True)
+        seed.sprint(web, "Add resumable uploads", started=30 * MINUTE, report=6 * MINUTE, asks=True)
         seed.sprint(web, "Fix the settings page", started=20 * MINUTE, report=2 * MINUTE)
     elif state == "waiting-on-you":
-        seed.sprint(web, "Add resumable uploads", started=30 * MINUTE, report=6 * MINUTE,
-                    asks=True)
+        seed.sprint(web, "Add resumable uploads", started=30 * MINUTE, report=6 * MINUTE, asks=True)
     elif state == "stuck":
         seed.sprint(web, "Add resumable uploads", started=60 * MINUTE, report=45 * MINUTE)
     elif state == "held-sprint":
         seed.sprint(web, "Add resumable uploads", started=180 * MINUTE, report=120 * MINUTE,
                     report_extra={"status": HELD_STATUS})
     elif state == "manager-cannot-hear":
-        sid, _ = seed.sprint(web, "Add resumable uploads", started=60 * MINUTE,
-                             report=45 * MINUTE)
+        sid, _ = seed.sprint(web, "Add resumable uploads", started=60 * MINUTE, report=45 * MINUTE)
         seed.put(MINUTE, sessions.SEEN, web, {
             "session_id": DEAF_MANAGER, "cwd": web_root, "repo": web_root, "state": "working",
             "name": manager.session_name(web, sid)})
     elif state in PERMISSION_STATES:
-        sid, _ = seed.sprint(web, "Add resumable uploads", started=60 * MINUTE,
-                             report=45 * MINUTE)
+        sid, _ = seed.sprint(web, "Add resumable uploads", started=60 * MINUTE, report=45 * MINUTE)
         seed.put(20 * MINUTE, sessions.SEEN, web, {
             "session_id": PERMISSION_MANAGER, "cwd": web_root, "repo": web_root,
             "state": "working", "name": manager.session_name(web, sid)})
@@ -2552,19 +2548,16 @@ def _seed_state(seed: _Seed, state: str, web_root: str = "",
         seed.sprint(web, "Try a new cache", started=4 * 60 * MINUTE, report=3.5 * 60 * MINUTE,
                     stop=3 * 60 * MINUTE)
     elif state == "owner-check":
-        seed.sprint(web, "Add resumable uploads", started=20 * MINUTE, report=2 * MINUTE,
-                    held=True)
+        seed.sprint(web, "Add resumable uploads", started=20 * MINUTE, report=2 * MINUTE, held=True)
         seed.check(web, 11, 3 * MINUTE)
     elif state == "inbox-card":
-        seed.sprint(web, "Add resumable uploads", started=30 * MINUTE, report=6 * MINUTE,
-                    asks=True)
+        seed.sprint(web, "Add resumable uploads", started=30 * MINUTE, report=6 * MINUTE, asks=True)
         seed.check(web, 11, 3 * MINUTE)
     elif state in ("look-card", "look-moved", "look-failed"):
         sid, goal = seed.sprint(web, "Fix the settings page", started=30 * MINUTE, report=6 * MINUTE)
         seed.look(web, sid, goal, moved=state == "look-moved", failed=state == "look-failed")
     elif state in ("question-words", "question-refused"):
-        seed.sprint(web, "Add resumable uploads", started=30 * MINUTE, report=6 * MINUTE,
-                    look=True)
+        seed.sprint(web, "Add resumable uploads", started=30 * MINUTE, report=6 * MINUTE, look=True)
     elif state == "accounts-panel":
         seed.account("work-main", 0.4)
         seed.account("work-spare", 0.9)

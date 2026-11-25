@@ -384,6 +384,7 @@ agent-workflow-tests *args:
     tests/test_console_page.py \
     tests/test_console_page_action.py \
     tests/test_console_page_move.py \
+    tests/test_console_page_held_sprint.py \
     tests/test_console_long_permission_card.py \
     tests/test_console_controls.py \
     tests/test_console_goal_box.py \
@@ -412,6 +413,7 @@ agent-workflow-tests *args:
     tests/test_console_screenshots.py \
     tests/test_console_permission_shots.py \
     tests/test_console_sprint_command.py \
+    tests/test_console_manager_contract_held.py \
     tests/test_console_sprint_action.py \
     tests/test_console_pictures.py \
     tests/test_console_manager.py \
