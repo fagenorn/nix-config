@@ -3141,6 +3141,9 @@ function renderStatement(view) {
   const box = document.getElementById("statement");
   const h1 = el("h1", view.statement.inbox_items > 0 ? "needs" : "", view.statement.headline);
   const nodes = [h1, el("p", "sub", view.statement.sentence)];
+  if (view.statement.inbox_items === 0 && typeof view.next_expected === "string") {
+    nodes.push(phrase("p", "sub next-expected", "Next update expected ", timeEl("weekday", view.next_expected, "")));
+  }
   const cap = view.capacity ? settledCapacity(view.capacity) : view.capacity;
   if (cap && cap.all_out && cap.resumes_at) nodes.push(phrase("p", "sub", "Resumes ", timeEl("weekday", cap.resumes_at, "")));
   for (const stopped of Array.isArray(view.unstopped) ? view.unstopped : []) {

@@ -1018,6 +1018,42 @@ HANDOFF_SPRINT_W = {
 PAGE_TEXT = PAGE.read_text()
 
 
+DONE = {
+    "inbox_items": 0,
+    "headline": "You're done for now",
+    "sentence": "2 sprints are working; we'll put anything that needs you here.",
+    "stale": False,
+}
+
+
+class PageDoneForNowTest(unittest.TestCase):
+    def test_the_done_for_now_heading_names_the_next_expected_time(self) -> None:
+        statement = render_page(
+            {**view([]), "statement": DONE, "next_expected": "2026-11-13T09:30:00+00:00"}, NOW_MS
+        )["statement"]
+        (h1,) = [n for n in nodes(statement) if n["tag"] == "h1"]
+        self.assertEqual(full(h1), "You're done for now")
+        (line,) = [n for n in nodes(statement) if has_class(n, "next-expected")]
+        self.assertEqual(line["text"], "Next update expected Fri 09:30")
+        self.assertEqual(len([n for n in nodes(line) if n["tag"] == "time"]), 1)
+
+    def test_no_next_expected_line_without_a_time_or_with_an_open_item(self) -> None:
+        cases = {
+            "null time": {**view([]), "statement": DONE, "next_expected": None},
+            "no key": {**view([]), "statement": DONE},
+            "open item": {
+                **view([]),
+                "statement": {**DONE, "inbox_items": 1, "headline": "1 thing needs you"},
+                "next_expected": "2026-11-13T09:30:00+00:00",
+            },
+        }
+        for name, data in cases.items():
+            with self.subTest(name):
+                statement = render_page(data, NOW_MS)["statement"]
+                self.assertEqual([n for n in nodes(statement) if has_class(n, "next-expected")], [])
+                self.assertNotIn("Next update expected", full(statement))
+
+
 def with_notices(entry: dict, *notices: dict) -> dict:
     return {**entry, "notices": list(notices)}
 
