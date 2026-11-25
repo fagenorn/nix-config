@@ -36,7 +36,7 @@ EVAL_TREE_SCRIPT = "home/common/agent-skills/evals/tests/test-run-eval-tree.sh"
 
 # Members over 30 s of wall time on the run the committed suite timings were last refreshed from:
 # https://github.com/fagenorn/nix-config/actions/runs/45629674495 (job `Agent Workflow Tests`, head d7f0962f4).
-# A refresh from a newer run replaces both.
+# A refresh from a newer run replaces both, and REFERENCE_ON_LAST_FULL_RUN below.
 SLOW_ON_LAST_FULL_RUN: dict[str, float] = {
     "tests/test_engine_land_recovery.py": 841.7776128529999,
     "tests/test_engine_stubbed_run.py": 808.021807008,
@@ -83,6 +83,193 @@ SLOW_ON_LAST_FULL_RUN: dict[str, float] = {
     "tests/test_console_manager_service.py": 32.93012106200001,
     "tests/test_engine_deliver.py": 31.188518614999992,
     "tests/test_console_register_service.py": 30.159735117999958,
+}
+
+# The rest of that run's members that set the runner speed (30 s or less, recorded at 1 s or more),
+# so the speed against which the slow members are judged is the full run's, not their own.
+REFERENCE_ON_LAST_FULL_RUN: dict[str, float] = {
+    "tests/test_console_stops.py": 29.781401365999955,
+    "tests/test_verify_slot.py": 28.277760856999976,
+    "tests/test_release_command.py": 26.421557814000153,
+    "tests/test_transaction_core_sweep.py": 25.629584840999996,
+    "tests/test_cache_keepalive.py": 25.000611957000046,
+    "tests/test_actions_health_adapter.py": 24.338920813999948,
+    "tests/test_engine_stop.py": 24.29214668900002,
+    "tests/test_console_guest_account.py": 23.069171199999914,
+    "tests/test_look_gate_end_to_end.py": 21.362990672000024,
+    "tests/test_console_pictures.py": 20.92202056999986,
+    "tests/test_closing.py": 20.81031964799996,
+    "tests/test_console_revive_check.py": 20.779356073000145,
+    "tests/test_railway_deploy_adapter.py": 20.736387351999838,
+    "tests/test_omlx_memory_watch.py": 20.732328958999915,
+    "tests/test_engine_resume.py": 20.69369398699999,
+    "home/common/agent-skills/tests/test_program_harness.py": 20.647850550000044,
+    "tests/test_console_service.py": 20.34895459900008,
+    "tests/test_cache_proxy.py": 19.94936875999997,
+    "home/common/agent-skills/tests/test_adopt_conformance_apply.py": 19.312129944999995,
+    "tests/test_console_register_check.py": 18.98366735799982,
+    "tests/test_suite_runner.py": 18.606647864000024,
+    "tests/test_console_guest_service.py": 18.136756228000195,
+    "tests/test_engine_slots.py": 17.972097367999993,
+    "tests/test_decision_record_wording.py": 17.961379355999952,
+    "tests/test_console_controls.py": 17.843046880999964,
+    "tests/test_forge_claim.py": 16.95657432600001,
+    "tests/test_console_look_answer.py": 16.816331504000118,
+    "tests/test_verify_block.py": 15.94580834899989,
+    "home/common/agent-skills/tests/test_adopt_project.py": 15.848410796999815,
+    "tests/test_git_pre_push_hook.py": 15.84814732000018,
+    "tests/test_issue_setup.py": 15.497522230000015,
+    "tests/test_console_signin_service.py": 15.397386217000076,
+    "tests/test_engine_continue.py": 15.24297734000001,
+    "home/common/agent-skills/tests/test_deliver_batch_program.py": 14.351166159000059,
+    "tests/test_console_message_check.py": 14.2674527879999,
+    "tests/test_promotion_lifecycle.py": 14.23411186899989,
+    "home/common/agent-skills/tests/test_host_readiness.py": 14.143686111000001,
+    "tests/test_console_hook_cost.py": 13.787212683999996,
+    "tests/test_console_checkout_remote.py": 13.610098159000017,
+    "tests/test_console_manager_check.py": 13.609306692000018,
+    "tests/test_engine_keep_alive.py": 13.050946288000006,
+    "tests/test_forge_owner_action.py": 12.822434002999898,
+    "home/common/agent-skills/tests/test_adopt_verify.py": 12.793340609000097,
+    "tests/test_console_guest_page.py": 12.314035023000088,
+    "home/common/agent-skills/tests/test_eval_cases.py": 12.085072111000045,
+    "tests/test_module_docstring_wording.py": 11.888350597999988,
+    "tests/test_release_dispose.py": 11.799244210999973,
+    "tests/test_console_signin_run.py": 11.566401904999793,
+    "tests/test_console_accounts_sandbox.py": 11.436413496999876,
+    "tests/test_forge_land_lock.py": 10.981493168000043,
+    "tests/test_console_stream.py": 10.91201165800021,
+    "tests/test_engine_housekeeping.py": 10.719577747999978,
+    "tests/test_codesigned_artifact_adapter.py": 10.569141311000067,
+    "tests/test_console_bypass_proof_checks.py": 10.541918213000145,
+    "tests/test_omlx_restart.py": 10.318951461999973,
+    "tests/test_console_tracker.py": 10.295805888000132,
+    "tests/test_launchd_agent_adapter.py": 10.228328034000015,
+    "tests/test_promotion_deployment.py": 9.880934999999909,
+    "home/common/agent-skills/evals/tests/test-run-eval-tree.sh": 9.466574849999915,
+    "tests/test_console_messages.py": 9.214548350999848,
+    "home/common/agent-skills/tests/test_adopt_entries.py": 9.073359112999924,
+    "home/common/agent-skills/tests/test_resolve_project.py": 8.920886962000168,
+    "tests/test_citation_lint.py": 8.807136804999914,
+    "home/common/agent-skills/tests/test_artifact_budget.py": 8.755038470000045,
+    "tests/test_engine_caps.py": 8.387738307999996,
+    "tests/test_issue_branch.py": 7.8086394950000795,
+    "tests/test_owner_actions.py": 7.6739339860000655,
+    "tests/test_forge_issue.py": 7.6403431640001145,
+    "tests/test_independent_review.py": 7.272955418999999,
+    "tests/test_host_alerts.py": 7.237311985000019,
+    "tests/test_verification_command.py": 6.989913017999925,
+    "tests/test_verify_pending_interrupted.py": 6.920996221999985,
+    "tests/test_promotion_documents.py": 6.871783839000045,
+    "tests/test_console_account_service.py": 6.835577595999894,
+    "tests/test_omlx_memory_fseventsd.py": 6.704605302999994,
+    "tests/test_engine_session_limits.py": 6.6522331239999914,
+    "home/common/agent-skills/tests/test_adopt_hook_install.py": 6.611728488000004,
+    "tests/test_agent_gate_bundle.py": 6.5852526749999925,
+    "tests/test_fallback_audit.py": 6.546260469000117,
+    "tests/test_program_copies.py": 6.469981579999967,
+    "tests/test_forge_markers.py": 6.304534038999918,
+    "tests/test_transaction_proof.py": 6.251596773000074,
+    "tests/test_console_writes.py": 6.1781764780000685,
+    "tests/test_console_contract_draft.py": 5.934957220999877,
+    "tests/test_console_idle_service.py": 5.921096722999891,
+    "tests/test_adr_number.py": 5.826702184999931,
+    "home/common/agent-skills/tests/test_fleet_preflight.py": 5.810768656999997,
+    "home/common/agent-skills/tests/test_adopt_apply_formatting.py": 5.810101576000079,
+    "tests/test_standards_lint.py": 5.662711322000064,
+    "tests/test_transaction_core.py": 5.593861575999881,
+    "tests/test_release_adapter_core.py": 5.571580152000024,
+    "tests/test_ruff_lint.py": 5.447231499000054,
+    "tests/test_console_answer.py": 5.082456685000125,
+    "tests/test_console_peer_service.py": 5.082100263000029,
+    "tests/test_release_verification.py": 5.029511864999904,
+    "tests/test_never_rise.py": 4.870601324000063,
+    "tests/test_console_account_add.py": 4.732321500999888,
+    "tests/test_verify_answer.py": 4.643858042000147,
+    "home/common/agent-skills/tests/test_adopt_conformance.py": 4.613511420999998,
+    "home/common/agent-skills/tests/test_instruction_surface_lint.py": 4.522007439999996,
+    "tests/test_console_folder_trust.py": 4.245214385999816,
+    "home/common/agent-skills/tests/test_diff_scope.py": 4.070821839000018,
+    "tests/test_console_engine_runs.py": 4.004473497999925,
+    "tests/test_console_account_remove_service.py": 3.897178153000141,
+    "tests/test_suppressions.py": 3.8730558299999984,
+    "tests/test_console_guest_actions.py": 3.760576263999951,
+    "tests/test_console_questions.py": 3.7321794570000293,
+    "tests/test_forge_land_lease.py": 3.701042607999966,
+    "tests/test_console_revive_service.py": 3.6743466110001464,
+    "tests/test_engine_ledger.py": 3.6303518870000033,
+    "tests/test_console_prompt_card_service.py": 3.4348320000000285,
+    "home/common/agent-skills/tests/test_conformance_suppressions.py": 3.3704088100000007,
+    "home/common/agent-skills/tests/test_resolve_schema_three.py": 3.2892944940000035,
+    "tests/test_look_lint.py": 3.2553933439999128,
+    "tests/test_console_trust_start.py": 3.2321565780000583,
+    "tests/test_release_cutover.py": 3.149614509999992,
+    "tests/test_agent_tools_layout.py": 3.1011257549998845,
+    "tests/test_console_probe.py": 3.063128499000186,
+    "home/common/agent-skills/tests/test_resolve_platform.py": 2.8957179039998664,
+    "tests/test_console_own_reads_wiring.py": 2.839587849000054,
+    "tests/test_plan_amend.py": 2.7963457389998894,
+    "tests/test_console_reports.py": 2.7391475409999657,
+    "tests/test_transaction_disposition.py": 2.668315600999904,
+    "tests/test_retired_surfaces.py": 2.6659866740001235,
+    "home/common/agent-skills/tests/test_workflow_skill_contracts.py": 2.664159615000017,
+    "tests/test_cleanup_issue.py": 2.6398607580000544,
+    "home/common/agent-skills/tests/test_conformance_records.py": 2.5974523089999977,
+    "home/common/agent-skills/tests/test_instruction_load.py": 2.5564194329999737,
+    "home/common/agent-skills/tests/test_adopt_migrate.py": 2.549051499000143,
+    "tests/test_transaction_recovery.py": 2.5433411989999968,
+    "tests/test_verify_pending_pass.py": 2.4874351630001,
+    "tests/test_console_notices.py": 2.485666490000085,
+    "home/common/agent-skills/tests/test_adopt_project_boundaries.py": 2.4155884570000126,
+    "tests/test_console_approve.py": 2.3911803139999392,
+    "home/common/agent-skills/tests/test_deliver_standard_landing.py": 2.326798671000006,
+    "tests/test_console_approve_waits.py": 2.312191445000053,
+    "tests/test_console_register.py": 2.240905804000022,
+    "tests/test_transaction_recovery_settle.py": 2.192806102000077,
+    "tests/test_console_nudge.py": 2.165840698000011,
+    "tests/test_release_merge.py": 2.1102457500001037,
+    "tests/test_console_manager.py": 2.0886138700000174,
+    "tests/test_console_goal_box.py": 1.9799542619998647,
+    "home/common/agent-skills/tests/test_eval_sandboxes.py": 1.9694095569999988,
+    "tests/test_console_sprint_action.py": 1.9414359219999824,
+    "home/common/agent-skills/tests/test_deliver_standard_before_pull_request.py": 1.9405473339999162,
+    "tests/test_console_hooks_missing.py": 1.9125172760000169,
+    "tests/test_omlx_memory_day.py": 1.8487261700000772,
+    "tests/test_console_bypass_proof_github.py": 1.8402428439999312,
+    "tests/test_suite_timing.py": 1.827088505000006,
+    "tests/test_console_prompt_card.py": 1.7877247760000046,
+    "home/common/agent-skills/tests/test_attempt_budget.py": 1.782449518,
+    "tests/test_comment_lint.py": 1.7590295259999493,
+    "tests/test_transaction_invocation.py": 1.7236550879999868,
+    "home/common/agent-skills/tests/test_deliver_batch_landing.py": 1.6932877230000258,
+    "home/common/agent-skills/tests/test_conformance_ruff.py": 1.6697220570000013,
+    "tests/test_transaction_receipt.py": 1.5882417899999837,
+    "tests/test_router.py": 1.5304080460000478,
+    "tests/test_console_session_start.py": 1.5301133729999492,
+    "tests/test_console_briefs.py": 1.5222782139999254,
+    "tests/test_console_question_check.py": 1.5097793109999884,
+    "tests/test_console_serve_probe_check.py": 1.4626335479999852,
+    "tests/test_console_spend_page.py": 1.4118093419999695,
+    "tests/test_console_permit_wire.py": 1.401392200000032,
+    "tests/test_console_draft_register_check.py": 1.3407788580000215,
+    "tests/test_console_approved_action.py": 1.3147086339999987,
+    "tests/test_console_release_rerun_check.py": 1.2771528950000857,
+    "tests/test_context_map_lint.py": 1.2625822259999495,
+    "home/common/agent-skills/tests/test_conformance_lint_times.py": 1.2566063049999983,
+    "tests/test_github_runners.py": 1.1607111649998387,
+    "tests/test_memory_budget.py": 1.122242052000047,
+    "tests/test_console_launch_profile_check.py": 1.1103534760000002,
+    "tests/test_console_release_card_service.py": 1.081432124999992,
+    "tests/test_console_takeover_merge_check.py": 1.0749949419999894,
+    "tests/test_console_long_permission_card.py": 1.0601967550001064,
+    "home/common/agent-skills/tests/test_agnostic_lint.py": 1.0529275210001288,
+    "tests/test_console_permission_shots.py": 1.0356608349999306,
+    "tests/test_memory_floor_check.py": 1.0046144220000315,
+    "tests/test_console_release_card.py": 0.9919558259999803,
+    "tests/test_suite_tiers.py": 0.9705839040000228,
+    "tests/test_transaction_custody.py": 0.9666977920001045,
+    "tests/test_console_transcript_digest.py": 0.9659327760000451,
+    "tests/test_console_activation_check.py": 0.9635057670000151,
 }
 
 # A unittest module that meets its peers at the barrier. It holds a live token
@@ -524,6 +711,11 @@ class ScheduleOrderTest(RunnerCase):
         self.assertEqual([self.members[i] for i in order],
                          ["c.py", "b.py", "e.py", "a.py", "d.py"])
 
+    def test_a_member_spelled_with_a_leading_dot_slash_starts_by_its_recorded_time(self):
+        members = ["./a.py", "b.py", "./tests/c.py"]
+        timings = {"a.py": 5.0, "b.py": 50.0, "tests/c.py": 20.0}
+        self.assertEqual(suite_runner.schedule_order(members, timings), [1, 2, 0])
+
     def test_no_timings_keeps_list_order(self):
         self.assertEqual(suite_runner.schedule_order(self.members, {}), [0, 1, 2, 3, 4])
 
@@ -558,13 +750,22 @@ class ScheduleOrderTest(RunnerCase):
         self.assertEqual(failed, ["test_m0.py", "test_m2.py"])
 
 
+def last_full_run(slow: Mapping[str, float] = SLOW_ON_LAST_FULL_RUN) -> list[MemberResult]:
+    """The last full run's members that passed, `slow` standing in for the slow ones, in the order of the run."""
+    seconds = {**slow, **REFERENCE_ON_LAST_FULL_RUN}
+    return [MemberResult(index=i, member=member, returncode=0, seconds=value, cpu_seconds=0.0)
+            for i, (member, value) in enumerate(seconds.items())]
+
+
 class CommittedTimingsTest(unittest.TestCase):
     def test_the_timings_are_not_stale_against_the_last_full_run(self):
-        last_run = [
-            MemberResult(index=i, member=member, returncode=0, seconds=seconds, cpu_seconds=0.0)
-            for i, (member, seconds) in enumerate(SLOW_ON_LAST_FULL_RUN.items())
-        ]
-        self.assertEqual(suite_runner.stale_timings(last_run, suite_runner.load_timings()), [])
+        self.assertEqual(suite_runner.stale_timings(last_full_run(), suite_runner.load_timings()), [])
+
+    def test_slow_timings_all_recorded_at_a_quarter_are_stale_against_the_last_full_run(self):
+        timings = suite_runner.load_timings()
+        quartered = {**timings, **{member: timings[member] / 4 for member in SLOW_ON_LAST_FULL_RUN}}
+        stale = suite_runner.stale_timings(last_full_run(), quartered)
+        self.assertEqual(len(stale), len(SLOW_ON_LAST_FULL_RUN), stale)
 
 
 def results_of(*rows: tuple[str, int | None, float]) -> list[MemberResult]:
@@ -634,6 +835,15 @@ class StaleTimingsTest(RunnerCase):
         self.assertEqual(suite_runner.stale_timings(results, {}, registered=None), [
             "suite-runner: stale timing p.py: 31.0s measured, not in suite_timings.json",
             "suite-runner: stale timing b.py: 32.0s measured, not in suite_timings.json"])
+
+    def test_a_member_spelled_with_a_leading_dot_slash_is_checked_as_the_registered_one(self):
+        results = results_of(("./tests/a.py", 0, 31.0))
+        self.assertEqual(suite_runner.stale_timings(results, {}, registered=["tests/a.py"]), [
+            "suite-runner: stale timing ./tests/a.py: 31.0s measured, not in suite_timings.json"])
+        self.assertEqual(suite_runner.stale_timings(results, {"tests/a.py": 31.0}, registered=["tests/a.py"]), [])
+        absolute = results_of((str(Path.cwd() / "tests/a.py"), 0, 31.0))
+        self.assertEqual(len(suite_runner.stale_timings(absolute, {}, registered=["tests/a.py"])), 1)
+        self.assertEqual(suite_runner.stale_timings(absolute, {"tests/a.py": 31.0}, registered=["tests/a.py"]), [])
 
     def test_the_registration_is_the_justfiles_suite_recipe(self):
         (self.work / "justfile").write_text(

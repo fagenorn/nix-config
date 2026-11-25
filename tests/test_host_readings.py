@@ -5,6 +5,7 @@ processes under the host lock, what the key covers, and that a failed or unusabl
 becomes an evaluation per reader. Needs nix and git; the freshness cases evaluate a scratch flake.
 Run: just agent-workflow-tests
 """
+import ast
 import fcntl
 import importlib
 import io
@@ -802,6 +803,43 @@ class RunReadsEachHostOnce(unittest.TestCase):
             else:
                 yield item
 
+    @staticmethod
+    def imports_host_readings(source):
+        """Whether the module's own import statements bring in `host_readings`; a string naming it is no import."""
+        for node in ast.walk(ast.parse(source)):
+            if isinstance(node, ast.Import):
+                if any(alias.name.split(".")[-1] == "host_readings" for alias in node.names):
+                    return True
+            elif isinstance(node, ast.ImportFrom):
+                if (node.module or "").split(".")[-1] == "host_readings":
+                    return True
+                if node.module in (None, "tests") and any(alias.name == "host_readings" for alias in node.names):
+                    return True
+        return False
+
+    def test_a_host_reader_is_found_by_its_import_statements_alone(self):
+        imports = (
+            "from . import host_readings\n",
+            "from tests import host_readings\n",
+            "from tests import (\n    accounts_sandbox,\n    host_readings,\n)\n",
+            "from . import (\n    host_readings as readings,\n)\n",
+            "import tests.host_readings\n",
+            "import host_readings\n",
+            "def f():\n    from . import host_readings\n",
+        )
+        for source in imports:
+            with self.subTest(source=source):
+                self.assertTrue(self.imports_host_readings(source))
+        for source in (
+            'PATH = "tests/test_host_readings.py"\n',
+            "# from . import host_readings\n",
+            "from . import accounts_sandbox\n",
+            "from tests import host_readings_other\n",
+            '"""from tests import host_readings"""\n',
+        ):
+            with self.subTest(source=source):
+                self.assertFalse(self.imports_host_readings(source))
+
     def test_no_other_test_names_a_host_output(self):
         paths = set(self.members()) | {f"tests/{path.name}" for path in (ROOT / "tests").glob("*.py")}
         naming = {
@@ -853,11 +891,10 @@ class RunReadsEachHostOnce(unittest.TestCase):
             self.assertEqual(refusals, "", "a reader ran a host evaluation of its own")
 
         paths = set(self.members()) | {f"tests/{path.name}" for path in (ROOT / "tests").glob("test_*.py")}
-        # A reader imports the module; a file that only names this test's path (a timing table) is no reader.
-        imports = re.compile(r"^\s*(from \. import [^\n]*\bhost_readings\b|import host_readings\b)", re.MULTILINE)
         readers = {
             path for path in paths
-            if path != "tests/test_host_readings.py" and imports.search((ROOT / path).read_text(encoding="utf-8"))
+            if path.endswith(".py") and path != "tests/test_host_readings.py"
+            and self.imports_host_readings((ROOT / path).read_text(encoding="utf-8"))
         }
         self.assertEqual(readers, {name.replace(".", "/") + ".py" for name in self.READERS})
 

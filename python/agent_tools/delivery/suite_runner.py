@@ -228,13 +228,24 @@ def load_timings(path: Path = TIMINGS_FILE) -> dict[str, float]:
     return timings
 
 
+def member_identity(member: str) -> str:
+    """`member` as the registration and the timings file spell it: normalised and relative to
+    the working directory, so `./tests/a.py` is `tests/a.py`. A member outside it keeps its
+    normalised spelling."""
+    base = Path(os.path.normpath(Path.cwd()))
+    path = Path(os.path.normpath(base / member))
+    return path.relative_to(base).as_posix() if path.is_relative_to(base) else path.as_posix()
+
+
 def schedule_order(members: Sequence[str], timings: Mapping[str, float]) -> list[int]:
     """Indexes of `members` in the order they start: longest-first (LPT) by
     `timings`, members the file does not name first, in list order, because
-    their length is unknown, and ties in list order."""
-    unknown = [i for i, member in enumerate(members) if member not in timings]
-    known = [i for i, member in enumerate(members) if member in timings]
-    known.sort(key=lambda i: (-timings[members[i]], i))
+    their length is unknown, and ties in list order. A member is named by its
+    `member_identity`."""
+    keys = [member_identity(member) for member in members]
+    unknown = [i for i, key in enumerate(keys) if key not in timings]
+    known = [i for i, key in enumerate(keys) if key in timings]
+    known.sort(key=lambda i: (-timings[keys[i]], i))
     return unknown + known
 
 
@@ -412,22 +423,24 @@ def stale_timings(results: Sequence[MemberResult], timings: Mapping[str, float],
     """One line per checked member, in list order, whose time `timings` does not name or
     understates by more than `STALE_FACTOR` at the run's speed. A checked member passed,
     took over `STALE_FLOOR_SECONDS` and, when `registered` is given, is in it. A member's
-    speed is `median_speed` of the other passed members, so it never sets its own."""
+    speed is `median_speed` of the other passed members, so it never sets its own. A member
+    is named in `timings` and `registered` by its `member_identity`."""
     ordered = sorted(results, key=lambda result: result.index)
     passed = [result for result in ordered if result.passed]
+    keys = {result.index: member_identity(result.member) for result in ordered}
     lines = []
     for result in passed:
         if result.seconds <= STALE_FLOOR_SECONDS:
             continue
-        if registered is not None and result.member not in registered:
+        if registered is not None and keys[result.index] not in registered:
             continue
-        if result.member not in timings:
+        if keys[result.index] not in timings:
             lines.append(f"{PREFIX} stale timing {result.member}: {result.seconds:.1f}s "
                          "measured, not in suite_timings.json")
             continue
-        factor = median_speed(timings, [(other.member, other.seconds) for other in passed
+        factor = median_speed(timings, [(keys[other.index], other.seconds) for other in passed
                                         if other.index != result.index])
-        recorded = timings[result.member]
+        recorded = timings[keys[result.index]]
         if result.seconds > STALE_FACTOR * factor * recorded:
             lines.append(f"{PREFIX} stale timing {result.member}: {result.seconds:.1f}s "
                          f"measured, {recorded:.1f}s recorded at runner speed {factor:.2f}")
