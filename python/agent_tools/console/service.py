@@ -1925,9 +1925,10 @@ the read health, the deliveries, the sprints, the withdrawn ids and the pending 
 the view; sample the registry's signature; `refresh()`; `poll_sessions()`; `poll_deliveries()`. The
 absent set starts empty, so a restart drops a session only after two polls miss
 it. On any failure after the bind, what was opened is closed and the exception
-re-raised. `start()` serves on a daemon thread named `console-http` and starts the spend thread; `close()`
-sets the stop flag, then `closing`, wakes every waiter, joins the watcher, the session poll, the probe loop, the
-tracker, movement, retention, digest and spend threads and the folder-trust start thread and tears the rest down; it is idempotent.
+re-raised. `start()` serves on daemon threads named `console-http` and, with a guest socket, `console-guest-http`, each
+polling for shutdown every `SERVE_POLL_SECONDS`, and starts the spend thread; `close()` sets the stop flag, then
+`closing`, wakes every waiter, joins the watcher, the session poll, the probe loop, the tracker, movement,
+retention, digest and spend threads and the folder-trust start thread, shuts both servers down together and tears the rest down; it is idempotent.
 
 `POST /api/project-question` (#1176, ADR-console-058) carries one JSON body of `project_id` and
 `question`, and optionally a non-empty string `thread_id` (#1178, ADR-console-062), an optional
@@ -2066,6 +2067,8 @@ GUEST_PAGE: bytes = PAGE.replace(DOOR_OWNER, DOOR_GUEST)
 SPEND_PAGE: bytes = Path(__file__).with_name("spend.html").read_bytes()
 BACKLOG = 16
 POLL_SECONDS = 0.25
+# serve_forever's poll: each shutdown() waits up to one poll for its loop to see the request.
+SERVE_POLL_SECONDS = 0.05
 DRAIN_POLL_SECONDS = 0.25
 KEEPALIVE_SECONDS = 15.0
 WATCH_THREAD = "console-registry-watch"
@@ -10657,9 +10660,12 @@ class ConsoleService(ActionPermit):
             self._apply(self.log.append([activation_run.finished_row(root, outcome)]))
 
     def _wait_for_activation(self, run: activation_run.Run) -> None:
-        self._activate_thread = threading.Thread(
-            target=self._await_activation, args=(run,), name=ACTIVATE_THREAD, daemon=True)
-        self._activate_thread.start()
+        with self._ingest:
+            if self._stop.is_set():
+                return  # close() has read the worker handle; the stopped wait would only return
+            self._activate_thread = threading.Thread(
+                target=self._await_activation, args=(run,), name=ACTIVATE_THREAD, daemon=True)
+            self._activate_thread.start()
 
     def _await_activation(self, run: activation_run.Run) -> None:
         try:
@@ -11261,11 +11267,13 @@ class ConsoleService(ActionPermit):
                 target=self._grant_at_start, name=TRUST_START_THREAD, daemon=True)
             self._trust_start_thread.start()
         self._thread = threading.Thread(
-            target=self._server.serve_forever, name="console-http", daemon=True)
+            target=self._server.serve_forever, kwargs={"poll_interval": SERVE_POLL_SECONDS},
+            name="console-http", daemon=True)
         self._thread.start()
         if self._guest_server is not None:
             self._guest_thread = threading.Thread(
-                target=self._guest_server.serve_forever, name="console-guest-http", daemon=True)
+                target=self._guest_server.serve_forever, kwargs={"poll_interval": SERVE_POLL_SECONDS},
+                name="console-guest-http", daemon=True)
             self._guest_thread.start()
         if self._serve_reader is not None or self._status_reader is not None:
             self._serve_thread = threading.Thread(
@@ -11280,34 +11288,16 @@ class ConsoleService(ActionPermit):
         with self._published:
             self._closing = True
             self._published.notify_all()
-        if self._watcher is not None:
-            self._watcher.join()
-        if self._session_poller is not None:
-            self._session_poller.join()
-        if self._tracker_thread is not None:
-            self._tracker_thread.join()
-        if self._activation_thread is not None:
-            self._activation_thread.join()
-        if self._activate_thread is not None:
-            self._activate_thread.join()
-        if self._adoption_thread is not None:
-            self._adoption_thread.join()
-        if self._movement_thread is not None:
-            self._movement_thread.join()
-        if self._retention_thread is not None:
-            self._retention_thread.join()
-        if self._digest_thread is not None:
-            self._digest_thread.join()
-        if self._spend_thread is not None:
-            self._spend_thread.join()
-        if self._serve_thread is not None:
-            self._serve_thread.join()
-        if self._probe_thread is not None:
-            self._probe_thread.join()
-        if self._signin_thread is not None:
-            self._signin_thread.join()
-        if self._trust_start_thread is not None:
-            self._trust_start_thread.join()
+        with self._ingest:  # a worker registers under this lock and not once the stop is set
+            activate = self._activate_thread
+        for thread in (
+            self._watcher, self._session_poller, self._tracker_thread, self._activation_thread, activate,
+            self._adoption_thread, self._movement_thread, self._retention_thread, self._digest_thread,
+            self._spend_thread, self._serve_thread, self._probe_thread, self._signin_thread,
+            self._trust_start_thread,
+        ):
+            if thread is not None:
+                thread.join()
         if self._signin_runs is not None:
             self._signin_runs.close()
         with self._ingest:
@@ -11327,12 +11317,22 @@ class ConsoleService(ActionPermit):
             workers = list(self._project_question_workers)
         for worker in workers:
             worker.join()
-        if self._thread is not None:
-            self._server.shutdown()
+        # Both shutdown requests go out before either wait, so close pays one poll, not one per server.
+        stoppers = []
+        for server, thread in ((self._server, self._thread), (self._guest_server, self._guest_thread)):
+            if thread is None:
+                continue
+            stopper = threading.Thread(target=server.shutdown, daemon=True)
+            try:
+                stopper.start()
+            except RuntimeError:
+                server.shutdown()  # no thread to start: stop it here, then finish the cleanup below
+            else:
+                stoppers.append(stopper)
+        for stopper in stoppers:
+            stopper.join()
         self._server.server_close()
         if self._guest_server is not None:
-            if self._guest_thread is not None:
-                self._guest_server.shutdown()
             self._guest_server.server_close()
         manager.reap_stops()
         with self._ingest:
