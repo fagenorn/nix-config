@@ -42,6 +42,7 @@ TRANSPORT = re.compile(
     r"\bHTTP 5\d\d\b|error connecting to|dial tcp|network is unreachable|connection refused"
     r"|connection reset|no such host|i/o timeout|TLS handshake timeout|unexpected EOF",
     re.IGNORECASE)
+HTTP_STATUS_PREFIX = re.compile(r"\bHTTP \d{3}\b")
 ADDRESS_EXHAUSTION = re.compile(
     r"\bconnect:?\s+(?:(?:can'?t|cannot|unable to) assign requested address|EADDRNOTAVAIL)\b", re.IGNORECASE)
 TIMEOUT = 30
@@ -69,8 +70,9 @@ def is_transport(stderr: str) -> bool:
 def is_address_exhaustion(stderr: str) -> bool:
     """Whether a `gh` failure's stderr shows the host ran out of local ports: the socket error after
     `connect`, never a repository name or other text of the diagnostic that happens to spell it. A failure
-    where `gh` reports an HTTP response is the server's, whatever its body says, and is never exhaustion."""
-    return HTTP_STATUS.search(stderr) is None and ADDRESS_EXHAUSTION.search(stderr) is not None
+    where `gh` reports an HTTP response, in either of its spellings, is the server's, whatever its body
+    says, and is never exhaustion."""
+    return HTTP_STATUS.search(stderr) is None and HTTP_STATUS_PREFIX.search(stderr) is None and ADDRESS_EXHAUSTION.search(stderr) is not None
 
 
 class ForgeError(Exception):

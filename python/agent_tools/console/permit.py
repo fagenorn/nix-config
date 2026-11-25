@@ -90,10 +90,10 @@ never None. The checks run in this order, the first that applies deciding:
 - Release: the plain run is `ALLOW` with its target; any other leading run is `RELEASE_SPELLING`.
 - A reader raising `ForgeUnreadable` is `DENY` with `FORGE_UNREADABLE`. A lookup failing with address
   exhaustion (the host out of local ports) is retried `LOOKUP_ATTEMPTS` times in all with a short doubling
-  back-off, the pauses of all the lookups of one judgement together within `LOOKUP_BUDGET` seconds so the
-  hook's ten-second request still gets its verdict, and when it still fails the reason is
-  `PORTS_EXHAUSTED`. The budget counts only those pauses: a lookup that succeeds, however slowly,
-  and any other failure are unchanged.
+  back-off, and no retry is begun once its pause would end more than `LOOKUP_BUDGET` seconds after the
+  judgement began, the time of the lookups themselves counted, so the hook's ten-second request still gets
+  its verdict; when it still fails the reason is `PORTS_EXHAUSTED`. A lookup that succeeds, however
+  slowly, and any other failure are unchanged.
 
 `ALONE` and `NOT_GRANTED` for a merge or rerun are composed by `spelling_refusal(sentence, verb, grant,
 missing)`: the sentence, ` Missing: <flags>.` when `missing` is not empty, and ` Accepted: <form>; <prefix
@@ -212,7 +212,7 @@ PORTS_EXHAUSTED = ("the host ran out of local network ports, so the lookup could
 LOOKUP_ATTEMPTS = 4
 LOOKUP_BACKOFF = 0.5
 LOOKUP_BUDGET = 6.0
-_PAUSED: contextvars.ContextVar[list[float] | None] = contextvars.ContextVar("lookup_paused", default=None)
+_STARTED: contextvars.ContextVar[float | None] = contextvars.ContextVar("lookup_started", default=None)
 NOT_ACTIVE = "This sprint is not active."
 NOT_MANAGER = "Only the sprint's manager session may run this command."
 MOVED = "The sprint changed while the command was judged."
@@ -374,19 +374,19 @@ def memoized(forge: Forge) -> Memoized:
 
 @contextlib.contextmanager
 def lookup_budget():
-    """Bound the retry pauses of every forge lookup of this block to `LOOKUP_BUDGET` seconds in all: the
-    hook's own request times out at ten, and the verdict must still be delivered. The lookups themselves
-    are not timed here."""
-    token = _PAUSED.set([0.0])
+    """Start the clock that bounds the retries of every forge lookup of this block: none is begun that would
+    end past `LOOKUP_BUDGET` seconds from here, the hook's own request timing out at ten and the verdict
+    still having to be delivered. A lookup that is not retried is never cut short by it."""
+    token = _STARTED.set(time.monotonic())
     try:
         yield
     finally:
-        _PAUSED.reset(token)
+        _STARTED.reset(token)
 
 
 def _lookup(read: Callable[[], object], what: str):
     """One forge lookup: address exhaustion is retried `LOOKUP_ATTEMPTS` times in all, with a doubling
-    back-off from `LOOKUP_BACKOFF` seconds, and no more pausing than the `lookup_budget` leaves room for;
+    back-off from `LOOKUP_BACKOFF` seconds, and none that the `lookup_budget` leaves no time for;
     then it is said plainly. Any other failure is `could not be read`."""
     for attempt in range(LOOKUP_ATTEMPTS):
         try:
@@ -395,11 +395,10 @@ def _lookup(read: Callable[[], object], what: str):
             if not error.exhausted:
                 raise ForgeUnreadable(f"{what} could not be read") from None
             pause = LOOKUP_BACKOFF * 2 ** attempt
-            paused = _PAUSED.get()
-            if attempt == LOOKUP_ATTEMPTS - 1 or (paused is not None and paused[0] + pause > LOOKUP_BUDGET):
+            started = _STARTED.get()
+            if attempt == LOOKUP_ATTEMPTS - 1 or (
+                    started is not None and time.monotonic() - started + pause > LOOKUP_BUDGET):
                 raise ForgeUnreadable(PORTS_EXHAUSTED) from None
-            if paused is not None:
-                paused[0] += pause
         time.sleep(pause)
 
 

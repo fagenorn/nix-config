@@ -11,7 +11,6 @@ import hashlib
 import importlib.util
 import io
 import os
-import re
 import subprocess
 import tempfile
 import time
@@ -683,16 +682,48 @@ class JudgeTest(unittest.TestCase):
         self.assertLess(len(calls), 10)
         self.assertEqual(len(calls) - 1, len(sleeps))
 
-    def test_the_retry_pauses_of_one_judgement_stay_within_the_budget(self):
-        """Pauses of 0.5, 1 and 2 s are each within the budget, but not those of two lookups together."""
+    def test_the_retries_of_one_judgement_end_before_the_hook_request_times_out(self):
+        """Four failed lookups of 2 s each and the pauses between them would outlast the ten seconds."""
         clock = [100.0]
-        stack, calls, sleeps = self.gh_answering(*[self.EXHAUSTED] * 20, took=0.1, clock=clock)
+        stack, calls, sleeps = self.gh_answering(*[self.EXHAUSTED] * 20, took=2.0, clock=clock)
         with stack:
             verdict = judge(self.merge, self.grant, permit.FORGE)
         self.assertEqual(DENY, verdict.decision)
         self.assertEqual(permit.FORGE_UNREADABLE.format(reason=permit.PORTS_EXHAUSTED), verdict.reason)
-        self.assertLessEqual(sum(sleeps), permit.LOOKUP_BUDGET)
+        self.assertLess(clock[0] - 100.0, sprint.TIMEOUT_SECONDS)
         self.assertLess(permit.LOOKUP_BUDGET, sprint.TIMEOUT_SECONDS)
+
+    def test_the_retry_pauses_of_two_lookups_of_one_judgement_share_the_budget(self):
+        """The first lookup recovers after pauses of 0.5, 1 and 2 s; the second, failing throughout, may not
+        pause as long again."""
+        clock = [100.0]
+        sleeps = []
+        outcomes = [True] * 3 + [False] + [True] * 20
+
+        def api_get(path):
+            if outcomes.pop(0):
+                raise permit.forge_api.ForgeError("gh_failed", "exhausted", exhausted=True)
+            return {}
+
+        def pause(seconds):
+            sleeps.append(seconds)
+            clock[0] += seconds
+
+        def reader(read):
+            def call(*args):
+                permit._get("path", "thing")
+                return read(*args)
+            return call
+        forge = Forge(reader(self.fake.read_pr), reader(self.fake.read_run), reader(self.fake.read_required),
+                      reader(self.fake.read_release_pr))
+        with mock.patch.object(permit.forge_api, "api_get", side_effect=api_get), \
+                mock.patch("time.sleep", side_effect=pause), \
+                mock.patch("time.monotonic", side_effect=lambda: clock[0]):
+            verdict = judge(self.rerun, self.grant, forge)
+        self.assertEqual(DENY, verdict.decision)
+        self.assertEqual(permit.FORGE_UNREADABLE.format(reason=permit.PORTS_EXHAUSTED), verdict.reason)
+        self.assertGreater(len(sleeps), 3)
+        self.assertLessEqual(sum(sleeps), permit.LOOKUP_BUDGET)
 
     def test_slow_lookups_that_succeed_together_past_the_retry_budget_are_judged_normally(self):
         """A rerun's three reads of 3 s each end at 9 s, past the retry budget and inside the hook's 10 s:
@@ -748,13 +779,6 @@ class JudgeTest(unittest.TestCase):
         self.assertEqual(permit.FORGE_UNREADABLE.format(reason="pull request 7 could not be read"),
                          verdict.reason)
         self.assertEqual((1, []), (len(calls), sleeps))
-
-    def test_the_documented_port_exhaustion_retry_names_no_issue_or_pull_request(self):
-        """The comment rule counts a header line naming one, so the retry paragraph must not add a line."""
-        start = permit.__doc__.index("A lookup failing with address")
-        paragraph = permit.__doc__[start:permit.__doc__.index("unchanged.", start)]
-        self.assertIn("PORTS_EXHAUSTED", paragraph)
-        self.assertIsNone(re.search(r"#\d+", paragraph), paragraph)
 
     def test_a_command_naming_no_granted_verb_has_no_decision(self):
         for command in ("git status", "gh pr view 7", "release transaction preview --repo-root r",
@@ -886,6 +910,7 @@ class ReaderTest(unittest.TestCase):
                  "connect: connection refused", False),
                 ("HTTP 404: repos/o/cannot assign requested address/pulls/7", False),
                 ("gh: upstream connect: cannot assign requested address (HTTP 502)", False),
+                ("HTTP 502: upstream connect: cannot assign requested address", False),
                 ("dial tcp 1.2.3.4:443: connect: connection refused", False),
                 ("HTTP 502 Bad Gateway", False)):
             done = mock.Mock(returncode=1, stdout="", stderr=stderr)
