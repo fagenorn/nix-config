@@ -77,7 +77,6 @@ from pathlib import Path
 
 from agent_tools.delivery import (
     engine_caps,
-    engine_graders,
     engine_ledger,
     engine_shell,
     procedure_check,
@@ -209,8 +208,7 @@ def main(argv: list[str] | None = None) -> int:
         return _usage(f"--procedures is not a directory: {args.procedures}")
     try:
         commands = engine_shell.check_declarations()
-        result = procedure_check.check_directory(args.procedures, commands)
-        breaches = engine_caps.breaches(ENGINE_DIR, args.procedures, engine_graders.GRADERS)
+        result, breaches = engine_caps.verdict(ENGINE_DIR, args.procedures, commands)
     except (procedure_check.DeclarationError, engine_shell.Refused, ValueError) as error:
         return _usage(str(error))
     if result.refusals or breaches:

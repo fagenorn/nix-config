@@ -99,6 +99,7 @@ REGISTERED_CHECK_IDS = (
     "verification.commands.no_shell_indirection",
     "verification.conformance_workflow.fresh",
     "verification.context_map.lint",
+    "verification.procedures.engine_check",
     "verification.standards.lint",
     "verification.violations.never_rise",
 )

@@ -22,8 +22,9 @@ from pathlib import Path, PurePosixPath
 import subprocess
 
 from agent_tools.delivery import (
-    comment_lint, context_map_lint, copied_test_lint, host_admission, instruction_surface_lint,
-    never_rise, node_lint, record_lint, ruff_lint, size_lint, skipped_test_lint, standards_lint,
+    comment_lint, context_map_lint, copied_test_lint, engine_caps, engine_commands,
+    host_admission, instruction_surface_lint, never_rise, node_lint, procedure_check,
+    record_lint, ruff_lint, size_lint, skipped_test_lint, standards_lint,
 )
 from agent_tools.project_contract import agent_platform
 from agent_tools.release import release_adapter, release_profile
@@ -40,6 +41,9 @@ from agent_tools.project_contract.conformance_registry import (
     TERMINAL_RESIDUE, TOOL_REASON_CODES, UNACKNOWLEDGED_RESIDUE, bound_fact,
     bound_facts,
 )
+
+SHIPPED_PROCEDURES = Path(procedure_check.__file__).with_name("procedures")
+DELIVERY_PACKAGE = Path(procedure_check.__file__).parent
 
 
 def bounded_run(argv: list[str], cwd, env: dict | None = None):
@@ -833,6 +837,49 @@ def check_never_rise(context: "Context") -> "Outcome":
         "base_count": first.base_count, "branch_count": first.branch_count,
         "violations": [bound_fact(v.text()) for v in first.new[:MAX_FACT_LIST]],
         "rules": bound_facts([r.rule for r in verdict.rises]), **listed, **extra})
+
+
+# --------------------------------------------------------------------------
+# The shipped procedures
+# --------------------------------------------------------------------------
+
+
+def check_shipped_procedures(context: "Context") -> "Outcome":
+    """Contract: every procedure file the platform ships passes the verdict
+    `engine check` gives, against the judged project's commands.
+
+    The set is found by listing `SHIPPED_PROCEDURES` when the check runs, so a
+    new file is judged with no list edited. The declarations are the judged
+    project's, the table `engine deliver` accepts: the platform's commands
+    and every command the contract declares. The verdict is
+    `engine_caps.verdict`, the function `engine check` calls. Any refusal
+    fails as `procedure_refused` (breaches are listed beside it), breaches
+    alone as `procedure_cap_exceeded`, and a check that cannot run as
+    `procedure_check_unusable`, never a refusal of the run. It starts no
+    process and opens no socket.
+    """
+    repair = "procedures.engine_check.repair"
+    try:
+        declarations = engine_commands.CommandTable(
+            engine_commands.PLATFORM_MODULES, context.bindings["commands"],
+            str(context.root)).declarations()
+        result, breaches = engine_caps.verdict(DELIVERY_PACKAGE, SHIPPED_PROCEDURES,
+                                               declarations)
+    except (procedure_check.DeclarationError, ValueError, OSError) as error:
+        return Outcome("failed", "procedure_check_unusable", repair,
+                       {"reason": bound_fact(" ".join(str(error).split()))})
+    found = {"breaches": bound_facts([f"{b.thing} {b.size} of {b.cap} {b.unit}"
+                                      for b in breaches]),
+             "breach_count": len(breaches)} if breaches else {}
+    if result.refusals:
+        lines = [" ".join(f"{r.defect} {r.procedure} {r.step if r.step is not None else '-'}: "
+                          f"{r.detail}".split()) for r in result.refusals]
+        return Outcome("failed", "procedure_refused", repair, {
+            "procedures": bound_facts({r.procedure for r in result.refusals}),
+            "refusals": bound_facts(lines), "count": len(result.refusals), **found})
+    if breaches:
+        return Outcome("failed", "procedure_cap_exceeded", repair, found)
+    return Outcome("passed", facts={"procedure_count": len(result.procedures)})
 
 
 # --------------------------------------------------------------------------
