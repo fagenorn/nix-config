@@ -245,7 +245,7 @@ class BypassProofWakesTest(unittest.TestCase):
         world = WakeProofWorld(self)
         self.addCleanup(lambda: world.stop_child() and _kill(world.stop_child()))
 
-        code, report, _, seconds = world.run("--time-limit", "10", "--teardown-reserve", "5",
+        code, report, _, seconds = world.run("--time-limit", "5", "--teardown-reserve", "2.5",
                                              env={"FAKE_CLIENT_STOP_HANGS": "1"})
 
         child = world.stop_child()
@@ -253,7 +253,7 @@ class BypassProofWakesTest(unittest.TestCase):
         self.assertFalse(world._running(child), "the stop's client child outlived teardown")
         self.assertIs(teardown(report)["stop_manager"]["ok"], False)
         self.assertEqual(code, 1)
-        self.assertLess(seconds, 11)
+        self.assertLess(seconds, 7)
 
     def test_a_session_that_cannot_be_found_fails_teardown_with_the_recovery(self):
         world = WakeProofWorld(self)
