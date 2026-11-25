@@ -88,22 +88,18 @@ kind, a project command, or an agent whose reply did not resolve, declares no sc
 
 from __future__ import annotations
 
-import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
 
-from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
 from agent_tools.delivery.engine_graders import GRADERS
 from agent_tools.delivery.engine_reply import schema_problem
+from agent_tools.delivery.procedure_terms import (
+    CLAIM_LOST, EXHAUSTED, FORMAT, INPUT_RE, NAME_RE, NEEDS, NO_REPLY, OUT_OF_BOUNDS, PLACEHOLDER_RE, QUOTA_WAIT,
+    ROLES, STAGES, SUPERSEDED, WAITS, CommandDeclaration, _inside, _strict_load, readable_format)
 
-FORMAT = 1
-STAGES = ("setup", "planning", "plan review", "building", "final review",
-          "verifying", "awaiting look", "landing", "closing out", "done")
 KINDS = ("command", "agent", "decide", "group", "call")
-NEEDS = ("owner-decision", "owner-look", "retry", "nothing")
-ROLES = ("planner", "implementer", "reviewer", "reviewer-lite")
 DEFECTS = ("unreadable_procedure", "undefined_field", "invalid_field",
            "unknown_stage", "duplicate_step", "unknown_target", "unknown_command",
            "undeclared_verdicts", "missing_claim_lost", "unknown_role", "missing_prompt", "missing_reply",
@@ -111,20 +107,11 @@ DEFECTS = ("unreadable_procedure", "undefined_field", "invalid_field",
            "unreachable_step", "unreachable_done", "unmapped_outcome",
            "unknown_outcome", "unbounded_cycle", "unproduced_input",
            "unknown_member", "unknown_placeholder", "each_not_a_list")
-EXHAUSTED = "exhausted"
-OUT_OF_BOUNDS = "out-of-bounds"
-NO_REPLY = "no-reply"
 REFUSED = "refused"
-CLAIM_LOST = "claim-lost"
-QUOTA_WAIT = "quota-wait"
-SUPERSEDED = "superseded"
 START = "(start)"
 
-NAME_RE = re.compile(r"^[a-z][a-z0-9-]*$")
-INPUT_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 PATH_RE = re.compile(r"^([a-z][a-z0-9-]*)\.([a-z][a-z0-9_]*)$")
 FILE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
-PLACEHOLDER_RE = re.compile(r"\{\{\s*([^{}]*?)\s*\}\}")
 
 # The members of each platform command's JSON output that are lists; every other member is not one.
 PLATFORM_LISTS: Mapping[str, frozenset[str]] = {
@@ -142,7 +129,6 @@ PLATFORM_LISTS: Mapping[str, frozenset[str]] = {
 HOLDS = ("run", "head", "live")
 COMMON_REQUIRED = ("id", "stage", "kind", "holds")
 COMMON_OPTIONAL = ("in", "on", "max_visits", "mutates")
-WAITS = ("usage-limit", "host-slot", "lock", "checks")
 KIND_MEMBERS = {
     "command": (("command",), ("subcommand", "check", "wait")),
     "agent": (("role", "prompt", "reply", "outcome_from"), ()),
@@ -150,7 +136,6 @@ KIND_MEMBERS = {
     "group": (("members",), ()),
     "call": (("procedure",), ("each", "parallel")),
 }
-DEFAULT_VERDICTS = ("ok", "failed")
 
 
 @dataclass(frozen=True)
@@ -190,78 +175,6 @@ class CheckResult:
     procedures: tuple[str, ...]
     refusals: tuple[Refusal, ...]
     resolved: Mapping[str, Resolved]
-
-
-class DeclarationError(Exception):
-    """`command_verdicts.json` is not a valid declaration file."""
-
-
-@dataclass(frozen=True)
-class CommandDeclaration:
-    """The two declared forms: `verdicts` (no subcommands) or `subcommands`."""
-
-    verdicts: tuple[str, ...] | None
-    subcommands: Mapping[str, tuple[str, ...]]
-
-    def outcomes(self, subcommand: str | None) -> tuple[str, ...] | None:
-        if self.verdicts is not None:
-            return (self.verdicts or DEFAULT_VERDICTS) if subcommand is None else None
-        if subcommand in self.subcommands:
-            return self.subcommands[subcommand] or DEFAULT_VERDICTS
-        return None
-
-
-def _strict_load(path: Path) -> object:
-    try:
-        return json.loads(path.read_text(encoding="utf-8"),
-                          object_pairs_hook=reject_duplicate_keys,
-                          parse_constant=reject_nonfinite_literal)
-    except RecursionError as error:
-        raise ValueError("the document is nested too deeply") from error
-
-
-def _verdict_list(value: object, where: str) -> tuple[str, ...]:
-    if (not isinstance(value, list) or not all(isinstance(item, str) and item for item in value)
-            or len(set(value)) != len(value)):
-        raise DeclarationError(f"{where}: verdicts are distinct non-empty strings")
-    for reserved in (EXHAUSTED, OUT_OF_BOUNDS):
-        if reserved in value:
-            raise DeclarationError(f"{where}: {reserved!r} is reserved, not a verdict")
-    return tuple(value)
-
-
-def _declaration(key: str, value: object) -> CommandDeclaration | None:
-    if value is None:
-        return None
-    if isinstance(value, dict) and list(value) == ["verdicts"]:
-        return CommandDeclaration(_verdict_list(value["verdicts"], key), {})
-    if isinstance(value, dict) and list(value) == ["subcommands"]:
-        listed = value["subcommands"]
-        if not isinstance(listed, dict) or not listed:
-            raise DeclarationError(f"{key}: subcommands is a non-empty object")
-        for subcommand in listed:
-            if not NAME_RE.fullmatch(subcommand):
-                raise DeclarationError(f"{key}: subcommand {subcommand!r} is not a name")
-        return CommandDeclaration(None, {
-            subcommand: _verdict_list(verdicts, f"{key} {subcommand}")
-            for subcommand, verdicts in listed.items()})
-    raise DeclarationError(f"{key}: null, {{\"verdicts\": [...]}} or {{\"subcommands\": {{...}}}} only")
-
-
-def load_commands(path: Path | None = None) -> dict[str, CommandDeclaration | None]:
-    path = path or Path(__file__).with_name("command_verdicts.json")
-    try:
-        document = _strict_load(path)
-    except (OSError, ValueError) as error:
-        raise DeclarationError(f"{path.name} is unreadable: {error}") from error
-    if not isinstance(document, dict):
-        raise DeclarationError(f"{path.name} is not an object")
-    commands: dict[str, CommandDeclaration | None] = {}
-    for key, value in document.items():
-        if not NAME_RE.fullmatch(key):
-            raise DeclarationError(f"{key!r} is not a command id")
-        commands[key] = _declaration(key, value)
-    return commands
 
 
 class _Findings:
@@ -307,11 +220,6 @@ def _paths(value: object, only_run: bool, found: _Findings, step: str | None,
             found.add("invalid_field", f"{where} path {path!r} is not <step>.<member> or run.<input>.", step)
         elif only_run and match.group(1) != "run":
             found.add("invalid_field", f"{where} path {path!r} must be a run.<input> path.", step)
-
-
-def readable_format(value: object) -> bool:
-    """Whether `value` is the one procedure format this engine reads."""
-    return _is_int(value) and value == FORMAT
 
 
 def _header(doc: dict, found: _Findings) -> None:
@@ -613,18 +521,6 @@ def _command_outcomes(reference: dict, commands: Mapping[str, CommandDeclaration
         found.add("undeclared_verdicts",
                   f"{command!r} declares no verdicts for subcommand {subcommand!r}.", step)
     return outcomes
-
-
-def _inside(directory: Path, name: str) -> Path | None:
-    """The named file when it is a file that resolves inside `directory`."""
-    path = directory / name
-    if not path.is_file():
-        return None
-    try:
-        path.resolve().relative_to(directory.resolve())
-    except ValueError:
-        return None
-    return path
 
 
 def _agent_references(item: dict, directory: Path, replies: dict[str, _Reply | tuple[str, str]],

@@ -81,6 +81,7 @@ from agent_tools.delivery import (
     engine_ledger,
     engine_shell,
     procedure_check,
+    procedure_terms,
 )
 
 ENGINE_DIR = Path(importlib.resources.files("agent_tools.delivery"))
@@ -211,7 +212,7 @@ def main(argv: list[str] | None = None) -> int:
         commands = engine_shell.check_declarations()
         result = procedure_check.check_directory(args.procedures, commands)
         breaches = engine_caps.breaches(ENGINE_DIR, args.procedures, engine_graders.GRADERS)
-    except (procedure_check.DeclarationError, engine_shell.Refused, ValueError) as error:
+    except (procedure_terms.DeclarationError, engine_shell.Refused, ValueError) as error:
         return _usage(str(error))
     if result.refusals or breaches:
         sys.stdout.write(compact({"breaches": [b.as_json() for b in breaches],

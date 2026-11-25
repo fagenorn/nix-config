@@ -28,7 +28,7 @@ from agent_tools.delivery.engine_commands import (
     LIFECYCLE_ARGV, LIFECYCLE_WALL_SECONDS, PLATFORM_MODULES, PLATFORM_WALL_SECONDS, PROJECT_WALL_SECONDS, CommandTable, Invocation,
     UnknownCommand, argument, command_text, grade, run)
 from agent_tools.delivery.engine_guard import Hook, Unavailable, locate
-from agent_tools.delivery.procedure_check import load_commands
+from agent_tools.delivery.procedure_terms import load_commands
 from agent_tools.system.siblings import sibling_argv
 from tests.engine_guards import (
     GUARD_NAME, STANDIN_GUARD, payloads, script, standin_guard, write_settings)

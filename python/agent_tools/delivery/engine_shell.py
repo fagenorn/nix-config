@@ -185,7 +185,8 @@ from typing import Callable, Mapping
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
 from agent_tools.delivery import (
     engine_commands, engine_core, engine_guard, engine_housekeeping, engine_ledger, engine_reply,
-    engine_session, engine_slots, engine_stop, host_admission, procedure_check, rule_reader,
+    engine_session, engine_slots, engine_stop, host_admission, procedure_check, procedure_terms,
+    rule_reader,
 )
 from agent_tools.delivery.engine_commands import CommandTable, UnknownCommand
 from agent_tools.delivery.engine_ledger import creation_lock_path
@@ -345,7 +346,7 @@ def _resolve() -> tuple[dict, CommandTable]:
         raise Refused(f"{error.code}: {error.repair_id}") from error
     try:
         return snapshot, CommandTable.from_snapshot(snapshot)
-    except procedure_check.DeclarationError as error:
+    except procedure_terms.DeclarationError as error:
         raise Refused(str(error)) from error
 
 
@@ -357,13 +358,13 @@ def _admitted() -> int:
                       f"{host_admission.ENGINE_ROUTE} route, so no run starts") from error
 
 
-def check_declarations() -> dict[str, procedure_check.CommandDeclaration | None]:
+def check_declarations() -> dict[str, procedure_terms.CommandDeclaration | None]:
     """The declarations `engine check` checks against: `engine deliver`'s inside an onboarded project."""
     try:
         snapshot = resolve_project.resolve(None)
     except resolve_project.ContractError as error:
         if error.code == "not_onboarded":
-            return procedure_check.load_commands()
+            return procedure_terms.load_commands()
         raise Refused(f"{error.code}: {error.repair_id}") from error
     return CommandTable.from_snapshot(snapshot).declarations()
 
@@ -443,7 +444,7 @@ def _open_runs(runs: list[Path]) -> list[Path]:
         state = engine_ledger.fold(engine_ledger.read_run(existing),
                                    engine_ledger.replay(existing / "events.jsonl"),
                                    engine_ledger.process_alive)
-        if not state.done and (state.stop or {}).get("name") != procedure_check.SUPERSEDED:
+        if not state.done and (state.stop or {}).get("name") != procedure_terms.SUPERSEDED:
             open_runs.append(existing)
     return open_runs
 
@@ -455,7 +456,7 @@ def _superseded(run_dir: Path) -> bool:
         document = _load(run_dir / "procedure" / "deliver.json")
     except (ValueError, OSError):
         return False
-    return not procedure_check.readable_format(document.get("format"))
+    return not procedure_terms.readable_format(document.get("format"))
 
 
 def _supersede(run_dir: Path, clock: Callable[[], datetime]) -> None:
@@ -463,7 +464,7 @@ def _supersede(run_dir: Path, clock: Callable[[], datetime]) -> None:
     ledger = engine_ledger.replay(run_dir / "events.jsonl")
     step = next((e["step"] for e in reversed(ledger) if e["event"] == "step_entered"), ENTRY)
     with engine_stop.publication(run_dir):
-        _record_stop(run_dir, step, procedure_check.SUPERSEDED, "nothing", "", False)
+        _record_stop(run_dir, step, procedure_terms.SUPERSEDED, "nothing", "", False)
     _record_history(run_dir, clock)
 
 
@@ -601,7 +602,7 @@ def _continue(run_dir: Path, table: CommandTable, inputs: dict) -> None:
         if (stored or graded) and not (graded and moved):
             outcome = next(e["outcome"] for e in here) if graded else stored[0]["outcome"]
             _graded(run_dir, steps[name], visit, outcome, graded=graded, moved=moved,
-                    member=name in members, bound=outcome == procedure_check.OUT_OF_BOUNDS)
+                    member=name in members, bound=outcome == procedure_terms.OUT_OF_BOUNDS)
             ledger = engine_ledger.replay(run_dir / "events.jsonl")
     events = core_events(run_dir, ledger, computed)
     action = engine_core.replay(procedure, inputs, events).action
@@ -965,8 +966,8 @@ def _renew(run_dir: Path, table: CommandTable, procedure: dict, inputs: dict,
     else:
         text = " ".join(ran.stdout.decode("utf-8", "replace").split()
                         + ran.stderr.decode("utf-8", "replace").split()) or "no output"
-    need = procedure["stops"][procedure_check.CLAIM_LOST]["need"]
-    return _stop(run_dir, step, procedure_check.CLAIM_LOST, need,
+    need = procedure["stops"][procedure_terms.CLAIM_LOST]["need"]
+    return _stop(run_dir, step, procedure_terms.CLAIM_LOST, need,
                  f"The claim was not renewed before step {step}, the keep-alive "
                  f"answered {verdict}: {text}.", stop)
 
@@ -1056,13 +1057,13 @@ def _grade_command(run_dir: Path, step: dict, name: str, visit: int,
         engine_ledger.store_result(run_dir, step=name, visit=visit, result={"bound": "wall-time"},
                                    at=_now(), wall_seconds=ran.wall_seconds, turns=0,
                                    tokens=dict(NO_TOKENS), spend_usd=0, head=head,
-                                   outcome=procedure_check.OUT_OF_BOUNDS)
-        _graded(run_dir, step, visit, procedure_check.OUT_OF_BOUNDS, bound=True, member=member)
+                                   outcome=procedure_terms.OUT_OF_BOUNDS)
+        _graded(run_dir, step, visit, procedure_terms.OUT_OF_BOUNDS, bound=True, member=member)
         return
     engine_ledger.store_result(run_dir, step=name, visit=visit, result=ran.result, at=_now(),
                                wall_seconds=ran.wall_seconds, turns=0, tokens=dict(NO_TOKENS),
                                spend_usd=0, head=head, outcome=ran.outcome)
-    if ran.outcome == procedure_check.OUT_OF_BOUNDS:  # only the engine grades a fired bound
+    if ran.outcome == procedure_terms.OUT_OF_BOUNDS:  # only the engine grades a fired bound
         raise Fault(f"step {name} has no mapping for the outcome {ran.outcome}")
     _graded(run_dir, step, visit, ran.outcome, member=member)
 
@@ -1143,7 +1144,7 @@ def _child(run_dir: Path, table: CommandTable, run: dict, step: dict,
                 shutil.rmtree(child_dir, ignore_errors=True)
             raise
         _, line = _walk(child_dir, table, scope, action.recheck)
-        if line["end"] == procedure_check.QUOTA_WAIT:
+        if line["end"] == procedure_terms.QUOTA_WAIT:
             raise _Quota(line["detail"])
         if line["end"] == engine_stop.STOPPED_BY_REQUEST:
             raise engine_stop.Stopped
@@ -1224,7 +1225,7 @@ def _quota_ended(run_dir: Path, step: str, quota: _Quota,
                  stop: Callable[[], bool]) -> tuple[int, dict]:
     """The `quota-wait` stop of a group or a call, recorded once its members or children have
     ended, so it is the run's last event; a member's step names it, else the group's or call's."""
-    return _stop(run_dir, quota.step or step, procedure_check.QUOTA_WAIT, QUOTA_NEED,
+    return _stop(run_dir, quota.step or step, procedure_terms.QUOTA_WAIT, QUOTA_NEED,
                  quota.detail, stop)
 
 
@@ -1287,12 +1288,12 @@ def _visit_session(run_dir: Path, root: str, step: dict, action: engine_core.Sta
     bound = (engine_session.WALL_TIME if launched.timed_out
              else engine_session.CAP_SUBTYPES.get(reading.subtype))
     if bound is not None:
-        store({"bound": bound}, procedure_check.OUT_OF_BOUNDS)
-        _graded(run_dir, step, visit, procedure_check.OUT_OF_BOUNDS, bound=True, member=member)
+        store({"bound": bound}, procedure_terms.OUT_OF_BOUNDS)
+        _graded(run_dir, step, visit, procedure_terms.OUT_OF_BOUNDS, bound=True, member=member)
         return None
     if no_reply:
-        store({}, procedure_check.NO_REPLY)
-        _graded(run_dir, step, visit, procedure_check.NO_REPLY, member=member)
+        store({}, procedure_terms.NO_REPLY)
+        _graded(run_dir, step, visit, procedure_terms.NO_REPLY, member=member)
         return None
     reply = reading.reply
     if reply is None:
@@ -1351,10 +1352,10 @@ def _launch_until_answered(
                    detail: str) -> tuple:
         record(launched, reading)
         if defer:
-            line = {"detail": detail, "end": procedure_check.QUOTA_WAIT, "need": QUOTA_NEED,
+            line = {"detail": detail, "end": procedure_terms.QUOTA_WAIT, "need": QUOTA_NEED,
                     "run": run_dir.name}
             return launched, reading, (EXIT_STOP, line), False
-        return launched, reading, _stop(run_dir, name, procedure_check.QUOTA_WAIT, QUOTA_NEED,
+        return launched, reading, _stop(run_dir, name, procedure_terms.QUOTA_WAIT, QUOTA_NEED,
                                         detail, stop), False
 
     while True:

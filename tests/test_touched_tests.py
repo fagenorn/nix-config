@@ -336,6 +336,7 @@ class RecipeTest(unittest.TestCase):
         for source in [f"{DELIVERY}/engine*.py",
                        f"{DELIVERY}/host_admission.py",
                        f"{DELIVERY}/procedure_check.py",
+                       f"{DELIVERY}/procedure_terms.py",
                        f"{DELIVERY}/lane_rule.py",
                        f"{DELIVERY}/rule_reader.py",
                        f"{DELIVERY}/procedures/*",

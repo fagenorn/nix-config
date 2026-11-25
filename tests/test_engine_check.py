@@ -23,9 +23,9 @@ from pathlib import Path
 from typing import Callable
 from unittest import mock
 
-from agent_tools.delivery import engine, engine_reply, procedure_check
+from agent_tools.delivery import engine, engine_reply, procedure_check, procedure_terms
 from agent_tools.delivery.engine_commands import LIFECYCLE_ARGV
-from agent_tools.delivery.procedure_check import CommandDeclaration, load_commands
+from agent_tools.delivery.procedure_terms import CommandDeclaration, load_commands
 from tests.engine_walks import reply_schemas, step_outcomes, walk_edges
 from tests.guard_policy_world import install_platform_manifest_in_environ
 
@@ -140,7 +140,7 @@ def _exhausted_scope_hands_over_to_the_repair_a_stop_enters(toy: dict) -> None:
 
 def _undeclared_command(toy: dict) -> None:
     step(toy, "scope")["command"] = next(
-        key for key, declaration in sorted(procedure_check.load_commands().items())
+        key for key, declaration in sorted(procedure_terms.load_commands().items())
         if declaration is None)
 
 
@@ -1094,8 +1094,8 @@ class NoSideEffectTest(unittest.TestCase):
         self.assertEqual(json.loads(done.stdout), {"called": [], "codes": [0, 1]})
 
     def test_the_check_modules_import_no_process_or_socket_module(self):
-        for name in ("engine.py", "procedure_check.py", "engine_graders.py", "engine_caps.py",
-                     "engine_reply.py"):
+        for name in ("engine.py", "procedure_check.py", "procedure_terms.py", "engine_graders.py",
+                     "engine_caps.py", "engine_reply.py"):
             tree = ast.parse((DELIVERY / name).read_text(encoding="utf-8"))
             for node in ast.walk(tree):
                 if isinstance(node, ast.Import):
@@ -1133,8 +1133,8 @@ class UsageTest(unittest.TestCase):
 
     def test_an_invalid_declarations_file_is_usage(self):
         out, err = io.StringIO(), io.StringIO()
-        with mock.patch.object(procedure_check, "load_commands",
-                               side_effect=procedure_check.DeclarationError("bad")), \
+        with mock.patch.object(procedure_terms, "load_commands",
+                               side_effect=procedure_terms.DeclarationError("bad")), \
                 contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             code = engine.main(["check"])
         self.assertEqual(code, 2)
@@ -1303,7 +1303,7 @@ class DeclarationTest(unittest.TestCase):
                 with self.subTest(text):
                     path = Path(tmp) / f"declarations-{index}.json"
                     path.write_text(text, encoding="utf-8")
-                    with self.assertRaises(procedure_check.DeclarationError):
+                    with self.assertRaises(procedure_terms.DeclarationError):
                         load_commands(path)
 
 
