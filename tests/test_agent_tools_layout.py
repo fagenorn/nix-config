@@ -115,8 +115,6 @@ ALLOWED_IMPORTS: dict[str, frozenset[str]] = {
         "agent_tools.project_contract.adopt_inspection",  # verify_exec
         "agent_tools.project_contract.adopt_verify",  # verify_exec
         "agent_tools.project_contract.adopt_apply",  # verify_checks (run_leashed)
-        "agent_tools.delivery.agent_gate_bundle",  # verify_checks
-        "agent_tools.delivery.issue_branch",  # verify_checks
     }),
 }
 
@@ -357,6 +355,11 @@ class SyntheticLayoutTest(unittest.TestCase):
 
 
 class LayoutRuleTest(unittest.TestCase):
+    def test_verification_imports_nothing_from_delivery(self):
+        self.assertEqual(
+            sorted(t for t in ALLOWED_IMPORTS["verification"]
+                   if t.startswith("agent_tools.delivery.")), [])
+
     def test_the_flat_allowance_is_the_closure_of_instruction_load_and_skill_lint(self):
         self.assertEqual(
             flat_modules(PACKAGE),
