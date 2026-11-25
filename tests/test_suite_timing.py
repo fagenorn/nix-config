@@ -15,7 +15,7 @@ from pathlib import Path
 
 from agent_tools.delivery import suite_runner
 from agent_tools.delivery.suite_runner import MemberResult
-from agent_tools.delivery.suite_timing import compare, load_report, speed_factor, summary_line
+from agent_tools.delivery.suite_timing import compare, load_report, median_speed, speed_factor, summary_line
 
 TIER = "fast"
 
@@ -126,6 +126,12 @@ class SpeedFactorTest(unittest.TestCase):
 
     def test_no_common_member_over_a_second_means_speed_one(self):
         self.assertEqual(speed_factor(report({"a": 0.5}), report({"b": 5})), 1.0)
+
+    def test_the_median_speed_reads_recorded_seconds_by_member(self):
+        recorded = {"a": 2.0, "b": 0.5, "c": 4.0}
+        measured = [("a", 4.0), ("b", 50.0), ("c", 4.0), ("d", 9.0)]
+        self.assertEqual(median_speed(recorded, measured), 1.5)
+        self.assertEqual(median_speed({}, [("a", 3.0)]), 1.0)
 
 
 class CommandTest(unittest.TestCase):

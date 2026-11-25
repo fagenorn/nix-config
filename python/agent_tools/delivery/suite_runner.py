@@ -60,9 +60,15 @@ committed map of member path to wall seconds taken from a full run's timing tabl
 members it does not name starting first in list order, ties in list order, and a missing or
 malformed file meaning list order. Serial mode keeps list order, and the report stays in
 list order for ties. Refresh the file from a run's `suite-runner: <wall>s wall ... <member>`
-rows when the suite's shape changes; a stale file only costs wall time.
-`tests/test_suite_runner.py` names the run the file was last refreshed from and its members
-slower than 30 s, and a refresh from a newer run replaces both.
+rows when the suite's shape changes. Every completed run checks the file against what it
+measured, and a stale file fails the run (exit 1) with a `suite-runner: stale timing` line per
+member. A checked member passed, took more than `STALE_FLOOR_SECONDS` (30 s) and, when the
+justfile's suite recipe is readable (`registered_members`), is registered there, so a paired
+test the recipe does not list runs and is reported but is never checked. It is stale when the file
+does not name it, or names it at under a third of its time: more than `STALE_FACTOR` (3) times
+its recorded seconds times the run's speed. The speed is suite_timing's `median_speed` of the
+other passed members' measured seconds over their recorded seconds, so a member never sets its
+own speed, a failed member never sets it, and a uniformly slower host is not stale.
 
 Output. In parallel mode each member's stdout and stderr are captured together and printed
 as one block when it exits, from `suite-runner: begin <member>` to
@@ -77,7 +83,9 @@ it, and every member still runs after a failure.
 
 Timing table. Every completed run ends with one
 `suite-runner: <wall>s wall <cpu>s cpu passed|failed <member>` row per member, slowest first
-with ties in list order, then one `suite-runner: failed <member>` line per failure and
+with ties in list order, then one `suite-runner: failed <member>` line per failure, one `suite-runner: stale timing
+<member>: <seconds>s measured, not in suite_timings.json` or `... <seconds>s measured,
+<recorded>s recorded at runner speed <factor>` line per stale member, in list order, and
 `suite-runner: summary members=<n> passed=<p> failed=<f> jobs=<N> wall=<seconds>s cpu=<seconds>s`.
 A row's CPU figure is the member's child CPU time: the user plus system seconds in the
 resource usage that `os.wait4` returns when the runner reaps the member. That covers the
@@ -96,15 +104,18 @@ a parallel one ran on slower, shared CPUs.
 Timing report (issue 1385, ADR-delivery-015). When `SUITE_RUNNER_REPORT` names a path,
 relative to the working directory, every completed run also writes the report there as JSON
 after the timing table, whether it passed or failed. The keys are `version` (1), `members`,
-`passed`, `failed`, `jobs`, `wall_seconds`, `member_seconds`, `cpu_seconds` and `timings`, one
-`{member, seconds, cpu_seconds, passed}` per member, slowest first by unrounded `seconds`,
-which a tie leaves in list order. The `wall_seconds` and `cpu_seconds` figures are the
-summary's, rounded to 0.1 s; `member_seconds` and each member's `seconds` keep full precision,
+`passed`, `failed`, `jobs`, `wall_seconds`, `member_seconds`, `cpu_seconds`,
+`idle_tail_seconds` and `timings`, one `{member, seconds, cpu_seconds, passed}` per member,
+slowest first by unrounded `seconds`, which a tie leaves in list order. The `idle_tail_seconds`
+figure is the time from the first worker that ran its last member to the last member's end:
+the latest of each worker's last end minus the earliest of them, 0.0 with one worker, rounded
+to 0.1 s. The `wall_seconds` and `cpu_seconds` figures are the summary's, rounded to 0.1 s; `member_seconds` and each member's `seconds` keep full precision,
 so a comparison of two reports sees growth the table's rounding hides. The file is written whole through a temporary
 file in its directory, and the parent directories are created. Members do not inherit the
 variable. An unwritable path raises, and an empty or unset value writes nothing.
 
-Exits. 0 means every member passed and 1 that one failed. 2 is a usage error, raised before
+Exits. 0 means every member passed and no timing is stale, and 1 that one failed or one is
+stale. 2 is a usage error, raised before
 anything starts: a bad `--jobs`, no members, a duplicate, a member that is missing, is not a
 file or lies outside the working directory, or a suffix other than `.py` or `.sh`. 130 is an
 interrupt: the runner starts nothing more, prints `suite-runner: interrupted, waiting for
@@ -127,7 +138,9 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO, Mapping, Sequence
+from typing import BinaryIO, Collection, Mapping, Sequence
+
+from agent_tools.delivery.suite_timing import median_speed
 
 PREFIX = "suite-runner:"
 JOBS_ENV = "SUITE_RUNNER_JOBS"
@@ -138,6 +151,10 @@ RESERVED_CPUS = 2
 REPORT_ENV = "SUITE_RUNNER_REPORT"
 REPORT_VERSION = 1
 TIMINGS_FILE = Path(__file__).with_name("suite_timings.json")
+# A passed member over this many seconds is checked against the timings file, and is stale
+# when its time is over this factor times its recorded seconds at the run's speed.
+STALE_FLOOR_SECONDS = 30.0
+STALE_FACTOR = 3.0
 INTERRUPTED = f"{PREFIX} interrupted, waiting for running members"
 INTERRUPT_EXIT = 130
 # Where the members' temporary files go (issue 1283): unset picks MEMORY_ROOT when it is a
@@ -166,6 +183,8 @@ class MemberResult:
     returncode: int | None
     seconds: float
     cpu_seconds: float
+    ended: float = 0.0
+    slot: int = 0
 
     @property
     def passed(self) -> bool:
@@ -232,6 +251,15 @@ def suite_members(justfile_text: str) -> list[str]:
             break
         body.append(line.strip().removesuffix(" \\"))
     return body[1:]
+
+
+def registered_members(root: Path) -> list[str] | None:
+    """The suite registration of `root`'s justfile; None when it cannot be read or has no
+    suite recipe."""
+    try:
+        return suite_members((root / "justfile").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
 
 
 def member_command(member: str) -> list[str]:
@@ -369,8 +397,44 @@ def end_line(result: MemberResult) -> str:
             f"exit={exit_field(result.returncode)} {result.seconds:.1f}s")
 
 
+def idle_tail(results: Sequence[MemberResult]) -> float:
+    """The latest of each slot's last end minus the earliest of them, over the slots that
+    ran a member; 0.0 with one slot."""
+    last_end: dict[int, float] = {}
+    for result in results:
+        last_end[result.slot] = max(result.ended, last_end.get(result.slot, result.ended))
+    return max(last_end.values()) - min(last_end.values()) if last_end else 0.0
+
+
+def stale_timings(results: Sequence[MemberResult], timings: Mapping[str, float],
+                  registered: Collection[str] | None = None) -> list[str]:
+    """One line per checked member, in list order, whose time `timings` does not name or
+    understates by more than `STALE_FACTOR` at the run's speed. A checked member passed,
+    took over `STALE_FLOOR_SECONDS` and, when `registered` is given, is in it. A member's
+    speed is `median_speed` of the other passed members, so it never sets its own."""
+    ordered = sorted(results, key=lambda result: result.index)
+    passed = [result for result in ordered if result.passed]
+    lines = []
+    for result in passed:
+        if result.seconds <= STALE_FLOOR_SECONDS:
+            continue
+        if registered is not None and result.member not in registered:
+            continue
+        if result.member not in timings:
+            lines.append(f"{PREFIX} stale timing {result.member}: {result.seconds:.1f}s "
+                         "measured, not in suite_timings.json")
+            continue
+        factor = median_speed(timings, [(other.member, other.seconds) for other in passed
+                                        if other.index != result.index])
+        recorded = timings[result.member]
+        if result.seconds > STALE_FACTOR * factor * recorded:
+            lines.append(f"{PREFIX} stale timing {result.member}: {result.seconds:.1f}s "
+                         f"measured, {recorded:.1f}s recorded at runner speed {factor:.2f}")
+    return lines
+
+
 def report_lines(results: Sequence[MemberResult], *, jobs: int,
-                 wall_seconds: float) -> list[str]:
+                 wall_seconds: float, stale: Sequence[str] = ()) -> list[str]:
     ordered = sorted(results, key=lambda result: result.index)
     lines = [f"{PREFIX} timings, slowest first"]
     for result in sorted(ordered, key=lambda r: (-round(r.seconds, 1), r.index)):
@@ -379,6 +443,7 @@ def report_lines(results: Sequence[MemberResult], *, jobs: int,
                      f"{result.cpu_seconds:7.1f}s cpu {state} {result.member}")
     failed = [result for result in ordered if not result.passed]
     lines.extend(f"{PREFIX} failed {result.member}" for result in failed)
+    lines.extend(stale)
     lines.append(f"{PREFIX} summary members={len(ordered)} "
                  f"passed={len(ordered) - len(failed)} failed={len(failed)} "
                  f"jobs={jobs} wall={wall_seconds:.1f}s "
@@ -431,21 +496,21 @@ def _wait_exited(process: subprocess.Popen) -> None:
 
 
 def _reap(index: int, member: str, process: subprocess.Popen | None,
-          started: float) -> MemberResult:
+          started: float, slot: int = 0) -> MemberResult:
     """The member's result, reaping its process if it launched; one that never
     launched has no exit code and 0.0 CPU. One `os.wait4` on its pid is the
     only wait that reaps a member, in either mode (issue 497 D1), and its
     status is stored as the Popen's `returncode`, so nothing waits on it again.
     Its CPU seconds are the user plus system time that `wait4` reports for the
     process and every descendant reaped beneath it. The wall time runs from
-    `started` to just after the reap."""
+    `started` to just after the reap, and `ended` is the clock's value there."""
     returncode, cpu_seconds = None, 0.0
     if process is not None:
         _, status, usage = os.wait4(process.pid, 0)
         returncode = process.returncode = os.waitstatus_to_exitcode(status)
         cpu_seconds = usage.ru_utime + usage.ru_stime
-    return MemberResult(index, member, returncode, time.monotonic() - started,
-                        cpu_seconds)
+    now = time.monotonic()
+    return MemberResult(index, member, returncode, now - started, cpu_seconds, now, slot)
 
 
 def _run_serial(members: Sequence[str], environment: Mapping[str, str],
@@ -503,7 +568,7 @@ def _run_parallel(members: Sequence[str], order: Sequence[int], jobs: int,
     running = min(jobs, len(members))
     finished = threading.Condition()
 
-    def run_members() -> None:
+    def run_members(slot: int) -> None:
         nonlocal next_index
         while True:
             # Taking a member, writing its start line and launching it share
@@ -530,7 +595,7 @@ def _run_parallel(members: Sequence[str], order: Sequence[int], jobs: int,
                 # interrupted (issue 497 D2).
                 with process.stdout:
                     output = process.stdout.read()
-            result = _reap(index, member, process, started)
+            result = _reap(index, member, process, started, slot)
             if output and not output.endswith(b"\n"):
                 output += b"\n"
             # One write per block, before this worker takes its next member.
@@ -539,10 +604,10 @@ def _run_parallel(members: Sequence[str], order: Sequence[int], jobs: int,
                           + _line(end_line(result)))
             results[index] = result
 
-    def worker() -> None:
+    def worker(slot: int) -> None:
         nonlocal running
         try:
-            run_members()
+            run_members(slot)
         finally:
             with finished:
                 running -= 1
@@ -561,8 +626,8 @@ def _run_parallel(members: Sequence[str], order: Sequence[int], jobs: int,
     hold = _HeldSigint()
     try:
         try:
-            for _ in range(running):
-                threading.Thread(target=worker).start()
+            for slot in range(running):
+                threading.Thread(target=worker, args=(slot,)).start()
         finally:
             hold.release()
         wait_for_workers()
@@ -591,6 +656,7 @@ def timing_report(results: Sequence[MemberResult], *, jobs: int,
         "wall_seconds": round(wall_seconds, 1),
         "member_seconds": sum(result.seconds for result in ordered),
         "cpu_seconds": round(sum(result.cpu_seconds for result in ordered), 1),
+        "idle_tail_seconds": round(idle_tail(ordered), 1),
         "timings": [{"member": result.member, "seconds": result.seconds,
                      "cpu_seconds": round(result.cpu_seconds, 1), "passed": result.passed}
                     for result in rows],
@@ -614,8 +680,10 @@ def write_report(path: Path, report: dict) -> None:
 
 
 def run_suite(members: Sequence[str], *, jobs: int, out: BinaryIO,
-              timings: Mapping[str, float] | None = None) -> int:
-    """Run every member and write the report; 0 when all passed, else 1.
+              timings: Mapping[str, float] | None = None,
+              registered: Collection[str] | None = None) -> int:
+    """Run every member and write the report; 0 when all passed and no timing is stale
+    (`stale_timings` against `timings` and `registered`), else 1.
     Parallel runs start members in `schedule_order(members, timings)`, serial
     runs in list order.
 
@@ -653,11 +721,12 @@ def run_suite(members: Sequence[str], *, jobs: int, out: BinaryIO,
         if missing:
             raise RuntimeError(f"members left without a result: {', '.join(missing)}")
         wall = time.monotonic() - started
-        report = report_lines(results, jobs=jobs, wall_seconds=wall)
+        stale = stale_timings(results, timings or {}, registered)
+        report = report_lines(results, jobs=jobs, wall_seconds=wall, stale=stale)
         output.write(b"".join(_line(line) for line in report))
         if report_path is not None:
             write_report(report_path, timing_report(results, jobs=jobs, wall_seconds=wall))
-        return 0 if all(result.passed for result in results) else 1
+        return 0 if all(result.passed for result in results) and not stale else 1
 
 
 def _jobs(text: str) -> int:
@@ -699,7 +768,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error(str(error))
     try:
         return run_suite(args.members, jobs=args.jobs, out=sys.stdout.buffer,
-                         timings=load_timings())
+                         timings=load_timings(), registered=registered_members(Path.cwd()))
     except KeyboardInterrupt:
         return INTERRUPT_EXIT
 

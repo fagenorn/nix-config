@@ -28,7 +28,7 @@ from unittest import mock
 from collections.abc import Mapping
 from pathlib import Path
 
-from agent_tools.delivery import suite_runner
+from agent_tools.delivery import suite_runner, suite_timing
 from agent_tools.delivery.suite_runner import MemberResult
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -545,6 +545,120 @@ class CommittedTimingsTest(unittest.TestCase):
         self.assertEqual([m for m in SLOW_ON_LAST_FULL_RUN if m not in timings], [])
 
 
+def results_of(*rows: tuple[str, int | None, float]) -> list[MemberResult]:
+    """Results in list order from `(member, returncode, seconds)` rows."""
+    return [MemberResult(index=index, member=member, returncode=returncode,
+                         seconds=seconds, cpu_seconds=0.0)
+            for index, (member, returncode, seconds) in enumerate(rows)]
+
+
+class StaleTimingsTest(RunnerCase):
+    def test_a_member_over_30_seconds_missing_from_the_timings_file_is_stale(self):
+        path = self.work / "timings.json"
+        path.write_text(json.dumps({"b.py": 5.0}), encoding="utf-8")
+        timings = suite_runner.load_timings(path)
+        results = results_of(("a.py", 0, 31.0), ("b.py", 0, 5.0), ("c.py", 0, 30.0))
+        self.assertEqual(suite_runner.stale_timings(results, timings), [
+            "suite-runner: stale timing a.py: 31.0s measured, not in suite_timings.json"])
+
+    def test_a_member_recorded_below_a_third_of_its_time_is_stale(self):
+        timings = {"a.py": 15.0, "b.py": 15.0, "c.py": 5.0, "d.py": 5.0, "e.py": 5.0}
+        results = results_of(("a.py", 0, 45.1), ("b.py", 0, 45.0), ("c.py", 0, 5.0),
+                             ("d.py", 0, 5.0), ("e.py", 0, 5.0))
+        self.assertEqual(suite_runner.stale_timings(results, timings), [
+            "suite-runner: stale timing a.py: 45.1s measured, 15.0s recorded at runner speed 1.00"])
+
+    def test_a_uniformly_slower_run_is_not_stale_until_one_member_outgrows_it(self):
+        timings = {"a.py": 20.0, "b.py": 5.0, "c.py": 5.0}
+        slower = results_of(("a.py", 0, 40.0), ("b.py", 0, 10.0), ("c.py", 0, 10.0))
+        self.assertEqual(suite_runner.stale_timings(slower, timings), [])
+        outgrown = results_of(("a.py", 0, 121.0), ("b.py", 0, 10.0), ("c.py", 0, 10.0))
+        self.assertEqual(suite_runner.stale_timings(outgrown, timings), [
+            "suite-runner: stale timing a.py: 121.0s measured, 20.0s recorded at runner speed 2.00"])
+
+    def test_a_lone_member_does_not_set_its_own_speed(self):
+        results = results_of(("a.py", 0, 100.0))
+        self.assertEqual(suite_runner.stale_timings(results, {"a.py": 5.0}), [
+            "suite-runner: stale timing a.py: 100.0s measured, 5.0s recorded at runner speed 1.00"])
+
+    def test_failed_members_are_neither_reported_nor_counted_in_the_speed(self):
+        timings = {name: 10.0 for name in ("a.py", "w.py", "z.py", "x.py", "y.py")}
+        results = results_of(("a.py", 0, 31.0), ("w.py", 0, 10.0), ("z.py", 0, 10.0),
+                             ("x.py", 1, 1000.0), ("y.py", 1, 1000.0),
+                             ("q.py", 1, 40.0), ("r.py", None, 50.0))
+        self.assertEqual(suite_runner.stale_timings(results, timings), [
+            "suite-runner: stale timing a.py: 31.0s measured, 10.0s recorded at runner speed 1.00"])
+
+    def test_members_recorded_under_a_second_do_not_set_the_speed(self):
+        timings = {"a.py": 10.0, "b.py": 5.0, "c.py": 5.0, "x.py": 0.1, "y.py": 0.1, "z.py": 0.1}
+        results = results_of(("a.py", 0, 31.0), ("b.py", 0, 5.0), ("c.py", 0, 5.0),
+                             ("x.py", 0, 1.0), ("y.py", 0, 1.0), ("z.py", 0, 1.0))
+        self.assertEqual(suite_runner.stale_timings(results, timings), [
+            "suite-runner: stale timing a.py: 31.0s measured, 10.0s recorded at runner speed 1.00"])
+
+    def test_the_runner_speed_follows_the_suite_timing_floor(self):
+        timings = {"a.py": 12.0, "b.py": 6.0, "x.py": 0.2, "y.py": 0.2, "z.py": 0.2}
+        results = results_of(("a.py", 0, 37.0), ("b.py", 0, 6.0), ("x.py", 0, 2.0),
+                             ("y.py", 0, 2.0), ("z.py", 0, 2.0))
+        with mock.patch.object(suite_timing, "FACTOR_FLOOR_SECONDS", 0.1):
+            self.assertEqual(suite_runner.stale_timings(results, timings), [])
+        self.assertEqual(suite_runner.stale_timings(results, timings), [
+            "suite-runner: stale timing a.py: 37.0s measured, 12.0s recorded at runner speed 1.00"])
+
+    def test_only_registered_members_are_checked_but_every_member_runs(self):
+        results = results_of(("p.py", 0, 31.0), ("b.py", 0, 32.0))
+        self.assertEqual(suite_runner.stale_timings(results, {}, registered=["b.py"]), [
+            "suite-runner: stale timing b.py: 32.0s measured, not in suite_timings.json"])
+        self.assertEqual(suite_runner.stale_timings(results, {}, registered=None), [
+            "suite-runner: stale timing p.py: 31.0s measured, not in suite_timings.json",
+            "suite-runner: stale timing b.py: 32.0s measured, not in suite_timings.json"])
+
+    def test_the_registration_is_the_justfiles_suite_recipe(self):
+        (self.work / "justfile").write_text(
+            "agent-workflow-tests *args:\n  run-the-runner \\\n"
+            "    tests/test_one.py \\\n    tests/test_two.py\n", encoding="utf-8")
+        self.assertEqual(suite_runner.registered_members(self.work),
+                         ["tests/test_one.py", "tests/test_two.py"])
+        empty = self.work / "empty"
+        empty.mkdir()
+        self.assertIsNone(suite_runner.registered_members(empty))
+        (empty / "justfile").write_text("other:\n  echo hi\n", encoding="utf-8")
+        self.assertIsNone(suite_runner.registered_members(empty))
+
+    def run_two_passing_members(self, **kwargs) -> tuple[int, list[str], list[str]]:
+        names = [self.member(f"test_m{n}.py", "import unittest\nclass T(unittest.TestCase):\n"
+                                              "    def test_x(self): pass\n") for n in range(2)]
+        out = io.BytesIO()
+        cwd = os.getcwd()
+        os.chdir(self.work)
+        try:
+            code = suite_runner.run_suite(
+                names, jobs=2, out=out, **{k: v(names) if callable(v) else v
+                                           for k, v in kwargs.items()})
+        finally:
+            os.chdir(cwd)
+        return code, names, out.getvalue().decode().splitlines()
+
+    def test_a_run_with_stale_timings_fails_with_every_member_passed(self):
+        with mock.patch.object(suite_runner, "STALE_FLOOR_SECONDS", 0.0):
+            code, names, lines = self.run_two_passing_members(timings={})
+        self.assertEqual(code, 1, "\n".join(lines))
+        self.assertRegex(lines[-1], SUMMARY)
+        self.assertEqual(SUMMARY.match(lines[-1]).group(1, 2, 3), ("2", "2", "0"))
+        for name, line in zip(names, lines[-3:-1]):
+            self.assertRegex(line, "^suite-runner: stale timing " + re.escape(name)
+                             + r": \d+\.\ds measured, not in suite_timings\.json$")
+        self.assertFalse([line for line in lines if line.startswith("suite-runner: failed ")])
+
+    def test_a_run_with_current_timings_passes(self):
+        with mock.patch.object(suite_timing, "FACTOR_FLOOR_SECONDS", 1e9):
+            code, names, lines = self.run_two_passing_members(
+                timings=lambda names: {name: 1000.0 for name in names},
+                registered=lambda names: names)
+        self.assertEqual(code, 0, "\n".join(lines))
+        self.assertFalse([line for line in lines if line.startswith("suite-runner: stale timing")])
+
+
 class CapTest(RunnerCase):
     def test_two_jobs_reach_two_open_members_and_never_exceed_them(self):
         members = self.barrier_members(*(f"test_m{n}.py" for n in range(5)))
@@ -684,11 +798,11 @@ class ReportFileTest(RunnerCase):
         # (g.sh at 3.24 s before f.py at 3.21 s) and the member total is 20.49 s.
         self.assertEqual(list(report), [
             "version", "members", "passed", "failed", "jobs", "wall_seconds",
-            "member_seconds", "cpu_seconds", "timings"])
+            "member_seconds", "cpu_seconds", "idle_tail_seconds", "timings"])
         self.assertAlmostEqual(report.pop("member_seconds"), 20.49, places=9)
         self.assertEqual(report, {
             "version": 1, "members": 7, "passed": 4, "failed": 3, "jobs": 3,
-            "wall_seconds": 12.3, "cpu_seconds": 8.5,
+            "wall_seconds": 12.3, "cpu_seconds": 8.5, "idle_tail_seconds": 0.0,
             "timings": [
                 {"member": "b.py", "seconds": 5.0, "cpu_seconds": 2.0, "passed": True},
                 {"member": "e.py", "seconds": 5.0, "cpu_seconds": 4.9, "passed": True},
@@ -698,6 +812,41 @@ class ReportFileTest(RunnerCase):
                 {"member": "c.py", "seconds": 2.0, "cpu_seconds": 0.0, "passed": False},
                 {"member": "d.py", "seconds": 0.04, "cpu_seconds": 0.0, "passed": False},
             ]})
+
+    def test_the_idle_tail_runs_from_the_first_idle_slot_to_the_last_end(self):
+        def result(index: int, slot: int, ended: float) -> MemberResult:
+            return MemberResult(index=index, member=f"m{index}.py", returncode=0, seconds=1.0,
+                                cpu_seconds=0.0, ended=ended, slot=slot)
+        results = [result(0, 0, 10.0), result(1, 1, 40.0), result(2, 1, 38.0)]
+        self.assertEqual(suite_runner.idle_tail(results), 30.0)
+        results += [result(3, 2, 25.0), result(4, 2, 35.0)]
+        self.assertEqual(suite_runner.idle_tail(results), 30.0)
+        serial = [result(index, 0, 5.0 + index) for index in range(5)]
+        self.assertEqual(suite_runner.idle_tail(serial), 0.0)
+
+    def test_the_report_carries_the_idle_tail_rounded_to_a_tenth(self):
+        results = [
+            MemberResult(index=0, member="a.py", returncode=0, seconds=1.0, cpu_seconds=0.0,
+                         ended=1.0, slot=0),
+            MemberResult(index=1, member="b.py", returncode=0, seconds=1.0, cpu_seconds=0.0,
+                         ended=10.04, slot=1),
+        ]
+        report = suite_runner.timing_report(results, jobs=2, wall_seconds=11.0)
+        self.assertEqual(report["idle_tail_seconds"], 9.0)
+
+    def test_parallel_workers_record_their_slot_and_end(self):
+        members = self.barrier_members("test_m0.py", "test_m1.py")
+        cwd = os.getcwd()
+        os.chdir(self.work)
+        try:
+            results = suite_runner._run_parallel(
+                members, [0, 1], 2, self.environment(2, 2, {}),
+                suite_runner._Output(io.BytesIO()))
+        finally:
+            os.chdir(cwd)
+        self.assertTrue(all(result.passed for result in results), results)
+        self.assertEqual({result.slot for result in results}, {0, 1})
+        self.assertTrue(all(result.ended > 0.0 for result in results), results)
 
     def test_a_member_time_just_over_a_tenth_is_not_rounded_in_the_report(self):
         results = [MemberResult(index=0, member="a.py", returncode=0, seconds=60.04,

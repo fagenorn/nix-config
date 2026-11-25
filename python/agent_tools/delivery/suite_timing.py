@@ -26,7 +26,7 @@ order on a tie, a member absent from the base counting as 0 s there. The compari
 the threshold is made on the unrounded growth and is strict: growth equal to the
 threshold is within it. The arithmetic is decimal on the numbers as the report writes
 them, so a float's error does not move growth across the threshold. Rounding is for
-display only.
+display only. The suite runner's stale-timings check uses the same speed (`median_speed`).
 
 Output, on stdout, one of three lines (`{t}` is the threshold in `%g` form):
 
@@ -56,7 +56,7 @@ import json
 import math
 import statistics
 import sys
-from collections.abc import Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
@@ -138,13 +138,19 @@ def _seconds_by_member(report: dict) -> dict[str, float]:
     return {row["member"]: row["seconds"] for row in report["timings"]}
 
 
+def median_speed(recorded: Mapping[str, float], measured: Iterable[tuple[str, float]]) -> float:
+    """The median of `seconds / recorded[member]` over the `(member, seconds)` pairs whose
+    recorded time is at least `FACTOR_FLOOR_SECONDS`, or 1.0 when there is none."""
+    ratios = [seconds / recorded[member] for member, seconds in measured
+              if recorded.get(member, 0.0) >= FACTOR_FLOOR_SECONDS]
+    return float(statistics.median(ratios)) if ratios else 1.0
+
+
 def speed_factor(base: dict, head: dict) -> float:
     """The median of head/base over members in both reports whose base time is at least
     `FACTOR_FLOOR_SECONDS`, or 1.0 when there is none."""
-    base_seconds = _seconds_by_member(base)
-    ratios = [row["seconds"] / base_seconds[row["member"]] for row in head["timings"]
-              if base_seconds.get(row["member"], 0.0) >= FACTOR_FLOOR_SECONDS]
-    return float(statistics.median(ratios)) if ratios else 1.0
+    return median_speed(_seconds_by_member(base),
+                        ((row["member"], row["seconds"]) for row in head["timings"]))
 
 
 def _exact(value: float) -> Decimal:
