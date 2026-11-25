@@ -417,6 +417,7 @@ agent-workflow-tests *args:
     tests/test_console_own_reads.py \
     tests/test_console_own_reads_wiring.py \
     tests/test_console_permit_wire.py \
+    tests/test_console_permit_rerun_service.py \
     tests/test_console_approved_action.py \
     tests/test_console_stops.py \
     tests/test_console_revive_service.py \
