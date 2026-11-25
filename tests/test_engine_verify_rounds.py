@@ -195,6 +195,24 @@ class RoundsTest(Scenario):
         self.assertEqual(self.entered(run, "rerun"), 0)
         self.nothing_pushed(run)
 
+    def test_a_lost_second_review_stops_verify_fix_review_without_asking_again(self):
+        run = self.stubbed(extra_files=FORMAT, replies={"implement": FOUR, "fix": TWO, "fix-review": UNUSABLE})
+
+        self.finish(run, "verify-fix-review", "owner-decision")
+
+        self.assertIn(("fix-review-again", "no-reply"), self.walk(run))
+        self.assertEqual(self.entered(run, "fix-review-again"), 1)
+        self.assertEqual(self.entered(run, "rerun"), 0)
+        self.nothing_pushed(run)
+
+    def test_every_agent_step_maps_a_lost_or_over_bound_reply_to_a_stop_or_the_next_stage(self):
+        for step in procedure("verify")["steps"]:
+            if step["kind"] != "agent":
+                continue
+            for outcome in ("no-reply", "out-of-bounds"):
+                with self.subTest(step=step["id"], outcome=outcome):
+                    self.assertNotEqual(step["on"][outcome], step["id"])
+
     def test_a_fix_review_with_only_minor_findings_goes_on(self):
         run = self.stubbed(extra_files=FORMAT, replies={
             "implement": FOUR, "fix": TWO, "fix-review": dict(FOUND, findings=[MINOR])})

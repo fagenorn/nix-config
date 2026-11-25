@@ -1198,7 +1198,8 @@ UNREACHABLE_EXHAUSTED = {
     "direct": tuple((f"{route}-{kind}", "exhausted")
                     for kind in ("tally", "settled") for route in ("lite", "escalated", "full")),
     "verify": tuple((name, "exhausted") for name in (
-        "checks", "round", "fixed", "ws-check", "fix-review", "narrowing", "narrowing-again", "rerun")),
+        "checks", "round", "fixed", "ws-check", "fix-review", "narrowing", "fix-review-again", "narrowing-again",
+        "rerun")),
 }
 
 

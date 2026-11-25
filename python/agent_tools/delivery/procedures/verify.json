@@ -37,7 +37,7 @@
      "on": {"unusable": "fix-review-again", "findings": "verify-fix-review", "rerun-failed-only": "rerun", "rerun-all": "checks", "exhausted": "verify"}},
     {"id": "fix-review-again", "stage": "verifying", "kind": "agent", "role": "reviewer", "prompt": "verify-fix-review.md", "reply": "verify-fix-review.reply.json", "outcome_from": "verdict", "holds": "run", "max_visits": 4,
      "in": ["preflight.worktree_path", "round.head", "round.problems", "fix.notes", "fix.outside_diff", "ws-check.whitespace_only", "ws-check.changed_paths"],
-     "on": {"pass": "narrowing-again", "findings": "narrowing-again", "no-reply": "fix-review-again", "out-of-bounds": "fix-review-again", "exhausted": "verify"}},
+     "on": {"pass": "narrowing-again", "findings": "narrowing-again", "no-reply": "verify-fix-review", "out-of-bounds": "verify-fix-review", "exhausted": "verify"}},
     {"id": "narrowing-again", "stage": "verifying", "kind": "decide", "grader": "verify-narrowing", "holds": "run", "max_visits": 2,
      "in": ["fix-review-again.findings", "round.clean", "round.results", "ws-check.whitespace_only", "ws-check.changed_paths", "fix-review-again.whitespace_insignificant", "fix-review-again.whitespace_evidence"],
      "on": {"unusable": "verify-fix-review", "findings": "verify-fix-review", "rerun-failed-only": "rerun", "rerun-all": "checks", "exhausted": "verify"}},

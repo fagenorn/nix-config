@@ -1483,17 +1483,12 @@ class FixRangeTest(ProjectCase):
         self.assertEqual(self.fix("a.json", '{\n    "a": 1\n}\n', '{\n  "a": 1\n}\n'),
                          {"whitespace_only": True, "changed_paths": ["a.json"]})
 
-    def test_a_change_of_the_spaces_inside_a_json_string_is_not_whitespace_only(self):
-        fixed = self.fix("a.json", '{\n    "a": "a b"\n}\n', '{\n  "a": "a  b"\n}\n')
-        self.assertEqual(fixed, {"whitespace_only": False, "changed_paths": ["a.json"]})
-
-    def test_a_content_change_is_not_whitespace_only(self):
-        fixed = self.fix("a.json", '{\n    "a": 1\n}\n', '{\n  "a": 2\n}\n')
-        self.assertEqual(fixed, {"whitespace_only": False, "changed_paths": ["a.json"]})
-
-    def test_a_reindented_python_file_is_not_whitespace_only(self):
-        fixed = self.fix("a.py", "if True:\n    pass\n", "if True:\n  pass\n")
-        self.assertEqual(fixed, {"whitespace_only": False, "changed_paths": ["a.py"]})
+    def test_a_change_beyond_a_json_reindent_is_not_whitespace_only(self):
+        for name, before, after in (("a.json", '{\n    "a": "a b"\n}\n', '{\n  "a": "a  b"\n}\n'),
+                                    ("a.json", '{\n    "a": 1\n}\n', '{\n  "a": 2\n}\n'),
+                                    ("a.py", "if True:\n    pass\n", "if True:\n  pass\n")):
+            with self.subTest(before=before):
+                self.assertEqual(self.fix(name, before, after), {"whitespace_only": False, "changed_paths": [name]})
 
     def test_an_unknown_commit_raises(self):
         with self.assertRaises(verified_tree.VerifiedTreeError):
