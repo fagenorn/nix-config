@@ -669,12 +669,18 @@ class RunTest(ProjectCase):
                 + extra)
         return {"argv": [sys.executable, "-c", code], "cwd": ".", "env": []}
 
-    def declare(self, commands, conditions=ABSENT, before=ABSENT):
-        """Commit a contract declaring `commands` (id -> extra code), publish it, add the worktree."""
+    def declare(self, commands, conditions=ABSENT, before=ABSENT, cwds=None):
+        """Commit a contract declaring `commands` (id -> extra code), publish it, add the worktree.
+
+        `cwds` maps an id to the directory (relative to the root) its command runs in."""
         path = self.repo / ".agents" / "project.json"
         contract = json.loads(path.read_text(encoding="utf-8"))
         bindings = contract["bindings"]
         bindings["commands"] = {name: self.command(name, extra) for name, extra in commands.items()}
+        for name, cwd in (cwds or {}).items():
+            bindings["commands"][name]["cwd"] = cwd
+            (self.repo / cwd).mkdir(parents=True, exist_ok=True)
+            (self.repo / cwd / ".keep").write_text("\n")
         bindings["workflow"]["verification"] = list(commands)
         bindings["workflow"].pop("verification_conditions", None)
         if conditions is not ABSENT:
@@ -688,10 +694,10 @@ class RunTest(ProjectCase):
         self.git("update-ref", "refs/remotes/origin/main", "HEAD")
         self.git("worktree", "add", "-q", "-b", "work", str(self.worktree))
 
-    def run_verified(self):
+    def run_verified(self, *extra):
         return subprocess.run(
             [sys.executable, "-m", "agent_tools.verification.verified_tree", "run",
-             "--worktree-path", str(self.worktree)],
+             "--worktree-path", str(self.worktree), *extra],
             cwd=self.repo, capture_output=True, text=True, check=False, env=self.env)
 
     def answer(self, done, exit_code=0):
@@ -738,7 +744,7 @@ class RunTest(ProjectCase):
         self.assertEqual(self.answer(self.run_verified())["verdict"], "failed")
         self.assertIsNone(self.recorded())
 
-    def test_a_failing_id_fails_the_run_and_the_others_still_run_once(self):
+    def test_a_failing_id_fails_the_run_and_the_others_still_run_and_it_is_rerun_once(self):
         self.declare({"lint": "print('boom');sys.exit(3)", "test": ""})
         answer = self.answer(self.run_verified())
         lint, test = answer["results"]
@@ -746,8 +752,9 @@ class RunTest(ProjectCase):
         self.assertEqual((lint["status"], lint["exit"]), ("fail", 3))
         self.assertIn("boom", lint["summary"])
         self.assertEqual(test["status"], "pass")
+        self.assertIs(lint["reran"], True)
         where = str(self.worktree.resolve())
-        self.assertEqual(self.logged(), [f"{where} lint", f"{where} test"])
+        self.assertEqual(self.logged(), [f"{where} lint", f"{where} test", f"{where} lint"])
 
     def test_an_id_whose_condition_matches_no_changed_path_is_skipped_with_its_reason(self):
         reason = "no documentation changed"
@@ -891,6 +898,303 @@ class RunTest(ProjectCase):
             cwd=self.repo, capture_output=True, text=True, check=False, env=self.env)
         self.assertEqual(self.answer(done, 1)["verdict"], "error")
 
+    # Issue 1536: a failure outside the branch's files is rerun once, at one head.
+
+    def branch_change(self, files):
+        """Commit `files` (path -> text) in the worktree: the branch's changed paths."""
+        for name, text in files.items():
+            path = self.worktree / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
+        self.git("add", "-A", cwd=self.worktree)
+        self.git("commit", "-q", "-m", "branch change", cwd=self.worktree)
+
+    def once(self, first="boom", then=None, exit_first=1, exit_then=0):
+        """Code failing with `first` the first time it runs and with `then` (silent when None) after."""
+        flag = self.scratch / "once"
+        return (f"p={str(flag)!r};seen=os.path.exists(p);open(p,'w').close();"
+                f"print({first!r} if not seen else {then or ''!r});"
+                f"sys.exit({exit_first} if not seen else {exit_then})")
+
+    def test_an_id_failing_outside_the_branchs_files_is_rerun_once_and_its_pass_is_recorded_flaky(self):
+        self.declare({"lint": "", "test": self.once()})
+        self.branch_change({"notes.txt": "x\n"})
+        answer = self.answer(self.run_verified())
+        lint, test = answer["results"]
+        self.assertEqual(answer["verdict"], "passed")
+        self.assertEqual((test["status"], test["flaky"]), ("pass", "boom"))
+        self.assertNotIn("flaky", lint)
+        where = str(self.worktree.resolve())
+        self.assertEqual(self.logged(), [f"{where} lint", f"{where} test", f"{where} test"])
+
+    def test_a_failure_whose_output_names_a_changed_path_is_not_rerun(self):
+        self.declare({"lint": "", "test": "print('notes.txt:12: broken');sys.exit(1)"})
+        self.branch_change({"notes.txt": "x\n"})
+        answer = self.answer(self.run_verified())
+        test = answer["results"][1]
+        self.assertEqual(answer["verdict"], "failed")
+        self.assertEqual((test["named"], test["outside_diff"]), (["notes.txt"], False))
+        self.assertNotIn("reran", test)
+        self.assertEqual(self.logged().count(f"{self.worktree.resolve()} test"), 1)
+
+    def test_a_changed_path_inside_a_longer_name_is_not_named(self):
+        cases = {"a.py": "data.py failed", "notes.txt": "notes.txt.bak failed"}
+        for changed, output in cases.items():
+            with self.subTest(changed):
+                if self.log.exists():
+                    self.log.unlink()
+                (self.scratch / "once").unlink(missing_ok=True)
+                if not self.worktree.exists():
+                    self.declare({"lint": "", "test": self.once(output)})
+                else:
+                    self.git("reset", "-q", "--hard", "origin/main", cwd=self.worktree)
+                    command = self.command("test", self.once(output))
+                    contract = self.worktree / ".agents" / "project.json"
+                    document = json.loads(contract.read_text(encoding="utf-8"))
+                    document["bindings"]["commands"]["test"] = command
+                    contract.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+                    self.git("commit", "-q", "-am", "output", cwd=self.worktree)
+                self.branch_change({changed: "x\n"})
+                test = self.answer(self.run_verified())["results"][1]
+                self.assertEqual((test["status"], test["flaky"]), ("pass", output))
+
+    def test_a_path_relative_to_the_commands_cwd_is_named(self):
+        self.declare({"lint": "", "test": "print('notes.txt:1: broken');sys.exit(1)"},
+                     cwds={"test": "sub"})
+        self.branch_change({"sub/notes.txt": "x\n"})
+        test = self.answer(self.run_verified())["results"][1]
+        self.assertEqual(test["named"], ["sub/notes.txt"])
+        self.assertEqual(self.logged().count(f"{self.worktree.resolve() / 'sub'} test"), 1)
+
+    def test_a_rerun_that_fails_again_keeps_the_first_failure_marked_reran(self):
+        flag = self.scratch / "again"
+        code = (f"p={str(flag)!r};seen=os.path.exists(p);open(p,'w').close();"
+                "print('second' if seen else 'first');sys.exit(1)")
+        self.declare({"lint": "", "test": code})
+        self.branch_change({"notes.txt": "x\n"})
+        answer = self.answer(self.run_verified())
+        test = answer["results"][1]
+        self.assertEqual(answer["verdict"], "failed")
+        self.assertEqual(test["summary"], "first")
+        self.assertIs(test["reran"], True)
+        self.assertIs(test["outside_diff"], True)
+        self.assertEqual(self.logged().count(f"{self.worktree.resolve()} test"), 2)
+
+    def test_one_failure_inside_the_diff_keeps_every_failure_from_a_rerun(self):
+        self.declare({"lint": "print('x');sys.exit(1)", "test": "print('notes.txt');sys.exit(1)"})
+        self.branch_change({"notes.txt": "x\n"})
+        lint, test = self.answer(self.run_verified())["results"]
+        where = str(self.worktree.resolve())
+        self.assertEqual(self.logged(), [f"{where} lint", f"{where} test"])
+        self.assertIs(lint["outside_diff"], True)
+        self.assertIs(test["outside_diff"], False)
+        for entry in (lint, test):
+            self.assertNotIn("flaky", entry)
+            self.assertNotIn("reran", entry)
+
+    def test_without_the_integration_ref_no_failure_is_outside_the_diff(self):
+        self.declare({"lint": "", "test": self.once()})
+        self.git("update-ref", "-d", "refs/remotes/origin/main")
+        answer = self.answer(self.run_verified())
+        test = answer["results"][1]
+        self.assertEqual(answer["verdict"], "failed")
+        self.assertEqual((test["outside_diff"], test["named"]), (False, []))
+        self.assertEqual(self.logged().count(f"{self.worktree.resolve()} test"), 1)
+
+    def second_run(self, effect):
+        """Code failing (printing boom) on its first run and running `effect`, passing, on its second."""
+        flag = self.scratch / "second"
+        return (f"p={str(flag)!r};seen=os.path.exists(p);open(p,'w').close();"
+                f"{effect} if seen else (print('boom'),sys.exit(1))")
+
+    def test_a_rerun_that_leaves_the_tree_dirty_keeps_the_first_results(self):
+        self.declare({"lint": "", "test": self.second_run("open('stray.txt','w').write('x')")})
+        self.branch_change({"notes.txt": "x\n"})
+        answer = self.answer(self.run_verified())
+        test = answer["results"][1]
+        self.assertEqual((answer["verdict"], answer["clean"]), ("failed", False))
+        self.assertEqual((test["status"], test["summary"]), ("fail", "boom"))
+        self.assertNotIn("flaky", test)
+
+    def test_a_rerun_that_moves_a_clean_head_keeps_the_first_failure_and_records_nothing(self):
+        move = ("subprocess.run(['git','commit','-q','--allow-empty','-m','moved'],check=True)")
+        self.declare({"lint": "", "test": "import subprocess;" + self.second_run(move)})
+        self.branch_change({"notes.txt": "x\n"})
+        answer = self.answer(self.run_verified())
+        test = answer["results"][1]
+        moved = self.git("rev-parse", "HEAD", cwd=self.worktree)
+        self.assertNotEqual(moved, answer["head"])
+        self.assertEqual(answer["verdict"], "failed")
+        self.assertEqual((test["status"], test["summary"]), ("fail", "boom"))
+        self.assertNotIn("flaky", test)
+        self.assertNotIn("reran", test)
+        self.assertIsNone(self.recorded())
+        self.assertFalse(verified_tree.last_path(self.worktree).exists())
+
+    def test_a_passing_run_whose_head_moved_is_dirty_and_records_nothing(self):
+        move = "subprocess.run(['git','commit','-q','--allow-empty','-m','moved'],check=True)"
+        self.declare({"lint": "", "test": "import subprocess;" + move})
+        answer = self.answer(self.run_verified())
+        self.assertEqual(answer["verdict"], "dirty")
+        self.assertIsNone(self.recorded())
+
+    def run_patched(self, replacement):
+        """`verified_tree.run` in this process with `_run_command` wrapped: replacement(real, n, id, ...)."""
+        real = verified_tree._run_command
+        calls = {}
+
+        def wrapper(verification_id, command, changed, root):
+            calls[verification_id] = calls.get(verification_id, 0) + 1
+            return replacement(real, calls[verification_id], verification_id, command, changed, root)
+
+        env = {**HERMETIC_GIT, "HOME": self.env["HOME"], "VERIFY_SLOT_DIR": str(self.slots)}
+        with (mock.patch.dict(os.environ, env), mock.patch.object(verified_tree, "_run_command", wrapper),
+              mock.patch("sys.stderr", StringIO())):
+            return verified_tree.run(self.worktree)
+
+    NO_SLOT = {"id": "test", "status": "fail", "exit": 75, "no_slot": True,
+               "summary": "no verify slot came free in 12 attempts"}
+
+    def test_a_rerun_with_no_free_slot_ends_as_no_slot(self):
+        self.declare({"lint": "", "test": "sys.exit(1)"})
+
+        def replacement(real, number, verification_id, *rest):
+            if verification_id == "test" and number == 2:
+                return dict(self.NO_SLOT)
+            return real(verification_id, *rest)
+
+        status, answer = self.run_patched(replacement)
+        self.assertEqual(status, 0)
+        self.assertEqual(answer["results"][1], self.NO_SLOT)
+
+    def test_slot_exhaustion_wins_over_a_rerun_that_dirtied_the_tree(self):
+        self.declare({"lint": "sys.exit(1)", "test": "sys.exit(1)"})
+        firsts = {}
+
+        def replacement(real, number, verification_id, *rest):
+            if number == 1:
+                firsts[verification_id] = real(verification_id, *rest)
+                return firsts[verification_id]
+            if verification_id == "lint":
+                (self.worktree / "stray.txt").write_text("x\n")
+                return {"id": "lint", "status": "pass", "exit": 0, "summary": "passed"}
+            return dict(self.NO_SLOT)
+
+        status, answer = self.run_patched(replacement)
+        lint, test = answer["results"]
+        self.assertEqual(test, self.NO_SLOT)
+        self.assertEqual(lint, firsts["lint"])
+        self.assertEqual(answer["verdict"], "failed")
+
+    # Narrowed runs: carry the stored passes when the fix only re-indents the named files.
+
+    JSON_CHECK = ("import json;t=open('data.json').read();"
+                  "(print('data.json is not two-space indented'),sys.exit(1)) "
+                  "if t!=json.dumps(json.loads(t),indent=2)+chr(10) else None")
+
+    def indented(self, indent, **value):
+        return json.dumps({"a": 1, **value}, indent=indent) + "\n"
+
+    def first_failed(self, extra_files=None):
+        """A first run whose `test` fails naming data.json; returns its answer."""
+        self.declare({"lint": "", "test": self.JSON_CHECK})
+        self.branch_change({"data.json": self.indented(4), "x.py": "if True:\n    pass\n",
+                            **(extra_files or {})})
+        first = self.answer(self.run_verified())
+        self.assertEqual(first["verdict"], "failed")
+        self.assertEqual(first["results"][1]["named"], ["data.json"])
+        return first
+
+    def narrowed(self, first):
+        head = self.git("rev-parse", "HEAD", cwd=self.worktree)
+        return self.run_verified("--head", first["head"], "--commit", head)
+
+    def test_a_narrowed_run_runs_only_the_failed_ids_and_carries_the_passes(self):
+        first = self.first_failed()
+        self.branch_change({"data.json": self.indented(2)})
+        logged = self.logged()
+        answer = self.answer(self.narrowed(first))
+        lint, test = answer["results"]
+        where = str(self.worktree.resolve())
+        self.assertEqual(answer["verdict"], "passed")
+        self.assertEqual(self.logged(), logged + [f"{where} test"])
+        self.assertEqual(lint, {**first["results"][0], "carried_from": first["head"]})
+        self.assertNotIn("carried_from", test)
+        done = subprocess.run(
+            [sys.executable, "-m", "agent_tools.verification.verified_tree", "check"],
+            cwd=self.worktree, capture_output=True, text=True, check=False, env=self.env)
+        self.assertEqual(json.loads(done.stdout)["status"], "verified")
+
+    def test_a_carried_pass_keeps_its_first_carried_from(self):
+        first = self.first_failed()
+        last = verified_tree.last_path(self.worktree)
+        document = json.loads(last.read_text())
+        document["results"][0]["carried_from"] = "c" * 40
+        last.write_text(json.dumps(document) + "\n")
+        self.branch_change({"data.json": self.indented(2)})
+        lint = self.answer(self.narrowed(first))["results"][0]
+        self.assertEqual(lint["carried_from"], "c" * 40)
+
+    def test_a_narrowed_run_whose_evidence_or_range_does_not_bind_runs_every_id(self):
+        first = self.first_failed({"other.json": self.indented(4)})
+        last = verified_tree.last_path(self.worktree)
+        stored = last.read_text()
+        fix_base = first["head"]
+        where = str(self.worktree.resolve())
+
+        def reindent_both():
+            self.branch_change({"data.json": self.indented(2), "other.json": self.indented(2)})
+
+        def change_value():
+            self.branch_change({"data.json": self.indented(2, a=2)})
+
+        def reindent_python():
+            self.branch_change({"data.json": self.indented(2), "x.py": "if True:\n  pass\n"})
+            document = json.loads(stored)
+            document["results"][1]["named"] = ["data.json", "x.py"]
+            last.write_text(json.dumps(document) + "\n")
+
+        def other_head():
+            self.branch_change({"data.json": self.indented(2)})
+            earlier = self.git("rev-parse", "HEAD", cwd=self.worktree)
+            self.branch_change({"data.json": self.indented(3)})
+            return earlier
+
+        def no_file():
+            self.branch_change({"data.json": self.indented(2)})
+            last.unlink()
+
+        cases = {"a file no failure named": reindent_both, "a changed value": change_value,
+                 "a python file": reindent_python, "another head": other_head,
+                 "no last verification file": no_file}
+        for name, arrange in cases.items():
+            with self.subTest(name):
+                self.git("reset", "-q", "--hard", fix_base, cwd=self.worktree)
+                last.write_text(stored)
+                self.log.unlink(missing_ok=True)
+                head = arrange()
+                done = self.run_verified("--head", head or fix_base, "--commit",
+                                         self.git("rev-parse", "HEAD", cwd=self.worktree))
+                answer = self.answer(done)
+                self.assertEqual(self.logged(), [f"{where} lint", f"{where} test"])
+                for entry in answer["results"]:
+                    self.assertNotIn("carried_from", entry)
+
+    def test_a_narrowed_run_at_another_head_than_the_fix_is_an_error(self):
+        first = self.first_failed()
+        self.branch_change({"data.json": self.indented(2)})
+        logged = self.logged()
+        answer = self.answer(self.run_verified("--head", first["head"], "--commit", first["head"]), 1)
+        self.assertEqual(answer["verdict"], "error")
+        self.assertTrue(answer["detail"].startswith("the narrowed verification would run at"))
+        self.assertEqual(self.logged(), logged)
+
+    def test_a_narrowed_run_given_only_one_of_its_flags_is_a_usage_error(self):
+        self.declare({"lint": "", "test": ""})
+        answer = self.answer(self.run_verified("--head", "a" * 40), 1)
+        self.assertEqual(answer["verdict"], "error")
+        self.assertTrue(answer["detail"].startswith("usage:"))
+
 
 class SyncSkipTest(RunTest):
     """A passed run is recorded, and after a clean sync that changes none of the branch's files
@@ -1012,7 +1316,7 @@ class SyncSkipTest(RunTest):
         self.git("merge", "-q", "--no-edit", "origin/main", cwd=self.worktree)
         logged = len(self.logged())
         answer = self.answer(self.run_verified())
-        self.assertEqual(len(self.logged()), logged + 2)
+        self.assertEqual(len(self.logged()), logged + 3)  # lint fails outside the diff and reruns once
         self.assertNotIn("synced_since", answer)
 
     def record_file(self):
@@ -1093,6 +1397,34 @@ class SlotSecondsTest(unittest.TestCase):
     def test_the_selection_variable_is_the_selectors(self):
         self.assertEqual(verified_tree.SELECTION_ENV, touched_tests.SELECTION_ENV)
         self.assertEqual(verified_tree.SELECTION_ENV, "VERIFIED_TREE_SELECTION")
+
+
+class FixRangeTest(ProjectCase):
+    """`fix_range`: is the fix between two commits only a re-indentation of whitespace-insensitive files."""
+
+    def fix(self, name, before, after):
+        (self.repo / name).write_text(before, encoding="utf-8")
+        self.commit_all("before")
+        start = self.git("rev-parse", "HEAD")
+        (self.repo / name).write_text(after, encoding="utf-8")
+        self.commit_all("after")
+        return verified_tree.fix_range(self.repo, start, self.git("rev-parse", "HEAD"))
+
+    def test_a_reindented_json_file_is_whitespace_only(self):
+        self.assertEqual(self.fix("a.json", '{\n    "a": 1\n}\n', '{\n  "a": 1\n}\n'),
+                         {"whitespace_only": True, "changed_paths": ["a.json"]})
+
+    def test_a_content_change_is_not_whitespace_only(self):
+        fixed = self.fix("a.json", '{\n    "a": 1\n}\n', '{\n  "a": 2\n}\n')
+        self.assertEqual(fixed, {"whitespace_only": False, "changed_paths": ["a.json"]})
+
+    def test_a_reindented_python_file_is_not_whitespace_only(self):
+        fixed = self.fix("a.py", "if True:\n    pass\n", "if True:\n  pass\n")
+        self.assertEqual(fixed, {"whitespace_only": False, "changed_paths": ["a.py"]})
+
+    def test_an_unknown_commit_raises(self):
+        with self.assertRaises(verified_tree.VerifiedTreeError):
+            verified_tree.fix_range(self.repo, "0" * 40, "1" * 40)
 
 
 if __name__ == "__main__":

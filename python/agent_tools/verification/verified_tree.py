@@ -96,9 +96,54 @@ then SIGKILL to it after `TERMINATE_GRACE_SECONDS`, so a command that ignores SI
 descendants cannot outlive it; output is captured in a file, never a pipe, so a descendant
 that outlives the command and keeps its stdout open delays nothing);
 any other exit is the command's own (0 `pass`, else `fail` whose summary is the last
-`SUMMARY_LINES` non-blank output lines). Every id runs even after an earlier one failed. The
-verdict is `failed` when any result is `fail`, else `dirty` when the tree is not clean after
-the runs, else `passed`; `clean` reports the after state and `tree` the tree that was run.
+`SUMMARY_LINES` non-blank output lines). Every id runs even after an earlier one failed.
+
+A `fail` that is not `no_slot` also carries `"named"`, the sorted branch changed paths (the
+`changed_paths` above against `origin/<integration_branch>`, read once per run) that the
+command's whole output names, and `"outside_diff"`, true only when those paths were read and
+`named` is empty; when they cannot be read (the origin ref is missing) `named` is `[]`, `outside_diff`
+false and nothing is rerun. A changed path `p` is named when a candidate occurs in the output
+with no character of `[A-Za-z0-9_.-]` right before it and, right after it, neither a character of
+`[A-Za-z0-9_-]` nor a `.` followed by a character of `[A-Za-z0-9_]`; the candidates are `p` and,
+when the command's cwd is a directory under the root other than the root and `p` lies under it,
+`p` relative to that cwd. So `notes.txt:12`, `notes.txt.` at a sentence end and `/abs/notes.txt`
+name `notes.txt`, and `notes.txt.bak` does not.
+
+After every planned id ran, one rerun happens only when at least one result is `fail`, every `fail`
+has `outside_diff` true (a `no_slot` result has none, so it blocks), the tree is clean and HEAD
+still equals the head read before the runs: each failed id's whole command runs exactly once more,
+nothing else reruns. The outcome has this precedence over the whole batch. (1) When any rerun
+answered `no_slot`, each such result replaces its first one and every other result stays the first
+one, whatever the tree or the head. (2) Else, when the tree is dirty or HEAD moved after the reruns,
+every first result stays. (3) Else per id: a `pass` replaces the result with the rerun's plus
+`"flaky"`, the first run's `summary`; any other outcome keeps the first result and adds
+`"reran": true`.
+
+One head per run: the verdict is `failed` when any result is `fail`, else `dirty` when the tree is
+not clean after the runs or HEAD differs from the head read before them, else `passed`; `clean`
+reports `git status --porcelain` after the last command and `tree` the tree that was run. A run
+whose HEAD moved writes no record, no pass record and no last verification file.
+
+The last verification file, `<git rev-parse --absolute-git-dir>/verified-tree-last.json`, is
+exactly {"head", "results", "schema": "verified-tree-last/v1", "tree"}, the final results of the
+latest run that ran its plan (verdict `passed`, `failed` or `dirty` after the runs, narrowed runs
+included, its HEAD not moved); a dirty-before run, a sync skip and an error never write it.
+
+`verified-tree run --worktree-path <path> --head <sha> --commit <sha>` is the narrowed run, the
+flags given together or not at all (else a usage error). HEAD must equal `--commit`, else the verdict
+is `error` with detail `the narrowed verification would run at <HEAD>, not at the fix <commit>, so
+no result was carried` and nothing runs. A passed result is carried instead of run, as that result
+plus `"carried_from"` (its own when it has one, else `--head`), only when all of these hold of the
+last verification file, never of the caller: it parses (that schema, a 40-hex `head`, a list
+`results`); its `head` equals `--head`; `--head` differs from `--commit`; some stored result is
+`pass`; every stored `fail` has a non-empty `named` and none is `no_slot`; `fix_range(root, --head,
+--commit)` is `whitespace_only`; and every path of its `changed_paths` is among the `named` paths
+of the stored failures. When any fails, every planned id runs as in a plain run. The sync skip
+never applies to a narrowed run, and a passed run records every `pass` id, carried ones included.
+`fix_range` answers {"whitespace_only", "changed_paths"}: the paths of `git diff --no-renames
+--name-only <start> <commit>`, and true only when `git diff -b --ignore-blank-lines --quiet`
+exits 0, there is a path and each path, stripped, matches `WS_INSENSITIVE`; a git failure raises.
+
 A `passed` run writes the record below for the tree it ran, its `verification` the ids whose
 status is `pass` (a run that passed no id writes none, the record's list being non-empty), so
 `check` then answers `verified` for that tree; a `failed` or `dirty` run, a usage error and an
@@ -154,7 +199,7 @@ since `check`, prints one `verified-tree: <message>` line on stderr and exits
 2 with empty stdout, writing no record (a plan changed since `check` is still
 consumed). `fresh` exits 2 the same way for a `--since` that names no commit,
 a `--record` outside the worktree or a git failure. argparse's usage errors
-also exit 2: no verb takes a verification id.
+also exit 2: no verb but the narrowed `run` takes a commit.
 """
 
 from __future__ import annotations
@@ -162,6 +207,7 @@ from __future__ import annotations
 import argparse
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
+from dataclasses import dataclass
 import fcntl
 import json
 import math
@@ -185,6 +231,12 @@ PLAN_NAME = "verified-tree-plan.json"
 PLAN_LOCK_NAME = "verified-tree-plan.lock"
 RUN_RECORD_SCHEMA = "verified-tree-run/v1"
 RUN_RECORD_NAME = "verified-tree-run.json"
+LAST_SCHEMA = "verified-tree-last/v1"
+LAST_NAME = "verified-tree-last.json"
+# Copied from deliver-standard.js: the file types whose meaning a whitespace-only change keeps.
+WS_INSENSITIVE = re.compile(
+    r"\.(c|cc|cpp|cxx|h|hh|hpp|cs|css|scss|less|dart|go|java|js|jsx|mjs|cjs|ts|tsx|mts|cts|json|kt|kts"
+    r"|rs|scala|swift|php|html|xml|vue|svelte|sql|proto)$", re.I)
 SYNC_SKIP_REASON = "passed at {head}; the sync since changed none of the pull request's files"
 TREE_PATTERN = r"[0-9a-f]{40}(?:[0-9a-f]{24})?"
 ERROR_EXIT = 2
@@ -243,6 +295,11 @@ def record_path(root: Path) -> Path:
 def run_record_path(root: Path) -> Path:
     """The last passed `run`'s record, beside the record."""
     return record_path(root).with_name(RUN_RECORD_NAME)
+
+
+def last_path(root: Path) -> Path:
+    """The last verification file `run` wrote, beside the record."""
+    return record_path(root).with_name(LAST_NAME)
 
 
 def plan_path(root: Path) -> Path:
@@ -391,6 +448,22 @@ def changed_paths(root: Path, integration_branch: str, tree: str) -> list[str]:
     """Every path `tree` changes against its merge base with `origin/<integration_branch>`."""
     base = _git(["merge-base", "HEAD", f"refs/remotes/origin/{integration_branch}"], root)
     return _tree_diff(root, base, tree)
+
+
+def fix_range(root: Path, start: str, commit: str) -> dict:
+    """{"whitespace_only", "changed_paths"} of the fix `start`..`commit`; VerifiedTreeError on a git failure."""
+    names = _git_bytes(["diff", "--no-renames", "--name-only", "-z", start, commit], root)
+    paths = [os.fsdecode(name) for name in names.split(b"\0") if name]
+    try:
+        quiet = subprocess.run(["git", "diff", "-b", "--ignore-blank-lines", "--quiet", start, commit],
+                               cwd=root, capture_output=True, check=False).returncode
+    except OSError as error:
+        raise VerifiedTreeError(f"git diff: {error}") from error
+    if quiet not in (0, 1):
+        raise VerifiedTreeError(f"git diff: exit {quiet}")
+    return {"whitespace_only": quiet == 0 and bool(paths)
+            and all(WS_INSENSITIVE.search(path.strip()) for path in paths),
+            "changed_paths": paths}
 
 
 def plan(verification: Sequence[str], conditions: Mapping[str, Mapping],
@@ -585,8 +658,37 @@ def _slotted(argv: Sequence[str], cwd: str, report: Path, selection: Path) -> tu
         return code, os.fsdecode(captured.read())
 
 
-def _run_command(verification_id: str, command: Mapping) -> dict:
-    """The result of one declared id, retried while no verify slot comes free."""
+def _under(root: Path, cwd: str) -> str | None:
+    """`cwd` relative to `root` when it is a directory under it other than it, else None."""
+    for base, path in ((root, Path(cwd)), (root.resolve(), Path(cwd).resolve())):
+        try:
+            parts = path.relative_to(base).parts
+        except ValueError:
+            continue
+        return "/".join(parts) if parts else None
+    return None
+
+
+def _named(output: str, changed: Sequence[str], root: Path, cwd: str) -> list[str]:
+    """The sorted `changed` paths `output` names, as the path or relative to the command's `cwd`."""
+    prefix = _under(root, cwd)
+    named = []
+    for path in changed:
+        candidates = [path]
+        if prefix is not None and path.startswith(prefix + "/"):
+            candidates.append(path[len(prefix) + 1:])
+        if any(re.search(r"(?<![A-Za-z0-9_.-])" + re.escape(candidate)
+                         + r"(?![A-Za-z0-9_-])(?!\.[A-Za-z0-9_])", output)
+               for candidate in candidates):
+            named.append(path)
+    return sorted(named)
+
+
+def _run_command(verification_id: str, command: Mapping, changed: Sequence[str] | None,
+                 root: Path) -> dict:
+    """The result of one declared id, retried while no verify slot comes free.
+
+    A failure that is not `no_slot` names the `changed` paths its whole output names."""
     code: int | None = None
     reports: list[dict | None] = []
     selection: dict | None = None
@@ -613,6 +715,9 @@ def _run_command(verification_id: str, command: Mapping) -> dict:
         status = "pass" if code == 0 else "fail"
         summary = "passed" if code == 0 else _output_summary(output) or f"exit {code}"
         result = {"id": verification_id, "status": status, "exit": code, "summary": summary}
+    if result["status"] == "fail" and not result.get("no_slot"):
+        named = [] if changed is None else _named(output, changed, root, command["cwd"])
+        result["named"], result["outside_diff"] = named, changed is not None and not named
     result["waited_seconds"], result["held_seconds"] = waited, held
     if selection is not None:
         result["selection"] = selection
@@ -669,14 +774,95 @@ def _record_pass(root: Path, head: str, run_ids: Sequence[str]) -> None:
         print(f"verified-tree: cannot record the pass: {error}", file=sys.stderr)
 
 
-def run(worktree: Path) -> tuple[int, dict]:
-    """Run every declared id once in `worktree`: (0, verdict document) or (1, error document)."""
+@dataclass(frozen=True)
+class Narrowing:
+    """The head a first run measured and the fix commit a narrowed run verifies."""
+    head: str
+    commit: str
+
+
+def _read_last(root: Path) -> dict | None:
+    """The strictly parsed last verification file, or None when absent or malformed; never raises."""
+    try:
+        document = json.loads(last_path(root).read_text(encoding="utf-8"),
+                              object_pairs_hook=reject_duplicate_keys,
+                              parse_constant=reject_nonfinite_literal)
+    except (VerifiedTreeError, OSError, ValueError):
+        return None
+    if (not isinstance(document, dict) or document.get("schema") != LAST_SCHEMA
+            or not isinstance(document.get("head"), str)
+            or not re.fullmatch(r"[0-9a-f]{40}", document["head"])
+            or not isinstance(document.get("results"), list)
+            or not all(isinstance(entry, dict) and isinstance(entry.get("id"), str)
+                       and isinstance(entry.get("status"), str) for entry in document["results"])):
+        return None
+    return document
+
+
+def _carried(root: Path, head: str, commit: str) -> list[dict] | None:
+    """The stored passes a narrowed run carries, or None when the stored evidence does not bind.
+
+    They bind only when the last verification file is at `head`, every stored failure named its
+    changed paths, and the fix `head`..`commit` is whitespace-only and touches only those paths."""
+    last = _read_last(root)
+    if last is None or last["head"] != head or head == commit:
+        return None
+    results = last["results"]
+    passes = [entry for entry in results if entry["status"] == "pass"]
+    fails = [entry for entry in results if entry["status"] == "fail"]
+    if not passes or any(entry.get("no_slot") or not isinstance(entry.get("named"), list)
+                         or not entry["named"] for entry in fails):
+        return None
+    try:
+        fix = fix_range(root, head, commit)
+    except VerifiedTreeError:
+        return None
+    named = {path for entry in fails for path in entry["named"]}
+    if not fix["whitespace_only"] or not set(fix["changed_paths"]) <= named:
+        return None
+    return [{**entry, "carried_from": entry.get("carried_from", head)} for entry in passes]
+
+
+def _rerun_outside(root: Path, head: str, commands: Mapping, results: list[dict],
+                   changed: Sequence[str] | None) -> list[dict]:
+    """`results` after the one rerun of every failure outside the diff, when the rerun applies."""
+    failed = [entry for entry in results if entry["status"] == "fail"]
+    if (not failed or changed is None or not all(entry.get("outside_diff") is True for entry in failed)
+            or not _clean(root) or _git(["rev-parse", "HEAD"], root) != head):
+        return results
+    again = {entry["id"]: _run_command(entry["id"], commands[entry["id"]], changed, root)
+             for entry in failed}
+    unslotted = {item for item, second in again.items() if second.get("no_slot")}
+    if unslotted:
+        return [again[entry["id"]] if entry["id"] in unslotted else entry for entry in results]
+    if not _clean(root) or _git(["rev-parse", "HEAD"], root) != head:
+        return results
+    kept = []
+    for entry in results:
+        second = again.get(entry["id"])
+        if second is None:
+            kept.append(entry)
+        elif second["status"] == "pass":
+            kept.append({**second, "flaky": entry["summary"]})
+        else:
+            kept.append({**entry, "reran": True})
+    return kept
+
+
+def run(worktree: Path, narrowing: Narrowing | None = None) -> tuple[int, dict]:
+    """Run every declared id in `worktree`: (0, verdict document) or (1, error document).
+
+    A failure outside the branch's files is rerun once; a `narrowing` carries stored passes."""
     try:
         root = Path(_git(["rev-parse", "--show-toplevel"], worktree))
         snapshot = _resolved(root)
         policy = _policy(snapshot)
         tree = current_tree(root)
         head = _git(["rev-parse", "HEAD"], root)
+        if narrowing is not None and head != narrowing.commit:
+            return 1, {"detail": f"the narrowed verification would run at {head}, not at the fix "
+                                 f"{narrowing.commit}, so no result was carried",
+                       "verdict": "error"}
         if not _clean(root):
             return 0, {"clean": False, "head": head, "results": [], "tree": tree,
                        "verdict": "dirty"}
@@ -684,7 +870,8 @@ def run(worktree: Path) -> tuple[int, dict]:
         planned = _plan_of(root, tree, {**policy, "verification": ids})
         reasons = {entry["id"]: entry["reason"] for entry in planned["skipped"]}
         bound = isinstance(policy["before_pull_request"], list)
-        earlier = _synced_since(root, tree, planned, policy) if bound else None
+        earlier = (_synced_since(root, tree, planned, policy)
+                   if bound and narrowing is None else None)
         if earlier is not None:
             if planned["run"]:  # the synced tree is the verified one, so landing can ready it
                 _write_atomically(record_path(root), {"schema": SCHEMA, "tree": tree,
@@ -696,21 +883,39 @@ def run(worktree: Path) -> tuple[int, dict]:
                                     "summary": reasons[item], "reason": reasons[item]}
                                    for item in ids]}
         commands = snapshot["bindings"]["commands"]
+        try:
+            changed: list[str] | None = changed_paths(root, policy["integration_branch"], tree)
+        except VerifiedTreeError:
+            changed = None
+        carried = ({} if narrowing is None else
+                   {entry["id"]: entry for entry in
+                    _carried(root, narrowing.head, narrowing.commit) or []})
         results = []
         for verification_id in ids:
             if verification_id in reasons:
                 reason = reasons[verification_id]
                 results.append({"id": verification_id, "status": "skipped",
                                 "summary": reason, "reason": reason})
+            elif verification_id in carried:
+                results.append(carried[verification_id])
             else:
-                results.append(_run_command(verification_id, commands[verification_id]))
+                results.append(_run_command(verification_id, commands[verification_id],
+                                            changed, root))
+        results = _rerun_outside(root, head, commands, results, changed)
         clean = _clean(root)
+        moved = _git(["rev-parse", "HEAD"], root) != head
         verdict = ("failed" if any(entry["status"] == "fail" for entry in results)
-                   else "passed" if clean else "dirty")
+                   else "dirty" if moved or not clean else "passed")
         passed = [entry["id"] for entry in results if entry["status"] == "pass"]
         if verdict == "passed" and passed:
             _write_atomically(record_path(root), {"schema": SCHEMA, "tree": tree,
                                                   "verification": passed})
+        if not moved:
+            try:
+                _write_atomically(last_path(root), {"head": head, "results": results,
+                                                    "schema": LAST_SCHEMA, "tree": tree})
+            except VerifiedTreeError as error:
+                print(f"verified-tree: cannot record the results: {error}", file=sys.stderr)
     except (VerifiedTreeError, OSError) as error:
         return 1, {"detail": str(error), "verdict": "error"}
     if bound and verdict == "passed":
@@ -747,12 +952,17 @@ class _RunParser(argparse.ArgumentParser):
 def _run_main(argv: Sequence[str]) -> int:
     parser = _RunParser(prog="verified-tree run")
     parser.add_argument("--worktree-path", required=True)
+    parser.add_argument("--head")
+    parser.add_argument("--commit")
     try:
         args = parser.parse_args(argv)
+        if (args.head is None) != (args.commit is None):
+            raise _UsageError("--head and --commit come together")
     except _UsageError as error:
         status, result = 1, {"detail": f"usage: {error}", "verdict": "error"}
     else:
-        status, result = run(Path(args.worktree_path))
+        narrowing = None if args.head is None else Narrowing(args.head, args.commit)
+        status, result = run(Path(args.worktree_path), narrowing)
     print(_canonical(result))
     return status
 
