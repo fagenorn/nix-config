@@ -11,11 +11,14 @@ import json
 import subprocess
 import sys
 import unittest
+from pathlib import Path
 
 from .conformance_test_support import (
-    HERMETIC_ENV, MANIFEST, REPO_ROOT, ReportAssertions, doctor, fixture, load_module,
-    make_root, run,
+    HERMETIC_ENV, INTEGRATION_REF, MANIFEST, REPO_ROOT, ReportAssertions, commit_all, doctor,
+    fixture, git, load_module, make_root, run,
 )
+
+NEVER_RISE = "verification.violations.never_rise"
 
 
 class PurposeSelectionTest(unittest.TestCase):
@@ -216,18 +219,25 @@ class PromotionLiteralPinTest(unittest.TestCase):
 class AcceptanceDemoTest(ReportAssertions, unittest.TestCase):
     """D22: the demo the issue names, against this repository's committed root."""
 
-    def test_doctor_on_this_repository_reports_every_registered_check(self):
-        report, by_id = doctor(self, REPO_ROOT, "--offline")
+    def assert_doctor_demo(self, report: dict, by_id: dict, root: Path) -> None:
+        """Everything the demo pins except a never-rise count rise, which is the
+        Conformance check's verdict on the branch and not this demo's."""
+        rose = (by_id[NEVER_RISE]["status"] == "failed"
+                and by_id[NEVER_RISE]["reason_code"] == "violation_count_rose")
         self.assertEqual([c["id"] for c in report["checks"]],
                          sorted(REGISTERED_CHECK_IDS))
         self.assertEqual(report["subject"]["project_id"], "fagenorn/nix-config")
-        self.assertNotIn("failed", [c["status"] for c in report["checks"]])
+        failed = [c["id"] for c in report["checks"]
+                  if c["status"] == "failed" and not (rose and c["id"] == NEVER_RISE)]
+        self.assertEqual(failed, [])
         self.assertEqual(by_id["host.tracker.credential"]["reason_code"],
                          "offline_constraint")
-        self.assertEqual(report["outcome"]["status"], "incomplete")
+        self.assertEqual(report["outcome"]["status"], "failed" if rose else "incomplete")
+        if rose:
+            self.assertEqual(report["outcome"]["primary_check_id"], NEVER_RISE)
         manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
         contract = json.loads(
-            (REPO_ROOT / ".agents/project.json").read_text(encoding="utf-8"))
+            (root / ".agents/project.json").read_text(encoding="utf-8"))
         schema = by_id["compatibility.contract.schema_supported"]
         self.assertEqual([schema["status"], schema["facts"]], ["passed", {
             "platform_version": manifest["platform_version"],
@@ -243,6 +253,31 @@ class AcceptanceDemoTest(ReportAssertions, unittest.TestCase):
         promoted = by_id["repository.residue.promoted_duplicate"]
         self.assertEqual([promoted["status"], promoted["facts"]], ["passed", {
             "duplicates": [], "count": 0, "deferred_count": 0, "retained_count": 0}])
+
+    def test_doctor_on_this_repository_reports_every_registered_check(self):
+        report, by_id = doctor(self, REPO_ROOT, "--offline")
+        self.assert_doctor_demo(report, by_id, REPO_ROOT)
+
+    def test_the_doctor_demo_holds_on_a_branch_that_raises_a_never_rise_count(self):
+        with fixture() as tmp:
+            root = make_root(tmp)
+            (root / "big.py").write_text("x = 1\n" * 1501, encoding="utf-8")
+            commit_all(root, "a file over the size budget")
+            report, by_id = doctor(self, root, "--offline")
+            never_rise = by_id[NEVER_RISE]
+            self.assertEqual([never_rise["status"], never_rise["reason_code"]],
+                             ["failed", "violation_count_rose"])
+            self.assertIn("B17", never_rise["facts"]["rules"])
+            self.assert_doctor_demo(report, by_id, root)
+
+    def test_the_doctor_demo_rejects_a_never_rise_check_that_could_not_judge(self):
+        with fixture() as tmp:
+            root = make_root(tmp)
+            git(root, "update-ref", "-d", INTEGRATION_REF)
+            report, by_id = doctor(self, root, "--offline")
+            self.assertEqual(by_id[NEVER_RISE]["reason_code"], "history_unavailable")
+            with self.assertRaisesRegex(AssertionError, NEVER_RISE):
+                self.assert_doctor_demo(report, by_id, root)
 
     def test_this_repository_declares_host_activation_as_production(self):
         """Issue 1206: this repository's contract declares nix-activate as production,

@@ -192,6 +192,7 @@ agent-workflow-tests *args:
     tests/test_independent_review.py \
     tests/test_issue_setup.py \
     tests/test_closing.py \
+    tests/test_holding.py \
     tests/test_landing.py \
     tests/test_land_tally.py \
     tests/test_verify_rounds.py \
@@ -346,6 +347,7 @@ agent-workflow-tests *args:
     tests/test_console_trust_start.py \
     tests/test_console_plan_questions.py \
     tests/test_console_project_question.py \
+    tests/test_console_credential_timing.py \
     tests/test_console_question_records.py \
     tests/test_console_question_check.py \
     tests/test_console_contract_draft.py \
