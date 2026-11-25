@@ -58,7 +58,7 @@ measured fastest on its runner (`.github/workflows/ci.yaml:100`). In parallel mo
 longest-first (LPT): the order comes from `python/agent_tools/delivery/suite_timings.json`, a
 committed map of member path to wall seconds, refreshed from main's CI `suite-timing`
 artifacts (the median per member over up to three runs, registered members only; the newest
-of them is named in tests/test_suite_runner.py with its members over 30 s and their times, and
+of them is named in tests/test_suite_timings_current.py with its members over 30 s and their times, and
 a refresh replaces both), with members it does not name starting first in list order, ties in
 list order, and a missing or malformed file meaning list order. Serial mode keeps list order,
 and the report stays in list order for ties. Every completed run checks the file against what it
