@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
 
-from agent_tools.delivery import procedure_check
+from agent_tools.delivery import engine_graders, procedure_check
 from agent_tools.delivery.engine_graders import Grader
 
 CORE_LINES = 600
@@ -122,6 +122,18 @@ def breaches(package_dir: Path, procedures_dir: Path, graders: Mapping[str, Grad
         return _breaches(package_dir, procedures_dir, graders)
     except OSError as error:
         raise ValueError(f"cannot measure the engine: {' '.join(str(error).split())}") from error
+
+
+def verdict(package_dir: Path, procedures_dir: Path,
+            commands: Mapping[str, procedure_check.CommandDeclaration | None],
+            ) -> tuple[procedure_check.CheckResult, tuple[Breach, ...]]:
+    """`engine check`'s verdict, the one every judge of a procedure set calls.
+
+    A set is refused when either part is non-empty: a refusal of the procedure
+    check or a breach of a size cap.
+    """
+    return (procedure_check.check_directory(procedures_dir, commands),
+            breaches(package_dir, procedures_dir, engine_graders.GRADERS))
 
 
 def _breaches(package_dir: Path, procedures_dir: Path, graders: Mapping[str, Grader]) -> tuple[Breach, ...]:

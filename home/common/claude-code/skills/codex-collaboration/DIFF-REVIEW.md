@@ -48,7 +48,7 @@ This operation's packet is built from scratch and contains exactly:
 
 1. The operation name, invocation directory, worktree root, current branch, and the base and head SHAs.
 2. The scope: review the diff `<base-sha>..<head-sha>` in the worktree for code correctness (bugs, boundary error handling, dead branches, assertions that fail to pin the documented contract, DRY against existing helpers, cross-task integration), and any acceptance criterion the caller passed that the diff leaves unmet.
-3. The caller's acceptance criteria, issue and plan path, labelled routing context.
+3. The caller's acceptance criteria, issue and plan path, labelled routing context, plus any probe rule the caller passed, verbatim.
 4. Inferred verify commands, labelled as context on how the change is verified elsewhere, not a request to run anything (the runtime is read-only), plus every applicable `AGENTS.md`/`CLAUDE.md`.
 5. The standards layers matching the diff's file types (`~/.agents/standards/the-bar.md`, its `stacks/` shards, the project's intersecting `docs/standards/` shards).
 
