@@ -1,87 +1,127 @@
-"""The console's runtime copy of the owner glossary, and the rule that finds a word used without its gloss.
+"""The console's runtime copy of the do-not-write list, and the rule that finds a listed word in a text.
 
-Why it exists: `docs/guides/owner-words.md` is the source of the glossary, but the console package does not
-ship `docs/`, so `GLOSSARY` is a copy of that table, row for row and in table order.
-`tests/test_console_owner_words.py` fails when the two differ.
+Why it exists: `docs/guides/owner-words.md` is the source of the list, but the console package does not ship
+`docs/`, so `ROWS` is a copy of that table, row for row and in table order, plus the forms each row finds.
+`tests/test_console_owner_words.py` fails when the first two cells of the two differ.
 
-The match rule: a word is used in a text when it appears as a whole word, ignoring case. The word characters
-are ASCII letters and digits only, case folding is ASCII only, and a multi-word entry matches across any run of
-the six ASCII separators (space, tab, newline, carriage return, form feed, vertical tab), never `\\s`. An
-inflected form ("slices", "looks", "verified") is not the word. The page implements the same rule in
-JavaScript and is held to the same cases, `tests/fixtures/console/owner-words-cases.json`.
+The match rule: each pattern of a row is compiled as a whole-word, case-insensitive match. The word characters
+are ASCII letters and digits only, case folding is ASCII only, and a space in a pattern matches any run of the
+six ASCII separators (space, tab, newline, carriage return, form feed, vertical tab), never `\\s`. Where a
+pattern has a group named `w`, the reported word is that group and the rest of the pattern is only the context
+that must surround it; otherwise the whole match is reported. Of the matches that overlap, the longest wins.
+Words that are also ordinary English are listed only in their internal form, so the patterns carry that form.
+The page of ordinary sentences in `tests/fixtures/console/owner-words-ordinary.txt` and the cases in
+`tests/fixtures/console/owner-words-cases.json` hold the rule to what it finds and what it leaves alone.
 
-The glossed rule: a word used in a text is cleared when that same text also holds its gloss, compared with
-runs of separators folded to one space and ASCII letters lowercased.
+Nothing clears a word: a text that also explains the word, in brackets or elsewhere, still has the word found.
 
-The four names: `GLOSSARY` (the 12 `(word, gloss)` rows), `unglossed(text)` (the rows `text` uses without their
-gloss, in glossary order, each at most once), `unglossed_in(texts)` (the distinct rows flagged in any one of
-`texts`, in glossary order) and `entries()` (the wire form for the view).
+The four names: `ROWS` (the `(do_not_write, write_instead, patterns)` rows), `Found` (a `row`, `pattern`,
+`word` and `sentence`), `found(text)` (the first match of each pattern in `text`, in list order) and
+`found_in(texts)` (the first `Found` of each pattern across `texts`, in list order). `SEPARATORS`, `MAIN` and
+`CHANGE` are the shared fragments.
 """
 import re
-import string
 from collections.abc import Iterable
-
-GLOSSARY: tuple[tuple[str, str], ...] = (
-    ("land lock",
-     "A turn-taking token: only one change at a time may be merged into the branch where finished changes are collected, so a change waits until it holds the lock."),
-    ("slice",
-     "One small piece of a larger job, made so that it can be built, checked and finished on its own."),
-    ("held",
-     "Finished and merged, but not counted as done until a check afterwards shows it works for real."),
-    ("verify",
-     "A check that a change does what it was meant to do. One kind runs before the change is merged, when it has not shipped yet. Another kind runs after the change is live, on a schedule, and only for a change kept open until real use proves it works; it may take several passes. Say which kind is meant."),
-    ("brief version",
-     "One numbered draft of the plan the manager writes for the owner, or the colleague who started the sprint, to approve; a new version replaces the last when the owner asks for changes."),
-    ("guard",
-     "A safety check that refuses a risky command before it runs, such as pushing code or merging a change."),
-    ("rerun",
-     "Run a failed automatic check again, in case it failed for a passing reason."),
-    ("claim",
-     "A note that says one sprint is working on certain files. It does not lock them: two sprints with overlapping claims both keep working, and a separate rule, not the claim, decides which one goes first."),
-    ("look",
-     "Your own look at how something appears on screen, before it is merged."),
-    ("live fault",
-     "A fault the manager has found in the running system that real users are meeting now."),
-    ("CI",
-     "The automatic checks that GitHub runs on every proposed change before it can be merged."),
-    ("pull request",
-     "A proposed change, held on GitHub for checking and review before it joins the main code."),
-)
+from typing import NamedTuple
 
 SEPARATORS = "[ \t\n\r\f\v]+"
-_ASCII_LOWER = str.maketrans(string.ascii_uppercase, string.ascii_lowercase)
+
+MAIN = ("(?-i:main)(?! (?!(?:and|or|but|now|yet|again|already|since|after|before|first|today|too|so|then"
+        "|is|was|with|by|at|in|for)(?![0-9A-Za-z]))[A-Za-z])")
+CHANGE = "(?:changes?|fix(?:es)?|PRs?|pull requests?|deliver(?:y|ies)|issues?)"
+ROWS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    ("land lock, merge lock", "its turn to merge", ("land locks?", "merge locks?")),
+    ("pull request, PR", "the proposed change", ("pull requests?", "PRs?")),
+    ("rerun", "ran the failed check again", ("re-?run(?:s|ning)?",)),
+    ("CI", "the automatic checks", ("CI",)),
+    ("held issue", "merged, waiting for proof it works in real use", ("held issues?",)),
+    ("verify, verification", "testing the change (before it goes in); checking it works in real use (after)",
+     ("verif(?:y|ies|ied|ying)", "verifications?")),
+    ("landed, landing (a change)", "went in, is going in",
+     ("(?:[0-9]+|" + CHANGE + ") (?:(?:is|are|was|were|has|have|had|just|now|already|been|being|still) )*"
+      "(?P<w>landed|landing)",
+      "(?P<w>landed|landing) (?:(?:the|this|that|a|its|their) )?" + CHANGE,
+      "(?P<w>landed|landing) (?:on|in|into) " + MAIN)),
+    ("slice", "step", ("slices?",)),
+    ("brief version", "the new version of the plan", ("brief versions?",)),
+    ("the guard, a guard refusal", "the safety check", ("the guard", "guard refusals?")),
+    ("a claim on files", "a note of the files it is working on",
+     ("claims? on (?:(?:the|its|their|these|those) )?files?",)),
+    ("look card", "your look at how it appears", ("look cards?",)),
+    ("live fault", "a problem users are hitting now", ("live faults?",)),
+    ("commit, sha, the head", "the latest version of the change",
+     ("commit(?:s|ted|ting)?", "shas?", "the head(?! of(?![0-9A-Za-z]))")),
+    ("on main, the branch", "the main version, the change's own copy", ("on " + MAIN, "into " + MAIN, "the branch(?:es)?")),
+    ("issue plus a number", "the task, named by its title", ("issues? #?[0-9]+",)),
+    ("milestone", "the sprint's task list", ("milestones?",)),
+    ("Conformance, lint", "the house-rule checks", ("conformance", "lint(?:s|ed|ing)?")),
+    ("fix wave", "a round of fixes", ("fix waves?",)),
+    ("activation of the host", "switching this computer to the new version",
+     ("activat(?:e|es|ed|ing|ion) (?:of )?(?:the|this) host", "host activations?")),
+    ("AC plus a number", "say what must be true", ("AC(?: )?[0-9]+",)),
+    ("stage names used as nouns (final-review, verify-fix and the like)", "say what is happening",
+     ("final-review", "plan-review", "verify-fix", "fix-wave", "fix-ci", "look-fix", "ws-check")),
+    ("ready mode", "built and tested, not yet proposed", ("ready(?:-| )mode",)),
+    ("sync (with main)", "brought up to date with the main version",
+     ("(?P<w>sync(?:s|ed|ing)?) (?:[A-Za-z']+ ){0,3}?(?:with|to|onto|from|into|against) (?:the |origin/)?" + MAIN,)),
+    ("flaky", "fails now and then for no real reason", ("flaky", "flakiness")),
+    ("tokens", "say the cost in dollars, or leave it out", ("tokens",)),
+    ("worktree, engine, workflow, delivery program", "leave it out; say what is being done",
+     ("worktrees?", "engines?", "workflows?", "delivery programs?")),
+)
 
 
-def _pattern(word: str) -> re.Pattern[str]:
-    parts = [p for p in re.split(SEPARATORS, word) if p]
-    body = SEPARATORS.join(re.escape(p) for p in parts)
-    return re.compile("(?<![0-9A-Za-z])" + body + "(?![0-9A-Za-z])", re.IGNORECASE | re.ASCII)
+class Found(NamedTuple):
+    row: int
+    pattern: int
+    word: str
+    sentence: str
 
 
-def _flat(s: str) -> str:
-    return " ".join(p for p in re.split(SEPARATORS, s) if p).translate(_ASCII_LOWER)
+def _compile(fragment: str) -> re.Pattern[str]:
+    return re.compile("(?<![0-9A-Za-z])" + fragment.replace(" ", SEPARATORS) + "(?![0-9A-Za-z])",
+                      re.IGNORECASE | re.ASCII)
 
 
-_PATTERNS = tuple(_pattern(word) for word, _ in GLOSSARY)
-_FLAT_GLOSSES = tuple(_flat(gloss) for _, gloss in GLOSSARY)
+_PATTERNS = tuple(tuple(_compile(p) for p in patterns) for _, _, patterns in ROWS)
+_SEPARATOR = re.compile(SEPARATORS)
+_END = re.compile(r"[.!?](?=[ \t\n\r\f\v]|\Z)")
 
 
-def unglossed(text: str) -> list[tuple[str, str]]:
-    """The glossary rows `text` uses without their gloss, in glossary order, each at most once."""
-    flat = _flat(text)
-    return [
-        row
-        for row, pattern, gloss in zip(GLOSSARY, _PATTERNS, _FLAT_GLOSSES)
-        if pattern.search(text) and gloss not in flat
-    ]
+def _fold(text: str) -> str:
+    return _SEPARATOR.sub(" ", text).strip()
 
 
-def unglossed_in(texts: Iterable[str]) -> list[tuple[str, str]]:
-    """The distinct rows flagged in any one of `texts`, in glossary order."""
-    flagged = {row for text in texts for row in unglossed(text)}
-    return [row for row in GLOSSARY if row in flagged]
+def _sentence(text: str, start: int, end: int) -> str:
+    before = [m.end() for m in _END.finditer(text) if m.end() <= start]
+    after = _END.search(text, end)
+    return _fold(text[before[-1] if before else 0:after.end() if after else len(text)])
 
 
-def entries() -> list[dict[str, str]]:
-    """The glossary as the view sends it."""
-    return [{"word": word, "gloss": gloss} for word, gloss in GLOSSARY]
+def found(text: str) -> list[Found]:
+    """The first match of each pattern in `text`, longest match first among overlaps, in list order."""
+    matches = []
+    for row, patterns in enumerate(_PATTERNS):
+        for pattern, rx in enumerate(patterns):
+            for m in rx.finditer(text):
+                start, end = m.span("w") if "w" in rx.groupindex else m.span()
+                matches.append((start, end, row, pattern))
+    kept: list[tuple[int, int, int, int]] = []
+    for start, end, row, pattern in sorted(matches, key=lambda m: (-(m[1] - m[0]), m[0], m[2], m[3])):
+        if all(end <= k[0] or k[1] <= start for k in kept):
+            kept.append((start, end, row, pattern))
+    first: dict[tuple[int, int], tuple[int, int]] = {}
+    for start, end, row, pattern in kept:
+        if (row, pattern) not in first or start < first[(row, pattern)][0]:
+            first[(row, pattern)] = (start, end)
+    return [Found(row, pattern, _fold(text[start:end]), _sentence(text, start, end))
+            for (row, pattern), (start, end) in sorted(first.items())]
+
+
+def found_in(texts: Iterable[str]) -> list[Found]:
+    """The first `Found` of each pattern across `texts`, in list order."""
+    first: dict[tuple[int, int], Found] = {}
+    for text in texts:
+        for f in found(text):
+            first.setdefault((f.row, f.pattern), f)
+    return [first[key] for key in sorted(first)]

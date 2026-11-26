@@ -17,6 +17,7 @@ TIER = "fast"
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CASES = REPO_ROOT / "tests/fixtures/console/owner-words-cases.json"
+ORDINARY = REPO_ROOT / "tests/fixtures/console/owner-words-ordinary.txt"
 PAGE = REPO_ROOT / "python/agent_tools/console/page.html"
 PAGE_TEXT_MODULES = ("view", "sprints", "engine_runs", "guest", "capacity")
 LITERAL_MODULES = ("answer", "approve", "contract_draft")
@@ -96,71 +97,64 @@ def console_text_words():
             + [w for m in LITERAL_MODULES for w in module_literals(read(m))])
 
 
-def G(word):
-    return dict(owner_words.GLOSSARY)[word]
+def words(text):
+    return [f.word for f in owner_words.found(text)]
 
 
-class GlossaryTest(unittest.TestCase):
-    def test_a_word_used_without_its_gloss_is_flagged_with_its_gloss(self):
-        self.assertEqual(owner_words.unglossed("waiting on the land lock"), [("land lock", G("land lock"))])
+class ListTest(unittest.TestCase):
+    def test_the_page_of_ordinary_sentences_raises_nothing(self):
+        lines = [l for l in ORDINARY.read_text(encoding="utf-8").splitlines() if l.strip()]
+        self.assertGreaterEqual(len(lines), 24)
+        for line in lines:
+            with self.subTest(line=line):
+                self.assertEqual(words(line), [])
+        page = "\n".join(lines)
+        for word in ("main", "head", "look", "held", "land", "claim", "issue", "profile", "guard", "brief",
+                     "queued", "activate"):
+            with self.subTest(word=word):
+                self.assertIsNotNone(re.search(rf"(?<![0-9A-Za-z]){word}(?![0-9A-Za-z])", page, re.I))
 
-    def test_the_glossary_copy_matches_the_docs_table(self):
+    def test_the_list_copy_matches_the_docs_table(self):
         text = (REPO_ROOT / "docs/guides/owner-words.md").read_text(encoding="utf-8")
-        rows = index_table(text)[1:]
-        self.assertEqual([tuple(r) for r in rows], list(owner_words.GLOSSARY))
-        self.assertEqual(len(owner_words.GLOSSARY), 12)
+        rows = index_table(text)
+        self.assertEqual(rows[0], ["Do not write", "Write instead"])
+        self.assertEqual([tuple(r) for r in rows[1:]], [(a, b) for a, b, _ in owner_words.ROWS])
+        self.assertEqual(len(owner_words.ROWS), 27)
 
-    def test_text_with_no_glossary_word_flags_nothing(self):
-        self.assertEqual(owner_words.unglossed("two parts of the job are being built"), [])
-
-    def test_a_word_matches_in_any_case(self):
-        self.assertEqual(owner_words.unglossed("Waiting on the Land Lock"), [("land lock", G("land lock"))])
-        self.assertEqual(owner_words.unglossed("the ci failed"), [("CI", G("CI"))])
-
-    def test_a_word_inside_a_longer_word_is_not_flagged(self):
-        self.assertEqual(owner_words.unglossed("a guardrail, a reclaim, decide, looked, held2"), [])
-
-    def test_a_non_ascii_letter_or_space_never_folds_or_separates(self):
-        self.assertEqual(owner_words.unglossed("İguard refused it"), [("guard", G("guard"))])
-        self.assertEqual(owner_words.unglossed("looK at it"), [])
-        self.assertEqual(owner_words.unglossed("the land lock"), [])
-
-    def test_a_two_word_entry_matches_across_any_whitespace(self):
-        self.assertEqual(owner_words.unglossed("the land \t\n lock"), [("land lock", G("land lock"))])
-
-    def test_an_inflected_form_is_not_flagged(self):
-        self.assertEqual(owner_words.unglossed("two slices, three pull requests, it looks fine, verified"), [])
-
-    def test_a_word_glossed_in_the_same_text_is_not_flagged(self):
-        text = "the land lock (" + G("land lock").upper().replace(" ", " \t ") + ")"
-        self.assertEqual(owner_words.unglossed(text), [])
-        self.assertEqual(
-            owner_words.unglossed("the land lock and the rerun (" + G("land lock") + ")"),
-            [("rerun", G("rerun"))],
-        )
-
-    def test_flags_come_in_glossary_order_once_each(self):
-        self.assertEqual(
-            owner_words.unglossed("rerun it, the pull request is held, rerun again"),
-            [("held", G("held")), ("rerun", G("rerun")), ("pull request", G("pull request"))],
-        )
-
-    def test_unglossed_in_counts_a_word_once_across_texts(self):
-        self.assertEqual(
-            owner_words.unglossed_in(["rerun now", "the guard said no", "rerun later"]),
-            [("guard", G("guard")), ("rerun", G("rerun"))],
-        )
-        self.assertEqual(owner_words.unglossed_in([]), [])
-
-    def test_entries_is_the_wire_form_in_glossary_order(self):
-        self.assertEqual(owner_words.entries(), [{"word": w, "gloss": g} for w, g in owner_words.GLOSSARY])
-
-    def test_the_shared_cases_flag_what_the_case_file_says(self):
+    def test_the_shared_cases_find_what_the_case_file_says(self):
         cases = json.loads(CASES.read_text(encoding="utf-8"))
-        self.assertGreaterEqual(len(cases), 9)
+        self.assertGreaterEqual(len(cases), 40)
         for case in cases:
             with self.subTest(text=case["text"]):
-                self.assertEqual([w for w, _ in owner_words.unglossed(case["text"])], case["flagged"])
+                self.assertEqual(words(case["text"]), case["found"])
+
+    def test_the_cases_cover_every_row(self):
+        cases = json.loads(CASES.read_text(encoding="utf-8"))
+        rows = {f.row for case in cases for f in owner_words.found(case["text"])}
+        self.assertEqual(rows, set(range(len(owner_words.ROWS))))
+
+    def test_an_explained_word_is_still_found(self):
+        self.assertEqual(words("the land lock (its turn to merge)"), ["land lock"])
+
+    def test_the_longest_match_wins_an_overlap(self):
+        self.assertEqual(words("the guard refusal"), ["guard refusal"])
+        self.assertEqual(words("verify-fix"), ["verify-fix"])
+
+    def test_the_sentence_is_the_one_holding_the_word(self):
+        (hit,) = owner_words.found("All good. Waiting on the land\nlock now. Next is tests.")
+        self.assertEqual((hit.word, hit.sentence), ("land lock", "Waiting on the land lock now."))
+
+    def test_found_in_counts_a_word_once_across_texts_in_list_order(self):
+        hits = owner_words.found_in(["the guard said no", "rerun now", "rerun later"])
+        self.assertEqual([f.word for f in hits], ["rerun", "the guard"])
+        self.assertEqual(hits[0].sentence, "rerun now")
+        self.assertEqual(owner_words.found_in([]), [])
+
+    def test_no_replacement_uses_a_listed_word(self):
+        for _, instead, _ in owner_words.ROWS:
+            with self.subTest(instead=instead):
+                self.assertEqual(owner_words.found(instead), [])
+
 
 class NoGlossTest(unittest.TestCase):
     def test_a_status_with_a_listed_word_stays_plain_text(self):
@@ -186,35 +180,6 @@ class NoGlossTest(unittest.TestCase):
 
 
 class FixedWordsTest(unittest.TestCase):
-    def test_the_pages_fixed_words_use_no_unglossed_glossary_word(self):
-        flagged = [t for t in page_words(PAGE.read_text(encoding="utf-8")) + console_text_words() if owner_words.unglossed(t)]
-        self.assertEqual(flagged, [])
-
-    def test_the_closing_counts_line_uses_no_unglossed_glossary_word(self):
-        from agent_tools.console import sprints
-        self.assertEqual(owner_words.unglossed(sprints.closing_text(1, 1, 1)), [])
-
-    def test_the_progress_counts_line_uses_no_unglossed_glossary_word(self):
-        from agent_tools.console import sprints
-        self.assertEqual(owner_words.unglossed(sprints.progress_text(1, 4, 1, 1, 1)), [])
-
-    def test_the_withdrawal_refusals_the_owner_reads_use_no_unglossed_glossary_word(self):
-        from agent_tools.console import sprints
-        for text in (sprints.FAULT_UNKNOWN, sprints.FAULT_WITHDRAWN_ALREADY):
-            with self.subTest(text=text):
-                self.assertEqual(owner_words.unglossed(text), [])
-
-    def test_the_active_reports_issue_stages_use_no_unglossed_glossary_word(self):
-        from agent_tools.console import sprints
-        for stage in (sprints.LANDED, sprints.HELD):
-            with self.subTest(stage=stage):
-                report = sprints.Report(at="t", status="s", phase="p", milestone="m", tracker_url="u",
-                                        issues=((14, stage),), inbox=(), next_step="n")
-                state = sprints.SprintState("s", "p", "g", 1, "t", report=report)
-                ((_, _, text),) = view._effective_stages(state)
-                self.assertEqual(owner_words.unglossed(text), [])
-        self.assertEqual(view._effective_stages(state)[0][2], "merged, not yet proven")
-
     def test_the_look_and_adoption_refusals_are_among_the_scanned_words(self):
         from agent_tools.console import answer, approve
         words = console_text_words()

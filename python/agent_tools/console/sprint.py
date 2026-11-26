@@ -39,10 +39,10 @@ decides, in one place.
 a JSON object, and sends `POST /api/report` with `{"sprint_id", "secret", "report"}`, no `Origin`.
 On success it prints `sprint: report sent` and exit 0. The command validates no member beyond the
 pictures' own rules: the console decides, in one place.
-After the console accepts it, the command prints to stderr one line `sprint: warning: the owner may
-not know "<word>"; say what it is: <gloss>` per glossary word (`agent_tools.console.owner_words`) that
-the status line uses without its gloss, in glossary order and once each; the text is sent and stored as
-before and the exit stays 0.
+After the console accepts it, the command prints to stderr one line `sprint: warning: rewrite
+"<sentence>" without "<word>"; write instead: <write instead>` per listed word
+(`agent_tools.console.owner_words`) that the status line uses, once each and in list order; the text is
+sent and stored as before and the exit stays 0.
 
 `pictures` is optional on a brief and on a report, at most 8, each member
 `{"file": "<path>", "line": "<one line, at most 140 characters>", "pair": "before" | "after"}`
@@ -133,10 +133,10 @@ On success it prints `sprint: round <id> sent, <n> questions` (`1 question` when
 0; a 200 answer without integer `round` and `questions` is `sprint: refused 200: unreadable
 answer: <error>` and exit 1. Beyond the pictures' own rules the command validates no member of the
 round: the console decides, in one place.
-After the console accepts it, the command prints to stderr one line `sprint: warning: the owner may
-not know "<word>"; say what it is: <gloss>` per glossary word (`agent_tools.console.owner_words`) that
-a question's ask, context or options uses without its gloss, in glossary order and once each; the text is sent and stored as
-before and the exit stays 0.
+After the console accepts it, the command prints to stderr one line `sprint: warning: rewrite
+"<sentence>" without "<word>"; write instead: <write instead>` per listed word
+(`agent_tools.console.owner_words`) that a question's ask, context or options uses, once each and in list
+order; the text is sent and stored as before and the exit stays 0.
 
 `sprint withdraw-question` reads the secret the same way and sends `POST /api/withdraw-question` with
 `{"sprint_id", "secret", "round", "index"}`, no `Origin`, for the question `--index` (an integer of at
@@ -153,9 +153,9 @@ and exit 0. The command validates no member of the notice: the console decides, 
 refusal is `sprint: refused <status>: <text>` and exit 1. A file that cannot be read or is not a JSON
 object is exit 2 with no request sent; a 200 answer without an integer `notice` is `sprint: refused
 200: unreadable answer: <error>` and exit 1. After the console accepts it, the command prints to stderr
-one line `sprint: warning: the owner may not know "<word>"; say what it is: <gloss>` per glossary word
-(`agent_tools.console.owner_words`) that the notice's text uses without its gloss, in glossary order
-and once each; the text is sent and stored as before and the exit stays 0.
+one line `sprint: warning: rewrite "<sentence>" without "<word>"; write instead: <write instead>` per
+listed word (`agent_tools.console.owner_words`) that the notice's text uses, once each and in list order;
+the text is sent and stored as before and the exit stays 0.
 
 `sprint notices` reads the secret the same way and sends `POST /api/notices` with `{"sprint_id",
 "secret"}`, no `Origin`. It prints the console's answer as returned, one JSON line `{"notices":
@@ -567,7 +567,7 @@ def resolve_secret(args: argparse.Namespace) -> str:
 
 
 PERMIT_FAILED = "the console could not judge this command: {reason}"
-WARNING = 'sprint: warning: the owner may not know "{word}"; say what it is: {gloss}'
+WARNING = 'sprint: warning: rewrite "{sentence}" without "{word}"; write instead: {instead}'
 
 
 def report_texts(report: dict) -> list[str]:
@@ -591,8 +591,8 @@ def notice_texts(notice: dict) -> list[str]:
 
 
 def warn(texts: Iterable[str]) -> None:
-    for word, gloss in owner_words.unglossed_in(texts):
-        print(WARNING.format(word=word, gloss=gloss), file=sys.stderr)
+    for f in owner_words.found_in(texts):
+        print(WARNING.format(sentence=f.sentence, word=f.word, instead=owner_words.ROWS[f.row][1]), file=sys.stderr)
 
 
 class HookFailure(Exception):

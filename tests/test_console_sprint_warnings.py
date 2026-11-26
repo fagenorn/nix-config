@@ -1,11 +1,11 @@
-"""`sprint report`, `ask` and `notice` warn once per glossary word used without its gloss, and still send.
+"""`sprint report`, `ask` and `notice` warn once per listed word with its replacement, and still send.
 
 Run: just agent-workflow-tests
 """
 import json
 import unittest
 
-from agent_tools.console import owner_words, sprint, sprints
+from agent_tools.console import sprint
 
 from . import console_test_support as support
 from . import test_console_sprint_command as commands
@@ -17,15 +17,6 @@ from .test_console_writes import Case
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures
 
 TIER = "fast"
-
-G = dict(owner_words.GLOSSARY)
-
-
-def said(test, line, word):
-    test.assertTrue(line.startswith("sprint: warning: "), line)
-    test.assertIn(f'"{word}"', line)
-    test.assertIn(G[word], line)
-
 
 class SprintWarningTest(Case):
     open, goal, port, files, reports, sent, asking, asked_rows, notice, notice_rows = (
@@ -44,24 +35,25 @@ class SprintWarningTest(Case):
                          "--report-file", path, "--port", self.port(svc))
         return svc, sid, got
 
-    def test_a_report_with_an_unglossed_word_is_accepted_and_warns_with_its_gloss(self):
+    def test_a_report_with_a_listed_word_is_accepted_and_warns_with_its_replacement(self):
         svc, sid, got = self.report({**REPORT, "status": "waiting on the land lock"})
-        lines = got.stderr.splitlines()
-        self.assertEqual((got.returncode, got.stdout, len(lines)), (0, "sprint: report sent\n", 1))
-        said(self, lines[0], "land lock")
+        self.assertEqual((got.returncode, got.stdout, got.stderr), (0, "sprint: report sent\n",
+                         'sprint: warning: rewrite "waiting on the land lock" without "land lock"; '
+                         'write instead: its turn to merge\n'))
         self.assertEqual(support.log_rows(self.store)[-1][2], "sprint.reported")
         (stored,) = [s for e in view_of(svc)["entries"] for s in e["sprints"]
                      if s["sprint_id"] == sid]
         self.assertEqual(stored["status"], "waiting on the land lock")
 
-    def test_a_report_with_no_glossary_word_prints_no_warning(self):
-        _, _, got = self.report(REPORT)
-        self.assertEqual((got.returncode, got.stdout, got.stderr), (0, "sprint: report sent\n", ""))
-
-    def test_a_glossed_word_prints_no_warning(self):
-        status = "waiting on the land lock (" + G["land lock"] + ")"
-        self.assertLessEqual(len(status), sprints.MAX_LINE_CHARS)
+    def test_an_explained_word_still_warns(self):
+        status = "waiting on the land lock (its turn to merge)"
         _, _, got = self.report({**REPORT, "status": status})
+        self.assertEqual((got.returncode, got.stdout, got.stderr), (0, "sprint: report sent\n",
+                         f'sprint: warning: rewrite "{status}" without "land lock"; '
+                         'write instead: its turn to merge\n'))
+
+    def test_a_plain_report_using_ordinary_words_prints_nothing(self):
+        _, _, got = self.report({**REPORT, "status": "the main page has a new look you can check"})
         self.assertEqual((got.returncode, got.stdout, got.stderr), (0, "sprint: report sent\n", ""))
 
     def test_a_refused_report_prints_no_warning(self):
@@ -75,7 +67,7 @@ class SprintWarningTest(Case):
         sid = self.goal(svc)
         round_ = {"questions": [
             {**Q0, "question": "May I rerun the check?",
-             "context": "The land lock is held by another sprint.",
+             "context": "It waits on the land lock. The PR is open.",
              "options": ["Wait", "Rerun now", "Ask the CI"], "recommended": "Wait"},
             {**Q1, "question": "Should I rerun the reader?"}]}
         secret, path = self.asking(svc, sid, round_)
@@ -83,20 +75,22 @@ class SprintWarningTest(Case):
                          "--port", self.port(svc))
         self.assertEqual(got.returncode, 0)
         self.assertEqual(got.stdout, f"sprint: round {self.asked_rows()[-1][0]} sent, 2 questions\n")
-        lines = got.stderr.splitlines()
-        self.assertEqual(len(lines), 4)
-        for i, word in enumerate(("land lock", "held", "rerun", "CI")):
-            said(self, lines[i], word)
+        self.assertEqual(got.stderr.splitlines(), [
+            "sprint: warning: " + line for line in (
+                'rewrite "It waits on the land lock." without "land lock"; write instead: its turn to merge',
+                'rewrite "The PR is open." without "PR"; write instead: the proposed change',
+                'rewrite "May I rerun the check?" without "rerun"; write instead: ran the failed check again',
+                'rewrite "Ask the CI" without "CI"; write instead: the automatic checks')])
 
-    def test_a_notice_with_an_unglossed_word_is_posted_and_warns(self):
+    def test_a_notice_with_a_listed_word_is_posted_and_warns(self):
         svc = self.open()
         sid = self.goal(svc)
-        got = self.notice(svc, sid, {"kind": "heads-up", "text": "the guard refuses a push"})
+        got = self.notice(svc, sid, {"kind": "heads-up", "text": "the guard refusal stopped the push"})
         self.assertEqual((got.returncode, got.stdout),
                          (0, f"sprint: notice {self.notice_rows()[-1][0]} posted\n"))
-        lines = got.stderr.splitlines()
-        self.assertEqual(len(lines), 1)
-        said(self, lines[0], "guard")
+        self.assertEqual(got.stderr.splitlines(), [
+            'sprint: warning: rewrite "the guard refusal stopped the push" without "guard refusal"; '
+            'write instead: the safety check'])
 
     def test_the_text_helpers_pick_only_the_checked_members(self):
         self.assertEqual(sprint.report_texts({**REPORT, "next": "rerun"}), [REPORT["status"]])
