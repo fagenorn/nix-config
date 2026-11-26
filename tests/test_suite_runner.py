@@ -1210,8 +1210,9 @@ TMPDIR_MEMBER = (
     "        self.assertEqual(os.environ.get('SUITE_RUNNER_TEST_FAIL'), None)\n")
 
 
-# A member that lists its TMPDIR when it starts, puts a file in it, and stays until the other
-# member has done the same, so the two overlap (issue 1882).
+# Two members that overlap: each lists its TMPDIR, puts a file in it and waits for the other to
+# do the same. Then test_a.py leaves a read-only directory holding a file and ends, while
+# test_b.py stays until test_a.py's TMPDIR is gone and records that its own still exists.
 OWN_TMPDIR_MEMBER = textwrap.dedent('''\
     import json
     import os
@@ -1224,6 +1225,14 @@ OWN_TMPDIR_MEMBER = textwrap.dedent('''\
     NAME = Path(__file__).name
 
 
+    def wait_for(condition, message):
+        deadline = time.monotonic() + 60
+        while not condition():
+            if time.monotonic() > deadline:
+                raise AssertionError(message)
+            time.sleep(0.01)
+
+
     class Member(unittest.TestCase):
         def test_member(self):
             tmp = Path(tempfile.gettempdir())
@@ -1231,24 +1240,65 @@ OWN_TMPDIR_MEMBER = textwrap.dedent('''\
             (tmp / f"file-of-{NAME}").write_text("x")
             (SEEN / f"{NAME}.json").write_text(json.dumps(
                 {"tmpdir": str(tmp), "listing": listing}))
-            deadline = time.monotonic() + 60
-            while len(list(SEEN.iterdir())) < 2:
-                if time.monotonic() > deadline:
-                    self.fail("the other member never started")
-                time.sleep(0.01)
+            wait_for(lambda: len(list(SEEN.glob("test_*.json"))) == 2,
+                     "the other member never started")
+            if NAME == "test_a.py":
+                locked = tmp / "locked"
+                locked.mkdir()
+                (locked / "file").write_text("x")
+                locked.chmod(0o500)
+            else:
+                first = Path(json.loads((SEEN / "test_a.py.json").read_text())["tmpdir"])
+                wait_for(lambda: not first.exists(), "the first member's TMPDIR survived it")
+                (SEEN / "after.json").write_text(json.dumps({"own_exists": tmp.exists()}))
             self.assertEqual(os.environ.get("SUITE_RUNNER_TEST_FAIL"), None)
 ''')
 
 
 class ParallelMemberTmpdirTest(RunnerCase):
-    def run_pair(self, env: dict) -> tuple[subprocess.CompletedProcess, list[dict]]:
+    def run_pair(self, env: dict) -> tuple[subprocess.CompletedProcess, dict[str, dict]]:
         seen = self.barrier / f"own-tmpdir-{len(list(self.barrier.iterdir()))}"
         seen.mkdir()
         members = [self.member(name, OWN_TMPDIR_MEMBER) for name in ("test_a.py", "test_b.py")]
         result = self.run_suite("--jobs", "2", *members,
                                 env={"SUITE_RUNNER_TEST_SEEN": str(seen), **env})
-        records = [json.loads(path.read_text()) for path in sorted(seen.iterdir())]
+        records = {path.name: json.loads(path.read_text()) for path in seen.iterdir()}
         return result, records
+
+    def test_a_stale_run_directory_in_the_inherited_tmpdir_is_swept_by_the_disk_fallback(self):
+        root = self.barrier / "root-sweep"
+        root.mkdir()
+        stale = root / "suite-runner-tmp-stale"
+        stale.mkdir()
+        (stale / "file").write_text("x")
+        os.utime(stale, (time.time() - 90000, time.time() - 90000))
+        result, _ = self.run_pair({"SUITE_RUNNER_SCRATCH": "disk", "TMPDIR": str(root)})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(stale.exists())
+
+    def test_a_member_directory_that_cannot_be_removed_fails_its_member(self):
+        name = self.member("test_ok.py", "import unittest\nclass T(unittest.TestCase):\n"
+                                         "    def test_x(self): pass\n")
+        original = tempfile.TemporaryDirectory.cleanup
+
+        def cleanup(directory):
+            original(directory)
+            if Path(directory.name).name.startswith("member"):
+                raise PermissionError(13, "Permission denied", directory.name)
+
+        out = io.BytesIO()
+        cwd = os.getcwd()
+        os.chdir(self.work)
+        try:
+            with mock.patch.object(tempfile.TemporaryDirectory, "cleanup", cleanup), \
+                    mock.patch.dict(os.environ, {"SUITE_RUNNER_SCRATCH": "disk"}):
+                code = suite_runner.run_suite([name], jobs=2, out=out)
+        finally:
+            os.chdir(cwd)
+        text = out.getvalue().decode()
+        self.assertEqual(code, 1, text)
+        self.assertRegex(text, r"member0-\S+ was not removed: .*Permission denied")
+        self.assertRegex(text, r"suite-runner: end test_ok\.py failed exit=1 ")
 
     def test_each_parallel_member_gets_its_own_empty_tmpdir_removed_after_it_ends(self):
         for name, extra, code in (("passing", {}, 0), ("failing", {"SUITE_RUNNER_TEST_FAIL": "1"}, 1)):
@@ -1260,13 +1310,17 @@ class ParallelMemberTmpdirTest(RunnerCase):
                            if scratch == "disk" else {"SUITE_RUNNER_SCRATCH": str(root)})
                     result, records = self.run_pair({**env, **extra})
                     self.assertEqual(result.returncode, code, result.stdout + result.stderr)
-                    self.assertEqual(len(records), 2, result.stdout + result.stderr)
-                    tmpdirs = [Path(record["tmpdir"]) for record in records]
+                    self.assertEqual(sorted(records), ["after.json", "test_a.py.json", "test_b.py.json"],
+                                     result.stdout + result.stderr)
+                    # test_b.py saw test_a.py's directory gone while its own survived.
+                    self.assertEqual(records["after.json"], {"own_exists": True})
+                    tmpdirs = [Path(records[f"test_{n}.py.json"]["tmpdir"]) for n in "ab"]
                     self.assertNotEqual(tmpdirs[0], tmpdirs[1])
-                    for record, tmpdir in zip(records, tmpdirs):
-                        self.assertEqual(record["listing"], [])
-                        self.assertEqual(tmpdir.parent.parent, root)
-                        self.assertTrue(tmpdir.parent.name.startswith("suite-runner-tmp-"))
+                    self.assertEqual(tmpdirs[0].parent, tmpdirs[1].parent)
+                    self.assertEqual(tmpdirs[0].parent.parent, root)
+                    self.assertTrue(tmpdirs[0].parent.name.startswith("suite-runner-tmp-"))
+                    for n in "ab":
+                        self.assertEqual(records[f"test_{n}.py.json"]["listing"], [])
                     self.assertEqual(list(root.iterdir()), [])
 
 
