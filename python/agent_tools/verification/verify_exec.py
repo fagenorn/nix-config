@@ -149,17 +149,6 @@ def ensure_commit(root: Path, sha: str) -> bool:
 
 WORKSPACE_PREFIX = "verify-pending-"
 WORKSPACE_LEAF = "wt"
-_WORKSPACE_PARENT = re.compile(re.escape(WORKSPACE_PREFIX) + r"[a-z0-9_]{8}")
-
-
-def is_workspace(path: str) -> bool:
-    """Whether `path` has the shape `workspace` gives its worktrees: `<tmp>/verify-pending-<8>/wt`.
-
-    The `<8>` is `tempfile.mkdtemp`'s suffix alphabet and length. It judges the last two path
-    components only, reads no file and does not consult TMPDIR, so a `/var` or `/private/var`
-    spelling of the same directory both match."""
-    p = Path(path)
-    return p.name == WORKSPACE_LEAF and _WORKSPACE_PARENT.fullmatch(p.parent.name) is not None
 
 
 def script_text(root: Path, commit: str, path: str) -> str | None:
