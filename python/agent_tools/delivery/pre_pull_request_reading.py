@@ -8,11 +8,14 @@ read: the boundary is the forge's committer date of `--merge`.
 A candidate is a pull request created after the boundary whose body has an Evidence section. It
 counts only when its branch started from a commit that contains the merge (the first commit's first
 parent is `ahead` of or `identical` to it). The check is met when a counting candidate's Evidence
-section lists a local result of the command: a clause naming it, not preceded in that clause by the
-word CI, with no CI word anywhere after it on the same line (the idioms "purpose ci" and "ci rules"
-excepted), and followed by a result word (pass, passed, fail, failed) in its own comma part or in a
-later one, with no skip, negation or pending word in the parts up to the result (so a list such as
-"conformance, lint and test-touched passed" counts). The Evidence section runs to the
+section lists a local result of the command: a clause naming it, not preceded in that clause by a CI
+name (CI, GitHub Actions, a required or status check, a pipeline), with no CI name anywhere after it
+on the same logical line (the idioms "purpose ci" and "ci rules" excepted; a wrapped continuation
+line joins the line above), and followed by a result word (pass, passed, fail, failed) in its own
+comma part or in a later one, with no skip, negation, n/a, none, timeout or pending word in the parts
+up to the result (so a list such as "conformance, lint and test-touched passed" counts). The sentence
+the delivery programs write, "CI on this pull request runs the full declared verification", is not
+a CI qualifier and is ignored. The Evidence section runs to the
 next heading of its level or higher (a bold or plain "Merge danger" line also ends it). Otherwise
 it is not yet (exit 75); a forge failure or a payload of the wrong shape (a body that is not text
 included) is `forge_unreadable`, also exit 75. The check never reports not met: the verify block's
@@ -37,10 +40,17 @@ HEADING = re.compile(r"^(?:(#{1,6})\s*)?(?:\*\*)?Evidence:?(?:\*\*)?:?$", re.IGN
 MARKDOWN_HEADING = re.compile(r"^(#{1,6})\s")
 BOLD_HEADING = re.compile(r"^\*\*[^*]+\*\*:?$")
 CLAUSES = re.compile(r";|\.(?=\s|$)")
-CI_WORD = re.compile(r"\bCI\b", re.IGNORECASE)
+CI_WORD = re.compile(r"\b(?:CI|GitHub\s+Actions|(?:required|status)\s+checks?|pipelines?|continuous\s+integration)\b"
+                     r"|\.github/workflows", re.IGNORECASE)
+CI_BOILERPLATE = re.compile(r"(\b(?:on|in|by|via|under|only|from)\s+)?\bCI\s+on\s+this\s+pull\s+request\s+runs\s+"
+                            r"the\s+full\s+declared\s+verification\b", re.IGNORECASE)
+LIST_ITEM = re.compile(r"^\s*(?:[-*+]\s|\d+[.)]\s|\||#)")
 CI_IDIOM = re.compile(r"(?:--)?\bpurpose\s+ci\b|\bci\s+rules?\b", re.IGNORECASE)
 NEGATION = re.compile(r"\b(?:skip|skipped|skipping|not|never|without|pending|todo|unknown|deferred|blocked"
-                      r"|waiting|running|unavailable)\b|n't", re.IGNORECASE)
+                      r"|waiting|running|unavailable|none|n/a|na|later|soon|will|would|should|shall|timeout"
+                      r"|timed\s*out|cancell?ed|aborted|crashed|errored)\b"
+                      r"|\bno\b(?!\s+(?:fail\w*|error\w*|issues?|problems?|warnings?|regress\w*))|n't",
+                      re.IGNORECASE)
 RESULT_WORD = re.compile(r"\b(?:pass|passed|fail|failed)\b", re.IGNORECASE)
 
 Read = Callable[[str], Any]
@@ -80,10 +90,27 @@ def evidence_section(body: Any) -> str | None:
     return "\n".join(section)
 
 
+def _without_boilerplate(section: str) -> str:
+    """`section` without the delivery programs' sentence about CI, unless a preposition makes it a qualifier."""
+    return CI_BOILERPLATE.sub(lambda m: m.group(0) if m.group(1) else "", section)
+
+
+def _logical_lines(section: str) -> list[str]:
+    """The lines of `section`, each indented, parenthesised or plain non-item line after a text line joined to it."""
+    joined: list[str] = []
+    for line in section.splitlines():
+        continues = joined and joined[-1].strip() and line.strip() and not LIST_ITEM.match(line)
+        if continues and (line[0].isspace() or line.lstrip().startswith("(") or CI_WORD.match(line.lstrip())):
+            joined[-1] += " " + line.strip()
+        else:
+            joined.append(line)
+    return joined
+
+
 def ran_locally(section: str, command: str) -> bool:
     """Whether a clause of `section` names `command` with no CI before it, none after it on its line, and a result."""
     named = re.compile(r"(?<![\w./-])" + re.escape(command) + r"(?![\w./-])", re.IGNORECASE)
-    for line in section.splitlines():
+    for line in _logical_lines(_without_boilerplate(section)):
         clauses = CLAUSES.split(line)
         for index, clause in enumerate(clauses):
             for occurrence in named.finditer(clause):
