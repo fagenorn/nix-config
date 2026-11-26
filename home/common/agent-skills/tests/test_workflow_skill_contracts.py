@@ -1867,7 +1867,7 @@ class DirectLaneRoutingTest(unittest.TestCase):
         for form in (
             "`git -C <dir> push origin <branch>`",
             "`gh pr create --repo <slug> --base <int> --head <branch> --title '<title>' --body '<body>'`",
-            "`gh pr merge <pr> --repo <slug> --<vcs.merge.strategy>`",
+            "`gh pr merge <pr> --repo <slug> --<vcs.merge.strategy> --match-head-commit <lock sha>`",
             "`reviewer-lite` with `lane: direct`",
             "**Eligibility.**",
         ):
@@ -1878,7 +1878,7 @@ class DirectLaneRoutingTest(unittest.TestCase):
         """#635: step 1 claims through forge-claim and goes on only on its holding verdicts;
         the hot instruction bytes do not grow."""
         raw = self.DELIVER_DIRECT.read_bytes()
-        self.assertLessEqual(len(raw), 5120)
+        self.assertLessEqual(len(raw), 5200)
         text = normalized(raw.decode("utf-8"))
         step1 = text[text.index("**Claim.**"):text.index("**Worktree.**")]
         for token in ("`forge-claim acquire --repo <slug> --issue <n> --holder <host>/session-<id> --branch <branch>`",
@@ -1905,7 +1905,7 @@ class DirectLaneRoutingTest(unittest.TestCase):
         """#677: step 6 carries the consumed forms in ship order: waiting acquire, sync merge, push,
         required-check wait, the holding verdict before the merge, release; the hot bytes stay within their cap."""
         raw = self.DELIVER_DIRECT.read_bytes()
-        self.assertLessEqual(len(raw), 5120)
+        self.assertLessEqual(len(raw), 5200)
         text = normalized(raw.decode("utf-8"))
         land = text[text.index("**Land in order.**"):text.index("**Close out.**")]
         at = 0

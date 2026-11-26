@@ -275,6 +275,7 @@ agent-workflow-tests *args:
     tests/test_look_lint.py \
     tests/test_program_bridge.py \
     tests/test_look_gate_end_to_end.py \
+    tests/test_guard_land_gate.py \
     tests/test_forge_claim.py \
     tests/test_forge_issue.py \
     tests/test_forge_owner_action.py \

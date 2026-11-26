@@ -497,6 +497,21 @@ commit with no object `commit` holding a string `message`. Which issues are mark
 owner's or a member's, naming this issue, this PR and this head, the latest answer deciding), is `look-approval`'s
 contract; `--admin` is in no merge form, so it is refused by the grammar before any lookup.
 
+The land check asks whether the merge holds the land lease. Each merge arm runs it right after the look gate, so before
+the feature arm's integration-base exemption and protection lookup and before the release arm's rollup predicate: the
+feature arm for its PR's base branch, the release arm for its head, the integration branch. The guard imports nothing,
+so the judgment is the store script `--land-bin` names (`forge-claim land permit`), run as `<land-bin> --repo <slug>
+--branch <branch> --pr <n>` with `--sha <headRefOid>` when that is 40 lowercase hex characters and `--pinned` when the
+merge carries `--match-head-commit` (held equal to the PR head by the mergeability check), in its own session with the
+row check's scrubbed environment and no token variable; at the child bound its process group is killed. Exit 0 with
+verdict `admit` passes. Exit 3 with verdict `refuse` and a printable `reason` of 1 to 300 characters is refused as
+`unsafe merge: the PR does not hold the land lease: <reason>`, with no accepted forms. A merge under a land lock must be
+pinned, and with no land lock the merge is judged exactly as before. Anything else is `land check failed: <child
+diagnostic>`; a missing `--land-bin` is `land check failed: no --land-bin was given`, a child that cannot start is
+`land check failed: could not start (<error>)` and a timeout is `land check timed out`. A merge by hand happens only on
+the forge's own page or the console's Merge card, so the guard judges no hand merge, and every command-line merge must
+hold the land lease.
+
 The plan-gated floor (issue 552) replaces that protection demand for one answer
 only. When the feature arm's protection read of the default branch exits
 non-zero, the guard parses its stdout, gh's response body, and never its
@@ -567,7 +582,8 @@ the forge state (authorization and row problems, an unresolvable default
 branch, a default-branch push, a permanent-branch deletion, head equal to base,
 a tag that is not an existing annotated tag, every PR, protection and rollup
 lookup or predicate failure, every look-gate lookup or unreadable answer and a
-merge awaiting the owner's look, a PR behind its base, a `--match-head-commit` that
+merge awaiting the owner's look, a merge that does not hold the land lease and every land check
+failure, a PR behind its base, a `--match-head-commit` that
 is not the PR head, every plan-gated floor refusal, an unreadable PR merge
 state or head commit, timeouts, the invocation deadline) names only its
 problem, since no spelling would pass there.
@@ -1329,6 +1345,8 @@ FORM_TABLE = {
 # The value `--match-head-commit` takes: a full commit SHA (issue 402 D10), which
 # must also be the PR's head commit (issue 476 D3).
 HEAD_COMMIT = re.compile(r"[0-9a-f]{40}")
+# The longest refusal reason the land check may print (its own bound).
+LAND_REASON_MAX = 300
 # The words that tie a pull request to an issue it settles (issue 1138): every
 # keyword GitHub closes an issue on (close, closes, closed, fix, fixes, fixed,
 # resolve, resolves, resolved) and `refs`, an optional colon, then `#<n>`,
@@ -3441,11 +3459,7 @@ def detect_repository(git_bin, cwd, timeout, strict=False):
     try:
         child = subprocess.run(
             [git_bin, "-C", cwd, "remote", "get-url", "origin"],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
-        )
+            capture_output=True, text=True, timeout=timeout, check=False)
     except (subprocess.TimeoutExpired, OSError) as error:
         if strict:
             raise RepositoryLookupFailed(
@@ -3510,11 +3524,7 @@ def default_branch(git_bin, cwd, timeout):
     try:
         child = subprocess.run(
             [git_bin, "-C", cwd, "symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
-        )
+            capture_output=True, text=True, timeout=timeout, check=False)
     except (subprocess.TimeoutExpired, OSError):
         return None
     if child.returncode != 0:
@@ -4685,6 +4695,7 @@ class Context:
         self.gh_bin = args.gh_bin
         self.jq_bin = args.jq_bin
         self.look_bin = args.look_bin
+        self.land_bin = args.land_bin
         self.deadline = deadline
         self.child_timeout = args.child_timeout_seconds
         self.authorized_owners = base.authorized_owners
@@ -4849,6 +4860,31 @@ def row_check_env(dropped=()):
     }
 
 
+def session_child(argv, env, timeout):
+    """The `CompletedProcess` of `argv`, or None when it ran past `timeout`.
+
+    The child runs once with no stdin, `env`, its output captured as text (an
+    undecodable byte is replaced) and its own session, so one SIGKILL to its
+    process group on the bound takes its descendants with it. The pipes are not
+    read again after the kill; only the direct child is reaped. An `OSError`
+    from starting it propagates.
+    """
+    child = subprocess.Popen(
+        argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, errors="replace", env=env, start_new_session=True)
+    try:
+        stdout, stderr = child.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(child.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            # Gone, or (macOS) a group of zombies only, which signals as EPERM.
+            pass
+        child.wait()
+        return None
+    return subprocess.CompletedProcess(argv, child.returncode, stdout, stderr)
+
+
 def row_check_problem(derive_bin, repository, row, timeout, dropped_env=()):
     """Why the row check does not confirm `row` for `repository`, or None when it does.
 
@@ -4866,33 +4902,19 @@ def row_check_problem(derive_bin, repository, row, timeout, dropped_env=()):
     why = None
     remedy = "repair: run claude-guard-policy"
     try:
-        child = subprocess.Popen(
-            [derive_bin, "--repository", repository],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env=row_check_env(dropped_env),
-            start_new_session=True,
-        )
+        child = session_child(
+            [derive_bin, "--repository", repository], row_check_env(dropped_env), timeout)
     except OSError as error:
         why = f"could not start ({error})"
     else:
-        try:
-            stdout, _stderr = child.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            try:
-                os.killpg(child.pid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                # Gone, or (macOS) a group of zombies only, which signals as EPERM.
-                pass
-            child.wait()
+        if child is None:
             why = "timed out"
             # Issue 476 D6: a slow check clears on a plain rerun, and recompiling
             # the policy cannot speed it up.
             remedy = ROW_CHECK_TRANSIENT_REMEDY
         else:
             try:
-                report = json.loads(stdout)
+                report = json.loads(child.stdout)
             except ValueError:
                 report = None
             why, transient = _report_mismatch(report, child.returncode, repository, row)
@@ -4968,11 +4990,7 @@ def branch_name_problem(git_bin, branch, timeout):
     try:
         child = subprocess.run(
             [git_bin, "check-ref-format", "--branch", branch],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
-        )
+            capture_output=True, text=True, timeout=timeout, check=False)
     except subprocess.TimeoutExpired:
         return BRANCH_VALIDATION_TIMEOUT
     if child.returncode != 0:
@@ -5515,11 +5533,7 @@ def validate_branch_delete(text, git_bin, timeout, compiled):
     try:
         ref_check = subprocess.run(
             [git_bin, "check-ref-format", "--branch", branch],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
-        )
+            capture_output=True, text=True, timeout=timeout, check=False)
     except subprocess.TimeoutExpired:
         return refuse("branch", BRANCH_VALIDATION_TIMEOUT)
     if ref_check.returncode != 0:
@@ -5562,12 +5576,8 @@ def annotated_tag_problem(context, tag, object_name):
     try:
         kind = subprocess.run(
             [context.git_bin, "cat-file", "-t", object_name],
-            capture_output=True,
-            text=True,
-            timeout=context.timeout,
-            check=False,
-            cwd=context.cwd,
-        )
+            capture_output=True, text=True, timeout=context.timeout, check=False,
+            cwd=context.cwd)
     except subprocess.TimeoutExpired:
         return "tag lookup timed out"
     if kind.returncode != 0 or kind.stdout.strip() != "tag":
@@ -5863,8 +5873,7 @@ def worktree_root(git_bin, cwd, timeout):
     try:
         child = subprocess.run(
             [git_bin, "-C", cwd, "rev-parse", "--show-toplevel"],
-            capture_output=True, text=True, timeout=timeout, check=False,
-        )
+            capture_output=True, text=True, timeout=timeout, check=False)
     except (subprocess.TimeoutExpired, OSError):
         return None
     top = child.stdout.strip()
@@ -6018,6 +6027,52 @@ def merge_slot_problem(values, repository):
     return None
 
 
+def jq_status(context, query, document, timed_out, failed):
+    """None when `jq -e query` accepts `document`, else the status of the refusal.
+
+    A timeout is `block(timed_out)`, a non-zero exit `block_child_failure(failed, child)`.
+    """
+    try:
+        child = subprocess.run(
+            [context.jq_bin, "-e", query], input=document, capture_output=True, text=True,
+            timeout=context.timeout, check=False)
+    except subprocess.TimeoutExpired:
+        return block(timed_out)
+    return block_child_failure(failed, child) if child.returncode != 0 else None
+
+
+def land_problem(context, number, pr_facts, branch, head_commit):
+    """None when the land check admits the merge, else the status the merge returns.
+
+    `branch` is the branch whose land lock the merge must hold, `head_commit` the
+    command's `--match-head-commit`, already held equal to the PR head when present.
+    """
+    if context.land_bin is None:
+        return block("land check failed: no --land-bin was given")
+    head = pr_facts.get("headRefOid")
+    argv = [context.land_bin, "--repo", context.repository, "--branch", branch, "--pr", number,
+            *(["--sha", head] if isinstance(head, str) and HEAD_COMMIT.fullmatch(head) else []),
+            *(["--pinned"] if head_commit is not None else [])]
+    try:
+        child = session_child(argv, row_check_env(GH_ENV_TOKEN_NAMES), context.timeout)
+    except OSError as error:
+        return block(f"land check failed: could not start ({error})")
+    if child is None:
+        return block("land check timed out")
+    try:
+        verdict = json.loads(child.stdout)
+    except ValueError:
+        verdict = None
+    verdict = verdict if isinstance(verdict, dict) else {}
+    reason = verdict.get("reason")
+    if child.returncode == 0 and verdict.get("verdict") == "admit":
+        return None
+    if (child.returncode == 3 and verdict.get("verdict") == "refuse" and isinstance(reason, str)
+            and 1 <= len(reason) <= LAND_REASON_MAX and reason.isprintable()):
+        return refuse("merge", f"the PR does not hold the land lease: {reason}")
+    return block_child_failure("land check failed", child)
+
+
 def validate_merge(text, context, compiled):
     problem = ownership_problem(context)
     if problem is not None:
@@ -6068,46 +6123,25 @@ def validate_merge(text, context, compiled):
 
     try:
         pr_lookup = subprocess.run(
-            [
-                context.gh_bin, "pr", "view", number, "--repo", repository,
-                "--json",
-                "state,baseRefName,headRefName,headRefOid,mergeStateStatus,url,statusCheckRollup",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=context.timeout,
-            check=False,
-            env=gh_lookup_env(),
-        )
+            [context.gh_bin, "pr", "view", number, "--repo", repository, "--json",
+             "state,baseRefName,headRefName,headRefOid,mergeStateStatus,url,statusCheckRollup"],
+            capture_output=True, text=True, timeout=context.timeout, check=False,
+            env=gh_lookup_env())
     except subprocess.TimeoutExpired:
         return block("PR lookup timed out")
     if pr_lookup.returncode != 0:
         return block_child_failure("PR lookup failed", pr_lookup)
 
-    try:
-        base_predicate = " or ".join(
-            f'.baseRefName == "{candidate}"' for candidate in sorted(allowed_bases)
-        )
-        pr_predicate_query = (
-            f'.state == "OPEN" and ({base_predicate}) and '
-            f'(.url | startswith("https://github.com/{repository}/pull/"))'
-        )
-        pr_predicate = subprocess.run(
-            [
-                context.jq_bin,
-                "-e",
-                pr_predicate_query,
-            ],
-            input=pr_lookup.stdout,
-            capture_output=True,
-            text=True,
-            timeout=context.timeout,
-            check=False,
-        )
-    except subprocess.TimeoutExpired:
-        return block("PR predicate timed out")
-    if pr_predicate.returncode != 0:
-        return block_child_failure("PR predicate failed", pr_predicate)
+    base_predicate = " or ".join(
+        f'.baseRefName == "{candidate}"' for candidate in sorted(allowed_bases)
+    )
+    status = jq_status(
+        context,
+        f'.state == "OPEN" and ({base_predicate}) and '
+        f'(.url | startswith("https://github.com/{repository}/pull/"))',
+        pr_lookup.stdout, "PR predicate timed out", "PR predicate failed")
+    if status is not None:
+        return status
 
     # Protection is demanded of the branch this PR actually targets, not of
     # the default branch. The predicate above already confined it to
@@ -6150,6 +6184,9 @@ def validate_merge(text, context, compiled):
         context, number, pr_facts, head_commit, match.values.get("subject"))
     if status is not None:
         return status
+    status = land_problem(context, number, pr_facts, base, head_commit)
+    if status is not None:
+        return status
 
     # A declared integration branch is deliberately exempt from the
     # protection demand: it is the development-pace branch, and its CI
@@ -6169,12 +6206,8 @@ def validate_merge(text, context, compiled):
     try:
         protection_lookup = subprocess.run(
             [context.gh_bin, "api", f"repos/{repository}/branches/{base}/protection"],
-            capture_output=True,
-            text=True,
-            timeout=context.timeout,
-            check=False,
-            env=gh_lookup_env(),
-        )
+            capture_output=True, text=True, timeout=context.timeout, check=False,
+            env=gh_lookup_env())
     except subprocess.TimeoutExpired:
         return block("protection lookup timed out")
     if protection_lookup.returncode != 0:
@@ -6185,25 +6218,10 @@ def validate_merge(text, context, compiled):
             return 0 if problem is None else refuse("merge", problem)
         return block_child_failure("protection lookup failed", protection_lookup)
 
-    try:
-        protection_predicate = subprocess.run(
-            [
-                context.jq_bin,
-                "-e",
-                "(.required_status_checks.contexts | length) > 0 "
-                "and .enforce_admins.enabled == true",
-            ],
-            input=protection_lookup.stdout,
-            capture_output=True,
-            text=True,
-            timeout=context.timeout,
-            check=False,
-        )
-    except subprocess.TimeoutExpired:
-        return block("protection predicate timed out")
-    if protection_predicate.returncode != 0:
-        return block_child_failure("protection predicate failed", protection_predicate)
-    return 0
+    return jq_status(
+        context,
+        "(.required_status_checks.contexts | length) > 0 and .enforce_admins.enabled == true",
+        protection_lookup.stdout, "protection predicate timed out", "protection predicate failed") or 0
 
 
 def mergeability_problem(pr_facts, base, head_commit):
@@ -6285,13 +6303,8 @@ def look_json(context, argv, timed_out, failed, unreadable):
     """
     try:
         child = subprocess.run(
-            [context.gh_bin, *argv],
-            capture_output=True,
-            text=True,
-            timeout=context.timeout,
-            check=False,
-            env=gh_lookup_env(),
-        )
+            [context.gh_bin, *argv], capture_output=True, text=True, timeout=context.timeout,
+            check=False, env=gh_lookup_env())
     except subprocess.TimeoutExpired:
         return None, block(timed_out)
     if child.returncode != 0:
@@ -6443,14 +6456,8 @@ def look_child(context, payload):
     """
     try:
         child = subprocess.run(
-            [context.look_bin],
-            input=json.dumps(payload),
-            capture_output=True,
-            text=True,
-            timeout=context.timeout,
-            check=False,
-            env=row_check_env(),
-        )
+            [context.look_bin], input=json.dumps(payload), capture_output=True, text=True,
+            timeout=context.timeout, check=False, env=row_check_env())
     except subprocess.TimeoutExpired:
         return None, None
     try:
@@ -6499,13 +6506,8 @@ def look_read(context, path):
     output that is not JSON (`DeadlineExhausted` propagates)."""
     try:
         child = subprocess.run(
-            [context.gh_bin, "api", path],
-            capture_output=True,
-            text=True,
-            timeout=context.timeout,
-            check=False,
-            env=gh_lookup_env(),
-        )
+            [context.gh_bin, "api", path], capture_output=True, text=True,
+            timeout=context.timeout, check=False, env=gh_lookup_env())
     except (subprocess.TimeoutExpired, OSError):
         return None
     if child.returncode != 0:
@@ -6735,27 +6737,12 @@ def validate_release_merge(
     status = look_problem(context, number, pr_facts, head_commit, subject)
     if status is not None:
         return status
-    try:
-        rollup_predicate = subprocess.run(
-            [
-                context.jq_bin,
-                "-e",
-                RELEASE_ROLLUP_PREDICATE,
-            ],
-            input=json.dumps(pr_facts),
-            capture_output=True,
-            text=True,
-            timeout=context.timeout,
-            check=False,
-        )
-    except subprocess.TimeoutExpired:
-        return block("check rollup predicate timed out")
-    if rollup_predicate.returncode != 0:
-        return block_child_failure(
-            "unsafe merge: the PR's check rollup is not entirely green",
-            rollup_predicate,
-        )
-    return 0
+    status = land_problem(context, number, pr_facts, head, head_commit)
+    if status is not None:
+        return status
+    return jq_status(
+        context, RELEASE_ROLLUP_PREDICATE, json.dumps(pr_facts), "check rollup predicate timed out",
+        "unsafe merge: the PR's check rollup is not entirely green") or 0
 
 
 def repository_context(operation, text, target, contexts, args, base, deadline, compiled):
@@ -6798,6 +6785,7 @@ def main():
     parser.add_argument("--policy", required=True)
     parser.add_argument("--derive-bin", required=True)
     parser.add_argument("--look-bin", default=None)
+    parser.add_argument("--land-bin", default=None)
     parser.add_argument("--derive-timeout-seconds", type=float, default=15)
     parser.add_argument("--git-bin", default=None)
     parser.add_argument("--gh-bin", default=None)

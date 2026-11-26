@@ -31,6 +31,7 @@ from pathlib import Path
 from agent_tools.delivery import look_marker
 
 from .forge_world import FLOOR_PROTECTION, ForgeWorld
+from .guard_land_check import write_land_bin, write_land_gh
 from .pre_push_world import FAKE_DERIVE
 from .program_bridge import NODE, run_program
 
@@ -241,12 +242,14 @@ class LookGateWorld:
             "os.execv(sys.executable, [sys.executable, '-m', 'agent_tools.delivery.look_approval',"
             " 'judge', *sys.argv[1:]])\n", encoding="utf-8")
         self.look_bin.chmod(0o755)
+        self.land_bin = write_land_bin(self.tmp, write_land_gh(self.tmp))
 
     def guard(self, command: str) -> subprocess.CompletedProcess:
         proc = subprocess.run(
             [sys.executable, "-I", str(self.guard_source), "--base-policy", str(self.base_policy),
              "--policy", str(self.policy), "--derive-bin", str(self.derive_bin),
-             "--look-bin", str(self.look_bin), "--gh-bin", str(self.forge.bin / "gh"),
+             "--look-bin", str(self.look_bin), "--land-bin", str(self.land_bin),
+             "--gh-bin", str(self.forge.bin / "gh"),
              "--child-timeout-seconds", "5"],
             input=json.dumps({"tool_name": "Bash", "tool_input": {"command": command},
                               "cwd": str(self.clone)}),

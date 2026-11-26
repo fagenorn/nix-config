@@ -31,6 +31,7 @@ from unittest import mock
 from agent_tools.console import bypass_proof
 from agent_tools.guard.push_fixture import make_push_fixture
 
+from .guard_land_check import write_land_bin, write_land_gh
 from .guard_policy_world import MANIFEST, REAL_GIT, REPO_ROOT
 from .pre_push_world import FAKE_DERIVE, GUARD_SOURCE
 
@@ -292,7 +293,8 @@ class BypassProofWorld:
         derive.chmod(0o755)
         self.env["FAKE_CLAUDE_GUARD"] = json.dumps([
             sys.executable, "-I", str(GUARD_SOURCE), "--base-policy", str(base),
-            "--policy", str(policy), "--derive-bin", str(derive)])
+            "--policy", str(policy), "--derive-bin", str(derive),
+            "--land-bin", str(write_land_bin(self.tmp, write_land_gh(self.tmp)))])
 
     def save_state(self) -> None:
         self.state_file.write_text(json.dumps(self.state), encoding="utf-8")

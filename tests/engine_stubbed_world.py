@@ -67,6 +67,7 @@ from agent_tools.delivery.engine_guard import payload
 from tests.engine_fixture import AdoptedFixtures, FixtureProject
 from tests.engine_guards import script, standin_guard, write_settings
 from tests.forge_world import ForgeWorld
+from tests.guard_land_check import write_land_bin
 from tests.guard_policy_world import REAL_GIT, REPO_ROOT, GuardPolicyWorld
 from tests.test_issue_setup import gh_only
 
@@ -270,6 +271,7 @@ class StubbedRun:
         real = script(self.tmp / "real-guard", sys.executable, "-I", str(GUARD_SOURCE),
                       "--base-policy", str(self.world.base), "--policy", str(self.world.output),
                       "--derive-bin", str(self.world.row_check()), "--look-bin", str(look),
+                      "--land-bin", str(write_land_bin(self.tmp)),
                       "--derive-timeout-seconds", "25")
         write_settings(home, str(standin_guard(self.tmp, "tee-guard", "tee", str(self.guard_log),
                                                str(real))))
