@@ -145,17 +145,20 @@ class SlotHarness:
         declaration.update(extra)
         target.write_text(json.dumps(declaration))
 
-    def env(self, home=None):
-        return {**os.environ, "HOME": home or self.home, "PYTHONPATH": str(REPO_ROOT / "python"),
+    def env(self, home=None, owner=None):
+        env = {key: value for key, value in os.environ.items() if key != "CLAUDE_CODE_SESSION_ID"}
+        if owner is not None:
+            env["CLAUDE_CODE_SESSION_ID"] = owner
+        return {**env, "HOME": home or self.home, "PYTHONPATH": str(REPO_ROOT / "python"),
                 SLOT_DIR_ENV: str(self.slots)}
 
-    def start(self, name, *opts, code=None, argv=None, home=None, cwd=None):
+    def start(self, name, *opts, code=None, argv=None, home=None, cwd=None, owner=None):
         tail = [str(code)] if code is not None else []
         command = argv if argv is not None else [
             sys.executable, "-c", CHILD, str(self.marks), name, *tail]
         proc = subprocess.Popen(
             [sys.executable, "-m", "agent_tools.delivery.verify_slot", "run", *opts, "--", *command],
-            env=self.env(home), cwd=cwd or self.home, stderr=subprocess.PIPE, text=True)
+            env=self.env(home, owner), cwd=cwd or self.home, stderr=subprocess.PIPE, text=True)
         self.procs.append(proc)
         return proc
 
@@ -1117,8 +1120,9 @@ class VerifySlotTest(SlotHarness, unittest.TestCase):
         entries = {entry["repository"]: entry for entry in self.history()}
         self.assertEqual(len(self.history()), 2)
         for entry in entries.values():
-            self.assertEqual(set(entry), {"command", "exit", "held_seconds", "place", "repository",
+            self.assertEqual(set(entry), {"command", "exit", "held_seconds", "owner", "place", "repository",
                                           "started", "waited_seconds"})
+            self.assertIsNone(entry["owner"])
         command = " ".join(" ".join([sys.executable, "-c", CHILD]).split()[:3])
         beta_entry, alpha_entry = entries["example/beta"], entries["example/alpha"]
         self.assertEqual(beta_entry["exit"], 4)
@@ -1134,6 +1138,12 @@ class VerifySlotTest(SlotHarness, unittest.TestCase):
             started = parse_rfc3339_utc(entry["started"])
             self.assertLessEqual(now - timedelta(seconds=120), started)
             self.assertLessEqual(started, now)
+
+    def test_the_history_line_records_the_session_that_asked_or_null(self):
+        quick = [sys.executable, "-c", "pass"]
+        for name, owner in (("a", "session-a"), ("b", ""), ("c", "s" * 300), ("d", None)):
+            self.assertEqual(self.finish(self.start(name, argv=quick, owner=owner))[0], 0)
+        self.assertEqual([entry["owner"] for entry in self.history()], ["session-a", None, "s" * 300, None])
 
     def test_a_run_whose_record_cannot_be_appended_still_returns_the_commands_exit(self):
         (self.slots / "history.jsonl").mkdir(parents=True)
@@ -1283,6 +1293,18 @@ class VerifySlotReportTest(SlotHarness, unittest.TestCase):
         self.assertEqual(len(lines), 1)
         self.assertTrue(lines[0].startswith("example/alpha runs=2 "), lines)
         self.assertIn(REPORT_SKIPPED_LINE.format(count=4, path=self.slots / "history.jsonl"),
+                      err.splitlines())
+
+    def test_a_line_whose_owner_is_neither_a_string_nor_null_is_skipped(self):
+        self.write_history({**self.rec("example/alpha", 30, 2), "owner": "session-a"},
+                           {**self.rec("example/beta", 40, 3), "owner": None},
+                           self.rec("example/gamma", 50, 4),
+                           {**self.rec("example/delta", 60, 5), "owner": 5})
+        code, lines, err = self.report()
+        self.assertEqual(code, 0)
+        self.assertEqual([line.split(" ", 1)[0] for line in lines],
+                         ["example/alpha", "example/beta", "example/gamma"])
+        self.assertIn(REPORT_SKIPPED_LINE.format(count=1, path=self.slots / "history.jsonl"),
                       err.splitlines())
 
     def report(self, *opts):

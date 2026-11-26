@@ -84,11 +84,11 @@ History. Every run that got past setup appends one line to `history.jsonl` in th
 (see `agent_tools.delivery.verify_history`), after it gave its slot and repository lock back:
 a run that took a slot, one that reached `--wait-limit` and one signalled while it waited. A run
 that held no slot records `held_seconds: null`. The line's `place` is the place the run joined the
-queue at, the place it took back for a resumed request, or null when it never joined. A setup or
-usage error records nothing. A failed append prints `HISTORY_FAILED_LINE` once and leaves the exit
-code alone. `--report PATH` writes the run's history entry, the same JSON object as its
-`history.jsonl` line, to PATH. A caller reads it to learn the run's wait and hold, and a path that
-cannot be written is reported and changes nothing.
+queue at, the place it took back for a resumed request, or null when it never joined. Its `owner` is
+`CLAUDE_CODE_SESSION_ID` when set and non-empty, else null. A setup or usage error records nothing.
+A failed append prints `HISTORY_FAILED_LINE` once and leaves the exit code alone. `--report PATH`
+writes the run's history entry, the same JSON object as its `history.jsonl` line, to PATH. A caller
+reads it to learn the run's wait and hold, and a path that cannot be written is reported and changes nothing.
 
 Report. `verify-slot report [--hours N]` reads `history.jsonl` and prints one stdout line per
 repository whose runs started in the last N hours (`DEFAULT_REPORT_HOURS`, 24; a positive
@@ -172,6 +172,7 @@ PROBE_RETRY_SECONDS = 0.005
 PROBE_SECONDS = 1.0
 DEFAULT_SLOT_DIR = "/tmp/agent-verify-slots"
 SLOT_DIR_ENV = "VERIFY_SLOT_DIR"
+OWNER_ENV = "CLAUDE_CODE_SESSION_ID"
 USAGE_EXIT = 2
 CANNOT_START_EXIT = 127
 
@@ -587,7 +588,8 @@ def run_command(argv: list[str], wait_limit: int | None, live: bool = False,
         for number, handler in previous.items():
             signal.signal(number, handler)
         if acquired:
-            entry = verify_history.entry(group, argv, started, waited, held_seconds, code, joined)
+            entry = verify_history.entry(group, argv, started, waited, held_seconds, code, joined,
+                                         owner=os.environ.get(OWNER_ENV) or None)
             _record(directory, entry)
             if report is not None:
                 _report(Path(report), entry)
