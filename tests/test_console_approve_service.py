@@ -2508,11 +2508,11 @@ class MergedRegistrationTest(ApproveCase):
         self.poll("merged")
         fake.report = GREEN
         self.restart()
-        end = time.monotonic() + 10
-        while time.monotonic() < end and self.results()[-1:] != ["registered"]:
-            time.sleep(0.05)
+        # The run appends its `registered` row first and lists the project after it (`refresh()`
+        # outside the lock, then a publish): wait for the listing, the service's own signal.
+        shown = awaited(self.svc, lambda: self.listed("o/r") or PENDING, 10, 0.05)
+        self.assertIsNot(shown, PENDING, "the project was never listed")
         self.assertEqual(self.results()[-1:], ["registered"])
-        self.assertTrue(self.listed("o/r"))
 
     def test_a_failed_run_is_refused_in_words_and_logged_in_full(self):
         self.merged(None, register_raises=register.RunFailed("timed_out"))
