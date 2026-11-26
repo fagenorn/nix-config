@@ -213,7 +213,7 @@ RETIRED_FIELDS: tuple[str, ...] = (
     "plans-path", "docs-paths", "context-paths", "standards-paths", "hints-paths", "operations-paths",
     "rejections-paths", "build-command", "review-plan-command", "review-code-command", "max-parallel",
     "attempt-budget", "projections", "light-lane")
-PLAN_AGAIN = ("The console now drafts fewer settings, so the plan is made again: choose the "
+PLAN_AGAIN = ("The console now drafts fewer settings, so the plan is made again: choose what "
               "finished work merges into to go on.")
 # The field a reconcile plan proposes alone; `draft` never adds it.
 _PROPOSED_TABLE = (

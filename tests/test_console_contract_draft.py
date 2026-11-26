@@ -583,7 +583,7 @@ class ContractDraftTest(unittest.TestCase):
     def test_the_branch_label_names_no_version_and_the_replan_sentence_follows_it(self):
         self.assertEqual(cd.LABELS["integration-branch"], "finished work merges into")
         self.assertNotIn("main version", cd.PLAN_AGAIN)
-        self.assertIn(f"choose the {cd.LABELS['integration-branch']} to go on.", cd.PLAN_AGAIN)
+        self.assertIn(f"choose what {cd.LABELS['integration-branch']} to go on.", cd.PLAN_AGAIN)
 
     def test_every_settled_value_is_shown_with_its_source(self):
         root, fields = self.remote_fields()
