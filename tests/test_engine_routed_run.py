@@ -66,9 +66,10 @@ def stored_event(run_dir: Path, step: str, visit: int = 1) -> dict:
 
 
 def router_answer(run: StubbedRun, stage: str, head: str) -> dict:
+    merge_base = run.world.git(run.worktree_path, "merge-base", "refs/remotes/origin/main", head).strip()
     done = subprocess.run(
         [sys.executable, "-m", "agent_tools.delivery.router", "--repo-root", str(run.worktree_path),
-         "--stage", stage, "--diff", f"refs/remotes/origin/main...{head}",
+         "--stage", stage, "--diff", f"{merge_base}..{head}",
          "--platform-standards", str(run.world.home / ".agents/standards")],
         capture_output=True, text=True, env=run.env, timeout=120)
     assert done.returncode == 0, done.stderr
@@ -98,13 +99,14 @@ class RouteTest(Scenario):
         head = stored_event(direct, "route-lite")["head"]
         self.assertEqual(head, self.stored(direct, "implement")["commit"])
         routed = self.stored(direct, "route-lite")["routed_files"]
-        self.assertEqual(self.stored(direct, "route-lite")["change"]["diff"], f"refs/remotes/origin/main...{head}")
+        merge_base = run.world.git(run.worktree_path, "merge-base", "refs/remotes/origin/main", head).strip()
+        self.assertEqual(self.stored(direct, "route-lite")["change"]["diff"], f"{merge_base}..{head}")
+        self.assertEqual(self.stored(direct, "route-lite")["merge_base"], merge_base)
         self.assertEqual(router_answer(run, "final review", head)["routed_files"], routed)
         self.assertIn(f"{standards}/stacks/python.md", routed)
         self.assertNotIn(hint, routed)
         self.assertEqual(routed_of(self.launch(run, "lite-review")["prompt"]), routed)
-        self.assertIn(f"git diff refs/remotes/origin/main...{head}", self.launch(run, "lite-review")["prompt"])
-        merge_base = run.world.git(run.worktree_path, "merge-base", "refs/remotes/origin/main", head).strip()
+        self.assertIn(f"git diff {merge_base}..{head}", self.launch(run, "lite-review")["prompt"])
         self.assertEqual(stored_event(direct, "route-lite")["base"],
                          {"ref": "refs/remotes/origin/main", "sha": merge_base})
         self.assertEqual(routed_of(self.launch(run, "lite-fix")["prompt"]), routed)
@@ -121,6 +123,31 @@ class RouteTest(Scenario):
         self.assertIn(f"{standards}/stacks/node.md", fixed)
         self.assertNotEqual(fixed, routed)
         self.assertEqual(routed_of(self.launch(run, "lite-rereview")["prompt"]), fixed)
+
+    def test_both_reviewers_read_the_routed_merge_base_though_the_integration_ref_moves_after_routing(self):
+        run = self.stubbed(review_code=[CODEX_CLEAN],
+                           replies={"lite-review": {"reply": UNNAMED_LITE, "advance": {}}})
+
+        self.finish(run, "direct-review", "owner-decision")
+
+        direct = self.child(run, "direct")
+        event = stored_event(direct, "route-lite")
+        head, routed_base = event["head"], event["base"]["sha"]
+        self.assertEqual(self.stored(direct, "route-lite")["merge_base"], routed_base)
+        self.assertEqual(self.stored(direct, "route-lite")["diff"], f"{routed_base}..{head}")
+        moved = run.world.git(run.worktree_path, "rev-parse", "refs/remotes/origin/main").strip()
+        self.assertEqual(moved, head)
+        self.assertNotEqual(head, routed_base)
+        self.assertEqual(run.world.git(run.worktree_path, "rev-parse", "HEAD").strip(), head)
+        self.assertIn(f"git diff {routed_base}..{head}.", self.launch(run, "lite-review")["prompt"])
+        reviews = [shlex.split(p["payload"]["tool_input"]["command"]) for p in payloads(run.guard_log)]
+        reviews = [argv for argv in reviews if "agent_tools.delivery.independent_review" in argv]
+        self.assertEqual(len(reviews), 1)
+        self.assertEqual(reviews[0][reviews[0].index("--merge-base") + 1], routed_base)
+        self.assertEqual(reviews[0][reviews[0].index("--head") + 1], head)
+        stdin = run.companion_launches()[0]["stdin"]
+        self.assertIn(f"Base: {routed_base}\nHead: {head}", stdin)
+        self.assertIn(f"Review the diff {routed_base}..{head}", stdin)
 
     def test_a_fix_that_commits_nothing_reuses_the_review_route(self):
         run = self.stubbed(replies={"lite-review": lite_findings(), "lite-fix": NO_COMMIT,

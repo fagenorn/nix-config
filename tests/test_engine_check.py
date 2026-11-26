@@ -1232,7 +1232,7 @@ SHIPPED_MEMBERS = {
     "issue": ({"text": "t", "body": "x\n\n## Acceptance criteria\n\n- [ ] a\n", "marked": False,
                "lane_paths": {"secrets": ["secrets/"]}},
               {"text": "t", "body": "", "marked": True, "lane_paths": None}),
-    **{route: ({"routed_files": ["/s/the-bar.md"], "diff": "refs/remotes/origin/main...h", "head": "h"},)
+    **{route: ({"routed_files": ["/s/the-bar.md"], "diff": "m..h", "head": "h", "merge_base": "m"},)
        for route in ("route", "route-lite", "route-full", "route-lite-fixed", "route-escalated-fixed",
                      "route-full-fixed")},
     "implement": ({}, {"ineligible": True}, {"sensitive": True}, {"acceptance": []}),
@@ -1247,7 +1247,7 @@ SHIPPED_MEMBERS = {
                            {"id": "test", "status": "fail", "named": ["a.json"]}]},),
     "ws-check": ({"start_head": "s", "commit": "c", "whitespace_only": True, "changed_paths": ["a.json"]},),
     "fix": ({}, {"unrelated": {"test": "", "evidence": ""}}),
-    **{route: ({"routed_files": ["/s/the-bar.md"], "diff": "refs/remotes/origin/main...h", "head": "h"},)
+    **{route: ({"routed_files": ["/s/the-bar.md"], "diff": "m..h", "head": "h", "merge_base": "m"},)
        for route in ("route-checks", "route-review")},
     **{review: ({}, {"findings": []}, UNNAMED,
                 {"findings": [], "whitespace_insignificant": True, "whitespace_evidence": "e"})

@@ -19,10 +19,12 @@ error: diff-review review_id <id> argv <argv>: expected codex-companion task [--
 diff-review; <first failing cause>` (causes in order: executable, subcommand, reviewer,
 unsupported token).
 
-`--head` is the commit the files were routed for (the router's `head`). The range is `merge-base
-refs/remotes/origin/<integration> <head>` to `<head>` in the worktree; one that does not resolve is
-`unavailable`, and so is a worktree whose `HEAD` is no longer `--head` (a commit landed after routing), the
-detail `head moved since routing`, before any process starts. `diff-scope` measures it (`product.changed_files` as `M`,
+`--head` and `--merge-base` are the commits the files were routed for (the router's `head` and
+`merge_base`, each a full commit id). The range is `--merge-base` to `--head` in the worktree, and
+the review reads no integration ref, so a fetch after routing changes neither end. It is `unavailable`
+for a worktree whose `HEAD` is no longer `--head` (a commit landed after routing), the detail `head
+moved since routing`, for a merge base that is no commit or is not an ancestor of the head (`merge base
+<sha> is not an ancestor of <head>`), before any process starts. `diff-scope` measures it (`product.changed_files` as `M`,
 `files[].path`, `files[].changed_lines`). More than `FILE_BUDGET` files (strictly) is cut into
 consecutive slices of that many `files[].path` entries in emitted order, each dispatched once, so
 every product file is reviewed once; exactly that many, or none, is dispatched whole. No measurement
@@ -350,7 +352,9 @@ def run_review(args: argparse.Namespace) -> dict:
         head = _git(args.worktree_path, "rev-parse", "HEAD")
         if head != args.head:
             return reply("unavailable", f"head moved since routing: routed {args.head}, HEAD is {head}")
-        base = _git(args.worktree_path, "merge-base", f"refs/remotes/origin/{args.integration_branch}", head)
+        base = args.merge_base
+        if _git(args.worktree_path, "merge-base", base, head) != base:
+            return reply("unavailable", f"merge base {base} is not an ancestor of {head}")
     except Refusal as refusal:
         return reply("unavailable", str(refusal))
     files = measure(base, head, args.worktree_path)
@@ -423,6 +427,8 @@ def _parser() -> argparse.ArgumentParser:
     code.add_argument("--routed-files", type=_routed_files, required=True,
                       help="the files the reviewer reads, a JSON list of paths")
     code.add_argument("--head", type=_commit, required=True, help="the commit the files were routed for")
+    code.add_argument("--merge-base", type=_commit, required=True,
+                      help="the merge base the router resolved for that commit")
     return parser
 
 

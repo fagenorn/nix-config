@@ -22,7 +22,7 @@ IMPLEMENTED = {"status": "done", "start_head": SHA, "commit": SHA, "notes": "n",
                "acceptance": [{"id": "AC1", "text": "t", "kind": "code", "result": "r"}],
                "sensitive": False, "ineligible": False}
 INDEPENDENT = {"verdict": "pass", "findings": []}
-ROUTED = {"routed_files": ["/s/the-bar.md"], "diff": f"refs/remotes/origin/main...{SHA}", "head": SHA}
+ROUTED = {"routed_files": ["/s/the-bar.md"], "diff": f"{SHA}..{SHA}", "head": SHA, "merge_base": SHA}
 
 
 STANDARDS_DIRECTORIES = (REPO_ROOT / "home/common/agent-skills/standards", REPO_ROOT / "docs/standards")
@@ -173,6 +173,9 @@ class DirectProcedureTest(unittest.TestCase):
         direct = load(PROCEDURES, "direct")
         self.assertIn("route-lite.routed_files", step(direct, "lite-independent")["in"])
         self.assertIn("route-full.routed_files", step(direct, "full-independent")["in"])
+        for name, route in (("lite-independent", "route-lite"), ("full-independent", "route-full")):
+            for member in ("merge_base", "head"):
+                self.assertIn(f"{route}.{member}", step(direct, name)["in"], name)
 
     def test_the_reviewers_read_the_diff_their_route_names_and_the_independent_reviews_its_head(self):
         direct = load(PROCEDURES, "direct")

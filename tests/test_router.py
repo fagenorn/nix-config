@@ -159,22 +159,32 @@ class EngineFormTest(World):
     def test_the_engine_form_routes_a_worktrees_branch_diff_at_its_stage(self):
         head = git(self.repo, "rev-parse", "HEAD").strip()
         engine = self.engine("building", *self.engine_flags())
-        flag = self.route("building", "--diff", f"refs/remotes/origin/main...{head}")
+        base = git(self.repo, "merge-base", "refs/remotes/origin/main", "HEAD").strip()
+        flag = self.route("building", "--diff", f"{base}..{head}")
         self.assertEqual((engine.returncode, flag.returncode), (0, 0), engine.stderr)
         doc = json.loads(engine.stdout)
         control = json.loads(flag.stdout)
-        self.assertEqual((control["head"], doc["head"]), (None, head))
-        self.assertEqual({**doc, "head": None}, control)
-        self.assertEqual(doc["diff"], f"refs/remotes/origin/main...{head}")
+        self.assertEqual((control["head"], control["merge_base"], doc["head"], doc["merge_base"]),
+                         (None, None, head, base))
+        self.assertEqual({**doc, "head": None, "merge_base": None}, control)
+        self.assertEqual(doc["diff"], f"{base}..{head}")
         self.assertEqual(doc["stage"], "building")
         self.assertEqual(
-            doc["change"],
-            {"diff": f"refs/remotes/origin/main...{head}", "paths": ["tools/run.py", "web/page.html"]})
+            doc["change"], {"diff": f"{base}..{head}", "paths": ["tools/run.py", "web/page.html"]})
         self.assertEqual(
             doc["routed_files"],
             [f"{self.platform}/the-bar.md", f"{self.platform}/stacks/python.md",
              f"{self.repo}/docs/standards/web.md", f"{self.repo}/.agents/knowledge/hints/building.md",
              f"{self.repo}/docs/areas/beta/adr/001-other.md"])
+
+    def test_the_engine_forms_range_names_commits_so_a_moved_integration_ref_leaves_it_whole(self):
+        done = self.engine("building", *self.engine_flags())
+        self.assertEqual(done.returncode, 0, done.stderr)
+        doc = json.loads(done.stdout)
+        git(self.repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+        self.assertNotIn("refs/", doc["diff"])
+        self.assertEqual(git(self.repo, "diff", "--name-only", doc["diff"]).split(),
+                         ["tools/run.py", "web/page.html"])
 
     def test_routed_files_list_every_shard_then_the_hint_then_the_must_read_records(self):
         for stage in ("final review", "building"):
@@ -197,7 +207,7 @@ class EngineFormTest(World):
         done = self.engine("building", *self.engine_flags())
         self.assertEqual(done.returncode, 0, done.stderr)
         doc = json.loads(done.stdout)
-        self.assertEqual(doc["change"]["diff"], f"refs/remotes/origin/main...{head}")
+        self.assertEqual(doc["change"]["diff"], f"{base}..{head}")
         self.assertEqual(doc["change"]["paths"], ["tools/run.py", "web/page.html"])
         self.assertIn(f"{self.platform}/stacks/python.md", doc["routed_files"])
         control = json.loads(self.route("building", "--diff", "origin/main...main").stdout)
@@ -230,6 +240,7 @@ class EngineFormTest(World):
             "peeled branch": ("building", flags(**{"--branch": "main^{commit}"})),
             "range branch": ("building", flags(**{"--branch": "main..main"})),
             "revision integration branch": ("building", flags(**{"--integration-branch": "main~0"})),
+            "absent integration ref": ("building", flags(**{"--integration-branch": "absent"})),
         }
         for name, (word, words) in cases.items():
             with self.subTest(name):
