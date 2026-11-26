@@ -24,7 +24,7 @@ from agent_tools.delivery import look_marker
 from .guard_fake_children import FAKE_DERIVE_SCRIPT, FAKE_GIT_SCRIPT
 from .guard_fake_gh import (
     FAKE_GH_SCRIPT, FAKE_SHELL_SCRIPT, check_run_accepts, check_run_forge, check_run_permit, check_run_reads, check_run_refusals,
-    check_run_spellings, jobs_facts, pull_facts, rerun_production, run_facts)
+    check_run_spellings, jobs_facts, rerun_production, run_facts)
 from .guard_policy_world import GuardPolicyWorld
 from .guard_sandbox_git import SandboxGit
 
@@ -2049,9 +2049,8 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         project's own open issue pull request, at its head, whose failed job is a check the
         forge requires, is not a production change, though the project declares a rerun rule."""
         guard_args, prod, _own, other = self.rerun_world()
-        command, log, reads = self.CHECK_RERUN, Path(self.fixture_dir.name) / "rerun.log", check_run_reads(PROD)
-        two = self.production_args({self.OWN: NODO_ROW, PROD: {**self.RERUN_ROW, "production": rerun_production(
-            ("deploy-rerun", ["gh", "run", "rerun"]), ("deploy-rerun-failed", ["gh", "run", "rerun", "--failed"]))}})
+        command, log = self.CHECK_RERUN, Path(self.fixture_dir.name) / "rerun.log"
+        two = self.production_args({self.OWN: NODO_ROW, PROD: {**self.RERUN_ROW, "production": rerun_production(("deploy-rerun", ["gh", "run", "rerun"]), ("deploy-rerun-failed", ["gh", "run", "rerun", "--failed"]))}})
 
         def run(text, cwd=prod, args=guard_args, **changes):
             log.write_text("", encoding="utf-8")
@@ -2065,7 +2064,7 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             with self.subTest(name):
                 result = run(text, cwd, args, **changes)
                 self.assertEqual(0, result.returncode, result.stderr)
-                self.assertEqual(reads, [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()])
+                self.assertEqual(check_run_reads(PROD, changes), [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()])
         with self.subTest("deadline"):
             result = run(command, args=(*guard_args, "--child-timeout-seconds", "28"))
             self.assertEqual(2, result.returncode, result.stderr)
@@ -2075,24 +2074,6 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             result = run(f"gh run rerun 55 --failed --repo {self.OWN}")
             self.assertEqual(0, result.returncode, result.stderr)
             self.assertEqual("", log.read_text(encoding="utf-8"))
-
-    def test_a_run_listing_a_closed_pull_request_beside_its_open_one_is_still_a_check_run(self):
-        """A pull request document that reads fine but is not the run's own open pull request is
-        skipped; only one that cannot be read refuses."""
-        guard_args, prod, _own, _other = self.rerun_world()
-        log = Path(self.fixture_dir.name) / "rerun.log"
-        log.write_text("", encoding="utf-8")
-        env = {**check_run_forge(PROD, self.CHECK_HEAD, FAKE_RUN_JSON=run_facts(PROD, self.CHECK_HEAD, numbers=(6, 7)),
-                                 FAKE_PULL_6_JSON=pull_facts(PROD, self.CHECK_HEAD, "closed")),
-               "FAKE_GH_LOG": str(log)}
-        result = self.run_guard(self.CHECK_RERUN, cwd=prod, env=env, guard_args=guard_args)
-        self.assertEqual(0, result.returncode, result.stderr)
-        base = f"repos/{PROD}"
-        self.assertEqual(
-            [["api", f"{base}/actions/runs/55"], ["api", "--paginate", "--slurp", f"{base}/actions/runs/55/jobs?per_page=100"],
-             ["api", f"{base}/pulls/6"], ["api", f"{base}/pulls/7"],
-             ["api", f"{base}/branches/main/protection/required_status_checks"]],
-            [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()])
 
     def test_a_rerun_of_any_other_run_or_an_unread_one_still_meets_the_production_rule(self):
         """A rerun that is not exactly the permit's form, or whose run, jobs, pull request or
@@ -2126,15 +2107,12 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         self.assertEqual(0, result.returncode, result.stderr)
         allowed = permit.judge(command, grant, forge)
         self.assertEqual((permit.ALLOW, "rerun", 1), (allowed.decision, allowed.verb, allowed.target["count"]))
-        again = dataclasses.replace(grant, reruns={head: (permit.Rerun(55),)})
-        self.assertEqual(2, permit.judge(command, again, forge).target["count"])
-        full = dataclasses.replace(grant, reruns={head: (permit.Rerun(55), permit.Rerun(55))})
-        one, denied = "run 55 (failing: no members reported)", permit.judge(command, full, forge)
-        self.assertEqual((permit.DENY, permit.RERUN_LIMIT.format(pr=7, head=head, reruns=f"{one} and {one}")),
-                         (denied.decision, denied.reason))
-        deploy = check_run_forge(PROD, head, FAKE_RUN_JSON=run_facts(PROD, head, "push", ()),
-                                 FAKE_JOBS_JSON=jobs_facts(failed=("deploy",)))
-        refused = self.run_guard(command, cwd=prod, env=deploy, guard_args=guard_args)
+        self.assertEqual(2, permit.judge(command, dataclasses.replace(grant, reruns={head: (permit.Rerun(55),)}), forge).target["count"])
+        one = "run 55 (failing: no members reported)"
+        denied = permit.judge(command, dataclasses.replace(grant, reruns={head: (permit.Rerun(55),) * 2}), forge)
+        self.assertEqual((permit.DENY, permit.RERUN_LIMIT.format(pr=7, head=head, reruns=f"{one} and {one}")), (denied.decision, denied.reason))
+        refused = self.run_guard(command, cwd=prod, guard_args=guard_args, env=check_run_forge(
+            PROD, head, FAKE_RUN_JSON=run_facts(PROD, head, "push", ()), FAKE_JOBS_JSON=jobs_facts(failed=("deploy",))))
         self.assertEqual(2, refused.returncode, refused.stderr)
         self.assertIn(self.RERUN, refused.stderr)
 

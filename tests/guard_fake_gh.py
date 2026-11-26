@@ -106,6 +106,8 @@ def check_run_accepts(slug, head):
         ("session and shell on one gh config directory", "", {"GH_CONFIG_DIR": "/gh", "XDG_CONFIG_HOME": "/xdg"}),
         ("shell restating the session gh config directory", "", {
             "GH_CONFIG_DIR": "/gh", "FAKE_SHELL_GH_CONFIG_DIR": "/gh"}),
+        ("closed pull request listed beside the open one", "", {
+            "FAKE_RUN_JSON": run_facts(slug, head, numbers=(6, 7)), "FAKE_PULL_6_JSON": pull_facts(slug, head, "closed")}),
         ("failed job on page two of 101", "", {"FAKE_JOBS_JSON": jobs_pages(("Tests",))}),
         ("failed job beside the required one", "", {
             "FAKE_JOBS_JSON": jobs_facts(failed=("Tests", "Lint and tests")), "FAKE_REQUIRED_JSON": required}),
@@ -207,11 +209,13 @@ def check_run_refusals(slug, head):
     ]
 
 
-def check_run_reads(slug, run_id=55, branch="main"):
-    """The `gh` arguments the check makes, in order, for run `run_id` of `slug` and its one listed pull request."""
+def check_run_reads(slug, forge, run_id=55, branch="main"):
+    """The `gh` arguments the check makes, in order, for run `run_id` of `slug`, reading each pull
+    request that the run of the `forge` answers lists (the default run lists pull request 7)."""
     base = f"repos/{slug}"
+    pulls = json.loads(forge.get("FAKE_RUN_JSON") or run_facts(slug, ""))["pull_requests"]
     return [["api", f"{base}/actions/runs/{run_id}"], ["api", "--paginate", "--slurp", f"{base}/actions/runs/{run_id}/jobs?per_page=100"],
-            ["api", f"{base}/pulls/7"],
+            *[["api", f"{base}/pulls/{pull['number']}"] for pull in pulls],
             ["api", f"{base}/branches/{branch}/protection/required_status_checks"]]
 
 

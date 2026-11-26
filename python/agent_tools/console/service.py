@@ -9688,8 +9688,7 @@ class ConsoleService(ActionPermit):
             except sprints.Refused:
                 verdict = permit.Verdict(permit.DENY, permit.MOVED, verb, {})
             recorded = self._permit_record(sprint, session_id, tool_use_id, slug, verdict)
-            key = permit.landing_key(verdict)
-            if key is not None:
+            if (key := permit.landing_key(verdict)) is not None:
                 self._permit_allows[(sprint_id, session_id, tool_use_id, slug, *key)] = self._clock()
             return recorded
 

@@ -13,20 +13,16 @@ compiled policy is documented in `python/agent_tools/guard/guard_policy.py`.
 Segments, tokens and verbs
 --------------------------
 
-The hook splits the command into shell segments, tokenises each one, and
-adjudicates a verb wherever a simple command starts: after `(`/`{`/`` ` ``/`$(`/a
-`case` arm, after `!`/`time`/`then`/`do`, and behind `command`/`env`/`sudo`-style
-wrappers, stepping over their option arguments (`env -u NAME`, `sudo -u user`,
-attached and long forms included). It compares token values, so `git  push`,
-`git<TAB>push` and `"git" push` all count. A word whose basename is `git` starts
-a git invocation (a git word that is not a `push` or `branch -d` is judged by
-Transmitting git invocations below): with no global option, or one `-C <dir>`,
-the word after them is its subcommand (`push`, or `branch` then `-d`), and with
-any other global option a `push` or `branch -d` anywhere among its words counts.
-A word whose basename is `gh` counts when its first two words are `pr merge`,
-`pr create`, `release create` or `release new`, or when a flag comes before the
-path's second word and both path words occur in order, so `gh --repo a/b pr
-merge 1` counts and `gh pr view 1 --json mergeable` does not (issue 400).
+The hook splits the command into shell segments, tokenises each one, and adjudicates a verb wherever a simple command
+starts: after `(`/`{`/`` ` ``/`$(`/a `case` arm, after `!`/`time`/`then`/`do`, and behind `command`/`env`/`sudo`-style
+wrappers, stepping over their option arguments (`env -u NAME`, `sudo -u user`, attached and long forms included). It
+compares token values, so `git  push`, `git<TAB>push` and `"git" push` all count. A word whose basename is `git`
+starts a git invocation (a git word that is not a `push` or `branch -d` is judged by Transmitting git invocations
+below): with no global option, or one `-C <dir>`, the word after them is its subcommand (`push`, or `branch` then
+`-d`), and with any other global option a `push` or `branch -d` anywhere among its words counts. A word whose basename
+is `gh` counts when its first two words are `pr merge`, `pr create`, `release create` or `release new`, or when a flag
+comes before the path's second word and both path words occur in order, so `gh --repo a/b pr merge 1` counts and `gh
+pr view 1 --json mergeable` does not (issue 400).
 
 Such an invocation is refused before any repository lookup, its problem ending `run git and gh by name, and carry a
 directory only as git -C <dir>` and followed by the accepted-forms clause (see Adjudicated verbs below), when its
@@ -642,34 +638,30 @@ unnamed rerun never erases a named one.
 
 One spelling of that rerun is not a production change, though the project declares a rerun rule: exactly `gh run
 rerun <id> --failed --repo <owner>/<repo>`, single-spaced, after at most one credential-scrub prefix, which is the
-form the console permit grants. The guard then reads the forge four times, and the narrowed hits of the named project
-are dropped only when every read shows a failed pull request check run of that project's own open pull request at its
-head: the run (an Actions run the pull request triggered, of the project's repository), its jobs (complete, with a
-failed job that is a required check), the pull request (open, from the project's repository into the row's integration
-branch, from a branch that is neither long-lived branch, at the run's head and branch) and the required checks. The
-required set is the forge's protection of the integration branch, read as the console permit reads it, not the checks
-the contract declares. The reads inherit the session's environment minus the token variables, with `GH_HOST` pinned to
-github.com (where a host-less `--repo` rerun goes, whatever gh's default host is), and the jobs are read page by page
-until every one is seen. The rerun runs in the session's shell, so the guard asks that shell for its host: the user's
-`$SHELL`, started as a login, interactive shell, prints `$GH_HOST`, `$GH_CONFIG_DIR` and `$XDG_CONFIG_HOME` once per
-command. A host other than github.com, a shell that cannot be started, times out or prints no answer, a shell
-`GH_HOST` that is not the hook's own (one empty and the other github.com included: gh's default host need not be
-github.com), or a `GH_CONFIG_DIR` or `XDG_CONFIG_HOME` that differs from the hook's own (gh's default host comes from
-the configuration those name) leaves the rule in place, so the reads and the rerun cannot meet on different hosts,
-whether the host comes from the session's environment or from a shell startup file. Every pull request the run lists
-is read, and one that cannot be read or is not a pull request document leaves the rule in place, whichever other pull
-request qualifies. A read that fails, times out or answers another shape leaves the rule in place, and a deadline too
-near refuses. Only the narrowed hits of the named project are dropped, each row by its own integration branch, with
-every read made once per command; a broader rule and every other hit still refuse. The rerun then goes to whatever
-judges `gh run rerun` next: in a manager session, the console permit, with its per-head cap and refusals.
+form the console permit grants. The guard then reads the forge, and the narrowed hits of the named project are dropped
+only when every read shows a failed pull request check run of that project's own open pull request at its head: the
+run (an Actions run the pull request triggered, of the project's repository), its jobs (complete, with a failed job
+that is a required check), every pull request the run lists (each readable and a pull request document, one of them
+open, from the project's repository into the row's integration branch, from a branch that is neither long-lived
+branch, at the run's head and branch) and the required checks. The required set is the forge's protection of the
+integration branch, read as the console permit reads it, not the checks the contract declares. The reads inherit the
+session's environment minus the token variables, with `GH_HOST` pinned to github.com (where a host-less `--repo`
+rerun goes), and the jobs are read page by page. The rerun runs in the session's shell, so the guard asks that shell
+(the user's `$SHELL`, as a login, interactive shell) for `$GH_HOST`, `$GH_CONFIG_DIR` and `$XDG_CONFIG_HOME` once per
+command. A shell that cannot be asked, a host other than github.com, a shell `GH_HOST` that is not the hook's own, or
+a `GH_CONFIG_DIR` or `XDG_CONFIG_HOME` that differs from the hook's own leaves the rule in place, so the reads and the
+rerun cannot meet on different hosts. Any other read that fails, times out or answers another shape leaves the rule in
+place, and a deadline too near refuses. Each row is judged by its own integration branch, with every read made once
+per command; a broader rule and every other hit still refuse. The rerun then goes to whatever judges `gh run rerun`
+next: in a manager session, the console permit, with its per-head cap and refusals.
 
 Known limits: a production command reached by another name (a bare `just` that runs the default recipe, a script or
 alias), words fed on stdin, a program's own directory option (`env -C`, `make -C`) and a one-word command handed to a
 program outside `PRODUCTION_RUNNERS` (`ssh host kubectl apply`) are not seen. Where the text is read raw or behind a
 runner, a one-word command's name anywhere refuses, file arguments included. A command that mentions a
 directory-changing word anywhere is judged against every declaring project. Rewriting the compiled policy can remove a
-project's production refusals, though it still gains no authorization.
-A `GH_HOST` that a startup file sets only for a shell other than the one the probe starts is not seen.
+project's production refusals, though it still gains no authorization. A `GH_HOST` that a startup file sets only for a
+shell other than the one the probe starts is not seen.
 
 Key files and MCP tools
 -----------------------
@@ -688,21 +680,16 @@ slug names the refusal, and no child process runs. The sentence is
     only through the release profile <release_profile> with release transaction
     preview and release transaction run.
 
-A write's path is resolved against `cwd` (a relative path with no absolute `cwd` is
-not judged). Three spellings are checked, each in
-the file system's own case: the path as named with `..` collapsed, the path with
-its directories resolved and the final component kept as named, and its full
-realpath (the file the write reaches). Each spelling is judged in its own checkout,
-the git toplevel of its nearest existing ancestor directory, and that checkout's
-`origin` slug names the project; the spelling is taken relative to the deepest
-ancestor that is that checkout's directory. A write is refused when any spelling
-matches. Globs are matched with `fnmatchcase` on the strings unchanged, as the
-contract matches them (`*` crosses `/`, no casefolding), the first glob in declared
-order naming the refusal. Git runs only after a glob matches a component suffix of
-a spelling, and the base policy is read only then, so an ordinary edit starts no
-child process and a bad base policy refuses only a key-file candidate. A repository
-lookup that fails (times out or cannot start) for a candidate refuses; a compiled
-policy that does not load refuses nothing. The sentence is
+A write's path is resolved against `cwd` (a relative path with no absolute `cwd` is not judged). Three spellings are
+checked, each in the file system's own case: the path as named with `..` collapsed, the path with its directories
+resolved and the final component kept as named, and its full realpath (the file the write reaches). Each spelling is
+judged in its own checkout, the git toplevel of its nearest existing ancestor directory, and that checkout's `origin`
+slug names the project; the spelling is taken relative to the deepest ancestor that is that checkout's directory. A
+write is refused when any spelling matches. Globs are matched with `fnmatchcase` on the strings unchanged, as the
+contract matches them (`*` crosses `/`, no casefolding), the first glob in declared order naming the refusal. Git runs
+only after a glob matches a component suffix of a spelling, and the base policy is read only then, so an ordinary edit
+starts no child process and a bad base policy refuses only a key-file candidate. A repository lookup that fails (times
+out or cannot start) for a candidate refuses; a compiled policy that does not load refuses nothing. The sentence is
 
     `<relative>` is a key file of <slug> (key file glob <glob>), so it changes only
     through the release profile <release_profile> with release transaction preview
@@ -845,17 +832,14 @@ guard authorizes is the base `authorized_owners` and `integration_bases` plus th
 Tests
 -----
 
-`tests/test_claude_permission_guard.py` takes the built settings through
-`CLAUDE_SETTINGS_PATH` and the built base policy through
-`CLAUDE_GUARD_BASE_POLICY_PATH`, runs under `python3 -m unittest` with `python/`
-on `PYTHONPATH`, and passes a fixture compiled policy and a stub row check on
-every invocation, so it never reads this host's compiled policy or fleet
-registry, and a look check fixture that runs `look-approval judge` from source as
-`--look-bin`. Three tests, `test_a_compiled_policy_round_trips_through_the_guard`,
+`tests/test_claude_permission_guard.py` takes the built settings through `CLAUDE_SETTINGS_PATH` and the built base
+policy through `CLAUDE_GUARD_BASE_POLICY_PATH`, runs under `python3 -m unittest` with `python/` on `PYTHONPATH`, and
+passes a fixture compiled policy and a stub row check on every invocation, so it never reads this host's compiled
+policy or fleet registry, and a look check fixture that runs `look-approval judge` from source as `--look-bin`. Three
+tests, `test_a_compiled_policy_round_trips_through_the_guard`,
 `test_a_compiled_policy_loads_whatever_branch_names_the_fleet_carries` and
-`test_an_arcwave_shaped_project_is_judged_by_its_compiled_row`, run
-`guard-policy derive` from source as the row check over a fixture fleet, and
-`test_the_row_check_never_sees_a_hostile_shell_environment` runs the built
+`test_an_arcwave_shaped_project_is_judged_by_its_compiled_row`, run `guard-policy derive` from source as the row check
+over a fixture fleet, and `test_the_row_check_never_sees_a_hostile_shell_environment` runs the built
 `claude-guard-row-check` with `HOME` at an empty fixture fleet.
 """
 
@@ -4071,12 +4055,10 @@ REQUIRED_CHECK_APPS = (None, -1, 15368)
 
 
 def pull_request_rerun_form(command):
-    """`(slug, run id)` when `command` is exactly the rerun the console permit grants, else None.
-
-    The form is `gh run rerun <id> --failed --repo <owner>/<repo>`, single-spaced, after at
-    most one credential-scrub prefix. No other character, operator, assignment or word is
-    allowed, the run id has at most 18 digits, and the repository carries no host and no `.git`
-    suffix."""
+    """`(slug, run id)` when `command` is exactly the rerun the console permit grants, else None:
+    `gh run rerun <id> --failed --repo <owner>/<repo>`, single-spaced, after at most one
+    credential-scrub prefix, with no other character, operator, assignment or word, a run id of
+    at most 18 digits, and a repository with no host and no `.git` suffix."""
     found = PULL_REQUEST_RERUN.fullmatch(strip_scrub_prefix(command))
     if found is None or found.group(3).endswith(".git"):
         return None
@@ -4084,12 +4066,10 @@ def pull_request_rerun_form(command):
 
 
 def forge_read(gh_bin, path, deadline, child_timeout, paged=False):
-    """The parsed JSON `gh api path` prints, or None when the read fails, times out or is
-    not JSON; a `paged` read prints the list of every page. The child inherits the
-    environment minus the token variables, with `GH_HOST` set to github.com, so the read
-    never reaches gh's configured default host, which a host-less rerun does not reach. It
-    is bounded when it starts; a deadline too near raises `DeadlineExhausted`, which is not
-    caught."""
+    """The parsed JSON `gh api path` prints, or None when the read fails, times out or is not
+    JSON; a `paged` read prints the list of every page. The child inherits the environment
+    minus the token variables, with `GH_HOST` set to github.com, as a host-less rerun reaches
+    it. It is bounded when it starts; a deadline too near raises `DeadlineExhausted`, not caught."""
     timeout = bounded_timeout(deadline, child_timeout)
     try:
         done = subprocess.run(
@@ -4106,8 +4086,7 @@ def is_count(value):
 
 
 def required_check_names(document):
-    """The names of the checks a branch's protection requires, read as the console permit
-    reads them, or None when `document` is not that shape."""
+    """The names of the checks a branch's protection requires, as the console permit reads them, else None."""
     if not isinstance(document, dict):
         return None
     checks, contexts = document.get("checks"), document.get("contexts")
@@ -4129,8 +4108,7 @@ def required_check_names(document):
 
 
 def run_document_facts(document, slug):
-    """`(head sha, head branch, pull request numbers)` of an Actions run of `slug` that a
-    pull request triggered, or None when the document shows anything else."""
+    """`(head sha, head branch, pull request numbers)` of a pull request's Actions run of `slug`, else None."""
     if not isinstance(document, dict) or document.get("event") != "pull_request":
         return None
     origin, head = document.get("head_repository"), document.get("head_sha")
@@ -4171,44 +4149,30 @@ def failed_job_names(pages):
 
 
 def is_own_open_pull_request(document, slug, head, branch, row):
-    """Whether `document` is an open pull request of `slug` from `branch` at `head`, into the
-    row's integration branch and from neither of its long-lived branches."""
-    if not isinstance(document, dict) or document.get("state") != "open":
-        return False
-    source, target = document.get("head"), document.get("base")
-    if not isinstance(source, dict) or not isinstance(target, dict):
-        return False
-    names = []
-    for side in (source, target):
-        repository = side.get("repo")
-        if not isinstance(repository, dict) or not isinstance(repository.get("full_name"), str):
-            return False
-        names.append(repository["full_name"].lower())
+    """Whether `document`, which `is_pull_request_document` accepts, is an open pull request of
+    `slug` from `branch` at `head`, into the row's integration branch and from neither of its
+    long-lived branches."""
+    source, target = document["head"], document["base"]
     return (
-        names == [slug.lower()] * 2 and source.get("sha") == head and source.get("ref") == branch
-        and target.get("ref") == row["integration_branch"]
+        document["state"] == "open"
+        and [source["repo"]["full_name"].lower(), target["repo"]["full_name"].lower()] == [slug.lower()] * 2
+        and source["sha"] == head and source["ref"] == branch and target["ref"] == row["integration_branch"]
         and branch not in (row["integration_branch"], row["default_branch"])
     )
 
 
 SHELL_HOST_VARIABLES = ("GH_HOST", "GH_CONFIG_DIR", "XDG_CONFIG_HOME")
-SHELL_HOST_MARKS = {name: f"GUARD-SHELL-{name}" for name in SHELL_HOST_VARIABLES}
-SHELL_HOST_SCRIPT = "".join(
-    f"printf '\\n{SHELL_HOST_MARKS[name]}<%s>\\n' \"${name}\"; " for name in SHELL_HOST_VARIABLES)
-SHELL_HOST_ANSWERS = {
-    name: re.compile(rf"^{mark}<([^<>\r\n]*)>$", re.MULTILINE) for name, mark in SHELL_HOST_MARKS.items()}
+SHELL_HOST_SCRIPT = "".join(f"printf '\\nGUARD-SHELL-{n}<%s>\\n' \"${n}\"; " for n in SHELL_HOST_VARIABLES)
 
 
 def shell_selected_host(deadline, child_timeout):
     """The `GH_HOST` the session's shell exports ("" when it exports none) when the shell leaves the
     gh configuration the hook reads where it is, else None, as it is when the shell cannot be asked.
-    Without a `GH_HOST`, gh takes the one host of the configuration under `GH_CONFIG_DIR`, else
-    `XDG_CONFIG_HOME`, so a startup file that changes either selects a host the hook's own reads
-    never see: an answer whose `GH_CONFIG_DIR` or `XDG_CONFIG_HOME` differs from the hook's is None.
-    The shell is `$SHELL`, an absolute path, started as a login, interactive shell as the session
-    starts it, so a startup file's choice shows; the last marked line of each variable answers. The
-    child is bounded when it starts; a deadline too near raises `DeadlineExhausted`, which is not
-    caught."""
+    Without a `GH_HOST`, gh takes the host of the configuration under `GH_CONFIG_DIR`, else
+    `XDG_CONFIG_HOME`, so a startup file that changes either selects a host the hook's reads never
+    see: such an answer is None. The shell is `$SHELL`, an absolute path, started as a login,
+    interactive shell as the session starts it; the last marked line of each variable answers. The
+    child is bounded when it starts; a deadline too near raises `DeadlineExhausted`, not caught."""
     shell = os.environ.get("SHELL", "")
     if not os.path.isabs(shell) or not os.access(shell, os.X_OK):
         return None
@@ -4219,10 +4183,10 @@ def shell_selected_host(deadline, child_timeout):
             check=False, stdin=subprocess.DEVNULL, env=gh_lookup_env(), timeout=timeout)
     except (subprocess.TimeoutExpired, OSError, ValueError):
         return None
-    answers = {name: SHELL_HOST_ANSWERS[name].findall(done.stdout) for name in SHELL_HOST_VARIABLES}
-    if not all(answers.values()):
-        return None
-    if any(answers[name][-1] != os.environ.get(name, "") for name in SHELL_HOST_VARIABLES[1:]):
+    answers = {name: re.findall(rf"^GUARD-SHELL-{name}<([^<>\r\n]*)>$", done.stdout, re.MULTILINE)
+               for name in SHELL_HOST_VARIABLES}
+    if not all(answers.values()) or any(
+            answers[name][-1] != os.environ.get(name, "") for name in SHELL_HOST_VARIABLES[1:]):
         return None
     return answers["GH_HOST"][-1]
 
@@ -4230,28 +4194,23 @@ def shell_selected_host(deadline, child_timeout):
 def is_pull_request_document(document):
     """Whether `document` has the shape of a pull request that `is_own_open_pull_request` reads:
     a state, and a head and a base that each name a ref and a repository, the head a sha."""
-    if not isinstance(document, dict) or not isinstance(document.get("state"), str):
-        return False
-    for side, members in ((document.get("head"), ("sha", "ref")), (document.get("base"), ("ref",))):
-        if not isinstance(side, dict) or not isinstance(side.get("repo"), dict):
-            return False
-        if not isinstance(side["repo"].get("full_name"), str):
-            return False
-        if not all(isinstance(side.get(member), str) for member in members):
-            return False
-    return True
+    def named(side, *members):
+        return (isinstance(side, dict) and isinstance(side.get("repo"), dict)
+                and isinstance(side["repo"].get("full_name"), str)
+                and all(isinstance(side.get(member), str) for member in members))
+    return (isinstance(document, dict) and isinstance(document.get("state"), str)
+            and named(document.get("head"), "sha", "ref") and named(document.get("base"), "ref"))
 
 
-def pull_request_check_run(gh_bin, slug, run_id, row, deadline, child_timeout, memo=None):
+def pull_request_check_run(gh_bin, slug, run_id, row, deadline, child_timeout, memo):
     """Whether run `run_id` of `slug` is a pull request check run of its own open issue pull
-    request at that pull request's head whose failed job is a check the forge requires of
-    the row's integration branch. Any read that fails, or any other shape, is False. The
-    row's declared `required_checks` are never consulted. `memo`, a dict shared by the calls
-    of one command, holds each read once."""
+    request at that pull request's head whose failed job is a check the forge requires of the
+    row's integration branch. Any read that fails, or any other shape, is False. The row's
+    declared `required_checks` are never consulted. `memo`, a dict shared by the calls of one
+    command, holds each read once."""
     hook_host = os.environ.get("GH_HOST", "").strip().lower()
     if hook_host not in ("", "github.com"):
         return False
-    memo = {} if memo is None else memo
     if "shell host" not in memo:
         memo["shell host"] = shell_selected_host(deadline, child_timeout)
     if memo["shell host"] is None or memo["shell host"].strip().lower() != hook_host:
@@ -4432,8 +4391,8 @@ def production_problem_for(command, rows, cwd, git_bin, gh_bin, deadline, child_
     1375). When the whole command is the permit's own rerun form and the forge shows it to
     be a pull request check run (`pull_request_check_run`), the narrowed hits of each row that
     names the project are dropped, each row decided by its own integration branch. Each child
-    is bounded when it starts.
-    Inside a row the first rule in `changes` order that hits names the refusal.
+    is bounded when it starts. Inside a row the first rule in `changes` order that hits names
+    the refusal.
     """
     rules = {
         slug: row["production"] for slug, row in rows.items()
@@ -4444,11 +4403,10 @@ def production_problem_for(command, rows, cwd, git_bin, gh_bin, deadline, child_
     hits, certain = production_hits(command, rules)
     form = pull_request_rerun_form(command)
     if form is not None:
-        exempt = sorted(
-            hit for hit, (named, by_checkout) in hits.items()
-            if hit[0].lower() == form[0] and not by_checkout and named == frozenset({form[0]}))
         memo, verdicts = {}, {}
-        for hit in exempt:
+        for hit in sorted(
+                hit for hit, (named, by_checkout) in hits.items()
+                if hit[0].lower() == form[0] and not by_checkout and named == frozenset({form[0]})):
             if hit[0] not in verdicts:
                 verdicts[hit[0]] = pull_request_check_run(
                     gh_bin, hit[0], form[1], rows[hit[0]], deadline, child_timeout, memo)
