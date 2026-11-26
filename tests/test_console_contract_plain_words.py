@@ -4,6 +4,7 @@ Run: just agent-workflow-tests
 """
 import unittest
 
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures
 from .test_console_sprint_command import run_sprint
 
 TIER = "fast"
