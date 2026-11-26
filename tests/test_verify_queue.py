@@ -7,6 +7,7 @@ Run: just agent-workflow-tests
 
 import errno
 import fcntl
+import fnmatch
 import json
 import os
 import subprocess
@@ -18,9 +19,9 @@ from unittest import mock
 from agent_tools import canonical
 from agent_tools.delivery import verify_queue
 from agent_tools.delivery.verify_queue import (
-    Holder, RESUME_SECONDS, Waiter, admitted, clear_holder, group_lock_name, holder_counts, holders_text,
-    join, leave, lock_queue, open_shared, place, read_holders, record_holder, repository_lock_paths,
-    request_key, reserve, waiters)
+    Holder, LONG_LANE, RESUME_SECONDS, SHORT_LANE, TICKET, Waiter, admitted, clear_holder, group_lock_name,
+    holder_counts, holders_text, join, leave, lock_queue, open_shared, place, read_holders, record_holder,
+    repository_lock_paths, request_key, reserve, short_admitted, slot_files, slot_name, ticket_name, waiters)
 
 TIER = "fast"
 
@@ -53,6 +54,18 @@ class AdmissionTest(unittest.TestCase):
         ws = [W(1, False, "a"), W(2, False, "a"), W(3, False, "b")]
         self.assertEqual(admitted(ws, {}, free=2, repository_limit=2), [W(1, False, "a"), W(2, False, "a")])
         self.assertEqual(admitted(ws, {}, free=2, repository_limit=1), [W(1, False, "a"), W(3, False, "b")])
+
+    def test_the_short_lane_admits_the_first_free_waiters_whatever_their_repository(self):
+        ws = [W(1, False, "a"), W(2, False, "a"), W(3, False, "b")]
+        self.assertEqual(admitted(ws, {}, free=2, repository_limit=1), [W(1, False, "a"), W(3, False, "b")])
+        cases = [
+            (ws, 2, [W(1, False, "a"), W(2, False, "a")]),
+            ([W(1, False, "a"), W(2, True, "a")], 1, [W(2, True, "a")]),
+            ([W(1, False, "a")], 0, []),
+        ]
+        for waiting, free, expected in cases:
+            with self.subTest(free=free):
+                self.assertEqual(short_admitted(waiting, free), expected)
 
     def test_runs_outside_a_repository_are_never_held_back_by_each_other(self):
         with tempfile.TemporaryDirectory() as scratch:
@@ -325,6 +338,72 @@ class HolderFileTest(unittest.TestCase):
             open_shared(self.dir / "slot-0.lock")
         self.assertEqual(read_holders(self.dir), [Holder(None, "", known=False)])
         self.assertEqual(victim.read_text(), "victim-original")
+
+
+class LaneTest(unittest.TestCase):
+    def setUp(self):
+        scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        self.dir = Path(scratch.name)
+        self.opened = []
+        self.addCleanup(self.close_all)
+
+    def close_all(self):
+        for descriptor in self.opened:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+    def join(self, key, lane=LONG_LANE, now=0):
+        ticket = join(self.dir, key, False, "example/alpha", now, lane=lane)
+        self.opened.append(ticket.descriptor)
+        return ticket
+
+    def test_a_short_lane_ticket_and_holder_are_invisible_to_the_long_lane(self):
+        queue = lock_queue(self.dir)
+        self.opened.append(queue)
+        long_ticket = self.join("k1")
+        short_ticket = self.join("k2", SHORT_LANE)
+        slot = open_shared(self.dir / slot_name(SHORT_LANE, 0))
+        self.opened.append(slot)
+        fcntl.flock(slot, fcntl.LOCK_EX)
+        record_holder(slot, "example/alpha", "just lint")
+        long_waiters = waiters(self.dir, long_ticket, 0)
+        short_waiters = waiters(self.dir, short_ticket, 0)
+        self.assertEqual(short_ticket.path.name, "short-ticket-000000000001.lock")
+        self.assertEqual(long_ticket.path.name, "ticket-000000000001.lock")
+        self.assertEqual([(w.seq, w.key) for w in long_waiters], [(long_ticket.seq, "k1")])
+        self.assertEqual([w.key for w in short_waiters], ["k2"])
+        self.assertEqual(read_holders(self.dir), [])
+        self.assertEqual(read_holders(self.dir, SHORT_LANE), [Holder("example/alpha", "just lint")])
+        self.assertFalse(fnmatch.fnmatch(ticket_name(SHORT_LANE, 1), "ticket-*.lock"))
+        self.assertFalse(fnmatch.fnmatch(slot_name(SHORT_LANE, 0), "slot-*.lock"))
+
+    def test_each_lane_numbers_its_own_tickets(self):
+        (self.dir / "ticket-000000000007.lock").write_text("")
+        self.assertEqual(self.join("a", SHORT_LANE).seq, 1)
+        self.assertEqual(self.join("b", SHORT_LANE).seq, 2)
+        self.assertEqual(self.join("c").seq, 8)
+
+    def test_a_reserved_short_ticket_is_taken_back_by_the_same_key_in_its_lane_only(self):
+        short = self.join("k", SHORT_LANE)
+        reserve(short, 0)
+        self.assertEqual(self.join("k").path.name, "ticket-000000000001.lock")
+        again = self.join("k", SHORT_LANE)
+        self.assertEqual((again.seq, again.path), (short.seq, short.path))
+
+    def test_the_lane_names_are_the_long_names_and_prefixed_short_ones(self):
+        self.assertEqual(ticket_name(LONG_LANE, 3), "ticket-000000000003.lock")
+        self.assertEqual(ticket_name(LONG_LANE, 3), TICKET.format(seq=3))
+        self.assertEqual(ticket_name(SHORT_LANE, 3), "short-ticket-000000000003.lock")
+        self.assertEqual(slot_name(LONG_LANE, 0), "slot-0.lock")
+        self.assertEqual(slot_name(SHORT_LANE, 1), "short-slot-1.lock")
+        for name in ("short-slot-2.lock", "short-slot-0.lock", "slot-0.lock"):
+            (self.dir / name).write_text("")
+        self.assertEqual([path.name for path in slot_files(self.dir, SHORT_LANE)],
+                         ["short-slot-0.lock", "short-slot-2.lock"])
+        self.assertEqual([path.name for path in slot_files(self.dir)], ["slot-0.lock"])
 
 
 class RequestKeyTest(unittest.TestCase):
