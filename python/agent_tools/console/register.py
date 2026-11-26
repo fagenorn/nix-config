@@ -64,7 +64,7 @@ pure function of the document. `summary(root, plan, report=None, draft=None)` is
 `bootstrap` or `reconcile` plan carries its header's `plan_id` and `state`, its
 `plan_questions.questions`, and its answered decisions as `{id, subject, value}` (ADR-console-029
 D1) and the `draft` it was given (the drafted contract's fields, ADR-console-031); every other row
-carries `DEFAULTS` (None, None, `[]`, `[]`, None). `hooks_noted(payload, cancel=None)` puts one line first in the lines of a planned row whose checkout `contract_draft.hooks_missing` finds uninstalled devenv hooks, once, and returns every other payload as it is: `HOOKS_LINE` where Apply has a commit environment to install them in (a drafted contract, which is schema 3 and takes the platform's `commit-environment`; an amendment proposing one; otherwise the contract's own binding as `contract_draft.binds_environment` reads it, a schema-3 contract always binding one), `HOOKS_LEFT_LINE` where it has none (a contract that is not schema 3, binds none and gets none, or an unreadable one). A ready plan's note is `The plan
+carries `DEFAULTS` (None, None, `[]`, `[]`, None). `hooks_noted(payload, cancel=None)` puts lines first in the lines of a planned row whose checkout `contract_draft.hooks_missing` finds uninstalled devenv hooks, once (a row whose first line is one of `NOTED_LINES` is returned as it is), and returns every other payload as it is: for a drafted contract (a non-empty draft list that is not an amendment; always schema 3, whose commit environment is the platform's `commit-environment`) `contract_draft.DRAFTED_ENVIRONMENT_LINE` then `HOOKS_LINE`; otherwise one line, `HOOKS_LINE` where Apply has a commit environment to install them in (an amendment proposing one, or the contract's own binding as `contract_draft.binds_environment` reads it, a schema-3 contract always binding one), `HOOKS_LEFT_LINE` where it has none (a contract that is not schema 3, binds none and gets none, or an unreadable one). A ready plan's note is `The plan
 is ready.` with no command and no plan id (#1065; ADR-console-030 keeps it, the page offers Approve beside it). A `no_change` plan with no report is
 `not_registered` and says `waiting_headline(name)`, `<name> is already adopted and is not registered
 yet.`, with the note `CONFIRM_NOTE`, `Choose Register it to register it.` (#1078, ADR-console-034):
@@ -229,6 +229,7 @@ OUTCOME_TEXT = {
 }
 HOOKS_LINE = "installs its git hooks on this host (not installed now)"
 HOOKS_LEFT_LINE = "leaves its git hooks uninstalled on this host (no commit environment to install them in)"
+NOTED_LINES: tuple[str, ...] = (contract_draft.DRAFTED_ENVIRONMENT_LINE, HOOKS_LINE, HOOKS_LEFT_LINE)
 MEMBERS = {"by", "root", "project_id", "result", "outcome", "headline", "lines", "note"}
 EXTRA = {"plan_id", "state", "questions", "answered"}
 EXTENDED = MEMBERS | EXTRA | {"draft", "remote"}
@@ -578,24 +579,25 @@ def summary(root: str, plan: Mapping, report: Mapping | None = None,
 def hooks_noted(payload: dict | None, cancel: threading.Event | None = None) -> dict | None:
     if not isinstance(payload, dict) or payload.get("result") != "planned":
         return payload
-    if payload["lines"][:1] in ([HOOKS_LINE], [HOOKS_LEFT_LINE]):
+    if payload["lines"] and payload["lines"][0] in NOTED_LINES:
         return payload
     if not contract_draft.hooks_missing(payload["root"], cancel):
         return payload
-    line = HOOKS_LINE if _installs_hooks(payload["root"], payload.get("draft")) else HOOKS_LEFT_LINE
+    draft = payload.get("draft")
+    if isinstance(draft, list) and draft and not contract_draft.amends(draft):
+        return {**payload, "lines": [contract_draft.DRAFTED_ENVIRONMENT_LINE, HOOKS_LINE, *payload["lines"]]}
+    line = HOOKS_LINE if _installs_hooks(payload["root"], draft) else HOOKS_LEFT_LINE
     return {**payload, "lines": [line, *payload["lines"]]}
 
 
 def _installs_hooks(root: str, draft: object) -> bool:
     """Whether Apply has a commit environment to install the hooks in.
 
-    An amendment has the one it proposes or else the contract's own binding; a drafted contract (always schema 3)
-    has the platform's; with no draft it is the contract's own binding.
+    An amendment has the one it proposes or else the contract's own binding; with no draft it is the contract's
+    own binding. A drafted contract never reaches here: `hooks_noted` names its dev shell first.
     """
     if contract_draft.amends(draft):
         return contract_draft.environment(draft) is not None or contract_draft.binds_environment(root)
-    if isinstance(draft, list) and draft:
-        return True
     return contract_draft.binds_environment(root)
 
 

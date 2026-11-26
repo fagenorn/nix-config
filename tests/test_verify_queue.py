@@ -12,6 +12,7 @@ import json
 import os
 import subprocess
 import tempfile
+import tracemalloc
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -97,31 +98,49 @@ class HolderCountTest(unittest.TestCase):
 
     def test_an_unknown_holder_makes_the_repository_locks_count(self):
         unknown = [Holder(None, "", known=False)]
-        first = open_shared(repository_lock_paths(self.dir, "a", 1)[0])
+        first = open_shared(repository_lock_paths(self.dir, "a", 1, 1)[0])
         self.addCleanup(os.close, first)
         fcntl.flock(first, fcntl.LOCK_EX | fcntl.LOCK_NB)
         self.assertEqual(holder_counts(self.dir, unknown, ["a", "b"]), {"a": 1, "b": 0})
-        second = open_shared(repository_lock_paths(self.dir, "a", 2)[1])
+        second = open_shared(repository_lock_paths(self.dir, "a", 2, 2)[1])
         self.addCleanup(os.close, second)
         fcntl.flock(second, fcntl.LOCK_EX | fcntl.LOCK_NB)
         self.assertEqual(holder_counts(self.dir, unknown, ["a", "b"]), {"a": 2, "b": 0})
 
     def test_an_unknown_holder_counts_every_held_lock_of_its_repository_whatever_its_index(self):
         unknown = [Holder(None, "", known=False)]
-        for path in (repository_lock_paths(self.dir, "a", 4)[3], repository_lock_paths(self.dir, "b", 2)[1]):
+        for path in (repository_lock_paths(self.dir, "a", 4, 4)[3], repository_lock_paths(self.dir, "b", 2, 2)[1]):
             descriptor = open_shared(path)
             self.addCleanup(os.close, descriptor)
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        os.close(open_shared(repository_lock_paths(self.dir, "a", 2)[1]))
+        os.close(open_shared(repository_lock_paths(self.dir, "a", 2, 2)[1]))
         self.assertEqual(holder_counts(self.dir, unknown, ["a", "b", "c"]), {"a": 1, "b": 1, "c": 0})
         self.assertEqual(held_repository_locks(self.dir, "a"), 1)
 
     def test_the_repository_lock_names_start_with_the_existing_one(self):
-        paths = repository_lock_paths(self.dir, "o/r", 3)
+        paths = repository_lock_paths(self.dir, "o/r", 3, 3)
         existing = group_lock_name("o/r")
         digest = existing[len("repo-"):-len(".lock")]
         self.assertEqual([p.name for p in paths], [existing, f"repo-{digest}-1.lock", f"repo-{digest}-2.lock"])
-        self.assertEqual([p.name for p in repository_lock_paths(self.dir, "o/r", 1)], [existing])
+        self.assertEqual([p.name for p in repository_lock_paths(self.dir, "o/r", 1, 3)], [existing])
+
+    def test_a_limit_above_the_slot_count_builds_only_the_slot_counts_paths(self):
+        expected = repository_lock_paths(self.dir, "o/r", 4, 4)
+        paths = repository_lock_paths(self.dir, "o/r", 50, 4)
+        self.assertEqual(paths, expected)
+        self.assertEqual(len(paths), 4)
+
+    def test_a_limit_far_above_the_slot_count_stays_under_100_megabytes(self):
+        # An unclamped 1_000_000 paths traces about 250 MB, so a missing clamp fails here at a
+        # size that still fits in 1 GiB; the bound is AC1's 100 MB (decimal), not 100 MiB.
+        tracemalloc.start()
+        try:
+            paths = repository_lock_paths(self.dir, "o/r", 1_000_000, 4)
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        self.assertEqual(len(paths), 4)
+        self.assertLess(peak, 100_000_000)
 
     def test_the_holders_are_described_in_plain_words(self):
         self.assertEqual(holders_text([]), "nothing")
