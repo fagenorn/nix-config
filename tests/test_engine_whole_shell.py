@@ -58,10 +58,8 @@ def _rule_matches(pattern: str, command: str) -> bool:
 def client_admits(command: str, allowed: list[str], denied: list[str]) -> bool:
     """Whether the client runs the single `command` under these `--allowedTools`/`--disallowedTools` words.
 
-    This models the documented wildcard forms of https://code.claude.com/docs/en/permissions (`*` matches
-    any run of characters, `:*` is the legacy prefix form, a deny rule is checked before an allow rule);
-    the pinned client itself is not run in CI.
-    """
+    Models the wildcard forms of https://code.claude.com/docs/en/permissions (`*` matches any run of
+    characters, `:*` is the legacy prefix form, a deny rule is checked before an allow rule); CI runs no client."""
     def bash_rules(rules: list[str]) -> list[str]:
         return [rule[len("Bash("):-1] for rule in rules if rule.startswith("Bash(") and rule.endswith(")")]
 
