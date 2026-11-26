@@ -845,18 +845,9 @@ def check_never_rise(context: "Context") -> "Outcome":
 
 
 def check_shipped_procedures(context: "Context") -> "Outcome":
-    """Contract: every procedure file the platform ships passes the verdict
-    `engine check` gives, against the judged project's commands.
+    """Contract: every shipped procedure file passes `engine check`'s verdict against the project's commands.
 
-    The set is found by listing `SHIPPED_PROCEDURES` when the check runs, so a
-    new file is judged with no list edited. The declarations are the judged
-    project's, the table `engine deliver` accepts: the platform's commands
-    and every command the contract declares. The verdict is
-    `engine_caps.verdict`, the function `engine check` calls. Any refusal
-    fails as `procedure_refused` (breaches are listed beside it), breaches
-    alone as `procedure_cap_exceeded`, and a check that cannot run as
-    `procedure_check_unusable`, never a refusal of the run. It starts no
-    process and opens no socket.
+    The set is found by listing, so a new file needs no list edit; it starts no process and opens no socket.
     """
     repair = "procedures.engine_check.repair"
     try:

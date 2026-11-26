@@ -86,6 +86,19 @@ class StartCheckTest(unittest.TestCase):
         self.assertEqual(listing(root), before)
         self.assertFalse(project.record.exists())
 
+    def test_a_set_with_no_entry_file_is_refused_by_the_verdict_not_on_stderr(self):
+        project = EngineProject(self)
+        procedures = project.procedures([step("a", "standin-record", "done")])
+        (procedures / "deliver.json").rename(procedures / "deliver_old.json")
+        done = project.deliver(procedures)
+        self.assertEqual(done.returncode, 2, done.stdout + done.stderr)
+        self.assertEqual(done.stderr, "")
+        self.assertEqual(len(done.stdout.splitlines()), 1)
+        self.assertIn(("invalid_field", "deliver_old"),
+                      [(r["defect"], r["procedure"]) for r in json.loads(done.stdout)["refusals"]])
+        self.assertEqual(project.runs(), [])
+        self.assertFalse(project.record.exists())
+
     def test_a_continued_run_is_not_judged_again_against_a_refused_procedure_set(self):
         project = EngineProject(self)
         first = project.deliver(project.procedures([step("a", "standin-fail", "done")]))

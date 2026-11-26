@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import contextlib
+import inspect
 import io
 import json
 import shutil
 import unittest
 from pathlib import Path
 
-from agent_tools.delivery import engine
+from agent_tools.delivery import comment_lint, engine
+from agent_tools.delivery.never_rise import Snapshot
 from agent_tools.project_contract import conformance_checks
 
 from .conformance_test_support import (
@@ -197,3 +199,14 @@ class ShippedProceduresCheckTest(PlatformHome, Rebinding, ReportAssertions, unit
                          engine.PROCEDURES_DIR.resolve())
         self.assertEqual(conformance_checks.DELIVERY_PACKAGE.resolve(),
                          engine.ENGINE_DIR.resolve())
+
+    def test_the_check_adds_no_comment_rule_violation_over_the_base(self):
+        path = conformance_checks.__file__
+        data = Path(path).read_bytes()
+        snapshot = Snapshot("working", {}, contents={"checks.py": data})
+        lines, start = inspect.getsourcelines(
+            conformance_checks.check_shipped_procedures)
+        span = range(start, start + len(lines))
+        found = [v for enforcer in comment_lint.enforcers(None)
+                 for v in enforcer.find(snapshot) if v.line in span]
+        self.assertEqual(found, [])

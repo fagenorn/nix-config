@@ -384,21 +384,23 @@ def check_declarations() -> dict[str, procedure_check.CommandDeclaration | None]
 
 def _validate(directory: Path, table: CommandTable, caps: bool = False) -> dict:
     """The entry procedure of `directory`, checked and runnable, or `Refused`; `caps` adds the size caps."""
-    if not directory.is_dir() or not (directory / f"{ENTRY}.json").is_file():
-        raise Refused(f"no {ENTRY}.json in the procedures directory {directory}")
+    absent = (None if (directory / f"{ENTRY}.json").is_file()
+              else Refused(f"no {ENTRY}.json in the procedures directory {directory}"))
     try:
         if caps:
             result, breaches = engine_caps.verdict(PACKAGE_DIR, directory, table.declarations())
         else:
             result, breaches = procedure_check.check_directory(directory, table.declarations()), ()
     except (ValueError, OSError) as error:
-        raise Refused(str(error)) from error
+        raise (absent or Refused(str(error))) from error
     if result.refusals or breaches:
         first = (result.refusals or breaches)[0]
         raise ProcedureRefused(
             f"procedure {first.procedure}, step {first.step}: {first.defect}, {first.detail}"
             if result.refusals else f"{first.thing} is {first.size} {first.unit}, over its cap of {first.cap}",
             result.refusals, tuple(breaches))
+    if absent:
+        raise absent
     try:
         procedure = _load(directory / f"{ENTRY}.json")
     except (ValueError, OSError) as error:
