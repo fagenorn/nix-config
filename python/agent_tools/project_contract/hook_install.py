@@ -60,9 +60,10 @@ MASK: dict[str, str] = {"GIT_CONFIG_GLOBAL": os.devnull}
 INSTALL_COMMAND: tuple[str, ...] = ("true",)
 TEXT_LIMIT: int = 1 << 20
 
-TOKEN = re.compile(r"""[\w'-]+|"_*"|==|[{}()\[\];=:@.?,]|\S""")
+TOKEN = re.compile(r"""[\w'-]+|"[\w'-]*"|==|[{}()\[\];=:@.?,]|\S""")
 OPENERS, CLOSERS = "({[", ")}]"
-NAME = re.compile(r"""[\w'-]+|"_*\"""")
+NAME = re.compile(r"""[\w'-]+|"[\w'-]*\"""")
+NAME_TEXT = re.compile(r"[\w'-]*")
 MODULE_LEAD = (None, ":", "@", "in", "rec", ";")
 HOOKS_PATH = "core.hooksPath"
 ROOTS = ("git-hooks", "pre-commit")
@@ -83,30 +84,35 @@ def left_alone(local_hooks_path: str | None, hooks_dir: Path) -> bool:
 
 
 def _code(text: str) -> str:
-    """`text` with each comment a space and each string literal's inside `_` characters.
+    """`text` with each comment a space and each string literal one token of `_` characters.
 
-    Nix strings (`"..."` and `''...''`, with `${...}`) are strings, so a `/*` or a `#`
-    inside one starts no comment and a setting named inside one is no setting.
+    A `/*` or a `#` inside a Nix string starts no comment and a setting named inside one is
+    no setting. Only a `"..."` of name characters keeps its text, so a quoted name reads.
     """
     out: list[str] = []
     strings: list[tuple[str, int]] = []  # (opening quote, brace depth of the code around it)
     in_string, depth, i, n = False, 0, 0, len(text)
+    mark = begin = 0  # where the outermost string's contents start in `out` and in `text`
     while i < n:
         char = text[i]
         if not in_string:
             if char == "#":
                 end = text.find("\n", i)
                 i = n if end < 0 else end
-                out.append(" ")
+                out.append("_" if strings else " ")
             elif text.startswith("/*", i):
                 end = text.find("*/", i + 2)
                 i = n if end < 0 else end + 2
-                out.append(" ")
+                out.append("_" if strings else " ")
             elif char == '"' or text.startswith("''", i):
                 quote = '"' if char == '"' else "''"
+                if not strings:
+                    out.append(quote)
+                    mark, begin = len(out), i + len(quote)
+                else:
+                    out.append("_")
                 strings.append((quote, depth))
                 in_string, depth = True, 0
-                out.append(quote)
                 i += len(quote)
             else:
                 if char == "{":
@@ -117,7 +123,7 @@ def _code(text: str) -> str:
                     continue
                 elif char == "}":
                     depth = max(depth - 1, 0)
-                out.append(char)
+                out.append("_" if strings else char)
                 i += 1
             continue
         quote = strings[-1][0]
@@ -130,17 +136,22 @@ def _code(text: str) -> str:
             i += 2
         elif quote == '"' and char == '"':
             in_string, depth = False, strings.pop()[1]
-            out.append('"')
+            if strings:
+                out.append("_")
+            else:
+                if NAME_TEXT.fullmatch(text, begin, i):
+                    out[mark:] = [text[begin:i]]
+                out.append('"')
             i += 1
         elif quote != '"' and text.startswith(("'''", "''$", "''\\"), i):
             out.append("___")
             i += 3
         elif quote != '"' and text.startswith("''", i):
             in_string, depth = False, strings.pop()[1]
-            out.append("''")
+            out.append("_" if strings else "''")
             i += 2
         else:
-            out.append("_" if char != "\n" else "\n")
+            out.append("_")
             i += 1
     return "".join(out)
 
@@ -190,11 +201,23 @@ def _let_end(tokens: list[str], pos: int) -> int:
     return len(tokens)
 
 
+def _closers(tokens: list[str]) -> list[int]:
+    """For each opening bracket in `tokens`, the index of its closer (`len(tokens)` when unclosed)."""
+    closers = [len(tokens)] * len(tokens)
+    opened: list[int] = []
+    for i, token in enumerate(tokens):
+        if token in OPENERS:
+            opened.append(i)
+        elif token in CLOSERS and opened:
+            closers[opened.pop()] = i
+    return closers
+
+
 def _path(tokens: list[str], pos: int) -> tuple[tuple[str, ...], int]:
     """The dotted attribute path at `pos` (empty when there is none) and the index after it."""
     names: list[str] = []
     while pos < len(tokens) and NAME.fullmatch(tokens[pos]):
-        names.append(tokens[pos])
+        names.append(tokens[pos].strip('"') if tokens[pos][0] == '"' else tokens[pos])
         pos += 1
         if pos < len(tokens) and tokens[pos] == ".":
             pos += 1
@@ -220,6 +243,7 @@ def declares_hooks(text: str) -> bool:
     tokens = TOKEN.findall(_code(text))
     n, i = len(tokens), 0
     sets: list[tuple[str, ...]] = []  # the attribute path of each open set
+    closers: list[int] | None = None  # `_closers`, read once when a set is first assigned
     previous: str | None = None
     while i < n:
         token = tokens[i]
@@ -246,9 +270,11 @@ def declares_hooks(text: str) -> bool:
             if len(path) > DEEPEST:
                 path = BEYOND  # no switch lies below it, and a nested set stores no ancestor copy
             if tokens[value:value + 1] == ["{"]:
-                sets.append(path)
-                i = value + 1
-                continue
+                closers = closers or _closers(tokens)
+                if tokens[closers[value] + 1:closers[value] + 2] == [";"]:
+                    sets.append(path)  # the set is the whole value; `// { ... }` or `.x` would change it
+                    i = value + 1
+                    continue
             if tokens[value:value + 2] == ["true", ";"] and _switch(path):
                 return True
         start = i

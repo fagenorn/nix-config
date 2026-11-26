@@ -292,7 +292,13 @@ class HookInstallRuleTest(unittest.TestCase):
                      "git-hooks.hooks.x.enable = true; }",
                      "{ pkgs ? { }, ... }: { packages = [ { } ]; git-hooks.hooks.x.enable = true; }",
                      "{ pkgs, ... }: rec { git-hooks.hooks.x.enable = true; }",
-                     "{ lib, ... }@args: with lib; { git-hooks.hooks.x.enable = true; }"):
+                     "{ lib, ... }@args: with lib; { git-hooks.hooks.x.enable = true; }",
+                     '{ git-hooks.hooks.shellcheck."enable" = true; }',
+                     '{ "git-hooks".hooks."x"."enable" = true; }',
+                     '{ git-hooks = { "hooks"."x" = { "enable" = true; }; }; }',
+                     '{ env.MSG = "${let a = 1; git-hooks.hooks.x.enable = true; in a}"; '
+                     "git-hooks.hooks.y.enable = true; }",
+                     "{ git-hooks.hooks.x = { enable = true; }; env.A = { } // { }; }"):
             self.assertTrue(hook_install.declares_hooks(text), text)
         for text in ("# git-hooks.hooks.x", 'scripts.a.exec = "pre-commit run";', "{ }", "",
                      "git-hooks = {", "pre-commit.hooks.y.enable = true;",
@@ -324,32 +330,40 @@ class HookInstallRuleTest(unittest.TestCase):
                      "{ pkgs, ... }: { outputs = { inherit (pkgs) pre-commit; }; }",
                      "/* git-hooks.hooks.x.enable = true; */ { }",
                      '{ s = "git-hooks.hooks.x.enable = true;"; t = "/*"; } /* c */',
-                     "{ s = ''\n  git-hooks.hooks.x.enable = true;\n''; }"):
+                     "{ s = ''\n  git-hooks.hooks.x.enable = true;\n''; }",
+                     "{ git-hooks.hooks.shellcheck = { enable = true; } // { enable = false; }; }",
+                     "{ git-hooks.hooks.x = { enable = true; }.enable; }",
+                     "{ git-hooks = { hooks.x = { enable = true; } // { }; }; }",
+                     '{ git-hooks."hooks.x".enable = true; }',
+                     '{ env.MSG = "${let a = 1; git-hooks.hooks.x.enable = true; in "ok"}"; }',
+                     "{ env.MSG = ''${let a = 1; git-hooks.hooks.x.enable = true; in a}''; }"):
             self.assertFalse(hook_install.declares_hooks(text), text)
 
     def test_declares_hooks_reads_deeply_nested_attribute_sets_in_linear_time(self):
         off = " git-hooks.hooks.x.enable = false;"
         enabled = " git-hooks.hooks.x.enable = true;"
-        for size in (80_000, 1 << 20):
-            depth = size // len("a = { ")
+        for depth in (5_000, MEMORY_DEPTH):
             nest = "a = { " * depth + "}; " * depth
             for text, expected in (
                     ("{ pkgs, ... }: {" + off + " " + nest + " }", False),
                     ("{ pkgs, ... }: {" + off + " " + nest + enabled + " }", True)):
+                self.assertLessEqual(len(text), hook_install.TEXT_LIMIT)
                 started = time.monotonic()
                 self.assertEqual(hook_install.declares_hooks(text), expected)
-                self.assertLess(time.monotonic() - started, 1.0, size)
+                self.assertLess(time.monotonic() - started, 1.0, depth)
 
     def test_declares_hooks_reads_generated_nested_text_in_linear_time(self):
         enabled = " git-hooks.hooks.x.enable = true;"
         off = " git-hooks.hooks.x.enable = false;"
-        for size in (80_000, 1 << 20):
+        for size in (80_000, hook_install.TEXT_LIMIT - 1_000):
+            levels = min(size // 2, MEMORY_DEPTH)
             for body in ("{ } ", "[ ] ", "( ) ", "{ a = [ { } ]; } "):
                 filler = body * (size // len(body))
                 for text, expected in (
                         ("{ pkgs, ... }: { packages = [ " + filler + "];" + off + " }", False),
                         ("{ pkgs, ... }: {" + off + " packages = [ " + filler + "];" + enabled + " }", True),
-                        ("{ pkgs, ... }: { x = " + "[ " * (size // 2) + "]; " + off + " }", False)):
+                        ("{ pkgs, ... }: { x = " + "[ " * levels + "]; " + off + " }", False)):
+                    self.assertLessEqual(len(text), hook_install.TEXT_LIMIT, (size, body))
                     started = time.monotonic()
                     self.assertEqual(hook_install.declares_hooks(text), expected)
                     self.assertLess(time.monotonic() - started, 1.0, (size, body))
