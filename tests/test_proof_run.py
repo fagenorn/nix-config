@@ -86,8 +86,10 @@ def records_of(run: StubbedRun) -> dict[str, Path]:
             "lock": state / "proof-run.lock"}
 
 
-def proves(run: StubbedRun, fake, revision: str, mode: str, engine=ENGINE, env=None, tip=None):
-    return proof_run.prove(tip or (lambda: revision), mode=mode, root=run.fixture.root,
+def proves(run: StubbedRun, fake, revision: str, mode: str, engine=ENGINE, env=None, tip=None,
+           root=None):
+    return proof_run.prove(tip or (lambda: revision), mode=mode,
+                           root=root or (lambda: run.fixture.root),
                            slug=run.fixture.slug, branch="main", tracker=fake,
                            engine=lambda _revision: engine, env=run.env if env is None else env,
                            **records_of(run))
@@ -269,6 +271,40 @@ class ProveTest(unittest.TestCase):
         self.assertEqual((ended["code"], ended["end"], ended["run"], ended["issue"]), (2, None, None, None))
         self.assertIsNone(read(records_of(run)["proven"]))
 
+    def test_a_tip_that_cannot_be_read_is_recorded_as_a_failed_attempt(self):
+        run = stubbed(self)
+        failure = forge_api.ForgeError("gh_failed", "no tip")
+
+        def tip() -> str:
+            raise failure
+
+        fake = FakeFixture()
+        with self.assertRaises(forge_api.ForgeError):
+            proves(run, fake, SHA_B, "daily", tip=tip)
+
+        started, ended = lines(records_of(run)["attempts"])
+        self.assertEqual((started["event"], started["mode"], started["project"], started["revision"]),
+                         ("started", "daily", run.fixture.slug, None))
+        self.assertEqual((ended["event"], ended["attempt"], ended["code"], ended["end"], ended["run"],
+                          ended["issue"]), ("ended", started["attempt"], 2, None, None, None))
+        self.assertEqual(fake.calls, [])
+        self.assertIsNone(read(records_of(run)["proven"]))
+
+    def test_a_registered_checkout_that_cannot_be_resolved_is_recorded_as_a_failed_attempt(self):
+        run = stubbed(self)
+
+        def root() -> Path:
+            raise cleanup_issue.Refusal("no registered checkout")
+
+        fake = FakeFixture()
+        with self.assertRaises(cleanup_issue.Refusal):
+            proves(run, fake, SHA_B, "daily", root=root)
+
+        started, ended = lines(records_of(run)["attempts"])
+        self.assertEqual((started["revision"], ended["attempt"], ended["code"], ended["issue"]),
+                         (SHA_B, started["attempt"], 2, None))
+        self.assertEqual(fake.calls, [])
+
     def test_inherited_repository_selectors_never_reach_the_engine(self):
         run = stubbed(self)
         other = another_checkout(run)
@@ -370,7 +406,18 @@ class AdapterTest(unittest.TestCase):
 
         query, variables = graphql.call_args.args
         self.assertIn("issue(number: 7)", query)
-        self.assertEqual(variables, {"owner": "o", "name": "f", "after": None})
+        self.assertEqual(variables, {"owner": "o", "name": "f"})
+
+    def test_the_first_page_sends_no_cursor_through_gh_and_the_next_sends_the_returned_one(self):
+        first = [{"number": n, "state": "CLOSED", "repository": {"nameWithOwner": "o/f"}}
+                 for n in range(1, 51)]
+        answers = [json.dumps(self.page(first, "c1")), json.dumps(self.page([], None))]
+        with mock.patch.object(forge_api, "run_gh", side_effect=[(0, a) for a in answers]) as gh:
+            proof_run.GitHubFixture("o/f").pulls_closing([7])
+
+        sent = [[arg for arg in call.args[0] if arg.startswith(("owner=", "name=", "after="))]
+                for call in gh.call_args_list]
+        self.assertEqual(sent, [["owner=o", "name=f"], ["owner=o", "name=f", "after=c1"]])
 
     @staticmethod
     def page(nodes: list, cursor: str | None, *, state: str | None = None) -> dict:
@@ -389,7 +436,7 @@ class AdapterTest(unittest.TestCase):
         with mock.patch.object(forge_api, "graphql", side_effect=answers) as graphql:
             self.assertEqual(proof_run.GitHubFixture("o/f").pulls_closing([7]), [99])
 
-        self.assertEqual([call.args[1]["after"] for call in graphql.call_args_list], [None, "c1"])
+        self.assertEqual([call.args[1].get("after") for call in graphql.call_args_list], [None, "c1"])
 
     def test_the_merged_pull_on_a_later_page_is_found(self):
         first = [{"number": n, "merged": False, "repository": {"nameWithOwner": "o/f"}}
@@ -532,9 +579,10 @@ class ObservedTest(unittest.TestCase):
         self.history = proof_run.engine_housekeeping.history_path()
         self.attempts.parent.mkdir(parents=True)
 
-    def started(self, attempt, *, mode="daily", at="2026-01-01T06:00:00Z", project=None):
+    def started(self, attempt, *, mode="daily", at="2026-01-01T06:00:00Z", project=None,
+                revision=SHA_A):
         self.append(self.attempts, {"format": 1, "attempt": attempt, "event": "started", "mode": mode,
-                                    "project": project or self.FIXTURE, "revision": SHA_A, "at": at})
+                                    "project": project or self.FIXTURE, "revision": revision, "at": at})
 
     def ended(self, attempt, *, code=0, end="done", run="root-run", at="2026-01-01T06:30:00Z",
               issue=41):
@@ -605,6 +653,36 @@ class ObservedTest(unittest.TestCase):
         code, line, _ = self.observe(merged=True)
 
         self.assertEqual((code, line["state"]), (1, "not_met"))
+
+    def test_an_attempt_that_ended_before_activation_is_not_the_first_scheduled_one(self):
+        self.started("d0", at="2025-12-30T06:00:00Z")
+        self.ended("d0", at="2025-12-30T06:30:00Z")
+        self.line("root-run")
+
+        code, line, _ = self.observe(merged=True, activated="2026-01-03T00:00:00Z")
+
+        self.assertEqual((code, line["state"], line["attempt"]), (75, "not_yet", None))
+
+    def test_the_first_attempt_is_the_first_one_at_or_after_activation(self):
+        self.started("d0", at="2025-12-31T06:00:00Z")
+        self.ended("d0", at="2025-12-31T06:30:00Z")
+        self.started("d1", at="2026-01-03T00:00:00Z")
+        self.ended("d1", code=3, end="stopped", at="2026-01-03T00:30:00Z")
+
+        code, line, _ = self.observe(merged=True, activated="2026-01-03T00:00:00Z")
+
+        self.assertEqual((code, line["state"], line["attempt"]), (1, "not_met", "d1"))
+
+    def test_a_first_attempt_that_failed_before_a_revision_was_known_is_not_met_whatever_follows(self):
+        self.started("d1", revision=None)
+        self.ended("d1", code=2, end=None, run=None, issue=None)
+        self.started("d2", at="2026-01-02T06:00:00Z")
+        self.ended("d2", run="root-2", at="2026-01-02T06:30:00Z", issue=42)
+        self.line("root-2", issue=42)
+
+        code, line, _ = self.observe(merged=True)
+
+        self.assertEqual((code, line["state"], line["attempt"]), (1, "not_met", "d1"))
 
     def test_the_observer_needs_a_valid_activation_time(self):
         self.started("d1")

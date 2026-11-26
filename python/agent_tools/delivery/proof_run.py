@@ -27,14 +27,16 @@ is closed (its branch deleted), each open marked issue by a trusted author is cl
 planned, and the checkout is fetched, hard-reset to `origin/<branch>`, cleaned and its worktrees
 pruned, each of which must exit 0.
 
-The attempt record. Once the revision is known and before the fixture is touched, one line
-`{"format": 1, "attempt": <uuid4 hex>, "event": "started", "mode", "project", "revision", "at"}`;
-after the engine exits, one line `{"format": 1, "attempt", "event": "ended", "code", "end", "run",
-"issue", "at"}`. `end` and `run` come from the engine's one result line on stdout and are `null`
-when stdout is not exactly one JSON object line. A setup that raises (the checkout check, a forge
-or git call of the reset, the issue's creation) still ends the attempt, with `code` 2 and `end`,
-`run` and `issue` `null`, before the error goes on, so a failed first scheduled attempt is never
-replaced by a later one.
+The attempt record. Once the lock is held and the branch tip is read, and before the registered
+checkout is resolved or the fixture is touched, one line
+`{"format": 1, "attempt": <uuid4 hex>, "event": "started", "mode", "project", "revision", "at"}`
+(none when the daily revision is `unmoved`); after the engine exits, one line `{"format": 1,
+"attempt", "event": "ended", "code", "end", "run", "issue", "at"}`. `end` and `run` come from the
+engine's one result line on stdout and are `null` when stdout is not exactly one JSON object line. A
+step that raises before the engine starts (the tip read, which records `started` with `revision`
+`null` first; the registered checkout; the checkout check, a forge or git call of the reset, the
+issue's creation) still ends the attempt, with `code` 2 and `end`, `run` and `issue` `null`, before
+the error goes on, so a failed first scheduled attempt is never replaced by a later one.
 
 The proven record. A line `{"format": 1, "issue", "project", "proven", "revision", "run"}` is
 appended only when the engine exits 0 and its result line has `end == "done"`. Any other exit (3 a
@@ -56,13 +58,12 @@ after the run's own effects (a proven line stays).
 
 `proof-run observed --fixture <o/n> --activated <RFC 3339 UTC time>` reads, and writes nothing;
 `--activated` is when the daemon was activated and is required. The attempt is the first `started`
-line of the attempt record with `mode` `daily` and `project` the fixture (a `now` attempt never
-counts). It prints one compact sorted-key line `{"attempt", "end", "issue", "run", "state"}` (the
-issue is the attempt's `ended` line's, `null` while it runs) and
-exits 75 for `not_yet` (no such attempt) or `running` (no `ended` line for it), 1 for `not_met`
-(its `ended` has `code` other than 0 or `end` other than `done`, or ended more than three days after
-`--activated`, or the
-engine history has no line with the attempt's root `run`, the fixture, `end` `done` and the
+line of the attempt record with `mode` `daily`, `project` the fixture and `at` at or after
+`--activated` (a `now` attempt, or one that started earlier, never counts). It prints one compact
+sorted-key line `{"attempt", "end", "issue", "run", "state"}` (the issue is the attempt's `ended`
+line's, `null` while it runs) and exits 75 for `not_yet` (no such attempt) or `running` (no `ended`
+line for it), 1 for `not_met` (its `ended` has `code` other than 0 or `end` other than `done`, or
+ended more than three days after `--activated`, or the engine history has no line with the attempt's root `run`, the fixture, `end` `done` and the
 attempt's issue, or no merged pull request of the fixture closes the issue), 0 for `met`, and 2 with
 `proof-run: <reason>` on stderr for a `ForgeError`.
 """
@@ -160,7 +161,9 @@ def _closing_nodes(slug: str, issue: int, *, closed: bool) -> tuple[str | None, 
     found_nodes: list[dict] = []
     while True:
         cursors.add(after)
-        answer = forge_api.graphql(query, {"owner": owner, "name": name, "after": after})
+        # `forge_api.graphql` sends every variable as text, so the first page leaves `after` out.
+        variables = {"owner": owner, "name": name, **({} if after is None else {"after": after})}
+        answer = forge_api.graphql(query, variables)
         data = answer.get("data") if isinstance(answer, dict) else None
         repository = data.get("repository") if isinstance(data, dict) else None
         found = repository.get("issue") if isinstance(repository, dict) else None
@@ -344,15 +347,26 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def prove(tip: Callable[[], str], *, mode: str, root: Path, slug: str, branch: str,
+def prove(tip: Callable[[], str], *, mode: str, root: Callable[[], Path], slug: str, branch: str,
           tracker: FixtureTracker, engine: Callable[[str], Sequence[str]], proven: Path,
           attempts: Path, lock: Path, env: Mapping[str, str] | None = None,
           now: Callable[[], datetime] = _utc_now) -> Outcome:
     """One attempt on the revision `tip()` names: the lock, the tip, the unmoved check, the reset, the engine.
 
     The tip is read once the lock is held, so the revision proven is the tip at the time the operation
-    ran and never one an earlier caller read before another caller proved a newer one.
+    ran and never one an earlier caller read before another caller proved a newer one. `root()` names
+    the fixture's checkout, read after the attempt is recorded. A tip that cannot be read records the
+    attempt as started (revision `None`) and ended (code 2) before the error goes on; a revision found
+    unmoved records no attempt.
     """
+    def note(attempt: str, event: str, **fields: object) -> None:
+        engine_housekeeping.append_history(
+            {"format": FORMAT, "attempt": attempt, "event": event, **fields, "at": _stamp(now())},
+            attempts)
+
+    def failed(attempt: str) -> None:
+        note(attempt, "ended", code=EXIT_USAGE, end=None, run=None, issue=None)
+
     engine_ledger.make_root(Path(lock).parent)
     descriptor = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
     try:
@@ -360,22 +374,24 @@ def prove(tip: Callable[[], str], *, mode: str, root: Path, slug: str, branch: s
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             return Outcome("busy", None, None, None, None, None)
-        revision = tip()
+        attempt = uuid.uuid4().hex
+        try:
+            revision = tip()
+        except Exception:
+            note(attempt, "started", mode=mode, project=slug, revision=None)
+            failed(attempt)
+            raise
         if mode == "daily" and latest_proven(proven) == revision:
             return Outcome("unmoved", revision, None, None, None, None)
-        attempt = uuid.uuid4().hex
-        engine_housekeeping.append_history(
-            {"format": FORMAT, "attempt": attempt, "event": "started", "mode": mode,
-             "project": slug, "revision": revision, "at": _stamp(now())}, attempts)
+        note(attempt, "started", mode=mode, project=slug, revision=revision)
         try:
-            issue = reset_fixture(root, slug=slug, branch=branch, tracker=tracker, env=env)
+            checkout = Path(root())
+            issue = reset_fixture(checkout, slug=slug, branch=branch, tracker=tracker, env=env)
         except Exception:
-            engine_housekeeping.append_history(
-                {"format": FORMAT, "attempt": attempt, "event": "ended", "code": EXIT_USAGE, "end": None,
-                 "run": None, "issue": None, "at": _stamp(now())}, attempts)
+            failed(attempt)
             raise
         try:
-            done = subprocess.run([*engine(revision), "deliver", str(issue)], cwd=root,
+            done = subprocess.run([*engine(revision), "deliver", str(issue)], cwd=checkout,
                                   env=_without_selectors(env), stdout=subprocess.PIPE,
                                   text=True, stdin=subprocess.DEVNULL)
             code, stdout = done.returncode, done.stdout
@@ -384,9 +400,7 @@ def prove(tip: Callable[[], str], *, mode: str, root: Path, slug: str, branch: s
             code, stdout = 1, ""
         result = _result_line(stdout)
         end, run = _string(result, "end"), _string(result, "run")
-        engine_housekeeping.append_history(
-            {"format": FORMAT, "attempt": attempt, "event": "ended", "code": code, "end": end,
-             "run": run, "issue": issue, "at": _stamp(now())}, attempts)
+        note(attempt, "ended", code=code, end=end, run=run, issue=issue)
         if code == 0 and end == "done":
             engine_housekeeping.append_history(
                 {"format": FORMAT, "issue": issue, "project": slug, "proven": _stamp(now()),
@@ -433,16 +447,23 @@ def _seconds_between(start: object, end: object) -> float | None:
         return None
 
 
+def _after(start: object, end: object) -> bool:
+    """Whether `end` is a time at or after `start`."""
+    seconds = _seconds_between(start, end)
+    return seconds is not None and seconds >= 0
+
+
 def observe(fixture: str, *, activated: str, attempts: Path, history: Path,
             tracker: FixtureTracker) -> tuple[int, dict]:
     """The exit code and result line of the first scheduled (`daily`) attempt on `fixture`; reads only.
 
-    `activated` is the RFC 3339 UTC time the daemon was activated; the attempt must end within
-    `OBSERVE_SECONDS` of it.
+    `activated` is the RFC 3339 UTC time the daemon was activated; the attempt is the first one that
+    started at or after it, and it must end within `OBSERVE_SECONDS` of it.
     """
     first = next((line for line in _json_lines(attempts)
                   if line.get("format") == FORMAT and line.get("event") == "started"
-                  and line.get("mode") == "daily" and line.get("project") == fixture), None)
+                  and line.get("mode") == "daily" and line.get("project") == fixture
+                  and _after(activated, line.get("at"))), None)
     if first is None:
         return EXIT_NOT_YET, {"attempt": None, "end": None, "issue": None, "run": None,
                               "state": "not_yet"}
@@ -456,7 +477,8 @@ def observe(fixture: str, *, activated: str, attempts: Path, history: Path,
     end, run, issue = ended.get("end"), ended.get("run"), ended.get("issue")
     line = {"attempt": attempt, "end": end, "issue": issue, "run": run}
     took = _seconds_between(activated, ended.get("at"))
-    met = (ended.get("code") == 0 and end == "done" and took is not None and took <= OBSERVE_SECONDS
+    met = (ended.get("code") == 0 and end == "done" and took is not None
+           and 0 <= took <= OBSERVE_SECONDS
            and isinstance(run, str) and isinstance(issue, int) and not isinstance(issue, bool)
            and any(entry.get("run") == run and entry.get("project") == fixture
                    and entry.get("end") == "done" and entry.get("issue") == issue
@@ -484,9 +506,9 @@ def _prove(args: argparse.Namespace) -> Outcome:
     for slug in (args.platform_repo, args.fixture):
         if not cleanup_issue.SLUG.fullmatch(slug):
             raise Refusal(f"not <owner>/<name>: {slug}")
-    root = Path(cleanup_issue.registered_root(args.fixture))
     return prove(
-        lambda: main_revision(args.platform_repo, args.branch), mode=args.mode, root=root,
+        lambda: main_revision(args.platform_repo, args.branch), mode=args.mode,
+        root=lambda: Path(cleanup_issue.registered_root(args.fixture)),
         slug=args.fixture, branch=args.fixture_branch, tracker=GitHubFixture(args.fixture),
         engine=lambda revision: engine_argv(args.platform_repo, revision),
         proven=proven_path(), attempts=attempts_path(), lock=lock_path(), env=dict(os.environ))
