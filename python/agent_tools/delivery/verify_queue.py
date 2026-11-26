@@ -6,10 +6,14 @@ and nothing is read or written through it. No function here sleeps or blocks on 
 
 Files. `queue.lock` is the queue lock: one process at a time takes it (`lock_queue`) to join the
 queue, list the waiters or admit one. `ticket-<12 digits>.lock` is one waiting run; its content is the
-JSON object `key`, `live`, `repository` and `reserved_until`. `slot-<i>.lock` is a verify slot; its
+JSON object `key`, `live`, `repository`, `reserved_until` and `repository_limit` (absent in an older
+ticket, which counts 1). `slot-<i>.lock` is a verify slot; its
 holder writes a JSON object `command`, `pid` and `repository` into it (`record_holder`). `repo-<digest>.lock`
 and `repo-<digest>-<k>.lock` are the per-repository locks of the older admission, kept so a run of
-an older `verify-slot` and a newer one exclude each other.
+an older `verify-slot` and a newer one exclude each other. The short lane keeps its own files,
+`short-ticket-<12 digits>.lock` and `short-slot-<i>.lock`: a glob of `ticket-*.lock` or `slot-*.lock`
+matches from the start of the name, so an older `verify-slot` never lists a short ticket or holder.
+Each lane numbers its tickets on its own; the lane is the file name, never part of the content.
 
 Liveness. A ticket is a waiter only while some process holds its `flock`; nothing else marks it. A
 SIGKILLed waiter loses its lock with its process, so its ticket is no waiter and is removed.
@@ -24,10 +28,10 @@ ticket, so a request that joins after a reservation expired never keeps it alive
 joined before it expired does.
 
 Admission. Waiters are served live first, then by ticket number (`service_order`). `admitted` walks
-that order: a waiter whose repository already has `repository_limit` holders is skipped and takes no
-slot, so it never blocks a later one; the others are admitted while slots are free. Holder counts
-come from one `read_holders` observation; only an unknown holder makes `holder_counts` probe the
-repository locks.
+that order: a waiter whose repository already has its ticket's `repository_limit` holders is skipped and
+takes no slot, so it never blocks a later one; the others are admitted while slots are free. Holder
+counts come from one `read_holders` observation; only an unknown holder makes `holder_counts` count
+every held lock of the repository, whatever its index.
 """
 
 from __future__ import annotations
@@ -55,13 +59,19 @@ NOTHING = "nothing"
 GROUP_LOCK = "repo-{digest}.lock"
 EXTRA_GROUP_LOCK = "repo-{digest}-{index}.lock"
 
+LONG_LANE = "long"
+SHORT_LANE = "short"
+LANES = (LONG_LANE, SHORT_LANE)
+
 _TICKET_NAME = re.compile(r"^ticket-(\d{12})\.lock$")
 _SLOT_NAME = re.compile(r"^slot-(\d+)\.lock$")
+_SHORT_PREFIX = "short-"
 _OPEN_FLAGS = os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK
 _READ_BYTES = 4096
 _LOCK_NOW = fcntl.LOCK_EX | fcntl.LOCK_NB
 _NO_DESCRIPTOR = (errno.EMFILE, errno.ENFILE)
 MAX_COMMAND_CHARS = 200
+LEGACY_REPOSITORY_LIMIT = 1
 
 
 @dataclass(frozen=True)
@@ -70,6 +80,7 @@ class Waiter:
     live: bool
     repository: str | None
     key: str
+    limit: int = LEGACY_REPOSITORY_LIMIT
 
 
 @dataclass(frozen=True)
@@ -87,6 +98,34 @@ class Ticket:
     key: str
     live: bool
     repository: str | None
+    limit: int = LEGACY_REPOSITORY_LIMIT
+    lane: str = LONG_LANE
+
+
+def _prefix(lane: str) -> str:
+    return _SHORT_PREFIX if lane == SHORT_LANE else ""
+
+
+def ticket_name(lane: str, seq: int) -> str:
+    """The file name of ticket `seq` in `lane`; the short lane's never matches `ticket-*.lock`."""
+    return f"{_prefix(lane)}{TICKET.format(seq=seq)}"
+
+
+def slot_name(lane: str, index: int) -> str:
+    """The file name of slot `index` in `lane`; the short lane's never matches `slot-*.lock`."""
+    return f"{_prefix(lane)}slot-{index}.lock"
+
+
+def slot_files(directory: Path, lane: str = LONG_LANE) -> list[Path]:
+    """The lane's existing slot files, sorted by slot index."""
+    prefix = _prefix(lane)
+    pattern = re.compile(rf"^{re.escape(prefix)}slot-(\d+)\.lock$")
+    found = []
+    for path in directory.glob(f"{prefix}slot-*.lock"):
+        match = pattern.match(path.name)
+        if match:
+            found.append((int(match.group(1)), path))
+    return [path for _index, path in sorted(found)]
 
 
 def open_shared(path: Path) -> int:
@@ -135,13 +174,24 @@ def group_lock_name(group: str) -> str:
     return GROUP_LOCK.format(digest=_group_digest(group))
 
 
-def repository_lock_paths(directory: Path, group: str, limit: int) -> list[Path]:
-    """The `limit` lock files of one repository; the first is the name older runs already use."""
+def repository_lock_paths(directory: Path, group: str, limit: int, count: int) -> list[Path]:
+    """The first `limit` lock files of one repository, never more than the host's slot `count`.
+
+    The first is the name older runs already use. However large a caller's `limit`, the list holds
+    at most `count` paths (and always the first), so it never grows past the slot count.
+    """
     digest = _group_digest(group)
     paths = [directory / group_lock_name(group)]
     paths.extend(directory / EXTRA_GROUP_LOCK.format(digest=digest, index=index)
-                 for index in range(1, limit))
+                 for index in range(1, min(limit, count)))
     return paths
+
+
+def held_repository_locks(directory: Path, group: str) -> int:
+    """The held lock files of one repository in the directory, whatever their index."""
+    digest = _group_digest(group)
+    name = re.compile(rf"^repo-{digest}(-\d+)?\.lock$")
+    return sum(1 for path in directory.glob(f"repo-{digest}*.lock") if name.match(path.name) and held(path))
 
 
 def request_key(cwd: Path, argv: Sequence[str]) -> str:
@@ -154,22 +204,19 @@ def service_order(waiters: Iterable[Waiter]) -> list[Waiter]:
     return sorted(waiters, key=lambda waiter: (not waiter.live, waiter.seq))
 
 
-def holder_counts(directory: Path, holders: Sequence[Holder], repositories: Iterable[str],
-                  repository_limit: int) -> dict[str, int]:
-    """Holders per repository; an unknown holder makes each repository's locks count as well."""
+def holder_counts(directory: Path, holders: Sequence[Holder], repositories: Iterable[str]) -> dict[str, int]:
+    """Holders per repository; an unknown holder makes each repository's held locks count as well."""
     counts = Counter(holder.repository for holder in holders
                      if holder.known and holder.repository is not None)
     result = dict(counts)
     if any(not holder.known for holder in holders):
         for repository in repositories:
-            probed = sum(1 for path in repository_lock_paths(directory, repository, repository_limit)
-                         if held(path))
+            probed = held_repository_locks(directory, repository)
             result[repository] = max(result.get(repository, 0), probed)
     return result
 
 
-def admitted(waiters: Iterable[Waiter], counts: Mapping[str, int], free: int,
-             repository_limit: int) -> list[Waiter]:
+def admitted(waiters: Iterable[Waiter], counts: Mapping[str, int], free: int) -> list[Waiter]:
     """The waiters that may take the free slots now, in service order."""
     counts = dict(counts)
     chosen: list[Waiter] = []
@@ -177,13 +224,18 @@ def admitted(waiters: Iterable[Waiter], counts: Mapping[str, int], free: int,
         if free <= 0:
             break
         repository = waiter.repository
-        if repository is not None and counts.get(repository, 0) >= repository_limit:
+        if repository is not None and counts.get(repository, 0) >= waiter.limit:
             continue
         chosen.append(waiter)
         free -= 1
         if repository is not None:
             counts[repository] = counts.get(repository, 0) + 1
     return chosen
+
+
+def short_admitted(waiters: Iterable[Waiter], free: int) -> list[Waiter]:
+    """The short lane's admission: the first `free` waiters in service order, whatever their repository."""
+    return service_order(waiters)[:max(0, free)]
 
 
 def place(waiters: Iterable[Waiter], seq: int) -> int:
@@ -214,9 +266,10 @@ def lock_queue(directory: Path) -> int | None:
     return descriptor
 
 
-def _content(key: str, live: bool, repository: str | None, reserved_until: float | None) -> bytes:
-    return json.dumps({"key": key, "live": live, "repository": repository,
-                       "reserved_until": reserved_until}, sort_keys=True).encode("utf-8")
+def _content(key: str, live: bool, repository: str | None, reserved_until: float | None,
+             limit: int) -> bytes:
+    return json.dumps({"key": key, "live": live, "repository": repository, "reserved_until": reserved_until,
+                       "repository_limit": limit}, sort_keys=True).encode("utf-8")
 
 
 def _write(descriptor: int, data: bytes) -> None:
@@ -242,13 +295,18 @@ def _parse(descriptor: int) -> dict | None:
         return None
     if until is not None and (isinstance(until, bool) or not isinstance(until, (int, float))):
         return None
+    limit = record.get("repository_limit", LEGACY_REPOSITORY_LIMIT)
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+        return None
     return record
 
 
-def _tickets(directory: Path) -> list[tuple[int, Path]]:
+def _tickets(directory: Path, lane: str = LONG_LANE) -> list[tuple[int, Path]]:
+    prefix = _prefix(lane)
+    pattern = re.compile(rf"^{re.escape(prefix)}ticket-(\d{{12}})\.lock$")
     found = []
-    for path in directory.glob("ticket-*.lock"):
-        match = _TICKET_NAME.match(path.name)
+    for path in directory.glob(f"{prefix}ticket-*.lock"):
+        match = pattern.match(path.name)
         if match:
             found.append((int(match.group(1)), path))
     return sorted(found)
@@ -288,12 +346,13 @@ def _close_probed(probed: Sequence[tuple[int, Path, int, bool]]) -> None:
         os.close(descriptor)
 
 
-def join(directory: Path, key: str, live: bool, repository: str | None, now: float) -> Ticket:
-    """Take back this request's reserved ticket or number a new one; the caller holds the queue lock."""
+def join(directory: Path, key: str, live: bool, repository: str | None, now: float,
+         limit: int = LEGACY_REPOSITORY_LIMIT, lane: str = LONG_LANE) -> Ticket:
+    """Take back this request's reserved ticket or number a new one in `lane`; the caller holds the queue lock."""
     probed: list[tuple[int, Path, int, bool]] = []
     highest = 0
     try:
-        for seq, path in _tickets(directory):
+        for seq, path in _tickets(directory, lane):
             highest = max(highest, seq)
             result = _probe(path)
             if result is not None:
@@ -318,7 +377,7 @@ def join(directory: Path, key: str, live: bool, repository: str | None, now: flo
                 taken = (seq, path, descriptor)
         if taken is None:
             seq = highest + 1
-            path = directory / TICKET.format(seq=seq)
+            path = directory / ticket_name(lane, seq)
             descriptor = open_shared(path)
             try:
                 fcntl.flock(descriptor, _LOCK_NOW)
@@ -326,7 +385,7 @@ def join(directory: Path, key: str, live: bool, repository: str | None, now: flo
                 os.close(descriptor)
                 raise
             taken = (seq, path, descriptor)
-        _write(taken[2], _content(key, live, repository, None))
+        _write(taken[2], _content(key, live, repository, None, limit))
     except BaseException:
         if taken is not None:
             os.close(taken[2])
@@ -335,14 +394,14 @@ def join(directory: Path, key: str, live: bool, repository: str | None, now: flo
         for _seq, _path, descriptor, _other in probed:
             if taken is None or descriptor != taken[2]:
                 os.close(descriptor)
-    return Ticket(taken[1], taken[2], taken[0], key, live, repository)
+    return Ticket(taken[1], taken[2], taken[0], key, live, repository, limit, lane)
 
 
 def waiters(directory: Path, own: Ticket, now: float) -> list[Waiter]:
-    """The waiters now, `own` included; the caller holds the queue lock. Dead tickets are removed."""
+    """The waiters now in `own`'s lane, `own` included; the caller holds the queue lock. Dead tickets are removed."""
     probed: list[tuple[int, Path, int, bool]] = []
     try:
-        for seq, path in _tickets(directory):
+        for seq, path in _tickets(directory, own.lane):
             if path == own.path:
                 continue
             result = _probe(path)
@@ -353,14 +412,15 @@ def waiters(directory: Path, own: Ticket, now: float) -> list[Waiter]:
     except BaseException:
         _close_probed(probed)
         raise
-    listed = [Waiter(own.seq, own.live, own.repository, own.key)]
+    listed = [Waiter(own.seq, own.live, own.repository, own.key, own.limit)]
     locked = [own.seq] + [seq for seq, _path, _descriptor, other in probed if other]
     try:
         for seq, path, descriptor, other in probed:
             record = _parse(descriptor)
             if other:
                 if record is not None and record["reserved_until"] is None:
-                    listed.append(Waiter(seq, record["live"], record["repository"], record["key"]))
+                    listed.append(Waiter(seq, record["live"], record["repository"], record["key"],
+                                         record.get("repository_limit", LEGACY_REPOSITORY_LIMIT)))
                 continue
             until = None if record is None else record["reserved_until"]
             if until is None or (until <= now and not any(number > seq for number in locked)):
@@ -375,7 +435,7 @@ def reserve(ticket: Ticket, now: float) -> None:
     """Give the ticket's place back for `RESUME_SECONDS`: record the reservation, then release the lock."""
     try:
         _write(ticket.descriptor, _content(ticket.key, ticket.live, ticket.repository,
-                                           now + RESUME_SECONDS))
+                                           now + RESUME_SECONDS, ticket.limit))
     finally:
         os.close(ticket.descriptor)
 
@@ -426,15 +486,10 @@ def _described(descriptor: int) -> Holder | None:
     return Holder(repository, command)
 
 
-def read_holders(directory: Path) -> list[Holder]:
-    """One entry per held slot file, in slot order; a held file nobody described is unknown."""
-    names = []
-    for path in directory.glob("slot-*.lock"):
-        match = _SLOT_NAME.match(path.name)
-        if match:
-            names.append((int(match.group(1)), path))
+def read_holders(directory: Path, lane: str = LONG_LANE) -> list[Holder]:
+    """One entry per held slot file of `lane`, in slot order; a held file nobody described is unknown."""
     holders = []
-    for _index, path in sorted(names):
+    for path in slot_files(directory, lane):
         try:
             descriptor = open_shared(path)
         except OSError:

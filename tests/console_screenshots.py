@@ -30,7 +30,7 @@ Contract:
   the sprint) folded working, then a `PermissionRequest` hook row for a Bash prompt, then a
   transcript whose `user` record is stamped after that hook (the 21 Nov reading: the manager's own
   hook refused the prompt at once and it went on working); on the branch's console the heading reads
-  "Nothing needs you" and the session reads working after the first session poll, on the base
+  "You're done for now" and the session reads working after the first session poll, on the base
   commit's the same seed reads "1 thing needs you" with the terminal sentence, the before picture
   (#1424); `permission-card` is that sprint with its manager's held Bash prompt, `git worktree add
   ../.worktrees/issue-12` with the words "Create the delivery's worktree", posted to
@@ -40,6 +40,9 @@ Contract:
   is the `PermissionRequest` hook row only, which is the before picture; `permission-long` is the same sprint holding a
   long heredoc command (a python3 script that rewrites test names, a `cat` into `/tmp` and a `git diff` into `review/diff.txt`),
   so the card shows its summary of what it reads, runs and writes above the folded text, and the base console the raw text;
+  `held-sprint` is a sprint whose last report, two hours old, says `HELD_STATUS` with issues still
+  building and queued and nothing running or asked, so the branch's console shows its held-sprint card
+  under "1 thing needs you" and the base console only the quiet line, which is the before picture;
   `waiting-until` is the `stuck` sprint whose report states a wait until a time two hours
   ahead (#1380), so its line reads "waiting until" with that time, and `paused` the same sprint whose
   report states a pause with `PAUSE_REASON`, so its line reads "paused: " and the reason (a base console
@@ -140,14 +143,14 @@ Contract:
   `account.added` row `{"by": COLLEAGUE, "profile": "colleague-1", "identity": <the mark of its directory>}` written straight to the log, the identity without which his row has no token and the page no Sign out or Remove) and
   whose week is the tightest of the three (5% left against `work-spare`'s 10% and `work-main`'s 60%);
   every manager runs on `work-main`, so the guest page shows `yours`, `Account 2` and `Account 3` and
-  the sprint's account, `Account 2`, and the owner's strip shows COLLEAGUE beside `colleague-1` in
-  its tightest node, the one the 480 px width keeps. On a page with `#pool` the
+  the sprint's account, `Account 2`, and the owner's strip names no account since the one-word top bar
+  (the panel's `colleague-1` row carries COLLEAGUE). On a page with `#pool` the
   guest shots wait for the pool, a session reset and the sprint's account (`.sprint-account`); on a
   page without it they wait for none of them. On a page with `.pool-add` the `guest-page` and
   `guest-steer` shots click it at each width and wait for `.guest-consent` and a disabled
   `.guest-signin` (the consent open, nothing ticked, nothing posted); on a page without it they click
-  nothing. `owner-actors` also waits for `.cap-tightest .cap-owner` on a page that has a `.cap-owner`
-  and for none on a page that has not. `owner-accounts` waits for the opened panel (`#accounts:not([hidden])`)
+  nothing. `owner-actors` also waits for `.cap-tightest .cap-owner` only on an earlier page that has a
+  `.cap-owner` (the before pictures), and for none on a page that has not. `owner-accounts` waits for the opened panel (`#accounts:not([hidden])`)
   and, on a page that has an `.acct-owner`, for `.acct-row .acct-owner`. `offers_account_changes()`
   (`ConsoleService` has `sign_out_account`) keys the account controls on the code being shot, never on
   the page: when it is true `owner-accounts` also waits for `.acct-row .acct-signout` and `guest-page` for
@@ -158,7 +161,9 @@ Contract:
   under the 2 MiB a picture may be, and `main` prints each sheet's path after the shots. `--states a,b`
   shoots only the named states (each a member of `STATES`; the default is every state), and `--composite NAME`
   (only with `--sheets`) writes `NAME` after the last state: the named states' sheets side by side in one
-  PNG under the same 2 MiB, which `main` prints after the sheets. Each
+  PNG under the same 2 MiB, which `main` prints after the sheets. `--widths a,b` shoots those viewport
+  widths instead of `WIDTHS` (distinct positive pixel widths), so a look can picture a phone width such as
+  390; the style rows are read only at the widths they name, so a width outside `STYLE_WIDTHS` reads none. Each
   width waits for what the owner judges to be visible, which fails the run when it is not:
   `guest-steer` the door check of `guest-page`, then `.started-by`, `Answered by`, `.guest-wait` and
   `#inbox button.approve`; `owner-actors` `.started-by` and `Answered by`. The rows are seeded
@@ -170,7 +175,7 @@ Contract:
   repository with no contract whose ready plan is drafted in schema 3 (`FACT_LINE`),
   served with a stand-in adopter and forge so the plan can be
   applied: `register-apply` is the ready Apply card of a project whose dev-shell hooks are not installed,
-  opening on the line that says Apply installs them (`register.HOOKS_LINE`) before the plan's own (`REGISTER_PLAN_LINES`), with the registration entry reduced to "needs you"
+  opening on the line naming the development shell (`contract_draft.DRAFTED_ENVIRONMENT_LINE`), then the line that says Apply installs the hooks (`register.HOOKS_LINE`), before the plan's own (`REGISTER_PLAN_LINES`), with the registration entry reduced to "needs you"
   and no draft beside it; `register-draft` is the same plan after the owner chose Not now (the
   `adoption.deferred` row is seeded), so no card asks and the registration's draft rows show with
   the project id as a fact line with no Change control. `register-reconcile-apply` and
@@ -178,64 +183,58 @@ Contract:
   and pending adoption work, a `reconcile` plan (#1333): the row seeds the reading the console takes
   of a pre-commit hook whose runner is not on the plain PATH and of a `devenv.nix`, so the plan
   proposes the same command, and the first is the Apply card, the second the plan after Not now.
-  `REGISTER_READING` reads the card's first
-  line, the proposal's draft row and whether that row has a Change button, and `REGISTER_SHOWN`
-  holds what each state must read on a page that proposes it (`proposes(state)`, which is
-  `shows_facts()` for `register-draft` and `proposes_reconcile()` for the reconcile pair); on
-  a page that does not (the base commit's) the reading is `REGISTER_BASE`, which is the before
-  picture, and any other reading fails. The base commit's register-draft has no facts and drafts the
-  commit environment as a main row with a Change button, so that row is its reading; its reconcile
-  row has no draft, so its Apply card opens on the plan's own first line and shows nothing.
-  `WIDTHS` are the two viewport widths each is shot at (`BETWEEN_WIDTHS` are read, never shot). `capture`
+  `REGISTER_READING` reads the card's first line, the proposal's draft row and whether that row has a Change button, and
+  `REGISTER_SHOWN` holds what each state must read on a page that proposes it (`proposes(state)`, which is
+  `shows_facts()` for `register-draft` and `proposes_reconcile()` for the reconcile pair); on a page that does not (the
+  base commit's) the reading is `REGISTER_BASE`, which is the before picture, and any other reading fails. The base
+  commit's register-draft has no facts and drafts the commit environment as a main row with a Change button, so that row
+  is its reading; its reconcile row has no draft, so its Apply card opens on the plan's own first line and shows
+  nothing. `WIDTHS` are the two viewport widths each is shot at (`BETWEEN_WIDTHS` are read, never shot). `capture`
   writes `<state>-<width>.png` for every pair, so a full run writes 114 files.
-- Each state is a fresh fixture console: a registry of three projects (`owner/web`,
-  `owner/api`, `owner/docs`) and an event log seeded for that state with event times relative
-  to one clock reading, served by the real `ConsoleService` on a loopback port. Nothing is
-  written through the service, nothing is mocked in the page, and the launcher is an inert
-  stand-in that records what it is given and starts nothing (without one the view would say
-  managers are not available on this host).
-- The sandbox rule: every path the fixture touches lies under one temporary root, and
-  `main` points `HOME`, `CLAUDE_ACCOUNTS_DIR`, `CLAUDE_CONFIG_DIR`, `XDG_STATE_HOME` and
-  `XDG_CONFIG_HOME` under another for the run, so the owner's real accounts directory and real
-  registry are never read or written. The temporary roots are removed after each state.
+- Each state is a fresh fixture console: a registry of three projects (`owner/web`, `owner/api`, `owner/docs`) and an
+  event log seeded for that state, served by the real `ConsoleService` on a loopback port. Its event times, file times
+  and clock come from the run's one reading (`READING`, or `--now`); the page runs on it in `UTC` and `en-US`,
+  animations disabled. Nothing is written through the service or mocked in the page, and the launcher is an inert
+  stand-in that records what it is given and starts nothing (without one the view says managers are unavailable).
+- The sandbox rule: every path the fixture touches lies under one root, the fixed `root` of a private folder
+  of this user under `/tmp`, whatever `TMPDIR` is (or the `home` a caller passes), which is refused unless it is
+  this user's folder of mode 0700, held by one run at a time, and a `root` no run marked is never emptied, so a
+  path the page draws is the same on every run. `main` points `HOME`, `CLAUDE_ACCOUNTS_DIR`, `CLAUDE_CONFIG_DIR`,
+  `XDG_STATE_HOME` and `XDG_CONFIG_HOME` under a random temporary root for the run, so the owner's real accounts
+  directory and real registry are never read or written; the guest door is a random temporary folder too. An
+  output folder inside the private folder is refused.
 - `main(["--out", dir])` prints each written path. It returns 1 (and says so) when any shot's
-  `document.documentElement.scrollWidth` exceeds its width; when any sprint's "what it is
-  doing now" sentence is squeezed (it starts above its title's bottom, is narrower than the
-  head's line or than the title, is taller than two lines, or is clipped); when a shot shows a
-  jargon label (a "Detail" or "More" fold, an "Approved version" message row that is not
-  sent or not picked up, or one of the review's phrases in the rendered text: "on track",
-  "stated" before an age, "withdraw", "nudge", "stop or", "would do differently"); or when a
-  `tell-box-open` shot does not show the open Tell box (the textarea, the Send button and the
-  pick-up hint, with the label, the field and the hint not overlapping and the field as wide as
-  the sprint block's content, `OPEN_TELL`); or when an `ask-box` shot of a page that has the `ASK_OPEN`
-  button does not show `owner/web`'s open field, its working question and its answered question's
-  Read line (`OPEN_ASK`, or `HEAD_ASK` on a page with the reading panel); or when a
-  `activation-tooling` or `activation-host` shot does not read its `ACTIVATION_SHOWN` entry (nor, on a page that
-  cannot read `other`, `ACTIVATION_BASE`); or when a
-  `question-read` shot on a page with the panel does not read `READ_SHOWN` (`READ_READING`: the
-  panel in the main column at the column's full width, the question once (counted from the question the shot was seeded with, an argument of
-  the script), the answer holding bold,
-  a list, inline code and a block of code, the call-out last in its row after the answer, three
-  choices visible); or when a `deeper-offer` or `deeper-answer` shot on a page with the panel does not read as
-  `deeper_shows` says (each row's seeded answer phrase and exact spend line, Make it a goal and,
-  for the offer, the estimate holding the deeper row's figures), a None reading failing on a
-  page that has the panel; or when a `questions-open` shot reads neither `OPEN_THREAD` (the fold
-  opened, the follow-up's Read line shown, a follow-up button visible) nor `BASE_THREAD` (a page
-  without the fold that still lists the follow-up and its answer, the before picture), or when a `question-words` or `question-refused` shot's reading is not its `WORDS_CARD` or
-  `REFUSED_CARD`; or when an `ask-goal` shot's reading is not `FILLED_GOAL` (the box
-  closed, the wrong text or project, or the field clipping the filled text); or when any
-  shot has a visible project line whose Ask a question button sits on another row than its Give it
-  a goal button (their vertical centres differ by more than 4 px, `ACTS_ROW`); or when any shot is not taken from the top of the
-  page (`window.scrollY` is not 0 right before its full-page capture); or when any shot has a
-  rendered, visible button, input, textarea, select, `btn-` link or `btn-` summary under 32 px
-  tall (`SHORT_CONTROLS`, read after the state is drawn). When any shot misses a `STYLE_CHECKS`
-  row, the line names each miss: the row's computed style is read after the capture, with probes
-  and steps as `StyleCheck` and `STYLE_STEPS` say (`look-card` is shot with its viewer closed,
-  then opens its first picture, so the viewer rows read it open). The style reading and its steps run only when
-  `style_applies()` (the page served is the page beside this module), so a base run's pictures and
-  result are as before. In real-answer mode, `fixture` rows are skipped. `capture(...,
-  mutate=True)` records in `Shot.broke` each row whose `broken` rule made it miss. It returns 2
-  with a one-line reason when Playwright or Chromium is missing, else 0.
+  `document.documentElement.scrollWidth` exceeds its width; when any sprint's "what it is doing now" sentence is
+  squeezed (it starts above its title's bottom, is narrower than the head's line or than the title, is taller than two
+  lines, or is clipped); when a shot shows a jargon label (a "Detail" or "More" fold, an "Approved version" message
+  row that is not sent or not picked up, or one of the review's phrases in the rendered text: "on track", "stated"
+  before an age, "withdraw", "nudge", "stop or", "would do differently"); or when a `tell-box-open` shot does not show
+  the open Tell box (the textarea, the Send button and the pick-up hint, with the label, the field and the hint not
+  overlapping and the field as wide as the sprint block's content, `OPEN_TELL`); or when an `ask-box` shot of a page
+  that has the `ASK_OPEN` button does not show `owner/web`'s open field, its working question and its answered
+  question's Read line (`OPEN_ASK`, or `HEAD_ASK` on a page with the reading panel); or when a `activation-tooling` or
+  `activation-host` shot does not read its `ACTIVATION_SHOWN` entry (nor, on a page that cannot read `other`,
+  `ACTIVATION_BASE`); or when a `question-read` shot on a page with the panel does not read `READ_SHOWN`
+  (`READ_READING`: the panel in the main column at the column's full width, the question once (counted from the
+  question the shot was seeded with, an argument of the script), the answer holding bold, a list, inline code and a
+  block of code, the call-out last in its row after the answer, three choices visible); or when a `deeper-offer` or
+  `deeper-answer` shot on a page with the panel does not read as `deeper_shows` says (each row's seeded answer phrase
+  and exact spend line, Make it a goal and, for the offer, the estimate holding the deeper row's figures), a None
+  reading failing on a page that has the panel; or when a `questions-open` shot reads neither `OPEN_THREAD` (the fold
+  opened, the follow-up's Read line shown, a follow-up button visible) nor `BASE_THREAD` (a page without the fold that
+  still lists the follow-up and its answer, the before picture), or when a `question-words` or `question-refused`
+  shot's reading is not its `WORDS_CARD` or `REFUSED_CARD`; or when an `ask-goal` shot's reading is not `FILLED_GOAL`
+  (the box closed, the wrong text or project, or the field clipping the filled text); or when any shot has a visible
+  project line whose Ask a question button sits on another row than its Give it a goal button (their vertical centres
+  differ by more than 4 px, `ACTS_ROW`); or when any shot is not taken from the top of the page (`window.scrollY` is
+  not 0 right before its full-page capture); or when any shot has a rendered, visible button, input, textarea, select,
+  `btn-` link or `btn-` summary under 32 px tall (`SHORT_CONTROLS`, read after the state is drawn). When any shot
+  misses a `STYLE_CHECKS` row, the line names each miss: the row's computed style is read after the capture, with
+  probes and steps as `StyleCheck` and `STYLE_STEPS` say (`look-card` is shot with its viewer closed, then opens its
+  first picture, so the viewer rows read it open). The style reading and its steps run only when `style_applies()`
+  (the page served is the page beside this module), so a base run's pictures and result are as before. In real-answer
+  mode, `fixture` rows are skipped. `capture(..., mutate=True)` records in `Shot.broke` each row whose `broken` rule
+  made it miss. It returns 2 with a one-line reason when Playwright or Chromium is missing, else 0.
 - Real-answer mode: `main(["--out", dir, "--question", TEXT, "--answer-file", PATH])` (both or
   neither; one alone exits 2) shoots only `question-read`, seeded with that question and the
   file's UTF-8 text as the stored answer, so it writes exactly `question-read-1440.png` and
@@ -289,12 +288,13 @@ from agent_tools.console.service import ConsoleService
 from agent_tools.console.sprints import TELL_MINUTE_TEXT, Question, SprintState, create_secret
 from agent_tools.system.forge_api import ForgeError
 
+from . import console_screenshot_clock as shot_clock
 from .console_land_queue import land_queue_reader
 from .console_screenshot_permissions import HELD_PROMPTS, PERMISSION_MANAGER, hold_permission, keep_permission
 from .console_test_support import hook_body, write_registry
 
-STATES = ("live-several", "waiting-on-you", "stuck", "tell-box-open", "message-sent",
-          "message-picked-up", "message-replied", "message-not-picked-up", "finished-list",
+STATES = ("live-several", "waiting-on-you", "stuck", "held-sprint", "tell-box-open",
+          "message-sent", "message-picked-up", "message-replied", "message-not-picked-up", "finished-list",
           "nothing-running", "waiting-its-turn", "manager-cannot-hear", "permission-stale", "permission-card",
           "permission-long", "waiting-until", "paused",
           "owner-check", "spend-page", "notices-fold",
@@ -315,6 +315,7 @@ GOAL_NEAR_CHARS = 1900
 GOAL_OVER_CHARS = 2100
 MINUTE = 60.0
 PAUSE_REASON = "the lead freed its account for a release"
+HELD_STATUS = "the last slice waits on the lead's go to grant its deploy key"
 PROJECTS = ("owner/web", "owner/api", "owner/docs")
 TRACKER_URL = "https://github.com/owner/web/issues"
 LOOK_APPROVE = "Approve this head"
@@ -953,20 +954,6 @@ STYLE_CHECKS += (
          _RGB),
     _row("cap-child-flex", "accounts-panel", ".cap > *", "flex", "equals", "0 0 auto", "1 1 auto",
          every=True),
-    _row("cap-acct-max-width", "accounts-panel", ".cap-acct", "max-width", "equals", "100%",
-         "none"),
-    _row("cap-acct-white-space", "accounts-panel", ".cap-acct", "white-space", "equals", "nowrap",
-         "normal"),
-    *_group("cap-acct-name", "accounts-panel", ".cap-acct b", (
-        ("overflow", "equals", "hidden", "visible"), ("text-overflow", "equals", "ellipsis", "clip"),
-        ("white-space", "equals", "nowrap", "normal"), ("max-width", "max", "160", "none"))),
-    _colour("cap-excl-color", "accounts-panel", ".cap-excl", "--ov2", host="#capacity",
-            probe='<span class="cap-excl" data-style-probe>x</span>'),
-    _colour("cap-pin-mark-color", "accounts-panel", ".cap-pin-mark", "--ov2", host="#capacity",
-            probe='<span class="cap-pin-mark" data-style-probe>x</span>'),
-    _row("cap-extra-display", "accounts-panel", ".cap-extra", "display", "equals", "none", "block",
-         widths=(480,), probe='<span class="cap-extra" data-style-probe>x</span>',
-         host="#capacity"),
     _row("brand-white-space", _NOTHING, ".brand", "white-space", "equals", "nowrap", "normal"),
     _row("top-fit-width", _NOTHING, ".top-in > *", "width", "max", "448", "600px", widths=(480,),
          every=True),
@@ -974,26 +961,6 @@ STYLE_CHECKS += (
          widths=(480,), every=True),
     _row("top-fit-flex-basis", _NOTHING, ".goal-bar", "flex-basis", "max", "448", "600px",
          widths=(480,)),
-    _row("top-fit-meter-width", "accounts-panel", ".meter", "width", "max", "448", "600px",
-         widths=(480,), every=True),
-    _row("top-fit-meter-min-width", "accounts-panel", ".meter", "min-width", "in", "auto|0px",
-         "600px", widths=(480,), every=True),
-    _row("top-fit-meter-flex-basis", "accounts-panel", ".meter", "flex-basis", "equals", "auto",
-         "600px", widths=(480,), every=True),
-    _row("meter-fill-background-color", _NOTHING, ".meter i", "background-color", "equals",
-         PALETTE["--sub0"], _RGB, probe='<span class="meter" data-style-probe><i></i></span>',
-         host="#capacity"),
-    _row("meter-fill-background-image", _NOTHING, ".meter i", "background-image", "equals", "none",
-         "linear-gradient(red, red)",
-         probe='<span class="meter" data-style-probe><i></i></span>', host="#capacity"),
-    _row("meter-excluded-background-color", _NOTHING, ".cap-excluded .meter i", "background-color",
-         "equals", PALETTE["--s2"], _RGB,
-         probe='<span class="cap-acct cap-excluded" data-style-probe><span class="meter"><i></i>'
-               '</span></span>', host="#capacity"),
-    _row("meter-excluded-background-image", _NOTHING, ".cap-excluded .meter i",
-         "background-image", "equals", "none", "linear-gradient(red, red)",
-         probe='<span class="cap-acct cap-excluded" data-style-probe><span class="meter"><i></i>'
-               '</span></span>', host="#capacity"),
     StyleCheck("lead-type-font-size", _DESK_STATES, _BOTH, "body", "font-size", "largest_type",
                "24|" + _DISPLAY_LEAD, ".brand { font-size: 30px !important }", fixture=True),
     _row("lead-type-card-font-size", "inbox-card", ".card .q", "font-size", "equals", "24px",
@@ -1684,9 +1651,7 @@ STYLE_MUTATE = r"""((css) => {
 STYLE_SETTLE = r"""(async () => {
   // A picture is fetched after the page draws it, so wait for each one to have its source and load.
   for (let tries = 0; tries < 100; tries++) {
-    const waiting = Array.from(document.querySelectorAll('img.pic-img')).some(
-      (img) => !img.hidden && (!img.getAttribute('src') || !img.complete));
-    if (!waiting) break;
+    if (!(""" + shot_clock.PICTURES_PENDING + r""")) break;
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
   for (const animation of document.getAnimations()) {
@@ -2391,7 +2356,7 @@ def _seed_registration(seed: _Seed, state: str, root: str) -> None:
     seed.put(MINUTE, event_log.REGISTRATION_ENDED, None, {
         "by": "owner", "root": root, "project_id": f"owner/{REGISTER_NAME}", "result": "planned",
         "outcome": "changes", "headline": f"What adopting {REGISTER_NAME} would change.",
-        "lines": [*filter(None, [getattr(register, "HOOKS_LINE", None)]), *REGISTER_PLAN_LINES], "note": None, "plan_id": REGISTER_PLAN_ID,
+        "lines": [*filter(None, [getattr(contract_draft, "DRAFTED_ENVIRONMENT_LINE", None), getattr(register, "HOOKS_LINE", None)]), *REGISTER_PLAN_LINES], "note": None, "plan_id": REGISTER_PLAN_ID,
         "state": "ready", "questions": [], "answered": [], "draft": fields, "remote": None})
     if state == "register-draft":
         seed.put(MINUTE / 2, event_log.ADOPTION_DEFERRED, None, {"plan_id": REGISTER_PLAN_ID})
@@ -2466,23 +2431,22 @@ def _seed_state(seed: _Seed, state: str, web_root: str = "",
         seed.sprint(api, "Keep the importer fast", started=60 * MINUTE, report=45 * MINUTE)
         seed.sprint(api, "Retire the old exporter", started=5 * 60 * MINUTE,
                     report=3 * 60 * MINUTE, landed=True, close=2 * 60 * MINUTE)
-        seed.sprint(web, "Add resumable uploads", started=30 * MINUTE, report=6 * MINUTE,
-                    asks=True)
+        seed.sprint(web, "Add resumable uploads", started=30 * MINUTE, report=6 * MINUTE, asks=True)
         seed.sprint(web, "Fix the settings page", started=20 * MINUTE, report=2 * MINUTE)
     elif state == "waiting-on-you":
-        seed.sprint(web, "Add resumable uploads", started=30 * MINUTE, report=6 * MINUTE,
-                    asks=True)
+        seed.sprint(web, "Add resumable uploads", started=30 * MINUTE, report=6 * MINUTE, asks=True)
     elif state == "stuck":
         seed.sprint(web, "Add resumable uploads", started=60 * MINUTE, report=45 * MINUTE)
+    elif state == "held-sprint":
+        seed.sprint(web, "Add resumable uploads", started=180 * MINUTE, report=120 * MINUTE,
+                    report_extra={"status": HELD_STATUS})
     elif state == "manager-cannot-hear":
-        sid, _ = seed.sprint(web, "Add resumable uploads", started=60 * MINUTE,
-                             report=45 * MINUTE)
+        sid, _ = seed.sprint(web, "Add resumable uploads", started=60 * MINUTE, report=45 * MINUTE)
         seed.put(MINUTE, sessions.SEEN, web, {
             "session_id": DEAF_MANAGER, "cwd": web_root, "repo": web_root, "state": "working",
             "name": manager.session_name(web, sid)})
     elif state in PERMISSION_STATES:
-        sid, _ = seed.sprint(web, "Add resumable uploads", started=60 * MINUTE,
-                             report=45 * MINUTE)
+        sid, _ = seed.sprint(web, "Add resumable uploads", started=60 * MINUTE, report=45 * MINUTE)
         seed.put(20 * MINUTE, sessions.SEEN, web, {
             "session_id": PERMISSION_MANAGER, "cwd": web_root, "repo": web_root,
             "state": "working", "name": manager.session_name(web, sid)})
@@ -2545,19 +2509,16 @@ def _seed_state(seed: _Seed, state: str, web_root: str = "",
         seed.sprint(web, "Try a new cache", started=4 * 60 * MINUTE, report=3.5 * 60 * MINUTE,
                     stop=3 * 60 * MINUTE)
     elif state == "owner-check":
-        seed.sprint(web, "Add resumable uploads", started=20 * MINUTE, report=2 * MINUTE,
-                    held=True)
+        seed.sprint(web, "Add resumable uploads", started=20 * MINUTE, report=2 * MINUTE, held=True)
         seed.check(web, 11, 3 * MINUTE)
     elif state == "inbox-card":
-        seed.sprint(web, "Add resumable uploads", started=30 * MINUTE, report=6 * MINUTE,
-                    asks=True)
+        seed.sprint(web, "Add resumable uploads", started=30 * MINUTE, report=6 * MINUTE, asks=True)
         seed.check(web, 11, 3 * MINUTE)
     elif state in ("look-card", "look-moved", "look-failed"):
         sid, goal = seed.sprint(web, "Fix the settings page", started=30 * MINUTE, report=6 * MINUTE)
         seed.look(web, sid, goal, moved=state == "look-moved", failed=state == "look-failed")
     elif state in ("question-words", "question-refused"):
-        seed.sprint(web, "Add resumable uploads", started=30 * MINUTE, report=6 * MINUTE,
-                    look=True)
+        seed.sprint(web, "Add resumable uploads", started=30 * MINUTE, report=6 * MINUTE, look=True)
     elif state == "accounts-panel":
         seed.account("work-main", 0.4)
         seed.account("work-spare", 0.9)
@@ -2815,8 +2776,8 @@ def build_fixture(root: Path, state: str, now_s: float, *,
         for name in ("work-main", "work-spare", *colleague):
             (accounts / "profiles" / name).mkdir(parents=True, exist_ok=True)
         if colleague:
-            # The directory's own mark: the console owns the account to the colleague only while the
-            # row's identity is the directory's, and his pool row carries a token only then.
+            # Stamped before marked, as a stamp moves the birth time the mark reads; his pool row has a token only then.
+            shot_clock.stamp(accounts / "profiles" / "colleague-1", now_s)
             colleague_identity = account_add.mark(accounts / "profiles" / "colleague-1")
     log = EventLog(fixture.store, clock=lambda: at[0])
     try:
@@ -2837,6 +2798,7 @@ def build_fixture(root: Path, state: str, now_s: float, *,
         _write_desk_spend(fixture, now_s, *sprint_ids)
     elif state in DEEPER_STATES:
         _write_deeper(fixture, now_s)
+    shot_clock.stamp(root, now_s)
     return fixture
 
 
@@ -3011,7 +2973,7 @@ def start_service(fixture: Fixture, now_s: float, launches: list | None = None, 
         dispatch=lambda job: job(),
         repo_of=lambda cwd: cwd, ping_log=lambda: None,
         **({} if guest_dir is None else guest_door_kwargs(ConsoleService, guest_dir)),
-        **_tailnet_kwargs(guest_dir, tailnet_readable, bound), **forge)
+        **_tailnet_kwargs(guest_dir, tailnet_readable, bound), **forge, **shot_clock.service_clocks(now_s))
     bound.append(service)
     service.start()
     if guest_dir is not None and "status_reader" in inspect.signature(ConsoleService).parameters:
@@ -3109,10 +3071,12 @@ class _Serve:
 
 
 def capture(out: Path, states: Sequence[str] = STATES, widths: Sequence[int] = WIDTHS, *,
-            read: tuple[str, str] = (READ_QUESTION, READ_ANSWER), sheets: bool = False,
-            mutate: bool = False, composite: str | None = None) -> list[Shot]:
+            read: tuple[str, str] = (READ_QUESTION, READ_ANSWER), sheets: bool = False, home: Path | None = None,
+            mutate: bool = False, composite: str | None = None, now: float = shot_clock.READING) -> list[Shot]:
     if composite is not None and not sheets:
         raise ValueError("a composite is made of the sheets: pass sheets with it")
+    home = shot_clock.shots_home() if home is None else Path(home)
+    shot_clock.refuse_inside(out, home)
     try:
         from playwright.sync_api import Error, sync_playwright
     except ImportError as error:
@@ -3122,7 +3086,7 @@ def capture(out: Path, states: Sequence[str] = STATES, widths: Sequence[int] = W
     taken: list[Shot] = []
     with sync_playwright() as pw:
         try:
-            browser = pw.chromium.launch(args=["--no-sandbox", "--disable-dev-shm-usage"])
+            browser = pw.chromium.launch(args=shot_clock.LAUNCH_ARGS)
         except Error as error:
             raise Unavailable(f"no Chromium to launch: {' '.join(str(error).split())[:120]}") from error
         try:
@@ -3131,12 +3095,11 @@ def capture(out: Path, states: Sequence[str] = STATES, widths: Sequence[int] = W
                 groups = [(width,) for width in widths] if state in CLICKED_STATES else [tuple(widths)]
                 shot_paths = []
                 for group in groups:
-                    with tempfile.TemporaryDirectory(prefix="console-shots-") as tmp, \
+                    with shot_clock.fixture_dirs(home) as tmp, \
                             tempfile.TemporaryDirectory(prefix="cg-", dir="/tmp") as door:
-                        now_s = datetime.now(timezone.utc).timestamp()
-                        fixture = build_fixture(Path(tmp).resolve(), state, now_s, read=read)
+                        fixture = build_fixture(Path(tmp).resolve(), state, now, read=read)
                         service = start_service(
-                            fixture, now_s,
+                            fixture, now,
                             guest_dir=Path(door) if state in SHARING_STATES else None,
                             tailnet_readable=state != "sharing-unreadable")
                         serve = None
@@ -3157,7 +3120,7 @@ def capture(out: Path, states: Sequence[str] = STATES, widths: Sequence[int] = W
                                     _shoot(browser, f"http://{host}:{port}/{path}", state, width, out,
                                            question=read[0],
                                            canonical=read == (READ_QUESTION, READ_ANSWER),
-                                           mutate=mutate))
+                                           mutate=mutate, now_s=now))
                                 shot_paths.append(out / f"{state}-{width}.png")
                         finally:
                             if serve is not None:
@@ -3355,9 +3318,9 @@ def read_style(page, rows: Sequence[StyleCheck], *, mutation: str | None = None,
     return tuple(sorted(found, key=place))
 
 
-def _shoot(browser, url: str, state: str, width: int, out: Path, *,
-           question: str = READ_QUESTION, canonical: bool = True, mutate: bool = False) -> Shot:
-    page = browser.new_page(viewport={"width": width, "height": HEIGHT})
+def _shoot(browser, url: str, state: str, width: int, out: Path, *, question: str = READ_QUESTION,
+           canonical: bool = True, mutate: bool = False, now_s: float = shot_clock.READING) -> Shot:
+    page = shot_clock.open_page(browser, width, HEIGHT, now_s)
     try:
         page.goto(url)
         page.wait_for_selector("#breakdowns h2" if state == "spend-page" else "#projects h2")
@@ -3509,7 +3472,7 @@ def _shoot(browser, url: str, state: str, width: int, out: Path, *,
         short = tuple(page.evaluate(SHORT_CONTROLS))
         acts = tuple(page.evaluate(ACTS_ROW))
         path = out / f"{state}-{width}.png"
-        page.screenshot(path=str(path), full_page=True)
+        shot_clock.screenshot(page, path)
         style: tuple[str, ...] = ()
         checked: tuple[str, ...] = ()
         broke: tuple[str, ...] = ()
@@ -3589,6 +3552,9 @@ def main(argv: list[str] | None = None) -> int:
                         help="also write <state>-sheet.png, the state's widths side by side")
     parser.add_argument("--states", help="a comma list of the states to shoot (default every state)")
     parser.add_argument("--composite", help="with --sheets, also write NAME, the shot states' sheets side by side")
+    shot_clock.add_flag(parser)
+    parser.add_argument("--widths", help="a comma list of the viewport widths to shoot, in pixels "
+                                         f"(default {','.join(map(str, WIDTHS))})")
     args = parser.parse_args(argv)
     states = STATES
     if args.states is not None:
@@ -3596,10 +3562,18 @@ def main(argv: list[str] | None = None) -> int:
         unknown = [state for state in states if state not in STATES]
         if unknown:
             parser.error(f"--states names {', '.join(unknown)}, which are not states")
+    widths = WIDTHS
+    if args.widths is not None:
+        members = args.widths.split(",")
+        if (not all(member.isascii() and member.isdigit() and int(member) > 0 for member in members)
+                or len(set(map(int, members))) != len(members)):
+            parser.error(f"--widths takes distinct positive whole pixel widths, not {args.widths!r}")
+        widths = tuple(int(member) for member in members)
     if args.composite is not None and not args.sheets:
         parser.error("--composite goes with --sheets")
     if (args.question is None) != (args.answer_file is None):
         parser.error("--question and --answer-file go together")
+    now = shot_clock.parsed_reading(parser, args.now)
     real = args.question is not None
     if real:
         text = Path(args.answer_file).read_text(encoding="utf-8")
@@ -3607,10 +3581,11 @@ def main(argv: list[str] | None = None) -> int:
     with tempfile.TemporaryDirectory(prefix="console-shots-env-") as tmp:
         os.environ.update(sandbox_environ(Path(tmp).resolve()))
         try:
-            taken = (capture(Path(args.out), states=("question-read",), read=(args.question, text),
-                             sheets=args.sheets, composite=args.composite)
-                     if real else capture(Path(args.out), states=states, sheets=args.sheets,
-                                          composite=args.composite))
+            taken = (capture(Path(args.out), states=("question-read",), widths=widths,
+                             read=(args.question, text), sheets=args.sheets, composite=args.composite,
+                             now=now)
+                     if real else capture(Path(args.out), states=states, widths=widths, sheets=args.sheets,
+                                          composite=args.composite, now=now))
         except Unavailable as error:
             print(f"console-screenshots: {error}", file=sys.stderr)
             return 2
