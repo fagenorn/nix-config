@@ -147,6 +147,10 @@ class FixedWordsTest(unittest.TestCase):
         flagged = [t for t in page_words(PAGE.read_text(encoding="utf-8")) + console_text_words() if owner_words.unglossed(t)]
         self.assertEqual(flagged, [])
 
+    def test_the_closing_counts_line_uses_no_unglossed_glossary_word(self):
+        from agent_tools.console import sprints
+        self.assertEqual(owner_words.unglossed(sprints.closing_text(1, 1, 1)), [])
+
     def test_page_words_reads_markup_text_and_visible_attributes(self):
         html = '<p title="Open the pull request">The land lock</p><style>.held{}</style><template id="x"><b>held</b></template><script>"use strict";</script>'
         words = page_words(html)

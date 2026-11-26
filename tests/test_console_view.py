@@ -2734,7 +2734,7 @@ class SprintEndViewTest(unittest.TestCase):
         self.assertEqual(shown["closing"], {
             "at": iso(C), "summary": SUMMARY, "first_line": "Importer resumes after a crash",
             "differently": "cut smaller slices", "landed": [12], "held": [14], "dropped": [13],
-            "counts_text": "1 landed, 1 held for verification, 1 dropped"})
+            "counts_text": "1 landed, 1 merged, not yet proven, 1 dropped"})
         self.assertIs(shown["stoppable"], False)
         self.assertEqual(shown["ended_at"], iso(C))
         self.assertIsNone(shown["stop_text"])
@@ -2757,7 +2757,7 @@ class SprintEndViewTest(unittest.TestCase):
             {"issue": 13, "stage": "dropped", "stage_text": "dropped"},
             {"issue": 14, "stage": "held", "stage_text": "merged, not yet proven"}])
         self.assertEqual(shown["closing"]["counts_text"],
-                         "1 landed, 1 held for verification, 1 dropped")
+                         "1 landed, 1 merged, not yet proven, 1 dropped")
 
     def test_a_done_sprint_folds_into_finished_sprints_after_24_hours(self):
         C = R + 5 * MIN

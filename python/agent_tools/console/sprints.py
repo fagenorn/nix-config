@@ -705,8 +705,8 @@ project, goal, at)` (replacing an earlier one); `manager.stopped` for a pending 
 `manager.stop_failed` for a pending id with a string `reason` sets `reason` and `failed_at`; every
 other row changes nothing, and folding `a + b` equals folding `b` onto the fold of `a`.
 `pending_due(stop, now_ms)` is true when `failed_at` is `None` or `STOP_RETRY_MS` have passed since
-it. `closing_text(landed, held, dropped)` is `<landed> landed` then `, <held> held for
-verification` and `, <dropped> dropped` for each non-zero count. The new texts are `STOP_TEXT`,
+it. `closing_text(landed, held, dropped)` is `<landed> landed` then `, <held> merged, not
+yet proven` and `, <dropped> dropped` for each non-zero count. The new texts are `STOP_TEXT`,
 `STOPPING_TEXT`, `STOPPED_TEXT`, `CLOSING_MEMBER`, `SUMMARY_NUMBER`, `NOT_ENDED`, `ENDED`,
 `ALREADY_STOPPING`, `STOP_FAILED_TEXT` and `UNSTOPPED_TEXT`.
 
@@ -3246,7 +3246,7 @@ def pending_due(stop: PendingStop, now_ms: int) -> bool:
 
 def closing_text(landed: int, held: int, dropped: int) -> str:
     text = f"{landed} landed"
-    for count, label in ((held, "held for verification"), (dropped, "dropped")):
+    for count, label in ((held, "merged, not yet proven"), (dropped, "dropped")):
         if count:
             text += f", {count} {label}"
     return text

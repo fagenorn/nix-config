@@ -1207,7 +1207,7 @@ class PendingStopTest(unittest.TestCase):
 class ClosingTextTest(unittest.TestCase):
     def test_the_closing_wording(self):
         self.assertEqual(sprints.closing_text(2, 0, 0), "2 landed")
-        self.assertEqual(sprints.closing_text(1, 1, 1), "1 landed, 1 held for verification, 1 dropped")
+        self.assertEqual(sprints.closing_text(1, 1, 1), "1 landed, 1 merged, not yet proven, 1 dropped")
         self.assertEqual(sprints.closing_text(0, 0, 2), "0 landed, 2 dropped")
         self.assertEqual(sprints.first_line("  \n first \nsecond"), "first")
 
