@@ -2358,14 +2358,10 @@ Re-review only these previously reported findings for task ${t.n} against the fi
   else tip = impl.commit
   if (partial === t.n) partial = undefined
 }
-// When every task ended with no commit, the branch holds nothing to review, verify or land: the final review would get
-// an empty range and the pull request no commit. Read from the done record (no_change), which a resume carries, never
-// from a head. The tasks' outputs are in place and recorded; the owner closes the issue. A branch ahead of the base it
-// was cut from holds commits to review whatever each task's reply said (a cut-off run committed them before this run
-// saw its tasks done), so it is not empty. Every comparison is between two commit ids the program holds: the issue
-// branch's head against the base_sha the setup recorded, a declared branch's head against the head the plan recorded
-// for it (a declared branch's base is a ref name such as origin/dev, which a string compare cannot resolve). The
-// head must be known before this stop is issued: an absent one says nothing about the branch.
+// Every task ended with no commit and the branch is not ahead of its base: nothing to review or land. no_change is
+// read from the done record a resume carries. A branch ahead holds commits whatever each task's reply said, so it is
+// reviewed. Comparisons are between commit ids only: a declared branch's base is a ref name (origin/dev), never a
+// sha. An unread head says nothing about the branch, so it stops at setup instead.
 const aheadOfBase = (head, base) => isCommit(head) && isCommit(base) && !sameSha(head, base)
 const branchAhead = aheadOfBase(tip, setup.base_sha) || declared(plan).some(b => aheadOfBase(branchTips[b.name], b.head))
 const everyNoChange = plan.tasks.length > 0 && plan.tasks.every(t => taskLog.some(d => d.n === t.n && d.no_change === true))
