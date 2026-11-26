@@ -194,6 +194,7 @@ agent-workflow-tests *args:
     tests/test_independent_review.py \
     tests/test_issue_setup.py \
     tests/test_closing.py \
+    tests/test_holding.py \
     tests/test_landing.py \
     tests/test_land_tally.py \
     tests/test_engine_land_recovery.py \
@@ -222,6 +223,10 @@ agent-workflow-tests *args:
     tests/test_omlx_memory_fseventsd.py \
     tests/test_memory_budget.py \
     tests/test_omlx_memory_day.py \
+    tests/test_omlx_memory_census.py \
+    tests/test_omlx_memory_records.py \
+    tests/test_omlx_memory_events.py \
+    tests/test_omlx_memory_census_day.py \
     tests/test_memory_floor.py \
     tests/test_memory_floor_priority.py \
     tests/test_memory_floor_gate.py \
@@ -317,6 +322,8 @@ agent-workflow-tests *args:
     tests/test_suite_tiers.py \
     tests/test_suite_timing.py \
     tests/test_verify_slot.py \
+    tests/test_verify_slot_timeouts.py \
+    tests/test_verify_queue.py \
     tests/test_verification_command.py \
     tests/test_touched_tests.py \
     tests/test_console_event_log.py \
@@ -346,6 +353,7 @@ agent-workflow-tests *args:
     tests/test_console_trust_start.py \
     tests/test_console_plan_questions.py \
     tests/test_console_project_question.py \
+    tests/test_console_credential_timing.py \
     tests/test_console_question_records.py \
     tests/test_console_question_check.py \
     tests/test_console_contract_draft.py \

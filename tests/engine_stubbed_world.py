@@ -37,6 +37,11 @@ request's `mergeStateStatus` is `BEHIND` while `main` is not an ancestor of its 
 The environment always sets `LANDING_BOUND_SECONDS` to 0 (no wait on a lock or a pending check).
 The replies' `merge`, `same_head` and `upstream` effects (see the launcher stand-in) are given the
 run's worktree and bare origin when they name none.
+
+`blocks` is the issue numbers the issue blocks (the answer to the hold path's blocking read; none by
+default). The world also answers the `needs-verification` label creation of the hold path and of its
+split children, and registers no `gh auth status`, so the close-out's `verify-pending run` does nothing. `fail_once` is the tracker's one-shot
+failures, as `ForgeWorld.comment_store` takes them (a bare operation kind, or `add_label:<label>` for one label).
 """
 
 from __future__ import annotations
@@ -80,7 +85,24 @@ IMPLEMENTED = {
               "sensitive": False, "ineligible": False, "tests": ["checks/check_greet.py"]},
     "commit": {"path": "fixture/farewell.py",
                "text": 'def farewell(name: str) -> str:\n    return f"Goodbye, {name}."\n'}}
-DEFAULT_REPLIES = {"applies": APPLIES, "implement": IMPLEMENTED, "lite-review": CLEAN_LITE}
+NOT_BEFORE = {"not_before": "2099-01-01T00:00:00Z"}
+EVIDENCE_CHECK = {"ac": "AC2", "kind": "evidence", "host": "any", "when": NOT_BEFORE,
+                  "run": {"command": "test"}}
+EVIDENCE_BODY = ("Add a greet() function.\n\n## Acceptance criteria\n\n"
+                 "- [ ] [code] greet() returns the greeting\n"
+                 "- [ ] [evidence] the owner has seen the greeting\n")
+REGRADED = {"verdict": "met", "code_unmet": [],
+            "acceptance": [{"id": "AC1", "met": True, "evidence": "checks/check_greet.py:8"}]}
+
+
+def drafted(*checks: dict) -> dict:
+    """A `hold-draft` reply that drafted `checks`, each written under its criterion id."""
+    return {"verdict": "drafted", "written": [{"ac": c["ac"], "check": json.dumps(c)} for c in checks],
+            "detail": ""}
+
+
+DEFAULT_REPLIES = {"applies": APPLIES, "implement": IMPLEMENTED, "lite-review": CLEAN_LITE,
+                   "hold-draft": drafted(EVIDENCE_CHECK), "regrade": REGRADED}
 DEFAULT_BODY = ("Add a greet() function to the fixture module.\n\n"
                 "## Acceptance criteria\n\n- [ ] [code] greet() returns the greeting\n")
 PULL_FIELDS = "number,state,headRefName,closingIssuesReferences"
@@ -96,7 +118,8 @@ class StubbedRun:
                  rollup: list | None = None, forge_events=(), lock_release_fails: bool = False,
                  before_pull_request: bool = False, rollups: list[list] | None = None,
                  advance_main: int = 0, main_change: dict | None = None, merge_behind: int = 0,
-                 merge_policy: int = 0, fixtures: AdoptedFixtures | None = None) -> None:
+                 merge_policy: int = 0, blocks=(), fail_once=(),
+                 fixtures: AdoptedFixtures | None = None) -> None:
         self.test = test_case
         self.issue = issue
         self.title = title
@@ -110,8 +133,8 @@ class StubbedRun:
                         else fixtures.project(test_case, self.world, **options))
         self.forge = ForgeWorld(test_case)
         slug = self.fixture.slug
-        self.forge.comment_store(slug, issue, comments, labels=list(labels))
-        self._respond(slug, issue, title, state, labels, body, list(pulls))
+        self.forge.comment_store(slug, issue, comments, labels=list(labels), fail_once=list(fail_once))
+        self._respond(slug, issue, title, state, labels, body, list(pulls), list(blocks))
         self.tmp = self.world.tmp / "stubbed-run"
         self.tmp.mkdir()
         self.branch: str = issue_branch.render(self.fixture.branch_pattern, issue,
@@ -184,7 +207,7 @@ class StubbedRun:
         self.world.env["PATH"] = os.pathsep.join([str(shims), self.world.env["PATH"]])
 
     def _respond(self, slug: str, issue: int, title: str, state: str, labels, body: str,
-                 pulls: list) -> None:
+                 pulls: list, blocks: list) -> None:
         names = [{"name": name} for name in labels]
         issue_json = {"number": issue, "title": title, "state": state, "labels": names, "body": body}
         respond = self.forge.respond_json
@@ -198,6 +221,10 @@ class StubbedRun:
                        "-f", "color=FBCA04"], {"name": "in-progress"})
         respond("gh", ["pr", "list", "--repo", slug, "--state", "all", "--search", str(issue),
                        "--json", PULL_FIELDS], pulls)
+        respond("gh", ["api", f"repos/{slug}/issues/{issue}/dependencies/blocking"],
+                [{"number": n} for n in blocks])
+        respond("gh", ["api", "-X", "POST", f"repos/{slug}/labels", "-f", "name=needs-verification",
+                       "-f", "color=1D76DB"], {"name": "needs-verification"})
 
     def _install_home(self, gh_bin: Path, slug: str) -> None:
         home = self.world.home

@@ -1,17 +1,19 @@
 """`omlx-memory-watch`: the eleven-m5 memory watcher, one sample per run.
 
 `omlx-memory-watch sample --state-dir DIR --floor-gib N --others-budget-gib N
---omlx-jetsam-priority N --host NAME [--label org.nixos.omlx] [--health-url URL] [--vm-stat PATH]
-[--sysctl PATH] [--launchctl PATH] [--ps PATH] [--footprint PATH] [--alert-settings FILE]
-[--alert-log FILE] [--telegram-api URL] [--now ISO8601]` takes one reading of the host and
+--unowned-alert-gib N --omlx-jetsam-priority N --host NAME [--label org.nixos.omlx] [--health-url URL] [--vm-stat PATH]
+[--sysctl PATH] [--launchctl PATH] [--ps PATH] [--footprint PATH] [--hdiutil PATH] [--slot-history FILE]
+[--colima-pid-file FILE] [--alert-settings FILE] [--alert-log FILE] [--telegram-api URL] [--census-record FILE]
+[--now ISO8601]` takes one reading of the host and
 records it. Used memory is (anonymous pages - purgeable pages + wired pages + compressor pages)
 x the page size of `vm_stat`; available is `hw.memsize` minus used. A model is loaded when the
 health URL (read without any proxy, 5 s) answers `engine_pool.loaded_count >= 1`. The oMLX
 footprint is `phys_footprint` of `footprint -p <pid>` for the pid `launchctl print
 system/<label>` shows, unknown when that is missing or fails; the memory of everything else is
 used minus that footprint, counted only on a loaded sample whose footprint is known. CI jobs
-are the `Runner.Worker` processes of `ps -axo comm=`, every user's, since a job runs under a
-runner account.
+are the `Runner.Worker` processes of `ps -axwwo pid=,args=` (the `ww` keeps a ps whose output is not a
+terminal from cutting the args), every user's, since a job runs under a runner account and other accounts'
+processes show as `(name)`.
 
 `DIR/memory-watch.json` (mode 0600 in a 0700 directory, replaced atomically) holds the day's
 `since`, `day`, `peak_used_bytes`, `peak_others_bytes`, `peak_omlx_bytes`,
@@ -21,11 +23,43 @@ runner account.
 gets one line per finished day: `day`, the peaks and minimum in GiB (null where unmeasured),
 `others_budget_gib`, `over_budget`, `jetsam_exits`, `peak_ci_jobs`, `samples`,
 `loaded_samples`, `min_loaded_available_gib`, `floor_gib`, `omlx_jetsam_priority` and
-`declared_jetsam_priority`.
+`declared_jetsam_priority`, then `peak_fseventsd_gib` and `fseventsd_restarts`, then for each of
+`sys_footprint`, `process_footprint`, `unowned`, `wired`, `anonymous` and `compressions` a
+`peak_<name>_gib` and a `peak_<name>_at` (the first sample, as ISO 8601, that held that peak; null
+where unmeasured), `peak_owners` (the day's five largest `{name, pid, gib, at}`), `census_samples`
+and `records_since`.
+
+Each successful sample also appends one line to `DIR/samples/<day>.jsonl` (directory 0700, file 0600):
+`at`, `used_bytes`, `available_bytes`, `loaded`, `omlx_bytes`, `ci_jobs`, `wired_bytes`,
+`anonymous_bytes`, `compressions_bytes` (null when `vm_stat` prints no `Compressions` line), then
+`sys_footprint_bytes`, `process_footprint_bytes`, `unowned_bytes`, `top_owners`, `census_at` and
+`census_seconds`, which are null without a fresh census, and last `events`, the list of changes since the previous
+sample (RAM disks from `hdiutil info -plist`, the Colima VM from the pid in `--colima-pid-file`, default
+`~/.colima/_lima/colima/vz.pid`, CI jobs and live `verify-slot run` processes from the ps listing, finished
+verify runs from `--slot-history`, default the verify-slot history of the slot directory, and the floor kills
+of the floor record). Their shapes and the baseline, unreadable-source and history-offset rules are in
+`agent_tools.hosts.omlx_memory_events`; the watcher never takes a slot's lock. The state keeps what each
+source last showed in `ci_pids_seen`, `vm_seen`, `ram_disks_seen`, `verify_live_seen` and `history_seen`.
+RAM disks, CI jobs and live verify runs are snapshots: one that starts and ends between two samples is not
+recorded. A failed `hdiutil`, an unreadable pid file or an unreadable history is not a failed reading. A census is fresh when its `error` is null,
+its three figures are integers and its `at` is within 150 s of the sample. A finished day deletes the
+files more than 14 days older than the new day. The state holds `census_peaks` (each figure's largest
+`{bytes, at}`; a later equal value keeps the earlier time; the three vm figures fold on every sample,
+the census figures only from a fresh census), `peak_owners` (each `(name, pid)` at its largest size,
+earliest on a tie, the five largest kept), `census_samples` (samples with a fresh census), all three
+reset each day, and `records_since`, the day of the first sample that kept them: it is set once and
+carried across days, so a day rolled over from a state without it reports null. `records_since_at`,
+that first sample's time, is kept with it for the post-deploy check. The state also keeps `last_sample`,
+`{day, line}`, the last sample line: the state is replaced first and the line appended after, so a run
+stopped between the two leaves the line in the state, and the next run appends it if the file does not
+end with it before it reads anything else.
 
 An alert is queued when the service's `runs` changed and its last exit reason is the memory
 killer's (`jetsam`), and when available memory falls under the floor while a model is loaded
-(`low_memory`, once per episode). The first sample only records a baseline. Each queued alert
+(`low_memory`, once per episode). `unowned_memory` is queued once per episode when a fresh census's
+unowned memory is over `--unowned-alert-gib` (strictly); an unowned figure at or under the line closes
+the episode, and a sample without a fresh census changes nothing. The first sample only records a
+baseline for the other alerts. Each queued alert
 is delivered through `agent_tools.hosts.host_alerts`, in order, before the state is written;
 one that fails stays queued, is logged once and is retried by the next sample.
 
@@ -44,6 +78,22 @@ shows no pid (no record). It never reads the alert settings and sends nothing: `
 `fseventsd_restarts` to the day line, and queues `fseventsd_restarted` when `restarts` rose, and
 `fseventsd_held` and `fseventsd_restart_failed` (the record says `restart_failed`) once per
 episode each. A missing or non-JSON record is not a failed reading.
+
+`census --record FILE [--footprint PATH] [--timeout-seconds N] [--now ISO8601]` runs as root: it
+runs `footprint -a --sysFootprint --noCategories -j <path>`, with `<path>` inside a fresh private
+temporary directory, and replaces FILE (default `/var/db/memory-watch/census.json`, directory 0755,
+file 0644, atomically) with `at`, `seconds` (how long footprint took), `footprint_exit` (null when it
+did not finish), `error` (null or text), `warnings` (the length of footprint's `warnings`),
+`sys_footprint_bytes`, `process_footprint_bytes`, `unowned_bytes`, `processes` and `top_owners` (at
+most five `{name, pid, bytes}`, largest first). Unowned memory is `sys_footprint` minus footprint's own
+`total footprint`, never a sum of the processes (which double-counts shared memory), and may be
+negative. A report is a census only when it is counted in bytes, carries both totals, has an empty
+`errors` list and at least one process; footprint's exit code never decides on its own. Any other
+outcome writes the record with `error` set and every figure null, prints `omlx-memory-watch: <error>`
+to stderr and exits 1: `footprint timed out after <N> s`, `footprint could not run (<class>)`,
+`footprint census incomplete (errors: <n>)` or `footprint output not parseable (exit <code>)`.
+
+`sample [--census-record FILE]` (default `/var/db/memory-watch/census.json`) reads the census record once per run.
 
 `sample [--floor-record FILE]` (default `/var/db/memory-watch/floor.json`, written by the root memory
 floor daemon, which never writes this watcher's log or alerts) reads the floor record once per run
@@ -66,17 +116,21 @@ or printed nothing parseable (stderr names it; nothing is written). 2: usage. A 
 """
 
 import argparse
+import copy
 import http.client
 import json
 import os
 import re
 import subprocess
 import sys
+import tempfile
+import time
 import urllib.request
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from agent_tools.hosts import host_alerts
+from agent_tools.delivery import verify_history, verify_slot
+from agent_tools.hosts import host_alerts, omlx_memory_events
 
 GIB = 1024**3
 PROG = "omlx-memory-watch"
@@ -87,8 +141,21 @@ FSEVENTSD_DEFAULTS = {
     "fseventsd_bytes": None, "peak_fseventsd_bytes": None, "fseventsd_restarts_seen": None,
     "fseventsd_restarts_today": 0, "fseventsd_held_open": False, "fseventsd_failed_open": False,
 }
+CENSUS_RECORD = "/var/db/memory-watch/census.json"
+CENSUS_TIMEOUT = 50
+CENSUS_FRESH_SECONDS = 150
+SAMPLE_DAYS = 14
+SAMPLES_DIR = "samples"
+PEAK_FIGURES = ("sys_footprint", "process_footprint", "unowned", "wired", "anonymous", "compressions")
+CENSUS_DEFAULTS = {
+    "census_peaks": {}, "peak_owners": [], "census_samples": 0, "records_since": None, "records_since_at": None,
+    "unowned_open": False, "last_sample": None,
+}
+TOP_OWNERS = 5
 FLOOR_RECORD = "/var/db/memory-watch/floor.json"
 FLOOR_DEFAULTS = {"floor_kills_seen": None, "floor_unmet_seen": None, "priority_unset_open": False, "floor_log": []}
+COLIMA_PID_FILE = ".colima/_lima/colima/vz.pid"
+PID_FILE_BYTES = 64
 STATE_NAME = "memory-watch.json"
 PEAKS_NAME = "memory-peaks.jsonl"
 RUN_TIMEOUT = 30
@@ -118,13 +185,18 @@ class CommandFailed(ReadingError):
 def parse_vm_stat(text: str) -> dict:
     header = re.search(r"page size of (\d+) bytes", text)
     found = {"page_size": int(header.group(1))} if header else {}
+    compressions = None
     for line in text.splitlines():
         name, separator, value = line.partition(":")
         key = VM_FIELDS.get(name.strip())
-        if separator and key and re.fullmatch(r"\s*\d+\.?\s*", value):
-            found[key] = int(value.strip().rstrip("."))
+        if separator and re.fullmatch(r"\s*\d+\.?\s*", value):
+            if key:
+                found[key] = int(value.strip().rstrip("."))
+            elif name.strip() == "Compressions":
+                compressions = int(value.strip().rstrip("."))
     if len(found) != len(VM_FIELDS) + 1:
         raise ValueError("vm_stat output lacks the page size or a memory field")
+    found["compressions"] = compressions
     return found
 
 
@@ -149,9 +221,48 @@ def parse_launchctl(text: str) -> dict:
     return found
 
 
-def count_ci_jobs(text: str) -> int:
-    names = (line.strip().strip("()") for line in text.splitlines())
-    return sum(1 for name in names if name.rsplit("/", 1)[-1] == "Runner.Worker")
+class CensusIncomplete(ValueError):
+    def __init__(self, errors: int):
+        super().__init__(f"footprint census incomplete (errors: {errors})")
+        self.errors = errors
+
+
+def _is_int(value) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def parse_census(document) -> dict:
+    """The figures of a complete `footprint -a --sysFootprint -j` report, or ValueError (CensusIncomplete)."""
+    if not isinstance(document, dict) or document.get("unit") != "byte":
+        raise ValueError("footprint report is not counted in bytes")
+    per_unit = document.get("bytes per unit")
+    if not _is_int(per_unit) or per_unit != 1:
+        raise ValueError("footprint report is not counted in bytes")
+    auxiliary = document.get("auxiliary")
+    system = auxiliary.get("sys_footprint") if isinstance(auxiliary, dict) else None
+    total = document.get("total footprint")
+    if not _is_int(total) or not _is_int(system):
+        raise ValueError("footprint report has no system or process total")
+    errors, listed = document.get("errors"), document.get("processes")
+    if not isinstance(errors, list) or not isinstance(listed, list):
+        raise ValueError("footprint report has no errors or processes list")
+    if errors:
+        raise CensusIncomplete(len(errors))
+    owners = [
+        {"name": entry["name"], "pid": entry["pid"], "bytes": entry["footprint"]}
+        for entry in listed
+        if isinstance(entry, dict) and isinstance(entry.get("name"), str)
+        and _is_int(entry.get("pid")) and _is_int(entry.get("footprint"))
+    ]
+    if not owners:
+        raise ValueError("footprint report has no process")
+    owners.sort(key=lambda owner: (-owner["bytes"], owner["pid"]))
+    warnings = document.get("warnings")
+    return {
+        "warnings": len(warnings) if isinstance(warnings, list) else 0,
+        "sys_footprint_bytes": system, "process_footprint_bytes": total, "unowned_bytes": system - total,
+        "processes": len(owners), "top_owners": owners[:TOP_OWNERS],
+    }
 
 
 def parse_footprint(text: str) -> int | None:
@@ -165,7 +276,8 @@ def fresh_day(since: str, day: str) -> dict:
         "peak_omlx_bytes": None, "min_available_bytes": None, "samples": 0, "loaded_samples": 0,
         "min_loaded_available_bytes": None, "peak_ci_jobs": 0, "jetsam_exits": 0, "omlx_runs": None,
         "omlx_jetsam_priority": None, "low_memory_open": False, "pending": [],
-        **FSEVENTSD_DEFAULTS, **FLOOR_DEFAULTS, "floor_log": [],
+        **FSEVENTSD_DEFAULTS, **FLOOR_DEFAULTS, "floor_log": [], **copy.deepcopy(CENSUS_DEFAULTS),
+        **omlx_memory_events.EVENT_DEFAULTS,
     }
 
 
@@ -201,6 +313,67 @@ def _day_line(state: dict, floor_bytes: int, others_budget_bytes: int, declared:
         "declared_jetsam_priority": declared,
         "peak_fseventsd_gib": _gib(state["peak_fseventsd_bytes"]),
         "fseventsd_restarts": state["fseventsd_restarts_today"],
+        **_peak_figures(state["census_peaks"]),
+        "peak_owners": [
+            {"name": owner["name"], "pid": owner["pid"], "gib": _gib(owner["bytes"]), "at": owner["at"]}
+            for owner in state["peak_owners"]
+        ],
+        "census_samples": state["census_samples"],
+        "records_since": state["records_since"],
+    }
+
+
+def _peak_figures(peaks: dict) -> dict:
+    figures = {}
+    for name in PEAK_FIGURES:
+        held = peaks.get(name)
+        figures[f"peak_{name}_gib"] = None if held is None else _gib(held["bytes"])
+        figures[f"peak_{name}_at"] = None if held is None else held["at"]
+    return figures
+
+
+def fresh_census(found: dict | None, now: datetime) -> dict | None:
+    """The census record when it has no error, carries its three figures and is within the freshness window."""
+    if not isinstance(found, dict) or found.get("error") is not None:
+        return None
+    if not all(_is_int(found.get(key)) for key in ("sys_footprint_bytes", "process_footprint_bytes", "unowned_bytes")):
+        return None
+    try:
+        age = abs((now - datetime.fromisoformat(found["at"])).total_seconds())
+    except (KeyError, TypeError, ValueError):
+        return None
+    return found if age <= CENSUS_FRESH_SECONDS else None
+
+
+def _fold_peak(state: dict, name: str, value: int, at: str) -> None:
+    held = state["census_peaks"].get(name)
+    if held is None or value > held["bytes"]:
+        state["census_peaks"][name] = {"bytes": value, "at": at}
+
+
+def _fold_owners(state: dict, owners, at: str) -> None:
+    kept = {(owner["name"], owner["pid"]): owner for owner in state["peak_owners"]}
+    for owner in owners if isinstance(owners, list) else []:
+        if not (isinstance(owner, dict) and isinstance(owner.get("name"), str)
+                and _is_int(owner.get("pid")) and _is_int(owner.get("bytes"))):
+            continue
+        held = kept.get((owner["name"], owner["pid"]))
+        if held is None or owner["bytes"] > held["bytes"]:
+            kept[(owner["name"], owner["pid"])] = {
+                "name": owner["name"], "pid": owner["pid"], "bytes": owner["bytes"], "at": at}
+    state["peak_owners"] = sorted(kept.values(), key=lambda owner: (-owner["bytes"], owner["pid"]))[:TOP_OWNERS]
+
+
+def _sample_line(reading: dict, now: datetime, census: dict | None, events: list) -> dict:
+    keys = ("sys_footprint_bytes", "process_footprint_bytes", "unowned_bytes", "top_owners")
+    found = census or {}
+    return {
+        "at": now.isoformat(), "used_bytes": reading["used_bytes"], "available_bytes": reading["available_bytes"],
+        "loaded": reading["loaded"], "omlx_bytes": reading["omlx_bytes"], "ci_jobs": reading["ci_jobs"],
+        "wired_bytes": reading["wired_bytes"], "anonymous_bytes": reading["anonymous_bytes"],
+        "compressions_bytes": reading["compressions_bytes"],
+        **{key: found.get(key) for key in keys},
+        "census_at": found.get("at"), "census_seconds": found.get("seconds"), "events": events,
     }
 
 
@@ -261,7 +434,7 @@ def _fold_fseventsd(state: dict, found: dict | None, host: str) -> None:
         state["fseventsd_failed_open"] = False
 
 
-def _fold_floor(state: dict, found: dict | None, reading: dict) -> None:
+def _fold_floor(state: dict, found: dict | None, reading: dict, events: list) -> None:
     found = found or {}
     host = reading["host"]
     kills = _int(found.get("kills"))
@@ -275,6 +448,11 @@ def _fold_floor(state: dict, found: dict | None, reading: dict) -> None:
                 why = (f"over the {found['run_bound_bytes'] // GIB} GiB run bound" if bound
                        else f"under the {found['floor_bytes'] // GIB} GiB floor")
                 state["floor_log"].append(kill_line(entry))
+                events.append({
+                    "kind": "floor_kill", "at": entry["at"], "reason": entry["reason"], "owner": entry["owner"],
+                    "root_pid": entry["root_pid"], "signals": entry["signals"],
+                    "tree_gib": round(entry["tree_bytes"] / GIB, 1),
+                })
                 state["pending"].append({
                     "kind": "memory_kill", "logged": False,
                     "text": f"{host}: the memory floor ended {entry['owner']}'s workload "
@@ -318,14 +496,34 @@ def _fold_floor(state: dict, found: dict | None, reading: dict) -> None:
         state["priority_unset_open"] = False
 
 
-def decide(state, reading: dict, now: datetime, floor_bytes: int, others_budget_bytes: int):
-    """Fold one reading into the state; answer the new state and the finished day's line or None."""
+def _fold_unowned(state: dict, census: dict | None, reading: dict, alert_bytes: int) -> None:
+    if census is None:
+        return
+    unowned = census["unowned_bytes"]
+    if unowned <= alert_bytes:
+        state["unowned_open"] = False
+    elif not state["unowned_open"]:
+        state["unowned_open"] = True
+        state["pending"].append({
+            "kind": "unowned_memory", "logged": False,
+            "text": f"{reading['host']}: {unowned / GIB:.1f} GiB of memory is in use but held by no process, "
+                    f"over the {alert_bytes // GIB} GiB alert line (system footprint "
+                    f"{census['sys_footprint_bytes'] / GIB:.1f} GiB, process footprints "
+                    f"{census['process_footprint_bytes'] / GIB:.1f} GiB, wired {reading['wired_bytes'] / GIB:.1f} GiB, "
+                    f"anonymous {reading['anonymous_bytes'] / GIB:.1f} GiB). {SEE}",
+        })
+
+
+def decide(state, reading: dict, now: datetime, floor_bytes: int, others_budget_bytes: int,
+           unowned_alert_bytes: int):
+    """Fold one reading into the state; answer the new state, the finished day's line or None, and the sample line."""
     day = now.date().isoformat()
     line = None
     if state is None:
         state = fresh_day(day, day)
     else:
-        state = {**FSEVENTSD_DEFAULTS, **FLOOR_DEFAULTS, **state,
+        state = {**FSEVENTSD_DEFAULTS, **FLOOR_DEFAULTS, **copy.deepcopy(CENSUS_DEFAULTS),
+                 **omlx_memory_events.EVENT_DEFAULTS, **state,
                  "pending": [dict(entry) for entry in state["pending"]]}
         state["floor_log"] = list(state["floor_log"])
         if state["day"] != day:
@@ -333,13 +531,29 @@ def decide(state, reading: dict, now: datetime, floor_bytes: int, others_budget_
             carried = fresh_day(state["since"], day)
             for key in ("omlx_runs", "omlx_jetsam_priority", "low_memory_open", "pending",
                         "fseventsd_restarts_seen", "fseventsd_held_open", "fseventsd_failed_open",
-                        "floor_kills_seen", "floor_unmet_seen", "priority_unset_open", "floor_log"):
+                        "floor_kills_seen", "floor_unmet_seen", "priority_unset_open", "floor_log",
+                        "records_since", "records_since_at", "unowned_open", "last_sample",
+                        *omlx_memory_events.EVENT_DEFAULTS):
                 carried[key] = state[key]
             state = carried
+    if state["records_since"] is None:
+        state["records_since"] = day
+        state["records_since_at"] = now.isoformat()
     used, available, loaded = reading["used_bytes"], reading["available_bytes"], reading["loaded"]
     omlx = reading["omlx_bytes"]
     footprint = "unknown" if omlx is None else f"{omlx / GIB:.1f}"
     memory = f"Used {used / GIB:.1f} GiB, available {available / GIB:.1f} GiB, oMLX footprint {footprint} GiB."
+    at = now.isoformat()
+    census = fresh_census(reading["census"], now)
+    for name, key in (("wired", "wired_bytes"), ("anonymous", "anonymous_bytes"),
+                      ("compressions", "compressions_bytes")):
+        if reading[key] is not None:
+            _fold_peak(state, name, reading[key], at)
+    if census is not None:
+        state["census_samples"] += 1
+        for name in ("sys_footprint", "process_footprint", "unowned"):
+            _fold_peak(state, name, census[f"{name}_bytes"], at)
+        _fold_owners(state, census.get("top_owners"), at)
     state["samples"] += 1
     state["peak_used_bytes"] = max(state["peak_used_bytes"], used)
     state["min_available_bytes"] = _lower(state["min_available_bytes"], available)
@@ -372,8 +586,10 @@ def decide(state, reading: dict, now: datetime, floor_bytes: int, others_budget_
     else:
         state["low_memory_open"] = False
     _fold_fseventsd(state, reading["fseventsd"], reading["host"])
-    _fold_floor(state, reading["floor"], reading)
-    return state, line
+    events = omlx_memory_events.fold_events(state, reading["observed"])
+    _fold_floor(state, reading["floor"], reading, events)
+    _fold_unowned(state, census, reading, unowned_alert_bytes)
+    return state, line, _sample_line(reading, now, census, events)
 
 
 def read_health(url: str) -> bool:
@@ -498,6 +714,38 @@ def fseventsd(args) -> int:
     return status
 
 
+def census(args) -> int:
+    start = time.monotonic()
+    code, error, figures = None, None, {}
+    with tempfile.TemporaryDirectory() as scratch:
+        target = Path(scratch) / "footprint.json"
+        try:
+            done = subprocess.run(
+                [args.footprint, "-a", "--sysFootprint", "--noCategories", "-j", str(target)],
+                capture_output=True, text=True, timeout=args.timeout_seconds)
+            code = done.returncode
+            try:
+                figures = parse_census(json.loads(target.read_text()))
+            except CensusIncomplete as incomplete:
+                error = str(incomplete)
+            except (OSError, ValueError):
+                error = f"footprint output not parseable (exit {code})"
+        except subprocess.TimeoutExpired:
+            error = f"footprint timed out after {args.timeout_seconds} s"
+        except (OSError, subprocess.SubprocessError) as failure:
+            error = f"footprint could not run ({type(failure).__name__})"
+    seconds = round(time.monotonic() - start, 1)
+    at = args.now if args.now is not None else datetime.now().astimezone()
+    keys = ("warnings", "sys_footprint_bytes", "process_footprint_bytes", "unowned_bytes", "processes", "top_owners")
+    write_record(args.record, {
+        "at": at.isoformat(), "seconds": seconds, "footprint_exit": code, "error": error,
+        **{key: figures.get(key) for key in keys},
+    })
+    if error:
+        print(f"{PROG}: {error}", file=sys.stderr)
+    return 1 if error else 0
+
+
 def _run(name: str, argv: list[str]) -> str:
     try:
         done = subprocess.run(argv, capture_output=True, text=True, timeout=RUN_TIMEOUT)
@@ -508,26 +756,69 @@ def _run(name: str, argv: list[str]) -> str:
     return done.stdout
 
 
-def take_reading(args) -> dict:
+def _read_pid_file(path: Path) -> str | None:
+    """The first bytes of Colima's pid file, None when absent; `OSError` or `UnicodeDecodeError` when unreadable."""
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return None
+    try:
+        return os.read(descriptor, PID_FILE_BYTES).decode()
+    finally:
+        os.close(descriptor)
+
+
+def _observe(args, processes: dict[int, str], seen) -> dict:
+    """What the sources of `omlx_memory_events` show now; None (or `UNREAD`) for one that could not be read."""
+    try:
+        ram_disks = omlx_memory_events.parse_ram_disks(_run("hdiutil", [args.hdiutil, "info", "-plist"]))
+    except (ReadingError, ValueError):
+        ram_disks = None
+    pid_file = args.colima_pid_file or Path.home() / COLIMA_PID_FILE
+    try:
+        vm_pid = omlx_memory_events.colima_vm_pid(_read_pid_file(pid_file), processes)
+    except (OSError, UnicodeDecodeError):
+        vm_pid = omlx_memory_events.UNREAD
+    identity, offset = (seen["identity"], seen["offset"]) if seen else (None, 0)
+    path = args.slot_history or verify_history.history_path(verify_slot.slot_dir())
+    try:
+        records, found, consumed = verify_history.read_from(path, identity, offset, baseline=not seen)
+        history = {"records": records, "identity": found, "offset": consumed}
+    except (OSError, ValueError):
+        history = None
+    return {
+        "ci_pids": omlx_memory_events.ci_pids(processes), "ram_disks": ram_disks, "vm_pid": vm_pid,
+        "verify_live": omlx_memory_events.verify_runs_live(processes), "history": history,
+    }
+
+
+def take_reading(args, previous: dict | None = None) -> dict:
     try:
         vm = parse_vm_stat(_run("vm_stat", [args.vm_stat]))
         total = int(_run("sysctl", [args.sysctl, "-n", "hw.memsize"]).strip())
         service = parse_launchctl(_run("launchctl", [args.launchctl, "print", f"system/{args.label}"]))
     except ValueError as error:
         raise ReadingError(f"output not parseable ({error})") from None
-    listing = _run("ps", [args.ps, "-axo", "comm="])
+    listing = _run("ps", [args.ps, "-axwwo", "pid=,args="])
     if not listing.strip():
         raise ReadingError("ps printed nothing")
+    processes = omlx_memory_events.parse_listing(listing)
     used = used_bytes(vm)
+    page = vm["page_size"]
+    compressions = vm["compressions"]
     floor = read_fseventsd_record(args.floor_record)
     return {
         "host": args.host, "used_bytes": used, "available_bytes": total - used,
-        "loaded": read_health(args.health_url), "ci_jobs": count_ci_jobs(listing),
+        "loaded": read_health(args.health_url), "ci_jobs": len(omlx_memory_events.ci_pids(processes)),
         "omlx_bytes": read_footprint(args.footprint, service["pid"]),
         "runs": service["runs"], "last_exit_reason": service["last_exit_reason"],
         "jetsam_priority": kernel_priority(service, floor),
         "declared_jetsam_priority": args.omlx_jetsam_priority,
         "fseventsd": read_fseventsd_record(args.fseventsd_record), "floor": floor,
+        "wired_bytes": vm["wired"] * page, "anonymous_bytes": vm["anonymous"] * page,
+        "compressions_bytes": None if compressions is None else compressions * page,
+        "census": read_fseventsd_record(args.census_record),
+        "observed": _observe(args, processes, (previous or {}).get("history_seen")),
     }
 
 
@@ -546,14 +837,59 @@ def read_state(path: Path):
     return document
 
 
-def write_state(directory: Path, document: dict, line: dict | None) -> None:
-    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-    if line is not None:
-        descriptor = os.open(directory / PEAKS_NAME, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+def _append(path: Path, document: dict) -> None:
+    descriptor = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    try:
+        os.write(descriptor, (json.dumps(document) + "\n").encode())
+    finally:
+        os.close(descriptor)
+
+
+def _prune_samples(samples: Path, day: str) -> None:
+    oldest = date.fromisoformat(day) - timedelta(days=SAMPLE_DAYS)
+    for path in samples.glob("*.jsonl"):
         try:
-            os.write(descriptor, (json.dumps(line) + "\n").encode())
-        finally:
-            os.close(descriptor)
+            if date.fromisoformat(path.stem) < oldest:
+                path.unlink()
+        except (ValueError, FileNotFoundError):
+            continue
+
+
+def _holds_last(path: Path, data: bytes) -> bool:
+    try:
+        with path.open("rb") as handle:
+            size = handle.seek(0, os.SEEK_END)
+            if size < len(data):
+                return False
+            handle.seek(size - len(data))
+            return handle.read() == data
+    except FileNotFoundError:
+        return False
+
+
+def _append_sample(directory: Path, day: str, sample: dict, only_if_missing: bool = False) -> None:
+    samples = directory / SAMPLES_DIR
+    samples.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path = samples / f"{day}.jsonl"
+    if only_if_missing and _holds_last(path, (json.dumps(sample) + "\n").encode()):
+        return
+    _append(path, sample)
+
+
+def recover_sample(directory: Path, previous: dict | None) -> None:
+    """Append the state's last sample line to its day file when a stopped run wrote the state but not the line."""
+    held = (previous or {}).get("last_sample")
+    if held is not None:
+        _append_sample(directory, held["day"], held["line"], only_if_missing=True)
+
+
+def write_state(directory: Path, document: dict, line: dict | None, sample: dict | None = None) -> None:
+    """Replace the state (it keeps `last_sample`), then append the sample; `recover_sample` finishes a stop between."""
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    samples = directory / SAMPLES_DIR
+    if line is not None:
+        _append(directory / PEAKS_NAME, line)
+        _prune_samples(samples, document["day"])
     temporary = directory / f".{STATE_NAME}.{os.getpid()}.tmp"
     descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
@@ -563,6 +899,8 @@ def write_state(directory: Path, document: dict, line: dict | None) -> None:
     except BaseException:
         temporary.unlink(missing_ok=True)
         raise
+    if sample is not None:
+        _append_sample(directory, document["day"], sample)
 
 
 def deliver_pending(state: dict, args, now: datetime) -> bool:
@@ -584,16 +922,22 @@ def sample(args) -> int:
     directory = args.state_dir
     try:
         previous = read_state(directory / STATE_NAME)
-        reading = take_reading(args)
+        reading = take_reading(args, previous)
     except ReadingError as error:
         print(f"{PROG}: {error}", file=sys.stderr)
         return 1
-    state, line = decide(previous, reading, now, args.floor_gib * GIB, args.others_budget_gib * GIB)
+    try:
+        recover_sample(directory, previous)
+    except OSError as error:
+        print(f"{PROG}: the last sample line was not recovered ({type(error).__name__}: {error})", file=sys.stderr)
+    state, line, record = decide(
+        previous, reading, now, args.floor_gib * GIB, args.others_budget_gib * GIB, args.unowned_alert_gib * GIB)
     failed = deliver_pending(state, args, now)
     for entry in state["floor_log"]:
         print(entry, end="", flush=True)
     state["floor_log"] = []
-    write_state(directory, state, line)
+    state["last_sample"] = {"day": state["day"], "line": record}
+    write_state(directory, state, line, record)
     return 3 if failed else 0
 
 
@@ -604,6 +948,7 @@ def build_parser() -> argparse.ArgumentParser:
     one.add_argument("--state-dir", type=Path, required=True)
     one.add_argument("--floor-gib", type=int, required=True)
     one.add_argument("--others-budget-gib", type=int, required=True)
+    one.add_argument("--unowned-alert-gib", type=int, required=True)
     one.add_argument("--omlx-jetsam-priority", type=int, required=True)
     one.add_argument("--host", required=True)
     one.add_argument("--label", default="org.nixos.omlx")
@@ -613,11 +958,15 @@ def build_parser() -> argparse.ArgumentParser:
     one.add_argument("--launchctl", default="/bin/launchctl")
     one.add_argument("--ps", default="/bin/ps")
     one.add_argument("--footprint", default="/usr/bin/footprint")
+    one.add_argument("--hdiutil", default="/usr/bin/hdiutil")
+    one.add_argument("--slot-history", type=Path, default=None)
+    one.add_argument("--colima-pid-file", type=Path, default=None)
     one.add_argument("--alert-settings", type=Path, default=None)
     one.add_argument("--alert-log", type=Path, default=None)
     one.add_argument("--telegram-api", default=None)
     one.add_argument("--fseventsd-record", type=Path, default=Path(FSEVENTSD_RECORD))
     one.add_argument("--floor-record", type=Path, default=Path(FLOOR_RECORD))
+    one.add_argument("--census-record", type=Path, default=Path(CENSUS_RECORD))
     one.add_argument("--now", type=datetime.fromisoformat, default=None)
     trim = commands.add_parser("fseventsd", help="restart fseventsd above its limit and record its size")
     trim.add_argument("--record", type=Path, required=True)
@@ -628,12 +977,17 @@ def build_parser() -> argparse.ArgumentParser:
     trim.add_argument("--footprint", default="/usr/bin/footprint")
     trim.add_argument("--kill", default="/bin/kill")
     trim.add_argument("--now", type=datetime.fromisoformat, default=None)
+    count = commands.add_parser("census", help="record footprint -a's system and process footprints")
+    count.add_argument("--record", type=Path, required=True)
+    count.add_argument("--footprint", default="/usr/bin/footprint")
+    count.add_argument("--timeout-seconds", type=int, default=CENSUS_TIMEOUT)
+    count.add_argument("--now", type=datetime.fromisoformat, default=None)
     return parser
 
 
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
-    return fseventsd(args) if args.command == "fseventsd" else sample(args)
+    return {"fseventsd": fseventsd, "census": census}.get(args.command, sample)(args)
 
 
 if __name__ == "__main__":
