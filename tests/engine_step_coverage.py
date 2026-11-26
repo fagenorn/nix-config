@@ -12,18 +12,27 @@ A check judges only the procedures it names: a visited step of another procedure
 `test_ids` names the module's tests with a fresh loader, so a `-k` filter on the shared default loader
 cannot narrow it, and leaves out each test a decorator skips: a decorator skip is part of the module's
 shape, so the check then fails if the skip lost a step. It names only the tests of `base`.
+Across modules, `check_scopes` holds the coverage modules to one rule: every procedure `deliver` reaches,
+through `call` steps, is in the scope of at least one module of `COVERAGE_MODULES`, every judged procedure
+is reachable, and every procedure file is reachable or named in `UNREACHABLE`. A new coverage module is
+registered in `COVERAGE_MODULES`. `toy` and `toy-child` are exempt because the engine refuses to run
+`toy` and nothing calls either; the exemption fails once `deliver` reaches either or its file is gone.
 """
 
 from __future__ import annotations
 
+import importlib
 import json
 import types
 import unittest
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 
 Step = tuple[str, str]
 PROCEDURE_NAMES = ("setup", "deliver", "direct", "verify", "land", "close-out")
+UNREACHABLE = ("toy", "toy-child")
+COVERAGE_MODULES = ("tests.test_engine_stubbed_run", "tests.test_engine_land_recovery",
+                    "tests.test_engine_verify_rounds")
 
 
 class StepCoverage:
@@ -32,6 +41,10 @@ class StepCoverage:
         self._names = names
         self._selected: set[str] = set()
         self._recorded: set[Step] = set()
+
+    @property
+    def names(self) -> tuple[str, ...]:
+        return self._names
 
     def declared(self) -> set[Step]:
         return {(name, step["id"]) for name in self._names
@@ -74,6 +87,42 @@ class StepCoverage:
             for test in entered:
                 type(test)._classSetupFailed = False
             self.reset()
+
+
+def reachable(procedures: Path, entry: str = "deliver") -> tuple[str, ...]:
+    seen = {entry}
+    queue = [entry]
+    while queue:
+        name = queue.pop(0)
+        path = procedures / f"{name}.json"
+        if not path.is_file():
+            raise AssertionError(f"procedure {name} has no file")
+        for step in json.loads(path.read_text("utf-8"))["steps"]:
+            if step.get("kind") == "call" and step["procedure"] not in seen:
+                seen.add(step["procedure"])
+                queue.append(step["procedure"])
+    return tuple(sorted(seen))
+
+
+def scopes() -> dict[str, tuple[str, ...]]:
+    return {module: importlib.import_module(module).STEPS.names for module in COVERAGE_MODULES}
+
+
+def check_scopes(procedures: Path, scopes: Mapping[str, tuple[str, ...]],
+                 exempt: tuple[str, ...] = UNREACHABLE) -> None:
+    files = {path.stem for path in procedures.glob("*.json") if not path.name.endswith(".reply.json")}
+    reach = set(reachable(procedures))
+    judged = {name for scope in scopes.values() for name in scope}
+    groups = (
+        ("procedures no stubbed-run module judges", reach - judged),
+        ("procedures judged but not reachable from deliver", judged - reach),
+        ("procedure files neither reachable from deliver nor exempt", files - reach - set(exempt)),
+        ("exempt procedures deliver reaches or that are gone",
+         {name for name in exempt if name in reach or name not in files}),
+    )
+    found = [f"{label}: {sorted(names)}" for label, names in groups if names]
+    if found:
+        raise AssertionError("; ".join(found))
 
 
 def _flattened(suite: unittest.TestSuite) -> Iterable[unittest.TestCase]:
