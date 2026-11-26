@@ -1,9 +1,9 @@
-"""The picture run's `jargon-gloss` state (#1797).
+"""The picture run's `jargon-gloss` state.
 
 `jargon-gloss` is the stuck sprint whose report status is `GLOSS_STATUS`, with its report fold opened. On the
 head's console (`style_applies()`), the mark inside that status is tapped, so its gloss shows. A head page
 without the mark fails the shot. On the base commit's console, the same open report shows the plain status,
-which is the before picture (#1797).
+which is the before picture.
 
 This module imports nothing from `agent_tools`: a base run puts the base commit's `python/` on the path, which
 has no `owner_words`."""

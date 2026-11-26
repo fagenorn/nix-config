@@ -1,4 +1,4 @@
-"""The screenshot state that shows a tapped gloss on a sprint's status line (#1797).
+"""The screenshot state that shows a tapped gloss on a sprint's status line.
 
 Run: just agent-workflow-tests
 """
@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest import mock
 
 from agent_tools.console import owner_words
+from agent_tools.delivery import comment_lint, never_rise
 
 from . import console_screenshot_gloss as gloss
 from . import console_screenshots as shots
@@ -60,6 +61,24 @@ class GlossShotTest(unittest.TestCase):
     def test_another_state_taps_no_gloss(self) -> None:
         page = shoot("paused", {gloss.GLOSS_MARK}, True)
         self.assertFalse([c for c in page.clicks if "gloss" in c])
+
+
+class NoIssueReferenceTest(unittest.TestCase):
+    """The comment rule that names no issue (B18) holds in the gloss files and the page cap note."""
+
+    def test_the_gloss_picture_files_and_the_page_cap_note_name_no_issue(self) -> None:
+        tests = Path(__file__).resolve().parent
+        enforcer = comment_lint.enforcers("fagenorn/nix-config")[0]
+        contents = {
+            "console_screenshot_gloss.py": (tests / "console_screenshot_gloss.py").read_bytes(),
+            "test_console_screenshot_gloss.py": (tests / "test_console_screenshot_gloss.py").read_bytes(),
+        }
+        note = [line for line in (tests / "test_console_page.py").read_text().splitlines()
+                if "Raised from 73.5 KB" in line]
+        self.assertEqual(len(note), 1)
+        contents["cap_note.py"] = ("\n".join("# " + line.strip().lstrip("# ") for line in note) + "\n").encode()
+        snapshot = never_rise.Snapshot("HEAD", {}, contents=contents)
+        self.assertEqual([v.text() for v in enforcer.find(snapshot)], [])
 
 
 if __name__ == "__main__":
