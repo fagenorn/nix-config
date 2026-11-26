@@ -116,7 +116,7 @@ and its `DEAF_SENTENCE` are all that name it, #1247; and each open permission ca
 once. A manager's waiting state alone (a session waiting for an answer or a permission) counts
 nothing, #1424: only an open permission card does), else
 `ALL_OUT_HEADLINE` when every profile is out of usage, else `STALE_HEADLINE` when a registered
-project's tracker cannot be read, else `done_for_now.HEADLINE` when a project is registered, else "Nothing needs you".
+project's tracker cannot be read, else `inbox.DONE_HEADLINE` when a project is registered, else "Nothing needs you".
 The sentence is `ALL_OUT_SENTENCE` when every profile is out of usage, else `STALE_SENTENCE` naming those projects when any is
 stale, else `BRIEF_SENTENCE` when any brief is open, else `MANAGER_SENTENCE` when a sprint is
 stalled, else `FAILED_START_SENTENCE` when a manager failed to start, else `PROGRESS_SENTENCE`
@@ -134,8 +134,8 @@ can answer it), else
 `REGISTER_STEP_SENTENCE` when only plan questions with no offered answer are open, else
 `NEEDS_SENTENCE` when something is open, else, with no project registered, `ADOPTING_SENTENCE` ("An adoption is
 under way; nothing is waiting on you.") when the view's `registration` (below) is running or holds
-an adoption, else `done_for_now.sentence` (how many sprints are working). The
-all-out promotion never changes `inbox_items`, and the statement keeps exactly its four keys; `next_expected` is `done_for_now.next_expected`.
+an adoption, else `inbox.done_sentence` (how many sprints are working). The
+all-out promotion never changes `inbox_items`, and the statement keeps exactly its four keys; `next_expected` is `inbox.next_expected`.
 `capacity` is the `capacity_view` the caller passes (`capacity.py` defines its members), else the
 empty capacity, the same bytes as `capacity_view` over no profile. `stale` is true
 when any registered project's last read failed. An inbox item is every stored member
@@ -815,7 +815,7 @@ from pathlib import PurePosixPath
 from types import MappingProxyType
 
 from agent_tools.console import (
-    card_entries, contract_draft, done_for_now, engine_runs as engine_runs_module, inbox, project_question,
+    card_entries, contract_draft, engine_runs as engine_runs_module, inbox, project_question,
     question_records, spend as spend_module)
 from agent_tools.console.activation import Activation
 from agent_tools.console.activation_run import LastRun
@@ -2180,7 +2180,7 @@ def _notice_entries(group: Iterable[SprintState], titles: Mapping[str, str],
 
 
 def _sentence(count: int, adopting: bool = False, working: int = 0) -> str:
-    return done_for_now.sentence(working) if count else ADOPTING_SENTENCE if adopting else "No project is registered yet."
+    return inbox.done_sentence(working) if count else ADOPTING_SENTENCE if adopting else "No project is registered yet."
 
 
 def item_headline(item: Mapping) -> tuple[str, int]:
@@ -2346,7 +2346,7 @@ def _headline(open_count: int, stale: bool, all_out: bool, registered: int) -> s
         return f"{open_count} things need you"
     if all_out:
         return ALL_OUT_HEADLINE
-    return STALE_HEADLINE if stale else done_for_now.HEADLINE if registered else HEADLINE
+    return STALE_HEADLINE if stale else inbox.DONE_HEADLINE if registered else HEADLINE
 
 
 def derive_view(
@@ -2509,7 +2509,7 @@ def derive_view(
                   + len(failures) + len(trusts) + len(open_items) + len(deaf) + len(stopped_runs))
     all_out = bool(capacity["all_out"])
     headline = _headline(open_count, bool(stale_projects), all_out, len(states))
-    next_expected = done_for_now.next_expected(entries + quiet_entries, headline)
+    next_expected = inbox.next_expected(entries + quiet_entries, headline)
     if all_out:
         sentence = ALL_OUT_SENTENCE
     elif stale_projects:
@@ -2547,7 +2547,7 @@ def derive_view(
     elif open_count:
         sentence = NEEDS_SENTENCE
     else:
-        sentence = _sentence(len(states), adopting, done_for_now.working(entries + quiet_entries))
+        sentence = _sentence(len(states), adopting, inbox.working(entries + quiet_entries))
     new_replies = sorted(
         ({"project_id": project["project_id"], "sprint_id": sprint["sprint_id"],
           "title": sprint["title"], "message_id": message["id"], "reply_at": message["reply_at"]}

@@ -99,15 +99,17 @@ class DoneForNowViewTest(unittest.TestCase):
 
 
 class DoneForNowCommentsTest(unittest.TestCase):
+    INBOX = "python/agent_tools/console/inbox.py"
     CHANGED = (
-        "python/agent_tools/console/done_for_now.py",
         "tests/test_console_done_for_now.py",
         "tests/test_console_page_done_for_now.py",
     )
 
     def test_the_new_files_carry_no_issue_reference_in_a_comment(self):
         root = Path(__file__).resolve().parents[1]
+        added = (root / self.INBOX).read_bytes()
         snapshot = Snapshot("a" * 40, {}, contents={
-            path: (root / path).read_bytes() for path in self.CHANGED})
+            self.INBOX: added[added.index(b"DONE_HEADLINE ="):],
+            **{path: (root / path).read_bytes() for path in self.CHANGED}})
         (reference, _length, _marker) = comment_lint.enforcers("fagenorn/nix-config")
         self.assertEqual(reference.find(snapshot), [])
