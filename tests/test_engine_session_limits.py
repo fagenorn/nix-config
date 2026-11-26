@@ -183,7 +183,7 @@ class DeliverLimitTest(unittest.TestCase):
         (graded,) = self.events("outcome_graded")
         self.assertEqual(graded["outcome"], "drafted")
 
-    def test_a_denied_shell_command_beside_a_limit_is_a_fault_not_a_relaunch(self):
+    def test_a_denied_shell_command_beside_a_limit_stops_at_tool_denied_not_a_relaunch(self):
         denial = {"tool_name": "Bash", "tool_use_id": "toolu_02",
                   "tool_input": {"command": "PYTHONPATH=python python3 -m unittest tests.test_x"}}
         limited = self.canned("denied.json", canned_result(
@@ -198,8 +198,10 @@ class DeliverLimitTest(unittest.TestCase):
             "review.md": "Review {{run.issue}}.\n",
             "review.reply.json": json.dumps(REVIEW_REPLY)})
         done = self.project.deliver(procedures, issue=1521)
-        self.assertEqual(done.returncode, 1)
-        self.assertIn("python3 -m unittest tests.test_x", done.stderr)
+        self.assertEqual(done.returncode, 3, done.stdout + done.stderr)
+        line = json.loads(done.stdout)
+        self.assertEqual((line["end"], line["need"]), ("tool-denied", "owner-decision"))
+        self.assertIn(repr("PYTHONPATH=python python3 -m unittest tests.test_x"), line["detail"])
         self.assertEqual(len(self.log(log)), 1)
         self.assertEqual(self.events("wait_started"), [])
         record = json.loads((self.run_dir() / "sessions/review.1.json").read_text(
@@ -386,7 +388,7 @@ class DeliverApiErrorTest(unittest.TestCase):
         self.assertIsNone(status["wait"]["until"])
         self.assertEqual(status["stop"]["name"], "quota-wait")
 
-    def test_a_denied_shell_command_beside_an_api_error_is_a_fault_before_any_retry(self):
+    def test_a_denied_shell_command_beside_an_api_error_stops_at_tool_denied_before_any_retry(self):
         denial = {"tool_name": "Bash", "tool_use_id": "toolu_02",
                   "tool_input": {"command": "PYTHONPATH=python python3 -m unittest tests.test_x"}}
         failed = self.canned("denied.json", canned_result(
@@ -400,9 +402,10 @@ class DeliverApiErrorTest(unittest.TestCase):
         procedures = write_procedures(self.project, steps, {
             "review.md": "Review {{run.issue}}.\n",
             "review.reply.json": json.dumps(REVIEW_REPLY)})
-        with self.assertRaises(engine_shell.Fault) as raised:
-            self.deliver(log, procedures)
-        self.assertIn("python3 -m unittest tests.test_x", str(raised.exception))
+        code, line, sleeps = self.deliver(log, procedures)
+        self.assertEqual((code, line["end"], line["need"]), (3, "tool-denied", "owner-decision"))
+        self.assertIn(repr("PYTHONPATH=python python3 -m unittest tests.test_x"), line["detail"])
+        self.assertNotIn(engine_shell.API_RETRY_SECONDS, [seconds for seconds, _ in sleeps])
         self.assertEqual(len(self.log(log)), 1)
         record = json.loads((self.run_dir() / "sessions/review.1.json").read_text(
             encoding="utf-8"))

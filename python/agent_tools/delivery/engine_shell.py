@@ -41,8 +41,10 @@ platform or project standards layer is stored with `rule` blank when the step's 
 usable reply (none, or one that breaks the schema) is a miss when `engine_session.is_miss` accepts
 its stdout: the same session is then resumed once (`session_resuming`, `--resume <session>`,
 `REASK_PROMPT`) and a second miss grades `no-reply` with `{}` stored, its measurements the sums of
-both launches (in a continued visit a miss is `no-reply` at once, see "Continuing"). Any other reading with no usable reply is a `Fault`, and so is a session denied a
-shell command, whose reply may rest on a check it never ran. Before each launch, the resumes included,
+both launches (in a continued visit a miss is `no-reply` at once, see "Continuing"). Any other reading with no usable reply is a `Fault`. A session denied a tool call (any
+tool, the resume launches included) is not graded: its reply may rest on a check it never ran, so the run ends at the engine's own
+stop `tool-denied` (need `owner-decision`, exit 3), its detail naming every denied call and an open usage-limit wait ended first. A
+group or a call records one stop joining its members' or children's. Before each launch, the resumes included,
 the host's settings are read again and a lifecycle guard hook that is gone is a `Fault`. A session ended
 by a bound is graded `out-of-bounds` before any fault is considered: the bounds are a turn or spend cap
 (`engine_session.CAP_SUBTYPES`) and the wall bound, the engine's own clock per role
@@ -77,8 +79,8 @@ is appended and no new visit starts. The session recorded for the visit is launc
 stored `prompt.md`. The launch's prompt is stored as `sessions/<step>.<visit>.continue-<attempt>.prompt.md` when
 absent, and each record as `.continue-<attempt>.json`. The continued launches are not re-asked, so a miss is
 `no-reply`; every later launch of the visit resumes. A visit with a stored result (with or without its outcome) or
-a recorded stop after its entry (`quota-wait`, `stopped-by-request`) or a launch that ended with its record stored (a
-`Fault` such as no structured reply or a denied shell command; each record names its `attempt`) is not resumed but
+a recorded stop after its entry (`quota-wait`, `tool-denied`, `stopped-by-request`) or a launch that ended with its record stored (a
+`Fault` such as no structured reply; each record names its `attempt`) is not resumed but
 rewound to a new visit as before, its `run_continued` clearing the stop and closing an open usage-limit wait. A resumed visit
 appends no `run_continued`, so the continuing call closes every wait the killed engine left open with a
 `wait_ended` of its kind (a usage-limit or `host-slot` wait) before the visit launches.
@@ -799,15 +801,6 @@ class _Scope:
         return engine_stop.requested(self.root, self.holder)
 
 
-class _Quota(Exception):
-    """A group member's session or a child run ended at the `quota-wait` stop, which the group
-    or the call records once its members have ended; `step` is the member that hit it, else None."""
-
-    def __init__(self, detail: str, step: str | None = None) -> None:
-        super().__init__(detail)
-        self.detail, self.step = detail, step
-
-
 def _forced(action, steps: dict[str, dict], first: bool):
     """`action` with the check owed to a child run of a rewound call: its first visit of each mutating command."""
     if not first:
@@ -896,16 +889,16 @@ def _walk(run_dir: Path, table: CommandTable, scope: _Scope,
                 _group(run_dir, table, steps, action, scope)
             except engine_stop.Stopped:
                 return _stopped(run_dir, action.step)
-            except _Quota as quota:
-                return _quota_ended(run_dir, action.step, quota, stop)
+            except engine_session.EngineStop as ended:
+                return _engine_stop_ended(run_dir, action.step, ended, stop)
             ran += len(action.members)
         elif isinstance(action, engine_core.RunCall):
             try:
                 _call(run_dir, table, run, steps[action.step], action, scope)
             except engine_stop.Stopped:
                 return _stopped(run_dir, action.step)
-            except _Quota as quota:
-                return _quota_ended(run_dir, action.step, quota, stop)
+            except engine_session.EngineStop as ended:
+                return _engine_stop_ended(run_dir, action.step, ended, stop)
         else:
             raise Fault(f"step {action.step} needs {type(action).__name__}, "
                         "which the engine does not run yet")
@@ -1110,7 +1103,8 @@ def _member(run_dir: Path, table: CommandTable, step: dict,
     if isinstance(action, engine_core.StartSession):
         stopped = _visit_session(run_dir, table.root, step, action, scope, member=True)
         if stopped is not None:
-            raise _Quota(stopped[1]["detail"], step["id"])
+            line = stopped[1]
+            raise engine_session.EngineStop(line["end"], line["need"], line["detail"], step["id"])
     else:
         _visit(run_dir, table, step, action, scope.stop, member=True)
 
@@ -1138,8 +1132,7 @@ def _group(run_dir: Path, table: CommandTable, steps: dict[str, dict],
                 raise
     finally:
         pool.shutdown(wait=True)  # after a stop `reaping` has killed the sessions: this returns
-    for future in futures:
-        future.result()
+    engine_session.raise_first([future.exception() for future in futures])
 
 
 def _names_child(run_dir: Path, child: str) -> bool:
@@ -1181,8 +1174,8 @@ def _child(run_dir: Path, table: CommandTable, run: dict, step: dict,
                 shutil.rmtree(child_dir, ignore_errors=True)
             raise
         _, line = _walk(child_dir, table, scope, action.recheck)
-        if line["end"] == procedure_terms.QUOTA_WAIT:
-            raise _Quota(line["detail"])
+        if line["end"] in procedure_terms.ENGINE_STOPS:
+            raise engine_session.EngineStop(line["end"], line["need"], line["detail"])
         if line["end"] == engine_stop.STOPPED_BY_REQUEST:
             raise engine_stop.Stopped
         return {"end": line["end"], "item": item, "run": child_dir.name}
@@ -1245,7 +1238,7 @@ def _call(run_dir: Path, table: CommandTable, run: dict, step: dict,
     finally:
         drain()  # after a stop `reaping` has killed the sessions: this returns
     if errors:
-        raise errors[min(errors)]
+        engine_session.raise_first([errors[index] for index in sorted(errors)])
     if len(entries) != len(items):
         raise Fault(f"step {action.step} stops before its items are all run: "
                     "the engine is ending")
@@ -1258,12 +1251,11 @@ def _call(run_dir: Path, table: CommandTable, run: dict, step: dict,
     _graded(run_dir, step, action.visit, outcome)
 
 
-def _quota_ended(run_dir: Path, step: str, quota: _Quota,
-                 stop: Callable[[], bool]) -> tuple[int, dict]:
-    """The `quota-wait` stop of a group or a call, recorded once its members or children have
+def _engine_stop_ended(run_dir: Path, step: str, ended: engine_session.EngineStop,
+                       stop: Callable[[], bool]) -> tuple[int, dict]:
+    """The engine's own stop of a group or a call, recorded once its members or children have
     ended, so it is the run's last event; a member's step names it, else the group's or call's."""
-    return _stop(run_dir, quota.step or step, procedure_terms.QUOTA_WAIT, QUOTA_NEED,
-                 quota.detail, stop)
+    return _stop(run_dir, ended.step or step, ended.name, ended.need, ended.detail, stop)
 
 
 def _visit_session(run_dir: Path, root: str, step: dict, action: engine_core.StartSession,
@@ -1385,15 +1377,13 @@ def _launch_until_answered(
                       f".continue-{attempt}" if resumed is not None else
                       ".resume" if missed else "")
 
-    def quota_stop(launched: engine_session.Launched, reading: engine_session.Reading,
-                   detail: str) -> tuple:
+    def stop_at(launched: engine_session.Launched, reading: engine_session.Reading, end: str,
+                need: str, detail: str) -> tuple:
         record(launched, reading)
         if defer:
-            line = {"detail": detail, "end": procedure_terms.QUOTA_WAIT, "need": QUOTA_NEED,
-                    "run": run_dir.name}
+            line = {"detail": detail, "end": end, "need": need, "run": run_dir.name}
             return launched, reading, (EXIT_STOP, line), False
-        return launched, reading, _stop(run_dir, name, procedure_terms.QUOTA_WAIT, QUOTA_NEED,
-                                        detail, stop), False
+        return launched, reading, _stop(run_dir, name, end, need, detail, stop), False
 
     while True:
         started: list[int] = []
@@ -1423,7 +1413,7 @@ def _launch_until_answered(
         reading = engine_session.read_result(launched.stdout)
         if answer.all_out and launched.exit_code == engine_session.ALL_OUT_EXIT:
             wait(answer.resumes_at)
-            return quota_stop(launched, reading, (
+            return stop_at(launched, reading, procedure_terms.QUOTA_WAIT, QUOTA_NEED, (
                 f"Every account is out of usage; the {ENTRY} procedure waits at step {name} "
                 f"until {answer.resumes_at or 'an unknown time'}."))
         account = answer.account or "unknown"
@@ -1432,14 +1422,12 @@ def _launch_until_answered(
                   account=account)
         if launched.timed_out or reading.subtype in engine_session.CAP_SUBTYPES:
             break  # a bound ended the session: graded by the visit, before any fault below
-        denied = next((d for d in reading.denials
-                       if isinstance(d, dict) and d.get("tool_name") == "Bash"), None)
-        if denied is not None:
-            record(launched, reading)
-            tool_input = denied.get("tool_input")
-            command = tool_input.get("command") if isinstance(tool_input, dict) else None
-            raise Fault(f"step {name} was denied the shell command {str(command)[:200]!r}, so "
-                        f"its reply is not graded: list it in the role's tools as Bash(<prefix>:*)")
+        if calls := engine_session.denied_calls(reading):
+            if waiting:
+                event("wait_ended", wait=engine_session.USAGE_LIMIT)
+            return stop_at(launched, reading, procedure_terms.TOOL_DENIED,
+                           procedure_terms.TOOL_DENIED_NEED,
+                           engine_session.denial_detail(name, calls))
         if reading.api_failure == engine_session.API_ERROR:
             if retried:
                 no_reply = True
@@ -1461,7 +1449,7 @@ def _launch_until_answered(
                 continue
             break
         if account in limited:
-            return quota_stop(launched, reading, (
+            return stop_at(launched, reading, procedure_terms.QUOTA_WAIT, QUOTA_NEED, (
                 f"Account {account} hit its usage limit twice at step {name} of the {ENTRY} "
                 "procedure; the run waits for it."))
         limited.add(account)

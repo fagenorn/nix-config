@@ -327,6 +327,10 @@ def _quota_wait_stop(toy: dict) -> None:
     toy["stops"]["quota-wait"] = {"need": "retry", "reenter": "draft"}
 
 
+def _tool_denied_stop(toy: dict) -> None:
+    toy["stops"]["tool-denied"] = {"need": "retry", "reenter": "draft"}
+
+
 def _superseded_stop(toy: dict) -> None:
     toy["stops"]["superseded"] = {"need": "retry", "reenter": "draft"}
 
@@ -550,6 +554,8 @@ CASES = [
     Case("stop_named_exhausted", editing("toy", _exhausted_stop),
          [("toy", None, "invalid_field")]),
     Case("stop_named_quota_wait", editing("toy", _quota_wait_stop),
+         [("toy", None, "invalid_field")]),
+    Case("stop_named_tool_denied", editing("toy", _tool_denied_stop),
          [("toy", None, "invalid_field")]),
     Case("stop_named_superseded", editing("toy", _superseded_stop),
          [("toy", None, "invalid_field")]),

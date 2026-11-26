@@ -291,6 +291,11 @@ class StubbedRun:
         return subprocess.run([sys.executable, *entry, "deliver", str(self.issue), *extra],
                               cwd=self.fixture.root, env=self.env, capture_output=True, text=True, timeout=600)
 
+    def status(self) -> subprocess.CompletedProcess:
+        """`engine status <issue>` in the fixture checkout."""
+        return subprocess.run([sys.executable, "-m", "agent_tools.delivery.engine", "status", str(self.issue)],
+                              cwd=self.fixture.root, env=self.env, capture_output=True, text=True, timeout=600)
+
     def slot_history(self) -> list[dict]:
         """The lines the verification slot recorded, `[]` when it recorded none."""
         path = Path(self.env["VERIFY_SLOT_DIR"]) / "history.jsonl"

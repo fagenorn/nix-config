@@ -50,8 +50,8 @@ shell command is denied, so a session cannot write to the worktree through it.
 prefix patterns would preapprove, so `GIT_WRITING` is passed as
 `--disallowedTools` (a deny rule is checked before an allow rule). A role that
 needs another shell command lists it in its own `tools` as `Bash(<prefix>:*)`;
-one that is denied a shell command anyway is a fault (`engine_shell`), never a
-graded reply.
+one that is denied a tool call anyway ends the run at the engine's own stop
+`tool-denied` (`engine_shell`), never a graded reply.
 
 The launcher tells the engine its choice through an answer file: the launch environment carries
 `CLAUDE_ACCOUNT_ANSWER`, the path of a file the launcher writes, and `read_answer` reads it. It holds
@@ -116,7 +116,7 @@ from agent_tools.canonical import (
 from agent_tools.delivery import engine_stop
 from agent_tools.delivery.engine_commands import Watchdog, argument
 from agent_tools.delivery.engine_ledger import TOKEN_COUNTS
-from agent_tools.delivery.procedure_terms import PLACEHOLDER_RE, ROLES
+from agent_tools.delivery.procedure_terms import PLACEHOLDER_RE, ROLES, TOOL_DENIED
 from agent_tools.skill_lint import parse_frontmatter
 
 FORBIDDEN_WORDS: tuple[str, ...] = (
@@ -272,6 +272,59 @@ class Answer:
     account: str | None
     all_out: bool
     resumes_at: str | None
+
+
+class EngineStop(Exception):
+    """A group member's session or a child run ended at one of the engine's own stops, which the
+    group or the call records once its members have ended; `step` is the member that stopped, else None."""
+
+    def __init__(self, name: str, need: str, detail: str, step: str | None = None) -> None:
+        super().__init__(detail)
+        self.name, self.need, self.detail, self.step = name, need, detail, step
+
+
+def denied_calls(reading: Reading) -> tuple[str, ...]:
+    """One text per tool call the session was denied, in order: a shell command whole, any other call
+    as its tool name and its input in compact sorted-key JSON."""
+    calls = []
+    for entry in reading.denials:
+        if not isinstance(entry, dict):
+            calls.append(json.dumps(entry, sort_keys=True))
+            continue
+        tool_input = entry.get("tool_input")
+        if (entry.get("tool_name") == "Bash" and isinstance(tool_input, dict)
+                and isinstance(tool_input.get("command"), str)):
+            calls.append(tool_input["command"])
+        else:
+            calls.append(f"{entry.get('tool_name')} "
+                         f"{json.dumps(tool_input, sort_keys=True, separators=(',', ':'))}")
+    return tuple(calls)
+
+
+def denial_detail(step: str, calls: Sequence[str]) -> str:
+    count = len(calls)
+    return (f"Step {step} was denied {count} tool call{'' if count == 1 else 's'}: "
+            + "; ".join(repr(call) for call in calls)
+            + "; its reply is not graded and the run stops at tool-denied.")
+
+
+def joined(stops: Sequence[EngineStop]) -> EngineStop:
+    """The one stop of several: `tool-denied` when any stop is, else the first stop's name."""
+    name = TOOL_DENIED if any(stop.name == TOOL_DENIED for stop in stops) else stops[0].name
+    first = next(stop for stop in stops if stop.name == name)
+    return EngineStop(name, first.need, " ".join(stop.detail for stop in stops), first.step)
+
+
+def raise_first(errors: Sequence[BaseException | None]) -> None:
+    """Raise the first error that is not an `EngineStop`, else the one stop the stops join to."""
+    stops = []
+    for error in errors:
+        if isinstance(error, EngineStop):
+            stops.append(error)
+        elif error is not None:
+            raise error
+    if stops:
+        raise joined(stops)
 
 
 def _number(text: str) -> int | float:

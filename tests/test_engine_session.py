@@ -874,8 +874,7 @@ class DeliverSessionTest(unittest.TestCase):
                          {"input": 11, "cache_write": 22, "cache_read": 33, "output": 44})
         self.assertEqual(stored["spend_usd"], 0.4321)
         self.assertEqual(json.loads((run / "sessions/draft.1.json").read_text(encoding="utf-8")), {
-            "attempt": 1, "denials": [{"tool_name": "Write", "tool_use_id": "toolu_01",
-                         "tool_input": {"file_path": "/etc/hosts"}}],
+            "attempt": 1, "denials": [],
             "exit_code": 0, "prose": "Status: stuck. I could not draft it.",
             "problem": None, "session": self.starting()["session"], "subtype": "success"})
 
@@ -984,30 +983,6 @@ class DeliverSessionTest(unittest.TestCase):
         self.assertEqual(len(done.stderr.strip().splitlines()), 1)
         self.assertEqual([e for e in self.project.events(self.run_dir())
                           if e["event"] == "outcome_graded"], [])
-
-    def test_a_denied_shell_command_is_a_fault_not_a_graded_reply(self):
-        denial = {"tool_name": "Bash", "tool_use_id": "toolu_02",
-                  "tool_input": {"command": "PYTHONPATH=python python3 -m unittest tests.test_x"}}
-        install_stub(self.project, canned_result(
-            structured_output={"verdict": "approve"}, permission_denials=[denial]))
-        steps = [agent_step("review", "reviewer", {"approve": "done", "revise": "needs-owner"},
-                            prompt="review.md", reply="review.reply.json",
-                            outcome_from="verdict")]
-        procedures = write_procedures(self.project, steps, {
-            "review.md": "Review {{run.issue}}.\n",
-            "review.reply.json": json.dumps(REVIEW_REPLY)})
-        done = self.project.deliver(procedures, issue=1514)
-        self.assertEqual(done.returncode, 1)
-        self.assertEqual(done.stdout, "")
-        self.assertEqual(len(done.stderr.splitlines()), 1, done.stderr)
-        for word in ("review", "python3 -m unittest tests.test_x"):
-            self.assertIn(word, done.stderr)
-        run = self.run_dir()
-        kinds = [e["event"] for e in self.project.events(run)]
-        for kind in ("result_stored", "outcome_graded", "transition_taken", "run_done"):
-            self.assertNotIn(kind, kinds)
-        record = json.loads((run / "sessions/review.1.json").read_text(encoding="utf-8"))
-        self.assertEqual(record["denials"], [denial])
 
     def test_a_result_without_its_duration_records_the_engines_measure(self):
         install_stub(self.project, canned_result(duration_ms=...))
@@ -1386,18 +1361,6 @@ class DeliverSessionTest(unittest.TestCase):
         kinds = self.kinds()
         for kind in ("session_resuming", "result_stored", "outcome_graded"):
             self.assertNotIn(kind, kinds)
-
-    def test_a_denied_shell_command_on_the_resume_is_a_fault(self):
-        denial = {"tool_name": "Bash", "tool_use_id": "t", "tool_input": {"command": "rm -rf x"}}
-        log = install_stub(self.project, RESULT_MISSING,
-                           resumed=canned_result(permission_denials=[denial]))
-        done = self.project.deliver(one_step(self.project), issue=1514)
-        self.assertEqual(done.returncode, 1)
-        self.assertEqual(done.stdout, "")
-        self.assertEqual(len(done.stderr.splitlines()), 1, done.stderr)
-        self.assertIn("draft", done.stderr)
-        self.assertEqual(len(self.log(log)), 2)
-        self.assertNotIn("outcome_graded", self.kinds())
 
     def test_the_resume_is_on_disk_before_its_launch(self):
         project = self.project

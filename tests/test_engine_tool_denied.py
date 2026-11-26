@@ -1,0 +1,292 @@
+"""Contract tests for a session denied a tool call: `engine deliver` ends the run at the engine's own stop
+`tool-denied`, never a fault and never a graded reply, and a blocked reply ends at its own stop.
+
+The helpers, fixtures and the stand-in launcher are the ones tests/test_engine_session.py defines; the group
+and call cases run in process as tests/test_engine_fanout.py does.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import sys
+import threading
+import unittest
+from pathlib import Path
+from unittest import mock
+
+from agent_tools.delivery import engine_session, engine_shell
+from tests.engine_fixture import AdoptedFixtures
+from tests.engine_procedure_copies import PROCEDURES
+from tests.engine_step_coverage import StepCoverage
+from tests.guard_policy_world import install_platform_manifest_in_environ
+from tests.test_engine_deliver import EngineProject
+from tests.test_engine_fanout import FAN, REVIEWS, child, children_of, roots, with_session_files
+from tests.test_engine_session import (
+    REPO_ROOT, RESULT_LIMIT, RESULT_MISSING, agent_step, canned_result, copy_roles, install_answers,
+    install_stub, one_step, write_procedures, REVIEW_REPLY, DRAFT_REPLY,
+)
+from tests.test_engine_stubbed_run import SHA, Scenario
+
+TIER = "integration"  # every case runs the engine as a child process or in process on a built project
+
+FIXTURES = AdoptedFixtures()
+STEPS = StepCoverage(PROCEDURES, ())
+RESULT_DENIED = REPO_ROOT / "tests/fixtures/engine-session/result-denied-1639.json"
+
+
+def setUpModule() -> None:
+    install_platform_manifest_in_environ()
+    unittest.addModuleCleanup(FIXTURES.close)
+
+
+def tearDownModule() -> None:
+    STEPS.finish(sys.modules[__name__], Scenario)
+
+
+def bash(command: str, ident: str = "toolu_01") -> dict:
+    return {"tool_name": "Bash", "tool_use_id": ident, "tool_input": {"command": command}}
+
+
+class ToolDeniedStopTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.project = EngineProject(self)
+        self.project.env.pop("CLAUDE_ACCOUNT", None)
+        copy_roles(self.project, "implementer", "reviewer")
+
+    def run_dir(self) -> Path:
+        (run,) = self.project.runs()
+        return run
+
+    def events(self) -> list[dict]:
+        return self.project.events(self.run_dir())
+
+    def kinds(self) -> list[str]:
+        return [event["event"] for event in self.events()]
+
+    def stopped(self, done, issue: int) -> dict:
+        self.assertEqual(done.returncode, 3, done.stdout + done.stderr)
+        line = json.loads(done.stdout)
+        self.assertEqual((line["end"], line["need"]), ("tool-denied", "owner-decision"), line)
+        stop = self.events()[-1]
+        self.assertEqual((stop["event"], stop["stop"], stop["need"]),
+                         ("stop_reached", "tool-denied", "owner-decision"))
+        return line
+
+    def test_the_recorded_1639_denial_ends_the_run_at_tool_denied(self):
+        fixture = json.loads(RESULT_DENIED.read_text(encoding="utf-8"))
+        (denial,) = fixture["permission_denials"]
+        install_stub(self.project, RESULT_DENIED)
+        procedures = one_step(self.project)
+
+        done = self.project.deliver(procedures, issue=1639)
+        status = json.loads(self.project.status(1639).stdout)
+
+        line = self.stopped(done, 1639)
+        self.assertIn(repr(denial["tool_input"]["command"]), line["detail"])
+        self.assertEqual(self.events()[-1]["step"], "draft")
+        kinds = self.kinds()
+        for kind in ("result_stored", "outcome_graded", "transition_taken", "run_done"):
+            self.assertNotIn(kind, kinds)
+        record = json.loads((self.run_dir() / "sessions/draft.1.json").read_text(encoding="utf-8"))
+        self.assertEqual(record["denials"], fixture["permission_denials"])
+        history = (self.project.world.home / ".agents/state/engine/history.jsonl").read_text(
+            encoding="utf-8").splitlines()
+        self.assertEqual(json.loads(history[-1])["end"], "tool-denied")
+        self.assertEqual(status["stop"]["name"], "tool-denied")
+
+    def test_a_session_denied_only_a_write_stops_at_tool_denied(self):
+        install_stub(self.project, canned_result(permission_denials=[
+            {"tool_name": "Write", "tool_use_id": "toolu_01", "tool_input": {"file_path": "/etc/hosts"}}]))
+
+        done = self.project.deliver(one_step(self.project), issue=1919)
+
+        line = self.stopped(done, 1919)
+        self.assertIn(repr('Write {"file_path":"/etc/hosts"}'), line["detail"])
+        self.assertNotIn("outcome_graded", self.kinds())
+
+    def test_every_denied_tool_call_is_named_whole_and_the_record_keeps_every_denial(self):
+        first = "echo " + "a" * 250 + " one"
+        second = "echo " + "a" * 250 + " two"
+        denials = [bash("make check"),
+                   {"tool_name": "Write", "tool_use_id": "toolu_02", "tool_input": {"file_path": "/etc/hosts"}},
+                   bash(first, "toolu_03"), bash(second, "toolu_04")]
+        install_stub(self.project, canned_result(permission_denials=denials))
+
+        done = self.project.deliver(one_step(self.project), issue=1919)
+
+        line = self.stopped(done, 1919)
+        named = [repr("make check"), repr('Write {"file_path":"/etc/hosts"}'), repr(first), repr(second)]
+        places = [line["detail"].index(text) for text in named]
+        self.assertEqual(places, sorted(set(places)))
+        record = json.loads((self.run_dir() / "sessions/draft.1.json").read_text(encoding="utf-8"))
+        self.assertEqual(record["denials"], denials)
+
+    def test_a_denied_shell_command_on_the_resume_stops_at_tool_denied(self):
+        log = install_stub(self.project, RESULT_MISSING,
+                           resumed=canned_result(permission_denials=[bash("rm -rf x", "t")]))
+
+        done = self.project.deliver(one_step(self.project), issue=1514)
+
+        self.stopped(done, 1514)
+        self.assertEqual(len(log.read_text(encoding="utf-8").splitlines()), 2)
+        self.assertNotIn("outcome_graded", self.kinds())
+
+    def test_a_reviewer_denied_a_shell_command_stops_at_tool_denied(self):
+        command = "PYTHONPATH=python python3 -m unittest tests.test_x"
+        denial = bash(command, "toolu_02")
+        install_stub(self.project, canned_result(
+            structured_output={"verdict": "approve"}, permission_denials=[denial]))
+        steps = [agent_step("review", "reviewer", {"approve": "done", "revise": "needs-owner"},
+                            prompt="review.md", reply="review.reply.json", outcome_from="verdict")]
+        procedures = write_procedures(self.project, steps, {
+            "review.md": "Review {{run.issue}}.\n",
+            "review.reply.json": json.dumps(REVIEW_REPLY)})
+
+        done = self.project.deliver(procedures, issue=1514)
+
+        line = self.stopped(done, 1514)
+        self.assertIn(repr(command), line["detail"])
+        kinds = self.kinds()
+        for kind in ("result_stored", "outcome_graded", "transition_taken", "run_done"):
+            self.assertNotIn(kind, kinds)
+        record = json.loads((self.run_dir() / "sessions/review.1.json").read_text(encoding="utf-8"))
+        self.assertEqual(record["denials"], [denial])
+
+    def test_a_denial_after_a_usage_limit_ends_the_wait_before_the_stop(self):
+        install_answers(self.project, [
+            {"stdout": str(RESULT_LIMIT), "exit": 1, "account": "p1"},
+            {"stdout": str(RESULT_DENIED), "exit": 0, "account": "p2"}])
+
+        done = self.project.deliver(one_step(self.project), issue=1919)
+
+        self.stopped(done, 1919)
+        kinds = self.kinds()
+        self.assertLess(kinds.index("wait_started"), kinds.index("wait_ended"))
+        self.assertLess(kinds.index("wait_ended"), len(kinds) - 1)
+        (ended,) = [e for e in self.events() if e["event"] == "wait_ended"]
+        self.assertEqual(ended["wait"], "usage-limit")
+        self.assertIsNone(json.loads(self.project.status(1919).stdout)["wait"])
+
+
+class FanOutDeniedTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.project = EngineProject(self)
+        self.project.env.pop("CLAUDE_ACCOUNT", None)
+        copy_roles(self.project, "reviewer", "reviewer-lite")
+
+    @staticmethod
+    def answer(env, document: dict) -> None:
+        Path(env[engine_session.ANSWER_ENV]).write_text(json.dumps(document))
+
+    def denied(self, command: str) -> engine_session.Launched:
+        return engine_session.Launched(
+            0, canned_result(permission_denials=[bash(command)]), b"", 0.1)
+
+    def test_two_group_members_denied_stop_the_run_at_tool_denied_naming_both(self):
+        directory = with_session_files(self.project.procedures(REVIEWS()))
+        commands = {"ra": "echo first", "rb": "echo second"}
+
+        def fake(argv, cwd, prompt, *, on_start, timeout=None, env=None, stop=None):
+            name = "ra" if argv[-1].endswith("ra.1.system.md") else "rb"
+            on_start(os.getpid())
+            self.answer(env, {"account": "stub"})
+            return self.denied(commands[name])
+
+        with self.project.inside(), mock.patch.object(engine_session, "launch", fake):
+            code, line = engine_shell.deliver(1919, directory)
+
+        self.assertEqual((code, line["end"], line["need"]), (3, "tool-denied", "owner-decision"))
+        for command in commands.values():
+            self.assertIn(repr(command), line["detail"])
+        (root,) = roots(self.project)
+        events = self.project.events(root)
+        self.assertEqual(events[-1]["event"], "stop_reached")
+        self.assertEqual(events[-1]["stop"], "tool-denied")
+        self.assertIn(events[-1]["step"], commands)
+        self.assertEqual([e for e in events if e["event"] == "outcome_graded" and e["step"] == "reviews"], [])
+
+    def test_two_child_runs_denied_stop_the_parent_at_tool_denied_naming_both(self):
+        directory = self.project.procedures(FAN("standin-items", 2), children={
+            "fan-child": child([
+                {"id": "look", "stage": "building", "kind": "agent", "holds": "run", "role": "reviewer",
+                 "prompt": "item.md", "reply": "draft.reply.json", "outcome_from": "status",
+                 "in": ["run.item"],
+                 "on": {"drafted": "done", "stuck": "child-stop", "no-reply": "child-stop",
+                        "out-of-bounds": "child-stop"}}])})
+        (directory / "item.md").write_text("Review item {{run.item}}.\n", encoding="utf-8")
+        (directory / "draft.reply.json").write_text(json.dumps(DRAFT_REPLY), encoding="utf-8")
+        commands = iter(["echo first", "echo second"])
+        taken = threading.Lock()
+        both = threading.Barrier(2, timeout=60)
+
+        def fake(argv, cwd, prompt, *, on_start, timeout=None, env=None, stop=None):
+            with taken:
+                command = next(commands)
+            on_start(os.getpid())
+            both.wait()
+            self.answer(env, {"account": "stub"})
+            return self.denied(command)
+
+        with self.project.inside(), mock.patch.object(engine_session, "launch", fake):
+            code, line = engine_shell.deliver(1919, directory)
+
+        self.assertEqual((code, line["end"], line["need"]), (3, "tool-denied", "owner-decision"))
+        for command in ("echo first", "echo second"):
+            self.assertIn(repr(command), line["detail"])
+        (root,) = roots(self.project)
+        self.assertEqual(len(children_of(self.project)), 2)
+        events = self.project.events(root)
+        self.assertEqual((events[-1]["event"], events[-1]["stop"]), ("stop_reached", "tool-denied"))
+        self.assertEqual([e for e in events if e["event"] in ("result_stored", "outcome_graded")
+                          and e["step"] == "fan"], [])
+
+
+class JoinedStopTest(unittest.TestCase):
+    def test_a_denial_outranks_a_quota_wait_and_the_details_join_in_order(self):
+        stop = engine_session.joined([engine_session.EngineStop("quota-wait", "retry", "q", "a"),
+                                      engine_session.EngineStop("tool-denied", "owner-decision", "d", "b")])
+        self.assertEqual((stop.name, stop.need, stop.step, stop.detail),
+                         ("tool-denied", "owner-decision", "b", "q d"))
+
+    def test_two_quota_waits_join_at_the_first(self):
+        stop = engine_session.joined([engine_session.EngineStop("quota-wait", "retry", "q", "a"),
+                                      engine_session.EngineStop("quota-wait", "retry", "r", "b")])
+        self.assertEqual((stop.name, stop.need, stop.step), ("quota-wait", "retry", "a"))
+
+    def test_a_fault_is_raised_before_any_stop(self):
+        with self.assertRaises(RuntimeError):
+            engine_session.raise_first([None, engine_session.EngineStop("quota-wait", "retry", "q", "a"),
+                                        RuntimeError("x")])
+
+    def test_no_error_returns(self):
+        self.assertIsNone(engine_session.raise_first([None, None]))
+
+    def test_two_stops_raise_one_holding_both(self):
+        with self.assertRaises(engine_session.EngineStop) as caught:
+            engine_session.raise_first([engine_session.EngineStop("tool-denied", "owner-decision", "d1", "a"),
+                                        engine_session.EngineStop("tool-denied", "owner-decision", "d2", "b")])
+        self.assertEqual(caught.exception.detail, "d1 d2")
+
+
+class BlockedReplyTest(Scenario):
+    def test_a_blocked_implement_reply_stops_the_delivery_at_task(self):
+        blocked = {"status": "blocked", "start_head": SHA, "commit": SHA, "notes": "no shell",
+                   "acceptance": [], "sensitive": False, "ineligible": False, "tests": []}
+        run = self.stubbed(replies={"implement": blocked})
+
+        done = run.deliver()
+
+        self.stopped(run, done, "task", "owner-decision")
+        (root,) = run.runs()
+        last = run.events(root)[-1]
+        self.assertEqual((last["event"], last["stop"]), ("stop_reached", "task"))
+        direct = self.child(run, "direct")
+        last = run.events(direct)[-1]
+        self.assertEqual((last["event"], last["stop"]), ("stop_reached", "task"))
+        status = json.loads(run.status().stdout)
+        self.assertEqual(status["stop"]["name"], "task")
+
+
+if __name__ == "__main__":
+    unittest.main()
