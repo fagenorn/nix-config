@@ -36,10 +36,17 @@ stop, 1 a fault, 2, 4, or an unreadable result line) appends none and is `unprov
 `latest_proven` is the revision of the last line that is an object of format 1 with a 40-character
 lowercase hex revision; a torn or foreign line is skipped.
 
-Output: one compact sorted-key line `{"action", "code", "end", "issue", "revision", "run"}` on
-stdout, `action` one of `unmoved`, `busy`, `proven`, `unproven`. Exit 0 for `unmoved` and `proven`,
+The filing pass. After `prove` has released its lock, every `daily` and `now` run that is not `busy`
+(`unmoved` included) runs `bound_issues.file_pass` against `cleanup_issue.GitHubTracker(<platform
+repo>)`: one issue per out-of-bounds engine step and per over-wide role bound. `proof-run file
+--platform-repo <o/n>` runs only that pass and prints `{"filed": [...]}`, exit 0.
+
+Output: one compact sorted-key line `{"action", "code", "end", "filed", "issue", "revision", "run"}` on
+stdout, `action` one of `unmoved`, `busy`, `proven`, `unproven`, `filed` the numbers of the issues the
+pass filed (`[]` for none, and for `busy`, which skips the pass). Exit 0 for `unmoved` and `proven`,
 3 for `unproven`, 4 for `busy`. Exit 2 with stdout empty and one stderr line `proof-run: <reason>`
-for a usage error, a `Refusal` or a `ForgeError`.
+for a usage error, a `Refusal` or a `ForgeError`, a failure of the filing pass included, which comes
+after the run's own effects (a proven line stays).
 """
 
 from __future__ import annotations
@@ -57,7 +64,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import NamedTuple, Protocol
 
-from agent_tools.delivery import cleanup_issue, engine_housekeeping, engine_ledger
+from agent_tools.delivery import bound_issues, cleanup_issue, engine_housekeeping, engine_ledger
 from agent_tools.delivery.cleanup_issue import Refusal
 from agent_tools.project_contract import adopt_conformance
 from agent_tools.system import forge_api
@@ -342,9 +349,10 @@ class _Parser(argparse.ArgumentParser):
 
 def parser() -> argparse.ArgumentParser:
     built = _Parser(prog=COMMAND, description="Prove the delivery engine on the fixture project.")
-    built.add_argument("mode", choices=("daily", "now"))
-    for flag in ("--platform-repo", "--branch", "--fixture", "--fixture-branch"):
-        built.add_argument(flag, required=True)
+    built.add_argument("mode", choices=("daily", "now", "file"))
+    built.add_argument("--platform-repo", required=True)
+    for flag in ("--branch", "--fixture", "--fixture-branch"):
+        built.add_argument(flag)
     return built
 
 
@@ -352,22 +360,44 @@ def _exit_of(outcome: Outcome) -> int:
     return {"unproven": EXIT_UNPROVEN, "busy": EXIT_BUSY}.get(outcome.action, 0)
 
 
+def _file_pass(platform_repo: str) -> list[int]:
+    filed = bound_issues.file_pass(
+        cleanup_issue.GitHubTracker(platform_repo), engine_housekeeping.history_path(),
+        bound_issues.seen_path(), bound_issues.lock_path(), _utc_now())
+    return [item.issue for item in filed]
+
+
+def _prove(args: argparse.Namespace) -> Outcome:
+    missing = [flag for flag in ("branch", "fixture", "fixture_branch") if getattr(args, flag) is None]
+    if missing:
+        raise Refusal("the following arguments are required: "
+                      + ", ".join("--" + flag.replace("_", "-") for flag in missing))
+    for slug in (args.platform_repo, args.fixture):
+        if not cleanup_issue.SLUG.fullmatch(slug):
+            raise Refusal(f"not <owner>/<name>: {slug}")
+    root = Path(cleanup_issue.registered_root(args.fixture))
+    revision = main_revision(args.platform_repo, args.branch)
+    return prove(
+        revision, mode=args.mode, root=root, slug=args.fixture, branch=args.fixture_branch,
+        tracker=GitHubFixture(args.fixture), engine=engine_argv(args.platform_repo, revision),
+        proven=proven_path(), attempts=attempts_path(), lock=lock_path(), env=dict(os.environ))
+
+
 def main(argv: list[str] | None = None) -> int:
     try:
         args = parser().parse_args(argv)
-        for slug in (args.platform_repo, args.fixture):
-            if not cleanup_issue.SLUG.fullmatch(slug):
-                raise Refusal(f"not <owner>/<name>: {slug}")
-        root = Path(cleanup_issue.registered_root(args.fixture))
-        revision = main_revision(args.platform_repo, args.branch)
-        outcome = prove(
-            revision, mode=args.mode, root=root, slug=args.fixture, branch=args.fixture_branch,
-            tracker=GitHubFixture(args.fixture), engine=engine_argv(args.platform_repo, revision),
-            proven=proven_path(), attempts=attempts_path(), lock=lock_path(), env=dict(os.environ))
+        if not cleanup_issue.SLUG.fullmatch(args.platform_repo):
+            raise Refusal(f"not <owner>/<name>: {args.platform_repo}")
+        if args.mode == "file":
+            print(json.dumps({"filed": _file_pass(args.platform_repo)}, sort_keys=True,
+                             separators=(",", ":")))
+            return 0
+        outcome = _prove(args)
+        filed = [] if outcome.action == "busy" else _file_pass(args.platform_repo)
     except (Refusal, forge_api.ForgeError) as error:
         print(f"{COMMAND}: {' '.join(str(error).split())}", file=sys.stderr)
         return EXIT_USAGE
-    print(json.dumps(outcome._asdict(), sort_keys=True, separators=(",", ":")))
+    print(json.dumps({**outcome._asdict(), "filed": filed}, sort_keys=True, separators=(",", ":")))
     return _exit_of(outcome)
 
 

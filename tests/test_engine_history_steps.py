@@ -7,14 +7,17 @@ child run and a run that faults each append a line of their own.
 from __future__ import annotations
 
 import json
+import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
 from agent_tools.delivery import engine_commands, engine_ledger, engine_session, engine_shell
+from agent_tools.delivery.bound_issues import file_pass
 from agent_tools.delivery.engine_housekeeping import history_line
 from tests.engine_fixture import AdoptedFixtures
+from tests.test_bound_issues import FakeTracker
 from tests.engine_stubbed_world import StubbedRun
 from tests.guard_policy_world import install_platform_manifest_in_environ
 from tests.test_engine_deliver import EngineProject, step
@@ -214,6 +217,29 @@ class FaultLineTest(unittest.TestCase):
         self.assertEqual((lines[0]["run"], lines[0]["end"], lines[0]["need"]),
                          (project.runs()[0].name, "fault", None))
         self.assertEqual([s["outcome"] for s in lines[0]["steps"]], ["out-of-bounds"])
+
+    def test_a_faulted_out_of_bounds_command_files_one_issue_over_two_passes(self):
+        project = EngineProject(self)
+        procedures = project.procedures(
+            [step("a", "standin-block", None, on={"ok": "done", "failed": "needs-owner",
+                                                  "refused": "needs-owner"})],
+            stops={"needs-owner": {"need": "owner-decision", "reenter": "a"},
+                   "step-failed": {"need": "retry", "reenter": "a"}})
+        with project.inside(), mock.patch.object(engine_commands, "PROJECT_WALL_SECONDS", 1):
+            with self.assertRaises(engine_shell.Fault):
+                engine_shell.deliver(1520, procedures)
+        tracker = FakeTracker()
+        with tempfile.TemporaryDirectory() as scratch:
+            seen, lock = Path(scratch) / "seen.json", Path(scratch) / "pass.lock"
+            history_file = project.world.home / ".agents/state/engine/history.jsonl"
+            now = datetime.now(timezone.utc)
+
+            first = file_pass(tracker, history_file, seen, lock, now)
+            second = file_pass(tracker, history_file, seen, lock, now)
+
+        self.assertEqual([item.kind for item in first], ["out-of-bounds"])
+        self.assertEqual(second, [])
+        self.assertEqual(len(tracker.created), 1)
 
     def test_a_walk_that_raises_a_core_error_records_a_fault_line_for_the_root_run(self):
         project = EngineProject(self)

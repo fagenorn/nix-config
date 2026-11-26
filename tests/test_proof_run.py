@@ -20,7 +20,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.delivery import cleanup_issue, proof_run
+from agent_tools.delivery import bound_issues, cleanup_issue, proof_run
 from agent_tools.system import forge_api
 from tests.engine_fixture import AdoptedFixtures
 from tests.engine_stubbed_world import IMPLEMENTED, StubbedRun
@@ -359,7 +359,8 @@ class CliTest(unittest.TestCase):
                 mock.patch.object(cleanup_issue, "registered_root",
                                   return_value=str(run.fixture.root)), \
                 mock.patch.object(proof_run, "engine_argv", return_value=ENGINE), \
-                mock.patch.object(proof_run, "GitHubFixture", return_value=fake):
+                mock.patch.object(proof_run, "GitHubFixture", return_value=fake), \
+                mock.patch.object(bound_issues, "file_pass", return_value=[]):
             daily = self.call(["daily", *FLAGS])
             self.assertEqual(json.loads(daily[1])["action"], "unmoved")
             self.assertEqual((daily[0], run.runs()), (0, []))
@@ -368,8 +369,26 @@ class CliTest(unittest.TestCase):
 
         line = json.loads(now[1])
         self.assertEqual((now[0], line["action"]), (0, "proven"), now)
-        self.assertEqual(sorted(line), ["action", "code", "end", "issue", "revision", "run"])
+        self.assertEqual(sorted(line), ["action", "code", "end", "filed", "issue", "revision", "run"])
         self.assertEqual(len(run.runs()), 1)
+
+
+    def test_daily_runs_the_filing_pass_and_prints_what_it_filed(self):
+        unmoved = proof_run.Outcome("unmoved", SHA_A, None, None, None, None)
+        filed = [bound_issues.Filed("out-of-bounds", "direct.implement", 101)]
+        with tempfile.TemporaryDirectory() as home, \
+                mock.patch.dict(os.environ, {"HOME": home}), \
+                mock.patch.object(proof_run, "main_revision", return_value=SHA_A), \
+                mock.patch.object(proof_run, "prove", return_value=unmoved), \
+                mock.patch.object(cleanup_issue, "registered_root", return_value=home), \
+                mock.patch.object(bound_issues, "file_pass", return_value=filed) as passed:
+            daily = self.call(["daily", *FLAGS])
+            only = self.call(["file", "--platform-repo", "o/n"])
+
+        line = json.loads(daily[1])
+        self.assertEqual((daily[0], line["filed"], line["action"]), (0, [101], "unmoved"))
+        self.assertEqual((only[0], json.loads(only[1])), (0, {"filed": [101]}))
+        self.assertEqual(passed.call_count, 2)
 
 
 class GlossaryTest(unittest.TestCase):
