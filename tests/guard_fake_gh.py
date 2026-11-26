@@ -102,8 +102,7 @@ def check_run_accepts(slug, head):
         ("tokens set", "", {"GITHUB_TOKEN": "x", "GH_TOKEN": "y"}),
         ("Actions-bound check", "", {"FAKE_REQUIRED_JSON": required_facts(contexts=(), checks=(("Tests", 15368),))}),
         ("any-app check", "", {"FAKE_REQUIRED_JSON": required_facts(contexts=(), checks=(("Tests", -1),))}),
-        ("session on github.com", "", {"GH_HOST": "github.com"}),
-        ("shell on github.com", "", {"FAKE_SHELL_GH_HOST": "github.com"}),
+        ("session and shell on github.com", "", {"GH_HOST": "github.com", "FAKE_SHELL_GH_HOST": "github.com"}),
         ("session and shell on one gh config directory", "", {"GH_CONFIG_DIR": "/gh", "XDG_CONFIG_HOME": "/xdg"}),
         ("shell restating the session gh config directory", "", {
             "GH_CONFIG_DIR": "/gh", "FAKE_SHELL_GH_CONFIG_DIR": "/gh"}),
@@ -148,6 +147,9 @@ def check_run_refusals(slug, head):
             '"total_count": 101, "jobs": [{"name": "Tests"', '"total_count": 7, "jobs": [{"name": "Tests"'))),
         ("session on another host", forge(GH_HOST="ghe.example.com")),
         ("shell startup file on another host", forge(FAKE_SHELL_GH_HOST="ghe.example.com")),
+        ("shell startup file naming github.com beside a session with no host", forge(
+            FAKE_SHELL_GH_HOST="github.com")),
+        ("shell startup file unsetting the session host github.com", forge(GH_HOST="github.com")),
         ("shell startup file on another gh config directory", forge(FAKE_SHELL_GH_CONFIG_DIR="/home/u/.config/gh-ghe")),
         ("shell startup file on another gh config directory than the session's", forge(
             GH_CONFIG_DIR="/gh", FAKE_SHELL_GH_CONFIG_DIR="/gh-ghe")),

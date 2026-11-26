@@ -652,8 +652,9 @@ the contract declares. The reads inherit the session's environment minus the tok
 page by page until every one is seen. The rerun runs in the session's shell, so the guard asks that shell for its
 host: the user's `$SHELL`, started as a login, interactive shell, prints `$GH_HOST`, `$GH_CONFIG_DIR` and
 `$XDG_CONFIG_HOME` once per command. A host other than github.com, a shell that cannot be started, times out or prints
-no answer, or a `GH_CONFIG_DIR` or `XDG_CONFIG_HOME` that differs from the hook's own (gh's default host comes from the
-configuration those name) leaves the rule in place, so the reads and the rerun cannot meet on different hosts, whether
+no answer, a shell `GH_HOST` that is not the hook's own (one empty and the other github.com included: gh's default
+host need not be github.com), or a `GH_CONFIG_DIR` or `XDG_CONFIG_HOME` that differs from the hook's own (gh's default
+host comes from the configuration those name) leaves the rule in place, so the reads and the rerun cannot meet on different hosts, whether
 the host comes from the session's environment or from a shell startup file. Every pull request the run lists is read, and one that cannot be read or is not a pull request document
 leaves the rule in place, whichever other pull request qualifies. A read that fails, times
 out or answers another shape leaves the rule in place, and a deadline too near refuses. Only the narrowed hits of the
@@ -4244,12 +4245,13 @@ def pull_request_check_run(gh_bin, slug, run_id, row, deadline, child_timeout, m
     the row's integration branch. Any read that fails, or any other shape, is False. The
     row's declared `required_checks` are never consulted. `memo`, a dict shared by the calls
     of one command, holds each read once."""
-    if os.environ.get("GH_HOST", "").strip().lower() not in ("", "github.com"):
+    hook_host = os.environ.get("GH_HOST", "").strip().lower()
+    if hook_host not in ("", "github.com"):
         return False
     memo = {} if memo is None else memo
     if "shell host" not in memo:
         memo["shell host"] = shell_selected_host(deadline, child_timeout)
-    if memo["shell host"] is None or memo["shell host"].strip().lower() not in ("", "github.com"):
+    if memo["shell host"] is None or memo["shell host"].strip().lower() != hook_host:
         return False
 
     def read(path, paged=False):
