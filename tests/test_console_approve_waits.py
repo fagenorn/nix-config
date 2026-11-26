@@ -265,9 +265,8 @@ class RestartedRegistrationTest(ApproveCase):
     def waiting_then_restarted(self, gate=None):
         """A merged plan whose only row is `waiting`, then a restart; `gate` holds the register call.
 
-        The fake writes the registry before the service appends its `registered` row. With a gate,
-        the call signals `gate["written"]` once the registry is written and then blocks on
-        `gate["release"]` (bounded), so the listing and the row are published in separate steps.
+        With a gate, the call sets `gate["written"]` once the registry is written, then waits
+        (bounded) on `gate["release"]`, so the listing and the row are published separately.
         """
         fake = self.merged(approve_service.NOT_INTEGRATED)
         self.poll("merged")
