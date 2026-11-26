@@ -188,9 +188,9 @@ Contract:
   writes `<state>-<width>.png` for every pair, so a full run writes 114 files.
 - Each state is a fresh fixture console: a registry of three projects (`owner/web`, `owner/api`, `owner/docs`) and an
   event log seeded for that state, served by the real `ConsoleService` on a loopback port. Its event times, file times
-  and the service's clock all come from the run's one reading (`console_screenshot_clock.READING`, or `--now`). Nothing
-  is written through the service, nothing is mocked in the page, and the launcher is an inert stand-in that records what
-  it is given and starts nothing (without one the view would say managers are not available on this host).
+  and clock come from the run's one reading (`READING`, or `--now`); the page runs on it in `UTC` and `en-US`,
+  animations disabled. Nothing is written through the service or mocked in the page, and the launcher is an inert
+  stand-in that records what it is given and starts nothing (without one the view says managers are unavailable).
 - The sandbox rule: every path the fixture touches lies under one temporary root, and
   `main` points `HOME`, `CLAUDE_ACCOUNTS_DIR`, `CLAUDE_CONFIG_DIR`, `XDG_STATE_HOME` and
   `XDG_CONFIG_HOME` under another for the run, so the owner's real accounts directory and real
@@ -3155,7 +3155,7 @@ def capture(out: Path, states: Sequence[str] = STATES, widths: Sequence[int] = W
                                     _shoot(browser, f"http://{host}:{port}/{path}", state, width, out,
                                            question=read[0],
                                            canonical=read == (READ_QUESTION, READ_ANSWER),
-                                           mutate=mutate))
+                                           mutate=mutate, now_s=now))
                                 shot_paths.append(out / f"{state}-{width}.png")
                         finally:
                             if serve is not None:
@@ -3353,9 +3353,9 @@ def read_style(page, rows: Sequence[StyleCheck], *, mutation: str | None = None,
     return tuple(sorted(found, key=place))
 
 
-def _shoot(browser, url: str, state: str, width: int, out: Path, *,
-           question: str = READ_QUESTION, canonical: bool = True, mutate: bool = False) -> Shot:
-    page = browser.new_page(viewport={"width": width, "height": HEIGHT})
+def _shoot(browser, url: str, state: str, width: int, out: Path, *, question: str = READ_QUESTION,
+           canonical: bool = True, mutate: bool = False, now_s: float = shot_clock.READING) -> Shot:
+    page = shot_clock.open_page(browser, width, HEIGHT, now_s)
     try:
         page.goto(url)
         page.wait_for_selector("#breakdowns h2" if state == "spend-page" else "#projects h2")
@@ -3507,7 +3507,7 @@ def _shoot(browser, url: str, state: str, width: int, out: Path, *,
         short = tuple(page.evaluate(SHORT_CONTROLS))
         acts = tuple(page.evaluate(ACTS_ROW))
         path = out / f"{state}-{width}.png"
-        page.screenshot(path=str(path), full_page=True)
+        shot_clock.screenshot(page, path)
         style: tuple[str, ...] = ()
         checked: tuple[str, ...] = ()
         broke: tuple[str, ...] = ()

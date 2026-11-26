@@ -10,6 +10,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 READING: float = datetime(2026, 11, 20, 9, 30, tzinfo=timezone.utc).timestamp()
+TIME_ZONE = "UTC"
+LOCALE = "en-US"
 
 
 def reading(text: str | None) -> float:
@@ -40,6 +42,21 @@ def service_clocks(now_s: float) -> dict:
     """The `ConsoleService` keywords that make it read, and stamp its rows with, the reading."""
     stamped = datetime.fromtimestamp(now_s, timezone.utc).isoformat(timespec="microseconds")
     return {"clock": lambda: now_s, "log_clock": lambda: stamped}
+
+
+def open_page(browser, width: int, height: int, now_s: float):
+    """A page in the fixed zone and locale whose clock stands at the reading before it loads anything."""
+    page = browser.new_page(viewport={"width": width, "height": height}, timezone_id=TIME_ZONE, locale=LOCALE)
+    try:
+        page.clock.set_fixed_time(now_s)
+    except BaseException:
+        page.close()
+        raise
+    return page
+
+
+def screenshot(page, path: Path) -> None:
+    page.screenshot(path=str(path), full_page=True, animations="disabled")
 
 
 def stamp(root: Path, at_s: float) -> None:

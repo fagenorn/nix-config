@@ -27,6 +27,17 @@ TIER = "integration"  # it serves fixture consoles and drives Chromium
 JANUARY = datetime(2026, 1, 9, 9, 30, tzinfo=timezone.utc).timestamp()
 FUTURE = datetime(2030, 1, 4, 9, 30, tzinfo=timezone.utc).timestamp()
 DEFAULT = datetime(2026, 11, 20, 9, 30, tzinfo=timezone.utc).timestamp()
+TUESDAY = datetime(2026, 1, 6, 15, 45, tzinfo=timezone.utc).timestamp()
+LAUNCH_ARGS = ["--no-sandbox", "--disable-dev-shm-usage"]
+PAGE_TIMES = """() => ({
+  now: Date.now(),
+  zone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+  language: navigator.language,
+  resets: Object.fromEntries([...document.querySelectorAll('.acct-row')].map(
+    r => [r.dataset.profile, r.querySelector('.acct-reset time')?.textContent ?? null])),
+  reported: [...document.querySelectorAll('.status-age time')].map(t => t.textContent),
+  agos: [...document.querySelectorAll('time[data-form="ago"]')].map(t => t.textContent),
+})"""
 
 
 def own_tempdir(test: unittest.TestCase) -> Path:
@@ -37,6 +48,48 @@ def own_tempdir(test: unittest.TestCase) -> Path:
     patch.start()
     test.addCleanup(patch.stop)
     return path
+
+
+def chromium_or_skip(test: unittest.TestCase) -> None:
+    """Skip the test unless Playwright is installed and can launch a Chromium."""
+    try:
+        from playwright.sync_api import Error, sync_playwright
+    except ImportError:
+        test.skipTest("playwright is not installed")
+    with sync_playwright() as pw:
+        try:
+            pw.chromium.launch(args=LAUNCH_ARGS).close()
+        except Error as err:
+            test.skipTest(f"no Chromium to launch: {err}")
+
+
+def browser_zone() -> str:
+    """The zone a bare Chromium page reports, with the browser closed again before it returns."""
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(args=LAUNCH_ARGS)
+        try:
+            return browser.new_page().evaluate("Intl.DateTimeFormat().resolvedOptions().timeZone")
+        finally:
+            browser.close()
+
+
+def read_before_shots(test: unittest.TestCase) -> list:
+    """The page's times and the screenshot options, read just before each picture is taken."""
+    from playwright.sync_api import Page
+
+    real = Page.screenshot
+    seen: list = []
+
+    def record(page, **kwargs):
+        seen.append((page.evaluate(PAGE_TIMES), kwargs))
+        return real(page, **kwargs)
+
+    patch = mock.patch.object(Page, "screenshot", autospec=True, side_effect=record)
+    patch.start()
+    test.addCleanup(patch.stop)
+    return seen
 
 
 def stub_playwright():
@@ -161,6 +214,39 @@ class FixedReadingTest(unittest.TestCase):
             codes = [shots.main(["--out", str(out), *extra]) for extra in runs]
         self.assertEqual(codes, [0, 0, 0])
         self.assertEqual(readings, [JANUARY, DEFAULT, JANUARY])
+
+
+class FixedPageTest(unittest.TestCase):
+    def test_a_picture_shows_its_times_from_the_fixed_reading(self) -> None:
+        chromium_or_skip(self)
+        out = own_tempdir(self) / "out"
+        seen = read_before_shots(self)
+        shots.capture(out, states=("owner-accounts",), widths=(1440,))
+        ((times, _),) = seen
+        self.assertEqual(times["resets"], {"work-main": "Fri 11:30", "colleague-1": "Fri 12:30",
+                                           "work-spare": "Fri 13:30"})
+        self.assertIn("6 min ago", times["reported"])
+        self.assertEqual([t for t in times["agos"] if t.endswith("days ago") or t == "yesterday"], [])
+        self.assertEqual(times["now"], DEFAULT * 1000)
+        self.assertEqual(times["zone"], "UTC")
+        self.assertEqual(times["language"], "en-US")
+
+    def test_the_now_override_moves_every_picture_time_with_it_in_utc_on_a_far_zone_host(self) -> None:
+        chromium_or_skip(self)
+        out = own_tempdir(self) / "out"
+        seen = read_before_shots(self)
+        patch = mock.patch.dict(os.environ, {"TZ": "Pacific/Kiritimati"})
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.assertEqual(browser_zone(), "Pacific/Kiritimati")
+        shots.capture(out, states=("owner-accounts",), widths=(1440,), now=TUESDAY)
+        ((times, kwargs),) = seen
+        self.assertEqual(times["resets"], {"work-main": "Tue 17:45", "colleague-1": "Tue 18:45",
+                                           "work-spare": "Tue 19:45"})
+        self.assertIn("6 min ago", times["reported"])
+        self.assertEqual(times["now"], TUESDAY * 1000)
+        self.assertEqual(times["zone"], "UTC")
+        self.assertEqual((kwargs["full_page"], kwargs.get("animations")), (True, "disabled"))
 
 
 if __name__ == "__main__":
