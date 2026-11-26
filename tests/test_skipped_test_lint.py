@@ -103,6 +103,8 @@ CSHARP = [
     ok("[Theory]"), ok("[ClassData<Rows<int>>(Explicit = false)]"),
     ok("public void NestedGenericRowRuns(int n) { Run(63); }"),
     ok("[Fact]"), ok("[Paging<Page>(Skip = 10)]"), ok("public void GenericOther() { Run(64); }"),
+    ok("[TestCase<int>(1, Explicit = true)]"), ok("public void NunitGenericCase() { Run(65); }"),
+    ok("[TestCaseSource<Rows>(Ignore = \"x\")]"), ok("public void NunitGenericSource() { Run(66); }"),
     ok("}"),
 ]
 WEB = [

@@ -295,15 +295,23 @@ class LintEntryPointTest(JustCase):
 
     def test_an_unformatted_csharp_file_fails_lint_naming_dotnet_format(self):
         fixtures = REPO_ROOT / "tests" / "fixtures" / "dotnet-format"
-        project = self.scratch / "dotnet"
-        self.addCleanup(shutil.rmtree, project, ignore_errors=True)
+        shared = self.scratch / "dotnet"
+        if not shared.exists():
+            shared.mkdir()
+            (shared / "AgentTools.slnx").write_text("<Solution />\n", "utf-8")
+            self.addCleanup(shutil.rmtree, shared, ignore_errors=True)
+        before = {p.relative_to(shared): p.read_bytes() for p in shared.rglob("*") if p.is_file()}
+        scratch = scratch_checkout()
+        self.addCleanup(shutil.rmtree, scratch, ignore_errors=True)
+        shutil.rmtree(scratch / "dotnet", ignore_errors=True)
+        project = scratch / "dotnet"
         (project / "Planted").mkdir(parents=True)
         shutil.copy(fixtures / "Planted.slnx.fixture", project / "Planted.slnx")
         shutil.copy(fixtures / "Planted.csproj.fixture", project / "Planted" / "Planted.csproj")
         source = project / "Planted" / "Sample.cs"
         shutil.copy(fixtures / "Unformatted.cs.fixture", source)
         env = child_env(HOME=str(self.tmp()), TMPDIR=str(self.tmp()))
-        result = self.run_just(["lint"], self.scratch, env)
+        result = self.run_just(["lint"], scratch, env)
         stderr = module_stderr(result)
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertIn("dotnet-format-lint: dotnet format would change files", stderr)
@@ -312,10 +320,12 @@ class LintEntryPointTest(JustCase):
         self.assertIn("dotnet-format", stderr[-1].removeprefix("lint: failed:").replace(
             " ", "").split(","))
         shutil.copy(fixtures / "Formatted.cs.fixture", source)
-        result = self.run_just(["lint"], self.scratch, env)
+        result = self.run_just(["lint"], scratch, env)
         self.assertIn("dotnet-format-lint: passed", result.stdout.splitlines(), result.stderr)
         self.assertFalse([l for l in module_stderr(result)
                           if l.startswith("lint: dotnet-format failed")])
+        after = {p.relative_to(shared): p.read_bytes() for p in shared.rglob("*") if p.is_file()}
+        self.assertEqual(after, before)
 
     def test_a_context_map_violation_fails_lint_naming_context_map_lint(self):
         map_path = self.scratch / "docs" / "CONTEXT-MAP.md"

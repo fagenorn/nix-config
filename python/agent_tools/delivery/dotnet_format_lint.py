@@ -17,6 +17,14 @@ and not a link: none prints `dotnet-format-lint: no_solution` and several print
 `dotnet-format-lint: several_solutions`, each on stderr with exit 1, before any child
 starts.
 
+Completeness. `dotnet format <solution>` reads only the projects the solution lists, so a
+discovered source it would never read must fail the check: a `.csproj` the solution does not
+list, or a `.cs` with no listed project in its directory or above it (a solution that cannot be
+parsed lists none). That prints `dotnet-format-lint: projects_outside_solution (<paths>)`,
+the paths relative to the root and comma separated, on stderr, exits 1 and starts no child.
+A directory or file under `<root>/dotnet` that cannot be read prints `dotnet-format-lint:
+discovery_failed (<reason>)` on stderr and exits 2; it is never read as empty.
+
 Tools. The SDK comes only from `nix build --no-link --print-out-paths
 <root>#agent-platform.dotnet-tools`, run from the root with stdin closed. That is a
 passthru of the platform package, in no launcher's closure, so the SDK is built only
@@ -41,12 +49,14 @@ be an absolute directory: <value>` and exits 2.
 
 import argparse
 import os
+import re
 import shutil
 import stat
 import subprocess
 import sys
 from collections.abc import Sequence
 from pathlib import Path
+from xml.etree import ElementTree
 
 from agent_tools.delivery.dotnet_solution import SOLUTION_ROOT
 from agent_tools.delivery.promotion_schema import symlinked_component
@@ -56,6 +66,7 @@ TOOLS_ATTRIBUTE = "agent-platform.dotnet-tools"
 SOURCE_SUFFIXES = (".cs", ".csproj", ".slnx", ".sln")
 SOLUTION_SUFFIXES = (".slnx", ".sln")
 IGNORED_DIRECTORIES = frozenset({"bin", "obj"})
+SLN_PROJECT = re.compile(r'^Project\("[^"]*"\)\s*=\s*"[^"]*"\s*,\s*"([^"]+)"', re.MULTILINE)
 TIMEOUT_SECONDS = 900
 CHECK_FAILED_EXIT = 2
 FIXED_ENV = {
@@ -69,25 +80,30 @@ FIXED_ENV = {
 
 
 class Refusal(Exception):
-    def __init__(self, reason: str):
+    def __init__(self, reason: str, detail: str = ""):
         super().__init__(reason)
         self.reason = reason
+        self.detail = detail
 
 
 def _is_regular(path: Path) -> bool:
-    try:
-        return stat.S_ISREG(os.lstat(path).st_mode)
-    except OSError:
-        return False
+    return stat.S_ISREG(os.lstat(path).st_mode)
+
+
+def _raise(error: OSError) -> None:
+    raise error
 
 
 def sources(root: Path) -> list[Path]:
-    """The .NET source files under `<root>/dotnet`, never through a link."""
+    """The .NET source files under `<root>/dotnet`, never through a link.
+
+    A directory or file that cannot be read raises its `OSError`: it is never read as empty.
+    """
     base = root / SOLUTION_ROOT
     if symlinked_component(root, SOLUTION_ROOT) is not None or not base.is_dir():
         return []
     found: list[Path] = []
-    for directory, names, files in os.walk(base, followlinks=False):
+    for directory, names, files in os.walk(base, followlinks=False, onerror=_raise):
         names[:] = sorted(n for n in names if n not in IGNORED_DIRECTORIES)
         found.extend(
             path for path in (Path(directory) / f for f in sorted(files))
@@ -106,6 +122,46 @@ def solution(root: Path) -> Path:
     if len(found) > 1:
         raise Refusal("several_solutions")
     return found[0]
+
+
+def listed_projects(chosen: Path) -> set[Path]:
+    """The project files the solution `chosen` lists, as normalised absolute paths.
+
+    A `.slnx` lists them as `Path` attributes of its `Project` elements, a `.sln` as the second
+    quoted field of its `Project(...)` lines; a backslash separates segments in either. A
+    solution that cannot be read or parsed lists none.
+    """
+    try:
+        text = chosen.read_text("utf-8")
+        if chosen.suffix == ".slnx":
+            names = [e.get("Path", "") for e in ElementTree.fromstring(text).iter("Project")]
+        else:
+            names = SLN_PROJECT.findall(text)
+    except (OSError, UnicodeDecodeError, ElementTree.ParseError):
+        return set()
+    return {Path(os.path.normpath(chosen.parent / name.replace("\\", "/")))
+            for name in names if name}
+
+
+def outside_solution(root: Path, chosen: Path, found: Sequence[Path]) -> list[Path]:
+    """The sources `dotnet format <solution>` never reads: it reads only the listed projects.
+
+    A `.csproj` the solution does not list is outside, and so is a `.cs` with no listed
+    project in its own directory or above it.
+    """
+    projects = listed_projects(chosen)
+    directories = {project.parent for project in projects}
+    base = root / SOLUTION_ROOT
+
+    def covered(path: Path) -> bool:
+        if path.name.endswith(".csproj"):
+            return path in projects
+        if not path.name.endswith(".cs"):
+            return True
+        return any(parent in directories for parent in (path.parent, *path.parent.parents)
+                   if parent == base or base in parent.parents)
+
+    return [path for path in found if not covered(path)]
 
 
 def tools_directory(root: Path) -> str:
@@ -143,15 +199,25 @@ def _say(stream, line: str) -> None:
 
 
 def run(root: Path) -> int:
-    if not sources(root):
-        _say(sys.stdout, f"no .NET sources under {SOLUTION_ROOT}/")
-        return 0
     try:
+        found = sources(root)
+        if not found:
+            _say(sys.stdout, f"no .NET sources under {SOLUTION_ROOT}/")
+            return 0
         chosen = solution(root)
+        stray = outside_solution(root, chosen, found)
+        if stray:
+            raise Refusal("projects_outside_solution", ", ".join(
+                path.relative_to(root).as_posix() for path in stray))
         tools = tools_directory(root)
     except Refusal as refusal:
-        _say(sys.stderr, refusal.reason)
-        return 1 if refusal.reason in ("no_solution", "several_solutions") else 2
+        _say(sys.stderr, f"{refusal.reason} ({refusal.detail})" if refusal.detail
+             else refusal.reason)
+        return 1 if refusal.reason in (
+            "no_solution", "several_solutions", "projects_outside_solution") else 2
+    except OSError as error:
+        _say(sys.stderr, f"discovery_failed ({error.strerror or type(error).__name__})")
+        return 2
     try:
         code = subprocess.run(
             format_argv(chosen), cwd=root / SOLUTION_ROOT, env=child_env(tools),

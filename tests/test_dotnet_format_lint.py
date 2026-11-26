@@ -31,6 +31,10 @@ FIXED_ENV = {
     "LANG": "C",
 }
 NO_SOURCES = "dotnet-format-lint: no .NET sources under dotnet/"
+SLNX = '<Solution>\n  <Project Path="A/A.csproj" />\n</Solution>\n'
+SLN = ('Microsoft Visual Studio Solution File, Format Version 12.00\n'
+       'Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "A", "A\\A.csproj",'
+       ' "{11111111-1111-1111-1111-111111111111}"\nEndProject\n')
 
 
 def stub_text(log: Path, code: int, lines: list[str]) -> str:
@@ -114,7 +118,8 @@ class LintCase(unittest.TestCase):
 
     def planted(self) -> Path:
         self.file("dotnet/A/A.cs")
-        return self.file("dotnet/One.slnx")
+        self.file("dotnet/A/A.csproj")
+        return self.file("dotnet/One.slnx", SLNX)
 
 
 class NoSourcesTest(LintCase):
@@ -187,6 +192,84 @@ class SolutionTest(LintCase):
                 self.assertEqual(result.returncode, 1, result.stderr)
                 self.assertEqual(result.stderr.splitlines(), [f"dotnet-format-lint: {reason}"])
                 self.assertEqual(read_log(self.nix_log), [])
+
+
+class ProjectsTest(LintCase):
+    def test_sources_outside_the_solution_fail_before_any_child(self):
+        def unregistered_project():
+            self.planted()
+            self.file("dotnet/NewArea/NewArea.csproj")
+            self.file("dotnet/NewArea/Bad.cs")
+
+        def loose_source():
+            self.planted()
+            self.file("dotnet/Loose/Bad.cs")
+
+        def project_without_a_listing():
+            self.file("dotnet/A/A.cs")
+            self.file("dotnet/A/A.csproj")
+            self.file("dotnet/One.slnx", "<Solution />\n")
+
+        def broken_solution():
+            self.planted()
+            self.file("dotnet/One.slnx", "<Solution>")
+
+        rows = [
+            ("unregistered", unregistered_project,
+             "dotnet/NewArea/Bad.cs, dotnet/NewArea/NewArea.csproj"),
+            ("loose", loose_source, "dotnet/Loose/Bad.cs"),
+            ("unlisted", project_without_a_listing, "dotnet/A/A.cs, dotnet/A/A.csproj"),
+            ("broken", broken_solution, "dotnet/A/A.cs, dotnet/A/A.csproj")]
+        for name, arrange, listed in rows:
+            with self.subTest(name):
+                shutil.rmtree(self.root)
+                self.root.mkdir()
+                arrange()
+                self.nix(0, [str(self.tools())])
+                result = self.run_lint()
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertEqual(result.stderr.splitlines(), [
+                    f"dotnet-format-lint: projects_outside_solution ({listed})"])
+                self.assertEqual(read_log(self.nix_log), [])
+                self.assertEqual(read_log(self.dotnet_log), [])
+
+    def test_sources_inside_the_solution_reach_the_formatter(self):
+        def slnx_nested():
+            self.planted()
+            self.file("dotnet/A/Deep/B.cs")
+
+        def sln():
+            self.file("dotnet/A/A.cs")
+            self.file("dotnet/A/A.csproj")
+            self.file("dotnet/One.sln", SLN)
+
+        for name, arrange in {"slnx": slnx_nested, "sln": sln}.items():
+            with self.subTest(name):
+                shutil.rmtree(self.root)
+                self.root.mkdir()
+                arrange()
+                self.nix(0, [str(self.tools())])
+                result = self.run_lint()
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.splitlines(), ["dotnet-format-lint: passed"])
+                self.assertEqual(len(read_log(self.dotnet_log)), 1)
+
+
+class DiscoveryErrorTest(LintCase):
+    def test_an_unreadable_dotnet_directory_fails_instead_of_finding_no_sources(self):
+        self.planted()
+        directory = self.root / "dotnet"
+        directory.chmod(0)
+        self.addCleanup(directory.chmod, 0o755)
+        if os.access(directory, os.R_OK):
+            self.skipTest("the caller can read a directory with no permissions")
+        self.nix(0, [str(self.tools())])
+        result = self.run_lint()
+        self.assertEqual(result.returncode, 2, result.stdout)
+        self.assertEqual(result.stdout, "")
+        (line,) = result.stderr.splitlines()
+        self.assertTrue(line.startswith("dotnet-format-lint: discovery_failed ("), line)
+        self.assertEqual(read_log(self.nix_log), [])
 
 
 class ToolsTest(LintCase):

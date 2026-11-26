@@ -19,9 +19,10 @@ other condition is one.
 C# markers: C1 `Skip` followed by `=` (any value), and `Explicit` followed by `=` and a
 value other than `false` or `null`, at the top level of the arguments of a `Fact`,
 `Theory`, `SkippableFact`, `SkippableTheory`, `InlineData`, `MemberData` or
-`ClassData` attribute (a generic name such as `ClassData<TClass>` included), and `Ignore`, `IgnoreReason` or `Explicit` followed by `=` and a value other than `false`
-or `null` at the top level of the arguments of a `TestCase` or `TestCaseSource`
-attribute;
+`ClassData` attribute (a generic name such as `ClassData<TClass>` included for the data-row
+attributes `InlineData`, `MemberData` and `ClassData` only), and `Ignore`, `IgnoreReason` or
+`Explicit` followed by `=` and a value other than `false` or `null` at the top level of the
+arguments of a `TestCase` or `TestCaseSource` attribute (never a generic name);
 C2 an attribute named `Ignore` or `Explicit`; C3 `Skip`, `SkipWhen`, `SkipUnless`
 or `Ignore` after `Assert .` and before `(`, and `If` or `IfNot` after `Skip .`
 and before `(`. Attribute names are compared by their last segment without
@@ -78,6 +79,7 @@ CS_ARGUMENT_KEYS = {
     "MemberData": CS_FACT_KEYS, "ClassData": CS_FACT_KEYS,
     "TestCase": CS_IGNORE_KEYS, "TestCaseSource": CS_IGNORE_KEYS,
     "TestFixture": CS_IGNORE_KEYS, "TestFixtureSource": CS_IGNORE_KEYS}
+CS_GENERIC_ATTRIBUTES = frozenset({"InlineData", "MemberData", "ClassData"})
 CS_OFF_VALUES = frozenset({"false", "null"})
 CS_DISABLING_ATTRIBUTES = frozenset({"Ignore", "Explicit"})
 CS_ASSERT_NAMES = frozenset({"Skip", "SkipWhen", "SkipUnless", "Ignore"})
@@ -201,7 +203,8 @@ def attribute_markers(tokens: tuple[Token, ...], pairs: dict[int, int],
                 if name in CS_DISABLING_ATTRIBUTES:
                     found.append(i)
                 elif name in CS_ARGUMENT_KEYS:
-                    open_ = after_type_arguments(tokens, i + 1, end)
+                    open_ = after_type_arguments(tokens, i + 1, end) \
+                        if name in CS_GENERIC_ATTRIBUTES else i + 1
                     if open_ < end and tokens[open_].text == "(":
                         found.extend(argument_skips(tokens, pairs, open_, CS_ARGUMENT_KEYS[name]))
         i += 1
