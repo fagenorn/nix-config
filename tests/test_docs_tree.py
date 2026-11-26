@@ -371,6 +371,27 @@ class DocsTreeTest(unittest.TestCase):
         self.assertEqual([violation.text() for violation in found], [])
         self.assertLessEqual({"002", "003", "005"}, cited)
 
+    def test_system_002_003_and_005_name_007_as_superseding_them(self):
+        directory = REPO_ROOT / "docs/areas/system/adr"
+        first = (directory / "002-one-agent-tools-package.md").read_text(encoding="utf-8")
+        second = (directory / "003-agent-tools-subpackages-are-the-areas.md").read_text(encoding="utf-8")
+        third = (directory / "005-the-flake-publishes-one-platform-package.md").read_text(encoding="utf-8")
+        self.assertIn("Superseded by ADR-system-007", first)
+        self.assertIn("Superseded by ADR-system-007", second)
+        self.assertIn("- **Status:** superseded by ADR-system-007", third)
+        self.assertNotIn("- **Status:** accepted", third)
+
+    def test_system_records_but_005_and_006_keep_the_record_form(self):
+        paths = [
+            path for path in sorted((REPO_ROOT / "docs/areas/system/adr").glob("*.md"))
+            if not path.name.startswith(("005-", "006-"))]
+        self.assertTrue(paths)
+        pairs = sorted(
+            (path.name, violation.rule)
+            for path in paths
+            for violation in record_violations(path.relative_to(REPO_ROOT).as_posix(), path.read_bytes()))
+        self.assertEqual(pairs, [])
+
     def test_the_architecture_guide_tables_31_references_each_to_a_lower_layer(self):
         text = (REPO_ROOT / "docs/guides/architecture.md").read_text(encoding="utf-8")
         rows = guide_table(text, "| Layer | Project | References |")
