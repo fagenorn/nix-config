@@ -12,6 +12,16 @@ checkout's head instead of the project's, and its stored result names the checko
 `checkout_heads` reads the current head of every checkout a run's stored results name, so a continue judges
 such a result by its own checkout's head. A checkout whose head moved while the step ran ends the step
 `out-of-bounds` and records no head (the shell's `_head_moved`).
+
+Reuse: such a step never mutates, so its result is a function of the command, its arguments and the checkout's
+head. Every `result_stored` of the step carries its `reuse_key` (the command, subcommand and arguments as
+compact sorted JSON, never the step id). Before the command starts the shell reads the checkout's head and
+`settle`s it: `reusable` searches the delivery's runs (`engine_ledger.delivery_runs` of the root run) for a
+stored result with the same `reuse_key`, the same `head` and the outcome `ok`, the last one in walk order
+winning, and a `LedgerError`, `OSError` or `ValueError` anywhere in the search is a miss. A hit is accepted only
+when the head read again after the search is the same one; otherwise the visit ends as a head that moved while
+the command ran. An accepted hit stores its document again, naming where it came from in `reused_from`, and
+no process starts.
 """
 
 from __future__ import annotations
@@ -20,7 +30,7 @@ import json
 import os
 import subprocess
 from pathlib import Path
-from typing import Mapping, Sequence
+from typing import Mapping, NamedTuple, Sequence
 
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
 from agent_tools.delivery import engine_ledger
@@ -103,3 +113,54 @@ def checkout_heads(ledger: list[dict]) -> dict[str, str | None]:
     """The current head of every checkout the ledger's stored results name."""
     return {event["repository"]: read_head(event["repository"]) for event in ledger
             if event["event"] == "result_stored" and "repository" in event}
+
+
+def reuse_key(action) -> str:
+    """The command, subcommand and arguments of a `RunCommand`, as compact sorted JSON."""
+    return json.dumps([action.command, action.subcommand, [[path, value] for path, value in action.args]],
+                      sort_keys=True, separators=(",", ":"))
+
+
+class Hit(NamedTuple):
+    """A stored result found for reuse: the run id, step and visit that stored it, and its document."""
+
+    run: str
+    step: str
+    visit: int
+    result: dict
+
+
+class Settled(NamedTuple):
+    """`settle`'s answer: the checkout's head (None when unreadable), the hit, and whether the head moved."""
+
+    head: str | None
+    hit: Hit | None
+    moved: bool
+
+
+def reusable(root: Path, key: str, head: str) -> Hit | None:
+    """The last stored `ok` result of `key` at `head` in the delivery's runs, None when there is none."""
+    try:
+        found = None
+        for run_dir in engine_ledger.delivery_runs(root):
+            for event in engine_ledger.replay(run_dir / "events.jsonl"):
+                if (event["event"] == "result_stored" and event.get("reuse_key") == key
+                        and event.get("head") == head and event.get("outcome") == "ok"):
+                    found = (run_dir, event)
+        if found is None:
+            return None
+        run_dir, event = found
+        return Hit(run_dir.name, event["step"], event["visit"], _load(run_dir / event["result"]))
+    except (engine_ledger.LedgerError, OSError, ValueError):
+        return None
+
+
+def settle(root: Path, key: str, checkout: str) -> Settled:
+    """The checkout's head and the stored result reusable at it, the head read again once the search is done."""
+    head = read_head(checkout)
+    if head is None:
+        return Settled(None, None, False)
+    hit = reusable(root, key, head)
+    if hit is not None and read_head(checkout) != head:
+        return Settled(head, None, True)
+    return Settled(head, hit, False)

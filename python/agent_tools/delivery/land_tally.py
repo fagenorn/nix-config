@@ -5,7 +5,8 @@ A procedure cannot hold a count a visit bound cannot hold (a count a continue or
 a count that spans attempts), so each is read here from the ledger, as `deliver-standard.js` held it in memory.
 
 The delivery's runs: the root run is `<runs root>/<the text after the last "/" of the holder>`; its runs are
-the root, then every run its `call` events name, each followed by its own descendants, in `call` event order.
+the root, then every run its `call` events name, each followed by its own descendants, in `call` event order
+(`engine_ledger.delivery_runs`, which the engine's reuse of a stored result walks too).
 The attempt runs are those whose procedure is `ATTEMPT`; the current attempt is the last.
 
 Rules, each with the program line it ports:
@@ -69,22 +70,16 @@ def _events(run_dir: Path) -> list[dict]:
         raise TallyError("ledger_unreadable", str(error)) from None
 
 
-def _descendants(root: Path, run_dir: Path, seen: set[str]) -> list[Path]:
-    found = [run_dir]
-    seen.add(run_dir.name)
-    for event in _events(run_dir):
-        if event["event"] == "call" and event["child"] not in seen:
-            found.extend(_descendants(root, root / event["child"], seen))
-    return found
-
-
 def delivery_runs(holder: str, root: Path | None = None) -> list[Path]:
     """The delivery's root run, then every run it called and their descendants, in `call` event order."""
     base = engine_ledger.runs_root() if root is None else Path(root)
     run_dir = base / holder.rsplit("/", 1)[-1]
     if not (run_dir / "run.json").is_file():
         raise TallyError("no_run", f"no run {run_dir.name} under the runs root")
-    return _descendants(base, run_dir, set())
+    try:
+        return engine_ledger.delivery_runs(run_dir)
+    except engine_ledger.LedgerError as error:
+        raise TallyError("ledger_unreadable", str(error)) from None
 
 
 def _procedure(run_dir: Path) -> str:

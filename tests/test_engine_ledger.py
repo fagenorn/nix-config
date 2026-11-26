@@ -1010,6 +1010,60 @@ class ReviewDefectsTest(unittest.TestCase):
                 self.assertEqual((code, out), (2, ""))
                 self.assertEqual(len(err.splitlines()), 1)
 
+class ReuseMemberTest(unittest.TestCase):
+    RUN = "1-20261122T000000Z-abcd"
+
+    def stored(self, **members) -> dict:
+        return {**EXAMPLES["result_stored"], **members}
+
+    def test_a_result_stored_event_accepts_a_reuse_key_and_the_visit_it_was_reused_from(self):
+        engine_ledger.validate_event(self.stored(
+            reuse_key="k", reused_from={"run": self.RUN, "step": "s", "visit": 1}))
+
+    def test_a_result_stored_event_refuses_a_reuse_key_that_is_not_a_non_empty_string(self):
+        for value in ("", 3):
+            with self.subTest(value=value), self.assertRaises(LedgerError):
+                engine_ledger.validate_event(self.stored(reuse_key=value))
+
+    def test_a_result_stored_event_refuses_a_reused_from_that_is_not_exactly_a_run_step_and_visit(self):
+        good = {"run": self.RUN, "step": "s", "visit": 1}
+        refused = [{"run": self.RUN, "step": "s"}, {**good, "visit": 0}, {**good, "visit": True},
+                   {**good, "run": "nope"}, {**good, "step": "S 1"}, {**good, "extra": 1}, "s", None]
+        for value in refused:
+            with self.subTest(value=value), self.assertRaises(LedgerError):
+                engine_ledger.validate_event(self.stored(reused_from=value))
+
+    def test_a_stored_result_carries_a_reuse_key_and_origin_only_when_given(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run = new_run(tmp)
+            origin = {"run": self.RUN, "step": "s", "visit": 2}
+            store(run, visit=1, reuse_key="k", reused_from=origin)
+            store(run, visit=2)
+            first, second = engine_ledger.replay(run / "events.jsonl")
+            self.assertEqual((first["reuse_key"], first["reused_from"]), ("k", origin))
+            self.assertNotIn("reuse_key", second)
+            self.assertNotIn("reused_from", second)
+
+
+class DeliveryRunsTest(unittest.TestCase):
+    def call(self, run: Path, child: Path, index: int = 0, items: int = 1) -> None:
+        visit = len([e for e in engine_ledger.replay(run / "events.jsonl") if e["event"] == "call"]) + 1
+        engine_ledger.append_event(run, {**EXAMPLES["call"], "visit": visit, "child": child.name,
+                                         "index": index, "items": items})
+
+    def test_delivery_runs_walk_the_call_events_depth_first(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, a, b, c = (new_run(tmp, token=token) for token in ("aaaa", "bbbb", "cccc", "dddd"))
+            self.call(root, a, 0, 2)
+            self.call(root, b, 1, 2)
+            self.call(a, c)
+            self.call(b, c)
+            self.assertEqual(engine_ledger.delivery_runs(root), [root, a, c, b])
+            (c / "events.jsonl").write_text("not json\n")
+            with self.assertRaises(LedgerError):
+                engine_ledger.delivery_runs(root)
+
+
 
 if __name__ == "__main__":
     unittest.main()

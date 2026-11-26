@@ -18,10 +18,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.delivery import engine_ledger, engine_shell
+from agent_tools.delivery import engine_heads, engine_ledger, engine_shell
+from agent_tools.delivery.engine_heads import Settled
+from tests import never_rise_world
 from tests.test_engine_deliver import (
     EngineProject, heads, mutating, run_continued, shape, start_deliver, step,
     wait_for_process_started)
+
+from tests.test_engine_ledger import EXAMPLES, new_run, store
 
 TIER = "integration"  # every case runs `engine deliver` against the stand-in command
 
@@ -558,3 +562,136 @@ class MutatingContinueTest(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         self.assertEqual(json.loads(done.stdout)["end"], "done")
         self.assertEqual((project.calls("effect"), project.calls("checks")), (1, 0))
+
+
+class ReuseTest(unittest.TestCase):
+    """A checkout step at an unchanged head takes the result an earlier run of the delivery stored."""
+
+    def checkout_step(self, id: str, command: str, ok: str, repository: bool = True) -> dict:
+        found = step(id, command, ok, holds="head")
+        found["in"] = ["p.path"]
+        if repository:
+            found["repository"] = "p.path"
+        return found
+
+    def child_procedures(self, project: EngineProject, r: dict) -> Path:
+        project.world.git(project.root, "worktree", "add", "-q", "-b", "side",
+                          str(project.tmp / "side"))
+        c = {"id": "c", "stage": "setup", "kind": "call", "procedure": "kid", "holds": "live",
+             "on": {"done": "done", "needs-owner": "needs-owner"}}
+        steps = [step("p", "standin-side", "r"), r, step("g", "standin-gate", "done")]
+        return project.procedures(
+            [c], stops={"needs-owner": {"need": "owner-decision", "reenter": "c"}},
+            children={"kid": {"steps": steps, "inputs": ["issue"], "stops": {
+                "needs-owner": {"need": "owner-decision", "reenter": "p"}}}})
+
+    def delivered_twice(self, project: EngineProject, procedures: Path, between=None):
+        first = project.deliver(procedures)
+        self.assertEqual(first.returncode, 3, first.stdout + first.stderr)
+        if between:
+            between()
+        second = project.deliver(procedures)
+        self.assertEqual(second.returncode, 3, second.stdout + second.stderr)
+        self.assertEqual(json.loads(second.stdout)["run"], json.loads(first.stdout)["run"])
+        runs = project.runs()[0].parent
+        root = runs / json.loads(first.stdout)["run"]
+        kids = [e["child"] for e in project.events(root) if e["event"] == "call"]
+        return root, [runs / kid for kid in kids]
+
+    def stored(self, project: EngineProject, run: Path, step_id: str) -> list[dict]:
+        return [e for e in project.events(run) if e["event"] == "result_stored"
+                and e["step"] == step_id]
+
+    def test_a_checkout_step_at_an_unchanged_head_reuses_the_result_an_earlier_child_run_stored(self):
+        project = EngineProject(self)
+        procedures = self.child_procedures(project, self.checkout_step("r", "count-b", "g"))
+        _, kids = self.delivered_twice(project, procedures)
+        self.assertEqual(len(kids), 2)
+        self.assertEqual(project.calls("b"), 1)
+        (first,), (second,) = (self.stored(project, kid, "r") for kid in kids)
+        self.assertNotIn("reused_from", first)
+        self.assertEqual(second["reused_from"], {"run": kids[0].name, "step": "r", "visit": 1})
+        for member in ("reuse_key", "head", "repository"):
+            self.assertEqual(second[member], first[member], member)
+        self.assertEqual((kids[1] / second["result"]).read_bytes(),
+                         (kids[0] / first["result"]).read_bytes())
+        self.assertEqual([e for e in project.events(kids[1])
+                          if e["event"] == "process_started" and e["step"] == "r"], [])
+
+    def test_a_moved_head_runs_the_checkout_step_again(self):
+        project = EngineProject(self)
+        procedures = self.child_procedures(project, self.checkout_step("r", "count-b", "g"))
+        _, kids = self.delivered_twice(project, procedures, lambda: project.world.git(
+            project.tmp / "side", "commit", "--quiet", "--allow-empty", "-m", "moved"))
+        self.assertEqual(project.calls("b"), 2)
+        (first,), (second,) = (self.stored(project, kid, "r") for kid in kids)
+        self.assertNotIn("reused_from", second)
+        self.assertNotEqual(second["head"], first["head"])
+
+    def test_a_second_step_with_the_same_command_arguments_and_head_reuses_the_first(self):
+        project = EngineProject(self)
+        project.world.git(project.root, "worktree", "add", "-q", "-b", "side",
+                          str(project.tmp / "side"))
+        procedures = project.procedures([
+            step("p", "standin-side", "r1"), self.checkout_step("r1", "count-b", "r2"),
+            self.checkout_step("r2", "count-b", "g"), step("g", "standin-gate", "done")])
+        first = project.deliver(procedures)
+        self.assertEqual(first.returncode, 3, first.stdout + first.stderr)
+        run = project.runs()[0]
+        self.assertEqual(project.calls("b"), 1)
+        (second,) = self.stored(project, run, "r2")
+        self.assertEqual(second["reused_from"], {"run": run.name, "step": "r1", "visit": 1})
+
+    def test_a_result_that_did_not_end_ok_is_not_reused(self):
+        project = EngineProject(self)
+        procedures = self.child_procedures(
+            project, self.checkout_step("r", "standin-stamp-fail", "g"))
+        self.delivered_twice(project, procedures)
+        self.assertEqual(len(project.stamps.read_text().splitlines()), 2)
+
+    def test_a_step_without_a_checkout_is_never_reused(self):
+        project = EngineProject(self)
+        procedures = self.child_procedures(
+            project, self.checkout_step("r", "count-b", "g", repository=False))
+        root, kids = self.delivered_twice(project, procedures)
+        self.assertEqual(project.calls("b"), 2)
+        self.assertEqual([e for run in (root, *kids) for e in project.events(run)
+                          if "reuse_key" in e], [])
+
+
+class HeldReuseTest(unittest.TestCase):
+    """The lookup, in process: `engine_heads.settle` over a ledger built by hand."""
+
+    KEY = '["count-b",null,[["p.path","/side"]]]'
+
+    def world(self, tmp: str):
+        checkout = never_rise_world.repo(tmp)
+        never_rise_world.write(checkout, "a.txt", "a")
+        never_rise_world.commit_all(checkout)
+        head = never_rise_world.git(checkout, "rev-parse", "HEAD").strip()
+        root = new_run(tmp, token="aaaa")
+        store(root, step="r", visit=1, head=head, repository=str(checkout), outcome="ok",
+              reuse_key=self.KEY)
+        return root, checkout, head
+
+    def test_a_head_that_moves_during_the_lookup_is_not_reused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, checkout, head = self.world(tmp)
+            with mock.patch.object(engine_heads, "read_head", side_effect=[head, "b" * 40]):
+                self.assertEqual(engine_heads.settle(root, self.KEY, str(checkout)),
+                                 Settled(head, None, True))
+            with mock.patch.object(engine_heads, "read_head", side_effect=[head, head]):
+                settled = engine_heads.settle(root, self.KEY, str(checkout))
+            self.assertEqual(settled.hit[:3], (root.name, "r", 1))
+            self.assertFalse(settled.moved)
+
+    def test_an_unreadable_run_in_the_delivery_is_a_miss(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, checkout, head = self.world(tmp)
+            child = new_run(tmp, token="bbbb")
+            (child / "events.jsonl").write_text("not json\n")
+            engine_ledger.append_event(root, {**EXAMPLES["call"], "visit": 1,
+                                              "child": child.name})
+            settled = engine_heads.settle(root, self.KEY, str(checkout))
+            self.assertIsNone(settled.hit)
+            self.assertFalse(settled.moved)
