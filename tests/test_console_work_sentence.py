@@ -6,6 +6,7 @@ Run: just agent-workflow-tests
 import dataclasses
 import re
 import unittest
+from pathlib import Path
 
 from agent_tools.console import deliveries
 from agent_tools.console import sprints
@@ -187,6 +188,13 @@ class SprintWorkSentenceTest(unittest.TestCase):
             self.assertEqual((got["work_text"], got["legend"], got["now_titled"]), (None, None, False))
         empty = simple(())
         self.assertEqual((empty["now_text"], empty["legend"], empty["progress_text"]), (IDLE, [], "0 done"))
+
+
+class ServiceSizeTest(unittest.TestCase):
+    def test_the_service_module_does_not_grow_past_its_size_at_the_merge_base(self):
+        """B17: the module was over 1,500 lines at the merge base, so it may not grow."""
+        path = Path(__file__).parent.parent / "python" / "agent_tools" / "console" / "service.py"
+        self.assertLessEqual(len(path.read_text(encoding="utf-8").splitlines()), 11341)
 
 
 if __name__ == "__main__":
