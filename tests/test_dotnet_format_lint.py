@@ -7,6 +7,9 @@ command finds, what it starts, with which argv and environment, and how each
 outcome maps to its exit.
 """
 
+import contextlib
+import errno
+import io
 import json
 import os
 import shutil
@@ -15,8 +18,9 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from agent_tools.delivery.dotnet_format_lint import format_argv
+from agent_tools.delivery.dotnet_format_lint import format_argv, main
 
 TIER = "integration"
 
@@ -268,16 +272,23 @@ class DiscoveryErrorTest(LintCase):
     def test_an_unreadable_dotnet_directory_fails_instead_of_finding_no_sources(self):
         self.planted()
         directory = self.root / "dotnet"
-        directory.chmod(0)
-        self.addCleanup(directory.chmod, 0o755)
-        if os.access(directory, os.R_OK):
-            self.skipTest("the caller can read a directory with no permissions")
+        listing = os.scandir
+
+        def unreadable(path):
+            if os.fspath(path) == str(directory):
+                raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), str(path))
+            return listing(path)
+
         self.nix(0, [str(self.tools())])
-        result = self.run_lint()
-        self.assertEqual(result.returncode, 2, result.stdout)
-        self.assertEqual(result.stdout, "")
-        (line,) = result.stderr.splitlines()
-        self.assertTrue(line.startswith("dotnet-format-lint: discovery_failed ("), line)
+        out, err = io.StringIO(), io.StringIO()
+        with (mock.patch.dict(os.environ, {"PATH": f"{self.stubs}{os.pathsep}{os.environ['PATH']}"}),
+              mock.patch("os.scandir", unreadable),
+              contextlib.redirect_stdout(out), contextlib.redirect_stderr(err)):
+            code = main(["--root", str(self.root)])
+        self.assertEqual(code, 2, out.getvalue())
+        self.assertEqual(out.getvalue(), "")
+        self.assertEqual(err.getvalue().splitlines(),
+                         ["dotnet-format-lint: discovery_failed (Permission denied)"])
         self.assertEqual(read_log(self.nix_log), [])
 
 
