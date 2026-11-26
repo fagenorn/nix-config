@@ -8,6 +8,7 @@ continue after a cut that left no stop. The scenario cases kill a stubbed `engin
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 import unittest
 from collections import Counter
@@ -17,8 +18,8 @@ from agent_tools.delivery import engine_core
 from tests.engine_fixture import AdoptedFixtures
 from tests.engine_procedure_copies import PROCEDURES
 from tests.engine_step_coverage import StepCoverage
-from tests.engine_stubbed_world import EVIDENCE_BODY, EVIDENCE_CHECK, IMPLEMENTED, StubbedRun, drafted
-from tests.guard_policy_world import install_platform_manifest_in_environ
+from tests.engine_stubbed_world import IMPLEMENTED, StubbedRun
+from tests.guard_policy_world import REAL_GIT, install_platform_manifest_in_environ
 from tests.test_engine_stubbed_run import Scenario
 
 TIER = "integration"  # the scenario cases build a repository and run the engine as a child process
@@ -111,7 +112,10 @@ class CutScenario(Scenario):
     """A stubbed delivery whose engine is killed while one agent session of its run is open."""
 
     def open_session(self, run: StubbedRun, procedure: str, step: str) -> bool:
-        """Whether a child run of `procedure` started a process for `step` and stored no result for it."""
+        """Whether a child run of `procedure` started a process for `step`, stored no result for it and the launcher
+        stand-in has logged that launch and reached its wait (a kill earlier would leave no launch to resume)."""
+        if not run.asleep(step):
+            return False
         try:
             for root in run.runs():
                 for child in run.children(root):
@@ -129,6 +133,23 @@ class CutScenario(Scenario):
     def cut_at(self, run: StubbedRun, procedure: str, step: str) -> None:
         run.deliver_until(lambda: self.open_session(run, procedure, step))
         self.assertTrue(self.open_session(run, procedure, step))
+
+    def entered(self, run: StubbedRun, procedure: str, step: str) -> bool:
+        """Whether a child run of `procedure` has entered `step`."""
+        try:
+            return any(e["event"] == "step_entered" and e["step"] == step
+                       for child in run.children(run.runs()[0])
+                       if json.loads((child / "run.json").read_text("utf-8"))["procedure"] == procedure
+                       for e in run.events(child))
+        except (FileNotFoundError, ValueError, IndexError):
+            return False  # a run directory was being published or an event line was being written
+
+    def branch_refs(self, run: StubbedRun) -> dict[str, list[str]]:
+        """The names of the branches the checkout and the bare origin hold."""
+        local = run.world.git(run.fixture.root, "for-each-ref", "--format=%(refname)", "refs/heads").split()
+        remote = subprocess.run([REAL_GIT, "-C", run.bare, "for-each-ref", "--format=%(refname)", "refs/heads"],
+                                capture_output=True, text=True, check=True).stdout.split()
+        return {"local": sorted(local), "origin": sorted(remote)}
 
     def procedures_of(self, run: StubbedRun) -> Counter:
         return Counter(json.loads((child / "run.json").read_text("utf-8"))["procedure"]
@@ -173,19 +194,46 @@ class CutContinueTest(CutScenario):
                          ["start", "issue", "direct-lane", "verification", "landing", "closing"])
         self.assertEqual(run.pulls()[0]["state"], "MERGED")
 
-    def test_a_delivery_cut_after_its_merge_and_continued_ends_as_an_uninterrupted_delivery_and_enters_no_setup_step(self):
-        hold = {"hold-draft": drafted(EVIDENCE_CHECK)}
-        whole = self.stubbed(body=EVIDENCE_BODY, replies=hold)
+    def test_a_delivery_cut_while_the_issue_was_parked_does_not_resume_the_open_implement_session(self):
+        run = self.stubbed(replies={"implement": {**IMPLEMENTED, "sleep": FOREVER}})
+        self.cut_at(run, "direct", "implement")
+        run.park()
+
+        done = run.deliver()
+
+        self.assertEqual(done.returncode, 3, done.stdout + done.stderr)
+        self.assertEqual(len([launch for launch in run.launches() if launch["key"] == "implement"]), 1)
+        direct = self.child(run, "direct")
+        self.assertEqual([e for e in run.events(direct) if e["event"] == "session_resuming"], [])
+        self.assertIn(("preflight", "parked"), run.transitions(direct))
+
+    def test_an_unrelated_advance_of_the_main_checkout_during_the_cut_keeps_the_open_implement_session(self):
+        run = self.stubbed(replies={"implement": {**IMPLEMENTED, "sleep": FOREVER}})
+        self.cut_at(run, "direct", "implement")
+        run.world.git(run.fixture.root, "commit", "--quiet", "--allow-empty", "-m", "unrelated")
+        run.world.git(run.fixture.root, "push", "--quiet", "origin", "main")
+
+        run.deliver()  # it later stops at the landing, behind the advanced main: not what this case is about
+
+        launches = [launch for launch in run.launches() if launch["key"] == "implement"]
+        self.assertEqual(len(launches), 2)
+        self.assertIn("--resume", launches[1]["argv"])
+        self.assertEqual(self.procedures_of(run)["direct"], 1)
+        self.assertEqual([e["visit"] for e in run.events(self.child(run, "direct"))
+                          if e["event"] == "step_entered" and e["step"] == "implement"], [1])
+
+    def test_a_delivery_cut_in_a_code_only_close_out_after_its_merge_changes_nothing_the_uninterrupted_one_does_not(self):
+        whole = self.stubbed()
         self.finish(whole, "done")
-        run = self.stubbed(body=EVIDENCE_BODY, replies={"hold-draft": {"reply": drafted(EVIDENCE_CHECK),
-                                                                       "sleep": FOREVER}})
-        self.cut_at(run, "close-out", "hold-draft")
+        run = self.stubbed()
+        run.deliver_until(lambda: self.entered(run, "close-out", "hold-facts"), poll=0.005)
         root = run.runs()[0]
-        merged = [pull["state"] for pull in run.pulls()]
-        claims = len(run.claims())
+        self.assertNotIn("run_done", [e["event"] for e in run.events(root)])
+        self.assertEqual([pull["state"] for pull in run.pulls()], ["MERGED"])
         events = len(run.events(root))
         children = self.procedures_of(run)
-        self.assertEqual(merged, ["MERGED"])
+        claims = len(run.claims())
+        comments = [comment["id"] for comment in run.forge.stored()]
 
         self.finish(run, "done")
 
@@ -195,12 +243,14 @@ class CutContinueTest(CutScenario):
                          [("closing", "done")])
         self.assertEqual(self.procedures_of(run), children)
         self.assertEqual(children["setup"], 1)
-        self.assertEqual(len(run.pulls()), 1)
         self.assertEqual(claims, 1)
-        self.assertEqual(run.claims(), [])
+        self.assertEqual(len(run.pulls()), 1)
+        ids = [comment["id"] for comment in run.forge.stored()]
+        self.assertEqual(ids[:len(comments)], comments)
+        self.assertEqual(ids, [comment["id"] for comment in whole.forge.stored()])
+        self.assertEqual(self.branch_refs(run), self.branch_refs(whole))
         self.assertEqual(len(self.released_claims(run)), len(self.released_claims(whole)))
         self.assertEqual(self.end_state(run), self.end_state(whole))
-        self.assertEqual(len(run.forge.stored()), len(whole.forge.stored()))
 
 
 if __name__ == "__main__":

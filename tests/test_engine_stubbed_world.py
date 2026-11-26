@@ -5,11 +5,14 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
+from agent_tools.delivery import engine_stop
 from tests.engine_stubbed_world import GREEN, STUB, StubbedRun
 from tests.guard_policy_world import REAL_GIT, install_platform_manifest_in_environ
 
@@ -349,6 +352,43 @@ class StubTest(unittest.TestCase):
             (run.tmp / "stub-scenario.json").write_text("{}", encoding="utf-8")
             done = subprocess.run(argv, input="prompt", env=run.env, capture_output=True, text=True, timeout=120)
             self.assertNotIn("structured_output", json.loads(done.stdout), flag)
+
+    def test_a_step_is_asleep_once_the_stub_logged_and_reached_its_first_launch_wait(self):
+        run = StubbedRun(self)
+        scenario = run.tmp / "stub-scenario.json"
+        scenario.write_text(json.dumps({"fix": {"reply": {"status": "done"}, "sleep": 0}}), encoding="utf-8")
+        self.assertFalse(run.asleep("fix"))
+
+        done = subprocess.run([sys.executable, str(STUB), str(scenario), str(run.log),
+                               "--append-system-prompt-file", str(run.tmp / "fix.1.system.md")],
+                              input="prompt", env=run.env, capture_output=True, text=True, timeout=120)
+
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertTrue(run.asleep("fix"))
+        self.assertFalse(run.asleep("other"))
+        self.assertEqual([launch["key"] for launch in run.launches()], ["fix"])
+
+    def test_the_cleanup_kills_a_recorded_process_that_is_still_itself_and_spares_a_recycled_id(self):
+        run = StubbedRun(self)
+        sleepers = [subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"],
+                                     start_new_session=True) for _ in range(2)]
+        for sleeper in sleepers:
+            self.addCleanup(sleeper.wait)
+            self.addCleanup(sleeper.kill)
+        with mock.patch.dict(os.environ, {"PATH": run.env["PATH"]}):
+            actual = engine_stop.process_started_at(sleepers[0].pid)
+        directory = run.world.home / ".agents/state/engine/runs/r-1"
+        directory.mkdir(parents=True)
+        (directory / "run.json").write_text("{}", encoding="utf-8")
+        recorded = [{"event": "process_started", "pid": sleepers[0].pid,
+                     "started": actual.strftime("%Y-%m-%dT%H:%M:%SZ")},
+                    {"event": "process_started", "pid": sleepers[1].pid, "started": "2000-01-01T00:00:00Z"}]
+        (directory / "events.jsonl").write_text("".join(json.dumps(e) + "\n" for e in recorded), encoding="utf-8")
+
+        run._kill_started()
+
+        self.assertEqual(sleepers[0].wait(timeout=30), -signal.SIGKILL)
+        self.assertIsNone(sleepers[1].poll())
 
 
 if __name__ == "__main__":

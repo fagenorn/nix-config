@@ -63,9 +63,10 @@ import time
 import unittest
 from collections.abc import Callable, Mapping
 from pathlib import Path
+from unittest import mock
 
 from agent_tools.claims import forge_markers
-from agent_tools.delivery import issue_branch
+from agent_tools.delivery import engine_stop, issue_branch
 from agent_tools.delivery.engine_guard import payload
 from tests.engine_fixture import AdoptedFixtures, FixtureProject
 from tests.engine_guards import script, standin_guard, write_settings
@@ -138,6 +139,7 @@ class StubbedRun:
         self.test = test_case
         self.issue = issue
         self.title = title
+        self.body = body
         self.world = GuardPolicyWorld(test_case)
         self.companion_log = self.world.tmp / "companion.log"
         if review_code is not None:
@@ -297,7 +299,19 @@ class StubbedRun:
         entry = ["-c", VALIDATOR_UNIMPORTABLE_ENGINE] if validator_unimportable else ["-m", "agent_tools.delivery.engine"]
         return [sys.executable, *entry, "deliver", str(self.issue), *extra]
 
-    def deliver_until(self, cut: Callable[[], bool], procedures: Path | None = None, wait: float = 120) -> None:
+    def park(self) -> None:
+        """From now on every read of the issue answers it with the `parked` label."""
+        self.forge.respond_json("gh", ["api", f"repos/{self.fixture.slug}/issues/{self.issue}"],
+                                {"number": self.issue, "title": self.title, "state": "open",
+                                 "labels": [{"name": "parked"}], "body": self.body})
+
+    def asleep(self, step: str) -> bool:
+        """Whether the launcher stand-in has reached the wait before its answer for the first launch of `step`
+        (it has then logged that launch): the point from which a kill leaves the session open."""
+        return (Path(f"{self.log}.slept") / step).exists()
+
+    def deliver_until(self, cut: Callable[[], bool], procedures: Path | None = None, wait: float = 120,
+                      poll: float = 0.05) -> None:
         """Start `engine deliver`, kill its process group with SIGKILL once `cut()` holds, and wait for it to end.
 
         The processes the run's steps started are left to the next `deliver()`, which ends them as a continue does;
@@ -307,7 +321,7 @@ class StubbedRun:
         self.test.addCleanup(self._kill_started)
         deadline = time.monotonic() + wait
         while time.monotonic() < deadline and engine.poll() is None and not cut():
-            time.sleep(0.05)
+            time.sleep(poll)
         try:
             os.killpg(engine.pid, signal.SIGKILL)
         except ProcessLookupError:
@@ -315,14 +329,17 @@ class StubbedRun:
         engine.communicate()
 
     def _kill_started(self) -> None:
-        """SIGKILL every process any run started that is still alive (the cleanup of `deliver_until`)."""
-        for run in self._run_dirs():
-            for event in self.events(run):
-                if event["event"] == "process_started":
-                    try:
-                        os.killpg(event["pid"], signal.SIGKILL)
-                    except (ProcessLookupError, PermissionError):
-                        pass
+        """SIGKILL every process any run started that is still the process it recorded (the cleanup of
+        `deliver_until`): a group id the host has since given to another process is left alone."""
+        with mock.patch.dict(os.environ, {"PATH": self.env["PATH"]}):  # the fake forge leaves `ps` off this process's
+            for run in self._run_dirs():
+                for event in self.events(run):
+                    if (event["event"] == "process_started"
+                            and engine_stop.same_process(event["pid"], event["started"])):
+                        try:
+                            os.killpg(event["pid"], signal.SIGKILL)
+                        except (ProcessLookupError, PermissionError):
+                            pass
 
     def slot_history(self) -> list[dict]:
         """The lines the verification slot recorded, `[]` when it recorded none."""

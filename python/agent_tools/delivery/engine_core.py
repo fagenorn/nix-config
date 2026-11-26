@@ -87,7 +87,7 @@ Continuing
     `call` step whose `owed` is above zero: the shell then checks the first
     visit of every mutating command in the call's child runs.
     `reentry(procedure, inputs, events, head)` answers where a continue should
-    re-enter: the earliest stale result by arrival order (`live` is always
+    re-enter: the earliest stale result by arrival order (`live` and `read` are always
     stale, `head` is stale when the recorded head is absent, `head` is None or
     they differ, `run` never; only a step's latest outcome is judged), else the
     pending step, else the stop's `reenter` step with its latest arrival's visit
@@ -557,7 +557,7 @@ def reentry(
         walk.produced.items(), key=lambda item: (item[1][0], item[1][1], item[0])
     ):
         holds = steps[step_id]["holds"]
-        if holds == "live" or (holds == "head" and (head is None or recorded != head)):
+        if holds in ("live", "read") or (holds == "head" and (head is None or recorded != head)):
             arrival = walk.arrivals[index]
             if (arrival.step, arrival.visit) not in stale:
                 stale.append((arrival.step, arrival.visit))

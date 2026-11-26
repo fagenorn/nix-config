@@ -82,10 +82,16 @@ a recorded stop after its entry (`quota-wait`, `stopped-by-request`) or a launch
 rewound to a new visit as before, its `run_continued` clearing the stop and closing an open usage-limit wait. A resumed visit
 appends no `run_continued`, so the continuing call closes every wait the killed engine left open with a
 `wait_ended` of its kind (a usage-limit or `host-slot` wait) before the visit launches.
+The same holds with earlier results stale when each stale step is a `read` command (it mutates nothing and waits for
+nothing) that, run again, answers with the outcome it stored (`_unchanged`: the answer is not recorded, a rewinding walk
+runs the step as a visit); one that answers otherwise rewinds the visit as before, so a read that changed (an issue
+parked meanwhile) is never walked past, and one that cannot have changed (the repository head) never discards a session.
 A `call` visit a killed engine left interrupted, whose `call` events name child runs and with no recorded stop after its
 entry, is continued in the same way (`engine_resume`): no `run_continued`, no new visit and no new child run. Each
 named child that is not done or at a stop of its own procedure is continued as a run of its own (the rules above,
-with its own procedure copy) and walked again under the same name, with no forced check; one that ended keeps its end.
+with its own procedure copy) and walked again under the same name; one that ended keeps its end. A walked-again
+child owes the first-visit checks of a rewound call as its first walk did (`_owed_at_entry`). A call visit whose result
+file a killed engine published before it appended `result_stored` records that file as its result and runs no child.
 
 A `group` step runs its members beside each other, one thread each: each member
 records `step_entered`, `process_started`, its stored result and
@@ -653,8 +659,9 @@ def _continue(run_dir: Path, table: CommandTable, inputs: dict) -> None:
         return  # the owner never saw this stop: the walk reports it before anything is re-entered
     point = engine_core.reentry(procedure, inputs, events, read_head(table.root))
     if (isinstance(action, engine_core.StartSession)
-            and (action.step, action.visit) == (point.step, point.visit)
-            and engine_resume.resumed(run_dir, ledger, action.step, action.visit) is not None):
+            and engine_resume.resumed(run_dir, ledger, action.step, action.visit) is not None
+            and ((action.step, action.visit) == (point.step, point.visit)
+                 or _unchanged(run_dir, table, procedure, inputs, ledger, point.stale))):
         for wait in engine_resume.open_waits(ledger):  # no run_continued closes what the killed engine left open
             engine_ledger.append_event(run_dir, {"event": "wait_ended", "at": _now(), "wait": wait})
         return  # the interrupted visit resumes its own session: no rewind, no new visit
@@ -665,6 +672,32 @@ def _continue(run_dir: Path, table: CommandTable, inputs: dict) -> None:
     if point.visit is not None:
         event["visit"] = point.visit
     engine_ledger.append_event(run_dir, event)
+
+
+def _unchanged(run_dir: Path, table: CommandTable, procedure: dict, inputs: dict, ledger: list[dict],
+               stale: tuple[str, ...]) -> bool:
+    """Whether every stale step is a `read` command that answers as it did: each is run again under the guard
+    (its answer is not recorded; a walk that rewinds runs it as a visit), and its outcome is the one its latest
+    visit stored. Else the interrupted session is not resumed."""
+    steps = {item["id"]: item for item in procedure["steps"]}
+    computed = _computed(procedure)
+    for name in stale:
+        step = steps[name]
+        if step["holds"] != "read":
+            return False
+        entered = [i for i, e in enumerate(ledger) if e["event"] == "step_entered" and e["step"] == name]
+        visit = ledger[entered[-1]]["visit"]
+        recorded = next((e.get("outcome") for e in ledger if e["event"] == "result_stored"
+                         and (e["step"], e["visit"]) == (name, visit)), None)
+        pending = engine_core.replay(procedure, inputs,
+                                     core_events(run_dir, ledger[:entered[-1]], computed)).action
+        if not isinstance(pending, engine_core.RunCommand) or pending.step != name:
+            return False
+        ran = engine_commands.run(table, pending.command, pending.subcommand, pending.args, guard=_guard(),
+                                  on_start=lambda pid: None, timeout=table.wall_seconds(pending.command))
+        if ran.timed_out or recorded is None or ran.outcome != recorded:
+            return False
+    return True
 
 
 def _record_history(run_dir: Path, clock: Callable[[], datetime]) -> None:
@@ -1099,6 +1132,20 @@ def _names_child(run_dir: Path, child: str) -> bool:
         return True
 
 
+def _owed_at_entry(run_dir: Path, run: dict, action: engine_core.RunCall) -> bool:
+    """Whether the call visit was entered owing the first-visit checks of its child runs (`RunCall.recheck` as it
+    stood before the visit's `step_entered` consumed it), so a continued child keeps the obligation its first walk had."""
+    procedure = _load(run_dir / "procedure" / f"{run['procedure']}.json")
+    ledger = engine_ledger.replay(run_dir / "events.jsonl")
+    cut = next((i for i, e in enumerate(ledger) if e["event"] == "step_entered"
+                and (e["step"], e["visit"]) == (action.step, action.visit)), None)
+    if cut is None:
+        return False
+    pending = engine_core.replay(procedure, run["inputs"],
+                                 core_events(run_dir, ledger[:cut], _computed(procedure))).action
+    return isinstance(pending, engine_core.RunCall) and pending.recheck
+
+
 def _child(run_dir: Path, table: CommandTable, run: dict, step: dict,
            action: engine_core.RunCall, item: object, index: int, count: int,
            scope: _Scope) -> dict:
@@ -1143,7 +1190,8 @@ def _child(run_dir: Path, table: CommandTable, run: dict, step: dict,
                 if not _names_child(run_dir, child_dir.name):
                     shutil.rmtree(child_dir, ignore_errors=True)
                 raise
-        _, line = _walk(child_dir, table, scope, action.recheck and named is None)
+        owed = action.recheck or (named is not None and _owed_at_entry(run_dir, run, action))
+        _, line = _walk(child_dir, table, scope, owed)
         if line["end"] == procedure_terms.QUOTA_WAIT:
             raise _Quota(line["detail"])
         if line["end"] == engine_stop.STOPPED_BY_REQUEST:
@@ -1157,12 +1205,21 @@ def _call(run_dir: Path, table: CommandTable, run: dict, step: dict,
           action: engine_core.RunCall, scope: _Scope) -> None:
     """Run the child procedure once per item, `parallel` at a time, and record the call's outcome."""
     started = time.monotonic()
+    ledger = engine_ledger.replay(run_dir / "events.jsonl")
     if not any(e["event"] == "step_entered" and (e["step"], e["visit"]) == (action.step, action.visit)
-               for e in engine_ledger.replay(run_dir / "events.jsonl")):  # a continued call is entered already
+               for e in ledger):  # a continued call is entered already
         engine_ledger.append_event(run_dir, {"event": "step_entered", "at": _now(),
                                              "step": action.step, "visit": action.visit,
                                              "stage": step["stage"]})
-    items = [None] if action.items is None else list(action.items)
+    published = engine_resume.published_ends(run_dir, ledger, action.step, action.visit)
+    if published is not None:  # a killed engine published the result and never recorded it: record, run nothing
+        outcome = engine_core.call_outcome([entry["end"] for entry in published])
+        engine_ledger.store_result(
+            run_dir, step=action.step, visit=action.visit, result={"items": published}, at=_now(),
+            wall_seconds=0, turns=0, tokens=dict(NO_TOKENS), spend_usd=0, adopt=True, outcome=outcome)
+        _graded(run_dir, step, action.visit, outcome)
+        return
+    items =[None] if action.items is None else list(action.items)
     admission = _Admission(len(items))
     entries: dict[int, dict] = {}
     errors: dict[int, Exception] = {}

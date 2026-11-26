@@ -88,6 +88,24 @@ def named_children(ledger: list[dict], step: str, visit: int) -> dict[int, str]:
             if e["event"] == "call" and (e["step"], e["visit"]) == (step, visit)}
 
 
+def published_ends(run_dir: Path, ledger: list[dict], step: str, visit: int) -> list[dict] | None:
+    """The ends in the call visit's result file a killed engine published before it appended `result_stored`,
+    or None when the visit has no such file (or its result is recorded already)."""
+    if any(e["event"] == "result_stored" and (e["step"], e["visit"]) == (step, visit) for e in ledger):
+        return None
+    try:
+        document = json.loads((run_dir / "results" / f"{step}.{visit}.json").read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as error:
+        raise engine_ledger.LedgerError(f"results/{step}.{visit}.json is not readable: {error}") from error
+    items = document.get("items") if isinstance(document, dict) else None
+    if not isinstance(items, list) or not all(isinstance(item, dict) and isinstance(item.get("end"), str)
+                                              for item in items):
+        raise engine_ledger.LedgerError(f"results/{step}.{visit}.json is not a call result")
+    return items
+
+
 def ended(child_dir: Path) -> str | None:
     """How the child run ended: `done`, the name of the procedure's own stop, or None when it is to be walked again.
 

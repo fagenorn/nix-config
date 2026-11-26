@@ -12,7 +12,7 @@
     "codex-unavailable": {"need": "retry", "reenter": "implemented"}
   },
   "steps": [
-    {"id": "preflight", "stage": "building", "kind": "command", "command": "issue-setup", "subcommand": "preflight", "holds": "head",
+    {"id": "preflight", "stage": "building", "kind": "command", "command": "issue-setup", "subcommand": "preflight", "holds": "read",
      "in": ["run.repo_root", "run.issue"],
      "on": {"clear": "implement", "closed": "setup", "parked": "setup", "duplicate": "setup", "open-pr": "setup", "error": "setup", "refused": "setup"}},
     {"id": "implement", "stage": "building", "kind": "agent", "role": "implementer", "prompt": "direct-implement.md", "reply": "direct-implement.reply.json", "outcome_from": "status", "holds": "run", "mutates": true,

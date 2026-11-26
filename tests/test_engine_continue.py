@@ -446,3 +446,69 @@ class MutatingContinueTest(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         self.assertEqual(json.loads(done.stdout)["end"], "done")
         self.assertEqual((project.calls("effect"), project.calls("checks")), (1, 0))
+
+
+class CallContinueTest(unittest.TestCase):
+    """A call a killed engine left interrupted is walked again in place (#1886)."""
+
+    def fan(self) -> dict:
+        return {"id": "fan", "stage": "landing", "kind": "call", "holds": "run", "procedure": "fan-child",
+                "on": {"done": "done", "child-stop": "needs-owner"}}
+
+    def test_a_call_result_published_but_never_recorded_is_recorded_from_the_file_not_stored_twice(self):
+        project = EngineProject(self)
+        child = {"steps": [step("m", "count-a", "done", failed="child-stop")], "inputs": ["issue"],
+                 "stops": {"child-stop": {"need": "retry", "reenter": "m"}}}
+        procedures = project.procedures([self.fan()], children={"fan-child": child})
+        first = project.deliver(procedures)
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        root = next(run for run in project.runs() if "parent" not in engine_ledger.read_run(run))
+        lines = (root / "events.jsonl").read_text().splitlines(keepends=True)
+        cut = next(i for i, line in enumerate(lines) if json.loads(line)["event"] == "result_stored")
+        (root / "events.jsonl").write_text("".join(lines[:cut]), encoding="utf-8")  # published, never recorded
+        published = (root / "results/fan.1.json").read_bytes()
+        runs = project.runs()
+
+        second = project.deliver(procedures)
+
+        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+        self.assertEqual(json.loads(second.stdout)["end"], "done")
+        self.assertEqual(project.runs(), runs)
+        self.assertEqual(project.calls("a"), 1)
+        self.assertEqual((root / "results/fan.1.json").read_bytes(), published)
+        after = project.events(root)[cut:]
+        self.assertEqual(shape(after), [
+            ("result_stored", "fan", 1), ("outcome_graded", "fan", 1), ("transition_taken", "fan", 1),
+            ("run_done", None, None)])
+        self.assertEqual((after[0]["result"], after[0]["outcome"]), ("results/fan.1.json", "done"))
+
+    def test_a_second_kill_in_a_rewound_calls_child_still_checks_what_the_first_walk_may_have_done(self):
+        project = EngineProject(self)
+
+        def mutates(id: str, ok: str, arguments: list[str]) -> dict:
+            document = step(id, "standin-effect", ok, failed="child-stop", mutates=True)
+            document.update({"in": arguments, "check": {"command": "standin-effect-check"}})
+            return document
+
+        issue, repo = "run.issue", "run.repo"
+        reads = step("k", "standin-effect", "m2", failed="child-stop")
+        reads["in"] = [issue, repo]  # not mutating: the kill the test arranges strikes here
+        child = {"steps": [mutates("m1", "k", [issue]), reads, mutates("m2", "s", [repo]),
+                           step("s", "standin-fail", "done", failed="child-stop")],
+                 "inputs": ["issue", "repo"], "stops": {"child-stop": {"need": "retry", "reenter": "m1"}}}
+        procedures = project.procedures([self.fan()], children={"fan-child": child}, inputs=("issue", "repo"),
+                                        stops={"needs-owner": {"need": "owner-decision", "reenter": "fan"}})
+        first = project.deliver(procedures)
+        self.assertEqual(first.returncode, 3, first.stdout + first.stderr)
+        m1, k, m2 = project.argvs("effect")
+        self.assertEqual(len({json.dumps(argv) for argv in (m1, k, m2)}), 3)
+        (project.tmp / "kill-before").write_text("go", encoding="utf-8")
+        second = project.deliver(procedures)  # the rewound call's new child: killed at k, before m2
+        self.assertEqual(second.returncode, -signal.SIGKILL, second.stdout + second.stderr)
+        self.assertEqual(project.argvs("checks"), [m1])
+
+        third = project.deliver(procedures)
+
+        self.assertEqual(third.returncode, 3, third.stdout + third.stderr)
+        self.assertEqual(project.argvs("effect"), [m1, k, m2, k])
+        self.assertEqual(project.argvs("checks"), [m1, m2])
