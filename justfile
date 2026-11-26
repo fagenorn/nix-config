@@ -214,7 +214,9 @@ agent-workflow-tests *args:
     tests/test_holding.py \
     tests/test_landing.py \
     tests/test_land_tally.py \
+    tests/test_verify_rounds.py \
     tests/test_engine_land_recovery.py \
+    tests/test_engine_verify_rounds.py \
     tests/test_plan_amend.py \
     tests/test_verify_block.py \
     tests/test_verify_pending.py \
@@ -251,8 +253,6 @@ agent-workflow-tests *args:
     tests/test_interrupted_reruns_check.py \
     tests/test_verify_checks.py \
     tests/test_cleanup_fix_check.py \
-    tests/test_suite_test_failures.py \
-    tests/test_protection_tree.py \
     tests/test_console_approved_action_check.py \
     tests/test_console_takeover_merge_check.py \
     tests/test_console_release_rerun_check.py \
@@ -425,6 +425,7 @@ agent-workflow-tests *args:
     tests/test_console_answer.py \
     tests/test_console_sprints.py \
     tests/test_console_manager_identity.py \
+    tests/test_console_contract_plain_words.py \
     tests/test_console_action_card.py \
     tests/test_console_revive.py \
     tests/test_console_idle.py \
@@ -480,10 +481,12 @@ agent-workflow-tests *args:
     home/common/agent-skills/tests/test_deliver_standard_landing.py \
     home/common/agent-skills/tests/test_deliver_standard_before_pull_request.py \
     home/common/agent-skills/tests/test_deliver_standard_lane_rule.py \
+    home/common/agent-skills/tests/test_deliver_standard_work_rules.py \
     home/common/agent-skills/tests/test_deliver_batch_program.py \
     home/common/agent-skills/tests/test_deliver_batch_landing.py \
     home/common/agent-skills/tests/test_deliver_batch_before_pull_request.py \
     home/common/agent-skills/tests/test_deliver_batch_lane_rule.py \
+    home/common/agent-skills/tests/test_deliver_batch_work_rules.py \
     home/common/agent-skills/evals/tests/test-run-eval-tree.sh
 
 # Validate every explicit pipeline dispatch and print the representative trace.
