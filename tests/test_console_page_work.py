@@ -9,7 +9,7 @@ import unittest
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures
 from .test_console_guest_page import GUEST, page_of, sprint_text
 from .test_console_page import (
-    REPORTED, SPRINT, START, full, has_class, nodes, render, sprint_lines, top, top_text, with_sprints)
+    PAGE, REPORTED, SPRINT, START, full, has_class, nodes, render, sprint_lines, top, top_text, with_sprints)
 from .test_console_view import A, MIN, T0_MS, entry as view_entry, line as view_line, reported, started
 from .test_console_work_sentence import SECOND, FIRST, TITLES, folded
 
@@ -77,6 +77,13 @@ class SprintWorkPageTest(unittest.TestCase):
             row_top = top_of(quiet)
             self.assertEqual([n for n in row_top if has_class(n, "sp-work")], [])
             self.assertEqual(legend_texts(row_top), [])
+
+    def test_the_work_line_is_not_cut_to_two_lines(self) -> None:
+        css = PAGE.read_text(encoding="utf-8")
+        rules = re.findall(r"^([^\n{}]*\.sp-work\b[^\n{}]*)\{([^}]*)\}", css, re.M)
+        self.assertTrue(rules)
+        for selector, body in rules:
+            self.assertNotRegex(body, r"line-clamp|overflow:\s*hidden", selector)
 
     def test_a_guest_sees_a_title_as_the_tracker_wrote_it(self) -> None:
         titled = {**REPORTED, "now_text": "Working on Export your settings.", "now_titled": True,

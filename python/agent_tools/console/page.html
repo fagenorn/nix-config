@@ -221,7 +221,8 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .overlap { padding: 0 16px; font-size: .8125rem; color: var(--sub0); overflow-wrap: anywhere; min-width: 0; }
 .sp-who { display: flex; flex-direction: column; min-width: 0; }
 .sp-project { font-size: .75rem; color: var(--ov2); }
-.sp-now, .sp-work { flex: 1 0 100%; grid-column: 2 / -1; color: var(--text); display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; }
+.sp-now { flex: 1 0 100%; grid-column: 2 / -1; color: var(--text); display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; }
+.sp-work { flex: 1 0 100%; grid-column: 2 / -1; color: var(--text); }
 .sprint .title-line { color: var(--text); font-weight: 500; overflow-wrap: anywhere; }
 .sprint-goal-full { color: var(--text); overflow-wrap: anywhere; }
 .sprint .age, .sprint .manager, .sprint .until, .sprint .status-age { color: var(--ov2); }
@@ -1086,8 +1087,7 @@ function drawSprint(item, entry, sprint) {
     head.appendChild(prog);
   }
   if (typeof sprint.work_text === "string") head.appendChild(el("p", "sp-work", sprint.work_text));
-  const nowYours = nowSteers(sprint);
-  const nowText = sprint.now_titled === true ? sprint.now_text : nowWords(sprint.now_text, nowYours);
+  const nowText = sprint.now_titled === true ? sprint.now_text : nowWords(sprint.now_text, nowSteers(sprint));
   const now = typeof sprint.now_until === "string"
     ? phrase("p", "sp-now", nowText + " ", timeEl("weekday", sprint.now_until, "now-until"))
     : el("p", "sp-now", nowText);

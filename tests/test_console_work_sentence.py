@@ -13,6 +13,7 @@ from agent_tools.console.sprints import NOW_QUIET_TEXT, Question
 
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures
 from .test_console_briefs import PARTS
+from .test_console_engine_runs import DEAD
 from .test_console_sprint_engine import LIVE, engine_state
 from .test_console_sprints import approved, at, ms, sent, seen, stated
 from .test_console_sprints import reported as report_event
@@ -118,6 +119,14 @@ class SprintWorkSentenceTest(unittest.TestCase):
         self.assertEqual({row["group"]: row["count"] for row in got["legend"]}, {"delivery": 2, "queued": 1})
         stage = {row["issue"]: row["stage"] for row in got["issues"]}[2]
         self.assertNotIn(stage, ("landed", "held", "queued"))
+
+    def test_a_dead_engine_does_not_turn_a_queued_issue_into_work(self):
+        it = reported(with_manager(started(A)), R, issues=((1, "building"), (2, "queued"), (3, "queued")))
+        got = view_of(it, R + 40 * MIN, sessions=[idle_session],
+                      engine_runs=[engine_state("sprint-moving.jsonl", DEAD, issue=2)])
+        self.assertEqual(got["now_text"], "last seen working on Title A. Next is Title B.")
+        self.assertEqual({row["group"]: row["count"] for row in got["legend"]}, {"delivery": 1, "queued": 2})
+        self.assertEqual({row["issue"]: row["stage"] for row in got["issues"]}[2], "queued")
 
     def test_a_closed_out_run_is_in_work_on_the_line_and_in_the_legend(self):
         runs = (seen(5, "wf_c", ms(4) + 30_000, [(1, "done")], project="p00"),)

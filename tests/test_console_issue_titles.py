@@ -6,7 +6,9 @@ Run: just agent-workflow-tests
 import contextlib
 import io
 import json
+import re
 import tempfile
+import threading
 import time
 import unittest
 from datetime import datetime
@@ -192,6 +194,80 @@ class TitlesServiceTest(Case):
         self.assertEqual(second, list(range(101, 151)))
         third, asked = movement.titles_batch(range(1, 151), {}, asked)
         self.assertEqual(third, list(range(1, 101)))
+
+    @staticmethod
+    def resolving(unresolved):
+        """A `gh api graphql` stand-in: a query naming a number in `unresolved` fails whole, as gh does."""
+        calls = []
+
+        def call(argv):
+            query = argv[argv.index("-f") + 1]
+            numbers = [int(n) for n in re.findall(r"\bi(\d+):", query)]
+            calls.append(numbers)
+            if unresolved & set(numbers):
+                raise ForgeError("gh_failed", "Could not resolve to an issue or pull request")
+            return {"data": {"repository": {f"i{n}": {"number": n, "title": f"Title {n}"} for n in numbers}}}
+
+        return call, calls
+
+    def test_a_number_that_does_not_resolve_does_not_hide_the_others_titles(self):
+        call, calls = self.resolving({9999})
+        self.assertEqual(movement.read_titles("owner/p00", [101, 9999], call=call), {101: "Title 101"})
+        self.assertEqual(movement.read_titles("owner/p00", [9999], call=call), {})
+        crowd = [*range(1, 100), 9999]
+        self.assertEqual(movement.read_titles("owner/p00", crowd, call=call),
+                         {n: f"Title {n}" for n in range(1, 100)})
+
+    def test_a_failed_read_that_is_not_the_numbers_still_fails(self):
+        for error in (ForgeError("gh_timeout", "slow"), ForgeError("gh_failed", "HTTP 502", transient=True),
+                      ForgeError("gh_missing", "no gh")):
+            calls = []
+
+            def call(argv, error=error):
+                calls.append(argv)
+                raise error
+
+            with self.subTest(code=error.code), self.assertRaises(ForgeError) as caught:
+                movement.read_titles("owner/p00", [1, 2, 3], call=call)
+            self.assertEqual((caught.exception.code, len(calls)), (error.code, 1))
+
+    def test_a_sprint_with_a_number_that_does_not_resolve_still_shows_the_titles_that_do(self):
+        call, calls = self.resolving({9999})
+        svc = self.open(lambda slug, numbers, *, cancelled: movement.read_titles(
+            slug, numbers, call=call, cancelled=cancelled))
+        self.running_sprint(svc, [(101, "building"), (9999, "queued")])
+        errors = self.poll(svc)
+        self.assertEqual(errors, "")
+        self.assertEqual(sprint_entry(svc)["now_text"], "Working on Title 101.")
+
+    def test_a_number_beyond_the_trackers_integer_range_is_never_asked(self):
+        big = 2 ** 31
+        batch, _ = movement.titles_batch([5, big - 1, big, big + 7], {}, ())
+        self.assertEqual(batch, [5, big - 1])
+        calls = []
+
+        def recorder(argv):
+            calls.append(argv[argv.index("-f") + 1])
+            return {"data": {"repository": {}}}
+
+        movement.read_titles("owner/p00", [5, big], call=recorder)
+        self.assertIn("i5:", calls[0])
+        self.assertNotIn(f"i{big}:", calls[0])
+        self.assertEqual(movement.read_titles("owner/p00", [big], call=recorder), {})
+        self.assertEqual(len(calls), 1)
+
+    def test_the_polling_thread_reads_titles_without_a_pull_reader(self):
+        asked = threading.Event()
+
+        def reader(slug, numbers, *, cancelled):
+            asked.set()
+            return {858: "Resume a broken upload"}
+
+        svc = self.open(reader, movement_seconds=3600)
+        self.running_sprint(svc)
+        svc.start()
+        self.assertTrue(asked.wait(5))
+        svc.close()
 
     def test_a_guest_sees_only_its_projects_titles(self):
         scoped = guest.scoped({"states": [], "issue_titles": {"acme/app": {1: "a"}, "other/app": {2: "b"}}},

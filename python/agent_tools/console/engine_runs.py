@@ -134,7 +134,7 @@ def project_lines(states: Iterable[RunState], now_ms: int | None,
 @dataclass(frozen=True)
 class SprintEngine:
     """What the engine runs of a sprint's issues say about the sprint: moving, open waits, sessions, issues shown,
-    and `stages`, the `(issue, stage, stage text)` of each shown run whose reading has not ended."""
+    and `stages`, the `(issue, stage, stage text)` of each shown run that is moving or waiting."""
 
     moving: bool = False
     waits: frozenset[str] = frozenset()
@@ -183,7 +183,7 @@ def sprint_engine(states: Iterable[RunState], project: str, issues: Collection[i
             continue
         shown.add(state.issue)
         kind = reading(state)
-        if not _ended(state, kind):
+        if kind in ("moving", "waiting"):
             stages.append((state.issue, state.stage, stage_text(state)))
         moving = moving or kind == "moving"
         if kind == "waiting":

@@ -129,7 +129,7 @@ name the work; no title is read from a report. One GraphQL query (`titles_query`
 is not an object, whose `number` is not that int or whose `title` is not a str, or a `data` or `repository`
 that is not an object, is `ForgeError("payload_invalid")`; a title is collapsed to one line (whitespace runs
 become one space) and an empty one is skipped. `read_titles` makes one call of at most `MAX_TITLES_PER_CALL`
-numbers, the smallest distinct ones, ascending; no numbers makes no call, and `cancelled()` true before the
+numbers, the smallest distinct ones the query can name (`MAX_QUERY_NUMBER`, a signed 32-bit `Int`), ascending; `gh` fails the whole call when one number does not resolve, so a `gh_failed` that is not a transport error is asked again in halves, and a number that fails alone stays untitled; no numbers makes no call, and `cancelled()` true before the
 call raises `ForgeError("cancelled")`; with no `call` the transport is `forge_api.gh_json(argv, cancelled=...)`.
 `titles_batch(issues, known, asked)` picks which numbers the next poll asks: the outstanding ones (not
 `known`) not yet `asked` in this round, the first `MAX_TITLES_PER_CALL` of them in ascending order; when every
@@ -446,6 +446,7 @@ def read_pulls(slug: str, pattern: str | None, *,
 
 
 MAX_TITLES_PER_CALL = 100
+MAX_QUERY_NUMBER = 2 ** 31 - 1
 
 
 def titles_query(numbers: Sequence[int]) -> str:
@@ -480,26 +481,45 @@ def titles_from_answer(answer: object, numbers: Sequence[int]) -> dict[int, str]
     return titles
 
 
+def askable(numbers: Iterable[int]) -> list[int]:
+    """The distinct numbers the tracker can be asked about, ascending: the query's `Int` is 32-bit signed."""
+    return sorted({number for number in numbers if 0 < number <= MAX_QUERY_NUMBER})
+
+
 def read_titles(slug: str, numbers: Iterable[int], *,
                 call: Callable[[list[str]], Any] | None = None,
                 cancelled: Callable[[], bool] = lambda: False) -> dict[int, str]:
-    """The titles of the smallest `MAX_TITLES_PER_CALL` distinct numbers, in one call; raises
-    `forge_api.ForgeError`. No numbers makes no call."""
-    asked = sorted(set(numbers))[:MAX_TITLES_PER_CALL]
+    """The titles of the smallest `MAX_TITLES_PER_CALL` distinct numbers the tracker can be asked about, in
+    one call; raises `forge_api.ForgeError`. No numbers makes no call. `gh` fails a whole batch when one
+    number does not resolve (a deleted issue, a typo), so a batch that failed for a reason other than the
+    transport is asked again in halves: a number that fails alone is left untitled, and the rest keep theirs."""
+    asked = askable(numbers)[:MAX_TITLES_PER_CALL]
     if not asked:
         return {}
     if call is None:
         def call(argv: list[str]) -> Any:
             return forge_api.gh_json(argv, cancelled=cancelled)
-    if cancelled():
-        raise ForgeError("cancelled")
-    return titles_from_answer(call(titles_argv(slug, asked)), asked)
+
+    def read(batch: list[int]) -> dict[int, str]:
+        if cancelled():
+            raise ForgeError("cancelled")
+        try:
+            return titles_from_answer(call(titles_argv(slug, batch)), batch)
+        except ForgeError as error:
+            if error.code != "gh_failed" or error.transient or error.exhausted:
+                raise
+            if len(batch) == 1:
+                return {}
+            middle = len(batch) // 2
+            return {**read(batch[:middle]), **read(batch[middle:])}
+
+    return read(asked)
 
 
 def titles_batch(issues: Iterable[int], known: Collection[int],
                  asked: Collection[int]) -> tuple[list[int], frozenset[int]]:
     """The numbers to ask next and the asked set after asking them; see the module docstring."""
-    outstanding = sorted(set(issues) - set(known))
+    outstanding = askable(set(issues) - set(known))
     fresh = [number for number in outstanding if number not in asked]
     if not fresh:
         asked, fresh = (), outstanding

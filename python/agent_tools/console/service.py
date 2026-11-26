@@ -1417,7 +1417,7 @@ with its traceback, or the whole returned report with its failed `checks`); one 
 ends the run. The console never writes the registry: the child does.
 
 Movement (#1110, the reading `movement.py` makes and ADR-console-042 uses):
-when the service is given a `pull_reader`, a thread, `MOVEMENT_THREAD`, started by `start()`, calls
+when the service is given a `pull_reader` (or a `title_reader`, which then only reads titles), a thread, `MOVEMENT_THREAD`, started by `start()`, calls
 `poll_movement()` at once and then every `movement_seconds` (`MOVEMENT_SECONDS`, two minutes). One
 poll reads, one project after another and never inside the ingest lock, each registered project
 with at least one sprint that has not ended (`sprints.ended_at` is None); first, under the lock, it
@@ -11164,11 +11164,11 @@ class ConsoleService(ActionPermit):
     def _move(self) -> None:
         while True:
             try:
-                self.poll_movement()
+                if self._pull_reader is not None:
+                    self.poll_movement()
                 self.poll_titles()
             except Exception as error:
-                print(f"console: movement_poll_failed {type(error).__name__}: {error}",
-                      file=sys.stderr)
+                print(f"console: movement_poll_failed {type(error).__name__}: {error}", file=sys.stderr)
             if self._stop.wait(self._movement_seconds):
                 return
 
@@ -11241,7 +11241,7 @@ class ConsoleService(ActionPermit):
             self._adoption_thread = threading.Thread(
                 target=self._adopt, name=ADOPTION_THREAD, daemon=True)
             self._adoption_thread.start()
-        if self._pull_reader is not None:
+        if self._pull_reader is not None or self._title_reader is not None:
             self._movement_thread = threading.Thread(
                 target=self._move, name=MOVEMENT_THREAD, daemon=True)
             self._movement_thread.start()
