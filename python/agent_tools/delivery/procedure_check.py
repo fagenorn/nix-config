@@ -83,7 +83,7 @@ declares no schema and is not member-checked), `unknown_placeholder` (a `{{<path
 its `in` paths; skipped when the prompt is missing) and `each_not_a_list` (a `call` step's `each` path that resolved with
 no refusal above and reads a value that is not a list: a run input, a decide step's `verdict`, an agent reply member
 whose property schema has no `"type": "array"`, or a member of a platform command's output that
-`PLATFORM_LISTS` does not name; a path that did not resolve keeps its own refusal alone, and a producer of any other
+`PLATFORM_LISTS` does not name (or, for a subcommand `SUBCOMMAND_LISTS` names, that its own list does not name); a path that did not resolve keeps its own refusal alone, and a producer of any other
 kind, a project command, or an agent whose reply did not resolve, declares no schema and is not list-checked)."""
 
 from __future__ import annotations
@@ -137,6 +137,13 @@ PLATFORM_LISTS: Mapping[str, frozenset[str]] = {
     "look-approval": frozenset({"acs", "covers"}),
     "resolve-project": frozenset(),
     "verified-tree": frozenset({"results"}),
+    "verify-rounds": frozenset({"changed_paths", "guards", "problems", "results"}),
+}
+# A command whose subcommands publish different lists: the member must be one the step's own subcommand lists.
+SUBCOMMAND_LISTS: Mapping[tuple[str, str], frozenset[str]] = {
+    ("verify-rounds", "round"): frozenset({"guards", "problems", "results"}),
+    ("verify-rounds", "fix-range"): frozenset({"changed_paths"}),
+    ("verify-rounds", "retested"): frozenset(),
 }
 
 HOLDS = ("run", "head", "live")
@@ -967,6 +974,9 @@ def _check_data_flow(procedure: dict, resolved: Resolved, found: _Findings) -> N
         kind = by_id[producer]["kind"] if producer in by_id else None
         if kind == "decide":
             return False
+        own = (by_id[producer].get("command"), by_id[producer].get("subcommand"))
+        if kind == "command" and own in SUBCOMMAND_LISTS:
+            return member in SUBCOMMAND_LISTS[own]
         if kind == "command" and by_id[producer]["command"] in PLATFORM_LISTS:
             return member in PLATFORM_LISTS[by_id[producer]["command"]]
         known = resolved.steps.get(producer)
