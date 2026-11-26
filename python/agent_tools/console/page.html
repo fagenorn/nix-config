@@ -40,6 +40,7 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .btn-option { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; column-gap: 14px; width: 100%; min-height: 44px; padding: 9px 14px; color: var(--text); border-color: transparent; }
 .btn-option kbd { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; border: 1px solid var(--s2); border-radius: 6px; font: inherit; font-size: .75rem; font-weight: 600; color: var(--sub1); }
 .btn-bare { padding: 0; border-color: transparent; background: none; }
+summary { min-height: 24px; }
 .field-line, .field-area, .field-code { min-height: 32px; padding: 5px 10px; font: 400 .875rem/1.4 var(--ui); color: var(--text); background: var(--mantle); border: 1px solid var(--s1); border-radius: 8px; }
 .field-area { display: block; width: 100%; min-height: 4.5rem; resize: vertical; }
 .field-code { font-family: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace; letter-spacing: .06em; }
@@ -75,7 +76,7 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .guest-kind { display: inline-flex; gap: 7px; font-weight: 600; color: var(--lav); }
 .brand { font-weight: 600; color: var(--sub1); white-space: nowrap; letter-spacing: -.005em; }
 .conn { color: var(--ov2); font-size: .8125rem; }
-.nav { color: var(--sub0); font-size: .8125rem; text-decoration: none; white-space: nowrap; }
+.nav { color: var(--sub0); font-size: .8125rem; text-decoration: none; white-space: nowrap; display: inline-flex; align-items: center; min-height: 24px; }
 .nav:hover { color: var(--text); }
 .cap { display: flex; flex: 0 0 auto; flex-wrap: nowrap; white-space: nowrap; overflow: hidden; align-items: center; gap: 0; margin-left: auto; min-width: 0; max-width: 100%; padding: 0; background: none; font: inherit; font-size: .8125rem; color: var(--sub0); text-align: left; cursor: pointer; }
 .cap > * { flex: none; }
@@ -215,15 +216,19 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .overlap { padding: 0 16px; font-size: .8125rem; color: var(--sub0); overflow-wrap: anywhere; min-width: 0; }
 .sp-who { display: flex; flex-direction: column; min-width: 0; }
 .sp-project { font-size: .75rem; color: var(--ov2); }
-.sp-now { flex: 1 0 100%; grid-column: 2 / -1; color: var(--text); display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; }
+.sp-now, .finished-line .wrap-up { flex: 1 0 100%; grid-column: 2 / -1; color: var(--text); display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; }
+.sp-work { flex: 1 0 100%; grid-column: 2 / -1; min-width: 0; color: var(--text); }
+.work-line { display: flex; min-width: 0; white-space: pre; }
+.work-title { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; font-weight: 600; }
 .sprint .title-line { color: var(--text); font-weight: 500; overflow-wrap: anywhere; }
 .sprint-goal-full { color: var(--text); overflow-wrap: anywhere; }
 .sprint .age, .sprint .manager, .sprint .until, .sprint .status-age { color: var(--ov2); }
 .sp-head { flex: 1 0 100%; display: grid; grid-template-columns: 16px minmax(0, 1fr) fit-content(40%); column-gap: 12px; row-gap: 2px; align-items: start; }
 .sp-status { grid-column: 2 / -1; display: flex; flex-wrap: wrap; gap: 0 8px; }
-.sp-prog { display: flex; align-items: flex-start; justify-content: flex-end; gap: 8px; min-width: 0; font-size: .8125rem; color: var(--sub0); }
+.sp-prog { display: flex; flex-direction: column; align-items: flex-end; gap: 8px; min-width: 0; font-size: .8125rem; color: var(--sub0); }
 .pips { display: flex; flex-wrap: wrap; gap: 4px; min-width: 0; padding-top: 3px; }
-.pip-count { flex: none; white-space: nowrap; }
+.pip-legend { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 0 10px; }
+.legend-item { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
 .pip { display: block; width: 9px; height: 9px; border-radius: 2px; flex: none; }
 .pip.pip-landed { background: var(--sub0); }
 .pip.pip-delivery { border: 1.5px solid var(--green); background: var(--green); box-shadow: inset 0 0 0 1.5px var(--base); }
@@ -238,11 +243,11 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .sprint-checks { flex: 1 0 100%; list-style: none; margin: 0; padding: 0 0 0 28px; }
 .sprint-check { padding: 2px 0; font: inherit; font-size: .8125rem; color: var(--ov2); text-align: left; cursor: pointer; overflow-wrap: anywhere; }
 .sprint-detail { flex: 1 0 100%; font-size: .8125rem; }
-.sprint-detail summary { cursor: pointer; color: var(--ov2); }
+.sprint-detail > summary { cursor: pointer; color: var(--ov2); }
 .sprint-detail ul { margin-top: 2px; padding: 0 0 0 16px; }
 .sprint-detail li { display: flex; flex-wrap: wrap; gap: 0 10px; color: var(--sub0); }
 .sprint-detail p { color: var(--sub0); }
-.sprint-detail .tracker { color: var(--lav); text-underline-offset: 3px; }
+.sprint-detail .tracker { display: inline-flex; align-items: center; min-height: 24px; color: var(--lav); text-underline-offset: 3px; }
 .sprint-sessions { flex: 1 0 100%; list-style: none; padding: 0 0 0 16px; }
 .sprint-session { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; }
 .sprint-messages { flex: 1 0 100%; list-style: none; padding: 0 0 0 16px; }
@@ -292,7 +297,7 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .sprint-tell .tell-send { align-self: flex-start; }
 .sprint-acts { flex: 1 0 100%; display: flex; flex-wrap: wrap; align-items: flex-start; gap: 4px 10px; }
 .sprint-acts .sprint-tell { flex: 1 0 100%; }
-.sprint-more { margin-left: auto; font-size: .8125rem; }
+.sprint-more { margin-top: 20px; padding-top: 12px; border-top: 1px solid var(--hair); font-size: .8125rem; }
 .sprint-more summary { list-style: none; }
 .sprint-more summary::-webkit-details-marker { display: none; }
 .tell { width: 100%; box-sizing: border-box; min-height: 3.5rem; resize: vertical; }
@@ -307,13 +312,13 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .finished-list > summary { cursor: pointer; color: var(--ov2); }
 .finished-list > ul { margin-top: 4px; }
 .finished-line summary { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 10px; padding: 3px 0; cursor: pointer; color: var(--sub0); }
-.finished-line .title-line { color: var(--text); overflow-wrap: anywhere; }
+.finished-line .title-line, .finished-line .wrap-up { color: var(--text); overflow-wrap: anywhere; }
 .finished-line .ended { color: var(--ov2); }
 .message-text { color: var(--lav); }
 .closing-report { margin-left: 4px; border-left: 1px solid var(--hair); padding: 2px 0 8px 16px; color: var(--sub0); overflow-wrap: anywhere; }
 .closing-report p { margin-top: 4px; white-space: pre-wrap; }
 .closing-report .closing-counts { color: var(--ov2); }
-.closing-report .tracker { display: inline-block; margin-top: 4px; color: var(--lav); text-underline-offset: 3px; }
+.closing-report .tracker { display: inline-flex; align-items: center; min-height: 24px; margin-top: 4px; color: var(--lav); text-underline-offset: 3px; }
 #digest { margin-top: 40px; max-width: 44rem; }
 #digest:empty { margin-top: 0; }
 .sec-h { font: 600 .9375rem/1.4 var(--ui); color: var(--text); }
@@ -328,7 +333,7 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .earlier summary::-webkit-details-marker { display: none; }
 .earlier summary:hover { background: rgba(202, 211, 245, .05); }
 .earlier summary b { font-weight: 600; color: var(--sub0); }
-.answer:not([class*="btn-"]) { color: var(--lav); text-underline-offset: 3px; }
+.answer:not([class*="btn-"]) { display: inline-flex; align-items: center; min-height: 24px; color: var(--lav); text-underline-offset: 3px; }
 .side { margin-top: 12px; }
 .side h2 { display: flex; align-items: baseline; gap: 10px; }
 .side h2 span { font-weight: 400; font-size: .8125rem; color: var(--ov2); }
@@ -446,19 +451,19 @@ code.md-code { padding: 0 4px; font-size: .875em; background: var(--mantle); bor
 .outside li.engine .stage { flex: 1 1 0; min-width: 0; }
 .run .moved { color: var(--ov2); }
 .sp-spend { flex: 1 0 100%; margin: 0; font-size: .8125rem; color: var(--ov2); }
-a.spend { color: var(--ov2); text-decoration: none; }
+a.spend { color: var(--ov2); text-decoration: none; display: inline-flex; align-items: center; min-height: 24px; }
 a.spend:hover { color: var(--sub0); text-decoration-line: underline; }
 .cap-none { color: var(--ov2); }
 .signin-run { margin: 6px 0 0; color: var(--sub0); }
 .signin-failed { color: var(--red); }
-.signin-link { color: var(--blue); overflow-wrap: anywhere; }
+.signin-link, .account-add-link { display: inline-flex; align-items: center; min-height: 24px; color: var(--blue); overflow-wrap: anywhere; }
 .signin-code { flex: 1 1 14rem; max-width: 24rem; }
 .signin-route { flex-basis: 100%; margin: 0; color: var(--sub0); }
 .signin-forward { font: 500 .8125rem/1.4 ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace; padding: 0 4px; background: var(--mantle); border-radius: 4px; overflow-wrap: anywhere; user-select: all; }
 .account-add { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-size: .8125rem; color: var(--sub0); }
 .account-name, .account-code { flex: 1 1 10rem; max-width: 16rem; }
 .account-add-note { margin: 0; color: var(--text); }
-.account-add-link { color: var(--blue); }
+.pr-link { display: inline-flex; align-items: center; min-height: 24px; }
 .account-add-reason { color: var(--sub0); }
 .register { margin-top: 24px; font-size: .8125rem; color: var(--sub0); }
 .register-form { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
@@ -547,6 +552,7 @@ html:has(#viewer:not([hidden])) { overflow: hidden; }
   .sprint-check { display: flex; align-items: flex-start; min-height: 44px; }
   .sprint-checks .wait { min-height: 44px; }
   .sprint-checks .live-fault { min-height: 44px; }
+  .sprint-acts .tell-open, #inbox :is(.card, .row) :is(button, a, summary):is(.btn-primary, .btn-quiet, .btn-danger, .btn-option):not(.btn-bare) { min-height: 44px; }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .001ms !important; animation-delay: 0s !important; transition-duration: .001ms !important; }
@@ -598,6 +604,14 @@ function el(tag, cls, text) {
 function markBusy(node, busy) {
   if (busy) node.setAttribute("aria-busy", "true");
   else node.removeAttribute("aria-busy");
+}
+// One line per line of the work words: each quoted title in a heavier weight, cut with an ellipsis before the line wraps.
+function workLines(node, text) {
+  for (const line of text.split("\n")) {
+    const parts = line.split(/(\u201c[^\u201d]*\u201d)/).filter(Boolean);
+    node.appendChild(phrase("span", "work-line", ...parts.map((p) => p.startsWith("\u201c") ? el("span", "work-title", p) : p)));
+  }
+  return node;
 }
 function pathWords(node, text) {
   const value = String(text);
@@ -774,9 +788,6 @@ function sprintDetail(sprint) {
   fold.appendChild(el("p", "sprint-goal-full", sprint.goal));
   const mode = permissionNote(sprint);
   if (mode !== null) fold.appendChild(mode);
-  if (typeof sprint.progress_text === "string") {
-    fold.appendChild(el("p", "progress", sprint.progress_text));
-  }
   if (reported) {
     const list = el("ul", "sprint-issues");
     for (const issue of sprint.issues || []) {
@@ -1049,9 +1060,7 @@ function drawSprint(item, entry, sprint) {
   item.dataset.sprintId = sprint.sprint_id;
   const before = Array.from(item.children).find((c) => c.className === "sprint-detail");
   const wasOpen = before !== undefined && before.open === true;
-  const acts = Array.from(item.children).find((c) => c.className === "sprint-acts");
-  const moreBefore = acts === undefined ? undefined
-    : Array.from(acts.children).find((c) => c.className === "sprint-more");
+  const moreBefore = before === undefined ? undefined : Array.from(before.children).find((c) => c.className === "sprint-more");
   const moreWasOpen = moreBefore !== undefined && moreBefore.open === true;
   const earlierBefore = Array.from(item.children).find((c) => c.className === "sprint-earlier");
   const earlierWasOpen = earlierBefore !== undefined && earlierBefore.open === true;
@@ -1071,30 +1080,26 @@ function drawSprint(item, entry, sprint) {
     const pips = el("span", "pips");
     pips.setAttribute("role", "img");
     pips.setAttribute("aria-label", sprint.progress_text);
-    pips.setAttribute("title", sprint.progress_text);
-    for (const issue of sprint.issues || []) {
-      pips.appendChild(el("i", "pip pip-" + pipGroup(issue.stage)));
-    }
+    for (const issue of sprint.issues || []) pips.appendChild(el("i", "pip pip-" + pipGroup(issue.stage)));
     prog.appendChild(pips);
-    prog.appendChild(el("span", "pip-count", progress.landed + " of " + progress.total));
+    const key = (sprint.legend || []).map((p) => phrase("span", "legend-item", el("i", "pip pip-" + p.group), p.text));
+    prog.appendChild(phrase("span", "pip-legend", ...key));
     head.appendChild(prog);
   }
-  const nowYours = nowSteers(sprint);
-  const nowText = nowWords(sprint.now_text, nowYours);
+  const titled = sprint.now_titled === true;
+  const work = titled ? sprint.now_text : sprint.work_text;
+  if (typeof work === "string") head.appendChild(workLines(el("p", "sp-work"), work));
+  const nowText = nowWords(sprint.now_text, nowSteers(sprint));
   const now = typeof sprint.now_until === "string"
     ? phrase("p", "sp-now", nowText + " ", timeEl("weekday", sprint.now_until, "now-until"))
     : el("p", "sp-now", nowText);
   now.setAttribute("title", typeof sprint.now_until === "string"
     ? nowText + " " + timeWords("weekday", sprint.now_until) : nowText);
-  head.appendChild(now);
+  if (!titled) head.appendChild(now);
   const words = el("p", "sp-status");
   words.appendChild(el("span", "sprint-ball " + look.tone, ballWords(sprint.ball_text, yours)));
-  if (typeof sprint.state_until === "string") {
-    words.appendChild(timeEl("weekday", sprint.state_until, "until"));
-  }
-  if (typeof sprint.status_at === "string") {
-    words.appendChild(phrase("span", "status-age", "reported ", timeEl("ago", sprint.status_at, "")));
-  }
+  if (typeof sprint.state_until === "string") words.appendChild(timeEl("weekday", sprint.state_until, "until"));
+  if (typeof sprint.status_at === "string") words.appendChild(phrase("span", "status-age", "reported ", timeEl("ago", sprint.status_at, "")));
   const age = el("span", "age");
   age.appendChild(el("span", "", "goal set "));
   age.appendChild(timeEl("ago", sprint.stated_at, ""));
@@ -1119,10 +1124,16 @@ function drawSprint(item, entry, sprint) {
     for (const wait of waits) list.appendChild(waitLine(wait, "li"));
     item.appendChild(list);
   }
-  if (sprint.manager_text !== null && sprint.manager_text !== undefined) {
-    item.appendChild(el("span", "manager", sprint.manager_text));
-  }
+  if (sprint.manager_text !== null && sprint.manager_text !== undefined) item.appendChild(el("span", "manager", sprint.manager_text));
   if (typeof sprint.manager_until === "string") item.appendChild(timeEl("weekday", sprint.manager_until, "until"));
+  // Tell the manager keeps one place, directly under the status lines, open report or closed.
+  const controls = el("div", "sprint-acts");
+  const hasControls = !guestDoor || sprint.steer === true;
+  if (hasControls) {
+    controls.appendChild(tellBox(item, entry, sprint));
+    if (guestDoor) controls.dataset.steer = "1";
+    item.appendChild(controls);
+  }
   const retrying = retries.get(sprint.sprint_id);
   const [verb, label] = sprint.retry === true ? ["retry", "Retry"]
     : sprint.move === true ? ["move", "Move to another account"] : [null, null];
@@ -1136,9 +1147,7 @@ function drawSprint(item, entry, sprint) {
     item.appendChild(el("span", "fail", "Could not " + verb + ": " + retrying.reason));
   }
   const stopButton = sprint.stoppable === true && !guestDoor ? stopControls(item, entry, sprint) : null;
-  if (typeof sprint.stop_text === "string") {
-    item.appendChild(el("span", "stop-fail", sprint.stop_text));
-  }
+  if (typeof sprint.stop_text === "string") item.appendChild(el("span", "stop-fail", sprint.stop_text));
   const fold = sprintDetail(sprint);
   if (wasOpen) fold.open = true;
   item.appendChild(fold);
@@ -1146,17 +1155,8 @@ function drawSprint(item, entry, sprint) {
     item.appendChild(el("span", "fail", "Could not drop: " + state.reason));
   }
   messageLife(item, sprint, earlierWasOpen);
-  if (typeof sprint.reach_text === "string") {
-    item.appendChild(el("span", "unreachable", sprint.reach_text));
-  }
-  if (guestDoor && sprint.steer !== true) return;
-  const controls = el("div", "sprint-acts");
-  controls.appendChild(tellBox(item, entry, sprint));
-  if (guestDoor) {
-    controls.dataset.steer = "1";
-    item.appendChild(controls);
-    return;
-  }
+  if (typeof sprint.reach_text === "string") item.appendChild(el("span", "unreachable", sprint.reach_text));
+  if (guestDoor) return;
   const more = el("details", "sprint-more");
   more.dataset.key = "more:" + sprint.sprint_id;
   if (moreWasOpen) more.open = true;
@@ -1166,14 +1166,13 @@ function drawSprint(item, entry, sprint) {
   if (state !== undefined && state.phase === "sending") button.setAttribute("disabled", "");
   markBusy(button, state !== undefined && state.phase === "sending");
   more.appendChild(button);
-  controls.appendChild(more);
-  item.appendChild(controls);
+  fold.appendChild(more);
 }
 function stopControls(item, entry, sprint) {
   const id = sprint.sprint_id;
   const state = stops.get(id);
   const asking = state !== undefined && (state.phase === "confirming" || state.phase === "sending");
-  // The Stop and report button sits under "End the sprint" beside Drop the sprint; the confirmation it opens stays on the sprint's line.
+  // The Stop and report button sits under "End the sprint", inside the sprint's fold, beside Drop the sprint; the confirmation it opens stays on the sprint's line.
   let button = null;
   if (!asking) {
     button = actionButton("stop btn-quiet", "Stop and report", () => {
@@ -3118,7 +3117,7 @@ function questionsFold(entry, afterLine) {
 function renderStatement(view) {
   const box = document.getElementById("statement");
   const h1 = el("h1", view.statement.inbox_items > 0 ? "needs" : "", view.statement.headline);
-  const nodes = [h1, el("p", "sub", view.statement.sentence)];
+  const nodes = [h1, el("p", "sub", view.statement.sentence), ...(view.statement.inbox_items === 0 && view.next_expected ? [phrase("p", "sub next-expected", "Next update expected ", timeEl("weekday", view.next_expected, ""))] : [])];
   const cap = view.capacity ? settledCapacity(view.capacity) : view.capacity;
   if (cap && cap.all_out && cap.resumes_at) nodes.push(phrase("p", "sub", "Resumes ", timeEl("weekday", cap.resumes_at, "")));
   for (const stopped of Array.isArray(view.unstopped) ? view.unstopped : []) {
@@ -5402,12 +5401,11 @@ function finishedLine(sprint, projectId) {
   fold.dataset.key = "ended:" + sprint.sprint_id;
   const summary = el("summary");
   summary.appendChild(el("span", "title-line", sprint.title));
-  const closing = sprint.closing;
-  const counted = closing !== null && typeof closing === "object" && typeof closing.counts_text === "string";
-  summary.appendChild(el("span", "outcome", counted ? closing.counts_text : ownerWords(sprint.state_text)));
+  summary.appendChild(el("span", "outcome", typeof sprint.closing?.counts_text === "string" ? sprint.closing.counts_text.replace(/(?<!dropped)$/, ", 0 dropped") : ownerWords(sprint.state_text)));
   summary.appendChild(phrase("span", "ended", "ended ", timeEl("ago", sprint.ended_at, "")));
   if (typeof sprint.started_by === "string") summary.appendChild(el("span", "started-by", "started by " + sprint.started_by));
   if (hasNewReply(sprint)) summary.appendChild(el("span", "message-new", "new reply"));
+  if (sprint.closing?.first_line) summary.appendChild(el("span", "wrap-up", sprint.closing.first_line));
   fold.appendChild(summary);
   const spendBox = spendLine("sprint", sprint.sprint_id);
   if (spendBox !== null) fold.appendChild(spendBox);

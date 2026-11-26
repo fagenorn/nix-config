@@ -1572,7 +1572,7 @@ class NewReplyViewTest(unittest.TestCase):
         self.assertEqual(view["new_replies_text"],
                          "New reply from the manager of make the importer resumable")
         self.assertEqual(view["statement"]["inbox_items"], 0)
-        self.assertEqual(view["statement"]["headline"], "Nothing needs you")
+        self.assertEqual(view["statement"]["headline"], "You're done for now")
 
     def test_a_reply_to_an_approval_is_new_until_a_later_look(self):
         rows = approval(message_row(5, event_log.SPRINT_READ, {"through": 4}),

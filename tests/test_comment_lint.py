@@ -647,5 +647,32 @@ class CommandTest(unittest.TestCase):
         self.assertIsNone(json.loads(verdicts.read_text("utf-8"))["comment-lint"])
 
 
+class ConsoleCommentsStayShortTest(unittest.TestCase):
+    """The comments the console titles work wrote stay within the cap of `standard:B19`."""
+
+    DOCSTRINGS = (
+        ("python/agent_tools/console/movement.py", "The titles of the smallest `MAX_TITLES_PER_CALL`"),
+        ("python/agent_tools/console/service.py", "`read()` with retries:"),
+        ("python/agent_tools/console/view.py", "What a running sprint is doing right now as one sentence"),
+    )
+    PAGE = ("tests/test_console_page.py", "Raised from 75264: the work line")
+
+    def flagged(self, path, anchor):
+        text = (REPO_ROOT / path).read_text("utf-8")
+        physical = text.split("\n")
+        hit = next(n for n, line in enumerate(physical, 1) if anchor in line)
+        block = next(b for b in comment_syntax.blocks(path, text) if b.first <= hit <= b.last)
+        return hit, comment_lint._length_lines(block, physical)
+
+    def test_each_new_docstring_is_a_short_block(self):
+        for path, anchor in self.DOCSTRINGS:
+            with self.subTest(path=path):
+                self.assertEqual(self.flagged(path, anchor)[1], [])
+
+    def test_the_page_size_note_has_no_line_over_the_cap(self):
+        hit, flagged = self.flagged(*self.PAGE)
+        self.assertNotIn(hit, flagged)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -794,7 +794,7 @@ class SessionSignalReadingTest(unittest.TestCase):
                 self.base, t0, ["idle"], view.wait_signals(self.base, pm)))
             shown = self.shown(t0, pm)
             self.assertEqual((shown["state"], shown["ball"]), ("on_track", "manager"))
-            self.assertEqual(shown["now_text"], "building 1 of 7: Importer resumes")
+            self.assertEqual(shown["now_text"], "Working on 2 issues.")
             write_at(transcript, (t0 - 16 * MIN) / 1000)
             pm = movement.merged(None, None, t0, LocalReading(
                 (), False, (), read_sessions([projects], targets, proc=noproc)))
@@ -843,7 +843,7 @@ class SessionSignalReadingTest(unittest.TestCase):
             self.assertEqual((shown["state"], shown["state_text"]),
                              ("quiet", "quiet for 16 min \u2014 may be stuck"))
             self.assertEqual(shown["ball"], "nobody")
-            self.assertEqual(shown["now_text"], "last seen building 1 of 7: Importer resumes")
+            self.assertEqual(shown["now_text"], "last seen working on 2 issues.")
 
     def test_with_no_process_table_the_reading_equals_todays(self):
         t0 = self.t0
