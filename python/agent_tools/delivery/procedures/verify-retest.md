@@ -1,5 +1,7 @@
 The verification of issue {{run.issue}} passed in the worktree {{preflight.worktree_path}} after a fix whose report recorded no test command. The commits git -C {{preflight.worktree_path}} diff {{round.start_head}}..{{round.head}} shows are that fix, committed with no test command recorded: treat them as your commit. The head {{round.head}} is landed next.
 
+Routed files (the standards, hints and decision records routed to this change; read them and no other standards): {{route-checks.routed_files}}
+
 Work only there: run git as git -C <worktree> and name every file by its absolute path. Never push, open a pull request, run git stash, run sed -i or run a destructive git command. Commit nothing.
 
 Run in full every test file among or covering the files the range changed (never a single test class), the test files of their direct callers and checkers (for each function, constant, option, command or file name the range changed, added or removed, run git -C <worktree> grep over the tree and take the test files of every file that uses or checks it), and the declared cheap guards {{round.guards}} (run each argv with its cwd as the working directory).
