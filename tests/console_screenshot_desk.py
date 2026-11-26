@@ -36,7 +36,7 @@ LEAD_TEXT = (
     "reading both shapes is acceptable or whether the change must be cut over in one step. Please also say which "
     "checks you plan to run after each slice lands, how long each takes, and which of them you would skip if time "
     "runs short. If any slice needs a decision from me, put it as a question with a recommendation so I can answer "
-    "it quickly from the desk. Finally, tell me what you would do differently if the slices grew, because I would "
+    "it quickly from the desk. Finally, tell me what you would change if the slices grew, because I would "
     "rather stop and re-plan than push a large change through at the end of the day. Keep the answer in plain "
     "words and short paragraphs; I will read it on the desk between other things, and I do not need a table.")
 MANAGER_TEXT = (
