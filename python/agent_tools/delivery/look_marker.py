@@ -136,6 +136,15 @@ returns its answer when it keeps or needs reads, so `judge` (the guard's carry r
 line naming `rule=own-files` with a `pictures` field carries nothing. `settle_own_files` drives it alone,
 for `look-approval carry --own-files`.
 
+Carried picture-match. An `approved` approval with a `pictures` digest is also carried by a trusted live
+line `<!-- agent:look-carry v1 issue=<issue> pr=<pr> from=<approved head> to=<head> pictures=<digest>
+rule=picture-match -->` (fields in that order) whose digest is the approval's: the owner approved those
+pictures and they re-rendered byte-identical. Readers keep it wherever they keep a digest line, so
+`judge`, `settle` and `merged_under_look` need no further change; a line naming another rule with a
+digest, or `rule=picture-match` with no digest or another one, carries nothing. The writer matches only
+this named form (`carry_matches` with `PICTURE_MATCH_RULE`), and `look-approval carry --own-files`
+writes it when the re-rendered pictures equal the approval's and a merge touched a named file.
+
 Manager-pictured approvals. The pictures of an approval may be the manager's, so a delivery with
 none of its own cannot re-render them. Such a carry holds under the own-files rule when, besides, `A...H` lists no
 file of any look file set at the base and none of `PICTURE_TOOL_FILES`, the inputs the pictures were rendered from.
@@ -162,6 +171,7 @@ CARRY_KIND = "look-carry"
 PICTURES_RULE = "pictures"
 LOOK_FILES_RULE = "look-files"
 OWN_FILES_RULE = "own-files"
+PICTURE_MATCH_RULE = "picture-match"
 # Only the owner's own association counts as the owner: ADR-verification-004.
 TRUSTED: tuple[str, ...] = ("OWNER", "MEMBER")
 ANSWERS: tuple[str, ...] = ("approved", "changes", "fix")
@@ -229,6 +239,7 @@ class Candidate:
     pictures: str | None = None
     line: int | None = None
     own_line: int | None = None
+    matched: bool = False  # `line` is a picture-match line only: it holds only where `merges_only` does
 
 
 @dataclass(frozen=True)
@@ -384,8 +395,8 @@ def carry_fields(issue: int, pr: int, approved_head: str, head: str, pictures: s
                  rule: str | None = None) -> dict[str, str]:
     """The fields of a look-carry line, in marker order; ValueError outside the grammar.
 
-    A digest names the pictures rule; None names the look-files rule; `rule` of
-    `OWN_FILES_RULE` names the own-files rule and takes no digest.
+    A digest names the pictures rule, None the look-files rule; `rule` of `OWN_FILES_RULE` takes no
+    digest and `PICTURE_MATCH_RULE` requires one, the line naming both.
     """
     _positive("issue", issue)
     _positive("pr", pr)
@@ -399,18 +410,21 @@ def carry_fields(issue: int, pr: int, approved_head: str, head: str, pictures: s
         if pictures is not None:
             raise ValueError("the own-files rule carries no pictures")
         return {**fields, "rule": OWN_FILES_RULE}
+    if rule == PICTURE_MATCH_RULE:
+        return {**fields, "pictures": _digest(pictures), "rule": PICTURE_MATCH_RULE}
     if pictures is None:
         return {**fields, "rule": LOOK_FILES_RULE}
     return {**fields, "pictures": _digest(pictures)}
 
 
 def carry_sentence(pr: int, approved_head: str, head: str, rule: str = PICTURES_RULE, inputs: bool = False) -> str:
-    rules = (PICTURES_RULE, LOOK_FILES_RULE, OWN_FILES_RULE)
+    rules = (PICTURES_RULE, LOOK_FILES_RULE, OWN_FILES_RULE, PICTURE_MATCH_RULE)
     if rule not in rules:
         raise ValueError(f"rule {rule!r} is not one of {rules}")
     what = {PICTURES_RULE: "the re-rendered pictures are unchanged",
             LOOK_FILES_RULE: "the pull request's change to the look files is unchanged",
-            OWN_FILES_RULE: "they changed none of the pull request's own files"}[rule]
+            OWN_FILES_RULE: "they changed none of the pull request's own files",
+            PICTURE_MATCH_RULE: "every picture the owner approved re-rendered byte-identical (the picture-match rule)"}[rule]
     if inputs and rule == OWN_FILES_RULE:
         what += ", none of the look files and not the picture tool, so the pictures it was shown still stand"
     return (f"Carried the owner's look approval of head {approved_head[:7]} of pull request {pr} "
@@ -421,7 +435,7 @@ def carry_body(issue: int, pr: int, approved_head: str, head: str, pictures: str
                rule: str | None = None) -> str:
     """The comment body of a look-carry line."""
     fields = carry_fields(issue, pr, approved_head, head, pictures, rule)
-    if rule != OWN_FILES_RULE:
+    if rule not in (OWN_FILES_RULE, PICTURE_MATCH_RULE):
         rule = PICTURES_RULE if pictures is not None else LOOK_FILES_RULE
     return forge_markers.render(CARRY_KIND, fields, carry_sentence(pr, approved_head, head, rule))
 
@@ -430,18 +444,24 @@ def carry_matches(fields: Mapping[str, str], issue: int, pr: int, approved_head:
                   pictures: str | None, rule: str | None = None) -> bool:
     """Whether a carry line's fields name exactly these and exactly one rule.
 
-    A digest names the pictures rule and the line holds no `rule` field; None names the look-files
-    rule and the line holds no `pictures` field; `rule` of `OWN_FILES_RULE` names the own-files rule,
-    a line with `rule=own-files` and no `pictures` field. The reader and the writer's
-    contention share it.
+    A digest names the pictures rule and the line holds no `rule` field, or `rule=picture-match`
+    when `rule` is None (the reader); None names the look-files rule and the line holds no `pictures`
+    field; `rule` of `OWN_FILES_RULE` names the own-files rule, a line with `rule=own-files` and no
+    `pictures` field; `rule` of `PICTURE_MATCH_RULE` names the strict picture-match form, a line
+    holding this digest and `rule=picture-match` (the writer's contention); `PICTURES_RULE` names
+    the strict digest-only form. The reader and the writer's contention share it.
     """
     wanted = {"issue": str(issue), "pr": str(pr), "from": approved_head, "to": head}
     if any(fields.get(key) != value for key, value in wanted.items()):
         return False
     if rule == OWN_FILES_RULE:
         return fields.get("rule") == OWN_FILES_RULE and "pictures" not in fields
-    if pictures is not None:
+    if rule == PICTURES_RULE:
         return fields.get("pictures") == pictures and "rule" not in fields
+    if rule == PICTURE_MATCH_RULE:
+        return fields.get("pictures") == pictures and fields.get("rule") == PICTURE_MATCH_RULE
+    if pictures is not None:
+        return fields.get("pictures") == pictures and fields.get("rule") in (None, PICTURE_MATCH_RULE)
     return fields.get("rule") == LOOK_FILES_RULE and "pictures" not in fields
 
 
@@ -653,7 +673,10 @@ def carry_candidate(comments: Iterable[Mapping[str, Any]], issue: int, pr: int, 
         return Candidate(issue, latest.fields["head"], latest.fields["answer"], latest.comment_id)
     line = carry_line(comments, issue, pr, latest.fields["head"], head, pictures)
     own = carry_line(comments, issue, pr, latest.fields["head"], head, None, OWN_FILES_RULE)
-    return Candidate(issue, latest.fields["head"], latest.fields["answer"], latest.comment_id, pictures, line, own)
+    matched = line is not None and carry_line(comments, issue, pr, latest.fields["head"], head, pictures,
+                                              PICTURES_RULE) is None
+    return Candidate(issue, latest.fields["head"], latest.fields["answer"], latest.comment_id, pictures, line, own,
+                     matched)
 
 
 def carry_rule(comments: Iterable[Mapping[str, Any]], candidate: Candidate) -> str | None:
@@ -848,6 +871,19 @@ def own_file_changed(approved_head: str, head: str, carry: Carry) -> str | None:
     return named[0] if named else None
 
 
+def merge_added_file(approved_head: str, head: str, carry: Carry) -> str | None:
+    """The first name `B...H` lists that `B...A` does not, from the reads `own_files_untouched` uses; else None.
+
+    A file no commit of the pull request changed before the approval, so a merge itself introduced it.
+    """
+    own = compare_files(carry.reads.get(compare_path(carry.base, approved_head)))
+    whole = compare_files(carry.reads.get(compare_path(carry.base, head)))
+    if own is None or whole is None:
+        return None
+    named = sorted(set(whole) - set(own))
+    return named[0] if named else None
+
+
 def picture_input_changed(approved_head: str, head: str, carry: Carry) -> str | None:
     """The first name `A...H` lists that a picture was rendered from, else None.
 
@@ -955,7 +991,7 @@ def kept(candidate: Candidate, head: str, carry: Carry) -> Kept:
         if candidate.line is None:
             return Kept(False)
         found = merges_only(candidate.head, head, carry)
-        if found.kept or found.need:
+        if found.kept or found.need or candidate.matched:
             return found
         base, reads = carry.base, carry.reads
         contents = contents_path(base)
