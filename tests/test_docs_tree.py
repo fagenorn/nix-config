@@ -467,6 +467,18 @@ class DocsTreeTest(unittest.TestCase):
             with self.subTest(word=word):
                 self.assertIn(word, owner_words(text))
 
+    def test_the_plain_words_rule_states_the_one_rule(self):
+        rule = (REPO_ROOT / "docs/guides/write-for-the-owner.md").read_text(encoding="utf-8")
+        flat = " ".join(rule.split())
+        self.assertIn("a person who has never seen this system understands each sentence on its own", flat)
+        self.assertIn("never lean on a list of terms", flat)
+        self.assertIn("is only a check's input", flat)
+        self.assertIn("does not clear the warning", flat)
+        for name in ("write-for-the-owner.md", "owner-words.md"):
+            with self.subTest(name=name):
+                text = (REPO_ROOT / "docs/guides" / name).read_text(encoding="utf-8")
+                self.assertIsNone(re.search(r"(?i)gloss", text))
+
     def test_the_glossary_reader_ignores_a_definition_hidden_in_a_comment(self):
         text = (
             "| Word | In everyday words |\n|---|---|\n| held |  |\n"

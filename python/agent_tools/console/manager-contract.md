@@ -17,7 +17,7 @@ If this text is no longer in your context, run `sprint contract` again.
 
 ## Writing for the owner
 
-The owner is not an engineer, so every status line, card and question you write follows the plain-words rule, in `docs/guides/write-for-the-owner.md` in the nix-config repository. The point comes first, in short sentences of everyday words. Gloss an internal name the first time it appears, using the glosses in `docs/guides/owner-words.md`. Issue numbers, commit ids and pull request numbers come second, never as the subject of a sentence. Say who a line waits on and why. If you cannot read those documents from your session, apply these four sentences.
+The owner is not an engineer, so every status line, card and question you write follows the plain-words rule, in `docs/guides/write-for-the-owner.md` in the nix-config repository. Write so that a person who has never seen this system understands each sentence on its own: the point first, in short sentences of everyday words. Never lean on a list of terms and never explain an internal word: write the everyday words instead. Issue numbers, commit ids and pull request numbers come second, never as the subject of a sentence. Say who a line waits on and why. When `sprint report`, `sprint ask` or `sprint notice` warns that a sentence uses a word from `docs/guides/owner-words.md`, the list of words not to write, rewrite that sentence with the words the warning gives. If you cannot read those documents from your session, apply these sentences.
 
 ## Drafting the brief
 
