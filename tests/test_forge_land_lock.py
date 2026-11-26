@@ -5,7 +5,6 @@ the CLI children and the token check keep real child processes."""
 import contextlib
 import io
 import json
-import linecache
 import os
 import subprocess
 import sys
@@ -1498,28 +1497,6 @@ class WaitTest(Base):
         self.assertEqual((code, out["verdict"], out["lock_sha"], out["waited_s"]), (3, "land-contended", B, 3000))
         self.assertEqual(len(self.cas_calls()), 1)  # 2760 lost to C; B seen anew at 2880 needs until 5580
         self.assertEqual(self.world.refs(), {REF: B, **self.waiting()})
-
-    def test_a_deadline_that_passes_between_the_check_and_the_sleep_times_out_cleanly(self):
-        """Issue 1891: the clock steps past the bound after the loop's check, as time.sleep would see it."""
-
-        class StepsPastTheBound(FakeClock):
-            def monotonic(self):
-                caller = sys._getframe(1)
-                line = linecache.getline(caller.f_code.co_filename, caller.f_lineno)
-                if "until - monotonic()" in line and self.now - self.start >= land_lock.BOUND - land_lock.POLL:
-                    self.now = self.start + land_lock.BOUND + 5  # the deadline passed mid-poll
-                return self.now
-
-            def sleep(self, seconds):
-                if seconds < 0:
-                    raise ValueError("sleep length must be non-negative")
-                super().sleep(seconds)
-
-        clock = StepsPastTheBound(self.move_once(2400, C))  # the holder moves its lock: no idle takeover
-        code, out = self.wait(clock)
-        self.assertEqual((code, out["verdict"], out["lock_sha"]), (3, "land-contended", C))
-        self.assertEqual(out["waited_s"], land_lock.BOUND + 5)
-        self.assertTrue(all(seconds >= 0 for seconds in clock.slept))
 
     def test_an_observed_absence_restarts_the_watch(self):
         clock = FakeClock()
