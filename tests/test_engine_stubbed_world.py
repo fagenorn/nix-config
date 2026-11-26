@@ -4,6 +4,7 @@ and the launcher stand-in's `merge`, `upstream` and `same_head` effects."""
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import unittest
@@ -30,6 +31,15 @@ def git(run: StubbedRun, *args: str, root: Path | None = None) -> str:
 def bare_git(run: StubbedRun, *args: str) -> str:
     done = subprocess.run([REAL_GIT, "-C", run.bare, *args], capture_output=True, text=True, check=True)
     return done.stdout.strip()
+
+
+def committing(run: StubbedRun, text: str = "R = 1\n") -> dict:
+    return {"reply": {"status": "done"},
+            "commit": {"worktree": str(run.fixture.root), "path": "fixture/resumed.py", "text": text}}
+
+
+def commits(run: StubbedRun) -> int:
+    return git(run, "log", "--format=%s").splitlines().count("stub change")
 
 
 class ForgeTest(unittest.TestCase):
@@ -169,6 +179,16 @@ class StubTest(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stderr)
         return json.loads(done.stdout)["structured_output"]
 
+    def stub_argv(self, run: StubbedRun, entry: dict, *flags: str) -> list[str]:
+        scenario = run.tmp / "stub-scenario.json"
+        scenario.write_text(json.dumps({"fix": entry}), encoding="utf-8")
+        return [sys.executable, str(STUB), str(scenario), str(run.tmp / "stub.log"), *flags,
+                "--append-system-prompt-file", str(run.tmp / "fix.1.system.md")]
+
+    def launch(self, run: StubbedRun, entry: dict, *flags: str) -> subprocess.CompletedProcess:
+        return subprocess.run(self.stub_argv(run, entry, *flags), input="prompt", env=run.env,
+                              capture_output=True, text=True, timeout=120)
+
     def diverged(self, run: StubbedRun, shared: str | None = None) -> Path:
         """The fixture root on a branch with one commit, `main` of the bare ahead of it by one."""
         root = run.fixture.root
@@ -267,6 +287,59 @@ class StubTest(unittest.TestCase):
         run = StubbedRun(self, replies={"fix": {"reply": {"status": "done"},
                                                 "leave": {"path": "fixture/scratch.txt", "text": "x\n"}}})
         self.assertEqual(run.replies["fix"]["leave"]["worktree"], str(run.worktree_path))
+
+
+    def test_a_resumed_session_that_answered_replays_its_answer_and_commits_nothing(self):
+        run = StubbedRun(self)
+        first = self.launch(run, committing(run), "--session-id", "s-1")
+        second = self.launch(run, committing(run), "--resume", "s-1")
+        self.assertEqual((first.returncode, second.returncode), (0, 0), first.stderr + second.stderr)
+        answered = json.loads(first.stdout)["structured_output"]
+        self.assertEqual(json.loads(second.stdout)["structured_output"], answered)
+        self.assertEqual(commits(run), 1)
+        self.assertEqual(git(run, "rev-parse", "HEAD"), answered["commit"])
+
+    def test_a_resume_of_a_session_with_no_recorded_answer_runs_its_entry(self):
+        run = StubbedRun(self)
+        done = self.launch(run, committing(run), "--resume", "s-2")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(commits(run), 1)
+        self.assertEqual(json.loads(done.stdout)["structured_output"]["commit"], git(run, "rev-parse", "HEAD"))
+
+    def test_a_session_whose_stdout_is_closed_still_records_its_answer(self):
+        run = StubbedRun(self)
+        r, w = os.pipe()
+        os.close(r)
+        stub = subprocess.Popen(self.stub_argv(run, committing(run), "--session-id", "s-3"),
+                                stdin=subprocess.PIPE, stdout=w, stderr=subprocess.PIPE, env=run.env, text=True)
+        os.close(w)
+        _, stderr = stub.communicate("prompt", timeout=120)
+        head = git(run, "rev-parse", "HEAD")
+        self.assertEqual(stub.returncode, 0, stderr)
+        record = run.tmp / "stub.log.sessions" / "s-3.json"
+        self.assertTrue(record.exists())
+        self.assertEqual(json.loads(record.read_text(encoding="utf-8"))["structured_output"]["commit"], head)
+        self.assertEqual(commits(run), 1)
+        resumed = self.launch(run, committing(run), "--resume", "s-3")
+        self.assertEqual(resumed.returncode, 0, resumed.stderr)
+        self.assertEqual(json.loads(resumed.stdout)["structured_output"]["commit"], head)
+        self.assertEqual(commits(run), 1)
+
+    def test_a_launch_with_no_session_flag_writes_no_answer_record(self):
+        run = StubbedRun(self)
+        reply = self.play(run, {"reply": {"status": "done"},
+                                "leave": {"worktree": str(run.fixture.root), "path": "left.txt", "text": "x\n"}})
+        self.assertEqual(reply["status"], "done")
+        sessions = run.tmp / "stub.log.sessions"
+        self.assertEqual(list(sessions.iterdir()) if sessions.exists() else [], [])
+
+    def test_a_fresh_launch_under_a_recorded_session_id_answers_its_entry_not_the_record(self):
+        run = StubbedRun(self)
+        self.launch(run, {"status": "first"}, "--session-id", "s-5")
+        again = self.launch(run, {"status": "second"}, "--session-id", "s-5")
+        self.assertEqual(json.loads(again.stdout)["structured_output"], {"status": "second"})
+        resumed = self.launch(run, {"status": "third"}, "--resume", "s-5")
+        self.assertEqual(json.loads(resumed.stdout)["structured_output"], {"status": "second"})
 
 
 if __name__ == "__main__":

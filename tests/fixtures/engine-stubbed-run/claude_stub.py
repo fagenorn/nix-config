@@ -20,7 +20,9 @@ step id (never the visit), writes `{"account": "stub"}` to the file named by
 `CLAUDE_ACCOUNT_ANSWER` when that is set, and prints
 `tests/fixtures/engine-session/result-normal.json` with `structured_output` replaced by the
 answer and `session_id` by the argv word after `--session-id` (or `--resume`), then exits 0. A
-step with no entry prints a result with no `structured_output`.
+step with no entry prints a result with no `structured_output`. A launch with a session id
+records its answer in `<log>.sessions/<session>.json` before printing; a `--resume` whose record
+exists replays that answer and runs no effect again.
 """
 
 import json
@@ -121,21 +123,8 @@ def leave_effect(effect: dict) -> None:
     target.write_text(effect["text"], encoding="utf-8")
 
 
-def main(argv: list[str]) -> int:
-    scenario = json.loads(Path(argv[0]).read_text(encoding="utf-8"))
-    log, words = argv[1], argv[2:]
-    prompt = sys.stdin.read()
-    step, visit = step_and_visit(words)
-    name = next((n for n in (f"{step}.{visit}", step) if n in scenario), None)
-    with open(log, "a", encoding="utf-8") as handle:
-        handle.write(json.dumps({"argv": words, "key": step, "prompt": prompt}, sort_keys=True) + "\n")
-    answer = os.environ.get("CLAUDE_ACCOUNT_ANSWER")
-    if answer:
-        Path(answer).write_text(json.dumps({"account": "stub"}), encoding="utf-8")
-    result = json.loads(NORMAL.read_text(encoding="utf-8"))
-    session = word_after(words, "--session-id", "--resume")
-    if session is not None:
-        result["session_id"] = session
+def run_entry(result: dict, scenario: dict, name: str | None) -> None:
+    """Run the scenario entry's effects and set the result's answer."""
     if name is None:
         result.pop("structured_output", None)
     else:
@@ -154,7 +143,38 @@ def main(argv: list[str]) -> int:
                 leave_effect(entry["leave"])
             entry = reply
         result["structured_output"] = entry
-    sys.stdout.write(json.dumps(result))
+
+
+def main(argv: list[str]) -> int:
+    scenario = json.loads(Path(argv[0]).read_text(encoding="utf-8"))
+    log, words = argv[1], argv[2:]
+    prompt = sys.stdin.read()
+    step, visit = step_and_visit(words)
+    name = next((n for n in (f"{step}.{visit}", step) if n in scenario), None)
+    with open(log, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"argv": words, "key": step, "prompt": prompt}, sort_keys=True) + "\n")
+    answer = os.environ.get("CLAUDE_ACCOUNT_ANSWER")
+    if answer:
+        Path(answer).write_text(json.dumps({"account": "stub"}), encoding="utf-8")
+    result = json.loads(NORMAL.read_text(encoding="utf-8"))
+    session = word_after(words, "--session-id", "--resume")
+    record = Path(log + ".sessions") / f"{session}.json" if session is not None else None
+    if session is not None:
+        result["session_id"] = session
+    if "--resume" in words and record is not None and record.exists():
+        result["structured_output"] = json.loads(record.read_text(encoding="utf-8"))["structured_output"]
+    else:
+        run_entry(result, scenario, name)
+        if record is not None and "structured_output" in result:
+            record.parent.mkdir(parents=True, exist_ok=True)
+            scratch = record.with_suffix(".json.tmp")
+            scratch.write_text(json.dumps({"structured_output": result["structured_output"]}), encoding="utf-8")
+            os.replace(scratch, record)
+    try:
+        sys.stdout.write(json.dumps(result))
+        sys.stdout.flush()
+    except BrokenPipeError:
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
     return 0
 
 
