@@ -15,6 +15,7 @@ let
   floorLauncher =
     inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.agent-platform.launchers.memory-floor;
   record = "/var/db/memory-watch/fseventsd.json";
+  censusRecord = "/var/db/memory-watch/census.json";
   # Matched against process cwds only; quoted because nix-darwin runs `command` through /bin/sh -c.
   agentRoots = [
     "${home}/Projects/*/.worktrees/*"
@@ -33,7 +34,7 @@ in
   # Samples memory every minute as the owner and records the day's peaks. Its alerts go through
   # the owner's host-alerts settings file, so no secret is declared here.
   launchd.daemons.omlx-memory-watch = {
-    command = "${launcher} sample --state-dir ${home}/.omlx/memory --floor-gib ${toString budget.floorGiB} --others-budget-gib ${toString budget.othersBudgetGiB} --omlx-jetsam-priority ${toString budget.omlxJetsamPriority} --host ${config.networking.hostName} --fseventsd-record ${record}";
+    command = "${launcher} sample --state-dir ${home}/.omlx/memory --floor-gib ${toString budget.floorGiB} --others-budget-gib ${toString budget.othersBudgetGiB} --omlx-jetsam-priority ${toString budget.omlxJetsamPriority} --host ${config.networking.hostName} --unowned-alert-gib ${toString budget.unownedAlertGiB} --fseventsd-record ${record}";
     serviceConfig = {
       UserName = username;
       EnvironmentVariables.HOME = home;
@@ -53,6 +54,18 @@ in
       StartInterval = 60;
       StandardOutPath = "/var/log/fseventsd-trim.log";
       StandardErrorPath = "/var/log/fseventsd-trim.log";
+    };
+  };
+
+  # Reads every process's footprint, which only root can, and records the system's unowned memory
+  # for the owner's sampler.
+  launchd.daemons.memory-census = {
+    command = "${launcher} census --record ${censusRecord}";
+    serviceConfig = {
+      RunAtLoad = true;
+      StartInterval = 60;
+      StandardOutPath = "/var/log/memory-census.log";
+      StandardErrorPath = "/var/log/memory-census.log";
     };
   };
 

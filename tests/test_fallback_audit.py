@@ -47,8 +47,6 @@ class LaddersTest(unittest.TestCase):
     EXEMPT_ONLY = {
         "python/agent_tools/project_contract/adopt_inspection.py": 'X = "skills.config.json"\n',
         "home/common/agent-skills/skills/ship-release/CHANGELOG.md": "bindings.deploy\n",
-        "python/agent_tools/verification/verify_checks.py":
-            'X = ("bindings.deploy", "skills.config.json", "release deploy inspect")\n',
         "python/agent_tools/project_contract/resolve_project.py": "bindings.deploy\n",
         "python/agent_tools/project_contract/adopt_migrate.py": "bindings.deploy\n",
         "python/agent_tools/release/release_profile.py": "bindings.deploy\n",
@@ -253,7 +251,7 @@ class LaddersTest(unittest.TestCase):
         code, report, _ = self.ladders(
             root, stub_body="""echo '{"error":{"code":"not_onboarded"}}'; exit 2""")
         self.assertEqual((code, report["findings"], report["clean"]), (0, [], True))
-        self.assertEqual(len(report["exempt"]), 8)
+        self.assertEqual(len(report["exempt"]), 5)
 
 
 def claude_line(timestamp, command, usage=True):

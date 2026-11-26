@@ -1,5 +1,0 @@
-#!/bin/sh
-# Verify check for issue 1031: the live console's first screen at 1440x900 shows a long-goal
-# sprint's open question, its whole ask and all options above the fold, and no goal text.
-# verify-pending runs it from the repository root at the commit the block names.
-PYTHONPATH=python exec python3 -m agent_tools.verification.verify_checks console-first-screen "$@"
