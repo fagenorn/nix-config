@@ -217,14 +217,18 @@ summary { min-height: 24px; }
 .sp-who { display: flex; flex-direction: column; min-width: 0; }
 .sp-project { font-size: .75rem; color: var(--ov2); }
 .sp-now, .finished-line .wrap-up { flex: 1 0 100%; grid-column: 2 / -1; color: var(--text); display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; }
+.sp-work { flex: 1 0 100%; grid-column: 2 / -1; min-width: 0; color: var(--text); }
+.work-line { display: flex; min-width: 0; white-space: pre; }
+.work-title { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; font-weight: 600; }
 .sprint .title-line { color: var(--text); font-weight: 500; overflow-wrap: anywhere; }
 .sprint-goal-full { color: var(--text); overflow-wrap: anywhere; }
 .sprint .age, .sprint .manager, .sprint .until, .sprint .status-age { color: var(--ov2); }
 .sp-head { flex: 1 0 100%; display: grid; grid-template-columns: 16px minmax(0, 1fr) fit-content(40%); column-gap: 12px; row-gap: 2px; align-items: start; }
 .sp-status { grid-column: 2 / -1; display: flex; flex-wrap: wrap; gap: 0 8px; }
-.sp-prog { display: flex; align-items: flex-start; justify-content: flex-end; gap: 8px; min-width: 0; font-size: .8125rem; color: var(--sub0); }
+.sp-prog { display: flex; flex-direction: column; align-items: flex-end; gap: 8px; min-width: 0; font-size: .8125rem; color: var(--sub0); }
 .pips { display: flex; flex-wrap: wrap; gap: 4px; min-width: 0; padding-top: 3px; }
-.pip-count { flex: none; white-space: nowrap; }
+.pip-legend { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 0 10px; }
+.legend-item { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
 .pip { display: block; width: 9px; height: 9px; border-radius: 2px; flex: none; }
 .pip.pip-landed { background: var(--sub0); }
 .pip.pip-delivery { border: 1.5px solid var(--green); background: var(--green); box-shadow: inset 0 0 0 1.5px var(--base); }
@@ -601,6 +605,14 @@ function markBusy(node, busy) {
   if (busy) node.setAttribute("aria-busy", "true");
   else node.removeAttribute("aria-busy");
 }
+// One line per line of the work words: each quoted title in a heavier weight, cut with an ellipsis before the line wraps.
+function workLines(node, text) {
+  for (const line of text.split("\n")) {
+    const parts = line.split(/(\u201c[^\u201d]*\u201d)/).filter(Boolean);
+    node.appendChild(phrase("span", "work-line", ...parts.map((p) => p.startsWith("\u201c") ? el("span", "work-title", p) : p)));
+  }
+  return node;
+}
 function pathWords(node, text) {
   const value = String(text);
   if (!value.includes("/")) {
@@ -776,9 +788,6 @@ function sprintDetail(sprint) {
   fold.appendChild(el("p", "sprint-goal-full", sprint.goal));
   const mode = permissionNote(sprint);
   if (mode !== null) fold.appendChild(mode);
-  if (typeof sprint.progress_text === "string") {
-    fold.appendChild(el("p", "progress", sprint.progress_text));
-  }
   if (reported) {
     const list = el("ul", "sprint-issues");
     for (const issue of sprint.issues || []) {
@@ -1071,30 +1080,26 @@ function drawSprint(item, entry, sprint) {
     const pips = el("span", "pips");
     pips.setAttribute("role", "img");
     pips.setAttribute("aria-label", sprint.progress_text);
-    pips.setAttribute("title", sprint.progress_text);
-    for (const issue of sprint.issues || []) {
-      pips.appendChild(el("i", "pip pip-" + pipGroup(issue.stage)));
-    }
+    for (const issue of sprint.issues || []) pips.appendChild(el("i", "pip pip-" + pipGroup(issue.stage)));
     prog.appendChild(pips);
-    prog.appendChild(el("span", "pip-count", progress.landed + " of " + progress.total));
+    const key = (sprint.legend || []).map((p) => phrase("span", "legend-item", el("i", "pip pip-" + p.group), p.text));
+    prog.appendChild(phrase("span", "pip-legend", ...key));
     head.appendChild(prog);
   }
-  const nowYours = nowSteers(sprint);
-  const nowText = nowWords(sprint.now_text, nowYours);
+  const titled = sprint.now_titled === true;
+  const work = titled ? sprint.now_text : sprint.work_text;
+  if (typeof work === "string") head.appendChild(workLines(el("p", "sp-work"), work));
+  const nowText = nowWords(sprint.now_text, nowSteers(sprint));
   const now = typeof sprint.now_until === "string"
     ? phrase("p", "sp-now", nowText + " ", timeEl("weekday", sprint.now_until, "now-until"))
     : el("p", "sp-now", nowText);
   now.setAttribute("title", typeof sprint.now_until === "string"
     ? nowText + " " + timeWords("weekday", sprint.now_until) : nowText);
-  head.appendChild(now);
+  if (!titled) head.appendChild(now);
   const words = el("p", "sp-status");
   words.appendChild(el("span", "sprint-ball " + look.tone, ballWords(sprint.ball_text, yours)));
-  if (typeof sprint.state_until === "string") {
-    words.appendChild(timeEl("weekday", sprint.state_until, "until"));
-  }
-  if (typeof sprint.status_at === "string") {
-    words.appendChild(phrase("span", "status-age", "reported ", timeEl("ago", sprint.status_at, "")));
-  }
+  if (typeof sprint.state_until === "string") words.appendChild(timeEl("weekday", sprint.state_until, "until"));
+  if (typeof sprint.status_at === "string") words.appendChild(phrase("span", "status-age", "reported ", timeEl("ago", sprint.status_at, "")));
   const age = el("span", "age");
   age.appendChild(el("span", "", "goal set "));
   age.appendChild(timeEl("ago", sprint.stated_at, ""));
@@ -1119,9 +1124,7 @@ function drawSprint(item, entry, sprint) {
     for (const wait of waits) list.appendChild(waitLine(wait, "li"));
     item.appendChild(list);
   }
-  if (sprint.manager_text !== null && sprint.manager_text !== undefined) {
-    item.appendChild(el("span", "manager", sprint.manager_text));
-  }
+  if (sprint.manager_text !== null && sprint.manager_text !== undefined) item.appendChild(el("span", "manager", sprint.manager_text));
   if (typeof sprint.manager_until === "string") item.appendChild(timeEl("weekday", sprint.manager_until, "until"));
   // Tell the manager keeps one place, directly under the status lines, open report or closed.
   const controls = el("div", "sprint-acts");
@@ -1144,9 +1147,7 @@ function drawSprint(item, entry, sprint) {
     item.appendChild(el("span", "fail", "Could not " + verb + ": " + retrying.reason));
   }
   const stopButton = sprint.stoppable === true && !guestDoor ? stopControls(item, entry, sprint) : null;
-  if (typeof sprint.stop_text === "string") {
-    item.appendChild(el("span", "stop-fail", sprint.stop_text));
-  }
+  if (typeof sprint.stop_text === "string") item.appendChild(el("span", "stop-fail", sprint.stop_text));
   const fold = sprintDetail(sprint);
   if (wasOpen) fold.open = true;
   item.appendChild(fold);
@@ -1154,9 +1155,7 @@ function drawSprint(item, entry, sprint) {
     item.appendChild(el("span", "fail", "Could not drop: " + state.reason));
   }
   messageLife(item, sprint, earlierWasOpen);
-  if (typeof sprint.reach_text === "string") {
-    item.appendChild(el("span", "unreachable", sprint.reach_text));
-  }
+  if (typeof sprint.reach_text === "string") item.appendChild(el("span", "unreachable", sprint.reach_text));
   if (guestDoor) return;
   const more = el("details", "sprint-more");
   more.dataset.key = "more:" + sprint.sprint_id;
