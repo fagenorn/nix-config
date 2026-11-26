@@ -1,4 +1,4 @@
-"""The loopback server the verify-check suites share shuts down without waiting out the default poll (#1727).
+"""The loopback server the verify-check suites share shuts down without waiting out the default poll.
 
 It lives beside, not in, the verify-checks suite to keep that file from growing past the B17 budget.
 

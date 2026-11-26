@@ -1,4 +1,4 @@
-"""The console suites' held-publish helper fails a test whose reader never met the held publish (#1727).
+"""The console suites' held-publish helper fails a test whose reader never met the held publish.
 
 Run: just agent-workflow-tests
 """
@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 
 from . import console_test_support as support
-from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures
 
 TIER = "integration"  # the case starts the console's loopback service
 

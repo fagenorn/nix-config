@@ -506,6 +506,12 @@ class RuleTest(unittest.TestCase):
         self.assertEqual(found("B19", snap), [])
         self.assertEqual(found("B20", snap), [Violation("B20", "a.py", 5)])
 
+    def test_the_publish_hold_and_loopback_suites_name_no_issue(self):
+        paths = ("tests/test_console_publish_hold.py", "tests/test_loopback_server.py")
+        snap = Snapshot("a" * 40, {}, contents={
+            path: (REPO_ROOT / path).read_bytes() for path in paths})
+        self.assertEqual(found("B18", snap), [])
+
     def test_a_module_docstring_sharing_its_closing_line_with_code_is_header(self):
         doc = '"""one\ntwo\nthree\nfour\nfive\nsix"""; import os\n'
         self.assertTrue(comment_syntax.blocks("a.py", doc)[0].header)
