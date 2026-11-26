@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "verify_slots": 2,
+  "verify_slots": 4,
   "verify_budget_seconds": 600,
   "routes": {
     "claude-code": {
