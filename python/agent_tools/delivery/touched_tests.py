@@ -44,7 +44,11 @@ selection already ran it), then CMD runs from the root and prints one `NAME=VALU
 variable (blank lines are skipped; any other line, or a non-zero exit, is the result with no
 suite run: the exit code, or 2 for a bad line), and MEMBER runs through the suite runner on its
 own with those variables added to the environment. The other selected members run first, as
-without the flag, and the result is the first non-zero exit of the runs. `--env-from` without
+without the flag, and the result is the first non-zero exit of the runs. When
+`SUITE_RUNNER_REPORT` is set and the selection runs in more than one process, each process
+writes its timing report to a temporary file and the runs' reports are merged into one report
+at the `SUITE_RUNNER_REPORT` path (resolved against the root) covering the whole selection;
+a run that wrote no report adds no rows. `--env-from` without
 `--build-command` is a usage error (exit 2), as is a value with no `=` or an empty side, or
 the same MEMBER twice.
 
@@ -70,10 +74,12 @@ import os
 import shlex
 import subprocess
 import sys
+import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
-from agent_tools.delivery.suite_runner import suite_members
+from agent_tools.delivery.suite_runner import (
+    REPORT_ENV, REPORT_VERSION, suite_members, write_report)
 
 
 SELECTION_ENV = "VERIFIED_TREE_SELECTION"
@@ -217,6 +223,23 @@ def parse_assignments(output: str) -> dict[str, str]:
     return assignments
 
 
+def merge_reports(reports: Sequence[Mapping]) -> dict:
+    """One timing report over the runs' reports: counts and times summed, rows slowest first."""
+    rows = sorted((row for report in reports for row in report["timings"]),
+                  key=lambda row: -row["seconds"])
+    return {
+        "version": REPORT_VERSION,
+        "members": sum(report["members"] for report in reports),
+        "passed": sum(report["passed"] for report in reports),
+        "failed": sum(report["failed"] for report in reports),
+        "jobs": max(report["jobs"] for report in reports),
+        "wall_seconds": round(sum(report["wall_seconds"] for report in reports), 1),
+        "member_seconds": sum(report["member_seconds"] for report in reports),
+        "cpu_seconds": round(sum(report["cpu_seconds"] for report in reports), 1),
+        "timings": rows,
+    }
+
+
 def _say(stream, line: str) -> None:
     print(line, file=stream, flush=True)
 
@@ -305,11 +328,27 @@ def main(argv: Sequence[str] | None = None, *,
     _say(sys.stderr, f"test-touched: running {len(selected)}: {' '.join(selected)}")
     runner = [sys.executable, "-m", "agent_tools.delivery.suite_runner"]
     plain = [m for m in selected if m not in prepared]
-    results = [run([*runner, *plain], root)] if plain else []
-    results.extend(run([*runner, member], root, prepared[member]) for member in selected
-                   if member in prepared)
+    launches: list[tuple[list[str], dict[str, str] | None]] = []
+    if plain:
+        launches.append((plain, None))
+    launches.extend(([member], prepared[member]) for member in selected if member in prepared)
+    report_value = os.environ.get(REPORT_ENV, "")
+    merging = bool(report_value) and len(launches) > 1
+    results: list[int] = []
+    with tempfile.TemporaryDirectory(prefix="touched-tests-report-") as scratch:
+        parts: list[Path] = []
+        for index, (members_run, extra) in enumerate(launches):
+            argv_run = [*runner, *members_run]
+            if merging:
+                parts.append(Path(scratch) / f"{index}.json")
+                extra = {**(extra or {}), REPORT_ENV: str(parts[-1])}
+            results.append(run(argv_run, root) if extra is None
+                           else run(argv_run, root, extra))
+        written = [json.loads(part.read_text(encoding="utf-8"))
+                   for part in parts if part.is_file()]
+        if written:
+            write_report(root / report_value, merge_reports(written))
     return next((code for code in results if code != 0), 0)
-
 
 if __name__ == "__main__":
     sys.exit(main())

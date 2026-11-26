@@ -21,9 +21,10 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.delivery.suite_runner import suite_members
+from agent_tools.delivery.suite_runner import REPORT_ENV, suite_members
 from agent_tools.delivery.touched_tests import (
-    SELECTION_ENV, build_trigger, default_capture, default_execute, main, select, selection)
+    SELECTION_ENV, build_trigger, default_capture, default_execute, main, parse_assignments,
+    select, selection)
 
 TIER = "integration"  # MainTest builds a git repository
 
@@ -375,6 +376,45 @@ class MainTest(unittest.TestCase):
         self.assertEqual(code, 3)
         self.assertEqual(len([a for a, _ in self.calls if a[:3] == RUNNER]), 2)
 
+    @staticmethod
+    def report(member, seconds, passed):
+        return {"version": 1, "members": 1, "passed": int(passed), "failed": int(not passed),
+                "jobs": 1, "wall_seconds": seconds, "member_seconds": seconds,
+                "cpu_seconds": seconds,
+                "timings": [{"member": member, "seconds": seconds, "cpu_seconds": seconds,
+                             "passed": passed}]}
+
+    def reporting(self, failing):
+        def execute(argv, cwd, env=None):
+            self.calls.append((argv, cwd))
+            if argv[:3] != RUNNER:
+                return 0
+            member = argv[-1]
+            if env and REPORT_ENV in env:
+                Path(env[REPORT_ENV]).write_text(
+                    json.dumps(self.report(member, 2.0 if member == failing else 1.0,
+                                           member != failing)), encoding="utf-8")
+            return 3 if member == failing else 0
+        return execute
+
+    def test_a_mixed_selection_leaves_one_report_covering_both_runs(self):
+        with mock.patch.dict(os.environ, {REPORT_ENV: "out/report.json"}):
+            code, _, _ = self.run_main("--base", "HEAD~1", *self.ENV_FLAGS,
+                                       "--build-when", "*.nix",
+                                       execute=self.reporting("tests/test_beta.py"),
+                                       capture=self.capturing(self.ENV_OUTPUT))
+        merged = json.loads((self.root / "out/report.json").read_text(encoding="utf-8"))
+        self.assertEqual(code, 3)
+        self.assertEqual((merged["members"], merged["passed"], merged["failed"]), (2, 1, 1))
+        self.assertEqual([(row["member"], row["passed"]) for row in merged["timings"]],
+                         [("tests/test_beta.py", False), ("tests/test_alpha.py", True)])
+        self.assertEqual((merged["member_seconds"], merged["wall_seconds"]), (3.0, 3.0))
+
+    def test_a_single_run_keeps_the_report_path_it_was_given(self):
+        with mock.patch.dict(os.environ, {REPORT_ENV: "out/report.json"}):
+            self.run_main("--base", "HEAD~1", "--source-root", "python")
+        self.assertEqual(self.environments, [None])
+
     def test_an_env_member_without_a_build_command_is_a_usage_error(self):
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as raised:
             main(["--base", "HEAD", "--root", str(self.root),
@@ -421,6 +461,27 @@ class RecipeTest(unittest.TestCase):
         for variable in ("CLAUDE_SETTINGS_PATH", "CLAUDE_GUARD_BASE_POLICY_PATH"):
             self.assertIn(variable, helper)
             self.assertIn(variable, (REPO_ROOT / guard_test).read_text(encoding="utf-8"))
+
+    def test_the_helper_prints_the_settings_and_the_base_policy_under_their_own_names(self):
+        store = "/nix/store/h1-"
+        listing = [f"{store}other", f"{store}claude-code-settings.json",
+                   f"{store}claude-bash-lifecycle-guard-base-policy.json"]
+        with tempfile.TemporaryDirectory() as scratch:
+            bin_dir = Path(scratch) / "bin"
+            bin_dir.mkdir()
+            fake = bin_dir / "nix-store"
+            fake.write_text("#!/bin/sh\ncat <<'EOF'\n" + "\n".join(listing) + "\nEOF\n",
+                            encoding="utf-8")
+            fake.chmod(0o755)
+            path = f"{bin_dir}{os.pathsep}{os.environ['PATH']}"
+            with mock.patch.dict(os.environ, {"PATH": path}):
+                code, out = default_capture(
+                    ["just", "--justfile", str(REPO_ROOT / "justfile"),
+                     "--working-directory", scratch, "claude-guard-test-env"], Path(scratch))
+        self.assertEqual(code, 0)
+        self.assertEqual(parse_assignments(out),
+                         {"CLAUDE_SETTINGS_PATH": listing[1],
+                          "CLAUDE_GUARD_BASE_POLICY_PATH": listing[2]})
 
     def test_the_recipe_covers_the_engine_with_its_tier(self):
         for source in [f"{DELIVERY}/engine*.py",
