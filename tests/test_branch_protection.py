@@ -17,8 +17,11 @@ import re
 import subprocess
 import tempfile
 import unittest
+from collections.abc import Sequence
 from pathlib import Path, PurePosixPath
 from unittest import mock
+
+from agent_tools.delivery import suite_timing
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 WORKFLOWS = REPO_ROOT / ".github" / "workflows"
@@ -83,7 +86,26 @@ SUITE_INVOCATION = ("WORKFLOW_POLICY_SURFACE=source nix shell --inputs-from . ni
 # whose evaluating step is one `run:` line, the line an earlier step must hold.
 UPLOAD_AFTER_EVALUATION_IF = "        if: ${{ !cancelled() }}"
 UPLOAD_ACTION = "        uses: actions/upload-artifact@v4"
-EVALUATION_RUNS = {"Agent Workflow Tests": SUITE_INVOCATION}
+
+# The suite runs as the shards of one matrix job, and the required job joins their reports. The
+# matrix list is the one place the shard count is declared; the join reads it from the workflow.
+SHARD_JOB = "agent-workflow-tests-shard"
+SHARD_JOB_NAME = "Agent Workflow Tests Shard ${{ matrix.shard }}"
+SHARD_ARTIFACT = "suite-timing-shard-${{ matrix.shard }}-attempt-${{ github.run_attempt }}-${{ job.status }}"
+FINAL_JOB_IF = "${{ always() && github.event_name != 'schedule' }}"
+FINAL_JOB_NEEDS = "    needs: agent-workflow-tests-shard"
+JOIN = ("PYTHONPATH=python python3 -m agent_tools.delivery.suite_timing join "
+        "--workflow .github/workflows/ci.yaml --shard-job agent-workflow-tests-shard "
+        "--shards-dir suite-timing/shards --out suite-timing/suite-timing.json "
+        '--needs-result "$SHARDS_RESULT"')
+SHARD_ENV = ['SUITE_RUNNER_JOBS: "4"', "SUITE_RUNNER_REPORT: suite-timing/suite-timing.json",
+             "SUITE_RUNNER_SHARD: ${{ matrix.shard }}/${{ strategy.job-total }}"]
+SHARD_MATRIX_RE = re.compile(r"^        shard: \[(\d+(?:, \d+)*)\]$")
+FINAL_STEPS = ["Checkout", "Download shard timings", "Join the shards", "Upload suite timing"]
+SHARD_STEPS = ["Checkout", "Install Nix", "Run agent workflow tests", "Upload shard timing"]
+EVALUATION_RUNS = {"Agent Workflow Tests": JOIN}
+# Lines of a required job `green_without_work` finds and the job is nonetheless allowed to carry.
+ALLOWED_GREEN_LINES = {"Agent Workflow Tests": (FINAL_JOB_NEEDS,)}
 
 # The step that compares a pull request's suite timing report with main's baseline.
 COMPARE = ('PYTHONPATH=python python3 -m agent_tools.delivery.suite_timing compare '
@@ -398,11 +420,136 @@ def conformance_job_problems(path=CONFORMANCE_WORKFLOW):
     return problems
 
 
-def green_without_work(lines, evaluation_run):
+def mutate_job(lines, job, anchor, replacement):
+    """`lines` with the first `anchor` line within the job `job` replaced by `replacement`."""
+    start = lines.index(f"  {job}:")
+    end = next((index for index in range(start + 1, len(lines))
+                if JOB_KEY_RE.match(lines[index]) or TOP_LEVEL_KEY_RE.match(lines[index])),
+               len(lines))
+    index = lines.index(anchor, start, end)
+    return lines[:index] + replacement + lines[index + 1:]
+
+
+def _code(step):
+    """The step's lines that are neither blank nor comments."""
+    return [line for line in step if line.strip() and not line.lstrip().startswith("#")]
+
+
+def final_job_problems(path=WORKFLOW):
+    """Why the required `Agent Workflow Tests` job could report green without every shard
+    having passed, or fail to publish the joined report, or [].
+    """
+    problems = []
+    if job_names(path).get("Agent Workflow Tests") != "agent-workflow-tests":
+        problems.append("the job is not named Agent Workflow Tests")
+    job = job_blocks(path)["agent-workflow-tests"]
+    if job_if_expression("agent-workflow-tests", path) != FINAL_JOB_IF:
+        problems.append("the job if: is not the always() condition")
+    if [line for line in job if line.startswith("    needs:")] != [FINAL_JOB_NEEDS]:
+        problems.append("the job does not need the shard job alone")
+    if any(RENAMING_KEY_RE.match(line) for line in job):
+        problems.append("a job-level strategy: or uses:")
+    if job_permission_lines(job):
+        problems.append("a job-level permissions:")
+    steps = step_blocks("agent-workflow-tests", path)
+    if list(steps) != FINAL_STEPS:
+        return [*problems, f"steps are {list(steps)}"]
+    download, join, upload = (steps[name] for name in FINAL_STEPS[1:])
+    shards_dir = with_value(download, "path")
+    report = with_value(upload, "path")
+    if with_value(download, "pattern") != "suite-timing-shard-*":
+        problems.append("the download pattern is not the shard artifacts")
+    if _code(join) != ["      - name: Join the shards", "        env:",
+                       "          SHARDS_RESULT: ${{ needs.agent-workflow-tests-shard.result }}",
+                       f"        run: {JOIN}"]:
+        problems.append(f"the join step is {_code(join)}")
+    for flag, value in (("--workflow", ".github/workflows/ci.yaml"), ("--shard-job", SHARD_JOB),
+                        ("--shards-dir", shards_dir), ("--out", report)):
+        if f"{flag} {value} " not in JOIN:
+            problems.append(f"the join {flag} is not {value}")
+    if UPLOAD_AFTER_EVALUATION_IF not in upload or UPLOAD_ACTION not in upload:
+        problems.append("the upload is not an upload after the join")
+    if "          if-no-files-found: error" not in upload:
+        problems.append("the upload tolerates a missing report")
+    if with_value(upload, "name") != "suite-timing":
+        problems.append("the upload is not named suite-timing")
+    offenders = green_without_work(job, JOIN, ALLOWED_GREEN_LINES["Agent Workflow Tests"])
+    if offenders:
+        problems.append(f"green without work: {offenders}")
+    return problems
+
+
+def shard_job_problems(path=WORKFLOW):
+    """Why the shard job could report green without running its share of the suite, or [].
+
+    The matrix list is the one declaration of the shard count: it must be `1..N` for `N >= 2`,
+    and the join reads the same `N` from the workflow.
+    """
+    problems = []
+    numbers = None
+    if job_names(path).get(SHARD_JOB_NAME) != SHARD_JOB:
+        problems.append("the job is not named Agent Workflow Tests Shard <shard>")
+    job = job_blocks(path)[SHARD_JOB]
+    if job_if_expression(SHARD_JOB, path) != "github.event_name != 'schedule'":
+        problems.append("the job if: is not the schedule guard")
+    for line in ("    runs-on: ubuntu-24.04", "    timeout-minutes: 45"):
+        if line not in job:
+            problems.append(f"the job lacks {line.strip()}")
+    if "    strategy:" not in job:
+        problems.append("the job has no strategy")
+    else:
+        block = []
+        for line in job[job.index("    strategy:") + 1:]:
+            if line.strip() and not line.startswith("      "):
+                break
+            block.append(line)
+        block = _code(block)
+        listed = SHARD_MATRIX_RE.match(block[2]) if len(block) == 3 else None
+        if block[:2] != ["      fail-fast: false", "      matrix:"] or listed is None:
+            problems.append(f"the strategy is {block}")
+        else:
+            numbers = [int(number) for number in listed.group(1).split(", ")]
+            if numbers != list(range(1, len(numbers) + 1)) or len(numbers) < 2:
+                problems.append(f"the matrix shards are {numbers}")
+    try:
+        declared = suite_timing.declared_shard_count("\n".join(workflow_lines(path)), SHARD_JOB)
+    except suite_timing.ReportError as error:
+        problems.append(f"the join cannot read the shard count: {error}")
+    else:
+        if declared != len(numbers or []):
+            problems.append("the join reads another shard count than the matrix lists")
+    steps = step_blocks(SHARD_JOB, path)
+    if list(steps) != SHARD_STEPS:
+        return [*problems, f"steps are {list(steps)}"]
+    if "          fetch-depth: 0" not in steps["Checkout"]:
+        problems.append("the checkout does not fetch the full history")
+    suite, upload = steps["Run agent workflow tests"], steps["Upload shard timing"]
+    if f"        run: {SUITE_INVOCATION}" not in suite:
+        problems.append("the suite step does not run the suite")
+    if step_env(suite) != SHARD_ENV:
+        problems.append(f"the suite env is {step_env(suite)}")
+    if any(line.startswith("        if:") for line in suite):
+        problems.append("the suite step has an if:")
+    if with_value(upload, "name") != SHARD_ARTIFACT:
+        problems.append("the upload name is not the shard artifact")
+    if with_value(upload, "path") != "suite-timing/suite-timing.json":
+        problems.append("the upload path is not the report path")
+    if UPLOAD_AFTER_EVALUATION_IF not in upload or UPLOAD_ACTION not in upload:
+        problems.append("the upload is not an upload after the suite")
+    if "          if-no-files-found: error" not in upload:
+        problems.append("the upload tolerates a missing report")
+    offenders = green_without_work(job, SUITE_INVOCATION)
+    if offenders:
+        problems.append(f"green without work: {offenders}")
+    return problems
+
+
+def green_without_work(lines, evaluation_run, allowed: Sequence[str] = ()):
     """The stripped lines of a job that let it conclude success without its steps running.
 
     One line is allowed: `UPLOAD_AFTER_EVALUATION_IF` on an upload step that follows a
-    step running `evaluation_run`. Without an `evaluation_run`, nothing is allowed.
+    step running `evaluation_run`. Without an `evaluation_run`, nothing is allowed. A line
+    in `allowed` is skipped as it stands.
     """
     steps = [[]]
     for line in lines:
@@ -415,7 +562,7 @@ def green_without_work(lines, evaluation_run):
             f"        run: {evaluation_run}" in earlier for earlier in steps[:index]
         )
         for line in step:
-            if not GREEN_WITHOUT_WORK_RE.match(line):
+            if not GREEN_WITHOUT_WORK_RE.match(line) or line in allowed:
                 continue
             if line == UPLOAD_AFTER_EVALUATION_IF and runs_before and UPLOAD_ACTION in step:
                 continue
@@ -455,37 +602,74 @@ def required_contexts():
 
 
 class WorkflowShape(unittest.TestCase):
-    def test_agent_workflow_tests_job_runs_the_whole_suite_and_fails_with_it(self):
-        """Issue 608: the suite gates merges, so its job must fail when a test fails."""
-        self.assertEqual("agent-workflow-tests", job_names().get("Agent Workflow Tests"))
-        body = job_body("agent-workflow-tests")
-        self.assertIn("runs-on: ubuntu-24.04", body)
-        self.assertIn("timeout-minutes: 45", body)
-        self.assertNotIn("continue-on-error", body)
-        steps = step_blocks("agent-workflow-tests")
+    def test_the_required_job_passes_only_when_every_shard_passed(self):
+        """The required job runs whatever the shards concluded and joins their reports."""
+        lines = workflow_lines()
+        job = "agent-workflow-tests"
+        name = "    name: Agent Workflow Tests"
+        join_run = f"        run: {JOIN}"
+        join_step = "      - name: Join the shards"
+        job_if = f"    if: {FINAL_JOB_IF}"
+        mutations = {
+            "job if without always": (job_if, ["    if: github.event_name != 'schedule'"]),
+            "job if on cancelled": (
+                job_if, ["    if: ${{ !cancelled() && github.event_name != 'schedule' }}"]),
+            "needs dropped": (FINAL_JOB_NEEDS, []),
+            "needs another job": (FINAL_JOB_NEEDS, ["    needs: nix-eval"]),
+            "join replaced": (join_run, ["        run: true"]),
+            "join of another job": (join_run, [join_run.replace(SHARD_JOB, "other")]),
+            "result dropped": (
+                "          SHARDS_RESULT: ${{ needs.agent-workflow-tests-shard.result }}", []),
+            "join failure ignored": (join_run, [join_run, "        continue-on-error: true"]),
+            "join skipped": (join_step, [join_step, "        if: always()"]),
+            "job strategy": (name, [name, "    strategy:", "      fail-fast: false"]),
+            "download pattern": ("          pattern: suite-timing-shard-*",
+                                 ["          pattern: suite-timing-*"]),
+            "upload renamed": ("          name: suite-timing", ["          name: suite-timing-joined"]),
+        }
+        self.assertEqual([], final_job_problems())
+        for label, (anchor, replacement) in mutations.items():
+            with self.subTest(mutation=label):
+                mutated = mutate_job(lines, job, anchor, replacement)
+                with mock.patch(f"{__name__}.workflow_lines", lambda path=None: mutated):
+                    self.assertNotEqual([], final_job_problems())
+        self.assertEqual(EXPECTED_PROTECTION_PAYLOAD, payload())
+
+    def test_the_shard_jobs_run_the_whole_suite_between_them(self):
+        """The shards are one matrix job: all of them run, none can fail unreported, and the
+        join reads the shard count from the one place it is declared."""
+        lines = workflow_lines()
+        self.assertEqual([], shard_job_problems())
+        pattern = with_value(step_blocks("agent-workflow-tests")["Download shard timings"], "pattern")
+        self.assertTrue(SHARD_ARTIFACT.startswith(pattern.removesuffix("*")))
+        rendered = (SHARD_ARTIFACT.replace("${{ matrix.shard }}", "2")
+                    .replace("${{ github.run_attempt }}", "1").replace("${{ job.status }}", "failure"))
+        self.assertTrue(suite_timing.SHARD_ARTIFACT_RE.fullmatch(rendered))
+        listed = [line for line in lines if SHARD_MATRIX_RE.match(line)]
         self.assertEqual(
-            ["Checkout", "Install Nix", "Run agent workflow tests", "Upload suite timing"],
-            list(steps),
-        )
-        # Issue 436: suite modules build fixtures from pinned ancestor commits and
-        # refuse to skip, so the checkout fetches history.
-        self.assertIn("          fetch-depth: 0", steps["Checkout"])
-        suite = steps["Run agent workflow tests"]
-        self.assertIn(f"        run: {SUITE_INVOCATION}", suite)
-        self.assertEqual(
-            ['SUITE_RUNNER_JOBS: "4"', "SUITE_RUNNER_REPORT: suite-timing/suite-timing.json"],
-            step_env(suite),
-        )
-        self.assertEqual([], [line for line in suite if line.startswith("        if:")])
-        upload = steps["Upload suite timing"]
-        self.assertIn(UPLOAD_AFTER_EVALUATION_IF, upload)
-        self.assertIn(UPLOAD_ACTION, upload)
-        self.assertIn("          if-no-files-found: error", upload)
-        self.assertEqual("suite-timing", with_value(upload, "name"))
-        self.assertEqual(
-            step_env(suite)[1].removeprefix("SUITE_RUNNER_REPORT: "),
-            with_value(upload, "path"),
-        )
+            len(SHARD_MATRIX_RE.match(listed[0]).group(1).split(", ")),
+            suite_timing.declared_shard_count(WORKFLOW.read_text(), SHARD_JOB))
+        fail_fast = "      fail-fast: false"
+        suite_run = f"        run: {SUITE_INVOCATION}"
+        shard_line = "          SUITE_RUNNER_SHARD: ${{ matrix.shard }}/${{ strategy.job-total }}"
+        mutations = {
+            "fail-fast dropped": (fail_fast, []),
+            "shards serialised": (fail_fast, [fail_fast, "      max-parallel: 1"]),
+            "a shard missing": ("        shard: [1, 2, 3, 4]", ["        shard: [1, 2, 4]"]),
+            "one shard": ("        shard: [1, 2, 3, 4]", ["        shard: [1]"]),
+            "shard line dropped": (shard_line, []),
+            "shard count fixed": (shard_line, [shard_line.replace("${{ strategy.job-total }}", "4")]),
+            "artifact without attempt": (
+                f"          name: {SHARD_ARTIFACT}", ["          name: suite-timing-shard-${{ matrix.shard }}"]),
+            "suite failure ignored": (suite_run, [suite_run, "        continue-on-error: true"]),
+            "suite replaced": (suite_run, ["        run: true"]),
+            "job skipped": ("    if: github.event_name != 'schedule'", ["    if: false"]),
+        }
+        for label, (anchor, replacement) in mutations.items():
+            with self.subTest(mutation=label):
+                mutated = mutate_job(lines, SHARD_JOB, anchor, replacement)
+                with mock.patch(f"{__name__}.workflow_lines", lambda path=None: mutated):
+                    self.assertNotEqual([], shard_job_problems())
 
     def test_only_an_upload_after_the_evaluation_may_run_when_it_failed(self):
         """ADR-delivery-015 D8: the one step `if:` a required job may carry."""
@@ -516,10 +700,13 @@ class WorkflowShape(unittest.TestCase):
             ("a failure ignored", failure_ignored, "S", ["continue-on-error: true"]),
             ("no evaluation run", base, None, ["if: ${{ !cancelled() }}"]),
             ("a needs", needing, "S", ["needs: other"]),
+            ("an allowed needs", [*base, FINAL_JOB_NEEDS], "S", []),
+            ("another needs beside an allowed one", needing, "S", ["needs: other"]),
         )
         for label, lines, evaluation_run, expected in cases:
             with self.subTest(case=label):
-                self.assertEqual(expected, green_without_work(lines, evaluation_run))
+                self.assertEqual(
+                    expected, green_without_work(lines, evaluation_run, (FINAL_JOB_NEEDS,)))
 
     def test_suite_timing_jobs_keep_and_compare_the_report(self):
         """Issue 1385: the report the suite job uploads reaches the baseline and the
@@ -579,7 +766,8 @@ class WorkflowShape(unittest.TestCase):
             self.assertFalse(
                 any(line.startswith("    paths") for line in trigger_block(trigger))
             )
-        self.assertEqual("github.event_name != 'schedule'", job_if_expression("agent-workflow-tests"))
+        self.assertEqual(FINAL_JOB_IF, job_if_expression("agent-workflow-tests"))
+        self.assertEqual("github.event_name != 'schedule'", job_if_expression(SHARD_JOB))
 
     def test_workflow_uses_only_minimum_permissions(self):
         self.assertEqual(EXPECTED_WORKFLOW_PERMISSIONS, workflow_permissions())
@@ -703,7 +891,8 @@ class WorkflowShape(unittest.TestCase):
             expression = job_if_expression(key, path)
             self.assertIn(
                 expression,
-                (None, "github.event_name != 'schedule'"),
+                (FINAL_JOB_IF,) if context == "Agent Workflow Tests"
+                else (None, "github.event_name != 'schedule'"),
                 f"job {key!r} in {path.name} backs required context {context!r} and "
                 f"carries an unreviewed `if:` ({expression!r}); if it can skip a "
                 f"pull request, that PR blocks forever on a context that never "
@@ -724,7 +913,8 @@ class WorkflowShape(unittest.TestCase):
         for context in contexts:
             self.assertIn(context, jobs)
             path, key = jobs[context]
-            offenders = green_without_work(job_blocks(path)[key], EVALUATION_RUNS.get(context))
+            offenders = green_without_work(job_blocks(path)[key], EVALUATION_RUNS.get(context),
+                                           ALLOWED_GREEN_LINES.get(context, ()))
             self.assertEqual(
                 [],
                 offenders,
@@ -755,7 +945,8 @@ class WorkflowShape(unittest.TestCase):
         self.assertIn(EVALUATED_ATTRIBUTE, nix_body)
         suite_path, suite_key = jobs["Agent Workflow Tests"]
         self.assertEqual(WORKFLOW, suite_path)
-        self.assertIn(SUITE_INVOCATION, job_body(suite_key, suite_path))
+        self.assertIn(JOIN, job_body(suite_key, suite_path))
+        self.assertIn(SUITE_INVOCATION, job_body(SHARD_JOB, suite_path))
         conformance_path, conformance_key = jobs["Conformance"]
         self.assertEqual(CONFORMANCE_WORKFLOW, conformance_path)
         self.assertEqual("conformance", conformance_key)
