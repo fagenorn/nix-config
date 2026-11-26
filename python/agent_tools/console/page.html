@@ -555,6 +555,13 @@ html:has(#viewer:not([hidden])) { overflow: hidden; }
   .sprint-checks .wait { min-height: 44px; }
   .sprint-checks .live-fault { min-height: 44px; }
 }
+@media (min-width: 901px) {
+  .desk-grid.work-wide { grid-template-columns: minmax(0, 1fr); }
+  .desk-grid.work-wide .side { margin-top: 48px; }
+  .desk-grid.work-wide .sprint-blocks { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 24px; align-items: start; }
+  .desk-grid.work-wide .sprint-blocks > .overlap { grid-column: 1 / -1; }
+  .desk-grid.work-wide #projects > :not(.sprint-blocks), .desk-grid.work-wide .side > :not(#projects) { max-width: 44rem; }
+}
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .001ms !important; animation-delay: 0s !important; transition-duration: .001ms !important; }
 }
@@ -3150,6 +3157,15 @@ function renderStatement(view) {
   box.replaceChildren(...nodes);
 }
 const TICK_MS = 30000;
+const EMPTY_LEFT_PX = 900;
+function deskWide(mainBottom, sideBottom) { return sideBottom - mainBottom > EMPTY_LEFT_PX; }
+function layDesk() {
+  const grid = document.querySelector(".desk-grid");
+  const main = grid && grid.querySelector(":scope > main"), side = grid && grid.querySelector(":scope > .side");
+  if (!main || !side) return;
+  grid.classList.remove("work-wide");
+  grid.classList.toggle("work-wide", deskWide(main.getBoundingClientRect().bottom, side.getBoundingClientRect().bottom));
+}
 const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 function pad(n) {
@@ -5118,9 +5134,7 @@ function dropBriefState(id, state, briefs) {
     clearTimeout(state.timer);
     state.timer = null;
     state.phase = "choosing";
-    if (briefs.some((b) => b.sprint_id === state.sprint_id && b.version > state.version)) {
-      replaced.set(state.sprint_id, state.version);
-    }
+    if (briefs.some((b) => b.sprint_id === state.sprint_id && b.version > state.version)) replaced.set(state.sprint_id, state.version);
   }
   if (!sending(state)) answers.delete(id);
 }
@@ -5446,9 +5460,7 @@ function closingReport(sprint) {
   if (typeof closing.counts_text === "string") box.appendChild(el("p", "closing-counts", closing.counts_text));
   for (const [label, key] of [["Landed", "landed"], ["Held", "held"], ["Dropped", "dropped"]]) {
     const numbers = Array.isArray(closing[key]) ? closing[key] : [];
-    if (numbers.length > 0) {
-      box.appendChild(el("p", "closing-" + key, label + ": " + numbers.map((n) => "#" + n).join(", ")));
-    }
+    if (numbers.length > 0) box.appendChild(el("p", "closing-" + key, label + ": " + numbers.map((n) => "#" + n).join(", ")));
   }
   const mode = permissionNote(sprint);
   if (mode !== null) box.appendChild(mode);
@@ -5579,9 +5591,7 @@ function drawProjects(view) {
       asked.add(project.project_id);
       askLatest.set(project.project_id, project);
       for (const thread of askThreads(project)) followLatest.set(followKey(project.project_id, thread.id), thread);
-      for (const notice of Array.isArray(project.notices) ? project.notices : []) {
-        listed.add(noticeKey(project.project_id, notice.id));
-      }
+      for (const notice of Array.isArray(project.notices) ? project.notices : []) listed.add(noticeKey(project.project_id, notice.id));
     }
   }
   for (const id of [...noticeDrafts.keys()]) {
@@ -5872,9 +5882,7 @@ async function sendGoal() {
       headers: { "X-Console-Token": token, "Content-Type": "application/json" },
       body: JSON.stringify({ project_id: project, goal: draft.text }),
     });
-    if (response.status !== 204) {
-      reason = (await response.text()).trim() || "HTTP " + response.status;
-    }
+    if (response.status !== 204) reason = (await response.text()).trim() || "HTTP " + response.status;
   } catch (error) {
     console.error(error);
     reason = "the console did not answer";
@@ -6255,9 +6263,7 @@ function changeBox(registration, entry, change) {
       // Typing replaces a chosen option as the answer.
       if (change.choice !== null) {
         change.choice = null;
-        for (const button of picks) {
-          button.setAttribute("aria-pressed", "false");
-        }
+        for (const button of picks) button.setAttribute("aria-pressed", "false");
       }
       send.disabled = !ready();
     });
@@ -6495,16 +6501,11 @@ function renderGoal() {
 // The register's fold keeps its own state per repository (registerMore), so the key-wide restore below leaves it out.
 const draftMoreKey = "draft-more";
 function render(view) {
-  if (guestDoor) {
-    renderGuest(view);
-    return;
-  }
-  holdPictures(() => {
+  if (guestDoor) renderGuest(view);
+  else holdPictures(() => {
     spendNow = spendIndex(view.spend);
     const wasOpen = new Set();
-    for (const fold of document.querySelectorAll("details[open]")) {
-      if (fold.dataset.key !== draftMoreKey) wasOpen.add(fold.dataset.key);
-    }
+    for (const fold of document.querySelectorAll("details[open]")) if (fold.dataset.key !== draftMoreKey) wasOpen.add(fold.dataset.key);
     renderStatement(view);
     recentProjects = view.recent_projects || [];
     renderGoal();
@@ -6518,10 +6519,9 @@ function render(view) {
     renderProjects(view);
     renderUnmanaged(view);
     renderRegister(view);
-    for (const fold of document.querySelectorAll("details")) {
-      if (wasOpen.has(fold.dataset.key)) fold.open = true;
-    }
+    for (const fold of document.querySelectorAll("details")) if (wasOpen.has(fold.dataset.key)) fold.open = true;
   });
+  layDesk();
 }
 function tick() {
   for (const t of document.querySelectorAll("time")) t.textContent = timeWords(t.dataset.form, t.dataset.stamp);
@@ -6731,9 +6731,7 @@ function poolRemove(row) {
 const POOL_REMOVE_NOTE = "Remove your account from the pool? It is signed out first. Each manager on it moves to another account, or waits for one with room; any other session keeps running.";
 // On his own `yours` row only: Sign out posts at once, Remove asks first.
 function poolChangeControls(item, row) {
-  if (poolRemoveOpen.has(row.number) && poolRemoveOpen.get(row.number) !== row.ident) {
-    poolRemoveOpen.delete(row.number);
-  }
+  if (poolRemoveOpen.has(row.number) && poolRemoveOpen.get(row.number) !== row.ident) poolRemoveOpen.delete(row.number);
   const state = poolChange.get(row.number);
   const sending = state !== undefined && state.phase === "sending";
   const mark = (button) => {
@@ -7003,13 +7001,12 @@ function endHold() {
   if (heldSince === null) return;
   const held = Date.now() - heldSince;
   heldSince = null;
-  if (held > LOOK_MS && !guestDoor) {
-    fetch("/api/looked", { method: "POST", headers: { "X-Console-Token": token }, keepalive: true }).catch(() => {});
-  }
+  if (held > LOOK_MS && !guestDoor) fetch("/api/looked", { method: "POST", headers: { "X-Console-Token": token }, keepalive: true }).catch(() => {});
 }
 window.addEventListener("focus", () => { if (heldSince === null) heldSince = Date.now(); });
 window.addEventListener("blur", endHold);
 window.addEventListener("pagehide", endHold);
+window.addEventListener("resize", layDesk);
 document.addEventListener("visibilitychange", () => { if (document.visibilityState === "hidden") endHold(); });
 document.addEventListener("keydown", (event) => {
   if (event.ctrlKey || event.altKey || event.metaKey || event.repeat || lastView === null) return;

@@ -119,5 +119,116 @@ class SevenSprintsSeedTest(unittest.TestCase):
                     capture.assert_not_called()
 
 
+class DeskLayoutTest(unittest.TestCase):
+    """The Work column's full-width layout, read in Chromium."""
+
+    READ = """() => {
+        const grid = document.querySelector(".desk-grid");
+        const style = getComputedStyle(grid);
+        const box = grid.getBoundingClientRect();
+        const mid = (box.left + parseFloat(style.paddingLeft) + box.right - parseFloat(style.paddingRight)) / 2;
+        const rect = (node) => node.getBoundingClientRect();
+        const blocks = [...document.querySelectorAll("#projects li.sprint")].map((node) => {
+            const r = rect(node);
+            return {top: r.top, bottom: r.bottom, left: r.left, width: r.width};
+        });
+        const lefts = [...document.querySelectorAll(".desk-grid > main > *, #projects li.sprint")]
+            .map(rect).filter((r) => r.width > 0 && r.height > 0 && r.left < mid);
+        let gap = 0;
+        if (blocks.length) {
+            const top = Math.min(...blocks.map((b) => b.top));
+            const bottom = Math.max(...blocks.map((b) => b.bottom));
+            const clipped = lefts.map((r) => [Math.max(r.top, top), Math.min(r.bottom, bottom)])
+                .filter((r) => r[1] > r[0]).sort((a, b) => a[0] - b[0]);
+            let cursor = top;
+            for (const [from, to] of clipped) {
+                if (from - cursor > gap) gap = from - cursor;
+                cursor = Math.max(cursor, to);
+            }
+            if (bottom - cursor > gap) gap = bottom - cursor;
+        }
+        const wide = grid.classList.contains("work-wide");
+        const height = document.documentElement.scrollHeight;
+        grid.classList.remove("work-wide");
+        const baseHeight = document.documentElement.scrollHeight;
+        const bottomOf = (selector) => rect(grid.querySelector(selector)).bottom;
+        const overhang = bottomOf(":scope > .side") - bottomOf(":scope > main");
+        if (wide) grid.classList.add("work-wide");
+        return {mid, blocks, gap, wide, height, baseHeight, overhang};
+    }"""
+    IS_WIDE = "document.querySelector('.desk-grid').classList.contains('work-wide')"
+
+    def chromium(self):
+        return controls.ControlTargetTest.chromium(self)
+
+    def desk(self, browser, state, width):
+        return open_desk(self, browser, state, width)
+
+    def test_one_card_and_seven_sprints_leave_no_tall_empty_left_and_a_shorter_page_at_1440(self) -> None:
+        page = self.desk(self.chromium(), "seven-sprints", 1440)
+        got = page.evaluate(self.READ)
+        self.assertEqual(len(got["blocks"]), 7)
+        self.assertLessEqual(got["gap"], 900, f"the gap in {got['gap']}")
+        self.assertLess(got["height"], got["baseHeight"])
+
+    def test_the_wide_rule_turns_at_900_px(self) -> None:
+        page = self.desk(self.chromium(), "seven-sprints", 1440)
+        self.assertEqual(page.evaluate(
+            "[EMPTY_LEFT_PX, deskWide(0, 900), deskWide(0, 901), deskWide(100, 1001), deskWide(100, 1000)]"),
+            [900, False, True, True, False])
+
+    def test_the_desk_goes_wide_exactly_when_its_work_would_run_over_900_px_below_the_cards(self) -> None:
+        browser = self.chromium()
+        wides = []
+        for state in ("seven-sprints", "live-several", "inbox-card", "nothing-running"):
+            with self.subTest(state=state):
+                got = self.desk(browser, state, 1440).evaluate(self.READ)
+                wides.append(got["wide"])
+                self.assertEqual(got["wide"], got["overhang"] > 900, f"overhang {got['overhang']}")
+                if state == "seven-sprints":
+                    lefts = sorted({round(b["left"]) for b in got["blocks"]})
+                    self.assertEqual(len(lefts), 2, lefts)
+                    self.assertLess(lefts[0], got["mid"])
+        self.assertIn(True, wides)
+        self.assertIn(False, wides)
+
+    def test_the_phone_width_keeps_one_column(self) -> None:
+        browser = self.chromium()
+        for width in (390, 480):
+            with self.subTest(width=width):
+                got = self.desk(browser, "seven-sprints", width).evaluate(self.READ)
+                self.assertEqual(len({round(b["left"]) for b in got["blocks"]}), 1)
+                self.assertLessEqual(abs(got["height"] - got["baseHeight"]), 1)
+                for block in got["blocks"]:
+                    self.assertAlmostEqual(block["width"], got["blocks"][0]["width"], delta=1)
+
+    def test_a_resize_lays_the_desk_out_again(self) -> None:
+        page = self.desk(self.chromium(), "seven-sprints", 1440)
+        self.assertTrue(page.evaluate(self.IS_WIDE))
+        page.evaluate("document.querySelector('.desk-grid > main').appendChild(Object.assign("
+                      "document.createElement('div'), {className: 'test-tall'})).style.height = '40000px'")
+        page.set_viewport_size({"width": 1441, "height": shots.HEIGHT})
+        page.wait_for_function(
+            "() => !document.querySelector('.desk-grid').classList.contains('work-wide')", timeout=5000)
+
+    def test_an_overlap_line_spans_both_block_columns(self) -> None:
+        page = self.desk(self.chromium(), "seven-sprints", 1440)
+        page.evaluate("document.querySelector('#projects li.sprint').after(Object.assign("
+                      "document.createElement('li'), {className: 'overlap', textContent: 'x'}))")
+        self.assertTrue(page.evaluate(self.IS_WIDE))
+        overlap = page.evaluate("document.querySelector('#projects li.overlap').getBoundingClientRect().width")
+        blocks = page.evaluate("document.querySelector('.sprint-blocks').getBoundingClientRect().width")
+        self.assertLessEqual(abs(overlap - blocks), 1)
+
+    def test_the_work_columns_other_parts_keep_a_reading_width(self) -> None:
+        page = self.desk(self.chromium(), "seven-sprints", 1440)
+        self.assertTrue(page.evaluate(self.IS_WIDE))
+        widths = page.evaluate("""[...document.querySelectorAll(
+            "#projects > :not(.sprint-blocks), .desk-grid > .side > :not(#projects)")]
+            .map((node) => node.getBoundingClientRect().width).filter((width) => width > 0)""")
+        self.assertTrue(widths)
+        self.assertLessEqual(max(widths), 704.5, widths)
+
+
 if __name__ == "__main__":
     unittest.main()
