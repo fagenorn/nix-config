@@ -13,7 +13,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
-import time
+import sys
 import tracemalloc
 import unittest
 from pathlib import Path
@@ -35,6 +35,25 @@ HELLO_FAILURE = "needs-dev-shell: hello not found"
 PASSED = "needs-dev-shell....Passed"
 MEMORY_DEPTH = 20_000
 MEMORY_LIMIT = 64 * 1024 * 1024
+
+
+def lines_run(text: str) -> int:
+    """The source lines of `hook_install` that run while `declares_hooks` reads `text`."""
+    count = 0
+    own = hook_install.__file__
+
+    def trace(frame, event, argument):
+        nonlocal count
+        if event == "line":
+            count += 1
+        return trace if frame.f_code.co_filename == own else None
+
+    sys.settrace(trace)
+    try:
+        hook_install.declares_hooks(text)
+    finally:
+        sys.settrace(None)
+    return count
 
 INSTALLER_SCRIPT = r"""
 echo "dev-shell sees global hooks path: $(git config --global --get core.hooksPath || echo none)"
@@ -295,6 +314,8 @@ class HookInstallRuleTest(unittest.TestCase):
                      "{ lib, ... }@args: with lib; { git-hooks.hooks.x.enable = true; }",
                      '{ git-hooks.hooks.shellcheck."enable" = true; }',
                      '{ "git-hooks".hooks."x"."enable" = true; }',
+                     "{ ... }: ({ git-hooks.hooks.shellcheck.enable = true; })",
+                     "{ pkgs, ... }: (({ git-hooks.hooks.x.enable = true; }))",
                      '{ git-hooks = { "hooks"."x" = { "enable" = true; }; }; }',
                      '{ env.MSG = "${let a = 1; git-hooks.hooks.x.enable = true; in a}"; '
                      "git-hooks.hooks.y.enable = true; }",
@@ -333,6 +354,11 @@ class HookInstallRuleTest(unittest.TestCase):
                      "{ s = ''\n  git-hooks.hooks.x.enable = true;\n''; }",
                      "{ git-hooks.hooks.shellcheck = { enable = true; } // { enable = false; }; }",
                      "{ git-hooks.hooks.x = { enable = true; }.enable; }",
+                     "{ ... }: { git-hooks.hooks.shellcheck.enable = true; } // { git-hooks = {}; }",
+                     "{ ... }: ({ git-hooks.hooks.x.enable = true; }) // { git-hooks = {}; }",
+                     "{ ... }: ({ git-hooks.hooks.x.enable = true; } // { git-hooks = {}; })",
+                     "{ ... }: ({ git-hooks.hooks.x.enable = true; }).config",
+                     "{ git-hooks.hooks.x.enable = true; } // { }",
                      "{ git-hooks = { hooks.x = { enable = true; } // { }; }; }",
                      '{ git-hooks."hooks.x".enable = true; }',
                      '{ env.MSG = "${let a = 1; git-hooks.hooks.x.enable = true; in "ok"}"; }',
@@ -344,31 +370,42 @@ class HookInstallRuleTest(unittest.TestCase):
     def test_declares_hooks_reads_deeply_nested_attribute_sets_in_linear_time(self):
         off = " git-hooks.hooks.x.enable = false;"
         enabled = " git-hooks.hooks.x.enable = true;"
-        for depth in (5_000, MEMORY_DEPTH):
+
+        def build(depth, tail, expected):
             nest = "a = { " * depth + "}; " * depth
-            for text, expected in (
-                    ("{ pkgs, ... }: {" + off + " " + nest + " }", False),
-                    ("{ pkgs, ... }: {" + off + " " + nest + enabled + " }", True)):
+            return "{ pkgs, ... }: {" + off + " " + nest + tail + " }", expected
+
+        for tail, expected in (("", False), (enabled, True)):
+            for depth in (5_000, MEMORY_DEPTH):
+                text, _ = build(depth, tail, expected)
                 self.assertLessEqual(len(text), hook_install.TEXT_LIMIT)
-                started = time.monotonic()
-                self.assertEqual(hook_install.declares_hooks(text), expected)
-                self.assertLess(time.monotonic() - started, 1.0, depth)
+                self.assertEqual(hook_install.declares_hooks(text), expected, depth)
+            self.assertScalesLinearly(lambda size, t=tail, e=expected: build(size, t, e)[0], 1_000, 4_000)
 
     def test_declares_hooks_reads_generated_nested_text_in_linear_time(self):
         enabled = " git-hooks.hooks.x.enable = true;"
         off = " git-hooks.hooks.x.enable = false;"
-        for size in (80_000, hook_install.TEXT_LIMIT - 1_000):
+
+        def cases(body, size):
+            filler = body * (size // len(body))
             levels = min(size // 2, MEMORY_DEPTH)
-            for body in ("{ } ", "[ ] ", "( ) ", "{ a = [ { } ]; } "):
-                filler = body * (size // len(body))
-                for text, expected in (
-                        ("{ pkgs, ... }: { packages = [ " + filler + "];" + off + " }", False),
-                        ("{ pkgs, ... }: {" + off + " packages = [ " + filler + "];" + enabled + " }", True),
-                        ("{ pkgs, ... }: { x = " + "[ " * levels + "]; " + off + " }", False)):
+            return (
+                ("{ pkgs, ... }: { packages = [ " + filler + "];" + off + " }", False),
+                ("{ pkgs, ... }: {" + off + " packages = [ " + filler + "];" + enabled + " }", True),
+                ("{ pkgs, ... }: { x = " + "[ " * levels + "]; " + off + " }", False))
+
+        for body in ("{ } ", "[ ] ", "( ) ", "{ a = [ { } ]; } "):
+            for size in (80_000, hook_install.TEXT_LIMIT - 1_000):
+                for text, expected in cases(body, size):
                     self.assertLessEqual(len(text), hook_install.TEXT_LIMIT, (size, body))
-                    started = time.monotonic()
-                    self.assertEqual(hook_install.declares_hooks(text), expected)
-                    self.assertLess(time.monotonic() - started, 1.0, (size, body))
+                    self.assertEqual(hook_install.declares_hooks(text), expected, (size, body))
+            for index in range(3):
+                self.assertScalesLinearly(lambda size, b=body, k=index: cases(b, size)[k][0], 10_000, 40_000)
+
+    def assertScalesLinearly(self, build, small, large):
+        """Growing the input by a factor grows the lines run by under 2.5 times it; a quadratic pass squares it."""
+        ratio = lines_run(build(large)) / lines_run(build(small))
+        self.assertLess(ratio, 2.5 * (large / small), (small, large, ratio))
 
     def test_declares_hooks_peak_memory_stays_under_64_mib_on_capped_nested_input(self):
         depth = MEMORY_DEPTH

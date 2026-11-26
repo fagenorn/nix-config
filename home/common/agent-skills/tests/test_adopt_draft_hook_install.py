@@ -45,6 +45,8 @@ DRAFTED_LINE = "commits run in its development shell: devenv shell"
 ONE_LINE = "{ ... }: { git-hooks.hooks.needs-dev-shell.enable = true; }\n"
 SWITCHED_OFF = "{ ... }: {\n  git-hooks.hooks.needs-dev-shell.enable = false;\n}\n"
 SWITCHED_OFF_IN_SET = "{ ... }: {\n  git-hooks.hooks.needs-dev-shell = { enable = false; };\n}\n"
+PARENTHESIZED = "{ ... }: ({ git-hooks.hooks.shellcheck.enable = true; })\n"
+OVERRIDDEN = "{ ... }: { git-hooks.hooks.shellcheck.enable = true; } // { git-hooks = {}; }\n"
 STRINGS_BEFORE = ('{ pkgs, ... }:\n{\n  scripts.clean.exec = "rm -rf build/*";\n'
                   '  env.URL = "http://x/#a";\n  git-hooks.hooks.needs-dev-shell.enable = true;\n'
                   '  /* formatting */\n  languages.nix.enable = true;\n}\n')
@@ -137,6 +139,12 @@ class DraftedHookInstallTest(ApplyTestCase):
         row = self.registration(root, self.drafted_plan(root, fields), fields)
         self.assertEqual(self.card_lines(row)[:2], [DRAFTED_LINE, register.HOOKS_LINE])
 
+    def test_a_drafted_registration_whose_only_hook_setting_is_in_a_parenthesized_body_names_the_dev_shell(self):
+        root = self.drafted_checkout(PARENTHESIZED)
+        fields = self.drafted_fields(root)
+        row = self.registration(root, self.drafted_plan(root, fields), fields)
+        self.assertEqual(self.card_lines(row)[:2], [DRAFTED_LINE, register.HOOKS_LINE])
+
     def test_a_drafted_registration_with_a_hook_setting_after_strings_holding_comment_openers_names_the_dev_shell(
             self):
         root = self.drafted_checkout(STRINGS_BEFORE)
@@ -145,7 +153,7 @@ class DraftedHookInstallTest(ApplyTestCase):
         self.assertEqual(self.card_lines(row)[:2], [DRAFTED_LINE, register.HOOKS_LINE])
 
     def test_a_drafted_registration_whose_only_hook_setting_switches_it_off_names_no_dev_shell(self):
-        for text in (SWITCHED_OFF, SWITCHED_OFF_IN_SET):
+        for text in (SWITCHED_OFF, SWITCHED_OFF_IN_SET, OVERRIDDEN):
             with self.subTest(text=text):
                 root = self.drafted_checkout(text)
                 fields = self.drafted_fields(root)

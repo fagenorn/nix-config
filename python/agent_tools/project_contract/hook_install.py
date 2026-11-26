@@ -64,7 +64,7 @@ TOKEN = re.compile(r"""[\w'-]+|"[\w'-]*"|==|[{}()\[\];=:@.?,]|\S""")
 OPENERS, CLOSERS = "({[", ")}]"
 NAME = re.compile(r"""[\w'-]+|"[\w'-]*\"""")
 NAME_TEXT = re.compile(r"[\w'-]*")
-MODULE_LEAD = (None, ":", "@", "in", "rec", ";")
+MODULE_LEAD = (None, ":", "@", "in", "rec", ";", "(")
 HOOKS_PATH = "core.hooksPath"
 ROOTS = ("git-hooks", "pre-commit")
 DEEPEST = 5  # `config.<root>.hooks.<name>.enable`, the longest path `_switch` reads
@@ -216,6 +216,14 @@ def _closers(tokens: list[str]) -> list[int]:
     return closers
 
 
+def _tail(tokens: list[str]) -> int:
+    """The index where the run of `)` that ends `tokens` starts."""
+    end = len(tokens)
+    while end and tokens[end - 1] == ")":
+        end -= 1
+    return end
+
+
 def _path(tokens: list[str], pos: int) -> tuple[tuple[str, ...], int]:
     """The dotted attribute path at `pos` (empty when there is none) and the index after it."""
     names: list[str] = []
@@ -238,24 +246,33 @@ def _switch(path: tuple[str, ...]) -> bool:
 def declares_hooks(text: str) -> bool:
     """Whether a `devenv.nix` text explicitly switches a devenv git hook on.
 
-    Reads only `git-hooks.hooks.<name>.enable = true;` (or `pre-commit`), dotted or nested, in the top
-    set (also under `config`); all else reads as no hooks, as a false positive promises a missing install.
+    Reads only `git-hooks.hooks.<name>.enable = true;` (or `pre-commit`), dotted or nested, in the
+    whole-body set (also under `config`); all else reads as no hooks, as a false positive promises a missing install.
     """
     if not any(root in text for root in ROOTS):
         return False
     tokens = TOKEN.findall(_code(text))
     n, i = len(tokens), 0
     sets: list[tuple[str, ...]] = []  # the attribute path of each open set
-    closers: list[int] | None = None  # `_closers`, read once when a set is first assigned
+    closers: list[int] | None = None  # `_closers`, read once when a set is first met
+    tail: int | None = None  # `_tail`, read once with `closers`
     previous: str | None = None
     while i < n:
         token = tokens[i]
         if not sets:
             if token == "let":
                 i, previous = _let_end(tokens, i + 1), "in"
+            elif token == "(" and previous in MODULE_LEAD:
+                i, previous = i + 1, "("  # a parenthesized module body is the body itself
             elif token == "{" and previous in MODULE_LEAD:
-                sets.append(())
-                i, previous = i + 1, "{"
+                closers = closers or _closers(tokens)
+                tail = _tail(tokens) if tail is None else tail
+                if closers[i] + 1 < tail:
+                    i = _group_end(tokens, i)  # `// { ... }`, `.x` or an application may override it
+                    previous = tokens[i - 1]
+                else:
+                    sets.append(())
+                    i, previous = i + 1, "{"
             elif token in OPENERS:
                 i = _group_end(tokens, i)
                 previous = tokens[i - 1]
