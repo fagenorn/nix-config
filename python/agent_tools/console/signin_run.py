@@ -503,8 +503,19 @@ class _Client:
         return code
 
     def kill_group(self) -> None:
-        with contextlib.suppress(ProcessLookupError):
+        """End the client's group; a group that is gone, or no longer ours, is an ended group.
+
+        Once the leader has exited, macOS answers EPERM (not ESRCH) to a kill of a group that holds
+        none of our processes, and the group id may since belong to another. An EPERM while the
+        leader still runs, or any other error, is raised.
+        """
+        try:
             os.killpg(self.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except PermissionError:
+            if self._process.poll() is None:
+                raise
 
     def output(self) -> int | None:
         if self._master is not None:

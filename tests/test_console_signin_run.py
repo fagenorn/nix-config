@@ -15,6 +15,7 @@ import textwrap
 import threading
 import time
 import unittest
+import unittest.mock
 from contextlib import redirect_stderr
 from pathlib import Path
 
@@ -829,6 +830,64 @@ class RunTest(unittest.TestCase):
         self.assertIs(runs_for("linux"), SignIns)
         self.assertIs(runs_for("darwin"), SignIns)
         self.assertIsNone(runs_for("win32"))
+
+
+class KillGroupTest(unittest.TestCase):
+    """Ending the client's process group when the group has already gone (#1787).
+
+    macOS answers EPERM, not ESRCH, to `killpg` on a group that holds none of the caller's
+    processes, so an ended group (or one whose id was reused) must read as ended once the leader
+    has exited; a leader that still runs, or any other error, is not that.
+    """
+
+    def client(self, code):
+        client = signin_run.start_client(
+            [sys.executable, "-c", code], cwd=tempfile.gettempdir(), env=dict(os.environ))
+        self.addCleanup(client.close_output)
+        self.addCleanup(self.reap, client)
+        return client
+
+    @staticmethod
+    def reap(client):
+        with contextlib.suppress(OSError):
+            os.killpg(client.pid, 9)
+        client.wait()
+
+    def exited(self):
+        client = self.client("pass")
+        client.wait()
+        return client
+
+    def test_an_error_from_a_group_whose_leader_has_exited_is_an_ended_group(self):
+        for error in (PermissionError(1, "Operation not permitted"), ProcessLookupError(3, "x")):
+            with self.subTest(error=type(error).__name__):
+                client = self.exited()
+                with unittest.mock.patch.object(signin_run.os, "killpg", side_effect=error):
+                    client.kill_group()
+
+    def test_a_permission_error_from_a_group_whose_leader_still_runs_is_raised(self):
+        client = self.client("import time; time.sleep(60)")
+        with unittest.mock.patch.object(signin_run.os, "killpg", side_effect=PermissionError):
+            with self.assertRaises(PermissionError):
+                client.kill_group()
+
+    def test_any_other_error_is_raised_even_when_the_leader_has_exited(self):
+        client = self.exited()
+        with unittest.mock.patch.object(signin_run.os, "killpg", side_effect=OSError(22, "bad")):
+            with self.assertRaises(OSError):
+                client.kill_group()
+
+    def test_a_running_group_is_ended_with_every_process_in_it(self):
+        code = ("import subprocess, sys, time\n"
+                "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+                "print(child.pid, flush=True)\n"
+                "time.sleep(60)\n")
+        client = self.client(code)
+        grandchild = int(os.read(client.output(), 32).split()[0])
+        self.assertTrue(process_alive(grandchild))
+        client.kill_group()
+        client.wait()
+        until(self, lambda: not process_alive(grandchild), 5)
 
 
 if __name__ == "__main__":
