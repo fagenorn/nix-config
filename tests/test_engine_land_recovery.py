@@ -541,7 +541,10 @@ class ShapeTest(unittest.TestCase):
         self.assertEqual(landing_step["on"], {"done": "closing", **{name: name for name in STOPS}})
         for name in STOPS:
             stop = deliver["stops"][name]
-            self.assertEqual(stop["reenter"], "landing" if name not in ("claim", "claim-lost") else "start", name)
+            # a stop after a merge-less change is verified again; a pinned one follows an effect nothing may redo
+            wanted = ("start" if name in ("claim", "claim-lost") else
+                      "landing" if stop.get("pinned") else "verification")
+            self.assertEqual(stop["reenter"], wanted, name)
             self.assertEqual(stop["need"], "retry" if name in RETRY else "owner-decision", name)
         for name in ("merge", "unreleased-lock"):
             self.assertTrue(deliver["stops"][name]["pinned"], name)
