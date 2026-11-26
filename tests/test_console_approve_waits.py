@@ -17,6 +17,7 @@ from agent_tools.console import service
 from . import approve_case_support as case_support
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1052)
 from .approve_case_support import PENDING, awaited, reconciled
+from . import test_console_approve_service as approve_service
 from .test_console_approve_service import ApproveCase
 from .test_console_register_service import READY, Case, Fake, git, reconcile_repository
 
@@ -255,3 +256,40 @@ class ReconciledCopyTest(ApproveCase):
         root = reconciled(self.parent / "c")
         self.assertFalse((root / ".agents").exists())
         self.assertEqual(git(root, "log", "--format=%s"), "legacy\none\n")
+
+
+class RestartedRegistrationTest(ApproveCase):
+    merged = approve_service.MergedRegistrationTest.merged
+    results = approve_service.MergedRegistrationTest.results
+
+    def restarted_and_registered(self, pause=0.0):
+        fake = self.merged(approve_service.NOT_INTEGRATED)
+        self.poll("merged")
+        fake.report = approve_service.GREEN
+        if pause:
+            written = fake.register
+
+            def register_then_pause(*arguments, **operands):
+                report = written(*arguments, **operands)
+                time.sleep(pause)  # the registry is written; the `registered` row is not yet
+                return report
+
+            fake.register = register_then_pause
+        self.restart()
+        # The fake writes the registry before the service appends its `registered` row, so the
+        # listing alone can be published first: wait for the listing and the committed row together.
+        done = awaited(
+            self.svc,
+            lambda: True if (self.listed("o/r") and self.results()[-1:] == ["registered"])
+            else PENDING,
+            10, 0.05)
+        self.assertIsNot(done, PENDING, "the project was never listed with a registered row")
+        self.assertEqual(self.results()[-1:], ["registered"])
+
+    def test_a_waiting_registration_survives_a_restart_and_registers_on_the_first_look(self):
+        self.restarted_and_registered()
+
+    def test_the_restart_wait_holds_while_the_registry_is_listed_before_the_row_lands(self):
+        # The registry watcher (0.25 s) lists the project during the pause: a wait on the
+        # listing alone would return while the last row is still `waiting`.
+        self.restarted_and_registered(pause=0.6)
