@@ -38,6 +38,7 @@ The environment always sets `LANDING_BOUND_SECONDS` to 0 (no wait on a lock or a
 The replies' `merge`, `same_head`, `leave` and `upstream` effects (see the launcher stand-in) are given the
 run's worktree and bare origin when they name none. `extra_files` (relative path to text) is passed to
 `FixtureProject`: each file is committed on `main` after the adoption, outside every branch diff.
+A resumed session that answered replays its recorded answer and runs no effect again.
 `answer(step, entry)` sets `replies[step]` to `entry` with its effects filled the same way and rewrites
 the scenario file (`self.scenario`) the stub reads, so the next `deliver()` answers `step` with `entry`.
 

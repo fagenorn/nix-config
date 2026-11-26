@@ -8,6 +8,7 @@ Run: just agent-workflow-tests
 """
 
 import contextlib
+import dataclasses
 import io as stdio
 import json
 import os
@@ -16,12 +17,16 @@ import signal
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
+from unittest import mock
 from datetime import datetime, timezone
 from pathlib import Path
 
 from agent_tools.hosts.memory_floor import (
     GIB,
+    _owners,
+    build_parser,
     Io,
     Limits,
     Loop,
@@ -51,7 +56,10 @@ OWNERS = Owners(
     "anis",
     ("/Users/anis/Projects/*/.worktrees/*", "/private/tmp/verify-pending-*"),
     ((534, "_github-runner-jarbird"),),
+    agent_sessions=("claude", ".claude-unwrapped"),
 )
+MAIN = "/Users/anis/Projects/nix-config"
+SCRATCH = "/private/tmp/claude-501/scratch"
 
 
 def proc(pid, ppid, uid, cwd, gib, command="node"):
@@ -62,9 +70,23 @@ def table_of(*procs):
     return {p.pid: p for p in procs}
 
 
+def session_tree(probe_gib, **overrides):
+    """A Claude Code session: a daemon, its pty host, a spare, the Bash tool shell and a probe below it."""
+    table = table_of(
+        proc(198, 1, 501, "/", 0, ".claude-unwrapped daemon run"),
+        proc(199, 198, 501, "/", 0, "claude bg-pty-host"),
+        proc(200, 199, 501, MAIN, 1, "claude bg-spare"),
+        proc(300, 200, 501, MAIN, 0, "/bin/zsh -c source snapshot.sh"),
+        proc(301, 300, 501, SCRATCH, probe_gib, "python3 probe.py"),
+    )
+    for pid, changes in overrides.items():
+        table[int(pid)] = dataclasses.replace(table[int(pid)], **changes)
+    return table
+
+
 LIMITS = Limits(16 * GIB, 3, 5, 16 * GIB, 2 * GIB, 2, 10, 24 * GIB, 190, GIB)
 KILL_LINE = re.compile(
-    r"^2026-11-24T12:33:05\+00:00 memory_kill reason=(floor|run_bound) owner=anis root_pid=300"
+    r"^2026-11-24T12:33:05\+00:00 memory_kill reason=(floor|run_bound) owner=anis workload=agent:/Users/anis/Projects/jarbird/\.worktrees/w1 root_pid=300"
     r' root="node vitest run" processes=3 tree_gib=\d+\.\d available_before_gib=\d+\.\d'
     r" available_after_gib=\d+\.\d signals=(term|term\+kill)\n$"
 )
@@ -155,6 +177,172 @@ class SelectionTest(unittest.TestCase):
         (only,) = selected(table)
         self.assertEqual(only.pids, (302, 303, 301, 300))
         self.assertEqual(only.root_pid, 300)
+
+
+    def test_an_agent_tree_outside_every_root_is_a_workload_below_its_session(self):
+        rows = {
+            "scratch_cwd": (
+                {**session_tree(30), 302: proc(302, 301, 501, SCRATCH, 2, "python3 -c worker")},
+                {"agent:session:300": (300, {300, 301, 302}, 32 * GIB)},
+            ),
+            "main_checkout_parent": (
+                {**session_tree(30), 301: proc(301, 300, 501, MAIN, 30, "python3 probe.py")},
+                {"agent:session:300": (300, {300, 301}, 30 * GIB)},
+            ),
+            "two_shells": (
+                {
+                    **session_tree(5),
+                    310: proc(310, 200, 501, MAIN, 0, "/bin/zsh -c source snapshot.sh"),
+                    311: proc(311, 310, 501, SCRATCH, 3, "python3 other.py"),
+                },
+                {
+                    "agent:session:300": (300, {300, 301}, 5 * GIB),
+                    "agent:session:310": (310, {310, 311}, 3 * GIB),
+                },
+            ),
+            "nested_session": (
+                {
+                    **session_tree(0),
+                    302: proc(302, 301, 501, MAIN, 1, "claude -p review"),
+                    303: proc(303, 302, 501, MAIN, 0, "/bin/zsh -c source snapshot.sh"),
+                    304: proc(304, 303, 501, SCRATCH, 30, "python3 probe.py"),
+                },
+                {
+                    "agent:session:300": (300, {300, 301}, 0),
+                    "agent:session:303": (303, {303, 304}, 30 * GIB),
+                },
+            ),
+            "rooted_shell_wins": (
+                {**session_tree(30), 300: proc(300, 200, 501, W1, 0, "/bin/zsh -c source snapshot.sh")},
+                {f"agent:{W1}": (300, {300, 301}, 30 * GIB)},
+            ),
+        }
+        for name, (table, expected) in rows.items():
+            with self.subTest(name):
+                found = selected(table)
+                self.assertEqual({w.key: (w.root_pid, set(w.pids), w.size) for w in found}, expected)
+                self.assertEqual({w.owner for w in found}, {"anis"})
+                if name == "two_shells":
+                    self.assertEqual([w.key for w in found], ["agent:session:300", "agent:session:310"])
+                members = {pid for w in found for pid in w.pids}
+                self.assertFalse(members & {198, 199, 200})
+                if name == "nested_session":
+                    self.assertNotIn(302, members)
+
+    def test_protection_and_other_users_hold_below_a_session(self):
+        rows = {
+            "omlx_shell": (session_tree(30), 300, (), {}),
+            "omlx_below_probe": (
+                {**session_tree(30), 302: proc(302, 301, 501, SCRATCH, 40)}, 301, (), {"agent:session:300": {300}},
+            ),
+            "service_shell": (session_tree(30), None, (300,), {}),
+            "service_session": (session_tree(30), None, (200,), {"agent:session:300": {300, 301}}),
+            "omlx_session_and_service_child": (session_tree(30), 198, (200,), {}),
+            "other_user_probe": (session_tree(30, **{"301": {"uid": 503}}), None, (), {"agent:session:300": {300}}),
+            "other_users_session": (session_tree(30, **{"200": {"uid": 503}}), None, (), {}),
+            "no_session": (
+                table_of(
+                    proc(400, 1, 501, SCRATCH, 30, "python3 probe.py"),
+                    proc(401, 1, 501, "/", 30, "/Applications/Safari.app/Contents/MacOS/Safari"),
+                ),
+                None, (), {},
+            ),
+            "session_alone": (table_of(proc(200, 1, 501, MAIN, 50, "claude bg-spare")), None, (), {}),
+        }
+        for name, (table, omlx_pid, services, expected) in rows.items():
+            with self.subTest(name):
+                found = selected(table, omlx_pid, services)
+                self.assertEqual({w.key: set(w.pids) for w in found}, expected)
+
+    def test_a_session_executable_under_a_path_with_spaces_is_found_by_its_executable(self):
+        spaced = "/Users/anis/Agent Tools/claude"
+        table = session_tree(30, **{"200": {"command": f"{spaced} bg-spare", "executable": spaced}})
+        self.assertEqual({w.key: set(w.pids) for w in selected(table)}, {"agent:session:300": {300, 301}})
+        # An unrooted child of that spaced session joins the run bound too.
+        child = table_of(
+            dataclasses.replace(proc(200, 1, 501, MAIN, 0), command=f"{spaced} bg-spare", executable=spaced),
+            proc(300, 200, 501, SCRATCH, 30, "python3 probe.py"),
+        )
+        self.assertEqual({w.key: set(w.pids) for w in selected(child)}, {"agent:session:300": {300}})
+
+    def test_every_omlx_descendant_is_protected_through_a_service_child(self):
+        self.assertEqual(protected_pids(session_tree(30), 198, {200}), {0, 1, 198, 199, 200, 300, 301})
+
+
+class OwnersCliTest(unittest.TestCase):
+    def test_parsed_session_programs_select_a_tree_below_each_one(self):
+        args = build_parser().parse_args([
+            "enforce", "--floor-gib", "10", "--run-bound-gib", "24", "--min-tree-gib", "1",
+            "--omlx-jetsam-priority", "190", "--agent-user", "anis",
+            "--agent-root", "/Users/anis/Projects/*/.worktrees/*",
+            "--agent-session", "claude", "--agent-session", ".claude-unwrapped",
+            "--record", "/nonexistent/floor.json",
+        ])
+        with mock.patch(
+            "agent_tools.hosts.memory_floor.pwd.getpwnam", return_value=types.SimpleNamespace(pw_uid=501)
+        ):
+            owners = _owners(args)
+        self.assertEqual(owners.agent_sessions, ("claude", ".claude-unwrapped"))
+        rows = {
+            "claude": "claude bg-spare",
+            ".claude-unwrapped": "/nix/store/abc-claude-code-2.1.322/bin/.claude-unwrapped daemon run",
+        }
+        for name, session_command in rows.items():
+            with self.subTest(name):
+                table = table_of(
+                    proc(200, 1, 501, MAIN, 0, session_command),
+                    proc(300, 200, 501, MAIN, 0, "/bin/zsh -c source snapshot.sh"),
+                    proc(301, 300, 501, SCRATCH, 30, "python3 probe.py"),
+                )
+                found = workloads(table, owners, protected_pids(table, None, set()))
+                self.assertEqual(
+                    [(w.key, w.root_pid, set(w.pids)) for w in found], [("agent:session:300", 300, {300, 301})]
+                )
+
+    def test_only_the_parsed_session_programs_select_a_tree(self):
+        args = build_parser().parse_args([
+            "enforce", "--floor-gib", "10", "--run-bound-gib", "24", "--min-tree-gib", "1",
+            "--omlx-jetsam-priority", "190", "--agent-user", "anis",
+            "--agent-root", "/Users/anis/Projects/*/.worktrees/*",
+            "--agent-session", ".claude-unwrapped",
+            "--record", "/nonexistent/floor.json",
+        ])
+        with mock.patch(
+            "agent_tools.hosts.memory_floor.pwd.getpwnam", return_value=types.SimpleNamespace(pw_uid=501)
+        ):
+            owners = _owners(args)
+        table = table_of(
+            proc(200, 1, 501, MAIN, 0, "/nix/store/abc-claude-code/bin/.claude-unwrapped daemon run"),
+            proc(300, 200, 501, MAIN, 0, "/bin/zsh -c source snapshot.sh"),
+            proc(301, 300, 501, SCRATCH, 30, "python3 probe.py"),
+            proc(210, 1, 501, MAIN, 0, "claude bg-spare"),
+            proc(310, 210, 501, MAIN, 0, "/bin/zsh -c source snapshot.sh"),
+            proc(311, 310, 501, SCRATCH, 30, "python3 probe.py"),
+        )
+        found = workloads(table, owners, protected_pids(table, None, set()))
+        self.assertEqual({w.key: set(w.pids) for w in found}, {"agent:session:300": {300, 301}})
+
+
+class KillLineTest(unittest.TestCase):
+    def test_an_unsafe_workload_name_stays_on_one_line(self):
+        base = {
+            "at": "2026-11-24T12:33:05+00:00", "reason": "run_bound", "owner": "anis", "root_pid": 300,
+            "root_command": "node", "processes": 2, "tree_bytes": 30 * GIB,
+            "available_before_bytes": 50 * GIB, "available_after_bytes": 60 * GIB, "signals": "term",
+        }
+        rows = {
+            "unsafe": (
+                "agent:/Users/anis/Projects/jar\nbird x/.worktrees/w1",
+                " workload=agent:/Users/anis/Projects/jar%0Abird%20x/.worktrees/w1 root_pid=",
+            ),
+            "session": ("agent:session:300", " workload=agent:session:300 root_pid="),
+        }
+        for name, (key, fragment) in rows.items():
+            with self.subTest(name):
+                line = kill_line({**base, "workload": key})
+                self.assertEqual(line.count("\n"), 1)
+                self.assertTrue(line.endswith("\n"))
+                self.assertIn(fragment, line)
 
 
 class ParseTest(unittest.TestCase):
@@ -302,6 +490,7 @@ class FloorTest(unittest.TestCase):
         entry = daemon.record["recent"][0]
         self.assertEqual(line, kill_line(entry))
         self.assertRegex(line, KILL_LINE)
+        self.assertEqual(entry["workload"], f"agent:{W1}")
         self.assertIn("reason=floor", line)
         self.assertEqual(daemon.record["kills"], 1)
         self.assertEqual(entry["seq"], 1)
@@ -475,6 +664,15 @@ class RunBoundTest(unittest.TestCase):
         self.assertEqual(entry["reason"], "run_bound")
         self.assertEqual(daemon.record["kills"], 1)
 
+    def test_an_agent_tree_outside_every_root_over_the_run_bound_is_ended(self):
+        daemon = Daemon([100], session_tree(30))
+        daemon.sample()
+        self.assertEqual(daemon.fake.signals, [(signal.SIGTERM, 301), (signal.SIGTERM, 300)])
+        (line,) = daemon.lines
+        self.assertIn(" owner=anis workload=agent:session:300 root_pid=300 ", line)
+        self.assertIn("reason=run_bound", line)
+        self.assertEqual(daemon.record["recent"][0]["workload"], "agent:session:300")
+
 
 class CadenceTest(unittest.TestCase):
     def test_the_interval_is_fast_while_memory_falls_or_sits_near_the_floor(self):
@@ -504,6 +702,7 @@ class CommandTest(unittest.TestCase):
         enforce = subprocess.run(base + ["enforce", "--help"], capture_output=True, text=True, env=env, timeout=60)
         self.assertEqual(enforce.returncode, 0)
         self.assertNotIn("--watch-log", enforce.stdout)
+        self.assertIn("--agent-session", enforce.stdout)
 
 
 if __name__ == "__main__":

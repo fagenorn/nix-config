@@ -32,6 +32,7 @@ from agent_tools.console.view import derive_view, encode_view, project_states
 from agent_tools.system.forge_api import ForgeError
 
 from . import console_test_support as support
+from .console_test_support import wait_rows, wait_until
 from .test_console_briefs import PARTS
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
@@ -107,16 +108,6 @@ def state_under_tripwires(svc, connection=None):
 
 
 SID = support.hook_cases()[0][1]["session_id"]
-
-
-def wait_rows(store, kind, count):
-    deadline = time.monotonic() + 2
-    while time.monotonic() < deadline:
-        rows = [row for row in support.log_rows(store) if row[2] == kind]
-        if len(rows) >= count:
-            return rows
-        time.sleep(0.02)
-    raise AssertionError(f"fewer than {count} {kind} rows")
 
 
 def listed(svc):
@@ -550,20 +541,30 @@ class HookTest(Case):
         plain = self.root / "plain"
         plain.mkdir()
         svc = self.start(self.ITEMS, repo_of=sessions.main_checkout)
-        status, _, _ = support.post_hook(
-            svc.address, support.hook_body("session start", cwd=str(plain)))
-        self.assertEqual(status, 204)
-        row = wait_rows(self.store, "session.hook", 1)[0]
+        with support.hold_the_publish(svc, "session.hook"):
+            status, _, _ = support.post_hook(
+                svc.address, support.hook_body("session start", cwd=str(plain)))
+            self.assertEqual(status, 204)
+            row = wait_rows(self.store, "session.hook", 1)[0]
+            with svc._ingest:
+                self.assertEqual(listed(svc), {})
+                self.assertEqual(json.loads(svc.view_bytes)["unmanaged"], [])
         self.assertIsNone(json.loads(row[4])["repo"])
         self.assertIsNone(row[3])
-        self.assertEqual(listed(svc), {})
-        self.assertEqual(json.loads(svc.view_bytes)["unmanaged"], [])
+
+    def test_a_hook_read_waits_for_the_views_republish(self):
+        svc = self.stale_busy_session()
+        with support.hold_the_publish(svc, "session.hook"):
+            svc, hook = self.permission_hook(svc)
+        self.assertIsInstance(hook, int)
 
     def test_a_hook_moves_the_projects_activity(self):
         svc = self.start(self.ITEMS)
-        support.post_hook(svc.address, support.hook_body("finished turn"))
-        row = wait_rows(self.store, "session.hook", 1)[0]
-        entry = json.loads(svc.view_bytes)["entries"][0]
+        with support.hold_the_publish(svc, "session.hook"):
+            support.post_hook(svc.address, support.hook_body("finished turn"))
+            row = wait_rows(self.store, "session.hook", 1)[0]
+            with svc._ingest:
+                entry = json.loads(svc.view_bytes)["entries"][0]
         self.assertEqual(entry["last_activity"], row[1])
         self.assertFalse(entry["quiet"])
 
@@ -650,7 +651,8 @@ class HookTest(Case):
                 status="busy", updated_at=received + 2000)
             gate.set()
             wait_rows(self.store, "session.hook", 1)
-        self.assertEqual(listed(svc), {SID: "idle"})
+        with svc._ingest:
+            self.assertEqual(listed(svc), {SID: "idle"})
         svc.poll_sessions()
         self.assertEqual(listed(svc), {SID: "working"})
 
@@ -695,11 +697,14 @@ class HookTest(Case):
 
     def waiting_on_a_permission(self, **kwargs):
         """A stale busy session that a permission hook has just put in `waiting_permission`."""
-        svc = self.stale_busy_session(**kwargs)
+        return self.permission_hook(self.stale_busy_session(**kwargs))
+
+    def permission_hook(self, svc):
         status, _, _ = support.post_hook(svc.address, support.hook_body("permission prompt"))
         self.assertEqual(status, 204)
         wait_rows(self.store, "session.hook", 1)
-        self.assertEqual(listed(svc), {SID: "waiting_permission"})
+        with svc._ingest:  # the hook appends its row and republishes the view under this lock
+            self.assertEqual(listed(svc), {SID: "waiting_permission"})
         svc.poll_sessions()
         self.assertEqual(listed(svc), {SID: "waiting_permission"})
         return svc, svc._sessions[SID].hook_ms
@@ -1574,15 +1579,6 @@ def look(svc):
 
 def digest_of(svc):
     return json.loads(svc.view_bytes)["digest"]
-
-
-def wait_until(condition):
-    deadline = time.monotonic() + 5
-    while time.monotonic() < deadline:
-        if condition():
-            return True
-        time.sleep(0.02)
-    return condition()
 
 
 def append_old(store, kind):
