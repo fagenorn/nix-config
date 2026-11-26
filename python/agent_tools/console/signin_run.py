@@ -506,9 +506,8 @@ class _Client:
     def kill_group(self) -> None:
         """End the client's group; a group that is gone counts as ended.
 
-        On macOS, a group whose only member is the exited leader answers EPERM, not ESRCH. That
-        EPERM alone counts as ended, and only once the kernel reports the leader exited. On Linux
-        an EPERM names a live member under other credentials, so it is raised, like any other error.
+        On macOS a group holding only the exited leader answers EPERM, not ESRCH, and that EPERM
+        counts as ended once the kernel reports the leader exited. Elsewhere EPERM is raised.
         """
         try:
             os.killpg(self.pid, signal.SIGKILL)
