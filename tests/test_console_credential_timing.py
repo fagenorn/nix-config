@@ -1,7 +1,7 @@
 """The console's credential check stays fast on a 96 KiB answer, whatever its shape.
 
 The time is the CPU time of the calling thread (`time.thread_time()`), the best of
-several calls, so a loaded runner descheduling the thread cannot fail it (#1835). The
+several calls, so a loaded runner descheduling the thread cannot fail it. The
 bound sits well above a linear check's cost and well below a quadratic one's.
 
 Run: just agent-workflow-tests
@@ -9,8 +9,11 @@ Run: just agent-workflow-tests
 
 import time
 import unittest
+from pathlib import Path
 
 from agent_tools.console import project_question
+from agent_tools.delivery import comment_lint
+from agent_tools.delivery.never_rise import Snapshot
 
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures
 
@@ -81,6 +84,13 @@ class CredentialTimingTest(unittest.TestCase):
             with self.subTest(name=name):
                 with self.assertRaisesRegex(AssertionError, "not less than"):
                     self.assert_checked_in_time(quadratic_check, text, calls=1)
+
+    def test_this_file_s_comments_carry_no_issue_reference_length_or_marker_violation(self):
+        path = Path(__file__)
+        snapshot = Snapshot("a" * 40, {}, contents={path.name: path.read_bytes()})
+        for enforcer in comment_lint.enforcers(None):
+            with self.subTest(rule=enforcer.rule):
+                self.assertEqual(enforcer.find(snapshot), [])
 
     def test_a_fast_wrong_call_cannot_set_the_minimum_for_a_slow_right_one(self):
         calls = []
