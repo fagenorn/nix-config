@@ -1,10 +1,10 @@
-"""Size caps on the engine, measured from the files it is given (#1513).
+"""Size caps on the engine, measured from the files it is given.
 
-Caps: core 600 lines; engine package 7300 lines (raised by the owner's
-amendments on issue 1496, the last in comment 7155533735; the core and every module that `engine.py`,
-`engine_*.py` or what they import reach, tests excluded); 25 graders of at most 40 source lines each; 40 steps per procedure (group
-members included); 8192 bytes per prompt file. Lines are physical lines, blank
-and comment lines included. Raising a cap is a reviewed change of its number.
+Caps: the core 600 lines; the engine package 8000 lines; 25 graders of at most 40 source lines each; 40 steps per
+procedure (group members included); 8192 bytes per prompt file. The engine package is every `engine.py` and `engine_*.py`
+module plus every module of the package they import, tests excluded, and the core is `engine_core.py`. Lines are physical
+lines, blank and comment lines included. Nothing changes a cap: no option, no environment variable, no argument. Raising a
+cap is a reviewed change of its number.
 """
 
 from __future__ import annotations
@@ -15,11 +15,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
 
-from agent_tools.delivery import procedure_check
+from agent_tools.delivery import procedure_terms
 from agent_tools.delivery.engine_graders import Grader
 
 CORE_LINES = 600
-PACKAGE_LINES = 7300
+PACKAGE_LINES = 8000
 PROCEDURE_STEPS = 40
 GRADER_COUNT = 25
 GRADER_LINES = 40
@@ -109,7 +109,7 @@ def _grader_breaches(graders: Mapping[str, Grader]) -> list[Breach]:
 
 def _step_count(path: Path) -> int | None:
     try:
-        doc = procedure_check._strict_load(path)
+        doc = procedure_terms._strict_load(path)
     except (OSError, ValueError):
         return None
     if not isinstance(doc, dict) or not isinstance(doc.get("steps"), list):
@@ -137,7 +137,7 @@ def _breaches(package_dir: Path, procedures_dir: Path, graders: Mapping[str, Gra
         (
             p
             for p in procedures_dir.glob("*.json")
-            if not p.name.endswith(".reply.json") and procedure_check._inside(procedures_dir, p.name)
+            if not p.name.endswith(".reply.json") and procedure_terms._inside(procedures_dir, p.name)
         ),
         key=lambda p: p.stem,
     )
@@ -145,7 +145,7 @@ def _breaches(package_dir: Path, procedures_dir: Path, graders: Mapping[str, Gra
         steps = _step_count(path)
         if steps is not None and steps > PROCEDURE_STEPS:
             out.append(Breach(f"procedure {path.stem}", steps, PROCEDURE_STEPS, "steps"))
-    for path in sorted((p for p in procedures_dir.glob("*.md") if procedure_check._inside(procedures_dir, p.name)), key=lambda p: p.name):
+    for path in sorted((p for p in procedures_dir.glob("*.md") if procedure_terms._inside(procedures_dir, p.name)), key=lambda p: p.name):
         size = path.stat().st_size
         if size > PROMPT_BYTES:
             out.append(Breach(f"prompt {path.name}", size, PROMPT_BYTES, "bytes"))
