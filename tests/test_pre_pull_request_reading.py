@@ -204,6 +204,41 @@ class DeliveryAfterTheMergeTest(unittest.TestCase):
                 code, document = run(Forge([[pull(1900, AFTER, "## Evidence\n" + body)]]))
                 self.assertEqual((code, document), (75, NOT_YET))
 
+    def test_the_repositorys_other_wording_and_ordinary_result_shapes_are_met(self):
+        bodies = ["- conformance: pass (Conformance over every rule as the required CI check does)\n",
+                  "- conformance: 41/41 rules passed\n",
+                  "- conformance (conformance run --purpose ci --lint-times): passed\n",
+                  "- conformance: \u2705 41 rules passed\n",
+                  "- conformance: 100% passed in 12.4s\n",
+                  "- conformance: pass\n\nThe required checks run on this pull request.\n",
+                  "- lint: pass\n- conformance: pass\n\nThe required checks run on this pull request.\n",
+                  "The pre-pull-request verification passed: lint, test-touched, conformance.\n",
+                  "Verification passed: lint, conformance and test-touched\n"]
+        for body in bodies:
+            with self.subTest(body=body):
+                code, document = run(Forge([[pull(1900, AFTER, "## Evidence\n" + body)]]))
+                self.assertEqual((code, document), (0, met(1900)))
+
+    def test_the_command_named_as_the_ci_check_or_the_pull_request_as_the_place_does_not_count(self):
+        bodies = ["conformance passed in the Conformance check", "conformance passed (Conformance job)",
+                  "Conformance passed on this pull request", "conformance passed on the PR",
+                  "conformance passed on GitHub", "The Conformance check passed", "conformance passed (check run)",
+                  "conformance passed in the merge queue", "conformance passed remotely",
+                  "conformance passed (the required status context)"]
+        for body in bodies:
+            with self.subTest(body=body):
+                code, document = run(Forge([[pull(1900, AFTER, "## Evidence\n" + body + "\n")]]))
+                self.assertEqual((code, document), (75, NOT_YET))
+
+    def test_a_result_word_before_the_command_that_does_not_list_it_does_not_count(self):
+        bodies = ["lint passed: lint, conformance skipped", "Not passed: lint, conformance",
+                  "lint passed; conformance skipped", "lint passed: lint\nconformance n/a",
+                  "Verification passed: conformance skipped, lint"]
+        for body in bodies:
+            with self.subTest(body=body):
+                code, document = run(Forge([[pull(1900, AFTER, "## Evidence\n" + body + "\n")]]))
+                self.assertEqual((code, document), (75, NOT_YET))
+
     def test_a_result_listed_after_the_command_in_a_list_is_met(self):
         bodies = ["## Evidence\nconformance, lint and test-touched passed\n",
                   "## Evidence\nconformance: no failures, all 41 passed\n",

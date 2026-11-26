@@ -9,12 +9,14 @@ A candidate is a pull request created after the boundary whose body has an Evide
 counts only when its branch started from a commit that contains the merge (the first commit's first
 parent is `ahead` of or `identical` to it). The check is met when a counting candidate's Evidence
 section lists a local result of the command: a clause naming it, not preceded in that clause by a CI
-name (CI, GitHub Actions, a required or status check, a pipeline, a workflow, a runner), with no CI name
+name (CI, GitHub, a required or status check, a job, a pipeline, a workflow, a runner, "on the pull request", the
+command named as a check or job), with no CI name
 anywhere after it on the same logical line (a wrapped continuation line, or a line opening with a CI name
 even after a blank line, joins the line above), and followed by a result word (pass, passed, fail, failed)
 reached through nothing but counting filler ("all 41 checks ran"), so any other wording between the command
 and the result ("postponed", "n/a", "expected to") is no result. A command that opens a list ("conformance,
-lint and test-touched passed") shares the result with the names after it. The repository's own words for
+lint and test-touched passed") shares the result with the names after it, and a result word that opens one
+("verification passed: lint, conformance") covers the names after its colon. The repository's own words for
 the command ("purpose ci", "ci rules", "as the required check runs it") are not CI names, and neither is the
 sentence the delivery programs write, "CI on this pull request runs the full declared verification" (also
 reworded, as a subject; after a preposition it is a CI qualifier). The Evidence section runs to the
@@ -42,25 +44,37 @@ HEADING = re.compile(r"^(?:(#{1,6})\s*)?(?:\*\*)?Evidence:?(?:\*\*)?:?$", re.IGN
 MARKDOWN_HEADING = re.compile(r"^(#{1,6})\s")
 BOLD_HEADING = re.compile(r"^\*\*[^*]+\*\*:?$")
 CLAUSES = re.compile(r";|\.(?=\s|$)")
-CI_WORD = re.compile(r"\b(?:CI|GitHub\s+Actions|(?:required|status)\s+checks?|pipelines?|continuous\s+integration)\b"
+CI_WORD = re.compile(r"\b(?:CI|GitHub|(?:required|status)\s+(?:checks?|contexts?)|check\s+(?:runs?|suites?)|merge\s+queue"
+                     r"|pipelines?|jobs?|continuous\s+integration|remotely)\b"
+                     r"|\b(?:on|in|at|from|via|by|under|within|through)\s+(?:(?:the|this|that|a)\s+)?"
+                     r"(?:pull\s+requests?|PRs?)\b"
                      r"|(?-i:\bActions\b)|(?<![\w./-])(?:workflows?|runners?)(?![\w./-])|\.github/workflows",
                      re.IGNORECASE)
 PREPOSITION = r"(?:on|in|by|via|under|only|from|as|at|within|through|per|using|with|for|during|against)"
 CI_BOILERPLATE = re.compile(rf"(\b{PREPOSITION}\s+)?\bCI\s+(?:on\s+this\s+(?:pull\s+request|PR)\s+)?"
                             r"(?:will\s+|would\s+)?runs?\b[^.;\n]*", re.IGNORECASE)
 CI_LEADING = re.compile(rf"^\(?\s*(?:(?:{PREPOSITION}|ran|run|runs|running|executed|the|an?|and|but)\s+)*"
-                        + CI_WORD.pattern, re.IGNORECASE)
+                        rf"(?:{CI_WORD.pattern})", re.IGNORECASE)
+CI_LEADING_AFTER_GAP = re.compile(rf"^(?:\(\s*|(?:{PREPOSITION}|ran|run|runs|running|executed)\s+)"
+                                  rf"(?:(?:{PREPOSITION}|ran|run|runs|running|executed|the|an?|and|but)\s+)*"
+                                  rf"(?:{CI_WORD.pattern})", re.IGNORECASE)
 LIST_ITEM = re.compile(r"^\s*(?:[-*+]\s|\d+[.)]\s|\||#)")
-CI_IDIOM = re.compile(r"\bpurpose:?\s+ci\b|\bci\s+rules?\b|\bas\s+the\s+required\s+check\s+runs\s+it\b",
-                      re.IGNORECASE)
-PUNCT = r"[\s:()\[\]|*_`'\"=>\u2013\u2014-]"
-FILLER = re.compile(rf"(?:{PUNCT}|\d+|(?:all|every|ran|runs?|checks?|rules?|tests?|suites?|members?|is|are|was|were"
-                    r"|has|have|been|now|locally|and|the|of|ok|clean|green"
+CI_IDIOM = re.compile(r"\bpurpose:?\s+ci\b|\bci\s+rules?\b"
+                      r"|\bas\s+the\s+required\s+(?:ci\s+)?check\s+(?:runs\s+it|does)\b", re.IGNORECASE)
+SYMBOLS = "\u2190-\u2bff\U0001f000-\U0001faff\ufe0f"
+PUNCT = rf"[\s:()\[\]|*_`'\"=>/%.\u2013\u2014{SYMBOLS}-]"
+FILLER = re.compile(rf"(?:{PUNCT}|\d+(?:\.\d+)?\s*(?:ms|s|secs?|seconds?|m|mins?|minutes?)\b|\d+"
+                    r"|--(?!no\b|no-|skip|dry|without|only)[a-z][\w-]*"
+                    r"|(?:all|every|ran|runs?|checks?|rules?|tests?|suites?|members?|is|are|was|were"
+                    r"|has|have|been|now|locally|and|the|of|in|took|finished|completed|results?|ok|clean|green"
                     r"|no\s+(?:fail\w*|error\w*|issues?|problems?|warnings?|regress\w*))\b)*", re.IGNORECASE)
 NAME = r"[A-Za-z][\w-]*"
 LIST_PART = re.compile(rf"\s*(?:and\s+)?{NAME}(?:\s+and\s+{NAME})*\s*")
 LIST_START = re.compile(r"\s*(?:,|and\b)", re.IGNORECASE)
 RESULT_WORD = re.compile(r"\b(?:pass|passed|fail|failed)\b", re.IGNORECASE)
+LISTED_UNDER = re.compile(rf"\b(?:pass|passed|fail|failed)\s*:\s*(?:{NAME}\s*(?:,|\band\b)\s*)*", re.IGNORECASE)
+LIST_TAIL = re.compile(rf"(?:\s*(?:,|\band\b)\s*{NAME})*\s*", re.IGNORECASE)
+NEGATION = re.compile(r"\b(?:not|never|no|without|cannot)\b|n't", re.IGNORECASE)
 
 Read = Callable[[str], Any]
 
@@ -110,11 +124,17 @@ def _normalized(section: str) -> str:
 
 
 def _logical_lines(section: str) -> list[str]:
-    """The lines of `section`, each wrapped continuation (indented, parenthesised or opening with a CI name) joined."""
+    """The lines of `section`, each wrapped continuation (indented, parenthesised or opening with a CI name) joined.
+
+    Across a blank line only a parenthesis or a preposition-led CI phrase ("(in CI)", "on CI") joins: a new
+    paragraph that merely opens with a CI name ("The required checks run ...") is not a qualifier.
+    """
     joined: list[str] = []
     for line in section.splitlines():
         text, last = line.strip(), next((i for i in range(len(joined) - 1, -1, -1) if joined[i].strip()), None)
-        if text and last is not None and not LIST_ITEM.match(line) and CI_LEADING.match(text):
+        gap = last is not None and last != len(joined) - 1
+        leading = CI_LEADING_AFTER_GAP if gap else CI_LEADING
+        if text and last is not None and not LIST_ITEM.match(line) and leading.match(text):
             joined[last] += " " + text
         elif text and last == len(joined) - 1 and not LIST_ITEM.match(line) and (line[0].isspace() or text[0] == "("):
             joined[last] += " " + text
@@ -124,18 +144,32 @@ def _logical_lines(section: str) -> list[str]:
 
 
 def ran_locally(section: str, command: str) -> bool:
-    """Whether a clause of `section` names `command` with no CI before it, none after it on its line, and a result."""
+    """Whether a clause of `section` names `command` with no CI before it, none after it on its line, and a result.
+
+    The command named as a CI check or job ("in the Conformance check", "(Conformance job)") is a CI name.
+    """
     named = re.compile(r"(?<![\w./-])" + re.escape(command) + r"(?![\w./-])", re.IGNORECASE)
+    ci_named = re.compile(r"(?:\b(?:the|this|in|on|via|by|from|at|under)\s+|\(\s*)(?<![\w./-])" + re.escape(command)
+                          + r"\s+(?:check|job|workflow|context|status)s?\b", re.IGNORECASE)
     for line in _logical_lines(_normalized(section)):
+        line = ci_named.sub(" CI ", line)
         clauses = CLAUSES.split(line)
         for index, clause in enumerate(clauses):
             for occurrence in named.finditer(clause):
                 after = clause[occurrence.end():]
                 if CI_WORD.search(clause[:occurrence.start()]) or CI_WORD.search(" ".join([after, *clauses[index + 1:]])):
                     continue
-                if _result_follows(after):
+                if _result_follows(after) or _listed_under_result(clause[:occurrence.start()], after):
                     return True
     return False
+
+
+def _listed_under_result(before: str, after: str) -> bool:
+    """Whether the command is a name in a list a result word opens ("verification passed: lint, conformance")."""
+    opening = LISTED_UNDER.search(before)
+    while opening and opening.end() != len(before):
+        opening = LISTED_UNDER.search(before, opening.start() + 1)
+    return bool(opening and not NEGATION.search(before[:opening.start()]) and LIST_TAIL.fullmatch(after))
 
 
 def _result_follows(after: str) -> bool:
