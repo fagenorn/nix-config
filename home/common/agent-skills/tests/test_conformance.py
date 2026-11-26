@@ -950,12 +950,20 @@ class EngineFailureTest(PlatformHome, Rebinding, unittest.TestCase):
 
     def test_an_unexpected_engine_exception_becomes_the_refusal(self):
         module = load_module()
-        self.rebind(module, "build_report", lambda *a, **k: (_ for _ in ()).throw(
-            RuntimeError("sentinel-exception-detail")))
-        buf = io.StringIO()
-        with contextlib.redirect_stdout(buf):
-            code = module.main(["run", "--purpose", "doctor", "--offline",
-                                "--repo-root", str(REPO_ROOT)])
+        with fixture() as tmp:
+            argv = ["run", "--purpose", "doctor", "--offline",
+                    "--repo-root", str(make_root(tmp))]
+            control = io.StringIO()
+            with contextlib.redirect_stdout(control):
+                self.assertEqual(module.main(argv), 0)
+            report = json.loads(control.getvalue())
+            self.assertIn("checks", report)
+            self.assertNotIn("error", report)
+            self.rebind(module, "build_report", lambda *a, **k: (_ for _ in ()).throw(
+                RuntimeError("sentinel-exception-detail")))
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                code = module.main(argv)
         self.assertEqual(code, 2)
         payload = json.loads(buf.getvalue())
         self.assertEqual(payload["error"]["code"], "resolver_failure")
