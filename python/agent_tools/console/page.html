@@ -222,7 +222,9 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .sp-who { display: flex; flex-direction: column; min-width: 0; }
 .sp-project { font-size: .75rem; color: var(--ov2); }
 .sp-now { flex: 1 0 100%; grid-column: 2 / -1; color: var(--text); display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; }
-.sp-work { flex: 1 0 100%; grid-column: 2 / -1; color: var(--text); }
+.sp-work, .sp-now.titled { flex: 1 0 100%; grid-column: 2 / -1; color: var(--text); display: block; -webkit-line-clamp: none; line-clamp: none; overflow: visible; }
+.work-line { display: block; }
+.work-title { font-weight: 600; }
 .sprint .title-line { color: var(--text); font-weight: 500; overflow-wrap: anywhere; }
 .sprint-goal-full { color: var(--text); overflow-wrap: anywhere; }
 .sprint .age, .sprint .manager, .sprint .until, .sprint .status-age { color: var(--ov2); }
@@ -607,6 +609,22 @@ function el(tag, cls, text) {
 function markBusy(node, busy) {
   if (busy) node.setAttribute("aria-busy", "true");
   else node.removeAttribute("aria-busy");
+}
+// One short block per line of the work words: the label, then each quoted title in a heavier weight.
+function workLines(node, text) {
+  for (const line of text.split("\n")) {
+    const row = el("span", "work-line");
+    const cut = line.indexOf(": ");
+    if (cut < 0) row.appendChild(el("span", "", line));
+    else {
+      row.appendChild(el("span", "work-label", line.slice(0, cut + 2)));
+      for (const part of line.slice(cut + 2).split(/(\u201c[^\u201d]*\u201d)/)) {
+        if (part) row.appendChild(el("span", part.startsWith("\u201c") ? "work-title" : "", part));
+      }
+    }
+    node.appendChild(row);
+  }
+  return node;
 }
 function pathWords(node, text) {
   const value = String(text);
@@ -1086,11 +1104,11 @@ function drawSprint(item, entry, sprint) {
     prog.appendChild(key);
     head.appendChild(prog);
   }
-  if (typeof sprint.work_text === "string") head.appendChild(el("p", "sp-work", sprint.work_text));
+  if (typeof sprint.work_text === "string") head.appendChild(workLines(el("p", "sp-work"), sprint.work_text));
   const nowText = sprint.now_titled === true ? sprint.now_text : nowWords(sprint.now_text, nowSteers(sprint));
   const now = typeof sprint.now_until === "string"
     ? phrase("p", "sp-now", nowText + " ", timeEl("weekday", sprint.now_until, "now-until"))
-    : el("p", "sp-now", nowText);
+    : sprint.now_titled === true ? workLines(el("p", "sp-now titled"), nowText) : el("p", "sp-now", nowText);
   now.setAttribute("title", typeof sprint.now_until === "string"
     ? nowText + " " + timeWords("weekday", sprint.now_until) : nowText);
   head.appendChild(now);

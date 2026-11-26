@@ -51,8 +51,9 @@ def simple(issues, titles=T, now_ms=R + MIN, **extra):
 FIRST = ((101, "building"), (102, "landing"), (103, "queued"))
 SECOND = ((101, "building"), (102, "landed"), (103, "queued"))
 TITLES = {101: "Resume a broken upload", 102: "Save a checkpoint per part", 103: "Show the retry button"}
-SENTENCE = ("Working on Resume a broken upload. Just finished Save a checkpoint per part; "
-            "next is Show the retry button.")
+SENTENCE = ("Working on: \u201cResume a broken upload\u201d\n"
+            "Just finished: \u201cSave a checkpoint per part\u201d\n"
+            "Next: \u201cShow the retry button\u201d")
 
 
 class SprintWorkSentenceTest(unittest.TestCase):
@@ -70,6 +71,18 @@ class SprintWorkSentenceTest(unittest.TestCase):
                                            {"group": "queued", "count": 1, "text": "1 waiting to start"}])
         self.assertEqual(shown["progress_text"], "1 done, 1 in work, 1 waiting to start")
 
+    def test_each_part_is_its_own_line_and_each_title_is_in_quotation_marks(self):
+        lines = SENTENCE.split("\n")
+        self.assertEqual(lines, ["Working on: \u201cResume a broken upload\u201d",
+                                 "Just finished: \u201cSave a checkpoint per part\u201d",
+                                 "Next: \u201cShow the retry button\u201d"])
+        sentence = deliveries.work_sentence(
+            [(101, "delivery"), (102, "landed"), (103, "queued")], (102,), TITLES, "Ship the importer")
+        self.assertEqual(sentence.split(deliveries.WORK_LINE_BREAK), lines)
+        for line in lines:
+            label, _, title = line.partition(": ")
+            self.assertRegex(title, "^\u201c[^\u201c\u201d]+\u201d$", label)
+
     def test_an_issue_with_no_known_title_is_counted_not_named(self):
         self.assertEqual(entry(line(reported(started(A), R, issues=SEVEN), R + MIN))["now_text"],
                          "Working on 2 issues.")
@@ -78,24 +91,24 @@ class SprintWorkSentenceTest(unittest.TestCase):
 
     def test_more_than_two_in_work_names_two_and_counts_the_rest(self):
         three = ((1, "building"), (2, "verifying"), (3, "landing"))
-        self.assertEqual(simple(three)["now_text"], "Working on Title A, Title B and 1 more.")
-        self.assertEqual(simple(three, {2: "Title B"})["now_text"], "Working on Title B and 2 more.")
-        self.assertEqual(simple(three[:2])["now_text"], "Working on Title A and Title B.")
+        self.assertEqual(simple(three)["now_text"], "Working on: \u201cTitle A\u201d, \u201cTitle B\u201d and 1 more")
+        self.assertEqual(simple(three, {2: "Title B"})["now_text"], "Working on: \u201cTitle B\u201d and 2 more")
+        self.assertEqual(simple(three[:2])["now_text"], "Working on: \u201cTitle A\u201d and \u201cTitle B\u201d")
 
     def test_just_finished_is_what_the_latest_report_moved_to_landed(self):
         it = folded(((1, "building"), (2, "verifying"), (3, "queued")),
                     ((1, "landed"), (2, "landed"), (3, "queued")))
         self.assertEqual(it.report.finished, (1, 2))
         self.assertEqual(view_of(it, ms(5) + MIN)["now_text"],
-                         "Just finished Title A and Title B; next is Title C.")
+                         "Just finished: \u201cTitle A\u201d and \u201cTitle B\u201d\nNext: \u201cTitle C\u201d")
         after = folded(((1, "building"), (2, "verifying"), (3, "queued")),
                        ((1, "landed"), (2, "landed"), (3, "queued")),
                        ((1, "landed"), (2, "landed"), (3, "building")))
         self.assertEqual(view_of(after, ms(6) + MIN)["now_text"],
-                         "Working on Title C. Just finished Title A and Title B.")
+                         "Working on: \u201cTitle C\u201d\nJust finished: \u201cTitle A\u201d and \u201cTitle B\u201d")
         single = folded(((1, "landed"), (2, "queued")))
         self.assertEqual(single.report.finished, ())
-        self.assertEqual(view_of(single, ms(4) + MIN)["now_text"], "Next is Title B.")
+        self.assertEqual(view_of(single, ms(4) + MIN)["now_text"], "Next: \u201cTitle B\u201d")
         added = folded(((1, "building"), (2, "queued")), ((1, "building"), (2, "queued"), (4, "landed")))
         self.assertNotIn(4, added.report.finished)
 
@@ -105,18 +118,18 @@ class SprintWorkSentenceTest(unittest.TestCase):
         it = folded(FIRST, SECOND, runs=runs)
         self.assertEqual(it.report.finished, (102,))
         self.assertEqual({o.issue for o in it.observed}, {101, 103})
-        self.assertIn("Just finished Save a checkpoint per part", view_of(it, ms(7) + MIN, TITLES)["now_text"])
+        self.assertIn("Just finished: \u201cSave a checkpoint per part\u201d", view_of(it, ms(7) + MIN, TITLES)["now_text"])
 
     def test_next_is_the_lowest_numbered_queued_issue(self):
         queued = ((5, "queued"), (6, "queued"))
-        self.assertEqual(simple(queued)["now_text"], "Next is Title E.")
+        self.assertEqual(simple(queued)["now_text"], "Next: \u201cTitle E\u201d")
         self.assertEqual(simple(queued, {6: "Title F"})["now_text"], IDLE)
 
     def test_an_issue_the_engine_is_building_is_in_work_not_next(self):
         it = reported(with_manager(started(A)), R, issues=((1, "building"), (2, "queued"), (3, "queued")))
         got = view_of(it, R + 40 * MIN, sessions=[idle_session],
                       engine_runs=[engine_state("sprint-moving.jsonl", LIVE, issue=2)])
-        self.assertEqual(got["now_text"], "Working on Title A and Title B. Next is Title C.")
+        self.assertEqual(got["now_text"], "Working on: \u201cTitle A\u201d and \u201cTitle B\u201d\nNext: \u201cTitle C\u201d")
         self.assertEqual({row["group"]: row["count"] for row in got["legend"]}, {"delivery": 2, "queued": 1})
         stage = {row["issue"]: row["stage"] for row in got["issues"]}[2]
         self.assertNotIn(stage, ("landed", "held", "queued"))
@@ -125,7 +138,7 @@ class SprintWorkSentenceTest(unittest.TestCase):
         it = reported(with_manager(started(A)), R, issues=((1, "building"), (2, "queued"), (3, "queued")))
         got = view_of(it, R + 40 * MIN, sessions=[idle_session],
                       engine_runs=[engine_state("sprint-moving.jsonl", DEAD, issue=2)])
-        self.assertEqual(got["now_text"], "last seen working on Title A. Next is Title B.")
+        self.assertEqual(got["now_text"], "last seen working on: \u201cTitle A\u201d\nNext: \u201cTitle B\u201d")
         self.assertEqual({row["group"]: row["count"] for row in got["legend"]}, {"delivery": 1, "queued": 2})
         self.assertEqual({row["issue"]: row["stage"] for row in got["issues"]}[2], "queued")
 
@@ -134,15 +147,16 @@ class SprintWorkSentenceTest(unittest.TestCase):
         it = folded(((1, "building"), (2, "queued")), runs=runs)
         got = view_of(it, ms(5) + MIN)
         self.assertEqual({row["issue"]: row["stage"] for row in got["issues"]}[1], "closed out")
-        self.assertEqual(got["now_text"], "Working on Title A. Next is Title B.")
+        self.assertEqual(got["now_text"], "Working on: \u201cTitle A\u201d\nNext: \u201cTitle B\u201d")
         self.assertEqual(it.report.finished, ())
         self.assertEqual([row["text"] for row in got["legend"]], ["1 in work", "1 waiting to start"])
 
     def test_a_quiet_sprint_reads_last_seen_and_its_work(self):
         it = folded(FIRST, SECOND)
         got = view_of(it, ms(5) + 20 * MIN, TITLES)
-        self.assertEqual(got["now_text"], "last seen working on Resume a broken upload. "
-                         "Just finished Save a checkpoint per part; next is Show the retry button.")
+        self.assertEqual(got["now_text"], "last seen working on: \u201cResume a broken upload\u201d\n"
+                         "Just finished: \u201cSave a checkpoint per part\u201d\n"
+                         "Next: \u201cShow the retry button\u201d")
         self.assertIs(got["now_titled"], True)
         self.assertIsNone(got["work_text"])
 
@@ -158,7 +172,7 @@ class SprintWorkSentenceTest(unittest.TestCase):
     def test_a_title_naming_an_issue_or_the_sprint_is_counted_not_named(self):
         titles = {1: "ship  the Importer", 2: "Upload 3 files at once", 3: "Follow up on #12"}
         got = simple(((1, "building"), (2, "building"), (3, "queued")), titles)
-        self.assertEqual(got["now_text"], "Working on Upload 3 files at once and 1 more.")
+        self.assertEqual(got["now_text"], "Working on: \u201cUpload 3 files at once\u201d and 1 more")
         self.assertEqual(deliveries.shown_title("  Save a\ncheckpoint ", "x"), "Save a checkpoint")
         self.assertIsNone(deliveries.shown_title("Fix #4", "x"))
         self.assertIsNone(deliveries.shown_title("Ship the importer", "Ship the importer"))

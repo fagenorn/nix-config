@@ -96,7 +96,7 @@ class TitlesServiceTest(Case):
         svc = self.open(titles)
         self.running_sprint(svc)
         self.poll(svc)
-        self.assertEqual(sprint_entry(svc)["now_text"], "Next is Resume a broken upload.")
+        self.assertEqual(sprint_entry(svc)["now_text"], "Next: \u201cResume a broken upload\u201d")
         self.assertEqual(titles.calls, [("owner/p00", [858])])
 
     def test_a_known_title_is_not_read_again(self):
@@ -129,7 +129,7 @@ class TitlesServiceTest(Case):
         self.assertEqual(sprint_entry(svc)["now_text"], "Working on 1 issue.")
         self.poll(svc)
         self.assertEqual(titles.calls[-1][1], list(range(101, 151)))
-        self.assertEqual(sprint_entry(svc)["now_text"], "Working on Resume a broken upload.")
+        self.assertEqual(sprint_entry(svc)["now_text"], "Working on: \u201cResume a broken upload\u201d")
         self.poll(svc)
         self.assertEqual(titles.calls[-1][1], list(range(1, 101)))
 
@@ -252,7 +252,7 @@ class TitlesServiceTest(Case):
         self.running_sprint(svc, [(101, "building"), (9999, "queued")])
         errors = self.poll(svc)
         self.assertEqual(errors, "")
-        self.assertEqual(sprint_entry(svc)["now_text"], "Working on Title 101.")
+        self.assertEqual(sprint_entry(svc)["now_text"], "Working on: \u201cTitle 101\u201d")
 
     def test_a_number_beyond_the_trackers_integer_range_is_never_asked(self):
         big = 2 ** 31
@@ -302,8 +302,9 @@ class TitlesServiceTest(Case):
                    if shown["state"] != "done"}
         settings = running["Fix the settings page."]
         self.assertEqual(settings["now_text"],
-                         "Working on Show which settings changed. Just finished Save the settings in one click; "
-                         "next is Undo a settings change.")
+                         "Working on: \u201cShow which settings changed\u201d\n"
+                         "Just finished: \u201cSave the settings in one click\u201d\n"
+                         "Next: \u201cUndo a settings change\u201d")
         self.assertEqual({item["group"]: item["count"] for item in settings["legend"]},
                          {"landed": 1, "delivery": 1, "queued": 1, "held": 1})
         for goal, shown in running.items():

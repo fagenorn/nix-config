@@ -57,18 +57,43 @@ class SprintWorkPageTest(unittest.TestCase):
         (snap,) = render([START, {"frame": with_sprints([sprint])}, {"snapshot": True}])
         (row,) = sprint_lines(snap)
         face = top_text(row)
-        self.assertIn("Working on Resume a broken upload. Just finished Save a checkpoint per part; "
-                      "next is Show the retry button.", face)
+        (now,) = [n for n in top(row) if has_class(n, "sp-now")]
+        self.assertEqual([full(line) for line in now["children"]], [
+            "Working on: \u201cResume a broken upload\u201d",
+            "Just finished: \u201cSave a checkpoint per part\u201d",
+            "Next: \u201cShow the retry button\u201d"])
         self.assertIsNone(re.search(r"#\d|\b10[123]\b", face))
         self.assertEqual(face.count(sprint["title"]), 1)
         self.assertEqual(legend_texts(top(row)), ["1 done", "1 in work", "1 waiting to start"])
 
+    def test_each_part_is_its_own_line_with_its_title_set_apart_in_a_heavier_weight(self) -> None:
+        it = folded(FIRST, SECOND)
+        sprint = view_entry(view_line(it, T0_MS + MIN, issue_titles={it.project_id: TITLES}))
+        row_top = top_of(sprint)
+        (now,) = [n for n in row_top if has_class(n, "sp-now")]
+        self.assertTrue(has_class(now, "titled"))
+        lines = now["children"]
+        self.assertEqual([c["cls"] for c in lines], ["work-line"] * 3)
+        self.assertEqual([[full(p) for p in c["children"]] for c in lines], [
+            ["Working on: ", "\u201cResume a broken upload\u201d"],
+            ["Just finished: ", "\u201cSave a checkpoint per part\u201d"],
+            ["Next: ", "\u201cShow the retry button\u201d"]])
+        for line in lines:
+            label, title = line["children"]
+            self.assertEqual((label["cls"], title["cls"]), ("work-label", "work-title"))
+        weight = re.search(r"^\.work-title\s*\{([^}]*)\}", PAGE.read_text(encoding="utf-8"), re.M)
+        self.assertRegex(weight.group(1), r"font-weight:\s*[5-9]00")
+        wait = {**REPORTED, "now_text": "waiting for CI on its pull request", "now_titled": False,
+                "work_text": sprint["now_text"]}
+        (work,) = [n for n in top_of(wait) if has_class(n, "sp-work")]
+        self.assertEqual([c["cls"] for c in work["children"]], ["work-line"] * 3)
+
     def test_a_wait_shows_the_work_line_before_its_now_line_and_none_without_it(self) -> None:
         wait = {**REPORTED, "now_text": "waiting for CI on its pull request",
-                "work_text": "Working on Resume a broken upload.", "now_titled": False}
-        order = [(n["cls"].split()[0], n["text"]) for n in top_of(wait)
+                "work_text": "Working on: \u201cResume a broken upload\u201d", "now_titled": False}
+        order = [(n["cls"].split()[0], full(n)) for n in top_of(wait)
                  if has_class(n, "sp-work") or has_class(n, "sp-now")]
-        self.assertEqual(order, [("sp-work", "Working on Resume a broken upload."),
+        self.assertEqual(order, [("sp-work", "Working on: \u201cResume a broken upload\u201d"),
                                  ("sp-now", "waiting for CI on its pull request")])
         empty = {**REPORTED, "work_text": None,
                  "progress": {"landed": 0, "in_delivery": 0, "queued": 0, "held": 0, "total": 0},
@@ -83,17 +108,18 @@ class SprintWorkPageTest(unittest.TestCase):
         rules = re.findall(r"^([^\n{}]*\.sp-work\b[^\n{}]*)\{([^}]*)\}", css, re.M)
         self.assertTrue(rules)
         for selector, body in rules:
-            self.assertNotRegex(body, r"line-clamp|overflow:\s*hidden", selector)
+            self.assertNotRegex(body, r"line-clamp:\s*\d|overflow:\s*hidden", selector)
+        self.assertTrue([selector for selector, _ in rules if ".sp-now.titled" in selector])
 
     def test_a_guest_sees_a_title_as_the_tracker_wrote_it(self) -> None:
-        titled = {**REPORTED, "now_text": "Working on Export your settings.", "now_titled": True,
+        titled = {**REPORTED, "now_text": "Working on: \u201cExport your settings\u201d", "now_titled": True,
                   "work_text": None}
         waiting = {**REPORTED, "now_text": "waiting for CI on its pull request", "now_titled": False,
-                   "work_text": "Working on Export your settings."}
+                   "work_text": "Working on: \u201cExport your settings\u201d"}
         for sprint in (titled, waiting):
             snap = page_of(GUEST, [START, {"frame": with_sprints([sprint])}])
             face = sprint_text(snap)
-            self.assertIn("Working on Export your settings.", face)
+            self.assertRegex(face, r"Working on:\s+\u201cExport your settings\u201d")
             self.assertNotIn("the owner's settings", face)
 
 

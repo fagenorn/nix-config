@@ -681,15 +681,16 @@ def delivery_changes(
 
 # The work words: what a sprint's block says it is working on, by issue title and never by number.
 # Titles come from the tracker read the service makes, never from the report. Pure: no clock, no I/O.
-# `delivery` is every stage that is not landed, held, queued or dropped, `closed out` included.
+# Each part is its own line, and each shown title sits in quotation marks. `delivery` is every stage that is not landed, held, queued or dropped, `closed out` included.
 
-NOW_WORKING_TEXT = "Working on {names}."
+NOW_WORKING_TEXT = "Working on: {names}"
 NOW_WORKING_ONE_TEXT = "Working on 1 issue."
 NOW_WORKING_COUNT_TEXT = "Working on {n} issues."
 NOW_MORE_TEXT = "{names} and {n} more"
-NOW_FINISHED_NEXT_TEXT = "Just finished {done}; next is {next}."
-NOW_FINISHED_TEXT = "Just finished {done}."
-NOW_NEXT_TEXT = "Next is {next}."
+NOW_FINISHED_TEXT = "Just finished: {done}"
+NOW_NEXT_TEXT = "Next: {next}"
+WORK_LINE_BREAK = "\n"
+TITLE_QUOTE = "\u201c{title}\u201d"
 NOW_IDLE_WORK_TEXT = "Nothing is being worked on right now."
 
 WORK_GROUPS = ("landed", "delivery", "queued", "held")
@@ -725,7 +726,8 @@ def shown_title(title: str | None, sprint_title: str) -> str | None:
 
 def _names(issues: Sequence[int], titles: Mapping[int, str], sprint_title: str) -> str | None:
     """The shown titles of `issues`, at most two in order, then `and n more` for the rest; None when none is shown."""
-    shown = [t for issue in issues if (t := shown_title(titles.get(issue), sprint_title)) is not None]
+    shown = [TITLE_QUOTE.format(title=t) for issue in issues
+             if (t := shown_title(titles.get(issue), sprint_title)) is not None]
     named = shown[:_NAMED_AT_MOST]
     if not named:
         return None
@@ -736,7 +738,7 @@ def _names(issues: Sequence[int], titles: Mapping[int, str], sprint_title: str) 
 
 def work_sentence(groups: Sequence[tuple[int, str]], finished: Collection[int],
                   titles: Mapping[int, str], sprint_title: str) -> str:
-    """What is in work, what just finished and what is next, by shown title; `groups` is `(issue, group)`."""
+    """The work lines (in work, just finished, next) by quoted shown title, joined by `WORK_LINE_BREAK`; `groups` is `(issue, group)`."""
     clauses = []
     working = [issue for issue, group in sorted(groups) if group == "delivery"]
     if working:
@@ -747,10 +749,8 @@ def work_sentence(groups: Sequence[tuple[int, str]], finished: Collection[int],
     done = _names(sorted(finished), titles, sprint_title)
     queued = [issue for issue, group in sorted(groups) if group == "queued"]
     following = shown_title(titles.get(queued[0]), sprint_title) if queued else None
-    if done and following:
-        clauses.append(NOW_FINISHED_NEXT_TEXT.format(done=done, next=following))
-    elif done:
+    if done:
         clauses.append(NOW_FINISHED_TEXT.format(done=done))
-    elif following:
-        clauses.append(NOW_NEXT_TEXT.format(next=following))
-    return " ".join(clauses) or NOW_IDLE_WORK_TEXT
+    if following:
+        clauses.append(NOW_NEXT_TEXT.format(next=TITLE_QUOTE.format(title=following)))
+    return WORK_LINE_BREAK.join(clauses) or NOW_IDLE_WORK_TEXT

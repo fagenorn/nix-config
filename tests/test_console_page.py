@@ -6229,7 +6229,7 @@ class PageSprintBlockTest(unittest.TestCase):
 
         five = ((1, "building"), (2, "building"), (3, "queued"), (4, "queued"), (5, "queued"))
         fit_stage = sentence(reported(started(A), T0_MS, issues=five), {1: "Resume uploads", 2: "Show retry"})
-        self.assertEqual(fit_stage, "Working on Resume uploads and Show retry.")
+        self.assertEqual(fit_stage, "Working on: \u201cResume uploads\u201d and \u201cShow retry\u201d")
         asked = dataclasses.replace(reported(started(A), T0_MS), questions=(Question(
             1, 0, iso(T0_MS), False, "Which store should the checkpoint use?",
             "the first slice", ("the database", "a file"), "the database"),))
@@ -6238,11 +6238,11 @@ class PageSprintBlockTest(unittest.TestCase):
                          "waiting for your answer: Which store should the checkpoint use?")
         fit_long = sentence(reported(started(A), T0_MS, issues=five), {
             1: "Resume a broken transfer", 2: "Show the retry button", 3: "Count parts"})
-        self.assertEqual(fit_long, "Working on Resume a broken transfer and Show the retry button. "
-                                   "Next is Count parts.")
+        self.assertEqual(fit_long, "Working on: \u201cResume a broken transfer\u201d and \u201cShow the retry button\u201d\n"
+                                   "Next: \u201cCount parts\u201d")
         clamped_words = " ".join(["word"] * 80)
         clamped = sentence(reported(started(A), T0_MS), {4: clamped_words})
-        self.assertEqual(clamped, f"Working on {clamped_words} and 1 more.")
+        self.assertEqual(clamped, f"Working on: \u201c{clamped_words}\u201d and 1 more")
         texts = (fit_stage, fit_question, fit_long, clamped)
         frame = with_sprints([
             {**LIFE_SPRINT, "sprint_id": c * 16, "now_text": text, "messages": [],
