@@ -1640,7 +1640,7 @@ class DraftRealTest(DraftCase):
         for line in ("branch finished work merges into: trunk (read from its remote)",
                      "project id and issue tracker: GitHub, as sample-owner/sample-app "
                      "(read from its remote)",
-                     "checks a pull request must pass: CI (found in its files)"):
+                     "checks a proposed change must pass: CI (found in its files)"):
             self.assertIn(line, [d["line"] for d in reg["draft"]])
         items = self.register_items()
         self.assertEqual([i["subject"] for i in items], ["lint-command", "test-command"])

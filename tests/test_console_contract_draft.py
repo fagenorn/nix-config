@@ -995,7 +995,7 @@ class ContractDraftTest(unittest.TestCase):
         facts = cd.facts(bare, cd.read(bare))
         self.assertEqual([f["field"] for f in facts], list(cd.FACTS))
         self.assertEqual([f["label"] for f in facts], [
-            "project id and issue tracker", "checks a pull request must pass",
+            "project id and issue tracker", "checks a proposed change must pass",
             "platform versions it runs on", "minutes per delivery attempt",
             "agent knowledge files it holds"])
         for record in facts:

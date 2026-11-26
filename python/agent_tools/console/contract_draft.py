@@ -224,7 +224,7 @@ _PROPOSED_TABLE = (
 _FACT_TABLE = (
     ("project-identity", "project id and issue tracker",
      ("/project/id", "/bindings/tracker/repo_slug")),
-    ("required-checks", "checks a pull request must pass", ("/bindings/vcs/merge/required_checks",)),
+    ("required-checks", "checks a proposed change must pass", ("/bindings/vcs/merge/required_checks",)),
     ("platform-range", "platform versions it runs on", ("/platform",)),
     ("attempt-minutes", "minutes per delivery attempt",
      ("/bindings/workflow/orchestration/attempt_budget_minutes",)),
