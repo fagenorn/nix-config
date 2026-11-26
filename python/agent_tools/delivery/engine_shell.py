@@ -174,7 +174,6 @@ import os
 import secrets
 import shutil
 import socket
-import subprocess
 import sys
 import tempfile
 import threading
@@ -188,11 +187,12 @@ from typing import Callable, Mapping
 
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
 from agent_tools.delivery import (
-    engine_check, engine_commands, engine_core, engine_guard, engine_housekeeping, engine_ledger,
-    engine_reply, engine_session, engine_slots, engine_stop, host_admission, procedure_terms,
+    engine_check, engine_commands, engine_core, engine_guard, engine_heads, engine_housekeeping,
+    engine_ledger, engine_reply, engine_session, engine_slots, engine_stop, host_admission, procedure_terms,
     rule_reader,
 )
 from agent_tools.delivery.engine_commands import CommandTable, UnknownCommand
+from agent_tools.delivery.engine_heads import REPOSITORY_ENV, core_events, read_head  # noqa: F401
 from agent_tools.delivery.engine_ledger import creation_lock_path
 from agent_tools.project_contract import agent_platform, resolve_project
 
@@ -210,9 +210,6 @@ SUPPLIED_INPUTS = ("holder", "issue", "repo", "repo_root")
 RUNNABLE_KINDS = ("command", "agent", "decide", "group", "call")
 QUOTA_NEED = "retry"
 ABSENT = "absent"
-REPOSITORY_ENV = ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
-                  "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE",
-                  "GIT_PREFIX", "GIT_IMPLICIT_WORK_TREE")
 NO_TOKENS = {"input": 0, "cache_write": 0, "cache_read": 0, "output": 0}
 
 
@@ -308,47 +305,6 @@ def _refuse_unrunnable(procedure: dict, directory: Path, supplied: tuple[str, ..
             raise Refused(str(error)) from error
         _refuse_unrunnable(document, directory, given, child, (*calling, name), validated)
         validated.add((child, given))
-
-
-def core_events(run_dir: Path, ledger: list[dict],
-                computed: frozenset[str] = frozenset()) -> list[dict]:
-    """The core's events for a run's ledger events; every other ledger event is skipped.
-
-    An `outcome_graded` of a step in `computed` (a group, graded by the core) is skipped.
-    """
-    heads = {(e["step"], e["visit"]): e for e in ledger if e["event"] == "result_stored"}
-    stored = {key: e["result"] for key, e in heads.items()}
-    events: list[dict] = []
-    for event in ledger:
-        if event["event"] == "step_entered":
-            events.append({"type": "entered", "step": event["step"]})
-        elif event["event"] == "run_continued":
-            events.append({"type": "continued", "step": event.get("step"),
-                           "visit": event.get("visit")})
-        elif event["event"] == "outcome_graded" and event["step"] not in computed:
-            relative = stored[(event["step"], event["visit"])]
-            outcome = {"type": "outcome", "step": event["step"],
-                       "outcome": event["outcome"], "result": _load(run_dir / relative)}
-            if "head" in heads[(event["step"], event["visit"])]:
-                outcome["head"] = heads[(event["step"], event["visit"])]["head"]
-            events.append(outcome)
-    return events
-
-
-def read_head(root: str) -> str | None:
-    """The full commit id `HEAD` names in `root`, or None when it cannot be read.
-
-    The repository is the one `root` is in: a variable that selects another is not passed on.
-    """
-    environ = {key: value for key, value in os.environ.items() if key not in REPOSITORY_ENV}
-    try:
-        done = subprocess.run(["git", "rev-parse", "--verify", "--quiet", "HEAD"], cwd=root, env=environ,
-                              stdin=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                              stdout=subprocess.PIPE, text=True, timeout=30)
-    except (OSError, subprocess.SubprocessError):
-        return None
-    head = done.stdout.strip()
-    return head if done.returncode == 0 and engine_ledger.HEAD_RE.fullmatch(head) else None
 
 
 def _resolve() -> tuple[dict, CommandTable]:
