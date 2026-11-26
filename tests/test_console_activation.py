@@ -971,7 +971,7 @@ class ActivatePageWriteTest(Trees):
         status, _, body = self.post(svc, {"commit": "f" * 40})
         self.assertEqual(
             (status, body.strip()),
-            (409, b"that commit is no longer the tip of origin's integration branch"))
+            (409, b"that version is no longer the latest main version on origin"))
         self.assertEqual(self.kinds(), [])
         self.assertFalse(self.ran.exists())
 
@@ -980,7 +980,7 @@ class ActivatePageWriteTest(Trees):
         status, _, body = self.post(svc)
         self.assertEqual(
             (status, body.strip()),
-            (409, b"that commit is no longer the tip of origin's integration branch"))
+            (409, b"that version is no longer the latest main version on origin"))
         self.assertEqual(self.kinds(), [])
 
         def unreadable(root):
@@ -990,7 +990,7 @@ class ActivatePageWriteTest(Trees):
         status, _, body = self.post(other)
         self.assertEqual(
             (status, body.strip()),
-            (409, b"the tip of origin's integration branch could not be read"))
+            (409, b"the latest main version on origin could not be read"))
         self.assertEqual(self.kinds(), [])
         self.assertFalse(self.ran.exists())
 

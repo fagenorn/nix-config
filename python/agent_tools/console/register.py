@@ -84,8 +84,9 @@ absolute path) finds any in it: a child's raw message is shown only through it, 
 `could not be made.` or `was not registered.`. `next_step(root, error, verb)` reads the
 error's `repair_id`: `adopt.manifest.*` with the not-found message says to run `just switch` on this computer to
 install the agent platform's files and to choose Try again (`MANIFEST_STEP`, which does not repeat the
-cause the headline gave; `LEGACY_NOTES` shows a stored note in the earlier words as it is today and `latest`
-applies it, never rewriting the log); `adopt.registration.no_remote`
+cause the headline gave; `LEGACY_NOTES` shows a stored note in the earlier words as it is today, and
+`current_headline` a stored behind headline that counts commits as one that counts changes, and `latest`
+applies both, never rewriting the log); `adopt.registration.no_remote`
 says to add the origin remote; `remote_default_unknown` (an origin that exists but advertises no
 default branch) says the origin needs a published default branch, not another origin;
 `adopt.git.remote_unreachable` and
@@ -252,6 +253,8 @@ LEGACY_NOTES = {
     "Switch this computer to its current configuration to install them, then choose Try again.":
         MANIFEST_STEP,
 }
+# The earlier count of a checkout behind its remote, which a stored behind row still says.
+LEGACY_BEHIND = re.compile(r"\b(\d+) commits? behind its remote\b")
 DISCARD_STEP = ("Choose Try again to remove the copy the last attempt left on this computer and "
                 "plan again.")
 VERB_WORDS = {"plan": "plan the adoption of", "register": "register",
@@ -389,6 +392,13 @@ def refusal(path: str, entries: Iterable[Mapping], *, home: str,
 
 def _count(count: int, noun: str) -> str:
     return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
+
+
+def current_headline(headline: object) -> object:
+    """A stored headline in the words of today: a behind row counts changes, not commits."""
+    if not isinstance(headline, str):
+        return headline
+    return LEGACY_BEHIND.sub(lambda m: f"{_count(int(m.group(1)), 'change')} behind its remote", headline)
 
 
 def _named(paths: Sequence[str]) -> str:
@@ -678,6 +688,7 @@ def _row_of(event: event_log.Event) -> tuple[dict | None, dict | None]:
     found = {**DEFAULTS, **payload, "at": event.at}
     if isinstance(found["note"], str) and found["note"] in LEGACY_NOTES:
         found["note"] = LEGACY_NOTES[found["note"]]
+    found["headline"] = current_headline(found["headline"])
     if isinstance(found["draft"], list) and isinstance(found["root"], str):
         stale = contract_draft.retired_in_use(found["draft"])
         refreshed = contract_draft.refresh(found["root"], found["draft"])

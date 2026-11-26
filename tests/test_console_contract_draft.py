@@ -1083,11 +1083,11 @@ class ContractDraftTest(unittest.TestCase):
         reopened = cd.refresh(root, earlier(**{"test-command": ("none", "files")}))
         self.assertEqual(pair(reopened, "test-command"), (None, None))
         self.assertIn("test-command", [f["field"] for f in cd.open_fields(reopened)])
-        refused = (None, "Every project has a test command: type the command that runs it.")
+        refused = (None, "Every project has a command that runs the tests: type that command.")
         for value in ("none", " NONE "):
             self.assertEqual(cd.set_value(settled, "test-command", value), refused)
         self.assertEqual(cd.set_value(settled, "lint-command", "None"),
-                         (None, "Every project has a lint command: type the command that runs it."))
+                         (None, "Every project has a command that runs the house-rule checks: type that command."))
         self.assertNotIn(["none"], [c["argv"] for c in cd.contract(settled)["bindings"]["commands"].values()])
 
 

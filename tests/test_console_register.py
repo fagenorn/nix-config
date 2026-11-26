@@ -1327,8 +1327,8 @@ class BehindTest(unittest.TestCase):
                          ("/x/r", "update"))
 
     def test_a_failed_update_is_a_try_again_card(self):
-        row = register.update_failed("/x/r", "it has changes that are not committed")
-        self.assertEqual(row["headline"], "r could not be updated: it has changes that are not committed.")
+        row = register.update_failed("/x/r", "it has changes that are not saved in the repository")
+        self.assertEqual(row["headline"], "r could not be updated: it has changes that are not saved in the repository.")
         self.assertEqual(row["note"], "Update the checkout in a terminal, then choose Try again.")
         self.assertEqual(row["result"], "failed")
         latest = {**row, "at": "t"}

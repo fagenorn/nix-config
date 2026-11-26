@@ -1712,7 +1712,7 @@ class DraftNoRemoteTest(DraftCase):
                 "the command could not be read: close every quote and do not end it with a "
                 "backslash")
         self.assertEqual(self.refusal_of(reg["plan_id"], "test-command", "none"),
-                         "Every project has a test command: type the command that runs it.")
+                         "Every project has a command that runs the tests: type that command.")
         self.assertEqual(self.rows("registration.ended"), rows)
         self.assertIn("lint-command", [i["subject"] for i in self.register_items()])
 
@@ -1855,7 +1855,7 @@ class RegisterRemoteTest(Case):
         row = self.settled_row(checkout)
         self.assertEqual(row["result"], "failed")
         self.assertEqual(row["headline"],
-                         "checkout could not be updated: it has changes that are not committed.")
+                         "checkout could not be updated: it has changes that are not saved in the repository.")
         self.assertEqual(row["note"], "Update the checkout in a terminal, then choose Try again.")
         self.assertEqual(len([i for i in self.view()["inbox"]["open"]
                               if i["reason"] == "register_failed"]), 1)
@@ -2069,7 +2069,7 @@ class PlanAnswerSecretTest(Case):
         self.assertEqual(
             question["why"],
             ".claude/secrets/key.md looks like a secret, so it cannot be answered here: remove it "
-            "from the repository in its own commit, then register the repository again.")
+            "from the repository and save that change on its own, then register the repository again.")
         self.assertEqual(reg["state"], "draft")
         self.assertEqual(json.loads(self.registry.read_text())["projects"], [])
         self.assertEqual(real_home_state(), before)

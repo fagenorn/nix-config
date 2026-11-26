@@ -100,7 +100,8 @@ cannot be derived and its value is then the words naming why. `facts(root, readi
 `fact_refused(error)` says an adoption refusal names only facts (or a registered project id), so it is a failed
 plan and no field's card reopens.
 
-Earlier drafts. `refresh(root, fields)` gives a saved draft today's label, option labels and card question.
+Earlier drafts. `refresh(root, fields)` gives a saved draft today's label, option labels, card question and
+refusal wording (`current_reason`, by `LEGACY_REASONS`).
 An amendment (a reconcile proposal) keeps its records. Any other saved draft is carried onto `FIELDS`
 (`integration-branch` from its saved value, else the earlier default branch; a test command unless it was
 `none`; the release; the production) and the saved facts; every other record of an earlier table
@@ -1014,11 +1015,33 @@ def _carry(fields: list[dict], name: str, remotes: int) -> list[dict]:
                              for f in fields if f["field"] in FACTS)]
 
 
+# Refusals and the replan sentence an earlier console saved in a draft, by the words it used then.
+LEGACY_REASONS = (
+    ("The plan refused the lint command:", f"The plan refused the {LABELS['lint-command']}:"),
+    ("The plan refused the commits run in its development shell:",
+     f"The plan refused the {LABELS[ENVIRONMENT_FIELD]}:"),
+    ("choose the branch finished work merges into to go on.", PLAN_AGAIN.split(": ", 1)[1]),
+)
+
+
+def current_reason(reason: object) -> object:
+    """A saved refusal in the words of today."""
+    if not isinstance(reason, str):
+        return reason
+    for old, new in LEGACY_REASONS:
+        reason = reason.replace(old, new)
+    return reason
+
+
 def refresh(root: str, fields: Iterable[Mapping]) -> list[dict]:
-    """A saved draft with today's wording and fields: labels, option labels and card questions.
+    """A saved draft with today's wording and fields: labels, option labels, card questions and refusals.
 
     An amendment keeps its records. Any other draft is carried onto `FIELDS` and its saved facts.
     """
+    return [{**f, "reason": current_reason(f["reason"])} for f in _refreshed(root, fields)]
+
+
+def _refreshed(root: str, fields: Iterable[Mapping]) -> list[dict]:
     fields = [dict(f) for f in fields]
     remotes, name = _remote_count(fields), Path(root).name
     if not amends(fields):
@@ -1147,8 +1170,8 @@ def set_value(fields: Iterable[Mapping], field: str, value: str) -> tuple[list[d
     if not TEXT[field] and value not in offered:
         return None, NOT_OFFERED
     if field in ("lint-command", "test-command") and value.lower() == "none":
-        kind = "lint" if field == "lint-command" else "test"
-        return None, f"Every project has a {kind} command: type the command that runs it."
+        what = "the house-rule checks" if field == "lint-command" else "the tests"
+        return None, f"Every project has a command that runs {what}: type that command."
     new = []
     for record in fields:
         record = copy.deepcopy(dict(record))

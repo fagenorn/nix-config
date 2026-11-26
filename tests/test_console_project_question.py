@@ -3315,14 +3315,14 @@ class QuestionDeepSpendServiceTest(QuestionCase):
                 "type": "assistant", "sessionId": SESSION_ID, "cwd": "/srv/p01",
                 "timestamp": f"{today}T10:00:00.000Z",
                 "message": {"id": "msg_q1", "model": "claude-sonnet-4-6", "content": [],
-                            "usage": {"input_tokens": 40}}}) + "\n")
+                            "usage": {"input_tokens": 1_000_000}}}) + "\n")
             os.utime(path, (self.NOW, self.NOW))
             return self.outcome
 
         svc = self.start(session_dirs=[sessions_dir], clock=lambda: self.NOW, project_asker=writer)
         svc.ask_project_question(WHY, "where does time go?", deep=True)
         question = self.shown(svc)["questions"]["threads"][0]["questions"][0]
-        self.assertTrue(question["spend_text"].startswith("Spent about $"), question["spend_text"])
+        self.assertEqual(question["spend_text"], "Spent about $3.00")  # a million input tokens at $3 per million
 
 
 class QuestionLifecycleTest(QuestionCase):

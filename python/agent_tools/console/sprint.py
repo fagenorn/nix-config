@@ -41,7 +41,7 @@ On success it prints `sprint: report sent` and exit 0. The command validates no 
 pictures' own rules: the console decides, in one place.
 After the console accepts it, the command prints to stderr one line `sprint: warning: rewrite
 "<sentence>" without "<word>"; write instead: <write instead>` per listed word
-(`agent_tools.console.owner_words`) that the status line uses, once each and in list order; the text is
+(`agent_tools.console.owner_words`) that the status line or the next step uses, once each and in list order; the text is
 sent and stored as before and the exit stays 0.
 
 `pictures` is optional on a brief and on a report, at most 8, each member
@@ -154,7 +154,7 @@ refusal is `sprint: refused <status>: <text>` and exit 1. A file that cannot be 
 object is exit 2 with no request sent; a 200 answer without an integer `notice` is `sprint: refused
 200: unreadable answer: <error>` and exit 1. After the console accepts it, the command prints to stderr
 one line `sprint: warning: rewrite "<sentence>" without "<word>"; write instead: <write instead>` per
-listed word (`agent_tools.console.owner_words`) that the notice's text uses, once each and in list order;
+listed word (`agent_tools.console.owner_words`) that the notice's text, area or end time uses, once each and in list order;
 the text is sent and stored as before and the exit stays 0.
 
 `sprint notices` reads the secret the same way and sends `POST /api/notices` with `{"sprint_id",
@@ -571,7 +571,7 @@ WARNING = 'sprint: warning: rewrite "{sentence}" without "{word}"; write instead
 
 
 def report_texts(report: dict) -> list[str]:
-    return [report["status"]] if isinstance(report.get("status"), str) else []
+    return [report[k] for k in ("status", "next") if isinstance(report.get(k), str)]
 
 
 def round_texts(round_: dict) -> list[str]:
@@ -587,7 +587,7 @@ def round_texts(round_: dict) -> list[str]:
 
 
 def notice_texts(notice: dict) -> list[str]:
-    return [notice["text"]] if isinstance(notice.get("text"), str) else []
+    return [notice[k] for k in ("text", "what", "until") if isinstance(notice.get(k), str)]
 
 
 def warn(texts: Iterable[str]) -> None:

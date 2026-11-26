@@ -3,12 +3,15 @@
 Run: just agent-workflow-tests
 """
 import ast
+import dataclasses
 import json
 import re
 import unittest
 from pathlib import Path
 
-from agent_tools.console import answer, approve, contract_draft, deliveries, engine_runs, owner_words, register, sprints, view
+from agent_tools.console import (answer, approve, contract_draft, deliveries, engine_runs, owner_words, register,
+                                 service, sprints, view)
+from agent_tools.console import checkout_remote, permission, plan_questions
 from agent_tools.console.event_log import Event
 from agent_tools.delivery import procedure_check
 from agent_tools.delivery.engine_ledger import RunState
@@ -25,6 +28,8 @@ PAGE = REPO_ROOT / "python/agent_tools/console/page.html"
 PAGE_TEXT_MODULES = ("view", "sprints", "engine_runs", "guest", "capacity")
 LITERAL_MODULES = ("answer", "approve", "contract_draft", "register")
 SPRINT_LITERAL_MODULES = ("answer", "card_entries")
+FIXED_MODULES = ("plan_questions", "checkout_remote", "permission")
+PROCEDURES = REPO_ROOT / "python/agent_tools/delivery/procedures"
 COMMANDS = frozenset({contract_draft.NPM["lint"]})
 OWNER_FACING = re.compile(r"(?:_TEXT|_LABEL|_SENTENCE|_LINE|_LEAD)$|^HEADLINE$")
 STR = r'"((?:[^"\\\n]|\\.)*)"'
@@ -138,11 +143,26 @@ def sprint_page_words():
                answer.LOOK_MOVED.format(found="bbbbbbb", head="aaaaaaa")])
 
 
+def stop_names():
+    """Every stop a built-in procedure can end a run at."""
+    return sorted({n for f in PROCEDURES.glob("*.json") for n in json.loads(f.read_text(encoding="utf-8")).get("stops", {})})
+
+
+def stopped_line(name):
+    return engine_runs.line_text(dataclasses.replace(engine_state("verifying"), stop={"name": name, "need": "owner-decision"}))
+
+
+def none_refusal(field):
+    return contract_draft.set_value([{"field": field}], field, "none")[1]
+
+
 def built_words():
-    """The registration texts a function completes from one word, which a literal scan cannot see."""
+    """The texts a function completes from one word or name, which a literal scan cannot see."""
     return ([register.behind("/x/r", 1, True)["headline"], register.behind("/x/r", 3, False)["headline"]]
             + [contract_draft._ask(field, "r", 1) for field in
-               ("integration-branch", "lint-command", "test-command", contract_draft.ENVIRONMENT_FIELD)])
+               ("integration-branch", "lint-command", "test-command", contract_draft.ENVIRONMENT_FIELD)]
+            + [none_refusal("lint-command"), none_refusal("test-command")]
+            + [stopped_line(name) for name in stop_names()])
 
 
 def console_words():
@@ -150,6 +170,8 @@ def console_words():
     read = lambda m: (root / (m + ".py")).read_text(encoding="utf-8")
     found = (sprint_page_words()
              + [w for m in ("approve", "contract_draft", "register") for w in prose(module_literals(read(m)))]
+             + [w for m in FIXED_MODULES for w in prose(module_literals(read(m)))]
+             + [service.ACTIVATE_MOVED, service.ACTIVATE_UNREADABLE]
              + built_words())
     return [w for w in found if w not in COMMANDS]
 
@@ -202,10 +224,16 @@ class ListTest(unittest.TestCase):
         self.assertEqual((hit.word, hit.sentence), ("land lock", "Waiting on the land lock now."))
 
     def test_found_in_counts_a_word_once_across_texts_in_list_order(self):
-        hits = owner_words.found_in(["the guard said no", "rerun now", "rerun later"])
-        self.assertEqual([f.word for f in hits], ["rerun", "the guard"])
+        hits = owner_words.found_in(["the guard's policy said no", "rerun now", "rerun later"])
+        self.assertEqual([f.word for f in hits], ["rerun", "the guard's policy"])
         self.assertEqual(hits[0].sentence, "rerun now")
         self.assertEqual(owner_words.found_in([]), [])
+
+    def test_a_word_two_patterns_find_is_found_once_with_its_first_sentence(self):
+        (hit,) = owner_words.found("The fix landed. We landed the change.")
+        self.assertEqual((hit.word, hit.sentence), ("landed", "The fix landed."))
+        (hit,) = owner_words.found_in(["We landed the change.", "The fix landed."])
+        self.assertEqual(hit.sentence, "We landed the change.")
 
     def test_no_replacement_uses_a_listed_word(self):
         for _, instead, _ in owner_words.ROWS:
@@ -218,12 +246,15 @@ class NoGlossTest(unittest.TestCase):
         from .test_console_page import REPORTED, START, full, nodes, of_class, render, sprint_lines, with_sprints
 
         frame = {**view.derive_view([]), **with_sprints([{**REPORTED, "status": "waiting on the land lock"}])}
-        (snap,) = render([START, {"frame": frame}, {"open": "sprint:" + REPORTED["sprint_id"]}, {"snapshot": True}])
+        opened = [START, {"frame": frame}, {"open": "sprint:" + REPORTED["sprint_id"]}]
+        (snap,) = render([*opened, {"snapshot": True}])
         (line,) = sprint_lines(snap)
         (status,) = of_class(line, "p", "report-status")
         self.assertEqual(full(status), "waiting on the land lock")
         self.assertEqual([n for n in nodes(status) if n["tag"] == "button"], [])
         self.assertEqual([n["title"] for n in nodes(status) if n.get("title")], [])
+        before, tapped = render([*opened, {"snapshot": True}, {"click": "report-status"}, {"snapshot": True}])
+        self.assertEqual(tapped, before)
 
     def test_the_view_sends_no_glossary(self):
         self.assertNotIn("glossary", view.derive_view([]))
@@ -332,6 +363,28 @@ class FixedWordsTest(unittest.TestCase):
         flagged = [t for t in console_words() if owner_words.found(blank_fields(t))]
         self.assertEqual(flagged, [])
 
+    def test_the_texts_other_modules_hand_the_page_are_among_the_scanned_words(self):
+        scanned = console_words()
+        for text in (plan_questions.REMOVE_THEN_REGISTER, checkout_remote.HAS_CHANGES, checkout_remote.DIVERGED,
+                     permission.NOT_ENFORCED, permission.POLICY_UNREADABLE, service.ACTIVATE_MOVED,
+                     service.ACTIVATE_UNREADABLE, none_refusal("lint-command"), stopped_line("verify")):
+            self.assertIn(text, scanned)
+
+    def test_the_refusal_of_none_for_a_command_names_the_house_rule_checks_in_plain_words(self):
+        self.assertEqual(none_refusal("lint-command"),
+                         "Every project has a command that runs the house-rule checks: type that command.")
+        self.assertEqual(none_refusal("test-command"), "Every project has a command that runs the tests: type that command.")
+
+    def test_every_built_in_stop_reads_in_plain_words(self):
+        names = stop_names()
+        self.assertGreaterEqual(len(names), 30)
+        self.assertIn("verify-fix-review", names)
+        for name in names:
+            with self.subTest(stop=name):
+                self.assertEqual(owner_words.found(stopped_line(name)), [])
+        self.assertEqual(stopped_line("verify"), "stopped at testing the change, needs your decision")
+        self.assertEqual(stopped_line("claim-lost"), "stopped at claim lost, needs your decision")
+
     def test_the_adoption_and_registration_texts_are_among_the_scanned_words(self):
         scanned = console_words()
         for text in (approve.FAILING_WHY, approve.APPLIED_NOTE, register.HOOKS_LEFT_LINE, register.CONFIRM_ASK,
@@ -350,6 +403,16 @@ class FixedWordsTest(unittest.TestCase):
 
 
 class StoredWordsTest(unittest.TestCase):
+    def test_an_old_open_failure_is_shown_in_todays_words(self):
+        from .test_console_approve import step_event
+        old = ("the forge refused the pull request", "gh is not signed in, or may not open pull requests on this repository")
+        new = ("the forge refused the proposed change", "gh is not signed in, or may not propose changes on this repository")
+        for before, after in zip(old, new):
+            with self.subTest(reason=before):
+                found = approve.adoptions([step_event(1, "t1", step="open_failed", reason=before)])
+                self.assertEqual(found["p1"]["reason"], after)
+                self.assertEqual(owner_words.found(after), [])
+
     OLD = "the project asks for signed commits and this computer could not sign the adoption commit"
 
     def test_an_old_signing_failure_still_offers_turning_signing_off(self):

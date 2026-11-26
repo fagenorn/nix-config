@@ -269,7 +269,7 @@ NO_PULL = "this plan has no proposed change the console opened"
 STALE_CARD = "this card is out of date; the page now shows the current one"
 CLOSED_PULL = "the proposed change of this plan was closed without merging"
 FOUND = "the console did not open this proposed change"
-UNREAD = "the console has not read the proposed change's head yet"
+UNREAD = "the console has not read the latest version of the proposed change yet"
 MOVED = "the proposed change holds changes the console did not push"
 RETARGETED = "the proposed change no longer goes into the version the console opened it against"
 FAILING = "a check of the proposed change failed"
@@ -285,7 +285,7 @@ RETARGETED_WHY = ("Its target branch is no longer the one the console opened it 
                   "the forge, or close it and choose Apply it again.")
 FAILING_WHY = "A check of its proposed change failed. Open the proposed change on GitHub to see which one."
 FOUND_WHY = "The console did not open this proposed change. Review it on the forge and merge it there."
-UNREAD_WHY = "The console has not read its proposed change's head yet; Merge is offered once it has."
+UNREAD_WHY = "The console has not read the latest version of its proposed change yet; Merge is offered once it has."
 CLOSED_WHY = "Its proposed change was closed without merging. Register the project again to adopt it."
 PUSH_NOTE = ("Check that the repository's origin can be reached from this host and accepts the "
              "push, then choose Try again.")
@@ -366,6 +366,9 @@ LEGACY_REASONS = (
      "the forge does not know the repository or the adoption's change"),
     ("the adoption commit could not be made", "the adoption's change could not be saved"),
     (" hook stopped the adoption commit: ", " hook stopped saving the adoption's change: "),
+    ("gh is not signed in, or may not open pull requests on this repository",
+     "gh is not signed in, or may not propose changes on this repository"),
+    ("the forge refused the pull request", "the forge refused the proposed change"),
 )
 NOT_INTEGRATED = "adopt.registration.not_integrated"
 UNCHECKED = "the adoption on the remote did not pass the registration's checks"

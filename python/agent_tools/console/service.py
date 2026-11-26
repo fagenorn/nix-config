@@ -1349,10 +1349,10 @@ line, appending nothing, in this order: `nothing to activate` (no `activator`, n
 reading with nothing pending whose commit is not that of a run that failed less than a day ago,
 `view.offers_activate`);
 `an activation is already running`;
-`that commit is no longer the tip of origin's integration branch` (the body's commit is not the
+`that version is no longer the latest main version on origin` (the body's commit is not the
 shown reading's); then a fresh
-`activator.tip(root)`, read outside the ingest lock, that cannot be read (`the tip of origin's
-integration branch could not be read`) or is not the commit (the same text as before). The claim on
+`activator.tip(root)`, read outside the ingest lock, that cannot be read (`the latest main version on
+origin could not be read`) or is not the commit (the same text as before). The claim on
 the activation is one flag taken under the ingest lock together with the first three checks, so two
 concurrent requests cannot both pass; the last check releases it when it refuses. An admitted request
 calls `activator.start(root, commit, record)` on the request thread, `record` being what writes the
@@ -2109,8 +2109,8 @@ OWNER_NOTICE_WITHDRAW_PATH = "/api/owner-notice-withdraw"
 ACTIVATE_PATH = "/api/activate"
 ACTIVATE_NOTHING = "nothing to activate"
 ACTIVATE_RUNNING = "an activation is already running"
-ACTIVATE_MOVED = "that commit is no longer the tip of origin's integration branch"
-ACTIVATE_UNREADABLE = "the tip of origin's integration branch could not be read"
+ACTIVATE_MOVED = "that version is no longer the latest main version on origin"
+ACTIVATE_UNREADABLE = "the latest main version on origin could not be read"
 ROUND_ANSWER_PATH = "/api/round-answer"
 LOOK_RETRY_PATH = "/api/look-retry"
 CHECK_PATH = "/api/check-answer"

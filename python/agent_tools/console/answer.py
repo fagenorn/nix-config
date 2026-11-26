@@ -164,7 +164,8 @@ UNEXPECTED_FAILURE = "the console ran into a problem it did not expect. Try agai
 LOOK_MOVED = ("Nothing was recorded: the proposed change is now at {found}, not at {head}, the version "
               "these pictures show. The manager will send the new pictures.")
 LOOK_CLOSED = "Nothing was recorded: the proposed change is {state}."
-LOOK_APPROVES = "Choosing \"{option}\" records your approval of {head}, proposed change #{pr}."
+LOOK_APPROVES = ("Choosing \"{option}\" records your approval of {head}, proposed change #{pr}, on "
+                 "task #{issue}.")
 ACTION_APPROVES = ("Choosing \"{option}\" lets the manager run exactly this command once, within 60 "
                    "minutes of your answer:")
 LOOK_RECORDING = "Recording your approval of {head}."

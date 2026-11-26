@@ -62,6 +62,22 @@ class SprintWarningTest(Case):
         self.assertTrue(got.stderr.startswith("sprint: refused 4"), got.stderr)
         self.assertNotIn("warning", got.stderr)
 
+    def test_the_next_step_of_a_report_warns_too(self):
+        _, _, got = self.report({**REPORT, "next": "start the resume slice"})
+        self.assertEqual((got.returncode, got.stdout, got.stderr), (0, "sprint: report sent\n",
+                         'sprint: warning: rewrite "start the resume slice" without "slice"; '
+                         'write instead: step\n'))
+
+    def test_a_claim_warns_for_its_area_and_end_the_page_shows(self):
+        svc = self.open()
+        sid = self.goal(svc)
+        got = self.notice(svc, sid, {"kind": "claim", "text": "Updating the settings page",
+                                     "what": "the lint settings", "until": "CI passes", "issue": 7})
+        self.assertEqual(got.returncode, 0)
+        self.assertEqual(got.stderr.splitlines(), [
+            'sprint: warning: rewrite "CI passes" without "CI"; write instead: the automatic checks',
+            'sprint: warning: rewrite "the lint settings" without "lint"; write instead: the house-rule checks'])
+
     def test_ask_warns_once_per_word_across_ask_context_and_options(self):
         svc = self.open()
         sid = self.goal(svc)
@@ -93,12 +109,14 @@ class SprintWarningTest(Case):
             'write instead: the safety check'])
 
     def test_the_text_helpers_pick_only_the_checked_members(self):
-        self.assertEqual(sprint.report_texts({**REPORT, "next": "rerun"}), [REPORT["status"]])
+        self.assertEqual(sprint.report_texts({**REPORT, "next": "rerun", "phase": "slice"}),
+                         [REPORT["status"], "rerun"])
         self.assertEqual(sprint.round_texts({"questions": [
             {"question": "q", "context": "c", "options": ["a", 3], "blocks": "b"}, "x"]}),
             ["q", "c", "a"])
         self.assertEqual(sprint.notice_texts(
-            {"kind": "claim", "text": "t", "what": "w", "until": "u"}), ["t"])
+            {"kind": "claim", "text": "t", "what": "w", "until": "u", "issue": 7}), ["t", "w", "u"])
+        self.assertEqual(sprint.notice_texts({"kind": "hand-off", "text": "t", "to": "slice"}), ["t"])
         self.assertEqual(sprint.report_texts({"status": 5}), [])
 
 

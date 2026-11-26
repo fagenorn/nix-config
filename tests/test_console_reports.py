@@ -30,7 +30,7 @@ URL = "https://github.com/owner/p00/milestone/3"
 REPORT = {"status": "two steps are building", "phase": "running", "milestone": "Importer resumes",
           "tracker_url": URL,
           "issues": [{"issue": 13, "stage": "landed"}, {"issue": 12, "stage": "building"}],
-          "inbox": [12], "next": "start the resume slice"}
+          "inbox": [12], "next": "start the resume step"}
 CLOSING = {"summary": "Importer resumes after a crash\nwith detail",
            "issues": [{"issue": 12, "stage": "landed"}, {"issue": 13, "stage": "dropped"}],
            "differently": "cut smaller slices"}
@@ -560,7 +560,7 @@ class SprintBallViewTest(unittest.TestCase):
             (reported(started(A), T0_MS, issues=((1, "queued"), (2, "queued"))),
              T0_MS + MIN, "queued 2 of 2: Importer resumes"),
             (reported(started(A), T0_MS, issues=((1, "landed"), (2, "held"))),
-             T0_MS + MIN, "landed 1 of 2: Importer resumes"),
+             T0_MS + MIN, "went in 1 of 2: Importer resumes"),
             (reported(started(A), T0_MS, issues=()), T0_MS + MIN, "Importer resumes"),
             (run, T0_MS + 2 * MIN, "building 1 of 1: Importer resumes"),
         )

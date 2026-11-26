@@ -53,6 +53,38 @@ class Keeping(Fake):
                             environment=environment)
 
 
+class SavedWordsTest(DraftCase):
+    def saved(self, row):
+        self.store.parent.mkdir(parents=True, exist_ok=True)
+        log = event_log.EventLog(self.store)
+        try:
+            log.append([register.ended(row)])
+        finally:
+            getattr(log, "close", lambda: None)()
+        self.begin(Fake(plan=READY), draft_reader=lambda root: READ_ALL)
+
+    def test_a_saved_refusal_is_asked_again_in_todays_words(self):
+        repo = git_repo(self.parent / "r", contract=False)
+        records = [{"field": field, "label": "old", "value": value, "source": source, "options": [], "text": True,
+                    "reason": reason, "ask": "old"} for field, value, source, reason in (
+            ("integration-branch", "main", "remote", None), ("lint-command", "make lint", "owner",
+             "The plan refused the lint command: must not be empty"),
+            ("test-command", "make test", "files", None), ("release", "unsupported", "start", None),
+            ("production", "none", "start", None))]
+        self.saved(register.drafting(str(repo), records))
+        (question,) = self.view()["registration"]["questions"]
+        self.assertEqual((question["subject"], question["why"]),
+                         ("lint-command", "The plan refused the house-rule checks command: must not be empty"))
+
+    def test_a_saved_behind_row_is_asked_in_todays_words(self):
+        row = register.behind("/x/checkout", 1, True)
+        row = {**row, "headline": "checkout is 1 commit behind its remote, which already has a project contract."}
+        self.saved(row)
+        (item,) = [i for i in self.view()["inbox"]["open"] if i["reason"] == "register_behind"]
+        said = "checkout is 1 change behind its remote, which already has a project contract."
+        self.assertEqual((item["headline"], item["questions"][0]["question"]), (said, said))
+
+
 class FactRefusalTest(DraftCase):
     def failure_cards(self):
         return [i for i in self.view()["inbox"]["open"] if i["reason"] == "register_failed"]
