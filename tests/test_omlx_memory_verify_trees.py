@@ -112,6 +112,20 @@ class VerifyTreeRecordTest(VerifyTreeCase):
         self.assertEqual((line["peak_verify_gib"], line["peak_verify_at"]), (4.0, "2026-11-24T23:51:00+00:00"))
         self.assertEqual(line["verify_runs"], 2)
 
+    def test_a_run_peaking_before_midnight_read_after_the_first_new_day_sample_is_not_counted_in_the_new_day(self):
+        self.sample_with("2026-11-24T23:58:00")
+        self.sample_with("2026-11-25T00:00:10")
+        self.run_line("2026-11-24T23:50:00Z", 800.0, 4.0, "2026-11-24T23:58:30Z")
+        self.sample_with("2026-11-25T00:04:00")
+        [event] = self.sample_lines("2026-11-25")[-1]["events"]
+        self.assertEqual(event["tree_peak_bytes"], 4 * GIB)
+        saved = self.read_state()
+        self.assertEqual(saved["verify_runs"], 0)
+        self.assertNotIn("verify", saved["census_peaks"])
+        self.sample_with("2026-11-26T00:01:00")
+        self.assertEqual([(line["day"], line["verify_runs"], line["peak_verify_gib"]) for line in self.day_lines()],
+                         [("2026-11-24", 0, None), ("2026-11-25", 0, None)])
+
     def test_the_day_of_a_peak_follows_the_hosts_clock_across_a_fall_back_change(self):
         self.env["TZ"] = "America/Los_Angeles"
         self.sample_with("2026-11-01T00:10:00")

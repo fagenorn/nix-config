@@ -28,7 +28,8 @@ gets one line per finished day: `day`, the peaks and minimum in GiB (null where 
 `peak_<name>_gib` and a `peak_<name>_at` (the first sample, as ISO 8601, that held that peak; null
 where unmeasured; for `verify` the largest single verify-run tree and the run's own peak time, kept
 only on its local day; the first sample after midnight also folds a run whose peak was on the finished
-day into that day's line, where it counts as one of its `verify_runs`), `peak_owners` (the day's five
+day into that day's line, where it counts as one of its `verify_runs`; a run read later whose peak
+was on another day is in its event and alert only and counts in no `verify_runs`),`peak_owners` (the day's five
 largest `{name, pid, gib, at}`), `census_samples`, `records_since` and `verify_runs` (the verify runs
 read that day).
 
@@ -410,7 +411,8 @@ def _fold_verify(state: dict, events: list[dict], reading: dict, now: datetime, 
                  line: dict | None) -> None:
     """Alert on each tree over the line; count each `verify_run` and fold its peak into the day the peak is dated in.
 
-    That day is the state's, or the finished day's `line` when this sample rolled the day over.
+    That day is the state's, or the finished day's `line` when this sample rolled the day over. A run whose peak is
+    dated on any other day is in its event and alert only: counting it would give the day a run with no peak.
     """
     for event in events:
         if event["kind"] != "verify_run":
@@ -421,6 +423,8 @@ def _fold_verify(state: dict, events: list[dict], reading: dict, now: datetime, 
         day = _local_day(at, now) if _is_int(peak) and isinstance(at, str) else None
         if line is not None and day == line["day"]:
             _amend_day_line(line, peak, at)
+            continue
+        if day is not None and day != state["day"]:
             continue
         state["verify_runs"] += 1
         if day == state["day"]:
