@@ -12,6 +12,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from agent_tools.delivery import comment_lint
+from agent_tools.delivery.never_rise import Snapshot
 from agent_tools.hosts.memory_floor import GIB, Limits, Loop, enforce_once, memory_reader, read_available
 from agent_tools.hosts.omlx_memory_watch import ReadingError
 from tests.test_memory_floor import (
@@ -259,6 +261,15 @@ class MemoryReaderTest(unittest.TestCase):
             os.remove(scratch / "blank")
             self.assertEqual([read(), read()], [read_available(VM_STAT, self.TOTAL)] * 2)
             self.assertEqual(len((scratch / "count").read_text().splitlines()), 2)
+
+
+class CommentLengthTest(unittest.TestCase):
+    def test_the_floor_source_has_no_comment_over_the_length_cap(self):
+        path = "python/agent_tools/hosts/memory_floor.py"
+        data = (Path(__file__).resolve().parents[1] / path).read_bytes()
+        snapshot = Snapshot("a" * 40, {}, contents={path: data})
+        length = comment_lint.enforcers(None)[1]
+        self.assertEqual([violation.text() for violation in length.find(snapshot)], [])
 
 
 if __name__ == "__main__":

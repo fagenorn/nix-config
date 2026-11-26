@@ -177,7 +177,7 @@ def protected_pids(table: dict[int, Proc], omlx_pid: int | None, service_pids: s
 
 
 def _is_program(proc: Proc, names: Collection[str]) -> bool:
-    """Whether the process runs a program in `names`: by its executable path (which may hold spaces) or its command's first word."""
+    """Whether the process runs a program in `names`, by its executable path or its command's first word."""
     if proc.executable is not None and proc.executable.rsplit("/", 1)[-1] in names:
         return True
     first = proc.command.split(None, 1)
@@ -656,7 +656,7 @@ def read_omlx_pid(launchctl: str, label: str) -> int | None:
 
 
 def memory_reader(vm_stat: str, sysctl: str) -> Callable[[], int]:
-    """A reader of available memory: `vm_stat` runs on every call, and the host's memory size is kept once a read of it parses."""
+    """A reader of available memory: `vm_stat` runs every call, the host memory size is kept once it parses."""
     total: str | None = None
 
     def available() -> int:
