@@ -545,6 +545,121 @@ class CommittedTimingsTest(unittest.TestCase):
         self.assertEqual([m for m in SLOW_ON_LAST_FULL_RUN if m not in timings], [])
 
 
+class ShardAssignmentTest(unittest.TestCase):
+    MEMBERS = ["a.py", "b.py", "c.py", "d.py", "e.py", "f.py", "g.py"]
+    # f.py and g.py are unrecorded; gone.py is not a member.
+    TIMINGS = {"a.py": 50.0, "b.py": 40.0, "c.py": 30.0, "d.py": 20.0, "e.py": 10.0,
+               "gone.py": 99.0}
+
+    def test_every_member_lands_in_exactly_one_shard_and_an_unrecorded_one_too(self):
+        members = self.MEMBERS
+        for count in (1, 2, 3, 4, 7):
+            for timings in (self.TIMINGS, {}):
+                with self.subTest(count=count, recorded=bool(timings)):
+                    shards = suite_runner.assign_shards(members, timings, count)
+                    flat = [m for shard in shards for m in shard]
+                    self.assertEqual(len(shards), count)
+                    self.assertEqual(sorted(flat), sorted(members))
+                    self.assertEqual(len(flat), 7)
+                    for name in ("f.py", "g.py"):
+                        self.assertEqual(sum(name in shard for shard in shards), 1)
+                    self.assertNotIn("gone.py", flat)
+                    for shard in shards:
+                        self.assertEqual(shard, sorted(shard, key=members.index))
+
+    def test_shards_balance_recorded_time_longest_first(self):
+        cases = (
+            (self.MEMBERS, self.TIMINGS, 3,
+             [["a.py", "d.py"], ["b.py", "g.py"], ["c.py", "e.py", "f.py"]]),
+            (["a.py", "b.py", "c.py", "d.py", "e.py"], {}, 2,
+             [["a.py", "c.py", "e.py"], ["b.py", "d.py"]]),
+        )
+        for members, timings, count, expected in cases:
+            with self.subTest(count=count, recorded=bool(timings)):
+                self.assertEqual(
+                    suite_runner.assign_shards(members, timings, count), expected)
+
+    def test_a_shard_count_below_one_is_refused(self):
+        with self.assertRaises(ValueError):
+            suite_runner.assign_shards(["a.py"], {}, 0)
+
+    def test_the_shard_variable_parses_index_over_count(self):
+        self.assertIsNone(suite_runner.shard_from({}))
+        self.assertIsNone(suite_runner.shard_from({"SUITE_RUNNER_SHARD": ""}))
+        self.assertEqual(suite_runner.shard_from({"SUITE_RUNNER_SHARD": "1/4"}), (1, 4))
+        self.assertEqual(suite_runner.shard_from({"SUITE_RUNNER_SHARD": "4/4"}), (4, 4))
+        for text in ("0/4", "5/4", "1/0", "a/4", "1", "1/4/2", " 1/4", "-1/4", "01/4",
+                     "1.0/4"):
+            with self.subTest(text=text):
+                with self.assertRaises(suite_runner.UsageError) as caught:
+                    suite_runner.shard_from({"SUITE_RUNNER_SHARD": text})
+                self.assertTrue(
+                    str(caught.exception).startswith("SUITE_RUNNER_SHARD: "),
+                    str(caught.exception))
+
+
+# Rebinds `load_timings` before `main` reads it, so a child runner sees the recorded seconds
+# argv[1] carries, not the committed file's.
+DRIVER = textwrap.dedent('''\
+    import json
+    import sys
+
+    from agent_tools.delivery import suite_runner
+
+
+    def recorded_timings(path=suite_runner.TIMINGS_FILE):
+        return dict(json.loads(sys.argv[1]))
+
+
+    suite_runner.load_timings = recorded_timings
+    raise SystemExit(suite_runner.main(sys.argv[2:]))
+''')
+
+
+class ShardRunTest(RunnerCase):
+    PASSING = "import unittest\nclass T(unittest.TestCase):\n    def test_x(self): pass\n"
+
+    def run_recorded(self, recorded: dict, *args: str,
+                     env: dict) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, "-c", DRIVER, json.dumps(recorded), *args],
+            cwd=self.work, env=self.environment(1, 1, env),
+            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=300,
+            check=False)
+
+    def test_a_sharded_run_runs_its_shard_only_and_records_it_in_the_report(self):
+        names = [self.member(f"test_s{n}.py", self.PASSING) for n in range(4)]
+        result = self.run_recorded(
+            {"test_s0.py": 10.0, "test_s1.py": 9.0, "test_s2.py": 1.0, "test_s3.py": 1.0},
+            "--jobs", "2", *names,
+            env={"SUITE_RUNNER_SHARD": "2/2", "SUITE_RUNNER_REPORT": "out/r.json"})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        started = {START.match(line).group(1) for line in result.stdout.splitlines()
+                   if START.match(line)}
+        self.assertEqual(started, {"test_s1.py", "test_s2.py"})
+        report = json.loads((self.work / "out/r.json").read_text(encoding="utf-8"))
+        self.assertEqual(report["members"], 2)
+        self.assertEqual(report["shard"], 2)
+        self.assertEqual(report["shard_count"], 2)
+        self.assertEqual(list(report)[-2:], ["shard", "shard_count"])
+        self.assertEqual({row["member"] for row in report["timings"]},
+                         {"test_s1.py", "test_s2.py"})
+
+    def test_a_bad_shard_variable_or_an_empty_shard_is_a_usage_error(self):
+        cases = (
+            ("5/4", "SUITE_RUNNER_SHARD: '5/4'"),
+            ("3/3", "shard 3 of 3 has no member"),
+        )
+        for shard, text in cases:
+            with self.subTest(shard=shard):
+                names = [self.member(f"test_u{n}.py", self.PASSING) for n in range(2)]
+                result = self.run_recorded({}, "--jobs", "2", *names,
+                                           env={"SUITE_RUNNER_SHARD": shard})
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                self.assertIn(text, result.stderr)
+                self.assertNotIn("suite-runner: start", result.stdout)
+
+
 class CapTest(RunnerCase):
     def test_two_jobs_reach_two_open_members_and_never_exceed_them(self):
         members = self.barrier_members(*(f"test_m{n}.py" for n in range(5)))
@@ -753,12 +868,14 @@ class ReportFileTest(RunnerCase):
                 self.assertEqual(sorted(path.name for path in self.work.iterdir()),
                                  sorted(members))
 
-    def test_members_do_not_inherit_the_report_variable(self):
-        parent = {"SUITE_RUNNER_REPORT": "x.json", "KEEP": "1"}
+    def test_members_do_not_inherit_the_report_or_shard_variable(self):
+        parent = {"SUITE_RUNNER_REPORT": "x.json", "SUITE_RUNNER_SHARD": "1/4", "KEEP": "1"}
         environment = suite_runner.member_environment(parent, "/tmp/c")
         self.assertNotIn("SUITE_RUNNER_REPORT", environment)
+        self.assertNotIn("SUITE_RUNNER_SHARD", environment)
         self.assertEqual(environment["KEEP"], "1")
         self.assertIn("SUITE_RUNNER_REPORT", parent)
+        self.assertIn("SUITE_RUNNER_SHARD", parent)
 
 
 class CpuTimeTest(RunnerCase):
