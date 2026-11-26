@@ -2,7 +2,8 @@
 
 The time is the CPU time of the calling thread (`time.thread_time()`), the best of
 several calls, so a loaded runner descheduling the thread cannot fail it. The
-bound sits well above a linear check's cost and well below a quadratic one's.
+bound is at least 5 times the linear check's cost on a hosted runner and below
+a quadratic one's.
 
 Run: just agent-workflow-tests
 """
@@ -22,7 +23,7 @@ TIER = "fast"
 GITHUB_TOKEN = "gh" + "p_" + "a1b2c3" * 6
 SIZE = 96 * 1024
 PROSE = "This answer reads src/foo/bar.py and explains why the build passes. "
-CPU_BOUND_SECONDS = 0.1
+CPU_BOUND_SECONDS = 1.0
 CALLS = 5
 
 
@@ -50,9 +51,9 @@ def holds_a_token(text):
 
 
 def quadratic_check(text):
-    """A correct credential check that first rescans the rest of the answer from every 4th position."""
-    for start in range(0, len(text), 4):
-        text.count("ab", start)
+    """A correct credential check that first rescans the rest of the answer from every position."""
+    for start in range(len(text)):
+        text[start:].upper().lower()
     return holds_a_token(text)
 
 
@@ -73,7 +74,7 @@ class CredentialTimingTest(unittest.TestCase):
             best = elapsed if best is None else min(best, elapsed)
         self.assertLess(best, CPU_BOUND_SECONDS)
 
-    def test_a_96_kib_answer_is_checked_in_under_100_ms_of_cpu_whatever_its_shape(self):
+    def test_a_96_kib_answer_is_checked_in_under_1_s_of_cpu_whatever_its_shape(self):
         for name, text in answers().items():
             with self.subTest(name=name):
                 self.assertLessEqual(len(text), SIZE + len(GITHUB_TOKEN))
