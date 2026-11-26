@@ -173,21 +173,36 @@ class WholeShellArgvTest(unittest.TestCase):
         self.assertEqual(argv[-2], "--append-system-prompt-file")
 
     def test_the_other_roles_keep_their_narrow_lists(self):
+        # Each role's baseline, written out here and not read from its role file: a tool added to a role
+        # file changes the launch and fails this table until the table is changed on purpose.
         expected = {
-            "planner": ("Read,Grep,Glob,Skill," + GIT_READ_ONLY, GIT_WRITING),
-            "reviewer": ("Read,Grep,Glob,Skill," + GIT_READ_ONLY, GIT_WRITING),
-            "reviewer-lite": ("Read,Grep,Glob,Skill," + GIT_READ_ONLY, GIT_WRITING),
+            "planner": ("Read,Glob,Grep,Bash,Write,Edit,Skill,Agent(Explore)",
+                        f"Read,Glob,Grep,{GIT_READ_ONLY},Write,Edit,Skill,Agent(Explore)", GIT_WRITING),
+            "reviewer": ("Read,Glob,Grep,Bash,Write,Skill",
+                         f"Read,Glob,Grep,{GIT_READ_ONLY},Write,Skill", GIT_WRITING),
+            "reviewer-lite": ("Read,Glob,Grep,Bash,Write",
+                              f"Read,Glob,Grep,{GIT_READ_ONLY},Write", GIT_WRITING),
         }
-        for name in expected:
+        for name, (tools, allowed, denied) in expected.items():
             with self.subTest(name):
                 role = engine_session.read_role(AGENTS, name)
                 argv = engine_session.launch_argv(role, SCHEMA, SESSION, SYSTEM)
-                tools = ",".join(role.tools)
-                allowed = tools.replace("Bash", GIT_READ_ONLY)
+                self.assertEqual(argv[argv.index("--tools") + 1], tools)
                 self.assertEqual(argv[argv.index("--allowedTools") + 1], allowed)
-                self.assertEqual(argv[argv.index("--disallowedTools") + 1], GIT_WRITING)
+                self.assertEqual(argv[argv.index("--disallowedTools") + 1], denied)
                 with self.assertRaises(engine_session.RoleError):
                     engine_session.launch_argv(replace(role, whole_shell=True), SCHEMA, SESSION, SYSTEM)
+
+    def test_the_implementer_without_a_worktree_keeps_its_launch(self):
+        role = engine_session.read_role(AGENTS, "implementer")
+
+        argv = engine_session.launch_argv(role, SCHEMA, SESSION, SYSTEM)
+
+        self.assertNotIn("--tools", argv)
+        self.assertNotIn("--allowedTools", argv)
+        self.assertEqual(argv[argv.index("--disallowedTools") + 1], (
+            "Artifact,ArtifactComments,ArtifactData,Workflow,ScheduleWakeup,AskUserQuestion,SendFeedback,"
+            "ReportFindings,CronCreate,CronDelete,CronList,RemoteTrigger,mcp__claude_ai_Claude_Docs"))
 
 
 def git(*words: str, cwd: Path) -> None:
@@ -195,6 +210,28 @@ def git(*words: str, cwd: Path) -> None:
     subprocess.run(["git", "-c", "user.name=n", "-c", "user.email=n@example.com",
                     "-c", "commit.gpgsign=false", *words], cwd=cwd, env=env, check=True,
                    capture_output=True, text=True)
+
+
+def local_env_vars() -> list[str]:
+    """The variables git lists as repository-local: the independent source for what a session must not inherit."""
+    done = subprocess.run(["git", "rev-parse", "--local-env-vars"], capture_output=True, text=True, check=True)
+    return done.stdout.split()
+
+
+class SessionEnvironmentTest(unittest.TestCase):
+    def test_a_session_inherits_no_variable_git_names_as_repository_local(self):
+        given = {"HOME": "/h", **dict.fromkeys(local_env_vars(), "x")}
+
+        got = engine_session.session_environment(given)
+
+        self.assertIn("GIT_SHALLOW_FILE", local_env_vars())
+        self.assertEqual(sorted(set(local_env_vars()) & set(got)), [])
+        self.assertEqual(got["HOME"], "/h")
+
+    def test_a_session_inherits_no_bare_mode_switch(self):
+        got = engine_session.session_environment({"CLAUDE_CODE_SIMPLE": "1", "HOME": "/h"})
+
+        self.assertNotIn("CLAUDE_CODE_SIMPLE", got)
 
 
 class OwnWorktreeTest(unittest.TestCase):
@@ -243,6 +280,21 @@ class OwnWorktreeTest(unittest.TestCase):
             got = engine_session.own_worktree(str(self.wt), "b", str(self.repo))
 
         self.assertEqual(got, os.path.realpath(self.wt))
+
+    def test_the_listing_runs_without_any_variable_git_names_as_repository_local(self):
+        seen = {}
+        real = subprocess.run
+
+        def spy(argv, **kwargs):
+            seen.update(kwargs["env"])
+            return real(argv, **kwargs)
+
+        with mock.patch.dict(os.environ, dict.fromkeys(local_env_vars(), "x")), \
+                mock.patch.object(subprocess, "run", spy):
+            engine_session.own_worktree(str(self.wt), "b", str(self.repo))
+
+        self.assertTrue(seen)
+        self.assertEqual(sorted(set(local_env_vars()) & set(seen)), [])
 
 
 class GuardSettingsTest(unittest.TestCase):
@@ -313,7 +365,8 @@ class WholeShellDeliverTest(Scenario):
         project = EngineProject(self)
         project.env.pop("CLAUDE_ACCOUNT", None)
         project.env.update(GIT_DIR="/nowhere/.git", GIT_WORK_TREE="/nowhere",
-                           GIT_INDEX_FILE="/nowhere/index")
+                           GIT_INDEX_FILE="/nowhere/index", GIT_SHALLOW_FILE="/nowhere/shallow",
+                           GIT_CONFIG_PARAMETERS="'core.worktree=/nowhere'")
         copy_roles(project, "implementer")
         log = install_stub(project, RESULT_NORMAL)
 
@@ -321,8 +374,21 @@ class WholeShellDeliverTest(Scenario):
 
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         (launch,) = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
-        for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"):
+        for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_SHALLOW_FILE",
+                     "GIT_CONFIG_PARAMETERS"):
             self.assertNotIn(name, launch["git_env"])
+
+    def test_a_relaunch_after_the_session_moved_its_branch_is_refused_before_it_starts(self):
+        run = self.stubbed(replies={"implement": {
+            "reply": {}, "switch": {"branch": "wandered"}, "miss": True}})
+
+        done = run.deliver()
+
+        self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+        self.assertIn("implement", done.stderr)
+        self.assertIn("not a worktree of the project on that branch", done.stderr)
+        self.assertEqual(self.keys(run).count("implement"), 1)
+        self.assertEqual(self.branch_here(run, run.worktree_path), "wandered")
 
     def test_the_direct_implement_session_runs_in_its_worktree(self):
         run = self.stubbed()

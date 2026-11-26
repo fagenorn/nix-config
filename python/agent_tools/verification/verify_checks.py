@@ -101,9 +101,9 @@ is 2.
 (`verify_checks.engine_direct_past_implement`) is met when the first direct-lane engine delivery after activation
 entered a step other than `preflight` and `implement` within two days of the activation. The anchor is found as
 `console-manager-merge` finds it (none: `not_yet`, 75). The runs are those under `--runs-root` (default the engine's
-runs root) whose `run.json` has procedure `direct` and a `started` at or after the anchor; one counts when its
-events hold a `step_entered` of `implement` and its `results/implement.1.json` is not `ineligible`. Only the first
-such run by `(started, id)` is judged: a first `outcome_graded` of `implement` that is not `done` is not met (1);
+runs root) whose `run.json` has procedure `direct` and a `started` at or after the anchor; one counts unless its
+`results/implement.1.json` is `ineligible`. Only the first such run by `(started, id)` is judged, whatever step it
+reached (a run that never entered `implement` is judged too, and no later run stands in for it): a first `outcome_graded` of `implement` that is not `done` is not met (1);
 else the first `step_entered` after that grade, at or before anchor plus two days, is met (0), a later one not met;
 with none it is not met once the clock is past that bound, else `not_yet`. The report is `{"met", "verdict",
 "anchor", "run", "implement", "entered", "at"}`.
@@ -161,7 +161,6 @@ from agent_tools.project_contract import agent_platform
 from agent_tools.project_contract.adopt_apply import run_leashed
 from agent_tools.canonical import parse_rfc3339_utc
 from agent_tools.claims import forge_markers, forge_owner_action
-from agent_tools.delivery.engine_ledger import runs_root as engine_runs_root
 from agent_tools.system import forge_api
 from agent_tools.verification import verify_answer, verify_issues
 
@@ -863,13 +862,12 @@ def _implement_ineligible(run_dir: Path) -> bool:
 
 
 def past_implement_verdict(runs_root: Path, anchor: datetime, now: datetime) -> tuple[int, dict]:
-    """The first direct engine run from `anchor` on that entered `implement` got a reply and a later step in time."""
+    """The first direct engine run from `anchor` on, ineligible ones aside, got past `implement` in time."""
     report = {"met": False, "verdict": "not_yet", "anchor": _stamp(anchor), "run": None,
               "implement": None, "entered": None, "at": None}
     for started, run_id, run_dir in _past_implement_runs(runs_root, anchor):
         events = _past_implement_events(run_dir)
-        if (not any(kind == "step_entered" and step == "implement" for kind, step, _, _ in events)
-                or _implement_ineligible(run_dir)):
+        if _implement_ineligible(run_dir):
             continue
         report["run"] = run_id
         grade = next((index for index, (kind, step, _, _) in enumerate(events)
@@ -899,7 +897,7 @@ def engine_direct_past_implement(since: str, *, runs_root: Path | None = None, l
     if anchor is None:
         return 75, {"met": False, "verdict": "not_yet", "anchor": None, "run": None,
                     "implement": None, "entered": None, "at": None}
-    return past_implement_verdict(runs_root if runs_root is not None else engine_runs_root(), anchor,
+    return past_implement_verdict(runs_root if runs_root is not None else agent_platform.engine_runs_root(), anchor,
                                   now if now is not None else _utcnow())
 
 

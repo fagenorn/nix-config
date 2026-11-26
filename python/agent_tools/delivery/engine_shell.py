@@ -1265,14 +1265,19 @@ def _visit_session(run_dir: Path, root: str, step: dict, action: engine_core.Sta
     again, and the session is launched under `resumed.attempt`."""
     name, visit = action.step, action.visit
     role = engine_session.read_role(engine_session.roles_dir(os.environ), step["role"])
-    cwd = root
-    if (w := step.get("worktree")) is not None:
-        args = dict(action.args)
-        cwd = engine_session.own_worktree(args.get(w["path"]), args.get(w["branch"]), root)
-        if cwd is None:
-            raise Fault(f"step {name} names the worktree {args.get(w['path'])!r} on "
-                        f"{args.get(w['branch'])!r}, which is not a worktree of the project on that branch")
-        role = replace(role, whole_shell=True)
+    w, args = step.get("worktree"), dict(action.args)
+
+    def session_dir() -> str:  # checked again before every launch: the session may have moved the branch
+        if w is None:
+            return root
+        path, branch = args.get(w["path"]), args.get(w["branch"])
+        if (found := engine_session.own_worktree(path, branch, root)) is None:
+            raise Fault(f"step {name} names the worktree {path!r} on {branch!r}, "
+                        "which is not a worktree of the project on that branch")
+        return found
+
+    session_dir()
+    role = role if w is None else replace(role, whole_shell=True)
     staged = run_dir / "procedure"
     schema = _load(staged / action.reply)
     if resumed is None:
@@ -1308,7 +1313,7 @@ def _visit_session(run_dir: Path, root: str, step: dict, action: engine_core.Sta
                 "session": session, "role": role.name,
                 "account": os.environ.get("CLAUDE_ACCOUNT") or "console"})
         launched, reading, stopped, no_reply = _launch_until_answered(
-            run_dir, cwd, (name, visit, session), prompt, (role, schema, system), scope.stop,
+            run_dir, session_dir, (name, visit, session), prompt, (role, schema, system), scope.stop,
             defer=member, resumed=resumed)
     if stopped is not None:
         return stopped
@@ -1352,7 +1357,7 @@ def _visit_session(run_dir: Path, root: str, step: dict, action: engine_core.Sta
 
 
 def _launch_until_answered(
-        run_dir: Path, root: str, visit_of: tuple[str, int, str], prompt: str,
+        run_dir: Path, session_dir: Callable[[], str], visit_of: tuple[str, int, str], prompt: str,
         launch_of: tuple[engine_session.Role, Mapping, Path], stop: Callable[[], bool],
         defer: bool = False, resumed: _Resumed | None = None,
 ) -> tuple[engine_session.Launched, engine_session.Reading, tuple[int, dict] | None, bool]:
@@ -1398,6 +1403,7 @@ def _launch_until_answered(
             started.append(pid)
             event("process_started", step=name, visit=visit, pid=pid, started=_now())
 
+        root = session_dir()  # the directory is validated before each launch, a resume included
         guard = _guard(root)
         if isinstance(guard, engine_guard.Unavailable):
             raise Fault(f"step {name} was not launched: the host's settings no longer load the "
@@ -1426,14 +1432,14 @@ def _launch_until_answered(
         if started:
             event("session_answered", step=name, visit=visit, session=session, attempt=attempt,
                   account=account)
-        if launched.timed_out or reading.subtype in engine_session.CAP_SUBTYPES:
-            break  # a bound ended the session: graded by the visit, before any fault below
-        if calls := engine_session.denied_calls(reading):
+        if calls := engine_session.denied_calls(reading):  # a reported refusal outranks a bound
             if waiting:
                 event("wait_ended", wait=engine_session.USAGE_LIMIT)
             return stop_at(launched, reading, procedure_terms.TOOL_DENIED,
                            procedure_terms.TOOL_DENIED_NEED,
                            engine_session.denial_detail(name, calls))
+        if launched.timed_out or reading.subtype in engine_session.CAP_SUBTYPES:
+            break  # a bound ended the session: graded by the visit, before any fault below
         if reading.api_failure == engine_session.API_ERROR:
             if retried:
                 no_reply = True

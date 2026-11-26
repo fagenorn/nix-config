@@ -35,7 +35,7 @@ commit to `main` and fail as not up to date; `merge_policy` makes each of the fi
 on the base branch policy, after which one read of `mergeStateStatus` answers `BLOCKED`. A pull
 request's `mergeStateStatus` is `BEHIND` while `main` is not an ancestor of its head, else `CLEAN`.
 The environment always sets `LANDING_BOUND_SECONDS` to 0 (no wait on a lock or a pending check).
-The replies' `merge`, `same_head`, `leave` and `upstream` effects (see the launcher stand-in) are given the
+The replies' `merge`, `same_head`, `leave`, `switch` and `upstream` effects (see the launcher stand-in) are given the
 run's worktree and bare origin when they name none. `extra_files` (relative path to text) is passed to
 `FixtureProject`: each file is committed on `main` after the adoption, outside every branch diff.
 A resumed session that answered replays its recorded answer and runs no effect again.
@@ -210,6 +210,7 @@ class StubbedRun:
                                           ("merge", "worktree", self.worktree_path),
                                           ("same_head", "worktree", self.worktree_path),
                                           ("leave", "worktree", self.worktree_path),
+                                          ("switch", "worktree", self.worktree_path),
                                           ("upstream", "bare", self.bare)):
                 if isinstance(entry.get(effect), dict) and member not in entry[effect]:
                     entry[effect][member] = str(value)

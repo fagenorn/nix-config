@@ -94,7 +94,8 @@ A session ended by a bound has no reply: its result subtype is `error_max_turns`
 names the bound the engine's own clock fires.
 
 `session_environment` drops `CLAUDE_CONFIG_DIR` and sets `CLAUDE_ACCOUNT_HOST_SETTINGS=required`, so the
-launcher starts the client only on `$HOME/.claude/settings.json`, the file `engine deliver` checked.
+launcher starts the client only on `$HOME/.claude/settings.json`, the file `engine deliver` checked. It
+also drops `CLAUDE_CODE_SIMPLE` (`BARE_SWITCH`), the client's bare-mode switch, which would skip the hooks.
 
 This module imports no `engine_core`.
 """
@@ -158,7 +159,10 @@ GIT_WRITING: tuple[str, ...] = tuple(
     f"Bash(git {verb}*--output*)" for verb in ("diff", "log", "show"))
 REPOSITORY_ENV = ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
                   "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE",
-                  "GIT_PREFIX", "GIT_IMPLICIT_WORK_TREE")
+                  "GIT_PREFIX", "GIT_IMPLICIT_WORK_TREE", "GIT_SHALLOW_FILE", "GIT_GRAFT_FILE",
+                  "GIT_NO_REPLACE_OBJECTS", "GIT_REPLACE_REF_BASE", "GIT_CONFIG",
+                  "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT")
+BARE_SWITCH = "CLAUDE_CODE_SIMPLE"
 WHOLE_SHELL_ALLOWED = ("Bash", "Edit", "Write")
 GIT_DENIED = ("push", "stash", "reset --hard", "clean", "checkout --", "branch -D", "branch -d")
 GH_DENIED = ("pr create", "pr merge", "release create")
@@ -334,15 +338,22 @@ def joined(stops: Sequence[EngineStop]) -> EngineStop:
 
 
 def raise_first(errors: Sequence[BaseException | None]) -> None:
-    """Raise the first error that is not an `EngineStop`, else the one stop the stops join to."""
-    stops = []
-    for error in errors:
-        if isinstance(error, EngineStop):
-            stops.append(error)
-        elif error is not None:
+    """Raise the first error that is not an `EngineStop`, else the one stop the stops join to.
+
+    A `tool-denied` stop outranks a fault (not a stop request): the one stop is raised so the run
+    ends recorded, its detail naming each fault that came with it."""
+    stops = [error for error in errors if isinstance(error, EngineStop)]
+    others = [error for error in errors if error is not None and not isinstance(error, EngineStop)]
+    denied = any(stop.name == TOOL_DENIED for stop in stops)
+    for error in others:
+        if not denied or isinstance(error, engine_stop.Stopped):
             raise error
     if stops:
-        raise joined(stops)
+        stop = joined(stops)
+        if others:
+            stop = EngineStop(stop.name, stop.need, " ".join(
+                [stop.detail, *(f"Another member faulted: {error}" for error in others)]), stop.step)
+        raise stop
 
 
 def _number(text: str) -> int | float:
@@ -579,10 +590,10 @@ def reaping():
 
 
 def session_environment(environ: Mapping[str, str]) -> dict[str, str]:
-    """The environment of a session: the caller's, without its config dir or any repository variable,
-    with the host-settings switch (every session)."""
+    """The environment of a session: the caller's, without its config dir, the client's bare-mode switch
+    or any repository variable, with the host-settings switch (every session)."""
     env = {key: value for key, value in environ.items()
-           if key != "CLAUDE_CONFIG_DIR" and key not in REPOSITORY_ENV}
+           if key not in ("CLAUDE_CONFIG_DIR", BARE_SWITCH) and key not in REPOSITORY_ENV}
     env[HOST_SETTINGS_SWITCH] = "required"
     return env
 

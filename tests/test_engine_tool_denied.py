@@ -15,7 +15,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.delivery import engine_session, engine_shell
+from agent_tools.delivery import engine_session, engine_shell, engine_stop
 from tests.engine_fixture import AdoptedFixtures
 from tests.engine_procedure_copies import PROCEDURES
 from tests.engine_step_coverage import StepCoverage
@@ -242,6 +242,61 @@ class FanOutDeniedTest(unittest.TestCase):
                           and e["step"] == "fan"], [])
 
 
+    def faulted(self) -> engine_session.Launched:
+        return engine_session.Launched(1, b"", b"the client crashed\n", 0.1)
+
+    def test_a_group_member_denied_beside_a_member_that_faults_still_stops_the_run_at_tool_denied(self):
+        directory = with_session_files(self.project.procedures(REVIEWS()))
+
+        def fake(argv, cwd, prompt, *, on_start, timeout=None, env=None, stop=None):
+            name = "ra" if argv[-1].endswith("ra.1.system.md") else "rb"
+            on_start(os.getpid())
+            self.answer(env, {"account": "stub"})
+            return self.denied("echo first") if name == "ra" else self.faulted()
+
+        with self.project.inside(), mock.patch.object(engine_session, "launch", fake):
+            code, line = engine_shell.deliver(1919, directory)
+
+        self.assertEqual((code, line["end"], line["need"]), (3, "tool-denied", "owner-decision"))
+        self.assertIn(repr("echo first"), line["detail"])
+        self.assertIn("the client crashed", line["detail"])
+        (root,) = roots(self.project)
+        events = self.project.events(root)
+        self.assertEqual((events[-1]["event"], events[-1]["stop"]), ("stop_reached", "tool-denied"))
+
+    def test_a_child_run_denied_beside_a_child_that_faults_still_stops_the_parent_at_tool_denied(self):
+        directory = self.project.procedures(FAN("standin-items", 2), children={
+            "fan-child": child([
+                {"id": "look", "stage": "building", "kind": "agent", "holds": "run", "role": "reviewer",
+                 "prompt": "item.md", "reply": "draft.reply.json", "outcome_from": "status",
+                 "in": ["run.item"],
+                 "on": {"drafted": "done", "stuck": "child-stop", "no-reply": "child-stop",
+                        "out-of-bounds": "child-stop"}}])})
+        (directory / "item.md").write_text("Review item {{run.item}}.\n", encoding="utf-8")
+        (directory / "draft.reply.json").write_text(json.dumps(DRAFT_REPLY), encoding="utf-8")
+        launches = iter([self.denied("echo first"), self.faulted()])
+        taken = threading.Lock()
+        both = threading.Barrier(2, timeout=60)
+
+        def fake(argv, cwd, prompt, *, on_start, timeout=None, env=None, stop=None):
+            with taken:
+                launched = next(launches)
+            on_start(os.getpid())
+            both.wait()
+            self.answer(env, {"account": "stub"})
+            return launched
+
+        with self.project.inside(), mock.patch.object(engine_session, "launch", fake):
+            code, line = engine_shell.deliver(1919, directory)
+
+        self.assertEqual((code, line["end"], line["need"]), (3, "tool-denied", "owner-decision"))
+        self.assertIn(repr("echo first"), line["detail"])
+        self.assertIn("the client crashed", line["detail"])
+        (root,) = roots(self.project)
+        events = self.project.events(root)
+        self.assertEqual((events[-1]["event"], events[-1]["stop"]), ("stop_reached", "tool-denied"))
+
+
 class JoinedStopTest(unittest.TestCase):
     def test_a_denial_outranks_a_quota_wait_and_the_details_join_in_order(self):
         stop = engine_session.joined([engine_session.EngineStop("quota-wait", "retry", "q", "a"),
@@ -258,6 +313,18 @@ class JoinedStopTest(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             engine_session.raise_first([None, engine_session.EngineStop("quota-wait", "retry", "q", "a"),
                                         RuntimeError("x")])
+
+    def test_a_denial_outranks_a_fault_and_the_stop_names_the_fault(self):
+        with self.assertRaises(engine_session.EngineStop) as caught:
+            engine_session.raise_first([RuntimeError("x"),
+                                        engine_session.EngineStop("tool-denied", "owner-decision", "d", "a")])
+        self.assertEqual((caught.exception.name, caught.exception.step), ("tool-denied", "a"))
+        self.assertEqual(caught.exception.detail, "d Another member faulted: x")
+
+    def test_a_stop_request_outranks_a_denial(self):
+        with self.assertRaises(engine_stop.Stopped):
+            engine_session.raise_first([engine_session.EngineStop("tool-denied", "owner-decision", "d", "a"),
+                                        engine_stop.Stopped()])
 
     def test_no_error_returns(self):
         self.assertIsNone(engine_session.raise_first([None, None]))

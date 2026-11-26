@@ -344,18 +344,20 @@ class LaunchTest(unittest.TestCase):
         self.assertEqual(len(pids), 1)
         self.assertGreater(pids[0], 0)
 
-    def test_the_session_environment_drops_only_the_config_dir(self):
-        given = {"HOME": "/h", "PATH": "/p", "CLAUDE_CONFIG_DIR": "/c"}
+    def test_the_session_environment_drops_the_config_dir_and_the_bare_mode_switch(self):
+        given = {"HOME": "/h", "PATH": "/p", "CLAUDE_CONFIG_DIR": "/c", "CLAUDE_CODE_SIMPLE": "1"}
         self.assertEqual(engine_session.session_environment(given), {
             "HOME": "/h", "PATH": "/p", "CLAUDE_ACCOUNT_HOST_SETTINGS": "required"})
         self.assertEqual(given["CLAUDE_CONFIG_DIR"], "/c")
         code = ("import json,os; print(json.dumps([os.environ.get(k) for k in "
-                "('CLAUDE_CONFIG_DIR', 'ENGINE_PROBE', 'CLAUDE_ACCOUNT_HOST_SETTINGS')]))")
+                "('CLAUDE_CONFIG_DIR', 'ENGINE_PROBE', 'CLAUDE_ACCOUNT_HOST_SETTINGS', "
+                "'CLAUDE_CODE_SIMPLE')]))")
         with tempfile.TemporaryDirectory() as directory, mock.patch.dict(
-                os.environ, {"CLAUDE_CONFIG_DIR": "/c", "ENGINE_PROBE": "kept"}):
+                os.environ, {"CLAUDE_CONFIG_DIR": "/c", "ENGINE_PROBE": "kept",
+                             "CLAUDE_CODE_SIMPLE": "1"}):
             launched = launch([sys.executable, "-c", code], directory, "",
                               on_start=lambda pid: None)
-        self.assertEqual(json.loads(launched.stdout), [None, "kept", "required"])
+        self.assertEqual(json.loads(launched.stdout), [None, "kept", "required", None])
 
     def test_a_given_env_is_the_launchers_whole_environment(self):
         env = {"PATH": os.environ["PATH"], "X_ANSWER": "1"}
@@ -963,16 +965,19 @@ class DeliverSessionTest(unittest.TestCase):
         except ProcessLookupError:
             pass
 
-    def test_a_capped_session_denied_a_shell_command_is_still_out_of_bounds(self):
+    def test_a_capped_session_denied_a_shell_command_stops_at_tool_denied_naming_it(self):
         document = json.loads(RESULT_MAX_TURNS.read_text(encoding="utf-8"))
         document["permission_denials"] = [{"tool_name": "Bash", "tool_use_id": "toolu_03",
                                            "tool_input": {"command": "make build"}}]
         install_stub(self.project, json.dumps(document).encode("utf-8"), exit=1)
         done = self.project.deliver(self.capped_procedures(), issue=1520)
         self.assertEqual(done.returncode, 3, done.stderr)
+        line = json.loads(done.stdout)
+        self.assertEqual((line["end"], line["need"]), ("tool-denied", "owner-decision"))
+        self.assertIn(repr("make build"), line["detail"])
         run = self.run_dir()
-        self.assertEqual(json.loads((run / "results/draft.1.json").read_text(
-            encoding="utf-8")), {"bound": "turns"})
+        self.assertFalse((run / "results/draft.1.json").exists())
+        self.assertNotIn("outcome_graded", [e["event"] for e in self.project.events(run)])
 
     def test_a_session_ending_with_an_error_subtype_that_is_no_cap_is_still_a_fault(self):
         document = json.loads(RESULT_MAX_TURNS.read_text(encoding="utf-8"))

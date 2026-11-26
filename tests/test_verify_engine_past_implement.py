@@ -103,6 +103,23 @@ class PastImplementVerdictTest(unittest.TestCase):
         self.assertEqual(self.verdict(HOUR)[0], 75)
         self.assertEqual(self.verdict(3 * DAY)[0], 1)
 
+    def test_a_first_delivery_that_faulted_before_implement_is_the_one_judged(self):
+        write_run(self.root, "a", HOUR, [("step_entered", "preflight", HOUR, {})])
+        write_run(self.root, "b", 5 * HOUR, met_events(entered=6 * HOUR))
+        code, report = self.verdict(7 * HOUR)
+        self.assertEqual(code, 75)
+        self.assertEqual(report["run"], "a")
+        self.assertIsNone(report["implement"])
+        self.assertIsNone(report["entered"])
+
+    def test_a_first_delivery_that_never_entered_implement_is_not_met_when_the_window_ends(self):
+        write_run(self.root, "a", HOUR, [("step_entered", "preflight", HOUR, {})])
+        write_run(self.root, "b", 5 * HOUR, met_events(entered=6 * HOUR))
+        code, report = self.verdict(3 * DAY)
+        self.assertEqual(code, 1)
+        self.assertEqual(report["verdict"], "not_met")
+        self.assertEqual(report["run"], "a")
+
     def test_an_old_success_before_activation_is_not_counted(self):
         write_run(self.root, "a", -DAY, met_events())
         code, report = self.verdict(3 * HOUR)

@@ -15,7 +15,9 @@ origin and merges `origin/main` into the worktree (a conflict is resolved with t
 committed, or aborted when `resolve` is absent); `"same_head": {"worktree"}` answers
 `start_head` and `commit` both as the worktree's HEAD and commits nothing;
 `"leave": {"worktree", "path", "text"}` writes that file in the worktree after every other effect
-and neither adds nor commits it (one untracked file, no head moved). It appends `{"argv", "cwd", "key", "prompt"}` (`cwd` being its working directory) as one JSON line to `<log>`, `key` being the
+and neither adds nor commits it (one untracked file, no head moved);
+`"switch": {"worktree", "branch"}` checks out a new branch of that name in the worktree after the
+others, and `"miss": true` gives no structured answer after every effect. It appends `{"argv", "cwd", "key", "prompt"}` (`cwd` being its working directory) as one JSON line to `<log>`, `key` being the
 step id (never the visit), writes `{"account": "stub"}` to the file named by
 `CLAUDE_ACCOUNT_ANSWER` when that is set, and prints
 `tests/fixtures/engine-session/result-normal.json` with `structured_output` replaced by the
@@ -123,6 +125,11 @@ def leave_effect(effect: dict) -> None:
     target.write_text(effect["text"], encoding="utf-8")
 
 
+def switch_effect(effect: dict) -> None:
+    """Create and check out the effect's branch in the worktree, as a session that moved its branch."""
+    git_in(effect["worktree"], "checkout", "-q", "-b", effect["branch"])
+
+
 def run_entry(result: dict, scenario: dict, name: str | None) -> None:
     """Run the scenario entry's effects and set the result's answer."""
     if name is None:
@@ -141,6 +148,11 @@ def run_entry(result: dict, scenario: dict, name: str | None) -> None:
                 reply["start_head"] = reply["commit"] = same_head_effect(entry["same_head"])
             if "leave" in entry:
                 leave_effect(entry["leave"])
+            if "switch" in entry:
+                switch_effect(entry["switch"])
+            if entry.get("miss") is True:  # every effect ran, and the session gave no structured answer
+                result.pop("structured_output", None)
+                return
             entry = reply
         result["structured_output"] = entry
 
