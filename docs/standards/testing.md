@@ -26,4 +26,4 @@ A `fast` or `integration` test is a member of `agent-workflow-tests`, and a `nig
 
 ### P18. CI reports suite time growth
 
-CI keeps each completed run's suite time and every member's time, slowest first, as the `suite-timing` artifact. A pull request whose member time grows by more than 60 s over `main`, after the runner speed factor, gets a line in the `Suite Timing` job summary, and its author justifies the growth in the pull request or moves the test to `nightly`. ([ADR-delivery-015](../areas/delivery/adr/015-tests-carry-a-tier-and-ci-reports-suite-time-growth.md))
+CI's `Agent Workflow Tests` runs the suite as parallel shards, each running the members assigned it from the committed timings, and joins the shards' records into the `suite-timing` artifact: each completed run's suite time and every member's time, slowest first. A pull request whose member time grows by more than 60 s over `main`, after the runner speed factor, gets a line in the `Suite Timing` job summary, and its author justifies the growth in the pull request or moves the test to `nightly`. ([ADR-delivery-015](../areas/delivery/adr/015-tests-carry-a-tier-and-ci-reports-suite-time-growth.md))
