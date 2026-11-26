@@ -104,7 +104,10 @@ def _sentence(text: str, start: int, end: int) -> str:
 
 
 def found(text: str) -> list[Found]:
-    """The first match of each pattern in `text` (one word two patterns find counts once), longest match first among overlaps, in list order."""
+    """The first match of each pattern in `text`, longest first among overlaps, in list order.
+
+    One word that two patterns find counts once.
+    """
     matches = []
     for row, patterns in enumerate(_PATTERNS):
         for pattern, rx in enumerate(patterns):

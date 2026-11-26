@@ -13,7 +13,7 @@ from agent_tools.console import (answer, approve, contract_draft, deliveries, en
                                  service, sprints, view)
 from agent_tools.console import checkout_remote, permission, plan_questions
 from agent_tools.console.event_log import Event
-from agent_tools.delivery import procedure_check
+from agent_tools.delivery import comment_lint, never_rise, procedure_check
 from agent_tools.delivery.engine_ledger import RunState
 from agent_tools.delivery.routing import index_table
 
@@ -454,3 +454,11 @@ class StoredWordsTest(unittest.TestCase):
         self.assertEqual(items[0]["values"], ["apply", "signing_off", "not_now"])
         self.assertEqual(items[0]["questions"][0]["options"], ["Apply it again", "Turn signing off", "Not now"])
         self.assertEqual(entry["headline"], "The adoption of r was not applied: " + approve.SIGNING_REASON + ".")
+
+
+class CommentLengthTest(unittest.TestCase):
+    def test_the_glossary_module_has_no_over_long_comment(self):
+        path = "python/agent_tools/console/owner_words.py"
+        snapshot = never_rise.Snapshot("a" * 40, {}, contents={path: (REPO_ROOT / path).read_bytes()})
+        length = next(e for e in comment_lint.enforcers(None) if e.rule == comment_lint.LENGTH_RULE)
+        self.assertEqual([v.text() for v in length.find(snapshot)], [])
