@@ -351,6 +351,7 @@ agent-workflow-tests *args:
     tests/test_suite_tiers.py \
     tests/test_suite_timing.py \
     tests/test_verify_slot.py \
+    tests/test_verify_slot_short_lane.py \
     tests/test_verify_slot_timeouts.py \
     tests/test_verify_queue.py \
     tests/test_verification_command.py \
@@ -498,6 +499,7 @@ agent-workflow-tests *args:
     home/common/agent-skills/tests/test_program_harness.py \
     home/common/agent-skills/tests/test_deliver_standard_program.py \
     home/common/agent-skills/tests/test_deliver_standard_landing.py \
+    home/common/agent-skills/tests/test_deliver_standard_resume_ahead.py \
     home/common/agent-skills/tests/test_deliver_standard_before_pull_request.py \
     home/common/agent-skills/tests/test_deliver_standard_lane_rule.py \
     home/common/agent-skills/tests/test_deliver_standard_work_rules.py \
