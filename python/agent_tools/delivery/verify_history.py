@@ -5,7 +5,7 @@ past setup: a run that held a slot, one that hit `--wait-limit` and one signalle
 A line is `json.dumps(record, sort_keys=True, separators=(",", ":"), allow_nan=False)` plus a
 newline, UTF-8, with exactly these keys:
 
-    {"command":"just test","exit":0,"held_seconds":412.3,"repository":"owner/repo",
+    {"command":"just test","exit":0,"held_seconds":412.3,"place":2,"repository":"owner/repo",
      "started":"2026-11-23T19:24:20Z","waited_seconds":12.0}
 
 `repository` is the run's lowercased `owner/repo`, or null outside a repository. `command` is the
@@ -13,7 +13,8 @@ first `COMMAND_WORDS` whitespace-separated words of the argv. `started` is the U
 began waiting. `waited_seconds` is the time from just before the first slot try to the slot taken
 (or to the end of the wait when none was taken); `held_seconds` is the time from the slot taken to
 the slot and repository lock given back, or null when no slot was taken. Both are rounded to one
-decimal. `exit` is the code the run returns.
+decimal. `exit` is the code the run returns. `place` is the place the run joined the queue at (at
+re-join for a resumed request), or null when it never joined.
 
 The file is created with mode 0666, so every account of the host appends to it; it is opened
 without following a symlink or blocking, and a path that is not a regular file with a single link
@@ -22,8 +23,9 @@ appended without a lock, by one `O_APPEND` write per run, is never pruned, and i
 host clears its temporary directory at boot.
 
 `verify-slot report` reads the file back. A line is readable when it is a JSON object with exactly
-the types above (`held_seconds` a number or null, the numbers finite and not below 0); any other
-line, a torn last one included, is skipped and counted. Over the runs that started in the window,
+the types above (`held_seconds` a number or null, the numbers finite and not below 0, `place`
+absent as in older lines, null or an integer of at least 1); any other line, a torn last one
+included, is skipped and counted. Over the runs that started in the window,
 per repository (`NO_REPOSITORY` for null), it gives `runs`, the median and the nearest-rank 90th
 percentile (the value at rank `ceil(0.9 * n)` of the sorted values) of the wait over every run,
 and of the hold over the runs that held a slot, plus the sum of those holds. Its line is
@@ -73,19 +75,20 @@ def history_path(directory: Path) -> Path:
 
 
 def entry(repository: str | None, argv: Sequence[str], started: datetime, waited: float,
-          held: float | None, exit_code: int) -> dict:
+          held: float | None, exit_code: int, place: int | None) -> dict:
     """The record of one run, with its argv cut to `COMMAND_WORDS` words."""
     return {
         "command": " ".join(" ".join(argv).split()[:COMMAND_WORDS]),
         "exit": exit_code,
         "held_seconds": None if held is None else round(held, 1),
+        "place": place,
         "repository": repository,
         "started": started.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "waited_seconds": round(waited, 1),
     }
 
 
-def _regular(descriptor: int, path: Path) -> int:
+def regular_descriptor(descriptor: int, path: Path) -> int:
     """`descriptor` when it is a regular file with one link; otherwise close it and raise `OSError`.
 
     A second link is another account's hard link to a file that is not ours to append to.
@@ -108,14 +111,14 @@ def _open_history(path: Path) -> int:
     """
     flags = os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK
     try:
-        return _regular(os.open(path, flags), path)
+        return regular_descriptor(os.open(path, flags), path)
     except FileNotFoundError:
         pass
     old = os.umask(0)
     try:
-        return _regular(os.open(path, flags | os.O_CREAT | os.O_EXCL, 0o666), path)
+        return regular_descriptor(os.open(path, flags | os.O_CREAT | os.O_EXCL, 0o666), path)
     except FileExistsError:
-        return _regular(os.open(path, flags), path)
+        return regular_descriptor(os.open(path, flags), path)
     finally:
         os.umask(old)
 
@@ -148,6 +151,10 @@ def _is_seconds(value: object) -> bool:
             and math.isfinite(value) and value >= 0)
 
 
+def _is_place(value: object) -> bool:
+    return value is None or (type(value) is int and value >= 1)
+
+
 def _readable(line: bytes) -> dict | None:
     """The record `line` holds, or None when it is not a readable record."""
     try:
@@ -159,7 +166,8 @@ def _readable(line: bytes) -> dict | None:
               and isinstance(record["command"], str)
               and type(record["exit"]) is int
               and _is_seconds(record["waited_seconds"])
-              and (record["held_seconds"] is None or _is_seconds(record["held_seconds"])))
+              and (record["held_seconds"] is None or _is_seconds(record["held_seconds"]))
+              and _is_place(record.get("place")))
     except (ValueError, KeyError, RecursionError, OverflowError):
         return None
     return record if ok else None
@@ -168,7 +176,7 @@ def _readable(line: bytes) -> dict | None:
 def read(path: Path) -> tuple[list[dict], int]:
     """The readable records of `path` and the count of unreadable lines; absent is `([], 0)`."""
     try:
-        descriptor = _regular(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), path)
+        descriptor = regular_descriptor(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), path)
     except FileNotFoundError:
         return [], 0
     with os.fdopen(descriptor, "rb") as handle:
@@ -184,7 +192,7 @@ def read_from(path: Path, identity: list[int] | None, offset: int, baseline: boo
               limit: int = READ_LIMIT) -> tuple[list[dict], list[int] | None, int]:
     """The readable records of `path` after the consumed position, the file's identity and the new offset."""
     try:
-        descriptor = _regular(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), path)
+        descriptor = regular_descriptor(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), path)
     except FileNotFoundError:
         return [], None, 0
     with os.fdopen(descriptor, "rb") as handle:
