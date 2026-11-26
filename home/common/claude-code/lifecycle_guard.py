@@ -711,8 +711,9 @@ Installation. `default.nix` builds the store directory `agent-git-hooks`
 `agentGitHookNames`, and sets `programs.git.settings.core.hooksPath` to it in
 the shared `home/common` module, so every host, darwin and Linux, carries the
 setting with no host or platform condition (O4). The wrapper is the
-`claude-bash-lifecycle-guard` exec line with `--mode pre-push`, the LFS binary
-(when `programs.git.lfs` is enabled) and git's `--` arguments appended, so it
+`claude-bash-lifecycle-guard` exec line without its `--land-bin` argument (a
+push runs no land check) with `--mode pre-push`, the LFS binary (when
+`programs.git.lfs` is enabled) and git's `--` arguments appended, so it
 shares the guard's interpreter, source and three policy arguments
 (`--base-policy`, `--policy`, `--derive-bin`); `tests/test_claude_code_installed.py`
 pins that equality. The derivation's build check fails `just build` on a shim

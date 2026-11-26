@@ -271,8 +271,10 @@ class GitHooksInstalledTest(unittest.TestCase):
         pre_push = (self.hooks / "pre-push").read_text(encoding="utf-8")
         exec_line = next(l for l in pre_push.splitlines() if l.startswith("exec "))
         guard_line = next(l for l in self.guard_wrapper.splitlines() if l.startswith("exec "))
-        self.assertTrue(exec_line.startswith(guard_line.removesuffix(' "$@"')
-                                             + " --mode pre-push "), exec_line)
+        # A push runs no land check, so the pre-push line carries no --land-bin.
+        shared = re.sub(r" --land-bin \S+", "", guard_line.removesuffix(' "$@"'))
+        self.assertNotIn("--land-bin", exec_line)
+        self.assertTrue(exec_line.startswith(shared + " --mode pre-push "), exec_line)
         self.assertTrue(exec_line.endswith(' -- "$@"'), exec_line)
 
     def test_the_shims_serve_git_lfs(self):

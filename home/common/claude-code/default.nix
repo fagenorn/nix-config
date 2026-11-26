@@ -280,7 +280,7 @@ let
   # leaves out `push-to-checkout`, `fsmonitor-watchman`, `reference-transaction`
   # and `post-index-change` (the Pre-push hook section of the docstring of
   # `lifecycle_guard.py`, D5). The `pre-push` text is the lifecycleGuard exec
-  # line plus `--mode pre-push`, the LFS binary and the hook's own arguments,
+  # line without `--land-bin` plus `--mode pre-push`, the LFS binary and the hook's own arguments,
   # so both read the same interpreter, source and policy.
   agentGitHookNames = [
     "applypatch-msg"
