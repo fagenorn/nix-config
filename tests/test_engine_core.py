@@ -18,7 +18,7 @@ from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.delivery import engine_core, engine_graders, procedure_check
+from agent_tools.delivery import engine_core, engine_graders, procedure_check, procedure_terms
 from agent_tools.delivery.engine_core import (
     Done,
     Graded,
@@ -86,7 +86,7 @@ def refusals(doc: dict, draft_outcomes: tuple[str, ...] = ()) -> tuple:
         reply["properties"]["status"]["enum"] += list(draft_outcomes)
         (directory / "draft.reply.json").write_text(json.dumps(reply), encoding="utf-8")
         (directory / "toy-core.json").write_text(json.dumps(doc), encoding="utf-8")
-        return procedure_check.check_directory(directory, procedure_check.load_commands()).refusals
+        return procedure_check.check_directory(directory, procedure_terms.load_commands()).refusals
 
 
 def fan() -> dict:
@@ -100,7 +100,7 @@ def fan_refusals(doc: dict) -> tuple:
         for source in FAN.iterdir():
             shutil.copy(source, directory / source.name)
         (directory / "toy-fan.json").write_text(json.dumps(doc), encoding="utf-8")
-        return procedure_check.check_directory(directory, procedure_check.load_commands()).refusals
+        return procedure_check.check_directory(directory, procedure_terms.load_commands()).refusals
 
 
 STOP = Stop(name="needs-owner", need="owner-decision", reenter="draft")
@@ -108,7 +108,7 @@ STOP = Stop(name="needs-owner", need="owner-decision", reenter="draft")
 
 class ToyTest(unittest.TestCase):
     def test_the_core_toy_is_a_checked_procedure(self) -> None:
-        result = procedure_check.check_directory(FIXTURE, procedure_check.load_commands())
+        result = procedure_check.check_directory(FIXTURE, procedure_terms.load_commands())
         self.assertEqual(result.refusals, ())
         self.assertEqual(result.procedures, ("toy-core",))
 

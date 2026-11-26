@@ -226,6 +226,33 @@ class StubTest(unittest.TestCase):
         self.assertEqual(bare_git(run, "rev-parse", "main^"), before)
         self.assertEqual(bare_git(run, "log", "-1", "--format=%an"), "stub upstream")
 
+    def test_answer_rewrites_one_reply_for_the_next_delivery(self):
+        run = StubbedRun(self)
+        entry = {"reply": {"status": "done"}, "commit": {"path": "fixture/x.py", "text": "X = 1\n"}}
+
+        run.answer("fix", entry)
+
+        scenario = json.loads(run.scenario.read_text(encoding="utf-8"))
+        self.assertEqual(scenario["fix"]["commit"],
+                         {"path": "fixture/x.py", "text": "X = 1\n", "worktree": str(run.worktree_path)})
+        self.assertEqual(scenario["fix"]["reply"], {"status": "done"})
+        self.assertEqual(scenario["implement"], run.replies["implement"])
+        self.assertEqual(run.replies["fix"], scenario["fix"])
+        self.assertEqual(scenario["implement"]["commit"]["worktree"], str(run.worktree_path))
+
+    def test_the_leave_effect_writes_one_untracked_file_and_keeps_the_head(self):
+        run = StubbedRun(self)
+        root = str(run.fixture.root)
+        head = git(run, "rev-parse", "HEAD")
+
+        reply = self.play(run, {"reply": {"status": "done"}, "same_head": {"worktree": root},
+                                "leave": {"worktree": root, "path": "fixture/scratch.txt", "text": "x\n"}})
+
+        self.assertEqual(git(run, "status", "--porcelain"), "?? fixture/scratch.txt")
+        self.assertEqual((run.fixture.root / "fixture/scratch.txt").read_text("utf-8"), "x\n")
+        self.assertEqual(git(run, "rev-parse", "HEAD"), head)
+        self.assertEqual((reply["start_head"], reply["commit"], reply["status"]), (head, head, "done"))
+
     def test_the_world_fills_the_worktree_and_the_bare_an_effect_names_none_of(self):
         entry = {"reply": {"status": "done"}, "merge": {}, "same_head": {}, "commit": {"path": "a", "text": "b"},
                  "upstream": {"path": "up.txt", "text": "up\n"}}
@@ -235,6 +262,11 @@ class StubTest(unittest.TestCase):
         self.assertEqual([filled[effect]["worktree"] for effect in ("merge", "same_head", "commit")],
                          [worktree] * 3)
         self.assertEqual(filled["upstream"]["bare"], run.bare)
+
+    def test_the_world_fills_the_worktree_a_leave_effect_names_none_of(self):
+        run = StubbedRun(self, replies={"fix": {"reply": {"status": "done"},
+                                                "leave": {"path": "fixture/scratch.txt", "text": "x\n"}}})
+        self.assertEqual(run.replies["fix"]["leave"]["worktree"], str(run.worktree_path))
 
 
 if __name__ == "__main__":

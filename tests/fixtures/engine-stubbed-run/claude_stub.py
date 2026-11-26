@@ -13,7 +13,9 @@ new HEAD. An entry may carry more effects beside `commit`, each answered with th
 (as `stub upstream`) after any `commit`; `"merge": {"worktree", "resolve": {path: text}}` fetches
 origin and merges `origin/main` into the worktree (a conflict is resolved with the given files and
 committed, or aborted when `resolve` is absent); `"same_head": {"worktree"}` answers
-`start_head` and `commit` both as the worktree's HEAD and commits nothing. It appends `{"argv", "key", "prompt"}` as one JSON line to `<log>`, `key` being the
+`start_head` and `commit` both as the worktree's HEAD and commits nothing;
+`"leave": {"worktree", "path", "text"}` writes that file in the worktree after every other effect
+and neither adds nor commits it (one untracked file, no head moved). It appends `{"argv", "key", "prompt"}` as one JSON line to `<log>`, `key` being the
 step id (never the visit), writes `{"account": "stub"}` to the file named by
 `CLAUDE_ACCOUNT_ANSWER` when that is set, and prints
 `tests/fixtures/engine-session/result-normal.json` with `structured_output` replaced by the
@@ -112,6 +114,13 @@ def same_head_effect(effect: dict) -> str:
     return git_in(effect["worktree"], "rev-parse", "HEAD").stdout.strip()
 
 
+def leave_effect(effect: dict) -> None:
+    """Write the effect's file in the worktree and leave it untracked."""
+    target = Path(effect["worktree"]) / effect["path"]
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(effect["text"], encoding="utf-8")
+
+
 def main(argv: list[str]) -> int:
     scenario = json.loads(Path(argv[0]).read_text(encoding="utf-8"))
     log, words = argv[1], argv[2:]
@@ -141,6 +150,8 @@ def main(argv: list[str]) -> int:
                 merge_effect(entry["merge"])
             if "same_head" in entry:
                 reply["start_head"] = reply["commit"] = same_head_effect(entry["same_head"])
+            if "leave" in entry:
+                leave_effect(entry["leave"])
             entry = reply
         result["structured_output"] = entry
     sys.stdout.write(json.dumps(result))

@@ -23,10 +23,11 @@ from pathlib import Path
 from typing import Callable
 from unittest import mock
 
-from agent_tools.delivery import engine, engine_reply, procedure_check
+from agent_tools.delivery import engine, engine_reply, procedure_check, procedure_terms
 from agent_tools.delivery.engine_commands import LIFECYCLE_ARGV
-from agent_tools.delivery.procedure_check import CommandDeclaration, load_commands
+from agent_tools.delivery.procedure_terms import CommandDeclaration, load_commands
 from tests.engine_walks import reply_schemas, step_outcomes, walk_edges
+from tests.engine_stubbed_world import VALIDATOR_UNIMPORTABLE_ENGINE
 from tests.guard_policy_world import install_platform_manifest_in_environ
 
 setUpModule = install_platform_manifest_in_environ
@@ -41,6 +42,7 @@ def compact(value: object) -> str:
 
 
 SHIPPED_OK = compact({"procedures": ["close-out", "deliver", "direct", "land", "land-attempt", "setup", "toy", "toy-child", "verify"], "verdict": "ok"})
+REPEAT_SCOPE_REFUSED = compact({"breaches": [], "refusals": [{"defect": "duplicate_step", "detail": "the step id 'scope' is used more than once.", "procedure": "toy", "step": "scope"}], "verdict": "refused"})
 
 
 def load(directory: Path, name: str) -> dict:
@@ -140,7 +142,7 @@ def _exhausted_scope_hands_over_to_the_repair_a_stop_enters(toy: dict) -> None:
 
 def _undeclared_command(toy: dict) -> None:
     step(toy, "scope")["command"] = next(
-        key for key, declaration in sorted(procedure_check.load_commands().items())
+        key for key, declaration in sorted(procedure_terms.load_commands().items())
         if declaration is None)
 
 
@@ -342,6 +344,17 @@ def _each_over(path: str) -> Callable[[dict], None]:
         children = step(toy, "children")
         children["in"] = [path]
         children["each"] = path
+    return change
+
+
+def _scope_reads_a_round(path: str) -> Callable[[dict], None]:
+    """The toy's `scope` step is a `verify-rounds round` read, and its `children` step runs over `path`."""
+    def change(toy: dict) -> None:
+        scope = step(toy, "scope")
+        scope.update(command="verify-rounds", subcommand="round",
+                     on={"passed": "draft", "retest": "draft", "fix": "draft", "spent": "needs-owner",
+                         "verify": "needs-owner", "error": "needs-owner", "refused": "needs-owner"})
+        _each_over(path)(toy)
     return change
 
 
@@ -553,6 +566,8 @@ CASES = [
          [("toy", "children", "each_not_a_list")]),
     Case("each_over_a_command_string", editing("toy", _each_over("scope.range")),
          [("toy", "children", "each_not_a_list")]),
+    Case("each_over_a_list_of_another_subcommand", editing("toy", _scope_reads_a_round("scope.changed_paths")),
+         [("toy", "children", "each_not_a_list")]),
     Case("each_over_a_missing_member", editing("toy", _each_over("draft.missing")),
          [("toy", "children", "unknown_member")]),
     Case("group_pass_unmapped",
@@ -638,11 +653,11 @@ mocks = {}
 for name, (owner, attribute) in targets.items():
     mocks[name] = mock.patch.object(owner, attribute, side_effect=AssertionError("side effect")).start()
 
-import agent_tools.delivery.engine as engine
+import agent_tools.delivery.procedure_check as procedure_check
 
 with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-    first = engine.main(["check"])
-    second = engine.main(["check", "--procedures", sys.argv[1]])
+    first = procedure_check.main([f"--procedures={sys.argv[1]}"])
+    second = procedure_check.main([f"--procedures={sys.argv[2]}"])
 sys.__stdout__.write(json.dumps({"called": sorted(n for n, m in mocks.items() if m.called),
                                  "codes": [first, second]}) + "\n")
 """
@@ -854,6 +869,13 @@ class RefusalTableTest(unittest.TestCase):
                     sorted((r["procedure"], r["step"] or "", r["defect"])
                            for r in document["refusals"]),
                     sorted((p, s or "", d) for p, s, d in case.expected))
+
+    def test_each_over_a_list_of_its_own_subcommand_is_accepted(self):
+        for member in ("guards", "problems", "results"):
+            with self.subTest(member):
+                code, out, _ = run_check("--procedures", str(broken_copy(
+                    editing("toy", _scope_reads_a_round(f"scope.{member}")))))
+                self.assertEqual((code, json.loads(out)["verdict"]), (0, "ok"))
 
     def test_every_defect_has_a_table_case(self):
         self.assertEqual({d for c in CASES for _, _, d in c.expected},
@@ -1086,16 +1108,16 @@ class RoleTest(unittest.TestCase):
 
 
 class NoSideEffectTest(unittest.TestCase):
-    def test_check_starts_no_process_and_opens_no_socket(self):
+    def test_the_check_process_starts_no_process_and_opens_no_socket(self):
         broken = broken_copy(editing("toy", _repeat_scope))
-        done = subprocess.run([sys.executable, "-c", SIDE_EFFECT_SCRIPT, str(broken)],
+        done = subprocess.run([sys.executable, "-c", SIDE_EFFECT_SCRIPT, str(PROCEDURES), str(broken)],
                               capture_output=True, text=True, timeout=60)
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertEqual(json.loads(done.stdout), {"called": [], "codes": [0, 1]})
 
     def test_the_check_modules_import_no_process_or_socket_module(self):
-        for name in ("engine.py", "procedure_check.py", "engine_graders.py", "engine_caps.py",
-                     "engine_reply.py"):
+        for name in ("engine.py", "procedure_check.py", "procedure_terms.py", "engine_graders.py",
+                     "size_caps.py", "engine_reply.py"):
             tree = ast.parse((DELIVERY / name).read_text(encoding="utf-8"))
             for node in ast.walk(tree):
                 if isinstance(node, ast.Import):
@@ -1106,6 +1128,22 @@ class NoSideEffectTest(unittest.TestCase):
                     continue
                 for module in imported:
                     self.assertNotIn(module.split(".")[0], ("subprocess", "socket"), name)
+
+
+class ProcessSeamTest(unittest.TestCase):
+    def test_engine_check_runs_with_the_validator_unimportable_in_its_process(self):
+        broken = broken_copy(editing("toy", _repeat_scope))
+        empty = tempfile.mkdtemp(prefix="engine-check-")
+        unittest.addModuleCleanup(shutil.rmtree, empty, ignore_errors=True)
+
+        def blocked(*args: str) -> tuple[int, str, str]:
+            done = subprocess.run([sys.executable, "-c", VALIDATOR_UNIMPORTABLE_ENGINE, "check", *args],
+                                  capture_output=True, text=True, timeout=60)
+            return done.returncode, done.stdout, done.stderr
+
+        self.assertEqual(blocked(), (0, SHIPPED_OK, ""))
+        self.assertEqual(blocked("--procedures", str(broken)), (1, REPEAT_SCOPE_REFUSED, ""))
+        self.assertEqual(blocked("--procedures", empty), (2, "", f"engine: {empty} holds no procedure file\n"))
 
 
 class UsageTest(unittest.TestCase):
@@ -1119,7 +1157,7 @@ class UsageTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             code, out, err = run_check("--procedures", tmp)
         self.assertEqual((code, out), (2, ""))
-        self.assertEqual(len(err.splitlines()), 1)
+        self.assertEqual(err, f"engine: {tmp} holds no procedure file\n")
 
     def test_a_bad_argument_returns_2_with_one_stderr_line(self):
         for argv in (["check", "--bogus"], [], ["check", "--procedures"]):
@@ -1133,8 +1171,8 @@ class UsageTest(unittest.TestCase):
 
     def test_an_invalid_declarations_file_is_usage(self):
         out, err = io.StringIO(), io.StringIO()
-        with mock.patch.object(procedure_check, "load_commands",
-                               side_effect=procedure_check.DeclarationError("bad")), \
+        with mock.patch.object(procedure_terms, "load_commands",
+                               side_effect=procedure_terms.DeclarationError("bad")), \
                 contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             code = engine.main(["check"])
         self.assertEqual(code, 2)
@@ -1161,6 +1199,14 @@ SHIPPED_MEMBERS = {
     "lite-independent": ({"findings": []},),
     "full-independent": ({"findings": []},),
     **{f"{route}-rereview": ({}, {"findings": []}, UNNAMED) for route in ("lite", "escalated", "full")},
+    "round": ({"head": "h", "clean": True, "problems": [], "start_head": "s", "guards": [], "digest": "d",
+               "results": [{"id": "lint", "status": "pass"},
+                           {"id": "test", "status": "fail", "named": ["a.json"]}]},),
+    "ws-check": ({"start_head": "s", "commit": "c", "whitespace_only": True, "changed_paths": ["a.json"]},),
+    "fix": ({}, {"unrelated": {"test": "", "evidence": ""}}),
+    **{review: ({}, {"findings": []}, UNNAMED,
+                {"findings": [], "whitespace_insignificant": True, "whitespace_evidence": "e"})
+       for review in ("fix-review", "fix-review-again")},
 }
 
 
@@ -1169,6 +1215,9 @@ SHIPPED_MEMBERS = {
 UNREACHABLE_EXHAUSTED = {
     "direct": tuple((f"{route}-{kind}", "exhausted")
                     for kind in ("tally", "settled") for route in ("lite", "escalated", "full")),
+    "verify": tuple((name, "exhausted") for name in (
+        "checks", "round", "fixed", "ws-check", "fix-review", "narrowing", "fix-review-again", "narrowing-again",
+        "rerun")),
 }
 
 
@@ -1267,7 +1316,8 @@ class ShippedProcedureTest(unittest.TestCase):
         names = ["setup-applies.md", "hold-draft.md", "hold-regrade.md"] + [
             f"direct-{kind}.md" for kind in (
                 "implement", "review-lite", "review", "fix-lite", "fix-escalated", "fix-full",
-                "rereview-lite", "rereview-escalated", "rereview-full")]
+                "rereview-lite", "rereview-escalated", "rereview-full")] + [
+            f"verify-{kind}.md" for kind in ("fix", "fix-review", "retest")]
         for name in names:
             with self.subTest(name=name):
                 self.assertNotIn("gh ", (PROCEDURES / name).read_text(encoding="utf-8"))
@@ -1372,7 +1422,7 @@ class DeclarationTest(unittest.TestCase):
                 with self.subTest(text):
                     path = Path(tmp) / f"declarations-{index}.json"
                     path.write_text(text, encoding="utf-8")
-                    with self.assertRaises(procedure_check.DeclarationError):
+                    with self.assertRaises(procedure_terms.DeclarationError):
                         load_commands(path)
 
 
