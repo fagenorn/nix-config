@@ -336,7 +336,9 @@ class HookInstallRuleTest(unittest.TestCase):
                      "{ git-hooks = { hooks.x = { enable = true; } // { }; }; }",
                      '{ git-hooks."hooks.x".enable = true; }',
                      '{ env.MSG = "${let a = 1; git-hooks.hooks.x.enable = true; in "ok"}"; }',
-                     "{ env.MSG = ''${let a = 1; git-hooks.hooks.x.enable = true; in a}''; }"):
+                     "{ env.MSG = ''${let a = 1; git-hooks.hooks.x.enable = true; in a}''; }",
+                     "{ pkgs, ... }: {\n  scripts.a.exec = ''\n    echo ''\\''; git-hooks.hooks.x.enable = true;\n  '';\n}\n",
+                     "{ s = '' ''\\''; git-hooks.hooks.x.enable = true; ''; }"):
             self.assertFalse(hook_install.declares_hooks(text), text)
 
     def test_declares_hooks_reads_deeply_nested_attribute_sets_in_linear_time(self):

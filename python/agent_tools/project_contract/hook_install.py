@@ -143,7 +143,10 @@ def _code(text: str) -> str:
                     out[mark:] = [text[begin:i]]
                 out.append('"')
             i += 1
-        elif quote != '"' and text.startswith(("'''", "''$", "''\\"), i):
+        elif quote != '"' and text.startswith("''\\", i):
+            out.append("____")  # `''\` escapes the next character too
+            i += 4
+        elif quote != '"' and text.startswith(("'''", "''$"), i):
             out.append("___")
             i += 3
         elif quote != '"' and text.startswith("''", i):
