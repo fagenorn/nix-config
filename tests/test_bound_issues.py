@@ -207,6 +207,22 @@ class WideBoundTest(unittest.TestCase):
 
         self.assertEqual(kinds(paths.file(tracker)), [("wide-bound", "implementer")])
 
+    def test_a_future_dated_line_is_not_counted(self):
+        paths, tracker = Paths(self), FakeTracker()
+        paths.write(
+            self.used(100.0, 10, 1.0),
+            line("future", NOW + timedelta(days=1), [step("implement", "implementer", "out-of-bounds",
+                                                          3600.0, 300, 20.0)]))
+
+        self.assertEqual(kinds(paths.file(tracker)), [("wide-bound", "implementer")])
+        self.assertTrue(has_line(tracker.created[0][1], "- turns: bound 300, largest use 10"))
+
+    def test_a_line_that_ended_exactly_now_is_counted(self):
+        paths = Paths(self)
+        paths.write(line("r1", NOW, [step("implement", "implementer", "ok", 100.0, 10, 1.0)]))
+
+        self.assertEqual(kinds(paths.file(FakeTracker())), [("wide-bound", "implementer")])
+
     def test_the_recorded_bound_is_judged_not_the_installed_table(self):
         table = {"implementer": engine_session.Bounds(3600, 300, 20.0)}
         paths = Paths(self)
@@ -275,7 +291,7 @@ class PassGuardTest(unittest.TestCase):
         first.start()
         self.assertTrue(inside.wait(5))
         second.start()
-        second_in.wait(0.5)
+        self.assertFalse(second_in.wait(0.5), "the second pass read the tracker under the first's lock")
         release.set()
         first.join(10)
         second.join(10)

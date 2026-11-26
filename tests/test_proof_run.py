@@ -9,6 +9,7 @@ attempt and proven records, the lock and the command line are pinned against wha
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import io
 import json
 import os
@@ -85,10 +86,20 @@ def records_of(run: StubbedRun) -> dict[str, Path]:
             "lock": state / "proof-run.lock"}
 
 
-def proves(run: StubbedRun, fake, revision: str, mode: str, engine=ENGINE):
-    return proof_run.prove(revision, mode=mode, root=run.fixture.root, slug=run.fixture.slug,
-                           branch="main", tracker=fake, engine=engine, env=run.env,
+def proves(run: StubbedRun, fake, revision: str, mode: str, engine=ENGINE, env=None, tip=None):
+    return proof_run.prove(tip or (lambda: revision), mode=mode, root=run.fixture.root,
+                           slug=run.fixture.slug, branch="main", tracker=fake,
+                           engine=lambda _revision: engine, env=run.env if env is None else env,
                            **records_of(run))
+
+
+def another_checkout(run: StubbedRun) -> Path:
+    """A second checkout of the fixture's repository on main, holding a local commit and a stray file."""
+    other = run.world.tmp / "other-checkout"
+    subprocess.run([REAL_GIT, "clone", "--quiet", run.bare, str(other)], check=True)
+    run.world.git(other, "commit", "--quiet", "--allow-empty", "-m", "work not on origin")
+    (other / "stray.txt").write_text("keep me", "utf-8")
+    return other
 
 
 def lines(path: Path) -> list[dict]:
@@ -136,10 +147,12 @@ class ProveTest(unittest.TestCase):
         self.assertEqual(subprocess.run([*merged, "main:test_proof_runs.py"], capture_output=True,
                                         text=True, check=True).stdout, EARLIER["test_proof_runs.py"])
         started, ended = lines(records_of(run)["attempts"])
-        self.assertEqual((started["event"], started["mode"], started["issue"], started["project"],
-                          started["revision"]), ("started", "daily", 41, run.fixture.slug, SHA_B))
-        self.assertEqual((ended["event"], ended["attempt"], ended["code"], ended["end"], ended["run"]),
-                         ("ended", started["attempt"], 0, "done", run.runs()[0].name))
+        self.assertEqual((started["event"], started["mode"], started["project"], started["revision"]),
+                         ("started", "daily", run.fixture.slug, SHA_B))
+        self.assertNotIn("issue", started)
+        self.assertEqual((ended["event"], ended["attempt"], ended["code"], ended["end"], ended["run"],
+                          ended["issue"]),
+                         ("ended", started["attempt"], 0, "done", run.runs()[0].name, 41))
         self.assertEqual(fake.calls[-1], ("create", (proof_run.TITLE, proof_run.BODY)))
 
     def test_an_unmoved_main_starts_no_run(self):
@@ -205,6 +218,71 @@ class ProveTest(unittest.TestCase):
         self.assertEqual(run.runs(), [])
         release.set()
 
+    def test_the_branch_tip_is_read_only_while_the_operation_is_held(self):
+        run = stubbed(self)
+        reads = []
+
+        def tip() -> str:
+            probe = os.open(records_of(run)["lock"], os.O_RDWR)
+            try:
+                fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                reads.append("held")
+            else:
+                reads.append("free")
+            finally:
+                os.close(probe)
+            return SHA_A
+
+        seed_proven(run, SHA_A)
+        proves(run, FakeFixture(created=run.issue), SHA_A, "daily", tip=tip)
+
+        self.assertEqual(reads, ["held"])
+
+    def test_a_busy_caller_never_reads_the_tip(self):
+        run = stubbed(self)
+        lock = records_of(run)["lock"]
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        held = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
+        self.addCleanup(os.close, held)
+        fcntl.flock(held, fcntl.LOCK_EX)
+        reads = []
+
+        outcome = proves(run, FakeFixture(), SHA_A, "now", tip=lambda: reads.append(1) or SHA_A)
+
+        self.assertEqual((outcome.action, outcome.revision, reads), ("busy", None, []))
+
+    def test_a_setup_failure_is_recorded_as_an_ended_attempt(self):
+        run = stubbed(self)
+        failure = forge_api.ForgeError("gh_failed", "no issue")
+
+        class Failing(FakeFixture):
+            def create(self, title: str, body: str) -> int:
+                raise failure
+
+        with self.assertRaises(forge_api.ForgeError):
+            proves(run, Failing(), SHA_B, "daily")
+
+        started, ended = lines(records_of(run)["attempts"])
+        self.assertEqual((started["event"], ended["event"], ended["attempt"]),
+                         ("started", "ended", started["attempt"]))
+        self.assertEqual((ended["code"], ended["end"], ended["run"], ended["issue"]), (2, None, None, None))
+        self.assertIsNone(read(records_of(run)["proven"]))
+
+    def test_inherited_repository_selectors_never_reach_the_engine(self):
+        run = stubbed(self)
+        other = another_checkout(run)
+        seen = run.world.tmp / "engine-env.json"
+        probe = ("import json, os; json.dump(sorted(k for k in os.environ if k in "
+                 f"('GIT_DIR', 'GIT_WORK_TREE')), open({str(seen)!r}, 'w')); "
+                 "print(json.dumps({'end': 'stopped', 'run': 'r'}))")
+        env = {**run.env, "GIT_DIR": str(other / ".git"), "GIT_WORK_TREE": str(other)}
+
+        proves(run, FakeFixture(created=run.issue), SHA_B, "now", env=env,
+               engine=[sys.executable, "-c", probe])
+
+        self.assertEqual(json.loads(seen.read_text("utf-8")), [])
+
 
 class ResetTest(unittest.TestCase):
     def reset(self, run: StubbedRun, fake) -> int:
@@ -224,6 +302,20 @@ class ResetTest(unittest.TestCase):
                          ["open_proof_issues", "pulls_closing", "close_pull", "close_issue", "create"])
         self.assertEqual(git(root, "rev-parse", "HEAD"), git(root, "rev-parse", "origin/main"))
         self.assertFalse((root / "junk.txt").exists())
+
+    def test_inherited_repository_selectors_cannot_aim_the_reset_at_another_checkout(self):
+        run = stubbed(self)
+        other = another_checkout(run)
+        other_head = run.world.git(other, "rev-parse", "HEAD")
+        (run.fixture.root / "junk.txt").write_text("x", "utf-8")
+        env = {**run.env, "GIT_DIR": str(other / ".git"), "GIT_WORK_TREE": str(other)}
+
+        self.assertEqual(proof_run.reset_fixture(run.fixture.root, slug=run.fixture.slug, branch="main",
+                                                 tracker=FakeFixture(created=12), env=env), 12)
+
+        self.assertEqual(run.world.git(other, "rev-parse", "HEAD"), other_head)
+        self.assertTrue((other / "stray.txt").exists())
+        self.assertFalse((run.fixture.root / "junk.txt").exists())
 
     def test_a_stale_registry_path_is_refused_before_anything_changes(self):
         run = stubbed(self)
@@ -278,7 +370,42 @@ class AdapterTest(unittest.TestCase):
 
         query, variables = graphql.call_args.args
         self.assertIn("issue(number: 7)", query)
-        self.assertEqual(variables, {"owner": "o", "name": "f"})
+        self.assertEqual(variables, {"owner": "o", "name": "f", "after": None})
+
+    @staticmethod
+    def page(nodes: list, cursor: str | None, *, state: str | None = None) -> dict:
+        found = {"closedByPullRequestsReferences": {
+            "pageInfo": {"hasNextPage": cursor is not None, "endCursor": cursor}, "nodes": nodes}}
+        if state is not None:
+            found["state"] = state
+        return {"data": {"repository": {"issue": found}}}
+
+    def test_an_open_pull_on_a_later_page_of_closing_pulls_is_found(self):
+        first = [{"number": n, "state": "CLOSED", "repository": {"nameWithOwner": "o/f"}}
+                 for n in range(1, 51)]
+        last = [{"number": 99, "state": "OPEN", "repository": {"nameWithOwner": "o/f"}}]
+        answers = [self.page(first, "c1"), self.page(last, None)]
+
+        with mock.patch.object(forge_api, "graphql", side_effect=answers) as graphql:
+            self.assertEqual(proof_run.GitHubFixture("o/f").pulls_closing([7]), [99])
+
+        self.assertEqual([call.args[1]["after"] for call in graphql.call_args_list], [None, "c1"])
+
+    def test_the_merged_pull_on_a_later_page_is_found(self):
+        first = [{"number": n, "merged": False, "repository": {"nameWithOwner": "o/f"}}
+                 for n in range(1, 51)]
+        last = [{"number": 99, "merged": True, "repository": {"nameWithOwner": "o/f"}}]
+        answers = [self.page(first, "c1", state="CLOSED"), self.page(last, None, state="CLOSED")]
+
+        with mock.patch.object(forge_api, "graphql", side_effect=answers):
+            self.assertIs(proof_run.GitHubFixture("o/f").closed_by_merged_pull(7), True)
+
+    def test_a_cursor_that_does_not_advance_is_an_error_not_a_loop(self):
+        answer = self.page([], "same")
+
+        with mock.patch.object(forge_api, "graphql", return_value=answer):
+            with self.assertRaises(forge_api.ForgeError):
+                proof_run.GitHubFixture("o/f").pulls_closing([7])
 
     def test_a_merged_pull_of_another_repository_does_not_count(self):
         def answer(repository: str) -> dict:
@@ -393,6 +520,7 @@ class CliTest(unittest.TestCase):
 
 class ObservedTest(unittest.TestCase):
     FIXTURE = "example/fixture"
+    ACTIVATED = "2026-01-01T06:00:00Z"
 
     def setUp(self):
         home = tempfile.TemporaryDirectory()
@@ -404,14 +532,14 @@ class ObservedTest(unittest.TestCase):
         self.history = proof_run.engine_housekeeping.history_path()
         self.attempts.parent.mkdir(parents=True)
 
-    def started(self, attempt, *, mode="daily", at="2026-01-01T06:00:00Z", issue=41, project=None):
+    def started(self, attempt, *, mode="daily", at="2026-01-01T06:00:00Z", project=None):
         self.append(self.attempts, {"format": 1, "attempt": attempt, "event": "started", "mode": mode,
-                                    "project": project or self.FIXTURE, "revision": SHA_A,
-                                    "issue": issue, "at": at})
+                                    "project": project or self.FIXTURE, "revision": SHA_A, "at": at})
 
-    def ended(self, attempt, *, code=0, end="done", run="root-run", at="2026-01-01T06:30:00Z"):
+    def ended(self, attempt, *, code=0, end="done", run="root-run", at="2026-01-01T06:30:00Z",
+              issue=41):
         self.append(self.attempts, {"format": 1, "attempt": attempt, "event": "ended", "code": code,
-                                    "end": end, "run": run, "at": at})
+                                    "end": end, "run": run, "issue": issue, "at": at})
 
     def line(self, run, *, issue=41, end="done"):
         self.append(self.history, {"format": 1, "run": run, "project": self.FIXTURE, "issue": issue,
@@ -422,12 +550,13 @@ class ObservedTest(unittest.TestCase):
         with path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(line) + "\n")
 
-    def observe(self, merged=True):
+    def observe(self, merged=True, activated=ACTIVATED):
         out, err = io.StringIO(), io.StringIO()
+        flags = [] if activated is None else ["--activated", activated]
         with mock.patch.object(proof_run.GitHubFixture, "closed_by_merged_pull",
                                return_value=merged) as asked, \
                 contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            code = proof_run.main(["observed", "--fixture", self.FIXTURE])
+            code = proof_run.main(["observed", "--fixture", self.FIXTURE, *flags])
         self.asked = asked
         return code, (json.loads(out.getvalue()) if out.getvalue() else None), err.getvalue()
 
@@ -453,8 +582,8 @@ class ObservedTest(unittest.TestCase):
     def test_a_failed_first_attempt_is_not_met_whatever_follows(self):
         self.started("d1")
         self.ended("d1", code=3, end="stopped")
-        self.started("d2", at="2026-01-02T06:00:00Z", issue=42)
-        self.ended("d2", run="root-2", at="2026-01-02T06:30:00Z")
+        self.started("d2", at="2026-01-02T06:00:00Z")
+        self.ended("d2", run="root-2", at="2026-01-02T06:30:00Z", issue=42)
         self.line("root-2", issue=42)
 
         code, line, _ = self.observe(merged=True)
@@ -467,6 +596,26 @@ class ObservedTest(unittest.TestCase):
         self.line("root-run")
 
         self.assertEqual(self.observe()[0], 1)
+
+    def test_a_first_attempt_that_started_four_days_after_activation_is_not_met_however_short(self):
+        self.started("d1", at="2026-01-05T06:00:00Z")
+        self.ended("d1", at="2026-01-05T06:05:00Z")
+        self.line("root-run")
+
+        code, line, _ = self.observe(merged=True)
+
+        self.assertEqual((code, line["state"]), (1, "not_met"))
+
+    def test_the_observer_needs_a_valid_activation_time(self):
+        self.started("d1")
+        self.ended("d1")
+        self.line("root-run")
+
+        for activated in (None, "yesterday"):
+            with self.subTest(activated=activated):
+                code, line, err = self.observe(activated=activated)
+                self.assertEqual((code, line), (2, None))
+                self.assertTrue(err.startswith("proof-run: "), err)
 
     def test_a_done_attempt_without_its_root_line_is_not_met(self):
         self.started("d1")
@@ -504,7 +653,7 @@ class ObservedTest(unittest.TestCase):
         err = io.StringIO()
         with mock.patch.object(proof_run.GitHubFixture, "closed_by_merged_pull", side_effect=failure), \
                 contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
-            code = proof_run.main(["observed", "--fixture", self.FIXTURE])
+            code = proof_run.main(["observed", "--fixture", self.FIXTURE, "--activated", self.ACTIVATED])
 
         self.assertEqual(code, 2)
         self.assertTrue(err.getvalue().startswith("proof-run: "), err.getvalue())

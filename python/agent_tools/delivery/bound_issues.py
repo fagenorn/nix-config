@@ -9,7 +9,8 @@ One pass at a time. The pass holds a blocking `fcntl.flock(LOCK_EX)` on `lock` f
 through writing the seen file, so overlapping passes (`proof-run` daily, now and file) never both read an
 empty tracker and file twice. The open issues are read once per pass, under the lock.
 
-The window. Only a line whose `ended` is at or after `now - WINDOW_DAYS` days counts. A line that is not
+The window. Only a line whose `ended` is from `now - WINDOW_DAYS` days to `now`, both ends included,
+counts: a line dated after `now` is not a measurement of the window and is skipped. A line that is not
 a JSON object, lacks one of the eight history members, has an unreadable `ended` or a `steps` that is not
 a list is skipped, and so is a step that is not an object or lacks the members it is judged by.
 
@@ -119,7 +120,7 @@ def _window(history: Path, now: datetime) -> list[tuple[datetime, dict]]:
             ended = parse_rfc3339_utc(line["ended"])
         except (ValueError, RecursionError):
             continue
-        if ended >= earliest:
+        if earliest <= ended <= now:
             found.append((ended, line))
     return found
 
