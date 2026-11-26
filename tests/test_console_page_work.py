@@ -1,0 +1,94 @@
+"""The page draws a sprint's work line and the legend beside its grid (#1793).
+
+Run: just agent-workflow-tests
+"""
+
+import re
+import unittest
+
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures
+from .test_console_guest_page import GUEST, page_of, sprint_text
+from .test_console_page import (
+    REPORTED, SPRINT, START, full, has_class, nodes, render, sprint_lines, top, top_text, with_sprints)
+from .test_console_view import A, MIN, T0_MS, entry as view_entry, line as view_line, reported, started
+from .test_console_work_sentence import SECOND, FIRST, TITLES, folded
+
+TIER = "fast"
+
+
+def top_of(frame_sprint: dict) -> list:
+    (snap,) = render([START, {"frame": with_sprints([frame_sprint])}, {"snapshot": True}])
+    (row,) = sprint_lines(snap)
+    return top(row)
+
+
+def legend_texts(row_top: list) -> list:
+    return [full(n) for n in row_top if has_class(n, "legend-item")]
+
+
+class SprintWorkPageTest(unittest.TestCase):
+    def test_the_progress_grid_carries_a_legend_in_counts_and_words(self) -> None:
+        it = reported(started(A), T0_MS, issues=(
+            (1, "landed"), (2, "building"), (3, "queued"), (4, "held"), (5, "landed")))
+        sprint = view_entry(view_line(it, T0_MS + MIN))
+        (snap,) = render([START, {"frame": with_sprints([sprint])}, {"snapshot": True}])
+        (row,) = sprint_lines(snap)
+        row_top = top(row)
+        (legend,) = [n for n in row_top if has_class(n, "pip-legend")]
+        self.assertEqual([n for n in row_top if has_class(n, "pip-count")], [])
+        items = [c for c in legend["children"] if has_class(c, "legend-item")]
+        self.assertEqual([full(c) for c in items],
+                         ["2 done", "1 in work", "1 waiting to start", "1 waiting for a check"])
+        self.assertEqual([c["children"][0]["cls"].split() for c in items],
+                         [["pip", f"pip-{g}"] for g in ("landed", "delivery", "queued", "held")])
+        (pips,) = [n for n in row_top if has_class(n, "pips")]
+        total = 0
+        for part in sprint["legend"]:
+            made = [c for c in pips["children"] if has_class(c, f"pip-{part['group']}")]
+            self.assertEqual(len(made), part["count"])
+            total += len(made)
+        self.assertEqual(total, len(pips["children"]))
+        self.assertEqual(total, 5)
+
+    def test_a_running_sprints_face_names_its_work_by_title_with_no_number_or_own_title(self) -> None:
+        it = folded(FIRST, SECOND)
+        titles = {it.project_id: TITLES}
+        sprint = view_entry(view_line(it, T0_MS + MIN, issue_titles=titles))
+        (snap,) = render([START, {"frame": with_sprints([sprint])}, {"snapshot": True}])
+        (row,) = sprint_lines(snap)
+        face = top_text(row)
+        self.assertIn("Working on Resume a broken upload. Just finished Save a checkpoint per part; "
+                      "next is Show the retry button.", face)
+        self.assertIsNone(re.search(r"#\d|\b10[123]\b", face))
+        self.assertEqual(face.count(sprint["title"]), 1)
+        self.assertEqual(legend_texts(top(row)), ["1 done", "1 in work", "1 waiting to start"])
+
+    def test_a_wait_shows_the_work_line_before_its_now_line_and_none_without_it(self) -> None:
+        wait = {**REPORTED, "now_text": "waiting for CI on its pull request",
+                "work_text": "Working on Resume a broken upload.", "now_titled": False}
+        order = [(n["cls"].split()[0], n["text"]) for n in top_of(wait)
+                 if has_class(n, "sp-work") or has_class(n, "sp-now")]
+        self.assertEqual(order, [("sp-work", "Working on Resume a broken upload."),
+                                 ("sp-now", "waiting for CI on its pull request")])
+        empty = {**REPORTED, "work_text": None,
+                 "progress": {"landed": 0, "in_delivery": 0, "queued": 0, "held": 0, "total": 0},
+                 "progress_text": "0 done", "issues": [], "legend": []}
+        for quiet in (SPRINT, {**REPORTED, "work_text": None}, empty):
+            row_top = top_of(quiet)
+            self.assertEqual([n for n in row_top if has_class(n, "sp-work")], [])
+            self.assertEqual(legend_texts(row_top), [])
+
+    def test_a_guest_sees_a_title_as_the_tracker_wrote_it(self) -> None:
+        titled = {**REPORTED, "now_text": "Working on Export your settings.", "now_titled": True,
+                  "work_text": None}
+        waiting = {**REPORTED, "now_text": "waiting for CI on its pull request", "now_titled": False,
+                   "work_text": "Working on Export your settings."}
+        for sprint in (titled, waiting):
+            snap = page_of(GUEST, [START, {"frame": with_sprints([sprint])}])
+            face = sprint_text(snap)
+            self.assertIn("Working on Export your settings.", face)
+            self.assertNotIn("the owner's settings", face)
+
+
+if __name__ == "__main__":
+    unittest.main()

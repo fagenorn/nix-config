@@ -188,8 +188,8 @@ class PageTest(unittest.TestCase):
         # Raised from 71 KB by #1432: a sprint's declared live fault line, its Withdraw and the same line on an
         # ended sprint's finished line (about 0.5 KB compressed) did not fit the 279 bytes the cap had left.
         # Raised from 72 KB by the merge of #1274 with #1432 and #1424: each side fit under its cap, and merged the
-        # page is 74199 bytes. Raised from 73 KB: a long command's permission card summary and fold did not fit.
-        self.assertLess(len(gzip.compress(self.data, 9)), 75264)
+        # page is 74199 bytes. Raised from 73 KB: a long command's permission card summary and fold did not fit. Raised from 75264 by #1793: the work line and the grid legend left no byte under it.
+        self.assertLess(len(gzip.compress(self.data, 9)), 75776)
 
     def test_the_top_bar_carries_one_spend_link(self) -> None:
         header = self.text[self.text.index('<header class="top">'):self.text.index("</header>")]
@@ -4413,7 +4413,7 @@ SPRINT = {
 REPORTED = {
     **SPRINT, "state": "on_track", "state_text": "on track", "manager_text": None,
     "progress": {"landed": 3, "in_delivery": 2, "queued": 2, "held": 0, "total": 7},
-    "progress_text": "3 of 7 landed, 2 in delivery, 2 queued",
+    "progress_text": "3 done, 2 in work, 2 waiting to start",
     "status": "two slices are building", "status_at": utc(4 * 60000),
     "next": "start the resume slice", "milestone": "Importer resumes",
     "tracker_url": "https://github.com/owner/p00/milestone/3",
@@ -5899,10 +5899,10 @@ class PageSprintReportTest(unittest.TestCase):
             {"frame": with_sprints([quiet])}, {"snapshot": True},
         ])
         (line,) = sprint_lines(snap)
-        for expected in ("manager working", "3 of 7", "two slices are building", "4 min ago"):
+        for expected in ("manager working", "two slices are building", "4 min ago"):
             self.assertIn(expected, top_text(line))
         self.assertNotIn("on track", top_text(line))
-        self.assertIn("3 of 7 landed, 2 in delivery, 2 queued", full(detail(line)))
+        self.assertNotIn(REPORTED["progress_text"], full(detail(line)))
         (line,) = sprint_lines(stuck)
         self.assertIn("nothing running, may be stuck", top_text(line))
         self.assertNotIn("quiet for 16 min", top_text(line))
@@ -6636,7 +6636,7 @@ class PageSprintGlanceTest(unittest.TestCase):
     def test_a_reported_sprint_shows_one_pip_per_issue_by_stage_group(self) -> None:
         staged = {**REPORTED,
                   "progress": {"landed": 1, "in_delivery": 2, "queued": 1, "held": 1, "total": 5},
-                  "progress_text": "1 of 5 landed, 2 in delivery, 1 queued, 1 held",
+                  "progress_text": "1 done, 2 in work, 1 waiting to start, 1 waiting for a check",
                   "issues": [
                       {"issue": 11, "stage": "landed", "stage_text": "landed"},
                       {"issue": 12, "stage": "building", "stage_text": "building task 2 of 4"},
@@ -6645,7 +6645,7 @@ class PageSprintGlanceTest(unittest.TestCase):
                       {"issue": 15, "stage": "closed out", "stage_text": "closed out"}]}
         empty = {**REPORTED,
                  "progress": {"landed": 0, "in_delivery": 0, "queued": 0, "held": 0, "total": 0},
-                 "progress_text": "0 of 0 landed", "issues": []}
+                 "progress_text": "0 done", "issues": []}
         first, second, third = render([
             START, {"frame": with_sprints([staged])}, {"snapshot": True},
             {"frame": with_sprints([SPRINT])}, {"snapshot": True},
@@ -6656,14 +6656,14 @@ class PageSprintGlanceTest(unittest.TestCase):
         self.assertEqual([c["cls"] for c in pips["children"]],
                          ["pip pip-landed", "pip pip-delivery", "pip pip-held", "pip pip-queued",
                           "pip pip-delivery"])
-        self.assertEqual(pips["title"], staged["progress_text"])
-        self.assertEqual([full(n) for n in top(line) if has_class(n, "pip-count")], ["1 of 5"])
+        self.assertNotEqual(pips.get("title"), staged["progress_text"])
+        self.assertEqual([n for n in nodes(line) if has_class(n, "pip-count")], [])
         (mark,) = [n for n in top(line) if has_class(n, "sic")]
         self.assertEqual([c["tag"] for c in mark["children"]], ["svg"])
-        self.assertIn("1 of 5 landed, 2 in delivery, 1 queued, 1 held", full(detail(line)))
+        self.assertNotIn(staged["progress_text"], full(detail(line)))
         for snap in (second, third):
             (line,) = sprint_lines(snap)
-            for cls in ("pips", "pip", "pip-count"):
+            for cls in ("pips", "pip", "pip-legend"):
                 self.assertEqual([n for n in nodes(line) if has_class(n, cls)], [])
             self.assertEqual(len([n for n in nodes(line) if has_class(n, "sic")]), 1)
 
@@ -6727,7 +6727,7 @@ class PageSprintGlanceTest(unittest.TestCase):
             **REPORTED,
             "progress": {"landed": 0, "in_delivery": 0, "queued": MAX_REPORT_ISSUES, "held": 0,
                          "total": MAX_REPORT_ISSUES},
-            "progress_text": f"0 of {MAX_REPORT_ISSUES} landed, {MAX_REPORT_ISSUES} queued",
+            "progress_text": f"{MAX_REPORT_ISSUES} waiting to start",
             "issues": [{"issue": n, "stage": "queued", "stage_text": "queued"}
                        for n in range(1, MAX_REPORT_ISSUES + 1)]}
         (snap,) = render([START, {"frame": with_sprints([full_report])}, {"snapshot": True}])
@@ -6735,8 +6735,7 @@ class PageSprintGlanceTest(unittest.TestCase):
         (pips,) = [n for n in top(line) if has_class(n, "pips")]
         self.assertEqual(len([c for c in pips["children"] if has_class(c, "pip")]),
                          MAX_REPORT_ISSUES)
-        self.assertEqual([full(n) for n in top(line) if has_class(n, "pip-count")],
-                         [f"0 of {MAX_REPORT_ISSUES}"])
+        self.assertEqual([n for n in nodes(line) if has_class(n, "pip-count")], [])
 
     def test_an_unknown_sprint_ball_fails_loud(self) -> None:
         for ball in ("bogus", "constructor", None):

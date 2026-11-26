@@ -221,15 +221,16 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .overlap { padding: 0 16px; font-size: .8125rem; color: var(--sub0); overflow-wrap: anywhere; min-width: 0; }
 .sp-who { display: flex; flex-direction: column; min-width: 0; }
 .sp-project { font-size: .75rem; color: var(--ov2); }
-.sp-now { flex: 1 0 100%; grid-column: 2 / -1; color: var(--text); display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; }
+.sp-now, .sp-work { flex: 1 0 100%; grid-column: 2 / -1; color: var(--text); display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; }
 .sprint .title-line { color: var(--text); font-weight: 500; overflow-wrap: anywhere; }
 .sprint-goal-full { color: var(--text); overflow-wrap: anywhere; }
 .sprint .age, .sprint .manager, .sprint .until, .sprint .status-age { color: var(--ov2); }
 .sp-head { flex: 1 0 100%; display: grid; grid-template-columns: 16px minmax(0, 1fr) fit-content(40%); column-gap: 12px; row-gap: 2px; align-items: start; }
 .sp-status { grid-column: 2 / -1; display: flex; flex-wrap: wrap; gap: 0 8px; }
-.sp-prog { display: flex; align-items: flex-start; justify-content: flex-end; gap: 8px; min-width: 0; font-size: .8125rem; color: var(--sub0); }
+.sp-prog { display: flex; flex-direction: column; align-items: flex-end; gap: 8px; min-width: 0; font-size: .8125rem; color: var(--sub0); }
 .pips { display: flex; flex-wrap: wrap; gap: 4px; min-width: 0; padding-top: 3px; }
-.pip-count { flex: none; white-space: nowrap; }
+.pip-legend { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 0 10px; }
+.legend-item { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
 .pip { display: block; width: 9px; height: 9px; border-radius: 2px; flex: none; }
 .pip.pip-landed { background: var(--sub0); }
 .pip.pip-delivery { border: 1.5px solid var(--green); background: var(--green); box-shadow: inset 0 0 0 1.5px var(--base); }
@@ -781,9 +782,6 @@ function sprintDetail(sprint) {
   fold.appendChild(el("p", "sprint-goal-full", sprint.goal));
   const mode = permissionNote(sprint);
   if (mode !== null) fold.appendChild(mode);
-  if (typeof sprint.progress_text === "string") {
-    fold.appendChild(el("p", "progress", sprint.progress_text));
-  }
   if (reported) {
     const list = el("ul", "sprint-issues");
     for (const issue of sprint.issues || []) {
@@ -1078,16 +1076,18 @@ function drawSprint(item, entry, sprint) {
     const pips = el("span", "pips");
     pips.setAttribute("role", "img");
     pips.setAttribute("aria-label", sprint.progress_text);
-    pips.setAttribute("title", sprint.progress_text);
     for (const issue of sprint.issues || []) {
       pips.appendChild(el("i", "pip pip-" + pipGroup(issue.stage)));
     }
     prog.appendChild(pips);
-    prog.appendChild(el("span", "pip-count", progress.landed + " of " + progress.total));
+    const key = el("span", "pip-legend");
+    for (const part of sprint.legend || []) key.appendChild(phrase("span", "legend-item", el("i", "pip pip-" + part.group), part.text));
+    prog.appendChild(key);
     head.appendChild(prog);
   }
+  if (typeof sprint.work_text === "string") head.appendChild(el("p", "sp-work", sprint.work_text));
   const nowYours = nowSteers(sprint);
-  const nowText = nowWords(sprint.now_text, nowYours);
+  const nowText = sprint.now_titled === true ? sprint.now_text : nowWords(sprint.now_text, nowYours);
   const now = typeof sprint.now_until === "string"
     ? phrase("p", "sp-now", nowText + " ", timeEl("weekday", sprint.now_until, "now-until"))
     : el("p", "sp-now", nowText);
