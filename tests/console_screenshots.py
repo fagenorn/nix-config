@@ -30,7 +30,7 @@ Contract:
   the sprint) folded working, then a `PermissionRequest` hook row for a Bash prompt, then a
   transcript whose `user` record is stamped after that hook (the 21 Nov reading: the manager's own
   hook refused the prompt at once and it went on working); on the branch's console the heading reads
-  "Nothing needs you" and the session reads working after the first session poll, on the base
+  "You're done for now" and the session reads working after the first session poll, on the base
   commit's the same seed reads "1 thing needs you" with the terminal sentence, the before picture
   (#1424); `permission-card` is that sprint with its manager's held Bash prompt, `git worktree add
   ../.worktrees/issue-12` with the words "Create the delivery's worktree", posted to
