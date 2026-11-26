@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
@@ -80,11 +81,14 @@ class HostAdmissionTest(unittest.TestCase):
         self.assertEqual(host_admission.validate_declaration(
             {**declaration(**supported), "verify_short_lane": good}),
             {**declaration(**supported), "verify_short_lane": good})
+        largest = {**declaration(**supported),
+                   "verify_short_lane": lane(bound_seconds=int(threading.TIMEOUT_MAX))}
+        self.assertEqual(host_admission.validate_declaration(largest), largest)
         cases = [("not an object", "just lint"),
                  ("missing commands", {"slots": 1, "bound_seconds": 30}),
                  ("extra member", lane(live=True))]
         cases += [(f"slots {bad!r}", lane(slots=bad)) for bad in (0, True, "1", 1.5)]
-        cases += [(f"bound {bad!r}", lane(bound_seconds=bad)) for bad in (0, -1, True)]
+        cases += [(f"bound {bad!r}", lane(bound_seconds=bad)) for bad in (0, -1, True, int(threading.TIMEOUT_MAX) + 1, 10 ** 310)]
         cases += [("commands a list", lane(commands=[["just", "lint"]]))]
         cases += [(f"key {key!r}", lane(commands={key: [["just", "lint"]]}))
                   for key in ("Example/Alpha", "alpha", "example/..")]

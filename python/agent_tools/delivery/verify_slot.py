@@ -145,7 +145,12 @@ forwarded to it and the exit code is `128 + signal` once it has ended (SIGTERM g
 short command runs in its own process group and the signal goes to the whole group. A short
 command still running `bound_seconds` after it started has its group sent SIGTERM and, once
 `SHORT_GRACE_SECONDS` have passed with a member left, SIGKILL; the slot is given back only
-after the group is gone, and a signal received meanwhile still gives `128 + signal`.
+after the group is gone, and a signal received meanwhile still gives `128 + signal`. The group
+is told before the bound line is written, and a stderr that cannot be written changes neither.
+A forwarded signal gets the same wait and KILL for a member that ignores it. When stdin is a
+terminal this run holds in the foreground, the short command's group takes the foreground and
+this run takes it back when the command ends. A `bound_seconds` above `threading.TIMEOUT_MAX`
+is an invalid declaration.
 While waiting for a slot, the signal ends the wait with `128 + signal` and nothing runs.
 The slot is released on every outcome. SIGKILL cannot be forwarded: the command goes on
 running, and the slot is free as soon as this process is gone.
@@ -555,11 +560,28 @@ def _kill_group(pid: int, signum: int) -> None:
         pass
 
 
-def _end_group(child: subprocess.Popen, bound: int) -> int:
-    """End a short child's whole group past its bound: TERM, the grace, KILL, then wait for it to go."""
-    _say(SHORT_BOUND_LINE.format(bound=bound))
+def _foreground(pgrp: int) -> None:
+    """Make `pgrp` the foreground group of the terminal on stdin, whatever the signals say."""
+    blocked = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTTOU})
+    try:
+        os.tcsetpgrp(0, pgrp)
+    except OSError:
+        pass
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, blocked)
+
+
+def _owns_terminal() -> bool:
+    """Whether this process's group is the foreground group of the terminal on stdin."""
+    try:
+        return os.isatty(0) and os.tcgetpgrp(0) == os.getpgrp()
+    except OSError:
+        return False
+
+
+def _reap_group(child: subprocess.Popen) -> None:
+    """Wait the grace for a short child's group to go, KILL what is left, then wait for it to go."""
     pid = child.pid
-    _kill_group(pid, signal.SIGTERM)
     grace_end = time.monotonic() + SHORT_GRACE_SECONDS
     while (child.poll() is None or _group_alive(pid)) and time.monotonic() < grace_end:
         time.sleep(0.05)
@@ -568,6 +590,16 @@ def _end_group(child: subprocess.Popen, bound: int) -> int:
     settled = time.monotonic() + 1.0
     while _group_alive(pid) and time.monotonic() < settled:
         time.sleep(0.05)
+
+
+def _end_group(child: subprocess.Popen, bound: int) -> int:
+    """End a short child's whole group past its bound; the group is told first, the report is best effort."""
+    _kill_group(child.pid, signal.SIGTERM)
+    try:
+        _say(SHORT_BOUND_LINE.format(bound=bound))
+    except OSError:  # a caller that closed its stderr still gets the group ended and its slot held
+        os.dup2(os.open(os.devnull, os.O_WRONLY), 2)  # the unwritten text must not fail the exit flush
+    _reap_group(child)
     return BOUND_EXIT
 
 
@@ -585,8 +617,16 @@ def _wait_bounded(child: subprocess.Popen, bound: int) -> int:
 def _run_child(argv: list[str], run: _Run, bound: int | None = None) -> int:
     if run.received is not None:
         return 128 + run.received
+    interactive = bound is not None and _owns_terminal()
     try:
-        child = subprocess.Popen(argv) if bound is None else subprocess.Popen(argv, process_group=0)
+        if bound is None:
+            child = subprocess.Popen(argv)
+        elif interactive:
+            # Its own group, made the terminal's foreground before it runs, so a read of stdin does not stop it.
+            child = subprocess.Popen(
+                argv, process_group=0, preexec_fn=lambda: _foreground(os.getpgrp()))
+        else:
+            child = subprocess.Popen(argv, process_group=0)
     except OSError as error:
         _say(f"verify-slot: cannot start {argv[0]}: {error}")
         return CANNOT_START_EXIT
@@ -595,7 +635,13 @@ def _run_child(argv: list[str], run: _Run, bound: int | None = None) -> int:
     # A signal that arrived while the child was being created found no child to forward to.
     if run.received is not None:
         run.handle(run.received, None)
-    code = child.wait() if bound is None else _wait_bounded(child, bound)
+    try:
+        code = child.wait() if bound is None else _wait_bounded(child, bound)
+        if run.received is not None and bound is not None:
+            _reap_group(child)  # a forwarded signal ends the leader, not a member that ignores it
+    finally:
+        if interactive:
+            _foreground(os.getpgrp())
     if run.received is not None:
         return 128 + run.received
     return 128 - code if code < 0 else code

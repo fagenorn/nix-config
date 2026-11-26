@@ -5,11 +5,14 @@ It starts `verify-slot` processes in scratch git repositories and reads the queu
 Run: just agent-workflow-tests
 """
 
+import fcntl
 import json
 import os
+import pty
 import signal
 import subprocess
 import sys
+import termios
 import time
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -44,6 +47,12 @@ with open(os.path.join(directory, "pair.pid"), "w") as handle:
 time.sleep(60)
 """
 
+TTY_CHILD = """
+import os, sys
+with open(os.path.join(sys.argv[1], "tty.foreground"), "w") as handle:
+    handle.write(f"{os.tcgetpgrp(0) == os.getpgrp()} {os.getpgrp() != os.getpgid(os.getppid())}")
+"""
+
 
 def is_dead(pid, timeout=5):
     deadline = time.monotonic() + timeout
@@ -76,6 +85,8 @@ class ShortLaneTest(SlotHarness, unittest.TestCase):
         self.assertEqual(code, 0, err)
         for line in (WAITING_LINE.format(count=1), SAME_REPOSITORY_LINE, QUEUED_LINE):
             self.assertNotIn(line, err.splitlines())
+        self.assertTrue(self.mark("lint", "start").exists())
+        self.assertTrue(self.mark("lint", "end").exists())
         self.assertFalse(self.mark("suite", "end").exists())
         holders = verify_queue.read_holders(self.slots)
         self.assertEqual([holder.repository for holder in holders], ["example/alpha"])
@@ -243,6 +254,57 @@ class ShortLaneTest(SlotHarness, unittest.TestCase):
         self.assertGreaterEqual(time.monotonic() - begin, 1 + grace - 0.5)
         self.assertEqual(self.finish(lint)[0], 0)
         self.assertFalse(process_alive(int(self.mark("pair", "pid").read_text())))
+
+    def test_a_short_command_past_its_bound_is_ended_though_the_caller_closed_its_stderr(self):
+        self.declare_short("lint", bound=1)
+        proc = self.start("lint", argv=self.short("lint"), cwd=self.worktree("alpha"))
+        self.assertTrue(wait_for(self.mark("lint", "start")))
+        pid = int(self.mark("lint", "pid").read_text())
+        proc.stderr.close()
+        self.assertEqual(proc.wait(timeout=20), verify_slot.BOUND_EXIT)
+        self.assertTrue(is_dead(pid, timeout=0.5))
+        self.assertEqual(verify_queue.read_holders(self.slots, verify_queue.SHORT_LANE), [])
+
+    def test_a_signalled_short_run_holds_its_slot_until_a_descendant_that_ignores_sigterm_is_gone(self):
+        pair_argv = [sys.executable, "-c", PAIR, str(self.marks)]
+        self.declare(verify_short_lane={
+            "slots": 1, "bound_seconds": 30, "commands": {"example/alpha": [pair_argv]}})
+        proc = self.start("pair", argv=pair_argv, cwd=self.worktree("alpha"))
+        self.assertTrue(wait_for(self.mark("pair", "pid")))
+        grandchild = int(self.mark("grandchild", "pid").read_text())
+        proc.send_signal(signal.SIGTERM)
+        self.assertEqual(self.finish(proc)[0], 143)
+        self.assertFalse(process_alive(grandchild))
+        self.assertFalse(process_alive(int(self.mark("pair", "pid").read_text())))
+        self.assertEqual(verify_queue.read_holders(self.slots, verify_queue.SHORT_LANE), [])
+
+    def test_a_short_command_keeps_the_terminal_foreground_of_an_interactive_run(self):
+        tty_argv = [sys.executable, "-c", TTY_CHILD, str(self.marks)]
+        self.declare(verify_short_lane={
+            "slots": 1, "bound_seconds": 30, "commands": {"example/alpha": [tty_argv]}})
+        master, slave = pty.openpty()
+        self.addCleanup(os.close, master)
+
+        def take_terminal():
+            os.setsid()
+            fcntl.ioctl(0, termios.TIOCSCTTY, 0)
+
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "agent_tools.delivery.verify_slot", "run", "--", *tty_argv],
+            env=self.env(), cwd=self.worktree("alpha"), stdin=slave, stderr=subprocess.PIPE,
+            text=True, preexec_fn=take_terminal)
+        self.procs.append(proc)
+        os.close(slave)
+        code, err = self.finish(proc, timeout=15)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.mark("tty", "foreground").read_text(), "True True")
+
+    def test_a_short_bound_too_large_for_a_timer_is_a_setup_error_and_nothing_runs(self):
+        self.declare_short("lint", bound=10 ** 310)
+        code, err = self.finish(
+            self.start("lint", argv=self.short("lint"), cwd=self.worktree("alpha")), timeout=15)
+        self.assertEqual(code, verify_slot.USAGE_EXIT, err)
+        self.assertFalse(self.mark("lint", "start").exists())
 
     def test_a_long_command_is_never_ended_at_the_short_bound(self):
         self.declare_short("lint", bound=1)

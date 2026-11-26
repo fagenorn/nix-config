@@ -27,6 +27,7 @@ import json
 import os
 from pathlib import Path
 import re
+import threading
 from types import MappingProxyType
 from typing import Sequence
 
@@ -119,6 +120,8 @@ def _short_lane_valid(lane: object) -> bool:
     if not isinstance(lane, dict) or set(lane) != SHORT_LANE_MEMBERS:
         return False
     if any(type(lane[name]) is not int or lane[name] < 1 for name in ("slots", "bound_seconds")):
+        return False
+    if lane["bound_seconds"] > threading.TIMEOUT_MAX:  # a bound no timer can count down
         return False
     commands = lane["commands"]
     if not isinstance(commands, dict):
