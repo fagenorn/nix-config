@@ -27,6 +27,7 @@ from agent_tools.console import account_add, approve, event_log, pictures, regis
 from . import accounts_sandbox
 from . import console_screenshots as shots
 from . import console_test_support as support
+from .test_console_screenshot_clock import chromium_or_skip
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
 
@@ -42,6 +43,11 @@ def entries_of(view):
         yield from (entry["projects"] if entry["type"] == "quiet_group" else [entry])
 
 
+class FixedPage:
+    clock = SimpleNamespace(set_fixed_time=lambda time: None)
+    mouse = SimpleNamespace(move=lambda x, y: None)
+
+
 def all_sprints(view):
     found = []
     for project in entries_of(view):
@@ -51,7 +57,7 @@ def all_sprints(view):
 
 
 def fake_browser(present):
-    class Page:
+    class Page(FixedPage):
         def __init__(self):
             self.clicks = []
             self.waits = []
@@ -164,7 +170,7 @@ def fake_browser(present):
                 return []
             return 0
 
-        def screenshot(self, path, full_page):
+        def screenshot(self, path, full_page, **options):
             self.order.append("screenshot")
 
         def close(self):
@@ -173,7 +179,7 @@ def fake_browser(present):
     page = Page()
 
     class Browser:
-        def new_page(self, viewport):
+        def new_page(self, viewport, **options):
             return page
 
     return Browser(), page
@@ -1139,7 +1145,7 @@ class ScreenshotFixtureTest(unittest.TestCase):
                         present = {door, "#pool"} | ({".pool-add"} if has else set())
                         browser, page = fake_browser(present)
                         order = []
-                        page.screenshot = lambda path, full_page: order.append("shot")
+                        page.screenshot = lambda path, full_page, **options: order.append("shot")
                         wait = page.wait_for_selector
                         page.wait_for_selector = lambda s: (wait(s), order.append(s))
                         shots._shoot(browser, "http://console.test/", state, width, Path(tmp))
@@ -1159,7 +1165,7 @@ class ScreenshotFixtureTest(unittest.TestCase):
                 with self.subTest(width=width, has=has), tempfile.TemporaryDirectory() as tmp:
                     browser, page = fake_browser({"#console-door"} | ({".cap-owner"} if has else set()))
                     order = []
-                    page.screenshot = lambda path, full_page: order.append("shot")
+                    page.screenshot = lambda path, full_page, **options: order.append("shot")
                     wait = page.wait_for_selector
                     page.wait_for_selector = lambda s: (wait(s), order.append(s))
                     shots._shoot(browser, "http://console.test/", "owner-actors", width, Path(tmp))
@@ -1179,7 +1185,7 @@ class ScreenshotFixtureTest(unittest.TestCase):
                         mock.patch.object(shots, "declares_live_faults", return_value=declared):
                     browser, page = fake_browser(set())
                     order = []
-                    page.screenshot = lambda path, full_page: order.append("shot")
+                    page.screenshot = lambda path, full_page, **options: order.append("shot")
                     wait = page.wait_for_selector
                     page.wait_for_selector = lambda s: (wait(s), order.append(s))
                     shots._shoot(browser, "http://console.test/", "live-fault", width, Path(tmp))
@@ -1202,7 +1208,7 @@ class ScreenshotFixtureTest(unittest.TestCase):
                         mock.patch.object(shots, "offers_account_changes", return_value=offered):
                     browser, page = fake_browser({"#console-door", ".acct-owner"})
                     order = []
-                    page.screenshot = lambda path, full_page: order.append("shot")
+                    page.screenshot = lambda path, full_page, **options: order.append("shot")
                     wait = page.wait_for_selector
                     page.wait_for_selector = lambda s: (wait(s), order.append(s))
                     shots._shoot(browser, "http://console.test/", "owner-accounts", width, Path(tmp))
@@ -1222,7 +1228,7 @@ class ScreenshotFixtureTest(unittest.TestCase):
                     mock.patch.object(shots, "offers_account_changes", return_value=offered):
                 browser, page = fake_browser({"#console-door", "#pool", ".pool-add"})
                 order = []
-                page.screenshot = lambda path, full_page: order.append("shot")
+                page.screenshot = lambda path, full_page, **options: order.append("shot")
                 wait = page.wait_for_selector
                 page.wait_for_selector = lambda s: (wait(s), order.append(s))
                 shots._shoot(browser, "http://console.test/", "guest-page", 480, Path(tmp))
@@ -1269,7 +1275,7 @@ class ScreenshotFixtureTest(unittest.TestCase):
                 mock.patch.dict(sys.modules, {"playwright": types.ModuleType("playwright"),
                                               "playwright.sync_api": api}), \
                 mock.patch.object(shots, "_shoot", side_effect=fake):
-            shots.capture(Path(tmp), states=("guest-steer",), widths=(shots.WIDTHS[0],))
+            shots.capture(Path(tmp), states=("guest-steer",), widths=(shots.WIDTHS[0],), home=Path(tmp) / "home")
         self.assertEqual(len(seen), 1)
         state, url, status, view = seen[0]
         self.assertEqual((state, status), ("guest-steer", 200))
@@ -1318,7 +1324,7 @@ class ScreenshotFixtureTest(unittest.TestCase):
                                               "playwright.sync_api": api}), \
                 mock.patch.object(shots, "_shoot", side_effect=fake), \
                 mock.patch.object(shots, "start_service", wraps=shots.start_service) as started:
-            shots.capture(Path(tmp), states=("adoption-failed",))
+            shots.capture(Path(tmp), states=("adoption-failed",), home=Path(tmp) / "home")
         self.assertEqual(started.call_count, len(shots.WIDTHS))
         self.assertEqual(cards, [(width, ["adoption"]) for width in shots.WIDTHS])
 
@@ -2112,7 +2118,7 @@ class ScreenshotFixtureTest(unittest.TestCase):
     @mock.patch.object(shots, "STYLE_CHECKS", ())
     def test_a_shot_scrolls_back_to_the_top_before_its_capture(self) -> None:
         def fake(reset_to):
-            class Page:
+            class Page(FixedPage):
                 y = 0.0
 
                 def __init__(self):
@@ -2139,7 +2145,7 @@ class ScreenshotFixtureTest(unittest.TestCase):
                         return []
                     return 0
 
-                def screenshot(self, path, full_page):
+                def screenshot(self, path, full_page, **options):
                     self.captured.append((self.y, full_page))
 
                 def close(self):
@@ -2148,7 +2154,7 @@ class ScreenshotFixtureTest(unittest.TestCase):
             page = Page()
 
             class Browser:
-                def new_page(self, viewport):
+                def new_page(self, viewport, **options):
                     return page
 
             return Browser(), page
@@ -2166,7 +2172,7 @@ class ScreenshotFixtureTest(unittest.TestCase):
     def test_the_goal_states_type_into_the_box_before_the_capture(self) -> None:
         calls: list[tuple[str, tuple]] = []
 
-        class Page:
+        class Page(FixedPage):
             def goto(self, url):
                 calls.append(("goto", (url,)))
 
@@ -2191,14 +2197,14 @@ class ScreenshotFixtureTest(unittest.TestCase):
                     return []
                 return 0
 
-            def screenshot(self, path, full_page):
+            def screenshot(self, path, full_page, **options):
                 calls.append(("screenshot", (path, full_page)))
 
             def close(self):
                 pass
 
         class Browser:
-            def new_page(self, viewport):
+            def new_page(self, viewport, **options):
                 return Page()
 
         self.assertEqual(shots.GOAL_NEAR_CHARS, 1900)
@@ -2354,7 +2360,7 @@ class ScreenshotFixtureTest(unittest.TestCase):
     def check_sharing_shot(self, state: str, present: set, opens: bool) -> None:
         calls: list[tuple[str, tuple]] = []
 
-        class Page:
+        class Page(FixedPage):
             def goto(self, url):
                 calls.append(("goto", (url,)))
 
@@ -2376,14 +2382,14 @@ class ScreenshotFixtureTest(unittest.TestCase):
                     return []
                 return 0
 
-            def screenshot(self, path, full_page):
+            def screenshot(self, path, full_page, **options):
                 pass
 
             def close(self):
                 pass
 
         class Browser:
-            def new_page(self, viewport):
+            def new_page(self, viewport, **options):
                 return Page()
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -2786,8 +2792,8 @@ class ScreenshotFixtureTest(unittest.TestCase):
                         self.assertEqual(card["reason"], "register_apply")
                         self.assertEqual(card["questions"][0]["options"], ["Apply it", "Not now"])
                         self.assertEqual(card["lines"][-2:], shots.REGISTER_PLAN_LINES)
-                        self.assertEqual(card["lines"][:-2], [shots.PROPOSAL_LINE] if proposes and reconcile
-                                         else [] if reconcile else [register.HOOKS_LINE])
+                        self.assertEqual(card["lines"][:-2], [shots.PROPOSAL_LINE] if proposes and reconcile else [] if reconcile
+                                         else [shots.contract_draft.DRAFTED_ENVIRONMENT_LINE, register.HOOKS_LINE])
                         self.assertIsNone(registration["draft"])
                     elif reconcile:
                         self.assertEqual(view["inbox"]["open"], [])
@@ -3637,17 +3643,9 @@ class ScreenshotStyleTest(unittest.TestCase):
         self.assertEqual(misses[1], "d: .t contrast is 5.79")
 
     def sandboxed_capture(self, **kw):
-        try:
-            from playwright.sync_api import Error, sync_playwright
-        except ImportError:
-            self.skipTest("playwright is not installed")
-        with sync_playwright() as pw:
-            try:
-                pw.chromium.launch(args=["--no-sandbox", "--disable-dev-shm-usage"]).close()
-            except Error as err:
-                self.skipTest(f"no Chromium to launch: {err}")
+        chromium_or_skip(self)
         with tempfile.TemporaryDirectory() as tmp:
-            return shots.capture(Path(tmp) / "out", **kw)
+            return shots.capture(Path(tmp) / "out", home=Path(tmp) / "home", **kw)
 
     def test_every_style_check_passes_and_fails_when_broken(self) -> None:
         taken = self.sandboxed_capture(mutate=True)
@@ -3685,7 +3683,7 @@ class ScreenshotCaptureTest(unittest.TestCase):
                 self.skipTest(f"no Chromium to launch: {err}")
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "out"
-            taken = shots.capture(out)
+            taken = shots.capture(out, home=Path(tmp) / "home")
             self.assertEqual([s for s in taken if s.width == 480 and s.scroll_width > 480], [])
             self.assertEqual([s for s in taken if s.squeezed], [])
             self.assertEqual([s for s in taken if s.jargon], [])

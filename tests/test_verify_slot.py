@@ -886,7 +886,7 @@ class VerifySlotTest(SlotHarness, unittest.TestCase):
         beta = self.repository("beta", "git@github.com:example/beta.git")
         self.slots.mkdir()
         old = [verify_queue.open_shared(self.slots / "slot-1.lock"),
-               verify_queue.open_shared(verify_queue.repository_lock_paths(self.slots, "example/alpha", 2)[1])]
+               verify_queue.open_shared(verify_queue.repository_lock_paths(self.slots, "example/alpha", 2, 2)[1])]
         try:
             for descriptor in old:
                 fcntl.flock(descriptor, fcntl.LOCK_EX)
@@ -910,16 +910,16 @@ class VerifySlotTest(SlotHarness, unittest.TestCase):
         self.addCleanup(lambda: [os.close(fd) for fd in taken])
         with mock.patch.object(verify_queue, "repository_lock_paths",
                                wraps=verify_queue.repository_lock_paths) as paths:
-            results = [verify_slot._try_slots(self.slots, 2, True, "example/alpha", 1_000_000_000)
+            results = [verify_slot._try_slots(self.slots, 2, True, "example/alpha", 50)
                        for _ in range(3)]
         for held, _ in results:
             taken.extend(held or ())
         self.assertEqual([reason for _, reason in results], [None, None, "taken"])
         self.assertTrue(all(fd is not None for held, _ in results[:2] for fd in held))
-        self.assertTrue(all(call.args[2] <= 2 for call in paths.call_args_list))
+        self.assertTrue(all(call.args[3] <= 2 for call in paths.call_args_list))
         self.assertEqual({path.name for path in self.slots.glob("repo-*.lock")},
                          {path.name for path in verify_queue.repository_lock_paths(
-                             self.slots, "example/alpha", 2)})
+                             self.slots, "example/alpha", 2, 2)})
 
     def test_a_waiter_behind_a_paused_earlier_waiter_prints_the_holders_that_left(self):
         self.declare(verify_slots=2)
@@ -1148,8 +1148,9 @@ class VerifySlotTest(SlotHarness, unittest.TestCase):
         entries = {entry["repository"]: entry for entry in self.history()}
         self.assertEqual(len(self.history()), 2)
         for entry in entries.values():
-            self.assertEqual(set(entry), {"command", "exit", "held_seconds", "owner", "place", "repository",
-                                          "started", "waited_seconds"})
+            self.assertEqual(set(entry), {"command", "exit", "held_seconds", "lane", "owner", "place",
+                                          "repository", "started", "waited_seconds"})
+            self.assertEqual(entry["lane"], "long")
             self.assertIsNone(entry["owner"])
         command = " ".join(" ".join([sys.executable, "-c", CHILD]).split()[:3])
         beta_entry, alpha_entry = entries["example/beta"], entries["example/alpha"]

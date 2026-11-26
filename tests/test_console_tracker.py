@@ -182,7 +182,7 @@ class StaleTest(Case):
             svc.poll_tracker()
         statement = view_of(svc)["statement"]
         self.assertEqual(statement["headline"], view.STALE_HEADLINE)
-        self.assertNotEqual(statement["headline"], "Nothing needs you")
+        self.assertNotEqual(statement["headline"], inbox.DONE_HEADLINE)
 
     def test_a_recovered_read_clears_stale_and_a_complete_read_drops_gone_items(self):
         svc = self.open(Scripted([A], ForgeError("gh_failed", "down"), []))
@@ -195,7 +195,7 @@ class StaleTest(Case):
         statement = view_of(svc)["statement"]
         self.assertEqual(open_keys(svc), [])
         self.assertFalse(statement["stale"])
-        self.assertEqual(statement["headline"], "Nothing needs you")
+        self.assertEqual(statement["headline"], inbox.DONE_HEADLINE)
 
     def test_a_read_of_an_unregistered_project_appends_nothing(self):
         def tracker(project_id, slug, *, cancelled):

@@ -176,6 +176,7 @@ agent-workflow-tests *args:
     home/common/agent-skills/tests/test_adopt_project_boundaries.py \
     home/common/agent-skills/tests/test_adopt_apply.py \
     home/common/agent-skills/tests/test_adopt_hook_install.py \
+    home/common/agent-skills/tests/test_adopt_draft_hook_install.py \
     home/common/agent-skills/tests/test_adopt_apply_formatting.py \
     home/common/agent-skills/tests/test_adopt_entries.py \
     home/common/agent-skills/tests/test_adopt_conformance.py \
@@ -352,6 +353,7 @@ agent-workflow-tests *args:
     tests/test_suite_tiers.py \
     tests/test_suite_timing.py \
     tests/test_verify_slot.py \
+    tests/test_verify_slot_short_lane.py \
     tests/test_verify_slot_timeouts.py \
     tests/test_verify_queue.py \
     tests/test_verification_command.py \
@@ -364,6 +366,7 @@ agent-workflow-tests *args:
     tests/test_console_view.py \
     tests/test_console_view_action.py \
     tests/test_console_view_lock_place.py \
+    tests/test_console_done_for_now.py \
     tests/test_console_view_held_sprint.py \
     tests/test_console_draft_facts.py \
     tests/test_console_failed_start.py \
@@ -423,6 +426,7 @@ agent-workflow-tests *args:
     tests/test_console_page.py \
     tests/test_console_page_action.py \
     tests/test_console_page_move.py \
+    tests/test_console_page_done_for_now.py \
     tests/test_console_page_held_sprint.py \
     tests/test_console_long_permission_card.py \
     tests/test_console_controls.py \
@@ -454,6 +458,7 @@ agent-workflow-tests *args:
     tests/test_console_screenshots.py \
     tests/test_console_screenshot_widths.py \
     tests/test_console_permission_shots.py \
+    tests/test_console_screenshot_clock.py \
     tests/test_console_sprint_command.py \
     tests/test_console_manager_contract_held.py \
     tests/test_console_sprint_action.py \
@@ -497,6 +502,7 @@ agent-workflow-tests *args:
     home/common/agent-skills/tests/test_program_harness.py \
     home/common/agent-skills/tests/test_deliver_standard_program.py \
     home/common/agent-skills/tests/test_deliver_standard_landing.py \
+    home/common/agent-skills/tests/test_deliver_standard_resume_ahead.py \
     home/common/agent-skills/tests/test_deliver_standard_before_pull_request.py \
     home/common/agent-skills/tests/test_deliver_standard_lane_rule.py \
     home/common/agent-skills/tests/test_deliver_standard_work_rules.py \
