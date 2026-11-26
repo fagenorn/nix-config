@@ -596,16 +596,8 @@ def deliver(issue: int, procedures_dir: Path, *, clock: Callable[[], datetime] |
             _continue(run_dir, table, inputs)
         engine_housekeeping.housekeep(project=project, run=run_dir.name, clock=clock,
                                       tracker=tracker_factory, identity=identity)
-        try:
-            code, line = _walk(run_dir, table, _Scope(run_dir, holder, slots))
-        except Fault:
-            engine_housekeeping.record_history(run_dir, clock, fault=True)
-            raise
-        if code in (EXIT_DONE, EXIT_STOP):
-            engine_housekeeping.record_history(run_dir, clock)
-        return code, line
-    except (engine_ledger.LedgerError, engine_core.CoreError, UnknownCommand,
-            OSError, ValueError, KeyError) as error:
+        return _walk_recorded(run_dir, table, _Scope(run_dir, holder, slots), clock)
+    except _WALK_ERRORS as error:
         raise Fault(str(error)) from error
     finally:
         _release(held)
@@ -813,6 +805,21 @@ def _forced(action, steps: dict[str, dict], first: bool):
     if isinstance(action, engine_core.RunCall):
         return replace(action, recheck=True)
     return action
+
+
+_WALK_ERRORS = (Fault, engine_ledger.LedgerError, engine_core.CoreError, UnknownCommand, OSError, ValueError, KeyError)
+
+
+def _walk_recorded(run_dir: Path, table: CommandTable, scope: _Scope, clock: Callable[[], datetime], recheck: bool = False) -> tuple[int, dict]:
+    """`_walk` the run, then append its history line: done or a stop, or the fault (any error in `_WALK_ERRORS`)."""
+    try:
+        code, line = _walk(run_dir, table, scope, recheck)
+    except _WALK_ERRORS:
+        engine_housekeeping.record_history(run_dir, clock, fault=True)
+        raise
+    if code in (EXIT_DONE, EXIT_STOP):
+        engine_housekeeping.record_history(run_dir, clock)
+    return code, line
 
 
 def _walk(run_dir: Path, table: CommandTable, scope: _Scope,
@@ -1172,14 +1179,7 @@ def _child(run_dir: Path, table: CommandTable, run: dict, step: dict,
             if not _names_child(run_dir, child_dir.name):
                 shutil.rmtree(child_dir, ignore_errors=True)
             raise
-        now = lambda: datetime.now(timezone.utc)  # noqa: E731
-        try:
-            code, line = _walk(child_dir, table, scope, action.recheck)
-        except Fault:
-            engine_housekeeping.record_history(child_dir, now, fault=True)
-            raise
-        if code in (EXIT_DONE, EXIT_STOP):
-            engine_housekeeping.record_history(child_dir, now)
+        _, line = _walk_recorded(child_dir, table, scope, lambda: datetime.now(timezone.utc), action.recheck)
         if line["end"] == procedure_terms.QUOTA_WAIT:
             raise _Quota(line["detail"])
         if line["end"] == engine_stop.STOPPED_BY_REQUEST:

@@ -18,6 +18,7 @@ from tests.engine_fixture import AdoptedFixtures
 from tests.engine_stubbed_world import StubbedRun
 from tests.guard_policy_world import install_platform_manifest_in_environ
 from tests.test_engine_deliver import EngineProject, step
+from tests.test_engine_fanout import FAN, child as fan_child, fan_children
 
 TIER = "integration"  # the last cases run the engine
 
@@ -213,6 +214,34 @@ class FaultLineTest(unittest.TestCase):
         self.assertEqual((lines[0]["run"], lines[0]["end"], lines[0]["need"]),
                          (project.runs()[0].name, "fault", None))
         self.assertEqual([s["outcome"] for s in lines[0]["steps"]], ["out-of-bounds"])
+
+    def test_a_walk_that_raises_a_core_error_records_a_fault_line_for_the_root_run(self):
+        project = EngineProject(self)
+
+        faulted = project.deliver(project.procedures(FAN("standin-items-object", 2),
+                                                     children=fan_children()), issue=1517)
+
+        self.assertEqual(faulted.returncode, 1, faulted.stdout + faulted.stderr)
+        lines = history(project.world.home)
+        self.assertEqual([(line["run"], line["end"]) for line in lines],
+                         [(project.runs()[0].name, "fault")])
+
+    def test_a_child_whose_walk_raises_a_core_error_records_a_fault_line_of_its_own(self):
+        project = EngineProject(self)
+        inner = FAN("standin-items-object", 1)
+        inner[1]["procedure"] = "grand"
+        inner[0]["on"] = {"ok": "fan", "failed": "child-stop", "refused": "child-stop"}
+        inner[1]["on"] = {"done": "done", "child-stop": "child-stop"}
+        children = {"fan-child": fan_child(inner), "grand": fan_children()["fan-child"]}
+
+        faulted = project.deliver(project.procedures(FAN("standin-items", 1), children=children),
+                                  issue=1517)
+
+        self.assertEqual(faulted.returncode, 1, faulted.stdout + faulted.stderr)
+        ends = {line["run"]: line["end"] for line in history(project.world.home)}
+        middle = next(run for run in project.runs()
+                      if json.loads((run / "run.json").read_text("utf-8"))["procedure"] == "fan-child")
+        self.assertEqual(ends[middle.name], "fault")
 
 
 if __name__ == "__main__":
