@@ -637,8 +637,10 @@ def _run_child(argv: list[str], run: _Run, bound: int | None = None) -> int:
         run.handle(run.received, None)
     try:
         code = child.wait() if bound is None else _wait_bounded(child, bound)
-        if run.received is not None and bound is not None:
-            _reap_group(child)  # a forwarded signal ends the leader, not a member that ignores it
+        if bound is not None and (interactive or run.received is not None):
+            # A forwarded signal ends the leader, not a member that ignores it; and the terminal's own
+            # interrupt goes to the child's foreground group alone, so the wrapper never learns of it.
+            _reap_group(child)
     finally:
         if interactive:
             _foreground(os.getpgrp())

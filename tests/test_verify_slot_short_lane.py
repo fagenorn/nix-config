@@ -47,6 +47,9 @@ with open(os.path.join(directory, "pair.pid"), "w") as handle:
 time.sleep(60)
 """
 
+# The same pair, its grandchild deaf to SIGINT as an asynchronous member of a non-interactive sh is.
+PAIR_DEAF_TO_INTERRUPT = PAIR.replace("signal.SIGTERM", "signal.SIGINT")
+
 TTY_CHILD = """
 import os, sys
 with open(os.path.join(sys.argv[1], "tty.foreground"), "w") as handle:
@@ -72,6 +75,23 @@ class ShortLaneTest(SlotHarness, unittest.TestCase):
 
     def worktree(self, name, repository="alpha"):
         return self.repository(name, f"git@github.com:example/{repository}.git")
+
+    def interactive(self, argv):
+        """Run `argv` in a verify-slot run whose stdin is the controlling terminal; `(process, master fd)`."""
+        master, slave = pty.openpty()
+        self.addCleanup(os.close, master)
+
+        def take_terminal():
+            os.setsid()
+            fcntl.ioctl(0, termios.TIOCSCTTY, 0)
+
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "agent_tools.delivery.verify_slot", "run", "--", *argv],
+            env=self.env(), cwd=self.worktree("alpha"), stdin=slave, stderr=subprocess.PIPE,
+            text=True, preexec_fn=take_terminal)
+        self.procs.append(proc)
+        os.close(slave)
+        return proc, master
 
     def test_a_short_command_of_a_repository_that_holds_its_slot_starts_at_once(self):
         self.declare_short("lint", verify_slots=1)
@@ -282,22 +302,25 @@ class ShortLaneTest(SlotHarness, unittest.TestCase):
         tty_argv = [sys.executable, "-c", TTY_CHILD, str(self.marks)]
         self.declare(verify_short_lane={
             "slots": 1, "bound_seconds": 30, "commands": {"example/alpha": [tty_argv]}})
-        master, slave = pty.openpty()
-        self.addCleanup(os.close, master)
-
-        def take_terminal():
-            os.setsid()
-            fcntl.ioctl(0, termios.TIOCSCTTY, 0)
-
-        proc = subprocess.Popen(
-            [sys.executable, "-m", "agent_tools.delivery.verify_slot", "run", "--", *tty_argv],
-            env=self.env(), cwd=self.worktree("alpha"), stdin=slave, stderr=subprocess.PIPE,
-            text=True, preexec_fn=take_terminal)
-        self.procs.append(proc)
-        os.close(slave)
+        proc, _ = self.interactive(tty_argv)
         code, err = self.finish(proc, timeout=15)
         self.assertEqual(code, 0, err)
         self.assertEqual(self.mark("tty", "foreground").read_text(), "True True")
+
+    def test_a_terminal_interrupt_of_an_interactive_short_run_holds_its_slot_until_a_deaf_descendant_is_gone(self):
+        pair_argv = [sys.executable, "-c", PAIR_DEAF_TO_INTERRUPT, str(self.marks)]
+        self.declare(verify_short_lane={
+            "slots": 1, "bound_seconds": 30, "commands": {"example/alpha": [pair_argv]}})
+        proc, master = self.interactive(pair_argv)
+        self.assertTrue(wait_for(self.mark("pair", "pid")))
+        grandchild = int(self.mark("grandchild", "pid").read_text())
+        self.addCleanup(lambda: process_alive(grandchild) and os.kill(grandchild, signal.SIGKILL))
+        os.write(master, b"\x03")  # the terminal sends it to the foreground group, the command's alone
+        code, err = self.finish(proc, timeout=20)
+        self.assertEqual(code, 130, err)
+        self.assertFalse(process_alive(grandchild))
+        self.assertFalse(process_alive(int(self.mark("pair", "pid").read_text())))
+        self.assertEqual(verify_queue.read_holders(self.slots, verify_queue.SHORT_LANE), [])
 
     def test_a_short_bound_too_large_for_a_timer_is_a_setup_error_and_nothing_runs(self):
         self.declare_short("lint", bound=10 ** 310)
