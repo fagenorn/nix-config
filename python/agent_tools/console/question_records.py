@@ -406,6 +406,13 @@ def _moved_at(moved_ms: int) -> str:
     return datetime.fromtimestamp(moved_ms / 1000, timezone.utc).isoformat(timespec="seconds")
 
 
+def _wire_stage(issue: deliveries.IssueStage) -> str:
+    """The raw stage, or the building task's position; never the owner's display words."""
+    if issue.stage == deliveries.BUILDING and issue.task is not None:
+        return deliveries.stage_text(issue)
+    return issue.stage
+
+
 def _deliveries(rows: list[Event], live_runs: Collection[tuple[str, str]]) -> list[dict]:
     runs: dict[tuple[str, str], dict] = {}
     for event in rows:
@@ -418,7 +425,7 @@ def _deliveries(rows: list[Event], live_runs: Collection[tuple[str, str]]) -> li
             "run_id": _shown_run(state.run_id), "session_id": _shown_run(state.session_id),
             "first_seen_at": event.at if entry is None else entry["first_seen_at"],
             "last_seen_at": event.at, "moved_at": _moved_at(state.moved_ms), "live": key in live_runs,
-            "issues": [{"issue": i.issue, "stage": deliveries.stage_text(i)} for i in state.issues],
+            "issues": [{"issue": i.issue, "stage": _wire_stage(i)} for i in state.issues],
             "_seq": event.seq}
     ordered = sorted(runs.values(), key=lambda entry: -entry["_seq"])
     return [{k: v for k, v in entry.items() if k != "_seq"} for entry in ordered]
