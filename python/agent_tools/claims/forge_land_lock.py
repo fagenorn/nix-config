@@ -223,7 +223,9 @@ deletes the pull request's other leases; `already_held` and `moved` create `<sin
 keeping the `<since>` of the effective lease it can trust (a fresh one when none), and delete the
 old one. A write is confirmed only when every lease it replaces is gone (a refused or lost
 deletion is read back): otherwise `acquire` answers `lease` `null` and `hold` is a forge error,
-both refs left, and the lock stays held. Every reader takes the effective lease as the one with
+both refs left, and the lock stays held. `acquire --lease` reads the lock again after its write:
+one no longer at its sha deletes the lease it wrote and answers `lease` `null`, its verdict as
+judged. Every reader takes the effective lease as the one with
 the largest `<since>`, `<beat>` and ref name, so no answer depends on listing order. A confirmed
 write answers `lease` `{since, beat}`. `hold --sha S [--seconds N]` (N from 0 to `HOLD_MAX`,
 default 0) reads the lock at once and every `LEASE_BEAT` seconds (60) of `monotonic()`: a lock
@@ -910,7 +912,8 @@ def _leases(args: Any) -> bool:
 
 
 def _lease(args: Any, node: Callable[[], str], out: dict[str, Any]) -> dict[str, Any]:
-    """D13: write the lease of a holding answer and add `lease` to it; a failed write is `null`."""
+    """D13: write the lease of a holding answer and add `lease` to it; a failed write is `null`, and
+    so is one made while the lock is no longer at its sha, which is deleted again."""
     try:
         now = forge_now()
         old = [w for w in read_leases(args.repo, args.branch) if w.pr == out["pr"]]
@@ -918,7 +921,13 @@ def _lease(args: Any, node: Callable[[], str], out: dict[str, Any]) -> dict[str,
         if out["verdict"] != "acquired":
             kept = effective(trusted(old, now))
             since = kept.since if kept else None
-        out["lease"] = write_lease(args.repo, args.branch, node, out["pr"], out["lock_sha"], since, old, now)
+        lease = write_lease(args.repo, args.branch, node, out["pr"], out["lock_sha"], since, old, now)
+        if fm.read_ref(args.repo, lock_ref(args.branch)) == out["lock_sha"]:
+            out["lease"] = lease
+        else:
+            name = f"{lease_prefix(args.branch)}{lease['since']}-{out['pr']}-{lease['beat']}"
+            drop_leases(args.repo, node, [Waiter(lease["since"], out["pr"], lease["beat"], name, out["lock_sha"])])
+            out["lease"] = None
     except forge_api.ForgeError:
         out["lease"] = None
     return out

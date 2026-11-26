@@ -381,3 +381,39 @@ class LeaseTest(base.QueueTest):
                 code, out = run(*land("hold", A))
             records.append((code, out["verdict"], out["pr"], self.leases()))
         self.assertEqual(records[0], records[1])
+
+    def lock_lost_with_no_lease_left(self, code_out):
+        code, out = code_out
+        self.assertEqual((code, out["verdict"], out["lease"]), (0, "already_held", None))
+        self.assertEqual([ref for ref, sha in self.leases().items() if sha == B], [])
+        self.assertEqual(self.world.refs()[REF], A)
+
+    def test_an_acquire_that_loses_the_lock_before_it_lists_leases_reports_lease_null(self):
+        self.lease(12, 0, 0)
+        self.forge_time(100)
+        original = land_lock.read_leases
+        staged = []
+
+        def listed(*args):
+            if not staged:
+                staged.append(True)
+                self.world.set_ref(REF, A)
+                self.world.set_ref(self.leased_by[12], None)
+            return original(*args)
+
+        with mock.patch.object(land_lock, "read_leases", listed):
+            self.lock_lost_with_no_lease_left(run(*land("acquire", B, "--lease")))
+
+    def test_an_acquire_that_loses_the_lock_after_its_lease_write_removes_that_lease(self):
+        self.lease(12, 0, 0)
+        self.forge_time(100)
+        original = fm.create_ref
+
+        def created(slug, ref, sha):
+            made = original(slug, ref, sha)
+            if ref.startswith(LEASE):
+                self.world.set_ref(REF, A)
+            return made
+
+        with mock.patch.object(fm, "create_ref", created):
+            self.lock_lost_with_no_lease_left(run(*land("acquire", B, "--lease")))
