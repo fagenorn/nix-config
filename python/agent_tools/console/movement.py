@@ -129,7 +129,7 @@ name the work; no title is read from a report. One GraphQL query (`titles_query`
 is not an object, whose `number` is not that int or whose `title` is not a str, or a `data` or `repository`
 that is not an object, is `ForgeError("payload_invalid")`; a title is collapsed to one line (whitespace runs
 become one space) and an empty one is skipped. `read_titles` makes one call of at most `MAX_TITLES_PER_CALL`
-numbers, the smallest distinct ones the query can name (`MAX_QUERY_NUMBER`, a signed 32-bit `Int`), ascending; `gh` fails the whole call when one number does not resolve, so a `gh_failed` that is not a transport error is asked again in halves, and a number that fails alone stays untitled; no numbers makes no call, and `cancelled()` true before the
+numbers, the smallest distinct ones the query can name (`MAX_QUERY_NUMBER`, a signed 32-bit `Int`), ascending; `gh` fails the whole call when one number does not resolve, so a `gh_failed` whose error says an issue or pull request did not resolve is asked again in halves, and a number that fails alone stays untitled, while any other failure raises after one call; no numbers makes no call, and `cancelled()` true before the
 call raises `ForgeError("cancelled")`; with no `call` the transport is `forge_api.gh_json(argv, cancelled=...)`.
 `titles_batch(issues, known, asked)` picks which numbers the next poll asks: the outstanding ones (not
 `known`) not yet `asked` in this round, the first `MAX_TITLES_PER_CALL` of them in ascending order; when every
@@ -447,6 +447,7 @@ def read_pulls(slug: str, pattern: str | None, *,
 
 MAX_TITLES_PER_CALL = 100
 MAX_QUERY_NUMBER = 2 ** 31 - 1
+UNRESOLVED_NUMBER = "Could not resolve to an issue or pull request"
 
 
 def titles_query(numbers: Sequence[int]) -> str:
@@ -491,8 +492,10 @@ def read_titles(slug: str, numbers: Iterable[int], *,
                 cancelled: Callable[[], bool] = lambda: False) -> dict[int, str]:
     """The titles of the smallest `MAX_TITLES_PER_CALL` distinct numbers the tracker can be asked about, in
     one call; raises `forge_api.ForgeError`. No numbers makes no call. `gh` fails a whole batch when one
-    number does not resolve (a deleted issue, a typo), so a batch that failed for a reason other than the
-    transport is asked again in halves: a number that fails alone is left untitled, and the rest keep theirs."""
+    number does not resolve (a deleted issue, a typo) and says so in its error (`UNRESOLVED_NUMBER`), so only
+    a batch that failed with that is asked again in halves: a number that fails alone is left untitled, and
+    the rest keep theirs. Any other failure (the repository, the credential, the rate limit, the transport)
+    is not about the numbers and raises after the one call."""
     asked = askable(numbers)[:MAX_TITLES_PER_CALL]
     if not asked:
         return {}
@@ -506,7 +509,7 @@ def read_titles(slug: str, numbers: Iterable[int], *,
         try:
             return titles_from_answer(call(titles_argv(slug, batch)), batch)
         except ForgeError as error:
-            if error.code != "gh_failed" or error.transient or error.exhausted:
+            if error.code != "gh_failed" or error.transient or error.exhausted or UNRESOLVED_NUMBER not in error.detail:
                 raise
             if len(batch) == 1:
                 return {}

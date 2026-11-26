@@ -231,6 +231,19 @@ class TitlesServiceTest(Case):
                 movement.read_titles("owner/p00", [1, 2, 3], call=call)
             self.assertEqual((caught.exception.code, len(calls)), (error.code, 1))
 
+    def test_a_failure_that_is_not_an_unresolved_number_raises_after_one_call(self):
+        for detail in ("HTTP 401: Bad credentials", "HTTP 403: API rate limit exceeded",
+                       "Could not resolve to a Repository with the name 'owner/p00'."):
+            calls = []
+
+            def call(argv, detail=detail):
+                calls.append(argv)
+                raise ForgeError("gh_failed", detail)
+
+            with self.subTest(detail=detail), self.assertRaises(ForgeError) as caught:
+                movement.read_titles("owner/p00", range(1, 101), call=call)
+            self.assertEqual((caught.exception.code, len(calls)), ("gh_failed", 1))
+
     def test_a_sprint_with_a_number_that_does_not_resolve_still_shows_the_titles_that_do(self):
         call, calls = self.resolving({9999})
         svc = self.open(lambda slug, numbers, *, cancelled: movement.read_titles(
