@@ -188,6 +188,7 @@ ENDS = ("exited", "timed_out", "cancelled")
 CODE_INPUT = "pipe"
 CODE_END = {"pipe": "\n", "pty": "\r"}
 POLL_SECONDS = 0.1
+EXIT_GRACE = 1.0
 
 _ACTION_OUTCOMES = {"start": START_OUTCOMES, "code": ("sent",), "cancel": ("cancelled",),
                     "signout": ("signed_out", "failed")}
@@ -503,19 +504,25 @@ class _Client:
         return code
 
     def kill_group(self) -> None:
-        """End the client's group; a group that is gone, or no longer ours, is an ended group.
+        """End the client's group; a group that is gone, or no longer ours, counts as ended.
 
-        Once the leader has exited, macOS answers EPERM (not ESRCH) to a kill of a group that holds
-        none of our processes, and the group id may since belong to another. An EPERM while the
-        leader still runs, or any other error, is raised.
+        After the leader exits macOS answers EPERM, not ESRCH; the waiter may still be recording the
+        exit, so wait for it. An EPERM from a running leader, or any other error, is raised.
         """
         try:
             os.killpg(self.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
         except PermissionError:
-            if self._process.poll() is None:
+            if not self._exited():
                 raise
+
+    def _exited(self) -> bool:
+        try:
+            self._process.wait(timeout=EXIT_GRACE)
+        except subprocess.TimeoutExpired:
+            return False
+        return True
 
     def output(self) -> int | None:
         if self._master is not None:
