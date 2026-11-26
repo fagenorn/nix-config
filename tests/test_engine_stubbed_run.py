@@ -25,9 +25,13 @@ from agent_tools.project_contract import resolve_project
 from agent_tools.verification import verify_block
 from tests.engine_fixture import AdoptedFixtures, FixtureProject
 from tests.engine_guards import payloads
+from tests.engine_procedure_copies import (PROCEDURES, keeping_the_run, stopping_after_verify,
+                                           unstructured_procedures)
 from tests.engine_step_coverage import StepCoverage, test_ids
 from tests.engine_stubbed_world import (CLEAN_LITE, EVIDENCE_BODY, EVIDENCE_CHECK, GREEN, IMPLEMENTED, NOT_BEFORE,
                                         ROLES, StubbedRun, drafted)
+from tests.engine_verify_fixtures import (ATTESTED, FORMAT, FOUR, PASS_ATTESTED, RETESTED, TWO_SPACES, fixing,
+                                          implementing)
 from tests.guard_policy_world import REAL_GIT, install_platform_manifest_in_environ
 
 TIER = "integration"  # every case builds a repository and runs the engine as a child process
@@ -43,7 +47,6 @@ def setUpModule() -> None:
 def tearDownModule() -> None:
     STEPS.finish(sys.modules[__name__], Scenario)
 
-PROCEDURES = Path(__file__).resolve().parents[1] / "python/agent_tools/delivery/procedures"
 STEPS = StepCoverage(PROCEDURES)
 LOOK_BODY = ("Add a greet() function.\n\n## Acceptance criteria\n\n"
              "- [ ] [human] before merge: the greeting text — measured: the owner, on the pull request\n")
@@ -80,70 +83,6 @@ def committing(path: str, text: str, **reply) -> dict:
     """A fix reply that commits `text` to `path`: the stub reports the commit it made."""
     return {"reply": {"status": "done", "notes": "n", "tests": [], "declines": [], **reply},
             "commit": {"path": path, "text": text}}
-
-
-def implementing(path: str, text: str, **members) -> dict:
-    return {"reply": {**IMPLEMENTED["reply"], **members}, "commit": {"path": path, "text": text}}
-
-
-def stopping_after_verify(tmp: Path) -> Path:
-    """A copy of the shipped procedures whose run is kept across a continue and stops once verified."""
-    copy = tmp / "procedures"
-    shutil.copytree(PROCEDURES, copy)
-    path = copy / "deliver.json"
-    document = json.loads(path.read_text("utf-8"))
-    for step in document["steps"]:
-        if step["id"] == "start":
-            step["holds"] = "run"
-        if step["id"] == "issue":
-            step["on"]["refused"] = "done"  # the check wants one reachable step that still ends the run
-        if step["id"] == "verification":
-            step["on"]["done"] = "verified"
-            step["on"]["verify"] = "landing"  # the check wants the landing step reachable too
-    document["stops"]["verified"] = {"need": "owner-decision", "reenter": "verification"}
-    path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
-    return copy
-
-
-def keeping_the_run(tmp: Path) -> Path:
-    """A copy of the shipped procedures whose run is kept across a continue and otherwise unchanged."""
-    copy = tmp / "kept-procedures"
-    shutil.copytree(PROCEDURES, copy)
-    path = copy / "deliver.json"
-    document = json.loads(path.read_text("utf-8"))
-    for step in document["steps"]:
-        if step["id"] == "start":
-            step["holds"] = "run"
-    path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
-    return copy
-
-
-def unstructured_procedures(tmp: Path) -> Path:
-    """A copy of the shipped procedures as they were before findings carried a kind, a rule and declines."""
-    copy = tmp / "unstructured-procedures"
-    shutil.copytree(PROCEDURES, copy)
-    for path in sorted(copy.glob("*.json")):
-        document = json.loads(path.read_text("utf-8"))
-        if path.name.endswith(".reply.json"):
-            items = document["properties"].get("findings", {}).get("items")
-            if items is not None:
-                for member in ("kind", "rule", "restates"):
-                    items["properties"].pop(member, None)
-                    if member in items["required"]:
-                        items["required"].remove(member)
-            if path.name == "direct-fix.reply.json":
-                document["properties"].pop("declines")
-                document["required"].remove("declines")
-            path.write_text(json.dumps(document) + "\n", encoding="utf-8")
-        else:
-            for step in document["steps"]:
-                if "in" in step:
-                    step["in"] = [name for name in step["in"] if not name.endswith(".declines")]
-            path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
-    for path in sorted(copy.glob("*.md")):
-        lines = path.read_text("utf-8").splitlines(keepends=True)
-        path.write_text("".join(line for line in lines if ".declines}}" not in line), encoding="utf-8")
-    return copy
 
 
 def model_of(launch: dict) -> str:
@@ -650,15 +589,43 @@ class ReviewRouteTest(Scenario):
 
 
 class VerifyTest(Scenario):
-    def test_a_failing_verification_id_stops_verify(self):
+    def test_a_failing_verification_id_with_no_fix_reply_stops_verify_fix(self):
         broken = implementing("fixture/greet.py", 'def greet(name: str) -> str:\n    return f"Hi, {name}."\n')
         run = self.stubbed(replies={"implement": broken})
 
-        self.finish(run, "verify", "owner-decision")
+        self.finish(run, "verify-fix", "owner-decision")
 
         checks = self.stored(self.child(run, "verify"), "checks")
         self.assertEqual(checks["verdict"], "failed")
         self.assertEqual({r["id"]: r["status"] for r in checks["results"]}, {"lint": "pass", "test": "fail"})
+        self.assertIs(next(r for r in checks["results"] if r["id"] == "test")["reran"], True)
+
+    def test_an_untested_fix_is_reviewed_narrowed_and_retested(self):
+        run = self.stubbed(extra_files=FORMAT, replies={
+            "implement": FOUR, "fix": fixing("fixture/greeting.json", TWO_SPACES), "fix-review": PASS_ATTESTED,
+            "retest": RETESTED})
+
+        self.finish(run, "done")
+
+        walk = run.transitions(self.child(run, "verify"))
+        for edge in (("round", "fix"), ("fixed", "done"), ("ws-check", "read"), ("fix-review", "pass"),
+                     ("narrowing", "rerun-failed-only"), ("round", "retest"), ("retested", "done")):
+            self.assertIn(edge, walk)
+
+    def test_an_unusable_fix_review_is_asked_once_more_and_the_second_reply_is_narrowed(self):
+        unusable = {"verdict": "findings", **ATTESTED,
+                    "findings": [{"severity": "important", "file": "", "failing_input": "",
+                                  "summary": "s", "kind": "other"}]}
+        run = self.stubbed(extra_files=FORMAT, replies={
+            "implement": FOUR, "fix": fixing("fixture/greeting.json", TWO_SPACES),
+            "fix-review": unusable, "fix-review-again": PASS_ATTESTED, "retest": RETESTED})
+
+        self.finish(run, "done")
+
+        walk = run.transitions(self.child(run, "verify"))
+        for edge in (("narrowing", "unusable"), ("fix-review-again", "pass"),
+                     ("narrowing-again", "rerun-failed-only")):
+            self.assertIn(edge, walk)
 
     def test_an_id_whose_condition_matches_no_changed_path_is_recorded_skipped_with_its_reason(self):
         conditions = {"lint": {"when_changed": ["docs/**"], "skip_reason": "no documentation changed"}}
