@@ -1743,7 +1743,7 @@ def sprint_now(state: SprintState, quota: Wait | None, listed: Collection[str], 
     ended; the first rule that holds, in the order the view docstring gives. `waiting`, `stages`,
     `ball`, `wait` (`sprint_wait`), `failed_start`, `deaf` (the manager holds the console's wake
     behind a prompt no one answers, #1229), `prompted` (an open permission card of its manager,
-    #1424), `hold` (`sprints.stated_hold`, #1380) and `work` (the work sentence, the last rule's words) are the entry's own."""
+    #1424), `hold` (`sprints.stated_hold`, #1380) and `work` (the last rule's words) are the entry's own."""
     if ended_at(state) is not None:
         return None
     brief, report = state.brief, state.report

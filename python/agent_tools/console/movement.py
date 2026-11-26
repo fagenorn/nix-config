@@ -490,12 +490,11 @@ def askable(numbers: Iterable[int]) -> list[int]:
 def read_titles(slug: str, numbers: Iterable[int], *,
                 call: Callable[[list[str]], Any] | None = None,
                 cancelled: Callable[[], bool] = lambda: False) -> dict[int, str]:
-    """The titles of the smallest `MAX_TITLES_PER_CALL` distinct numbers the tracker can be asked about, in
-    one call; raises `forge_api.ForgeError`. No numbers makes no call. `gh` fails a whole batch when one
-    number does not resolve (a deleted issue, a typo) and says so in its error (`UNRESOLVED_NUMBER`), so only
-    a batch that failed with that is asked again in halves: a number that fails alone is left untitled, and
-    the rest keep theirs. Any other failure (the repository, the credential, the rate limit, the transport)
-    is not about the numbers and raises after the one call."""
+    """The titles of the smallest `MAX_TITLES_PER_CALL` askable numbers, in one call; raises `ForgeError`.
+    `gh` fails a whole batch when one number does not resolve (a deleted issue, a typo) and says so
+    (`UNRESOLVED_NUMBER`), so only a batch that failed with that is asked again in halves: a number that
+    fails alone is left untitled, the rest keep theirs. Any other failure (the repository, the credential,
+    the rate limit, the transport) is not about the numbers and raises after the one call."""
     asked = askable(numbers)[:MAX_TITLES_PER_CALL]
     if not asked:
         return {}

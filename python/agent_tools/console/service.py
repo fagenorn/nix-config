@@ -11114,7 +11114,8 @@ class ConsoleService(ActionPermit):
                 self._publish()
 
     def _forge_read(self, project_id: str, line: str, read: Callable[[], object]) -> tuple[bool, object]:
-        """`read()` with retries: (True, None) when the poll ended, (False, None) after a failure line, else (False, answer)."""
+        """`read()` with retries: (True, None) when the poll ended, (False, None) after a failure line,
+        else (False, answer)."""
         try:
             return False, answer.with_retries(read, clock=self._monotonic, sleep=self._write_sleep)
         except Exception as error:
