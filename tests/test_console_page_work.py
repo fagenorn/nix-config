@@ -107,7 +107,7 @@ class SprintWorkPageTest(unittest.TestCase):
         css = PAGE.read_text(encoding="utf-8")
         self.assertNotIn(".sp-now.titled", css)
         for selector in (r"\.sp-now", r"\.work-line", r"\.work-title"):
-            (body,) = re.findall(r"^" + selector + r"\s*\{([^}]*)\}", css, re.M)
+            (body,) = re.findall(r"^" + selector + r"(?:,[^{]*)?\s*\{([^}]*)\}", css, re.M)
             if selector == r"\.sp-now":
                 self.assertRegex(body, r"-webkit-line-clamp:\s*2")
                 self.assertRegex(body, r"overflow:\s*hidden")

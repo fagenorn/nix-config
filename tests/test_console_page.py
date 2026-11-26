@@ -187,8 +187,8 @@ class PageTest(unittest.TestCase):
         # stay focusable while sending (about 150 bytes compressed, over the 2 the cap had left).
         # Raised from 71 KB by #1432: a sprint's declared live fault line, its Withdraw and the same line on an
         # ended sprint's finished line (about 0.5 KB compressed) did not fit the 279 bytes the cap had left.
-        # Raised from 72 KB by the merge of #1274 with #1432 and #1424: each side fit under its cap, and merged the
-        # page is 74199 bytes. Raised from 73 KB: a long command's permission card summary and fold did not fit.
+        # Raised from 72 KB by the merge of #1274, #1432 and #1424 (merged, 74199 bytes), from 73 KB: a long command's
+        # permission card summary and fold did not fit, and from 73.5 KB: the done-for-now line and wrap-up did not fit.
         # Raised from 75264: the work line and the grid legend left no byte under it.
         self.assertLess(len(gzip.compress(self.data, 9)), 75776)
 
@@ -6113,7 +6113,7 @@ class PageSprintBlockTest(unittest.TestCase):
         self.assertFalse(of_class(closed["projects"], "details", "finished-list")[0]["open"])
         rows = of_class(opened["projects"], "li", "finished-line")
         self.assertEqual(len(rows), 4)
-        expected = [("Sprint c", "2 landed"), ("Sprint e", "done"),
+        expected = [("Sprint c", "2 landed, 0 dropped"), ("Sprint e", "done"),
                     ("Sprint d", "stopped by you"), ("Sprint f", "done")]
         for row, (title, outcome) in zip(rows, expected):
             (summary,) = [n for n in nodes(row) if n["tag"] == "summary"]

@@ -3405,7 +3405,7 @@ class NoCommitTaskTest(unittest.TestCase):
             self.assertFalse(label.startswith(("final-", "renew-final", "verify", "pr")), label)
         self.assertNotIn("partial", result["cont"])
         self.assertEqual([d.get("no_change") for d in result["cont"]["done"]], [True, True])
-        again, calls = run(args=dict(ARGS, cont=result["cont"]))
+        again, calls = run(args=dict(ARGS, cont=result["cont"]), patch={"setup": {"head": SHA}})
         self.assertEqual(again["stage"], "no-changes")
         self.assertEqual(labels(calls), ["setup"])
 
