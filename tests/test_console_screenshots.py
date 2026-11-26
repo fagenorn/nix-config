@@ -31,7 +31,7 @@ from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- modul
 
 
 def fixture_paths(fixture):
-    paths = [value for field in dataclasses.fields(fixture) if field.name not in ("holding", "deaf", "activating", "registering", "adopting", "refusing", "prompting")
+    paths = [value for field in dataclasses.fields(fixture) if field.name not in ("holding", "deaf", "activating", "registering", "adopting", "refusing", "prompting", "titled")
              for value in ([getattr(fixture, field.name)] if field.name != "projects"
                            else list(fixture.projects))]
     return paths

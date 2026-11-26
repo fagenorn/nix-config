@@ -460,6 +460,7 @@ agent-workflow-tests *args:
     tests/test_console_sprint_engine.py \
     tests/test_console_movement.py \
     tests/test_console_movement_check.py \
+    tests/test_console_issue_titles.py \
     tests/test_console_spend.py \
     tests/test_console_engine_spend.py \
     tests/test_console_transcript_digest.py \

@@ -245,7 +245,7 @@ OWNER_ONLY_INPUTS: Mapping[str, object] = MappingProxyType({
     "moves": None})
 PASSED_INPUTS = frozenset({"now_ms", "managers", "nudges", "looked"})
 FILTERED_INPUTS = frozenset({"states", "records", "health", "sessions", "deliveries", "sprints",
-                             "pending", "movement", "owner_notices", "engine_runs"})
+                             "pending", "movement", "owner_notices", "engine_runs", "issue_titles"})
 SERVE_TIMEOUT_SECONDS = 15.0
 SERVE_STATES = ("off", "unreadable", "unchecked", "not_proxying", "serving")
 DOOR_WIDER = "door_wider"
@@ -640,6 +640,7 @@ def scoped(inputs: Mapping[str, object], projects: frozenset[str]) -> dict:
     keep("health", lambda key, _: key in projects)
     keep("movement", lambda key, _: key in projects)
     keep("owner_notices", lambda key, _: key in projects)
+    keep("issue_titles", lambda key, _: key in projects)
     keep("sprints", lambda _, value: value.project_id in projects)
     keep("pending", lambda _, value: value.project_id in projects)
     keep("deliveries", lambda _, value: value.session_id in session_ids)

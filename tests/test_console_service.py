@@ -89,7 +89,7 @@ def state_under_tripwires(svc, connection=None):
     try:
         with contextlib.ExitStack() as stack:
             for name, replacement in mocks.items():
-                stack.enter_context(mock.patch.object(service, name, replacement))
+                stack.enter_context(mock.patch.object(register if name == "read_fleet" else service, name, replacement))
             stack.enter_context(metadata_tripwires())
             ARMED.set()
             try:
@@ -1535,7 +1535,7 @@ class ReadFleetTest(Case):
     def read(self):
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
-            return service.read_fleet(self.registry), err.getvalue()
+            return register.read_fleet(self.registry), err.getvalue()
 
     def test_only_a_valid_registry_is_a_reading(self):
         self.assertEqual(self.read(), (None, ""))

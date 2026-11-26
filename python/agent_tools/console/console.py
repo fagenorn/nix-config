@@ -80,7 +80,8 @@ plan and the console pushes its branch and opens its pull request through `gh`; 
 refuses.
 
 It is also given `pull_reader=movement.read_pulls` (#1110), so a running sprint's pull requests are read
-from the forge to name what it waits on (`agent_tools.console.movement`).
+from the forge to name what it waits on (`agent_tools.console.movement`), and `title_reader=movement.read_titles`
+(#1793), so a running sprint's issues are named by their titles from the tracker.
 
 Every minute it compares the console's own files, and the files the host's configuration is built from
 (from the host's configuration revision), with the integration branch on origin as the console's
@@ -152,7 +153,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         console = service.ConsoleService(
             service.default_store(), service.default_registry(), port=args.port, guest_socket=args.guest_socket,
-            tracker=inbox.read_items, pull_reader=movement.read_pulls, launcher=manager.launcher_for(sys.platform),
+            tracker=inbox.read_items, pull_reader=movement.read_pulls,
+            title_reader=movement.read_titles, launcher=manager.launcher_for(sys.platform),
             nudger=nudge.nudger_for(sys.platform), stopper=manager.stopper_for(sys.platform),
             full_listing=nudge.full_lister_for(sys.platform),
             prober=probe.prober_for(sys.platform), signin_reader=signin.reader_for(sys.platform),
