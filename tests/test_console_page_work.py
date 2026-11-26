@@ -57,8 +57,9 @@ class SprintWorkPageTest(unittest.TestCase):
         (snap,) = render([START, {"frame": with_sprints([sprint])}, {"snapshot": True}])
         (row,) = sprint_lines(snap)
         face = top_text(row)
-        (now,) = [n for n in top(row) if has_class(n, "sp-now")]
-        self.assertEqual([full(line) for line in now["children"]], [
+        self.assertEqual([n for n in top(row) if has_class(n, "sp-now")], [])
+        (work,) = [n for n in top(row) if has_class(n, "sp-work")]
+        self.assertEqual([full(line) for line in work["children"]], [
             "Working on: \u201cResume a broken upload\u201d",
             "Just finished: \u201cSave a checkpoint per part\u201d",
             "Next: \u201cShow the retry button\u201d"])
@@ -70,9 +71,8 @@ class SprintWorkPageTest(unittest.TestCase):
         it = folded(FIRST, SECOND)
         sprint = view_entry(view_line(it, T0_MS + MIN, issue_titles={it.project_id: TITLES}))
         row_top = top_of(sprint)
-        (now,) = [n for n in row_top if has_class(n, "sp-now")]
-        self.assertTrue(has_class(now, "titled"))
-        lines = now["children"]
+        (work,) = [n for n in row_top if has_class(n, "sp-work")]
+        lines = work["children"]
         self.assertEqual([c["cls"] for c in lines], ["work-line"] * 3)
         self.assertEqual([[full(p) for p in c["children"]] for c in lines], [
             ["Working on: ", "\u201cResume a broken upload\u201d"],
@@ -80,7 +80,7 @@ class SprintWorkPageTest(unittest.TestCase):
             ["Next: ", "\u201cShow the retry button\u201d"]])
         for line in lines:
             label, title = line["children"]
-            self.assertEqual((label["cls"], title["cls"]), ("work-label", "work-title"))
+            self.assertEqual((label["cls"], title["cls"]), ("", "work-title"))
         weight = re.search(r"^\.work-title\s*\{([^}]*)\}", PAGE.read_text(encoding="utf-8"), re.M)
         self.assertRegex(weight.group(1), r"font-weight:\s*[5-9]00")
         wait = {**REPORTED, "now_text": "waiting for CI on its pull request", "now_titled": False,
@@ -103,13 +103,21 @@ class SprintWorkPageTest(unittest.TestCase):
             self.assertEqual([n for n in row_top if has_class(n, "sp-work")], [])
             self.assertEqual(legend_texts(row_top), [])
 
-    def test_the_work_line_is_not_cut_to_two_lines(self) -> None:
+    def test_the_now_sentence_keeps_its_two_line_clamp_and_the_work_line_stays_on_one_line(self) -> None:
         css = PAGE.read_text(encoding="utf-8")
-        rules = re.findall(r"^([^\n{}]*\.sp-work\b[^\n{}]*)\{([^}]*)\}", css, re.M)
-        self.assertTrue(rules)
-        for selector, body in rules:
-            self.assertNotRegex(body, r"line-clamp:\s*\d|overflow:\s*hidden", selector)
-        self.assertTrue([selector for selector, _ in rules if ".sp-now.titled" in selector])
+        self.assertNotIn(".sp-now.titled", css)
+        for selector in (r"\.sp-now", r"\.work-line", r"\.work-title"):
+            (body,) = re.findall(r"^" + selector + r"\s*\{([^}]*)\}", css, re.M)
+            if selector == r"\.sp-now":
+                self.assertRegex(body, r"-webkit-line-clamp:\s*2")
+                self.assertRegex(body, r"overflow:\s*hidden")
+            elif selector == r"\.work-line":
+                self.assertRegex(body, r"display:\s*flex")
+                self.assertRegex(body, r"white-space:\s*pre\b")
+            else:
+                self.assertRegex(body, r"overflow:\s*hidden")
+                self.assertRegex(body, r"text-overflow:\s*ellipsis")
+                self.assertRegex(body, r"min-width:\s*0")
 
     def test_a_guest_sees_a_title_as_the_tracker_wrote_it(self) -> None:
         titled = {**REPORTED, "now_text": "Working on: \u201cExport your settings\u201d", "now_titled": True,
