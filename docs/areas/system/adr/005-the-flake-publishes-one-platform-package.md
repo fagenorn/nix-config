@@ -1,11 +1,11 @@
 # ADR-system-005 — The flake publishes one platform package, and hosts install it
 
-- **Status:** accepted
+- **Status:** superseded by ADR-system-007
 - **Decided in:** #1439
 
 ## Context
 
-The platform (the agent commands, the standards directory and the platform manifest) existed only as parts of a home configuration: a launcher was one store file per command, and the manifest and standards were linked into `~/.agents` by Home Manager. A project's CI, which has no home configuration, could not fetch the platform (#1413). The commands also located the manifest only through `$HOME`, so a package that carries its own manifest had no way to be read without a home directory.
+The platform existed only as parts of a home configuration: a launcher was one store file per command, and the manifest and standards were linked into `~/.agents` by Home Manager. A project's CI, which has no home configuration, could not fetch the platform (#1413). The commands also located the manifest only through `$HOME`, so a package that carries its own manifest had no way to be read without a home directory.
 
 ## Decision
 
