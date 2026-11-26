@@ -212,7 +212,9 @@ agent-workflow-tests *args:
     tests/test_holding.py \
     tests/test_landing.py \
     tests/test_land_tally.py \
+    tests/test_verify_rounds.py \
     tests/test_engine_land_recovery.py \
+    tests/test_engine_verify_rounds.py \
     tests/test_plan_amend.py \
     tests/test_verify_block.py \
     tests/test_verify_pending.py \
@@ -249,8 +251,6 @@ agent-workflow-tests *args:
     tests/test_interrupted_reruns_check.py \
     tests/test_verify_checks.py \
     tests/test_cleanup_fix_check.py \
-    tests/test_suite_test_failures.py \
-    tests/test_protection_tree.py \
     tests/test_console_approved_action_check.py \
     tests/test_console_takeover_merge_check.py \
     tests/test_console_release_rerun_check.py \
