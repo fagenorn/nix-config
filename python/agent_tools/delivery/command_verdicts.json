@@ -176,7 +176,12 @@
       "resolve": []
     }
   },
-  "router": null,
+  "router": {
+    "subcommands": {
+      "building": [],
+      "final-review": []
+    }
+  },
   "ruff-lint": null,
   "size-lint": null,
   "skill-lint": null,
