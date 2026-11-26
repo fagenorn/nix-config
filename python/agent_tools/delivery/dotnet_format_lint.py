@@ -127,11 +127,9 @@ def solution(root: Path) -> Path:
 def listed_projects(chosen: Path) -> set[Path]:
     """The `.csproj` files the solution `chosen` lists, as normalised absolute paths.
 
-    A `.slnx` lists them as `Path` attributes of its `Project` elements, a `.sln` as the second
-    quoted field of its `Project(...)` lines; a backslash separates segments in either. An
-    entry that is not a `.csproj`, such as a `.sln` solution folder (whose path repeats its
-    name), compiles no `.cs` and is not listed. A solution that cannot be read or parsed lists
-    none.
+    A `.slnx` lists `Project` `Path` attributes, a `.sln` the second quoted field of `Project(...)`
+    lines; an entry that is no `.csproj` (a `.sln` solution folder) is not listed, nor is any
+    entry of a solution that cannot be read or parsed.
     """
     try:
         text = chosen.read_text("utf-8")

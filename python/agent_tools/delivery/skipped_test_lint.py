@@ -167,9 +167,8 @@ def argument_skips(tokens: tuple[Token, ...], pairs: dict[int, int], open_: int,
 def after_type_arguments(tokens: tuple[Token, ...], i: int, end: int) -> int:
     """The index after the generic type arguments `< ... >` that start at token `i`, else `i`.
 
-    A generic attribute name (`ClassData<TClass>`) carries them between its name and its `(`; the
-    angle brackets nest, and only names, dots, commas, `?`, `[`, `]` and `::` may sit inside. An
-    unclosed or foreign run reads as no type arguments.
+    A generic attribute name (`ClassData<TClass>`) carries them before its `(`; they nest and hold
+    only names, dots, commas, `?`, `[`, `]` and `::`. An unclosed or foreign run reads as none.
     """
     if i >= end or tokens[i].text != "<":
         return i
