@@ -143,7 +143,8 @@ The margin is an estimate, not a guarantee. A burst that drains more than 7 GiB 
 under 11 s outruns it, and so does a fall with no eligible workload, one of at least
 `floorMinTreeGiB` that frees enough to matter. The daemon also sleeps after each
 sample, and it scans processes after each sample, so a scan slow under load adds to
-the 11 s; peak sub-minute drain and scan latency under load are unmeasured. If a
+the 11 s; peak sub-minute drain is unmeasured, and scan latency under load is named
+by the `slow_reading` lines (see the memory floor below). If a
 fall is ever seen that is faster than 39 GiB in one minute, or the reaction time
 grows, raise the floor again in `memory-budget.nix`.
 
@@ -211,8 +212,13 @@ not a day with no peak.
 when memory stays under `floorGiB`. It only ends a workload with a declared
 owner: the agent user (`--agent-user`), whose processes count when their working
 directory is under a worktree (`~/Projects/*/.worktrees/*`) or a verification
-run's temporary directory, and the CI runner accounts, whose `Runner.Worker`
-starts a job's workload. A process of any other user is never ended.
+run's temporary directory, or when it runs below a declared session program
+(`claude`, `.claude-unwrapped`; `--agent-session`): the processes below the
+session's child (the shell a tool call starts) are grouped as `agent:session:<pid>`
+whatever their working directory, and a session's own processes are never
+members of that session grouping (one inside a declared root still joins that
+rooted workload). The CI runner accounts count too: a `Runner.Worker` starts a job's
+workload. A process of any other user is never ended.
 
 Protected, whatever its owner: pids 0 and 1, the oMLX server and everything it
 started, and each service process the host runs for the system.
@@ -234,11 +240,20 @@ it may end would bring memory over the floor, it ends nothing and logs one
 candidate, 0.0 with none), keeps it in its record, and the sampler sends one `floor_unmet`
 alert. It logs again only when memory has been over the floor and a new episode starts.
 
+A reading slower than `fastSampleSeconds` (available memory, the service list,
+oMLX's pid or the process table) logs one
+`slow_reading reading=<available|services|omlx_pid|table> seconds=<n>` line and is
+kept in the record (`slow_readings`, the count, and `slow_reading_recent`, the last
+entries); it changes no decision.
+
 Each kill is one line:
 
 ```
-<time> memory_kill reason=<floor|run_bound> owner=<agent:dir|ci:user:pid> root_pid=<pid> root="<command>" processes=<n> tree_gib=<size> available_before_gib=<n> available_after_gib=<n> signals=<term|term+kill>
+<time> memory_kill reason=<floor|run_bound> owner=<user> workload=<agent:dir|agent:session:pid|ci:user:pid|ci:user:orphans> root_pid=<pid> root="<command>" processes=<n> tree_gib=<size> available_before_gib=<n> available_after_gib=<n> signals=<term|term+kill>
 ```
+
+The workload key is percent-encoded (`/` and `:` kept), so a directory name with a
+space or a newline stays on one line.
 
 It lands at once in the root daemon's `/var/log/memory-floor.log`, and within a
 minute in `~/.omlx/logs/memory-watch.log`, where the owner's sampler writes it:
