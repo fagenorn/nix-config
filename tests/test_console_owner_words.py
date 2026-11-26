@@ -11,13 +11,15 @@ from pathlib import Path
 from agent_tools.console import owner_words, view
 from agent_tools.delivery.routing import index_table
 
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures
+
 TIER = "fast"
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CASES = REPO_ROOT / "tests/fixtures/console/owner-words-cases.json"
 PAGE = REPO_ROOT / "python/agent_tools/console/page.html"
-PAGE_TEXT_MODULES = ("view", "sprints", "engine_runs", "guest", "capacity")
-OWNER_FACING = re.compile(r"(?:_TEXT|_LABEL|_SENTENCE|_LINE|_LEAD)$|^HEADLINE$")
+PAGE_TEXT_MODULES = ("view", "sprints", "engine_runs", "guest", "capacity", "answer", "approve")
+OWNER_FACING = re.compile(r"(?:_TEXT|_LABEL|_SENTENCE|_LINE|_LEAD|_WHY|_NOTE|_APPROVES)$|^HEADLINE$")
 STR = r'"((?:[^"\\\n]|\\.)*)"'
 CLASS_POSITIONS = (
     r'\b(?:el|phrase)\(\s*"[^"]*"\s*,\s*' + STR,
@@ -151,6 +153,22 @@ class FixedWordsTest(unittest.TestCase):
         from agent_tools.console import sprints
         self.assertEqual(owner_words.unglossed(sprints.closing_text(1, 1, 1)), [])
 
+    def test_the_progress_counts_line_uses_no_unglossed_glossary_word(self):
+        from agent_tools.console import sprints
+        self.assertEqual(owner_words.unglossed(sprints.progress_text(1, 4, 1, 1, 1)), [])
+
+    def test_the_withdrawal_refusals_the_owner_reads_use_no_unglossed_glossary_word(self):
+        from agent_tools.console import sprints
+        for text in (sprints.FAULT_UNKNOWN, sprints.FAULT_WITHDRAWN_ALREADY):
+            with self.subTest(text=text):
+                self.assertEqual(owner_words.unglossed(text), [])
+
+    def test_a_failing_adoptions_reason_names_the_link_the_card_shows(self):
+        from agent_tools.console import approve
+        label = "Open the proposed change on GitHub"
+        self.assertIn(label, PAGE.read_text(encoding="utf-8"))
+        self.assertIn(label, approve.FAILING_WHY)
+
     def test_page_words_reads_markup_text_and_visible_attributes(self):
         html = '<p title="Open the pull request">The land lock</p><style>.held{}</style><template id="x"><b>held</b></template><script>"use strict";</script>'
         words = page_words(html)
@@ -180,7 +198,8 @@ class FixedWordsTest(unittest.TestCase):
         self.assertEqual(text_constants(source), ["Claim", "your look", "x", "held ", "ab", "Top", "Line"])
 
     def test_console_text_words_reads_the_modules_the_page_shows(self):
-        from agent_tools.console import guest, sprints
+        from agent_tools.console import answer, approve, guest, sprints
         words = console_text_words()
-        for text in (sprints.NOW_LOCK_TEXT, view.HEADLINE, guest.SHARING_OFF_TEXT):
+        for text in (sprints.NOW_LOCK_TEXT, view.HEADLINE, guest.SHARING_OFF_TEXT, answer.LOOK_APPROVES,
+                     approve.FAILING_WHY, approve.APPLIED_NOTE):
             self.assertIn(text, words)

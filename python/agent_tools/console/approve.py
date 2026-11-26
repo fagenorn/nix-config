@@ -281,19 +281,19 @@ MOVED_WHY = ("Its branch holds commits the console did not push. Review them on 
              "merge it there, or close it and choose Apply it again.")
 RETARGETED_WHY = ("Its target branch is no longer the one the console opened it against. Review it on "
                   "the forge, or close it and choose Apply it again.")
-FAILING_WHY = "A check of its pull request failed. Open the pull request to see which one."
-FOUND_WHY = "The console did not open this pull request. Review it on the forge and merge it there."
-UNREAD_WHY = "The console has not read its pull request's head yet; Merge is offered once it has."
-CLOSED_WHY = "Its pull request was closed without merging. Register the project again to adopt it."
+FAILING_WHY = "A check of its proposed change failed. Open the proposed change on GitHub to see which one."
+FOUND_WHY = "The console did not open this proposed change. Review it on the forge and merge it there."
+UNREAD_WHY = "The console has not read its proposed change's head yet; Merge is offered once it has."
+CLOSED_WHY = "Its proposed change was closed without merging. Register the project again to adopt it."
 PUSH_NOTE = ("Check that the repository's origin can be reached from this host and accepts the "
              "push, then choose Try again.")
 OPEN_NOTE = ("Check that gh is signed in on this host and can open pull requests on the "
              "repository, then choose Try again.")
 NO_SLUG = "the repository's origin is not on GitHub"
 NO_BASE = "the project contract names no integration branch"
-NO_SLUG_NOTE = ("Open a pull request for the adoption's branch yourself on the forge that hosts "
+NO_SLUG_NOTE = ("Open a proposed change for the adoption's branch yourself on the forge that hosts "
                 "origin, then choose Not now.")
-NO_BASE_NOTE = ("Open a pull request for the adoption's branch yourself against the branch the "
+NO_BASE_NOTE = ("Open a proposed change for the adoption's branch yourself against the branch the "
                 "project merges into, then choose Not now.")
 PUSH_REFUSED = "origin refused the push or could not be reached"
 CLOSED_NOTE = ("Ask an agent to delete the adoption's branch on this computer and on origin, then "
@@ -316,7 +316,7 @@ APPLY_REASONS = (
     ("adopt.resolver.", "the project contract could not be read"),
     ("adopt.commit.", "the adoption commit did not pass its own checks"),
 )
-APPLIED_NOTE = "Choose Try again to push the branch and open its pull request."
+APPLIED_NOTE = "Choose Try again to push the branch and open its proposed change."
 MERGED = "the pull request of this plan was already merged"
 NOT_REFUSED = "that registration is not waiting for a retry"
 RETRY_AGAIN = "choose Retry."

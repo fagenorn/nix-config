@@ -224,6 +224,7 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .sp-who { display: flex; flex-direction: column; min-width: 0; }
 .sp-project { font-size: .75rem; color: var(--ov2); }
 .sp-now { flex: 1 0 100%; grid-column: 2 / -1; color: var(--text); display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; }
+.sp-now:has(.gloss-text) { display: block; overflow: visible; }
 .sprint .title-line { color: var(--text); font-weight: 500; overflow-wrap: anywhere; }
 .sprint-goal-full { color: var(--text); overflow-wrap: anywhere; }
 .sprint .age, .sprint .manager, .sprint .until, .sprint .status-age { color: var(--ov2); }
@@ -671,6 +672,7 @@ function glossFound(text) {
   const flat = glossFlat(text);
   return glossary.filter((e) => e.test.test(text) && !flat.includes(glossFlat(e.gloss)));
 }
+function focusGloss(id) { [...document.querySelectorAll("button.gloss")].find((n) => n.dataset.gloss === id)?.focus({ preventScroll: true }); }
 function glossMark(into, id, word, gloss, redraw) {
   const mark = el("button", "gloss btn-quiet btn-bare", word);
   mark.type = "button";
@@ -681,7 +683,7 @@ function glossMark(into, id, word, gloss, redraw) {
     event.stopPropagation();
     if (!openGlosses.delete(id)) openGlosses.add(id);
     redraw(); // the redraw replaces the focused mark: focus the new one so a second Enter is not read as the inbox's answer key
-    [...document.querySelectorAll("button.gloss")].find((n) => n.dataset.gloss === id)?.focus({ preventScroll: true });
+    focusGloss(id);
   });
   into.appendChild(mark);
   if (openGlosses.has(id)) into.appendChild(el("span", "gloss-text", " (" + gloss + ")"));
@@ -3930,7 +3932,7 @@ function isLookCard(item) {
 function lookCard(item) {
   const card = el("article", "card look-card");
   card.appendChild(headLine(item));
-  card.appendChild(pathWords(el("h2", "q"), item.headline));
+  card.appendChild(glossWords(el("h2", "q"), item.headline, "ask:" + itemId(item), pathWords));
   lookLine(card, item);
   if (item.look.state === "failed") {
     const again = stallPosts.get("look-retry\n" + itemId(item));
@@ -4024,11 +4026,12 @@ function prunePictures() {
 // Every redraw that can remove a thumbnail runs under one hold; only the outermost does the upkeep once the whole page is drawn.
 let pictureHolds = 0;
 function holdPictures(draw) {
-  let heldThumb = null;
+  let heldThumb = null, heldGloss = null; // a streamed view replaces a focused gloss mark: focus the new one, so Enter is not read as the inbox's answer key
   if (pictureHolds === 0) {
     const active = document.activeElement;
     heldThumb = active && active.dataset && active.tagName === "BUTTON" && active.className.split(" ")[0] === "pic-thumb"
       ? active.dataset.key : null;
+    heldGloss = active && active.tagName === "BUTTON" && active.dataset && active.dataset.gloss !== undefined ? active.dataset.gloss : null;
   }
   pictureHolds += 1;
   try {
@@ -4037,6 +4040,7 @@ function holdPictures(draw) {
     pictureHolds -= 1;
   }
   if (pictureHolds !== 0) return;
+  if (heldGloss !== null) focusGloss(heldGloss);
   if (viewer !== null && !viewerStillShown()) closeViewer();
   if (heldThumb !== null && viewer === null) {
     const thumb = [...document.querySelectorAll("button.pic-thumb")].find((n) => n.dataset.key === heldThumb);
@@ -4196,18 +4200,12 @@ function viewerKey(event) {
   }
   return true;
 }
-function isRetry(item) {
-  return item.reason === "register_retry";
-}
-function isApply(item) {
-  return item.reason === "register_apply";
-}
+function isRetry(item) { return item.reason === "register_retry"; }
+function isApply(item) { return item.reason === "register_apply"; }
 function isConfirm(item) {
   return item.reason === "register_confirm" || item.reason === "register_behind";
 }
-function isTrust(item) {
-  return item.reason === "trust_failed";
-}
+function isTrust(item) { return item.reason === "trust_failed"; }
 function isFailure(item) {
   return item.reason === "register_failed";
 }
@@ -6592,7 +6590,7 @@ function renderGuestInbox(view) {
       kind.appendChild(el("span", "", word));
       row.appendChild(kind);
       if (typeof item.project_id === "string") row.appendChild(pathWords(el("span", "proj"), item.project_id));
-      row.appendChild(el("b", "guest-head", isBrief(item) ? item.title : item.headline));
+      row.appendChild(isQuestion(item) ? glossWords(el("b", "guest-head"), item.headline, "ask:" + itemId(item)) : el("b", "guest-head", isBrief(item) ? item.title : item.headline));
       row.appendChild(Number.isFinite(Date.parse(item.waiting_since))
         ? phrase("span", "guest-wait", "Waiting on the owner for ", timeEl("since", item.waiting_since, ""))
         : el("span", "guest-wait", "Waiting on the owner"));

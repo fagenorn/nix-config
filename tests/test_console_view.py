@@ -1666,7 +1666,7 @@ class SprintReportViewTest(unittest.TestCase):
         held = reported(started(A), R, issues=SEVEN[:6] + ((7, "held"),))
         shown = entry(line(held, T0_MS + 5 * MIN))
         self.assertEqual(shown["progress_text"],
-                         "3 of 7 landed, 2 in delivery, 1 queued, 1 held")
+                         "3 of 7 landed, 2 in delivery, 1 queued, 1 merged, not yet proven")
         self.assertEqual(shown["progress"]["held"], 1)
 
     def test_state_drafting_the_brief(self):

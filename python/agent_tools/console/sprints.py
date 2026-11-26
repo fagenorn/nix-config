@@ -257,8 +257,8 @@ the record that the manager delivered an issue outlives the run and its cleanup.
 `ago_text(elapsed_ms)` is `just now` under a minute, `<m> min ago` under an hour, `<h> h ago` under
 a day, else `1 day ago` or `<d> days ago`; a negative count is 0. `age_text(elapsed_ms)` is `goal set `
 plus that. `progress_text(landed, total, in_delivery, queued, held)` is `<landed> of <total> landed`
-followed by `, <n> in delivery`, `, <n> queued` and `, <n> held` for each non-zero count, in that
-order. The view states and texts are the constants `ON_TRACK`, `WAITING`, `QUIET`, `CLOSING`,
+followed by `, <n> in delivery`, `, <n> queued` and `, <n> merged, not yet proven` for each non-zero
+count, in that order. The view states and texts are the constants `ON_TRACK`, `WAITING`, `QUIET`, `CLOSING`,
 `DONE` and their `_TEXT`; `CLOSED_OUT` is the view's stage for a run's `done` (not a report stage).
 A running sprint's ball (#1086) is `BALL_MANAGER`, `BALL_OWNER`, `BALL_NOBODY`, or, while its report
 states a wait or a pause that holds (#1380), `BALL_WAITING` or `BALL_PAUSED`, worded by
@@ -995,8 +995,8 @@ FAULT_MEMBER = "the live fault has no valid {member}"
 FAULT_TOO_LONG = "the live fault's {member} is over {limit} characters"
 FAULT_NOT_OURS = "the live fault's issue is not an issue of this sprint's latest report"
 FAULT_TWICE = "this issue is already declared a live fault"
-FAULT_UNKNOWN = "this live fault is not known"
-FAULT_WITHDRAWN_ALREADY = "this live fault is already withdrawn"
+FAULT_UNKNOWN = "this fault is not known"
+FAULT_WITHDRAWN_ALREADY = "this fault was already withdrawn"
 _FAULT_LIMITS = {"observed": MAX_FAULT_OBSERVED_CHARS, "when": MAX_FAULT_WHEN_CHARS,
                  "proven": MAX_FAULT_PROVEN_CHARS}
 NOTICE_BLOCK_HEAD = ("Open notices of the other sprints of this project "
@@ -3279,7 +3279,7 @@ def age_text(elapsed_ms: int) -> str:
 
 def progress_text(landed: int, total: int, in_delivery: int, queued: int, held: int) -> str:
     text = f"{landed} of {total} landed"
-    for count, label in ((in_delivery, "in delivery"), (queued, "queued"), (held, "held")):
+    for count, label in ((in_delivery, "in delivery"), (queued, "queued"), (held, "merged, not yet proven")):
         if count:
             text += f", {count} {label}"
     return text

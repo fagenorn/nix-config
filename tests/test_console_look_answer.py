@@ -475,7 +475,7 @@ class LookAnswerTest(QuestionRoutes):
             self.entry(svc, sid)["look"],
             {"issue": ISSUE, "pr": PR, "head": HEAD, "state": "open", "approve_index": 2,
              "line": 'Choosing "Ask for changes" records your approval of aaaaaaa, '
-                     'pull request #12, on issue #7.'})
+                     'proposed change #12, on issue #7.'})
 
     def test_an_open_look_card_is_consequential_without_the_mark(self):
         svc = self.open()

@@ -1,22 +1,28 @@
 """The console page marks a flagged glossary word and shows its gloss on hover and on tap.
 
+The scenarios run the page under node, so the module is an integration test.
+
 Run: just agent-workflow-tests
 """
 import json
+import re
 import unittest
 from pathlib import Path
 
 from agent_tools.console import owner_words
 
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures
-from .test_console_guest_page import GUEST, harness
+from .test_console_guest_page import ASKED, GUEST, harness, named, page_of, steer_frame
 from .test_console_page import (
-    BRIEF, HEADSUP_W, PROGRESS, REPORTED, SPRINT, START, PageNoticeTest, frame, full, has_class, nodes, of_class,
-    project, question, render, sprint_lines, view, with_notices, with_sprints, approvals)
+    BRIEF, HEADSUP_W, PROGRESS, REPORTED, SPRINT, START, PageNoticeTest, frame, full, has_class, look_answered,
+    look_cards, nodes, of_class, project, question, render, sprint_lines, view, with_notices, with_sprints,
+    approvals)
 
-TIER = "fast"
+TIER = "integration"
 
 CASES = Path(__file__).resolve().parent / "fixtures/console/owner-words-cases.json"
+PAGE = Path(__file__).resolve().parents[1] / "python/agent_tools/console/page.html"
+OPEN_REPORT = {"open": "sprint:" + REPORTED["sprint_id"]}  # the status line sits in the closed "Show the report" fold
 GLOSS = owner_words.entries()
 G = dict(owner_words.GLOSSARY)
 
@@ -46,7 +52,7 @@ def gloss_texts(snap: dict) -> list:
 class PageGlossTest(unittest.TestCase):
     def test_a_flagged_word_in_the_status_line_shows_its_gloss_on_hover_and_tap(self) -> None:
         before, after = render([
-            START, {"frame": f("waiting on the land lock")}, {"snapshot": True}, {"click": "gloss"},
+            START, {"frame": f("waiting on the land lock")}, OPEN_REPORT, {"snapshot": True}, {"click": "gloss"},
             {"snapshot": True}])
         status = status_line(before)
         self.assertEqual(full(status), "waiting on the land lock")
@@ -67,7 +73,7 @@ class PageGlossTest(unittest.TestCase):
 
     def test_a_second_tap_closes_the_gloss(self) -> None:
         (snap,) = render([
-            START, {"frame": f("waiting on the land lock")}, {"click": "gloss"}, {"click": "gloss"},
+            START, {"frame": f("waiting on the land lock")}, OPEN_REPORT, {"click": "gloss"}, {"click": "gloss"},
             {"snapshot": True}])
         (mark,) = marks(status_line(snap))
         self.assertEqual(mark["expanded"], "false")
@@ -75,7 +81,7 @@ class PageGlossTest(unittest.TestCase):
 
     def test_a_mark_keeps_keyboard_focus_through_its_own_redraw(self) -> None:
         opened, closed = render([
-            START, {"frame": f("waiting on the land lock")}, {"focus_on": "gloss"}, {"click": "gloss"},
+            START, {"frame": f("waiting on the land lock")}, OPEN_REPORT, {"focus_on": "gloss"}, {"click": "gloss"},
             {"snapshot": True}, {"click": "gloss"}, {"snapshot": True}])
         for snap, state in ((opened, "true"), (closed, "false")):
             (mark,) = marks(status_line(snap))
@@ -93,14 +99,14 @@ class PageGlossTest(unittest.TestCase):
 
     def test_closing_a_gloss_with_the_keyboard_never_approves_the_current_brief(self) -> None:
         both = {**f("waiting on the land lock"), "inbox": {"open": [BRIEF], "answered": []}}
-        steps = [START, {"frame": both}, {"focus_on": "gloss"}, {"click": "gloss"}, {"click": "gloss"},
+        steps = [START, {"frame": both}, OPEN_REPORT, {"focus_on": "gloss"}, {"click": "gloss"}, {"click": "gloss"},
                  {"key": "Enter", "follow": True}, {"clock": 6000}, {"snapshot": True}]
         (snap,) = render(steps)
         self.assertEqual(approvals(snap), [])
 
     def test_an_open_gloss_stays_open_across_an_unchanged_redraw(self) -> None:
         (snap,) = render([
-            START, {"frame": f("waiting on the land lock")}, {"click": "gloss"},
+            START, {"frame": f("waiting on the land lock")}, OPEN_REPORT, {"click": "gloss"},
             {"frame": f("waiting on the land lock")}, {"snapshot": True}])
         (mark,) = marks(status_line(snap))
         self.assertEqual(mark["expanded"], "true")
@@ -108,7 +114,7 @@ class PageGlossTest(unittest.TestCase):
 
     def test_a_replacement_report_with_another_word_at_the_same_place_starts_closed(self) -> None:
         (snap,) = render([
-            START, {"frame": f("guard said no")}, {"click": "gloss"}, {"frame": f("rerun said no")},
+            START, {"frame": f("guard said no")}, OPEN_REPORT, {"click": "gloss"}, {"frame": f("rerun said no")},
             {"snapshot": True}])
         (mark,) = marks(status_line(snap))
         self.assertEqual(full(mark), "rerun")
@@ -206,9 +212,44 @@ class PageGlossTest(unittest.TestCase):
         (reason,) = [n for n in nodes(snap["inbox"]) if n["tag"] == "span" and has_class(n, "reason")]
         self.assertEqual(texts(reason), ["land lock"])
 
+    def test_a_streamed_view_keeps_keyboard_focus_on_an_open_gloss_and_never_approves_the_brief(self) -> None:
+        both = {**f("waiting on the land lock"), "inbox": {"open": [BRIEF], "answered": []}}
+        before, after = render([
+            START, {"frame": both}, OPEN_REPORT, {"focus_on": "gloss"}, {"click": "gloss"}, {"frame": both},
+            {"snapshot": True}, {"key": "Enter", "follow": True}, {"clock": 6000}, {"snapshot": True}])
+        (mark,) = marks(status_line(before))
+        self.assertEqual(mark["expanded"], "true")
+        self.assertTrue(mark["focused"])
+        self.assertEqual(approvals(after), [])
+
+    def test_an_open_gloss_unclips_the_sprint_line_it_sits_in(self) -> None:
+        page = PAGE.read_text(encoding="utf-8")
+        (rule,) = re.findall(r"\.sp-now:has\(\.gloss-text\)\s*\{([^}]*)\}", page)
+        self.assertIn("overflow: visible", rule)
+        self.assertIn("display: block", rule)
+        (clip,) = re.findall(r"\n\.sp-now \{([^}]*)\}", page)
+        self.assertIn("overflow: hidden", clip)
+
+    def test_a_question_headline_on_an_answered_look_card_marks_its_flagged_word(self) -> None:
+        answered = {**look_answered("posted", None), "headline": "May I rerun the check?"}
+        (snap,) = render([START, {"frame": {**frame([answered]), "glossary": GLOSS}}, {"snapshot": True}])
+        (card,) = look_cards(snap)
+        (headline,) = [n for n in nodes(card) if n["tag"] == "h2" and has_class(n, "q")]
+        self.assertEqual(texts(headline), ["rerun"])
+        self.assertEqual(full(headline), "May I rerun the check?")
+
+    def test_the_guest_inbox_marks_the_flagged_word_of_a_question_it_cannot_answer(self) -> None:
+        asked = {**ASKED, "question": "May I rerun the check?", "owner_only": True}
+        snap = page_of(GUEST, [START, {"frame": steer_frame(tracker=False, rounds=True, asked=asked)},
+                               {"snapshot": True}])
+        (row,) = named(snap["inbox"], "guest-item")
+        (head,) = named(row, "guest-head")
+        self.assertEqual(texts(head), ["rerun"])
+        self.assertEqual(full(head), "May I rerun the check?")
+
     def test_the_guest_page_keeps_the_mark_and_its_gloss(self) -> None:
         first, second = harness([
-            START, {"frame": f("waiting on the land lock")}, {"snapshot": True}, {"click": "gloss"},
+            START, {"frame": f("waiting on the land lock")}, OPEN_REPORT, {"snapshot": True}, {"click": "gloss"},
             {"snapshot": True}], GUEST)
         status = status_line(first)
         self.assertEqual(full(status), "waiting on the land lock")

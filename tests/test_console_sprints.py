@@ -1349,7 +1349,7 @@ class AgeTest(unittest.TestCase):
         self.assertEqual(sprints.progress_text(3, 7, 2, 2, 0),
                          "3 of 7 landed, 2 in delivery, 2 queued")
         self.assertEqual(sprints.progress_text(0, 0, 0, 0, 0), "0 of 0 landed")
-        self.assertEqual(sprints.progress_text(1, 4, 0, 0, 3), "1 of 4 landed, 3 held")
+        self.assertEqual(sprints.progress_text(1, 4, 0, 0, 3), "1 of 4 landed, 3 merged, not yet proven")
         self.assertEqual(sprints.QUIET_TEXT.format(minutes=16), "quiet for 16 min \u2014 may be stuck")
 
 
@@ -2851,9 +2851,9 @@ class LiveFaultCheckTest(unittest.TestCase):
         self.assertEqual(sprints.withdrawable_fault(s, 5).fault_id, 5)
         self.assertEqual(sprints.withdrawable_fault(replace(s, stop_at=at(8)), 5).fault_id, 5)
         self.assertEqual(notice_refusal(sprints.withdrawable_fault, s, 9),
-                         "this live fault is not known")
+                         "this fault is not known")
         self.assertEqual(notice_refusal(sprints.withdrawable_fault, s, 6),
-                         "this live fault is already withdrawn")
+                         "this fault was already withdrawn")
 
     def test_the_fault_requests_parse_strictly(self):
         body = json.dumps({"sprint_id": SA, "secret": "s", "fault": FAULT}).encode()

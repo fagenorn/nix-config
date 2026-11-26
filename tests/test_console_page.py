@@ -6641,7 +6641,7 @@ class PageSprintGlanceTest(unittest.TestCase):
     def test_a_reported_sprint_shows_one_pip_per_issue_by_stage_group(self) -> None:
         staged = {**REPORTED,
                   "progress": {"landed": 1, "in_delivery": 2, "queued": 1, "held": 1, "total": 5},
-                  "progress_text": "1 of 5 landed, 2 in delivery, 1 queued, 1 held",
+                  "progress_text": "1 of 5 landed, 2 in delivery, 1 queued, 1 merged, not yet proven",
                   "issues": [
                       {"issue": 11, "stage": "landed", "stage_text": "landed"},
                       {"issue": 12, "stage": "building", "stage_text": "building task 2 of 4"},
@@ -6665,7 +6665,7 @@ class PageSprintGlanceTest(unittest.TestCase):
         self.assertEqual([full(n) for n in top(line) if has_class(n, "pip-count")], ["1 of 5"])
         (mark,) = [n for n in top(line) if has_class(n, "sic")]
         self.assertEqual([c["tag"] for c in mark["children"]], ["svg"])
-        self.assertIn("1 of 5 landed, 2 in delivery, 1 queued, 1 held", full(detail(line)))
+        self.assertIn("1 of 5 landed, 2 in delivery, 1 queued, 1 merged, not yet proven", full(detail(line)))
         for snap in (second, third):
             (line,) = sprint_lines(snap)
             for cls in ("pips", "pip", "pip-count"):
@@ -12077,7 +12077,7 @@ class PageLiveFaultTest(unittest.TestCase):
     def test_withdraw_posts_the_fault_and_a_refusal_says_why(self) -> None:
         (snap,) = render([
             START, {"frame": fault_frame([FAULT_ENTRY])},
-            {"respond": {"status": 409, "text": "this live fault is already withdrawn\n"}},
+            {"respond": {"status": 409, "text": "this fault was already withdrawn\n"}},
             {"click": "live-fault-withdraw"}, {"snapshot": True},
         ])
         (post,) = snap["posts"]
@@ -12087,7 +12087,7 @@ class PageLiveFaultTest(unittest.TestCase):
         self.assertIn("X-Console-Token", post["headers"])
         (line,) = of_class(snap["projects"], "li", "live-fault")
         (fail,) = of_class(line, "span", "fail")
-        self.assertEqual(full(fail), "Could not withdraw: this live fault is already withdrawn")
+        self.assertEqual(full(fail), "Could not withdraw: this fault was already withdrawn")
 
     def test_a_refused_withdraw_of_a_finished_sprint_shows_its_reason_on_the_row_a_frame_replaced(self) -> None:
         ended = {**ended_sprint("b", 60_000), "live_faults": [FAULT_ENTRY]}
@@ -12095,13 +12095,13 @@ class PageLiveFaultTest(unittest.TestCase):
             START, {"frame": with_sprints([ended])}, {"hold": True},
             {"click": "live-fault-withdraw"},
             {"frame": with_sprints([{**ended, "title": "Sprint b again"}])},
-            {"release": {"status": 409, "text": "this live fault is already withdrawn\n"}},
+            {"release": {"status": 409, "text": "this fault was already withdrawn\n"}},
             {"snapshot": True},
         ])
         (row,) = of_class(snap["projects"], "li", "finished-line")
         (fault,) = of_class(row, "li", "live-fault")
         (fail,) = of_class(fault, "span", "fail")
-        self.assertEqual(full(fail), "Could not withdraw: this live fault is already withdrawn")
+        self.assertEqual(full(fail), "Could not withdraw: this fault was already withdrawn")
         (button,) = [n for n in nodes(fault) if n["tag"] == "button"]
         self.assertIs(button["disabled"], False)
 
