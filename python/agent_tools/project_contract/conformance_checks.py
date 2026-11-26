@@ -22,7 +22,7 @@ from pathlib import Path, PurePosixPath
 import subprocess
 
 from agent_tools.delivery import (
-    comment_lint, context_map_lint, copied_test_lint, engine_caps, engine_commands,
+    comment_lint, context_map_lint, copied_test_lint, engine_commands,
     host_admission, instruction_surface_lint, never_rise, node_lint, procedure_check,
     record_lint, ruff_lint, size_lint, skipped_test_lint, standards_lint,
 )
@@ -43,7 +43,6 @@ from agent_tools.project_contract.conformance_registry import (
 )
 
 SHIPPED_PROCEDURES = Path(procedure_check.__file__).with_name("procedures")
-DELIVERY_PACKAGE = Path(procedure_check.__file__).parent
 
 
 def bounded_run(argv: list[str], cwd, env: dict | None = None):
@@ -851,11 +850,10 @@ def check_shipped_procedures(context: "Context") -> "Outcome":
     """
     repair = "procedures.engine_check.repair"
     try:
-        declarations = engine_commands.CommandTable(
+        project_ids = engine_commands.CommandTable(
             engine_commands.PLATFORM_MODULES, context.bindings["commands"],
-            str(context.root)).declarations()
-        result, breaches = engine_caps.verdict(DELIVERY_PACKAGE, SHIPPED_PROCEDURES,
-                                               declarations)
+            str(context.root)).project_ids()
+        result, breaches = procedure_check.verdict(SHIPPED_PROCEDURES, project_ids)
     except (procedure_check.DeclarationError, ValueError, OSError) as error:
         return Outcome("failed", "procedure_check_unusable", repair,
                        {"reason": bound_fact(" ".join(str(error).split()))})

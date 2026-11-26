@@ -197,8 +197,6 @@ class ShippedProceduresCheckTest(PlatformHome, Rebinding, ReportAssertions, unit
     def test_the_check_reads_the_directory_engine_check_defaults_to(self):
         self.assertEqual(conformance_checks.SHIPPED_PROCEDURES.resolve(),
                          engine.PROCEDURES_DIR.resolve())
-        self.assertEqual(conformance_checks.DELIVERY_PACKAGE.resolve(),
-                         engine.ENGINE_DIR.resolve())
 
     def test_the_check_adds_no_comment_rule_violation_over_the_base(self):
         path = conformance_checks.__file__

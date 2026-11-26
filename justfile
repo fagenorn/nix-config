@@ -107,7 +107,7 @@ test:
 
 # Run the suite members this branch touches, or the whole suite when a build input changes (the `test-touched` command).
 test-touched:
-  tools="$(nix build --no-link --print-out-paths '{{justfile_directory()}}#agent-platform.tools')" && test -n "$tools" && AGENT_PLATFORM_TOOLS="$tools/bin" WORKFLOW_POLICY_SURFACE=source PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.delivery.touched_tests --base origin/main --source-root python --pair home/common/claude-code/lifecycle_guard.py=tests/test_claude_permission_guard.py --cover 'python/agent_tools/delivery/engine*.py=tests/test_engine_*.py' --cover 'python/agent_tools/delivery/host_admission.py=tests/test_engine_*.py' --cover 'python/agent_tools/delivery/procedure_check.py=tests/test_engine_*.py' --cover 'python/agent_tools/delivery/lane_rule.py=tests/test_engine_*.py' --cover 'python/agent_tools/delivery/rule_reader.py=tests/test_engine_*.py' --cover 'python/agent_tools/delivery/procedures/*=tests/test_engine_*.py' --cover 'tests/engine_*.py=tests/test_engine_*.py' --cover 'tests/fixtures/engine-*=tests/test_engine_*.py' --build-command 'just build' --env-from 'tests/test_claude_permission_guard.py=just claude-guard-test-env' --build-when '*.nix' --build-when flake.lock --build-when .sops.yaml --build-when 'data/*' --build-when 'homebrew/*' --build-when 'patches/*' --build-when 'secrets/*' --build-when 'vars/*'
+  tools="$(nix build --no-link --print-out-paths '{{justfile_directory()}}#agent-platform.tools')" && test -n "$tools" && AGENT_PLATFORM_TOOLS="$tools/bin" WORKFLOW_POLICY_SURFACE=source PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.delivery.touched_tests --base origin/main --source-root python --pair home/common/claude-code/lifecycle_guard.py=tests/test_claude_permission_guard.py --cover 'python/agent_tools/delivery/engine*.py=tests/test_engine_*.py' --cover 'python/agent_tools/delivery/host_admission.py=tests/test_engine_*.py' --cover 'python/agent_tools/delivery/procedure_check.py=tests/test_engine_*.py' --cover 'python/agent_tools/delivery/procedure_terms.py=tests/test_engine_*.py' --cover 'python/agent_tools/delivery/size_caps.py=tests/test_engine_*.py' --cover 'python/agent_tools/delivery/lane_rule.py=tests/test_engine_*.py' --cover 'python/agent_tools/delivery/rule_reader.py=tests/test_engine_*.py' --cover 'python/agent_tools/delivery/procedures/*=tests/test_engine_*.py' --cover 'tests/engine_*.py=tests/test_engine_*.py' --cover 'tests/fixtures/engine-*=tests/test_engine_*.py' --build-command 'just build' --env-from 'tests/test_claude_permission_guard.py=just claude-guard-test-env' --build-when '*.nix' --build-when flake.lock --build-when .sops.yaml --build-when 'data/*' --build-when 'homebrew/*' --build-when 'patches/*' --build-when 'secrets/*' --build-when 'vars/*'
 
 # Print the two variables the lifecycle guard's test reads, from the built ./result (`test-touched` builds first).
 claude-guard-test-env:
@@ -185,6 +185,7 @@ agent-workflow-tests *args:
     tests/test_agent_tools_layout.py \
     tests/test_agent_tools_semver.py \
     tests/test_engine_check.py \
+    tests/test_engine_check_process.py \
     tests/test_engine_direct_procedures.py \
     tests/test_engine_graders.py \
     tests/test_engine_findings.py \
@@ -302,6 +303,7 @@ agent-workflow-tests *args:
     tests/test_release_lock.py \
     tests/test_guard_policy.py \
     tests/test_git_pre_push_hook.py \
+    tests/test_guard_sandbox_git.py \
     tests/test_release_adapter_core.py \
     tests/test_codesigned_artifact_adapter.py \
     tests/test_launchd_agent_adapter.py \
