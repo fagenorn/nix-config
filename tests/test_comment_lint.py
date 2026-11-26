@@ -537,6 +537,11 @@ class RuleTest(unittest.TestCase):
             found("B19", snapshot(a__sh=text)),
             [Violation("B19", "a.sh", 8), Violation("B19", "a.sh", 17)])
 
+    def test_the_restart_helper_docstring_of_the_approve_waits_suite_is_within_the_cap(self):
+        name = "tests/test_console_approve_waits.py"
+        text = (REPO_ROOT / name).read_text("utf-8")
+        self.assertEqual(found("B19", snapshot(a__py=text)), [])
+
     def test_a_long_block_with_a_long_first_line_is_one_violation(self):
         text = hash_lines("x=1", "# " + "z" * 119, *["# row"] * 5)
         self.assertEqual(found("B19", snapshot(a__sh=text)), [Violation("B19", "a.sh", 2)])
