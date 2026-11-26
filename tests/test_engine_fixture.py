@@ -67,6 +67,21 @@ class FixtureTest(unittest.TestCase):
                                       capture_output=True, text=True, timeout=120)
                 self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
 
+    def test_extra_files_are_on_main_and_run_by_the_test_command(self):
+        failing = ("import unittest\n\n\nclass ExtraTest(unittest.TestCase):\n"
+                   "    def test_fails(self):\n        self.assertEqual(1, 2)\n")
+        world = GuardPolicyWorld(self)
+
+        fixture = FixtureProject(self, world, extra_files={"checks/check_extra.py": failing})
+        snapshot = resolve_project.resolve(str(fixture.root))
+        command = snapshot["bindings"]["commands"]["test"]
+        done = subprocess.run(command["argv"], cwd=fixture.root / command["cwd"],
+                              capture_output=True, text=True, timeout=120)
+
+        self.assertNotEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("checks/check_extra.py",
+                      world.git(fixture.root, "ls-tree", "--name-only", "-r", "origin/main").splitlines())
+
     def test_building_the_fixture_registers_no_project(self):
         world = GuardPolicyWorld(self)
 

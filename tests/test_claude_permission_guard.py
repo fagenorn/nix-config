@@ -26,6 +26,7 @@ from .guard_fake_gh import (
     FAKE_GH_SCRIPT, check_run_accepts, check_run_forge, check_run_permit, check_run_reads, check_run_refusals,
     check_run_spellings, jobs_facts, rerun_production, run_facts)
 from .guard_policy_world import GuardPolicyWorld
+from .guard_sandbox_git import SandboxGit
 
 
 SETTINGS_PATH = Path(os.environ["CLAUDE_SETTINGS_PATH"])
@@ -3456,22 +3457,19 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         name = self.SHAPES["values"]["<branch>"]
         base = Path(tempfile.mkdtemp(dir=self.fixture_dir.name))
         remote, work = base / "remote.git", base / "work"
-        identity = ["-c", "user.name=t", "-c", "user.email=t@t",
-                    "-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false"]
+        sandbox = SandboxGit(base)
 
         def git(*argv, cwd=work):
-            return subprocess.run(["git", *identity, *argv], cwd=cwd, check=True,
-                                  capture_output=True, text=True).stdout
+            return sandbox.git(*argv, cwd=cwd)
 
-        subprocess.run(["git", "init", "--quiet", "--bare", str(remote)], check=True,
-                       capture_output=True)
+        sandbox.run(["git", "init", "--quiet", "--bare", str(remote)])
         work.mkdir()
         git("init", "--quiet")
         git("remote", "add", "origin", str(remote))
         git("commit", "--quiet", "--allow-empty", "-m", "init")
         git("tag", name)
-        git("push", "--quiet", "origin", f"HEAD:refs/heads/{name}", f"refs/tags/{name}")
-        subprocess.run(shlex.split(command), cwd=work, check=True, capture_output=True)
+        sandbox.push(work, "origin", f"HEAD:refs/heads/{name}", f"refs/tags/{name}")
+        sandbox.run(shlex.split(command), cwd=work)
         self.assertEqual("", git("ls-remote", "--heads", "origin", name))
         self.assertIn(f"refs/tags/{name}", git("ls-remote", "--tags", "origin", name))
 

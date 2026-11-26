@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 
 from agent_tools.delivery.record_lint import record_violations
+from agent_tools.delivery.routing import index_table
 from agent_tools.project_contract.adopt_links import links
 
 
@@ -36,6 +37,38 @@ LOGIN_LIKE = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)*")
 def logins_in(text: str) -> list:
     """Every email-style login in `text`; the `<colleague-login>` placeholder is not one."""
     return LOGIN_LIKE.findall(text)
+
+
+OWNER_WORDS = (
+    "land lock", "slice", "held", "verify", "brief version", "guard", "rerun", "claim", "look",
+    "live fault", "CI", "pull request",
+)
+
+
+def owner_word_problems(text: str) -> list[str]:
+    """What is wrong with the rendered glossary table of `docs/guides/owner-words.md`, one line each.
+
+    Rows come from `index_table`, so a line in a fence or an HTML comment is not a row. A row with other
+    than two cells, an empty word or gloss, or a word that an earlier row already gave is a problem.
+    """
+    problems = []
+    seen = set()
+    for row in index_table(text)[1:]:
+        if len(row) != 2:
+            problems.append(f"row of {len(row)} cells: {row}")
+            continue
+        word, gloss = row
+        if not word or not re.sub(r"<!--.*?-->", "", gloss).strip():
+            problems.append(f"empty word or gloss: {row}")
+        if word in seen:
+            problems.append(f"duplicate word: {word}")
+        seen.add(word)
+    return problems
+
+
+def owner_words(text: str) -> set[str]:
+    """The words the rendered glossary table of `docs/guides/owner-words.md` defines."""
+    return {row[0] for row in index_table(text)[1:] if len(row) == 2}
 
 
 def markdown_section(text: str, name: str) -> str:
@@ -207,6 +240,20 @@ def console_records(numbers) -> list[Path]:
         if int(p.name[:3]) in numbers)
 
 
+def guide_table(text: str, header: str) -> list[list[str]]:
+    lines = text.splitlines()
+    if header not in lines:
+        return []
+    rows = []
+    for line in lines[lines.index(header) + 1:]:
+        if not line.startswith("|"):
+            break
+        if line.startswith("|---"):
+            continue
+        rows.append([cell.strip() for cell in line.strip().strip("|").split("|")])
+    return rows
+
+
 def console_form_findings(numbers) -> list[tuple[str, str, int]]:
     return [
         (p.name, v.rule, v.line)
@@ -346,6 +393,88 @@ class DocsTreeTest(unittest.TestCase):
                 breaches[relative] = [violation.rule for violation in found]
         self.assertEqual(breaches, {})
 
+    def test_system_record_007_keeps_the_record_form_and_supersedes_002_003_and_005(self):
+        path = REPO_ROOT / "docs/areas/system/adr/007-agent-tools-moves-to-dotnet-under-one-reference-graph.md"
+        found, cited = [], set()
+        if path.is_file():
+            data = path.read_bytes()
+            found = record_violations(path.relative_to(REPO_ROOT).as_posix(), data)
+            cited = {int(number) for number in re.findall(r"ADR-system-(\d{3})", data.decode("utf-8"))} - {7}
+        self.assertTrue(path.is_file())
+        self.assertEqual([violation.text() for violation in found], [])
+        self.assertEqual(cited, {2, 3, 5})
+
+    def test_system_002_003_and_005_name_007_as_superseding_them(self):
+        directory = REPO_ROOT / "docs/areas/system/adr"
+        names = (
+            "002-one-agent-tools-package.md",
+            "003-agent-tools-subpackages-are-the-areas.md",
+            "005-the-flake-publishes-one-platform-package.md")
+        cited = {
+            name: {int(number) for number in re.findall(
+                r"ADR-system-(\d{3})", (directory / name).read_text(encoding="utf-8"))}
+            for name in names}
+        self.assertEqual([name for name, numbers in cited.items() if 7 not in numbers], [])
+
+    def test_system_records_but_005_and_006_keep_the_record_form(self):
+        paths = [
+            path for path in sorted((REPO_ROOT / "docs/areas/system/adr").glob("*.md"))
+            if not path.name.startswith(("005-", "006-"))]
+        self.assertTrue(paths)
+        pairs = sorted(
+            (path.name, violation.rule)
+            for path in paths
+            for violation in record_violations(path.relative_to(REPO_ROOT).as_posix(), path.read_bytes()))
+        self.assertEqual(pairs, [])
+
+    def test_the_architecture_guide_tables_31_references_each_to_a_lower_layer(self):
+        text = (REPO_ROOT / "docs/guides/architecture.md").read_text(encoding="utf-8")
+        rows = guide_table(text, "| Layer | Project | References |")
+        layers = {}
+        references = {}
+        for cells in rows:
+            project = cells[1].split()[0]
+            layers[project] = int(cells[0].lstrip("L"))
+            references[project] = [] if cells[2] == "none" else cells[2].split(", ")
+        forbidden = {
+            frozenset(pair) for pair in (
+                ("Release", "Verification"), ("Release", "Delivery"), ("Claims", "Guard"),
+                ("Delivery", "Guard"), ("Console", "Guard"))}
+        self.assertEqual(len(rows), 9)
+        self.assertEqual(set(layers), {
+            "System", "ProjectContract", "Claims", "Guard", "Release", "Verification",
+            "Delivery", "Console", "Hosts"})
+        self.assertEqual(len({(project, reference) for project, refs in references.items() for reference in refs}), 31)
+        for project, refs in references.items():
+            for reference in refs:
+                self.assertLess(layers[reference], layers[project], f"{project} -> {reference}")
+                self.assertNotIn(frozenset({project, reference}), forbidden)
+
+    def test_the_architecture_guide_names_an_owner_and_a_writer_for_every_shared_format(self):
+        text = (REPO_ROOT / "docs/guides/architecture.md").read_text(encoding="utf-8")
+        rows = guide_table(text, "| Format | Owner project · module | Writer |")
+        projects = {
+            "System", "ProjectContract", "Claims", "Guard", "Release", "Verification",
+            "Delivery", "Console", "Hosts"}
+        formats = [cells[0] for cells in rows]
+        self.assertEqual(len(formats), len(set(formats)))
+        self.assertEqual(set(formats), {
+            "`events.sqlite3` (`events` table)", "`activation.result`, `activation.log`",
+            "Not-yet exit code 75", "Command ids", "Engine step ids", "`gh` calls",
+            "Engine run files `events.jsonl`, `run.json`",
+            "Claude profile `.claude.json`, created by `claude-account add`",
+            "Claude trust files, updated after creation", "`needs-verification` label",
+            "`<!-- agent:... -->` markers", "Issue-body acceptance criteria",
+            "Fleet registry `registry.json`, `.agents/state` root", "`.agents/project.json`",
+            "Release profile grammar and adapter catalog", "Memory-watch files, cache-proxy log",
+            "Lint timing record", "Release transaction `state.json`"})
+        for cells in rows:
+            self.assertIn(cells[1].split()[0], projects, cells[0])
+            self.assertTrue(cells[2].strip(), cells[0])
+        writers = {cells[0]: cells[2] for cells in rows}
+        self.assertIn("jq", writers["Claude profile `.claude.json`, created by `claude-account add`"])
+        self.assertEqual(writers["Claude trust files, updated after creation"], "Python")
+
     def test_no_living_file_names_a_working_artifact_outside_a_pinned_link(self):
         archived = archived_files()
         hits = [hit for path, lines in scanned_files() for hit in working_artifact_hits(path, lines, archived)]
@@ -422,6 +551,40 @@ class DocsTreeTest(unittest.TestCase):
             with self.subTest(term=term):
                 self.assertIsNotNone(re.search(rf"^\*\*{term}\*\*:", area, re.M))
                 self.assertIn(f"| {term} | Delivery |", context_map)
+
+    def test_the_owner_words_glossary_gives_each_listed_word_a_gloss(self):
+        text = (REPO_ROOT / "docs/guides/owner-words.md").read_text(encoding="utf-8")
+        self.assertEqual(owner_word_problems(text), [])
+        for word in OWNER_WORDS:
+            with self.subTest(word=word):
+                self.assertIn(word, owner_words(text))
+
+    def test_the_glossary_reader_ignores_a_definition_hidden_in_a_comment(self):
+        text = (
+            "| Word | In everyday words |\n|---|---|\n| held |  |\n"
+            "<!--\n| held | Finished and merged, but not done. |\n-->\n"
+        )
+        self.assertEqual(owner_word_problems(text), ["empty word or gloss: ['held', '']"])
+
+    def test_the_glossary_reader_rejects_a_gloss_that_renders_empty(self):
+        text = "| Word | In everyday words |\n|---|---|\n| held | <!-- explanation pending --> |\n"
+        self.assertEqual(owner_word_problems(text), ["empty word or gloss: ['held', '<!-- explanation pending -->']"])
+
+    def test_the_land_lock_gloss_names_no_branch_the_project_may_not_have(self):
+        text = (REPO_ROOT / "docs/guides/owner-words.md").read_text(encoding="utf-8")
+        gloss = next(row[1] for row in index_table(text)[1:] if row[0] == "land lock")
+        self.assertNotIn("main", gloss)
+
+    def test_the_glossary_reader_reports_a_word_given_twice(self):
+        text = "| Word | In everyday words |\n|---|---|\n| held | One. |\n| held | Two. |\n"
+        self.assertEqual(owner_word_problems(text), ["duplicate word: held"])
+
+    def test_the_index_reaches_the_plain_words_rule_the_glossary_and_the_audit(self):
+        index = (REPO_ROOT / "docs/README.md").read_text(encoding="utf-8")
+        for name in ("write-for-the-owner.md", "owner-words.md", "console-page-audit-2026-11-25.md"):
+            with self.subTest(name=name):
+                self.assertTrue((REPO_ROOT / "docs/guides" / name).is_file())
+                self.assertIn(f"docs/guides/{name}", index_destinations(index))
 
     def test_dissolved_readmes_fit_150_lines(self):
         too_long = []

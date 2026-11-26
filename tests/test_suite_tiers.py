@@ -25,6 +25,10 @@ BASE = "9282d2a404f2e447c55bac067a984c8cff48689e"
 REPO_ROOT = Path(__file__).resolve().parents[1]
 STANDARD = REPO_ROOT / "docs/standards/testing.md"
 TIER = "integration"  # this module reads git history
+PROBE_RULE = (
+    'A stress probe with large or deeply nested inputs fixes a finite cap on time and peak memory before it starts, starts at a size that fits in 1 GiB, grows in steps (for example doubling), measures time and peak memory at each step and stops before a step whose projected peak would exceed the cap or at the first step that grows faster than its input, never an unbounded loop or one giant input on a shared host. A test that proves a memory bound measures the peak at a small capped size (for example with tracemalloc at a nesting depth whose peak stays under a few hundred MiB) and passes only when that peak is within the claimed limit, never by running the large case.'
+)
+P19_LINK = " ([issue 1859](https://github.com/fagenorn/nix-config/issues/1859))"
 
 SUITE_RECIPE = "agent-workflow-tests"
 NIGHTLY_RECIPES = (
@@ -237,6 +241,17 @@ class StandardTest(unittest.TestCase):
         rows = [line for line in lines if line.startswith("| [testing.md](testing.md) |")]
         self.assertEqual(len(rows), 1)
         self.assertIn("`tests/**`", rows[0])
+        self.assertIn("a stress probe grows in bounded steps from under 1 GiB", rows[0])
+
+    def test_the_standard_states_the_bounded_stress_probe_rule(self):
+        lines = STANDARD.read_text().splitlines()
+        heading = "### P19. A stress probe grows in bounded steps"
+        self.assertEqual(lines.count(heading), 1)
+        rest = lines[lines.index(heading) + 1 :]
+        end = next((i for i, line in enumerate(rest) if line.startswith("### ")), len(rest))
+        body = [line for line in rest[:end] if line.strip()]
+        self.assertEqual(body, [PROBE_RULE + P19_LINK])
+        self.assertEqual(len(re.findall(r"\.(?=\s|$)", PROBE_RULE)), 2)
 
 
 class DeclaredTierTest(unittest.TestCase):
