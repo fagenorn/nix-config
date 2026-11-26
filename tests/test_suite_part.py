@@ -80,6 +80,78 @@ class Helper:
         record("helper")
 '''
 
+NAMED_MEMBER = '''\
+import unittest
+
+
+class A(unittest.TestCase):
+    def test_a(self):
+        pass
+
+
+class C(unittest.TestCase):
+    def test_case(self):
+        self.fail("planned failure")
+
+
+class S(unittest.TestCase):
+    def test_sub(self):
+        with self.subTest("row"):
+            self.fail("planned failure")
+'''
+
+NOISY_MEMBER = '''\
+import os
+import unittest
+
+print("A 1")
+os.write(1, b"A 1\\n")
+
+
+class A(unittest.TestCase):
+    def test_a(self):
+        pass
+'''
+
+CUSTOM_MEMBER = '''\
+import unittest
+
+
+class A(unittest.TestCase):
+    def test_a(self):
+        pass
+
+
+class Adding(unittest.TestSuite):
+    def run(self, result, debug=False):
+        self.addTest(A("test_a"))
+        return super().run(result, debug)
+
+
+def load_tests(loader, tests, pattern):
+    return Adding()
+'''
+
+LEFT_MODULE = '''\
+import os
+import unittest
+
+
+class Cases(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        if os.environ.get("SUITE_PART_FAIL") == "left-setup":
+            raise RuntimeError("class fixture failed")
+
+    def test_one(self):
+        pass
+'''
+
+ALIAS_MEMBER = '''\
+from left import Cases as LeftCases
+from right import Cases as RightCases
+'''
+
 BROKEN_MEMBER = "import suite_part_missing_module\n"
 
 HOOKED_MEMBER = '''\
@@ -214,6 +286,53 @@ class SuitePartTest(unittest.TestCase):
             broken = self.part("test_broken.py", "--list")
             self.assertEqual(broken.returncode, 1, broken.stderr)
             self.assertIn("suite_part_missing_module", broken.stdout + broken.stderr)
+
+    def test_a_failing_test_named_test_case_and_a_failing_subtest_name_their_own_classes(self):
+        (self.work / "test_named.py").write_text(NAMED_MEMBER)
+        rows = (
+            (["--only", "A", "--only", "C"], "C"),
+            (["--only", "S"], "S"),
+            (["--except", "A"], "C,S"),
+        )
+        for args, expected in rows:
+            with self.subTest(args=args):
+                done = self.part("test_named.py", *args)
+                self.assertEqual(done.returncode, 1, done.stderr)
+                lines = [line for line in done.stderr.splitlines() if line.strip()]
+                self.assertEqual(lines[-1], "suite-part: failed classes " + expected)
+
+    def test_what_the_member_prints_while_it_is_listed_never_reaches_the_rows(self):
+        (self.work / "test_noisy.py").write_text(NOISY_MEMBER)
+        done = self.part("test_noisy.py", "--list")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(done.stdout.splitlines(), ["A 1"])
+        self.assertIn("A 1", done.stderr)
+
+    def test_a_suite_that_may_run_tests_it_does_not_hold_cannot_be_listed_or_split(self):
+        (self.work / "test_custom.py").write_text(CUSTOM_MEMBER)
+        for args in (["--list"], ["--only", "A"], ["--except", "A"]):
+            with self.subTest(args=args):
+                done = self.part("test_custom.py", *args)
+                self.assertEqual(done.returncode, 1, done.stderr)
+                self.assertEqual(done.stdout, "")
+                self.assertIn("suite-part: cannot split a test_custom.Adding suite", done.stderr)
+
+    def test_a_class_from_another_module_is_named_with_its_module(self):
+        (self.work / "left.py").write_text(LEFT_MODULE)
+        (self.work / "right.py").write_text(LEFT_MODULE)
+        (self.work / "test_alias.py").write_text(ALIAS_MEMBER)
+        listed = self.part("test_alias.py", "--list")
+        self.assertEqual(listed.stdout.splitlines(), ["left:Cases 1", "right:Cases 1"])
+        only = self.part("test_alias.py", "--only", "left:Cases")
+        self.assertEqual(only.returncode, 0, only.stderr)
+        self.assertIn("Ran 1 test", only.stderr)
+        rest = self.part("test_alias.py", "--except", "left:Cases")
+        self.assertIn("Ran 1 test", rest.stderr)
+        failed = self.part("test_alias.py", "--only", "left:Cases",
+                           extra={"SUITE_PART_FAIL": "left-setup"})
+        self.assertEqual(failed.returncode, 1)
+        lines = [line for line in failed.stderr.splitlines() if line.strip()]
+        self.assertEqual(lines[-1], "suite-part: failed classes left:Cases")
 
     def test_usage_errors_exit_2_before_any_test_runs(self):
         (self.work / "run.sh").write_text("true\n")

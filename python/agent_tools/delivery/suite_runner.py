@@ -78,13 +78,15 @@ Splitting. In parallel mode a `.py` member whose recorded time is above `SPLIT_S
 divided by the bound, rounded up; classes go to parts by their test count, largest first,
 each to the part with the fewest tests so far. Part 1 runs every test of the module whose
 class no other part names, so a test the listing missed still runs once; the other parts run
-only their named classes. A part's lines name it `<member>::<Class>[,<Class>...]`, and a
+only their named classes. A part's lines name it `<member>::<Class>[,<Class>...]` (a class
+imported from another module is `<module>:<Class>`), and a
 failed part's `failed part` line names the classes of its failing tests. Its process gets
 `SUITE_RUNNER_PART` (`<n>/<parts>`), `SUITE_RUNNER_PART_DIR`, a directory the member's parts
 share for the run, and `SUITE_RUNNER_PART_MEMBER`, the member's absolute path. A member with
-no recorded time, fewer than two such classes, a listing that fails, a `.sh` suffix or a
-serial run runs whole. The parts join into one result per member: the sum of their wall and
-CPU seconds, passed only when every part passed, the first failing part's exit otherwise;
+no recorded time, fewer than two such classes, a listing that fails or names a class twice, a
+suite that is a `TestSuite` subclass, a `.sh` suffix or a serial run runs whole. The parts
+join into one result per member: the sum of their wall and CPU seconds, passed only when
+every part passed, the first failing part's exit otherwise;
 the timing table, the summary and the report count members, never parts, so the committed
 timings keep one figure per member. Parts of one member always run in one runner process.
 
@@ -274,7 +276,7 @@ def schedule_order(members: Sequence[str], timings: Mapping[str, float]) -> list
 def test_classes(member: str, environment: Mapping[str, str], cwd: Path) -> list[tuple[str, int]]:
     """The `(class qualname, test count)` pairs the unittest loader finds in `member`, in order,
     as `suite_part --list` prints them; empty when the member is not a `.py` file or the listing
-    fails, times out or prints anything else, so the member runs whole."""
+    fails, times out, prints anything else or names a class twice, so the member runs whole."""
     if not member.endswith(".py"):
         return []
     try:
@@ -292,6 +294,8 @@ def test_classes(member: str, environment: Mapping[str, str], cwd: Path) -> list
         if found is None:
             return []
         listed.append((found[1], int(found[2])))
+    if len({name for name, _ in listed}) != len(listed):
+        return []
     return listed
 
 

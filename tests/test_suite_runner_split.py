@@ -33,6 +33,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 PYTHON_PATH = str(REPO_ROOT / "python")
 
 RECORDING = textwrap.dedent('''\
+    import json
     import os
     import unittest
 
@@ -41,7 +42,7 @@ RECORDING = textwrap.dedent('''\
         def note(self):
             values = [os.environ.get(name, "") for name in (
                 "SUITE_RUNNER_PART", "SUITE_RUNNER_PART_DIR", "SUITE_RUNNER_PART_MEMBER")]
-            line = " ".join([self.id(), *values]) + "\\n"
+            line = json.dumps([self.id(), *values]) + "\\n"
             descriptor = os.open(os.environ["SPLIT_TEST_RECORD"],
                                  os.O_WRONLY | os.O_APPEND | os.O_CREAT)
             try:
@@ -90,6 +91,67 @@ SMALL_MEMBER = RECORDING + textwrap.dedent('''\
             self.note()
 ''')
 
+NOISY_MEMBER = RECORDING + textwrap.dedent('''\
+
+
+    print("A 1")
+    os.write(1, b"A 1\\n")
+
+
+    class A(Recording):
+        def test_a(self):
+            self.note()
+
+
+    class B(Recording):
+        def test_b1(self):
+            self.note()
+
+        def test_b2(self):
+            self.note()
+''')
+
+CUSTOM_MEMBER = RECORDING + textwrap.dedent('''\
+
+
+    class A(Recording):
+        def test_a(self):
+            self.note()
+
+
+    class B(Recording):
+        def test_b(self):
+            self.note()
+
+
+    class C(Recording):
+        def test_c(self):
+            self.note()
+
+
+    class Adding(unittest.TestSuite):
+        def run(self, result, debug=False):
+            self.addTest(C("test_c"))
+            return super().run(result, debug)
+
+
+    def load_tests(loader, tests, pattern):
+        return Adding([A("test_a"), B("test_b")])
+''')
+
+CASES_MODULE = RECORDING + textwrap.dedent('''\
+
+
+    class Cases(Recording):
+        def test_one(self):
+            self.note()
+''')
+
+ALIAS_MEMBER = textwrap.dedent('''\
+    from left import Cases as LeftCases
+    from right import Cases as RightCases
+''')
+
 PAIR_MEMBER = textwrap.dedent('''\
     import os
     import time
@@ -121,7 +183,7 @@ PAIR_MEMBER = textwrap.dedent('''\
 
 TIMINGS = {"test_big.py": 400.0, "test_small.py": 10.0}
 STARTED = re.compile(r"^suite-runner: start (\S+)$", re.MULTILINE)
-ROW = re.compile(r"^suite-runner: +\d+\.\ds wall +\d+\.\ds cpu (passed|failed) \S+$",
+ROW = re.compile(r"^suite-runner: +\d+\.\ds wall +\d+\.\ds cpu (?:passed|failed) (\S+)$",
                  re.MULTILINE)
 
 BIG_IDS = {"test_big.A.test_a1": 1, "test_big.A.test_a2": 1, "test_big.B.test_b": 1,
@@ -169,7 +231,7 @@ class SplitCase(unittest.TestCase):
     def records(self) -> list[list[str]]:
         if not self.record.exists():
             return []
-        return [line.split(" ") for line in self.record.read_text().splitlines()]
+        return [json.loads(line) for line in self.record.read_text().splitlines()]
 
     def recorded_ids(self) -> collections.Counter:
         return collections.Counter(fields[0] for fields in self.records())
@@ -192,6 +254,44 @@ class SplitRunTest(SplitCase):
         code, output = self.run_members([member], {"test_pair.py": 400.0}, jobs=2)
         self.assertEqual(set(self.started(output)), {"test_pair.py::P", "test_pair.py::Q"})
         self.assertEqual(code, 0, output)
+
+
+    def test_what_a_member_prints_while_it_is_listed_adds_no_class_row(self):
+        member = self.write("test_noisy.py", NOISY_MEMBER)
+        self.assertEqual(suite_runner.test_classes(member, self.environment(), self.work),
+                         [("A", 1), ("B", 2)])
+        code, output = self.run_members([member], {member: 400.0})
+        self.assertEqual(code, 0, output)
+        self.assertEqual(set(self.started(output)), {"test_noisy.py::A", "test_noisy.py::B"})
+        self.assertEqual(self.recorded_ids(), collections.Counter(
+            {"test_noisy.A.test_a": 1, "test_noisy.B.test_b1": 1, "test_noisy.B.test_b2": 1}))
+
+    def test_a_listing_that_names_a_class_twice_runs_the_member_whole(self):
+        done = subprocess.CompletedProcess([], 0, stdout=b"A 1\nB 2\nA 1\n", stderr=b"")
+        with mock.patch.object(suite_runner.subprocess, "run", return_value=done):
+            self.assertEqual(suite_runner.test_classes("m.py", {}, self.work), [])
+
+    def test_a_member_whose_suite_runs_tests_it_does_not_hold_runs_whole_and_runs_them(self):
+        member = self.write("test_custom.py", CUSTOM_MEMBER)
+        self.assertEqual(suite_runner.test_classes(member, self.environment(), self.work), [])
+        code, output = self.run_members([member], {member: 400.0})
+        self.assertEqual(code, 0, output)
+        self.assertEqual(self.started(output), ["test_custom.py"])
+        self.assertEqual(self.recorded_ids(), collections.Counter(
+            {"test_custom.A.test_a": 1, "test_custom.B.test_b": 1, "test_custom.C.test_c": 1}))
+
+    def test_same_named_classes_of_two_modules_are_two_classes_in_two_parts(self):
+        self.write("left.py", CASES_MODULE)
+        self.write("right.py", CASES_MODULE)
+        member = self.write("test_alias.py", ALIAS_MEMBER)
+        self.assertEqual(suite_runner.test_classes(member, self.environment(), self.work),
+                         [("left:Cases", 1), ("right:Cases", 1)])
+        code, output = self.run_members([member], {member: 400.0})
+        self.assertEqual(code, 0, output)
+        self.assertEqual(set(self.started(output)),
+                         {"test_alias.py::left:Cases", "test_alias.py::right:Cases"})
+        self.assertEqual(self.recorded_ids(), collections.Counter(
+            {"left.Cases.test_one": 1, "right.Cases.test_one": 1}))
 
 
 class PlanUnitsTest(SplitCase):
@@ -335,15 +435,13 @@ class JoinTest(SplitCase):
     def test_a_split_run_reports_one_table_row_and_one_report_row_per_member(self):
         code, output = self.run_big(SUITE_RUNNER_REPORT="report.json")
         self.assertEqual(code, 0, output)
-        rows = [line for line in output.splitlines() if ROW.match(line)]
-        self.assertEqual(len(rows), 2, output)
-        self.assertFalse([row for row in rows if "::" in row])
+        once = collections.Counter({"test_big.py": 1, "test_small.py": 1})
+        self.assertEqual(collections.Counter(ROW.findall(output)), once, output)
         self.assertTrue(any(line.startswith("suite-runner: summary members=2 passed=2 failed=0 ")
                             for line in output.splitlines()), output)
         report = json.loads((self.work / "report.json").read_text())
         self.assertEqual(report["members"], 2)
-        self.assertEqual({row["member"] for row in report["timings"]},
-                         {"test_big.py", "test_small.py"})
+        self.assertEqual(collections.Counter(row["member"] for row in report["timings"]), once)
 
 
 class FailureTest(SplitCase):
@@ -411,7 +509,10 @@ class SerialTest(SplitCase):
 
 class PartEnvironmentTest(SplitCase):
     def test_each_part_gets_its_number_and_the_members_shared_directory_and_path(self):
-        code, output = self.run_big()
+        spaced = self.record.parent / "suite scratch"
+        spaced.mkdir()
+        with mock.patch.object(tempfile, "tempdir", str(spaced)):
+            code, output = self.run_big()
         self.assertEqual(code, 0, output)
         numbers = {}
         directories = set()
@@ -426,6 +527,7 @@ class PartEnvironmentTest(SplitCase):
         self.assertEqual(numbers, {"A": {"1/3"}, "D": {"2/3"}, "B": {"3/3"}, "C": {"3/3"}})
         self.assertEqual(len(directories), 1)
         directory = directories.pop()
+        self.assertTrue(directory.startswith(str(spaced) + "/"), directory)
         self.assertTrue(directory.endswith("/0"), directory)
         self.assertEqual(members, {str((self.work / "test_big.py").resolve())})
         self.assertFalse(os.path.exists(directory))
