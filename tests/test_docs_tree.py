@@ -1029,7 +1029,7 @@ class DocsTreeTest(unittest.TestCase):
         context = self.doc("docs/areas/console/CONTEXT.md")
         for needle in ("A brief approval shows only until the manager picks it up",
                        "as the manager's own line, with no approval line above it",
-                       "built from its report's milestone and its issues' stages",
+                       "built from its report's issues, their stages and runs and the issues' titles on the tracker",
                        "its status line first"):
             self.assertIn(needle, context)
 
