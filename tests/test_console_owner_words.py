@@ -9,8 +9,8 @@ import re
 import unittest
 from pathlib import Path
 
-from agent_tools.console import (answer, approve, contract_draft, deliveries, engine_runs, owner_words, register,
-                                 service, sprints, view)
+from agent_tools.console import (answer, approve, contract_draft, deliveries, engine_runs, register,
+                                 service, sprint, sprints, view)
 from agent_tools.console import checkout_remote, permission, plan_questions
 from agent_tools.console.event_log import Event
 from agent_tools.delivery import comment_lint, never_rise, procedure_check
@@ -185,7 +185,7 @@ def console_words():
 
 
 def words(text):
-    return [f.word for f in owner_words.found(text)]
+    return [f.word for f in sprint.words_found(text)]
 
 
 class ListTest(unittest.TestCase):
@@ -205,8 +205,8 @@ class ListTest(unittest.TestCase):
         text = (REPO_ROOT / "docs/guides/owner-words.md").read_text(encoding="utf-8")
         rows = index_table(text)
         self.assertEqual(rows[0], ["Do not write", "Write instead"])
-        self.assertEqual([tuple(r) for r in rows[1:]], [(a, b) for a, b, _ in owner_words.ROWS])
-        self.assertEqual(len(owner_words.ROWS), 27)
+        self.assertEqual([tuple(r) for r in rows[1:]], [(a, b) for a, b, _ in sprint.WORD_ROWS])
+        self.assertEqual(len(sprint.WORD_ROWS), 27)
 
     def test_the_shared_cases_find_what_the_case_file_says(self):
         cases = json.loads(CASES.read_text(encoding="utf-8"))
@@ -217,8 +217,8 @@ class ListTest(unittest.TestCase):
 
     def test_the_cases_cover_every_row(self):
         cases = json.loads(CASES.read_text(encoding="utf-8"))
-        rows = {f.row for case in cases for f in owner_words.found(case["text"])}
-        self.assertEqual(rows, set(range(len(owner_words.ROWS))))
+        rows = {f.row for case in cases for f in sprint.words_found(case["text"])}
+        self.assertEqual(rows, set(range(len(sprint.WORD_ROWS))))
 
     def test_an_explained_word_is_still_found(self):
         self.assertEqual(words("the land lock (its turn to merge)"), ["land lock"])
@@ -228,40 +228,40 @@ class ListTest(unittest.TestCase):
         self.assertEqual(words("verify-fix"), ["verify-fix"])
 
     def test_the_sentence_is_the_one_holding_the_word(self):
-        (hit,) = owner_words.found("All good. Waiting on the land\nlock now. Next is tests.")
+        (hit,) = sprint.words_found("All good. Waiting on the land\nlock now. Next is tests.")
         self.assertEqual((hit.word, hit.sentence), ("land lock", "Waiting on the land lock now."))
 
     def test_found_in_counts_a_word_once_across_texts_in_list_order(self):
-        hits = owner_words.found_in(["the guard said no", "rerun now", "rerun later"])
+        hits = sprint.words_found_in(["the guard said no", "rerun now", "rerun later"])
         self.assertEqual([f.word for f in hits], ["rerun", "the guard"])
         self.assertEqual(hits[0].sentence, "rerun now")
-        self.assertEqual(owner_words.found_in([]), [])
+        self.assertEqual(sprint.words_found_in([]), [])
 
     def test_a_word_two_patterns_find_is_found_once_with_its_first_sentence(self):
-        (hit,) = owner_words.found("The fix landed. We landed the change.")
+        (hit,) = sprint.words_found("The fix landed. We landed the change.")
         self.assertEqual((hit.word, hit.sentence), ("landed", "The fix landed."))
-        (hit,) = owner_words.found_in(["We landed the change.", "The fix landed."])
+        (hit,) = sprint.words_found_in(["We landed the change.", "The fix landed."])
         self.assertEqual(hit.sentence, "We landed the change.")
 
     def test_the_singular_and_plural_of_one_word_are_found_once(self):
         self.assertEqual(words("Open a pull request. Close the pull requests."), ["pull request"])
         self.assertEqual(words("The commit moved. Two commits left."), ["commit"])
-        self.assertEqual([f.word for f in owner_words.found_in(["a pull request", "the pull requests"])],
+        self.assertEqual([f.word for f in sprint.words_found_in(["a pull request", "the pull requests"])],
                          ["pull request"])
 
     def test_no_refusal_card_text_uses_a_listed_word(self):
         for field in (*contract_draft.FIELDS, *contract_draft.PROPOSED):
             with self.subTest(field=field):
-                self.assertEqual(owner_words.found(refusal(field)), [])
+                self.assertEqual(sprint.words_found(refusal(field)), [])
 
     def test_a_refusal_stored_before_the_label_changed_is_shown_in_todays_words(self):
         old = "The plan refused the branch finished work merges into: it is not a value"
-        self.assertEqual(owner_words.found(contract_draft.current_reason(old)), [])
+        self.assertEqual(sprint.words_found(contract_draft.current_reason(old)), [])
 
     def test_no_replacement_uses_a_listed_word(self):
-        for _, instead, _ in owner_words.ROWS:
+        for _, instead, _ in sprint.WORD_ROWS:
             with self.subTest(instead=instead):
-                self.assertEqual(owner_words.found(instead), [])
+                self.assertEqual(sprint.words_found(instead), [])
 
 
 class NoGlossTest(unittest.TestCase):
@@ -343,7 +343,7 @@ class FixedWordsTest(unittest.TestCase):
             self.assertIn(text, words)
 
     def test_the_sprint_and_page_words_use_no_listed_word(self):
-        flagged = [t for t in sprint_page_words() if owner_words.found(blank_fields(t))]
+        flagged = [t for t in sprint_page_words() if sprint.words_found(blank_fields(t))]
         self.assertEqual(flagged, [])
 
     def test_the_completed_lines_are_among_the_scanned_words(self):
@@ -357,7 +357,7 @@ class FixedWordsTest(unittest.TestCase):
     def test_each_shown_stage_word_uses_no_listed_word(self):
         for stage in sprints.REPORT_STAGES + sprints.CLOSING_STAGES + deliveries.STAGES:
             with self.subTest(stage=stage):
-                self.assertEqual(owner_words.found(view.CLOSING_OUTCOME_TEXT.get(stage, deliveries.stage_words(stage))), [])
+                self.assertEqual(sprint.words_found(view.CLOSING_OUTCOME_TEXT.get(stage, deliveries.stage_words(stage))), [])
         self.assertEqual(deliveries.stage_words("verifying"), "testing")
         self.assertEqual(deliveries.stage_words("landing"), "going in")
 
@@ -375,15 +375,15 @@ class FixedWordsTest(unittest.TestCase):
 
     def test_blank_fields_puts_a_number_in_each_format_field(self):
         self.assertEqual(blank_fields("{commit} at ${tokens}"), "1 at 1")
-        self.assertEqual(owner_words.found(blank_fields("{commit} at ${tokens}")), [])
-        self.assertNotEqual(owner_words.found("{commit} at ${tokens}"), [])
+        self.assertEqual(sprint.words_found(blank_fields("{commit} at ${tokens}")), [])
+        self.assertNotEqual(sprint.words_found("{commit} at ${tokens}"), [])
         self.assertEqual(words(blank_fields("on issue #{issue}.")), ["issue #1"])
 
     def test_prose_keeps_only_texts_with_whitespace(self):
         self.assertEqual(prose(["commit", "the adoption commit", "adopt.commit.failed"]), ["the adoption commit"])
 
     def test_the_consoles_fixed_words_use_no_listed_word(self):
-        flagged = [t for t in console_words() if owner_words.found(blank_fields(t))]
+        flagged = [t for t in console_words() if sprint.words_found(blank_fields(t))]
         self.assertEqual(flagged, [])
 
     def test_the_texts_other_modules_hand_the_page_are_among_the_scanned_words(self):
@@ -404,7 +404,7 @@ class FixedWordsTest(unittest.TestCase):
         self.assertIn("verify-fix-review", names)
         for name in names:
             with self.subTest(stop=name):
-                self.assertEqual(owner_words.found(stopped_line(name)), [])
+                self.assertEqual(sprint.words_found(stopped_line(name)), [])
         self.assertEqual(stopped_line("verify"), "stopped at testing the change, needs your decision")
         self.assertEqual(stopped_line("claim-lost"), "stopped at claim lost, needs your decision")
 
@@ -434,7 +434,7 @@ class StoredWordsTest(unittest.TestCase):
             with self.subTest(reason=before):
                 found = approve.adoptions([step_event(1, "t1", step="open_failed", reason=before)])
                 self.assertEqual(found["p1"]["reason"], after)
-                self.assertEqual(owner_words.found(after), [])
+                self.assertEqual(sprint.words_found(after), [])
 
     OLD = "the project asks for signed commits and this computer could not sign the adoption commit"
 
@@ -457,8 +457,8 @@ class StoredWordsTest(unittest.TestCase):
 
 
 class CommentLengthTest(unittest.TestCase):
-    def test_the_glossary_module_has_no_over_long_comment(self):
-        path = "python/agent_tools/console/owner_words.py"
+    def test_the_sprint_module_has_no_over_long_comment(self):
+        path = "python/agent_tools/console/sprint.py"
         snapshot = never_rise.Snapshot("a" * 40, {}, contents={path: (REPO_ROOT / path).read_bytes()})
         length = next(e for e in comment_lint.enforcers(None) if e.rule == comment_lint.LENGTH_RULE)
         self.assertEqual([v.text() for v in length.find(snapshot)], [])

@@ -1,6 +1,6 @@
 # Words not to write for the owner
 
-This table lists internal words that no status line, card, question or notice the owner reads may use, each with the few everyday words to write instead. The replacements are phrases that fit in a sentence, not definitions: rewrite the sentence with them, and never explain the internal word instead ([the plain-words rule](./write-for-the-owner.md)). The list is only a check's input. The console keeps a copy in `python/agent_tools/console/owner_words.py`, with the forms each row finds, and a test fails when the first two cells of the two differ.
+This table lists internal words that no status line, card, question or notice the owner reads may use, each with the few everyday words to write instead. The replacements are phrases that fit in a sentence, not definitions: rewrite the sentence with them, and never explain the internal word instead ([the plain-words rule](./write-for-the-owner.md)). The list is only a check's input. The console keeps a copy in `python/agent_tools/console/sprint.py`, with the forms each row finds, and a test fails when the first two cells of the two differ.
 
 Words that are also ordinary English are never flagged bare. This covers main, head, look, held, land, claim, issue, profile, guard, brief, queued and activate. They are flagged only in their internal form: on main, the head, look card, held issue, landing a change, land lock, a claim on files, issue plus a number, brief version, activation of the host.
 

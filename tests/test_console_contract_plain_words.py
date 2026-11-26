@@ -6,7 +6,7 @@ import json
 import re
 import unittest
 
-from agent_tools.console import owner_words
+from agent_tools.console import sprint
 
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures
 from .test_console_sprint_command import run_sprint
@@ -43,7 +43,7 @@ class ContractPlainWordsTest(unittest.TestCase):
         self.assertGreaterEqual(len(copy), 5)
         for line in copy:
             with self.subTest(line=line):
-                self.assertEqual([f.word for f in owner_words.found(line)], [])
+                self.assertEqual([f.word for f in sprint.words_found(line)], [])
 
 
 if __name__ == "__main__":

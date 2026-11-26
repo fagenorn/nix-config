@@ -41,7 +41,7 @@ On success it prints `sprint: report sent` and exit 0. The command validates no 
 pictures' own rules: the console decides, in one place.
 After the console accepts it, the command prints to stderr one line `sprint: warning: rewrite
 "<sentence>" without "<word>"; write instead: <write instead>` per listed word
-(`agent_tools.console.owner_words`) that the status line or the next step uses, once each and in list order; the text is
+(`WORD_ROWS`) that the status line or the next step uses, once each and in list order; the text is
 sent and stored as before and the exit stays 0.
 
 `pictures` is optional on a brief and on a report, at most 8, each member
@@ -135,7 +135,7 @@ answer: <error>` and exit 1. Beyond the pictures' own rules the command validate
 round: the console decides, in one place.
 After the console accepts it, the command prints to stderr one line `sprint: warning: rewrite
 "<sentence>" without "<word>"; write instead: <write instead>` per listed word
-(`agent_tools.console.owner_words`) that a question's ask, context or options uses, once each and in list
+(`WORD_ROWS`) that a question's ask, context or options uses, once each and in list
 order; the text is sent and stored as before and the exit stays 0.
 
 `sprint withdraw-question` reads the secret the same way and sends `POST /api/withdraw-question` with
@@ -154,7 +154,7 @@ refusal is `sprint: refused <status>: <text>` and exit 1. A file that cannot be 
 object is exit 2 with no request sent; a 200 answer without an integer `notice` is `sprint: refused
 200: unreadable answer: <error>` and exit 1. After the console accepts it, the command prints to stderr
 one line `sprint: warning: rewrite "<sentence>" without "<word>"; write instead: <write instead>` per
-listed word (`agent_tools.console.owner_words`) that the notice's text, area or end time uses, once each and in list order;
+listed word (`WORD_ROWS`) that the notice's text, area or end time uses, once each and in list order;
 the text is sent and stored as before and the exit stays 0.
 
 `sprint notices` reads the secret the same way and sends `POST /api/notices` with `{"sprint_id",
@@ -300,6 +300,28 @@ or a picture file that cannot be read, or a brief, report, closing report or rou
 or a `brief` or `report` secret when the object names a `file` member, that is not printable
 ASCII (it travels in a header) is stderr `sprint: the secret is not printable ASCII, so it cannot go
 in a header: no request sent` and exit 2, with no request sent; bad arguments are exit 2. The secret is printed nowhere.
+
+The plain-words check: the console's runtime copy of the do-not-write list, and the rule that finds a listed word in a text.
+
+Why it exists: `docs/guides/owner-words.md` is the source of the list, but the console package does not ship
+`docs/`, so `WORD_ROWS` is a copy of that table, row for row and in table order, plus the forms each row finds.
+`tests/test_console_owner_words.py` fails when the first two cells of the two differ.
+
+The match rule: each pattern of a row is compiled as a whole-word, case-insensitive match. The word characters
+are ASCII letters and digits only, case folding is ASCII only, and a space in a pattern matches any run of the
+six ASCII separators (space, tab, newline, carriage return, form feed, vertical tab), never `\\s`. Where a
+pattern has a group named `w`, the reported word is that group and the rest of the pattern is only the context
+that must surround it; otherwise the whole match is reported. Of the matches that overlap, the longest wins.
+Words that are also ordinary English are listed only in their internal form, so the patterns carry that form.
+The page of ordinary sentences in `tests/fixtures/console/owner-words-ordinary.txt` and the cases in
+`tests/fixtures/console/owner-words-cases.json` hold the rule to what it finds and what it leaves alone.
+
+Nothing clears a word: a text that also explains the word, in brackets or elsewhere, still has the word found.
+
+The four names: `WORD_ROWS` (the `(do_not_write, write_instead, patterns)` rows), `WordFound` (a `row`, `pattern`,
+`word` and `sentence`), `words_found(text)` (the first match of each pattern in `text`, in list order) and
+`words_found_in(texts)` (the first `WordFound` of each pattern across `texts`, in list order). A word that
+two patterns of a row both find is one word. `WORD_SEPARATORS`, `WORD_MAIN`, `WORD_GUARD` and `WORD_CHANGE` are the shared fragments.
 """
 
 from __future__ import annotations
@@ -315,9 +337,10 @@ import sys
 import time
 from collections.abc import Callable, Iterable
 from pathlib import Path
+from typing import NamedTuple
 
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
-from agent_tools.console import (manager, own_reads, owner_words, permit, project_question_hook,
+from agent_tools.console import (manager, own_reads, permit, project_question_hook,
                                  prompt_card, service, sprints)
 from agent_tools.console.console import port_number
 
@@ -590,9 +613,130 @@ def notice_texts(notice: dict) -> list[str]:
     return [notice[k] for k in ("text", "what", "until") if isinstance(notice.get(k), str)]
 
 
+WORD_SEPARATORS = "[ \t\n\r\f\v]+"
+
+WORD_MAIN = ("(?-i:main)(?! (?!(?:and|or|but|now|yet|again|already|since|after|before|first|today|too|so|then"
+        "|is|was|with|by|at|in|for|yesterday|tomorrow|tonight)(?![0-9A-Za-z]))[A-Za-z])")
+# "the guard", unless a person is meant: a verb of a person at a gate, or a gate, door or post later in the sentence.
+WORD_GUARD = ("the guard(?:['’]s)?(?! (?:opened|closed|watched|stood|waved|walked|nodded|smiled|patrolled|locked|unlocked"
+         "|yawned|saluted|looked|waited)(?![0-9A-Za-z]))"
+         "(?![^.!?]*(?<![0-9A-Za-z])(?:gates?|doors?|prison|castle|palace|museum|bank|duty|shift|uniform|badge)"
+         "(?![0-9A-Za-z]))(?: (?:policy|policies|rules?|hooks?|decisions?))?")
+WORD_CHANGE = "(?:changes?|fix(?:es)?|PRs?|pull requests?|deliver(?:y|ies)|issues?)"
+WORD_ROWS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    ("land lock, merge lock", "its turn to merge", ("land locks?", "merge locks?")),
+    ("pull request, PR", "the proposed change", ("pull requests?", "PRs?")),
+    ("rerun", "ran the failed check again", ("re-?run(?:s|ning)?",)),
+    ("CI", "the automatic checks", ("CI",)),
+    ("held issue", "merged, waiting for proof it works in real use", ("held issues?",)),
+    ("verify, verification", "testing the change (before it goes in); checking it works in real use (after)",
+     ("verif(?:y|ies|ied|ying)", "verifications?")),
+    ("landed, landing (a change)", "went in, is going in",
+     ("(?:[0-9]+|" + WORD_CHANGE + ") (?:(?:is|are|was|were|has|have|had|just|now|already|been|being|still) )*"
+      "(?P<w>landed|landing)",
+      "(?P<w>landed|landing) (?:(?:the|this|that|a|its|their) )?" + WORD_CHANGE,
+      "(?P<w>landed|landing) (?:on|in|into) " + WORD_MAIN)),
+    ("slice", "step", ("slices?",)),
+    ("brief version", "the new version of the plan", ("brief versions?",)),
+    ("the guard, a guard refusal", "the safety check", (WORD_GUARD, "guard refusals?")),
+    ("a claim on files", "a note of the files it is working on",
+     ("claims? on (?:(?:the|its|their|these|those) )?files?",)),
+    ("look card", "your look at how it appears", ("look cards?",)),
+    ("live fault", "a problem users are hitting now", ("live faults?",)),
+    ("commit, sha, the head", "the latest version of the change",
+     ("commit(?:s|ted|ting)?", "shas?", "(?:the|" + WORD_CHANGE + "['’]s) head(?! of(?![0-9A-Za-z]))")),
+    ("on main, the branch", "the main version, the change's own copy", ("on " + WORD_MAIN, "into " + WORD_MAIN, "the branch(?:es)?")),
+    ("issue plus a number", "the task, named by its title", ("issues? #?[0-9]+",)),
+    ("milestone", "the sprint's task list", ("milestones?",)),
+    ("Conformance, lint", "the house-rule checks", ("conformance", "lint(?:s|ed|ing)?")),
+    ("fix wave", "a round of fixes", ("fix waves?",)),
+    ("activation of the host", "switching this computer to the new version",
+     ("activat(?:e|es|ed|ing|ion) (?:of )?(?:the|this) host", "host activations?")),
+    ("AC plus a number", "say what must be true", ("AC(?: )?[0-9]+",)),
+    ("stage names used as nouns (final-review, verify-fix and the like)", "say what is happening",
+     ("final-review", "plan-review", "verify-fix", "fix-wave", "fix-ci", "look-fix", "ws-check")),
+    ("ready mode", "built and tested, not yet proposed", ("ready(?:-| )mode",)),
+    ("sync (with main)", "brought up to date with the main version",
+     ("(?P<w>sync(?:s|ed|ing)?) (?:[A-Za-z']+ ){0,3}?(?:with|to|onto|from|into|against) (?:the |origin/)?" + WORD_MAIN,)),
+    ("flaky", "fails now and then for no real reason", ("flaky", "flakiness")),
+    ("tokens", "say the cost in dollars, or leave it out", ("tokens",)),
+    ("worktree, engine, workflow, delivery program", "leave it out; say what is being done",
+     ("worktrees?", "engines?", "workflows?", "delivery programs?")),
+)
+
+
+class WordFound(NamedTuple):
+    row: int
+    pattern: int
+    word: str
+    sentence: str
+
+
+def _compile_word(fragment: str) -> re.Pattern[str]:
+    return re.compile("(?<![0-9A-Za-z])" + fragment.replace(" ", WORD_SEPARATORS) + "(?![0-9A-Za-z])",
+                      re.IGNORECASE | re.ASCII)
+
+
+_WORD_PATTERNS = tuple(tuple(_compile_word(p) for p in patterns) for _, _, patterns in WORD_ROWS)
+_WORD_SEPARATOR = re.compile(WORD_SEPARATORS)
+_SENTENCE_END = re.compile(r"[.!?](?=[ \t\n\r\f\v]|\Z)")
+
+
+def _fold_space(text: str) -> str:
+    return _WORD_SEPARATOR.sub(" ", text).strip()
+
+
+def _sentence_of(text: str, start: int, end: int) -> str:
+    before = [m.end() for m in _SENTENCE_END.finditer(text) if m.end() <= start]
+    after = _SENTENCE_END.search(text, end)
+    return _fold_space(text[before[-1] if before else 0:after.end() if after else len(text)])
+
+
+def words_found(text: str) -> list[WordFound]:
+    """The first match of each pattern in `text`, longest first among overlaps, in list order.
+
+    One word that two patterns find counts once.
+    """
+    matches = []
+    for row, patterns in enumerate(_WORD_PATTERNS):
+        for pattern, rx in enumerate(patterns):
+            for m in rx.finditer(text):
+                start, end = m.span("w") if "w" in rx.groupindex else m.span()
+                matches.append((start, end, row, pattern))
+    kept: list[tuple[int, int, int, int]] = []
+    for start, end, row, pattern in sorted(matches, key=lambda m: (-(m[1] - m[0]), m[0], m[2], m[3])):
+        if all(end <= k[0] or k[1] <= start for k in kept):
+            kept.append((start, end, row, pattern))
+    # One warning per pattern, then one per surface word of a row: two patterns that find one word warn once.
+    firsts: dict[tuple[int, int], tuple[int, int]] = {}
+    for start, end, row, pattern in sorted(kept, key=lambda k: (k[0], k[2], k[3])):
+        firsts.setdefault((row, pattern), (start, end))
+    seen: dict[tuple[int, str], tuple[int, int, int]] = {}
+    for (row, pattern), (start, end) in sorted(firsts.items(), key=lambda i: (i[1], i[0])):
+        seen.setdefault((row, _fold_space(text[start:end]).casefold()), (pattern, start, end))
+    return [WordFound(row, pattern, _fold_space(text[start:end]), _sentence_of(text, start, end))
+            for (row, _), (pattern, start, end) in sorted(seen.items(), key=lambda i: (i[0][0], i[1][0]))]
+
+
+def words_found_in(texts: Iterable[str]) -> list[WordFound]:
+    """The first `WordFound` of each pattern across `texts`, in list order; one word two patterns find is one."""
+    patterns: set[tuple[int, int]] = set()
+    words: set[tuple[int, str]] = set()
+    first: dict[tuple[int, int], WordFound] = {}
+    for text in texts:
+        for f in words_found(text):
+            if (f.row, f.pattern) in patterns:
+                continue
+            patterns.add((f.row, f.pattern))
+            if (f.row, f.word.casefold()) not in words:
+                words.add((f.row, f.word.casefold()))
+                first[(f.row, f.pattern)] = f
+    return [first[key] for key in sorted(first)]
+
+
 def warn(texts: Iterable[str]) -> None:
-    for f in owner_words.found_in(texts):
-        print(WARNING.format(sentence=f.sentence, word=f.word, instead=owner_words.ROWS[f.row][1]), file=sys.stderr)
+    for f in words_found_in(texts):
+        print(WARNING.format(sentence=f.sentence, word=f.word, instead=WORD_ROWS[f.row][1]), file=sys.stderr)
 
 
 class HookFailure(Exception):
@@ -757,7 +901,10 @@ def prompt_reply(text: str, secret: str, sprint: str, nonce: str) -> tuple[int |
 
 
 def ask_signed(port: int, sprint: str, secret: str, body: dict) -> tuple[int | None, str]:
-    """The prompt number and state the console answers to `body`, sent with a fresh nonce and an `auth` and no secret."""
+    """The prompt number and state the console answers to `body`, sent with a fresh nonce and an `auth`.
+
+    The secret itself is not sent.
+    """
     fields = {**body, "nonce": secrets.token_hex(16)}
     sent = {**fields, "auth": prompt_card.request_auth(secret, prompt_card.signed_bytes(fields))}
     text = ask(port, "POST", prompt_card.ASK_PATH, json.dumps(sent).encode())
