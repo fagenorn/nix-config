@@ -125,6 +125,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.parse
 import urllib.request
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -661,8 +662,11 @@ def write_record(path: Path, document: dict) -> None:
 
 def kill_line(entry: dict) -> str:
     """The one-line wire format of a floor kill, shared by the floor daemon's log and the watch log."""
+    workload = (
+        f" workload={urllib.parse.quote(entry['workload'], safe='/:')}" if "workload" in entry else ""
+    )
     return (
-        f"{entry['at']} memory_kill reason={entry['reason']} owner={entry['owner']}"
+        f"{entry['at']} memory_kill reason={entry['reason']} owner={entry['owner']}{workload}"
         f" root_pid={entry['root_pid']} root={json.dumps(entry['root_command'][:200])}"
         f" processes={entry['processes']} tree_gib={entry['tree_bytes'] / GIB:.1f}"
         f" available_before_gib={entry['available_before_bytes'] / GIB:.1f}"

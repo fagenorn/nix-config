@@ -6,7 +6,10 @@ belongs to a declared owner: the agent user, or a CI runner user.
 - An agent-user process is a direct member of the workload `agent:<dir>` when its cwd is inside a
   declared root glob (`<dir>` is the part of the cwd the glob matched); otherwise it joins the
   workload of its nearest ancestor, and has none when the walk meets a protected or undeclared
-  ancestor, or pid 1.
+  ancestor, or pid 1. An agent-user process that no root reaches joins `agent:session:<pid>`, rooted
+  at the child of its nearest declared session program (`--agent-session`) among its ancestors; a
+  session process is never a member of that grouping (inside a declared root it joins that rooted
+  workload), and a process with no session ancestor is in no workload.
 - A runner-user `Runner.Worker` starts the workload `ci:<user>:<pid>` and its descendants join it;
   a runner-user process whose parent is pid 1 and that is not protected joins `ci:<user>:orphans`.
 - A process of any other user is never in a workload, wherever its cwd or ancestors are.
@@ -17,7 +20,9 @@ it, and each service process the host runs for the system (the process only, not
 The selection is pure over a process table, so it runs against stubbed tables. The enforcement loop
 reaches the machine only through `Io`: it samples available memory, ends the largest workload while
 memory stays under the floor for the declared samples (and any workload over the run bound), and
-records each kill. A floor kill must be able to help: the largest remaining workload is ended only
+records each kill. A reading slower than `fastSampleSeconds` logs one
+`slow_reading reading=<available|services|omlx_pid|table> seconds=<n>` line and is kept in the record
+(`slow_readings`, the count, and `slow_reading_recent`, the last entries), and changes no decision. A floor kill must be able to help: the largest remaining workload is ended only
 when its footprint is at least the declared minimum and, added to available memory, reaches the
 floor. When it is not, nothing is ended, and the episode logs one `floor_unmet` line (available
 memory and the largest candidate's size) and keeps it in the record (`floor_unmets`, the count, and `floor_unmet_recent`, the last entries, each with
@@ -50,7 +55,7 @@ import signal
 import struct
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -69,6 +74,7 @@ from agent_tools.hosts.omlx_memory_watch import (
 
 PROG = "memory-floor"
 WORKER = "Runner.Worker"
+PROC_PIDPATHINFO_MAXSIZE = 4096
 RECENT = 50
 FOOTPRINT_OFFSET = 72
 CWD_OFFSET = 152
@@ -91,6 +97,7 @@ class Proc:
     command: str
     cwd: str | None
     footprint: int
+    executable: str | None = None
 
 
 @dataclass(frozen=True)
@@ -99,6 +106,7 @@ class Owners:
     agent_user: str
     agent_roots: tuple[str, ...]
     runners: tuple[tuple[int, str], ...]
+    agent_sessions: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -157,18 +165,23 @@ def protected_pids(table: dict[int, Proc], omlx_pid: int | None, service_pids: s
         children: dict[int, list[int]] = {}
         for proc in table.values():
             children.setdefault(proc.ppid, []).append(proc.pid)
+        visited = {omlx_pid}
         pending = [omlx_pid]
         while pending:
             for child in children.get(pending.pop(), ()):
-                if child not in protected:
+                if child not in visited:
+                    visited.add(child)
                     protected.add(child)
                     pending.append(child)
     return protected
 
 
-def _program(command: str) -> str:
-    first = command.split(None, 1)
-    return first[0].rsplit("/", 1)[-1] if first else ""
+def _is_program(proc: Proc, names: Collection[str]) -> bool:
+    """Whether the process runs a program in `names`, by its executable path or its command's first word."""
+    if proc.executable is not None and proc.executable.rsplit("/", 1)[-1] in names:
+        return True
+    first = proc.command.split(None, 1)
+    return bool(first) and first[0].rsplit("/", 1)[-1] in names
 
 
 def _depth(table: dict[int, Proc], pid: int) -> int:
@@ -203,7 +216,7 @@ def workloads(table: dict[int, Proc], owners: Owners, protected: set[int]) -> li
                     found = None
         elif proc.uid in runner_names:
             name = runner_names[proc.uid]
-            if _program(proc.command) == WORKER:
+            if _is_program(proc, (WORKER,)):
                 found = (f"ci:{name}:{pid}", name)
             elif proc.ppid == 1:
                 found = (f"ci:{name}:orphans", name)
@@ -214,9 +227,34 @@ def workloads(table: dict[int, Proc], owners: Owners, protected: set[int]) -> li
         assigned[pid] = found
         return found
 
+    def below_session(pid: int) -> int | None:
+        """The child of the nearest session program above `pid`, for an unrooted agent-user process."""
+        proc = table[pid]
+        if (
+            proc.uid != owners.agent_uid or pid <= 1 or pid in protected
+            or _is_program(proc, owners.agent_sessions)
+        ):
+            return None
+        current, seen = pid, {pid}
+        while True:
+            parent = table[current].ppid
+            above = table.get(parent)
+            if above is None or parent <= 1 or parent in seen or above.uid != owners.agent_uid:
+                return None
+            if _is_program(above, owners.agent_sessions):
+                return current
+            if parent in protected:
+                return None
+            seen.add(parent)
+            current = parent
+
     members: dict[str, tuple[str, list[int]]] = {}
     for pid in table:
         found = assign(pid)
+        if found is None:
+            session_root = below_session(pid)
+            if session_root is not None:
+                found = (f"agent:session:{session_root}", owners.agent_user)
         if found is not None:
             members.setdefault(found[0], (found[1], []))[1].append(pid)
 
@@ -355,10 +393,30 @@ def _complain(error: ReadingError) -> None:
     print(f"{PROG}: {error}", file=sys.stderr)
 
 
-def _candidates(io: Io, owners: Owners) -> tuple[list[Workload], int | None] | None:
+def _timed(limits: Limits, io: Io, record: dict, out: Callable[[str], None], name: str, call: Callable):
+    """Run one reading; when it takes longer than the fast interval, even by failing, log and record it."""
+    start = io.clock()
+    try:
+        return call()
+    finally:
+        elapsed = io.clock() - start
+        if elapsed > limits.fast_seconds:
+            at = io.now().isoformat(timespec="seconds")
+            seq = record.get("slow_readings", 0) + 1
+            record["slow_readings"] = seq
+            entry = {"seq": seq, "at": at, "reading": name, "seconds": round(elapsed, 1)}
+            record["slow_reading_recent"] = [*record.get("slow_reading_recent", []), entry][-RECENT:]
+            out(f"{at} slow_reading reading={name} seconds={elapsed:.1f}\n")
+
+
+def _candidates(
+    limits: Limits, io: Io, owners: Owners, record: dict, out: Callable[[str], None]
+) -> tuple[list[Workload], int | None] | None:
     """The workloads, largest first, and the oMLX pid; None, after naming the cause, when an input is unreadable."""
     try:
-        services, omlx_pid, table = io.services(), io.omlx_pid(), io.table()
+        services = _timed(limits, io, record, out, "services", io.services)
+        omlx_pid = _timed(limits, io, record, out, "omlx_pid", io.omlx_pid)
+        table = _timed(limits, io, record, out, "table", io.table)
     except ReadingError as error:
         _complain(error)
         return None
@@ -369,7 +427,7 @@ def enforce_once(
     limits: Limits, owners: Owners, io: Io, loop: Loop, record: dict, out: Callable[[str], None]
 ) -> float:
     try:
-        available = io.available()
+        available = _timed(limits, io, record, out, "available", io.available)
     except ReadingError as error:
         _complain(error)
         _stamp(limits, io, loop, record, None, limits.fast_seconds)
@@ -381,12 +439,13 @@ def enforce_once(
 
     def end(workload: Workload, reason: str) -> bool:
         """End one workload and read memory again; False when that reading failed."""
-        nonlocal available
+        nonlocal available, fresh
+        fresh = None
         before = available
         attempted.add(workload.root_pid)
         signals = end_workload(workload, io, limits.grace_seconds)
         try:
-            available = io.available()
+            available = _timed(limits, io, record, out, "available", io.available)
             readable = True
         except ReadingError as error:
             _complain(error)
@@ -396,7 +455,7 @@ def enforce_once(
             loop.unmet_open = False
         entry = {
             "seq": record.get("kills", 0) + 1, "at": io.now().isoformat(timespec="seconds"),
-            "reason": reason, "owner": workload.owner, "root_pid": workload.root_pid,
+            "reason": reason, "owner": workload.owner, "workload": workload.key, "root_pid": workload.root_pid,
             "root_command": workload.root_command, "processes": len(workload.pids),
             "tree_bytes": workload.size, "available_before_bytes": before,
             "available_after_bytes": available, "signals": signals,
@@ -406,14 +465,15 @@ def enforce_once(
         out(kill_line(entry))
         return readable
 
-    first = _candidates(io, owners)
+    first = _candidates(limits, io, owners, record, out)
+    fresh = first
     unreadable = first is None
     for workload in first[0] if first else ():
         if workload.size > limits.run_bound_bytes and not end(workload, "run_bound"):
             unreadable = True
             break
     while not unreadable and loop.streak >= limits.floor_samples:
-        again = _candidates(io, owners)
+        again, fresh = fresh or _candidates(limits, io, owners, record, out), None
         if again is None:
             break
         remaining = [w for w in again[0] if w.root_pid not in attempted]
@@ -502,6 +562,8 @@ def _stamp(limits: Limits, io: Io, loop: Loop, record: dict, available: int | No
     record.setdefault("recent", [])
     record.setdefault("floor_unmets", 0)
     record.setdefault("floor_unmet_recent", [])
+    record.setdefault("slow_readings", 0)
+    record.setdefault("slow_reading_recent", [])
     record.update(
         at=at, floor_bytes=limits.floor_bytes, run_bound_bytes=limits.run_bound_bytes,
         min_tree_bytes=limits.min_tree_bytes,
@@ -531,8 +593,11 @@ def read_record(path: Path) -> dict | None:
     return document if isinstance(document, dict) else None
 
 
-def _libproc_readers(path: str) -> tuple[Callable[[int], int], Callable[[int], str | None]]:
+def _libproc_readers(
+    path: str,
+) -> tuple[Callable[[int], int], Callable[[int], str | None], Callable[[int], str | None]]:
     lib = ctypes.CDLL(path)
+    lib.proc_pidpath.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
     lib.proc_pid_rusage.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p]
     lib.proc_pidinfo.argtypes = [
         ctypes.c_int, ctypes.c_int, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_int
@@ -550,7 +615,12 @@ def _libproc_readers(path: str) -> tuple[Callable[[int], int], Callable[[int], s
             return None
         return buffer.raw[CWD_OFFSET:].split(b"\0", 1)[0].decode(errors="replace") or None
 
-    return footprint, cwd
+    def executable(pid: int) -> str | None:
+        buffer = ctypes.create_string_buffer(PROC_PIDPATHINFO_MAXSIZE)
+        length = lib.proc_pidpath(pid, buffer, PROC_PIDPATHINFO_MAXSIZE)
+        return buffer.raw[:length].decode(errors="replace") if length > 0 else None
+
+    return footprint, cwd, executable
 
 
 def _memorystatus_control(path: str) -> Callable[[int, int, int, bytearray], int]:
@@ -585,14 +655,31 @@ def read_omlx_pid(launchctl: str, label: str) -> int | None:
         raise ReadingError(f"launchctl output not parseable ({error})") from None
 
 
-def build_io(args, owners: Owners) -> Io:
-    footprint, cwd = _libproc_readers(args.libproc)
-    relevant = {owners.agent_uid, *(uid for uid, _ in owners.runners)}
+def memory_reader(vm_stat: str, sysctl: str) -> Callable[[], int]:
+    """A reader of available memory: `vm_stat` runs every call, the host memory size is kept once it parses."""
+    total: str | None = None
 
     def available() -> int:
-        return read_available(
-            _run("vm_stat", [args.vm_stat]), _run("sysctl", [args.sysctl, "-n", "hw.memsize"])
-        )
+        nonlocal total
+        used = _run("vm_stat", [vm_stat])
+        fresh = total is None
+        read = total if total is not None else _run("sysctl", [sysctl, "-n", "hw.memsize"])
+        if fresh:
+            try:
+                int(read.strip())
+            except ValueError as error:
+                raise ReadingError(f"memory output not parseable ({error})") from None
+            total = read
+        return read_available(used, read)
+
+    return available
+
+
+def build_io(args, owners: Owners) -> Io:
+    footprint, cwd, executable = _libproc_readers(args.libproc)
+    relevant = {owners.agent_uid, *(uid for uid, _ in owners.runners)}
+
+    available = memory_reader(args.vm_stat, args.sysctl)
 
     def table() -> dict[int, Proc]:
         try:
@@ -605,6 +692,7 @@ def build_io(args, owners: Owners) -> Io:
                 pid, ppid, uid, command,
                 cwd(pid) if uid == owners.agent_uid else None,
                 footprint(pid) if uid in relevant else 0,
+                executable(pid) if uid in relevant else None,
             )
             for pid, (ppid, uid, command) in listing.items()
         }
@@ -661,6 +749,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--omlx-jetsam-priority", type=_declared_priority, required=True)
     run.add_argument("--agent-user", required=True)
     run.add_argument("--agent-root", action="append", required=True)
+    run.add_argument("--agent-session", action="append", default=[])
     run.add_argument("--runner-user", action="append", default=[])
     run.add_argument("--record", type=Path, required=True)
     run.add_argument("--label", default="org.nixos.omlx")
@@ -689,7 +778,7 @@ def _owners(args) -> Owners:
             runners.append((pwd.getpwnam(name).pw_uid, name))
         except KeyError:
             print(f"{PROG}: unknown runner user {name}, skipped", file=sys.stderr)
-    return Owners(agent_uid, args.agent_user, tuple(args.agent_root), tuple(runners))
+    return Owners(agent_uid, args.agent_user, tuple(args.agent_root), tuple(runners), tuple(args.agent_session))
 
 
 def _print_line(line: str) -> None:
@@ -719,11 +808,7 @@ def _log_line(line: str) -> None:
 
 
 def gate(args) -> int:
-    def available() -> int:
-        return read_available(
-            _run("vm_stat", [args.vm_stat]), _run("sysctl", [args.sysctl, "-n", "hw.memsize"])
-        )
-
+    available = memory_reader(args.vm_stat, args.sysctl)
     wait_for_floor(available, args.floor_gib * GIB, args.interval_seconds, time.sleep, _log_line)
     return 0
 
