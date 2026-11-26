@@ -52,4 +52,6 @@ rec {
   omlxJetsamPriority = 190;
   # How often the fseventsd trim daemon restarts it.
   fseventsdRestartMinutes = 60;
+  # Unowned memory (system footprint minus process footprints) over which the watcher alerts.
+  unownedAlertGiB = 5;
 }
