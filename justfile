@@ -274,6 +274,7 @@ agent-workflow-tests *args:
     tests/test_owner_actions.py \
     tests/test_forge_land_lock.py \
     tests/test_forge_land_lease.py \
+    tests/test_forge_land_deadline.py \
     tests/test_landing_reading.py \
     tests/test_verified_tree.py \
     tests/test_transaction_core.py \
