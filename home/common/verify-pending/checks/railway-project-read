@@ -1,5 +1,0 @@
-#!/bin/sh
-# Verify check for issue 1124: no railway on the system paths, and every registered Railway project's deploy
-# watch reads its deploys from the project's own dev shell. verify-pending runs it from the repository root
-# at the commit the block names.
-PYTHONPATH=python exec python3 -m agent_tools.verification.verify_checks railway-project-read "$@"

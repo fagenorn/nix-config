@@ -1,9 +1,0 @@
-#!/bin/sh
-# Verify check for issue 1466: the attempt-budget report of the repository at --repo-root, run from
-# this checkout's source, must name the 20 latest delivered attempts the tracker holds, compared
-# through gh pr list and gh issue view rather than the command's own reads: the same pulls, each
-# claim and merge time within 60 s, each duration within a minute, built from history. Prints one
-# JSON line. Exit 0 they agree, 1 they do not (a fallback report included), 2 the command, the
-# forge or the contract will not read, or the merged listing may be truncated.
-# verify-pending runs it from the repository root at the commit the block names.
-PYTHONPATH=python exec python3 -B -m agent_tools.verification.verify_checks attempt-budget-tracker "$@"
