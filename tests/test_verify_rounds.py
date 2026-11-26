@@ -17,7 +17,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.delivery import engine_caps, engine_ledger, verify_rounds
+from agent_tools.delivery import engine_ledger, size_caps, verify_rounds
 from tests.test_land_tally import LedgerMaker
 from tests.test_verified_tree import HERMETIC_GIT, ProjectCase
 
@@ -426,7 +426,7 @@ class RetestedTest(RoundCase):
 class PackageTest(unittest.TestCase):
     def test_no_engine_module_imports_verify_rounds(self):
         directory = Path(engine_ledger.__file__).parent
-        self.assertNotIn(directory / "verify_rounds.py", engine_caps.engine_modules(directory))
+        self.assertNotIn(directory / "verify_rounds.py", size_caps.engine_modules(directory))
 
 
 if __name__ == "__main__":
