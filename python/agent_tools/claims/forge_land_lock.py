@@ -1,7 +1,7 @@
-"""The cross-host land lock: `forge-claim land acquire|release|status|refresh|hold`.
+"""The cross-host land lock: `forge-claim land acquire|release|status|refresh|hold|permit`.
 
 The lock serialises landings on one branch across hosts. Each action takes `--repo <owner/name>`,
-`--branch <name>` and `--sha <40 hex>`; `--wait` and `--release` exist on `acquire` only, as does
+`--branch <name>` and `--sha <40 hex>` (`permit` takes it optionally, D14); `--wait` and `--release` exist on `acquire` only, as does
 `--follow-head`, which needs both (a usage error otherwise). `--lease` exists on `acquire` only
 and is a usage error with `--release` (D13); `hold` takes `--seconds` and `--detach`.
 
@@ -112,8 +112,8 @@ only on a refusal, so a wait that succeeds is attributed by these numbers. On th
 the lock, or when its last read failed) and the pull requests ahead of it, oldest first. The `acquire` verdicts are
 `acquired`, `already_held` (the lock is already at `--sha`, or at the followed head), `moved`,
 `held_by` and `lost_to`. Exit 0 is `acquired`, `already_held`, `moved`,
-`released` and every `status` verdict (`free`, `held_by`, `stale`); exit 3 is contention
-(`held_by`, `lost_to`, `land-contended`, and `not_held` on `release`); exit 1 a forge error; exit 2
+`released`, every `status` verdict (`free`, `held_by`, `stale`) and `admit` of `permit`; exit 3 is
+contention (`held_by`, `lost_to`, `land-contended`, and `not_held` on `release`) and `refuse` of `permit`; exit 1 a forge error; exit 2
 a usage error or `no_open_pr`.
 
 D8, `--wait` attempts at offsets 0, `POLL` (120 s), ... `BOUND` (3000 s), sooner when it is first
@@ -259,6 +259,25 @@ for the first in line and for every waiter behind it, and the lease that counts 
 effective one at the lock whichever pull request owns it; a poll reads the leases once, so a failed
 read takes nothing over in it; its absence, its lapse and its bound leave
 the holder to D4 as before.
+
+D14, the merge permit. `permit --repo R --branch B --pr N [--sha HEAD] [--pinned]` answers whether
+a merge of pull request N at HEAD may go on; it writes nothing, is never retried, and prints the D7
+object with `verdict` `admit` (exit 0) or `refuse` (exit 3) and `lock_sha`, a refusal adding
+`reason`; a forge error is exit 1 and a usage error exit 2. It reads the lock; no lock is the
+whole answer, `admit`. Otherwise it lists the leases, reads the forge's clock when there are any,
+and reads the lock again, last; only an HTTP 404 is an absent lock, any other answer that is not a
+ref is a forge error. `--pinned` says the merge carries `--match-head-commit` equal to HEAD; absent,
+it is unpinned. The first rule that applies decides: (1) no lock admits; (2) the lock moved or was
+released between its two reads refuses; (3) a HEAD that could not be read (no `--sha`) refuses; (4)
+a lock not at HEAD refuses, naming the pull request whose effective trusted lease sits at the lock
+when it is another's; (5) an unpinned merge under a lock refuses, since it would merge whatever
+head the forge then has; (6) a pull request with no lease of its own is judged by the lock alone
+and admitted, leases of other pull requests never count; (7) one whose leases are all dated more
+than `QUEUE_SKEW` ahead of the clock refuses; (8) one whose newest trusted lease is not at HEAD
+refuses; (9) one whose newest lease last beat `LEASE_LAPSE - MERGE_MARGIN` seconds ago or more
+refuses, the bound `HOLD_BOUND` being no part of it. A reason shows at most `REF_SHOWN` characters
+of the lock ref and is at most `REASON_MAX` long. A merge by hand on the forge's page, or by the
+console's Merge card, is never judged by it.
 """
 import os
 import re
@@ -296,7 +315,10 @@ HOLD_BOUND = 2400
 LEASE_BEAT = 60  # D13: `hold` rewrites the beat of its lease this often
 LEASE_LAPSE = 180  # D13: a lease whose beat is this far behind the forge's clock has lapsed
 HOLD_MAX = BOUND  # D13: the largest `hold --seconds`
-ACTIONS = ("acquire", "release", "status", "refresh", "hold")
+MERGE_MARGIN = LEASE_BEAT  # D14: a merge needs a beat this much younger than a lapse, one beat of room
+REF_SHOWN = 80  # D14: a refusal shows at most this many characters of the lock ref
+REASON_MAX = 300  # D14: a refusal's reason is at most this long; the guard refuses a longer one
+ACTIONS = ("acquire", "release", "status", "refresh", "hold", "permit")
 
 monotonic = time.monotonic
 sleep = time.sleep
@@ -1173,8 +1195,78 @@ def _status(args: Any) -> tuple[int, dict[str, Any]]:
                      by=holder(args.repo, pr))
 
 
+class Hold(NamedTuple):
+    """D14: what one permit read of the lock and its leases found; `confirmed` is the lock read again, last."""
+    lock: str | None
+    leases: tuple[Waiter, ...]
+    now: int | None
+    confirmed: str | None
+
+
+def read_hold(slug: str, branch: str) -> Hold:
+    """D14: the lock, then (only when there is one) the leases, the forge's clock when there are any, and
+    the lock again. A failed read raises."""
+    lock = fm.read_ref(slug, lock_ref(branch))
+    if lock is None:
+        return Hold(None, (), None, None)
+    leases = tuple(read_leases(slug, branch))
+    now = forge_now() if leases else None
+    return Hold(lock, leases, now, fm.read_ref(slug, lock_ref(branch)))
+
+
+def merge_problem(hold: Hold, branch: str, pr: int, head: str | None, *, pinned: bool) -> str | None:
+    """D14: why a merge of pull request `pr` at `head` is refused, None when it is admitted; the first
+    rule that applies decides."""
+    lock = hold.lock
+    if lock is None:
+        return None
+    ref = lock_ref(branch)
+    shown = ref if len(ref) <= REF_SHOWN else ref[:REF_SHOWN - 3] + "..."
+    if hold.confirmed != lock:
+        if hold.confirmed is None:
+            return f"the land lock {shown} at {lock[:7]} was released while the merge was judged"
+        return f"the land lock {shown} moved from {lock[:7]} to {hold.confirmed[:7]} while the merge was judged"
+    if head is None:
+        return f"the land lock {shown} is at {lock[:7]}, and the head of pull request {pr} could not be read"
+    now = hold.now
+    if lock != head:
+        text = f"the land lock {shown} is at {lock[:7]}, not at the head {head[:7]} of pull request {pr}"
+        holder = lease_at(hold.leases, lock, now) if now is not None else None
+        if holder is not None and holder.pr != pr:
+            text += f"; pull request {holder.pr} holds it under a lease"
+        return text
+    if not pinned:
+        return f"the land lock {shown} is held, so the merge must carry --match-head-commit {head}"
+    own = [w for w in hold.leases if w.pr == pr]
+    if not own:
+        return None
+    if now is None:
+        raise ValueError("a hold with leases carries the forge's clock")
+    live = trusted(own, now)
+    if not live:
+        return f"no land lease of pull request {pr} is dated at most {QUEUE_SKEW} s ahead of the forge's clock"
+    newest = effective(live)
+    assert newest is not None
+    if newest.oid != head:
+        return f"the newest land lease of pull request {pr} is at {newest.oid[:7]}, not at its head {head[:7]}"
+    age, limit = now - newest.beat, LEASE_LAPSE - MERGE_MARGIN
+    if age >= limit:
+        return (f"the newest land lease of pull request {pr} last beat {age} s ago, "
+                f"and a merge needs a beat under {limit} s")
+    return None
+
+
+def _permit(args: Any) -> tuple[int, dict[str, Any]]:
+    hold = read_hold(args.repo, args.branch)
+    problem = merge_problem(hold, args.branch, args.pr, args.sha, pinned=args.pinned)
+    if problem is None:
+        return 0, result(args, "admit", lock_sha=hold.lock)
+    return 3, result(args, "refuse", lock_sha=hold.lock, reason=problem)
+
+
 def run(args: Any, attempts: Attempts | None = None) -> tuple[int, dict[str, Any]]:
     """Run the parsed action; a caller that retries `acquire` passes the same `attempts` each try."""
     if args.action == "acquire":
         return _acquire(args, attempts)
-    return {"release": _release, "status": _status, "refresh": _refresh, "hold": _hold}[args.action](args)
+    return {"release": _release, "status": _status, "refresh": _refresh, "hold": _hold,
+            "permit": _permit}[args.action](args)

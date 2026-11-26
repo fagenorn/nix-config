@@ -192,8 +192,11 @@ def build_parser() -> argparse.ArgumentParser:
         sub = actions.add_parser(name)
         sub.add_argument("--repo", required=True, type=REPO)
         sub.add_argument("--branch", required=True, type=BRANCH)
-        sub.add_argument("--sha", required=True, type=SHA)
-        if name == "acquire":
+        sub.add_argument("--sha", required=name != "permit", type=SHA, default=None)
+        if name == "permit":
+            sub.add_argument("--pr", required=True, type=_issue)
+            sub.add_argument("--pinned", action="store_true")
+        elif name == "acquire":
             sub.add_argument("--wait", action="store_true")
             sub.add_argument("--release", action="store_true")
             sub.add_argument("--follow-head", action="store_true")

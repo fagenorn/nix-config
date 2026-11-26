@@ -33,6 +33,7 @@ transport class) to report when the ref is unchanged (D1). REST ref deletion is 
 Transport: the `gh api` calls, `ForgeError` and its transport class (issue 740), and the
 server-time read (D5) are in `agent_tools.system.forge_api`; this module only calls them.
 """
+import json
 import re
 from collections.abc import Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass
@@ -292,11 +293,16 @@ def latest_pr_event(slug: str, branch: str) -> datetime | None:
 
 
 def read_ref(slug: str, ref: str) -> str | None:
-    """The sha a full ref name (`refs/...`) points at, None when HTTP 404 says it is absent."""
-    payload = forge_api.gh_json(["api", f"repos/{slug}/git/ref/{quote(ref.removeprefix('refs/'), safe='/')}"],
-                                allow=(404,))
-    if payload is None:
+    """The sha a full ref name (`refs/...`) points at, None only when HTTP 404 says it is absent; an
+    answer that is not a ref object, JSON `null` included, is a `payload_invalid` error."""
+    status, out = forge_api.run_gh(["api", f"repos/{slug}/git/ref/{quote(ref.removeprefix('refs/'), safe='/')}"],
+                                   allow=(404,))
+    if status == 404:
         return None
+    try:
+        payload = json.loads(out)
+    except ValueError:
+        raise ForgeError("payload_invalid", "stdout is not JSON") from None
     obj = payload.get("object") if isinstance(payload, dict) else None
     sha = obj.get("sha") if isinstance(obj, dict) else None
     if (not isinstance(payload, dict) or payload.get("ref") != ref
