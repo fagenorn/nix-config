@@ -1,4 +1,4 @@
-"""The console reads the issues' titles of its running sprints from the tracker (#1793).
+"""The console reads the issues' titles of its running sprints from the tracker.
 
 Run: just agent-workflow-tests
 """
@@ -15,11 +15,12 @@ from datetime import datetime
 from pathlib import Path
 
 from agent_tools.console import deliveries, guest, movement, service, sprints
+from agent_tools.delivery import comment_lint, comment_syntax
 from agent_tools.system.forge_api import ForgeError
 
 from . import console_screenshots as shots
 from . import console_test_support as support
-from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures
 from .test_console_briefs import PARTS
 from .test_console_service import Case, sprint_entry
 
@@ -309,6 +310,26 @@ class TitlesServiceTest(Case):
             if goal != "Fix the settings page.":
                 words = " ".join(filter(None, (shown["now_text"], shown.get("work_text"))))
                 self.assertTrue(any(title in words for title in shots.stand_ins.TITLES.values()), goal)
+
+
+class CommentsNameNoIssueTest(unittest.TestCase):
+    """B18: no comment of the files this work touched names its own issue or pull request."""
+
+    FILES = (
+        "python/agent_tools/console/console.py", "python/agent_tools/console/deliveries.py",
+        "python/agent_tools/console/movement.py", "python/agent_tools/console/service.py",
+        "python/agent_tools/console/sprints.py", "tests/test_console_issue_titles.py",
+        "tests/test_console_page.py", "tests/test_console_page_work.py", "tests/test_console_work_sentence.py",
+    )
+
+    def test_no_comment_line_cites_issue_1793(self):
+        root = Path(__file__).resolve().parents[1]
+        cited = []
+        for path in self.FILES:
+            for block in comment_syntax.blocks(path, (root / path).read_text(encoding="utf-8")):
+                cited += [f"{path}:{number}" for number, text in enumerate(block.texts, block.first)
+                          if "1793" in text and comment_lint.references(text, "fagenorn/nix-config")]
+        self.assertEqual(cited, [])
 
 
 if __name__ == "__main__":

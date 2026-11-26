@@ -80,8 +80,8 @@ plan and the console pushes its branch and opens its pull request through `gh`; 
 refuses.
 
 It is also given `pull_reader=movement.read_pulls` (#1110), so a running sprint's pull requests are read
-from the forge to name what it waits on (`agent_tools.console.movement`), and `title_reader=movement.read_titles`
-(#1793), so a running sprint's issues are named by their titles from the tracker.
+from the forge to name what it waits on (`agent_tools.console.movement`), and `title_reader=movement.read_titles`,
+so a running sprint's issues are named by their titles from the tracker.
 
 Every minute it compares the console's own files, and the files the host's configuration is built from
 (from the host's configuration revision), with the integration branch on origin as the console's

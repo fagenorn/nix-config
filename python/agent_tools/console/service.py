@@ -1443,7 +1443,7 @@ it reads as no movement), `console: movement_release_invalid <project_id> <trans
 release store holds a transaction that is not readable; one line until a good read, and it moves
 nothing) and `console: movement_poll_failed <Type>: <message>` (an exception escaped a round; the
 loop goes on). The cost is two forge calls per project with a running sprint per `MOVEMENT_SECONDS`.
-Issue titles (#1793): with a `title_reader` (`movement.read_titles`) the thread then calls `poll_titles()`: at most one
+Issue titles: with a `title_reader` (`movement.read_titles`) the thread then calls `poll_titles()`: at most one
 forge call per project per `MOVEMENT_SECONDS`, none once its titles are known, `console: titles_read_failed <project_id> <Type>: <message>` on a failure (`movement.py`).
 The sessions half (#1185): under the same lock the poll computes, per running project,
 `view.sprint_sessions_of` (the live sessions that carry a running sprint's manager name, are its

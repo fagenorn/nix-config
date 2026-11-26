@@ -1,4 +1,4 @@
-"""A sprint's now line names its work by issue title, and its grid has a legend (#1793).
+"""A sprint's now line names its work by issue title, and its grid has a legend.
 
 Run: just agent-workflow-tests
 """

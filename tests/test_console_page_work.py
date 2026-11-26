@@ -1,4 +1,4 @@
-"""The page draws a sprint's work line and the legend beside its grid (#1793).
+"""The page draws a sprint's work line and the legend beside its grid.
 
 Run: just agent-workflow-tests
 """

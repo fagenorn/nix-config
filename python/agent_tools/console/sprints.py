@@ -236,7 +236,7 @@ next_step, pictures, wait_until, paused, finished)`. `sprint.reported` changes a
 (`STARTING`) and `checked_report` accepts the dict `report` without its `pictures` key; the report
 is then replaced (`at` is the event's `at`, `issues` a tuple of `(issue, stage)`, `inbox` a tuple,
 `next_step` the `next` member, `pictures` the read-back below, `wait_until` and `paused` the checked
-members or None; the fold checks without a clock, so a stored wait whose time has passed folds; `finished` is the issues the new report lists as `landed` that the previous report listed with another stage, in issue order, else the previous `finished` issues the new report still lists as landed: a first report or an issue first listed already landed adds none, and a run movement never changes it, #1793) and the sprint's observations are
+members or None; the fold checks without a clock, so a stored wait whose time has passed folds; `finished` is the issues the new report lists as `landed` that the previous report listed with another stage, in issue order, else the previous `finished` issues the new report still lists as landed: a first report or an issue first listed already landed adds none, and a run movement never changes it) and the sprint's observations are
 cleared; its movement (`moved_ms`) is kept (#1109). Every other report row changes nothing.
 
 Movement and observations (#1109): a `delivery.seen` row carries no sprint id and is read as the

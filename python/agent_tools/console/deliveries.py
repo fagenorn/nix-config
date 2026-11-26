@@ -679,7 +679,7 @@ def delivery_changes(
     return changes
 
 
-# The work words (#1793): what a sprint's block says it is working on, by issue title and never by number.
+# The work words: what a sprint's block says it is working on, by issue title and never by number.
 # Titles come from the tracker read the service makes, never from the report. Pure: no clock, no I/O.
 # `delivery` is every stage that is not landed, held, queued or dropped, `closed out` included.
 

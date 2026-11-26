@@ -122,7 +122,7 @@ read incrementally like the held reading (`_TURN_SEEN`, per file identity, throu
 line), so a poll costs what was appended; a file that shrank or was replaced is read again from its
 start, and an incomplete last line is read but not kept. The service uses it to clear a wait.
 
-Issue titles (#1793). `read_titles` asks the tracker what its issues are called, so a sprint's now line can
+Issue titles. `read_titles` asks the tracker what its issues are called, so a sprint's now line can
 name the work; no title is read from a report. One GraphQL query (`titles_query`, `titles_argv`) holds one
 `issueOrPullRequest(number: n)` alias `i<n>` per number, in the order given, and `titles_from_answer` reads
 `data.repository.i<n>` for each: a null or absent node is skipped (the number names nothing there), a node that
