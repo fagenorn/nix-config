@@ -642,15 +642,18 @@ def read_omlx_pid(launchctl: str, label: str) -> int | None:
 
 
 def memory_reader(vm_stat: str, sysctl: str) -> Callable[[], int]:
-    """A reader of available memory: `vm_stat` runs on every call, and the host's memory size is read once it succeeds."""
+    """A reader of available memory: `vm_stat` runs on every call, and the host's memory size is kept once a read of it parses."""
     total: str | None = None
 
     def available() -> int:
         nonlocal total
         used = _run("vm_stat", [vm_stat])
-        if total is None:
-            total = _run("sysctl", [sysctl, "-n", "hw.memsize"])
-        return read_available(used, total)
+        fresh = total is None
+        read = total if total is not None else _run("sysctl", [sysctl, "-n", "hw.memsize"])
+        result = read_available(used, read)
+        if fresh:
+            total = read
+        return result
 
     return available
 

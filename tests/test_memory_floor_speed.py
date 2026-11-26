@@ -208,7 +208,8 @@ class MemoryReaderTest(unittest.TestCase):
         vm_stat, sysctl = scratch / "vm_stat", scratch / "sysctl"
         vm_stat.write_text(f"#!/bin/sh\ncat {scratch}/vm.txt\n")
         sysctl.write_text(
-            f"#!/bin/sh\necho x >> {scratch}/count\n[ -e {scratch}/fail ] && exit 1\necho {self.TOTAL}\n"
+            f"#!/bin/sh\necho x >> {scratch}/count\n[ -e {scratch}/fail ] && exit 1\n"
+            f"[ -e {scratch}/blank ] && {{ echo; exit 0; }}\necho {self.TOTAL}\n"
         )
         for tool in (vm_stat, sysctl):
             tool.chmod(0o755)
@@ -235,6 +236,17 @@ class MemoryReaderTest(unittest.TestCase):
             with self.assertRaises(ReadingError):
                 read()
             os.remove(scratch / "fail")
+            self.assertEqual([read(), read()], [read_available(VM_STAT, self.TOTAL)] * 2)
+            self.assertEqual(len((scratch / "count").read_text().splitlines()), 2)
+
+    def test_an_unparseable_host_memory_size_is_read_again(self):
+        with tempfile.TemporaryDirectory() as directory:
+            scratch, read = self.tools(directory)
+            (scratch / "vm.txt").write_text(VM_STAT)
+            (scratch / "blank").write_text("")
+            with self.assertRaises(ReadingError):
+                read()
+            os.remove(scratch / "blank")
             self.assertEqual([read(), read()], [read_available(VM_STAT, self.TOTAL)] * 2)
             self.assertEqual(len((scratch / "count").read_text().splitlines()), 2)
 
