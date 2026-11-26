@@ -14,7 +14,7 @@ The tiers are:
 
 ([ADR-delivery-015](../areas/delivery/adr/015-tests-carry-a-tier-and-ci-reports-suite-time-growth.md))
 
-`just test-touched` runs the `fast` and `integration` members a branch touches: the touched test files, the test files named for or importing a changed module, the files naming a changed path, the engine's `tests/test_engine_*.py` when an engine module, procedure or test helper changes, and the lifecycle guard's adversarial table when the guard changes. When the branch changes a `.nix` file, `flake.lock` or another host build input, which CI cannot test because it builds no darwin configuration, it runs `just build` and then the whole suite, and its selection names that file. Deliveries run it with `lint` before a pull request (the contract's `workflow.verification_before_pull_request`), the engine's verify step included, and `Agent Workflow Tests` runs the whole suite on the pull request.
+`just test-touched` runs the `fast` and `integration` members a branch touches: the touched test files, the test files named for or importing a changed module, the files naming a changed path, the engine's `tests/test_engine_*.py` when an engine module, procedure or test helper changes, and the lifecycle guard's adversarial table when the guard changes. When the branch changes a `.nix` file, `flake.lock` or another host build input, which CI cannot test because it builds no darwin configuration, it runs `just build` and then the whole suite, and its selection names that file. Deliveries run it with `lint` and `conformance` (Conformance over every rule, as the required check runs it) before a pull request (the contract's `workflow.verification_before_pull_request`), the engine's verify step included, and `Agent Workflow Tests` runs the whole suite on the pull request.
 
 ### P16. A new test file declares its tier
 
@@ -26,7 +26,7 @@ A `fast` or `integration` test is a member of `agent-workflow-tests`, and a `nig
 
 ### P18. CI reports suite time growth
 
-CI keeps each completed run's suite time and every member's time, slowest first, as the `suite-timing` artifact. A pull request whose member time grows by more than 60 s over `main`, after the runner speed factor, gets a line in the `Suite Timing` job summary, and its author justifies the growth in the pull request or moves the test to `nightly`. ([ADR-delivery-015](../areas/delivery/adr/015-tests-carry-a-tier-and-ci-reports-suite-time-growth.md))
+CI's `Agent Workflow Tests` runs the suite as parallel shards, each running the members assigned it from the committed timings, and joins the shards' records into the `suite-timing` artifact: each completed run's suite time and every member's time, slowest first. A pull request whose member time grows by more than 60 s over `main`, after the runner speed factor, gets a line in the `Suite Timing` job summary, and its author justifies the growth in the pull request or moves the test to `nightly`. ([ADR-delivery-015](../areas/delivery/adr/015-tests-carry-a-tier-and-ci-reports-suite-time-growth.md))
 
 ### P19. A stress probe grows in bounded steps
 

@@ -140,6 +140,7 @@ class SprintEngine:
     sessions: frozenset[str] = frozenset()
     issues: frozenset[int] = frozenset()
     limit_until: str | None = None
+    stopped: bool = False
 
     @property
     def moves(self) -> bool:
@@ -172,7 +173,7 @@ NO_ENGINE = SprintEngine()
 def sprint_engine(states: Iterable[RunState], project: str, issues: Collection[int],
                   now_ms: int | None) -> SprintEngine:
     """The reading of the runs of `project` whose issue is in `issues`; see P9."""
-    moving, waits, sessions, shown, limits = False, set(), set(), set(), []
+    moving, stopped, waits, sessions, shown, limits = False, False, set(), set(), set(), []
     for state in states:
         if state.project != project or state.issue not in issues:
             continue
@@ -182,12 +183,13 @@ def sprint_engine(states: Iterable[RunState], project: str, issues: Collection[i
         shown.add(state.issue)
         kind = reading(state)
         moving = moving or kind == "moving"
+        stopped = stopped or (kind == "stopped" and state.stop["need"] != "nothing")  # type: ignore[index]
         if kind == "waiting":
             waits.add(state.wait["wait"])  # type: ignore[index]
             if state.wait["wait"] == "usage-limit" and state.wait["until"] is not None:  # type: ignore[index]
                 limits.append(state.wait["until"])  # type: ignore[index]
     return SprintEngine(moving, frozenset(waits), frozenset(sessions), frozenset(shown),
-                        min(limits, key=lambda until: parse_rfc3339_utc(until), default=None))
+                        min(limits, key=lambda until: parse_rfc3339_utc(until), default=None), stopped)
 
 
 @dataclass(frozen=True)

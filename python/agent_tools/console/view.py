@@ -113,8 +113,8 @@ and so is each open question of the registration's plan, and each retry, apply, 
 failure or trust card, see below, and each running sprint whose `ball` is `owner` and that no item
 above already counts: its manager cannot hear the console, #1229; it has no card, so the heading
 and its `DEAF_SENTENCE` are all that name it, #1247; and each open permission card, below, counts
-once. A manager's waiting state alone (a session waiting for an answer or a permission) counts
-nothing, #1424: only an open permission card does), else
+once, and each held sprint card (`held_sprint`). A manager's waiting state alone (a session waiting for an answer or a permission)
+counts nothing, #1424: only an open permission card does), else
 `ALL_OUT_HEADLINE` when every profile is out of usage, else `STALE_HEADLINE` when a registered
 project's tracker cannot be read, else `inbox.DONE_HEADLINE` when a project is registered, else "Nothing needs you".
 The sentence is `ALL_OUT_SENTENCE` when every profile is out of usage, else `STALE_SENTENCE` naming those projects when any is
@@ -125,14 +125,14 @@ when a profile's sign-in asks, else `ADOPTION_SENTENCE` when an adoption's pull 
 merge, else `QUESTION_SENTENCE` when any manager question is open, else `PERMISSION_SENTENCE` when any permission card is open (a
 held prompt is refused when its ten minutes run out, so it outranks every item below, a tracker
 item that waits included), else, when only sprints whose managers cannot hear the console are
-counted, `DEAF_SENTENCE`, else
+counted, `DEAF_SENTENCE`, else `card_entries.HELD_SENTENCE` when only held sprint cards are counted, else
 `REGISTER_SENTENCE` when a plan question, a retry, apply, confirm, failure or trust item offers an option (the page
 can answer it), else
 `REGISTER_TYPE_SENTENCE` when a plan question takes a typed answer (`text`), else
 `CHOOSE_SENTENCE` when an open item is a decision with questions (the page can answer it), else
 `ANSWER_SENTENCE` when an open item has answers (a verification prompt the page can answer), else
 `REGISTER_STEP_SENTENCE` when only plan questions with no offered answer are open, else
-`NEEDS_SENTENCE` when something is open, else, with no project registered, `ADOPTING_SENTENCE` ("An adoption is
+`NEEDS_SENTENCE` when something is open (`card_entries.HELD_MIXED_SENTENCE` beside a held card), else, with no project registered, `ADOPTING_SENTENCE` ("An adoption is
 under way; nothing is waiting on you.") when the view's `registration` (below) is running or holds
 an adoption, else `inbox.done_sentence` (how many sprints are working). The
 all-out promotion never changes `inbox_items`, and the statement keeps exactly its four keys; `next_expected` is `inbox.next_expected`.
@@ -222,6 +222,13 @@ one entry of `inbox.open`, after the stalls and the failed starts and before the
 
 `PROGRESS_SENTENCE` says what the page offers. The sentence precedence is all out, stale, briefs,
 stalls, progress, sign-in, questions, then the existing ones.
+
+A held sprint is one entry of `inbox.open`, derived as the `card_entries` module docstring says. Its quiet reading
+counts a working session associated with the sprint by `sprint_sessions_of` (a worker running a delivery of its
+issues, a manager known by session id alone), not only one carrying the manager's name, and restarts when its last
+open question is answered or taken back. `prompted_sprints` (sprint ids, default none) names sprints an owner-only
+permission card already asks about, so a guest view, which carries no card, raises no held card for them; it changes
+no ball and no count.
 
 A profile whose sign-in asks (#1010: `capacity["profiles"][i]["signin"]["ask"]` is true, a read of
 `entry.get("signin")` so a capacity without that member shows none) and that no colleague added (#1361,
@@ -513,7 +520,7 @@ only. `unmanaged` is always present, possibly empty, sorted by `root`.
                                | "closing" | "done" | "stopping" | "stopped",
                       "state_text": "<text>",
                       "ball": "manager" | "owner" | "nobody" | "waiting" | "paused" | null,
-                      "ball_text": "<text>" | null, "now_text": "<sentence>" | null,
+                      "ball_text": "<text>" | null, "held_since": "<ISO time>" | null, "now_text": "<sentence>" | null,
                       "now_until": "<time>" | null,
                       "stated_at", "started_by": "<login>" | null, "age_text",
                       "manager_text": <text> | null,
@@ -815,8 +822,8 @@ from pathlib import PurePosixPath
 from types import MappingProxyType
 
 from agent_tools.console import (
-    card_entries, contract_draft, engine_runs as engine_runs_module, inbox, project_question,
-    question_records, spend as spend_module)
+    card_entries, contract_draft, engine_runs as engine_runs_module, inbox,
+    project_question, question_records, spend as spend_module)
 from agent_tools.console.activation import Activation
 from agent_tools.console.activation_run import LastRun
 from agent_tools.console.capacity import EMPTY, MoveNote
@@ -876,7 +883,6 @@ from agent_tools.console.sprints import (
     NO_PROGRESS_TEXT,
     NUDGE_ACTION_TEXT,
     NONE,
-    NOTICE_OWNER,
     NOT_PICKED_UP,
     NOT_PICKED_UP_TEXT,
     NOW_BRIEF_TEXT,
@@ -906,7 +912,6 @@ from agent_tools.console.sprints import (
     NOW_WAIT_TEXT,
     ON_TRACK,
     ON_TRACK_TEXT,
-    OVERLAP_UNSETTLED,
     PAUSED,
     PICKED_UP,
     PICKED_UP_TEXT,
@@ -946,7 +951,6 @@ from agent_tools.console.sprints import (
     SprintState,
     WAIT_UNTIL,
     age_text,
-    claim_overlaps,
     fault_entry,
     closing_text,
     cut,
@@ -959,9 +963,7 @@ from agent_tools.console.sprints import (
     message_state,
     open_questions,
     pending_looks,
-    project_notices,
     open_faults,
-    open_notices,
     open_owner_notices,
     progress_text,
     sprint_title,
@@ -984,15 +986,8 @@ CLOSING_OUTCOME_TEXT = {LANDED: "landed", HELD: "held for verification", DROPPED
 FINISHED_LABEL = "Finished sprints"
 QUESTIONS_LABEL = "Questions"
 UNMANAGED_LABEL = "Not yet managed"
-NOTICE_KIND_TEXT = {"claim": "Claim", "heads-up": "Heads-up", "hand-off": "Hand-off"}
-NOTICE_UNTIL_TEXT = "until {until}"
-NOTICE_OWNER_TEXT = "for you"
-NOTICE_FOR_TEXT = "for {title}"
-NOTICE_OTHER_TEXT = "for another sprint"
-NOTICE_YOU_TEXT = "You"
 LIVE_FAULT_TEXT = "Live fault in production on #{issue}: {observed}, seen {when}, proven by {proven}"
-OVERLAP_UNSETTLED_TEXT = ("{first} and {second} both fix a live fault in {files}; "
-                          "the rule could not decide which lands first")
+OVERLAP_UNSETTLED_TEXT = card_entries.OVERLAP_UNSETTLED_TEXT
 ASK_WORKING_TEXT = "Working on it"
 ASK_ANSWERED_TEXT = "Answered"
 ASK_TIMED_OUT_TEXT = "Timed out"
@@ -1544,6 +1539,21 @@ def _base_ms(state: SprintState) -> int:
     return max(times, default=0)
 
 
+def _closed_ms(state: SprintState) -> int | None:
+    """The latest time a question of the sprint was answered or taken back, else None; a time that
+    does not read as one is left out."""
+    times = []
+    for question in state.questions:
+        for text in (question.answered_at, question.withdrawn_at):
+            if text is None:
+                continue
+            try:
+                times.append(_millis(text))
+            except (TypeError, ValueError):
+                continue
+    return max(times, default=None)
+
+
 def sprint_quiet_for(state: SprintState, now_ms: int | None, listed: Collection[str],
                      waits: WaitSignals = NO_WAITS) -> int | None:
     """The one movement reading of a running sprint (#1109): None while it moves, else the
@@ -1868,7 +1878,8 @@ def _sprint_entry(state: SprintState, now_ms: int | None, managers: bool, sessio
                   movement: ProjectMovement | None = None, wait_lines: Sequence[Mapping] = (),
                   waits_of: Callable[[DeliveryState], WaitSignals | None] = lambda run: None, prompted: bool = False,
                   engine: engine_runs_module.SprintEngine = engine_runs_module.NO_ENGINE,
-                  move: MoveNote | None = None) -> dict:
+                  move: MoveNote | None = None, associated: Sequence[str] = (),
+                  permission_held: bool = False) -> dict:
     stated_ms = _millis(state.stated_at)
     elapsed = 0 if now_ms is None else now_ms - stated_ms
     report = state.report
@@ -1902,6 +1913,15 @@ def _sprint_entry(state: SprintState, now_ms: int | None, managers: bool, sessio
     deaf = any(m.held and m.session_id in manager_ids for m in own)
     ball = sprint_ball(state, now_ms, waiting, listed, waits, failed_start=failed, deaf=deaf,
                        prompted=prompted)
+    quiet = sprint_quiet_for(state, now_ms, [*listed, *associated], waits)
+    closed = _closed_ms(state)
+    if quiet is not None and closed is not None:
+        quiet = min(quiet, max(0, now_ms - closed))
+    held = card_entries.held_since(
+        now_ms, quiet,
+        ball != BALL_NOBODY or permission_held or state.stop_at is not None or quota is not None or bool(checks)
+        or engine.stopped or not sprint_open_issues(state)
+        or (state.manager is not None and state.manager.state == WAITING))
     hold = stated_hold(state, now_ms)
     now_text = move.text if move is not None else sprint_now(
         state, quota, listed, waiting, stages, ball, sprint_wait(state, now_ms, listed, waits),
@@ -1916,6 +1936,7 @@ def _sprint_entry(state: SprintState, now_ms: int | None, managers: bool, sessio
         "state_text": text,
         "ball": ball,
         "ball_text": None if ball is None else BALL_TEXT[ball],
+        "held_since": None if held is None else _utc(held),
         "now_text": now_text,
         "now_until": (hold[1] if hold is not None and hold[0] == WAIT_UNTIL
                       and now_text == NOW_WAIT_TEXT
@@ -1991,7 +2012,9 @@ def _project_entry(state: ProjectState, sessions: Sequence[SessionState],
                    waits: Sequence[Mapping] = (), read: ReadState | None = None,
                    questions: Mapping | None = None, prompted: Collection[str] = (),
                    engine_runs: Sequence[Mapping] = (), engine_states: Sequence[engine_runs_module.RunState] = (),
-                   moves: Mapping[str, MoveNote] | None = None) -> dict:
+                   moves: Mapping[str, MoveNote] | None = None,
+                   associated: Mapping[str, Sequence[str]] | None = None,
+                   permission_held: Collection[str] = ()) -> dict:
     manager_ids: dict[str, set[str]] = {}
     for sprint in sprints:
         ids = {s.session_id for s in (sprint_sessions or {}).get(sprint.sprint_id, ())}
@@ -2013,7 +2036,9 @@ def _project_entry(state: ProjectState, sessions: Sequence[SessionState],
                               prompted=s.sprint_id in prompted,
                               engine=engine_runs_module.sprint_engine(
                                   engine_states, s.project_id, sprint_issue_numbers(s), now_ms),
-                              move=(moves or {}).get(s.sprint_id))
+                              move=(moves or {}).get(s.sprint_id),
+                              associated=(associated or {}).get(s.sprint_id, ()),
+                              permission_held=s.sprint_id in permission_held)
                 for s in group]
 
     return {
@@ -2123,60 +2148,6 @@ def _question_threads(questions: Sequence[project_question.AskedQuestion],
                          "questions": [one(q) for q in group],
                          "follow_up": group[-1].state == project_question.ANSWERED}
                         for group in threads]}
-
-
-def _notice_to_text(to: str | None, titles: Mapping[str, str]) -> str:
-    if to == NOTICE_OWNER:
-        return NOTICE_OWNER_TEXT
-    if to in titles:
-        return NOTICE_FOR_TEXT.format(title=titles[to])
-    return NOTICE_OTHER_TEXT
-
-
-def _overlap_entries(group: Iterable[SprintState], titles: Mapping[str, str],
-                     project_id: str) -> list[dict]:
-    """One page line for each pair of open claims the default rule cannot order."""
-    return [{
-        "sprints": list(reading["sprints"]),
-        "files": list(reading["files"]),
-        "text": OVERLAP_UNSETTLED_TEXT.format(
-            first=titles[reading["sprints"][0]], second=titles[reading["sprints"][1]],
-            files=", ".join(reading["files"])),
-    } for reading in claim_overlaps(project_notices(group, project_id))
-        if reading["rule"] == OVERLAP_UNSETTLED]
-
-
-def _notice_entries(group: Iterable[SprintState], titles: Mapping[str, str],
-                    owner: Iterable[Notice] = ()) -> list[dict]:
-    """The open notices of `group`'s sprints and the owner's as page entries, newest first."""
-    found = [(n, s) for s in group for n in open_notices(s)]
-    entries = [{
-        "id": n.notice_id,
-        "sprint_id": s.sprint_id,
-        "poster": titles[s.sprint_id],
-        "kind": n.kind,
-        "kind_text": NOTICE_KIND_TEXT[n.kind],
-        "text": n.text,
-        "what": n.what if n.kind == "claim" else None,
-        "until_text": (NOTICE_UNTIL_TEXT.format(until=n.until) if n.kind == "claim" else None),
-        "to_text": (_notice_to_text(n.to, titles) if n.kind == "hand-off" else None),
-        "at": n.at,
-        "owner": False,
-    } for n, s in found]
-    entries.extend({
-        "id": n.notice_id,
-        "sprint_id": None,
-        "poster": NOTICE_YOU_TEXT,
-        "kind": n.kind,
-        "kind_text": NOTICE_KIND_TEXT[n.kind],
-        "text": n.text,
-        "what": None,
-        "until_text": None,
-        "to_text": None,
-        "at": n.at,
-        "owner": True,
-    } for n in owner)
-    return sorted(entries, key=lambda entry: -entry["id"])
 
 
 def _sentence(count: int, adopting: bool = False, working: int = 0) -> str:
@@ -2377,6 +2348,7 @@ def derive_view(
     project_questions: Mapping[str, Sequence[project_question.AskedQuestion]] | None = None,
     sharing: Mapping | None = None, moves: Mapping[str, MoveNote] | None = None,
     engine_runs: Iterable[engine_runs_module.RunState] | None = None, engine_lines: bool = True,
+    prompted_sprints: Iterable[str] = (),
 ) -> dict:
     states = list(states)
     sessions = list(sessions)
@@ -2450,6 +2422,15 @@ def derive_view(
                 in_sprint[sprint.sprint_id] = mine
                 owned[project_id] = [s for s in owned[project_id] if s.name != name]
 
+    associated: dict[str, list[str]] = {}
+    live = {s.session_id: s.state for s in sessions}
+    for project_id in drafted:
+        found = sprint_sessions_of(project_id, drafted[project_id], sessions, deliveries or {}, by_id)
+        for session_id, sprint_ids in found.items():
+            for sprint_id in sprint_ids:
+                associated.setdefault(sprint_id, []).append(live[session_id])
+    permission_held = set(prompted_sprints)
+
     starts = sorted((s for group in drafted.values() for s in group
                      if failed_start(s, bool(in_sprint.get(s.sprint_id)), managers)),
                     key=lambda s: (s.manager.at, s.sprint_id))
@@ -2457,10 +2438,10 @@ def derive_view(
     for delivery in (deliveries or {}).values():
         runs.setdefault(delivery.session_id, []).append(delivery)
     titles = {s.sprint_id: sprint_title(s) for s in (sprints or {}).values()}
-    notices = {pid: _notice_entries(drafted.get(pid, []) + finished.get(pid, []), titles,
+    notices = {pid: card_entries.notice_entries(drafted.get(pid, []) + finished.get(pid, []), titles,
                                     open_owner_notices(owner_notices or {}, pid))
                for pid in registered}
-    overlaps = {pid: _overlap_entries(drafted.get(pid, []) + finished.get(pid, []), titles, pid)
+    overlaps = {pid: card_entries.overlap_entries(drafted.get(pid, []) + finished.get(pid, []), titles, pid)
                 for pid in registered}
     notice_post = {pid: any(takes_notices(s) for s in drafted.get(pid, ())) for pid in registered}
     asks = {pid: _question_threads((project_questions or {}).get(pid, ()), spend) for pid in registered}
@@ -2490,7 +2471,8 @@ def derive_view(
                               notice_post=notice_post[s.project_id], overlaps=overlaps[s.project_id],
                               sprint_waits=sprint_waits, waits=project_waits.get(s.project_id, ()),
                               read=health.get(s.project_id), questions=asks[s.project_id], prompted=prompted,
-                              engine_runs=lines.get(s.project_id, ()), engine_states=engine_states, moves=moves)
+                              engine_runs=lines.get(s.project_id, ()), engine_states=engine_states, moves=moves,
+                              associated=associated, permission_held=permission_held)
                for s in active]
     quiet_entries = [_project_entry(s, (), runs, now_ms, (), managers, in_sprint,
                                     finished=finished.get(s.project_id, ()), capacity=capacity,
@@ -2503,10 +2485,11 @@ def derive_view(
     counted.update(prompted)
     deaf = [sprint["sprint_id"] for project in (*entries, *quiet_entries) for sprint in project["sprints"]
             if sprint["ball"] == BALL_OWNER and not sprint["waiting"] and sprint["sprint_id"] not in counted]
+    held = card_entries.held_cards(entries, SENTENCE_STOPS)
     stopped_runs = [run for project in entries for run in project["engine_runs"] if run["need"] not in (None, "nothing")]
     open_count = (len(briefs) + len(stalls) + len(starts) + len(unprogressed) + len(signins) + len(adoptions)
                   + len(releases) + len(prompts) + len(asked) + len(retries) + len(registering) + len(applies) + len(confirms)
-                  + len(failures) + len(trusts) + len(open_items) + len(deaf) + len(stopped_runs))
+                  + len(failures) + len(trusts) + len(open_items) + len(deaf) + len(held) + len(stopped_runs))
     all_out = bool(capacity["all_out"])
     headline = _headline(open_count, bool(stale_projects), all_out, len(states))
     next_expected = inbox.next_expected(entries + quiet_entries, headline)
@@ -2532,6 +2515,8 @@ def derive_view(
         sentence = PERMISSION_SENTENCE
     elif deaf and open_count == len(deaf):
         sentence = DEAF_SENTENCE
+    elif held and open_count == len(held):
+        sentence = card_entries.HELD_SENTENCE
     elif stopped_runs and open_count == len(stopped_runs):
         sentence = ENGINE_SENTENCE
     elif retries or applies or confirms or failures or trusts or any(e["questions"] for e in registering):
@@ -2545,7 +2530,7 @@ def derive_view(
     elif registering and not open_items:
         sentence = REGISTER_STEP_SENTENCE
     elif open_count:
-        sentence = NEEDS_SENTENCE
+        sentence = card_entries.HELD_MIXED_SENTENCE if held else NEEDS_SENTENCE
     else:
         sentence = _sentence(len(states), adopting, inbox.working(entries + quiet_entries))
     new_replies = sorted(
@@ -2578,6 +2563,7 @@ def derive_view(
         "inbox": {"open": [_brief_entry(s) for s in briefs] + [_stall_entry(s) for s in stalls]
                           + [_failed_start_entry(s) for s in starts]
                           + [_progress_entry(s) for s in unprogressed]
+                          + held
                           + [_signin_entry(e, signin_runs) for e in signins]
                           + adoptions
                           + releases

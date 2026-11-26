@@ -92,7 +92,7 @@ def normalize_remote_url(url: str) -> str | None:
     identity from an unrecognised spelling is exactly the inference the
     contract forbids, and the caller turns None into an open question.
     """
-    value = url.strip()
+    value = url.strip().rstrip("/")
     if not value:
         return None
     if value.endswith(".git"):

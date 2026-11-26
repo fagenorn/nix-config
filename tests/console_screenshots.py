@@ -40,6 +40,9 @@ Contract:
   is the `PermissionRequest` hook row only, which is the before picture; `permission-long` is the same sprint holding a
   long heredoc command (a python3 script that rewrites test names, a `cat` into `/tmp` and a `git diff` into `review/diff.txt`),
   so the card shows its summary of what it reads, runs and writes above the folded text, and the base console the raw text;
+  `held-sprint` is a sprint whose last report, two hours old, says `HELD_STATUS` with issues still
+  building and queued and nothing running or asked, so the branch's console shows its held-sprint card
+  under "1 thing needs you" and the base console only the quiet line, which is the before picture;
   `waiting-until` is the `stuck` sprint whose report states a wait until a time two hours
   ahead (#1380), so its line reads "waiting until" with that time, and `paused` the same sprint whose
   report states a pause with `PAUSE_REASON`, so its line reads "paused: " and the reason (a base console
@@ -140,14 +143,14 @@ Contract:
   `account.added` row `{"by": COLLEAGUE, "profile": "colleague-1", "identity": <the mark of its directory>}` written straight to the log, the identity without which his row has no token and the page no Sign out or Remove) and
   whose week is the tightest of the three (5% left against `work-spare`'s 10% and `work-main`'s 60%);
   every manager runs on `work-main`, so the guest page shows `yours`, `Account 2` and `Account 3` and
-  the sprint's account, `Account 2`, and the owner's strip shows COLLEAGUE beside `colleague-1` in
-  its tightest node, the one the 480 px width keeps. On a page with `#pool` the
+  the sprint's account, `Account 2`, and the owner's strip names no account since the one-word top bar
+  (the panel's `colleague-1` row carries COLLEAGUE). On a page with `#pool` the
   guest shots wait for the pool, a session reset and the sprint's account (`.sprint-account`); on a
   page without it they wait for none of them. On a page with `.pool-add` the `guest-page` and
   `guest-steer` shots click it at each width and wait for `.guest-consent` and a disabled
   `.guest-signin` (the consent open, nothing ticked, nothing posted); on a page without it they click
-  nothing. `owner-actors` also waits for `.cap-tightest .cap-owner` on a page that has a `.cap-owner`
-  and for none on a page that has not. `owner-accounts` waits for the opened panel (`#accounts:not([hidden])`)
+  nothing. `owner-actors` also waits for `.cap-tightest .cap-owner` only on an earlier page that has a
+  `.cap-owner` (the before pictures), and for none on a page that has not. `owner-accounts` waits for the opened panel (`#accounts:not([hidden])`)
   and, on a page that has an `.acct-owner`, for `.acct-row .acct-owner`. `offers_account_changes()`
   (`ConsoleService` has `sign_out_account`) keys the account controls on the code being shot, never on
   the page: when it is true `owner-accounts` also waits for `.acct-row .acct-signout` and `guest-page` for
@@ -158,7 +161,9 @@ Contract:
   under the 2 MiB a picture may be, and `main` prints each sheet's path after the shots. `--states a,b`
   shoots only the named states (each a member of `STATES`; the default is every state), and `--composite NAME`
   (only with `--sheets`) writes `NAME` after the last state: the named states' sheets side by side in one
-  PNG under the same 2 MiB, which `main` prints after the sheets. Each
+  PNG under the same 2 MiB, which `main` prints after the sheets. `--widths a,b` shoots those viewport
+  widths instead of `WIDTHS` (distinct positive pixel widths), so a look can picture a phone width such as
+  390; the style rows are read only at the widths they name, so a width outside `STYLE_WIDTHS` reads none. Each
   width waits for what the owner judges to be visible, which fails the run when it is not:
   `guest-steer` the door check of `guest-page`, then `.started-by`, `Answered by`, `.guest-wait` and
   `#inbox button.approve`; `owner-actors` `.started-by` and `Answered by`. The rows are seeded
@@ -293,8 +298,8 @@ from .console_land_queue import land_queue_reader
 from .console_screenshot_permissions import HELD_PROMPTS, PERMISSION_MANAGER, hold_permission, keep_permission
 from .console_test_support import hook_body, write_registry
 
-STATES = ("live-several", "waiting-on-you", "stuck", "tell-box-open", "message-sent",
-          "message-picked-up", "message-replied", "message-not-picked-up", "finished-list",
+STATES = ("live-several", "waiting-on-you", "stuck", "held-sprint", "tell-box-open",
+          "message-sent", "message-picked-up", "message-replied", "message-not-picked-up", "finished-list",
           "nothing-running", "waiting-its-turn", "manager-cannot-hear", "permission-stale", "permission-card",
           "permission-long", "waiting-until", "paused",
           "owner-check", "spend-page", "notices-fold",
@@ -315,6 +320,7 @@ GOAL_NEAR_CHARS = 1900
 GOAL_OVER_CHARS = 2100
 MINUTE = 60.0
 PAUSE_REASON = "the lead freed its account for a release"
+HELD_STATUS = "the last slice waits on the lead's go to grant its deploy key"
 PROJECTS = ("owner/web", "owner/api", "owner/docs")
 TRACKER_URL = "https://github.com/owner/web/issues"
 LOOK_APPROVE = "Approve this head"
@@ -953,20 +959,6 @@ STYLE_CHECKS += (
          _RGB),
     _row("cap-child-flex", "accounts-panel", ".cap > *", "flex", "equals", "0 0 auto", "1 1 auto",
          every=True),
-    _row("cap-acct-max-width", "accounts-panel", ".cap-acct", "max-width", "equals", "100%",
-         "none"),
-    _row("cap-acct-white-space", "accounts-panel", ".cap-acct", "white-space", "equals", "nowrap",
-         "normal"),
-    *_group("cap-acct-name", "accounts-panel", ".cap-acct b", (
-        ("overflow", "equals", "hidden", "visible"), ("text-overflow", "equals", "ellipsis", "clip"),
-        ("white-space", "equals", "nowrap", "normal"), ("max-width", "max", "160", "none"))),
-    _colour("cap-excl-color", "accounts-panel", ".cap-excl", "--ov2", host="#capacity",
-            probe='<span class="cap-excl" data-style-probe>x</span>'),
-    _colour("cap-pin-mark-color", "accounts-panel", ".cap-pin-mark", "--ov2", host="#capacity",
-            probe='<span class="cap-pin-mark" data-style-probe>x</span>'),
-    _row("cap-extra-display", "accounts-panel", ".cap-extra", "display", "equals", "none", "block",
-         widths=(480,), probe='<span class="cap-extra" data-style-probe>x</span>',
-         host="#capacity"),
     _row("brand-white-space", _NOTHING, ".brand", "white-space", "equals", "nowrap", "normal"),
     _row("top-fit-width", _NOTHING, ".top-in > *", "width", "max", "448", "600px", widths=(480,),
          every=True),
@@ -974,26 +966,6 @@ STYLE_CHECKS += (
          widths=(480,), every=True),
     _row("top-fit-flex-basis", _NOTHING, ".goal-bar", "flex-basis", "max", "448", "600px",
          widths=(480,)),
-    _row("top-fit-meter-width", "accounts-panel", ".meter", "width", "max", "448", "600px",
-         widths=(480,), every=True),
-    _row("top-fit-meter-min-width", "accounts-panel", ".meter", "min-width", "in", "auto|0px",
-         "600px", widths=(480,), every=True),
-    _row("top-fit-meter-flex-basis", "accounts-panel", ".meter", "flex-basis", "equals", "auto",
-         "600px", widths=(480,), every=True),
-    _row("meter-fill-background-color", _NOTHING, ".meter i", "background-color", "equals",
-         PALETTE["--sub0"], _RGB, probe='<span class="meter" data-style-probe><i></i></span>',
-         host="#capacity"),
-    _row("meter-fill-background-image", _NOTHING, ".meter i", "background-image", "equals", "none",
-         "linear-gradient(red, red)",
-         probe='<span class="meter" data-style-probe><i></i></span>', host="#capacity"),
-    _row("meter-excluded-background-color", _NOTHING, ".cap-excluded .meter i", "background-color",
-         "equals", PALETTE["--s2"], _RGB,
-         probe='<span class="cap-acct cap-excluded" data-style-probe><span class="meter"><i></i>'
-               '</span></span>', host="#capacity"),
-    _row("meter-excluded-background-image", _NOTHING, ".cap-excluded .meter i",
-         "background-image", "equals", "none", "linear-gradient(red, red)",
-         probe='<span class="cap-acct cap-excluded" data-style-probe><span class="meter"><i></i>'
-               '</span></span>', host="#capacity"),
     StyleCheck("lead-type-font-size", _DESK_STATES, _BOTH, "body", "font-size", "largest_type",
                "24|" + _DISPLAY_LEAD, ".brand { font-size: 30px !important }", fixture=True),
     _row("lead-type-card-font-size", "inbox-card", ".card .q", "font-size", "equals", "24px",
@@ -2466,23 +2438,22 @@ def _seed_state(seed: _Seed, state: str, web_root: str = "",
         seed.sprint(api, "Keep the importer fast", started=60 * MINUTE, report=45 * MINUTE)
         seed.sprint(api, "Retire the old exporter", started=5 * 60 * MINUTE,
                     report=3 * 60 * MINUTE, landed=True, close=2 * 60 * MINUTE)
-        seed.sprint(web, "Add resumable uploads", started=30 * MINUTE, report=6 * MINUTE,
-                    asks=True)
+        seed.sprint(web, "Add resumable uploads", started=30 * MINUTE, report=6 * MINUTE, asks=True)
         seed.sprint(web, "Fix the settings page", started=20 * MINUTE, report=2 * MINUTE)
     elif state == "waiting-on-you":
-        seed.sprint(web, "Add resumable uploads", started=30 * MINUTE, report=6 * MINUTE,
-                    asks=True)
+        seed.sprint(web, "Add resumable uploads", started=30 * MINUTE, report=6 * MINUTE, asks=True)
     elif state == "stuck":
         seed.sprint(web, "Add resumable uploads", started=60 * MINUTE, report=45 * MINUTE)
+    elif state == "held-sprint":
+        seed.sprint(web, "Add resumable uploads", started=180 * MINUTE, report=120 * MINUTE,
+                    report_extra={"status": HELD_STATUS})
     elif state == "manager-cannot-hear":
-        sid, _ = seed.sprint(web, "Add resumable uploads", started=60 * MINUTE,
-                             report=45 * MINUTE)
+        sid, _ = seed.sprint(web, "Add resumable uploads", started=60 * MINUTE, report=45 * MINUTE)
         seed.put(MINUTE, sessions.SEEN, web, {
             "session_id": DEAF_MANAGER, "cwd": web_root, "repo": web_root, "state": "working",
             "name": manager.session_name(web, sid)})
     elif state in PERMISSION_STATES:
-        sid, _ = seed.sprint(web, "Add resumable uploads", started=60 * MINUTE,
-                             report=45 * MINUTE)
+        sid, _ = seed.sprint(web, "Add resumable uploads", started=60 * MINUTE, report=45 * MINUTE)
         seed.put(20 * MINUTE, sessions.SEEN, web, {
             "session_id": PERMISSION_MANAGER, "cwd": web_root, "repo": web_root,
             "state": "working", "name": manager.session_name(web, sid)})
@@ -2545,19 +2516,16 @@ def _seed_state(seed: _Seed, state: str, web_root: str = "",
         seed.sprint(web, "Try a new cache", started=4 * 60 * MINUTE, report=3.5 * 60 * MINUTE,
                     stop=3 * 60 * MINUTE)
     elif state == "owner-check":
-        seed.sprint(web, "Add resumable uploads", started=20 * MINUTE, report=2 * MINUTE,
-                    held=True)
+        seed.sprint(web, "Add resumable uploads", started=20 * MINUTE, report=2 * MINUTE, held=True)
         seed.check(web, 11, 3 * MINUTE)
     elif state == "inbox-card":
-        seed.sprint(web, "Add resumable uploads", started=30 * MINUTE, report=6 * MINUTE,
-                    asks=True)
+        seed.sprint(web, "Add resumable uploads", started=30 * MINUTE, report=6 * MINUTE, asks=True)
         seed.check(web, 11, 3 * MINUTE)
     elif state in ("look-card", "look-moved", "look-failed"):
         sid, goal = seed.sprint(web, "Fix the settings page", started=30 * MINUTE, report=6 * MINUTE)
         seed.look(web, sid, goal, moved=state == "look-moved", failed=state == "look-failed")
     elif state in ("question-words", "question-refused"):
-        seed.sprint(web, "Add resumable uploads", started=30 * MINUTE, report=6 * MINUTE,
-                    look=True)
+        seed.sprint(web, "Add resumable uploads", started=30 * MINUTE, report=6 * MINUTE, look=True)
     elif state == "accounts-panel":
         seed.account("work-main", 0.4)
         seed.account("work-spare", 0.9)
@@ -3589,6 +3557,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="also write <state>-sheet.png, the state's widths side by side")
     parser.add_argument("--states", help="a comma list of the states to shoot (default every state)")
     parser.add_argument("--composite", help="with --sheets, also write NAME, the shot states' sheets side by side")
+    parser.add_argument("--widths", help="a comma list of the viewport widths to shoot, in pixels "
+                                         f"(default {','.join(map(str, WIDTHS))})")
     args = parser.parse_args(argv)
     states = STATES
     if args.states is not None:
@@ -3596,6 +3566,13 @@ def main(argv: list[str] | None = None) -> int:
         unknown = [state for state in states if state not in STATES]
         if unknown:
             parser.error(f"--states names {', '.join(unknown)}, which are not states")
+    widths = WIDTHS
+    if args.widths is not None:
+        members = args.widths.split(",")
+        if (not all(member.isascii() and member.isdigit() and int(member) > 0 for member in members)
+                or len(set(map(int, members))) != len(members)):
+            parser.error(f"--widths takes distinct positive whole pixel widths, not {args.widths!r}")
+        widths = tuple(int(member) for member in members)
     if args.composite is not None and not args.sheets:
         parser.error("--composite goes with --sheets")
     if (args.question is None) != (args.answer_file is None):
@@ -3607,9 +3584,9 @@ def main(argv: list[str] | None = None) -> int:
     with tempfile.TemporaryDirectory(prefix="console-shots-env-") as tmp:
         os.environ.update(sandbox_environ(Path(tmp).resolve()))
         try:
-            taken = (capture(Path(args.out), states=("question-read",), read=(args.question, text),
-                             sheets=args.sheets, composite=args.composite)
-                     if real else capture(Path(args.out), states=states, sheets=args.sheets,
+            taken = (capture(Path(args.out), states=("question-read",), widths=widths,
+                             read=(args.question, text), sheets=args.sheets, composite=args.composite)
+                     if real else capture(Path(args.out), states=states, widths=widths, sheets=args.sheets,
                                           composite=args.composite))
         except Unavailable as error:
             print(f"console-screenshots: {error}", file=sys.stderr)
