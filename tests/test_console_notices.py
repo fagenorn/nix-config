@@ -34,7 +34,7 @@ OTHER_GOAL = "make the exporter resumable"
 FAULT = {"issue": 12, "observed": "saving the settings form drops the billing address",
          "when": "12:10 UTC today",
          "proven": "a saved form read back from the production database"}
-FAULT_TEXT = ("Live fault in production on #12: saving the settings form drops the billing "
+FAULT_TEXT = ("Fault users meet now in production on #12: saving the settings form drops the billing "
               "address, seen 12:10 UTC today, proven by a saved form read back from the "
               "production database")
 

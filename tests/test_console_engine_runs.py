@@ -142,7 +142,7 @@ class ReadingTest(unittest.TestCase):
         state = poll_state("sprint-checks.jsonl", LIVE)
         entry = engine_runs.engine_entry(state, None)
         self.assertEqual((entry["reading"], entry["text"]),
-                         ("waiting", "building, waiting for CI on its pull request"))
+                         ("waiting", "building, waiting for GitHub's automatic checks on the proposed change"))
         self.assertEqual(engine_runs.wait_text(state), sprints.NOW_CI_TEXT)
 
     def test_wait_text_names_the_open_wait_only_while_the_run_reads_waiting(self):

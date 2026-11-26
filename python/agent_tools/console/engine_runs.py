@@ -49,7 +49,7 @@ READINGS = ("moving", "waiting", "stopped", "not_running", "done")
 WAIT_TEXT = {"usage-limit": "waiting out a usage limit",
              "host-slot": "waiting for a free session slot on this host",
              "lock": sprints.NOW_LOCK_TEXT, "checks": sprints.NOW_CI_TEXT}
-NEED_TEXT = {"owner-decision": "your decision", "owner-look": "your look", "retry": "a retry",
+NEED_TEXT = {"owner-decision": "your decision", "owner-look": "your check of the pictures", "retry": "a retry",
              "nothing": "nothing"}
 NOT_RUNNING_TEXT = "the engine is not running"
 ENDED_SHOWN_MS = 24 * 60 * 60 * 1000

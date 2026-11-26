@@ -127,7 +127,7 @@ class SprintEngineEntryTest(unittest.TestCase):
 
 class SprintEngineWaitTest(unittest.TestCase):
     def test_with_no_forge_reading_an_open_ci_wait_and_an_open_lock_wait_read_their_sentences(self):
-        for fixture, text in (("sprint-checks.jsonl", "waiting for CI on its pull request"),
+        for fixture, text in (("sprint-checks.jsonl", "waiting for GitHub's automatic checks on the proposed change"),
                               ("sprint-lock.jsonl", "waiting its turn to merge")):
             with self.subTest(fixture):
                 got = shown(engine_runs=[engine_state(fixture, LIVE)])

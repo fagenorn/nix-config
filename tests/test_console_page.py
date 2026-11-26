@@ -996,7 +996,7 @@ def times(tree: dict) -> dict:
 
 CLAIM_W = {
     "id": 3, "sprint_id": "a" * 16, "poster": "Fix the settings page", "kind": "claim",
-    "kind_text": "Claim", "text": "the page fold",
+    "kind_text": "Files in use", "text": "the page fold",
     "what": "python/agent_tools/console/page.html", "until_text": "until the board fold lands",
     "to_text": None, "at": utc(12 * 60000),
 }
@@ -1095,7 +1095,7 @@ class PageNoticeTest(unittest.TestCase):
             "Heads-up, from Keep the importer fast",
             "Hand-off for Fix the settings page, from Keep the importer fast",
             "Hand-off for you, from Fix the settings page",
-            "Claim, from Fix the settings page"])
+            "Files in use, from Fix the settings page"])
         self.assertEqual([head["children"][1]["text"] for head in heads],
                          ["1 min ago", "2 min ago", "3 min ago", "12 min ago"])
         self.assertEqual([full(b["children"][1]) for b in blocks], [
@@ -6513,7 +6513,7 @@ class PageSprintEndTest(unittest.TestCase):
         self.assertEqual(
             [(full(n), n["cls"]) for n in of_class(row, "p", "closing-landed")
              + of_class(row, "p", "closing-held") + of_class(row, "p", "closing-dropped")],
-            [("Landed: #12, #14", "closing-landed"), ("Held: #15", "closing-held"),
+            [("Landed: #12, #14", "closing-landed"), ("Merged, not yet proven: #15", "closing-held"),
              ("Dropped: #13", "closing-dropped")])
         (link,) = of_class(row, "a", "tracker")
         self.assertEqual(link["href"], "https://github.com/o/p/milestone/3")
@@ -6580,7 +6580,7 @@ class PageSprintEndTest(unittest.TestCase):
         (fold,) = of_class(line, "details", "sprint-detail")
         shown = visible_text(fold)
         for expected in (CLOSING["summary"], "Next time: cut smaller slices",
-                         "1 landed, 1 dropped", "Landed: #12, #14", "Held: #15"):
+                         "1 landed, 1 dropped", "Landed: #12, #14", "Merged, not yet proven: #15"):
             self.assertIn(expected, shown)
         self.assertEqual(len(of_class(fold, "a", "tracker")), 1)
         (label,) = [c for c in fold["children"] if c["tag"] == "summary"]
@@ -8736,7 +8736,7 @@ class SigninPageTest(unittest.TestCase):
         (headline,) = of_class(card, "p", "q")
         self.assertEqual(full(headline), ADOPTION_ITEM["headline"])
         (link,) = of_class(card, "a", "pr-link")
-        self.assertEqual(full(link), "Open the pull request")
+        self.assertEqual(full(link), "Open the proposed change on GitHub")
         self.assertEqual(link["href"], ADOPTION_ITEM["url"])
 
     def test_a_ready_adoption_card_offers_merge_and_posts_its_card(self) -> None:
@@ -11855,7 +11855,7 @@ class WaitingLinePageTest(unittest.TestCase):
 
 
 class PageOverlapTest(unittest.TestCase):
-    TEXT = ("Fix a and Fix b both fix a live fault in python/agent_tools/console/page.html; "
+    TEXT = ("Fix a and Fix b both fix a fault users meet now in production in python/agent_tools/console/page.html; "
             "the rule could not decide which lands first")
 
     def ov(self, x: str, y: str) -> dict:
@@ -12041,7 +12041,7 @@ FAULT_ENTRY = {
     "id": 41, "issue": 12, "observed": "saving the settings form drops the billing address",
     "when": "12:10 UTC today", "proven": "a saved form read back from the production database",
     "at": "2026-11-12T10:00:00+00:00",
-    "text": "Live fault in production on #12: saving the settings form drops the billing address, "
+    "text": "Fault users meet now in production on #12: saving the settings form drops the billing address, "
             "seen 12:10 UTC today, proven by a saved form read back from the production database",
 }
 

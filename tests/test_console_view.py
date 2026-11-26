@@ -2210,7 +2210,7 @@ class SprintWaitViewTest(unittest.TestCase):
         shown = self.shown(movement)
         self.assertEqual(shown["state"], "on_track")
         self.assertEqual((shown["ball"], shown["ball_text"]), ("manager", "manager working"))
-        self.assertEqual(shown["now_text"], "waiting for CI on its pull request")
+        self.assertEqual(shown["now_text"], "waiting for GitHub's automatic checks on the proposed change")
         self.assertNotIn("may be stuck", json.dumps(shown))
         with self.subTest("not the sprint's pull request"):
             other = reported(with_manager(started(A)), R, issues=((1, "landed"), (2, "building")))
@@ -2323,7 +2323,7 @@ class SprintWaitViewTest(unittest.TestCase):
         cases = (
             ("all four", moving(pulls=(pull,), read_ms=now - MIN, release_ms=now - MIN,
                                 locks=((4, now - MIN),)),
-             "waiting for CI on its pull request"),
+             "waiting for GitHub's automatic checks on the proposed change"),
             ("no CI", moving(pulls=(dataclasses.replace(pull, running_ms=None),),
                              read_ms=now - MIN, release_ms=now - MIN),
              "a delivery is committing"),
@@ -2357,7 +2357,7 @@ class SprintWaitViewTest(unittest.TestCase):
                           read_ms=now - MIN)
         shown = self.shown(movement, sessions=[], sprint_state=failed_at(self.base, R + 5 * MIN))
         self.assertEqual(shown["ball"], "manager")
-        self.assertEqual(shown["now_text"], "waiting for CI on its pull request")
+        self.assertEqual(shown["now_text"], "waiting for GitHub's automatic checks on the proposed change")
 
     def test_a_signal_that_disappears_keeps_moving_the_sprint_for_the_window(self):
         now = self.now
@@ -2365,7 +2365,7 @@ class SprintWaitViewTest(unittest.TestCase):
         cases = (
             ("a merged pull request after CI",
              (PullRequest(40, frozenset({4}), True, None),), LocalReading((), False),
-             "waiting for CI on its pull request"),
+             "waiting for GitHub's automatic checks on the proposed change"),
             ("a merged pull request after a commit",
              (PullRequest(40, frozenset({4}), False, seen),), LocalReading((), False),
              "a delivery is committing"),
@@ -2412,13 +2412,13 @@ class SprintRunLineViewTest(unittest.TestCase):
             ("a land lock wait", moving(locks=((4, now - MIN),)), "waiting its turn to merge"),
             ("CI on its pull request",
              moving(pulls=(PullMovement(40, frozenset({4}), now - MIN, None),), read_ms=now - MIN),
-             "waiting for CI on its pull request"),
+             "waiting for GitHub's automatic checks on the proposed change"),
             ("a commit on its branch", moving(branches=((4, now - 5 * MIN),)),
              "a delivery is committing"),
             ("a release step", moving(release_ms=now - MIN), "waiting for a release step"),
             ("the order, CI first",
              moving(pulls=(pull,), read_ms=now - MIN, release_ms=now - MIN,
-                    locks=((4, now - MIN),)), "waiting for CI on its pull request"),
+                    locks=((4, now - MIN),)), "waiting for GitHub's automatic checks on the proposed change"),
             ("the order, release before the lock",
              moving(release_ms=now - MIN, locks=((4, now - MIN),)),
              "waiting for a release step"),
@@ -2755,7 +2755,7 @@ class SprintEndViewTest(unittest.TestCase):
         self.assertEqual(shown["issues"], [
             {"issue": 12, "stage": "landed", "stage_text": "landed"},
             {"issue": 13, "stage": "dropped", "stage_text": "dropped"},
-            {"issue": 14, "stage": "held", "stage_text": "held for verification"}])
+            {"issue": 14, "stage": "held", "stage_text": "merged, not yet proven"}])
         self.assertEqual(shown["closing"]["counts_text"],
                          "1 landed, 1 held for verification, 1 dropped")
 
@@ -3083,7 +3083,7 @@ class NoticeViewTest(unittest.TestCase):
              "kind_text": "Heads-up", "text": "sprint ask gains a dry run", "what": None,
              "until_text": None, "to_text": None, "at": at_min(5), "owner": False},
             {"id": 3, "sprint_id": A, "poster": "Fix the settings page", "kind": "claim",
-             "kind_text": "Claim", "text": "the page fold",
+             "kind_text": "Files in use", "text": "the page fold",
              "what": "python/agent_tools/console/page.html",
              "until_text": "until the board fold lands", "to_text": None, "at": at_min(3),
              "owner": False}])
@@ -3159,7 +3159,7 @@ class NoticeViewTest(unittest.TestCase):
             issue=issue, live_fault=live_fault))
 
     def line(self, sa, sb):
-        return (sprint_title(sa) + " and " + sprint_title(sb) + " both fix a live fault in "
+        return (sprint_title(sa) + " and " + sprint_title(sb) + " both fix a fault users meet now in production in "
                 + self.PATH + "; the rule could not decide which lands first")
 
     def overlaps(self, states, projects=(("p00", 1),)):
@@ -4084,7 +4084,7 @@ class WaitingLineTest(unittest.TestCase):
     def test_an_undated_wait_reads_its_reason(self):
         texts = {
             "not_released": "Waiting for the release to be seen: no release yet includes its merge",
-            "no_when": "Waiting with no date: its wording states a wait, but its verify block has no when field "
+            "no_when": "Waiting with no date: its wording states a wait, but its check after release names no date "
                        "for that wait",
             "due": "Due now: the next verification pass asks you here",
             "due_command": "Due now: the next verification pass asks you here, "
@@ -4098,7 +4098,7 @@ class WaitingLineTest(unittest.TestCase):
         self.assertEqual(WAIT_TEXT["window_opening"],
                          "Waiting for the next verification pass to start its wait: what it waits for has been seen")
         self.assertEqual(WAIT_TEXT["not_deployed"], "Waiting for the deploy to be seen: no deploy is known to include its merge")
-        self.assertEqual(WAIT_TEXT["ci_not_passed"], "Waiting for a CI run to pass at its commit")
+        self.assertEqual(WAIT_TEXT["ci_not_passed"], "Waiting for GitHub's automatic checks to pass at its commit")
         self.assertEqual(WAIT_TEXT["unknown"], "Waiting: the tracker could not say whether it is due yet")
 
     def test_a_wait_no_sprint_owns_is_under_its_project(self):

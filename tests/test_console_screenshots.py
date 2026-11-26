@@ -2854,7 +2854,7 @@ class ScreenshotFixtureTest(unittest.TestCase):
                           False)])
                     self.assertEqual(
                         [o["text"] for o in web["overlaps"]],
-                        ["Add resumable uploads and Fix the settings page both fix a live fault "
+                        ["Add resumable uploads and Fix the settings page both fix a fault users meet now in production "
                          "in python/agent_tools/console/page.html; the rule could not decide "
                          "which lands first"])
                     self.assertFalse(shots.overlap_card())
@@ -2870,7 +2870,7 @@ class ScreenshotFixtureTest(unittest.TestCase):
                         "id": faults[0]["id"], "issue": 12,
                         "observed": shots.LIVE_FAULT_OBSERVED, "when": shots.LIVE_FAULT_WHEN,
                         "proven": shots.LIVE_FAULT_PROVEN, "at": faults[0]["at"],
-                        "text": "Live fault in production on #12: saving the settings form "
+                        "text": "Fault users meet now in production on #12: saving the settings form "
                                 "drops the billing address, seen 12:10 UTC today, proven by a "
                                 "saved form read back from the production database"}])
                     self.assertEqual(view["statement"]["inbox_items"], 0)

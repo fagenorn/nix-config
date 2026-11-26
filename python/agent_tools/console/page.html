@@ -1585,7 +1585,7 @@ function adoptionCard(item) {
     card.appendChild(act);
   }
   if (isHttps(item.url)) {
-    const link = el("a", "pr-link", "Open the pull request");
+    const link = el("a", "pr-link", "Open the proposed change on GitHub");
     link.href = item.url;
     link.rel = "noreferrer";
     card.appendChild(link);
@@ -5443,7 +5443,7 @@ function closingReport(sprint) {
     box.appendChild(el("p", "differently", "Next time: " + closing.differently));
   }
   if (typeof closing.counts_text === "string") box.appendChild(el("p", "closing-counts", closing.counts_text));
-  for (const [label, key] of [["Landed", "landed"], ["Held", "held"], ["Dropped", "dropped"]]) {
+  for (const [label, key] of [["Landed", "landed"], ["Merged, not yet proven", "held"], ["Dropped", "dropped"]]) {
     const numbers = Array.isArray(closing[key]) ? closing[key] : [];
     if (numbers.length > 0) {
       box.appendChild(el("p", "closing-" + key, label + ": " + numbers.map((n) => "#" + n).join(", ")));

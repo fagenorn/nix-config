@@ -26,7 +26,7 @@ class LockPlaceViewTest(SprintWaitViewTest):
         self.assertEqual(self.shown(moving(locks=((4, now - MIN),), positions=((9, 1),)))["now_text"],
                          "waiting its turn to merge")
         ahead = view.WaitSignals(ci_ms=now - MIN, lock_ms=now - MIN, lock_position=2)
-        self.assertEqual(view.fresh_wait(ahead, now), "waiting for CI on its pull request")
+        self.assertEqual(view.fresh_wait(ahead, now), "waiting for GitHub's automatic checks on the proposed change")
 
 
 def load_tests(loader, tests, pattern):

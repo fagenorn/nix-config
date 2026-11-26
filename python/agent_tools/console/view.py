@@ -612,7 +612,7 @@ A shown sprint reads its manager's latest report (`SprintState.report`); with no
 `issues` is `[]` and `waiting` is 0. A sprint ended by a closing report (#980) shows its closing
 only: `progress`, `progress_text`, `status`, `status_at` and `next` are null whatever its last report
 said, and each of `issues`, ordered by number, is an issue of the closing with its closing stage
-(`landed`, `held` or `dropped`) and `stage_text` `landed`, `held for verification` or `dropped`;
+(`landed`, `held` or `dropped`) and `stage_text` `landed`, `merged, not yet proven` or `dropped`;
 `milestone` and `tracker_url` stay the report's. The report's pictures are shown only while its
 status is (a report and no closing), as `pictures`, else `[]`. Each reported issue, ordered by number, has an effective
 `stage`: the report's own when it is `landed` or `held` (an outcome the manager reported is kept
@@ -980,18 +980,18 @@ NEW_REPLY_TEXT = "New reply from the manager of {title}"
 NEW_REPLIES_TEXT = "{n} new replies from managers"
 HEADLINE = "Nothing needs you"
 OUTSIDE_LABEL = "Outside sprints"
-CLOSING_OUTCOME_TEXT = {LANDED: "landed", HELD: "held for verification", DROPPED: "dropped"}
+CLOSING_OUTCOME_TEXT = {LANDED: "landed", HELD: "merged, not yet proven", DROPPED: "dropped"}
 FINISHED_LABEL = "Finished sprints"
 QUESTIONS_LABEL = "Questions"
 UNMANAGED_LABEL = "Not yet managed"
-NOTICE_KIND_TEXT = {"claim": "Claim", "heads-up": "Heads-up", "hand-off": "Hand-off"}
+NOTICE_KIND_TEXT = {"claim": "Files in use", "heads-up": "Heads-up", "hand-off": "Hand-off"}
 NOTICE_UNTIL_TEXT = "until {until}"
 NOTICE_OWNER_TEXT = "for you"
 NOTICE_FOR_TEXT = "for {title}"
 NOTICE_OTHER_TEXT = "for another sprint"
 NOTICE_YOU_TEXT = "You"
-LIVE_FAULT_TEXT = "Live fault in production on #{issue}: {observed}, seen {when}, proven by {proven}"
-OVERLAP_UNSETTLED_TEXT = ("{first} and {second} both fix a live fault in {files}; "
+LIVE_FAULT_TEXT = "Fault users meet now in production on #{issue}: {observed}, seen {when}, proven by {proven}"
+OVERLAP_UNSETTLED_TEXT = ("{first} and {second} both fix a fault users meet now in production in {files}; "
                           "the rule could not decide which lands first")
 ASK_WORKING_TEXT = "Working on it"
 ASK_ANSWERED_TEXT = "Answered"
@@ -1054,9 +1054,9 @@ WAIT_TEXT = {
     "window_opening": "Waiting for the next verification pass to start its wait: what it waits for has been seen",
     "not_released": "Waiting for the release to be seen: no release yet includes its merge",
     "not_deployed": "Waiting for the deploy to be seen: no deploy is known to include its merge",
-    "ci_not_passed": "Waiting for a CI run to pass at its commit",
+    "ci_not_passed": "Waiting for GitHub's automatic checks to pass at its commit",
     "unknown": "Waiting: the tracker could not say whether it is due yet",
-    "no_when": "Waiting with no date: its wording states a wait, but its verify block has no when field for that wait",
+    "no_when": "Waiting with no date: its wording states a wait, but its check after release names no date for that wait",
     "due": "Due now: the next verification pass asks you here",
     "due_command": ("Due now: the next verification pass asks you here, "
                     "unless it refuses the command as not a verification command"),
