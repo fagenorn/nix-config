@@ -105,20 +105,22 @@ ALLOWED_IMPORTS: dict[str, frozenset[str]] = {
     "verification": frozenset({
         "agent_tools.project_contract.resolve_project",  # verified_tree, verify_pending
         "agent_tools.project_contract.agent_platform",  # verify_checks, verify_pending, adopt_hook_check
-        "agent_tools.project_contract.fleet_preflight",  # verify_checks
         "agent_tools.claims.forge_markers",  # verify_facts, verify_issues, verify_owner, verify_run
         "agent_tools.claims.forge_claim",  # verify_owner
         "agent_tools.claims.forge_owner_action",  # verify_run
         "agent_tools.claims.owner_actions",  # verify_pending
-        "agent_tools.guard.push_fixture",  # verify_checks
         "agent_tools.guard.guard_policy",  # verify_exec
         "agent_tools.project_contract.adopt_inspection",  # verify_exec
         "agent_tools.project_contract.adopt_verify",  # verify_exec
         "agent_tools.project_contract.adopt_apply",  # verify_checks (run_leashed)
-        "agent_tools.delivery.agent_gate_bundle",  # verify_checks
-        "agent_tools.delivery.issue_branch",  # verify_checks
     }),
 }
+
+
+def delivery_targets(targets) -> list[str]:
+    """The targets that are the delivery package or a module under it."""
+    return sorted(t for t in targets if t == "agent_tools.delivery"
+                  or t.startswith("agent_tools.delivery."))
 
 
 def area_packages(areas_dir: Path) -> frozenset[str]:
@@ -357,6 +359,15 @@ class SyntheticLayoutTest(unittest.TestCase):
 
 
 class LayoutRuleTest(unittest.TestCase):
+    def test_verification_imports_nothing_from_delivery(self):
+        self.assertEqual(delivery_targets(ALLOWED_IMPORTS["verification"]), [])
+
+    def test_the_delivery_package_itself_counts_as_delivery(self):
+        self.assertEqual(
+            delivery_targets({"agent_tools.delivery", "agent_tools.delivery.x",
+                              "agent_tools.deliveryx", "agent_tools.claims.forge_markers"}),
+            ["agent_tools.delivery", "agent_tools.delivery.x"])
+
     def test_the_flat_allowance_is_the_closure_of_instruction_load_and_skill_lint(self):
         self.assertEqual(
             flat_modules(PACKAGE),

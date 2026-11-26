@@ -1,0 +1,6 @@
+#!/bin/sh
+# Verify check for the eleven-m5 memory census: the first whole day after the deploy has the unowned
+# figure on every sample, and the day line agrees with the sample records. verify-pending runs it
+# from the repository root at the commit the block names, so `python` below is that commit's source.
+# Exit 0 met, 1 not met, 75 not yet.
+PYTHONPATH=python exec python3 -m agent_tools.hosts.omlx_memory_census_day "$@"

@@ -345,6 +345,17 @@ def _each_over(path: str) -> Callable[[dict], None]:
     return change
 
 
+def _scope_reads_a_round(path: str) -> Callable[[dict], None]:
+    """The toy's `scope` step is a `verify-rounds round` read, and its `children` step runs over `path`."""
+    def change(toy: dict) -> None:
+        scope = step(toy, "scope")
+        scope.update(command="verify-rounds", subcommand="round",
+                     on={"passed": "draft", "retest": "draft", "fix": "draft", "spent": "needs-owner",
+                         "verify": "needs-owner", "error": "needs-owner", "refused": "needs-owner"})
+        _each_over(path)(toy)
+    return change
+
+
 def _drop_first_pass_set(toy: dict) -> None:
     del step(toy, "review")["members"][0]["pass"]
 
@@ -552,6 +563,8 @@ CASES = [
     Case("each_over_a_decide_verdict", editing("toy", _each_over("tally.verdict")),
          [("toy", "children", "each_not_a_list")]),
     Case("each_over_a_command_string", editing("toy", _each_over("scope.range")),
+         [("toy", "children", "each_not_a_list")]),
+    Case("each_over_a_list_of_another_subcommand", editing("toy", _scope_reads_a_round("scope.changed_paths")),
          [("toy", "children", "each_not_a_list")]),
     Case("each_over_a_missing_member", editing("toy", _each_over("draft.missing")),
          [("toy", "children", "unknown_member")]),
@@ -854,6 +867,13 @@ class RefusalTableTest(unittest.TestCase):
                     sorted((r["procedure"], r["step"] or "", r["defect"])
                            for r in document["refusals"]),
                     sorted((p, s or "", d) for p, s, d in case.expected))
+
+    def test_each_over_a_list_of_its_own_subcommand_is_accepted(self):
+        for member in ("guards", "problems", "results"):
+            with self.subTest(member):
+                code, out, _ = run_check("--procedures", str(broken_copy(
+                    editing("toy", _scope_reads_a_round(f"scope.{member}")))))
+                self.assertEqual((code, json.loads(out)["verdict"]), (0, "ok"))
 
     def test_every_defect_has_a_table_case(self):
         self.assertEqual({d for c in CASES for _, _, d in c.expected},
@@ -1161,6 +1181,14 @@ SHIPPED_MEMBERS = {
     "lite-independent": ({"findings": []},),
     "full-independent": ({"findings": []},),
     **{f"{route}-rereview": ({}, {"findings": []}, UNNAMED) for route in ("lite", "escalated", "full")},
+    "round": ({"head": "h", "clean": True, "problems": [], "start_head": "s", "guards": [], "digest": "d",
+               "results": [{"id": "lint", "status": "pass"},
+                           {"id": "test", "status": "fail", "named": ["a.json"]}]},),
+    "ws-check": ({"start_head": "s", "commit": "c", "whitespace_only": True, "changed_paths": ["a.json"]},),
+    "fix": ({}, {"unrelated": {"test": "", "evidence": ""}}),
+    **{review: ({}, {"findings": []}, UNNAMED,
+                {"findings": [], "whitespace_insignificant": True, "whitespace_evidence": "e"})
+       for review in ("fix-review", "fix-review-again")},
 }
 
 
@@ -1169,6 +1197,9 @@ SHIPPED_MEMBERS = {
 UNREACHABLE_EXHAUSTED = {
     "direct": tuple((f"{route}-{kind}", "exhausted")
                     for kind in ("tally", "settled") for route in ("lite", "escalated", "full")),
+    "verify": tuple((name, "exhausted") for name in (
+        "checks", "round", "fixed", "ws-check", "fix-review", "narrowing", "fix-review-again", "narrowing-again",
+        "rerun")),
 }
 
 
@@ -1267,7 +1298,8 @@ class ShippedProcedureTest(unittest.TestCase):
         names = ["setup-applies.md", "hold-draft.md", "hold-regrade.md"] + [
             f"direct-{kind}.md" for kind in (
                 "implement", "review-lite", "review", "fix-lite", "fix-escalated", "fix-full",
-                "rereview-lite", "rereview-escalated", "rereview-full")]
+                "rereview-lite", "rereview-escalated", "rereview-full")] + [
+            f"verify-{kind}.md" for kind in ("fix", "fix-review", "retest")]
         for name in names:
             with self.subTest(name=name):
                 self.assertNotIn("gh ", (PROCEDURES / name).read_text(encoding="utf-8"))
