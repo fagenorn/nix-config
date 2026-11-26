@@ -159,6 +159,10 @@ class WatcherDeclarationTest(unittest.TestCase):
                 self.assertIn(needle, command)
         self.assertTrue(command.endswith("--fseventsd-record /var/db/memory-watch/fseventsd.json"))
 
+    def test_the_watcher_passes_the_unowned_alert_line(self):
+        self.assertEqual(self.budget["unownedAlertGiB"], 5)
+        self.assertIn(f"--unowned-alert-gib {self.budget['unownedAlertGiB']} ", self.watch["command"])
+
     def test_the_watcher_leaves_the_alert_settings_to_the_shared_module(self):
         for needle in ("--alert-settings", "--alert-log", "--telegram-api", "telegram.json", "sops", "--gh", "--repo"):
             with self.subTest(needle=needle):
@@ -180,6 +184,18 @@ class WatcherDeclarationTest(unittest.TestCase):
         self.assertRegex(command, r"-agent-platform/bin/omlx-memory-watch fseventsd --record /var/db/memory-watch/fseventsd\.json ")
         self.assertIn(f"--limit-gib {budget['fseventsdLimitGiB']} ", command)
         self.assertIn(f"--min-restart-minutes {budget['fseventsdRestartMinutes']}", command)
+
+
+    def test_the_census_runs_as_root_every_minute(self):
+        census = self.got["census"]
+        self.assertIsNone(census["UserName"])
+        self.assertEqual(census["StartInterval"], 60)
+        self.assertIs(census["RunAtLoad"], True)
+        self.assertIn(census["KeepAlive"], (None, False))
+        self.assertEqual(census["StandardOutPath"], "/var/log/memory-census.log")
+        self.assertRegex(
+            census["command"],
+            r"^/nix/store/[0-9a-z]{32}-agent-platform/bin/omlx-memory-watch census --record /var/db/memory-watch/census\.json$")
 
 
 class FloorDaemonTest(unittest.TestCase):
@@ -265,6 +281,22 @@ class GuideTest(unittest.TestCase):
             with self.subTest(needle=needle):
                 self.assertIn(needle, self.section)
 
+    def test_the_guide_names_the_sample_records(self):
+        for needle in (
+            "~/.omlx/memory/samples/<day>.jsonl", "peak_unowned_gib", "peak_unowned_at", "census_samples",
+            "records_since", "14 days",
+        ):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, self.section)
+
+    def test_the_guide_names_the_recorded_events(self):
+        for needle in (
+            "ram_disk_attached", "vm_started", "floor_kill", "verify_run", "verify_started", "ci_job_started",
+            "hdiutil info", "vz.pid", "between two samples",
+        ):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, self.section)
+
     def test_the_guide_names_the_alert_settings_file(self):
         self.assertTrue(self.alerts, "the guide has no `### Alerts` subsection")
         for needle in (
@@ -276,6 +308,10 @@ class GuideTest(unittest.TestCase):
         for needle in ("sops", "gh issue"):
             with self.subTest(needle=needle):
                 self.assertNotIn(needle, self.alerts)
+
+    def test_the_guide_lists_the_unowned_alert(self):
+        self.assertIn("- `unowned_memory`:", self.alerts)
+        self.assertIn("There are nine kinds", self.alerts)
 
     def test_the_guide_states_what_makes_fseventsd_grow(self):
         for needle in (
@@ -335,9 +371,19 @@ class GuideTest(unittest.TestCase):
 
     def test_the_guide_lists_the_new_daemons_among_restarts(self):
         self.assertTrue(self.restarts)
-        for needle in ("omlx-memory-watch", "fseventsd-trim", "memory-floor"):
+        for needle in ("omlx-memory-watch", "fseventsd-trim", "memory-floor", "memory-census"):
             with self.subTest(needle=needle):
                 self.assertIn(needle, self.restarts)
+
+    def test_the_guide_states_how_unowned_memory_is_measured(self):
+        unowned = self.between(self.section, "### Unowned memory", "\n### ")
+        self.assertTrue(unowned, "the guide has no `### Unowned memory` subsection")
+        for needle in (
+            "sys_footprint", "total footprint", "/var/db/memory-watch/census.json", "/var/log/memory-census.log",
+            "double-counts", "census_seconds", "incomplete census",
+        ):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, unowned)
 
 
 if __name__ == "__main__":

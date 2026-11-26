@@ -116,7 +116,7 @@ from agent_tools.canonical import (
 from agent_tools.delivery import engine_stop
 from agent_tools.delivery.engine_commands import Watchdog, argument
 from agent_tools.delivery.engine_ledger import TOKEN_COUNTS
-from agent_tools.delivery.procedure_check import PLACEHOLDER_RE, ROLES
+from agent_tools.delivery.procedure_terms import PLACEHOLDER_RE, ROLES
 from agent_tools.skill_lint import parse_frontmatter
 
 FORBIDDEN_WORDS: tuple[str, ...] = (

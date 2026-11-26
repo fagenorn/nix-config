@@ -7,7 +7,7 @@ merge base of the worktree's `HEAD` and `refs/remotes/origin/<branch>` and `head
 `HEAD` (each `""` when unread); `new_tests` lists the change's new test ids sorted by file path then
 id; `still_passing` is the subset whose run exited 0, in the same order; `reason` is `""` when every
 new test ran, else one sentence saying why the check did not run or did not finish. The result is
-information for a reviewer and never blocks. The decision is ADR-delivery-022.
+information for a reviewer and never blocks. The decision is ADR-delivery-023.
 
 A new test is a `test*` method (`def` or `async def`) directly in a top-level class whose bases reach
 a base named `TestCase` (a bare name or an attribute `x.TestCase`) through classes defined in the

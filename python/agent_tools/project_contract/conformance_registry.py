@@ -319,6 +319,12 @@ REPAIRS = {
     "violations.enforcer.repair": {
         "module": "conformance", "safety_class": "user_action",
         "operation": None},
+    # No engine command edits a shipped procedure or a contract's commands, so
+    # the fix (repair the procedure in the platform, or declare the command id
+    # in the contract) is the reader's own call.
+    "procedures.engine_check.repair": {
+        "module": "conformance", "safety_class": "user_action",
+        "operation": None},
 }
 
 
@@ -435,6 +441,12 @@ REGISTRY: tuple[Check, ...] = (
            ("history_unavailable", "violations.history.fetch"),
            ("enforcer_failed", "violations.enforcer.repair")),
           "check_never_rise"),
+    Check("verification.procedures.engine_check", "verification", "command", "required",
+          ("repository.projection.fresh",),
+          (("procedure_refused", "procedures.engine_check.repair"),
+           ("procedure_cap_exceeded", "procedures.engine_check.repair"),
+           ("procedure_check_unusable", "procedures.engine_check.repair")),
+          "check_shipped_procedures"),
     Check("repository.residue.nested_ledger", "repository", "residue", "optional",
           ("repository.contract.valid",), NESTED_LEDGER_FINDINGS,
           "check_residue_nested_ledger"),

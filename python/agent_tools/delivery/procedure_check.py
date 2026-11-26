@@ -83,27 +83,48 @@ declares no schema and is not member-checked), `unknown_placeholder` (a `{{<path
 its `in` paths; skipped when the prompt is missing) and `each_not_a_list` (a `call` step's `each` path that resolved with
 no refusal above and reads a value that is not a list: a run input, a decide step's `verdict`, an agent reply member
 whose property schema has no `"type": "array"`, or a member of a platform command's output that
-`PLATFORM_LISTS` does not name; a path that did not resolve keeps its own refusal alone, and a producer of any other
-kind, a project command, or an agent whose reply did not resolve, declares no schema and is not list-checked)."""
+`PLATFORM_LISTS` does not name (or, for a subcommand `SUBCOMMAND_LISTS` names, that its own list does not name); a path that did not resolve keeps its own refusal alone, and a producer of any other
+kind, a project command, or an agent whose reply did not resolve, declares no schema and is not list-checked).
+
+Command. `python -m agent_tools.delivery.procedure_check --procedures=<dir> [--project-command=<id>]... [--without-caps]`
+checks a procedure directory and prints one line of compact sorted-key JSON. `--procedures` is required;
+`--project-command` repeats and names a project command id, declared with the default verdicts and overriding a platform
+declaration of the same id (`declarations`); `--without-caps` measures nothing, so `breaches` is empty. The engine passes
+each value as `--option=<value>`, so a value that starts with `-` is never read as an option. Nothing else is an option.
+The line is the one `engine check` prints:
+
+- exit 0: `{"procedures": [<names>], "verdict": "ok"}`;
+- exit 1: `{"breaches": [...], "refusals": [...], "verdict": "refused"}`, both lists always present, at least one not empty,
+  the breaches of `size_caps.breaches` and the refusals of `check_directory` in their order;
+- exit 2, stdout empty and one stderr line `procedure-check: <reason>`: a usage error, `--procedures` not a directory, a
+  directory with no procedure file, an invalid `command_verdicts.json`, or a file the measure cannot read.
+
+The check is a process of its own: the engine runs it, it starts no process, opens no socket and reads no environment
+variable."""
 
 from __future__ import annotations
 
+import argparse
+import importlib.resources
 import json
 import re
+import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping
+from typing import Mapping, Sequence
 
-from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
+from agent_tools.delivery import engine_graders, size_caps
 from agent_tools.delivery.engine_graders import GRADERS
 from agent_tools.delivery.engine_reply import schema_problem
+from agent_tools.delivery.procedure_terms import (
+    CLAIM_LOST, EXHAUSTED, FORMAT, INPUT_RE, NAME_RE, NEEDS, NO_REPLY, OUT_OF_BOUNDS, PLACEHOLDER_RE, QUOTA_WAIT,
+    ROLES, STAGES, SUPERSEDED, WAITS, CommandDeclaration, DeclarationError, _inside, _strict_load, load_commands,
+    readable_format)
 
-FORMAT = 1
-STAGES = ("setup", "planning", "plan review", "building", "final review",
-          "verifying", "awaiting look", "landing", "closing out", "done")
+ENGINE_DIR = Path(importlib.resources.files("agent_tools.delivery"))
+PROJECT_DECLARATION = CommandDeclaration((), {})
+
 KINDS = ("command", "agent", "decide", "group", "call")
-NEEDS = ("owner-decision", "owner-look", "retry", "nothing")
-ROLES = ("planner", "implementer", "reviewer", "reviewer-lite")
 DEFECTS = ("unreadable_procedure", "undefined_field", "invalid_field",
            "unknown_stage", "duplicate_step", "unknown_target", "unknown_command",
            "undeclared_verdicts", "missing_claim_lost", "unknown_role", "missing_prompt", "missing_reply",
@@ -111,20 +132,11 @@ DEFECTS = ("unreadable_procedure", "undefined_field", "invalid_field",
            "unreachable_step", "unreachable_done", "unmapped_outcome",
            "unknown_outcome", "unbounded_cycle", "unproduced_input",
            "unknown_member", "unknown_placeholder", "each_not_a_list")
-EXHAUSTED = "exhausted"
-OUT_OF_BOUNDS = "out-of-bounds"
-NO_REPLY = "no-reply"
 REFUSED = "refused"
-CLAIM_LOST = "claim-lost"
-QUOTA_WAIT = "quota-wait"
-SUPERSEDED = "superseded"
 START = "(start)"
 
-NAME_RE = re.compile(r"^[a-z][a-z0-9-]*$")
-INPUT_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 PATH_RE = re.compile(r"^([a-z][a-z0-9-]*)\.([a-z][a-z0-9_]*)$")
 FILE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
-PLACEHOLDER_RE = re.compile(r"\{\{\s*([^{}]*?)\s*\}\}")
 
 # The members of each platform command's JSON output that are lists; every other member is not one.
 PLATFORM_LISTS: Mapping[str, frozenset[str]] = {
@@ -138,12 +150,18 @@ PLATFORM_LISTS: Mapping[str, frozenset[str]] = {
     "resolve-project": frozenset(),
     "revert-check": frozenset({"new_tests", "still_passing"}),
     "verified-tree": frozenset({"results"}),
+    "verify-rounds": frozenset({"changed_paths", "guards", "problems", "results"}),
+}
+# A command whose subcommands publish different lists: the member must be one the step's own subcommand lists.
+SUBCOMMAND_LISTS: Mapping[tuple[str, str], frozenset[str]] = {
+    ("verify-rounds", "round"): frozenset({"guards", "problems", "results"}),
+    ("verify-rounds", "fix-range"): frozenset({"changed_paths"}),
+    ("verify-rounds", "retested"): frozenset(),
 }
 
 HOLDS = ("run", "head", "live")
 COMMON_REQUIRED = ("id", "stage", "kind", "holds")
 COMMON_OPTIONAL = ("in", "on", "max_visits", "mutates")
-WAITS = ("usage-limit", "host-slot", "lock", "checks")
 KIND_MEMBERS = {
     "command": (("command",), ("subcommand", "check", "wait")),
     "agent": (("role", "prompt", "reply", "outcome_from"), ()),
@@ -151,7 +169,6 @@ KIND_MEMBERS = {
     "group": (("members",), ()),
     "call": (("procedure",), ("each", "parallel")),
 }
-DEFAULT_VERDICTS = ("ok", "failed")
 
 
 @dataclass(frozen=True)
@@ -191,78 +208,6 @@ class CheckResult:
     procedures: tuple[str, ...]
     refusals: tuple[Refusal, ...]
     resolved: Mapping[str, Resolved]
-
-
-class DeclarationError(Exception):
-    """`command_verdicts.json` is not a valid declaration file."""
-
-
-@dataclass(frozen=True)
-class CommandDeclaration:
-    """The two declared forms: `verdicts` (no subcommands) or `subcommands`."""
-
-    verdicts: tuple[str, ...] | None
-    subcommands: Mapping[str, tuple[str, ...]]
-
-    def outcomes(self, subcommand: str | None) -> tuple[str, ...] | None:
-        if self.verdicts is not None:
-            return (self.verdicts or DEFAULT_VERDICTS) if subcommand is None else None
-        if subcommand in self.subcommands:
-            return self.subcommands[subcommand] or DEFAULT_VERDICTS
-        return None
-
-
-def _strict_load(path: Path) -> object:
-    try:
-        return json.loads(path.read_text(encoding="utf-8"),
-                          object_pairs_hook=reject_duplicate_keys,
-                          parse_constant=reject_nonfinite_literal)
-    except RecursionError as error:
-        raise ValueError("the document is nested too deeply") from error
-
-
-def _verdict_list(value: object, where: str) -> tuple[str, ...]:
-    if (not isinstance(value, list) or not all(isinstance(item, str) and item for item in value)
-            or len(set(value)) != len(value)):
-        raise DeclarationError(f"{where}: verdicts are distinct non-empty strings")
-    for reserved in (EXHAUSTED, OUT_OF_BOUNDS):
-        if reserved in value:
-            raise DeclarationError(f"{where}: {reserved!r} is reserved, not a verdict")
-    return tuple(value)
-
-
-def _declaration(key: str, value: object) -> CommandDeclaration | None:
-    if value is None:
-        return None
-    if isinstance(value, dict) and list(value) == ["verdicts"]:
-        return CommandDeclaration(_verdict_list(value["verdicts"], key), {})
-    if isinstance(value, dict) and list(value) == ["subcommands"]:
-        listed = value["subcommands"]
-        if not isinstance(listed, dict) or not listed:
-            raise DeclarationError(f"{key}: subcommands is a non-empty object")
-        for subcommand in listed:
-            if not NAME_RE.fullmatch(subcommand):
-                raise DeclarationError(f"{key}: subcommand {subcommand!r} is not a name")
-        return CommandDeclaration(None, {
-            subcommand: _verdict_list(verdicts, f"{key} {subcommand}")
-            for subcommand, verdicts in listed.items()})
-    raise DeclarationError(f"{key}: null, {{\"verdicts\": [...]}} or {{\"subcommands\": {{...}}}} only")
-
-
-def load_commands(path: Path | None = None) -> dict[str, CommandDeclaration | None]:
-    path = path or Path(__file__).with_name("command_verdicts.json")
-    try:
-        document = _strict_load(path)
-    except (OSError, ValueError) as error:
-        raise DeclarationError(f"{path.name} is unreadable: {error}") from error
-    if not isinstance(document, dict):
-        raise DeclarationError(f"{path.name} is not an object")
-    commands: dict[str, CommandDeclaration | None] = {}
-    for key, value in document.items():
-        if not NAME_RE.fullmatch(key):
-            raise DeclarationError(f"{key!r} is not a command id")
-        commands[key] = _declaration(key, value)
-    return commands
 
 
 class _Findings:
@@ -308,11 +253,6 @@ def _paths(value: object, only_run: bool, found: _Findings, step: str | None,
             found.add("invalid_field", f"{where} path {path!r} is not <step>.<member> or run.<input>.", step)
         elif only_run and match.group(1) != "run":
             found.add("invalid_field", f"{where} path {path!r} must be a run.<input> path.", step)
-
-
-def readable_format(value: object) -> bool:
-    """Whether `value` is the one procedure format this engine reads."""
-    return _is_int(value) and value == FORMAT
 
 
 def _header(doc: dict, found: _Findings) -> None:
@@ -614,18 +554,6 @@ def _command_outcomes(reference: dict, commands: Mapping[str, CommandDeclaration
         found.add("undeclared_verdicts",
                   f"{command!r} declares no verdicts for subcommand {subcommand!r}.", step)
     return outcomes
-
-
-def _inside(directory: Path, name: str) -> Path | None:
-    """The named file when it is a file that resolves inside `directory`."""
-    path = directory / name
-    if not path.is_file():
-        return None
-    try:
-        path.resolve().relative_to(directory.resolve())
-    except ValueError:
-        return None
-    return path
 
 
 def _agent_references(item: dict, directory: Path, replies: dict[str, _Reply | tuple[str, str]],
@@ -968,6 +896,9 @@ def _check_data_flow(procedure: dict, resolved: Resolved, found: _Findings) -> N
         kind = by_id[producer]["kind"] if producer in by_id else None
         if kind == "decide":
             return False
+        own = (by_id[producer].get("command"), by_id[producer].get("subcommand"))
+        if kind == "command" and own in SUBCOMMAND_LISTS:
+            return member in SUBCOMMAND_LISTS[own]
         if kind == "command" and by_id[producer]["command"] in PLATFORM_LISTS:
             return member in PLATFORM_LISTS[by_id[producer]["command"]]
         known = resolved.steps.get(producer)
@@ -1107,3 +1038,72 @@ def check_graph(name: str, doc: dict, resolved: Resolved) -> list[Refusal]:
     position = {item["id"]: index for index, item in enumerate(doc["steps"])}
     return sorted(found.refusals,
                   key=lambda r: (-1 if r.step is None else position[r.step]))
+
+
+def declarations(project_commands: Sequence[str]) -> dict[str, CommandDeclaration | None]:
+    """The platform's declarations, with each project command declared with the default verdicts in their place."""
+    declared = dict(load_commands())
+    for command in project_commands:
+        declared[command] = PROJECT_DECLARATION
+    return declared
+
+
+def verdict(directory: Path, project_commands: Sequence[str],
+            *, caps: bool = True) -> tuple[CheckResult, tuple[size_caps.Breach, ...]]:
+    """The verdict the command prints, the one every judge of a procedure set in this process calls.
+
+    A set is refused when either part is non-empty: a refusal of the check or, with `caps`, a breach of a size cap.
+    """
+    result = check_directory(directory, declarations(project_commands))
+    breaches = size_caps.breaches(ENGINE_DIR, directory, engine_graders.GRADERS) if caps else ()
+    return result, breaches
+
+
+class _Parser(argparse.ArgumentParser):
+    def error(self, message: str):
+        raise _Usage(message)
+
+
+class _Usage(Exception):
+    pass
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = _Parser(prog="procedure-check", description=__doc__)
+    parser.add_argument("--procedures", type=Path, required=True)
+    parser.add_argument("--project-command", action="append", dest="project_command")
+    parser.add_argument("--without-caps", action="store_true", dest="without_caps")
+    return parser
+
+
+def _usage(reason: str) -> int:
+    sys.stderr.write(f"procedure-check: {' '.join(reason.split())}\n")
+    return 2
+
+
+def _line(value: object) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n"
+
+
+def main(argv: list[str] | None = None) -> int:
+    try:
+        args = build_parser().parse_args(argv)
+    except _Usage as error:
+        return _usage(str(error))
+    if not args.procedures.is_dir():
+        return _usage(f"--procedures is not a directory: {args.procedures}")
+    try:
+        result, breaches = verdict(args.procedures, args.project_command or (), caps=not args.without_caps)
+    except (DeclarationError, ValueError, OSError) as error:
+        return _usage(str(error))
+    if result.refusals or breaches:
+        sys.stdout.write(_line({"breaches": [b.as_json() for b in breaches],
+                                "refusals": [r.as_json() for r in result.refusals],
+                                "verdict": "refused"}))
+        return 1
+    sys.stdout.write(_line({"procedures": list(result.procedures), "verdict": "ok"}))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

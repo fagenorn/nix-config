@@ -61,6 +61,9 @@ ALLOWED_IMPORTS: dict[str, frozenset[str]] = {
         "agent_tools.project_contract.derived_values",  # verify_slot
         "agent_tools.project_contract.resolve_project",  # issue_branch, engine_shell
         "agent_tools.verification.verified_tree",  # landing
+        "agent_tools.verification.verify_block",  # holding
+        "agent_tools.verification.verify_issues",  # holding
+        "agent_tools.verification.verify_pending",  # holding
     }),
     "guard": frozenset({
         "agent_tools.project_contract.adopt_inspection",  # guard_policy, contract_export
@@ -91,6 +94,8 @@ ALLOWED_IMPORTS: dict[str, frozenset[str]] = {
         "agent_tools.delivery.skipped_test_lint",  # conformance_checks
         "agent_tools.delivery.copied_test_lint",  # conformance_checks
         "agent_tools.delivery.instruction_surface_lint",  # conformance_checks
+        "agent_tools.delivery.engine_commands",  # conformance_checks
+        "agent_tools.delivery.procedure_check",  # conformance_checks
         "agent_tools.release.railway_deploy_adapter",  # host_readiness
         "agent_tools.release.codesigned_artifact_adapter",  # host_readiness
     }),
@@ -102,20 +107,22 @@ ALLOWED_IMPORTS: dict[str, frozenset[str]] = {
     "verification": frozenset({
         "agent_tools.project_contract.resolve_project",  # verified_tree, verify_pending
         "agent_tools.project_contract.agent_platform",  # verify_checks, verify_pending, adopt_hook_check
-        "agent_tools.project_contract.fleet_preflight",  # verify_checks
         "agent_tools.claims.forge_markers",  # verify_facts, verify_issues, verify_owner, verify_run
         "agent_tools.claims.forge_claim",  # verify_owner
         "agent_tools.claims.forge_owner_action",  # verify_run
         "agent_tools.claims.owner_actions",  # verify_pending
-        "agent_tools.guard.push_fixture",  # verify_checks
         "agent_tools.guard.guard_policy",  # verify_exec
         "agent_tools.project_contract.adopt_inspection",  # verify_exec
         "agent_tools.project_contract.adopt_verify",  # verify_exec
         "agent_tools.project_contract.adopt_apply",  # verify_checks (run_leashed)
-        "agent_tools.delivery.agent_gate_bundle",  # verify_checks
-        "agent_tools.delivery.issue_branch",  # verify_checks
     }),
 }
+
+
+def delivery_targets(targets) -> list[str]:
+    """The targets that are the delivery package or a module under it."""
+    return sorted(t for t in targets if t == "agent_tools.delivery"
+                  or t.startswith("agent_tools.delivery."))
 
 
 def area_packages(areas_dir: Path) -> frozenset[str]:
@@ -354,6 +361,15 @@ class SyntheticLayoutTest(unittest.TestCase):
 
 
 class LayoutRuleTest(unittest.TestCase):
+    def test_verification_imports_nothing_from_delivery(self):
+        self.assertEqual(delivery_targets(ALLOWED_IMPORTS["verification"]), [])
+
+    def test_the_delivery_package_itself_counts_as_delivery(self):
+        self.assertEqual(
+            delivery_targets({"agent_tools.delivery", "agent_tools.delivery.x",
+                              "agent_tools.deliveryx", "agent_tools.claims.forge_markers"}),
+            ["agent_tools.delivery", "agent_tools.delivery.x"])
+
     def test_the_flat_allowance_is_the_closure_of_instruction_load_and_skill_lint(self):
         self.assertEqual(
             flat_modules(PACKAGE),

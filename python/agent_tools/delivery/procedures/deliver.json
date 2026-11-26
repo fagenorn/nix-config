@@ -19,6 +19,9 @@
     "codex-unavailable": {"need": "retry", "reenter": "direct-lane"},
     "revert-check-unavailable": {"need": "retry", "reenter": "direct-lane"},
     "verify": {"need": "owner-decision", "reenter": "verification"},
+    "verify-unrelated": {"need": "owner-decision", "reenter": "verification"},
+    "verify-fix": {"need": "owner-decision", "reenter": "verification"},
+    "verify-fix-review": {"need": "owner-decision", "reenter": "verification"},
     "land": {"need": "owner-decision", "reenter": "landing"},
     "head-moved": {"need": "owner-decision", "reenter": "landing"},
     "checks": {"need": "owner-decision", "reenter": "landing"},
@@ -33,7 +36,8 @@
     "merge": {"need": "owner-decision", "reenter": "landing", "pinned": true},
     "unreleased-lock": {"need": "owner-decision", "reenter": "landing", "pinned": true},
     "close-out": {"need": "owner-decision", "reenter": "closing", "pinned": true},
-    "hold": {"need": "owner-decision", "reenter": "closing", "pinned": true}
+    "hold": {"need": "owner-decision", "reenter": "closing", "pinned": true},
+    "code-unmet": {"need": "owner-decision", "reenter": "closing", "pinned": true}
   },
   "steps": [
     {"id": "start", "stage": "setup", "kind": "call", "procedure": "setup", "holds": "live",
@@ -51,7 +55,9 @@
             "task": "task", "direct-review": "direct-review", "direct-fix": "direct-fix",
             "codex-unavailable": "codex-unavailable", "revert-check-unavailable": "revert-check-unavailable"}},
     {"id": "verification", "stage": "verifying", "kind": "call", "procedure": "verify", "holds": "live",
-     "on": {"done": "landing", "setup": "setup", "claim-lost": "claim-lost", "verify": "verify"}},
+     "on": {"done": "landing", "setup": "setup", "claim-lost": "claim-lost", "verify": "verify",
+            "verify-unrelated": "verify-unrelated", "verify-fix": "verify-fix",
+            "verify-fix-review": "verify-fix-review"}},
     {"id": "landing", "stage": "landing", "kind": "call", "procedure": "land", "holds": "live",
      "on": {"done": "closing", "land": "land", "claim-lost": "claim-lost", "claim": "claim",
             "head-moved": "head-moved", "checks": "checks", "checks-pending": "checks-pending",
@@ -59,6 +65,6 @@
             "sync-contention": "sync-contention", "sync-review": "sync-review", "sync-fix": "sync-fix",
             "land-contended": "land-contended", "merge": "merge", "unreleased-lock": "unreleased-lock"}},
     {"id": "closing", "stage": "closing out", "kind": "call", "procedure": "close-out", "holds": "live",
-     "on": {"done": "done", "close-out": "close-out", "hold": "hold"}}
+     "on": {"done": "done", "close-out": "close-out", "hold": "hold", "code-unmet": "code-unmet"}}
   ]
 }

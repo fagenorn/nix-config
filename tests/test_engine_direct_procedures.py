@@ -48,7 +48,7 @@ class DirectProcedureTest(unittest.TestCase):
     def test_the_direct_steps_that_commit_are_the_only_mutating_ones(self):
         self.assertEqual([s["id"] for s in load(PROCEDURES, "direct")["steps"] if s.get("mutates")],
                          ["implement", "lite-fix", "escalated-fix", "full-fix"])
-        self.assertEqual([s["id"] for s in load(PROCEDURES, "verify")["steps"] if s.get("mutates")], [])
+        self.assertEqual([s["id"] for s in load(PROCEDURES, "verify")["steps"] if s.get("mutates")], ["fix"])
 
     def test_the_direct_review_roles(self):
         direct = load(PROCEDURES, "direct")
@@ -72,7 +72,10 @@ class DirectProcedureTest(unittest.TestCase):
         self.assertEqual(load(PROCEDURES, "verify")["stops"], {
             "setup": {"need": "owner-decision", "reenter": "preflight"},
             "claim-lost": {"need": "owner-decision", "reenter": "preflight"},
-            "verify": {"need": "owner-decision", "reenter": "checks"}})
+            "verify": {"need": "owner-decision", "reenter": "checks"},
+            "verify-unrelated": {"need": "owner-decision", "reenter": "checks"},
+            "verify-fix": {"need": "owner-decision", "reenter": "checks"},
+            "verify-fix-review": {"need": "owner-decision", "reenter": "checks"}})
 
     def test_the_route_prompts_differ_only_by_their_producers(self):
         producers = {"lite": ("lite-review", "lite-independent", "lite-fix", "lite-revert-check"),
@@ -173,6 +176,29 @@ class DirectProcedureTest(unittest.TestCase):
         steps = [(t.step, t.outcome) for t in done.transitions]
         self.assertIn(("lite-fixed", "not-done"), steps)
         self.assertNotIn("lite-rereview", [name for name, _ in steps])
+
+
+class VerifyProcedureTest(unittest.TestCase):
+    def test_a_fix_range_that_could_not_be_read_still_reaches_the_full_review_and_reruns_every_id(self):
+        results = [{"id": "lint", "status": "pass"}, {"id": "test", "status": "fail", "named": ["a.json"]}]
+        round_read = {"head": SHA, "clean": True, "results": results, "start_head": "", "guards": [],
+                      "problems": [{"id": "test", "status": "fail", "summary": "s", "reran": False}]}
+        fix = {"status": "done", "start_head": SHA, "commit": "b" * 40, "notes": "n", "tests": ["t"],
+               "outside_diff": [], "unrelated": {"test": "", "evidence": ""}}
+        unread = {"start_head": SHA, "commit": "", "whitespace_only": False, "changed_paths": []}
+        events = (reported("preflight", "clear", PREFLIGHT) + reported("checks", "failed", round_read)
+                  + reported("round", "fix", round_read) + reported("fix", "done", fix)
+                  + reported("ws-check", "unread", unread))
+
+        review = engine_core.replay(load(PROCEDURES, "verify"), SHIPPED_INPUTS, events)
+
+        self.assertEqual((type(review.action), review.action.step), (engine_core.StartSession, "fix-review"))
+        passed = {"verdict": "pass", "findings": [], "whitespace_insignificant": True, "whitespace_evidence": "e"}
+        narrowed = engine_core.replay(load(PROCEDURES, "verify"), SHIPPED_INPUTS,
+                                      events + reported("fix-review", "pass", passed))
+        self.assertIn(("narrowing", "rerun-all"), [(t.step, t.outcome) for t in narrowed.transitions])
+        self.assertEqual((type(narrowed.action), narrowed.action.step, narrowed.action.command),
+                         (engine_core.RunCommand, "checks", "verified-tree"))
 
 
 if __name__ == "__main__":

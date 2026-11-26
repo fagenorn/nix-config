@@ -35,8 +35,16 @@ commit to `main` and fail as not up to date; `merge_policy` makes each of the fi
 on the base branch policy, after which one read of `mergeStateStatus` answers `BLOCKED`. A pull
 request's `mergeStateStatus` is `BEHIND` while `main` is not an ancestor of its head, else `CLEAN`.
 The environment always sets `LANDING_BOUND_SECONDS` to 0 (no wait on a lock or a pending check).
-The replies' `merge`, `same_head` and `upstream` effects (see the launcher stand-in) are given the
-run's worktree and bare origin when they name none.
+The replies' `merge`, `same_head`, `leave` and `upstream` effects (see the launcher stand-in) are given the
+run's worktree and bare origin when they name none. `extra_files` (relative path to text) is passed to
+`FixtureProject`: each file is committed on `main` after the adoption, outside every branch diff.
+`answer(step, entry)` sets `replies[step]` to `entry` with its effects filled the same way and rewrites
+the scenario file (`self.scenario`) the stub reads, so the next `deliver()` answers `step` with `entry`.
+
+`blocks` is the issue numbers the issue blocks (the answer to the hold path's blocking read; none by
+default). The world also answers the `needs-verification` label creation of the hold path and of its
+split children, and registers no `gh auth status`, so the close-out's `verify-pending run` does nothing. `fail_once` is the tracker's one-shot
+failures, as `ForgeWorld.comment_store` takes them (a bare operation kind, or `add_label:<label>` for one label).
 """
 
 from __future__ import annotations
@@ -49,6 +57,7 @@ import shutil
 import subprocess
 import sys
 import unittest
+from collections.abc import Mapping
 from pathlib import Path
 
 from agent_tools.claims import forge_markers
@@ -80,7 +89,30 @@ IMPLEMENTED = {
               "sensitive": False, "ineligible": False, "tests": ["checks/check_greet.py"]},
     "commit": {"path": "fixture/farewell.py",
                "text": 'def farewell(name: str) -> str:\n    return f"Goodbye, {name}."\n'}}
-DEFAULT_REPLIES = {"applies": APPLIES, "implement": IMPLEMENTED, "lite-review": CLEAN_LITE}
+VALIDATOR_UNIMPORTABLE_ENGINE = (
+    "import sys\n"
+    "sys.modules['agent_tools.delivery.procedure_check'] = None\n"
+    "sys.modules['agent_tools.delivery.size_caps'] = None\n"
+    "from agent_tools.delivery import engine\n"
+    "sys.exit(engine.main(sys.argv[1:]))\n")
+NOT_BEFORE = {"not_before": "2099-01-01T00:00:00Z"}
+EVIDENCE_CHECK = {"ac": "AC2", "kind": "evidence", "host": "any", "when": NOT_BEFORE,
+                  "run": {"command": "test"}}
+EVIDENCE_BODY = ("Add a greet() function.\n\n## Acceptance criteria\n\n"
+                 "- [ ] [code] greet() returns the greeting\n"
+                 "- [ ] [evidence] the owner has seen the greeting\n")
+REGRADED = {"verdict": "met", "code_unmet": [],
+            "acceptance": [{"id": "AC1", "met": True, "evidence": "checks/check_greet.py:8"}]}
+
+
+def drafted(*checks: dict) -> dict:
+    """A `hold-draft` reply that drafted `checks`, each written under its criterion id."""
+    return {"verdict": "drafted", "written": [{"ac": c["ac"], "check": json.dumps(c)} for c in checks],
+            "detail": ""}
+
+
+DEFAULT_REPLIES = {"applies": APPLIES, "implement": IMPLEMENTED, "lite-review": CLEAN_LITE,
+                   "hold-draft": drafted(EVIDENCE_CHECK), "regrade": REGRADED}
 DEFAULT_BODY = ("Add a greet() function to the fixture module.\n\n"
                 "## Acceptance criteria\n\n- [ ] [code] greet() returns the greeting\n")
 PULL_FIELDS = "number,state,headRefName,closingIssuesReferences"
@@ -96,7 +128,9 @@ class StubbedRun:
                  rollup: list | None = None, forge_events=(), lock_release_fails: bool = False,
                  before_pull_request: bool = False, rollups: list[list] | None = None,
                  advance_main: int = 0, main_change: dict | None = None, merge_behind: int = 0,
-                 merge_policy: int = 0, fixtures: AdoptedFixtures | None = None) -> None:
+                 merge_policy: int = 0, blocks=(), fail_once=(),
+                 fixtures: AdoptedFixtures | None = None,
+                 extra_files: Mapping[str, str] | None = None) -> None:
         self.test = test_case
         self.issue = issue
         self.title = title
@@ -106,12 +140,14 @@ class StubbedRun:
             self._install_companion(review_code)
         options = {"review_code": review_code is not None, "conditions": conditions,
                    "required_checks": required_checks, "before_pull_request": before_pull_request}
+        if extra_files:
+            options["extra_files"] = dict(extra_files)
         self.fixture = (FixtureProject(test_case, self.world, **options) if fixtures is None
                         else fixtures.project(test_case, self.world, **options))
         self.forge = ForgeWorld(test_case)
         slug = self.fixture.slug
-        self.forge.comment_store(slug, issue, comments, labels=list(labels))
-        self._respond(slug, issue, title, state, labels, body, list(pulls))
+        self.forge.comment_store(slug, issue, comments, labels=list(labels), fail_once=list(fail_once))
+        self._respond(slug, issue, title, state, labels, body, list(pulls), list(blocks))
         self.tmp = self.world.tmp / "stubbed-run"
         self.tmp.mkdir()
         self.branch: str = issue_branch.render(self.fixture.branch_pattern, issue,
@@ -119,13 +155,13 @@ class StubbedRun:
         self.worktree_path: Path = self.fixture.worktree_root / (self.fixture.worktree_prefix + self.branch)
         self.bare = self.world.git(self.fixture.root, "remote", "get-url", "origin").strip()
         self.replies = self._with_worktree({**DEFAULT_REPLIES, **(replies or {})})
-        scenario = self.tmp / "scenario.json"
-        scenario.write_text(json.dumps(self.replies), encoding="utf-8")
+        self.scenario = self.tmp / "scenario.json"
+        self.scenario.write_text(json.dumps(self.replies), encoding="utf-8")
         self.log = self.tmp / "launches.log"
         stub_bin = self.tmp / "bin"
         stub_bin.mkdir()
         launcher = stub_bin / "claude-account"
-        launcher.write_text(f"#!/bin/sh\nexec {sys.executable} {STUB} {scenario} {self.log} \"$@\"\n",
+        launcher.write_text(f"#!/bin/sh\nexec {sys.executable} {STUB} {self.scenario} {self.log} \"$@\"\n",
                             encoding="utf-8")
         launcher.chmod(0o755)
         self.env = {key: value for key, value in self.world.env.items() if key not in DROPPED_ENV}
@@ -159,14 +195,20 @@ class StubbedRun:
         return script(self.tmp / "pulls-bin" / "gh", sys.executable, str(GH_PULLS),
                       str(self.pulls_state), str(forge_gh)).parent
 
+    def answer(self, step: str, entry: dict) -> None:
+        """Answer `step` with `entry` from the next delivery on, every other entry unchanged."""
+        self.replies[step] = self._with_worktree({step: entry})[step]
+        self.scenario.write_text(json.dumps(self.replies), encoding="utf-8")
+
     def _with_worktree(self, replies: dict) -> dict:
-        """The replies, each `commit`, `merge` and `same_head` effect without a worktree made in the
-        run's worktree and each `upstream` effect without a bare made in the bare origin."""
+        """The replies, each `commit`, `merge`, `same_head` and `leave` effect without a worktree made in
+        the run's worktree and each `upstream` effect without a bare made in the bare origin."""
         filled = copy.deepcopy(replies)
         for entry in filled.values():
             for effect, member, value in (("commit", "worktree", self.worktree_path),
                                           ("merge", "worktree", self.worktree_path),
                                           ("same_head", "worktree", self.worktree_path),
+                                          ("leave", "worktree", self.worktree_path),
                                           ("upstream", "bare", self.bare)):
                 if isinstance(entry.get(effect), dict) and member not in entry[effect]:
                     entry[effect][member] = str(value)
@@ -184,7 +226,7 @@ class StubbedRun:
         self.world.env["PATH"] = os.pathsep.join([str(shims), self.world.env["PATH"]])
 
     def _respond(self, slug: str, issue: int, title: str, state: str, labels, body: str,
-                 pulls: list) -> None:
+                 pulls: list, blocks: list) -> None:
         names = [{"name": name} for name in labels]
         issue_json = {"number": issue, "title": title, "state": state, "labels": names, "body": body}
         respond = self.forge.respond_json
@@ -198,6 +240,10 @@ class StubbedRun:
                        "-f", "color=FBCA04"], {"name": "in-progress"})
         respond("gh", ["pr", "list", "--repo", slug, "--state", "all", "--search", str(issue),
                        "--json", PULL_FIELDS], pulls)
+        respond("gh", ["api", f"repos/{slug}/issues/{issue}/dependencies/blocking"],
+                [{"number": n} for n in blocks])
+        respond("gh", ["api", "-X", "POST", f"repos/{slug}/labels", "-f", "name=needs-verification",
+                       "-f", "color=1D76DB"], {"name": "needs-verification"})
 
     def _install_home(self, gh_bin: Path, slug: str) -> None:
         home = self.world.home
@@ -233,12 +279,16 @@ class StubbedRun:
         for name in ("implementer", "reviewer", "reviewer-lite"):
             shutil.copy(ROLES / f"{name}.md", home / ".claude/agents" / f"{name}.md")
 
-    def deliver(self, procedures: Path | None = None) -> subprocess.CompletedProcess:
-        """`engine deliver <issue>` in the fixture checkout, with the procedures in `procedures` when given."""
+    def deliver(self, procedures: Path | None = None, *,
+                validator_unimportable: bool = False) -> subprocess.CompletedProcess:
+        """`engine deliver <issue>` in the fixture checkout, with the procedures in `procedures` when given.
+
+        `validator_unimportable` runs the engine in a process that cannot import the check or the cap checker.
+        """
         extra = ["--procedures", str(procedures)] if procedures is not None else []
-        return subprocess.run([sys.executable, "-m", "agent_tools.delivery.engine", "deliver",
-                               str(self.issue), *extra], cwd=self.fixture.root, env=self.env,
-                              capture_output=True, text=True, timeout=600)
+        entry = ["-c", VALIDATOR_UNIMPORTABLE_ENGINE] if validator_unimportable else ["-m", "agent_tools.delivery.engine"]
+        return subprocess.run([sys.executable, *entry, "deliver", str(self.issue), *extra],
+                              cwd=self.fixture.root, env=self.env, capture_output=True, text=True, timeout=600)
 
     def slot_history(self) -> list[dict]:
         """The lines the verification slot recorded, `[]` when it recorded none."""

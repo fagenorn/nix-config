@@ -107,6 +107,7 @@ let
     "standards-lint" = "delivery.standards_lint";
     "verified-tree" = "verification.verified_tree";
     "verify-pending" = "verification.verify_pending";
+    "verify-rounds" = "delivery.verify_rounds";
     "verify-slot" = "delivery.verify_slot";
   };
 
