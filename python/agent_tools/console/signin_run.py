@@ -504,25 +504,37 @@ class _Client:
         return code
 
     def kill_group(self) -> None:
-        """End the client's group; a group that is gone, or no longer ours, counts as ended.
+        """End the client's group; a group that is gone counts as ended.
 
-        After the leader exits macOS answers EPERM, not ESRCH; the waiter may still be recording the
-        exit, so wait for it. An EPERM from a running leader, or any other error, is raised.
+        On macOS, a group whose only member is the exited leader answers EPERM, not ESRCH. That
+        EPERM alone counts as ended, and only once the kernel reports the leader exited. On Linux
+        an EPERM names a live member under other credentials, so it is raised, like any other error.
         """
         try:
             os.killpg(self.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
         except PermissionError:
-            if not self._exited():
+            if sys.platform != "darwin" or not self._exited():
                 raise
 
     def _exited(self) -> bool:
-        try:
-            self._process.wait(timeout=EXIT_GRACE)
-        except subprocess.TimeoutExpired:
-            return False
-        return True
+        """Whether the kernel reports the leader exited, within EXIT_GRACE.
+
+        A leader mid-exit already answers EPERM but is not yet a zombie, so the check polls the
+        kernel; it never depends on the waiter thread having recorded the exit.
+        """
+        end = time.monotonic() + EXIT_GRACE
+        while True:
+            try:
+                flags = os.WEXITED | os.WNOHANG | os.WNOWAIT
+                if os.waitid(os.P_PID, self.pid, flags) is not None:
+                    return True
+            except ChildProcessError:
+                return True
+            if time.monotonic() >= end:
+                return False
+            time.sleep(0.005)
 
     def output(self) -> int | None:
         if self._master is not None:
