@@ -650,6 +650,76 @@ class ContinueTest(unittest.TestCase):
         del unrecorded[-1]["head"]
         self.assertEqual(reentry(toy(), INPUTS, unrecorded, "h1").stale, ("review",))
 
+    def test_a_head_result_naming_a_checkout_is_judged_by_that_checkouts_head(self) -> None:
+        doc = inline(
+            [
+                {"id": "r", "stage": "setup", "kind": "command", "command": "diff-scope", "holds": "head",
+                 "in": ["run.range"], "on": {"ok": "g", "failed": "needs-owner"}},
+                {"id": "g", "stage": "building", "kind": "command", "command": "diff-scope", "holds": "run",
+                 "in": ["run.range"], "on": {"ok": "done", "failed": "needs-owner"}},
+            ],
+            "g",
+        )
+        events = [
+            {"type": "entered", "step": "r"},
+            {"type": "outcome", "step": "r", "outcome": "ok", "result": {}, "head": "w1", "repository": "/w/one"},
+            {"type": "entered", "step": "g"},
+            {"type": "outcome", "step": "g", "outcome": "failed", "result": {}},
+        ]
+        self.assertEqual(reentry(doc, INPUTS, events, "w1", {"/w/one": "w1"}), Reentry("g", 1, ()))
+        self.assertEqual(reentry(doc, INPUTS, events, "w1", {"/w/one": "w2"}), Reentry("r", 1, ("r",)))
+        self.assertEqual(reentry(doc, INPUTS, events, "w1", {}), Reentry("r", 1, ("r",)))
+        self.assertEqual(reentry(doc, INPUTS, events, None, {"/w/one": "w1"}), Reentry("g", 1, ()))
+
+    def test_a_group_members_checkout_head_is_judged_from_its_own_outcome(self) -> None:
+        doc = inline(
+            [
+                {"id": "grp", "stage": "setup", "kind": "group", "holds": "run",
+                 "members": [{"step": "x", "pass": ["ok"]}, {"step": "y", "pass": ["ok"]}],
+                 "on": {"pass": "g", "blocked": "needs-owner"}},
+                {"id": "x", "stage": "setup", "kind": "command", "command": "diff-scope", "holds": "head",
+                 "in": ["run.range"]},
+                {"id": "y", "stage": "setup", "kind": "command", "command": "diff-scope", "holds": "run",
+                 "in": ["run.range"]},
+                {"id": "g", "stage": "building", "kind": "command", "command": "diff-scope", "holds": "run",
+                 "in": ["run.range"], "on": {"ok": "done", "failed": "needs-owner"}},
+            ],
+            "g",
+        )
+        events = [
+            {"type": "entered", "step": "grp"},
+            {"type": "entered", "step": "x"},
+            {"type": "outcome", "step": "x", "outcome": "ok", "result": {}, "head": "w1", "repository": "/w/one"},
+            {"type": "entered", "step": "y"},
+            {"type": "outcome", "step": "y", "outcome": "ok", "result": {}},
+            {"type": "entered", "step": "g"},
+            {"type": "outcome", "step": "g", "outcome": "failed", "result": {}},
+        ]
+        fresh = reentry(doc, INPUTS, events, "w1", {"/w/one": "w1"})
+        self.assertEqual(fresh.stale, ())
+        moved = reentry(doc, INPUTS, events, "w1", {"/w/one": "w2"})
+        self.assertEqual(moved, Reentry("grp", 1, ("grp",)))
+
+    def test_an_entered_step_after_a_head_result_never_hides_it(self) -> None:
+        doc = inline(
+            [
+                {"id": "r", "stage": "setup", "kind": "command", "command": "diff-scope", "holds": "head",
+                 "in": ["run.range"], "on": {"ok": "m", "failed": "needs-owner"}},
+                {"id": "m", "stage": "building", "kind": "command", "command": "diff-scope", "holds": "run",
+                 "mutates": True, "check": {"command": "diff-scope"}, "in": ["run.range"],
+                 "on": {"ok": "g", "failed": "needs-owner"}},
+                {"id": "g", "stage": "building", "kind": "command", "command": "diff-scope", "holds": "run",
+                 "in": ["run.range"], "on": {"ok": "done", "failed": "needs-owner"}},
+            ],
+            "g",
+        )
+        events = [
+            {"type": "entered", "step": "r"},
+            {"type": "outcome", "step": "r", "outcome": "ok", "result": {}, "head": "h0"},
+            {"type": "entered", "step": "m"},
+        ]
+        self.assertEqual(reentry(doc, INPUTS, events, "h1"), Reentry("r", 1, ("r",)))
+
     def test_the_earliest_stale_result_in_executed_order_wins(self) -> None:
         doc = toy()
         by_id = {item["id"]: item for item in doc["steps"]}
