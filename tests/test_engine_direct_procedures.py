@@ -31,6 +31,7 @@ CHOICE_WORD = re.compile(r"\b(choose|chooses|choosing|pick|picks|picking|select|
                          r"|\bwhich\b[^.]*\bapply\b", re.IGNORECASE)
 STANDARDS_WORD = re.compile(r"\b(standards?|shards?|stacks?|rules? files?)\b", re.IGNORECASE)
 MARKERS = "#-*>| "
+# A long sentence may be any part of a rule, but a short one counts only when it is a whole rule sentence.
 MINIMUM_PASTE = 40
 
 
@@ -58,10 +59,15 @@ def sentences(text: str) -> list[str]:
     return [part for block in blocks(text) for part in re.split(r"(?<=[.!?]) ", block)]
 
 
+def rule_sentence(sentence: str) -> bool:
+    return len(sentence.split()) >= 2 and sentence[-1] in ".!?"
+
+
 def standards_sentences() -> set[str]:
     texts = (path.read_text(encoding="utf-8") for directory in STANDARDS_DIRECTORIES
              for path in sorted(directory.rglob("*.md")))
-    return {sentence.lower() for text in texts for sentence in sentences(text) if len(sentence) >= MINIMUM_PASTE}
+    return {sentence.lower() for text in texts for sentence in sentences(text)
+            if len(sentence) >= MINIMUM_PASTE or rule_sentence(sentence)}
 
 
 def prompt_defects(directory: Path) -> list[tuple[str, str]]:
@@ -308,8 +314,11 @@ class RoutedPromptTest(unittest.TestCase):
         heading = next(index for index, line in enumerate(bar) if line.startswith("### B1."))
         body = next(line for line in bar[heading + 1:] if line.strip())
         cut = body.index(" ", 60)
+        rule = next(index for index, line in enumerate(bar) if line.startswith("### B8."))
+        short = sentences(next(line for line in bar[rule + 1:] if line.strip()))[0]
         for label, text in (("whole", body), ("wrapped", body[:cut] + "\n" + body[cut + 1:]),
-                            ("first sentence", "Every trust boundary is checked on both sides.")):
+                            ("first sentence", "Every trust boundary is checked on both sides."),
+                            ("short rule", short)):
             with self.subTest(copy=label):
                 self.assertEqual(prompt_defects(with_appended(text)), [("direct-review.md", "pasted-standards")])
 
@@ -323,8 +332,11 @@ class RoutedPromptTest(unittest.TestCase):
                 self.assertEqual(prompt_defects(with_appended(text)), expected)
 
     def test_the_prompt_check_passes_ordinary_words(self):
-        text = "Keep the global settings as they are; select the test files you changed."
-        self.assertEqual(prompt_defects(with_appended(text)), [])
+        for text in ("Keep the global settings as they are; select the test files you changed.",
+                     "Give the rule's id, as B8.",
+                     "Keep defense in depth in mind."):
+            with self.subTest(text=text):
+                self.assertEqual(prompt_defects(with_appended(text)), [])
 
 
 class VerifyProcedureTest(unittest.TestCase):
