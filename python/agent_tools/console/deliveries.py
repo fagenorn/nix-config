@@ -681,7 +681,8 @@ def delivery_changes(
 
 # The work words: what a sprint's block says it is working on, by issue title and never by number.
 # Titles come from the tracker read the service makes, never from the report. Pure: no clock, no I/O.
-# Each part is its own line, and each shown title sits in quotation marks. `delivery` is every stage that is not landed, held, queued or dropped, `closed out` included.
+# Each part is its own line, and each shown title sits in quotation marks. `delivery` is every stage that is not
+# landed, held, queued or dropped, `closed out` included.
 
 NOW_WORKING_TEXT = "Working on: {names}"
 NOW_WORKING_ONE_TEXT = "Working on 1 issue."
@@ -738,7 +739,9 @@ def _names(issues: Sequence[int], titles: Mapping[int, str], sprint_title: str) 
 
 def work_sentence(groups: Sequence[tuple[int, str]], finished: Collection[int],
                   titles: Mapping[int, str], sprint_title: str) -> str:
-    """The work lines (in work, just finished, next) by quoted shown title, joined by `WORK_LINE_BREAK`; `groups` is `(issue, group)`."""
+    """The work lines (in work, just finished, next) by quoted shown title, joined by `WORK_LINE_BREAK`.
+
+    `groups` is `(issue, group)`."""
     clauses = []
     working = [issue for issue, group in sorted(groups) if group == "delivery"]
     if working:
