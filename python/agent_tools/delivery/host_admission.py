@@ -160,7 +160,19 @@ def _short_lane_valid(lane: object) -> bool:
         isinstance(repository, str) and REPOSITORY_NAME_PATTERN.fullmatch(repository)
         and isinstance(entries, list) and entries
         and all(_short_entry(entry) is not None for entry in entries)
+        and _bounds_agree(entries, lane["bound_seconds"])
         for repository, entries in commands.items())
+
+
+def _bounds_agree(entries: list, lane_bound: int) -> bool:
+    """Whether no argv among `entries` is declared with two different effective bounds."""
+    bounds: dict[tuple, int] = {}
+    for entry in entries:
+        argv, own = _short_entry(entry)
+        if bounds.setdefault(tuple(argv), lane_bound if own is None else own) \
+                != (lane_bound if own is None else own):
+            return False
+    return True
 
 
 def validate_declaration(value: object) -> dict:

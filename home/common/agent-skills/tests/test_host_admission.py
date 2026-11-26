@@ -94,6 +94,20 @@ class HostAdmissionTest(unittest.TestCase):
         self.assertEqual(short(value, "example/alpha", ["just", "slow"]), (2, 90))
         self.assertIsNone(short(value, "example/alpha", ["just", "slow", "--x"]))
         self.assertIsNone(short(value, "example/beta", ["just", "slow"]))
+        for order in ([["just", "slow"], {"argv": ["just", "slow"], "bound_seconds": 90}],
+                      [{"argv": ["just", "slow"], "bound_seconds": 90}, ["just", "slow"]],
+                      [{"argv": ["just", "slow"], "bound_seconds": 60},
+                       {"argv": ["just", "slow"], "bound_seconds": 90}]):
+            conflicting = {**declaration(**supported), "verify_short_lane": {
+                "slots": 1, "bound_seconds": 9, "commands": {"example/alpha": order}}}
+            with self.subTest(order), self.assertRaises(host_admission.DeclarationError) as raised:
+                host_admission.validate_declaration(conflicting)
+            self.assertEqual(str(raised.exception), "verify_short_lane")
+        agreeing = {**declaration(**supported), "verify_short_lane": {
+            "slots": 1, "bound_seconds": 9, "commands": {
+                "example/alpha": [["just", "slow"], {"argv": ["just", "slow"], "bound_seconds": 9}],
+                "example/beta": [{"argv": ["just", "slow"], "bound_seconds": 90}]}}}
+        self.assertEqual(host_admission.validate_declaration(agreeing), agreeing)
         good = {"slots": 1, "bound_seconds": 30, "commands": {}}
         cases = [("missing bound", {"argv": ["just", "slow"]}),
                  ("missing argv", {"bound_seconds": 90}),
