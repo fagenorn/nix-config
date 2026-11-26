@@ -5,6 +5,8 @@ from agent_tools.claims import forge_land_lock as land_lock
 
 from .test_forge_land_lock import A, B, C, REF, Base, land, pull, run
 
+TIER = "fast"
+
 
 class ReadingClock:
     """`monotonic` and `sleep` for forge_land_lock, scripted by the number of readings taken.
