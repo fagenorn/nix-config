@@ -21,12 +21,19 @@ under 2 (no read yet after the first sample's set). Met when `omlx_kernel_priori
 `declared_priority` and `omlx_priority_resets` is 0, so a value launchd or the kernel puts back
 between samples is not met although each set succeeds. Not met otherwise. The line carries
 `omlx_kernel_priority`, `declared_priority`, `omlx_priority_resets` and `omlx_priority_error`.
+
+`session-kill [--log FILE]`: reads the floor daemon's log (default `/var/log/memory-floor.log`), not the
+record. Met (`{"verdict": "met", "at", "workload", "root_pid", "root"}`) with the last line that is a
+`memory_kill reason=run_bound` of a `workload=agent:session:<pid>`, a run-bound kill of an agent tree
+outside every root; a floor kill, a rooted or CI workload and a line without `workload` do not count.
+Not yet (`{"verdict": "not_yet"}`) when no line matches. A log that cannot be read is exit 2.
 """
 
 import argparse
 import fnmatch
 import json
 import os
+import re
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -39,6 +46,11 @@ MET = 0
 NOT_MET = 1
 NOT_YET = 75
 UNREADABLE = 2
+LOG = Path("/var/log/memory-floor.log")
+SESSION_KILL = re.compile(
+    r'^(?P<at>\S+) memory_kill reason=run_bound owner=\S+ workload=(?P<workload>agent:session:\d+)'
+    r' root_pid=(?P<root_pid>\d+) root=(?P<root>"(?:[^"\\]|\\.)*")'
+)
 
 
 def _read_json(path: Path) -> dict | None:
@@ -101,12 +113,27 @@ def priority(args: argparse.Namespace) -> tuple[int, dict]:
     return (MET if met else NOT_MET), {"verdict": "met" if met else "not_met", **figures}
 
 
+def session_kill(args: argparse.Namespace) -> tuple[int, dict]:
+    found = None
+    for line in args.log.read_text(encoding="utf-8").splitlines():
+        match = SESSION_KILL.match(line)
+        if match:
+            found = match
+    if found is None:
+        return NOT_YET, {"verdict": "not_yet"}
+    return MET, {
+        "verdict": "met", "at": found["at"], "workload": found["workload"],
+        "root_pid": int(found["root_pid"]), "root": json.loads(found["root"]),
+    }
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="memory-floor", description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="check", required=True)
     for name in ("week", "priority"):
         one = sub.add_parser(name)
         one.add_argument("--record", type=Path, default=RECORD)
+    sub.add_parser("session-kill").add_argument("--log", type=Path, default=LOG)
     weekly = sub.choices["week"]
     weekly.add_argument("--state-dir", type=Path, default=Path.home() / ".omlx/memory")
     weekly.add_argument("--reports-dir", type=Path, default=REPORTS)
@@ -114,7 +141,7 @@ def main(argv=None) -> int:
     weekly.add_argument("--now", default=None)
     args = parser.parse_args(argv)
     try:
-        code, answer = (week if args.check == "week" else priority)(args)
+        code, answer = {"week": week, "priority": priority, "session-kill": session_kill}[args.check](args)
     except (OSError, ValueError, KeyError, TypeError) as error:
         print(f"memory-floor: {error}", file=sys.stderr)
         return UNREADABLE
