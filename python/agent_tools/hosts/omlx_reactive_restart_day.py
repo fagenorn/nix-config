@@ -1,7 +1,7 @@
 """`omlx-reactive-restart-day`: the verify check that the first whole day after the reactive restart deploy held.
 
 `python3 -m agent_tools.hosts.omlx_reactive_restart_day [--state-dir DIR]` reads the restart state
-`DIR/omlx-restart.json` (default `~/.omlx/memory`) for its `since_at` and `limits`, each line of
+`DIR/omlx-restart.json` (default `~/.omlx/memory`) for its `since_at`, each line of
 `DIR/memory-peaks.jsonl`, the sample lines of `DIR/samples/<day>.jsonl` and the records of
 `DIR/omlx-restarts.jsonl`. It prints one JSON line and exits 0 met, 1 not met, 75 not yet, 2 (stderr
 `omlx-reactive-restart-day: <error>`, nothing on stdout) when the state, a day line, a sample line, a record or
@@ -19,10 +19,13 @@ The target day T is the date of `since_at` plus one day. The first decision that
    `repeated` the counts of such lines.
 7. `samples` is under `MIN_SAMPLES` (90 % of a day's minutes): `few_samples`.
 8. `samples/<T+1>.jsonl` is missing: `no_next_samples` (its first sample carries the kills from before midnight).
+   No line of it has an integer `floor_kills` (the floor record was read): `no_next_floor_reading`, because the
+   floor events through midnight reach the day's lines only with a successful reading.
 9. A record dated T (by its `at`) whose `outcome` is not `restarted`, `deferred`, `failed` or `interrupted`, whose
    `available_bytes`, `unowned_bytes` or `compressor_bytes` is not an integer, or whose `reason` is empty:
    `bad_restart_record`.
-10. The lines of `samples/<T-1>.jsonl` (when present) and of T's file are replayed with `limits`, merged in time
+10. The lines of `samples/<T-1>.jsonl` (when present) and of T's file are replayed with the criterion's fixed 25 GiB trigger and
+    three samples (`TRIGGER_BYTES`, `SAMPLES`), never the saved limits, merged in time
     order with the records dated T-1 or T (a record sorts after the sample line with the same `at`). A line's
     figure is `unowned_bytes + compressor_bytes`, None when either is not an integer. None resets the streak
     and keeps the episode; a figure at or under `trigger_bytes` resets the streak and reopens the episode; a
@@ -58,6 +61,9 @@ PEAKS_NAME = "memory-peaks.jsonl"
 RESTARTS_NAME = "omlx-restarts.jsonl"
 SAMPLES_NAME = "samples"
 MIN_SAMPLES = 1296
+# The criterion's own numbers, not the watcher's saved ones: a limit raised after the day cannot excuse it.
+TRIGGER_BYTES = 25 * 1024**3
+SAMPLES = 3
 OUTCOMES = ("restarted", "deferred", "failed", "interrupted")
 FIGURES = ("available_bytes", "unowned_bytes", "compressor_bytes")
 MET = 0
@@ -82,8 +88,8 @@ def _is_int(value) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
-def _read_state(directory: Path) -> tuple[date, dict | None] | None:
-    """The target day and the state's limits, None when there is no state or its `since_at` is null."""
+def _read_state(directory: Path) -> date | None:
+    """The target day, None when there is no state or its `since_at` is null."""
     try:
         with (directory / STATE_NAME).open(encoding="utf-8") as handle:
             state = json.load(handle)
@@ -96,14 +102,7 @@ def _read_state(directory: Path) -> tuple[date, dict | None] | None:
         return None
     if not isinstance(since, str):
         raise ValueError(f"since_at is not an ISO time: {since!r}")
-    return datetime.fromisoformat(since).date() + timedelta(days=1), state.get("limits")
-
-
-def _limits(limits) -> tuple[int, int]:
-    """The trigger and the sample count of the state's limits."""
-    if not isinstance(limits, dict) or not _is_int(limits.get("trigger_bytes")) or not _is_int(limits.get("samples")):
-        raise ValueError("the restart state holds no limits")
-    return limits["trigger_bytes"], limits["samples"]
+    return datetime.fromisoformat(since).date() + timedelta(days=1)
 
 
 def _day_line(directory: Path, target: date) -> tuple[dict | None, bool]:
@@ -205,7 +204,7 @@ def decide(directory: Path) -> tuple[int, dict]:
     anchored = _read_state(directory)
     if anchored is None:
         return NOT_YET, {"verdict": "not_yet", "day": None}
-    target, limits = anchored
+    target = anchored
     day = target.isoformat()
     line, later = _day_line(directory, target)
     if line is None and not later:
@@ -233,12 +232,14 @@ def decide(directory: Path) -> tuple[int, dict]:
     next_path = folder / f"{(target + timedelta(days=1)).isoformat()}.jsonl"
     if not next_path.exists():
         return not_met("no_next_samples")
+    if not any(_is_int(line.get("floor_kills")) for line in _objects(next_path)):
+        return not_met("no_next_floor_reading")
     records = [(datetime.fromisoformat(record["at"]), record) for record in _objects(directory / RESTARTS_NAME)] \
         if (directory / RESTARTS_NAME).exists() else []
     watched = [record for moment, record in records if moment.date() == target]
     if any(_bad_record(record) for record in watched):
         return not_met("bad_restart_record")
-    trigger, needed = _limits(limits)
+    trigger, needed = TRIGGER_BYTES, SAMPLES
     before, _ = _read_samples(folder / f"{(target - timedelta(days=1)).isoformat()}.jsonl", False)
     after, after_kills = _read_samples(next_path, True)
     near = [(moment, record) for moment, record in records if moment.date() in (target, target - timedelta(days=1))]

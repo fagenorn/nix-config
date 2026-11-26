@@ -347,14 +347,18 @@ growth is real and the server is idle.
   gate returned) defers the attempt.
 - Gate: the watcher runs `omlx-restart --reactive`. It reads the API key like the server does, asks
   the authenticated `/api/status` for `active_requests` and `waiting_requests`, and restarts only
-  when both are zero and no model but the pinned one is loaded or loading. A server that is gone
+  when both are zero and no model but the pinned one is loaded or loading. It sends the key only
+  after `lsof` shows that this account's `omlx-server` is the listener on port 8000, because another
+  account could answer `/health` there while oMLX is down. A server that is gone
   before the signal is a deferral, not a restart. Every state it cannot read defers. It never
   uses `--now`, never reloads a held plist, and leaves the `.restart-needed` marker untouched.
 - Outcomes: a restarted or interrupted outcome ends the episode and sends `omlx_restarted` once. A
   deferred or failed one is only recorded, and the next due sample tries again.
 - State: `~/.omlx/memory/omlx-restart.json`, apart from the watcher's own state. It is saved
   before the gate runs, so a run stopped after the gate may have signalled is recorded as
-  interrupted and never signals twice.
+  interrupted and never signals twice; the gap then counts from the later of the next sample and
+  the gate's start plus its 120-second timeout. A lock file beside it makes overlapping samples
+  take turns.
 - Records: `~/.omlx/memory/omlx-restarts.jsonl` holds one line per attempt.
 - Log: every attempt adds one `omlx_restart outcome=<outcome> available_gib=... unowned_gib=...
   compressor_gib=... reason=...` line to `~/.omlx/logs/memory-watch.log`.

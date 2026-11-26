@@ -9,7 +9,9 @@ Run: just agent-workflow-tests
 import importlib
 import json
 import tempfile
+import threading
 import time
+import tracemalloc
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -45,6 +47,8 @@ class ReactiveRestartTest(RecordsCase):
         self.fake(
             "omlx-restart",
             f'echo "$@" >> "{self.d}/restart.calls"\n'
+            f'cp "{self.state_dir}/memory-watch.json" "{self.d}/state-at-gate.json" 2>/dev/null\n'
+            f'cat "{self.state_dir}/samples/{DAY}.jsonl" > "{self.d}/lines-at-gate.jsonl" 2>/dev/null\n'
             f'if [ -e "{self.d}/reason" ]; then echo "oMLX: restart deferred ($(cat "{self.d}/reason"))" >&2; fi\n'
             f'rc=0; [ -e "{self.d}/restart.rc" ] && rc=$(cat "{self.d}/restart.rc")\n'
             'exit "$rc"\n')
@@ -214,6 +218,22 @@ class ReactiveRestartTest(RecordsCase):
         self.sample_at(at("12:01"))
         self.assertEqual(json.loads(self.restart_state.read_text())["since_at"], at("12:00"))
 
+    def test_the_sample_is_recoverable_when_the_gate_runs(self):
+        self.over_at(at("12:00"), at("12:01"), at("12:02"))
+        self.assertEqual(len(self.calls()), 1)
+        held = json.loads((self.d / "state-at-gate.json").read_text())
+        self.assertEqual(held["last_sample"]["line"]["at"], at("12:02"))
+        lines = [json.loads(line) for line in (self.d / "lines-at-gate.jsonl").read_text().splitlines()]
+        self.assertEqual([line["at"] for line in lines], [at("12:00"), at("12:01"), at("12:02")])
+        self.assertEqual([line["at"] for line in self.sample_lines()], [at("12:00"), at("12:01"), at("12:02")])
+    def test_the_sample_line_says_whether_the_floor_record_was_read(self):
+        self.sample_at(at("12:00"))
+        (self.d / "floor.json").write_text(json.dumps({"kills": 3}))
+        self.sample_at(at("12:01"))
+        (self.d / "floor.json").write_text("not json")
+        self.sample_at(at("12:02"))
+        self.assertEqual([line["floor_kills"] for line in self.sample_lines()], [None, 3, None])
+
     def test_the_compressor_decides_a_figure_just_over_the_line(self):
         self.vm_stat(VM_STAT.replace("105539.", "0."))
         self.over_at(at("12:00"), at("12:01"), at("12:02"))
@@ -259,11 +279,18 @@ class ReactiveStepTest(unittest.TestCase):
         self.gate_calls = []
         self.sent = []
         self.answers = []
+        self.persisted = []
         self.outcome = self.m.Gate("restarted", "omlx-restart restarted oMLX")
 
     def gate(self, argv):
         self.gate_calls.append(argv)
         return self.outcome
+
+    def persist(self):
+        path = self.dir / self.m.RESTART_STATE_NAME
+        attempt = json.loads(path.read_text())["attempt"] if path.exists() else None
+        self.persisted.append({
+            "attempt": attempt, "gates": len(self.gate_calls), "records": len(self.records())})
 
     def deliver(self, kind, text, logged):
         self.sent.append((kind, text, logged))
@@ -273,7 +300,7 @@ class ReactiveStepTest(unittest.TestCase):
         found = None if unowned is None else {"unowned_bytes": unowned}
         return self.m.step(
             self.dir, found, self.reading, datetime.fromisoformat(at(clock, day)), self.limits,
-            elapsed=self.clock.elapsed, gate=gate or self.gate, deliver=self.deliver)
+            elapsed=self.clock.elapsed, gate=gate or self.gate, deliver=self.deliver, persist=self.persist)
 
     def records(self):
         path = self.dir / self.m.RESTARTS_NAME
@@ -326,14 +353,99 @@ class ReactiveStepTest(unittest.TestCase):
         with mock.patch.object(self.m, "_save", stops):
             with self.assertRaises(OSError):
                 self.go("12:02")
-        started = self.held()["attempt"]["started_at"]
         self.go("12:03")
         self.assertEqual(len(self.gate_calls), 1)
         [record] = self.records()
         self.assertEqual((record["outcome"], record["at"]), ("interrupted", at("12:02")))
         self.assertEqual(len(self.sent), 1)
         self.assertIn("may have been restarted", self.sent[0][1])
-        self.assertEqual(self.held()["last_restart_at"], started)
+        # The gate may have signalled any time up to its 120-second timeout after it began at 12:02.
+        self.assertEqual(self.held()["last_restart_at"], at("12:04"))
+
+    def test_a_stopped_run_counts_the_gap_from_after_its_signal_not_from_the_gate_entry(self):
+        original = self.m._save
+        armed = [True]
+
+        def stops(path, document):
+            if armed[0] and document["attempt"] is None and document["outbox"]:
+                armed[0] = False
+                raise OSError("disk full")
+            original(path, document)
+
+        for clock in ("12:00", "12:01"):
+            self.go(clock)
+        # The gate began at 12:02:00 and signalled at 12:02:45, then the watcher stopped.
+        with mock.patch.object(self.m, "_save", stops):
+            with self.assertRaises(OSError):
+                self.go("12:02")
+        self.go("12:03")
+        self.go("12:04", unowned=UNDER)
+        for clock in ("12:30", "12:31"):
+            self.go(clock)
+        # 12:32:30 is 29 minutes 45 seconds after the signal and 30 minutes 30 seconds after the gate began.
+        self.clock.value = timedelta(seconds=30)
+        self.go("12:32")
+        self.assertEqual(len(self.gate_calls), 1)
+        last = self.records()[-1]
+        self.assertEqual((last["outcome"], last["at"]), ("deferred", at("12:32")))
+
+    def test_overlapping_samples_signal_one_due_episode_once(self):
+        original = self.m._load
+        armed = [True]
+        second = []
+
+        def overlap(path, now):
+            found = original(path, now)
+            if armed[0]:
+                armed[0] = False
+                worker = threading.Thread(target=self.go, args=("12:02",))
+                worker.start()
+                second.append(worker)
+                worker.join(1.0)
+            return found
+
+        for clock in ("12:00", "12:01"):
+            self.go(clock)
+        with mock.patch.object(self.m, "_load", overlap):
+            self.go("12:02")
+        second[0].join(10)
+        self.assertFalse(second[0].is_alive())
+        self.assertEqual(len(self.gate_calls), 1)
+        self.assertEqual(len(self.sent), 1)
+        self.assertEqual([record["outcome"] for record in self.records()], ["restarted"])
+
+    def test_the_sample_is_persisted_after_the_attempt_is_saved_and_before_the_gate_and_record(self):
+        for clock in ("12:00", "12:01", "12:02"):
+            self.go(clock)
+        [first, second, third] = self.persisted
+        self.assertEqual([entry["gates"] for entry in (first, second)], [0, 0])
+        self.assertEqual((third["gates"], third["records"]), (0, 0))
+        self.assertEqual(third["attempt"]["at"], at("12:02"))
+        self.assertEqual(len(self.records()), 1)
+
+    def test_a_deferral_persists_the_sample_before_its_record_is_appended(self):
+        self.reading["available_bytes"] = GIB
+        for clock in ("12:00", "12:01", "12:02"):
+            self.go(clock)
+        self.assertEqual(self.persisted[-1]["records"], 0)
+        self.assertEqual(len(self.records()), 1)
+        self.assertEqual(self.gate_calls, [])
+
+    def test_a_pending_record_is_checked_against_the_file_tail_only(self):
+        path = self.dir / self.m.RESTARTS_NAME
+        old = {"id": "a" * 32, "at": at("11:00"), "outcome": "deferred", "reason": "r" * 100}
+        path.write_text("".join(json.dumps({**old, "id": f"{index:032d}"}) + "\n" for index in range(40000)))
+        record = {**old, "id": "b" * 32}
+        tracemalloc.start()
+        try:
+            self.assertTrue(self.m._append_record(path, record))
+            self.assertFalse(self.m._append_record(path, record))
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        self.assertLess(peak, 1024 * 1024)
+        self.assertEqual(path.read_text().count(record["id"]), 1)
+        self.assertGreater(path.stat().st_size, 4_000_000)
 
     def test_a_run_stopped_after_its_success_record_records_and_alerts_once(self):
         original = self.m._save

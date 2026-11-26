@@ -26,8 +26,10 @@ SINCE = "2026-11-27T15:00:00+00:00"
 PREVIOUS, TARGET, NEXT = "2026-11-27", "2026-11-28", "2026-11-29"
 
 
-def minute_lines(day, n=1440, over=(), events=None, null=False):
-    """`n` sample lines, one per minute from midnight of `day`: a figure of 2 GiB, 30 GiB at the `over` minutes."""
+def minute_lines(day, n=1440, over=(), events=None, null=False, floor=0):
+    """`n` sample lines, one per minute from midnight of `day`: a figure of 2 GiB, 30 GiB at the `over` minutes.
+
+    `floor` is each line's `floor_kills`, the floor record's count (None when the record was not read)."""
     start = datetime.fromisoformat(f"{day}T00:00:00+00:00")
     lines = []
     for index in range(n):
@@ -35,7 +37,7 @@ def minute_lines(day, n=1440, over=(), events=None, null=False):
         hhmm = at.strftime("%H:%M")
         unowned = 29 * GIB if hhmm in over else GIB
         lines.append({"at": at.isoformat(), "unowned_bytes": None if null else unowned, "compressor_bytes": GIB,
-                      "events": list((events or {}).get(hhmm, []))})
+                      "floor_kills": floor, "events": list((events or {}).get(hhmm, []))})
     return lines
 
 
@@ -220,6 +222,22 @@ class RestartDayTest(unittest.TestCase):
         with self.subTest("a kill of the day before is not judged"):
             self.healthy_target(over=("00:00",), events={"00:00": [kill("2026-11-27T23:59:50+00:00")]})
             self.assertMet(floor_kills=0)
+
+    def test_a_floor_kill_is_judged_against_the_criterions_trigger_not_the_saved_one(self):
+        self.healthy_target(over=("12:00",), events={"12:01": [kill("2026-11-28T12:00:30+00:00")]})
+        self.put_state(limits={**LIMITS, "trigger_bytes": 40 * GIB})
+        self.assertNotMet("kill_over_trigger", kills=1)
+
+    def test_the_next_day_needs_a_successful_floor_reading_before_the_day_is_judged(self):
+        self.healthy_target(over=("23:59",))
+        with self.subTest("the next day's file holds no floor reading yet"):
+            self.write_samples(NEXT, minute_lines(NEXT, 2, floor=None))
+            self.assertNotMet("no_next_floor_reading")
+        with self.subTest("a later line read the floor record"):
+            lines = minute_lines(NEXT, 2, floor=None)
+            lines[1]["floor_kills"] = 4
+            self.write_samples(NEXT, lines)
+            self.assertMet()
 
     def test_a_floor_kill_with_no_figure_is_not_met(self):
         self.healthy_target(events={"12:01": [kill("2026-11-28T12:00:30+00:00")]})

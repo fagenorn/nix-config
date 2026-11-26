@@ -610,6 +610,14 @@ class ReactiveGateTest(unittest.TestCase):
         self.reload_stub = self.root / "reload"
         self.reload_stub.write_text('#!/bin/sh\necho reload >> "$(dirname "$0")/reload-calls"\nexit 0\n')
         self.reload_stub.chmod(0o755)
+        # Reads like `lsof -F`: the listener's pid, command and uid, and exit 1 when it prints nothing.
+        self.listener = self.root / "listener"
+        self.listener.write_text(
+            '#!/bin/sh\nhere="$(dirname "$0")"\necho "$@" >> "$here/listener-args"\n'
+            'cat "$here/listener-out"\n[ -s "$here/listener-out" ]\n'
+        )
+        self.listener.chmod(0o755)
+        self.listen(f"p4242\ncomlx-server\nu{os.getuid()}\n")
         self.server = self.status_server(
             {
                 "/health": (200, serving(1)),
@@ -621,12 +629,16 @@ class ReactiveGateTest(unittest.TestCase):
     def answer(self, path, status, body, headers=None):
         self.server.answers[path] = (status, body, headers or {})
 
+    def listen(self, text):
+        (self.root / "listener-out").write_text(text)
+
     def run_reactive(self, *extra, stdin=None):
         command = [
             sys.executable, str(RESTART),
             "--state-dir", str(self.state),
             "--restart-bin", str(self.stub),
             "--reload-bin", str(self.reload_stub),
+            "--listener-bin", str(self.listener),
             "--health-url", f"{self.base}/health",
             "--status-url", f"{self.base}/api/status",
             "--reactive",
@@ -658,6 +670,30 @@ class ReactiveGateTest(unittest.TestCase):
         self.assertEqual(self.reload_calls(), 0)
         self.assertEqual(self.marker.read_bytes(), before)
         self.assertIn(("/api/status", f"Bearer {self.KEY}"), self.server.seen)
+        port = self.server.server_address[1]
+        asked = (self.root / "listener-args").read_text()
+        for needle in (f"-iTCP:{port}", "-sTCP:LISTEN", str(os.getuid())):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, asked)
+
+    def test_the_key_goes_only_to_the_oMLX_server_of_this_account(self):
+        mine = os.getuid()
+        cases = {
+            "another account": (f"p77\ncomlx-server\nu{mine + 1}\n", ()),
+            "another program": (f"p77\ncpython3\nu{mine}\n", ()),
+            "no visible listener": ("", ()),
+            "one listener of another account among ours": (
+                f"p77\ncomlx-server\nu{mine}\np78\ncomlx-server\nu{mine + 1}\n", ()),
+            "a listener tool that cannot run": (None, ("--listener-bin", str(self.root / "absent"))),
+        }
+        for name, (text, extra) in cases.items():
+            with self.subTest(name):
+                self.server.seen.clear()
+                if text is not None:
+                    self.listen(text)
+                self.assert_deferred(self.run_reactive(*extra), "listener is not the oMLX server")
+                self.assertEqual([auth for _, auth in self.server.seen], [None] * len(self.server.seen))
+                self.assertNotIn("/api/status", [path for path, _ in self.server.seen])
 
     def test_reactive_defers_while_requests_are_active_or_waiting(self):
         for active, waiting in ((1, 0), (0, 2)):

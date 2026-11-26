@@ -31,7 +31,9 @@ and `records_since`.
 
 Each successful sample also appends one line to `DIR/samples/<day>.jsonl` (directory 0700, file 0600):
 `at`, `used_bytes`, `available_bytes`, `loaded`, `omlx_bytes`, `ci_jobs`, `wired_bytes`,
-`anonymous_bytes`, `compressions_bytes` (null when `vm_stat` prints no `Compressions` line), then
+`anonymous_bytes`, `compressions_bytes` (null when `vm_stat` prints no `Compressions` line), `compressor_bytes`,
+`floor_kills` (the floor record's `kills`, null when the record was not read, so a line holds proof its floor
+events were collected), then
 `sys_footprint_bytes`, `process_footprint_bytes`, `unowned_bytes`, `top_owners`, `census_at` and
 `census_seconds`, which are null without a fresh census, and last `events`, the list of changes since the previous
 sample (RAM disks from `hdiutil info -plist`, the Colima VM from the pid in `--colima-pid-file`, default
@@ -380,6 +382,7 @@ def _sample_line(reading: dict, now: datetime, census: dict | None, events: list
         "loaded": reading["loaded"], "omlx_bytes": reading["omlx_bytes"], "ci_jobs": reading["ci_jobs"],
         "wired_bytes": reading["wired_bytes"], "anonymous_bytes": reading["anonymous_bytes"],
         "compressions_bytes": reading["compressions_bytes"], "compressor_bytes": reading["compressor_bytes"],
+        "floor_kills": _int((reading["floor"] or {}).get("kills")),
         **{key: found.get(key) for key in keys},
         "census_at": found.get("at"), "census_seconds": found.get("seconds"), "events": events,
     }
@@ -943,7 +946,7 @@ def _restart_limits(args) -> omlx_reactive_restart.Limits | None:
         args.restart_room_gib * GIB, timedelta(minutes=args.restart_min_minutes))
 
 
-def _restart_step(args, limits, directory: Path, reading: dict, now: datetime, started: float) -> bool:
+def _restart_step(args, limits, directory: Path, reading: dict, now: datetime, started: float, persist) -> bool:
     def send(kind: str, text: str, logged: bool) -> str:
         outcome = host_alerts.deliver(
             kind, text, settings=args.alert_settings, log=args.alert_log,
@@ -956,7 +959,7 @@ def _restart_step(args, limits, directory: Path, reading: dict, now: datetime, s
         directory, fresh_census(reading["census"], now), reading, now, limits,
         elapsed=lambda: timedelta(seconds=time.monotonic() - started),
         gate=partial(omlx_reactive_restart.run_gate, timeout=omlx_reactive_restart.GATE_TIMEOUT_SECONDS),
-        deliver=send)
+        deliver=send, persist=persist)
 
 
 def sample(args) -> int:
@@ -976,13 +979,23 @@ def sample(args) -> int:
         print(f"{PROG}: the last sample line was not recovered ({type(error).__name__}: {error})", file=sys.stderr)
     state, line, record = decide(
         previous, reading, now, args.floor_gib * GIB, args.others_budget_gib * GIB, args.unowned_alert_gib * GIB)
-    restart_failed = limits is not None and _restart_step(args, limits, directory, reading, now, started)
-    failed = deliver_pending(state, args, now) or restart_failed
     for entry in state["floor_log"]:
         print(entry, end="", flush=True)
     state["floor_log"] = []
     state["last_sample"] = {"day": state["day"], "line": record}
-    write_state(directory, state, line, record)
+    saved = []
+
+    def persist() -> None:
+        # The restart step calls this once its attempt is saved, so the sample line it counts can be recovered.
+        saved.append(True)
+        write_state(directory, state, line, record)
+
+    restart_failed = limits is not None and _restart_step(args, limits, directory, reading, now, started, persist)
+    failed = deliver_pending(state, args, now) or restart_failed
+    if saved:
+        write_state(directory, state, None)
+    else:
+        write_state(directory, state, line, record)
     return 3 if failed else 0
 
 

@@ -13,13 +13,16 @@ of the job) instead of a kill, because a kill only relaunches the job definition
 `--reactive` is the gate for a restart nobody scheduled: it needs no marker, reads the API key from the
 first line of stdin and asks the authenticated `/api/status` for the requests in flight. It restarts only
 when no request is active or waiting and no model but a `--pinned-model` is loaded or loading, and it
-sends the key to a loopback `http` URL only, through a read that follows no redirect. Every state it
+sends the key to a loopback `http` URL only, through a read that follows no redirect, and only after
+`lsof` shows that this account's `omlx-server` is the listener on the status port (a health answer
+cannot tell whose server answered). Every state it
 cannot read defers. Exit 0 is restarted, 75 deferred (one stderr line), 1 the kill failed.
 """
 
 import argparse
 import http.client
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -32,6 +35,8 @@ HEALTH_TIMEOUT_SECONDS = 5
 DIRECT = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 LOOPBACK = {"127.0.0.1", "::1", "localhost"}
 DEFERRED = 75
+LISTENER_BIN = "/usr/sbin/lsof"
+SERVER_NAME = "omlx-server"
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -147,7 +152,29 @@ def classify_health(health_url):
     return f"server state unknown: status {status} with an unexpected body"
 
 
-def classify_reactive(health_url, status_url, key, pinned):
+def own_server_listens(listener_bin, status_url):
+    """True when every listener `listener_bin` (lsof) shows on the status port is this account's oMLX server.
+
+    lsof lists only this account's sockets, so a listener of another account shows as none."""
+    port = urllib.parse.urlsplit(status_url).port or 80
+    uid = os.getuid()
+    argv = [listener_bin, "+c", "0", "-nP", "-a", "-u", str(uid), f"-iTCP:{port}", "-sTCP:LISTEN", "-Fpcu"]
+    try:
+        found = subprocess.run(
+            argv, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=HEALTH_TIMEOUT_SECONDS)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    owners: list[dict] = []
+    for line in found.stdout.splitlines():
+        if line.startswith("p"):
+            owners.append({})
+        elif owners and line[:1] in ("c", "u"):
+            owners[-1][line[0]] = line[1:]
+    return bool(owners) and all(
+        owner.get("c") == SERVER_NAME and owner.get("u") == str(uid) for owner in owners)
+
+
+def classify_reactive(health_url, status_url, key, pinned, listener_bin=LISTENER_BIN):
     """Return None when the server holds no request and no unpinned model, else why to wait."""
     if not (loopback(health_url) and loopback(status_url)):
         return "endpoint is not loopback"
@@ -156,6 +183,9 @@ def classify_reactive(health_url, status_url, key, pinned):
     why = classify_health(health_url)
     if why is not None:
         return why
+    # The health answer proves nothing about who answered: the key goes only to this account's server.
+    if not own_server_listens(listener_bin, status_url):
+        return "listener is not the oMLX server"
     try:
         status, raw = read_status(status_url, key)
     except (OSError, http.client.HTTPException) as error:
@@ -206,6 +236,7 @@ def main(argv=None):
     parser.add_argument("--health-url", default="http://127.0.0.1:8000/health")
     parser.add_argument("--status-url", default="http://127.0.0.1:8000/api/status")
     parser.add_argument("--pinned-model", action="append", default=[])
+    parser.add_argument("--listener-bin", default=LISTENER_BIN)
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--now", action="store_true", help="restart without reading /health")
     mode.add_argument("--reactive", action="store_true", help="restart only while no request is in flight")
@@ -213,7 +244,7 @@ def main(argv=None):
 
     if args.reactive:
         key = sys.stdin.readline().strip()
-        why = classify_reactive(args.health_url, args.status_url, key, args.pinned_model)
+        why = classify_reactive(args.health_url, args.status_url, key, args.pinned_model, args.listener_bin)
         if why is not None:
             print(f"oMLX: restart deferred ({why})", file=sys.stderr)
             return DEFERRED

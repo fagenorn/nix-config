@@ -12,12 +12,17 @@ failed one is only recorded, and the next due sample tries again.
 
 The state is `DIR/omlx-restart.json`, apart from the watcher's own state. It is saved with the attempt
 before the gate runs, so a run stopped after the gate may have signalled becomes an `interrupted`
-outcome and never signals twice. The outcome, the episode and its record and alert are saved in one
+outcome and never signals twice; its cooldown starts at the later of the recovering sample and the
+gate's start plus its timeout, never at the gate's start. The whole step holds `DIR/omlx-restart.lock`,
+so overlapping samples take turns. The caller's `persist` saves the sample itself right after the attempt
+is saved (or, with no attempt, before any record is appended), so a record never outlives a lost sample
+line. The outcome, the episode and its record and alert are saved in one
 replace (the outbox); the record goes to `DIR/omlx-restarts.jsonl` (one line per attempt, skipped when
-its id is already there), then the alert is delivered and the entry dropped. An alert that is not sent
+the file already ends with it), then the alert is delivered and the entry dropped. An alert that is not sent
 stays in the outbox and is retried on the next sample.
 """
 
+import fcntl
 import json
 import os
 import signal
@@ -33,6 +38,7 @@ GIB = 1024**3
 PROG = "omlx-memory-watch"
 RESTART_STATE_NAME = "omlx-restart.json"
 RESTARTS_NAME = "omlx-restarts.jsonl"
+LOCK_NAME = "omlx-restart.lock"
 GATE_TIMEOUT_SECONDS = 120
 REAP_SECONDS = 5
 DEFERRED_PREFIX = "oMLX: restart deferred ("
@@ -173,35 +179,38 @@ def _queue(document: dict, facts: dict, outcome: str, reason: str, host: str, li
         {"record": record, "alert": _alert(host, outcome, facts, limits), "recorded": False, "logged": False})
 
 
-def _interrupt(document: dict, host: str, limits: Limits) -> None:
+def _interrupt(document: dict, host: str, limits: Limits, now: datetime) -> None:
     attempt = document["attempt"]
     facts = {key: attempt[key] for key in _FACT_KEYS}
     _queue(document, facts, "interrupted", "the watcher stopped during the restart attempt", host, limits)
     document["episode_done"] = True
-    document["last_restart_at"] = attempt["started_at"]
+    # The signal came after the gate began and, from a gate that stopped with the watcher, before its own
+    # timeout; this sample began after the stop. The later of the two bounds the signal from above.
+    began = datetime.fromisoformat(attempt["started_at"])
+    document["last_restart_at"] = max(now, began + timedelta(seconds=GATE_TIMEOUT_SECONDS)).isoformat()
     document["attempt"] = None
 
 
-def _has_record(path: Path, identity: str) -> bool:
+def _ends_with(path: Path, data: bytes) -> bool:
     try:
-        text = path.read_text()
+        with path.open("rb") as handle:
+            size = handle.seek(0, os.SEEK_END)
+            if size < len(data):
+                return False
+            handle.seek(size - len(data))
+            return handle.read() == data
     except FileNotFoundError:
         return False
-    for line in text.splitlines():
-        try:
-            if json.loads(line).get("id") == identity:
-                return True
-        except (ValueError, AttributeError):
-            continue
-    return False
 
 
 def _append_record(path: Path, record: dict) -> bool:
-    if _has_record(path, record["id"]):
+    """Append `record` unless the file already ends with it (a flush that stopped before it was marked)."""
+    data = (json.dumps(record) + "\n").encode()
+    if _ends_with(path, data):
         return False
     descriptor = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
     try:
-        os.write(descriptor, (json.dumps(record) + "\n").encode())
+        os.write(descriptor, data)
     finally:
         os.close(descriptor)
     return True
@@ -260,7 +269,7 @@ def _deferral_reason(document: dict, reading: dict, now: datetime, limits: Limit
     return None
 
 
-def _attempt(directory, document, facts, reading, now, limits, elapsed, gate) -> None:
+def _attempt(directory, document, facts, reading, now, limits, elapsed, gate, persist) -> None:
     path = directory / RESTART_STATE_NAME
     host = reading["host"]
     reason = _deferral_reason(document, reading, now, limits, elapsed)
@@ -269,6 +278,7 @@ def _attempt(directory, document, facts, reading, now, limits, elapsed, gate) ->
         return
     document["attempt"] = {**facts, "started_at": (now + elapsed()).isoformat()}
     _save(path, document)
+    persist()
     found = gate([limits.command, "--reactive"])
     document["attempt"] = None
     if found.outcome == "restarted":
@@ -287,8 +297,23 @@ def step(
     elapsed: Callable[[], timedelta],
     gate: Callable[[list[str]], Gate],
     deliver: Callable[[str, str, bool], str],
+    persist: Callable[[], None],
 ) -> bool:
-    """Fold one sample into the restart state, attempt a due restart and send its alert; True when one was not sent."""
+    """Fold one sample into the restart state, attempt a due restart and send its alert; True when one was not sent.
+
+    The state is read, the gate run and the outcome saved under one lock, so overlapping samples take turns.
+    `persist` makes the sample recoverable; it is called once, after the attempt is saved and before the gate
+    runs, or else after the outcome is saved and before its record is appended."""
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    descriptor = os.open(directory / LOCK_NAME, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        return _step(directory, census, reading, now, limits, elapsed, gate, deliver, persist)
+    finally:
+        os.close(descriptor)
+
+
+def _step(directory, census, reading, now, limits, elapsed, gate, deliver, persist) -> bool:
     path = directory / RESTART_STATE_NAME
     try:
         document = _load(path, now)
@@ -296,9 +321,15 @@ def step(
         print(f"{PROG}: the restart state is unreadable ({type(error).__name__}); "
               "no reactive restart this sample", file=sys.stderr)
         return True
-    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    persisted = []
+
+    def persist_once() -> None:
+        if not persisted:
+            persisted.append(True)
+            persist()
+
     if document["attempt"] is not None:
-        _interrupt(document, reading["host"], limits)
+        _interrupt(document, reading["host"], limits, now)
         _save(path, document)
     document["limits"] = _limits_document(limits)
     value = figure(census, reading)
@@ -309,6 +340,7 @@ def step(
             "unowned_bytes": census["unowned_bytes"], "compressor_bytes": reading["compressor_bytes"],
             "figure_bytes": value, "streak": document["streak"],
         }
-        _attempt(directory, document, facts, reading, now, limits, elapsed, gate)
+        _attempt(directory, document, facts, reading, now, limits, elapsed, gate, persist_once)
     _save(path, document)
+    persist_once()
     return _flush(directory, document, deliver)
