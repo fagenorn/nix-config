@@ -2,6 +2,7 @@
 from unittest import mock
 
 from agent_tools.claims import forge_land_lock as land_lock
+from agent_tools.claims import forge_markers as fm
 from agent_tools.system import forge_api
 
 from . import test_forge_land_lock as base
@@ -329,3 +330,54 @@ class LeaseTest(base.QueueTest):
                 self.assertEqual(failed, [True])
                 self.assertEqual((code, out["verdict"], out["took_over"], out["waited_s"]),
                                  (0, "acquired", "idle", 2880))
+
+    def test_a_renewal_whose_replaced_lease_cannot_be_deleted_is_not_confirmed(self):
+        self.lock(B, refuse_to=(fm.ZERO_OID,))
+        self.pulls(B, pull(12, sha=B))
+        self.lease(12, 0, 0)
+        self.forge_time(100)
+        code, out = run(*land("acquire", B, "--lease"))
+        self.assertEqual((code, out["verdict"], out["lease"]), (0, "already_held", None))
+        self.assertEqual(self.leases(), {f"{LEASE}{EPOCH}-12-{EPOCH}": B, f"{LEASE}{EPOCH}-12-{EPOCH + 100}": B})
+
+    def test_a_move_whose_source_lease_cannot_be_deleted_is_not_confirmed(self):
+        self.lock(A, refuse_to=(fm.ZERO_OID,))
+        self.pulls(A, pull(11, sha=A))
+        self.lease(11, 0, 0, sha=A)
+        self.forge_time(100)
+        self.pulls(C, pull(11, sha=C))
+        self.pulls(A, pull(11, sha=C))
+        code, out = run(*land("acquire", C, "--lease"))
+        self.assertEqual((code, out["verdict"], out["lease"]), (0, "moved", None))
+        self.assertEqual(self.world.refs()[REF], C)
+        self.assertEqual(self.leases(), {f"{LEASE}{EPOCH}-11-{EPOCH}": A, f"{LEASE}{EPOCH}-11-{EPOCH + 100}": C})
+
+    def test_a_hold_whose_replaced_lease_cannot_be_deleted_is_a_forge_error(self):
+        self.lock(A, refuse_to=(fm.ZERO_OID,))
+        self.pulls(A, pull(11, sha=A))
+        self.lease(11, -30, -30, sha=A)
+        code, out = run(*land("hold", A))
+        self.assertEqual((code, out["verdict"], out["error"]), (1, "error", "gh_failed"))
+        leases = self.leases()
+        for name in (f"{LEASE}{EPOCH - 30}-11-{EPOCH - 30}", f"{LEASE}{EPOCH - 30}-11-{EPOCH}"):
+            self.assertEqual(leases.get(name), A)
+
+    def test_hold_renews_the_same_lease_whatever_order_the_forge_lists_them_in(self):
+        original = fm.matching_refs
+        records = []
+        for reverse in (False, True):
+            self.lock(A)
+            self.pulls(A, pull(11, sha=A))
+            self.leased_by = {}
+            self.lease(11, 0, 0, sha=A)
+            self.lease(13, 0, 0, sha=A)
+            self.forge_time(60)
+
+            def listed(*args, reverse=reverse):
+                found = original(*args)
+                return dict(sorted(found.items(), reverse=reverse))
+
+            with mock.patch.object(fm, "matching_refs", listed):
+                code, out = run(*land("hold", A))
+            records.append((code, out["verdict"], out["pr"], self.leases()))
+        self.assertEqual(records[0], records[1])

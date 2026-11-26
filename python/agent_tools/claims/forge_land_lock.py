@@ -220,10 +220,14 @@ so with `acquire --lease` (not with `--release`): after a holding verdict it wri
 ref `refs/agent-locks/land-lease/<branch>/<since>-<pr>-<beat>` at the lock's sha, named like a
 registration (D12) and read from the forge's clock too. `acquired` creates `<now>-<pr>-<now>` and
 deletes the pull request's other leases; `already_held` and `moved` create `<since>-<pr>-<now>`,
-keeping the newest `<since>` it can trust (a fresh one when none), and delete the old one. A write
-that fails leaves the lock held and the answer's `lease` `null`; otherwise `lease` is `{since,
-beat}`. `hold --sha S [--seconds N]` (N from 0 to `HOLD_MAX`, default 0) reads the lock at once and
-every `LEASE_BEAT` seconds (60) of `monotonic()`: a lock not at S answers `not_held` (exit 3) at
+keeping the `<since>` of the effective lease it can trust (a fresh one when none), and delete the
+old one. A write is confirmed only when every lease it replaces is gone (a refused or lost
+deletion is read back): otherwise `acquire` answers `lease` `null` and `hold` is a forge error,
+both refs left, and the lock stays held. Every reader takes the effective lease as the one with
+the largest `<since>`, `<beat>` and ref name, so no answer depends on listing order. A confirmed
+write answers `lease` `{since, beat}`. `hold --sha S [--seconds N]` (N from 0 to `HOLD_MAX`,
+default 0) reads the lock at once and every `LEASE_BEAT` seconds (60) of `monotonic()`: a lock
+not at S answers `not_held` (exit 3) at
 once, one at S with a lease at S rewrites its `<beat>` to the forge's clock, one at S with none
 answers `unleased` (exit 0) and writes nothing; after N seconds it answers `held` with `lease` and
 `held_s`, the seconds since `<since>`. The first in line, and only it (a read of this poll's queue
@@ -435,13 +439,24 @@ def lease_late(lease: Waiter, now: int) -> str | None:
     return "bound" if now - lease.since >= HOLD_BOUND else None
 
 
-def drop_leases(slug: str, node: Callable[[], str], leases: Collection[Waiter]) -> None:
-    """D13: delete leases by compare-and-swap; one that changed, is gone or fails is left alone."""
+def drop_leases(slug: str, node: Callable[[], str], leases: Collection[Waiter]) -> list[Waiter]:
+    """D13: delete leases by compare-and-swap and return those still there. An applied deletion
+    reads nothing back; one that failed or raised is read back, and the lease is returned when
+    its ref is there or the read fails. It never raises."""
+    left = []
     for lease in leases:
         try:
-            fm.cas_ref(slug, node(), lease.ref, lease.oid, fm.ZERO_OID)
+            if fm.cas_ref(slug, node(), lease.ref, lease.oid, fm.ZERO_OID) is None:
+                continue
         except forge_api.ForgeError:
             pass
+        try:
+            if fm.read_ref(slug, lease.ref) is None:
+                continue
+        except forge_api.ForgeError:
+            pass
+        left.append(lease)
+    return left
 
 
 def write_lease(slug: str, branch: str, node: Callable[[], str], pr: int, sha: str,
@@ -452,7 +467,9 @@ def write_lease(slug: str, branch: str, node: Callable[[], str], pr: int, sha: s
     name = f"{lease_prefix(branch)}{since}-{pr}-{now}"
     if not any(w.ref == name and w.oid == sha for w in old) and not fm.create_ref(slug, name, sha):
         raise forge_api.ForgeError("gh_failed", f"lease {name} not created")
-    drop_leases(slug, node, [w for w in old if w.ref != name])
+    left = drop_leases(slug, node, [w for w in old if w.ref != name])
+    if left:
+        raise forge_api.ForgeError("gh_failed", f"lease {name} written, {len(left)} it replaces left")
     return {"since": since, "beat": now}
 
 
@@ -899,7 +916,8 @@ def _lease(args: Any, node: Callable[[], str], out: dict[str, Any]) -> dict[str,
         old = [w for w in read_leases(args.repo, args.branch) if w.pr == out["pr"]]
         since = None
         if out["verdict"] != "acquired":
-            since = max((w.since for w in trusted(old, now)), default=None)
+            kept = effective(trusted(old, now))
+            since = kept.since if kept else None
         out["lease"] = write_lease(args.repo, args.branch, node, out["pr"], out["lock_sha"], since, old, now)
     except forge_api.ForgeError:
         out["lease"] = None
@@ -925,12 +943,12 @@ def _hold(args: Any) -> tuple[int, dict[str, Any]]:
         mine = trusted([w for w in read_leases(args.repo, args.branch) if w.oid == args.sha], now)
         if not mine:
             return 0, result(args, "unleased", lock_sha=lock)
-        newest = max(mine, key=lambda w: (w.since, w.beat))
-        lease = write_lease(args.repo, args.branch, node, newest.pr, args.sha, newest.since,
-                            [w for w in mine if w.pr == newest.pr], now)
+        prior = effective(mine)
+        lease = write_lease(args.repo, args.branch, node, prior.pr, args.sha, prior.since,
+                            [w for w in mine if w.pr == prior.pr], now)
         left = args.seconds - (monotonic() - start)
         if left <= 0:
-            return 0, result(args, "held", lock_sha=lock, pr=newest.pr, lease=lease,
+            return 0, result(args, "held", lock_sha=lock, pr=prior.pr, lease=lease,
                              held_s=forge_now() - lease["since"])
         sleep(min(LEASE_BEAT, left))
 
