@@ -476,14 +476,16 @@ verify host *args:
   PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.verification.verify_pending run --host {{host}} {{args}}
 
 # Shoot the console's sprint states against a fixture console, 118 PNGs into out (default ~/tmp/clarity-screenshots) (#1086).
+[positional-arguments]
 console-screenshots out="" *args:
   #!/usr/bin/env bash
   set -euo pipefail
   pkgs='(builtins.getFlake (toString ./.)).inputs.nixpkgs.legacyPackages.${builtins.currentSystem}'
   py=$(nix build --no-link --print-out-paths --impure --expr "($pkgs).python3.withPackages (ps: [ ps.playwright ])")
   browsers=$(nix build --no-link --print-out-paths --impure --expr "($pkgs).playwright-driver.browsers")
-  dir="{{out}}"
-  PLAYWRIGHT_BROWSERS_PATH="$browsers" PYTHONPATH="{{agent_tools_path}}" "$py/bin/python3" -m tests.console_screenshots --out "${dir:-$HOME/tmp/clarity-screenshots}" {{args}}
+  dir="$1"
+  shift
+  PLAYWRIGHT_BROWSERS_PATH="$browsers" PYTHONPATH="{{agent_tools_path}}" "$py/bin/python3" -m tests.console_screenshots --out "${dir:-$HOME/tmp/clarity-screenshots}" "$@"
 
 # Check the skill contracts, agent-tool launchers, generated Claude settings and Claude launchers against what the Nix build installs.
 agent-installed-skill-tests: build

@@ -3,6 +3,9 @@
 Run: just agent-workflow-tests
 """
 import json
+import os
+import shutil
+import subprocess
 import tempfile
 import time
 import unittest
@@ -18,6 +21,7 @@ from . import test_console_controls as controls
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures
 from .test_console_screenshots import all_sprints, entries_of
 
+ROOT = Path(__file__).resolve().parents[1]
 TIER = "integration"  # every case builds a seeded console; the layout cases drive Chromium
 
 
@@ -228,6 +232,56 @@ class DeskLayoutTest(unittest.TestCase):
             .map((node) => node.getBoundingClientRect().width).filter((width) => width > 0)""")
         self.assertTrue(widths)
         self.assertLessEqual(max(widths), 704.5, widths)
+
+    def test_closing_a_tall_reading_panel_lays_the_desk_out_wide_again(self) -> None:
+        page = self.desk(self.chromium(), "seven-sprints", 1440)
+        self.assertTrue(page.evaluate(self.IS_WIDE))
+        page.evaluate("""() => {
+            const panel = document.getElementById("reading");
+            panel.hidden = false;
+            panel.appendChild(Object.assign(document.createElement("div"), {className: "test-tall"})).style.height = "40000px";
+            layDesk();
+        }""")
+        self.assertFalse(page.evaluate(self.IS_WIDE))
+        page.evaluate("closeReading()")
+        self.assertTrue(page.evaluate(self.IS_WIDE))
+
+
+class ScreenshotRecipeTest(unittest.TestCase):
+    """The `console-screenshots` recipe hands its words to the shooter as the words they were typed as."""
+
+    def run_recipe(self, *words: str) -> list[str]:
+        self.assertIsNotNone(shutil.which("just"), "just is not on PATH")
+        tmp = Path(tempfile.mkdtemp(prefix="console-screenshots-recipe-"))
+        self.addCleanup(shutil.rmtree, tmp, True)
+        (tmp / "bin").mkdir()
+        log = tmp / "argv.log"
+        stubs = {
+            tmp / "bin" / "nix": f"#!/bin/sh\nprintf '%s\\n' '{tmp}'\n",
+            tmp / "bin" / "python3": f"#!/bin/sh\nprintf '%s\\n' \"$@\" >> '{log}'\n",
+        }
+        for path, text in stubs.items():
+            path.write_text(text)
+            path.chmod(0o755)
+        env = {**os.environ, "PATH": f"{tmp / 'bin'}:{os.environ['PATH']}", "HOME": str(tmp)}
+        done = subprocess.run(["just", "--justfile", str(ROOT / "justfile"), "console-screenshots", *words],
+                              capture_output=True, text=True, env=env, cwd=tmp, check=False)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return log.read_text().splitlines()
+
+    def test_a_quoted_question_stays_one_argument_and_its_shell_syntax_does_not_run(self) -> None:
+        marker = Path(tempfile.mkdtemp(prefix="console-screenshots-marker-")) / "ran"
+        self.addCleanup(shutil.rmtree, marker.parent, True)
+        question = f"a b; touch {marker}"
+        got = self.run_recipe("my out", "--question", question)
+        self.assertEqual(got[-4:], ["--out", "my out", "--question", question])
+        self.assertFalse(marker.exists())
+
+    def test_an_empty_out_shoots_into_the_default_directory(self) -> None:
+        got = self.run_recipe("", "--states", "seven-sprints")
+        self.assertEqual(got[-4], "--out")
+        self.assertTrue(got[-3].endswith("/tmp/clarity-screenshots"), got)
+        self.assertEqual(got[-2:], ["--states", "seven-sprints"])
 
 
 if __name__ == "__main__":
