@@ -3,7 +3,7 @@
 The lock serialises landings on one branch across hosts. Each action takes `--repo <owner/name>`,
 `--branch <name>` and `--sha <40 hex>`; `--wait` and `--release` exist on `acquire` only, as does
 `--follow-head`, which needs both (a usage error otherwise). `--lease` exists on `acquire` only
-and is a usage error with `--release` (D13); `hold` takes `--seconds`.
+and is a usage error with `--release` (D13); `hold` takes `--seconds` and `--detach`.
 
 D1, the lock is the ref `refs/agent-locks/land/<branch>`, whose value is a pull-request head sha:
 created by REST `POST git/refs` (HTTP 422 means not created), moved and deleted by the
@@ -222,11 +222,16 @@ beat}`. `hold --sha S [--seconds N]` (N from 0 to `HOLD_MAX`, default 0) reads t
 every `LEASE_BEAT` seconds (60) of `monotonic()`: a lock not at S answers `not_held` (exit 3) at
 once, one at S with a lease at S rewrites its `<beat>` to the forge's clock, one at S with none
 answers `unleased` (exit 0) and writes nothing; after N seconds it answers `held` with `lease` and
-`held_s`, the seconds since `<since>`. The first in line, and only it (a read of this poll's queue
+`held_s`, the seconds since `<since>`. `hold --detach [--seconds N]` (issue 1904; N defaults to
+`HOLD_MAX`) is for a step that runs its own long commands and so cannot sit in a foreground `hold`: it
+beats once at once and answers that read when it is `not_held` (exit 3) or `unleased`; otherwise it
+starts the same `hold --seconds N` as a process of its own session with no streams, which beats
+every 60 seconds and ends by itself at N seconds or at its first `not_held`, and answers `beating`
+with `lease`, `seconds` and `pid` (exit 0). A caller that passes no `--detach` is unchanged. The first in line, and only it (a read of this poll's queue
 that succeeded and put it first, so neither position 2 or later nor an unordered poll nor a
 one-shot `acquire`), takes a lock whose holder's newest lease has a `<beat>` more than
 `LEASE_LAPSE` (180) seconds behind the poll's queue clock (`took_over` `"lapsed"`), or a `<since>`
-that is `HOLD_BOUND` (1200) seconds old (`"bound"`), by the compare-and-swap of an idle takeover,
+that is `HOLD_BOUND` (2400) seconds old (`"bound"`), by the compare-and-swap of an idle takeover,
 and deletes the taken holder's leases. Its next poll comes when the earlier of the two ends. A
 holder with no lease ref of its pull request, a release, a train or a client that predates this
 rule among them, and one whose lease is more than `QUEUE_SKEW` ahead of the clock, is judged by D4
@@ -236,7 +241,10 @@ poll's own queue read, never a host clock. The holder that lost the lock asks ag
 (ADR-claims-012). A lease can be forged: it can cut a hold short, and the holder waits again; it
 grants nothing, since the lock is still granted by D1's create and swap only.
 """
+import os
 import re
+import subprocess
+import sys
 import time
 from collections.abc import Collection
 from typing import Any, Callable, NamedTuple
@@ -262,7 +270,10 @@ QUEUE_REFRESH = POLL // 2  # D12: a registration is rewritten at most this often
 QUEUE_SKEW = 60  # D12: a registration whose beat is this far ahead of the forge's clock is dead
 FREE_GRACE = 60  # D12: a lock watched free this long is tried by a waiter that is not first
 CLOSED_GRACE = POLL + 30  # D12: and one seen closed this long; the first in line sees that in a whole poll
-HOLD_BOUND = 1200  # D13: a lease held this long is taken over by the first in line
+# D13: a lease held this long is taken over by the first in line. It must outlast the required check the holder waits
+# for under it: the slowest of the last 48 passing Agent Workflow Tests runs on 26 Nov 2026 took 1807 s (the median
+# 1250 s), and 2400 s is that worst case with a margin of a third (issue 1904); it stays under IDLE_AFTER.
+HOLD_BOUND = 2400
 LEASE_BEAT = 60  # D13: `hold` rewrites the beat of its lease this often
 LEASE_LAPSE = 180  # D13: a lease whose beat is this far behind the forge's clock has lapsed
 HOLD_MAX = BOUND  # D13: the largest `hold --seconds`
@@ -864,8 +875,40 @@ def _lease(args: Any, node: Callable[[], str], out: dict[str, Any]) -> dict[str,
     return out
 
 
+def spawn_beater(args: Any, seconds: int) -> int:
+    """Issue 1904: start `hold --seconds <seconds>` for `args`' lock as a process of its own session with no streams;
+    it ends by itself, so nothing waits for it. Returns its pid."""
+    argv = [sys.executable, "-m", "agent_tools.claims.forge_claim", "land", "hold", "--repo", args.repo,
+            "--branch", args.branch, "--sha", args.sha, "--seconds", str(seconds)]
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join(p for p in sys.path if p)}
+    proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                            start_new_session=True, env=env)
+    return proc.pid
+
+
+def _detach(args: Any) -> tuple[int, dict[str, Any]]:
+    """Issue 1904: beat once; unless that read found the lock gone or unleased, leave the beating to a background `hold`."""
+    seconds = args.seconds or HOLD_MAX
+    code, out = _hold(_Once(args))
+    if code != 0 or out["verdict"] != "held":
+        return code, out
+    pid = spawn_beater(args, seconds)
+    return 0, result(args, "beating", lock_sha=out["lock_sha"], pr=out["pr"], lease=out["lease"], seconds=seconds, pid=pid)
+
+
+class _Once:
+    """`args` as a `hold --seconds 0` that is not detached: one read and one beat."""
+
+    def __init__(self, args: Any) -> None:
+        self.__dict__.update(vars(args))
+        self.seconds = 0
+        self.detach = False
+
+
 def _hold(args: Any) -> tuple[int, dict[str, Any]]:
     """D13: keep the lease of the lock at `--sha` beating for `--seconds`."""
+    if getattr(args, "detach", False):
+        return _detach(args)
     cached: list[str] = []
 
     def node() -> str:

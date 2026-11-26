@@ -200,6 +200,7 @@ def build_parser() -> argparse.ArgumentParser:
             sub.add_argument("--lease", action="store_true")
         elif name == "hold":
             sub.add_argument("--seconds", type=_hold_seconds, default=0)
+            sub.add_argument("--detach", action="store_true")
     return parser
 
 

@@ -31,6 +31,15 @@ from .test_deliver_standard_program import (
 TIER = "integration"
 
 
+def beat(hold):
+    """The lease beat a held step starts first: `hold --detach`, which returns at once and beats in a background process
+    for the whole step, and the stop on not_held. Written out here, not read from the program."""
+    return (f"First start the lease beat: run alone and exactly: {hold} --detach\n"
+            "It returns at once and leaves a background process that beats the land lease every 60 seconds for the whole step. "
+            "When it prints not_held the lease is lost: stop at once, run nothing more and answer as you do when the step cannot be done "
+            "(a failed or blocked answer, never a success) with lease lost in its notes or detail. Whatever else it prints, go on.\n")
+
+
 class GreenFirstTest(unittest.TestCase):
     """The land lease is asked for only once the head is read green, and the checks wait under it beats the lease."""
 
@@ -83,10 +92,39 @@ class GreenFirstTest(unittest.TestCase):
         self.assertEqual(names[names.index("land-take"):names.index("merge") + 1], ["land-take", "sync-1", "land-push-2", "checks-2", "merge"])
         self.assertEqual([n for n in names if n.startswith("sync-")], ["sync-1"])
         self.assertEqual([n for n in names if n.startswith("checks-")], ["checks-2"])
-        beat = f"First run alone and exactly: {self.HOLD}; whatever it answers, go on.\n"
-        self.assertIn(beat + "The branch is behind dev.", prompt(calls, "sync-1"))
-        self.assertIn(beat, prompt(calls, "land-push-2"))
-        self.assertIn(beat.replace(SHA, self.D), prompt(calls, "merge"))
+        self.assertIn(beat(self.HOLD) + "The branch is behind dev.", prompt(calls, "sync-1"))
+        self.assertIn(beat(self.HOLD), prompt(calls, "land-push-2"))
+        self.assertIn(beat(self.HOLD.replace(SHA, self.D)), prompt(calls, "merge"))
+
+    def test_a_held_step_beats_the_lease_in_the_background_for_its_whole_length(self):
+        """The beat is a detached `hold` for the step's whole length (it rewrites the beat every 60 s itself) that returns
+        at once, so the step's own long command runs beside it in the foreground; a beat sent once would lapse at 180 s."""
+        calls = self.synced()["calls"]
+        for label in ("sync-1", "land-push-2", "merge"):
+            with self.subTest(label=label):
+                text = prompt(calls, label)
+                self.assertEqual(text.count("forge-claim land hold"), 1)
+                self.assertIn("--detach\n", text)
+                self.assertNotIn("run_in_background set to true", text)
+                self.assertIn("beats the land lease every 60 seconds for the whole step", text)
+                self.assertIn("When it prints not_held the lease is lost: stop at once", text)
+        # A step that holds nothing starts no beat.
+        for label in ("pr", "land-take"):
+            self.assertNotIn("forge-claim land hold", prompt(calls, label))
+
+    def test_a_clean_sync_whose_head_is_a_follow_up_commit_beats_through_its_review_and_fix(self):
+        """The review of a clean merge with commits on top runs while the lease is still held."""
+        head = "e" * 40
+        finding = {"verdict": "findings", "descends": True, "findings": [{"severity": "important", "summary": "dropped a change", "failing_input": "x"}]}
+        fixed = {"start_head": head, "commit": "f" * 40, "notes": "ok", "tests": ["t"]}
+        out = run_out(replies={"checks-2": green_read("f" * 40), "sync-review-1": finding},
+                      patch={**self.BEHIND, "sync-1": {"merge_commit": self.D, "head": head}, "fix-sync-1": fixed})
+        calls = out["calls"]
+        names = labels(calls)
+        self.assertNotIn("land-unlock", names[:names.index("fix-sync-1")])
+        for label in ("sync-review-1", "fix-sync-1", "fix-sync-review-1"):
+            with self.subTest(label=label):
+                self.assertIn(beat(self.HOLD), prompt(calls, label))
 
     def test_every_merge_follows_a_passed_poll_of_an_up_to_date_head(self):
         # (label, head) of each read that passed with the base not past the head.
@@ -522,8 +560,8 @@ class OwnFilesCarryTest(unittest.TestCase):
             self.assertNotIn("look-approval post", call["prompt"])
         self.assertIn("look-approval carry --repo owner/repo --issue 9 --pr 42 --from " + SHA + " --head " + D + " --own-files",
                       prompt(calls, "look-carry-own"))
-        self.assertIn("First run alone and exactly: forge-claim land hold --repo owner/repo --branch dev --sha " + D
-                      + "; whatever it answers, go on.\nThen run alone and exactly: look-approval carry", prompt(calls, "look-carry-own"))
+        self.assertIn(beat("forge-claim land hold --repo owner/repo --branch dev --sha " + D)
+                      + "Then run alone and exactly: look-approval carry", prompt(calls, "look-carry-own"))
         between = got[got.index("sync-1"):got.index("merge")]
         self.assertEqual([l for l in between if l.startswith("checks-")], ["checks-2"])
         self.assertIn("--match-head-commit " + D, prompt(calls, "merge"))

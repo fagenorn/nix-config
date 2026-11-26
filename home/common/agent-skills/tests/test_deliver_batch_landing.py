@@ -36,6 +36,15 @@ from .test_deliver_batch_program import (
 TIER = "integration"
 
 
+def beat(hold):
+    """The lease beat a held step starts first: `hold --detach`, which returns at once and beats in a background process
+    for the whole step, and the stop on not_held. Written out here, not read from the program."""
+    return (f"First start the lease beat: run alone and exactly: {hold} --detach\n"
+            "It returns at once and leaves a background process that beats the land lease every 60 seconds for the whole step. "
+            "When it prints not_held the lease is lost: stop at once, run nothing more and answer as you do when the step cannot be done "
+            "(a failed or blocked answer, never a success) with lease lost in its notes or detail. Whatever else it prints, go on.\n")
+
+
 class ConflictedSyncOutsideLockTest(unittest.TestCase):
     """A sync merge that conflicts is aborted under the land lock and resolved, tested, reviewed and fixed outside it; the
     reviewed head is read green before it takes the lock again, waiting, and a clean merge never leaves it."""
@@ -576,6 +585,40 @@ class BatchGreenFirstTest(unittest.TestCase):
         self.assertNotIn("--repo owner/repo --watch", record)
         self.assertIn(f"--sha {B} --wait --lease", prompt(calls, "land-lock-1-1"))
         self.assertLess(labels(calls).index("land-record-1-1"), labels(calls).index("land-lock-1-1"))
+
+    HOLD = f"forge-claim land hold --repo owner/repo --branch dev --sha {SHA}"
+
+    def test_the_sync_step_under_the_lease_beats_it_in_the_background_for_its_whole_length(self):
+        """A sync merge that runs its tests holds the lease for minutes; a beat sent once at its start lapses at 180 s."""
+        result, calls, _ = run(replies={"land-take-1": dict(self.TAKEN, behind=True), "land-sync-1-1": self.MERGED})
+        self.assertEqual(row(result, 1)["outcome"], "landed")
+        text = prompt(calls, "land-sync-1-1")
+        self.assertEqual(text.count("forge-claim land hold"), 1)
+        self.assertIn(beat(self.HOLD), text)
+        self.assertIn("--detach\n", text)
+        # No step that holds nothing starts one: the pull request step, the checks read before the lock and the take.
+        for label in ("land-pr-1", "land-take-1"):
+            self.assertNotIn("forge-claim land hold", prompt(calls, label))
+
+    def test_a_conflicted_sync_beats_while_it_aborts_and_the_resolution_outside_the_lock_starts_none(self):
+        out = run_full(replies={"land-sync-1-1": ABORTED, "land-take-1": [dict(self.TAKEN, behind=True), {}], "land-checks-1-2": green(B)})
+        calls = out["calls"]
+        self.assertIn(beat(self.HOLD), prompt(calls, "land-sync-1-1"))
+        self.assertNotIn("forge-claim land hold", prompt(calls, "land-sync-resolve-1-1"))
+
+    def test_a_clean_merge_with_commits_on_top_beats_through_its_review_and_fix(self):
+        """The review and the fix of a clean merge with a follow-up commit run while the lease is still held."""
+        found = {"verdict": "findings", "descends": True, "findings": [{"severity": "important", "summary": "dropped a change", "failing_input": "x"}]}
+        merged = {"status": "done", "conflicted": False, "head": C, "merge_commit": B, "notes": "ok"}
+        fixed = {"status": "done", "start_head": C, "commit": "d" * 40, "notes": "ok", "tests": ["t"]}
+        out = run_full(replies={"land-take-1": dict(self.TAKEN, behind=True), "land-sync-1-1": merged, "land-sync-review-1-1": found,
+                                "land-sync-fix-1-1": fixed, "land-checks-1-2": green("d" * 40)})
+        calls = out["calls"]
+        ls = labels(calls)
+        self.assertNotIn("land-unlock-1", ls[:ls.index("land-sync-rereview-1-1")])
+        for label in ("land-sync-1-1", "land-sync-review-1-1", "land-sync-fix-1-1", "land-sync-rereview-1-1"):
+            with self.subTest(label=label):
+                self.assertIn(beat(self.HOLD), prompt(calls, label))
 
     def test_a_red_check_at_a_synced_head_releases_the_lock_before_the_fix(self):
         red = {"state": "failed", "head": B, "failing": ["ci"]}

@@ -100,10 +100,28 @@ class LeaseTest(base.QueueTest):
         self.lease(12, 0, 0)
         code, out = self.leased(self.clock(self.live_holder()))
         self.assertEqual((code, out["verdict"], out["took_over"]), (0, "acquired", "bound"))
-        self.assertGreaterEqual(out["waited_s"], 1200)
-        self.assertLess(out["waited_s"], 1200 + land_lock.FAST_POLL + 20)
+        self.assertGreaterEqual(out["waited_s"], 2400)
+        self.assertLess(out["waited_s"], 2400 + land_lock.FAST_POLL + 20)
         self.assertEqual(self.world.refs()[REF], A)
         self.assertEqual([ref for ref in self.leases() if "-12-" in ref], [])
+
+    def test_a_holder_whose_required_check_runs_1740_seconds_is_not_taken_over_at_the_bound(self):
+        """The slowest required check of the 26 Nov runs took 1807 s; a holder that beats through a 1740 s check and
+        then merges keeps the lock from the first in line, which waits for the release and takes nothing over."""
+        self.lease(12, 0, 0)
+        hook = self.live_holder(self.release_at(1740, None))
+        code, out = self.leased(self.clock(hook))
+        self.assertEqual((code, out["verdict"], out["took_over"]), (0, "acquired", None))
+        self.assertGreaterEqual(out["waited_s"], 1740)
+        self.assertEqual([a for a in self.lock_swaps() if a[-3] == f"before={B}"], [])
+        self.assertEqual(self.world.refs()[REF], A)
+
+    def test_a_holder_still_holding_at_1740_seconds_with_beats_stopped_is_taken_over_as_lapsed(self):
+        self.lease(12, 0, 0)
+        hook = self.live_holder(lease=False)
+        code, out = self.leased(self.clock(hook))
+        self.assertEqual((code, out["verdict"], out["took_over"]), (0, "acquired", "lapsed"))
+        self.assertLess(out["waited_s"], 1740)
 
     def test_a_waiter_that_is_not_first_never_takes_over_a_lease(self):
         self.lease(12, 0, 0)
@@ -228,8 +246,72 @@ class LeaseTest(base.QueueTest):
         self.assertEqual((code, out["verdict"]), (0, "unleased"))
         self.assertEqual(self.lease_creates(), [])
 
+    def detach(self, *extra):
+        with mock.patch.object(land_lock, "spawn_beater", return_value=4242) as spawn:
+            code, out = run(*land("hold", A, "--detach", *extra))
+        return code, out, spawn
+
+    def test_hold_detach_beats_once_and_leaves_a_background_beater_for_the_whole_step(self):
+        """A step whose own command runs for minutes cannot run `hold --seconds` beside it: it starts the beater and goes on."""
+        self.lock(A)
+        self.pulls(A, pull(11, sha=A))
+        self.lease(11, -30, -30, sha=A)
+        code, out, spawn = self.detach()
+        self.assertEqual((code, out["verdict"]), (0, "beating"))
+        self.assertEqual([int(name.rsplit("-", 1)[1]) - EPOCH for name in self.lease_creates()], [0])
+        self.assertEqual(out["lease"], {"since": EPOCH - 30, "beat": EPOCH})
+        self.assertEqual(out["seconds"], 3000)
+        spawn.assert_called_once()
+        self.assertEqual(spawn.call_args.args[1], 3000)
+        self.assertEqual(spawn.call_args.args[0].sha, A)
+
+    def test_hold_detach_beats_for_the_seconds_it_is_given(self):
+        self.lock(A)
+        self.pulls(A, pull(11, sha=A))
+        self.lease(11, 0, 0, sha=A)
+        code, out, spawn = self.detach("--seconds", "600")
+        self.assertEqual((code, out["verdict"], out["seconds"]), (0, "beating", 600))
+        self.assertEqual(spawn.call_args.args[1], 600)
+
+    def test_hold_detach_answers_not_held_at_once_and_starts_no_beater(self):
+        self.lock(E)
+        self.pulls(E, pull(13, sha=E))
+        code, out, spawn = self.detach()
+        self.assertEqual((code, out["verdict"], out["lock_sha"], out["pr"]), (3, "not_held", E, 13))
+        spawn.assert_not_called()
+        self.assertEqual(self.lease_creates(), [])
+
+    def test_hold_detach_with_no_lease_answers_unleased_and_starts_no_beater(self):
+        self.lock(A)
+        self.pulls(A, pull(11, sha=A))
+        code, out, spawn = self.detach()
+        self.assertEqual((code, out["verdict"]), (0, "unleased"))
+        spawn.assert_not_called()
+
+    def test_hold_without_detach_starts_no_beater(self):
+        self.lock(A)
+        self.pulls(A, pull(11, sha=A))
+        self.lease(11, 0, 0, sha=A)
+        with mock.patch.object(land_lock, "spawn_beater") as spawn:
+            code, out = self.hold(self.clock(), "--seconds", "60")
+        self.assertEqual((code, out["verdict"]), (0, "held"))
+        spawn.assert_not_called()
+
+    def test_the_beater_is_the_same_hold_in_its_own_session_with_no_streams(self):
+        args = mock.Mock(repo=SLUG, branch="main", sha=A)
+        with mock.patch.object(land_lock.subprocess, "Popen") as popen:
+            land_lock.spawn_beater(args, 900)
+        argv = popen.call_args.args[0]
+        self.assertEqual(argv[1:], ["-m", "agent_tools.claims.forge_claim", "land", "hold", "--repo", SLUG, "--branch", "main",
+                                    "--sha", A, "--seconds", "900"])
+        kw = popen.call_args.kwargs
+        self.assertIs(kw["start_new_session"], True)
+        self.assertEqual((kw["stdin"], kw["stdout"], kw["stderr"]), (land_lock.subprocess.DEVNULL,) * 3)
+
     def test_the_lease_timings(self):
-        self.assertEqual((land_lock.HOLD_BOUND, land_lock.LEASE_BEAT, land_lock.LEASE_LAPSE), (1200, 60, 180))
+        # 2400 s is the slowest required check of the last 48 passing runs on 26 Nov (1807 s) with a margin of a third.
+        self.assertEqual((land_lock.HOLD_BOUND, land_lock.LEASE_BEAT, land_lock.LEASE_LAPSE), (2400, 60, 180))
+        self.assertGreater(land_lock.HOLD_BOUND, 1807)
         self.assertLess(land_lock.LEASE_LAPSE, land_lock.HOLD_BOUND)
         self.assertLess(land_lock.HOLD_BOUND, land_lock.IDLE_AFTER)
         self.assertLess(land_lock.IDLE_AFTER, land_lock.BOUND)
