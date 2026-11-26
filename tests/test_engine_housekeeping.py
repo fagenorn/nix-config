@@ -1336,9 +1336,9 @@ class DeliverHousekeepingTest(unittest.TestCase):
         seen = []
         validate = engine_shell._validate
 
-        def checked(directory, table):
+        def checked(directory, table, **kwargs):
             seen.append(("validate", Path(directory)))
-            checked_procedure = validate(directory, table)
+            checked_procedure = validate(directory, table, **kwargs)
             if Path(directory) == procedures:
                 seen.append(("edit",))
                 edited = json.loads((procedures / "deliver.json").read_text())
