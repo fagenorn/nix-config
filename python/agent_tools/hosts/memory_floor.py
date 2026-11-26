@@ -6,7 +6,9 @@ belongs to a declared owner: the agent user, or a CI runner user.
 - An agent-user process is a direct member of the workload `agent:<dir>` when its cwd is inside a
   declared root glob (`<dir>` is the part of the cwd the glob matched); otherwise it joins the
   workload of its nearest ancestor, and has none when the walk meets a protected or undeclared
-  ancestor, or pid 1.
+  ancestor, or pid 1. An agent-user process that no root reaches joins `agent:session:<pid>`, rooted
+  at the child of its nearest declared session program (`--agent-session`) among its ancestors; a
+  session process is never a member, and a process with no session ancestor is in no workload.
 - A runner-user `Runner.Worker` starts the workload `ci:<user>:<pid>` and its descendants join it;
   a runner-user process whose parent is pid 1 and that is not protected joins `ci:<user>:orphans`.
 - A process of any other user is never in a workload, wherever its cwd or ancestors are.
@@ -99,6 +101,7 @@ class Owners:
     agent_user: str
     agent_roots: tuple[str, ...]
     runners: tuple[tuple[int, str], ...]
+    agent_sessions: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -157,10 +160,12 @@ def protected_pids(table: dict[int, Proc], omlx_pid: int | None, service_pids: s
         children: dict[int, list[int]] = {}
         for proc in table.values():
             children.setdefault(proc.ppid, []).append(proc.pid)
+        visited = {omlx_pid}
         pending = [omlx_pid]
         while pending:
             for child in children.get(pending.pop(), ()):
-                if child not in protected:
+                if child not in visited:
+                    visited.add(child)
                     protected.add(child)
                     pending.append(child)
     return protected
@@ -214,9 +219,34 @@ def workloads(table: dict[int, Proc], owners: Owners, protected: set[int]) -> li
         assigned[pid] = found
         return found
 
+    def below_session(pid: int) -> int | None:
+        """The child of the nearest session program above `pid`, for an unrooted agent-user process."""
+        proc = table[pid]
+        if (
+            proc.uid != owners.agent_uid or pid <= 1 or pid in protected
+            or _program(proc.command) in owners.agent_sessions
+        ):
+            return None
+        current, seen = pid, {pid}
+        while True:
+            parent = table[current].ppid
+            above = table.get(parent)
+            if above is None or parent <= 1 or parent in seen or above.uid != owners.agent_uid:
+                return None
+            if _program(above.command) in owners.agent_sessions:
+                return current
+            if parent in protected:
+                return None
+            seen.add(parent)
+            current = parent
+
     members: dict[str, tuple[str, list[int]]] = {}
     for pid in table:
         found = assign(pid)
+        if found is None:
+            session_root = below_session(pid)
+            if session_root is not None:
+                found = (f"agent:session:{session_root}", owners.agent_user)
         if found is not None:
             members.setdefault(found[0], (found[1], []))[1].append(pid)
 
@@ -396,7 +426,7 @@ def enforce_once(
             loop.unmet_open = False
         entry = {
             "seq": record.get("kills", 0) + 1, "at": io.now().isoformat(timespec="seconds"),
-            "reason": reason, "owner": workload.owner, "root_pid": workload.root_pid,
+            "reason": reason, "owner": workload.owner, "workload": workload.key, "root_pid": workload.root_pid,
             "root_command": workload.root_command, "processes": len(workload.pids),
             "tree_bytes": workload.size, "available_before_bytes": before,
             "available_after_bytes": available, "signals": signals,
@@ -661,6 +691,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--omlx-jetsam-priority", type=_declared_priority, required=True)
     run.add_argument("--agent-user", required=True)
     run.add_argument("--agent-root", action="append", required=True)
+    run.add_argument("--agent-session", action="append", default=[])
     run.add_argument("--runner-user", action="append", default=[])
     run.add_argument("--record", type=Path, required=True)
     run.add_argument("--label", default="org.nixos.omlx")
@@ -689,7 +720,7 @@ def _owners(args) -> Owners:
             runners.append((pwd.getpwnam(name).pw_uid, name))
         except KeyError:
             print(f"{PROG}: unknown runner user {name}, skipped", file=sys.stderr)
-    return Owners(agent_uid, args.agent_user, tuple(args.agent_root), tuple(runners))
+    return Owners(agent_uid, args.agent_user, tuple(args.agent_root), tuple(runners), tuple(args.agent_session))
 
 
 def _print_line(line: str) -> None:
