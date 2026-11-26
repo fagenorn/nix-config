@@ -43,6 +43,11 @@ def entries_of(view):
         yield from (entry["projects"] if entry["type"] == "quiet_group" else [entry])
 
 
+class FixedPage:
+    clock = SimpleNamespace(set_fixed_time=lambda time: None)
+    mouse = SimpleNamespace(move=lambda x, y: None)
+
+
 def all_sprints(view):
     found = []
     for project in entries_of(view):
@@ -52,8 +57,7 @@ def all_sprints(view):
 
 
 def fake_browser(present):
-    class Page:
-        clock = SimpleNamespace(set_fixed_time=lambda time: None)
+    class Page(FixedPage):
         def __init__(self):
             self.clicks = []
             self.waits = []
@@ -1291,7 +1295,7 @@ class ScreenshotFixtureTest(unittest.TestCase):
                 mock.patch.dict(sys.modules, {"playwright": types.ModuleType("playwright"),
                                               "playwright.sync_api": api}), \
                 mock.patch.object(shots, "_shoot", side_effect=fake):
-            shots.capture(Path(tmp), states=("guest-steer",), widths=(shots.WIDTHS[0],))
+            shots.capture(Path(tmp), states=("guest-steer",), widths=(shots.WIDTHS[0],), home=Path(tmp) / "home")
         self.assertEqual(len(seen), 1)
         state, url, status, view = seen[0]
         self.assertEqual((state, status), ("guest-steer", 200))
@@ -1340,7 +1344,7 @@ class ScreenshotFixtureTest(unittest.TestCase):
                                               "playwright.sync_api": api}), \
                 mock.patch.object(shots, "_shoot", side_effect=fake), \
                 mock.patch.object(shots, "start_service", wraps=shots.start_service) as started:
-            shots.capture(Path(tmp), states=("adoption-failed",))
+            shots.capture(Path(tmp), states=("adoption-failed",), home=Path(tmp) / "home")
         self.assertEqual(started.call_count, len(shots.WIDTHS))
         self.assertEqual(cards, [(width, ["adoption"]) for width in shots.WIDTHS])
 
@@ -2134,8 +2138,7 @@ class ScreenshotFixtureTest(unittest.TestCase):
     @mock.patch.object(shots, "STYLE_CHECKS", ())
     def test_a_shot_scrolls_back_to_the_top_before_its_capture(self) -> None:
         def fake(reset_to):
-            class Page:
-                clock = SimpleNamespace(set_fixed_time=lambda time: None)
+            class Page(FixedPage):
                 y = 0.0
 
                 def __init__(self):
@@ -2189,8 +2192,7 @@ class ScreenshotFixtureTest(unittest.TestCase):
     def test_the_goal_states_type_into_the_box_before_the_capture(self) -> None:
         calls: list[tuple[str, tuple]] = []
 
-        class Page:
-            clock = SimpleNamespace(set_fixed_time=lambda time: None)
+        class Page(FixedPage):
             def goto(self, url):
                 calls.append(("goto", (url,)))
 
@@ -2378,8 +2380,7 @@ class ScreenshotFixtureTest(unittest.TestCase):
     def check_sharing_shot(self, state: str, present: set, opens: bool) -> None:
         calls: list[tuple[str, tuple]] = []
 
-        class Page:
-            clock = SimpleNamespace(set_fixed_time=lambda time: None)
+        class Page(FixedPage):
             def goto(self, url):
                 calls.append(("goto", (url,)))
 
@@ -3664,7 +3665,7 @@ class ScreenshotStyleTest(unittest.TestCase):
     def sandboxed_capture(self, **kw):
         chromium_or_skip(self)
         with tempfile.TemporaryDirectory() as tmp:
-            return shots.capture(Path(tmp) / "out", **kw)
+            return shots.capture(Path(tmp) / "out", home=Path(tmp) / "home", **kw)
 
     def test_every_style_check_passes_and_fails_when_broken(self) -> None:
         taken = self.sandboxed_capture(mutate=True)
@@ -3702,7 +3703,7 @@ class ScreenshotCaptureTest(unittest.TestCase):
                 self.skipTest(f"no Chromium to launch: {err}")
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "out"
-            taken = shots.capture(out)
+            taken = shots.capture(out, home=Path(tmp) / "home")
             self.assertEqual([s for s in taken if s.width == 480 and s.scroll_width > 480], [])
             self.assertEqual([s for s in taken if s.squeezed], [])
             self.assertEqual([s for s in taken if s.jargon], [])

@@ -3,13 +3,17 @@
 Run: just agent-workflow-tests
 """
 import contextlib
+import errno
 import http.client
 import io
 import json
 import os
 import shutil
+import stat
 import sys
 import tempfile
+import threading
+import time
 import types
 import unittest
 from datetime import datetime, timezone
@@ -247,6 +251,209 @@ class FixedPageTest(unittest.TestCase):
         self.assertEqual(times["now"], TUESDAY * 1000)
         self.assertEqual(times["zone"], "UTC")
         self.assertEqual((kwargs["full_page"], kwargs.get("animations")), (True, "disabled"))
+
+
+class FixedPicturesTest(unittest.TestCase):
+    def test_two_captures_at_different_real_times_write_the_same_bytes(self) -> None:
+        chromium_or_skip(self)
+        base = own_tempdir(self)
+        a, b = base / "a", base / "b"
+        shots.capture(a)
+        shots.capture(b)
+        names = sorted(f"{s}-{w}.png" for s in shots.STATES for w in shots.WIDTHS)
+        self.assertEqual(sorted(p.name for p in a.iterdir()), names)
+        self.assertEqual(sorted(p.name for p in b.iterdir()), names)
+        self.assertEqual([n for n in names if (a / n).read_bytes() != (b / n).read_bytes()], [])
+
+    def test_every_entry_yields_the_same_empty_private_root(self) -> None:
+        from . import console_screenshot_clock as shot_clock
+
+        home = own_tempdir(self) / "home"
+        for entry in range(2):
+            with shot_clock.fixture_dirs(home) as root:
+                self.assertEqual(root, home / "root")
+                self.assertEqual(os.listdir(root), [])
+                self.assertEqual([stat.S_IMODE(os.lstat(p).st_mode) for p in (home, root)], [0o700, 0o700])
+                (root / "inside.txt").write_text("inside", encoding="utf-8")
+            self.assertFalse((home / "root").exists())
+            self.assertTrue(home.is_dir() and (home / "lock").exists())
+            if entry == 0:
+                os.mkdir(home / "root", 0o700)
+                (home / "root" / "stale.txt").write_text("stale", encoding="utf-8")
+
+    def test_a_waiter_acquires_the_root_once_the_holder_leaves(self) -> None:
+        from . import console_screenshot_clock as shot_clock
+
+        home = own_tempdir(self) / "home"
+        wait = mock.patch.object(shot_clock, "FIXTURE_WAIT_SECONDS", 5.0)
+        wait.start()
+        self.addCleanup(wait.stop)
+        entered, release, blocked = threading.Event(), threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+        order, errors = [], []
+        real_sleep = time.sleep
+        sleeping = mock.patch.object(shot_clock.time, "sleep", side_effect=lambda s: (blocked.set(), real_sleep(s)))
+        sleeping.start()
+        self.addCleanup(sleeping.stop)
+
+        def hold():
+            with shot_clock.fixture_dirs(home):
+                order.append("holder in")
+                entered.set()
+                release.wait(5)
+                order.append("holder out")
+
+        def wait_for_it():
+            try:
+                with shot_clock.fixture_dirs(home) as root:
+                    order.append(("waiter in", root.is_dir(), os.listdir(root)))
+            except BaseException as error:
+                errors.append(error)
+
+        holder = threading.Thread(target=hold, daemon=True)
+        waiter = threading.Thread(target=wait_for_it, daemon=True)
+        holder.start()
+        self.assertTrue(entered.wait(5))
+        waiter.start()
+        self.assertTrue(blocked.wait(5))
+        release.set()
+        holder.join(5)
+        waiter.join(5)
+        self.assertFalse(holder.is_alive() or waiter.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(order, ["holder in", "holder out", ("waiter in", True, [])])
+
+    def test_a_waiter_gives_up_at_the_bound_and_leaves_the_holder_root(self) -> None:
+        from . import console_screenshot_clock as shot_clock
+
+        home = own_tempdir(self) / "home"
+        wait = mock.patch.object(shot_clock, "FIXTURE_WAIT_SECONDS", 0.3)
+        wait.start()
+        self.addCleanup(wait.stop)
+        stack = contextlib.ExitStack()
+        self.addCleanup(stack.close)
+        root = stack.enter_context(shot_clock.fixture_dirs(home))
+        (root / "mine.txt").write_text("mine", encoding="utf-8")
+        errors = []
+
+        def wait_for_it():
+            try:
+                with shot_clock.fixture_dirs(home):
+                    pass
+            except BaseException as error:
+                errors.append(error)
+
+        waiter = threading.Thread(target=wait_for_it, daemon=True)
+        waiter.start()
+        waiter.join(5)
+        self.assertFalse(waiter.is_alive())
+        self.assertEqual([type(e) for e in errors], [TimeoutError])
+        self.assertIn(str(home / "lock"), str(errors[0]))
+        self.assertEqual((root / "mine.txt").read_text(encoding="utf-8"), "mine")
+
+    def test_a_failed_entry_body_or_cleanup_releases_the_lock(self) -> None:
+        from . import console_screenshot_clock as shot_clock
+
+        home = own_tempdir(self) / "home"
+        wait = mock.patch.object(shot_clock, "FIXTURE_WAIT_SECONDS", 0.3)
+        wait.start()
+        self.addCleanup(wait.stop)
+        os.mkdir(home, 0o700)
+        (home / "root").write_text("a file", encoding="utf-8")
+        with self.assertRaises(FileExistsError), shot_clock.fixture_dirs(home):
+            pass
+        self.assertTrue((home / "root").is_file())
+        (home / "root").unlink()
+        with shot_clock.fixture_dirs(home):
+            pass
+        with self.assertRaises(RuntimeError), shot_clock.fixture_dirs(home):
+            raise RuntimeError("body")
+        self.assertFalse((home / "root").exists())
+        with shot_clock.fixture_dirs(home):
+            pass
+        def cannot_remove(path, ignore_errors=False, **kwargs):
+            if not ignore_errors:
+                raise OSError("cannot remove")
+
+        failing = mock.patch.object(shot_clock.shutil, "rmtree", side_effect=cannot_remove)
+        with self.assertRaises(OSError) as raised, failing, shot_clock.fixture_dirs(home) as root:
+            (root / "x").write_text("x", encoding="utf-8")
+        self.assertIn("cannot remove", str(raised.exception))
+        self.assertTrue((home / "root" / "x").exists())
+        with shot_clock.fixture_dirs(home) as root:
+            self.assertEqual(os.listdir(root), [])
+
+    def test_an_out_inside_the_fixture_folder_is_refused_before_anything_is_made(self) -> None:
+        from . import console_screenshot_clock as shot_clock
+
+        base = own_tempdir(self)
+        home = shot_clock.shots_home()
+        (home / "root").mkdir(parents=True)
+        (home / "root" / "mine.txt").write_text("mine", encoding="utf-8")
+        link = base / "link"
+        os.symlink(home / "root", link)
+        with stub_playwright(), mock.patch.object(shots, "_shoot", return_value=None):
+            for out in (home / "root" / "shots", home, link / "shots"):
+                with self.subTest(out=out), self.assertRaises(ValueError) as raised:
+                    shots.capture(out, states=("nothing-running",))
+                self.assertIn(str(home), str(raised.exception))
+        self.assertEqual((home / "root" / "mine.txt").read_text(encoding="utf-8"), "mine")
+        self.assertFalse((home / "root" / "shots").exists())
+
+    def test_a_planted_link_or_a_wrong_or_foreign_home_is_refused_and_left_alone(self) -> None:
+        from . import console_screenshot_clock as shot_clock
+
+        base = own_tempdir(self)
+        victim = base / "victim"
+        victim.mkdir()
+        (victim / "keep").write_text("mine", encoding="utf-8")
+        home = base / "home"
+        os.symlink(victim, home)
+        with self.assertRaises(PermissionError) as raised, shot_clock.fixture_dirs(home):
+            pass
+        self.assertIn(str(home), str(raised.exception))
+        self.assertEqual(sorted(os.listdir(victim)), ["keep"])
+        home.unlink()
+        os.mkdir(home, 0o700)
+        os.symlink(victim / "keep", home / "lock")
+        with self.assertRaises(OSError) as raised, shot_clock.fixture_dirs(home):
+            pass
+        self.assertEqual(raised.exception.errno, errno.ELOOP)
+        self.assertEqual((victim / "keep").read_text(encoding="utf-8"), "mine")
+        self.assertFalse((home / "root").exists())
+        for name, setup in (("wrong", lambda h: (os.mkdir(h), os.chmod(h, 0o755))),
+                            ("foreign", lambda h: os.mkdir(h, 0o700)),
+                            ("owner-only", lambda h: (os.mkdir(h, 0o700), os.chmod(h, 0o300)))):
+            fresh = base / name
+            setup(fresh)
+            foreign = mock.patch.object(shot_clock.os, "getuid", return_value=os.getuid() + (name == "foreign"))
+            with self.subTest(name), foreign, self.assertRaises(PermissionError) as raised, \
+                    shot_clock.fixture_dirs(fresh):
+                pass
+            self.assertIn(str(fresh), str(raised.exception))
+            os.chmod(fresh, 0o700)
+            self.assertEqual(os.listdir(fresh), [])
+
+    def test_capture_holds_its_fixture_in_the_home_it_is_given(self) -> None:
+        from . import console_screenshot_clock as shot_clock
+
+        base = own_tempdir(self)
+        home = base / "given"
+        seen = []
+
+        def fake(browser, url, state, width, out, **kwargs):
+            seen.append(sorted(os.listdir(home / "root")))
+
+        with stub_playwright(), mock.patch.object(shots, "_shoot", side_effect=fake):
+            shots.capture(base / "out", states=("nothing-running",), widths=(1440,), home=home)
+            self.assertEqual(len(seen), 1)
+            self.assertIn("projects", seen[0])
+            self.assertTrue((home / "lock").exists())
+            self.assertFalse((home / "root").exists())
+            self.assertFalse(shot_clock.shots_home().exists())
+            with self.assertRaises(ValueError):
+                shots.capture(home / "root" / "shots", states=("nothing-running",), home=home)
+        self.assertFalse((home / "root" / "shots").exists())
 
 
 if __name__ == "__main__":
