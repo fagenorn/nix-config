@@ -254,6 +254,7 @@ agent-workflow-tests *args:
     tests/test_memory_floor_speed.py \
     tests/test_interrupted_reruns_check.py \
     tests/test_verify_checks.py \
+    tests/test_loopback_server.py \
     tests/test_cleanup_fix_check.py \
     tests/test_console_approved_action_check.py \
     tests/test_console_takeover_merge_check.py \
@@ -416,6 +417,7 @@ agent-workflow-tests *args:
     tests/test_console_controls.py \
     tests/test_console_goal_box.py \
     tests/test_console_service.py \
+    tests/test_console_publish_hold.py \
     tests/test_console_close.py \
     tests/test_console_stream.py \
     tests/test_console_sessions.py \
