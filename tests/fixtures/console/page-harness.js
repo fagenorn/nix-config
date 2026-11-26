@@ -31,10 +31,9 @@
 // own focus listeners with {type: "focus", target}; after its disabled and inert
 // checks Elem.focus() also adds 1 to state.hiddenFocus (the snapshot's
 // hidden_focus, starting at 0) when an ancestor DETAILS is not open and the
-// element is not inside that details' own SUMMARY child, and focuses all the same; a {click} on an element inside a
-// closed sprint report (the details of class sprint-detail) throws, as no one can click what a closed report hides;
-// Elem.focus(options) also adds 1 to state.scrollingFocus (the snapshot's scrolling_focus) unless options.preventScroll
-// is true, as a browser scrolls a focused element into view only then; Elem.blur() clears
+// element is not inside that details' own SUMMARY child, and focuses all the same; Elem.focus(options) also adds 1 to
+// state.scrollingFocus (the snapshot's scrolling_focus) unless options.preventScroll is true, as a browser scrolls a
+// focused element into view only then; Elem.blur() clears
 // state.active when it is that element and fires nothing; removing a node (replaceChildren dropping it, appendChild
 // moving it, the textContent setter, Elem.remove()) clears state.active when it
 // is that node or inside its subtree, as a browser blurs a removed element, and
@@ -160,17 +159,16 @@ class Elem {
     delete this.attributes[name];
     if (name === "disabled") this.disabled = false;
   }
-  inClosedDetails(cls) {
-    for (let n = this; n.parentNode; n = n.parentNode) {
-      const up = n.parentNode;
-      if (up.tagName === "DETAILS" && up.open !== true && n.tagName !== "SUMMARY" && (cls === undefined || up.className === cls)) return true;
-    }
-    return false;
-  }
   focus(options) {
     if (this.disabled === true) return; // a browser does not focus a disabled control
     for (let n = this; n; n = n.parentNode) if (n.inert === true) return; // nor inside an inert subtree
-    if (this.inClosedDetails()) state.hiddenFocus += 1; // a browser does not focus a control in a closed details
+    for (let n = this; n.parentNode; n = n.parentNode) {
+      const up = n.parentNode;
+      if (up.tagName === "DETAILS" && up.open !== true && n.tagName !== "SUMMARY") {
+        state.hiddenFocus += 1; // a browser does not focus a control in a closed details
+        break;
+      }
+    }
     const was = state.active === this;
     state.active = this;
     state.focusCount += 1;
@@ -546,9 +544,8 @@ async function run() {
       for (const fn of target.listeners.blur || []) fn({ type: "blur", target, relatedTarget: related });
     } else if ("click" in step) {
       const target = byClass(step.click, scopeOf(step), step.nth);
-      if (target.inClosedDetails("sprint-detail")) throw new Error("click on " + step.click + ", hidden inside a closed report");
       if (target.disabled !== true) {
-        for (const fn of target.listeners.click || []) fn({ type: "click", preventDefault() {}, stopPropagation() {} });
+        for (const fn of target.listeners.click || []) fn({ type: "click", preventDefault() {} });
       }
     } else if ("check" in step) {
       const target = byClass(step.check.cls, scopeOf(step), step.check.nth);

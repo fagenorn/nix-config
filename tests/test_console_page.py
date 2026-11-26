@@ -164,29 +164,32 @@ class PageTest(unittest.TestCase):
                 self.assertEqual(re.findall(pattern, self.data), [])
 
     def test_the_page_is_under_65_kb_compressed(self) -> None:
-        # Raised from 60 KB by #1260: main sat 5 bytes under the old cap, so the look card's own code could only fit by
-        # dropping ten of the page's explanatory comments, which a merge did silently. Raised from 61 KB by #1323: the
-        # route sentence, its three wordings and the forward-command check (about 700 bytes compressed) did not fit the
-        # 439 bytes the cap had left. Raised from 62 KB by #1263: its guest controls and actor marks on both pages,
-        # merged with #1323's route sentence, came to 64126 bytes against the 63488 the two caps held. Raised from 63 KB
-        # by #1341: the guest pool's line, rows and settling (about 1.4 KB compressed) did not fit the 302 bytes the cap
-        # had left. #1338 also needed room beyond the 63 KB cap: the notice that keeps a refused merge's words once its
-        # card is gone (a merge that found another head merged) took the 63 bytes it had left, and merged with #1341 the
-        # page is 66082 bytes against the 66560 the cap holds. Raised from 65 KB by #1343: the guest page's own-account
-        # form (consent, tick, sign-in, link, code box and their redraws, about 2.1 KB compressed) did not fit the room
-        # the 65 KB cap had left, and merged with #1338 the page is 68280 bytes against the 66560 the cap before it
-        # held. Raised from 68 KB by #1345: the guest pool's Sign out and Remove controls, their confirmation and their
-        # redraws (about 0.9 KB compressed) did not fit the 281 bytes the cap had left. Raised from 70 KB by #1272: the
-        # thread delete control, the credential refusal's draft cleanup in both editors and the settling of accepted
-        # questions after a stream break (about 1 KB compressed) did not fit the 100 bytes the cap had left. Raised from
-        # 71 KB by #1424: the permission card's answer buttons keep their focus through a redraw and stay focusable
-        # while sending (about 150 bytes compressed, over the 2 the cap had left). Raised from 71 KB by #1432: a
-        # sprint's declared live fault line, its Withdraw and the same line on an ended sprint's finished line (about
-        # 0.5 KB compressed) did not fit the 279 bytes the cap had left. Raised from 72 KB by the merge of #1274 with
-        # #1432 and #1424: each side fit under its cap, and merged the page is 74199 bytes. Raised from 73 KB: a long
-        # command's permission card summary and fold did not fit. Raised from 73.5 KB by the jargon glossary: its marks
-        # (about 1.2 KB compressed) did not fit the 64 bytes the cap had left.
-        self.assertLess(len(gzip.compress(self.data, 9)), 76800)
+        # Raised from 60 KB by #1260: main sat 5 bytes under the old cap, so the look card's own code could
+        # only fit by dropping ten of the page's explanatory comments, which a merge did silently.
+        # Raised from 61 KB by #1323: the route sentence, its three wordings and the forward-command check
+        # (about 700 bytes compressed) did not fit the 439 bytes the cap had left.
+        # Raised from 62 KB by #1263: its guest controls and actor marks on both pages, merged with #1323's
+        # route sentence, came to 64126 bytes against the 63488 the two caps held.
+        # Raised from 63 KB by #1341: the guest pool's line, rows and settling (about 1.4 KB compressed) did
+        # not fit the 302 bytes the cap had left.
+        # #1338 also needed room beyond the 63 KB cap: the notice that keeps a refused merge's words once its
+        # card is gone (a merge that found another head merged) took the 63 bytes it had left, and merged with
+        # #1341 the page is 66082 bytes against the 66560 the cap holds.
+        # Raised from 65 KB by #1343: the guest page's own-account form (consent, tick, sign-in, link, code box and
+        # their redraws, about 2.1 KB compressed) did not fit the room the 65 KB cap had left, and merged with
+        # #1338 the page is 68280 bytes against the 66560 the cap before it held.
+        # Raised from 68 KB by #1345: the guest pool's Sign out and Remove controls, their confirmation and their
+        # redraws (about 0.9 KB compressed) did not fit the 281 bytes the cap had left.
+        # Raised from 70 KB by #1272: the thread delete control, the credential refusal's draft cleanup in both
+        # editors and the settling of accepted questions after a stream break (about 1 KB compressed) did not fit
+        # the 100 bytes the cap had left.
+        # Raised from 71 KB by #1424: the permission card's answer buttons keep their focus through a redraw and
+        # stay focusable while sending (about 150 bytes compressed, over the 2 the cap had left).
+        # Raised from 71 KB by #1432: a sprint's declared live fault line, its Withdraw and the same line on an
+        # ended sprint's finished line (about 0.5 KB compressed) did not fit the 279 bytes the cap had left.
+        # Raised from 72 KB by the merge of #1274 with #1432 and #1424: each side fit under its cap, and merged the
+        # page is 74199 bytes. Raised from 73 KB: a long command's permission card summary and fold did not fit.
+        self.assertLess(len(gzip.compress(self.data, 9)), 75264)
 
     def test_the_top_bar_carries_one_spend_link(self) -> None:
         header = self.text[self.text.index('<header class="top">'):self.text.index("</header>")]

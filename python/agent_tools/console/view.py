@@ -58,7 +58,7 @@ Wire format, one object:
      "unmanaged": [<unmanaged entry>, ...],
      "recent_projects": ["<project id>", ...],
      "digest": <digest> | null,
-     "managers": <bool>, "glossary": [{"word", "gloss"}, ...],
+     "managers": <bool>,
      "pin": <pin note> | null,
      "pin_launches": ["<profile>", ...],
      "profile_sessions": {"<profile>": <int>, ...},
@@ -76,7 +76,7 @@ Wire format, one object:
 (`guest.scrub`). `last_request` is the last guest-door request's `guest.reading` (counts and flags,
 never a login; its `client` is a comparison with this host's own addresses, never an address), null
 before the first one. `other_device_seen` is true once any reading since the service began had `client`
-`other_device` (ADR-console-079), false after a restart. `glossary` is the console's copy of the owner glossary (`owner_words.entries()`, from `docs/guides/owner-words.md`), on every view, so that the page can mark a word a manager's text uses without its gloss.
+`other_device` (ADR-console-079), false after a restart.
 
 `activation` is the one line the page shows about activating this host (#1114, #1193,
 ADR-console-043): `{"text", "state": "pending" | "running" | "activated" | "failed", "commit": <40 hex>,
@@ -815,7 +815,7 @@ from pathlib import PurePosixPath
 from types import MappingProxyType
 
 from agent_tools.console import (
-    card_entries, contract_draft, engine_runs as engine_runs_module, inbox, owner_words, project_question,
+    card_entries, contract_draft, engine_runs as engine_runs_module, inbox, project_question,
     question_records, spend as spend_module)
 from agent_tools.console.activation import Activation
 from agent_tools.console.activation_run import LastRun
@@ -2607,7 +2607,7 @@ def derive_view(
             for root in sorted(unmanaged)],
         "recent_projects": [s.project_id for s in _order(states)],
         "digest": dict(digest) if digest is not None else None,
-        "managers": managers, "glossary": owner_words.entries(),
+        "managers": managers,
         "unstopped": [
             {"project_id": stop.project_id, "sprint_id": stop.sprint_id,
              "title": goal_title(stop.goal),

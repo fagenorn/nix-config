@@ -162,9 +162,27 @@ class GlossaryTest(unittest.TestCase):
             with self.subTest(text=case["text"]):
                 self.assertEqual([w for w, _ in owner_words.unglossed(case["text"])], case["flagged"])
 
-class ViewGlossaryTest(unittest.TestCase):
-    def test_the_view_carries_the_glossary_in_order(self):
-        self.assertEqual(view.derive_view([])["glossary"], owner_words.entries())
+class NoGlossTest(unittest.TestCase):
+    def test_a_status_with_a_listed_word_stays_plain_text(self):
+        from .test_console_page import REPORTED, START, full, nodes, of_class, render, sprint_lines, with_sprints
+
+        frame = {**view.derive_view([]), **with_sprints([{**REPORTED, "status": "waiting on the land lock"}])}
+        (snap,) = render([START, {"frame": frame}, {"open": "sprint:" + REPORTED["sprint_id"]}, {"snapshot": True}])
+        (line,) = sprint_lines(snap)
+        (status,) = of_class(line, "p", "report-status")
+        self.assertEqual(full(status), "waiting on the land lock")
+        self.assertEqual([n for n in nodes(status) if n["tag"] == "button"], [])
+        self.assertEqual([n["title"] for n in nodes(status) if n.get("title")], [])
+
+    def test_the_view_sends_no_glossary(self):
+        self.assertNotIn("glossary", view.derive_view([]))
+
+    def test_no_gloss_module_or_picture_state_remains(self):
+        self.assertEqual(sorted(p.name for p in (REPO_ROOT / "tests").glob("*gloss*.py")), [])
+        for name in ("tests/console_screenshots.py", "justfile"):
+            with self.subTest(file=name):
+                text = (REPO_ROOT / name).read_text(encoding="utf-8")
+                self.assertIsNone(re.search(r"(?i)gloss", text))
 
 
 class FixedWordsTest(unittest.TestCase):

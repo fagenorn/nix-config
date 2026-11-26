@@ -3,18 +3,26 @@
 Run: just console-screenshots [out]   (Playwright and its Chromium come from nixpkgs)
 
 Contract:
-- `STATES` names the fifty-nine screens the sprint block, the finished list, the message life, the Spend page, the notices fold, the desk's spend figures and the controls
-  must read well on (`tell-box-open` is the sprint block with its Tell box opened; `owner-check` is the sprint block with a held issue's owner check beside it;
-  `spend-page` is the `/spend` page over seeded transcripts: a running sprint's manager session, an outside-sprint session and one workflow run, with spend on at least
-  four of the last seven days; `notices-fold` is `owner/web`'s open Notices fold over two sprints whose live-fault claims name one file: on the branch's console the
-  sprint blocks show the overlap line and no card asks about it; on the base commit's console (`overlap_card()`) the seed also records the owner-only card the base
-  contract had the later-started sprint send, which is the before picture (#1347); `notice-post-open` is that fold with the owner's post control opened, and shot against
-  a page that has no such control it is the same fold, which is how the before pictures are made; `live-fault` is one running sprint with a live fault its manager
-  declared on issue 12 (its `fault.declared` row is seeded as a literal kind, so the module needs nothing the base commit lacks): the sprint line carries the declaration
-  and the owner's Withdraw, and on a base console that ignores the row the same sprint shows neither, which is the before picture (#1432); `waiting-its-turn` is a sprint
-  whose only movement is the land lock held by a pull request of another issue, with the sprint's own pull request registered behind it (`console_land_queue`) and a live
-  delivery run of the sprint's issue in its `pr` step (a run that is not live is no holder of the sprint's), whose run line reads "waiting its turn to merge, position 1",
-  not quiet; a base console reads "waiting its turn to merge", the before picture; `jargon-gloss` is described in `console_screenshot_gloss`;
+- `STATES` names the fifty-seven screens the sprint block, the finished list, the message life, the
+  Spend page, the notices fold, the desk's spend figures and the controls must read well on (`tell-box-open` is
+  the sprint block with its Tell box opened; `owner-check` is the sprint block with a held
+  issue's owner check beside it; `spend-page` is the `/spend` page over seeded transcripts: a
+  running sprint's manager session, an outside-sprint session and one workflow run, with spend on
+  at least four of the last seven days; `notices-fold` is `owner/web`'s open Notices fold
+  over two sprints whose live-fault claims name one file: on the branch's console the sprint blocks
+  show the overlap line and no card asks about it; on the base commit's console (`overlap_card()`)
+  the seed also records the owner-only card the base contract had the later-started sprint send,
+  which is the before picture (#1347);
+  `notice-post-open` is that fold with the owner's post control opened, and shot against a page
+  that has no such control it is the same fold, which is how the before pictures are made;
+  `live-fault` is one running sprint with a live fault its manager declared on issue 12 (its
+  `fault.declared` row is seeded as a literal kind, so the module needs nothing the base commit
+  lacks): the sprint line carries the declaration and the owner's Withdraw, and on a base console
+  that ignores the row the same sprint shows neither, which is the before picture (#1432);
+  `waiting-its-turn` is a sprint whose only movement is the land lock held by a pull request of another issue,
+  with the sprint's own pull request registered behind it (`console_land_queue`) and a live delivery run of the sprint's issue
+  in its `pr` step (a run that is not live is no holder of the sprint's), whose run line reads "waiting its turn to
+  merge, position 1", not quiet; a base console reads "waiting its turn to merge", the before picture;
   `manager-cannot-hear` is a running sprint whose manager session (listed, named for the sprint)
   has a transcript whose last peer-message record is one the client held and did not deliver
   (#1229), read once through the movement poll, so its line reads that the manager cannot hear
@@ -282,14 +290,13 @@ from agent_tools.console.sprints import TELL_MINUTE_TEXT, Question, SprintState,
 from agent_tools.system.forge_api import ForgeError
 
 from .console_land_queue import land_queue_reader
-from .console_screenshot_gloss import GLOSS_STATE, seed_gloss, shoot_gloss
 from .console_screenshot_permissions import HELD_PROMPTS, PERMISSION_MANAGER, hold_permission, keep_permission
 from .console_test_support import hook_body, write_registry
 
 STATES = ("live-several", "waiting-on-you", "stuck", "tell-box-open", "message-sent",
           "message-picked-up", "message-replied", "message-not-picked-up", "finished-list",
           "nothing-running", "waiting-its-turn", "manager-cannot-hear", "permission-stale", "permission-card",
-          "permission-long", "waiting-until", "paused", "jargon-gloss",
+          "permission-long", "waiting-until", "paused",
           "owner-check", "spend-page", "notices-fold",
           "notice-post-open", "live-fault", "desk-spend", "failed-start", "goal-open", "goal-near", "goal-over",
           "inbox-card", "question-words", "question-refused", "look-card", "look-moved",
@@ -2490,8 +2497,6 @@ def _seed_state(seed: _Seed, state: str, web_root: str = "",
     elif state == "paused":
         seed.sprint(web, "Add resumable uploads", started=60 * MINUTE, report=45 * MINUTE,
                     report_extra={"paused": PAUSE_REASON})
-    elif state == GLOSS_STATE:
-        seed_gloss(seed, web)
     elif state == "failed-start":
         seed.failed_start(web, "Add resumable uploads", 3 * MINUTE)
     elif state in (*SHARING_STATES, "owner-actors", "owner-accounts"):
@@ -3405,7 +3410,6 @@ def _shoot(browser, url: str, state: str, width: int, out: Path, *,
         if state == "live-fault" and declares_live_faults():
             for selector in (".sprint-checks .live-fault", ".live-fault-withdraw"):
                 page.wait_for_selector(selector)
-        if state == GLOSS_STATE: shoot_gloss(page, style_applies())
         if state in ("goal-open", "goal-near", "goal-over"):
             page.focus("textarea.goal-text")
             page.wait_for_selector(".goal-box")

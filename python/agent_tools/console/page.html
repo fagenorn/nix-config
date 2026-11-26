@@ -65,8 +65,6 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .btn-option[aria-pressed="true"] kbd { background: var(--lav); border-color: var(--lav); color: var(--crust); }
 .btn-option.keyless { grid-template-columns: minmax(0, 1fr) auto; }
 /* end controls: desk */
-.gloss { display: inline-flex; min-height: 32px; margin: -7px 0; padding: 0 2px; font: inherit; color: inherit; vertical-align: baseline; text-decoration: underline dotted; text-underline-offset: 3px; cursor: help; }
-.gloss-text { color: var(--sub0); }
 
 .top { position: sticky; top: 0; z-index: 10; background: var(--base); border-bottom: 1px solid var(--hair); }
 .top-in { max-width: 1360px; margin: 0 auto; padding: 8px 48px; display: flex; flex-wrap: wrap; align-items: center; gap: 10px 28px; min-height: 56px; }
@@ -224,7 +222,6 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .sp-who { display: flex; flex-direction: column; min-width: 0; }
 .sp-project { font-size: .75rem; color: var(--ov2); }
 .sp-now { flex: 1 0 100%; grid-column: 2 / -1; color: var(--text); display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; }
-.sp-now:has(.gloss-text) { display: block; overflow: visible; }
 .sprint .title-line { color: var(--text); font-weight: 500; overflow-wrap: anywhere; }
 .sprint-goal-full { color: var(--text); overflow-wrap: anywhere; }
 .sprint .age, .sprint .manager, .sprint .until, .sprint .status-age { color: var(--ov2); }
@@ -654,75 +651,12 @@ function cutWords(node, text) {
   flush();
   return node;
 }
-// The owner glossary (view.glossary): a word a text uses without its gloss is a button that shows the gloss on hover and on tap. The rule is owner_words.py's: ASCII whole words, ASCII case folding, six ASCII separators, never \s, the u flag or a lookbehind.
-let glossary = [];
-const openGlosses = new Set();
-function glossFlat(s) {
-  return String(s).split(/[ \t\n\r\f\v]+/).filter(Boolean).join(" ").replace(/[A-Z]/g, (c) => c.toLowerCase());
+function icon(id) {
+  return document.getElementById(id).content.firstElementChild.cloneNode(true);
 }
-function glossPattern(word) {
-  return word.split(/[ \t\n\r\f\v]+/).filter(Boolean).map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("[ \\t\\n\\r\\f\\v]+");
+function quietIcon() {
+  return icon("quiet-icon");
 }
-function setGlossary(list) {
-  glossary = (Array.isArray(list) ? list : [])
-    .filter((e) => e && typeof e.word === "string" && e.word !== "" && typeof e.gloss === "string" && e.gloss !== "")
-    .map((e) => ({ word: e.word, gloss: e.gloss, test: new RegExp("(^|[^0-9A-Za-z])" + glossPattern(e.word) + "(?![0-9A-Za-z])", "i") }));
-}
-function glossFound(text) {
-  const flat = glossFlat(text);
-  return glossary.filter((e) => e.test.test(text) && !flat.includes(glossFlat(e.gloss)));
-}
-function focusGloss(id) { [...document.querySelectorAll("button.gloss")].find((n) => n.dataset.gloss === id)?.focus({ preventScroll: true }); }
-function glossMark(into, id, word, gloss, redraw) {
-  const mark = el("button", "gloss btn-quiet btn-bare", word);
-  mark.type = "button";
-  mark.dataset.gloss = id;
-  mark.setAttribute("title", gloss);
-  mark.setAttribute("aria-expanded", String(openGlosses.has(id)));
-  mark.addEventListener("click", (event) => {
-    event.stopPropagation();
-    if (!openGlosses.delete(id)) openGlosses.add(id);
-    redraw(); // the redraw replaces the focused mark: focus the new one so a second Enter is not read as the inbox's answer key
-    focusGloss(id);
-  });
-  into.appendChild(mark);
-  if (openGlosses.has(id)) into.appendChild(el("span", "gloss-text", " (" + gloss + ")"));
-}
-function glossWords(node, text, key, fill = (into, run) => into.appendChild(el("span", "", run))) {
-  const value = String(text);
-  const found = glossFound(value);
-  if (found.length === 0) {
-    fill(node, value);
-    return node;
-  }
-  const words = [...found].sort((a, b) => b.word.length - a.word.length).map((e) => glossPattern(e.word)).join("|");
-  let at = 0;
-  for (const m of value.matchAll(new RegExp("(^|[^0-9A-Za-z])(" + words + ")(?![0-9A-Za-z])", "gi"))) {
-    const start = m.index + m[1].length;
-    if (start > at) fill(node, value.slice(at, start));
-    const entry = found.find((e) => glossFlat(e.word) === glossFlat(m[2]));
-    glossMark(node, key + "\n" + value + "\n" + start, m[2], entry.gloss, () => {
-      node.replaceChildren();
-      glossWords(node, text, key, fill);
-    });
-    at = start + m[2].length;
-  }
-  if (at < value.length) fill(node, value.slice(at));
-  return node;
-}
-function optionGlosses(row, option, key) {
-  const found = glossFound(String(option));
-  if (found.length === 0) return;
-  const box = el("span", "opt-glosses");
-  row.appendChild(box);
-  const draw = () => {
-    box.replaceChildren();
-    for (const e of found) glossMark(box, key + "\n" + option + "\n" + e.word, e.word, e.gloss, draw);
-  };
-  draw();
-}
-function icon(id) { return document.getElementById(id).content.firstElementChild.cloneNode(true); }
-function quietIcon() { return icon("quiet-icon"); }
 function movedWords(run, cls) {
   if (typeof run.wait_text === "string" && run.wait_text !== "") return el("span", cls, run.wait_text);
   if (!Number.isFinite(Date.parse(run.reading_at))) return el("span", cls, run.moved_text);
@@ -780,7 +714,9 @@ function spendLine(kind, id) {
   line.appendChild(figure);
   return line;
 }
-function engineUntil(run) { return typeof run.wait_until === "string" ? [" until ", timeEl("weekday", run.wait_until, "now-until")] : []; }
+function engineUntil(run) {
+  return typeof run.wait_until === "string" ? [" until ", timeEl("weekday", run.wait_until, "now-until")] : [];
+}
 function lineFold(key, nameNode, words, outside, root, engineRuns) {
   const fold = el("details");
   fold.dataset.key = key;
@@ -841,7 +777,7 @@ function sprintDetail(sprint) {
   // A sprint whose closing report arrived while it is still stopping has no ended_at yet: its fold keeps the report.
   const closed = sprint.closing !== null && typeof sprint.closing === "object";
   fold.appendChild(el("summary", "", reported || closed ? "Show the report" : "Show the goal"));
-  if (reported) fold.appendChild(glossWords(el("p", "report-status"), sprint.status, "status:" + sprint.sprint_id));
+  if (reported) fold.appendChild(el("p", "report-status", sprint.status));
   fold.appendChild(el("p", "sprint-goal-full", sprint.goal));
   const mode = permissionNote(sprint);
   if (mode !== null) fold.appendChild(mode);
@@ -895,7 +831,9 @@ function ballLook(sprint) {
   if (look === undefined) throw new Error("unknown sprint ball " + JSON.stringify(sprint.ball));
   return guestDoor && look.tone === "needs" ? { ...look, tone: "st-wait" } : look;
 }
-function pipGroup(stage) { return stage === "landed" || stage === "held" || stage === "queued" ? stage : "delivery"; }
+function pipGroup(stage) {
+  return stage === "landed" || stage === "held" || stage === "queued" ? stage : "delivery";
+}
 const withdrawals = new Map();
 const stops = new Map();
 const retries = new Map();
@@ -1000,7 +938,9 @@ function messageLife(parent, sprint, earlierWasOpen) {
   fold.appendChild(messageList(older));
   parent.appendChild(fold);
 }
-function hasNewReply(sprint) { return (sprint.messages || []).some((message) => message.new === true); }
+function hasNewReply(sprint) {
+  return (sprint.messages || []).some((message) => message.new === true);
+}
 function refillRows(id) {
   const latest = latestSprints.get(id);
   if (latest === undefined) return;
@@ -1008,7 +948,9 @@ function refillRows(id) {
     if (row.dataset.sprintId === id) fillSprint(row, latest.entry, latest.sprint);
   }
 }
-function tellField(id) { return Array.from(document.querySelectorAll("textarea.tell")).find((area) => area.dataset.tell === id); }
+function tellField(id) {
+  return Array.from(document.querySelectorAll("textarea.tell")).find((area) => area.dataset.tell === id);
+}
 function openTell(id) {
   tellOpen.add(id);
   refillRows(id);
@@ -1104,7 +1046,9 @@ const YOURS_NOW = ["waiting for your approval of the brief", "waiting for your a
 function nowWords(text, acts) {
   return acts && typeof text === "string" && YOURS_NOW.some((lead) => text.startsWith(lead)) ? text : ownerWords(text);
 }
-function ballWords(text, acts) { return acts && text === "waiting on you" ? text : ownerWords(text); }
+function ballWords(text, acts) {
+  return acts && text === "waiting on you" ? text : ownerWords(text);
+}
 function drawSprint(item, entry, sprint) {
   const state = withdrawals.get(sprint.sprint_id);
   const yours = steersHere(sprint);
@@ -1146,7 +1090,7 @@ function drawSprint(item, entry, sprint) {
   const nowText = nowWords(sprint.now_text, nowYours);
   const now = typeof sprint.now_until === "string"
     ? phrase("p", "sp-now", nowText + " ", timeEl("weekday", sprint.now_until, "now-until"))
-    : glossWords(el("p", "sp-now"), nowText, "now:" + sprint.sprint_id);
+    : el("p", "sp-now", nowText);
   now.setAttribute("title", typeof sprint.now_until === "string"
     ? nowText + " " + timeWords("weekday", sprint.now_until) : nowText);
   head.appendChild(now);
@@ -1450,7 +1394,9 @@ async function withdrawLiveFault(sprint, projectId, fault, redraw) {
   redraw();
 }
 const stallPosts = new Map();
-function isStall(item) { return item.reason === "manager"; }
+function isStall(item) {
+  return item.reason === "manager";
+}
 async function stallPost(item, kind, failure, send) {
   const key = kind + "\n" + item.sprint_id;
   const current = stallPosts.get(key);
@@ -1476,8 +1422,12 @@ async function stallPost(item, kind, failure, send) {
   }
   redraw();
 }
-function stallHeaders() { return { "X-Console-Token": token, "Content-Type": "application/json" }; }
-function stallBody(item) { return JSON.stringify({ project_id: item.project_id, sprint_id: item.sprint_id }); }
+function stallHeaders() {
+  return { "X-Console-Token": token, "Content-Type": "application/json" };
+}
+function stallBody(item) {
+  return JSON.stringify({ project_id: item.project_id, sprint_id: item.sprint_id });
+}
 function stallCard(item) {
   const card = el("article", "card stall");
   card.appendChild(el("p", "q", item.headline));
@@ -1507,7 +1457,9 @@ function stallCard(item) {
   card.appendChild(act);
   return card;
 }
-function isFailedStart(item) { return item.reason === "failed_start"; }
+function isFailedStart(item) {
+  return item.reason === "failed_start";
+}
 function failedStartCard(item) {
   const card = el("article", "card failed-start");
   card.appendChild(el("p", "q", item.headline));
@@ -1537,8 +1489,12 @@ function failedStartCard(item) {
   card.appendChild(act);
   return card;
 }
-function isProgress(item) { return item.reason === "progress"; }
-function isAdoption(item) { return item.reason === "adoption"; }
+function isProgress(item) {
+  return item.reason === "progress";
+}
+function isAdoption(item) {
+  return item.reason === "adoption";
+}
 const adoptionMerges = new Map();
 async function mergeAdoption(item) {
   const key = item.key + "\n" + item.number + "\n" + item.commit;
@@ -1594,7 +1550,9 @@ function adoptionCard(item) {
   }
   return card;
 }
-function isRelease(item) { return item.reason === "release"; }
+function isRelease(item) {
+  return item.reason === "release";
+}
 // A release card (#1401): the owner always clicks, so neither answer is picked for them.
 const releaseAnswers = new Map();
 async function answerRelease(item, answer) {
@@ -1717,7 +1675,7 @@ function adoptionNotice(key, state) {
 function progressCard(item) {
   const card = el("article", "card progress");
   card.appendChild(el("p", "q", item.headline));
-  if (typeof item.last_status === "string") card.appendChild(glossWords(el("span", "reason"), item.last_status, "progress:" + item.sprint_id));
+  if (typeof item.last_status === "string") card.appendChild(el("span", "reason", item.last_status));
   const going = stallPosts.get("continue\n" + item.sprint_id);
   const away = stallPosts.get("progress-withdraw\n" + item.sprint_id);
   const onward = actionButton("continue btn-primary", "Continue",
@@ -1751,8 +1709,12 @@ function signinWords(s) {
   if (s.days_left === 0) return "signed in, ends today";
   return s.days_left === 1 ? "signed in, ends in 1 day" : "signed in, ends in " + s.days_left + " days";
 }
-function signedOut(p) { return p.signin !== null && typeof p.signin === "object" && p.signin.state === "signed_out"; }
-function excludedProfile(p) { return p.excluded === true; }
+function signedOut(p) {
+  return p.signin !== null && typeof p.signin === "object" && p.signin.state === "signed_out";
+}
+function excludedProfile(p) {
+  return p.excluded === true;
+}
 // A profile signed in to an account another profile already stands for is not counted again.
 function counted(p) { return typeof p.duplicate_of !== "string"; }
 const exclusionPosts = new Map();
@@ -1851,7 +1813,9 @@ function signoutControls(acct, p) {
     acct.appendChild(el("span", "fail", "Could not sign out: " + state.reason));
   }
 }
-function pinnedProfile(p) { return p.pinned === true; }
+function pinnedProfile(p) {
+  return p.pinned === true;
+}
 const pinPosts = new Map();
 async function togglePin(p) {
   const current = pinPosts.get(p.profile);
@@ -2000,7 +1964,9 @@ function removeControls(act, row, p, view) {
   }
   row.appendChild(box);
 }
-function isSignin(item) { return item.reason === "signin"; }
+function isSignin(item) {
+  return item.reason === "signin";
+}
 const signinLinks = new Map();
 const signinPosts = new Map();
 // The profile the header's Add account continuation is for, or null.
@@ -2022,7 +1988,9 @@ function signinEnded(run, attempt) {
   if (run === null || typeof run !== "object") return false;
   return run.attempt > attempt || (run.attempt === attempt && run.state !== "running");
 }
-function isHttps(link) { return typeof link === "string" && /^https:\/\//.test(link); }
+function isHttps(link) {
+  return typeof link === "string" && /^https:\/\//.test(link);
+}
 // The newest attempt of a profile this page knows: the link it holds, the newest view's run and its inbox item's run.
 function knownSigninAttempt(profile) {
   let newest = 0;
@@ -2305,7 +2273,9 @@ function waitLine(wait, tag) {
   }
   return line;
 }
-function noticeKey(projectId, id) { return projectId + "\n" + id; }
+function noticeKey(projectId, id) {
+  return projectId + "\n" + id;
+}
 function noticeField(projectId) {
   return Array.from(document.querySelectorAll("input.notice-text")).find((input) => input.dataset.noticeDraft === projectId);
 }
@@ -2342,7 +2312,9 @@ async function ownerAnswer(response) {
   if (response.status === 204) return null;
   return (await response.text()).trim() || "HTTP " + response.status;
 }
-function ownerHeaders() { return { "X-Console-Token": token, "Content-Type": "application/json" }; }
+function ownerHeaders() {
+  return { "X-Console-Token": token, "Content-Type": "application/json" };
+}
 async function postNotice(projectId) {
   const current = noticePosts.get(projectId);
   if (current !== undefined && current.phase === "sending") return;
@@ -2469,7 +2441,7 @@ function noticeLine(notice, projectId) {
   }
   head.appendChild(timeEl("ago", notice.at, "notice-age"));
   item.appendChild(head);
-  item.appendChild(glossWords(el("p", "notice-words"), notice.text, "notice:" + projectId + ":" + notice.id, cutWords));
+  item.appendChild(cutWords(el("p", "notice-words"), notice.text));
   if (typeof notice.what === "string") {
     const claim = el("p", "notice-claim");
     const paths = el("span", "notice-paths");
@@ -2548,7 +2520,9 @@ function askRows(entry) {
   for (const thread of askThreads(entry)) rows.push(...thread.questions);
   return rows;
 }
-function askIds(entry) { return askRows(entry).map((question) => question.id); }
+function askIds(entry) {
+  return askRows(entry).map((question) => question.id);
+}
 function matchSent(sent, post, fresh) {
   const submissions = [...(sent === undefined ? [] : sent.list), ...(post !== undefined && post.phase === "sending" ? [post] : [])];
   const taken = new Map();
@@ -2843,9 +2817,15 @@ function askBlock(entry, afterLine, lined) {
   }
   return item;
 }
-function followKey(projectId, threadId) { return projectId + "\n" + threadId; }
-function followHolds(projectId) { return [...followOpen].some((key) => key.startsWith(projectId + "\n")); }
-function followField(key) { return Array.from(document.querySelectorAll("textarea.follow-text")).find((area) => area.dataset.followDraft === key); }
+function followKey(projectId, threadId) {
+  return projectId + "\n" + threadId;
+}
+function followHolds(projectId) {
+  return [...followOpen].some((key) => key.startsWith(projectId + "\n"));
+}
+function followField(key) {
+  return Array.from(document.querySelectorAll("textarea.follow-text")).find((area) => area.dataset.followDraft === key);
+}
 function openFollow(key) {
   followOpen.add(key);
   redrawNotices();
@@ -2976,7 +2956,9 @@ function revealed(key) {
   askReveal.delete(key);
   return true;
 }
-function isReading(projectId, thread) { return reading !== null && reading.project === projectId && reading.thread === thread.id; }
+function isReading(projectId, thread) {
+  return reading !== null && reading.project === projectId && reading.thread === thread.id;
+}
 function threadItem(projectId, thread) {
   const first = thread.questions[0];
   const last = thread.questions[thread.questions.length - 1];
@@ -3170,7 +3152,9 @@ function renderStatement(view) {
 const TICK_MS = 30000;
 const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-function pad(n) { return n < 10 ? "0" + n : String(n); }
+function pad(n) {
+  return n < 10 ? "0" + n : String(n);
+}
 function ago(stamp) {
   const ms = Date.now() - Date.parse(stamp);
   if (ms < 60000) return "just now";
@@ -3300,7 +3284,9 @@ function lapsedNow(view) {
   return lapsed.join("\n");
 }
 // The login of the colleague who added a profile, shown beside its name, or null when the owner added it.
-function ownerMark(cls, p) { return typeof p.owner === "string" && p.owner !== "" ? el("span", cls, p.owner) : null; }
+function ownerMark(cls, p) {
+  return typeof p.owner === "string" && p.owner !== "" ? el("span", cls, p.owner) : null;
+}
 function renderCapacity(view) {
   const box = document.getElementById("capacity");
   const cap = settledCapacity(view.capacity);
@@ -3596,7 +3582,9 @@ function shareLast(r) {
   const from = r.client === "this_host" ? ", from this host" : r.client === "other_device" ? ", from another device" : "";
   return "Last request on the guest door" + from + ": " + host + ", " + forwarded + ", " + login + ", " + (r.admitted ? "admitted" : why === undefined ? "refused" : "refused because " + why) + ".";
 }
-function shareSwitch(shared) { return fetch("/api/share-tailnet", { method: "POST", headers: ownerHeaders(), body: JSON.stringify({ shared }) }); }
+function shareSwitch(shared) {
+  return fetch("/api/share-tailnet", { method: "POST", headers: ownerHeaders(), body: JSON.stringify({ shared }) });
+}
 async function postShare(key, send, done, cls) {
   const current = sharePosts.get(key);
   if (current !== undefined && current.phase === "sending") return;
@@ -3772,7 +3760,9 @@ function renderPromoted(view) {
   box.appendChild(el("h2", "sec-h", "Capacity"));
   box.appendChild(list);
 }
-function holds(item) { return item.held_work === 1 ? "holds 1 issue" : "holds " + item.held_work + " issues"; }
+function holds(item) {
+  return item.held_work === 1 ? "holds 1 issue" : "holds " + item.held_work + " issues";
+}
 function answerLink(item, cls) {
   const a = el("a", cls || "answer", "Answer on the tracker");
   a.href = item.url;
@@ -3803,8 +3793,12 @@ function kindWords(item) {
   node.appendChild(el("span", "", word));
   return node;
 }
-function checkLabel(item) { return typeof item.check_id === "string" && item.check_id !== "" ? el("span", "check-id", item.check_id) : null; }
-function isOwnerCheck(item) { return typeof item.check_id === "string"; }
+function checkLabel(item) {
+  return typeof item.check_id === "string" && item.check_id !== "" ? el("span", "check-id", item.check_id) : null;
+}
+function isOwnerCheck(item) {
+  return typeof item.check_id === "string";
+}
 // A Before picture reads ahead of the After picture of the same width, whatever order the files are named in; every other order is kept.
 function beforeFirst(pictures) {
   if (!Array.isArray(pictures)) return pictures;
@@ -3918,9 +3912,15 @@ let currentId = null;
 let inboxCards = new Map();
 let keyHint = null;
 let hintHost = null;
-function itemId(item) { return item.project_id + "#" + item.key; }
-function isQuestion(item) { return item.reason === "question"; }
-function lookOf(item) { return isQuestion(item) && item.look !== null && typeof item.look === "object" ? item.look : null; }
+function itemId(item) {
+  return item.project_id + "#" + item.key;
+}
+function isQuestion(item) {
+  return item.reason === "question";
+}
+function lookOf(item) {
+  return isQuestion(item) && item.look !== null && typeof item.look === "object" ? item.look : null;
+}
 function lookLine(node, item) {
   const look = lookOf(item), action = isQuestion(item) ? item.action : null;
   if (look !== null && typeof look.line === "string") node.appendChild(el("p", "look-line", look.line));
@@ -3932,7 +3932,7 @@ function isLookCard(item) {
 function lookCard(item) {
   const card = el("article", "card look-card");
   card.appendChild(headLine(item));
-  card.appendChild(glossWords(el("h2", "q"), item.headline, "ask:" + itemId(item), pathWords));
+  card.appendChild(pathWords(el("h2", "q"), item.headline));
   lookLine(card, item);
   if (item.look.state === "failed") {
     const again = stallPosts.get("look-retry\n" + itemId(item));
@@ -4026,12 +4026,11 @@ function prunePictures() {
 // Every redraw that can remove a thumbnail runs under one hold; only the outermost does the upkeep once the whole page is drawn.
 let pictureHolds = 0;
 function holdPictures(draw) {
-  let heldThumb = null, heldGloss = null; // a streamed view replaces a focused gloss mark: focus the new one, so Enter is not read as the inbox's answer key
+  let heldThumb = null;
   if (pictureHolds === 0) {
     const active = document.activeElement;
     heldThumb = active && active.dataset && active.tagName === "BUTTON" && active.className.split(" ")[0] === "pic-thumb"
       ? active.dataset.key : null;
-    heldGloss = active && active.tagName === "BUTTON" && active.dataset && active.dataset.gloss !== undefined ? active.dataset.gloss : null;
   }
   pictureHolds += 1;
   try {
@@ -4040,7 +4039,6 @@ function holdPictures(draw) {
     pictureHolds -= 1;
   }
   if (pictureHolds !== 0) return;
-  if (heldGloss !== null) focusGloss(heldGloss);
   if (viewer !== null && !viewerStillShown()) closeViewer();
   if (heldThumb !== null && viewer === null) {
     const thumb = [...document.querySelectorAll("button.pic-thumb")].find((n) => n.dataset.key === heldThumb);
@@ -4200,12 +4198,18 @@ function viewerKey(event) {
   }
   return true;
 }
-function isRetry(item) { return item.reason === "register_retry"; }
-function isApply(item) { return item.reason === "register_apply"; }
+function isRetry(item) {
+  return item.reason === "register_retry";
+}
+function isApply(item) {
+  return item.reason === "register_apply";
+}
 function isConfirm(item) {
   return item.reason === "register_confirm" || item.reason === "register_behind";
 }
-function isTrust(item) { return item.reason === "trust_failed"; }
+function isTrust(item) {
+  return item.reason === "trust_failed";
+}
 function isFailure(item) {
   return item.reason === "register_failed";
 }
@@ -4984,7 +4988,7 @@ function answerBox(item, state, lead) {
   }
   item.questions.forEach((q, qi) => {
     if (item.questions.length > 1) {
-      box.appendChild(glossWords(el("p", live && itemId(item) === currentId && qi === now ? "meta now" : "meta"), q.question, "ask:" + itemId(item) + ":" + qi));
+      box.appendChild(el("p", live && itemId(item) === currentId && qi === now ? "meta now" : "meta", q.question));
     }
     if (soleOption(item)) return;
     const list = el("ul", "opts");
@@ -5004,7 +5008,6 @@ function answerBox(item, state, lead) {
       });
       const row = el("li");
       row.appendChild(button);
-      optionGlosses(row, option, "option:" + itemId(item) + ":" + qi + ":" + oi);
       list.appendChild(row);
     });
     box.appendChild(list);
@@ -5029,9 +5032,9 @@ function boxState(item) {
 function leadItem(item) {
   const card = el("article", "card lead");
   card.appendChild(headLine(item));
-  card.appendChild(isQuestion(item) ? glossWords(el("h2", "q"), item.headline, "ask:" + itemId(item), pathWords) : pathWords(el("h2", isRegister(item) ? "q reg" : "q"), item.headline));
+  card.appendChild(pathWords(el("h2", isRegister(item) ? "q reg" : "q"), item.headline));
   if (isOwnerCheck(item)) checkHead(card, item);
-  if (isQuestion(item) && typeof item.context === "string") card.appendChild(glossWords(el("p", "context"), item.context, "context:" + itemId(item)));
+  if (isQuestion(item) && typeof item.context === "string") card.appendChild(el("p", "context", item.context));
   lookLine(card, item);
   if (isQuestion(item)) {
     const gallery = pictureGallery(itemId(item), item.pictures);
@@ -5062,7 +5065,7 @@ function itemLine(item) {
     head.appendChild(kindWords(item));
     const label = checkLabel(item);
     if (label !== null) head.appendChild(label);
-    head.appendChild(isQuestion(item) ? glossWords(el("b"), item.headline, "ask:" + itemId(item)) : el("b", "", item.headline));
+    head.appendChild(el("b", "", item.headline));
     const lm = pathWords(el("span", "lm"), item.project_id + " \u00b7 " + (isQuestion(item) ? item.title : holds(item)));
     if (item.stale) {
       lm.appendChild(el("span", "", " \u00b7 "));
@@ -5073,7 +5076,7 @@ function itemLine(item) {
     line.appendChild(head);
   }
   if (isOwnerCheck(item)) checkHead(line, item);
-  if (isQuestion(item) && typeof item.context === "string") line.appendChild(glossWords(el("p", "context"), item.context, "context:" + itemId(item)));
+  if (isQuestion(item) && typeof item.context === "string") line.appendChild(el("p", "context", item.context));
   lookLine(line, item);
   if (isQuestion(item)) {
     const gallery = pictureGallery(itemId(item), item.pictures);
@@ -6492,7 +6495,6 @@ function renderGoal() {
 // The register's fold keeps its own state per repository (registerMore), so the key-wide restore below leaves it out.
 const draftMoreKey = "draft-more";
 function render(view) {
-  setGlossary(view.glossary);
   if (guestDoor) {
     renderGuest(view);
     return;
@@ -6539,7 +6541,7 @@ setTimeout(tick, TICK_MS);
 const token = document.getElementById("console-token").content;
 const GUEST_TOP = "The owner's console, shared with you";
 const STALE_LEAD = "The tracker could not be read for ";
-const GUEST_KEEPS = new Set(["pic-thumb", "sprint-check", "gloss"]);
+const GUEST_KEEPS = new Set(["pic-thumb", "sprint-check"]);
 const OWNER_PARTS = ["spend-link", "capacity", "accounts", "accounts-body", "account-add", "sharing-open",
   "sharing", "sharing-body", "promoted", "digest", "unmanaged", "register"];
 const guestDoor = document.getElementById("console-door").content !== "owner";
@@ -6590,7 +6592,7 @@ function renderGuestInbox(view) {
       kind.appendChild(el("span", "", word));
       row.appendChild(kind);
       if (typeof item.project_id === "string") row.appendChild(pathWords(el("span", "proj"), item.project_id));
-      row.appendChild(isQuestion(item) ? glossWords(el("b", "guest-head"), item.headline, "ask:" + itemId(item)) : el("b", "guest-head", isBrief(item) ? item.title : item.headline));
+      row.appendChild(el("b", "guest-head", isBrief(item) ? item.title : item.headline));
       row.appendChild(Number.isFinite(Date.parse(item.waiting_since))
         ? phrase("span", "guest-wait", "Waiting on the owner for ", timeEl("since", item.waiting_since, ""))
         : el("span", "guest-wait", "Waiting on the owner"));
