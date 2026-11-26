@@ -12,7 +12,7 @@ from .console_screenshots import CONTROL_SELECTOR
 from .test_console_spend_page import render_spend, spend_view_fixture
 from .test_console_page import (
     ACTIVATION, ADD_STEPS, ADDED, ADOPTION_ITEM, PERMISSION_ITEM, RELEASE_ITEM, ANSWERABLE, ASK_ANSWERED, ASK_CHOOSE, ASK_DEEP_OFFER, ASKING, BRIEF, CHECK, DECISION_ITEM, DRAFTED, F3, FAILED_ITEM,
-    FAILED_REGISTRATION, FAILED_START, GOAL_FRAME, HEADSUP_W, MORE_KEY, NOW_MS, NOW_S, NO_ITEM, NO_LINK_RUNNING,
+    FAILED_REGISTRATION, FAILED_START, DETAIL_KEY, GOAL_FRAME, HEADSUP_W, MORE_KEY, NOW_MS, NOW_S, NO_ITEM, NO_LINK_RUNNING,
     OPEN_A, OWNER_W, PICTURED, PROGRESS, Q0, Q1, R0, R2, REGISTER_TYPED, REPORTED, SIGNED_IN_STEPS,
     SIGNIN, SPRINT, ACTIVATION, START, STALL, T0, V, WORK_CAP, ANSWER, ASK_ANSWERED, cards,
     FAILED_LINE, asking, check_item, frame, nodes, panel, postable, project, real_capacity, render,
@@ -178,10 +178,10 @@ def desk_scenarios() -> list:
          snapshot],
         # a sprint block with Tell open and End the sprint opened, then a stop question
         [START, {"frame": with_sprints([SPRINT])}, {"click": "tell-open"},
-         {"open": MORE_KEY}, snapshot],
-        [START, {"frame": with_sprints([{**SPRINT, "stoppable": True}])}, {"open": MORE_KEY},
+         {"open": DETAIL_KEY}, {"open": MORE_KEY}, snapshot],
+        [START, {"frame": with_sprints([{**SPRINT, "stoppable": True}])}, {"open": DETAIL_KEY}, {"open": MORE_KEY},
          snapshot],
-        [START, {"frame": with_sprints([{**SPRINT, "stoppable": True}])}, {"open": MORE_KEY},
+        [START, {"frame": with_sprints([{**SPRINT, "stoppable": True}])}, {"open": DETAIL_KEY}, {"open": MORE_KEY},
          {"click": "stop"}, snapshot],
         [START, {"frame": with_sprints([{**SPRINT, "manager_state": "failed",
                                          "manager_text": "no manager", "retry": True}])}, snapshot],
