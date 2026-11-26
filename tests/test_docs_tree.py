@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 
 from agent_tools.delivery.record_lint import record_violations
+from agent_tools.delivery.routing import index_table
 from agent_tools.project_contract.adopt_links import links
 
 
@@ -36,6 +37,38 @@ LOGIN_LIKE = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)*")
 def logins_in(text: str) -> list:
     """Every email-style login in `text`; the `<colleague-login>` placeholder is not one."""
     return LOGIN_LIKE.findall(text)
+
+
+OWNER_WORDS = (
+    "land lock", "slice", "held", "verify", "brief version", "guard", "rerun", "claim", "look",
+    "live fault", "CI", "pull request",
+)
+
+
+def owner_word_problems(text: str) -> list[str]:
+    """What is wrong with the rendered glossary table of `docs/guides/owner-words.md`, one line each.
+
+    Rows come from `index_table`, so a line in a fence or an HTML comment is not a row. A row with other
+    than two cells, an empty word or gloss, or a word that an earlier row already gave is a problem.
+    """
+    problems = []
+    seen = set()
+    for row in index_table(text)[1:]:
+        if len(row) != 2:
+            problems.append(f"row of {len(row)} cells: {row}")
+            continue
+        word, gloss = row
+        if not word or not re.sub(r"<!--.*?-->", "", gloss).strip():
+            problems.append(f"empty word or gloss: {row}")
+        if word in seen:
+            problems.append(f"duplicate word: {word}")
+        seen.add(word)
+    return problems
+
+
+def owner_words(text: str) -> set[str]:
+    """The words the rendered glossary table of `docs/guides/owner-words.md` defines."""
+    return {row[0] for row in index_table(text)[1:] if len(row) == 2}
 
 
 def markdown_section(text: str, name: str) -> str:
@@ -422,6 +455,40 @@ class DocsTreeTest(unittest.TestCase):
             with self.subTest(term=term):
                 self.assertIsNotNone(re.search(rf"^\*\*{term}\*\*:", area, re.M))
                 self.assertIn(f"| {term} | Delivery |", context_map)
+
+    def test_the_owner_words_glossary_gives_each_listed_word_a_gloss(self):
+        text = (REPO_ROOT / "docs/guides/owner-words.md").read_text(encoding="utf-8")
+        self.assertEqual(owner_word_problems(text), [])
+        for word in OWNER_WORDS:
+            with self.subTest(word=word):
+                self.assertIn(word, owner_words(text))
+
+    def test_the_glossary_reader_ignores_a_definition_hidden_in_a_comment(self):
+        text = (
+            "| Word | In everyday words |\n|---|---|\n| held |  |\n"
+            "<!--\n| held | Finished and merged, but not done. |\n-->\n"
+        )
+        self.assertEqual(owner_word_problems(text), ["empty word or gloss: ['held', '']"])
+
+    def test_the_glossary_reader_rejects_a_gloss_that_renders_empty(self):
+        text = "| Word | In everyday words |\n|---|---|\n| held | <!-- explanation pending --> |\n"
+        self.assertEqual(owner_word_problems(text), ["empty word or gloss: ['held', '<!-- explanation pending -->']"])
+
+    def test_the_land_lock_gloss_names_no_branch_the_project_may_not_have(self):
+        text = (REPO_ROOT / "docs/guides/owner-words.md").read_text(encoding="utf-8")
+        gloss = next(row[1] for row in index_table(text)[1:] if row[0] == "land lock")
+        self.assertNotIn("main", gloss)
+
+    def test_the_glossary_reader_reports_a_word_given_twice(self):
+        text = "| Word | In everyday words |\n|---|---|\n| held | One. |\n| held | Two. |\n"
+        self.assertEqual(owner_word_problems(text), ["duplicate word: held"])
+
+    def test_the_index_reaches_the_plain_words_rule_the_glossary_and_the_audit(self):
+        index = (REPO_ROOT / "docs/README.md").read_text(encoding="utf-8")
+        for name in ("write-for-the-owner.md", "owner-words.md", "console-page-audit-2026-11-25.md"):
+            with self.subTest(name=name):
+                self.assertTrue((REPO_ROOT / "docs/guides" / name).is_file())
+                self.assertIn(f"docs/guides/{name}", index_destinations(index))
 
     def test_dissolved_readmes_fit_150_lines(self):
         too_long = []
