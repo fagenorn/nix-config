@@ -507,6 +507,20 @@ class RuleTest(unittest.TestCase):
         self.assertEqual(found("B19", snap), [])
         self.assertEqual(found("B20", snap), [Violation("B20", "a.py", 5)])
 
+    def test_the_publish_hold_and_loopback_suites_name_no_issue(self):
+        paths = ("tests/test_console_publish_hold.py", "tests/test_loopback_server.py")
+        snap = Snapshot("a" * 40, {}, contents={
+            path: (REPO_ROOT / path).read_bytes() for path in paths})
+        self.assertEqual(found("B18", snap), [])
+
+    def test_the_publish_hold_helper_docstring_stays_within_the_comment_cap(self):
+        path = "tests/console_test_support.py"
+        source = (REPO_ROOT / path).read_text()
+        start = next(number for number, row in enumerate(source.splitlines(), 1)
+                     if row.startswith("def hold_the_publish("))
+        snap = Snapshot("a" * 40, {}, contents={path: source.encode()})
+        self.assertNotIn(Violation("B19", path, start + 1), found("B19", snap))
+
     def test_a_module_docstring_sharing_its_closing_line_with_code_is_header(self):
         doc = '"""one\ntwo\nthree\nfour\nfive\nsix"""; import os\n'
         self.assertTrue(comment_syntax.blocks("a.py", doc)[0].header)
@@ -523,6 +537,11 @@ class RuleTest(unittest.TestCase):
         self.assertEqual(
             found("B19", snapshot(a__sh=text)),
             [Violation("B19", "a.sh", 8), Violation("B19", "a.sh", 17)])
+
+    def test_the_restart_helper_docstring_of_the_approve_waits_suite_is_within_the_cap(self):
+        name = "tests/test_console_approve_waits.py"
+        text = (REPO_ROOT / name).read_text("utf-8")
+        self.assertEqual(found("B19", snapshot(a__py=text)), [])
 
     def test_a_long_block_with_a_long_first_line_is_one_violation(self):
         text = hash_lines("x=1", "# " + "z" * 119, *["# row"] * 5)

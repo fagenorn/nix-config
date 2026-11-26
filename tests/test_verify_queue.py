@@ -11,6 +11,7 @@ import json
 import os
 import subprocess
 import tempfile
+import tracemalloc
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -18,51 +19,56 @@ from unittest import mock
 from agent_tools import canonical
 from agent_tools.delivery import verify_queue
 from agent_tools.delivery.verify_queue import (
-    Holder, RESUME_SECONDS, Waiter, admitted, clear_holder, group_lock_name, holder_counts, holders_text,
-    join, leave, lock_queue, open_shared, place, read_holders, record_holder, repository_lock_paths,
-    request_key, reserve, waiters)
+    Holder, RESUME_SECONDS, Waiter, admitted, clear_holder, group_lock_name, held_repository_locks,
+    holder_counts, holders_text, join, leave, lock_queue, open_shared, place, read_holders, record_holder,
+    repository_lock_paths, request_key, reserve, waiters)
 
 TIER = "fast"
 
 
-def W(seq, live, repo):
-    return Waiter(seq, live, repo, "k")
+def W(seq, live, repo, limit=1):
+    return Waiter(seq, live, repo, "k", limit)
 
 
 class AdmissionTest(unittest.TestCase):
     def test_a_free_slot_goes_to_the_first_waiter_whose_repository_is_under_its_limit(self):
         ws = [W(1, False, "a"), W(2, False, "a"), W(3, False, "b")]
-        self.assertEqual(admitted(ws, {"a": 1}, free=1, repository_limit=1), [W(3, False, "b")])
+        self.assertEqual(admitted(ws, {"a": 1}, free=1), [W(3, False, "b")])
 
     def test_waiters_are_served_by_ticket_number(self):
         ws = [W(3, False, "c"), W(1, False, "a"), W(2, False, "b")]
-        self.assertEqual(admitted(ws, {}, free=2, repository_limit=1), [W(1, False, "a"), W(2, False, "b")])
+        self.assertEqual(admitted(ws, {}, free=2), [W(1, False, "a"), W(2, False, "b")])
         self.assertEqual(place(ws, 3), 3)
 
     def test_every_live_waiter_is_served_before_every_ordinary_one(self):
         ws = [W(1, False, "a"), W(2, True, "b"), W(3, True, "c")]
-        self.assertEqual(admitted(ws, {}, free=1, repository_limit=1), [W(2, True, "b")])
+        self.assertEqual(admitted(ws, {}, free=1), [W(2, True, "b")])
         self.assertEqual(place(ws, 1), 3)
         self.assertEqual(place(ws, 3), 2)
 
     def test_a_live_waiter_its_repository_holds_back_gets_no_priority(self):
         ws = [W(1, True, "a"), W(2, False, "b")]
-        self.assertEqual(admitted(ws, {"a": 1}, free=1, repository_limit=1), [W(2, False, "b")])
+        self.assertEqual(admitted(ws, {"a": 1}, free=1), [W(2, False, "b")])
 
     def test_a_repository_limit_of_two_admits_two_runs_of_one_repository(self):
-        ws = [W(1, False, "a"), W(2, False, "a"), W(3, False, "b")]
-        self.assertEqual(admitted(ws, {}, free=2, repository_limit=2), [W(1, False, "a"), W(2, False, "a")])
-        self.assertEqual(admitted(ws, {}, free=2, repository_limit=1), [W(1, False, "a"), W(3, False, "b")])
+        ws = [W(1, False, "a", 2), W(2, False, "a", 2), W(3, False, "b", 2)]
+        self.assertEqual(admitted(ws, {}, free=2), [W(1, False, "a", 2), W(2, False, "a", 2)])
+        ws = [W(1, False, "a"), W(2, False, "a"), W(3, False, "b", 2)]
+        self.assertEqual(admitted(ws, {}, free=2), [W(1, False, "a"), W(3, False, "b", 2)])
+
+    def test_each_waiter_is_admitted_up_to_the_limit_its_ticket_carries(self):
+        ws = [W(1, False, "a", 1), W(2, False, "b", 2), W(3, False, "b", 2), W(4, False, "c", 1)]
+        self.assertEqual(admitted(ws, {"a": 1, "b": 1}, free=2), [W(2, False, "b", 2), W(4, False, "c", 1)])
 
     def test_runs_outside_a_repository_are_never_held_back_by_each_other(self):
         with tempfile.TemporaryDirectory() as scratch:
-            counts = holder_counts(Path(scratch), [Holder(None, "x")], [], 1)
+            counts = holder_counts(Path(scratch), [Holder(None, "x")], [])
         self.assertEqual(counts, {})
         ws = [W(1, False, None), W(2, False, None)]
-        self.assertEqual(admitted(ws, counts, free=2, repository_limit=1), ws)
+        self.assertEqual(admitted(ws, counts, free=2), ws)
 
     def test_no_free_slot_admits_no_one(self):
-        self.assertEqual(admitted([W(1, False, "a")], {}, free=0, repository_limit=1), [])
+        self.assertEqual(admitted([W(1, False, "a")], {}, free=0), [])
 
 
 class HolderCountTest(unittest.TestCase):
@@ -73,26 +79,54 @@ class HolderCountTest(unittest.TestCase):
 
     def test_known_holders_are_counted_without_probing_the_repository_locks(self):
         with mock.patch.object(verify_queue, "held", side_effect=AssertionError("probed")):
-            counts = holder_counts(self.dir, [Holder("a", "just test")], ["a", "b"], 1)
+            counts = holder_counts(self.dir, [Holder("a", "just test")], ["a", "b"])
         self.assertEqual(counts, {"a": 1})
 
     def test_an_unknown_holder_makes_the_repository_locks_count(self):
         unknown = [Holder(None, "", known=False)]
-        first = open_shared(repository_lock_paths(self.dir, "a", 1)[0])
+        first = open_shared(repository_lock_paths(self.dir, "a", 1, 1)[0])
         self.addCleanup(os.close, first)
         fcntl.flock(first, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        self.assertEqual(holder_counts(self.dir, unknown, ["a", "b"], 1), {"a": 1, "b": 0})
-        second = open_shared(repository_lock_paths(self.dir, "a", 2)[1])
+        self.assertEqual(holder_counts(self.dir, unknown, ["a", "b"]), {"a": 1, "b": 0})
+        second = open_shared(repository_lock_paths(self.dir, "a", 2, 2)[1])
         self.addCleanup(os.close, second)
         fcntl.flock(second, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        self.assertEqual(holder_counts(self.dir, unknown, ["a", "b"], 2), {"a": 2, "b": 0})
+        self.assertEqual(holder_counts(self.dir, unknown, ["a", "b"]), {"a": 2, "b": 0})
+
+    def test_an_unknown_holder_counts_every_held_lock_of_its_repository_whatever_its_index(self):
+        unknown = [Holder(None, "", known=False)]
+        for path in (repository_lock_paths(self.dir, "a", 4, 4)[3], repository_lock_paths(self.dir, "b", 2, 2)[1]):
+            descriptor = open_shared(path)
+            self.addCleanup(os.close, descriptor)
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        os.close(open_shared(repository_lock_paths(self.dir, "a", 2, 2)[1]))
+        self.assertEqual(holder_counts(self.dir, unknown, ["a", "b", "c"]), {"a": 1, "b": 1, "c": 0})
+        self.assertEqual(held_repository_locks(self.dir, "a"), 1)
 
     def test_the_repository_lock_names_start_with_the_existing_one(self):
-        paths = repository_lock_paths(self.dir, "o/r", 3)
+        paths = repository_lock_paths(self.dir, "o/r", 3, 3)
         existing = group_lock_name("o/r")
         digest = existing[len("repo-"):-len(".lock")]
         self.assertEqual([p.name for p in paths], [existing, f"repo-{digest}-1.lock", f"repo-{digest}-2.lock"])
-        self.assertEqual([p.name for p in repository_lock_paths(self.dir, "o/r", 1)], [existing])
+        self.assertEqual([p.name for p in repository_lock_paths(self.dir, "o/r", 1, 3)], [existing])
+
+    def test_a_limit_above_the_slot_count_builds_only_the_slot_counts_paths(self):
+        expected = repository_lock_paths(self.dir, "o/r", 4, 4)
+        paths = repository_lock_paths(self.dir, "o/r", 50, 4)
+        self.assertEqual(paths, expected)
+        self.assertEqual(len(paths), 4)
+
+    def test_a_limit_far_above_the_slot_count_stays_under_100_megabytes(self):
+        # An unclamped 1_000_000 paths traces about 250 MB, so a missing clamp fails here at a
+        # size that still fits in 1 GiB; the bound is AC1's 100 MB (decimal), not 100 MiB.
+        tracemalloc.start()
+        try:
+            paths = repository_lock_paths(self.dir, "o/r", 1_000_000, 4)
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        self.assertEqual(len(paths), 4)
+        self.assertLess(peak, 100_000_000)
 
     def test_the_holders_are_described_in_plain_words(self):
         self.assertEqual(holders_text([]), "nothing")
@@ -108,8 +142,8 @@ class TicketTest(unittest.TestCase):
         self.dir = Path(scratch.name)
         self.opened = []
 
-    def join(self, key="k", now=0, live=False, repository=None):
-        ticket = join(self.dir, key, live, repository, now)
+    def join(self, key="k", now=0, live=False, repository=None, limit=1):
+        ticket = join(self.dir, key, live, repository, now, limit=limit)
         self.opened.append(ticket)
         return ticket
 
@@ -140,12 +174,42 @@ class TicketTest(unittest.TestCase):
         self.assertEqual([w.seq for w in waiters(self.dir, t2, 0)], [2])
         self.assertFalse(t1.path.exists())
 
+    def test_a_ticket_carries_its_repository_limit_and_an_older_ticket_counts_one(self):
+        older = open_shared(self.dir / "ticket-000000000001.lock")
+        self.addCleanup(os.close, older)
+        fcntl.flock(older, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        os.pwrite(older, json.dumps({"key": "older", "live": False, "repository": "a",
+                                     "reserved_until": None}).encode(), 0)
+        own = self.join("k", repository="a", limit=2)
+        listed = waiters(self.dir, own, 0)
+        self.assertEqual(own.seq, 2)
+        self.assertEqual(self.content(own)["repository_limit"], 2)
+        self.assertEqual([(w.seq, w.key, w.limit) for w in listed], [(1, "older", 1), (2, "k", 2)])
+        reserve(own, 0)
+        self.assertEqual(self.content(own)["repository_limit"], 2)
+
+    def test_a_ticket_whose_repository_limit_is_not_a_positive_int_is_no_waiter(self):
+        own = self.join("k")
+        for bad in (0, -1, True, "2", 1.5, None):
+            with self.subTest(bad=bad):
+                path = self.dir / "ticket-000000000009.lock"
+                descriptor = open_shared(path)
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    os.pwrite(descriptor, json.dumps({"key": "bad", "live": False, "repository": "a",
+                                                      "reserved_until": None,
+                                                      "repository_limit": bad}).encode(), 0)
+                    self.assertEqual([w.seq for w in waiters(self.dir, own, 0)], [own.seq])
+                finally:
+                    os.close(descriptor)
+                    path.unlink()
+
     def test_a_locked_ticket_of_another_waiter_is_listed(self):
         t1 = self.join("one", live=True, repository="o/r")
         t2 = self.join("two")
         listed = {w.seq: w for w in waiters(self.dir, t2, 0)}
         self.assertEqual(set(listed), {1, 2})
-        self.assertEqual(listed[1], Waiter(1, True, "o/r", "one"))
+        self.assertEqual(listed[1], Waiter(1, True, "o/r", "one", 1))
 
     def test_a_reserved_ticket_holds_back_no_one(self):
         t1, t2 = self.join("k"), self.join()

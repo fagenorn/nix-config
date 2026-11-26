@@ -60,8 +60,15 @@ MASK: dict[str, str] = {"GIT_CONFIG_GLOBAL": os.devnull}
 INSTALL_COMMAND: tuple[str, ...] = ("true",)
 TEXT_LIMIT: int = 1 << 20
 
-DECLARATION = re.compile(r"(?m)^[ \t]*(?:git-hooks|pre-commit)[ \t]*[.=]")
+TOKEN = re.compile(r"""[\w'-]+|"[\w'-]*"|==|[{}()\[\];=:@.?,]|\S""")
+OPENERS, CLOSERS = "({[", ")}]"
+NAME = re.compile(r"""[\w'-]+|"[\w'-]*\"""")
+NAME_TEXT = re.compile(r"[\w'-]*")
+MODULE_LEAD = (None, ":", "@", "in", "rec", ";", "(")
 HOOKS_PATH = "core.hooksPath"
+ROOTS = ("git-hooks", "pre-commit")
+DEEPEST = 5  # `config.<root>.hooks.<name>.enable`, the longest path `_switch` reads
+BEYOND = ("",) * (DEEPEST + 1)  # stands for any path longer than `DEEPEST`
 
 
 def installed(hooks_dir: Path) -> list[str]:
@@ -76,9 +83,227 @@ def left_alone(local_hooks_path: str | None, hooks_dir: Path) -> bool:
     return local_hooks_path is not None or bool(installed(hooks_dir))
 
 
+def _code(text: str) -> str:
+    """`text` with each comment a space and each string literal one token of `_` characters.
+
+    A `/*` or a `#` inside a Nix string starts no comment and a setting named inside one is
+    no setting. Only a `"..."` of name characters keeps its text, so a quoted name reads.
+    """
+    out: list[str] = []
+    strings: list[tuple[str, int]] = []  # (opening quote, brace depth of the code around it)
+    in_string, depth, i, n = False, 0, 0, len(text)
+    mark = begin = 0  # where the outermost string's contents start in `out` and in `text`
+    while i < n:
+        char = text[i]
+        if not in_string:
+            if char == "#":
+                end = text.find("\n", i)
+                i = n if end < 0 else end
+                out.append("_" if strings else " ")
+            elif text.startswith("/*", i):
+                end = text.find("*/", i + 2)
+                i = n if end < 0 else end + 2
+                out.append("_" if strings else " ")
+            elif char == '"' or text.startswith("''", i):
+                quote = '"' if char == '"' else "''"
+                if not strings:
+                    out.append(quote)
+                    mark, begin = len(out), i + len(quote)
+                else:
+                    out.append("_")
+                strings.append((quote, depth))
+                in_string, depth = True, 0
+                i += len(quote)
+            else:
+                if char == "{":
+                    depth += 1
+                elif char == "}" and depth == 0 and strings:
+                    in_string = True  # the end of a `${...}` interpolation
+                    i += 1
+                    continue
+                elif char == "}":
+                    depth = max(depth - 1, 0)
+                out.append("_" if strings else char)
+                i += 1
+            continue
+        quote = strings[-1][0]
+        if text.startswith("${", i):
+            in_string, depth = False, 0
+            out.append("_")
+            i += 2
+        elif quote == '"' and char == "\\":
+            out.append("__")
+            i += 2
+        elif quote == '"' and char == '"':
+            in_string, depth = False, strings.pop()[1]
+            if strings:
+                out.append("_")
+            else:
+                if NAME_TEXT.fullmatch(text, begin, i):
+                    out[mark:] = [text[begin:i]]
+                out.append('"')
+            i += 1
+        elif quote != '"' and text.startswith("''\\", i):
+            out.append("____")  # `''\` escapes the next character too
+            i += 4
+        elif quote != '"' and text.startswith(("'''", "''$"), i):
+            out.append("___")
+            i += 3
+        elif quote != '"' and text.startswith("''", i):
+            in_string, depth = False, strings.pop()[1]
+            out.append("_" if strings else "''")
+            i += 2
+        else:
+            out.append("_")
+            i += 1
+    return "".join(out)
+
+
+def _group_end(tokens: list[str], pos: int) -> int:
+    """The index after the bracketed group that opens at `pos`, or the end of `tokens`."""
+    depth = 0
+    for i in range(pos, len(tokens)):
+        depth += tokens[i] in OPENERS
+        depth -= tokens[i] in CLOSERS
+        if depth <= 0:
+            return i + 1
+    return len(tokens)
+
+
+def _value_end(tokens: list[str], pos: int) -> int:
+    """The index of the `;` that ends the value at `pos`, or of the `}` that closes its set.
+
+    A bracketed group and a `let ... in` are part of the value, whatever they hold.
+    """
+    depth = lets = 0
+    for i in range(pos, len(tokens)):
+        token = tokens[i]
+        if token in OPENERS:
+            depth += 1
+        elif token in CLOSERS:
+            if depth == 0:
+                return i
+            depth -= 1
+        elif token == "let":
+            lets += 1
+        elif token == "in":
+            lets = max(lets - 1, 0)
+        elif token == ";" and depth == 0 and lets == 0:
+            return i
+    return len(tokens)
+
+
+def _let_end(tokens: list[str], pos: int) -> int:
+    """The index after the `in` that ends the `let` whose keyword sits before `pos`."""
+    lets = 1
+    for i in range(pos, len(tokens)):
+        lets += tokens[i] == "let"
+        lets -= tokens[i] == "in"
+        if lets == 0:
+            return i + 1
+    return len(tokens)
+
+
+def _closers(tokens: list[str]) -> list[int]:
+    """For each opening bracket in `tokens`, the index of its closer (`len(tokens)` when unclosed)."""
+    closers = [len(tokens)] * len(tokens)
+    opened: list[int] = []
+    for i, token in enumerate(tokens):
+        if token in OPENERS:
+            opened.append(i)
+        elif token in CLOSERS and opened:
+            closers[opened.pop()] = i
+    return closers
+
+
+def _tail(tokens: list[str]) -> int:
+    """The index where the run of `)` that ends `tokens` starts."""
+    end = len(tokens)
+    while end and tokens[end - 1] == ")":
+        end -= 1
+    return end
+
+
+def _path(tokens: list[str], pos: int) -> tuple[tuple[str, ...], int]:
+    """The dotted attribute path at `pos` (empty when there is none) and the index after it."""
+    names: list[str] = []
+    while pos < len(tokens) and NAME.fullmatch(tokens[pos]):
+        names.append(tokens[pos].strip('"') if tokens[pos][0] == '"' else tokens[pos])
+        pos += 1
+        if pos < len(tokens) and tokens[pos] == ".":
+            pos += 1
+        else:
+            return tuple(names), pos
+    return (), pos
+
+
+def _switch(path: tuple[str, ...]) -> bool:
+    """Whether `path` is `<root>.hooks.<name>.enable`, a leading `config` aside."""
+    path = path[1:] if path[:1] == ("config",) else path
+    return len(path) == 4 and path[0] in ROOTS and path[1] == "hooks" and path[3] == "enable"
+
+
 def declares_hooks(text: str) -> bool:
-    """Whether some line of a `devenv.nix` text sets devenv git hooks."""
-    return DECLARATION.search(text) is not None
+    """Whether a `devenv.nix` text explicitly switches a devenv git hook on.
+
+    Reads only `git-hooks.hooks.<name>.enable = true;` (or `pre-commit`), dotted or nested, in the
+    whole-body set (also under `config`); all else reads as no hooks, as a false positive promises a missing install.
+    """
+    if not any(root in text for root in ROOTS):
+        return False
+    tokens = TOKEN.findall(_code(text))
+    n, i = len(tokens), 0
+    sets: list[tuple[str, ...]] = []  # the attribute path of each open set
+    closers: list[int] | None = None  # `_closers`, read once when a set is first met
+    tail: int | None = None  # `_tail`, read once with `closers`
+    previous: str | None = None
+    while i < n:
+        token = tokens[i]
+        if not sets:
+            if token == "let":
+                i, previous = _let_end(tokens, i + 1), "in"
+            elif token == "(" and previous in MODULE_LEAD:
+                i, previous = i + 1, "("  # a parenthesized module body is the body itself
+            elif token == "{" and previous in MODULE_LEAD:
+                closers = closers or _closers(tokens)
+                tail = _tail(tokens) if tail is None else tail
+                if closers[i] + 1 < tail:
+                    i = _group_end(tokens, i)  # `// { ... }`, `.x` or an application may override it
+                    previous = tokens[i - 1]
+                else:
+                    sets.append(())
+                    i, previous = i + 1, "{"
+            elif token in OPENERS:
+                i = _group_end(tokens, i)
+                previous = tokens[i - 1]
+            else:
+                i, previous = i + 1, token
+            continue
+        if token == "}":
+            sets.pop()
+            previous = "}"
+            i += 1
+            continue
+        names, after = _path(tokens, i)
+        if names and tokens[after:after + 1] == ["="]:
+            path, value = (*sets[-1], *names), after + 1
+            if len(path) > DEEPEST:
+                path = BEYOND  # no switch lies below it, and a nested set stores no ancestor copy
+            if tokens[value:value + 1] == ["{"]:
+                closers = closers or _closers(tokens)
+                if tokens[closers[value] + 1:closers[value] + 2] == [";"]:
+                    sets.append(path)  # the set is the whole value; `// { ... }` or `.x` would change it
+                    i = value + 1
+                    continue
+            if tokens[value:value + 2] == ["true", ";"] and _switch(path):
+                return True
+        start = i
+        i = _value_end(tokens, i)
+        if i < n and tokens[i] == ";":
+            i += 1
+        elif i == start:
+            i += 1
+    return False
 
 
 def declared(worktree: Path) -> bool:
