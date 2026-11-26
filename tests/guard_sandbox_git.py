@@ -1,4 +1,4 @@
-"""Git for the guard suite's sandbox repositories, isolated from the host (issue 1878).
+"""Git for the guard suite's sandbox repositories, isolated from the host.
 
 `SandboxGit(directory)` writes a configuration of its own under `directory` and exposes the
 environment that makes `git` read only that: `GIT_CONFIG_GLOBAL` names it, `GIT_CONFIG_NOSYSTEM`

@@ -5,6 +5,9 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from agent_tools.delivery import comment_lint
+from agent_tools.delivery.never_rise import Snapshot
+
 from .guard_sandbox_git import SandboxGit
 
 TIER = "integration"  # creates real git repositories and pushes between them
@@ -74,6 +77,15 @@ class SandboxPushTest(unittest.TestCase):
         sandbox.push(self.work, "origin", "HEAD:refs/heads/topic")
         self.assertIn("refs/heads/topic",
                       sandbox.git("ls-remote", "--heads", "origin", "topic", cwd=self.work))
+
+
+class SandboxSourceCommentsTest(unittest.TestCase):
+    def test_the_support_module_comments_name_no_issue(self):
+        path = Path(__file__).resolve().with_name("guard_sandbox_git.py")
+        snapshot = Snapshot(revision="", line_counts={},
+                            contents={path.name: path.read_bytes()})
+        (reference, _, _) = comment_lint.enforcers("fagenorn/nix-config")
+        self.assertEqual([], reference.find(snapshot))
 
 
 if __name__ == "__main__":
