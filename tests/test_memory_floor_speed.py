@@ -239,6 +239,16 @@ class MemoryReaderTest(unittest.TestCase):
             self.assertEqual([read(), read()], [read_available(VM_STAT, self.TOTAL)] * 2)
             self.assertEqual(len((scratch / "count").read_text().splitlines()), 2)
 
+    def test_a_malformed_first_vm_stat_keeps_the_valid_host_memory_size(self):
+        with tempfile.TemporaryDirectory() as directory:
+            scratch, read = self.tools(directory)
+            (scratch / "vm.txt").write_text("Pages free: 1.\n")
+            with self.assertRaises(ReadingError):
+                read()
+            (scratch / "vm.txt").write_text(VM_STAT)
+            self.assertEqual([read(), read()], [read_available(VM_STAT, self.TOTAL)] * 2)
+            self.assertEqual(len((scratch / "count").read_text().splitlines()), 1)
+
     def test_an_unparseable_host_memory_size_is_read_again(self):
         with tempfile.TemporaryDirectory() as directory:
             scratch, read = self.tools(directory)

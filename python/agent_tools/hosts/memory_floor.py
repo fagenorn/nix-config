@@ -8,7 +8,8 @@ belongs to a declared owner: the agent user, or a CI runner user.
   workload of its nearest ancestor, and has none when the walk meets a protected or undeclared
   ancestor, or pid 1. An agent-user process that no root reaches joins `agent:session:<pid>`, rooted
   at the child of its nearest declared session program (`--agent-session`) among its ancestors; a
-  session process is never a member, and a process with no session ancestor is in no workload.
+  session process is never a member of that grouping (inside a declared root it joins that rooted
+  workload), and a process with no session ancestor is in no workload.
 - A runner-user `Runner.Worker` starts the workload `ci:<user>:<pid>` and its descendants join it;
   a runner-user process whose parent is pid 1 and that is not protected joins `ci:<user>:orphans`.
 - A process of any other user is never in a workload, wherever its cwd or ancestors are.
@@ -54,7 +55,7 @@ import signal
 import struct
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -73,6 +74,7 @@ from agent_tools.hosts.omlx_memory_watch import (
 
 PROG = "memory-floor"
 WORKER = "Runner.Worker"
+PROC_PIDPATHINFO_MAXSIZE = 4096
 RECENT = 50
 FOOTPRINT_OFFSET = 72
 CWD_OFFSET = 152
@@ -95,6 +97,7 @@ class Proc:
     command: str
     cwd: str | None
     footprint: int
+    executable: str | None = None
 
 
 @dataclass(frozen=True)
@@ -173,9 +176,12 @@ def protected_pids(table: dict[int, Proc], omlx_pid: int | None, service_pids: s
     return protected
 
 
-def _program(command: str) -> str:
-    first = command.split(None, 1)
-    return first[0].rsplit("/", 1)[-1] if first else ""
+def _is_program(proc: Proc, names: Collection[str]) -> bool:
+    """Whether the process runs a program in `names`: by its executable path (which may hold spaces) or its command's first word."""
+    if proc.executable is not None and proc.executable.rsplit("/", 1)[-1] in names:
+        return True
+    first = proc.command.split(None, 1)
+    return bool(first) and first[0].rsplit("/", 1)[-1] in names
 
 
 def _depth(table: dict[int, Proc], pid: int) -> int:
@@ -210,7 +216,7 @@ def workloads(table: dict[int, Proc], owners: Owners, protected: set[int]) -> li
                     found = None
         elif proc.uid in runner_names:
             name = runner_names[proc.uid]
-            if _program(proc.command) == WORKER:
+            if _is_program(proc, (WORKER,)):
                 found = (f"ci:{name}:{pid}", name)
             elif proc.ppid == 1:
                 found = (f"ci:{name}:orphans", name)
@@ -226,7 +232,7 @@ def workloads(table: dict[int, Proc], owners: Owners, protected: set[int]) -> li
         proc = table[pid]
         if (
             proc.uid != owners.agent_uid or pid <= 1 or pid in protected
-            or _program(proc.command) in owners.agent_sessions
+            or _is_program(proc, owners.agent_sessions)
         ):
             return None
         current, seen = pid, {pid}
@@ -235,7 +241,7 @@ def workloads(table: dict[int, Proc], owners: Owners, protected: set[int]) -> li
             above = table.get(parent)
             if above is None or parent <= 1 or parent in seen or above.uid != owners.agent_uid:
                 return None
-            if _program(above.command) in owners.agent_sessions:
+            if _is_program(above, owners.agent_sessions):
                 return current
             if parent in protected:
                 return None
@@ -587,8 +593,11 @@ def read_record(path: Path) -> dict | None:
     return document if isinstance(document, dict) else None
 
 
-def _libproc_readers(path: str) -> tuple[Callable[[int], int], Callable[[int], str | None]]:
+def _libproc_readers(
+    path: str,
+) -> tuple[Callable[[int], int], Callable[[int], str | None], Callable[[int], str | None]]:
     lib = ctypes.CDLL(path)
+    lib.proc_pidpath.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
     lib.proc_pid_rusage.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p]
     lib.proc_pidinfo.argtypes = [
         ctypes.c_int, ctypes.c_int, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_int
@@ -606,7 +615,12 @@ def _libproc_readers(path: str) -> tuple[Callable[[int], int], Callable[[int], s
             return None
         return buffer.raw[CWD_OFFSET:].split(b"\0", 1)[0].decode(errors="replace") or None
 
-    return footprint, cwd
+    def executable(pid: int) -> str | None:
+        buffer = ctypes.create_string_buffer(PROC_PIDPATHINFO_MAXSIZE)
+        length = lib.proc_pidpath(pid, buffer, PROC_PIDPATHINFO_MAXSIZE)
+        return buffer.raw[:length].decode(errors="replace") if length > 0 else None
+
+    return footprint, cwd, executable
 
 
 def _memorystatus_control(path: str) -> Callable[[int, int, int, bytearray], int]:
@@ -650,16 +664,19 @@ def memory_reader(vm_stat: str, sysctl: str) -> Callable[[], int]:
         used = _run("vm_stat", [vm_stat])
         fresh = total is None
         read = total if total is not None else _run("sysctl", [sysctl, "-n", "hw.memsize"])
-        result = read_available(used, read)
         if fresh:
+            try:
+                int(read.strip())
+            except ValueError as error:
+                raise ReadingError(f"memory output not parseable ({error})") from None
             total = read
-        return result
+        return read_available(used, read)
 
     return available
 
 
 def build_io(args, owners: Owners) -> Io:
-    footprint, cwd = _libproc_readers(args.libproc)
+    footprint, cwd, executable = _libproc_readers(args.libproc)
     relevant = {owners.agent_uid, *(uid for uid, _ in owners.runners)}
 
     available = memory_reader(args.vm_stat, args.sysctl)
@@ -675,6 +692,7 @@ def build_io(args, owners: Owners) -> Io:
                 pid, ppid, uid, command,
                 cwd(pid) if uid == owners.agent_uid else None,
                 footprint(pid) if uid in relevant else 0,
+                executable(pid) if uid in relevant else None,
             )
             for pid, (ppid, uid, command) in listing.items()
         }

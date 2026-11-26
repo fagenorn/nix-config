@@ -254,6 +254,17 @@ class SelectionTest(unittest.TestCase):
                 found = selected(table, omlx_pid, services)
                 self.assertEqual({w.key: set(w.pids) for w in found}, expected)
 
+    def test_a_session_executable_under_a_path_with_spaces_is_found_by_its_executable(self):
+        spaced = "/Users/anis/Agent Tools/claude"
+        table = session_tree(30, **{"200": {"command": f"{spaced} bg-spare", "executable": spaced}})
+        self.assertEqual({w.key: set(w.pids) for w in selected(table)}, {"agent:session:300": {300, 301}})
+        # An unrooted child of that spaced session joins the run bound too.
+        child = table_of(
+            dataclasses.replace(proc(200, 1, 501, MAIN, 0), command=f"{spaced} bg-spare", executable=spaced),
+            proc(300, 200, 501, SCRATCH, 30, "python3 probe.py"),
+        )
+        self.assertEqual({w.key: set(w.pids) for w in selected(child)}, {"agent:session:300": {300}})
+
     def test_every_omlx_descendant_is_protected_through_a_service_child(self):
         self.assertEqual(protected_pids(session_tree(30), 198, {200}), {0, 1, 198, 199, 200, 300, 301})
 
@@ -287,6 +298,29 @@ class OwnersCliTest(unittest.TestCase):
                 self.assertEqual(
                     [(w.key, w.root_pid, set(w.pids)) for w in found], [("agent:session:300", 300, {300, 301})]
                 )
+
+    def test_only_the_parsed_session_programs_select_a_tree(self):
+        args = build_parser().parse_args([
+            "enforce", "--floor-gib", "10", "--run-bound-gib", "24", "--min-tree-gib", "1",
+            "--omlx-jetsam-priority", "190", "--agent-user", "anis",
+            "--agent-root", "/Users/anis/Projects/*/.worktrees/*",
+            "--agent-session", ".claude-unwrapped",
+            "--record", "/nonexistent/floor.json",
+        ])
+        with mock.patch(
+            "agent_tools.hosts.memory_floor.pwd.getpwnam", return_value=types.SimpleNamespace(pw_uid=501)
+        ):
+            owners = _owners(args)
+        table = table_of(
+            proc(200, 1, 501, MAIN, 0, "/nix/store/abc-claude-code/bin/.claude-unwrapped daemon run"),
+            proc(300, 200, 501, MAIN, 0, "/bin/zsh -c source snapshot.sh"),
+            proc(301, 300, 501, SCRATCH, 30, "python3 probe.py"),
+            proc(210, 1, 501, MAIN, 0, "claude bg-spare"),
+            proc(310, 210, 501, MAIN, 0, "/bin/zsh -c source snapshot.sh"),
+            proc(311, 310, 501, SCRATCH, 30, "python3 probe.py"),
+        )
+        found = workloads(table, owners, protected_pids(table, None, set()))
+        self.assertEqual({w.key: set(w.pids) for w in found}, {"agent:session:300": {300, 301}})
 
 
 class KillLineTest(unittest.TestCase):

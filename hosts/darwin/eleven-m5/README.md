@@ -215,8 +215,9 @@ directory is under a worktree (`~/Projects/*/.worktrees/*`) or a verification
 run's temporary directory, or when it runs below a declared session program
 (`claude`, `.claude-unwrapped`; `--agent-session`): the processes below the
 session's child (the shell a tool call starts) are grouped as `agent:session:<pid>`
-whatever their working directory, and the session's own processes are never
-members. The CI runner accounts count too: a `Runner.Worker` starts a job's
+whatever their working directory, and a session's own processes are never
+members of that session grouping (one inside a declared root still joins that
+rooted workload). The CI runner accounts count too: a `Runner.Worker` starts a job's
 workload. A process of any other user is never ended.
 
 Protected, whatever its owner: pids 0 and 1, the oMLX server and everything it
