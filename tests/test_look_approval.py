@@ -551,6 +551,7 @@ class CarryVerbTest(unittest.TestCase):
     X = "7" * 40
     T = "6" * 40
     DIG = lm.picture_digest([("before", lm.picture_id(b"before")), ("after", lm.picture_id(b"after"))])
+    PM_FIELDS = {"issue": "7", "pr": "12", "from": A, "to": HEAD, "pictures": DIG, "rule": "picture-match"}
     LINE = lm.carry_body(7, 12, A, HEAD, DIG)
 
     def setUp(self):
@@ -581,6 +582,11 @@ class CarryVerbTest(unittest.TestCase):
 
     def pics(self, cid, pictures=None, head=A, answer="approved"):
         return comment(cid, lm.approval_body(7, 12, head, answer, f"m{cid}", pictures=(pictures or self.DIG) if answer == "approved" else None))
+
+    def pm_line(self, cid, issue=7, **change):
+        fields = {**self.PM_FIELDS, "issue": str(issue), **change}
+        fields = {key: value for key, value in fields.items() if value is not None}
+        return comment(cid, forge_markers.render(lm.CARRY_KIND, fields, "x"))
 
     def posted(self):
         return [a for a in self.world.argvs("gh") if a[:3] == ["api", "-X", "POST"]]
@@ -969,6 +975,32 @@ class CarryVerbTest(unittest.TestCase):
         code, out = run(*STATUS)
         self.assertEqual((code, out["verdict"], out["comment_id"], out["kept_from"]), (0, "approved", 5, A))
 
+    def test_status_reads_a_picture_match_carry_line_as_a_kept_approval(self):
+        compares = self.merges()
+        compares[f"compare/{A}...{HEAD}"] = cmp([PAGE])
+        self.seed([self.pics(5), self.pm_line(6)], compares)
+        code, out = run(*STATUS)
+        self.assertEqual((code, out["verdict"], out["comment_id"], out["kept_from"]), (0, "approved", 5, A))
+
+    def test_a_picture_match_line_with_no_or_another_digest_carries_nothing(self):
+        for change in ({"pictures": None}, {"pictures": "0" * 64}):
+            with self.subTest(change=change):
+                self.world = ForgeWorld(self)
+                self.seed([self.pics(5), self.pm_line(6, **change)])
+                code, out = run(*STATUS)
+                self.assertEqual((code, out["verdict"], out["kept_from"]), (0, "needed", None))
+
+    def test_carry_fields_of_the_picture_match_rule_name_the_digest_and_the_rule(self):
+        fields = lm.carry_fields(7, 12, A, HEAD, self.DIG, lm.PICTURE_MATCH_RULE)
+        self.assertEqual(fields, self.PM_FIELDS)
+        self.assertEqual(list(fields), list(self.PM_FIELDS))
+        lines = lm.carry_body(7, 12, A, HEAD, self.DIG, rule=lm.PICTURE_MATCH_RULE).splitlines()
+        self.assertEqual(lines[0], f"<!-- agent:look-carry v1 issue=7 pr=12 from={A} to={HEAD} "
+                                   f"pictures={self.DIG} rule=picture-match -->")
+        self.assertIn("picture-match", lines[1])
+        with self.assertRaises(ValueError):
+            lm.carry_fields(7, 12, A, HEAD, None, lm.PICTURE_MATCH_RULE)
+
     def test_a_line_naming_own_files_and_pictures_carries_nothing(self):
         self.seed([self.pics(5), self.own_files_comment(6, pictures=self.DIG)])
         code, out = run(*STATUS)
@@ -1094,6 +1126,17 @@ class TickCarryTest(unittest.TestCase):
         self.assertEqual((code, out["verdict"], out["ticked"], out["kept_from"]), (0, "ticked", 1, A))
         self.assertEqual(len(self.patches()), 1)
 
+    def test_tick_accepts_a_picture_match_carry_line_across_a_touched_own_file(self):
+        pictured = comment(5, lm.approval_body(7, 12, A, "approved", "m5", pictures=CarryVerbTest.DIG))
+        line = comment(6, forge_markers.render(lm.CARRY_KIND, CarryVerbTest.PM_FIELDS, "x"))
+        served = {f"compare/{BT}...{A}": cmp([PAGE], commits=[(A, [FORK])]),
+                  f"compare/{A}...{HEAD}": cmp([PAGE]),
+                  f"compare/{BT}...{HEAD}": cmp([PAGE], commits=[(A, [FORK]), (HEAD, [A, "7" * 40])])}
+        self.seed(served, comments=[pictured, line])
+        code, out = run(*self.TICK)
+        self.assertEqual((code, out["verdict"], out["ticked"], out["kept_from"]), (0, "ticked", 1, A))
+        self.assertEqual(len(self.patches()), 1)
+
     def test_tick_of_an_indirect_merge_ticks_at_the_landing_commit_the_caller_resolved(self):
         """#1356 I3: the same resolved landing commit serves `tick`; without it the null merge_commit_sha is an error."""
         self.seed(pull=dict(self.PULL, merge_commit_sha=None))
@@ -1187,6 +1230,24 @@ class CarryJudgeTest(unittest.TestCase):
         self.assertEqual(out["need"], sorted(f"compare/{x}...{y}" for x, y in ((B, A), (A, HEAD), (B, HEAD))))
         for path in out["need"]:
             self.assertTrue(lm.read_path_ok(path, B), path)
+        code, out = self.judge(json.dumps({**data, "carry": {"base": B, "reads": served}}))
+        self.assertEqual((code, out), (0, {"command": "look-approval", "action": "judge", "verdict": "admit",
+                                           "marked": [1200]}))
+
+    def test_the_guard_runs_admit_a_pictured_approval_carried_by_its_picture_match_line(self):
+        digest = CarryVerbTest.DIG
+        data = {"pr": 12, "head": HEAD, "issues": [{"number": 1200, "body": BODY, "comments": [
+            comment(5, lm.approval_body(1200, 12, A, "approved", "m1", pictures=digest)),
+            comment(6, forge_markers.render(lm.CARRY_KIND, {**CarryVerbTest.PM_FIELDS, "issue": "1200"}, "x"))]}]}
+        served = {f"compare/{B}...{A}": cmp([PAGE], commits=[(A, [FORK])]),
+                  f"compare/{A}...{HEAD}": cmp([PAGE]),
+                  f"compare/{B}...{HEAD}": cmp(commits=[(A, [FORK]), (HEAD, [A, "7" * 40])])}
+        code, out = self.judge(json.dumps(data))
+        self.assertEqual((code, out["verdict"], out["candidates"]),
+                         (1, "refuse", [{"issue": 1200, "head": A, "answer": "approved"}]))
+        code, out = self.judge(json.dumps({**data, "carry": {"base": B, "reads": {}}}))
+        self.assertEqual((code, out["verdict"]), (1, "refuse"))
+        self.assertEqual(out["need"], sorted(f"compare/{x}...{y}" for x, y in ((B, A), (A, HEAD), (B, HEAD))))
         code, out = self.judge(json.dumps({**data, "carry": {"base": B, "reads": served}}))
         self.assertEqual((code, out), (0, {"command": "look-approval", "action": "judge", "verdict": "admit",
                                            "marked": [1200]}))
