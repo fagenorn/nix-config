@@ -886,7 +886,7 @@ class VerifySlotTest(SlotHarness, unittest.TestCase):
         beta = self.repository("beta", "git@github.com:example/beta.git")
         self.slots.mkdir()
         old = [verify_queue.open_shared(self.slots / "slot-1.lock"),
-               verify_queue.open_shared(verify_queue.repository_lock_paths(self.slots, "example/alpha", 2)[1])]
+               verify_queue.open_shared(verify_queue.repository_lock_paths(self.slots, "example/alpha", 2, 2)[1])]
         try:
             for descriptor in old:
                 fcntl.flock(descriptor, fcntl.LOCK_EX)
@@ -916,10 +916,10 @@ class VerifySlotTest(SlotHarness, unittest.TestCase):
             taken.extend(held or ())
         self.assertEqual([reason for _, reason in results], [None, None, "taken"])
         self.assertTrue(all(fd is not None for held, _ in results[:2] for fd in held))
-        self.assertTrue(all(call.args[2] <= 2 for call in paths.call_args_list))
+        self.assertTrue(all(call.args[3] <= 2 for call in paths.call_args_list))
         self.assertEqual({path.name for path in self.slots.glob("repo-*.lock")},
                          {path.name for path in verify_queue.repository_lock_paths(
-                             self.slots, "example/alpha", 2)})
+                             self.slots, "example/alpha", 2, 2)})
 
     def test_a_waiter_behind_a_paused_earlier_waiter_prints_the_holders_that_left(self):
         self.declare(verify_slots=2)
