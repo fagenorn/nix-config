@@ -2360,8 +2360,12 @@ Re-review only these previously reported findings for task ${t.n} against the fi
 }
 // When every task ended with no commit, the branch holds nothing to review, verify or land: the final review would get
 // an empty range and the pull request no commit. Read from the done record (no_change), which a resume carries, never
-// from a head. The tasks' outputs are in place and recorded; the owner closes the issue.
-if (plan.tasks.length && plan.tasks.every(t => taskLog.some(d => d.n === t.n && d.no_change === true))) {
+// from a head. The tasks' outputs are in place and recorded; the owner closes the issue. A branch ahead of the base it
+// was cut from holds commits to review whatever each task's reply said (a cut-off run committed them before this run
+// saw its tasks done), so it is not empty; each head is read against the base the program recorded.
+const aheadOfBase = (head, base) => present(head) && present(base) && !sameSha(head, base)
+const branchAhead = aheadOfBase(tip, setup.base_sha) || declared(plan).some(b => aheadOfBase(branchTips[b.name], b.base))
+if (plan.tasks.length && !branchAhead && plan.tasks.every(t => taskLog.some(d => d.n === t.n && d.no_change === true))) {
   return stop('no-changes', { details: `every task ended with no commit: the branch ${setup.branch} holds nothing to review or land. The tasks' outputs are in place; close the issue by hand, or amend the plan if a file change was meant` })
 }
 
@@ -2888,9 +2892,12 @@ if (LOOK_ANSWER && (LOOK_ANSWER.answer === 'changes' || LOOK_ANSWER.answer === '
   const lostClaim = await renew('look-fix', 'Verify')
   if (lostClaim) return lostClaim
   const lookFix = await call(`${CTX}\n${PLAN_REF} The owner looked at the pull request head and asked for changes; the owner's words are the one finding of this fix round: ${JSON.stringify(asked)}. Fix it in the worktree, with a regression test for each real defect, then commit. ${FIX_TESTS} ${COMMIT_SCOPE} ${IMPL_RETURN}\n${RULES}`, { label: 'look-fix', phase: 'Verify', agentType: 'implementer', model: 'sonnet', schema: IMPL })
-  if (noteUntested('look-fix', lookFix, setup.head)) return stop('look-fix', { fix: lookFix, details: UNTESTED })
-  if (!implDone(lookFix) || sameSha(lookFix.commit, lookFix.start_head)) return stop('look-fix', { fix: lookFix })
-  const lookReview = await readReview(`${CTX}\nRe-review only this owner finding against the fix: ${span(lookFix)}; the implementer's notes: ${lookFix.notes}. Findings: ${JSON.stringify(asked)}. Report the finding if it is still unresolved and any new Important or Critical defect the fix introduced.`, { label: 'look-fix-review', phase: 'Verify', agentType: 'reviewer', schema: FINDINGS })
+  // Whether the fix changed anything is read against the head the owner looked at, which the program recorded, never
+  // against the start_head the reply names: an earlier attempt's commit is already in that start.
+  const lookBase = lookAt && present(lookAt.head) ? lookAt.head : setup.head
+  if (noteUntested('look-fix', lookFix, lookBase)) return stop('look-fix', { fix: lookFix, details: UNTESTED })
+  if (!implDone(lookFix) || sameSha(lookFix.commit, lookBase)) return stop('look-fix', { fix: lookFix })
+  const lookReview = await readReview(`${CTX}\nRe-review only this owner finding against the fix: ${span({ start_head: lookBase, commit: lookFix.commit })}; the implementer's notes: ${lookFix.notes}. Findings: ${JSON.stringify(asked)}. Report the finding if it is still unresolved and any new Important or Critical defect the fix introduced.`, { label: 'look-fix-review', phase: 'Verify', agentType: 'reviewer', schema: FINDINGS })
   if (!lookReview || findingsOf(lookReview).length) return stop('look-fix-review', { review: lookReview })
   VERIFY_CACHED = false
   verified = null
