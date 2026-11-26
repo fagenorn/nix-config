@@ -258,8 +258,9 @@ class FixedPicturesTest(unittest.TestCase):
         chromium_or_skip(self)
         base = own_tempdir(self)
         a, b = base / "a", base / "b"
-        shots.capture(a)
-        shots.capture(b)
+        for out in (a, b):
+            with mock.patch.object(tempfile, "tempdir", tempfile.mkdtemp(dir=base)):
+                shots.capture(out)
         names = sorted(f"{s}-{w}.png" for s in shots.STATES for w in shots.WIDTHS)
         self.assertEqual(sorted(p.name for p in a.iterdir()), names)
         self.assertEqual(sorted(p.name for p in b.iterdir()), names)
@@ -280,6 +281,7 @@ class FixedPicturesTest(unittest.TestCase):
             if entry == 0:
                 os.mkdir(home / "root", 0o700)
                 (home / "root" / "stale.txt").write_text("stale", encoding="utf-8")
+                (home / "root.made").write_text("", encoding="utf-8")
 
     def test_a_waiter_acquires_the_root_once_the_holder_leaves(self) -> None:
         from . import console_screenshot_clock as shot_clock
@@ -387,7 +389,7 @@ class FixedPicturesTest(unittest.TestCase):
         from . import console_screenshot_clock as shot_clock
 
         base = own_tempdir(self)
-        home = shot_clock.shots_home()
+        home = base / "home"
         (home / "root").mkdir(parents=True)
         (home / "root" / "mine.txt").write_text("mine", encoding="utf-8")
         link = base / "link"
@@ -395,7 +397,7 @@ class FixedPicturesTest(unittest.TestCase):
         with stub_playwright(), mock.patch.object(shots, "_shoot", return_value=None):
             for out in (home / "root" / "shots", home, link / "shots"):
                 with self.subTest(out=out), self.assertRaises(ValueError) as raised:
-                    shots.capture(out, states=("nothing-running",))
+                    shots.capture(out, states=("nothing-running",), home=home)
                 self.assertIn(str(home), str(raised.exception))
         self.assertEqual((home / "root" / "mine.txt").read_text(encoding="utf-8"), "mine")
         self.assertFalse((home / "root" / "shots").exists())
@@ -450,10 +452,71 @@ class FixedPicturesTest(unittest.TestCase):
             self.assertIn("projects", seen[0])
             self.assertTrue((home / "lock").exists())
             self.assertFalse((home / "root").exists())
-            self.assertFalse(shot_clock.shots_home().exists())
             with self.assertRaises(ValueError):
                 shots.capture(home / "root" / "shots", states=("nothing-running",), home=home)
         self.assertFalse((home / "root" / "shots").exists())
+
+
+    def test_the_default_fixture_folder_does_not_move_with_the_temporary_folder(self) -> None:
+        from . import console_screenshot_clock as shot_clock
+
+        base, homes = own_tempdir(self), []
+        for _ in range(2):
+            with mock.patch.object(tempfile, "tempdir", tempfile.mkdtemp(dir=base)):
+                homes.append(shot_clock.shots_home())
+        self.assertEqual(homes[0], homes[1])
+
+    def test_a_root_no_run_made_is_refused_and_left_alone(self) -> None:
+        from . import console_screenshot_clock as shot_clock
+
+        home = own_tempdir(self) / "work"
+        (home / "root").mkdir(parents=True, mode=0o700)
+        os.chmod(home, 0o700)
+        (home / "root" / "notes.txt").write_text("mine", encoding="utf-8")
+        with self.assertRaises(FileExistsError) as raised, shot_clock.fixture_dirs(home):
+            pass
+        self.assertIn(str(home / "root"), str(raised.exception))
+        self.assertEqual((home / "root" / "notes.txt").read_text(encoding="utf-8"), "mine")
+        self.assertFalse((home / "root.made").exists())
+
+    def test_a_run_marks_its_root_while_it_holds_it_and_clears_the_mark_when_it_leaves(self) -> None:
+        from . import console_screenshot_clock as shot_clock
+
+        home = own_tempdir(self) / "home"
+        with shot_clock.fixture_dirs(home):
+            self.assertTrue((home / "root.made").is_file())
+        self.assertEqual(sorted(os.listdir(home)), ["lock"])
+
+
+class PicturesPendingTest(unittest.TestCase):
+    class Page:
+        def __init__(self, pending: bool) -> None:
+            self.pending, self.taken = pending, []
+            self.mouse = types.SimpleNamespace(move=lambda x, y: None)
+
+        def evaluate(self, script):
+            return self.pending
+
+        def screenshot(self, **kwargs):
+            self.taken.append(kwargs)
+
+    def test_a_picture_still_pending_at_the_deadline_fails_the_capture_and_saves_nothing(self) -> None:
+        from . import console_screenshot_clock as shot_clock
+
+        page = self.Page(pending=True)
+        with self.assertRaises(TimeoutError) as raised:
+            shot_clock.screenshot(page, Path("look-card-1440.png"))
+        self.assertIn("look-card-1440.png", str(raised.exception))
+        self.assertEqual(page.taken, [])
+        page = self.Page(pending=False)
+        shot_clock.screenshot(page, Path("look-card-1440.png"))
+        self.assertEqual(len(page.taken), 1)
+
+    def test_the_style_settle_waits_on_the_same_pending_reading_as_the_picture(self) -> None:
+        from . import console_screenshot_clock as shot_clock
+
+        self.assertIn(shot_clock.PICTURES_PENDING, shots.STYLE_SETTLE)
+        self.assertIn(shot_clock.PICTURES_PENDING, shot_clock.PICTURES_LOADED)
 
 
 if __name__ == "__main__":

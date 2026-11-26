@@ -192,12 +192,12 @@ Contract:
   animations disabled. Nothing is written through the service or mocked in the page, and the launcher is an inert
   stand-in that records what it is given and starts nothing (without one the view says managers are unavailable).
 - The sandbox rule: every path the fixture touches lies under one root, the fixed `root` of a private folder
-  of this user under the temporary folder (or the `home` a caller passes), which is refused unless it is this
-  user's folder of mode 0700, held by one run at a time and emptied after each state, so a path the page draws is
-  the same on every run. `main` points `HOME`, `CLAUDE_ACCOUNTS_DIR`, `CLAUDE_CONFIG_DIR`, `XDG_STATE_HOME` and
-  `XDG_CONFIG_HOME` under a random temporary root for the run, so the owner's real accounts directory and real
-  registry are never read or written; the guest door is a random temporary folder too. An output folder inside
-  the private folder is refused.
+  of this user under `/tmp`, whatever `TMPDIR` is (or the `home` a caller passes), which is refused unless it is
+  this user's folder of mode 0700, held by one run at a time, and a `root` no run marked is never emptied, so a
+  path the page draws is the same on every run. `main` points `HOME`, `CLAUDE_ACCOUNTS_DIR`, `CLAUDE_CONFIG_DIR`,
+  `XDG_STATE_HOME` and `XDG_CONFIG_HOME` under a random temporary root for the run, so the owner's real accounts
+  directory and real registry are never read or written; the guest door is a random temporary folder too. An
+  output folder inside the private folder is refused.
 - `main(["--out", dir])` prints each written path. It returns 1 (and says so) when any shot's
   `document.documentElement.scrollWidth` exceeds its width; when any sprint's "what it is doing now" sentence is
   squeezed (it starts above its title's bottom, is narrower than the head's line or than the title, is taller than two
@@ -1679,9 +1679,7 @@ STYLE_MUTATE = r"""((css) => {
 STYLE_SETTLE = r"""(async () => {
   // A picture is fetched after the page draws it, so wait for each one to have its source and load.
   for (let tries = 0; tries < 100; tries++) {
-    const waiting = Array.from(document.querySelectorAll('img.pic-img')).some(
-      (img) => !img.hidden && (!img.getAttribute('src') || !img.complete));
-    if (!waiting) break;
+    if (!(""" + shot_clock.PICTURES_PENDING + r""")) break;
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
   for (const animation of document.getAnimations()) {

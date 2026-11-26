@@ -9,7 +9,6 @@ import fcntl
 import os
 import shutil
 import stat
-import tempfile
 import time
 from argparse import ArgumentParser
 from datetime import datetime, timezone
@@ -64,17 +63,20 @@ def open_page(browser, width: int, height: int, now_s: float):
     return page
 
 
+# True while a visible picture has no source yet or has not finished loading; the style reading waits on it too.
+PICTURES_PENDING = """Array.from(document.querySelectorAll('img.pic-img')).some(
+    (img) => !img.hidden && (!img.getAttribute('src') || !img.complete))"""
 PICTURES_LOADED = """async () => {
-  const waiting = () => [...document.querySelectorAll('img.pic-img')].some(
-    (img) => !img.hidden && (!img.getAttribute('src') || !img.complete));
-  for (let tries = 0; tries < 100 && waiting(); tries++) await new Promise((done) => setTimeout(done, 50));
-}"""
+  for (let tries = 0; tries < 100 && (%s); tries++) await new Promise((done) => setTimeout(done, 50));
+  return %s;
+}""" % (PICTURES_PENDING, PICTURES_PENDING)
 
 
 def screenshot(page, path: Path) -> None:
-    """Take the picture with the pointer off the page and its pictures loaded, waiting for them at most 5 s."""
+    """Take the picture with the pointer off the page; fail if a picture is still loading after 5 s."""
     page.mouse.move(0, 0)
-    page.evaluate(PICTURES_LOADED)
+    if page.evaluate(PICTURES_LOADED):
+        raise TimeoutError(f"{path.name}: a picture on the page was still loading after 5 s")
     page.screenshot(path=str(path), full_page=True, animations="disabled")
 
 
@@ -89,8 +91,8 @@ def stamp(root: Path, at_s: float) -> None:
 
 
 def shots_home() -> Path:
-    """The private folder, one per user under the temporary folder, that holds the fixture root and its lock."""
-    return Path(tempfile.gettempdir()) / f"console-shots-{os.getuid()}"
+    """The private folder, one per user, that holds the fixture root and its lock; the page draws the root's path."""
+    return Path("/tmp") / f"console-shots-{os.getuid()}"
 
 
 def refuse_inside(out: Path, home: Path) -> None:
@@ -124,18 +126,20 @@ def fixture_dirs(home: Path):
                     raise TimeoutError(
                         f"another screenshot run holds {home / 'lock'} for over {FIXTURE_WAIT_SECONDS:g} s") from None
                 time.sleep(0.1)
-        root = home / "root"
-        try:
-            leftover = os.lstat(root)
-        except FileNotFoundError:
-            leftover = None
-        if leftover is not None and stat.S_ISDIR(leftover.st_mode):
+        root, made = home / "root", home / "root.made"
+        if os.path.lexists(root):
+            reclaimable = stat.S_ISDIR(os.lstat(root).st_mode) and os.path.lexists(made) and stat.S_ISREG(
+                os.lstat(made).st_mode)
+            if not reclaimable:
+                raise FileExistsError(f"{root} was not made by a screenshot run, so it is left alone")
             shutil.rmtree(root)
+        os.close(os.open(made, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600))
         os.mkdir(root, 0o700)
         try:
             yield root
         finally:
             if os.path.lexists(root):
                 shutil.rmtree(root)
+            os.unlink(made)
     finally:
         os.close(fd)
