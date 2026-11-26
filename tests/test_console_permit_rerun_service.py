@@ -179,6 +179,15 @@ class PermitRerunServiceTest(PermitCase):
         self.assertTrue(svc.permit_landed(sid, self.secret(sid), "s-1", "t-1", self.RERUN))
         self.assertEqual(self.rows("permit.landed"), [self.landed_row(sid)])
 
+    def test_a_rerun_allow_whose_judged_append_is_rolled_back_cannot_land(self):
+        svc, sid = self.boot()
+        with mock.patch.object(svc.log, "append", side_effect=sqlite3.OperationalError("rolled back")):
+            with self.assertRaises(sqlite3.OperationalError):
+                self.judge(svc, sid, self.RERUN, call="t-1")
+        self.assertEqual(self.rows("permit.judged"), [])
+        self.assertFalse(svc.permit_landed(sid, self.secret(sid), "s-1", "t-1", self.RERUN))
+        self.assertEqual(self.rows("permit.landed"), [])
+
     def test_an_allowed_rerun_records_the_rerun_rule_the_guards_policy_declares_for_its_project(self):
         def policy(changes):
             path = Path(self.enterContext(tempfile.TemporaryDirectory())) / "policy.json"

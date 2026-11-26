@@ -649,8 +649,12 @@ failed job that is a required check), the pull request (open, from the project's
 branch, from a branch that is neither long-lived branch, at the run's head and branch) and the required checks. The
 required set is the forge's protection of the integration branch, read as the console permit reads it, not the checks
 the contract declares. The reads inherit the session's environment minus the token variables, and the jobs are read
-page by page until every one is seen. A session whose `GH_HOST` names a host other than github.com leaves the rule in
-place, so the reads and the rerun cannot meet on different hosts. A read that fails, times
+page by page until every one is seen. The rerun runs in the session's shell, so the guard asks that shell for its
+host: the user's `$SHELL`, started as a login, interactive shell, prints `$GH_HOST` once per command. A host other than
+github.com, or a shell that cannot be started, times out or prints no answer, leaves the rule in place, so the reads
+and the rerun cannot meet on different hosts, whether the host comes from the session's environment or from a shell
+startup file. Every pull request the run lists is read, and one that cannot be read or is not a pull request document
+leaves the rule in place, whichever other pull request qualifies. A read that fails, times
 out or answers another shape leaves the rule in place, and a deadline too near refuses. Only the narrowed hits of the
 named project are dropped, each row by its own integration branch, with every read made once per command; a
 broader rule and every other hit still refuse. The rerun then goes to whatever judges `gh run rerun` next: in a manager
@@ -662,8 +666,7 @@ program outside `PRODUCTION_RUNNERS` (`ssh host kubectl apply`) are not seen. Wh
 runner, a one-word command's name anywhere refuses, file arguments included. A command that mentions a
 directory-changing word anywhere is judged against every declaring project. Rewriting the compiled policy can remove a
 project's production refusals, though it still gains no authorization.
-A different `GH_HOST` exported by a shell startup file, rather than the session's environment, is not seen by the
-rerun's forge reads.
+A `GH_HOST` that a startup file sets only for a shell other than the one the probe starts is not seen.
 
 Key files and MCP tools
 -----------------------
@@ -4183,6 +4186,46 @@ def is_own_open_pull_request(document, slug, head, branch, row):
     )
 
 
+SHELL_HOST_MARK = "GUARD-SHELL-HOST"
+SHELL_HOST_SCRIPT = f"printf '\\n{SHELL_HOST_MARK}<%s>\\n' \"$GH_HOST\""
+SHELL_HOST_ANSWER = re.compile(rf"^{SHELL_HOST_MARK}<([^<>\r\n]*)>$", re.MULTILINE)
+
+
+def shell_selected_host(deadline, child_timeout):
+    """The `GH_HOST` the session's shell exports ("" when it exports none), or None when the shell
+    cannot be asked. The shell is `$SHELL`, an absolute path, started as a login, interactive shell
+    as the session starts it, so a host a startup file selects shows; the last marked line of its
+    output answers. The child is bounded when it starts; a deadline too near raises
+    `DeadlineExhausted`, which is not caught."""
+    shell = os.environ.get("SHELL", "")
+    if not os.path.isabs(shell) or not os.access(shell, os.X_OK):
+        return None
+    timeout = bounded_timeout(deadline, child_timeout)
+    try:
+        done = subprocess.run(
+            [shell, "-l", "-i", "-c", SHELL_HOST_SCRIPT], capture_output=True, text=True,
+            check=False, stdin=subprocess.DEVNULL, env=gh_lookup_env(), timeout=timeout)
+    except (subprocess.TimeoutExpired, OSError, ValueError):
+        return None
+    answers = SHELL_HOST_ANSWER.findall(done.stdout)
+    return answers[-1] if answers else None
+
+
+def is_pull_request_document(document):
+    """Whether `document` has the shape of a pull request that `is_own_open_pull_request` reads:
+    a state, and a head and a base that each name a ref and a repository, the head a sha."""
+    if not isinstance(document, dict) or not isinstance(document.get("state"), str):
+        return False
+    for side, members in ((document.get("head"), ("sha", "ref")), (document.get("base"), ("ref",))):
+        if not isinstance(side, dict) or not isinstance(side.get("repo"), dict):
+            return False
+        if not isinstance(side["repo"].get("full_name"), str):
+            return False
+        if not all(isinstance(side.get(member), str) for member in members):
+            return False
+    return True
+
+
 def pull_request_check_run(gh_bin, slug, run_id, row, deadline, child_timeout, memo=None):
     """Whether run `run_id` of `slug` is a pull request check run of its own open issue pull
     request at that pull request's head whose failed job is a check the forge requires of
@@ -4192,6 +4235,10 @@ def pull_request_check_run(gh_bin, slug, run_id, row, deadline, child_timeout, m
     if os.environ.get("GH_HOST", "").strip().lower() not in ("", "github.com"):
         return False
     memo = {} if memo is None else memo
+    if "shell host" not in memo:
+        memo["shell host"] = shell_selected_host(deadline, child_timeout)
+    if memo["shell host"] is None or memo["shell host"].strip().lower() not in ("", "github.com"):
+        return False
 
     def read(path, paged=False):
         key = (slug.lower(), path)
@@ -4206,14 +4253,13 @@ def pull_request_check_run(gh_bin, slug, run_id, row, deadline, child_timeout, m
     failed = failed_job_names(read(f"actions/runs/{run_id}/jobs?per_page=100", paged=True))
     if not failed:
         return False
-    for number in numbers:
-        pull = read(f"pulls/{number}")
-        if pull is None:
-            return False
-        if is_own_open_pull_request(pull, slug, head, branch, row):
-            required = required_check_names(
-                read(f"branches/{row['integration_branch']}/protection/required_status_checks"))
-            return bool(required and failed & required)
+    pulls = [read(f"pulls/{number}") for number in numbers]
+    if not all(is_pull_request_document(pull) for pull in pulls):
+        return False
+    if any(is_own_open_pull_request(pull, slug, head, branch, row) for pull in pulls):
+        required = required_check_names(
+            read(f"branches/{row['integration_branch']}/protection/required_status_checks"))
+        return bool(required and failed & required)
     return False
 
 

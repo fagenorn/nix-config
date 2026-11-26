@@ -11,18 +11,41 @@ and status. It lives beside the suite to keep both files under the size budget (
 
 The rerun check reads four more endpoints, one stage each: `run` (an Actions run), `jobs` (its jobs),
 `pull` (a pull request) and `required` (a branch's required status checks), answered from FAKE_RUN_JSON,
-FAKE_JOBS_JSON, FAKE_PULL_JSON and FAKE_REQUIRED_JSON (the jobs are read with `--paginate --slurp`, so a
+FAKE_JOBS_JSON, FAKE_PULL_JSON (FAKE_PULL_<number>_JSON for one pull request) and FAKE_REQUIRED_JSON (the jobs are read with `--paginate --slurp`, so a
 JSON object answers as one page and a JSON list as the pages), with FAKE_RUN_MODE, FAKE_JOBS_MODE,
 FAKE_PULL_MODE and FAKE_REQUIRED_MODE injecting failures. `run_facts`, `jobs_facts`, `pull_facts` and
 `required_facts` build those payloads; each defaults to a pull request check run that passes.
 `check_run_forge`, `check_run_accepts`, `check_run_refusals`, `check_run_spellings`, `check_run_reads`,
-`check_run_permit` and `rerun_production` hold the scenarios of that check, beside the
+`check_run_permit`, `rerun_production` and `FAKE_SHELL_SCRIPT` (the shell the guard asks for its host,
+answered from FAKE_SHELL_GH_HOST, FAKE_SHELL_MODE) hold the scenarios of that check, beside the
 suite to keep it under the size budget.
 """
 
 import json
 
 from agent_tools.console import permit
+
+
+FAKE_SHELL_SCRIPT = '''
+import os
+import sys
+import time
+
+mode = os.environ.get("FAKE_SHELL_MODE", "")
+if mode == "hang":
+    time.sleep(30)
+if mode == "fail":
+    raise SystemExit(1)
+if mode == "silent":
+    raise SystemExit(0)
+if sys.argv[1:4] != ["-l", "-i", "-c"] or len(sys.argv) != 5:
+    print("unexpected fake-shell argv: " + repr(sys.argv[1:]), file=sys.stderr)
+    raise SystemExit(64)
+environment = {k: v for k, v in os.environ.items() if k != "GH_HOST"}
+if "FAKE_SHELL_GH_HOST" in environment:
+    environment["GH_HOST"] = environment["FAKE_SHELL_GH_HOST"]
+os.execve("/bin/sh", ["sh", "-c", sys.argv[4]], environment)
+'''
 
 
 def run_facts(slug, head, event="pull_request", numbers=(7,), head_repo=None, branch="issue-12-x"):
@@ -79,6 +102,7 @@ def check_run_accepts(slug, head):
         ("Actions-bound check", "", {"FAKE_REQUIRED_JSON": required_facts(contexts=(), checks=(("Tests", 15368),))}),
         ("any-app check", "", {"FAKE_REQUIRED_JSON": required_facts(contexts=(), checks=(("Tests", -1),))}),
         ("session on github.com", "", {"GH_HOST": "github.com"}),
+        ("shell on github.com", "", {"FAKE_SHELL_GH_HOST": "github.com"}),
         ("failed job on page two of 101", "", {"FAKE_JOBS_JSON": jobs_pages(("Tests",))}),
         ("failed job beside the required one", "", {
             "FAKE_JOBS_JSON": jobs_facts(failed=("Tests", "Lint and tests")), "FAKE_REQUIRED_JSON": required}),
@@ -119,6 +143,20 @@ def check_run_refusals(slug, head):
         ("pages disagree on the total", forge(FAKE_JOBS_JSON=jobs_pages(("Tests",), total=101).replace(
             '"total_count": 101, "jobs": [{"name": "Tests"', '"total_count": 7, "jobs": [{"name": "Tests"'))),
         ("session on another host", forge(GH_HOST="ghe.example.com")),
+        ("shell startup file on another host", forge(FAKE_SHELL_GH_HOST="ghe.example.com")),
+        ("shell cannot be started", forge(FAKE_SHELL_MODE="fail")),
+        ("shell prints no answer", forge(FAKE_SHELL_MODE="silent")),
+        ("no shell named", forge(SHELL="")),
+        ("shell that is not a path", forge(SHELL="zsh")),
+        ("first pull request malformed beside a qualifying one", forge(
+            FAKE_RUN_JSON=run_facts(slug, head, numbers=(7, 8)), FAKE_PULL_7_JSON="{}")),
+        ("later pull request malformed beside a qualifying one", forge(
+            FAKE_RUN_JSON=run_facts(slug, head, numbers=(7, 8)), FAKE_PULL_8_JSON="{}")),
+        ("pull request without a head repository", forge(FAKE_PULL_JSON=json.dumps({
+            "state": "open", "head": {"sha": head, "ref": "issue-12-x", "repo": None},
+            "base": {"ref": "main", "repo": {"full_name": slug}}}))),
+        ("pull request that is not readable beside a qualifying one", forge(
+            FAKE_RUN_JSON=run_facts(slug, head, numbers=(7, 8)), FAKE_PULL_8_JSON="[]")),
         ("sibling job with a malformed conclusion", forge(FAKE_JOBS_JSON=json.dumps({"total_count": 2, "jobs": [
             {"name": "Tests", "conclusion": "failure"}, {"name": "Lint", "conclusion": 42}]}))),
         ("run nested past the recursion limit", forge(FAKE_RUN_JSON="[" * 30000 + "]" * 30000)),
@@ -149,6 +187,7 @@ def check_run_refusals(slug, head):
         ("declared by the row only", forge(FAKE_REQUIRED_JSON=required_facts(contexts=("Lint",))),
          {"required_checks": ["Tests"]}, ()),
         ("run timeout", forge(FAKE_RUN_MODE="timeout"), {}, ("--child-timeout-seconds", "0.5")),
+        ("shell timeout", forge(FAKE_SHELL_MODE="hang"), {}, ("--child-timeout-seconds", "0.5")),
         ("case-spelled row of another integration branch", forge(), {"integration_branch": "dev", "also": (
             ("Acme/Deployer", {}),)}, ()),
     ]
@@ -415,6 +454,8 @@ else:
         '"enforce_admins":{"enabled":true}}'
     )
 answer = os.environ.get("FAKE_" + stage.upper() + "_JSON", default)
+if stage == "pull":
+    answer = os.environ.get("FAKE_PULL_" + number + "_JSON", answer)
 if stage == "jobs" and isinstance(json.loads(answer), dict):
     answer = "[" + answer + "]"
 print(answer)

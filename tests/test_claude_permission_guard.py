@@ -23,8 +23,8 @@ from agent_tools.delivery import look_marker
 
 from .guard_fake_children import FAKE_DERIVE_SCRIPT, FAKE_GIT_SCRIPT
 from .guard_fake_gh import (
-    FAKE_GH_SCRIPT, check_run_accepts, check_run_forge, check_run_permit, check_run_reads, check_run_refusals,
-    check_run_spellings, jobs_facts, rerun_production, run_facts)
+    FAKE_GH_SCRIPT, FAKE_SHELL_SCRIPT, check_run_accepts, check_run_forge, check_run_permit, check_run_reads, check_run_refusals,
+    check_run_spellings, jobs_facts, pull_facts, rerun_production, run_facts)
 from .guard_policy_world import GuardPolicyWorld
 from .guard_sandbox_git import SandboxGit
 
@@ -110,6 +110,9 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         cls.fake_gh = Path(cls.fixture_dir.name) / "fake-gh"
         cls.fake_gh.write_text(f"#!{sys.executable}\n" + FAKE_GH_SCRIPT, encoding="utf-8")
         cls.fake_gh.chmod(0o755)
+        cls.fake_shell = Path(cls.fixture_dir.name) / "fake-shell"
+        cls.fake_shell.write_text(f"#!{sys.executable}\n" + FAKE_SHELL_SCRIPT, encoding="utf-8")
+        cls.fake_shell.chmod(0o755)
         rows_path = Path(cls.fixture_dir.name) / "derive-rows.json"
         rows_path.write_text(json.dumps({NODO: NODO_ROW}), encoding="utf-8")
         cls.fake_derive = Path(cls.fixture_dir.name) / "fake-derive"
@@ -174,6 +177,7 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         if "--look-bin" not in guard_args:
             guard_args = (*guard_args, "--look-bin", str(self.look_bin))
         child_env = {k: v for k, v in os.environ.items() if not k.startswith("FAKE_")}
+        child_env["SHELL"] = str(self.fake_shell)
         child_env.update(env or {})
         return subprocess.run(
             [self.guard, *guard_args], input=raw, text=True, capture_output=True,
@@ -2071,6 +2075,24 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             result = run(f"gh run rerun 55 --failed --repo {self.OWN}")
             self.assertEqual(0, result.returncode, result.stderr)
             self.assertEqual("", log.read_text(encoding="utf-8"))
+
+    def test_a_run_listing_a_closed_pull_request_beside_its_open_one_is_still_a_check_run(self):
+        """A pull request document that reads fine but is not the run's own open pull request is
+        skipped; only one that cannot be read refuses."""
+        guard_args, prod, _own, _other = self.rerun_world()
+        log = Path(self.fixture_dir.name) / "rerun.log"
+        log.write_text("", encoding="utf-8")
+        env = {**check_run_forge(PROD, self.CHECK_HEAD, FAKE_RUN_JSON=run_facts(PROD, self.CHECK_HEAD, numbers=(6, 7)),
+                                 FAKE_PULL_6_JSON=pull_facts(PROD, self.CHECK_HEAD, "closed")),
+               "FAKE_GH_LOG": str(log)}
+        result = self.run_guard(self.CHECK_RERUN, cwd=prod, env=env, guard_args=guard_args)
+        self.assertEqual(0, result.returncode, result.stderr)
+        base = f"repos/{PROD}"
+        self.assertEqual(
+            [["api", f"{base}/actions/runs/55"], ["api", "--paginate", "--slurp", f"{base}/actions/runs/55/jobs?per_page=100"],
+             ["api", f"{base}/pulls/6"], ["api", f"{base}/pulls/7"],
+             ["api", f"{base}/branches/main/protection/required_status_checks"]],
+            [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()])
 
     def test_a_rerun_of_any_other_run_or_an_unread_one_still_meets_the_production_rule(self):
         """A rerun that is not exactly the permit's form, or whose run, jobs, pull request or
