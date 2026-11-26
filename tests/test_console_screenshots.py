@@ -1040,12 +1040,12 @@ def uncovered(moved, rows) -> list[str]:
 
 
 class ScreenshotFixtureTest(unittest.TestCase):
-    def test_the_set_is_fifty_eight_states_at_two_widths(self) -> None:
-        self.assertEqual(len(shots.STATES), 58)
+    def test_the_set_is_fifty_nine_states_at_two_widths(self) -> None:
+        self.assertEqual(len(shots.STATES), 59)
         self.assertEqual(shots.STATES[shots.STATES.index("manager-cannot-hear") + 1:][:5],
                          ("permission-stale", "permission-card", "permission-long", "waiting-until",
                           "paused"))
-        self.assertEqual(shots.STATES[shots.STATES.index("notice-post-open") + 1], "live-fault")
+        self.assertEqual((shots.STATES[shots.STATES.index("notice-post-open") + 1], shots.STATES[shots.STATES.index("paused") + 1]), ("live-fault", "jargon-gloss"))
         self.assertEqual(shots.STATES[-8:], ("sharing-panel", "sharing-off", "sharing-unreadable",
                                              "sharing-reached", "guest-page", "guest-steer",
                                              "owner-actors", "owner-accounts"))
