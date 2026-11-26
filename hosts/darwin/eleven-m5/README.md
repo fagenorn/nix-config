@@ -191,7 +191,9 @@ top owners. The files of the last 14 days are kept. The day's line in
 the `peak_owners` of the day, `census_samples` (how many samples had a census) and
 `records_since`, the day the records began, so an earlier line without them is
 not a day with no peak. `peak_verify_gib` is the day's largest single verify-run
-tree and `peak_verify_at` its time, and `verify_runs` is the verify runs read that day.
+tree and `peak_verify_at` its time, and `verify_runs` is the verify runs read that day. A run whose
+peak was before midnight and that the first sample after midnight reads is counted in the finished day's
+line, not the new day's.
 
 ### When you add a workload
 

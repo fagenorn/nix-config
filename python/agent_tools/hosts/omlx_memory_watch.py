@@ -27,8 +27,10 @@ gets one line per finished day: `day`, the peaks and minimum in GiB (null where 
 `sys_footprint`, `process_footprint`, `unowned`, `wired`, `anonymous`, `compressions` and `verify` a
 `peak_<name>_gib` and a `peak_<name>_at` (the first sample, as ISO 8601, that held that peak; null
 where unmeasured; for `verify` the largest single verify-run tree and the run's own peak time, kept
-only on its local day), `peak_owners` (the day's five largest `{name, pid, gib, at}`), `census_samples`,
-`records_since` and `verify_runs` (the verify runs read that day).
+only on its local day; the first sample after midnight also folds a run whose peak was on the finished
+day into that day's line, where it counts as one of its `verify_runs`), `peak_owners` (the day's five
+largest `{name, pid, gib, at}`), `census_samples`, `records_since` and `verify_runs` (the verify runs
+read that day).
 
 Each successful sample also appends one line to `DIR/samples/<day>.jsonl` (directory 0700, file 0600):
 `at`, `used_bytes`, `available_bytes`, `loaded`, `omlx_bytes`, `ci_jobs`, `wired_bytes`,
@@ -391,19 +393,37 @@ def _queue_verify_tree(state: dict, event: dict, peak: int, reading: dict, alert
     })
 
 
-def _fold_verify(state: dict, events: list[dict], reading: dict, now: datetime, alert_bytes: int) -> None:
-    """Count each `verify_run`, alert on a tree over the line, and fold the peak dated in the state's day."""
-    local = now if now.tzinfo else now.astimezone()
+def _local_day(at: str, now: datetime) -> str:
+    """The local day of the instant `at`: the host's zone with its own offset at `at`, else `now`'s zone."""
+    zone = None if now.astimezone().utcoffset() == now.utcoffset() else now.tzinfo
+    return datetime.fromisoformat(at).astimezone(zone).date().isoformat()
+
+
+def _amend_day_line(line: dict, peak: int, at: str) -> None:
+    """Count a run into the finished day's line and keep its peak there when it is the day's highest."""
+    line["verify_runs"] += 1
+    if line["peak_verify_gib"] is None or _gib(peak) > line["peak_verify_gib"]:
+        line["peak_verify_gib"], line["peak_verify_at"] = _gib(peak), at
+
+
+def _fold_verify(state: dict, events: list[dict], reading: dict, now: datetime, alert_bytes: int,
+                 line: dict | None) -> None:
+    """Alert on each tree over the line; count each `verify_run` and fold its peak into the day the peak is dated in.
+
+    That day is the state's, or the finished day's `line` when this sample rolled the day over.
+    """
     for event in events:
         if event["kind"] != "verify_run":
             continue
-        state["verify_runs"] += 1
         peak, at = event.get("tree_peak_bytes"), event.get("tree_peak_at")
         if _is_int(peak) and peak > alert_bytes:
             _queue_verify_tree(state, event, peak, reading, alert_bytes)
-        if not _is_int(peak) or not isinstance(at, str):
+        day = _local_day(at, now) if _is_int(peak) and isinstance(at, str) else None
+        if line is not None and day == line["day"]:
+            _amend_day_line(line, peak, at)
             continue
-        if datetime.fromisoformat(at).astimezone(local.tzinfo).date().isoformat() == state["day"]:
+        state["verify_runs"] += 1
+        if day == state["day"]:
             _fold_peak(state, "verify", peak, at)
 
 
@@ -645,7 +665,7 @@ def decide(state, reading: dict, now: datetime, floor_bytes: int, others_budget_
         state["low_memory_open"] = False
     _fold_fseventsd(state, reading["fseventsd"], reading["host"])
     events = omlx_memory_events.fold_events(state, reading["observed"])
-    _fold_verify(state, events, reading, now, verify_alert_bytes)
+    _fold_verify(state, events, reading, now, verify_alert_bytes, line)
     _fold_floor(state, reading["floor"], reading, events)
     _fold_unowned(state, census, reading, unowned_alert_bytes)
     return state, line, _sample_line(reading, now, census, events)

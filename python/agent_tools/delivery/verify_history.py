@@ -10,7 +10,8 @@ newline, UTF-8, with exactly these keys:
      "tree_peak_bytes":3221225472,"waited_seconds":12.0}
 
 `repository` is the run's lowercased `owner/repo`, or null outside a repository. `command` is the
-first `COMMAND_WORDS` whitespace-separated words of the argv. `started` is the UTC instant the run
+first `COMMAND_WORDS` whitespace-separated words of the argv, an argument that starts `NAME=` having its
+whole value replaced by `<redacted>` first. `started` is the UTC instant the run
 began waiting. `waited_seconds` is the time from just before the first slot try to the slot taken
 (or to the end of the wait when none was taken); `held_seconds` is the time from the slot taken to
 the slot and repository lock given back, or null when no slot was taken. Both are rounded to one
@@ -31,7 +32,7 @@ host clears its temporary directory at boot.
 the types above (`held_seconds` a number or null, the numbers finite and not below 0, `place`
 absent as in older lines, null or an integer of at least 1; `lane` absent as in older lines or one
 of `LANES`; `owner` absent as in older lines, null
-or a string; `tree_peak_bytes` absent as in older lines, null or an integer of at least 0 and
+or a string; `tree_peak_bytes` absent as in older lines, null or an integer from 0 to `MAX_TREE_BYTES` and
 `tree_peak_at` absent, null or an RFC 3339 UTC string, the two both set or both null or absent);
 any other line, a torn last one included, is skipped and counted. Over the runs that
 started in the window, per repository (`NO_REPOSITORY` for null), it gives `runs`, the median and
@@ -67,6 +68,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import stat
 import statistics
 
@@ -77,6 +79,14 @@ COMMAND_WORDS = 3
 READ_LIMIT = 1 << 20
 NO_REPOSITORY = "(no repository)"
 LANES = ("long", "short")
+MAX_TREE_BYTES = 1 << 63
+ASSIGNMENT = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=")
+
+
+def _redacted(word: str) -> str:
+    """`word` with the value of a leading `NAME=value` assignment replaced, whatever the value holds."""
+    found = ASSIGNMENT.match(word)
+    return word if found is None else f"{found.group(1)}=<redacted>"
 
 
 def history_path(directory: Path) -> Path:
@@ -89,7 +99,7 @@ def entry(repository: str | None, argv: Sequence[str], started: datetime, waited
           tree_peak_at: str | None = None) -> dict:
     """The record of one run, with its argv cut to `COMMAND_WORDS` words and its owner kept whole."""
     return {
-        "command": " ".join(" ".join(argv).split()[:COMMAND_WORDS]),
+        "command": " ".join(" ".join(_redacted(word) for word in argv).split()[:COMMAND_WORDS]),
         "exit": exit_code,
         "held_seconds": None if held is None else round(held, 1),
         "lane": lane,
@@ -183,7 +193,7 @@ def _is_tree(record: Mapping) -> bool:
     peak, at = record.get("tree_peak_bytes"), record.get("tree_peak_at")
     if peak is None or at is None:
         return peak is None and at is None
-    if type(peak) is not int or peak < 0:
+    if type(peak) is not int or not 0 <= peak <= MAX_TREE_BYTES:
         return False
     canonical.parse_rfc3339_utc(at)
     return True

@@ -52,9 +52,10 @@ Repositories. `verify-slot run` admits at most a repository's declared number of
 once (`verify_repository_slots`, 1 for a repository the declaration does not name), since
 two suites of one project may share resources such as a single test database. The
 repository is the `origin` remote of the working directory, normalized to `owner/repo` and
-lowercased; a run outside a repository, or in one without `origin`, is its own group and is
-excluded by no other run. A holder takes an exclusive non-blocking `flock` on one of its
-repository's `repository_lock_paths`, never past the slot count (`GROUP_LOCK` names the first),
+lowercased (a remote it cannot normalize is kept whole, minus any `user:password@` after its scheme);
+a run outside a repository, or in one without `origin`, is its own group and is excluded by no other
+run. A holder takes an exclusive non-blocking `flock` on one of its repository's `repository_lock_paths`,
+never past the slot count (`GROUP_LOCK` names the first),
 in the slot directory only after it took its slot and passed the count recheck, and gives the
 slot back and waits while another holder has each. The lock is taken after the slot so a
 waiter holds neither and a live waiter still goes first (ADR-delivery-016 D6): ordinary
@@ -169,6 +170,7 @@ import json
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import re
 import signal
 import stat
 import subprocess
@@ -178,7 +180,8 @@ import time
 from agent_tools.delivery import host_admission, verify_history, verify_queue, verify_tree
 from agent_tools.project_contract.derived_values import normalize_remote_url
 
-NO_SLOT_LINE = "verify-slot: no verify slot came free within {limit}s; nothing ran"
+CREDENTIALS = re.compile(r"^([A-Za-z][A-Za-z0-9+.-]*://)[^/@]*@")
+NO_SLOT_LINE ="verify-slot: no verify slot came free within {limit}s; nothing ran"
 WAITING_LINE = "verify-slot: all {count} verify slots of this host are taken; waiting"
 WAITED_LINE = "verify-slot: waited {seconds:.1f}s for a verify slot"
 DEFERRING_LINE = "verify-slot: a live-fault verify run is waiting for a slot; this run waits behind it"
@@ -283,7 +286,7 @@ def repository_group(cwd: Path) -> str | None:
     url = result.stdout.strip()
     if result.returncode != 0 or not url:
         return None
-    return (normalize_remote_url(url) or url).lower()
+    return (normalize_remote_url(url) or CREDENTIALS.sub(r"\1", url)).lower()
 
 
 def _say(line: str) -> None:

@@ -2,7 +2,8 @@
 
 `verify-slot run` starts a `TreePeak` for its command's child. It reads the tree at `start()` and then
 every `interval` seconds (`TREE_SECONDS`) until `stop()`, and reads nothing once `stop()` has returned.
-One read is exactly
+`stop()` waits for a read in flight, which `TREE_TIMEOUT_SECONDS` bounds, and a thread that cannot be
+started leaves the run unmeasured. One read is exactly
 
     footprint -p <pid> -t -f bytes --noCategories -j <path>
 
@@ -35,7 +36,7 @@ import threading
 
 TREE_SECONDS = 2.0
 TREE_TIMEOUT_SECONDS = 10
-JOIN_SECONDS = 1.0
+JOIN_SECONDS = TREE_TIMEOUT_SECONDS + 1
 FOOTPRINT_ENV = "VERIFY_SLOT_FOOTPRINT"
 DEFAULT_FOOTPRINT = "/usr/bin/footprint"
 TIME_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
@@ -98,11 +99,15 @@ class TreePeak:
     def start(self) -> None:
         if not os.access(self._footprint, os.X_OK):
             return
-        self._thread = threading.Thread(target=self._loop, daemon=True)
-        self._thread.start()
+        thread = threading.Thread(target=self._loop, daemon=True)
+        try:
+            thread.start()
+        except (RuntimeError, OSError):
+            return
+        self._thread = thread
 
     def stop(self) -> tuple[int | None, str | None]:
-        """End the reads and answer the peak and its time; a read in flight is bounded by its own timeout."""
+        """End the reads and answer the peak and its time, waiting for a read in flight to finish or time out."""
         self._stopped.set()
         if self._thread is not None:
             self._thread.join(JOIN_SECONDS)

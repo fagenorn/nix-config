@@ -15,9 +15,10 @@ import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest import mock
 
 from agent_tools.canonical import parse_rfc3339_utc
-from agent_tools.delivery import verify_history, verify_tree
+from agent_tools.delivery import verify_history, verify_slot, verify_tree
 
 TIER = "fast"
 
@@ -144,12 +145,49 @@ class VerifyRunTreeTest(unittest.TestCase):
                {**BASE, "tree_peak_bytes": "1", "tree_peak_at": at},
                {**BASE, "tree_peak_bytes": 1, "tree_peak_at": "yesterday"},
                {**BASE, "tree_peak_bytes": 1, "tree_peak_at": None},
-               {**BASE, "tree_peak_bytes": None, "tree_peak_at": at}]
+               {**BASE, "tree_peak_bytes": None, "tree_peak_at": at},
+               {**BASE, "tree_peak_bytes": 10**400, "tree_peak_at": at},
+               {**BASE, "tree_peak_bytes": verify_history.MAX_TREE_BYTES + 1, "tree_peak_at": at}]
         path = self.d / "history.jsonl"
         path.write_text("".join(json.dumps(record) + "\n" for record in [*good, *bad]))
         records, skipped = verify_history.read(path)
         self.assertEqual(records, good)
-        self.assertEqual(skipped, 6)
+        self.assertEqual(skipped, 8)
+
+    def test_stop_waits_for_a_read_still_running_and_keeps_its_figure(self):
+        report = self.d / "slow-report.json"
+        report.write_text(json.dumps(TREE))
+        slow = self.d / "slow-footprint"
+        slow.write_text(
+            '#!/bin/sh\nwhile [ $# -gt 0 ]; do if [ "$1" = "-j" ]; then dest="$2"; fi; shift; done\n'
+            f'sleep 1.5\ncp "{report}" "$dest"\n')
+        slow.chmod(0o755)
+        peak = verify_tree.TreePeak(os.getpid(), str(slow), interval=60)
+        peak.start()
+        figure, at = peak.stop()
+        self.assertEqual(figure, 3 * GIB)
+        self.assertIsNotNone(at)
+
+    def test_a_sampler_thread_that_cannot_start_leaves_the_run_unmeasured(self):
+        fake = fake_footprint(self.d, [TREE])
+        peak = verify_tree.TreePeak(os.getpid(), str(fake))
+        with mock.patch.object(verify_tree.threading.Thread, "start", side_effect=RuntimeError("can't start")):
+            peak.start()
+        self.assertEqual(peak.stop(), (None, None))
+        self.assertEqual(self.log_lines(), [])
+
+    def test_the_history_command_hides_a_whole_assignment_value_even_with_spaces(self):
+        started = datetime(2026, 11, 24, 12, 0, 0, tzinfo=timezone.utc)
+        line = verify_history.entry(
+            "o/r", ["env", "AUTH=Bearer private-token", "just", "test"], started, 0.0, 1.0, 0, None)
+        self.assertEqual(line["command"], "env AUTH=<redacted> just")
+
+    def test_a_remote_that_is_not_normalized_loses_its_credentials_in_the_repository_name(self):
+        repository = self.d / "work"
+        git = ["git", "-C", str(repository)]
+        subprocess.run([*git, "init", "-q"], check=True)
+        subprocess.run([*git, "remote", "add", "origin", "https://user:token@Host/Project.git"], check=True)
+        self.assertEqual(verify_slot.repository_group(repository), "https://host/project.git")
 
 
 if __name__ == "__main__":

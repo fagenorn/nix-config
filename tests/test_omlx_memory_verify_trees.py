@@ -44,7 +44,7 @@ class VerifyTreeCase(RecordsCase):
 
 
 class VerifyTreeRecordTest(VerifyTreeCase):
-    def test_a_verify_run_carries_its_tree_peak_with_its_command_and_repository(self):
+    def test_a_verify_run_records_its_tree_peak_with_its_command_and_repository(self):
         self.sample_with("2026-11-24T12:00:00")
         self.run_line("2026-11-24T12:00:10Z", 30.0, 3.0, "2026-11-24T12:00:20Z")
         self.sample_with("2026-11-24T12:01:00")
@@ -86,20 +86,53 @@ class VerifyTreeRecordTest(VerifyTreeCase):
         self.assertIsNone(line["peak_verify_at"])
         self.assertEqual(line["verify_runs"], 2)
 
-    def test_a_peak_before_midnight_read_after_it_stays_out_of_the_new_day(self):
+    def test_a_peak_before_midnight_read_after_it_lands_in_the_finished_day_not_the_new_one(self):
         self.sample_with("2026-11-24T23:58:00")
-        self.run_line("2026-11-24T23:50:00Z", 600.0, 3.0, "2026-11-24T23:59:00Z")
-        self.sample_with("2026-11-25T00:01:00")
+        self.run_line("2026-11-24T23:50:00Z", 600.0, 4.0, "2026-11-24T23:59:50Z")
+        self.sample_with("2026-11-25T00:00:10")
         [event] = self.sample_lines("2026-11-25")[-1]["events"]
-        self.assertEqual(event["tree_peak_bytes"], 3 * GIB)
+        self.assertEqual(event["tree_peak_bytes"], 4 * GIB)
         [line] = self.day_lines()
         self.assertEqual(line["day"], "2026-11-24")
-        self.assertIsNone(line["peak_verify_gib"])
-        self.assertEqual(line["verify_runs"], 0)
+        self.assertEqual(line["peak_verify_gib"], 4.0)
+        self.assertEqual(line["peak_verify_at"], "2026-11-24T23:59:50+00:00")
+        self.assertEqual(line["verify_runs"], 1)
         saved = self.read_state()
         self.assertEqual(saved["day"], "2026-11-25")
-        self.assertEqual(saved["verify_runs"], 1)
+        self.assertEqual(saved["verify_runs"], 0)
         self.assertNotIn("verify", saved["census_peaks"])
+
+    def test_a_lower_peak_read_after_midnight_does_not_replace_the_finished_days_highest(self):
+        self.sample_with("2026-11-24T23:58:00")
+        self.run_line("2026-11-24T23:50:00Z", 100.0, 4.0, "2026-11-24T23:51:00Z")
+        self.sample_with("2026-11-24T23:59:00")
+        self.run_line("2026-11-24T23:55:00Z", 300.0, 3.0, "2026-11-24T23:59:30Z")
+        self.sample_with("2026-11-25T00:00:10")
+        [line] = self.day_lines()
+        self.assertEqual((line["peak_verify_gib"], line["peak_verify_at"]), (4.0, "2026-11-24T23:51:00+00:00"))
+        self.assertEqual(line["verify_runs"], 2)
+
+    def test_the_day_of_a_peak_follows_the_hosts_clock_across_a_fall_back_change(self):
+        self.env["TZ"] = "America/Los_Angeles"
+        self.sample_with("2026-11-01T00:10:00")
+        self.run_line("2026-11-01T07:20:00Z", 600.0, 3.0, "2026-11-01T07:30:00Z")
+        self.sample_with("2026-11-01T02:10:00")
+        self.sample_with("2026-11-02T00:01:00")
+        [line] = self.day_lines()
+        self.assertEqual(line["day"], "2026-11-01")
+        self.assertEqual((line["peak_verify_gib"], line["peak_verify_at"]), (3.0, "2026-11-01T07:30:00+00:00"))
+        self.assertEqual(line["verify_runs"], 1)
+
+    def test_a_tree_peak_too_large_to_be_a_byte_count_is_skipped_and_the_next_sample_goes_on(self):
+        self.sample_with("2026-11-24T12:00:00")
+        self.append(json.dumps({
+            "command": "just test", "exit": 0, "held_seconds": 30.0, "lane": "long", "owner": None, "place": 1,
+            "repository": "o/r", "started": "2026-11-24T12:00:10Z", "tree_peak_at": "2026-11-24T12:00:20Z",
+            "tree_peak_bytes": 10**400, "waited_seconds": 0.0}) + "\n")
+        self.run_line("2026-11-24T12:00:30Z", 30.0, 3.0, "2026-11-24T12:00:40Z")
+        self.sample_with("2026-11-24T12:01:00")
+        [event] = self.sample_lines()[-1]["events"]
+        self.assertEqual(event["tree_peak_bytes"], 3 * GIB)
 
     def test_an_upgrade_over_an_older_saved_day_dates_the_verify_records_from_the_new_day(self):
         self.put_state(state(day="2026-11-24"))
