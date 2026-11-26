@@ -17,7 +17,8 @@ repository's runs that may hold verify slots at once, which
 `agent_tools.delivery.verify_slot` reads (`DEFAULT_REPOSITORY_VERIFY_SLOTS` for
 a repository it does not name), and `verify_short_lane`, which
 names, per repository, the short commands that run beside the verify slots in
-their own lane, with that lane's slot count and per-command time bound;
+their own lane, with that lane's slot count and time bound (a command's entry may
+carry its own bound instead);
 `agent_tools.delivery.verify_slot` reads it through `short_command`. Nothing else is
 declared: admission reasons over declared `agent_slots` only, never CPU, memory
 or load.
@@ -77,6 +78,7 @@ REPOSITORY_NAME_PATTERN = re.compile(r"[a-z0-9_-][a-z0-9_.-]*/(?!\.{1,2}$)[a-z0-
 
 _DECLARATION_MEMBERS = frozenset({"schema_version", "routes"})
 SHORT_LANE_MEMBERS = frozenset({"slots", "bound_seconds", "commands"})
+SHORT_COMMAND_MEMBERS = frozenset({"argv", "bound_seconds"})
 
 _OPTIONAL_DECLARATION_MEMBERS = frozenset(
     {"verify_slots", "verify_budget_seconds", "verify_repository_slots", "verify_short_lane"})
@@ -122,23 +124,43 @@ def _reject_non_finite(token: str) -> object:
     raise _invalid(f"non-finite number: {token}")
 
 
+def _bound_valid(bound: object) -> bool:
+    """Whether `bound` is a plain int >= 1 that a timer can count down."""
+    return type(bound) is int and 1 <= bound <= threading.TIMEOUT_MAX
+
+
+def _argv_valid(argv: object) -> bool:
+    return isinstance(argv, list) and bool(argv) and all(
+        isinstance(word, str) and word for word in argv)
+
+
+def _short_entry(entry: object) -> tuple[list, int | None] | None:
+    """`(argv, own bound or None)` of a short-command entry, `None` when it is not of the declared shape.
+
+    An entry is an argv list, which takes the lane's bound, or exactly `{argv, bound_seconds}`.
+    """
+    if isinstance(entry, dict):
+        if set(entry) != SHORT_COMMAND_MEMBERS or not _argv_valid(entry["argv"]) \
+                or not _bound_valid(entry["bound_seconds"]):
+            return None
+        return entry["argv"], entry["bound_seconds"]
+    return (entry, None) if _argv_valid(entry) else None
+
+
 def _short_lane_valid(lane: object) -> bool:
     """Whether `lane` is exactly `{slots, bound_seconds, commands}` of the declared shape."""
     if not isinstance(lane, dict) or set(lane) != SHORT_LANE_MEMBERS:
         return False
-    if any(type(lane[name]) is not int or lane[name] < 1 for name in ("slots", "bound_seconds")):
-        return False
-    if lane["bound_seconds"] > threading.TIMEOUT_MAX:  # a bound no timer can count down
+    if type(lane["slots"]) is not int or lane["slots"] < 1 or not _bound_valid(lane["bound_seconds"]):
         return False
     commands = lane["commands"]
     if not isinstance(commands, dict):
         return False
     return all(
         isinstance(repository, str) and REPOSITORY_NAME_PATTERN.fullmatch(repository)
-        and isinstance(argvs, list) and argvs
-        and all(isinstance(argv, list) and argv
-                and all(isinstance(word, str) and word for word in argv) for argv in argvs)
-        for repository, argvs in commands.items())
+        and isinstance(entries, list) and entries
+        and all(_short_entry(entry) is not None for entry in entries)
+        for repository, entries in commands.items())
 
 
 def validate_declaration(value: object) -> dict:
@@ -149,7 +171,9 @@ def validate_declaration(value: object) -> dict:
     int >= 1, `verify_repository_slots`, an object whose keys are
     lowercase `owner/repo` and whose values are plain ints >= 1, and
     `verify_short_lane`, `{slots, bound_seconds, commands}` with
-    two such ints and `commands` mapping `owner/repo` to non-empty argv lists;
+    two such ints and `commands` mapping `owner/repo` to non-empty lists of
+    entries, each a non-empty argv list (the lane's bound applies) or exactly
+    `{argv, bound_seconds}` (its own bound applies);
     `schema_version` is a plain int equal to 1; `routes` is a non-empty object
     whose keys match the route grammar and are not `direct`; a supported route
     is exactly `{"support": "supported", "agent_slots": <int >= floor>}` and an
@@ -265,9 +289,11 @@ def short_command(declaration: dict, repository: str | None,
     lane = declaration.get("verify_short_lane")
     if lane is None or repository is None:
         return None
-    if list(argv) not in lane["commands"].get(repository, ()):
-        return None
-    return lane["slots"], lane["bound_seconds"]
+    for entry in lane["commands"].get(repository, ()):
+        declared, own = _short_entry(entry)
+        if declared == list(argv):
+            return lane["slots"], lane["bound_seconds"] if own is None else own
+    return None
 
 
 def repository_verify_slots(declaration: dict, repository: str) -> int:
