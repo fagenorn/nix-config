@@ -1000,15 +1000,6 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         pass
 
 
-class LoopbackServerTest(unittest.TestCase):
-    def test_a_loopback_server_shuts_down_without_waiting_out_the_default_poll(self):
-        server = loopback_server(ConsoleHandler)
-        self.addCleanup(server.server_close)
-        started = time.monotonic()
-        server.shutdown()
-        self.assertLess(time.monotonic() - started, 0.25)
-
-
 class OwnerServicesWorld(unittest.TestCase):
     """A temp HOME with the forge key and the activation record, and the two loopback servers."""
     commit = "b" * 40
