@@ -262,34 +262,52 @@ class RestartedRegistrationTest(ApproveCase):
     merged = approve_service.MergedRegistrationTest.merged
     results = approve_service.MergedRegistrationTest.results
 
-    def restarted_and_registered(self, pause=0.0):
+    def waiting_then_restarted(self, gate=None):
+        """A merged plan whose only row is `waiting`, then a restart; `gate` holds the register call.
+
+        The fake writes the registry before the service appends its `registered` row. With a gate,
+        the call signals `gate["written"]` once the registry is written and then blocks on
+        `gate["release"]` (bounded), so the listing and the row are published in separate steps.
+        """
         fake = self.merged(approve_service.NOT_INTEGRATED)
         self.poll("merged")
+        self.assertEqual(self.results(), ["waiting"])  # a persisted waiting row, not a fresh plan
         fake.report = approve_service.GREEN
-        if pause:
+        if gate is not None:
             written = fake.register
+            self.addCleanup(gate["release"].set)
 
-            def register_then_pause(*arguments, **operands):
+            def register_then_hold(*arguments, **operands):
                 report = written(*arguments, **operands)
-                time.sleep(pause)  # the registry is written; the `registered` row is not yet
+                gate["written"].set()
+                gate["release"].wait(10)
                 return report
 
-            fake.register = register_then_pause
+            fake.register = register_then_hold
         self.restart()
-        # The fake writes the registry before the service appends its `registered` row, so the
-        # listing alone can be published first: wait for the listing and the committed row together.
+
+    def listed_and_registered(self):
         done = awaited(
             self.svc,
-            lambda: True if (self.listed("o/r") and self.results()[-1:] == ["registered"])
+            lambda: True if (self.listed("o/r") and self.results() == ["waiting", "registered"])
             else PENDING,
             10, 0.05)
         self.assertIsNot(done, PENDING, "the project was never listed with a registered row")
-        self.assertEqual(self.results()[-1:], ["registered"])
+        self.assertEqual(self.results(), ["waiting", "registered"])
 
     def test_a_waiting_registration_survives_a_restart_and_registers_on_the_first_look(self):
-        self.restarted_and_registered()
+        self.waiting_then_restarted()
+        self.listed_and_registered()
 
     def test_the_restart_wait_holds_while_the_registry_is_listed_before_the_row_lands(self):
-        # The registry watcher (0.25 s) lists the project during the pause: a wait on the
-        # listing alone would return while the last row is still `waiting`.
-        self.restarted_and_registered(pause=0.6)
+        gate = {"written": threading.Event(), "release": threading.Event()}
+        self.waiting_then_restarted(gate)
+        self.assertTrue(gate["written"].wait(10), "the restarted service never registered")
+        # The registry is written and the row is held back: the listing appears while the last
+        # row is still `waiting`, so a wait on the listing alone would return here.
+        listed = awaited(
+            self.svc, lambda: True if self.listed("o/r") else PENDING, 10, 0.05)
+        self.assertIsNot(listed, PENDING, "the registry was never listed")
+        self.assertEqual(self.results(), ["waiting"])
+        gate["release"].set()
+        self.listed_and_registered()
