@@ -333,5 +333,13 @@ class CommentsNameNoIssueTest(unittest.TestCase):
         self.assertEqual(cited, [])
 
 
+class ScreenshotsFileSizeTest(unittest.TestCase):
+    """The screenshots module, already over the size budget, does not grow past its merge base's 3,684 lines."""
+
+    def test_the_screenshots_module_is_no_longer_than_its_merge_base(self):
+        text = (Path(__file__).resolve().parent / "console_screenshots.py").read_text(encoding="utf-8")
+        self.assertLessEqual(len(text.splitlines()), 3684)
+
+
 if __name__ == "__main__":
     unittest.main()

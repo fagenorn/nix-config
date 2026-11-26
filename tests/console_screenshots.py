@@ -2970,9 +2970,8 @@ def start_service(fixture: Fixture, now_s: float, launches: list | None = None, 
         dispatch=lambda job: job(),
         repo_of=lambda cwd: cwd, ping_log=lambda: None,
         **({} if guest_dir is None else guest_door_kwargs(ConsoleService, guest_dir)),
-        **_tailnet_kwargs(guest_dir, tailnet_readable, bound),
-        **(stand_ins.title_kwargs(ConsoleService) if fixture.titled else {}), **forge,
-        **shot_clock.service_clocks(now_s))
+        **_tailnet_kwargs(guest_dir, tailnet_readable, bound), **(stand_ins.title_kwargs(ConsoleService) if fixture.titled else {}),
+        **forge, **shot_clock.service_clocks(now_s))
     bound.append(service)
     service.start()
     if guest_dir is not None and "status_reader" in inspect.signature(ConsoleService).parameters:
