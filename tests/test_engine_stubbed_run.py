@@ -273,8 +273,10 @@ class RefusalTest(Scenario):
 
         blocked = run.deliver(copy, validator_unimportable=True)
 
-        self.assertEqual((blocked.returncode, blocked.stdout, blocked.stderr), (2, "", (
-            "engine: procedure deliver, step issue: unknown_stage, stage 'testing' is not one of the ten stages.\n")))
+        self.assertEqual((blocked.returncode, blocked.stderr), (2, ""))
+        self.assertEqual(json.loads(blocked.stdout), {"breaches": [], "refusals": [{
+            "defect": "unknown_stage", "detail": "stage 'testing' is not one of the ten stages.",
+            "procedure": "deliver", "step": "issue"}], "verdict": "refused"})
         self.assertEqual(run.runs(), [])
         self.assertEqual(run.launches(), [])
         self.assertEqual(run.claims(), [])

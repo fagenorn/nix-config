@@ -55,7 +55,9 @@ child once one faults; `engine status` reads the root run, never a child:
 - exit 2, stdout empty and one stderr line: a usage error, a host whose settings load no
   lifecycle guard hook, a host declaration that does not admit the engine route (printed with its
   reason code first), or a refusal before any run is created or continued (two open runs of the
-  issue included), which creates no run directory.
+  issue included), which creates no run directory;
+- exit 2 with one stdout line and nothing on stderr: the procedure set the verdict refuses prints
+  `engine check`'s refused line instead, a new run's before any run directory is created.
 
 `engine stop <issue> [--project <slug>]` asks the run of the issue that is running on this host
 to stop: it writes the run's `stop-request` file naming the lock holder, signals no process,
@@ -178,6 +180,9 @@ def _stop_run(issue: int, project: str | None) -> int:
 def _deliver(issue: int, procedures: Path) -> int:
     try:
         code, line = engine_shell.deliver(issue, procedures)
+    except engine_shell.ProcedureRefused as error:
+        sys.stdout.write(compact(error.document))
+        return engine_shell.EXIT_REFUSED
     except engine_shell.Refused as error:
         return _usage(str(error))
     except engine_shell.Fault as error:

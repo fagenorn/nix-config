@@ -22,8 +22,11 @@ refusal starts with its reason code), checked after the guard; every child proce
 names is refused on the same terms, with the parent's inputs (plus `item` under
 `each`) as the inputs it may declare. The same checks run again on the run's
 staged copy, which is the copy the loop reads (`<run>/procedure/`); a mutating command step needs its `check`,
-which the checker requires. A new run checks `<procedures_dir>/deliver.json`; a continued run checks
-its own staged copy only. The engine supplies four inputs, each only to a procedure that declares it: `issue`
+which the checker requires. A refused verdict (the procedure check, and for a new run the size caps too)
+raises `ProcedureRefused`. A new run's set is judged before the runs root or its creation lock is created when
+neither exists, else under the lock after the running and open-run answers; a superseding run is judged on its
+staged copy before the old run is ended; a continued run checks its own staged copy only and is not judged
+again. The engine supplies four inputs, each only to a procedure that declares it: `issue`
 (the issue number), `repo` (the tracker's repository slug), `repo_root` (the project root) and `holder`
 (`<host>/<run id>` of the root run, which a child run inherits); a declared one with no value in the project is refused.
 
@@ -217,6 +220,14 @@ class Refused(Exception):
     """The procedure or the project cannot be run; nothing was created."""
 
 
+class ProcedureRefused(Refused):
+    """The check's verdict refused the procedure set; `document` is the refused line it printed."""
+
+    def __init__(self, message: str, document: dict):
+        super().__init__(message)
+        self.document = document
+
+
 class Fault(Exception):
     """The run could not continue; its events stay as recorded."""
 
@@ -371,18 +382,25 @@ def check_project_commands() -> tuple[str, ...]:
     return CommandTable.from_snapshot(snapshot).project_ids()
 
 
-def _validate(directory: Path, table: CommandTable) -> dict:
-    """The entry procedure of `directory`, checked and runnable, or `Refused`."""
-    if not directory.is_dir() or not (directory / f"{ENTRY}.json").is_file():
-        raise Refused(f"no {ENTRY}.json in the procedures directory {directory}")
+def _validate(directory: Path, table: CommandTable, caps: bool = False) -> dict:
+    """The entry procedure of `directory`, checked and runnable, or `Refused`; `caps` adds the size caps."""
+    absent = (None if (directory / f"{ENTRY}.json").is_file()
+              else Refused(f"no {ENTRY}.json in the procedures directory {directory}"))
     try:
-        _, document = engine_check.verdict(directory, table.project_ids(), caps=False)
+        _, document = engine_check.verdict(directory, table.project_ids(), caps=caps)
     except engine_check.CheckError as error:
-        raise Refused(str(error)) from error
-    if document.get("refusals"):
-        first = document["refusals"][0]
-        raise Refused(f"procedure {first['procedure']}, step {first['step']}: "
-                      f"{first['defect']}, {first['detail']}")
+        raise (absent or Refused(str(error))) from error
+    if document.get("refusals") or document.get("breaches"):
+        if document["refusals"]:
+            first = document["refusals"][0]
+            message = (f"procedure {first['procedure']}, step {first['step']}: "
+                       f"{first['defect']}, {first['detail']}")
+        else:
+            first = document["breaches"][0]
+            message = f"{first['thing']} is {first['size']} {first['unit']}, over its cap of {first['cap']}"
+        raise ProcedureRefused(message, document)
+    if absent:
+        raise absent
     try:
         procedure = _load(directory / f"{ENTRY}.json")
     except (ValueError, OSError) as error:
@@ -498,13 +516,34 @@ def deliver(issue: int, procedures_dir: Path, *, clock: Callable[[], datetime] |
     holder = {"pid": os.getpid(), "started": _now()}
     held: list[int] = []
     continued = False
+    replaced: Path | None = None
 
     def stage(staged: Path) -> None:
         # The copy that runs is the copy checked; the lock is held before the run is visible.
-        if _validate(staged / "procedure", table)["inputs"] != procedure["inputs"]:
+        if _validate(staged / "procedure", table, caps=True)["inputs"] != procedure["inputs"]:
             raise Refused(f"the {ENTRY} procedure changed while its run was created")
         held.append(_take_run_lock(staged, holder["started"]))
+        if replaced is not None:
+            # The replacement is judged on the bytes it publishes, before the
+            # unreadable-format run it replaces is ended.
+            old = _take_run_lock(replaced, holder["started"])
+            try:
+                _end_leftover(replaced)
+                _supersede(replaced, clock)
+            finally:
+                os.close(old)
 
+    checked = None
+    try:
+        root = engine_ledger.runs_root()
+        if (not os.path.lexists(creation_lock_path(root, issue))
+                and not engine_ledger.find_runs(root, issue, project)):
+            # A new run's set is judged before the runs root or the issue's creation lock
+            # exists; when either exists the judgement waits for the lock, so a running
+            # or open run answers first.
+            checked = _validate(procedures_dir, table, caps=True)
+    except (engine_ledger.LedgerError, OSError, KeyError) as error:
+        raise Refused(str(error)) from error
     try:
         creation = _lock_creation(issue)
         try:
@@ -518,20 +557,16 @@ def deliver(issue: int, procedures_dir: Path, *, clock: Callable[[], datetime] |
             if len(open_runs) > 1:
                 raise Refused(f"runs {', '.join(run.name for run in open_runs)} of issue "
                               f"{issue} are all open; the engine continues one run only")
-            if open_runs and _superseded(open_runs[0]):
-                held.append(_take_run_lock(open_runs[0], holder["started"]))
-                _end_leftover(open_runs[0])
-                _supersede(open_runs[0], clock)
-                _release(held)
-                open_runs = []
-            if open_runs:
+            replaced = open_runs[0] if open_runs and _superseded(open_runs[0]) else None
+            if open_runs and replaced is None:
                 run_dir = open_runs[0]
                 procedure = _validate(run_dir / "procedure", table)
                 inputs = engine_ledger.read_run(run_dir)["inputs"]
                 held.append(_take_run_lock(run_dir, holder["started"]))
                 continued = True
             else:
-                procedure = _validate(procedures_dir, table)
+                procedure = checked if checked is not None else _validate(
+                    procedures_dir, table, caps=True)
                 now = datetime.now(timezone.utc)
                 token = "".join(secrets.choice(engine_ledger.TOKEN_ALPHABET) for _ in range(4))
                 host = _host()

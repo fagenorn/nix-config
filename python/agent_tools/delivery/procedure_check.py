@@ -1047,6 +1047,17 @@ def declarations(project_commands: Sequence[str]) -> dict[str, CommandDeclaratio
     return declared
 
 
+def verdict(directory: Path, project_commands: Sequence[str],
+            *, caps: bool = True) -> tuple[CheckResult, tuple[size_caps.Breach, ...]]:
+    """The verdict the command prints, the one every judge of a procedure set in this process calls.
+
+    A set is refused when either part is non-empty: a refusal of the check or, with `caps`, a breach of a size cap.
+    """
+    result = check_directory(directory, declarations(project_commands))
+    breaches = size_caps.breaches(ENGINE_DIR, directory, engine_graders.GRADERS) if caps else ()
+    return result, breaches
+
+
 class _Parser(argparse.ArgumentParser):
     def error(self, message: str):
         raise _Usage(message)
@@ -1081,8 +1092,7 @@ def main(argv: list[str] | None = None) -> int:
     if not args.procedures.is_dir():
         return _usage(f"--procedures is not a directory: {args.procedures}")
     try:
-        result = check_directory(args.procedures, declarations(args.project_command or ()))
-        breaches = () if args.without_caps else size_caps.breaches(ENGINE_DIR, args.procedures, engine_graders.GRADERS)
+        result, breaches = verdict(args.procedures, args.project_command or (), caps=not args.without_caps)
     except (DeclarationError, ValueError, OSError) as error:
         return _usage(str(error))
     if result.refusals or breaches:
