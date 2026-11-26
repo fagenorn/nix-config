@@ -1,4 +1,4 @@
-"""deliver-standard.js scenarios of #1915: a resumed delivery whose branch holds commits ahead of its base.
+"""deliver-standard.js scenarios: a resumed delivery whose branch holds commits ahead of its base.
 
 Run: just agent-workflow-tests
 """
@@ -9,6 +9,7 @@ import unittest
 
 from .test_deliver_standard_program import ARGS, BR, F, MARKED, PLAN, RESUME, SHA, bplan, labels, prompt, run, tasks
 
+TIER = "integration"
 AHEAD = "d" * 40
 NONE = {"start_head": SHA, "commit": SHA}
 BRANCH_FACTS = {"name": "cand", "current": "cand", "toplevel": "/r/.wt/cand", "common_dir": "/r/.git"}
@@ -61,7 +62,7 @@ class ResumeAheadTest(unittest.TestCase):
 
 
 class LookFixAheadTest(unittest.TestCase):
-    """#1809: a look fix made by an earlier attempt is read against the head the owner looked at."""
+    """A look fix made by an earlier attempt is read against the head the owner looked at."""
 
     def look_cont(self):
         result, _ = run(patch={"setup": {"look": MARKED}})
