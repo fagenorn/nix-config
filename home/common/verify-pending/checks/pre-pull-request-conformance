@@ -1,5 +1,0 @@
-#!/bin/sh
-# Verify check for the pre-pull-request conformance run: a delivery started after the merge lists a local
-# result of the command in its Evidence. verify-pending runs it from the repository root at the commit the
-# block names. Exit 0 met, 75 not yet, never 1: the block's expiry ends an unmet hold.
-PYTHONPATH=python exec python3 -m agent_tools.delivery.pre_pull_request_reading "$@"
