@@ -3,9 +3,11 @@
 Run: just console-screenshots [out]   (Playwright and its Chromium come from nixpkgs)
 
 Contract:
-- `STATES` names the fifty-seven screens the sprint block, the finished list, the message life, the
+- `STATES` names the fifty-nine screens the sprint block, the finished list, the message life, the
   Spend page, the notices fold, the desk's spend figures and the controls must read well on (`tell-box-open` is
-  the sprint block with its Tell box opened; `owner-check` is the sprint block with a held
+  the sprint block with its Tell box opened; `sprint-fold-open` is the sprint block of `tell-box-open`
+  with its own fold and its End the sprint fold opened (`open_end_fold`); on a base console End the
+  sprint opens beside Tell the manager, the before picture; `owner-check` is the sprint block with a held
   issue's owner check beside it; `spend-page` is the `/spend` page over seeded transcripts: a
   running sprint's manager session, an outside-sprint session and one workflow run, with spend on
   at least four of the last seven days; `notices-fold` is `owner/web`'s open Notices fold
@@ -55,7 +57,7 @@ Contract:
   characters typed, so the count reads near the limit; `goal-over` is it with 2100 characters
   typed, so the count reads over the limit, Send is unavailable and the hint beside it says how much to cut (#1214);
   `inbox-card` is `owner/web`'s question card with
-  two options and an owner check beside it; `question-words` and `question-refused` are
+  two options and an owner check beside it, and `owner/api`'s question as the second row; `question-words` and `question-refused` are
   `owner/web`'s look-check question card (Approve, Approve with one fix, Ask for changes, the last
   two marked as needing words) with Ask for changes picked: `question-words` with the words
   `LOOK_WORDS` typed in the card's words box (`WORDS_CARD`: the picked option, the words, the one
@@ -227,8 +229,8 @@ Contract:
   (the box closed, the wrong text or project, or the field clipping the filled text); or when any shot has a visible
   project line whose Ask a question button sits on another row than its Give it a goal button (their vertical centres
   differ by more than 4 px, `ACTS_ROW`); or when any shot is not taken from the top of the page (`window.scrollY` is
-  not 0 right before its full-page capture); or when any shot has a rendered, visible button, input, textarea, select,
-  `btn-` link or `btn-` summary under 32 px tall (`SHORT_CONTROLS`, read after the state is drawn). When any shot
+  not 0 right before its full-page capture); or when any shot has a control under 32 px tall, under 24 by 24 px, or (card answer, Tell the manager) under 44 px
+  while `PHONE_MEDIA` matches (`console_screenshot_controls.control_report`). When any shot
   misses a `STYLE_CHECKS` row, the line names each miss: the row's computed style is read after the capture, with
   probes and steps as `StyleCheck` and `STYLE_STEPS` say (`look-card` is shot with its viewer closed, then opens its
   first picture, so the viewer rows read it open). The style reading and its steps run only when `style_applies()`
@@ -292,11 +294,13 @@ from agent_tools.system.forge_api import ForgeError
 from . import console_screenshot_stand_ins as stand_ins
 from . import console_screenshot_clock as shot_clock
 from .console_land_queue import land_queue_reader
+from .console_screenshot_controls import (ACTS_ROW, CONTROL_SELECTOR, SHORT_CONTROLS, SMALL_TARGETS,
+                                          control_report, open_end_fold)
 from .console_screenshot_permissions import HELD_PROMPTS, PERMISSION_MANAGER, hold_permission, keep_permission
 from .console_screenshot_stand_ins import UnixHTTPConnection as _UnixHTTPConnection, door_connection as _door_connection
 from .console_test_support import hook_body, write_registry
 
-STATES = ("live-several", "waiting-on-you", "stuck", "held-sprint", "tell-box-open",
+STATES = ("live-several", "waiting-on-you", "stuck", "held-sprint", "tell-box-open", "sprint-fold-open",
           "message-sent", "message-picked-up", "message-replied", "message-not-picked-up", "finished-list",
           "nothing-running", "waiting-its-turn", "manager-cannot-hear", "permission-stale", "permission-card",
           "permission-long", "waiting-until", "paused",
@@ -1336,7 +1340,6 @@ STYLE_CHECKS += (
     _narrow("viewer-pair-direction", _LOOK, ".viewer-pair", "flex-direction", "equals", "column",
             "row"),
 )
-CONTROL_SELECTOR = 'button, input, textarea, select, a[class*="btn-"], summary[class*="btn-"]'
 KINDS = ("btn-primary", "btn-quiet", "btn-danger", "btn-option", "field-line", "field-area",
          "field-code")
 BUTTON_KINDS = KINDS[:4]
@@ -2084,6 +2087,7 @@ class Shot:
     tell: tuple[bool, str | None, str | None, bool] | None = None
     scroll_y: float = 0.0
     short: tuple[str, ...] = ()
+    small: tuple[str, ...] = ()
     ask: tuple[bool, str | None, str | None] | None = None
     goal: tuple[bool, str | None, str | None, bool | None] | None = None
     acts: tuple[str, ...] = ()
@@ -2505,7 +2509,7 @@ def _seed_state(seed: _Seed, state: str, web_root: str = "",
             seed.account("colleague-1", 0.95, session=0.5, week_in=2 * 86400, session_in=3 * 3600)
     elif state == "waiting-its-turn":
         seed.sprint(web, "Add resumable uploads", started=60 * MINUTE, report=45 * MINUTE)
-    elif state in ("tell-box-open", "goal-open", "goal-near", "goal-over"):
+    elif state in ("tell-box-open", "sprint-fold-open", "goal-open", "goal-near", "goal-over"):
         seed.sprint(web, "Add resumable uploads", started=20 * MINUTE, report=2 * MINUTE)
     elif state.startswith("message-"):
         sid, goal = seed.sprint(web, "Add resumable uploads", started=20 * MINUTE,
@@ -2530,6 +2534,8 @@ def _seed_state(seed: _Seed, state: str, web_root: str = "",
     elif state == "inbox-card":
         seed.sprint(web, "Add resumable uploads", started=30 * MINUTE, report=6 * MINUTE, asks=True)
         seed.check(web, 11, 3 * MINUTE)
+        seed.sprint(api, "Keep the importer fast", started=60 * MINUTE, report=45 * MINUTE,
+                    asks=True)
     elif state in ("look-card", "look-moved", "look-failed"):
         sid, goal = seed.sprint(web, "Fix the settings page", started=30 * MINUTE, report=6 * MINUTE)
         seed.look(web, sid, goal, moved=state == "look-moved", failed=state == "look-failed")
@@ -3203,17 +3209,6 @@ GOAL_READING = """(() => {
           field ? shown && field.scrollHeight <= field.clientHeight + 1 : null];
 })()"""
 
-ACTS_ROW = """Array.from(document.querySelectorAll('li[data-project]')).filter((line) => {
-  const give = line.querySelector('button.give-goal');
-  const ask = line.querySelector('button.ask-open');
-  if (!give || !ask || line.getClientRects().length === 0) return false;
-  const centre = (node) => {
-    const rect = node.getBoundingClientRect();
-    return rect.top + rect.height / 2;
-  };
-  return Math.abs(centre(give) - centre(ask)) > 4;
-}).map((line) => line.dataset.project)"""
-
 THREAD_READING = f"""(() => {{
   const fold = document.querySelector('details[data-key="questions:owner/web"]');
   const homes = Array.from(document.querySelectorAll(
@@ -3261,11 +3256,6 @@ JARGON_COUNT = r"""(() => {
 })()"""
 
 
-SHORT_CONTROLS = f"""Array.from(document.querySelectorAll({json.dumps(CONTROL_SELECTOR)})).filter(
-  (n) => n.getClientRects().length > 0 && getComputedStyle(n).visibility !== "hidden").map(
-  (n) => [n, n.getBoundingClientRect().height]).filter(([n, h]) => h < 32).map(
-  ([n, h]) => n.tagName.toLowerCase() + "." + (n.getAttribute("class") || "").split(/\\s+/)[0]
-    + " " + Math.round(h * 100) / 100 + "px")"""
 SCROLL_TOP = "window.scrollTo(0, 0)"
 SCROLL_Y = "window.scrollY"
 
@@ -3392,6 +3382,8 @@ def _shoot(browser, url: str, state: str, width: int, out: Path, *, question: st
             page.click("button.tell-open")
             page.wait_for_selector(".tell-hint")
             tell = tuple(page.evaluate(TELL_READING))
+        if state == "sprint-fold-open":
+            open_end_fold(page)
         paneled = (state in ("ask-box", "ask-goal", "questions-open", "question-read",
                              *DEEPER_STATES)
                    and page.query_selector(READING_PANEL) is not None)
@@ -3470,6 +3462,7 @@ def _shoot(browser, url: str, state: str, width: int, out: Path, *, question: st
         jargon = page.evaluate(JARGON_COUNT)
         scroll_y = page.evaluate(SCROLL_Y)
         short = tuple(page.evaluate(SHORT_CONTROLS))
+        small = tuple(page.evaluate(SMALL_TARGETS))
         acts = tuple(page.evaluate(ACTS_ROW))
         path = out / f"{state}-{width}.png"
         shot_clock.screenshot(page, path)
@@ -3507,7 +3500,7 @@ def _shoot(browser, url: str, state: str, width: int, out: Path, *, question: st
     return Shot(state, width, path, scroll_width, squeezed, jargon, tell, scroll_y=scroll_y,
                 short=short, ask=ask, goal=goal, acts=acts, thread=thread, reading=reading,
                 card=card, activation=activation, register=register, style=style, checked=checked, broke=broke,
-                deeper=deeper)
+                deeper=deeper, small=small)
 
 
 def sheet(browser, paths: Sequence[Path], out: Path) -> Path:
@@ -3668,16 +3661,15 @@ def main(argv: list[str] | None = None) -> int:
     for shot in scrolled:
         print(f"console-screenshots: {shot.path.name} is not taken from the top of the page "
               f"(scrolled {shot.scroll_y:g} px)")
-    short = [shot for shot in taken if shot.short]
-    for shot in short:
-        print(f"console-screenshots: {shot.path.name} has a control under 32 px "
-              f"({', '.join(shot.short)})")
+    controlled = control_report(taken)
+    for line in controlled:
+        print(line)
     broken = [shot for shot in taken if shot.style]
     for shot in broken:
         print(f"console-screenshots: {shot.path.name} breaks a page style "
               f"({'; '.join(shot.style)})")
     return 1 if (wide or squeezed or jargon or closed or unasked or unfilled or unthreaded or unread
-                 or undeep or unlined or proposals or uncarded or offrow or scrolled or short or broken) else 0
+                 or undeep or unlined or proposals or uncarded or offrow or scrolled or controlled or broken) else 0
 
 
 if __name__ == "__main__":
