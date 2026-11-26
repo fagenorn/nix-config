@@ -40,6 +40,9 @@ Contract:
   is the `PermissionRequest` hook row only, which is the before picture; `permission-long` is the same sprint holding a
   long heredoc command (a python3 script that rewrites test names, a `cat` into `/tmp` and a `git diff` into `review/diff.txt`),
   so the card shows its summary of what it reads, runs and writes above the folded text, and the base console the raw text;
+  `held-sprint` is a sprint whose last report, two hours old, says `HELD_STATUS` with issues still
+  building and queued and nothing running or asked, so the branch's console shows its held-sprint card
+  under "1 thing needs you" and the base console only the quiet line, which is the before picture;
   `waiting-until` is the `stuck` sprint whose report states a wait until a time two hours
   ahead (#1380), so its line reads "waiting until" with that time, and `paused` the same sprint whose
   report states a pause with `PAUSE_REASON`, so its line reads "paused: " and the reason (a base console
@@ -293,8 +296,8 @@ from .console_land_queue import land_queue_reader
 from .console_screenshot_permissions import HELD_PROMPTS, PERMISSION_MANAGER, hold_permission, keep_permission
 from .console_test_support import hook_body, write_registry
 
-STATES = ("live-several", "waiting-on-you", "stuck", "tell-box-open", "message-sent",
-          "message-picked-up", "message-replied", "message-not-picked-up", "finished-list",
+STATES = ("live-several", "waiting-on-you", "stuck", "held-sprint", "tell-box-open",
+          "message-sent", "message-picked-up", "message-replied", "message-not-picked-up", "finished-list",
           "nothing-running", "waiting-its-turn", "manager-cannot-hear", "permission-stale", "permission-card",
           "permission-long", "waiting-until", "paused",
           "owner-check", "spend-page", "notices-fold",
@@ -315,6 +318,7 @@ GOAL_NEAR_CHARS = 1900
 GOAL_OVER_CHARS = 2100
 MINUTE = 60.0
 PAUSE_REASON = "the lead freed its account for a release"
+HELD_STATUS = "the last slice waits on the lead's go to grant its deploy key"
 PROJECTS = ("owner/web", "owner/api", "owner/docs")
 TRACKER_URL = "https://github.com/owner/web/issues"
 LOOK_APPROVE = "Approve this head"
@@ -2466,23 +2470,22 @@ def _seed_state(seed: _Seed, state: str, web_root: str = "",
         seed.sprint(api, "Keep the importer fast", started=60 * MINUTE, report=45 * MINUTE)
         seed.sprint(api, "Retire the old exporter", started=5 * 60 * MINUTE,
                     report=3 * 60 * MINUTE, landed=True, close=2 * 60 * MINUTE)
-        seed.sprint(web, "Add resumable uploads", started=30 * MINUTE, report=6 * MINUTE,
-                    asks=True)
+        seed.sprint(web, "Add resumable uploads", started=30 * MINUTE, report=6 * MINUTE, asks=True)
         seed.sprint(web, "Fix the settings page", started=20 * MINUTE, report=2 * MINUTE)
     elif state == "waiting-on-you":
-        seed.sprint(web, "Add resumable uploads", started=30 * MINUTE, report=6 * MINUTE,
-                    asks=True)
+        seed.sprint(web, "Add resumable uploads", started=30 * MINUTE, report=6 * MINUTE, asks=True)
     elif state == "stuck":
         seed.sprint(web, "Add resumable uploads", started=60 * MINUTE, report=45 * MINUTE)
+    elif state == "held-sprint":
+        seed.sprint(web, "Add resumable uploads", started=180 * MINUTE, report=120 * MINUTE,
+                    report_extra={"status": HELD_STATUS})
     elif state == "manager-cannot-hear":
-        sid, _ = seed.sprint(web, "Add resumable uploads", started=60 * MINUTE,
-                             report=45 * MINUTE)
+        sid, _ = seed.sprint(web, "Add resumable uploads", started=60 * MINUTE, report=45 * MINUTE)
         seed.put(MINUTE, sessions.SEEN, web, {
             "session_id": DEAF_MANAGER, "cwd": web_root, "repo": web_root, "state": "working",
             "name": manager.session_name(web, sid)})
     elif state in PERMISSION_STATES:
-        sid, _ = seed.sprint(web, "Add resumable uploads", started=60 * MINUTE,
-                             report=45 * MINUTE)
+        sid, _ = seed.sprint(web, "Add resumable uploads", started=60 * MINUTE, report=45 * MINUTE)
         seed.put(20 * MINUTE, sessions.SEEN, web, {
             "session_id": PERMISSION_MANAGER, "cwd": web_root, "repo": web_root,
             "state": "working", "name": manager.session_name(web, sid)})
@@ -2545,19 +2548,16 @@ def _seed_state(seed: _Seed, state: str, web_root: str = "",
         seed.sprint(web, "Try a new cache", started=4 * 60 * MINUTE, report=3.5 * 60 * MINUTE,
                     stop=3 * 60 * MINUTE)
     elif state == "owner-check":
-        seed.sprint(web, "Add resumable uploads", started=20 * MINUTE, report=2 * MINUTE,
-                    held=True)
+        seed.sprint(web, "Add resumable uploads", started=20 * MINUTE, report=2 * MINUTE, held=True)
         seed.check(web, 11, 3 * MINUTE)
     elif state == "inbox-card":
-        seed.sprint(web, "Add resumable uploads", started=30 * MINUTE, report=6 * MINUTE,
-                    asks=True)
+        seed.sprint(web, "Add resumable uploads", started=30 * MINUTE, report=6 * MINUTE, asks=True)
         seed.check(web, 11, 3 * MINUTE)
     elif state in ("look-card", "look-moved", "look-failed"):
         sid, goal = seed.sprint(web, "Fix the settings page", started=30 * MINUTE, report=6 * MINUTE)
         seed.look(web, sid, goal, moved=state == "look-moved", failed=state == "look-failed")
     elif state in ("question-words", "question-refused"):
-        seed.sprint(web, "Add resumable uploads", started=30 * MINUTE, report=6 * MINUTE,
-                    look=True)
+        seed.sprint(web, "Add resumable uploads", started=30 * MINUTE, report=6 * MINUTE, look=True)
     elif state == "accounts-panel":
         seed.account("work-main", 0.4)
         seed.account("work-spare", 0.9)
