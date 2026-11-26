@@ -347,6 +347,17 @@ def _each_over(path: str) -> Callable[[dict], None]:
     return change
 
 
+def _scope_reads_a_round(path: str) -> Callable[[dict], None]:
+    """The toy's `scope` step is a `verify-rounds round` read, and its `children` step runs over `path`."""
+    def change(toy: dict) -> None:
+        scope = step(toy, "scope")
+        scope.update(command="verify-rounds", subcommand="round",
+                     on={"passed": "draft", "retest": "draft", "fix": "draft", "spent": "needs-owner",
+                         "verify": "needs-owner", "error": "needs-owner", "refused": "needs-owner"})
+        _each_over(path)(toy)
+    return change
+
+
 def _drop_first_pass_set(toy: dict) -> None:
     del step(toy, "review")["members"][0]["pass"]
 
@@ -554,6 +565,8 @@ CASES = [
     Case("each_over_a_decide_verdict", editing("toy", _each_over("tally.verdict")),
          [("toy", "children", "each_not_a_list")]),
     Case("each_over_a_command_string", editing("toy", _each_over("scope.range")),
+         [("toy", "children", "each_not_a_list")]),
+    Case("each_over_a_list_of_another_subcommand", editing("toy", _scope_reads_a_round("scope.changed_paths")),
          [("toy", "children", "each_not_a_list")]),
     Case("each_over_a_missing_member", editing("toy", _each_over("draft.missing")),
          [("toy", "children", "unknown_member")]),
@@ -856,6 +869,13 @@ class RefusalTableTest(unittest.TestCase):
                     sorted((r["procedure"], r["step"] or "", r["defect"])
                            for r in document["refusals"]),
                     sorted((p, s or "", d) for p, s, d in case.expected))
+
+    def test_each_over_a_list_of_its_own_subcommand_is_accepted(self):
+        for member in ("guards", "problems", "results"):
+            with self.subTest(member):
+                code, out, _ = run_check("--procedures", str(broken_copy(
+                    editing("toy", _scope_reads_a_round(f"scope.{member}")))))
+                self.assertEqual((code, json.loads(out)["verdict"]), (0, "ok"))
 
     def test_every_defect_has_a_table_case(self):
         self.assertEqual({d for c in CASES for _, _, d in c.expected},
@@ -1179,6 +1199,14 @@ SHIPPED_MEMBERS = {
     "lite-independent": ({"findings": []},),
     "full-independent": ({"findings": []},),
     **{f"{route}-rereview": ({}, {"findings": []}, UNNAMED) for route in ("lite", "escalated", "full")},
+    "round": ({"head": "h", "clean": True, "problems": [], "start_head": "s", "guards": [], "digest": "d",
+               "results": [{"id": "lint", "status": "pass"},
+                           {"id": "test", "status": "fail", "named": ["a.json"]}]},),
+    "ws-check": ({"start_head": "s", "commit": "c", "whitespace_only": True, "changed_paths": ["a.json"]},),
+    "fix": ({}, {"unrelated": {"test": "", "evidence": ""}}),
+    **{review: ({}, {"findings": []}, UNNAMED,
+                {"findings": [], "whitespace_insignificant": True, "whitespace_evidence": "e"})
+       for review in ("fix-review", "fix-review-again")},
 }
 
 
@@ -1187,6 +1215,9 @@ SHIPPED_MEMBERS = {
 UNREACHABLE_EXHAUSTED = {
     "direct": tuple((f"{route}-{kind}", "exhausted")
                     for kind in ("tally", "settled") for route in ("lite", "escalated", "full")),
+    "verify": tuple((name, "exhausted") for name in (
+        "checks", "round", "fixed", "ws-check", "fix-review", "narrowing", "fix-review-again", "narrowing-again",
+        "rerun")),
 }
 
 
@@ -1212,11 +1243,81 @@ class ShippedProcedureTest(unittest.TestCase):
                 for walk in coverage.walks:
                     self.assertTrue(walk.end == "done" or walk.end in stops, (walk.edge, walk.end))
 
+    def test_close_out_holds_in_the_programs_order_with_a_check_on_each_mutating_step(self):
+        close_out = load(PROCEDURES, "close-out")
+        steps = close_out["steps"]
+        follow = ("merged", "open", "clear", "drafted", "ready", "met", "met", "valid", "none",
+                  "posted", "labelled", "ran")
+        visited, current, taken = [], "read", iter(follow)
+        while current != "done":
+            visited.append(current)
+            on = step(close_out, current)["on"]
+            outcome = next(taken, None)
+            if outcome is None or outcome not in on:
+                outcome = next(o for o in on if o not in ("error", "refused", "unmerged", "failed"))
+            current = on[outcome]
+            if current in close_out["stops"]:
+                break
+        self.assertEqual(visited, [
+            "read", "hold-facts", "hold-look", "hold-draft", "hold-gate", "regrade", "graded",
+            "hold-lint", "split", "hold-post", "hold-label", "once-run", "remove", "forward", "delete", "gone",
+            "release", "close"])
+        self.assertEqual([s["id"] for s in steps], visited)
+        self.assertEqual(step(close_out, "close")["on"]["open-criteria"], "done")
+        self.assertEqual({s["id"]: s["check"]["subcommand"] for s in steps if s.get("mutates")},
+                         {"split": "hold-split-check", "hold-post": "hold-posted",
+                          "hold-label": "hold-labelled"})
+
+    def test_every_close_out_hold_refusal_stops_hold_and_an_unmet_regrade_stops_code_unmet(self):
+        close_out, deliver = load(PROCEDURES, "close-out"), load(PROCEDURES, "deliver")
+        for gate in ("missing-checks", "human-checks", "unattended", "owner-checks",
+                     "script-checks", "note-checks", "error", "refused"):
+            self.assertEqual(step(close_out, "hold-gate")["on"][gate], "hold", gate)
+        self.assertEqual(step(close_out, "hold-lint")["on"]["invalid"], "hold")
+        for sid in ("hold-facts", "hold-look", "hold-gate", "hold-lint", "split", "hold-post",
+                    "hold-label", "once-run"):
+            on = step(close_out, sid)["on"]
+            self.assertEqual((on["error"], on["refused"]), ("hold", "hold"), sid)
+        for sid in ("hold-draft", "regrade"):
+            on = step(close_out, sid)["on"]
+            self.assertEqual((on["no-reply"], on["out-of-bounds"]), ("hold", "hold"), sid)
+        self.assertEqual(step(close_out, "hold-draft")["on"]["blocked"], "hold")
+        self.assertEqual(step(close_out, "hold-facts")["on"]["absent-merge"], "hold")
+        self.assertEqual(step(close_out, "hold-look")["on"]["stale"], "hold")
+        self.assertEqual(step(close_out, "regrade")["on"]["unmet"], "code-unmet")
+        self.assertEqual(step(close_out, "regrade")["on"]["met"], "graded")
+        graded = step(close_out, "graded")
+        self.assertEqual((graded["on"]["unmet"], graded["on"]["met"]), ("code-unmet", "hold-lint"))
+        self.assertEqual((graded["on"]["error"], graded["on"]["refused"]), ("hold", "hold"))
+        self.assertEqual(graded["in"], ["regrade.verdict", "regrade.code_unmet", "regrade.acceptance",
+                                         "hold-facts.criteria"])
+        self.assertEqual(close_out["stops"]["code-unmet"],
+                         {"need": "owner-decision", "reenter": "read"})
+        self.assertEqual(step(deliver, "closing")["on"]["code-unmet"], "code-unmet")
+        self.assertEqual(deliver["stops"]["code-unmet"],
+                         {"need": "owner-decision", "reenter": "closing", "pinned": True})
+
+    def test_the_close_step_closes_by_the_criteria_the_hold_read_not_the_first_read(self):
+        close = step(load(PROCEDURES, "close-out"), "close")
+        self.assertEqual(close["in"], ["run.repo", "run.issue", "hold-facts.closes"])
+
+    def test_each_hold_agent_prompt_meets_its_roles_brief(self):
+        close_out = load(PROCEDURES, "close-out")
+        self.assertEqual(step(close_out, "hold-draft")["role"], "reviewer")
+        regrade = step(close_out, "regrade")
+        self.assertEqual(regrade["role"], "reviewer-lite")
+        prompt = (PROCEDURES / "hold-regrade.md").read_text(encoding="utf-8")
+        self.assertEqual(prompt.splitlines()[0], "lane: direct.")
+        self.assertIn("git diff {{read.merge_commit}}^1 {{read.merge_commit}}", prompt)
+        self.assertIn("git show {{read.merge_commit}}",
+                      (PROCEDURES / "hold-draft.md").read_text(encoding="utf-8"))
+
     def test_no_shipped_prompt_asks_for_a_forge_command(self):
-        names = ["setup-applies.md"] + [
+        names = ["setup-applies.md", "hold-draft.md", "hold-regrade.md"] + [
             f"direct-{kind}.md" for kind in (
                 "implement", "review-lite", "review", "fix-lite", "fix-escalated", "fix-full",
-                "rereview-lite", "rereview-escalated", "rereview-full")]
+                "rereview-lite", "rereview-escalated", "rereview-full")] + [
+            f"verify-{kind}.md" for kind in ("fix", "fix-review", "retest")]
         for name in names:
             with self.subTest(name=name):
                 self.assertNotIn("gh ", (PROCEDURES / name).read_text(encoding="utf-8"))

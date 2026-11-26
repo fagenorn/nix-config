@@ -21,9 +21,12 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.delivery.suite_runner import suite_members
+from agent_tools.delivery import comment_lint
+from agent_tools.delivery.never_rise import Snapshot
+from agent_tools.delivery.suite_runner import REPORT_ENV, suite_members
 from agent_tools.delivery.touched_tests import (
-    SELECTION_ENV, build_trigger, default_execute, main, select, selection)
+    SELECTION_ENV, build_trigger, default_capture, default_execute, main, parse_assignments,
+    select, selection)
 
 TIER = "integration"  # MainTest builds a git repository
 
@@ -186,6 +189,7 @@ class MainTest(unittest.TestCase):
         self.write("hosts/m.nix", "{ a = 1; }\n")
         self.commit("second")
         self.calls = []
+        self.environments = []
 
     def git(self, *args):
         subprocess.run(["git", "-C", str(self.root), *args], check=True,
@@ -203,15 +207,24 @@ class MainTest(unittest.TestCase):
     def stub(self, codes=None):
         codes = codes or {}
 
-        def execute(argv, cwd):
+        def execute(argv, cwd, env=None):
             self.calls.append((argv, cwd))
+            self.environments.append(env)
             return codes.get(argv[0], codes.get("runner", 0))
         return execute
 
-    def run_main(self, *args, execute=None):
+    def capturing(self, output="", code=0):
+        def capture(argv, cwd):
+            self.calls.append((argv, cwd))
+            self.environments.append(None)
+            return code, output
+        return capture
+
+    def run_main(self, *args, execute=None, capture=None):
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            code = main(["--root", str(self.root), *args], execute=execute or self.stub())
+            code = main(["--root", str(self.root), *args], execute=execute or self.stub(),
+                        capture=capture or self.capturing())
         return code, out.getvalue(), err.getvalue()
 
     def test_the_cli_runs_the_selected_members_through_the_suite_runner(self):
@@ -310,6 +323,116 @@ class MainTest(unittest.TestCase):
         self.assertEqual(raised.exception.code, 2)
 
 
+    ENV_FLAGS = ("--source-root", "python", "--build-command", "just build",
+                 "--env-from", "tests/test_alpha.py=just env")
+    ENV_OUTPUT = "FIRST_PATH=/store/first\nSECOND_PATH=/store/second\n"
+
+    def test_a_selected_env_member_builds_then_runs_with_the_variables_the_command_prints(self):
+        code, _, _ = self.run_main("--base", "HEAD~1", *self.ENV_FLAGS,
+                                   capture=self.capturing(self.ENV_OUTPUT))
+        self.assertEqual(self.calls, [(["just", "build"], self.root),
+                                      (["just", "env"], self.root),
+                                      ([*RUNNER, "tests/test_alpha.py"], self.root)])
+        self.assertEqual(self.environments[2],
+                         {"FIRST_PATH": "/store/first", "SECOND_PATH": "/store/second"})
+        self.assertEqual(code, 0)
+
+    def test_no_env_member_selected_runs_no_build_and_no_env_command(self):
+        self.run_main("--base", "HEAD~1", "--source-root", "python", "--build-command",
+                      "just build", "--env-from", "tests/test_beta.py=just env")
+        self.assertEqual(self.calls, [([*RUNNER, "tests/test_alpha.py"], self.root)])
+        self.assertEqual(self.environments, [None])
+
+    def test_a_full_selection_builds_once_and_only_the_env_member_gets_the_variables(self):
+        self.run_main("--base", "HEAD~1", *self.ENV_FLAGS, "--build-when", "*.nix",
+                      capture=self.capturing(self.ENV_OUTPUT))
+        self.assertEqual([argv for argv, _ in self.calls],
+                         [["just", "build"], ["just", "env"],
+                          [*RUNNER, "tests/test_beta.py"], [*RUNNER, "tests/test_alpha.py"]])
+        self.assertIsNone(self.environments[2])
+        self.assertEqual(self.environments[3]["FIRST_PATH"], "/store/first")
+
+    def test_a_failed_build_stops_before_the_env_command(self):
+        code, _, _ = self.run_main("--base", "HEAD~1", *self.ENV_FLAGS,
+                                   execute=self.stub({"just": 4}))
+        self.assertEqual(code, 4)
+        self.assertEqual([argv for argv, _ in self.calls], [["just", "build"]])
+
+    def test_a_failed_env_command_stops_before_the_suite(self):
+        code, _, _ = self.run_main("--base", "HEAD~1", *self.ENV_FLAGS,
+                                   capture=self.capturing("", 5))
+        self.assertEqual(code, 5)
+        self.assertEqual([argv for argv, _ in self.calls], [["just", "build"], ["just", "env"]])
+
+    def test_an_env_command_line_that_is_no_assignment_stops_before_the_suite(self):
+        code, _, err = self.run_main("--base", "HEAD~1", *self.ENV_FLAGS,
+                                     capture=self.capturing("not an assignment\n"))
+        self.assertEqual(code, 2)
+        self.assertIn("not an assignment", err)
+        self.assertNotIn([*RUNNER, "tests/test_alpha.py"], [argv for argv, _ in self.calls])
+
+    def test_a_failing_plain_member_does_not_skip_the_env_member(self):
+        code, _, _ = self.run_main("--base", "HEAD~1", *self.ENV_FLAGS, "--build-when", "*.nix",
+                                   execute=self.stub({"just": 0, "runner": 3}),
+                                   capture=self.capturing(self.ENV_OUTPUT))
+        self.assertEqual(code, 3)
+        self.assertEqual(len([a for a, _ in self.calls if a[:3] == RUNNER]), 2)
+
+    @staticmethod
+    def report(member, seconds, passed):
+        return {"version": 1, "members": 1, "passed": int(passed), "failed": int(not passed),
+                "jobs": 1, "wall_seconds": seconds, "member_seconds": seconds,
+                "cpu_seconds": seconds,
+                "timings": [{"member": member, "seconds": seconds, "cpu_seconds": seconds,
+                             "passed": passed}]}
+
+    def reporting(self, failing):
+        def execute(argv, cwd, env=None):
+            self.calls.append((argv, cwd))
+            if argv[:3] != RUNNER:
+                return 0
+            member = argv[-1]
+            if env and REPORT_ENV in env:
+                Path(env[REPORT_ENV]).write_text(
+                    json.dumps(self.report(member, 2.0 if member == failing else 1.0,
+                                           member != failing)), encoding="utf-8")
+            return 3 if member == failing else 0
+        return execute
+
+    def test_a_mixed_selection_leaves_one_report_covering_both_runs(self):
+        with mock.patch.dict(os.environ, {REPORT_ENV: "out/report.json"}):
+            code, _, _ = self.run_main("--base", "HEAD~1", *self.ENV_FLAGS,
+                                       "--build-when", "*.nix",
+                                       execute=self.reporting("tests/test_beta.py"),
+                                       capture=self.capturing(self.ENV_OUTPUT))
+        merged = json.loads((self.root / "out/report.json").read_text(encoding="utf-8"))
+        self.assertEqual(code, 3)
+        self.assertEqual((merged["members"], merged["passed"], merged["failed"]), (2, 1, 1))
+        self.assertEqual([(row["member"], row["passed"]) for row in merged["timings"]],
+                         [("tests/test_beta.py", False), ("tests/test_alpha.py", True)])
+        self.assertEqual((merged["member_seconds"], merged["wall_seconds"]), (3.0, 3.0))
+
+    def test_a_single_run_keeps_the_report_path_it_was_given(self):
+        with mock.patch.dict(os.environ, {REPORT_ENV: "out/report.json"}):
+            self.run_main("--base", "HEAD~1", "--source-root", "python")
+        self.assertEqual(self.environments, [None])
+
+    def test_an_env_member_without_a_build_command_is_a_usage_error(self):
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as raised:
+            main(["--base", "HEAD", "--root", str(self.root),
+                  "--env-from", "tests/test_alpha.py=just env"])
+        self.assertEqual(raised.exception.code, 2)
+
+    def test_the_default_runner_adds_the_environment_to_the_inherited_one(self):
+        probe = "import os, sys; sys.exit(0 if os.environ.get('ADDED') == 'yes' else 3)"
+        code = default_execute([sys.executable, "-c", probe], self.root, {"ADDED": "yes"})
+        self.assertEqual(code, 0)
+
+    def test_the_default_capture_returns_the_exit_code_and_stdout(self):
+        code, out = default_capture([sys.executable, "-c", "print('A=1')"], self.root)
+        self.assertEqual((code, out), (0, "A=1\n"))
+
+
 class RecipeTest(unittest.TestCase):
     def setUp(self):
         self.justfile = (REPO_ROOT / "justfile").read_text(encoding="utf-8")
@@ -331,6 +454,43 @@ class RecipeTest(unittest.TestCase):
         self.assertIn("--build-when '*.nix'", self.recipe)
         self.assertIn("--build-when flake.lock", self.recipe)
         self.assertIn("build target_host=hostname", self.justfile)
+
+    def test_the_recipe_runs_the_guard_test_with_the_variables_a_fresh_build_gives(self):
+        guard_test = "tests/test_claude_permission_guard.py"
+        self.assertIn(f"--env-from '{guard_test}=just claude-guard-test-env'", self.recipe)
+        start = self.justfile.index("\nclaude-guard-test-env:\n")
+        helper = self.justfile[start:self.justfile.find("\n\n", start + 1)]
+        for variable in ("CLAUDE_SETTINGS_PATH", "CLAUDE_GUARD_BASE_POLICY_PATH"):
+            self.assertIn(variable, helper)
+            self.assertIn(variable, (REPO_ROOT / guard_test).read_text(encoding="utf-8"))
+
+    def test_the_helper_comment_stays_within_the_comment_length_rule(self):
+        data = self.justfile.encode("utf-8")
+        snapshot = Snapshot("HEAD", {}, contents={"justfile": data})
+        length = next(e for e in comment_lint.enforcers(None) if e.rule == comment_lint.LENGTH_RULE)
+        recipe_line = self.justfile[:self.justfile.index("\nclaude-guard-test-env:\n")].count("\n") + 1
+        self.assertNotIn(recipe_line, [v.line for v in length.find(snapshot)])
+
+    def test_the_helper_prints_the_settings_and_the_base_policy_under_their_own_names(self):
+        store = "/nix/store/h1-"
+        listing = [f"{store}other", f"{store}claude-code-settings.json",
+                   f"{store}claude-bash-lifecycle-guard-base-policy.json"]
+        with tempfile.TemporaryDirectory() as scratch:
+            bin_dir = Path(scratch) / "bin"
+            bin_dir.mkdir()
+            fake = bin_dir / "nix-store"
+            fake.write_text("#!/bin/sh\ncat <<'EOF'\n" + "\n".join(listing) + "\nEOF\n",
+                            encoding="utf-8")
+            fake.chmod(0o755)
+            path = f"{bin_dir}{os.pathsep}{os.environ['PATH']}"
+            with mock.patch.dict(os.environ, {"PATH": path}):
+                code, out = default_capture(
+                    ["just", "--justfile", str(REPO_ROOT / "justfile"),
+                     "--working-directory", scratch, "claude-guard-test-env"], Path(scratch))
+        self.assertEqual(code, 0)
+        self.assertEqual(parse_assignments(out),
+                         {"CLAUDE_SETTINGS_PATH": listing[1],
+                          "CLAUDE_GUARD_BASE_POLICY_PATH": listing[2]})
 
     def test_the_recipe_covers_the_engine_with_its_tier(self):
         for source in [f"{DELIVERY}/engine*.py",

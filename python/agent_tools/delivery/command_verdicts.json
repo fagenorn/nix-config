@@ -16,7 +16,19 @@
       "worktree": ["removed", "dirty", "error"],
       "forward": ["forwarded", "skipped", "error"],
       "branch": ["gone", "kept", "error"],
-      "issue": ["closed", "open-criteria", "error"]
+      "issue": ["closed", "open-criteria", "error"],
+      "hold-facts": ["closes", "open", "bad-kinds", "absent-merge", "error"],
+      "hold-look": ["clear", "stale", "error"],
+      "hold-graded": ["met", "unmet", "error"],
+      "hold-gate": ["ready", "missing-checks", "human-checks", "unattended", "owner-checks", "script-checks", "note-checks", "error"],
+      "hold-lint": ["valid", "invalid", "error"],
+      "hold-split": ["split", "none", "error"],
+      "hold-split-check": ["split", "none", "absent", "error"],
+      "hold-post": ["posted", "closed", "error"],
+      "hold-posted": ["posted", "closed", "absent", "error"],
+      "hold-label": ["labelled", "error"],
+      "hold-labelled": ["labelled", "absent", "error"],
+      "hold-run": ["ran", "failed", "error"]
     }
   },
   "comment-lint": null,
@@ -177,5 +189,12 @@
     }
   },
   "verify-pending": null,
+  "verify-rounds": {
+    "subcommands": {
+      "round": ["passed", "retest", "fix", "spent", "verify", "error"],
+      "fix-range": ["read", "unread", "error"],
+      "retested": ["done", "untested", "dirty", "error"]
+    }
+  },
   "verify-slot": null
 }
