@@ -9,9 +9,10 @@ A candidate is a pull request created after the boundary whose body has an Evide
 counts only when its branch started from a commit that contains the merge (the first commit's first
 parent is `ahead` of or `identical` to it). The check is met when a counting candidate's Evidence
 section lists a local result of the command: a clause naming it, not preceded in that clause by the
-word CI, not followed by "in CI" or "only CI", and followed by a result word (pass, passed, fail,
-failed) in its own comma part or in a later part that opens with only a quantifier ("all passed");
-a skip or a negation between the command and the result voids it. The Evidence section runs to the
+word CI, with no CI word anywhere after it on the same line (the idioms "purpose ci" and "ci rules"
+excepted), and followed by a result word (pass, passed, fail, failed) in its own comma part or in a
+later one, with no skip, negation or pending word in the parts up to the result (so a list such as
+"conformance, lint and test-touched passed" counts). The Evidence section runs to the
 next heading of its level or higher (a bold or plain "Merge danger" line also ends it). Otherwise
 it is not yet (exit 75); a forge failure or a payload of the wrong shape (a body that is not text
 included) is `forge_unreadable`, also exit 75. The check never reports not met: the verify block's
@@ -35,11 +36,11 @@ COUNTING = ("ahead", "identical")
 HEADING = re.compile(r"^(?:(#{1,6})\s*)?(?:\*\*)?Evidence:?(?:\*\*)?:?$", re.IGNORECASE)
 MARKDOWN_HEADING = re.compile(r"^(#{1,6})\s")
 BOLD_HEADING = re.compile(r"^\*\*[^*]+\*\*:?$")
-CLAUSES = re.compile(r"\n|;|\.(?=\s|$)")
+CLAUSES = re.compile(r";|\.(?=\s|$)")
 CI_WORD = re.compile(r"\bCI\b", re.IGNORECASE)
-CI_AFTER = re.compile(r"\b(?:in|on|by|via|under|from|at|through|only)\s+(?:the\s+)?CI\b|\bCI\s+only\b", re.IGNORECASE)
-NEGATION = re.compile(r"\b(?:skip|skipped|skipping|not|never|without)\b|n't", re.IGNORECASE)
-QUANTIFIER_OPENING = re.compile(r"^\s*(?:(?:all|both|every|each|everything|and|they|it|were|was|have|has)\s+)*$", re.IGNORECASE)
+CI_IDIOM = re.compile(r"(?:--)?\bpurpose\s+ci\b|\bci\s+rules?\b", re.IGNORECASE)
+NEGATION = re.compile(r"\b(?:skip|skipped|skipping|not|never|without|pending|todo|unknown|deferred|blocked"
+                      r"|waiting|running|unavailable)\b|n't", re.IGNORECASE)
 RESULT_WORD = re.compile(r"\b(?:pass|passed|fail|failed)\b", re.IGNORECASE)
 
 Read = Callable[[str], Any]
@@ -80,26 +81,28 @@ def evidence_section(body: Any) -> str | None:
 
 
 def ran_locally(section: str, command: str) -> bool:
-    """Whether a clause of `section` names `command` with no CI before it and a result word after it."""
+    """Whether a clause of `section` names `command` with no CI before it, none after it on its line, and a result."""
     named = re.compile(r"(?<![\w./-])" + re.escape(command) + r"(?![\w./-])", re.IGNORECASE)
-    for clause in CLAUSES.split(section):
-        for occurrence in named.finditer(clause):
-            if CI_WORD.search(clause[:occurrence.start()]):
-                continue
-            after = clause[occurrence.end():]
-            if CI_AFTER.search(after) or not _result_follows(after):
-                continue
-            return True
+    for line in section.splitlines():
+        clauses = CLAUSES.split(line)
+        for index, clause in enumerate(clauses):
+            for occurrence in named.finditer(clause):
+                after = clause[occurrence.end():]
+                rest_of_line = " ".join([after, *clauses[index + 1:]])
+                if CI_WORD.search(clause[:occurrence.start()]) or CI_WORD.search(CI_IDIOM.sub("", rest_of_line)):
+                    continue
+                if _result_follows(after):
+                    return True
     return False
 
 
 def _result_follows(after: str) -> bool:
-    """Whether a result word in `after` belongs to the command: its own comma part, or a part opening with a quantifier."""
-    for index, part in enumerate(after.split(",")):
+    """Whether a result word follows in `after`, in its own comma part or a later one, with no negation before it."""
+    for part in after.split(","):
         result = RESULT_WORD.search(part)
         if NEGATION.search(part[:result.start()] if result else part):
             return False
-        if result and (index == 0 or QUANTIFIER_OPENING.match(part[:result.start()])):
+        if result:
             return True
     return False
 

@@ -149,6 +149,31 @@ class DeliveryAfterTheMergeTest(unittest.TestCase):
                 code, document = run(Forge([[pull(1900, AFTER, body)]]))
                 self.assertEqual((code, document), (75, NOT_YET))
 
+    def test_any_ci_wording_after_the_command_on_its_line_does_not_count(self):
+        bodies = ["## Evidence\nConformance: the CI job passed\n",
+                  "## Evidence\nconformance passed (CI)\n",
+                  "## Evidence\nconformance - CI passed\n",
+                  "## Evidence\nconformance passed; CI only\n",
+                  "## Evidence\nconformance passed. CI only\n"]
+        for body in bodies:
+            with self.subTest(body=body):
+                code, document = run(Forge([[pull(1900, AFTER, body)]]))
+                self.assertEqual((code, document), (75, NOT_YET))
+
+    def test_a_result_listed_after_the_command_in_a_list_is_met(self):
+        bodies = ["## Evidence\nconformance, lint and test-touched passed\n",
+                  "## Evidence\nconformance: no failures, all 41 passed\n",
+                  "## Evidence\nlint, conformance and test-touched passed\n"]
+        for body in bodies:
+            with self.subTest(body=body):
+                code, document = run(Forge([[pull(1900, AFTER, body)]]))
+                self.assertEqual((code, document), (0, met(1900)))
+
+    def test_a_pending_command_ahead_of_another_result_does_not_count(self):
+        body = "## Evidence\nconformance pending, lint passed\n"
+        code, document = run(Forge([[pull(1900, AFTER, body)]]))
+        self.assertEqual((code, document), (75, NOT_YET))
+
     def test_a_longer_word_is_not_the_command(self):
         bodies = ["## Evidence\nlint pass, conformance-report pass, test-touched pass\n",
                   "## Evidence\nlint pass, pre-conformance pass\n"]
