@@ -312,9 +312,9 @@ def _holders_beside(directory: Path, own: Path) -> int:
     return sum(1 for path in sorted(directory.glob("slot-*.lock")) if path != own and _held(path))
 
 
-def _take_repository(directory: Path, group: str, repository_limit: int) -> int | None:
+def _take_repository(directory: Path, group: str, repository_limit: int, count: int) -> int | None:
     """The first repository lock of `group` this process gets without blocking, else None."""
-    for path in verify_queue.repository_lock_paths(directory, group, repository_limit):
+    for path in verify_queue.repository_lock_paths(directory, group, repository_limit, count):
         descriptor = _open_slot(path)
         try:
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -360,7 +360,7 @@ def _try_slots(directory: Path, count: int, live: bool, group: str | None, repos
         held_group = None
         if group is not None:
             try:
-                held_group = _take_repository(directory, group, min(repository_limit, count))
+                held_group = _take_repository(directory, group, repository_limit, count)
             except BaseException:
                 os.close(descriptor)
                 raise

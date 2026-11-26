@@ -176,6 +176,7 @@ agent-workflow-tests *args:
     home/common/agent-skills/tests/test_adopt_project_boundaries.py \
     home/common/agent-skills/tests/test_adopt_apply.py \
     home/common/agent-skills/tests/test_adopt_hook_install.py \
+    home/common/agent-skills/tests/test_adopt_draft_hook_install.py \
     home/common/agent-skills/tests/test_adopt_apply_formatting.py \
     home/common/agent-skills/tests/test_adopt_entries.py \
     home/common/agent-skills/tests/test_adopt_conformance.py \
