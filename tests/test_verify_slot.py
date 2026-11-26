@@ -21,7 +21,7 @@ from pathlib import Path
 from unittest import mock
 
 from agent_tools.canonical import parse_rfc3339_utc
-from agent_tools.delivery import verify_history, verify_queue, verify_slot
+from agent_tools.delivery import comment_lint, never_rise, verify_history, verify_queue, verify_slot
 from agent_tools.delivery.verify_slot import (
     NO_SLOT_EXIT, NO_SLOT_LINE, PLACE_LINE, QUEUED_LINE, REPORT_SKIPPED_LINE, SAME_REPOSITORY_LINE,
     SLOT_DIR_ENV, WAITING_LINE)
@@ -1280,6 +1280,22 @@ class VerifySlotReportTest(SlotHarness, unittest.TestCase):
             [sys.executable, "-m", "agent_tools.delivery.verify_slot", "report", "--", "true"],
             env=self.env(), cwd=self.home, capture_output=True, text=True)
         self.assertEqual(result.returncode, 2)
+
+
+class CommentCapTests(unittest.TestCase):
+    """The queue docstrings this command added stay within the comment cap (rule B19)."""
+
+    def test_the_decision_and_acquire_docstrings_are_within_the_cap(self):
+        path = Path(verify_slot.__file__)
+        data = path.read_bytes()
+        snapshot = never_rise.Snapshot(revision="x", line_counts={}, contents={path.name: data})
+        flagged = {v.line for v in comment_lint.enforcers(None)[1].find(snapshot)}
+        lines = data.decode().split("\n")
+        queue_docstrings = {n for n, text in enumerate(lines, 1)
+                            if text.lstrip().startswith(('"""One decision under the queue lock',
+                                                         '"""`(held, None, place)`'))}
+        self.assertEqual(len(queue_docstrings), 2)
+        self.assertEqual(flagged & queue_docstrings, set())
 
 
 if __name__ == "__main__":

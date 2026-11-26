@@ -391,9 +391,8 @@ def _decide(directory: Path, count: int, live: bool, group: str | None, key: str
             ticket: verify_queue.Ticket | None) -> tuple:
     """One decision under the queue lock: `(ticket, held, reason, eligible, place, holders)`.
 
-    `held` is the slot taken (its holder recorded and the ticket given up), `reason` why the run
-    waits (None while it only waits for an earlier admitted waiter) and `eligible` whether its
-    repository is under the limit.
+    `held` is the slot taken, `reason` why the run waits (None while it waits for an earlier
+    admitted waiter) and `eligible` whether its repository is under the limit.
     """
     if ticket is None:
         ticket = verify_queue.join(directory, key, live, group, time.time())
@@ -431,10 +430,8 @@ def _acquire(directory: Path, count: int, wait_limit: int | None, run: _Run, liv
              command: str) -> tuple[tuple[int, int | None] | None, int | None, int | None]:
     """`(held, None, place)` on a taken slot, else `(None, exit code, place)` with nothing to run.
 
-    `place` is the place the run joined the queue at, None when it never joined. A live run holds
-    the marker while it waits with its repository under the limit and drops it on every exit; a
-    run that reaches the wait limit reserves its ticket, without the queue lock, and any other run
-    that leaves without a slot gives its ticket up.
+    `place` is where the run joined the queue, None if it never did. A live run holds the marker
+    while it waits under the limit; a run leaving without a slot gives its ticket up.
     """
     marker = None
     ticket = None
