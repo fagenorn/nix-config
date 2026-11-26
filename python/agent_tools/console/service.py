@@ -5193,6 +5193,7 @@ class ConsoleService(ActionPermit):
             release_items=release_card.inbox_entries(
                 release_card.live(self._release_cards, self._now())),
             prompt_items=prompt_card.inbox_entries(self._open_prompts(), self._sprints, {p: s.root for p, s in self._states.items()}),
+            prompted_sprints=sorted({prompt.sprint_id for prompt in self._open_prompts()}),
             retry_items=approve.retry_entries(self._adoptions, self._enrolling),
             apply_items=apply_items,
             trust_items=folder_trust.items(self._trust_failures),

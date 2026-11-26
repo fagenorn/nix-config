@@ -12,7 +12,10 @@ not out of usage and not recorded waiting on quota (a sprint waiting on a reset 
 person), no check card names its issues, no engine run of its issues is stopped needing the owner
 (that run is already one counted item), its report names an issue not landed, held, dropped or
 closed out, and nothing has moved for `HELD_AFTER_MS`, the one movement reading the quiet state and the
-ball already use. It clears the moment the sprint moves or any card or question opens; the sprint's
+ball already use, restarted when the sprint's last open question is answered or taken back, and read with every
+session associated with the sprint (`view.sprint_sessions_of`), not only the manager's own by name. A sprint named
+by the view's `prompted_sprints` raises none (a guest view carries no permission card, so it is told which sprints
+have one). It clears the moment the sprint moves or any card or question opens; the sprint's
 `state`, `ball`, `ball_text` and `now_text` stay as they are. The card is one entry of `inbox.open`,
 after the progress entries and before the sign-ins, ordered by `(held_since, sprint_id)`, and counts
 in `inbox_items` and the headline:

@@ -5,7 +5,7 @@ import unittest
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures
 from .test_console_page import PROGRESS, START, frame, full, has_class, nodes, render
 
-TIER = "fast"
+TIER = "integration"  # the renderer is a Node harness
 
 HELD_SPRINT = {
     "type": "inbox_item", "reason": "held_sprint", "key": "held-sprint/" + "a" * 16,

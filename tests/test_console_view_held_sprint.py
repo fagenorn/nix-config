@@ -2,7 +2,8 @@
 import dataclasses
 import unittest
 
-from agent_tools.console import card_entries, view
+from agent_tools.console import card_entries, guest, view
+from agent_tools.console.deliveries import DeliveryState, IssueStage
 from agent_tools.console.sprints import Manager
 
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures
@@ -10,7 +11,7 @@ from .test_console_engine_runs import LIVE
 from .test_console_sprint_engine import engine_state
 from .test_console_view import (
     A, MIN, R, T0, T0_MS, U, asked, check_item, derive_view, entry, iso, line, open_item, out,
-    permission_item, reported, started, state, with_manager, working_session)
+    permission_item, reported, session, started, state, with_manager, working_session)
 
 TIER = "fast"
 
@@ -181,3 +182,59 @@ class HeldSprintViewTest(unittest.TestCase):
             waiting = dataclasses.replace(self.held, manager=Manager("waiting", T0, until=U))
             self.assertEqual(self.cards(line(waiting, now)), [])
 
+
+
+class HeldSprintAssociationTest(unittest.TestCase):
+    """What the held reading sees of the sprint beyond its manager's name, its questions and a guest's view."""
+
+    held = HeldSprintViewTest.held
+    now = R + 120 * MIN
+
+    @staticmethod
+    def cards(shown):
+        return HeldSprintViewTest.cards(shown)
+
+    def test_a_working_session_associated_by_issue_number_or_by_session_id_keeps_the_sprint_unheld(self):
+        delivering = {("d1", "wf_1"): DeliveryState("d1", "wf_1", 1, (IssueStage(12, "building"),))}
+        cases = {
+            "delivery of its issue under another name": dict(
+                sessions=[session("d1", "working")], deliveries=delivering),
+            "manager known by session id alone": dict(sessions=[session("m2", "working")]),
+        }
+        for name, extra in cases.items():
+            sprint_state = (dataclasses.replace(self.held, manager_session="m2")
+                            if "manager" in name else self.held)
+            with self.subTest(name):
+                shown = line(sprint_state, self.now, **extra)
+                self.assertEqual(self.cards(shown), [])
+                self.assertIsNone(entry(shown)["held_since"])
+        with self.subTest("the same sessions idle"):
+            shown = line(self.held, self.now, sessions=[session("d1", "idle")], deliveries=delivering)
+            self.assertEqual(len(self.cards(shown)), 1)
+
+    def test_answering_the_last_open_question_starts_the_hour_again(self):
+        closed = tuple(dataclasses.replace(q, answer="sqlite", chosen="sqlite",
+                                           answered_at=iso(self.now - 5 * MIN))
+                       for q in asked(self.held).questions)
+        answered = dataclasses.replace(self.held, questions=closed)
+        shown = line(answered, self.now)
+        self.assertEqual(self.cards(shown), [])
+        self.assertIsNone(entry(shown)["held_since"])
+        later = line(answered, self.now + 56 * MIN)
+        self.assertEqual([c["waiting_since"] for c in self.cards(later)], ["2026-11-12T11:56:00+00:00"])
+        withdrawn = dataclasses.replace(self.held, questions=tuple(
+            dataclasses.replace(q, withdrawn_at=iso(self.now - 5 * MIN))
+            for q in asked(self.held).questions))
+        self.assertEqual(self.cards(line(withdrawn, self.now)), [])
+
+    def test_a_guest_view_raises_no_held_card_for_a_sprint_the_owner_has_a_permission_card_for(self):
+        inputs = dict(states=[state("p00", 1)], sprints={A: self.held}, now_ms=self.now,
+                      prompt_items=[permission_item()], prompted_sprints=[A, "b" * 16])
+        scoped = guest.scoped(inputs, frozenset({"p00"}))
+        self.assertEqual(scoped["prompt_items"], ())
+        self.assertEqual(scoped["prompted_sprints"], (A,))
+        self.assertEqual(self.cards(derive_view(**scoped)), [])
+        bare = guest.scoped({k: v for k, v in inputs.items() if k != "prompted_sprints"},
+                            frozenset({"p00"}))
+        self.assertEqual(len(self.cards(derive_view(**bare))), 1)
+        self.assertEqual(guest.scoped(inputs, frozenset())["prompted_sprints"], ())

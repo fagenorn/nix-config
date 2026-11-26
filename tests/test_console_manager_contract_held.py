@@ -22,9 +22,9 @@ class HeldContractTest(unittest.TestCase):
             "names what is held, why it is held and the one action that releases it",
             "A status line, a report's `inbox` or `next`, or a reply is not an ask",
             "A merge the guard refuses is not such a hold",
-            "when ten are open, first take back the one whose answer matters least with"
-            " `sprint withdraw-question`, then send the round of nine replacements and the held"
-            " question",
+            "when more than nine are open, even across two rounds, first take back as many as it"
+            " takes to leave nine",
+            "then send the round of the nine replacements and the held question at once",
         ):
             with self.subTest(needle=needle):
                 self.assertIn(needle, flat)

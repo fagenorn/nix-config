@@ -223,7 +223,12 @@ one entry of `inbox.open`, after the stalls and the failed starts and before the
 `PROGRESS_SENTENCE` says what the page offers. The sentence precedence is all out, stale, briefs,
 stalls, progress, sign-in, questions, then the existing ones.
 
-A held sprint is one entry of `inbox.open`, derived as the `card_entries` module docstring says.
+A held sprint is one entry of `inbox.open`, derived as the `card_entries` module docstring says. Its quiet reading
+counts a working session associated with the sprint by `sprint_sessions_of` (a worker running a delivery of its
+issues, a manager known by session id alone), not only one carrying the manager's name, and restarts when its last
+open question is answered or taken back. `prompted_sprints` (sprint ids, default none) names sprints an owner-only
+permission card already asks about, so a guest view, which carries no card, raises no held card for them; it changes
+no ball and no count.
 
 A profile whose sign-in asks (#1010: `capacity["profiles"][i]["signin"]["ask"]` is true, a read of
 `entry.get("signin")` so a capacity without that member shows none) and that no colleague added (#1361,
@@ -1534,6 +1539,21 @@ def _base_ms(state: SprintState) -> int:
     return max(times, default=0)
 
 
+def _closed_ms(state: SprintState) -> int | None:
+    """The latest time a question of the sprint was answered or taken back, else None; a time that
+    does not read as one is left out."""
+    times = []
+    for question in state.questions:
+        for text in (question.answered_at, question.withdrawn_at):
+            if text is None:
+                continue
+            try:
+                times.append(_millis(text))
+            except (TypeError, ValueError):
+                continue
+    return max(times, default=None)
+
+
 def sprint_quiet_for(state: SprintState, now_ms: int | None, listed: Collection[str],
                      waits: WaitSignals = NO_WAITS) -> int | None:
     """The one movement reading of a running sprint (#1109): None while it moves, else the
@@ -1858,7 +1878,8 @@ def _sprint_entry(state: SprintState, now_ms: int | None, managers: bool, sessio
                   movement: ProjectMovement | None = None, wait_lines: Sequence[Mapping] = (),
                   waits_of: Callable[[DeliveryState], WaitSignals | None] = lambda run: None, prompted: bool = False,
                   engine: engine_runs_module.SprintEngine = engine_runs_module.NO_ENGINE,
-                  move: MoveNote | None = None) -> dict:
+                  move: MoveNote | None = None, associated: Sequence[str] = (),
+                  permission_held: bool = False) -> dict:
     stated_ms = _millis(state.stated_at)
     elapsed = 0 if now_ms is None else now_ms - stated_ms
     report = state.report
@@ -1892,9 +1913,13 @@ def _sprint_entry(state: SprintState, now_ms: int | None, managers: bool, sessio
     deaf = any(m.held and m.session_id in manager_ids for m in own)
     ball = sprint_ball(state, now_ms, waiting, listed, waits, failed_start=failed, deaf=deaf,
                        prompted=prompted)
+    quiet = sprint_quiet_for(state, now_ms, [*listed, *associated], waits)
+    closed = _closed_ms(state)
+    if quiet is not None and closed is not None:
+        quiet = min(quiet, max(0, now_ms - closed))
     held = card_entries.held_since(
-        now_ms, sprint_quiet_for(state, now_ms, listed, waits),
-        ball != BALL_NOBODY or state.stop_at is not None or quota is not None or bool(checks)
+        now_ms, quiet,
+        ball != BALL_NOBODY or permission_held or state.stop_at is not None or quota is not None or bool(checks)
         or engine.stopped or not sprint_open_issues(state)
         or (state.manager is not None and state.manager.state == WAITING))
     hold = stated_hold(state, now_ms)
@@ -1987,7 +2012,9 @@ def _project_entry(state: ProjectState, sessions: Sequence[SessionState],
                    waits: Sequence[Mapping] = (), read: ReadState | None = None,
                    questions: Mapping | None = None, prompted: Collection[str] = (),
                    engine_runs: Sequence[Mapping] = (), engine_states: Sequence[engine_runs_module.RunState] = (),
-                   moves: Mapping[str, MoveNote] | None = None) -> dict:
+                   moves: Mapping[str, MoveNote] | None = None,
+                   associated: Mapping[str, Sequence[str]] | None = None,
+                   permission_held: Collection[str] = ()) -> dict:
     manager_ids: dict[str, set[str]] = {}
     for sprint in sprints:
         ids = {s.session_id for s in (sprint_sessions or {}).get(sprint.sprint_id, ())}
@@ -2009,7 +2036,9 @@ def _project_entry(state: ProjectState, sessions: Sequence[SessionState],
                               prompted=s.sprint_id in prompted,
                               engine=engine_runs_module.sprint_engine(
                                   engine_states, s.project_id, sprint_issue_numbers(s), now_ms),
-                              move=(moves or {}).get(s.sprint_id))
+                              move=(moves or {}).get(s.sprint_id),
+                              associated=(associated or {}).get(s.sprint_id, ()),
+                              permission_held=s.sprint_id in permission_held)
                 for s in group]
 
     return {
@@ -2322,6 +2351,7 @@ def derive_view(
     project_questions: Mapping[str, Sequence[project_question.AskedQuestion]] | None = None,
     sharing: Mapping | None = None, moves: Mapping[str, MoveNote] | None = None,
     engine_runs: Iterable[engine_runs_module.RunState] | None = None, engine_lines: bool = True,
+    prompted_sprints: Iterable[str] = (),
 ) -> dict:
     states = list(states)
     sessions = list(sessions)
@@ -2395,6 +2425,15 @@ def derive_view(
                 in_sprint[sprint.sprint_id] = mine
                 owned[project_id] = [s for s in owned[project_id] if s.name != name]
 
+    associated: dict[str, list[str]] = {}
+    live = {s.session_id: s.state for s in sessions}
+    for project_id in drafted:
+        found = sprint_sessions_of(project_id, drafted[project_id], sessions, deliveries or {}, by_id)
+        for session_id, sprint_ids in found.items():
+            for sprint_id in sprint_ids:
+                associated.setdefault(sprint_id, []).append(live[session_id])
+    permission_held = set(prompted_sprints)
+
     starts = sorted((s for group in drafted.values() for s in group
                      if failed_start(s, bool(in_sprint.get(s.sprint_id)), managers)),
                     key=lambda s: (s.manager.at, s.sprint_id))
@@ -2435,7 +2474,8 @@ def derive_view(
                               notice_post=notice_post[s.project_id], overlaps=overlaps[s.project_id],
                               sprint_waits=sprint_waits, waits=project_waits.get(s.project_id, ()),
                               read=health.get(s.project_id), questions=asks[s.project_id], prompted=prompted,
-                              engine_runs=lines.get(s.project_id, ()), engine_states=engine_states, moves=moves)
+                              engine_runs=lines.get(s.project_id, ()), engine_states=engine_states, moves=moves,
+                              associated=associated, permission_held=permission_held)
                for s in active]
     quiet_entries = [_project_entry(s, (), runs, now_ms, (), managers, in_sprint,
                                     finished=finished.get(s.project_id, ()), capacity=capacity,
