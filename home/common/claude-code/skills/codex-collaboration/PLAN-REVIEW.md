@@ -11,7 +11,7 @@ An absolute plan path (the plan root; its task files sit beside it, linked from 
 From the invocation directory, resolve the canonical worktree root and build one self-contained prompt with:
 
 1. The operation name, invocation directory, worktree root, current branch and base SHA.
-2. The issue reference and the caller's acceptance criteria; the reviewer may read the issue with read-only `gh issue view`.
+2. The issue reference and the caller's acceptance criteria; the reviewer may read the issue with read-only `gh issue view`. Plus any probe rule the caller passed, verbatim.
 3. The absolute plan root, its task files, and the spec and code map paths when given.
 4. Every applicable `AGENTS.md` and `CLAUDE.md` from the invocation directory up to the worktree root.
 5. Available `bindings.paths.hints` paths and the domain docs from the snapshot's context, standards and architecture paths: the context map and only the area `CONTEXT.md` files whose `governs:` globs intersect the plan's paths or whose terms appear in the issue; ADRs cited by the issue, spec, plan or a selected area; and the applicable standards (`~/.agents/standards/the-bar.md`, its `stacks/` shards for the plan's file types, the project's intersecting `docs/standards/` shards). A worktree `GROUNDING.md` routes this selection, never replacing it. Without a context map, use the retained `bindings.paths.{context,standards,architecture}` paths.

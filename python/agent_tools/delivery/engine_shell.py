@@ -12,7 +12,8 @@ Every refusal raises `Refused`, before a run directory exists and before any
 process starts: the project contract must resolve from the current directory; a
 held run lock answers `EXIT_RUNNING` first; the host's settings must name the lifecycle guard as the one
 unconditional Bash hook with no hook switch on (`engine_guard.locate`), checked after that answer;
-the procedure must pass `procedure_check.check_directory` against the platform
+the procedure must pass the procedure check, run as its own process through `engine_check` without
+measuring the caps, against the platform
 declarations plus every project command, hold only `command`, `agent`, `decide`, `group` and `call` steps,
 a `mutates: true` step only as a `command` or `agent` step, no input the run does not supply, no `call` member
 of a group, no procedure that calls itself and no agent step whose role file does not read
@@ -21,8 +22,11 @@ refusal starts with its reason code), checked after the guard; every child proce
 names is refused on the same terms, with the parent's inputs (plus `item` under
 `each`) as the inputs it may declare. The same checks run again on the run's
 staged copy, which is the copy the loop reads (`<run>/procedure/`); a mutating command step needs its `check`,
-which the checker requires. A new run checks `<procedures_dir>/deliver.json`; a continued run checks
-its own staged copy only. The engine supplies four inputs, each only to a procedure that declares it: `issue`
+which the checker requires. A refused verdict (the procedure check, and for a new run the size caps too)
+raises `ProcedureRefused`. A new run's set is judged before the runs root or its creation lock is created when
+neither exists, else under the lock after the running and open-run answers; a superseding run is judged on its
+staged copy before the old run is ended; a continued run checks its own staged copy only and is not judged
+again. The engine supplies four inputs, each only to a procedure that declares it: `issue`
 (the issue number), `repo` (the tracker's repository slug), `repo_root` (the project root) and `holder`
 (`<host>/<run id>` of the root run, which a child run inherits); a declared one with no value in the project is refused.
 
@@ -184,8 +188,9 @@ from typing import Callable, Mapping
 
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
 from agent_tools.delivery import (
-    engine_commands, engine_core, engine_guard, engine_housekeeping, engine_ledger, engine_reply,
-    engine_session, engine_slots, engine_stop, host_admission, procedure_check, rule_reader,
+    engine_check, engine_commands, engine_core, engine_guard, engine_housekeeping, engine_ledger,
+    engine_reply, engine_session, engine_slots, engine_stop, host_admission, procedure_terms,
+    rule_reader,
 )
 from agent_tools.delivery.engine_commands import CommandTable, UnknownCommand
 from agent_tools.delivery.engine_ledger import creation_lock_path
@@ -213,6 +218,14 @@ NO_TOKENS = {"input": 0, "cache_write": 0, "cache_read": 0, "output": 0}
 
 class Refused(Exception):
     """The procedure or the project cannot be run; nothing was created."""
+
+
+class ProcedureRefused(Refused):
+    """The check's verdict refused the procedure set; `document` is the refused line it printed."""
+
+    def __init__(self, message: str, document: dict):
+        super().__init__(message)
+        self.document = document
 
 
 class Fault(Exception):
@@ -345,7 +358,7 @@ def _resolve() -> tuple[dict, CommandTable]:
         raise Refused(f"{error.code}: {error.repair_id}") from error
     try:
         return snapshot, CommandTable.from_snapshot(snapshot)
-    except procedure_check.DeclarationError as error:
+    except procedure_terms.DeclarationError as error:
         raise Refused(str(error)) from error
 
 
@@ -357,29 +370,37 @@ def _admitted() -> int:
                       f"{host_admission.ENGINE_ROUTE} route, so no run starts") from error
 
 
-def check_declarations() -> dict[str, procedure_check.CommandDeclaration | None]:
-    """The declarations `engine check` checks against: `engine deliver`'s inside an onboarded project."""
+def check_project_commands() -> tuple[str, ...]:
+    """The project command ids `engine check` adds to the platform's: `engine deliver`'s inside an onboarded project."""
     try:
         snapshot = resolve_project.resolve(None)
     except resolve_project.ContractError as error:
         if error.code == "not_onboarded":
-            return procedure_check.load_commands()
+            procedure_terms.load_commands()  # a DeclarationError propagates
+            return ()
         raise Refused(f"{error.code}: {error.repair_id}") from error
-    return CommandTable.from_snapshot(snapshot).declarations()
+    return CommandTable.from_snapshot(snapshot).project_ids()
 
 
-def _validate(directory: Path, table: CommandTable) -> dict:
-    """The entry procedure of `directory`, checked and runnable, or `Refused`."""
-    if not directory.is_dir() or not (directory / f"{ENTRY}.json").is_file():
-        raise Refused(f"no {ENTRY}.json in the procedures directory {directory}")
+def _validate(directory: Path, table: CommandTable, caps: bool = False) -> dict:
+    """The entry procedure of `directory`, checked and runnable, or `Refused`; `caps` adds the size caps."""
+    absent = (None if (directory / f"{ENTRY}.json").is_file()
+              else Refused(f"no {ENTRY}.json in the procedures directory {directory}"))
     try:
-        result = procedure_check.check_directory(directory, table.declarations())
-    except (ValueError, OSError) as error:
-        raise Refused(str(error)) from error
-    if result.refusals:
-        first = result.refusals[0]
-        raise Refused(f"procedure {first.procedure}, step {first.step}: "
-                      f"{first.defect}, {first.detail}")
+        _, document = engine_check.verdict(directory, table.project_ids(), caps=caps)
+    except engine_check.CheckError as error:
+        raise (absent or Refused(str(error))) from error
+    if document.get("refusals") or document.get("breaches"):
+        if document["refusals"]:
+            first = document["refusals"][0]
+            message = (f"procedure {first['procedure']}, step {first['step']}: "
+                       f"{first['defect']}, {first['detail']}")
+        else:
+            first = document["breaches"][0]
+            message = f"{first['thing']} is {first['size']} {first['unit']}, over its cap of {first['cap']}"
+        raise ProcedureRefused(message, document)
+    if absent:
+        raise absent
     try:
         procedure = _load(directory / f"{ENTRY}.json")
     except (ValueError, OSError) as error:
@@ -443,7 +464,7 @@ def _open_runs(runs: list[Path]) -> list[Path]:
         state = engine_ledger.fold(engine_ledger.read_run(existing),
                                    engine_ledger.replay(existing / "events.jsonl"),
                                    engine_ledger.process_alive)
-        if not state.done and (state.stop or {}).get("name") != procedure_check.SUPERSEDED:
+        if not state.done and (state.stop or {}).get("name") != procedure_terms.SUPERSEDED:
             open_runs.append(existing)
     return open_runs
 
@@ -455,7 +476,7 @@ def _superseded(run_dir: Path) -> bool:
         document = _load(run_dir / "procedure" / "deliver.json")
     except (ValueError, OSError):
         return False
-    return not procedure_check.readable_format(document.get("format"))
+    return not procedure_terms.readable_format(document.get("format"))
 
 
 def _supersede(run_dir: Path, clock: Callable[[], datetime]) -> None:
@@ -463,7 +484,7 @@ def _supersede(run_dir: Path, clock: Callable[[], datetime]) -> None:
     ledger = engine_ledger.replay(run_dir / "events.jsonl")
     step = next((e["step"] for e in reversed(ledger) if e["event"] == "step_entered"), ENTRY)
     with engine_stop.publication(run_dir):
-        _record_stop(run_dir, step, procedure_check.SUPERSEDED, "nothing", "", False)
+        _record_stop(run_dir, step, procedure_terms.SUPERSEDED, "nothing", "", False)
     _record_history(run_dir, clock)
 
 
@@ -495,13 +516,34 @@ def deliver(issue: int, procedures_dir: Path, *, clock: Callable[[], datetime] |
     holder = {"pid": os.getpid(), "started": _now()}
     held: list[int] = []
     continued = False
+    replaced: Path | None = None
 
     def stage(staged: Path) -> None:
         # The copy that runs is the copy checked; the lock is held before the run is visible.
-        if _validate(staged / "procedure", table)["inputs"] != procedure["inputs"]:
+        if _validate(staged / "procedure", table, caps=True)["inputs"] != procedure["inputs"]:
             raise Refused(f"the {ENTRY} procedure changed while its run was created")
         held.append(_take_run_lock(staged, holder["started"]))
+        if replaced is not None:
+            # The replacement is judged on the bytes it publishes, before the
+            # unreadable-format run it replaces is ended.
+            old = _take_run_lock(replaced, holder["started"])
+            try:
+                _end_leftover(replaced)
+                _supersede(replaced, clock)
+            finally:
+                os.close(old)
 
+    checked = None
+    try:
+        root = engine_ledger.runs_root()
+        if (not os.path.lexists(creation_lock_path(root, issue))
+                and not engine_ledger.find_runs(root, issue, project)):
+            # A new run's set is judged before the runs root or the issue's creation lock
+            # exists; when either exists the judgement waits for the lock, so a running
+            # or open run answers first.
+            checked = _validate(procedures_dir, table, caps=True)
+    except (engine_ledger.LedgerError, OSError, KeyError) as error:
+        raise Refused(str(error)) from error
     try:
         creation = _lock_creation(issue)
         try:
@@ -515,20 +557,16 @@ def deliver(issue: int, procedures_dir: Path, *, clock: Callable[[], datetime] |
             if len(open_runs) > 1:
                 raise Refused(f"runs {', '.join(run.name for run in open_runs)} of issue "
                               f"{issue} are all open; the engine continues one run only")
-            if open_runs and _superseded(open_runs[0]):
-                held.append(_take_run_lock(open_runs[0], holder["started"]))
-                _end_leftover(open_runs[0])
-                _supersede(open_runs[0], clock)
-                _release(held)
-                open_runs = []
-            if open_runs:
+            replaced = open_runs[0] if open_runs and _superseded(open_runs[0]) else None
+            if open_runs and replaced is None:
                 run_dir = open_runs[0]
                 procedure = _validate(run_dir / "procedure", table)
                 inputs = engine_ledger.read_run(run_dir)["inputs"]
                 held.append(_take_run_lock(run_dir, holder["started"]))
                 continued = True
             else:
-                procedure = _validate(procedures_dir, table)
+                procedure = checked if checked is not None else _validate(
+                    procedures_dir, table, caps=True)
                 now = datetime.now(timezone.utc)
                 token = "".join(secrets.choice(engine_ledger.TOKEN_ALPHABET) for _ in range(4))
                 host = _host()
@@ -601,7 +639,7 @@ def _continue(run_dir: Path, table: CommandTable, inputs: dict) -> None:
         if (stored or graded) and not (graded and moved):
             outcome = next(e["outcome"] for e in here) if graded else stored[0]["outcome"]
             _graded(run_dir, steps[name], visit, outcome, graded=graded, moved=moved,
-                    member=name in members, bound=outcome == procedure_check.OUT_OF_BOUNDS)
+                    member=name in members, bound=outcome == procedure_terms.OUT_OF_BOUNDS)
             ledger = engine_ledger.replay(run_dir / "events.jsonl")
     events = core_events(run_dir, ledger, computed)
     action = engine_core.replay(procedure, inputs, events).action
@@ -965,8 +1003,8 @@ def _renew(run_dir: Path, table: CommandTable, procedure: dict, inputs: dict,
     else:
         text = " ".join(ran.stdout.decode("utf-8", "replace").split()
                         + ran.stderr.decode("utf-8", "replace").split()) or "no output"
-    need = procedure["stops"][procedure_check.CLAIM_LOST]["need"]
-    return _stop(run_dir, step, procedure_check.CLAIM_LOST, need,
+    need = procedure["stops"][procedure_terms.CLAIM_LOST]["need"]
+    return _stop(run_dir, step, procedure_terms.CLAIM_LOST, need,
                  f"The claim was not renewed before step {step}, the keep-alive "
                  f"answered {verdict}: {text}.", stop)
 
@@ -1056,13 +1094,13 @@ def _grade_command(run_dir: Path, step: dict, name: str, visit: int,
         engine_ledger.store_result(run_dir, step=name, visit=visit, result={"bound": "wall-time"},
                                    at=_now(), wall_seconds=ran.wall_seconds, turns=0,
                                    tokens=dict(NO_TOKENS), spend_usd=0, head=head,
-                                   outcome=procedure_check.OUT_OF_BOUNDS)
-        _graded(run_dir, step, visit, procedure_check.OUT_OF_BOUNDS, bound=True, member=member)
+                                   outcome=procedure_terms.OUT_OF_BOUNDS)
+        _graded(run_dir, step, visit, procedure_terms.OUT_OF_BOUNDS, bound=True, member=member)
         return
     engine_ledger.store_result(run_dir, step=name, visit=visit, result=ran.result, at=_now(),
                                wall_seconds=ran.wall_seconds, turns=0, tokens=dict(NO_TOKENS),
                                spend_usd=0, head=head, outcome=ran.outcome)
-    if ran.outcome == procedure_check.OUT_OF_BOUNDS:  # only the engine grades a fired bound
+    if ran.outcome == procedure_terms.OUT_OF_BOUNDS:  # only the engine grades a fired bound
         raise Fault(f"step {name} has no mapping for the outcome {ran.outcome}")
     _graded(run_dir, step, visit, ran.outcome, member=member)
 
@@ -1143,7 +1181,7 @@ def _child(run_dir: Path, table: CommandTable, run: dict, step: dict,
                 shutil.rmtree(child_dir, ignore_errors=True)
             raise
         _, line = _walk(child_dir, table, scope, action.recheck)
-        if line["end"] == procedure_check.QUOTA_WAIT:
+        if line["end"] == procedure_terms.QUOTA_WAIT:
             raise _Quota(line["detail"])
         if line["end"] == engine_stop.STOPPED_BY_REQUEST:
             raise engine_stop.Stopped
@@ -1224,7 +1262,7 @@ def _quota_ended(run_dir: Path, step: str, quota: _Quota,
                  stop: Callable[[], bool]) -> tuple[int, dict]:
     """The `quota-wait` stop of a group or a call, recorded once its members or children have
     ended, so it is the run's last event; a member's step names it, else the group's or call's."""
-    return _stop(run_dir, quota.step or step, procedure_check.QUOTA_WAIT, QUOTA_NEED,
+    return _stop(run_dir, quota.step or step, procedure_terms.QUOTA_WAIT, QUOTA_NEED,
                  quota.detail, stop)
 
 
@@ -1287,12 +1325,12 @@ def _visit_session(run_dir: Path, root: str, step: dict, action: engine_core.Sta
     bound = (engine_session.WALL_TIME if launched.timed_out
              else engine_session.CAP_SUBTYPES.get(reading.subtype))
     if bound is not None:
-        store({"bound": bound}, procedure_check.OUT_OF_BOUNDS)
-        _graded(run_dir, step, visit, procedure_check.OUT_OF_BOUNDS, bound=True, member=member)
+        store({"bound": bound}, procedure_terms.OUT_OF_BOUNDS)
+        _graded(run_dir, step, visit, procedure_terms.OUT_OF_BOUNDS, bound=True, member=member)
         return None
     if no_reply:
-        store({}, procedure_check.NO_REPLY)
-        _graded(run_dir, step, visit, procedure_check.NO_REPLY, member=member)
+        store({}, procedure_terms.NO_REPLY)
+        _graded(run_dir, step, visit, procedure_terms.NO_REPLY, member=member)
         return None
     reply = reading.reply
     if reply is None:
@@ -1351,10 +1389,10 @@ def _launch_until_answered(
                    detail: str) -> tuple:
         record(launched, reading)
         if defer:
-            line = {"detail": detail, "end": procedure_check.QUOTA_WAIT, "need": QUOTA_NEED,
+            line = {"detail": detail, "end": procedure_terms.QUOTA_WAIT, "need": QUOTA_NEED,
                     "run": run_dir.name}
             return launched, reading, (EXIT_STOP, line), False
-        return launched, reading, _stop(run_dir, name, procedure_check.QUOTA_WAIT, QUOTA_NEED,
+        return launched, reading, _stop(run_dir, name, procedure_terms.QUOTA_WAIT, QUOTA_NEED,
                                         detail, stop), False
 
     while True:

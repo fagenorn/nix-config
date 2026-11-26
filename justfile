@@ -107,7 +107,7 @@ test:
 
 # Run the suite members this branch touches, or the whole suite when a build input changes (the `test-touched` command).
 test-touched:
-  tools="$(nix build --no-link --print-out-paths '{{justfile_directory()}}#agent-platform.tools')" && test -n "$tools" && AGENT_PLATFORM_TOOLS="$tools/bin" WORKFLOW_POLICY_SURFACE=source PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.delivery.touched_tests --base origin/main --source-root python --pair home/common/claude-code/lifecycle_guard.py=tests/test_claude_permission_guard.py --cover 'python/agent_tools/delivery/engine*.py=tests/test_engine_*.py' --cover 'python/agent_tools/delivery/host_admission.py=tests/test_engine_*.py' --cover 'python/agent_tools/delivery/procedure_check.py=tests/test_engine_*.py' --cover 'python/agent_tools/delivery/lane_rule.py=tests/test_engine_*.py' --cover 'python/agent_tools/delivery/rule_reader.py=tests/test_engine_*.py' --cover 'python/agent_tools/delivery/procedures/*=tests/test_engine_*.py' --cover 'tests/engine_*.py=tests/test_engine_*.py' --cover 'tests/fixtures/engine-*=tests/test_engine_*.py' --build-command 'just build' --env-from 'tests/test_claude_permission_guard.py=just claude-guard-test-env' --build-when '*.nix' --build-when flake.lock --build-when .sops.yaml --build-when 'data/*' --build-when 'homebrew/*' --build-when 'patches/*' --build-when 'secrets/*' --build-when 'vars/*'
+  tools="$(nix build --no-link --print-out-paths '{{justfile_directory()}}#agent-platform.tools')" && test -n "$tools" && AGENT_PLATFORM_TOOLS="$tools/bin" WORKFLOW_POLICY_SURFACE=source PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.delivery.touched_tests --base origin/main --source-root python --pair home/common/claude-code/lifecycle_guard.py=tests/test_claude_permission_guard.py --cover 'python/agent_tools/delivery/engine*.py=tests/test_engine_*.py' --cover 'python/agent_tools/delivery/host_admission.py=tests/test_engine_*.py' --cover 'python/agent_tools/delivery/procedure_check.py=tests/test_engine_*.py' --cover 'python/agent_tools/delivery/procedure_terms.py=tests/test_engine_*.py' --cover 'python/agent_tools/delivery/size_caps.py=tests/test_engine_*.py' --cover 'python/agent_tools/delivery/lane_rule.py=tests/test_engine_*.py' --cover 'python/agent_tools/delivery/rule_reader.py=tests/test_engine_*.py' --cover 'python/agent_tools/delivery/procedures/*=tests/test_engine_*.py' --cover 'tests/engine_*.py=tests/test_engine_*.py' --cover 'tests/fixtures/engine-*=tests/test_engine_*.py' --build-command 'just build' --env-from 'tests/test_claude_permission_guard.py=just claude-guard-test-env' --build-when '*.nix' --build-when flake.lock --build-when .sops.yaml --build-when 'data/*' --build-when 'homebrew/*' --build-when 'patches/*' --build-when 'secrets/*' --build-when 'vars/*'
 
 # Print the two variables the lifecycle guard's test reads, from the built ./result (`test-touched` builds first).
 claude-guard-test-env:
@@ -165,6 +165,7 @@ agent-workflow-tests *args:
     home/common/agent-skills/tests/test_conformance_registry.py \
     home/common/agent-skills/tests/test_conformance_ruff.py \
     home/common/agent-skills/tests/test_conformance_lint_times.py \
+    home/common/agent-skills/tests/test_conformance_procedures.py \
     home/common/agent-skills/tests/test_adopt_project.py \
     home/common/agent-skills/tests/test_adopt_migrate.py \
     home/common/agent-skills/tests/test_adopt_project_boundaries.py \
@@ -184,6 +185,7 @@ agent-workflow-tests *args:
     tests/test_agent_tools_layout.py \
     tests/test_agent_tools_semver.py \
     tests/test_engine_check.py \
+    tests/test_engine_check_process.py \
     tests/test_engine_direct_procedures.py \
     tests/test_engine_graders.py \
     tests/test_engine_findings.py \
@@ -192,6 +194,7 @@ agent-workflow-tests *args:
     tests/test_engine_commands.py \
     tests/test_engine_guard.py \
     tests/test_engine_deliver.py \
+    tests/test_engine_start_check.py \
     tests/test_engine_session.py \
     tests/test_engine_session_limits.py \
     tests/test_engine_reaping.py \
@@ -252,8 +255,6 @@ agent-workflow-tests *args:
     tests/test_interrupted_reruns_check.py \
     tests/test_verify_checks.py \
     tests/test_cleanup_fix_check.py \
-    tests/test_suite_test_failures.py \
-    tests/test_protection_tree.py \
     tests/test_console_approved_action_check.py \
     tests/test_console_takeover_merge_check.py \
     tests/test_console_release_rerun_check.py \
@@ -426,6 +427,7 @@ agent-workflow-tests *args:
     tests/test_console_answer.py \
     tests/test_console_sprints.py \
     tests/test_console_manager_identity.py \
+    tests/test_console_contract_plain_words.py \
     tests/test_console_action_card.py \
     tests/test_console_revive.py \
     tests/test_console_idle.py \
@@ -481,10 +483,12 @@ agent-workflow-tests *args:
     home/common/agent-skills/tests/test_deliver_standard_landing.py \
     home/common/agent-skills/tests/test_deliver_standard_before_pull_request.py \
     home/common/agent-skills/tests/test_deliver_standard_lane_rule.py \
+    home/common/agent-skills/tests/test_deliver_standard_work_rules.py \
     home/common/agent-skills/tests/test_deliver_batch_program.py \
     home/common/agent-skills/tests/test_deliver_batch_landing.py \
     home/common/agent-skills/tests/test_deliver_batch_before_pull_request.py \
     home/common/agent-skills/tests/test_deliver_batch_lane_rule.py \
+    home/common/agent-skills/tests/test_deliver_batch_work_rules.py \
     home/common/agent-skills/evals/tests/test-run-eval-tree.sh
 
 # Validate every explicit pipeline dispatch and print the representative trace.

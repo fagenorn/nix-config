@@ -43,6 +43,13 @@ CONTRACTS = {
         "same turn: never end your turn while a command or agent you started "
         "still runs."
     ),
+    "fresh-scratch": (
+        "Scratch work: with Bash, create the scratch directory the brief names "
+        "with mkdir -p and run a probe or one-off script from it by path; with "
+        "Write, create only new files there, under names not yet used, never "
+        "overwriting an existing file and never writing a file in the worktree; "
+        "such a file is not an edit of the reviewed work."
+    ),
     "no-wait-loops": (
         "Never run `sleep` in the foreground: wait with Monitor with an "
         "until-condition or a background Bash command, or end the turn "
@@ -72,12 +79,13 @@ class Carrier:
 
 
 AGENT_CLAUSES = ("own-commands",)
+REVIEWER_CLAUSES = AGENT_CLAUSES + ("fresh-scratch",)
 
 
 CARRIERS = (
     Carrier("implementer.md", "agents", "body", contracts=AGENT_CLAUSES),
-    Carrier("reviewer.md", "agents", "body", contracts=AGENT_CLAUSES),
-    Carrier("reviewer-lite.md", "agents", "body", contracts=AGENT_CLAUSES),
+    Carrier("reviewer.md", "agents", "body", contracts=REVIEWER_CLAUSES),
+    Carrier("reviewer-lite.md", "agents", "body", contracts=REVIEWER_CLAUSES),
 )
 
 # Wording #317 retired: the commands-only turn-end tail and the false premise
@@ -321,6 +329,9 @@ class SourceTreeContractsTest(unittest.TestCase):
     def test_no_wait_loops(self):
         self.assert_contract_held("no-wait-loops")
 
+    def test_fresh_scratch(self):
+        self.assert_contract_held("fresh-scratch")
+
 
 class InstalledViewsTest(unittest.TestCase):
     def test_only_the_claude_view_is_installed(self):
@@ -478,7 +489,8 @@ class CarrierDeclarationTest(unittest.TestCase):
         )
         for carrier in enrolled.values():
             with self.subTest(carrier=carrier.relative):
-                self.assertEqual((carrier.kind, carrier.contracts), ("body", AGENT_CLAUSES))
+                expected = REVIEWER_CLAUSES if carrier.relative in ("reviewer.md", "reviewer-lite.md") else AGENT_CLAUSES
+                self.assertEqual((carrier.kind, carrier.contracts), ("body", expected))
 
 
 # The dispatch-marker inventory across both skill source trees (#272 D12) has
