@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -162,6 +163,33 @@ class AgentToolSetTest(unittest.TestCase):
     def test_the_implementer_role_file_runs_on_sonnet_at_high_effort(self):
         metadata = frontmatter(AGENTS / "implementer.md")
         self.assertEqual((metadata["model"], metadata["effort"]), ("sonnet", "high"))
+
+    def test_every_agent_type_given_the_work_rules_can_follow_them(self):
+        source = (REPO_ROOT / "home/common/claude-code/skills/deliver-standard/deliver-standard.js"
+                  ).read_text(encoding="utf-8")
+        lines = [line for line in source.splitlines() if line.startswith("const WORKERS = [")]
+        self.assertEqual(len(lines), 1)
+        workers = re.findall(r"'([a-z-]+)'", lines[0])
+        self.assertEqual(workers, ["implementer", "reviewer", "reviewer-lite"])
+        for name in workers:
+            with self.subTest(agent=name):
+                metadata = frontmatter(AGENTS / f"{name}.md")
+                if "tools" in metadata:
+                    granted = tool_list(metadata["tools"])
+                    self.assertIn("Write", granted)
+                    self.assertIn("Bash", granted)
+                else:
+                    blocked = tool_list(metadata["disallowedTools"])
+                    self.assertNotIn("Write", blocked)
+                    self.assertNotIn("Bash", blocked)
+
+    def test_reviewers_create_scratch_files_but_never_edit(self):
+        reviewer = tool_list(frontmatter(AGENTS / "reviewer.md")["tools"])
+        lite = tool_list(frontmatter(AGENTS / "reviewer-lite.md")["tools"])
+        self.assertEqual(reviewer, ["Read", "Glob", "Grep", "Bash", "Write", "Skill"])
+        self.assertEqual(lite, ["Read", "Glob", "Grep", "Bash", "Write"])
+        self.assertNotIn("Edit", reviewer)
+        self.assertNotIn("Edit", lite)
 
     def test_no_program_agent_type_runs_on_the_default_tool_set(self):
         for name in ("clerk", "planner", "implementer", "reviewer", "reviewer-lite"):

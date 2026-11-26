@@ -10145,7 +10145,7 @@ class PlannerReadsTest(unittest.TestCase):
             self.assertEqual(source.count(f"  {kind}: `{sentence}`,\n"), 1, kind)
             # One sentence: its only full stop ends it.
             self.assertEqual(sentence.index("."), len(sentence) - 1, kind)
-        self.assertIn("reply = await agent(withRounds(withReply(prompt, opts), opts), opts)", source)
+        self.assertIn("reply = await agent(withRounds(withWork(withReply(prompt, opts), opts), opts), opts)", source)
         # Every agent call of the program goes through that one wrapper.
         self.assertEqual(len(re.findall(r"\bawait agent\(", source)), 1)
 
