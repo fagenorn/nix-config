@@ -428,6 +428,7 @@ agent-workflow-tests *args:
     tests/test_console_manager_identity.py \
     tests/test_console_contract_plain_words.py \
     tests/test_console_owner_words.py \
+    tests/test_console_comment_width.py \
     tests/test_console_action_card.py \
     tests/test_console_revive.py \
     tests/test_console_idle.py \

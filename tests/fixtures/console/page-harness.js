@@ -31,10 +31,10 @@
 // own focus listeners with {type: "focus", target}; after its disabled and inert
 // checks Elem.focus() also adds 1 to state.hiddenFocus (the snapshot's
 // hidden_focus, starting at 0) when an ancestor DETAILS is not open and the
-// element is not inside that details' own SUMMARY child, and focuses all the same; a {click} on an element inside a closed sprint report
-// (the details of class sprint-detail) throws, as no one can click what a closed report hides; Elem.focus(options) also adds 1 to
-// state.scrollingFocus (the snapshot's scrolling_focus) unless options.preventScroll is true, as a browser scrolls a
-// focused element into view only then; Elem.blur() clears
+// element is not inside that details' own SUMMARY child, and focuses all the same; a {click} on an element inside a
+// closed sprint report (the details of class sprint-detail) throws, as no one can click what a closed report hides;
+// Elem.focus(options) also adds 1 to state.scrollingFocus (the snapshot's scrolling_focus) unless options.preventScroll
+// is true, as a browser scrolls a focused element into view only then; Elem.blur() clears
 // state.active when it is that element and fires nothing; removing a node (replaceChildren dropping it, appendChild
 // moving it, the textContent setter, Elem.remove()) clears state.active when it
 // is that node or inside its subtree, as a browser blurs a removed element, and
