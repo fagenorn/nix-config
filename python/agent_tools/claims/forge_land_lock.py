@@ -753,7 +753,9 @@ def wait_acquire(args: Any, node: Callable[[], str],
                                  position=queue.position, ahead=queue.ahead)
             until = min(monotonic() + (min(POLL, poll[3]) if poll[3] else POLL), start + BOUND)
             while True:  # D12: the first in line reads the lock ref between two polls
-                sleep(min(FAST_POLL if first else POLL, until - monotonic()))
+                # Issue 1891: a deadline that passed since the check above leaves nothing to sleep, and the
+                # poll that follows ends the wait with the bound's own verdict.
+                sleep(max(0.0, min(FAST_POLL if first else POLL, until - monotonic())))
                 if not first or monotonic() >= until:
                     break
                 try:
