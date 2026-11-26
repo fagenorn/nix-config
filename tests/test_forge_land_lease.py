@@ -413,7 +413,7 @@ class LeaseTest(base.QueueTest):
                 state["refreshed"] = elapsed
                 refreshes.extend([run(*land("refresh", B)), run(*land("refresh", B))])
                 beats.append(self.world.refs().get(BEAT))
-            if elapsed >= 1700 and not state["leased"]:
+            if elapsed >= 500 and not state["leased"]:
                 state["leased"] = True
                 state["held"] = elapsed
                 holds.append(run(*land("acquire", B, "--lease")))
@@ -456,7 +456,7 @@ class LeaseTest(base.QueueTest):
                 else:
                     def hook(elapsed):
                         if elapsed >= 1000:
-                            self.lease(12, 1000, elapsed)
+                            self.lease(12, 100, elapsed)
                 code, out = self.leased(self.clock(hook, alive=-100))
                 self.assertEqual((code, out["verdict"], out["took_over"], out["waited_s"]),
                                  (0, "acquired", "idle", 2760))
@@ -601,8 +601,8 @@ class LeaseTest(base.QueueTest):
                 self.assertEqual((code, out["verdict"]), (0, "held"))
         code, out = self.leased(self.clock(hook))
         self.assertEqual((code, out["verdict"], out["took_over"]), (0, "acquired", "bound"))
-        self.assertGreaterEqual(out["waited_s"], 1200)
-        self.assertLess(out["waited_s"], 1200 + land_lock.FAST_POLL + 20)
+        self.assertGreaterEqual(out["waited_s"], 2400)
+        self.assertLess(out["waited_s"], 2400 + land_lock.FAST_POLL + 20)
 
     def test_a_delayed_acquire_never_prunes_the_lease_of_the_lock_that_moved_on(self):
         self.pulls(B, pull(12, sha=B))
