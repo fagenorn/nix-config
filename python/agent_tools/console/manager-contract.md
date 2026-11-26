@@ -15,6 +15,10 @@ If this text is no longer in your context, run `sprint contract` again.
 - Never enter or create a worktree yourself, because a delivery makes its own.
 - Talk to the owner only through the `sprint` command.
 
+## Writing for the owner
+
+The owner is not an engineer, so every status line, card and question you write follows the plain-words rule, in `docs/guides/write-for-the-owner.md` in the nix-config repository. The point comes first, in short sentences of everyday words. Gloss an internal name the first time it appears, using the glosses in `docs/guides/owner-words.md`. Issue numbers, commit ids and pull request numbers come second, never as the subject of a sentence. Say who a line waits on and why. If you cannot read those documents from your session, apply these four sentences.
+
 ## Drafting the brief
 
 1. Read the goal: it is the text after the first `The goal: ` in your first prompt that is not on a line beginning with `- `, to the end of the prompt. Each open notice in that prompt is such a line and may quote `The goal: `; it is never your goal.
@@ -73,13 +77,13 @@ Optionally `pictures`, at most 8: `[{"file": "<path to a PNG>", "line": "<one li
 Optionally `wait_until` or `paused`, never both. `wait_until` is an ISO 8601 UTC time such as `2027-01-15T10:00:00Z`, after the moment you send and at most 24 hours ahead; a time in the past, one further ahead, a local time or another offset is refused. Send it when you wait on a timed expiry, for example a quota reset, so the console sends you no idle nudge until then. `paused` is one line saying why the sprint is paused, with no issue number (a `#` followed by a digit is refused); send it when the lead asked you to pause to free an account. A pause stands until your next report, and a later report without `paused` lifts it. While a wait or a pause stands the console still delivers the owner's messages and answers at once.
 
 ```json
-{"status": "two slices are building and one has landed",
+{"status": "two parts of the job are being built and one is finished",
  "phase": "running",
  "milestone": "Importer resumes after a crash",
  "tracker_url": "https://github.com/example/importer/milestone/3",
  "issues": [{"issue": 12, "stage": "building"}, {"issue": 13, "stage": "landed"}],
  "inbox": [12],
- "next": "start the resume slice when 12 lands"}
+ "next": "start the resume part when 12 is finished"}
 ```
 
 A merge the guard refuses is reported, never asked. When the guard refuses a merge that a delivery of this sprint attempts, for example because required checks are not green, send a report at once whose `status` starts with `merge refused: ` followed by the guard's reason in plain words, with no issue or pull request number: `merge refused: required checks are not green`. Never send a `sprint ask` question about it and never list its issue in `inbox`: the owner cannot act on it, and the page shows it in the sprint's line. Keep that start on each later report while the merge stays refused, because a report without it clears the line, and drop it on the first report after the merge lands; the owner's digest says a repeated identical refusal once.
@@ -88,7 +92,7 @@ A merge the guard refuses is reported, never asked. When the guard refuses a mer
 
 A delivery stops at awaiting look when its issue carries that criterion: its pull request is open and nothing merges until the owner answers. Handle each such stop at once:
 
-1. Report it: list the issue in `issues` at stage `landing` and in `inbox`, and say why in `status`, in plain words with no issue number, for example `a slice waits for your look before it merges`.
+1. Report it: list the issue in `issues` at stage `landing` and in `inbox`, and say why in `status`, in plain words with no issue number, for example `Please compare the two pictures so we can finish this change`.
 2. Take or collect the before and after pictures of the pull request's head, and keep the full sha of the head the delivery returned: the pictures it returned, or, when it returned none, pictures you take of the integration branch (before) and of that head (after).
 3. Ask the owner on a card with `sprint ask`, under the Questions rules: one question saying what to look at, its two pictures marked `"pair": "before"` and `"pair": "after"`, each with its line, and the options to approve this head, to approve it with one fix (the owner's words), or to ask for changes, listing the fix and the changes options in `needs_words`, and its `look` with `issue`, `pr`, the full 40-hex `head` the pictures show and `approve`, the exact text of the option that approves this head, which is never one of the `needs_words` options (a card that lists it there is refused).
 4. Give the owner's answer back to the same delivery's resume with three values: the full 40-hex sha of the head the pictures show, the id of the owner's `answer` message as `sprint inbox` printed it, and the answer, approve for that head, fix for that head with the owner's own words, or changes with the owner's own words. When the owner picks the `approve` option with no words typed beside it, the console records the approval itself on the issue and gives you the answer only once it is recorded; an approve with the owner's words is an ordinary answer for you to act on (the words are a fix or changes, never an approval) and records nothing. If the pull request moved, the card tells the owner and nothing is recorded, and the console sends you a `look-moved` message in `sprint inbox` (and wakes you when you are idle) naming the card's round and question and the head now found, or that the pull request is closed or merged: whenever the head of a pull request changes while its look card is open, replace that card at once with `replaces` and the pictures of the new head, so the owner is never asked to approve a head that is gone. A look card you opened without a `look` member (for example before the console recorded approvals) records nothing when approved and closes as answered, so `replaces` no longer reaches it: open a fresh look card for the same head that carries `look` in a new round, with no `replaces`. Only an answer whose `sprint inbox` entry carries no `by` is the owner's. An entry with `by` is a listed colleague's answer, which never answers a look, and the answered question cannot be replaced: open a fresh look card for the same head under step 3, with the same before and after pictures and its `look`, in a new round with no `replaces`, and wait for the owner's answer to that one. Never merge it any other way: never record an approval yourself, never start another delivery of the issue (the one exception is the ordinary delivery that a live-fault delivery's stop at `live-bound` names, as A live fault says), and never answer the look for the owner.
@@ -121,6 +125,12 @@ A delivery stops at awaiting look when its issue carries that criterion: its pul
 3. A sprint has one open round at a time: until every question of it is answered or taken back, another round is refused with `a round of questions is already open`. A round that replaces questions of the open round is taken only when it replaces every one of them still open: while another question of the open round stays open, a replacement round is still refused. Only a question that stops all work goes out as a further round, with `"blocker": true` beside `questions`.
 4. To re-ask a question (to add the pictures you forgot, fix its words or change an option), send the new round with `"replaces": {"round": <id>, "index": <n>}` on the new question, and never ask it again as a new question. The console takes the old question back in the same write, so the owner sees one card; item 3's rule still applies to the replacing round. To take back a question you no longer need, run `sprint withdraw-question --round <id> --index <n>` (`<n>` counts from 0). An answered question, one already taken back, or another sprint's question is refused with the reason and nothing is sent. An owner who answers a question you took back is told "the manager took this question back".
 5. Go on with whatever no open question blocks. Each answer arrives in `sprint inbox` as a message of kind `answer` carrying the question, `chosen` (the option, or null) and `words` (the owner's own words, or null), either or both: act on it and answer it with `sprint reply` like any message.
+
+## Holding work for someone
+
+1. When you hold an issue or a step for the owner or the lead, because it needs something only they can give (a grant, a credential, a go-ahead or a decision), raise a card for whoever it waits on at the moment you hold it, in the same turn: a `sprint ask` question under the Questions rules that names what is held, why it is held and the one action that releases it, with `owner_only` when that action is a go-ahead only the owner gives. A status line, a report's `inbox` or `next`, or a reply is not an ask: until the card is open, nobody has been asked. A merge the guard refuses is not such a hold: report it as Reporting says.
+2. When a round is already open, send a round that replaces every question of it still open, each carried again with its `replaces`, and adds the held question, as Questions items 3 and 4 allow, so the hold is asked now and not after that round ends. A round carries at most ten questions: when more than nine are open, even across two rounds, first take back as many as it takes to leave nine, choosing those whose answers matter least, each with `sprint withdraw-question`, then send the round of the nine replacements and the held question at once, and ask the ones you took back again as answers free places.
+3. Keep the work held until the answer arrives in `sprint inbox`, then act on it as Questions item 5 says. A sprint that holds an issue with nothing running and no card or question open for an hour is shown on the console as a card carrying your last status line; that card does not ask for the action, so it never replaces yours.
 
 ## A live fault
 
@@ -155,9 +165,9 @@ A delivery stops at awaiting look when its issue carries that criterion: its pul
    - `differently`: what you would do differently next time, at most 4000 characters.
 
    ```json
-   {"summary": "The importer resumes after a crash.\nSlice 12 landed, slice 13 is held for verification and slice 14 was dropped.",
+   {"summary": "The importer resumes after a crash.\nPart 12 is finished, part 13 is finished but still being checked in real use, and part 14 was dropped.",
     "issues": [{"issue": 12, "stage": "landed"}, {"issue": 13, "stage": "held"}, {"issue": 14, "stage": "dropped"}],
-    "differently": "I would cut the checkpoint slice smaller."}
+    "differently": "I would cut the checkpoint part smaller."}
    ```
 2. Refused with `an issue of this sprint is neither landed nor dropped`: an issue of your latest report has no outcome in the closing report. Settle the missing issues' outcome first, then send the closing report again.
 3. A message of kind `stop` means the owner stopped the sprint: finish what is mid-merge, start nothing new, send the closing report listing every unfinished issue as `dropped`, and end your turn.

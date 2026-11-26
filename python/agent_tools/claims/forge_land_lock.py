@@ -635,6 +635,12 @@ def wait_acquire(args: Any, node: Callable[[], str],
     closed: list[Any] = [None, 0.0]  # [a lock seen closed with a waiter ahead, first seen so]
     taken: list[Waiter] = []  # D13: the leases of the holder whose lapsed or overdue lock was taken
 
+    def contended() -> tuple[int, dict[str, Any]]:
+        return 3, result(args, "land-contended", lock_sha=last.lock_sha if last else None,
+                         pr=last.pr if last else None, by=holder(args.repo, last.pr) if last else None,
+                         waited_s=int(monotonic() - start), waited_on=sorted(waited_on),
+                         position=queue.position, ahead=queue.ahead)
+
     def seen(oid: str | None) -> None:
         if watch[0] != oid:
             watch[0], watch[1] = oid, monotonic()
@@ -746,14 +752,12 @@ def wait_acquire(args: Any, node: Callable[[], str],
                     waited_on.add(outcome.pr)
             if monotonic() - start >= BOUND:
                 keep = True
-                return 3, result(args, "land-contended", lock_sha=last.lock_sha if last else None,
-                                 pr=last.pr if last else None,
-                                 by=holder(args.repo, last.pr) if last else None,
-                                 waited_s=int(monotonic() - start), waited_on=sorted(waited_on),
-                                 position=queue.position, ahead=queue.ahead)
+                return contended()
             until = min(monotonic() + (min(POLL, poll[3]) if poll[3] else POLL), start + BOUND)
             while True:  # D12: the first in line reads the lock ref between two polls
-                sleep(min(FAST_POLL if first else POLL, until - monotonic()))
+                # A deadline that passed since the check above leaves nothing to sleep, and no poll starts
+                # after it: the poll at exactly the bound is the last one.
+                sleep(max(0.0, min(FAST_POLL if first else POLL, until - monotonic())))
                 if not first or monotonic() >= until:
                     break
                 try:
@@ -774,6 +778,9 @@ def wait_acquire(args: Any, node: Callable[[], str],
                     if failures:
                         continue  # after a failed poll the polls keep their 120-second rate (D8)
                     break  # the poll that follows counts the failure
+            if monotonic() - start > BOUND:
+                keep = True
+                return contended()
     finally:
         if not keep:
             queue.leave()

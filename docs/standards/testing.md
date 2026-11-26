@@ -27,3 +27,7 @@ A `fast` or `integration` test is a member of `agent-workflow-tests`, and a `nig
 ### P18. CI reports suite time growth
 
 CI's `Agent Workflow Tests` runs the suite as parallel shards, each running the members assigned it from the committed timings, and joins the shards' records into the `suite-timing` artifact: each completed run's suite time and every member's time, slowest first. A pull request whose member time grows by more than 60 s over `main`, after the runner speed factor, gets a line in the `Suite Timing` job summary, and its author justifies the growth in the pull request or moves the test to `nightly`. ([ADR-delivery-015](../areas/delivery/adr/015-tests-carry-a-tier-and-ci-reports-suite-time-growth.md))
+
+### P19. A stress probe grows in bounded steps
+
+A stress probe with large or deeply nested inputs fixes a finite cap on time and peak memory before it starts, starts at a size that fits in 1 GiB, grows in steps (for example doubling), measures time and peak memory at each step and stops before a step whose projected peak would exceed the cap or at the first step that grows faster than its input, never an unbounded loop or one giant input on a shared host. A test that proves a memory bound measures the peak at a small capped size (for example with tracemalloc at a nesting depth whose peak stays under a few hundred MiB) and passes only when that peak is within the claimed limit, never by running the large case. ([issue 1859](https://github.com/fagenorn/nix-config/issues/1859))

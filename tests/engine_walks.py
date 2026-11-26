@@ -29,7 +29,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from agent_tools.delivery import engine_core, procedure_check
+from agent_tools.delivery import engine_core, procedure_check, procedure_terms
 from agent_tools.delivery.engine_core import (
     CORE_KINDS,
     Done,
@@ -66,7 +66,7 @@ def edges(procedure: Mapping) -> tuple[tuple[str, str], ...]:
 
 
 def step_outcomes(directory: Path, name: str) -> dict[str, tuple[str, ...]]:
-    result = procedure_check.check_directory(directory, procedure_check.load_commands())
+    result = procedure_check.check_directory(directory, procedure_terms.load_commands())
     if result.refusals:
         raise AssertionError("procedure refused:\n" + "\n".join(str(refusal) for refusal in result.refusals))
     resolved = result.resolved[name]

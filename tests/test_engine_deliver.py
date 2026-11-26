@@ -290,8 +290,8 @@ from agent_tools.delivery import engine_shell
 real = engine_shell._validate
 edited, source = sys.argv[1], sys.argv[-1]
 
-def wrapper(directory, table):
-    result = real(directory, table)
+def wrapper(*args, **kwargs):
+    result = real(*args, **kwargs)
     engine_shell._validate = real
     shutil.copyfile(edited, os.path.join(source, "deliver.json"))
     return result
@@ -699,8 +699,11 @@ class FindingsTest(unittest.TestCase):
             + "[" * 100000 + "]" * 100000 + "}]}", encoding="utf-8")
         done = project.deliver(directory)
         self.assertEqual(done.returncode, 2, done.stdout + done.stderr)
-        self.assertEqual(len(done.stderr.splitlines()), 1, done.stderr)
-        self.assertNotIn("Traceback", done.stderr)
+        self.assertEqual(done.stderr, "")
+        self.assertEqual(len(done.stdout.splitlines()), 1, done.stdout)
+        self.assertIn("unreadable_procedure",
+                      [r["defect"] for r in json.loads(done.stdout)["refusals"]])
+        self.assertNotIn("Traceback", done.stdout + done.stderr)
         self.assertEqual(project.runs(), [])
 
     def test_engine_check_accepts_the_project_command_ids_deliver_accepts(self):
@@ -1093,6 +1096,16 @@ class RefusalTest(unittest.TestCase):
         self.assertEqual(project.runs(), [])
         self.assertFalse(project.record.exists())
 
+    def assertCheckRefused(self, project: EngineProject, done, defect: str) -> None:
+        self.assertEqual(done.returncode, 2, done.stdout + done.stderr)
+        self.assertEqual(done.stderr, "")
+        self.assertEqual(len(done.stdout.splitlines()), 1, done.stdout)
+        line = json.loads(done.stdout)
+        self.assertEqual(line["verdict"], "refused")
+        self.assertIn(defect, [r["defect"] for r in line["refusals"]])
+        self.assertEqual(project.runs(), [])
+        self.assertFalse(project.record.exists())
+
     def test_a_host_without_the_guard_hook_starts_no_command_run(self):
         project = EngineProject(self)
         project.use_settings_text(json.dumps({"hooks": {"PreToolUse": []}}))
@@ -1103,7 +1116,7 @@ class RefusalTest(unittest.TestCase):
         project = EngineProject(self)
         procedures = project.procedures([step("a", "standin-record", "b"),
                                          step("b", "no-such-command", "done")])
-        self.assertRefused(project, project.deliver(procedures), "unknown_command")
+        self.assertCheckRefused(project, project.deliver(procedures), "unknown_command")
 
     def test_a_procedure_the_engine_cannot_run_is_refused(self):
         def shipped(project: EngineProject) -> Path:
@@ -1144,17 +1157,21 @@ class RefusalTest(unittest.TestCase):
             "an undeclared input": (
                 "branch", lambda p: p.procedures([step("a", "standin-record", "done")],
                                                  inputs=("issue", "branch"))),
-            "a mutating step without a check": ("check", with_mutation),
-            "a keep-alive with no claim-lost stop": ("missing_claim_lost", no_claim_lost),
+            "a mutating step without a check": ("invalid_field", with_mutation, True),
+            "a keep-alive with no claim-lost stop": ("missing_claim_lost", no_claim_lost, True),
             "a mutating decide step": ("marked mutates", mutating_decide),
             "a mutating group step": ("marked mutates", mutating_group),
             "the shipped toy, whose call step is marked mutates": ("marked mutates", shipped),
             "no deliver.json": ("deliver.json", empty),
         }
-        for name, (word, build) in cases.items():
+        for name, (word, build, *checked) in cases.items():
             with self.subTest(name):
                 project = EngineProject(self)
-                self.assertRefused(project, project.deliver(build(project)), word)
+                done = project.deliver(build(project))
+                if checked:
+                    self.assertCheckRefused(project, done, word)
+                else:
+                    self.assertRefused(project, done, word)
         with self.subTest("outside any project"):
             project = EngineProject(self)
             procedures = project.procedures([step("a", "standin-record", "done")])
@@ -1246,7 +1263,10 @@ class LockTest(unittest.TestCase):
             [sys.executable, "-c", LAUNCH, str(edited_path), "deliver", "1512",
              "--procedures", str(procedures)], capture_output=True, timeout=120, **options)
         self.assertEqual(process.returncode, 2, process.stdout + process.stderr)
-        self.assertIn("unknown_command", process.stderr)
+        self.assertEqual(process.stderr, "")
+        self.assertIn({"defect": "unknown_command", "procedure": "deliver", "step": "b"},
+                      [{k: r[k] for k in ("defect", "procedure", "step")}
+                       for r in json.loads(process.stdout)["refusals"]])
         self.assertFalse(project.record.exists())
         self.assertEqual(project.runs(), [])
 
