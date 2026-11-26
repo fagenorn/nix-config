@@ -349,6 +349,7 @@ agent-workflow-tests *args:
     tests/test_console_view.py \
     tests/test_console_view_action.py \
     tests/test_console_view_lock_place.py \
+    tests/test_console_work_sentence.py \
     tests/test_console_draft_facts.py \
     tests/test_console_failed_start.py \
     tests/test_console_activation.py \

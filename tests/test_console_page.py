@@ -6223,30 +6223,25 @@ class PageSprintBlockTest(unittest.TestCase):
         except ImportError:
             self.skipTest("playwright is not installed")
 
-        def with_milestone(state, text):
-            return dataclasses.replace(state, report=dataclasses.replace(state.report, milestone=text))
-
-        def sentence(state):
-            return view_entry(view_line(state, T0_MS + MIN))["now_text"]
+        def sentence(state, titles=None):
+            return view_entry(view_line(state, T0_MS + MIN, issue_titles={state.project_id: titles or {}}))["now_text"]
 
         five = ((1, "building"), (2, "building"), (3, "queued"), (4, "queued"), (5, "queued"))
-        fit_stage = sentence(with_milestone(
-            reported(started(A), T0_MS, issues=five), "the upload form"))
-        self.assertEqual(fit_stage, "building 2 of 5: the upload form")
+        fit_stage = sentence(reported(started(A), T0_MS, issues=five), {1: "Resume uploads", 2: "Show retry"})
+        self.assertEqual(fit_stage, "Working on Resume uploads and Show retry.")
         asked = dataclasses.replace(reported(started(A), T0_MS), questions=(Question(
             1, 0, iso(T0_MS), False, "Which store should the checkpoint use?",
             "the first slice", ("the database", "a file"), "the database"),))
         fit_question = sentence(asked)
         self.assertEqual(fit_question,
                          "waiting for your answer: Which store should the checkpoint use?")
-        fit_long = sentence(with_milestone(
-            reported(started(A), T0_MS, issues=five),
-            "the importer that resumes a broken transfer from its last good part"))
-        self.assertEqual(fit_long, "building 2 of 5: the importer that resumes a broken "
-                                   "transfer from its last good part")
+        fit_long = sentence(reported(started(A), T0_MS, issues=five), {
+            1: "Resume a broken transfer", 2: "Show the retry button", 3: "Count parts"})
+        self.assertEqual(fit_long, "Working on Resume a broken transfer and Show the retry button. "
+                                   "Next is Count parts.")
         clamped_words = " ".join(["word"] * 80)
-        clamped = sentence(with_milestone(reported(started(A), T0_MS), clamped_words))
-        self.assertEqual(clamped, "building 1 of 7: " + clamped_words)
+        clamped = sentence(reported(started(A), T0_MS), {4: clamped_words})
+        self.assertEqual(clamped, f"Working on {clamped_words} and 1 more.")
         texts = (fit_stage, fit_question, fit_long, clamped)
         frame = with_sprints([
             {**LIFE_SPRINT, "sprint_id": c * 16, "now_text": text, "messages": [],

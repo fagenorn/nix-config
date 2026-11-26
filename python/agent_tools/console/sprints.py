@@ -232,11 +232,11 @@ microsecond, so `Z` reads `+00:00` and a fractional part is kept to the microsec
 without either is exactly the dict above.
 
 The fold keeps each open sprint's `Report(at, status, phase, milestone, tracker_url, issues, inbox,
-next_step, pictures, wait_until, paused)`. `sprint.reported` changes an open sprint only when its brief is approved
+next_step, pictures, wait_until, paused, finished)`. `sprint.reported` changes an open sprint only when its brief is approved
 (`STARTING`) and `checked_report` accepts the dict `report` without its `pictures` key; the report
 is then replaced (`at` is the event's `at`, `issues` a tuple of `(issue, stage)`, `inbox` a tuple,
 `next_step` the `next` member, `pictures` the read-back below, `wait_until` and `paused` the checked
-members or None; the fold checks without a clock, so a stored wait whose time has passed folds) and the sprint's observations are
+members or None; the fold checks without a clock, so a stored wait whose time has passed folds; `finished` is the issues the new report lists as `landed` that the previous report listed with another stage, in issue order, else the previous `finished` issues the new report still lists as landed: a first report or an issue first listed already landed adds none, and a run movement never changes it, #1793) and the sprint's observations are
 cleared; its movement (`moved_ms`) is kept (#1109). Every other report row changes nothing.
 
 Movement and observations (#1109): a `delivery.seen` row carries no sprint id and is read as the
@@ -256,17 +256,15 @@ the record that the manager delivered an issue outlives the run and its cleanup.
 
 `ago_text(elapsed_ms)` is `just now` under a minute, `<m> min ago` under an hour, `<h> h ago` under
 a day, else `1 day ago` or `<d> days ago`; a negative count is 0. `age_text(elapsed_ms)` is `goal set `
-plus that. `progress_text(landed, total, in_delivery, queued, held)` is `<landed> of <total> landed`
-followed by `, <n> in delivery`, `, <n> queued` and `, <n> held` for each non-zero count, in that
-order. The view states and texts are the constants `ON_TRACK`, `WAITING`, `QUIET`, `CLOSING`,
+plus that. The legend under a sprint's grid is `deliveries.progress_text`. The view states and texts are the constants `ON_TRACK`, `WAITING`, `QUIET`, `CLOSING`,
 `DONE` and their `_TEXT`; `CLOSED_OUT` is the view's stage for a run's `done` (not a report stage).
 A running sprint's ball (#1086) is `BALL_MANAGER`, `BALL_OWNER`, `BALL_NOBODY`, or, while its report
 states a wait or a pause that holds (#1380), `BALL_WAITING` or `BALL_PAUSED`, worded by
 `BALL_TEXT`, and its now-sentence is one of the `NOW_*_TEXT` constants (among them the wait sentences
 `NOW_CI_TEXT`, `NOW_COMMITTING_TEXT`, `NOW_RELEASE_TEXT` (#1110) and `NOW_LOCK_TEXT` (#1184), which reads `NOW_LOCK_POSITION_TEXT` when the sprint's place in the queue is known, #1679)) or
-the stage phrase (`NOW_STAGE_TEXT`, prefixed by `NOW_QUIET_TEXT` when nobody has the ball), never the report's status
+the work sentence (`deliveries.work_sentence`, prefixed by `NOW_QUIET_TEXT` when nobody has the ball), never the report's status
 line and never shortened. A sprint's check line (#1111) reads `CHECK_LINE_TEXT`. The now-sentence of a report whose status marks a refused merge
-(`refused_reason`) is `NOW_REFUSED_TEXT` in place of the stage phrase, shown by `merge_refused` until a later report
+(`refused_reason`) is `NOW_REFUSED_TEXT` in place of the work sentence, shown by `merge_refused` until a later report
 without the marker or a closing clears it (no run observation clears it: the status names no issue); it is the one now-sentence that may equal the status line.
 
 Messages (#889) are what the owner says to a sprint, each one a `Message` kept in `message_id` order
@@ -854,7 +852,6 @@ NOW_WAIT_TEXT = "waiting until"
 NOW_PAUSED_TEXT = "paused: {reason}"
 NOW_UNREAD_TEXT = "waiting for the manager to read your message"
 NOW_STARTING_TEXT = "starting the work"
-NOW_STAGE_TEXT = "{stage} {count} of {total}: {milestone}"
 NOW_QUIET_TEXT = "last seen {phrase}"
 CHECK_LINE_TEXT = "Your check: {question}"
 NOW_CI_TEXT = "waiting for CI on its pull request"
@@ -1080,6 +1077,7 @@ class Report:
     pictures: tuple["QuestionPicture", ...] = ()
     wait_until: str | None = None
     paused: str | None = None
+    finished: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -2992,13 +2990,18 @@ def _folded_report(state: SprintState, event: Event) -> SprintState:
         checked = checked_report(members)
     except Refused:
         return state
+    rows = tuple((row["issue"], row["stage"]) for row in checked["issues"])
+    landed = {issue for issue, stage in rows if stage == LANDED}
+    before = {} if state.report is None else dict(state.report.issues)
+    finished = tuple(sorted(issue for issue in landed if issue in before and before[issue] != LANDED))
+    if not finished and state.report is not None:
+        finished = tuple(issue for issue in state.report.finished if issue in landed)
     return replace(state, observed=(), idle_nudges=0, no_progress_at=None,
                    report=Report(event.at, checked["status"], checked["phase"],
-                                 checked["milestone"], checked["tracker_url"],
-                                 tuple((row["issue"], row["stage"]) for row in checked["issues"]),
+                                 checked["milestone"], checked["tracker_url"], rows,
                                  tuple(checked["inbox"]), checked["next"],
                                  _read_back_pictures("report", report),
-                                 checked.get("wait_until"), checked.get("paused")))
+                                 checked.get("wait_until"), checked.get("paused"), finished))
 
 
 def _folded_stop_request(state: SprintState, event: Event) -> SprintState:
@@ -3275,14 +3278,6 @@ def ago_text(elapsed_ms: int) -> str:
 
 def age_text(elapsed_ms: int) -> str:
     return "goal set " + ago_text(elapsed_ms)
-
-
-def progress_text(landed: int, total: int, in_delivery: int, queued: int, held: int) -> str:
-    text = f"{landed} of {total} landed"
-    for count, label in ((in_delivery, "in delivery"), (queued, "queued"), (held, "held")):
-        if count:
-            text += f", {count} {label}"
-    return text
 
 
 def _ms(time: str) -> int:

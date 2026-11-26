@@ -133,13 +133,15 @@ def project_lines(states: Iterable[RunState], now_ms: int | None,
 
 @dataclass(frozen=True)
 class SprintEngine:
-    """What the engine runs of a sprint's issues say about the sprint: moving, open waits, sessions, issues shown."""
+    """What the engine runs of a sprint's issues say about the sprint: moving, open waits, sessions, issues shown,
+    and `stages`, the `(issue, stage, stage text)` of each shown run whose reading has not ended."""
 
     moving: bool = False
     waits: frozenset[str] = frozenset()
     sessions: frozenset[str] = frozenset()
     issues: frozenset[int] = frozenset()
     limit_until: str | None = None
+    stages: tuple[tuple[int, str, str], ...] = ()
 
     @property
     def moves(self) -> bool:
@@ -172,7 +174,7 @@ NO_ENGINE = SprintEngine()
 def sprint_engine(states: Iterable[RunState], project: str, issues: Collection[int],
                   now_ms: int | None) -> SprintEngine:
     """The reading of the runs of `project` whose issue is in `issues`; see P9."""
-    moving, waits, sessions, shown, limits = False, set(), set(), set(), []
+    moving, waits, sessions, shown, limits, stages = False, set(), set(), set(), [], []
     for state in states:
         if state.project != project or state.issue not in issues:
             continue
@@ -181,13 +183,16 @@ def sprint_engine(states: Iterable[RunState], project: str, issues: Collection[i
             continue
         shown.add(state.issue)
         kind = reading(state)
+        if not _ended(state, kind):
+            stages.append((state.issue, state.stage, stage_text(state)))
         moving = moving or kind == "moving"
         if kind == "waiting":
             waits.add(state.wait["wait"])  # type: ignore[index]
             if state.wait["wait"] == "usage-limit" and state.wait["until"] is not None:  # type: ignore[index]
                 limits.append(state.wait["until"])  # type: ignore[index]
     return SprintEngine(moving, frozenset(waits), frozenset(sessions), frozenset(shown),
-                        min(limits, key=lambda until: parse_rfc3339_utc(until), default=None))
+                        min(limits, key=lambda until: parse_rfc3339_utc(until), default=None),
+                        tuple(sorted(stages)))
 
 
 @dataclass(frozen=True)
