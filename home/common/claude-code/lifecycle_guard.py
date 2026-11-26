@@ -4166,13 +4166,11 @@ SHELL_HOST_SCRIPT = "".join(f"printf '\\nGUARD-SHELL-{n}<%s>\\n' \"${n}\"; " for
 
 
 def shell_selected_host(deadline, child_timeout):
-    """The `GH_HOST` the session's shell exports ("" when it exports none) when the shell leaves the
-    gh configuration the hook reads where it is, else None, as it is when the shell cannot be asked.
-    Without a `GH_HOST`, gh takes the host of the configuration under `GH_CONFIG_DIR`, else
-    `XDG_CONFIG_HOME`, so a startup file that changes either selects a host the hook's reads never
-    see: such an answer is None. The shell is `$SHELL`, an absolute path, started as a login,
-    interactive shell as the session starts it; the last marked line of each variable answers. The
-    child is bounded when it starts; a deadline too near raises `DeadlineExhausted`, not caught."""
+    """The `GH_HOST` the session's shell exports ("" when none), else None when the shell cannot be asked
+    or changes `GH_CONFIG_DIR` or `XDG_CONFIG_HOME`, whose configuration gh reads its host from without
+    a `GH_HOST`. The shell is `$SHELL`, an absolute path, started as a login, interactive shell as the
+    session starts it; the last marked line of each variable answers. The child is bounded when it
+    starts; a deadline too near raises `DeadlineExhausted`, not caught."""
     shell = os.environ.get("SHELL", "")
     if not os.path.isabs(shell) or not os.access(shell, os.X_OK):
         return None
