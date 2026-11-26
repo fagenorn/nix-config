@@ -19,8 +19,9 @@ EDIT_RULE = "Change files only with the Edit and Write tools, never with a shell
 SCRIPT_RULE = ("run a one-off evaluation as a script file kept in that directory and run by path, never as an inline "
                "program handed to an interpreter on its command line or through a heredoc")
 OPENERS = ("Change files only with", "put scratch and probe files in", "run a one-off evaluation as", "A stress probe")
-WORK_ONLY = ("Work only in the worktree path you are given; the one exception is the job scratch directory your brief "
-             "names, for scratch, probe and one-off script files.")
+WORK_ONLY = ("Work only in the worktree path you are given and in the paths your brief names for its outputs, such as "
+             "the job scratch directory for scratch, probe and one-off script files.")
+CODEX_DOCS = ("DIFF-REVIEW.md", "PLAN-REVIEW.md")
 HARD = "Hard rules for this step"
 WORKERS = {program.IMPL, program.REV, program.LITE}
 CODEX = {"plan-codex", "direct-codex", "final-codex"}
@@ -100,6 +101,23 @@ class WorkRulesTest(unittest.TestCase):
         calls = self.runs[0][1]
         for label in ("impl-1", "review-1"):
             self.assertIn(f"put scratch and probe files in {DEFAULT_PLAN_DIR}/scratch ", program.prompt(calls, label))
+
+    def test_the_planner_brief_may_write_its_named_outputs(self):
+        planner = [(plan_dir, call) for plan_dir, calls in self.runs for call in calls if call["label"] == "plan"]
+        self.assertTrue(planner)
+        for plan_dir, call in planner:
+            self.assertIn(WORK_ONLY, call["prompt"])
+            self.assertIn(f"Write the plan to {plan_dir}/plan.md", call["prompt"])
+            self.assertNotIn("the one exception", call["prompt"])
+
+    def test_the_codex_packet_contracts_carry_the_callers_probe_rule(self):
+        for name in CODEX_DOCS:
+            path = program.REPO_ROOT / "home/common/claude-code/skills/codex-collaboration" / name
+            lines = path.read_text(encoding="utf-8").splitlines()
+            with self.subTest(name):
+                items = [line for line in lines if line.startswith(("2. ", "3. ")) and "probe" in line]
+                self.assertEqual(len(items), 1)
+                self.assertIn("verbatim", items[0])
 
     def test_a_rerun_review_carries_each_rule_once(self):
         calls = program.run_out(replies={"review-1": program.INCOMPLETE})["calls"]

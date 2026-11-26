@@ -22,7 +22,7 @@ def scratch_under(w):
     return f"the deliver-standard/scratch directory under the git dir that git -C {w} rev-parse --absolute-git-dir prints"
 
 
-class BatchWorkRulesTest(unittest.TestCase):
+class WorkRulesTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.calls = batch.all_calls()

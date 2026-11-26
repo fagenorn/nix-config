@@ -180,7 +180,7 @@ const SCRATCH_UNDER = w => `the deliver-standard/scratch directory under the git
 const withWork = (prompt, opts, w) => (opts && WORKERS.includes(opts.agentType) ? `${TOOL_RULES(SCRATCH_UNDER(w))}\n${PROBE_RULE}\n${prompt}` : prompt)
 const BASE_RULES = `
 Hard rules for this step (they override anything else you remember):
-- Work only in the worktree path you are given; the one exception is the job scratch directory your brief names, for scratch, probe and one-off script files. Never commit in the shared checkout. Never git stash. Never sed -i.
+- Work only in the worktree path you are given and in the paths your brief names for its outputs, such as the job scratch directory for scratch, probe and one-off script files. Never commit in the shared checkout. Never git stash. Never sed -i.
 - Do everything in the FOREGROUND inside this one turn: run long commands with a long Bash timeout; never use run_in_background, never end your turn while anything you started is pending, never sleep or use sleep workarounds. Your final message is your return value.
 - Do not dispatch subagents unless this step says so.
 - Never run a host activation, deploy or release command.

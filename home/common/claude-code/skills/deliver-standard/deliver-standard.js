@@ -140,7 +140,7 @@ const CLAIMING = !CONT || !!CONT.claim_incomplete
 const FORGE_TIMEOUT = 'Give each forge-claim command a Bash timeout of 20 minutes (1200000 ms). Only a land acquire command that ends in --wait gets more: the flag takes no value, so write nothing after it, and the command itself waits for up to 50 minutes and then answers land-contended by itself, so give it a Bash timeout of 60 minutes (3600000 ms) and never run it in the background. The reason for both: forge-claim retries a forge outage itself before it prints its one JSON line.'
 const BASE_RULES = `
 Hard rules for this step (they override anything else you remember):
-- Work only in the worktree path you are given; the one exception is the job scratch directory your brief names, for scratch, probe and one-off script files. Never commit in the shared checkout. Never git stash. Never sed -i.
+- Work only in the worktree path you are given and in the paths your brief names for its outputs, such as the job scratch directory for scratch, probe and one-off script files. Never commit in the shared checkout. Never git stash. Never sed -i.
 - Do everything in the FOREGROUND inside this one turn: run long commands with a long Bash timeout; never use run_in_background, never end your turn while anything you started is pending, never sleep or use sleep workarounds. Your final message is your return value.
 - Do not dispatch subagents unless this step says so.
 - File any issue with forge-issue create, each blocking edge as --blocked-by <n> or --blocks <n>; never file one another way. Exit 1 with an issue: repair it with forge-issue link; create_unconfirmed: search for its title before filing again.
