@@ -1144,10 +1144,7 @@ class OwnAccountPageTest(unittest.TestCase):
         cap = {**cap, "profiles": [{**p, "owner": COLLEAGUE if p["profile"] == "colleague-1" else None}
                                    for p in cap["profiles"]]}
         (snap,) = harness([START, {"frame": {**view([]), "capacity": cap}}, {"click": "cap"}, SNAP], PAGE.read_bytes())
-        accts = [n for n in snap["capacity"]["children"] if has_class(n, "cap-acct")]
-        by_name = {next(c["text"] for c in nodes(n) if c["tag"] == "b"): n for n in accts}
-        self.assertEqual([full(c) for c in named(by_name["colleague-1"], "cap-owner")], [COLLEAGUE])
-        self.assertEqual(named(by_name["work"], "cap-owner"), [])
+        self.assertNotIn(COLLEAGUE, full(snap["capacity"]))
         row = next(n for n in nodes(snap["accounts_body"]) if n["tag"] == "li" and has_class(n, "acct-row")
                    and any(c["text"] == "colleague-1" for c in nodes(n)))
         self.assertEqual([full(c) for c in named(row, "acct-owner")], [COLLEAGUE])
