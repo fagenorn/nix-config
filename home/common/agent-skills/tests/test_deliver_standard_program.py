@@ -3405,20 +3405,9 @@ class NoCommitTaskTest(unittest.TestCase):
             self.assertFalse(label.startswith(("final-", "renew-final", "verify", "pr")), label)
         self.assertNotIn("partial", result["cont"])
         self.assertEqual([d.get("no_change") for d in result["cont"]["done"]], [True, True])
-        again, calls = run(args=dict(ARGS, cont=result["cont"]))
+        again, calls = run(args=dict(ARGS, cont=result["cont"]), patch={"setup": {"head": SHA}})
         self.assertEqual(again["stage"], "no-changes")
         self.assertEqual(labels(calls), ["setup"])
-
-    def test_a_resumed_delivery_whose_tasks_were_all_committed_before_the_cut_goes_to_the_final_review(self):
-        """#1915: every task is seen done with no new commit, yet the branch is ahead of its base: the work exists, so it is reviewed."""
-        ahead = "d" * 40
-        done = {"start_head": ahead, "commit": ahead}
-        result, calls = run(replies={"plan": dict(PLAN, tasks=tasks(2))},
-                            patch={"setup": {"head": ahead}, "impl-1": done, "impl-2": done})
-        self.assertNotEqual(result["stage"], "no-changes")
-        self.assertEqual(result["stage"], "done")
-        self.assertTrue(any(label.startswith("final-") for label in labels(calls)), labels(calls))
-        self.assertEqual([d.get("no_change") for d in result["tasks"]], [True, True])
 
     def test_a_task_that_commits_is_reviewed_with_the_same_bytes_as_before(self):
         for risk, lane in (("standard", ""), ("low", "lane: low. ")):
@@ -12988,25 +12977,6 @@ class LookResumeTest(unittest.TestCase):
         self.assertIn(json.dumps("make the label bold"), fix["prompt"])
         self.assertEqual([c["agentType"] for c in calls if c["label"] == "look-fix-review"], ["reviewer"])
         self.assertNotIn("merge", got)
-
-    def test_a_look_fix_made_by_an_earlier_attempt_is_reviewed_and_pushed(self):
-        """#1915 (#1809): the branch head F is ahead of the looked-at head SHA, and the implementer names F as both ends."""
-        patch = dict(RESUME, **{"setup": {"look": MARKED, "head": F}, "look-fix": {"start_head": F, "commit": F},
-                                "verify": {"head": F}, "look-pr": {"head": F}})
-        result, calls = run(args=dict(ARGS, cont=self.look_cont(), look={"answer": "changes", "words": "make the label bold"}), patch=patch)
-        got = labels(calls)
-        self.assertEqual(result["stage"], "awaiting-look")
-        self.assertEqual(result["head"], F)
-        self.assertEqual([l for l in got if l in ("look-fix", "look-fix-review", "verify", "look-pr")],
-                         ["look-fix", "look-fix-review", "verify", "look-pr"])
-        self.assertIn(f"git -C /r/.wt/w-issue-9-x diff {SHA}..{F}", prompt(calls, "look-fix-review"))
-
-    def test_a_look_fix_with_the_branch_at_the_looked_at_head_still_stops(self):
-        noop = dict(RESUME, **{"setup": {"look": MARKED, "head": SHA}, "look-fix": {"start_head": SHA, "commit": SHA}})
-        result, calls = run(args=dict(ARGS, cont=self.look_cont(), look={"answer": "changes", "words": "make the label bold"}), patch=noop)
-        self.assertEqual(result["stage"], "look-fix")
-        for label in ("look-fix-review", "verify", "look-pr", "look-push", "merge"):
-            self.assertNotIn(label, labels(calls))
 
     FIXED = dict(RESUME, **{"look-fix": {"start_head": SHA, "commit": F}, "verify": {"head": F},
                             "pr": {"head": F, "green": green_read(F)},

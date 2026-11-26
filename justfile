@@ -495,6 +495,7 @@ agent-workflow-tests *args:
     home/common/agent-skills/tests/test_program_harness.py \
     home/common/agent-skills/tests/test_deliver_standard_program.py \
     home/common/agent-skills/tests/test_deliver_standard_landing.py \
+    home/common/agent-skills/tests/test_deliver_standard_resume_ahead.py \
     home/common/agent-skills/tests/test_deliver_standard_before_pull_request.py \
     home/common/agent-skills/tests/test_deliver_standard_lane_rule.py \
     home/common/agent-skills/tests/test_deliver_standard_work_rules.py \

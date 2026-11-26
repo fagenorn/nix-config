@@ -2362,10 +2362,17 @@ Re-review only these previously reported findings for task ${t.n} against the fi
 // an empty range and the pull request no commit. Read from the done record (no_change), which a resume carries, never
 // from a head. The tasks' outputs are in place and recorded; the owner closes the issue. A branch ahead of the base it
 // was cut from holds commits to review whatever each task's reply said (a cut-off run committed them before this run
-// saw its tasks done), so it is not empty; each head is read against the base the program recorded.
-const aheadOfBase = (head, base) => present(head) && present(base) && !sameSha(head, base)
-const branchAhead = aheadOfBase(tip, setup.base_sha) || declared(plan).some(b => aheadOfBase(branchTips[b.name], b.base))
-if (plan.tasks.length && !branchAhead && plan.tasks.every(t => taskLog.some(d => d.n === t.n && d.no_change === true))) {
+// saw its tasks done), so it is not empty. Every comparison is between two commit ids the program holds: the issue
+// branch's head against the base_sha the setup recorded, a declared branch's head against the head the plan recorded
+// for it (a declared branch's base is a ref name such as origin/dev, which a string compare cannot resolve). The
+// head must be known before this stop is issued: an absent one says nothing about the branch.
+const aheadOfBase = (head, base) => isCommit(head) && isCommit(base) && !sameSha(head, base)
+const branchAhead = aheadOfBase(tip, setup.base_sha) || declared(plan).some(b => aheadOfBase(branchTips[b.name], b.head))
+const everyNoChange = plan.tasks.length > 0 && plan.tasks.every(t => taskLog.some(d => d.n === t.n && d.no_change === true))
+if (everyNoChange && !isCommit(tip)) {
+  return stop('setup', { missing: ['head'], details: `every task is recorded with no new commit, but the setup read no head of ${setup.branch}: whether the branch is ahead of its base is not established, so it is neither sent to the final review nor stopped as empty; read the head and resume` })
+}
+if (everyNoChange && !branchAhead) {
   return stop('no-changes', { details: `every task ended with no commit: the branch ${setup.branch} holds nothing to review or land. The tasks' outputs are in place; close the issue by hand, or amend the plan if a file change was meant` })
 }
 
