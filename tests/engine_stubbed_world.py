@@ -35,8 +35,11 @@ commit to `main` and fail as not up to date; `merge_policy` makes each of the fi
 on the base branch policy, after which one read of `mergeStateStatus` answers `BLOCKED`. A pull
 request's `mergeStateStatus` is `BEHIND` while `main` is not an ancestor of its head, else `CLEAN`.
 The environment always sets `LANDING_BOUND_SECONDS` to 0 (no wait on a lock or a pending check).
-The replies' `merge`, `same_head` and `upstream` effects (see the launcher stand-in) are given the
-run's worktree and bare origin when they name none.
+The replies' `merge`, `same_head`, `leave` and `upstream` effects (see the launcher stand-in) are given the
+run's worktree and bare origin when they name none. `extra_files` (relative path to text) is passed to
+`FixtureProject`: each file is committed on `main` after the adoption, outside every branch diff.
+`answer(step, entry)` sets `replies[step]` to `entry` with its effects filled the same way and rewrites
+the scenario file (`self.scenario`) the stub reads, so the next `deliver()` answers `step` with `entry`.
 
 `blocks` is the issue numbers the issue blocks (the answer to the hold path's blocking read; none by
 default). The world also answers the `needs-verification` label creation of the hold path and of its
@@ -54,6 +57,7 @@ import shutil
 import subprocess
 import sys
 import unittest
+from collections.abc import Mapping
 from pathlib import Path
 
 from agent_tools.claims import forge_markers
@@ -119,7 +123,8 @@ class StubbedRun:
                  before_pull_request: bool = False, rollups: list[list] | None = None,
                  advance_main: int = 0, main_change: dict | None = None, merge_behind: int = 0,
                  merge_policy: int = 0, blocks=(), fail_once=(),
-                 fixtures: AdoptedFixtures | None = None) -> None:
+                 fixtures: AdoptedFixtures | None = None,
+                 extra_files: Mapping[str, str] | None = None) -> None:
         self.test = test_case
         self.issue = issue
         self.title = title
@@ -129,6 +134,8 @@ class StubbedRun:
             self._install_companion(review_code)
         options = {"review_code": review_code is not None, "conditions": conditions,
                    "required_checks": required_checks, "before_pull_request": before_pull_request}
+        if extra_files:
+            options["extra_files"] = dict(extra_files)
         self.fixture = (FixtureProject(test_case, self.world, **options) if fixtures is None
                         else fixtures.project(test_case, self.world, **options))
         self.forge = ForgeWorld(test_case)
@@ -142,13 +149,13 @@ class StubbedRun:
         self.worktree_path: Path = self.fixture.worktree_root / (self.fixture.worktree_prefix + self.branch)
         self.bare = self.world.git(self.fixture.root, "remote", "get-url", "origin").strip()
         self.replies = self._with_worktree({**DEFAULT_REPLIES, **(replies or {})})
-        scenario = self.tmp / "scenario.json"
-        scenario.write_text(json.dumps(self.replies), encoding="utf-8")
+        self.scenario = self.tmp / "scenario.json"
+        self.scenario.write_text(json.dumps(self.replies), encoding="utf-8")
         self.log = self.tmp / "launches.log"
         stub_bin = self.tmp / "bin"
         stub_bin.mkdir()
         launcher = stub_bin / "claude-account"
-        launcher.write_text(f"#!/bin/sh\nexec {sys.executable} {STUB} {scenario} {self.log} \"$@\"\n",
+        launcher.write_text(f"#!/bin/sh\nexec {sys.executable} {STUB} {self.scenario} {self.log} \"$@\"\n",
                             encoding="utf-8")
         launcher.chmod(0o755)
         self.env = {key: value for key, value in self.world.env.items() if key not in DROPPED_ENV}
@@ -182,14 +189,20 @@ class StubbedRun:
         return script(self.tmp / "pulls-bin" / "gh", sys.executable, str(GH_PULLS),
                       str(self.pulls_state), str(forge_gh)).parent
 
+    def answer(self, step: str, entry: dict) -> None:
+        """Answer `step` with `entry` from the next delivery on, every other entry unchanged."""
+        self.replies[step] = self._with_worktree({step: entry})[step]
+        self.scenario.write_text(json.dumps(self.replies), encoding="utf-8")
+
     def _with_worktree(self, replies: dict) -> dict:
-        """The replies, each `commit`, `merge` and `same_head` effect without a worktree made in the
-        run's worktree and each `upstream` effect without a bare made in the bare origin."""
+        """The replies, each `commit`, `merge`, `same_head` and `leave` effect without a worktree made in
+        the run's worktree and each `upstream` effect without a bare made in the bare origin."""
         filled = copy.deepcopy(replies)
         for entry in filled.values():
             for effect, member, value in (("commit", "worktree", self.worktree_path),
                                           ("merge", "worktree", self.worktree_path),
                                           ("same_head", "worktree", self.worktree_path),
+                                          ("leave", "worktree", self.worktree_path),
                                           ("upstream", "bare", self.bare)):
                 if isinstance(entry.get(effect), dict) and member not in entry[effect]:
                     entry[effect][member] = str(value)
