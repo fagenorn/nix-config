@@ -207,6 +207,20 @@ def console_records(numbers) -> list[Path]:
         if int(p.name[:3]) in numbers)
 
 
+def guide_table(text: str, header: str) -> list[list[str]]:
+    lines = text.splitlines()
+    if header not in lines:
+        return []
+    rows = []
+    for line in lines[lines.index(header) + 1:]:
+        if not line.startswith("|"):
+            break
+        if line.startswith("|---"):
+            continue
+        rows.append([cell.strip() for cell in line.strip().strip("|").split("|")])
+    return rows
+
+
 def console_form_findings(numbers) -> list[tuple[str, str, int]]:
     return [
         (p.name, v.rule, v.line)
@@ -345,6 +359,51 @@ class DocsTreeTest(unittest.TestCase):
             if found:
                 breaches[relative] = [violation.rule for violation in found]
         self.assertEqual(breaches, {})
+
+    def test_system_record_007_keeps_the_record_form_and_supersedes_002_003_and_005(self):
+        path = REPO_ROOT / "docs/areas/system/adr/007-agent-tools-moves-to-dotnet-under-one-reference-graph.md"
+        found, cited = [], set()
+        if path.is_file():
+            data = path.read_bytes()
+            found = record_violations(path.relative_to(REPO_ROOT).as_posix(), data)
+            cited = set(re.findall(r"\bADR-system-(\d{3})\b", data.decode("utf-8")))
+        self.assertTrue(path.is_file())
+        self.assertEqual([violation.text() for violation in found], [])
+        self.assertLessEqual({"002", "003", "005"}, cited)
+
+    def test_the_architecture_guide_tables_31_references_each_to_a_lower_layer(self):
+        text = (REPO_ROOT / "docs/guides/architecture.md").read_text(encoding="utf-8")
+        rows = guide_table(text, "| Layer | Project | References |")
+        layers = {}
+        references = {}
+        for cells in rows:
+            project = cells[1].split()[0]
+            layers[project] = int(cells[0].lstrip("L"))
+            references[project] = [] if cells[2] == "none" else cells[2].split(", ")
+        forbidden = {
+            frozenset(pair) for pair in (
+                ("Release", "Verification"), ("Release", "Delivery"), ("Claims", "Guard"),
+                ("Delivery", "Guard"), ("Console", "Guard"))}
+        self.assertEqual(len(rows), 9)
+        self.assertEqual(set(layers), {
+            "System", "ProjectContract", "Claims", "Guard", "Release", "Verification",
+            "Delivery", "Console", "Hosts"})
+        self.assertEqual(sum(len(refs) for refs in references.values()), 31)
+        for project, refs in references.items():
+            for reference in refs:
+                self.assertLess(layers[reference], layers[project], f"{project} -> {reference}")
+                self.assertNotIn(frozenset({project, reference}), forbidden)
+
+    def test_the_architecture_guide_names_an_owner_and_a_writer_for_every_shared_format(self):
+        text = (REPO_ROOT / "docs/guides/architecture.md").read_text(encoding="utf-8")
+        rows = guide_table(text, "| Format | Owner project · module | Writer |")
+        projects = {
+            "System", "ProjectContract", "Claims", "Guard", "Release", "Verification",
+            "Delivery", "Console", "Hosts"}
+        self.assertEqual(len(rows), 17)
+        for cells in rows:
+            self.assertIn(cells[1].split()[0], projects, cells[0])
+            self.assertTrue(cells[2].strip(), cells[0])
 
     def test_no_living_file_names_a_working_artifact_outside_a_pinned_link(self):
         archived = archived_files()
