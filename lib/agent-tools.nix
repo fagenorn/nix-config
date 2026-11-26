@@ -51,6 +51,14 @@ let
     pathsToLink = [ "/bin" ];
   };
 
+  # The .NET SDK the dotnet-format lint member runs. It is in no launcher's closure (the launchers export
+  # only `tools`), so the platform package stays free of the SDK; the lint builds it by this passthru.
+  dotnetTools = pkgs.buildEnv {
+    name = "agent-platform-dotnet-tools";
+    paths = [ pkgs.dotnet-sdk_10 ];
+    pathsToLink = [ "/bin" ];
+  };
+
   # A row maps a command to its module path under agent_tools, and the module is named for the command:
   # its last segment is the command with each "-" replaced by "_".
   # context-map-lint is a stable path other projects' CIs call without vendoring it (parent D15).
@@ -167,6 +175,7 @@ let
         passthru = {
           launchers = lib.mapAttrs (name: _: "${package}/bin/${name}") commands;
           inherit python tools;
+          dotnet-tools = dotnetTools;
         };
       }
       ''

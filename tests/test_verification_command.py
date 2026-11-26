@@ -83,7 +83,7 @@ class JustCase(unittest.TestCase):
 
 
 class MembersTest(unittest.TestCase):
-    def test_lint_members_are_the_repositorys_three_lints_in_order(self):
+    def test_lint_members_are_the_repositorys_four_lints_in_order(self):
         root = Path("/r")
         self.assertEqual(members("lint", root), (
             Member("agnostic-lint",
@@ -93,6 +93,8 @@ class MembersTest(unittest.TestCase):
                     "--context-map", str(root / "docs" / "CONTEXT-MAP.md"))),
             Member("skill-lint",
                    (*sibling_argv("skill_lint"), "check", "--root", str(root))),
+            Member("dotnet-format",
+                   (*sibling_argv("delivery.dotnet_format_lint"), "--root", str(root))),
         ))
 
     def test_test_members_are_the_build_then_the_suite(self):
@@ -289,7 +291,31 @@ class LintEntryPointTest(JustCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             result.stdout.splitlines()[-1],
-            "lint: passed: agnostic-lint, context-map-lint, skill-lint")
+            "lint: passed: agnostic-lint, context-map-lint, skill-lint, dotnet-format")
+
+    def test_an_unformatted_csharp_file_fails_lint_naming_dotnet_format(self):
+        fixtures = REPO_ROOT / "tests" / "fixtures" / "dotnet-format"
+        project = self.scratch / "dotnet"
+        self.addCleanup(shutil.rmtree, project, ignore_errors=True)
+        (project / "Planted").mkdir(parents=True)
+        shutil.copy(fixtures / "Planted.slnx.fixture", project / "Planted.slnx")
+        shutil.copy(fixtures / "Planted.csproj.fixture", project / "Planted" / "Planted.csproj")
+        source = project / "Planted" / "Sample.cs"
+        shutil.copy(fixtures / "Unformatted.cs.fixture", source)
+        env = child_env(HOME=str(self.tmp()), TMPDIR=str(self.tmp()))
+        result = self.run_just(["lint"], self.scratch, env)
+        stderr = module_stderr(result)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("dotnet-format-lint: dotnet format would change files", stderr)
+        self.assertIn("lint: dotnet-format failed (exit 1)", stderr)
+        self.assertTrue(stderr[-1].startswith("lint: failed:"), stderr[-1])
+        self.assertIn("dotnet-format", stderr[-1].removeprefix("lint: failed:").replace(
+            " ", "").split(","))
+        shutil.copy(fixtures / "Formatted.cs.fixture", source)
+        result = self.run_just(["lint"], self.scratch, env)
+        self.assertIn("dotnet-format-lint: passed", result.stdout.splitlines(), result.stderr)
+        self.assertFalse([l for l in module_stderr(result)
+                          if l.startswith("lint: dotnet-format failed")])
 
     def test_a_context_map_violation_fails_lint_naming_context_map_lint(self):
         map_path = self.scratch / "docs" / "CONTEXT-MAP.md"

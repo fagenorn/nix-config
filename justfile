@@ -328,6 +328,7 @@ agent-workflow-tests *args:
     tests/test_suite_source.py \
     tests/test_skipped_test_lint.py \
     tests/test_copied_test_lint.py \
+    tests/test_dotnet_format_lint.py \
     tests/test_suppressions.py \
     tests/test_decision_record_wording.py \
     tests/test_module_docstring_wording.py \
