@@ -616,6 +616,37 @@ DRIVER = textwrap.dedent('''\
 ''')
 
 
+class ShardBoundTest(RunnerCase):
+    def main_in_process(self, shard: str, names: list[str]):
+        counts: list[int] = []
+
+        def assign(members, timings, count):
+            counts.append(count)
+            return [list(members)]
+        with mock.patch.dict(os.environ, {"SUITE_RUNNER_SHARD": shard}), \
+                mock.patch.object(suite_runner, "assign_shards", side_effect=assign), \
+                mock.patch.object(suite_runner, "run_suite", return_value=0) as ran, \
+                mock.patch.object(suite_runner, "load_timings", return_value={}), \
+                mock.patch.object(Path, "cwd", return_value=self.work):
+            try:
+                code = suite_runner.main(["--jobs", "1", *names])
+            except SystemExit as stop:
+                code = stop.code
+        return code, counts, ran
+
+    def test_an_index_past_the_members_is_refused_before_any_partition(self):
+        names = [self.member("test_b0.py", ShardRunTest.PASSING)]
+        code, counts, ran = self.main_in_process("999999999/999999999", names)
+        self.assertEqual((code, counts), (2, []))
+        ran.assert_not_called()
+
+    def test_the_partition_never_has_more_shards_than_members(self):
+        names = [self.member("test_b0.py", ShardRunTest.PASSING)]
+        code, counts, ran = self.main_in_process("1/999999999", names)
+        self.assertEqual((code, counts), (0, [1]))
+        self.assertEqual(ran.call_args.args[0], ["test_b0.py"])
+
+
 class ShardRunTest(RunnerCase):
     PASSING = "import unittest\nclass T(unittest.TestCase):\n    def test_x(self): pass\n"
 

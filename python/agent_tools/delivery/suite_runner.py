@@ -766,7 +766,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     members = args.members
     if shard is not None:
         index, count = shard
-        members = assign_shards(members, timings, count)[index - 1]
+        if index <= len(members):  # a larger index is an empty shard; never allocate for it
+            members = assign_shards(members, timings, min(count, len(members)))[index - 1]
+        else:
+            members = []
         if not members:
             parser.error(f"shard {index} of {count} has no member")
     try:

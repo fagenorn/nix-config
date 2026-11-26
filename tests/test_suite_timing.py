@@ -370,13 +370,16 @@ class JoinCommandTest(unittest.TestCase):
         compared = run_module(self.root, "compare", "--head", str(self.out), "--base",
                               str(self.out), "--base-label", "main")
         self.assertEqual(compared.returncode, 0, compared.stderr)
+        self.assertIn("Suite time changed by +0.0s over main, within the 60s threshold:",
+                      compared.stdout)
+        self.assertNotIn("no main baseline", compared.stdout)
 
     def test_a_failed_shard_fails_the_join_naming_it_and_still_writes_the_report(self):
         workflow(self.root)
         write_artifact(self.shards, shard_report(1, 2, {"a": 30, "b": 10}))
         write_artifact(self.shards, shard_report(2, 2, {"c": 20, "d": 15}, failed=("c",)),
                        status="failure")
-        result = join(self.root, needs="failure")
+        result = join(self.root, needs="success")
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertIn("suite-timing: shard 2 of 2 failed: 1 of 2 members failed: "
                       "tests/test_c.py", self.lines(result))
@@ -396,7 +399,7 @@ class JoinCommandTest(unittest.TestCase):
         workflow(self.root)
         write_artifact(self.shards, shard_report(1, 2, {"a": 30}))
         write_artifact(self.shards, shard_report(2, 2, {"c": 20}), status="failure")
-        result = join(self.root, needs="failure")
+        result = join(self.root, needs="success")
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertIn("suite-timing: shard 2 of 2 failed: its job had failed when it "
                       "uploaded a passing report", self.lines(result))
@@ -460,6 +463,12 @@ class JoinCommandTest(unittest.TestCase):
                 "1, 2", arrange(second=broken(passed="2")),
                 [reasoned + "passed is '2', not an integer"],
                 "suite-timing: failed shards: 2"),
+            "member_seconds against the rows": (
+                "1, 2", arrange(second=broken(
+                    timings=[{**two["timings"][0], "seconds": 90}, two["timings"][1]],
+                    member_seconds=0)),
+                [reasoned + "member_seconds is 0 but the timings sum to 91"],
+                "suite-timing: failed shards: 2"),
             "members against the rows": (
                 "1, 2", arrange(second=broken(members=3)),
                 [reasoned + "members is 3 but timings has 2 rows"],
@@ -500,6 +509,13 @@ class JoinCommandTest(unittest.TestCase):
                         line.startswith("suite-timing: shard 2 of 4 failed: its report is "
                                         "invalid: ") for line in self.lines(result)))
                 self.assertEqual(self.lines(result)[-1], last)
+
+    def test_member_seconds_that_differ_only_by_float_rounding_are_valid(self):
+        path = write_artifact(self.shards, shard_report(1, 1, {"a": 0.1, "b": 0.2}))
+        made = json.loads((path / "suite-timing.json").read_text(encoding="utf-8"))
+        self.assertNotEqual(sum(row["seconds"] for row in made["timings"]),
+                            made["member_seconds"])
+        self.assertEqual(load_shard_report(path / "suite-timing.json")["members"], 2)
 
     def test_shard_jobs_that_did_not_succeed_fail_the_join_though_every_report_passed(self):
         workflow(self.root)
@@ -688,6 +704,29 @@ class ObservedTest(unittest.TestCase):
         self.assertIn(f"{LISTING}&head_sha={MERGE}&per_page=100", read)
         self.assertEqual([path for path in read if "created=>=" in path],
                          [f"{LISTING}&created=>={stamp(START)}&per_page=100"])
+
+    def test_a_run_before_the_merge_in_its_second_is_not_in_the_window(self):
+        world = ObservedWorld(after=2)
+        world.ids = [99, *world.ids]
+        world.created = lambda run_id: START if run_id == 99 else (
+            START + timedelta(minutes=run_id - 100))
+        world.jobs[99] = {"jobs": [world.listing(99)["jobs"][-1]]}
+
+        code, line, _, _ = self.observe(world)
+
+        self.assertEqual(code, 0)
+        self.assertEqual([row["run"] for row in line["runs"]], [100, 101, 102])
+
+    def test_a_listing_without_the_merge_run_is_not_yet(self):
+        world = ObservedWorld(after=3)
+        pages = world.pages()
+        key = f"{LISTING}&created=>={stamp(START)}&per_page=100"
+        pages[key] = [{"workflow_runs": [run for run in pages[key][0]["workflow_runs"]
+                                         if run["id"] != 100]}]
+
+        code, line, _, _ = call(OBSERVED, world.gets(), pages)
+
+        self.assertEqual((code, line["state"]), (75, "not_yet"))
 
     def test_each_run_is_measured_on_its_first_attempt(self):
         world = ObservedWorld(after=2)

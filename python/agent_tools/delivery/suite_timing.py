@@ -320,6 +320,14 @@ def load_shard_report(path: Path) -> dict:
     if report["passed"] != members - failed:
         raise ReportError(f"passed is {report['passed']}, not members {members} minus "
                           f"failed {failed}")
+    total = sum(row["seconds"] for row in rows)
+    try:
+        agrees = math.isclose(report["member_seconds"], total, rel_tol=1e-9, abs_tol=1e-6)
+    except OverflowError:
+        agrees = False
+    if not agrees:
+        raise ReportError(f"member_seconds is {report['member_seconds']!r} but the timings "
+                          f"sum to {total!r}")
     return report
 
 
@@ -523,8 +531,12 @@ def _window(slug: str, branch: str, merge: str, runs: int) -> list[dict] | None:
     first = min(at_merge, key=lambda run: (run["created_at"], run["id"]))
     pages = forge_api.api_pages(f"{listing}&created=>={first['created_at']}&per_page=100")
     found = {run["id"]: run for page in pages for run in _listed_runs(page)}
-    window = sorted(found.values(), key=lambda run: (run["created_at"], run["id"]))
-    return window[:runs] if len(window) >= runs else None
+    ordered = sorted(found.values(), key=lambda run: (run["created_at"], run["id"]))
+    at = next((index for index, run in enumerate(ordered) if run["id"] == first["id"]), None)
+    if at is None:
+        return None
+    window = ordered[at:at + runs]
+    return window if len(window) == runs else None
 
 
 def _time(value: object) -> datetime | None:
