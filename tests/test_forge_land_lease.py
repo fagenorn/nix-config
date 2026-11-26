@@ -2,6 +2,8 @@
 from unittest import mock
 
 from agent_tools.claims import forge_land_lock as land_lock
+from agent_tools.claims import forge_markers as fm
+from agent_tools.system import forge_api
 
 from . import test_forge_land_lock as base
 from .test_forge_land_lock import (
@@ -234,3 +236,279 @@ class LeaseTest(base.QueueTest):
         self.assertLess(land_lock.HOLD_BOUND, land_lock.IDLE_AFTER)
         self.assertLess(land_lock.IDLE_AFTER, land_lock.BOUND)
         self.assertEqual(land_lock.HOLD_MAX, land_lock.BOUND)
+
+    def test_a_holder_whose_beat_repeats_keeps_a_lease_beating_within_its_bound_from_the_idle_takeover(self):
+        """The beat reads C at every poll, so the idle watch never restarts; the lease does."""
+        self.world.reset()
+        self.lock(B, refuse_to=(C, D))
+        self.pulls(A, pull(11, sha=A))
+        self.pulls(B, pull(12, sha=B))
+        for sha, parent in ((B, C), (C, D), (D, None)):
+            self.world.respond_json("gh", ["api", f"repos/{SLUG}/git/commits/{sha}"],
+                                    {"sha": sha, "parents": [{"sha": parent}] if parent else []})
+        self.world.set_ref(BEAT, C)
+        refreshes, beats, holds, state = [], [], [], {"refreshed": None, "held": None, "leased": False}
+
+        def hook(elapsed):
+            if state["refreshed"] is None or elapsed - state["refreshed"] >= 60:
+                state["refreshed"] = elapsed
+                refreshes.extend([run(*land("refresh", B)), run(*land("refresh", B))])
+                beats.append(self.world.refs().get(BEAT))
+            if elapsed >= 1700 and not state["leased"]:
+                state["leased"] = True
+                state["held"] = elapsed
+                holds.append(run(*land("acquire", B, "--lease")))
+            elif state["leased"] and elapsed - state["held"] >= 60:
+                state["held"] = elapsed
+                holds.append(run(*land("hold", B)))
+        code, out = self.leased(self.clock(hook))
+        self.assertEqual((code, out["verdict"], out["took_over"]), (0, "acquired", "bound"))
+        self.assertGreaterEqual(out["waited_s"], 2900)
+        self.assertLess(out["waited_s"], 2900 + land_lock.FAST_POLL + 20)
+        self.assertEqual([(c, o["verdict"]) for c, o in refreshes], [(0, "refreshed")] * len(refreshes))
+        self.assertEqual(set(beats), {C})
+        self.assertEqual(self.world.refs()[REF], A)
+
+    def test_a_holder_renewing_only_through_acquire_lease_is_never_taken_over_as_idle(self):
+        answers = []
+
+        def hook(elapsed):
+            if elapsed >= 1900:
+                answers.append(run(*land("acquire", B, "--lease")))
+        code, out = self.leased(self.clock(hook, alive=-100))
+        self.assertEqual((code, out["verdict"], out["waited_s"], out["pr"], out["position"]),
+                         (3, "land-contended", 3000, 12, 2))
+        self.assertTrue(answers)
+        for answer_code, answer in answers:
+            self.assertEqual((answer_code, answer["verdict"]), (0, "already_held"))
+            self.assertEqual(answer["lease"]["since"], EPOCH + 1920)
+        self.assertEqual(self.world.refs()[REF], B)
+        self.assertEqual([a for a in self.lock_swaps() if a[-3] == f"before={B}"], [])
+
+    def test_a_lease_that_lapsed_or_passed_its_bound_does_not_stop_the_idle_takeover(self):
+        for name in ("lapsed", "past_bound"):
+            with self.subTest(lease=name):
+                self.world.reset()
+                self.prepare(B)
+                self.leased_by = {}
+                hook = None
+                if name == "lapsed":
+                    self.lease(12, 2000, 2000)
+                else:
+                    def hook(elapsed):
+                        if elapsed >= 1000:
+                            self.lease(12, 1000, elapsed)
+                code, out = self.leased(self.clock(hook, alive=-100))
+                self.assertEqual((code, out["verdict"], out["took_over"], out["waited_s"]),
+                                 (0, "acquired", "idle", 2760))
+
+    def test_a_failed_read_at_the_idle_deadline_takes_nothing_over_that_poll(self):
+        for name in ("leases", "queue"):
+            with self.subTest(failed=name):
+                self.world.reset()
+                self.prepare(B)
+                self.leased_by = {}
+                clock, failed = self.clock(alive=-100), []
+
+                def fail_once(real, due=lambda: True):
+                    def read(*args):
+                        if not failed and due():
+                            failed.append(True)
+                            raise forge_api.ForgeError("gh_failed", "x")
+                        return real(*args)
+                    return read
+                if name == "leases":
+                    patch = mock.patch.object(land_lock, "read_leases", fail_once(land_lock.read_leases))
+                else:
+                    self.lease(12, 2000, 2000)
+                    def due():
+                        return clock.monotonic() - clock.start >= 2700
+                    look = fail_once(land_lock.Queue.look, due)
+                    patch = mock.patch.object(land_lock.Queue, "look", lambda queue, *args: look(queue, *args))
+                with patch:
+                    code, out = self.leased(clock)
+                self.assertEqual(failed, [True])
+                self.assertEqual((code, out["verdict"], out["took_over"], out["waited_s"]),
+                                 (0, "acquired", "idle", 2880))
+
+    def test_a_renewal_whose_replaced_lease_cannot_be_deleted_is_not_confirmed(self):
+        self.lock(B, refuse_to=(fm.ZERO_OID,))
+        self.pulls(B, pull(12, sha=B))
+        self.lease(12, 0, 0)
+        self.forge_time(100)
+        code, out = run(*land("acquire", B, "--lease"))
+        self.assertEqual((code, out["verdict"], out["lease"]), (0, "already_held", None))
+        self.assertEqual(self.leases(), {f"{LEASE}{EPOCH}-12-{EPOCH}": B, f"{LEASE}{EPOCH}-12-{EPOCH + 100}": B})
+
+    def test_a_move_whose_source_lease_cannot_be_deleted_is_not_confirmed(self):
+        self.lock(A, refuse_to=(fm.ZERO_OID,))
+        self.pulls(A, pull(11, sha=A))
+        self.lease(11, 0, 0, sha=A)
+        self.forge_time(100)
+        self.pulls(C, pull(11, sha=C))
+        self.pulls(A, pull(11, sha=C))
+        code, out = run(*land("acquire", C, "--lease"))
+        self.assertEqual((code, out["verdict"], out["lease"]), (0, "moved", None))
+        self.assertEqual(self.world.refs()[REF], C)
+        self.assertEqual(self.leases(), {f"{LEASE}{EPOCH}-11-{EPOCH}": A, f"{LEASE}{EPOCH}-11-{EPOCH + 100}": C})
+
+    def test_a_hold_whose_replaced_lease_cannot_be_deleted_is_a_forge_error(self):
+        self.lock(A, refuse_to=(fm.ZERO_OID,))
+        self.pulls(A, pull(11, sha=A))
+        self.lease(11, -30, -30, sha=A)
+        code, out = run(*land("hold", A))
+        self.assertEqual((code, out["verdict"], out["error"]), (1, "error", "gh_failed"))
+        leases = self.leases()
+        for name in (f"{LEASE}{EPOCH - 30}-11-{EPOCH - 30}", f"{LEASE}{EPOCH - 30}-11-{EPOCH}"):
+            self.assertEqual(leases.get(name), A)
+
+    def test_hold_renews_the_same_lease_whatever_order_the_forge_lists_them_in(self):
+        original = fm.matching_refs
+        records = []
+        for reverse in (False, True):
+            self.lock(A)
+            self.pulls(A, pull(11, sha=A))
+            self.leased_by = {}
+            self.lease(11, 0, 0, sha=A)
+            self.lease(13, 0, 0, sha=A)
+            self.forge_time(60)
+
+            def listed(*args, reverse=reverse):
+                found = original(*args)
+                return dict(sorted(found.items(), reverse=reverse))
+
+            with mock.patch.object(fm, "matching_refs", listed):
+                code, out = run(*land("hold", A))
+            records.append((code, out["verdict"], out["pr"], self.leases()))
+        self.assertEqual(records[0], records[1])
+
+    def lock_lost_with_no_lease_left(self, code_out):
+        code, out = code_out
+        self.assertEqual((code, out["verdict"], out["lease"]), (0, "already_held", None))
+        self.assertEqual([ref for ref, sha in self.leases().items() if sha == B], [])
+        self.assertEqual(self.world.refs()[REF], A)
+
+    def test_an_acquire_that_loses_the_lock_before_it_lists_leases_reports_lease_null(self):
+        self.lease(12, 0, 0)
+        self.forge_time(100)
+        original = land_lock.read_leases
+        staged = []
+
+        def listed(*args):
+            if not staged:
+                staged.append(True)
+                self.world.set_ref(REF, A)
+                self.world.set_ref(self.leased_by[12], None)
+            return original(*args)
+
+        with mock.patch.object(land_lock, "read_leases", listed):
+            self.lock_lost_with_no_lease_left(run(*land("acquire", B, "--lease")))
+
+    def test_an_acquire_that_loses_the_lock_after_its_lease_write_removes_that_lease(self):
+        self.lease(12, 0, 0)
+        self.forge_time(100)
+        original = fm.create_ref
+
+        def created(slug, ref, sha):
+            made = original(slug, ref, sha)
+            if ref.startswith(LEASE):
+                self.world.set_ref(REF, A)
+            return made
+
+        with mock.patch.object(fm, "create_ref", created):
+            self.lock_lost_with_no_lease_left(run(*land("acquire", B, "--lease")))
+
+    def refusing_deletes(self, refs, times=None):
+        """A `cas_ref` that refuses to delete `refs` (the first `times` attempts when given)."""
+        real, refused = fm.cas_ref, []
+
+        def cas(slug, node, ref, before, after):
+            if after == fm.ZERO_OID and ref in refs and (times is None or len(refused) < times):
+                refused.append(ref)
+                return forge_api.ForgeError("gh_failed", "refused")
+            return real(slug, node, ref, before, after)
+        return mock.patch.object(fm, "cas_ref", cas)
+
+    def test_holders_sharing_a_lock_sha_with_tied_leases_agree_on_the_lease_hold_renews(self):
+        self.pulls(B, pull(12, sha=B), pull(14, sha=B))
+        self.lease(12, 0, 0)
+        self.lease(14, 0, 0)
+        state = {"held": -60}
+
+        def hook(elapsed):
+            if elapsed - state["held"] >= 60:
+                state["held"] = elapsed
+                code, out = run(*land("hold", B))
+                self.assertEqual((code, out["verdict"]), (0, "held"))
+        code, out = self.leased(self.clock(hook))
+        self.assertEqual((code, out["verdict"], out["took_over"]), (0, "acquired", "bound"))
+        self.assertGreaterEqual(out["waited_s"], 1200)
+        self.assertLess(out["waited_s"], 1200 + land_lock.FAST_POLL + 20)
+
+    def test_a_delayed_acquire_never_prunes_the_lease_of_the_lock_that_moved_on(self):
+        self.pulls(B, pull(12, sha=B))
+        self.lease(12, 0, 0)
+        self.forge_time(100)
+        successor = f"{LEASE}{EPOCH}-12-{EPOCH + 90}"
+        original, staged = land_lock.read_leases, []
+
+        def listed(*args):
+            if not staged:
+                staged.append(True)  # the same pull request moves to C and publishes its lease first
+                self.world.set_ref(REF, C)
+                self.world.set_ref(successor, C)
+            return original(*args)
+
+        with mock.patch.object(land_lock, "read_leases", listed):
+            code, out = run(*land("acquire", B, "--lease"))
+        self.assertEqual((code, out["verdict"], out["lease"]), (0, "already_held", None))
+        self.assertEqual(self.world.refs()[REF], C)
+        self.assertEqual(self.leases().get(successor), C)
+        self.assertEqual(sorted(self.leases().values()), [B, C])
+        self.assertEqual(self.lease_creates(), [])
+
+    def lock_lost_after_the_write(self):
+        original = fm.create_ref
+
+        def created(slug, ref, sha):
+            made = original(slug, ref, sha)
+            if ref.startswith(LEASE):
+                self.world.set_ref(REF, A)
+            return made
+        return mock.patch.object(fm, "create_ref", created)
+
+    def test_a_lost_lock_removes_the_new_lease_although_an_older_one_cannot_be_deleted(self):
+        self.lease(12, 0, 0)
+        self.forge_time(100)
+        older = self.leased_by[12]
+        with self.lock_lost_after_the_write(), self.refusing_deletes({older}):
+            code, out = run(*land("acquire", B, "--lease"))
+        self.assertEqual((code, out["verdict"], out["lease"]), (0, "already_held", None))
+        self.assertEqual(self.leases(), {older: B})
+
+    def test_a_lost_lock_deletes_its_new_lease_again_when_the_first_deletion_is_refused(self):
+        self.lease(12, 0, 0)
+        self.forge_time(100)
+        newest = f"{LEASE}{EPOCH}-12-{EPOCH + 100}"
+        with self.lock_lost_after_the_write(), self.refusing_deletes({newest}, times=1):
+            self.lock_lost_with_no_lease_left(run(*land("acquire", B, "--lease")))
+
+    def test_a_failed_lease_read_at_the_idle_deadline_is_not_reread_by_the_first_in_line(self):
+        self.lease(12, 0, 0)  # lapsed long ago, but 13 stood ahead of 11 until the idle deadline
+        self.register(13, 0, 0)
+        failed, real, clock = [], land_lock.read_leases, None
+
+        def hook(elapsed):
+            if elapsed >= 2700:
+                self.register(13, None, None)
+
+        def read(*args):
+            if clock.monotonic() - clock.start >= 2700 and not failed:
+                failed.append(True)
+                raise forge_api.ForgeError("gh_failed", "x")
+            return real(*args)
+        clock = self.clock(hook, alive=-100)
+        with mock.patch.object(land_lock, "read_leases", read):
+            code, out = self.leased(clock)
+        self.assertEqual(failed, [True])
+        self.assertEqual((code, out["verdict"], out["took_over"]), (0, "acquired", "idle"))
