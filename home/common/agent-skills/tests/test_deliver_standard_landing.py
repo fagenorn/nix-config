@@ -33,11 +33,15 @@ TIER = "integration"
 
 def beat(hold):
     """The lease beat a held step starts first: `hold --detach`, which returns at once and beats in a background process
-    for the whole step, and the stop on not_held. Written out here, not read from the program."""
+    for the whole step, the stop on anything but beating, and the one-shot hold before each push and merge. Written out
+    here, not read from the program."""
     return (f"First start the lease beat: run alone and exactly: {hold} --detach\n"
-            "It returns at once and leaves a background process that beats the land lease every 60 seconds for the whole step. "
-            "When it prints not_held the lease is lost: stop at once, run nothing more and answer as you do when the step cannot be done "
-            "(a failed or blocked answer, never a success) with lease lost in its notes or detail. Whatever else it prints, go on.\n")
+            "It returns at once and leaves a background process that beats the land lease every 60 seconds for the whole step and stops by itself when your session ends. "
+            "Go on only when it prints beating. "
+            "When it prints anything else (not_held, unleased, an error or nothing) the lease is lost or not beating: stop at once, run nothing more and answer as you do when the step cannot be done "
+            "(a failed or blocked answer, never a success) with lease lost in its notes or detail.\n"
+            f"The background beat tells you nothing later, so immediately before every git push and every merge this step makes, run alone and exactly: {hold}\n"
+            "When it prints not_held, do not push or merge: stop and answer as above.\n")
 
 
 class GreenFirstTest(unittest.TestCase):
@@ -103,14 +107,36 @@ class GreenFirstTest(unittest.TestCase):
         for label in ("sync-1", "land-push-2", "merge"):
             with self.subTest(label=label):
                 text = prompt(calls, label)
-                self.assertEqual(text.count("forge-claim land hold"), 1)
-                self.assertIn("--detach\n", text)
+                # the detached beat, and the one-shot hold before each push and merge
+                self.assertEqual(text.count("forge-claim land hold"), 2)
+                self.assertEqual(text.count("--detach\n"), 1)
                 self.assertNotIn("run_in_background set to true", text)
                 self.assertIn("beats the land lease every 60 seconds for the whole step", text)
-                self.assertIn("When it prints not_held the lease is lost: stop at once", text)
+                self.assertIn("Go on only when it prints beating.", text)
+                self.assertIn("the lease is lost or not beating: stop at once", text)
         # A step that holds nothing starts no beat.
         for label in ("pr", "land-take"):
             self.assertNotIn("forge-claim land hold", prompt(calls, label))
+
+    def test_a_sync_step_that_reports_the_lease_lost_is_followed_by_no_push_and_no_merge(self):
+        """The loss is injected into the held sync step: nothing is pushed or merged under that lease after it."""
+        lost = {"status": "blocked", "conflicted": False, "notes": "lease lost"}
+        out = run_out(replies={"sync-1": lost}, patch={"land-take": {"behind": True}})
+        names = labels(out["calls"])
+        self.assertNotEqual(out["result"]["stage"], "done")
+        self.assertEqual(out["result"]["stage"], "sync")
+        after = out["calls"][names.index("sync-1") + 1:]
+        # only the release of the lease follows: no push step, no checks step, no merge step
+        self.assertEqual([c["label"] for c in after], ["land-unlock"])
+
+    def test_a_merge_step_that_reports_the_lease_lost_merges_nothing_more(self):
+        lost = {"merged": False, "notes": "lease lost"}
+        out = run_out(replies={"merge": lost})
+        names = labels(out["calls"])
+        self.assertEqual(out["result"]["stage"], "merge")
+        after = out["calls"][names.index("merge") + 1:]
+        self.assertEqual([c["label"] for c in after], ["land-unlock"])
+        self.assertEqual(names.count("merge"), 1)
 
     def test_a_clean_sync_whose_head_is_a_follow_up_commit_beats_through_its_review_and_fix(self):
         """The review of a clean merge with commits on top runs while the lease is still held."""

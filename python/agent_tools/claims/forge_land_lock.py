@@ -225,9 +225,12 @@ answers `unleased` (exit 0) and writes nothing; after N seconds it answers `held
 `held_s`, the seconds since `<since>`. `hold --detach [--seconds N]` (issue 1904; N defaults to
 `HOLD_MAX`) is for a step that runs its own long commands and so cannot sit in a foreground `hold`: it
 beats once at once and answers that read when it is `not_held` (exit 3) or `unleased`; otherwise it
-starts the same `hold --seconds N` as a process of its own session with no streams, which beats
-every 60 seconds and ends by itself at N seconds or at its first `not_held`, and answers `beating`
-with `lease`, `seconds` and `pid` (exit 0). A caller that passes no `--detach` is unchanged. The first in line, and only it (a read of this poll's queue
+starts the same `hold --seconds N` as a sibling process of its own session with no streams, which
+beats every 60 seconds and ends by itself at N seconds, at its first `not_held`, or, when its owner
+(the nearest ancestor of the `hold --detach` that is not a shell, named by the process's own hidden
+`--owner` and `--owner-start`) is gone, as `abandoned`, so a dead lander stops beating and its lease
+lapses after 3 minutes; it answers `beating` with `lease`, `seconds` and `pid` (exit 0). A caller
+that passes no `--detach` is unchanged. The first in line, and only it (a read of this poll's queue
 that succeeded and put it first, so neither position 2 or later nor an unordered poll nor a
 one-shot `acquire`), takes a lock whose holder's newest lease has a `<beat>` more than
 `LEASE_LAPSE` (180) seconds behind the poll's queue clock (`took_over` `"lapsed"`), or a `<since>`
@@ -244,13 +247,13 @@ grants nothing, since the lock is still granted by D1's create and swap only.
 import os
 import re
 import subprocess
-import sys
 import time
 from collections.abc import Collection
 from typing import Any, Callable, NamedTuple
 
 from agent_tools.claims import forge_markers as fm
 from agent_tools.system import forge_api
+from agent_tools.system.siblings import sibling_argv
 
 LOCK_PREFIX = "refs/agent-locks/land/"
 BEAT_PREFIX = "refs/agent-locks/land-beat/"
@@ -875,14 +878,60 @@ def _lease(args: Any, node: Callable[[], str], out: dict[str, Any]) -> dict[str,
     return out
 
 
-def spawn_beater(args: Any, seconds: int) -> int:
-    """Issue 1904: start `hold --seconds <seconds>` for `args`' lock as a process of its own session with no streams;
-    it ends by itself, so nothing waits for it. Returns its pid."""
-    argv = [sys.executable, "-m", "agent_tools.claims.forge_claim", "land", "hold", "--repo", args.repo,
-            "--branch", args.branch, "--sha", args.sha, "--seconds", str(seconds)]
-    env = {**os.environ, "PYTHONPATH": os.pathsep.join(p for p in sys.path if p)}
+SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh", "fish", "csh", "tcsh"})
+OWNER_DEPTH = 16  # the ancestors looked through for an owner that is not a shell
+
+
+def _proc(pid: int) -> tuple[int, str, str] | None:
+    """(parent pid, start time, command) of `pid` as `ps` prints them, or None when `ps` knows no such process."""
+    try:
+        done = subprocess.run(["ps", "-o", "ppid=,lstart=,comm=", "-p", str(pid)], capture_output=True, text=True,
+                              timeout=10, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    words = done.stdout.split()
+    if done.returncode != 0 or len(words) < 7 or not words[0].isdigit():
+        return None
+    return int(words[0]), " ".join(words[1:6]), " ".join(words[6:])
+
+
+def find_owner() -> tuple[int, str] | None:
+    """Issue 1904: the pid and start time of the nearest ancestor of this process that is not a shell (the session
+    that runs the step), or None when there is none to be found."""
+    pid = os.getppid()
+    for _ in range(OWNER_DEPTH):
+        info = _proc(pid) if pid > 1 else None
+        if info is None:
+            return None
+        parent, started, command = info
+        if os.path.basename(command).lstrip("-") not in SHELLS:
+            return pid, started
+        pid = parent
+    return None
+
+
+def owner_alive(pid: int, started: str | None) -> bool:
+    """Whether the process `pid` that started at `started` still runs; a pid another process now has is not it."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+    info = _proc(pid)
+    return info is None or started is None or info[1] == started
+
+
+def spawn_beater(args: Any, seconds: int, owner: tuple[int, str] | None = None) -> int:
+    """Issue 1904: start `hold --seconds <seconds>` for `args`' lock as a sibling process of its own session with no
+    streams; it ends by itself, so nothing waits for it, and with an `owner` it ends when that process is gone.
+    Returns its pid."""
+    argv = [*sibling_argv("claims.forge_claim"), "land", "hold", "--repo", args.repo, "--branch", args.branch,
+            "--sha", args.sha, "--seconds", str(seconds)]
+    if owner is not None:
+        argv += ["--owner", str(owner[0]), "--owner-start", owner[1]]
     proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                            start_new_session=True, env=env)
+                            start_new_session=True)
     return proc.pid
 
 
@@ -892,7 +941,7 @@ def _detach(args: Any) -> tuple[int, dict[str, Any]]:
     code, out = _hold(_Once(args))
     if code != 0 or out["verdict"] != "held":
         return code, out
-    pid = spawn_beater(args, seconds)
+    pid = spawn_beater(args, seconds, find_owner())
     return 0, result(args, "beating", lock_sha=out["lock_sha"], pr=out["pr"], lease=out["lease"], seconds=seconds, pid=pid)
 
 
@@ -916,8 +965,11 @@ def _hold(args: Any) -> tuple[int, dict[str, Any]]:
             cached.append(fm.repo_node_id(args.repo))
         return cached[0]
 
+    owner = getattr(args, "owner", None)
     start = monotonic()
     while True:
+        if owner is not None and not owner_alive(owner, getattr(args, "owner_start", None)):
+            return 0, result(args, "abandoned", lock_sha=args.sha)
         lock = fm.read_ref(args.repo, lock_ref(args.branch))
         if lock != args.sha:
             pr = _pr_of(args.repo, args.branch, lock)

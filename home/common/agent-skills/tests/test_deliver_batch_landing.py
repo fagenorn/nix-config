@@ -38,11 +38,15 @@ TIER = "integration"
 
 def beat(hold):
     """The lease beat a held step starts first: `hold --detach`, which returns at once and beats in a background process
-    for the whole step, and the stop on not_held. Written out here, not read from the program."""
+    for the whole step, the stop on anything but beating, and the one-shot hold before each push and merge. Written out
+    here, not read from the program."""
     return (f"First start the lease beat: run alone and exactly: {hold} --detach\n"
-            "It returns at once and leaves a background process that beats the land lease every 60 seconds for the whole step. "
-            "When it prints not_held the lease is lost: stop at once, run nothing more and answer as you do when the step cannot be done "
-            "(a failed or blocked answer, never a success) with lease lost in its notes or detail. Whatever else it prints, go on.\n")
+            "It returns at once and leaves a background process that beats the land lease every 60 seconds for the whole step and stops by itself when your session ends. "
+            "Go on only when it prints beating. "
+            "When it prints anything else (not_held, unleased, an error or nothing) the lease is lost or not beating: stop at once, run nothing more and answer as you do when the step cannot be done "
+            "(a failed or blocked answer, never a success) with lease lost in its notes or detail.\n"
+            f"The background beat tells you nothing later, so immediately before every git push and every merge this step makes, run alone and exactly: {hold}\n"
+            "When it prints not_held, do not push or merge: stop and answer as above.\n")
 
 
 class ConflictedSyncOutsideLockTest(unittest.TestCase):
@@ -593,12 +597,38 @@ class BatchGreenFirstTest(unittest.TestCase):
         result, calls, _ = run(replies={"land-take-1": dict(self.TAKEN, behind=True), "land-sync-1-1": self.MERGED})
         self.assertEqual(row(result, 1)["outcome"], "landed")
         text = prompt(calls, "land-sync-1-1")
-        self.assertEqual(text.count("forge-claim land hold"), 1)
+        self.assertEqual(text.count("forge-claim land hold"), 2)  # the detached beat, and the hold before the push
         self.assertIn(beat(self.HOLD), text)
-        self.assertIn("--detach\n", text)
+        self.assertEqual(text.count("--detach\n"), 1)
+        self.assertLess(text.index("--detach\n"), text.index("4. After a clean merge, push"))
         # No step that holds nothing starts one: the pull request step, the checks read before the lock and the take.
         for label in ("land-pr-1", "land-take-1"):
             self.assertNotIn("forge-claim land hold", prompt(calls, label))
+
+    def test_the_merge_step_under_the_lease_beats_it_before_the_recheck_and_the_merge(self):
+        """A landing that goes straight from the take to the merge keeps the lease beating through a slow merge."""
+        result, calls, _ = run()
+        self.assertEqual(row(result, 1)["outcome"], "landed")
+        merge = prompt(calls, "land-merge-1")
+        self.assertTrue(merge.startswith("First start the lease beat: run alone and exactly: forge-claim land hold --repo owner/repo --branch dev --sha "), merge[:120])
+        self.assertEqual(merge.count("--detach\n"), 1)
+        self.assertLess(merge.index("--detach\n"), merge.index("re-check the cross-host landing lock"))
+        self.assertLess(merge.index("--detach\n"), merge.index("gh pr merge"))
+
+    def test_a_sync_step_that_reports_the_lease_lost_is_followed_by_no_push_and_no_merge(self):
+        """The loss is injected into the held sync step, whose last step is a push: nothing lands under that lease after it."""
+        lost = {"status": "blocked", "conflicted": False, "notes": "lease lost"}
+        result, calls, _ = run(replies={"land-take-1": dict(self.TAKEN, behind=True), "land-sync-1-1": lost})
+        self.assertEqual((row(result, 1)["outcome"], row(result, 1)["stage"]), ("stopped", "land-sync"))
+        after = calls[labels(calls).index("land-sync-1-1") + 1:]
+        self.assertEqual([c["label"] for c in after], ["land-unlock-1"])  # only the release: no push, checks or merge step
+        self.assertIn("immediately before every git push and every merge this step makes", prompt(calls, "land-sync-1-1"))
+
+    def test_a_merge_step_that_reports_the_lease_lost_merges_nothing_more(self):
+        lost = {"merged": False, "notes": "lease lost"}
+        result, calls, _ = run(replies={"land-merge-1": lost})
+        self.assertEqual((row(result, 1)["outcome"], row(result, 1)["stage"]), ("stopped", "merge"))
+        self.assertEqual(labels(calls).count("land-merge-1"), 1)
 
     def test_a_conflicted_sync_beats_while_it_aborts_and_the_resolution_outside_the_lock_starts_none(self):
         out = run_full(replies={"land-sync-1-1": ABORTED, "land-take-1": [dict(self.TAKEN, behind=True), {}], "land-checks-1-2": green(B)})

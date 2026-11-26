@@ -1,4 +1,5 @@
 """forge-claim land (D13): a delivery holds the land lock as a lease that beats, and the first in line takes over one that lapsed."""
+import sys
 from unittest import mock
 
 from agent_tools.claims import forge_land_lock as land_lock
@@ -125,11 +126,11 @@ class LeaseTest(base.QueueTest):
 
     def test_a_waiter_that_is_not_first_never_takes_over_a_lease(self):
         self.lease(12, 0, 0)
-        hook = self.live_holder(self.release_at(2000))
+        hook = self.live_holder(self.release_at(2600))  # beats past the 2400 s bound
         code, out = self.leased(self.clock(hook, alive=-100))
         self.assertEqual((code, out["verdict"], out["took_over"], out["position"]), (0, "acquired", None, 2))
         self.assertEqual([a for a in self.lock_swaps() if a[-3] == f"before={B}"], [])
-        self.assertGreaterEqual(out["waited_s"], 2000)
+        self.assertGreaterEqual(out["waited_s"], 2600)
 
     def test_a_holder_with_no_lease_keeps_the_idle_takeover_only(self):
         code, out = self.leased(self.clock(self.live_holder(self.release_at(2000), lease=False)))
@@ -307,6 +308,82 @@ class LeaseTest(base.QueueTest):
         kw = popen.call_args.kwargs
         self.assertIs(kw["start_new_session"], True)
         self.assertEqual((kw["stdin"], kw["stdout"], kw["stderr"]), (land_lock.subprocess.DEVNULL,) * 3)
+
+    def test_the_beater_of_an_isolated_caller_runs_isolated_and_inherits_no_path(self):
+        """C4: the child of an installed launcher (python -I) must not import a module from the working directory."""
+        args = mock.Mock(repo=SLUG, branch="main", sha=A)
+        for isolated, flag in ((1, ["-I"]), (0, [])):
+            with self.subTest(isolated=isolated), mock.patch.object(sys, "flags", mock.Mock(isolated=isolated)), \
+                    mock.patch.object(land_lock.subprocess, "Popen") as popen:
+                land_lock.spawn_beater(args, 900)
+            self.assertEqual(popen.call_args.args[0][:3 + len(flag)], [sys.executable, *flag, "-m", "agent_tools.claims.forge_claim"])
+            self.assertNotIn("env", popen.call_args.kwargs)
+
+    def test_the_beater_is_told_its_owner(self):
+        args = mock.Mock(repo=SLUG, branch="main", sha=A)
+        with mock.patch.object(land_lock.subprocess, "Popen") as popen:
+            land_lock.spawn_beater(args, 900, (77, "Thu Nov 26 07:28:26 2026"))
+        self.assertEqual(popen.call_args.args[0][-4:], ["--owner", "77", "--owner-start", "Thu Nov 26 07:28:26 2026"])
+
+    def test_hold_detach_hands_the_owner_it_found_to_the_beater(self):
+        self.lock(A)
+        self.pulls(A, pull(11, sha=A))
+        self.lease(11, 0, 0, sha=A)
+        with mock.patch.object(land_lock, "find_owner", return_value=(77, "T")), \
+                mock.patch.object(land_lock, "spawn_beater", return_value=4242) as spawn:
+            code, out = run(*land("hold", A, "--detach"))
+        self.assertEqual((code, out["verdict"]), (0, "beating"))
+        self.assertEqual(spawn.call_args.args[2], (77, "T"))
+
+    def ps(self, table):
+        """`ps -o ppid=,lstart=,comm= -p <pid>` answering from `table` {pid: (ppid, command)}."""
+        def run_ps(argv, **_):
+            pid = int(argv[-1])
+            if pid not in table:
+                return mock.Mock(returncode=1, stdout="")
+            parent, command = table[pid]
+            return mock.Mock(returncode=0, stdout=f"{parent:>6} Thu Nov 26 07:28:26 2026 {command}\n")
+        return mock.patch.object(land_lock.subprocess, "run", side_effect=run_ps)
+
+    def test_the_owner_is_the_nearest_ancestor_that_is_not_a_shell(self):
+        """C2: the lander's session, past the launcher's bash and the tool's zsh, which the next step's shell outlives."""
+        table = {300: (200, "/bin/zsh"), 200: (100, "-bash"), 100: (50, "/usr/bin/claude"), 50: (1, "/sbin/launchd")}
+        with mock.patch.object(land_lock.os, "getppid", return_value=300), self.ps(table):
+            self.assertEqual(land_lock.find_owner(), (100, "Thu Nov 26 07:28:26 2026"))
+
+    def test_there_is_no_owner_when_the_chain_ends_at_init_or_ps_knows_nothing(self):
+        with mock.patch.object(land_lock.os, "getppid", return_value=300), self.ps({300: (1, "zsh")}):
+            self.assertIsNone(land_lock.find_owner())
+        with mock.patch.object(land_lock.os, "getppid", return_value=300), self.ps({}):
+            self.assertIsNone(land_lock.find_owner())
+
+    def test_an_owner_is_alive_only_while_its_pid_runs_with_the_same_start(self):
+        table = {100: (50, "claude")}
+        with mock.patch.object(land_lock.os, "kill"), self.ps(table):
+            self.assertTrue(land_lock.owner_alive(100, "Thu Nov 26 07:28:26 2026"))
+            self.assertFalse(land_lock.owner_alive(100, "Wed Nov 25 01:00:00 2026"))
+        with mock.patch.object(land_lock.os, "kill", side_effect=ProcessLookupError):
+            self.assertFalse(land_lock.owner_alive(100, "Thu Nov 26 07:28:26 2026"))
+
+    def test_a_beater_whose_owner_is_gone_stops_beating_and_lets_the_lease_lapse(self):
+        """C2: a lander that died with its pull request open must not keep the lock for the 40-minute bound."""
+        self.lock(A)
+        self.pulls(A, pull(11, sha=A))
+        self.lease(11, 0, 0, sha=A)
+        with mock.patch.object(land_lock, "owner_alive", side_effect=[True, True, False]) as alive:
+            code, out = self.hold(self.clock(), "--seconds", "3000", "--owner", "77", "--owner-start", "T")
+        self.assertEqual((code, out["verdict"]), (0, "abandoned"))
+        # the lease written at 0 stands; the beat at 60 is the last, and none follows the owner's death at 120
+        self.assertEqual([int(name.rsplit("-", 1)[1]) - EPOCH for name in self.lease_creates()], [60])
+        self.assertEqual(alive.call_args.args, (77, "T"))
+
+    def test_a_beater_with_a_live_owner_beats_to_its_end(self):
+        self.lock(A)
+        self.pulls(A, pull(11, sha=A))
+        self.lease(11, 0, 0, sha=A)
+        with mock.patch.object(land_lock, "owner_alive", return_value=True):
+            code, out = self.hold(self.clock(), "--seconds", "120", "--owner", "77", "--owner-start", "T")
+        self.assertEqual((code, out["verdict"]), (0, "held"))
 
     def test_the_lease_timings(self):
         # 2400 s is the slowest required check of the last 48 passing runs on 26 Nov (1807 s) with a margin of a third.

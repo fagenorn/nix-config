@@ -201,6 +201,8 @@ def build_parser() -> argparse.ArgumentParser:
         elif name == "hold":
             sub.add_argument("--seconds", type=_hold_seconds, default=0)
             sub.add_argument("--detach", action="store_true")
+            sub.add_argument("--owner", type=int, default=None, help=argparse.SUPPRESS)
+            sub.add_argument("--owner-start", default=None, help=argparse.SUPPRESS)
     return parser
 
 

@@ -249,7 +249,7 @@ const SLUG = SETUP.slug, INT = SETUP.integration_branch, MAX = SETUP.max_paralle
 const LAND_ACQUIRE = (sha, wait, lease = false) => `forge-claim land acquire --repo ${SLUG} --branch ${INT} --sha ${sha}${wait ? ' --wait' : ''}${lease ? ' --lease' : ''}`
 const LEASE_HOLD = (sha, seconds) => `forge-claim land hold --repo ${SLUG} --branch ${INT} --sha ${sha}${seconds ? ` --seconds ${seconds}` : ''}`
 // A step that runs while the lease is held starts the beat first (issue 1904), byte for byte as deliver-standard.js has it.
-const LEASE_BEAT = sha => `First start the lease beat: run alone and exactly: ${LEASE_HOLD(sha)} --detach\nIt returns at once and leaves a background process that beats the land lease every 60 seconds for the whole step. When it prints not_held the lease is lost: stop at once, run nothing more and answer as you do when the step cannot be done (a failed or blocked answer, never a success) with lease lost in its notes or detail. Whatever else it prints, go on.\n`
+const LEASE_BEAT = sha => `First start the lease beat: run alone and exactly: ${LEASE_HOLD(sha)} --detach\nIt returns at once and leaves a background process that beats the land lease every 60 seconds for the whole step and stops by itself when your session ends. Go on only when it prints beating. When it prints anything else (not_held, unleased, an error or nothing) the lease is lost or not beating: stop at once, run nothing more and answer as you do when the step cannot be done (a failed or blocked answer, never a success) with lease lost in its notes or detail.\nThe background beat tells you nothing later, so immediately before every git push and every merge this step makes, run alone and exactly: ${LEASE_HOLD(sha)}\nWhen it prints not_held, do not push or merge: stop and answer as above.\n`
 const LOCK_RETURN = `Return its verdict (acquired, already_held, moved, land-contended, held_by, lost_to, or error on any other exit), lock_sha, by, detail, waited_s and waited_on from its output, and position and ahead when it prints them. ${FORGE_TIMEOUT}`
 const RELEASE_AGAIN = maybe => `When it prints not_held with lock_sha ${maybe}, run alone and exactly: forge-claim land release --repo ${SLUG} --branch ${INT} --sha ${maybe}, then return the verdict of that second release.\n`
 const RELEASE_FIRST = (sha, maybe) => `First, before anything below, release the cross-host landing lock of the branch ${INT}: run alone and exactly: forge-claim land release --repo ${SLUG} --branch ${INT} --sha ${sha}
@@ -1020,7 +1020,7 @@ ${RULES}`, `land-ask-${n}`, { ...clerk, schema: ASK_SCHEMA })
     const label = `land-record-${n}-${c.record}`
     // The move may land and its answer be lost: the release then also tries expected (P10).
     if (!lockless && expected !== lockSha) lockMaybe = expected
-    const rec = await call(`The head of PR #${pr} of issue #${n} of ${SLUG} changed to ${expected} and passed its gate. Record it in the PR body.
+    const rec = await call(`${publish && !lockless ? held() : ''}The head of PR #${pr} of issue #${n} of ${SLUG} changed to ${expected} and passed its gate. Record it in the PR body.
 ${publish ? `First push that head, which is a reviewed fix commit not pushed yet: git -C ${W} fetch origin, confirm git -C ${W} rev-parse HEAD prints ${expected}, then run git -C ${W} push origin ${B}. When HEAD is another commit or the push fails, change nothing else and return ok false with the head you read.\n` : ''}1. Run gh pr view ${pr} --repo ${SLUG} --json body,headRefOid and confirm headRefOid is ${expected}. If it is not, change nothing and return ok false with the head it shows.
 2. Make a fresh directory with mktemp -d and write the body to a file in it, rewriting only the Accepted head line (the last line of the Evidence section) to exactly this text, everything else unchanged:
 Accepted head: ${expected}
@@ -1348,7 +1348,7 @@ ${RULES}`, `land-pr-${n}`, { agentType: 'clerk', model: DEFAULT_CLERK_MODEL, eff
         if (mode === 'first') lockHeld = true
         return out('ci-failed', { failing: failingNames, ...extra })
       }
-      const fix = await call(`Issue #${n} of ${SLUG}: the checks of PR #${pr} failed at ${expected}: ${JSON.stringify(failingNames)}. Details: ${details || 'none given'}.
+      const fix = await call(`${mode === 'first' ? held() : ''}Issue #${n} of ${SLUG}: the checks of PR #${pr} failed at ${expected}: ${JSON.stringify(failingNames)}. Details: ${details || 'none given'}.
 ${mode === 'first' ? `${FIX_OFF_LOCK(lockSha)}\n` : mode === 'unasked' ? `${FIX_NO_LOCK}\n` : `${FIX_LEFT_QUEUE}\n`}Work in the worktree ${W} on branch ${B}. Find the cause in this branch's changes, fix the failing checks with the smallest change and a regression test, and commit. Do not push: the program pushes the commit once its report records its tests and its review passes. ${PUSH_TESTS(GUARDS)}. Never weaken, skip or delete a test or check to make it pass. ${COMMIT_SCOPE} ${IMPL_RETURN}
 When the failure has no cause in the code (an infrastructure, cache or network error in a setup step), change and commit nothing: ${RERUN_ALL(UNSET, SLUG, expected)}, do not wait for them, and return status done with the head unchanged (commit equal to start_head, ${expected}) and the error you saw in notes; the program then polls the checks itself.
 ${RULES}`, `land-fix-${n}`, { agentType: 'implementer', model: 'sonnet', schema: mode === 'first' ? { ...IMPL, properties: { ...IMPL.properties, lock_released: { type: 'boolean' } } } : IMPL })
@@ -1483,7 +1483,7 @@ ${stalePoll ? `${STALE_RERUN(UNSET, SLUG)}\n` : ''}${RULES}`, label, { ...lifecy
       }
 
       // One call: renew, the pre-merge lock check (a lock retaken after a loss rechecks first), then the merge (O3).
-      const mg = await recall(() => call(`${RENEW_FIRST}
+      const mg = await recall(() => call(`${held()}${RENEW_FIRST}
 Then re-check the cross-host landing lock of the branch ${INT} for PR #${pr}: run alone and exactly: ${LAND_ACQUIRE(expected, false, LEASE)}
 ${LOCK_RETURN} Return it as lock.
 Only when lock's verdict is already_held or moved, merge PR #${pr} of issue #${n} of ${SLUG} into ${INT}; a re-run must not merge twice.
