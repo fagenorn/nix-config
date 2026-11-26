@@ -11,4 +11,6 @@ Run `program-copies --repo-root <checkout> --from <this skill dir>`, then the Wo
 
 Returns `{stage, ...}`. `done`, `planned`, `ready` succeed; keep `cont` for a later `mode`. No `cont`: report it. Else fix the cause (`needs_user`: ask, set `decisions`; `awaiting-look`: show the owner `pr`, set `look`), rerun with `args.cont`.
 
-Batch of issues: the `deliver-batch` skill.
+A stop holding work raises a card at once for whoever it waits on: what is held, why and the action that releases it.
+
+Batches: `deliver-batch`.

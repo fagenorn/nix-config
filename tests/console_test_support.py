@@ -1,4 +1,5 @@
 """Shared helpers of the console service suites (#855): registries, log rows, requests, a started service."""
+import contextlib
 import http.client
 import json
 import os
@@ -6,8 +7,10 @@ import shutil
 import socket
 import sqlite3
 import tempfile
+import threading
 import time
 from pathlib import Path
+from unittest import mock
 
 from agent_tools.console import manager as console_manager
 from agent_tools.console import peer
@@ -62,6 +65,67 @@ def log_rows(store):
             "SELECT seq, at, kind, project, payload FROM events ORDER BY seq").fetchall()
     finally:
         connection.close()
+
+
+def wait_rows(store, kind, count):
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        rows = [row for row in log_rows(store) if row[2] == kind]
+        if len(rows) >= count:
+            return rows
+        time.sleep(0.02)
+    raise AssertionError(f"fewer than {count} {kind} rows")
+
+
+def wait_until(condition):
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        if condition():
+            return True
+        time.sleep(0.02)
+    return condition()
+
+
+@contextlib.contextmanager
+def hold_the_publish(svc, kind, wait=5):
+    """Hold a hook's republish, under `svc._ingest`, until the reading thread is at the ingest lock.
+
+    A view read outside the lock sees the stale view and one made inside it sees the republish.
+    The publisher gives the reader `wait` seconds, then goes on; leaving the block then fails the test.
+    """
+    reader = threading.current_thread()
+    arrived = threading.Event()
+    settled = threading.Event()
+    waited = []
+    real = svc._ingest
+    append = EventLog.append
+
+    class Fence:
+        def __enter__(self):
+            if threading.current_thread() is reader:
+                arrived.set()
+            real.acquire()
+            return self
+
+        def __exit__(self, *exc):
+            real.release()
+            return False
+
+        def __getattr__(self, name):
+            return getattr(real, name)
+
+    def late(log, entries):
+        rows = append(log, entries)
+        if any(entry[0] == kind for entry in entries):
+            waited.append(arrived.wait(wait))
+            settled.set()
+        return rows
+
+    with mock.patch.object(svc, "_ingest", Fence()), mock.patch.object(EventLog, "append", late):
+        yield
+        if not settled.wait(wait + 5) or waited != [True]:
+            raise AssertionError(
+                f"the publish of a {kind} row was not held until the reader reached the lock: {waited}")
 
 
 def request(address, method, path, host=None):
