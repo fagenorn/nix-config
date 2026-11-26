@@ -210,12 +210,29 @@ let
     '';
   };
 
+  # The land check the guard runs before a merge: `forge-claim land permit`, which reads the land
+  # lock and the leases through the store gh, so it exports the PATH of the row check. The hook
+  # wrapper names it by store path and it is not installed on PATH.
+  lifecycleGuardLandCheck = pkgs.writeTextFile {
+    name = "claude-guard-land-check";
+    executable = true;
+    text = ''
+      #!${pkgs.runtimeShell} -p
+      unset BASH_ENV ENV
+      export PATH="${guardToolPath}:$PATH"
+      exec ${agentTools.launchers.forge-claim} land permit "$@"
+    '';
+    checkPhase = ''
+      ${pkgs.stdenv.shellDryRun} "$target"
+    '';
+  };
+
   # The registered hook: one argument-free store path. Bash's `-p` ignores
   # BASH_ENV and inherited functions, `-I` and the unset keep PYTHONPATH, user
   # site and NIX_PYTHON* `.pth` hooks out, and `exec` hands the hook's timeout
   # kill to Python. `--base-policy` names the store base policy and `--policy`
   # the compiled policy, whose path is fixed at evaluation time, and
-  # `--derive-bin` the row check. The check runs the wrapper on a payload with no
+  # `--derive-bin` the row check and `--land-bin` the land check. The check runs the wrapper on a payload with no
   # repository-bound verb: the guard loads the base policy, so the build refuses
   # a guard source or a base policy that cannot load, and never opens the
   # compiled path or runs the row check. The check also runs one harmless Edit
@@ -227,7 +244,7 @@ let
     text = ''
       #!${pkgs.runtimeShell} -p
       unset NIX_PYTHONPATH NIX_PYTHONPREFIX NIX_PYTHONEXECUTABLE
-      exec ${pkgs.python3}/bin/python3 -I ${./lifecycle_guard.py} --look-bin ${lifecycleGuardLookCheck} --base-policy ${lifecycleGuardBasePolicy} --policy ${lifecycleGuardPolicyPath} --derive-bin ${lifecycleGuardRowCheck} "$@"
+      exec ${pkgs.python3}/bin/python3 -I ${./lifecycle_guard.py} --look-bin ${lifecycleGuardLookCheck} --base-policy ${lifecycleGuardBasePolicy} --policy ${lifecycleGuardPolicyPath} --derive-bin ${lifecycleGuardRowCheck} --land-bin ${lifecycleGuardLandCheck} "$@"
     '';
     checkPhase = ''
       if ! printf '%s' '{"tool_name":"Bash","tool_input":{"command":"true"}}' \

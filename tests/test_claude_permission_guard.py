@@ -16,10 +16,12 @@ import time
 import types
 import unittest
 
+from agent_tools.claims import forge_land_lock as land_lock
 from agent_tools.claims import forge_markers
 from agent_tools.delivery import look_marker
 
-from .guard_fake_gh import FAKE_GH_SCRIPT
+from .guard_fake_gh import FAKE_DERIVE_SCRIPT, FAKE_GH_SCRIPT, FAKE_GIT_SCRIPT
+from .guard_land_check import write_land_bin, write_land_gh
 from .guard_policy_world import GuardPolicyWorld
 from .guard_sandbox_git import SandboxGit
 
@@ -61,84 +63,8 @@ EXPECTED_ALLOW = [
     "Bash(forge-issue:*)", "Bash(~/.agents/bin/forge-issue:*)", "Agent",
 ]
 
-# Stand-in for the row check (`guard-policy derive`). Answers from a JSON object
-# of slug -> row: FAKE_DERIVE_ROWS names one, else the class default (Nodo's row).
-# FAKE_DERIVE_MODE: rows (default), refused_code (its refusals are FAKE_DERIVE_REFUSED,
-# a JSON list, else one fetch_failed), unavailable, garbage, hang, and
-# slow (sleeps until the time.time() instant FAKE_DERIVE_UNTIL, then answers as rows).
-# FAKE_DERIVE_LOG appends each slug asked; FAKE_DERIVE_PIDFILE receives the pid
-# of the grandchild `hang` leaves behind.
-FAKE_DERIVE_SCRIPT = '''
-import json
-import os
-import subprocess
-import sys
-import time
-
-argv = sys.argv[1:]
-if len(argv) != 2 or argv[0] != "--repository":
-    print("unexpected fake-derive argv: " + repr(argv), file=sys.stderr)
-    raise SystemExit(64)
-slug = argv[1]
-log = os.environ.get("FAKE_DERIVE_LOG")
-if log:
-    with open(log, "a", encoding="utf-8") as stream:
-        stream.write(slug + "\\n")
-mode = os.environ.get("FAKE_DERIVE_MODE", "rows")
-if mode == "hang":
-    sleeper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"])
-    with open(os.environ["FAKE_DERIVE_PIDFILE"], "w", encoding="utf-8") as stream:
-        stream.write(str(sleeper.pid))
-    time.sleep(600)
-if mode == "slow":
-    time.sleep(max(0.0, float(os.environ["FAKE_DERIVE_UNTIL"]) - time.time()))
-if mode == "garbage":
-    print("{")
-    raise SystemExit(0)
-report = {"schema_version": 1, "repository": slug, "row": None, "refused": [], "cause": None}
-if mode == "unavailable":
-    report.update(outcome="unavailable", cause={"reason_code": "registry_invalid", "detail": "x"})
-    print(json.dumps(report))
-    raise SystemExit(2)
-if mode == "refused_code":
-    report.update(outcome="refused", refused=json.loads(os.environ.get(
-        "FAKE_DERIVE_REFUSED", '[{"project_id": "p", "root": "/p", '
-        '"reason_code": "fetch_failed", "detail": "x"}]')))
-    print(json.dumps(report))
-    raise SystemExit(1)
-with open(os.environ.get("FAKE_DERIVE_ROWS", @ROWS@), encoding="utf-8") as stream:
-    rows = json.load(stream)
-if slug in rows:
-    report.update(outcome="derived", row=rows[slug])
-    print(json.dumps(report))
-    raise SystemExit(0)
-report.update(outcome="refused")
-print(json.dumps(report))
-raise SystemExit(1)
-'''
-
-
 GUARD_SOURCE = Path(__file__).resolve().parents[1] / "home/common/claude-code/lifecycle_guard.py"
 
-FAKE_GIT_SCRIPT = '''
-import os
-import sys
-import time
-
-REAL = @GIT@
-LOOKUP = ["remote", "get-url", "--push", "--all", "origin"]
-mode = os.environ.get("FAKE_PUSH_URL_MODE")
-if mode and sys.argv[-len(LOOKUP):] == LOOKUP:
-    if mode == "timeout":
-        time.sleep(5)
-    elif mode == "nonzero":
-        print("git@github.com:fagenorn/nix-config.git")
-        print("fake push URL failure", file=sys.stderr)
-        raise SystemExit(1)
-    elif mode == "empty":
-        raise SystemExit(0)
-os.execv(REAL, [REAL, *sys.argv[1:]])
-'''
 
 class ClaudePermissionGuardTest(unittest.TestCase):
     @classmethod
@@ -199,6 +125,7 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             " 'judge', *sys.argv[1:]])\n",
             encoding="utf-8")
         cls.look_bin.chmod(0o755)
+        cls.land_bin = write_land_bin(Path(cls.fixture_dir.name), write_land_gh(Path(cls.fixture_dir.name)))
         # The registered wrapper names the store base policy and the compiled policy
         # of this host, which no test may read: every invocation passes the built base
         # policy and a fixture compiled policy (`cls.policy`, one row for Nodo) as later
@@ -244,6 +171,8 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             guard_args = (*guard_args, "--derive-bin", str(self.fake_derive))
         if "--look-bin" not in guard_args:
             guard_args = (*guard_args, "--look-bin", str(self.look_bin))
+        if "--land-bin" not in guard_args:
+            guard_args = (*guard_args, "--land-bin", str(self.land_bin))
         child_env = {k: v for k, v in os.environ.items() if not k.startswith("FAKE_")}
         child_env.update(env or {})
         return subprocess.run(
@@ -5188,7 +5117,7 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         self.assertRegex(wrapper, r'--base-policy /nix/store/\S+-claude-bash-lifecycle-guard-'
                                   r'base-policy\.json --policy /\S+/\.agents/state/guard/'
                                   r'policy\.json --derive-bin /nix/store/\S+-claude-guard-'
-                                  r'row-check "\$@"\n')
+                                  r'row-check --land-bin /nix/store/\S+-claude-guard-land-check "\$@"\n')
         self.assertIn(f"--base-policy {BASE_POLICY_PATH} ", wrapper)
         row_check = Path(wrapper.split("--derive-bin ", 1)[1].split(" ", 1)[0])
         script = row_check.read_text(encoding="utf-8")
@@ -6737,6 +6666,58 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         script = look_check.read_text(encoding="utf-8")
         self.assertRegex(script, r"\A#!/nix/store/\S+/bin/\S+ -p\nunset BASH_ENV ENV\n")
         self.assertIn(f'exec {self.installed_launcher("look-approval")} judge "$@"\n', script)
+
+    def test_registered_hook_names_the_land_check(self):
+        wrapper = self.guard.read_text(encoding="utf-8")
+        land_check = Path(wrapper.split("--land-bin ", 1)[1].split(" ", 1)[0])
+        self.assertRegex(str(land_check), r"/nix/store/\S+-claude-guard-land-check\Z")
+        script = land_check.read_text(encoding="utf-8")
+        self.assertRegex(script, r"\A#!/nix/store/\S+/bin/\S+ -p\nunset BASH_ENV ENV\n")
+        self.assertIn('export PATH="', script)
+        self.assertIn(f'exec {self.installed_launcher("forge-claim")} land permit "$@"\n', script)
+
+    def test_a_merge_not_holding_the_land_lease_is_refused_naming_its_condition(self):
+        head, other = "d4d9acc0505c73305b3e0ced029db43100bc0e8a", "e" * 40
+        merge = f"gh pr merge 1 --repo fagenorn/nix-config --merge --match-head-commit {head} --delete-branch"
+        unpinned = "gh pr merge 1 --repo fagenorn/nix-config --merge --delete-branch"
+        lock, limit = land_lock.lock_ref("main"), land_lock.LEASE_LAPSE - land_lock.MERGE_MARGIN
+        now = int(time.time())
+
+        def lease(pr, sha, ago):
+            return land_lock.lease_prefix("main") + f"{now - ago}-{pr}-{now - ago}", sha
+
+        def refs(*pairs, mode=""):
+            return {"FAKE_LAND_REFS": json.dumps(dict(pairs)), "FAKE_LAND_NOW": str(now),
+                    "FAKE_LAND_MODE": mode}
+
+        at_lock = f"the land lock {lock} is at {other[:7]}, not at the head {head[:7]} of pull request 1"
+        refused = "lifecycle guard: unsafe merge: the PR does not hold the land lease: "
+        for name, command, env, line in (
+            ("taken over", merge, refs((lock, other), lease(9, other, 0)),
+             refused + at_lock + "; pull request 9 holds it under a lease"),
+            ("lock elsewhere", merge, refs((lock, other)), refused + at_lock),
+            ("lease at another head", merge, refs((lock, head), lease(1, other, 9)),
+             refused + f"the newest land lease of pull request 1 is at {other[:7]}, not at its head {head[:7]}"),
+            ("lease lapsed", merge, refs((lock, head), (land_lock.lease_prefix("main") + f"{now - 900}-1-{now - limit}", head)),
+             refused + f"the newest land lease of pull request 1 last beat {limit} s ago, "
+                       f"and a merge needs a beat under {limit} s"),
+            ("unpinned under a lock", unpinned, refs((lock, head)),
+             refused + f"the land lock {lock} is held, so the merge must carry --match-head-commit {head}"),
+            ("forge failure", merge, refs((lock, head), mode="fail"), None),
+            ("no lock", merge, refs(), ""),
+            ("no lock, unpinned", unpinned, refs(), ""),
+            ("holder with no lease", merge, refs((lock, head)), ""),
+            ("holder with a fresh lease", merge, refs((lock, head), lease(1, head, 0)), ""),
+        ):
+            with self.subTest(name):
+                result = self.run_guard(
+                    command, self.make_repo("git@github.com:fagenorn/nix-config.git"), env, timeout=60)
+                if line is None:
+                    self.assertEqual(2, result.returncode, result.stderr)
+                    self.assertTrue(result.stderr.startswith("lifecycle guard: land check failed: "), result.stderr)
+                else:
+                    self.assertEqual((2 if line else 0, line + "\n" if line else ""),
+                                     (result.returncode, result.stderr))
 
     def test_the_merge_commit_text_reaches_the_look_gate_on_the_release_arm(self):
         repo = self.make_repo("git@github.com:elevenyellow/nodocom.git")
