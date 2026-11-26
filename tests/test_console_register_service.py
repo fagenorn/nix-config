@@ -562,7 +562,7 @@ class RegisterRunTest(Case):
         self.assertEqual(
             reg["headline"], f"What the console read from {repo.name}: it has no project contract yet")
         self.assertEqual([q["subject"] for q in reg["questions"]], ["lint-command", "test-command"])
-        self.assertIn("main version finished work merges into: main (read from its remote)",
+        self.assertIn("finished work merges into: main (read from its remote)",
                       [d["line"] for d in reg["draft"]])
         self.assertIn("cannot be derived until its origin remote names a GitHub repository",
                       [d["value"] for d in reg["draft"]])
@@ -1637,7 +1637,7 @@ class DraftRealTest(DraftCase):
     def test_a_repository_with_no_contract_is_drafted_from_its_remote(self):
         reg = self.registered(self.repo)
         self.assertEqual(reg["result"], "drafting")
-        for line in ("main version finished work merges into: trunk (read from its remote)",
+        for line in ("finished work merges into: trunk (read from its remote)",
                      "project id and issue tracker: GitHub, as sample-owner/sample-app "
                      "(read from its remote)",
                      "checks a proposed change must pass: CI (found in its files)"):

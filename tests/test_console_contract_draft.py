@@ -580,6 +580,11 @@ class ContractDraftTest(unittest.TestCase):
         self.assertFalse(cd.fact_refused({"repair_id": "adopt.other", "violations": [
             {"pointer": "/platform", "message": "m"}]}))
 
+    def test_the_branch_label_names_no_version_and_the_replan_sentence_follows_it(self):
+        self.assertEqual(cd.LABELS["integration-branch"], "finished work merges into")
+        self.assertNotIn("main version", cd.PLAN_AGAIN)
+        self.assertIn(f"choose the {cd.LABELS['integration-branch']} to go on.", cd.PLAN_AGAIN)
+
     def test_every_settled_value_is_shown_with_its_source(self):
         root, fields = self.remote_fields()
         lines = cd.shown(fields)
@@ -592,7 +597,7 @@ class ContractDraftTest(unittest.TestCase):
                              {"field", "line", "value", "options", "text", "more", "fact", "placeholder"})
         texts = [entry["line"] for entry in lines]
         for line in (
-            "main version finished work merges into: trunk (read from its remote)",
+            "finished work merges into: trunk (read from its remote)",
             f"project id and issue tracker: GitHub, as {ID} (read from its remote)",
             "it makes no releases",
             "it declares no production rules",

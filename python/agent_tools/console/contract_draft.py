@@ -197,7 +197,7 @@ def _none(label: str) -> list[dict]:
 
 # id, label, pointers (the first is the field's member), options, text.
 _TABLE = (
-    ("integration-branch", "main version finished work merges into", ("/bindings/vcs/integration_branch",),
+    ("integration-branch", "finished work merges into", ("/bindings/vcs/integration_branch",),
      [], True),
     ("lint-command", "house-rule checks command", ("/bindings/commands/lint",), [], True),
     ("test-command", "test command", ("/bindings/commands/test",), [], True),
@@ -213,8 +213,8 @@ RETIRED_FIELDS: tuple[str, ...] = (
     "plans-path", "docs-paths", "context-paths", "standards-paths", "hints-paths", "operations-paths",
     "rejections-paths", "build-command", "review-plan-command", "review-code-command", "max-parallel",
     "attempt-budget", "projections", "light-lane")
-PLAN_AGAIN = ("The console now drafts fewer settings, so the plan is made again: choose the main "
-              "version finished work merges into to go on.")
+PLAN_AGAIN = ("The console now drafts fewer settings, so the plan is made again: choose the "
+              "finished work merges into to go on.")
 # The field a reconcile plan proposes alone; `draft` never adds it.
 _PROPOSED_TABLE = (
     (ENVIRONMENT_FIELD, "changes are saved in its development shell",
