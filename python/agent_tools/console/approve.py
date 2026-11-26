@@ -167,7 +167,7 @@ trust, #1078, ADR-console-034); with an adoption the ask is the entry's headline
 that is not a non-empty string), and `deferrals(events, state)` folds `state` plus the plan id of
 every such row whose payload is exactly that, skipping any other. `acknowledges(latest)` is true
 when a plan line starts with `deletes `, the only case a deletion is acknowledged for the owner.
-`title(name)` and `body(latest)` word the pull request from the plan. `retained(plan_id)` reads the
+`title(name)` and `body(latest)` word the pull request from the plan. The body leaves `register.NOTED_LINES` out. `retained(plan_id)` reads the
 kept worktree of a failed apply from its failure record (a file of at most 65536 bytes holding a JSON
 object whose `branch` and `worktree` are strings and whose worktree is a directory), else None; it
 never raises. `left_behind(plan_id, root)` is wider: true when the failure record, the worktree directory
@@ -1050,7 +1050,7 @@ def console_made(found: Mapping, name: str, plan_id: str, attempt: str) -> bool:
 
 
 def body(latest: Mapping, attempt: str | None = None) -> str:
-    bullets = "\n".join(f"- {line}" for line in latest["lines"] if line not in (register.HOOKS_LINE, register.HOOKS_LEFT_LINE))
+    bullets = "\n".join(f"- {line}" for line in latest["lines"] if line not in register.NOTED_LINES)
     text = (f"{latest['headline']}\n\n{bullets}\n\n{signature(latest['plan_id'])} Merge it "
             "once its required checks pass.")
     return text if attempt is None else f"{text}\n\n{attempt_marker(attempt)}"

@@ -16,6 +16,7 @@ from pathlib import Path
 import shutil
 import tempfile
 import subprocess
+import unittest
 from unittest import mock
 
 from agent_tools.project_contract import (adopt_apply, adopt_conformance, adopt_inspection,
@@ -64,6 +65,33 @@ def schema_three_draft() -> dict:
     }
 
 
+def schema_three_checkout(case: unittest.TestCase, home: Path, scratch: Path, *,
+                          protection: bool = True, devenv: bool = True) -> Path:
+    """A bootstrapped checkout of `fixture/target` on the installed platform revision.
+
+    The store manifest and the `STORE_DIR` patch live under `scratch`; both and the checkout
+    are released by `case`'s cleanups.
+    """
+    install_platform_revision(home)
+    store = scratch / "store"
+    manifest = (Path(derived_values.store_path(FIXTURE_REVISION["narHash"], str(store)))
+                / derived_values.TREE_MANIFEST)
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text(
+        json.dumps({"platform_version": json.loads(MANIFEST.read_text("utf-8"))["platform_version"]}),
+        encoding="utf-8")
+    patch = mock.patch.object(derived_values, "STORE_DIR", str(store))
+    patch.start()
+    case.addCleanup(patch.stop)
+    root = bootstrap_repo(home, remotes=("https://github.com/fixture/target.git",))
+    case.addCleanup(shutil.rmtree, root, ignore_errors=True)
+    if protection:
+        write(root, ".github/branch-protection.json", json.dumps(PROTECTION))
+    if devenv:
+        write_devenv(root)
+    return root
+
+
 class SchemaThreeDraftPlanTest(AdoptTestCase):
     def setUp(self) -> None:
         super().setUp()
@@ -81,25 +109,9 @@ class SchemaThreeDraftPlanTest(AdoptTestCase):
         return sorted(path.name for path in directory.glob("*")) if directory.exists() else []
 
     def schema_three_repo(self, *, protection: bool = True, devenv: bool = True) -> Path:
-        install_platform_revision(self.home)
-        store = self.scratch / "store"
-        manifest = (Path(derived_values.store_path(FIXTURE_REVISION["narHash"], str(store)))
-                    / derived_values.TREE_MANIFEST)
-        manifest.parent.mkdir(parents=True, exist_ok=True)
-        manifest.write_text(
-            json.dumps({"platform_version": json.loads(MANIFEST.read_text("utf-8"))["platform_version"]}),
-            encoding="utf-8")
-        patch = mock.patch.object(derived_values, "STORE_DIR", str(store))
-        patch.start()
-        self.addCleanup(patch.stop)
-        root = self.root = bootstrap_repo(
-            self.home, remotes=("https://github.com/fixture/target.git",))
-        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
-        if protection:
-            write(root, ".github/branch-protection.json", json.dumps(PROTECTION))
-        if devenv:
-            write_devenv(root)
-        return root
+        self.root = schema_three_checkout(self, self.home, self.scratch,
+                                          protection=protection, devenv=devenv)
+        return self.root
 
     def answering(self, verb: str, document: dict, *, scratch_only: bool = False):
         """The in-process resolver child, except that `verb` answers `document` (exit 2).
