@@ -5854,8 +5854,7 @@ class PageSprintReportTest(unittest.TestCase):
                              "Next: start the resume slice", "Milestone: Importer resumes"):
                 self.assertIn(expected, full(fold))
             last = fold["children"][-2]
-            self.assertEqual((last["tag"], last["cls"], full(last)),
-                             ("a", "tracker", "Open on the tracker"))
+            self.assertEqual((last["tag"], last["cls"], full(last)), ("a", "tracker", "Open on the tracker"))
             self.assertEqual(full(fold["children"][0]), "Show the report")
 
     def test_a_reported_sprint_line_reads_state_progress_status_and_age(self) -> None:
