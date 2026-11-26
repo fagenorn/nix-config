@@ -1,16 +1,20 @@
 """The verify-slot timeout share: how much of a repository's recent requests gave up waiting for a slot.
 
 Run: python3 -m agent_tools.delivery.verify_slot_timeouts --repository OWNER/REPO [--hours N] [--history FILE]
+     [--median-wait-below SECONDS]
 
 The requests are the readable history records of the repository started within the last `--hours` hours (not
 after now). A request timed out when it exited 75 without ever holding a slot. The verdict is `met` when the
 timed-out share is strictly below the share before the queue (`BASELINE_TIMED_OUT` of `BASELINE_REQUESTS`),
-compared in integers, and `not_yet` while fewer than `MIN_REQUESTS` requests are in the window. One JSON line is
-printed. Exit 0 met, 1 not met, 75 not yet, 2 when the history cannot be read or the hours are not positive.
+compared in integers, and `not_yet` while fewer than `MIN_REQUESTS` requests are in the window. With
+`--median-wait-below`, `met` also needs the median `waited_seconds` of those requests, timed-out ones included, to
+be strictly below SECONDS, and the line gains `median_waited_seconds` and `median_wait_below`. One JSON line is
+printed. Exit 0 met, 1 not met, 75 not yet, 2 when the history cannot be read or a limit is not positive.
 """
 
 import argparse
 import json
+import statistics
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -32,19 +36,32 @@ def _positive_hours(text: str) -> int:
     return value
 
 
+def _positive_seconds(text: str) -> int:
+    value = int(text)
+    if value < 1:
+        raise argparse.ArgumentTypeError("seconds must be positive")
+    return value
+
+
+def _window(records: list[dict], repository: str, hours: int, now: datetime) -> list[dict]:
+    """The records of `repository` started in the window."""
+    earliest = now - timedelta(hours=hours)
+    return [record for record in records if record["repository"] == repository
+            and earliest <= canonical.parse_rfc3339_utc(record["started"]) <= now]
+
+
 def count_requests(records: list[dict], repository: str, hours: int, now: datetime) -> tuple[int, int]:
     """The requests of `repository` started in the window, and how many of those timed out."""
-    earliest = now - timedelta(hours=hours)
-    requests = timed_out = 0
-    for record in records:
-        if record["repository"] != repository:
-            continue
-        if not earliest <= canonical.parse_rfc3339_utc(record["started"]) <= now:
-            continue
-        requests += 1
-        if record["exit"] == verify_slot.NO_SLOT_EXIT and record["held_seconds"] is None:
-            timed_out += 1
-    return requests, timed_out
+    window = _window(records, repository, hours, now)
+    timed_out = sum(1 for record in window
+                    if record["exit"] == verify_slot.NO_SLOT_EXIT and record["held_seconds"] is None)
+    return len(window), timed_out
+
+
+def median_wait(records: list[dict], repository: str, hours: int, now: datetime) -> float | None:
+    """The median `waited_seconds` of the requests `count_requests` counts, or None when there are none."""
+    waits = [record["waited_seconds"] for record in _window(records, repository, hours, now)]
+    return statistics.median(waits) if waits else None
 
 
 def main(argv=None) -> int:
@@ -52,6 +69,7 @@ def main(argv=None) -> int:
     parser.add_argument("--repository", required=True)
     parser.add_argument("--hours", type=_positive_hours, default=DEFAULT_HOURS)
     parser.add_argument("--history", type=Path, default=None)
+    parser.add_argument("--median-wait-below", type=_positive_seconds, default=None)
     args = parser.parse_args(argv)
     try:
         path = args.history or verify_history.history_path(verify_slot.slot_dir())
@@ -59,16 +77,21 @@ def main(argv=None) -> int:
     except OSError as error:
         print(f"verify-slot-timeouts: {error}", file=sys.stderr)
         return UNREADABLE
-    requests, timed_out = count_requests(records, args.repository.lower(), args.hours, datetime.now(timezone.utc))
+    repository, now = args.repository.lower(), datetime.now(timezone.utc)
+    requests, timed_out = count_requests(records, repository, args.hours, now)
+    median = median_wait(records, repository, args.hours, now)
+    quick = args.median_wait_below is None or (median is not None and median < args.median_wait_below)
     if requests < MIN_REQUESTS:
         verdict, code = "not_yet", NOT_YET
-    elif timed_out * BASELINE_REQUESTS < BASELINE_TIMED_OUT * requests:
+    elif timed_out * BASELINE_REQUESTS < BASELINE_TIMED_OUT * requests and quick:
         verdict, code = "met", MET
     else:
         verdict, code = "not_met", NOT_MET
-    print(json.dumps({"verdict": verdict, "repository": args.repository.lower(), "hours": args.hours,
-                      "requests": requests, "timed_out": timed_out, "baseline_timed_out": BASELINE_TIMED_OUT,
-                      "baseline_requests": BASELINE_REQUESTS}))
+    line = {"verdict": verdict, "repository": repository, "hours": args.hours, "requests": requests,
+            "timed_out": timed_out, "baseline_timed_out": BASELINE_TIMED_OUT, "baseline_requests": BASELINE_REQUESTS}
+    if args.median_wait_below is not None:
+        line.update(median_waited_seconds=median, median_wait_below=args.median_wait_below)
+    print(json.dumps(line))
     return code
 
 
