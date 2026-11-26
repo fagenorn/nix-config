@@ -449,7 +449,7 @@ class MutatingContinueTest(unittest.TestCase):
 
 
 class CallContinueTest(unittest.TestCase):
-    """A call a killed engine left interrupted is walked again in place (#1886)."""
+    """A call a killed engine left interrupted is walked again in place."""
 
     def fan(self) -> dict:
         return {"id": "fan", "stage": "landing", "kind": "call", "holds": "run", "procedure": "fan-child",

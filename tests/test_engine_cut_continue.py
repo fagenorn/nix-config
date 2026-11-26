@@ -1,4 +1,4 @@
-"""A delivery cut anywhere after its setup and continued re-enters where it was cut (#1886).
+"""A delivery cut anywhere after its setup and continued re-enters where it was cut.
 
 The core cases read the shipped `deliver` procedure over hand-built ledgers: where `engine_core.reentry` sends a
 continue after a cut that left no stop. The scenario cases kill a stubbed `engine deliver` while a session is open

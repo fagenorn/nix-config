@@ -1,9 +1,22 @@
-"""What a continued run takes up again from the run a killed engine left (`engine_shell`, #1886).
+"""What a continued run takes up again from the run a killed engine left (`engine_shell`).
 
 A visit a killed engine left interrupted is continued in the same visit: `resumed` names the session to launch
 again, `open_waits` the waits the killed engine left open. A `call` step a killed engine left interrupted is
 continued in the same visit too: `named_children` reads the child runs its `call` events name, and `ended`
 reads how a child run ended, so the continuing call walks the unfinished children again in place and starts none.
+
+With earlier results stale, the interrupted visit still resumes when each stale step is a `read` command (it
+mutates nothing and waits for nothing) that, run again, answers with the outcome it stored: the answer is not
+recorded and a rewinding walk runs the step as a visit. One that answers otherwise rewinds the visit as before,
+so a read that changed (an issue parked meanwhile) is never walked past, and one that cannot have changed (the
+repository head) never discards a session.
+
+A call visit with `call` events naming child runs and no recorded stop after its entry gets no `run_continued`,
+no new visit and no new child run. Each named child that is not done or at a stop of its own procedure is
+continued as a run of its own (with its own procedure copy) and walked again under the same name; one that
+ended keeps its end. A walked-again child owes the first-visit checks of a rewound call as its first walk did.
+A call visit whose result file a killed engine published before it appended `result_stored` records that file
+as its result and runs no child.
 """
 
 from __future__ import annotations
@@ -86,6 +99,15 @@ def named_children(ledger: list[dict], step: str, visit: int) -> dict[int, str]:
         return {}
     return {e["index"]: e["child"] for e in ledger
             if e["event"] == "call" and (e["step"], e["visit"]) == (step, visit)}
+
+
+def names_child(run_dir: Path, child: str) -> bool:
+    """Whether the run's readable events name `child`; true too when they cannot be read."""
+    try:
+        return any(event["event"] == "call" and event["child"] == child
+                   for event in engine_ledger.replay(run_dir / "events.jsonl"))
+    except engine_ledger.LedgerError:
+        return True
 
 
 def published_ends(run_dir: Path, ledger: list[dict], step: str, visit: int) -> list[dict] | None:
