@@ -125,11 +125,13 @@ def solution(root: Path) -> Path:
 
 
 def listed_projects(chosen: Path) -> set[Path]:
-    """The project files the solution `chosen` lists, as normalised absolute paths.
+    """The `.csproj` files the solution `chosen` lists, as normalised absolute paths.
 
     A `.slnx` lists them as `Path` attributes of its `Project` elements, a `.sln` as the second
-    quoted field of its `Project(...)` lines; a backslash separates segments in either. A
-    solution that cannot be read or parsed lists none.
+    quoted field of its `Project(...)` lines; a backslash separates segments in either. An
+    entry that is not a `.csproj`, such as a `.sln` solution folder (whose path repeats its
+    name), compiles no `.cs` and is not listed. A solution that cannot be read or parsed lists
+    none.
     """
     try:
         text = chosen.read_text("utf-8")
@@ -140,7 +142,7 @@ def listed_projects(chosen: Path) -> set[Path]:
     except (OSError, UnicodeDecodeError, ElementTree.ParseError):
         return set()
     return {Path(os.path.normpath(chosen.parent / name.replace("\\", "/")))
-            for name in names if name}
+            for name in names if name.endswith(".csproj")}
 
 
 def outside_solution(root: Path, chosen: Path, found: Sequence[Path]) -> list[Path]:

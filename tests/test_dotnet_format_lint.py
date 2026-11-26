@@ -35,6 +35,8 @@ SLNX = '<Solution>\n  <Project Path="A/A.csproj" />\n</Solution>\n'
 SLN = ('Microsoft Visual Studio Solution File, Format Version 12.00\n'
        'Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "A", "A\\A.csproj",'
        ' "{11111111-1111-1111-1111-111111111111}"\nEndProject\n')
+SLN_FOLDER = ('Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "src", "src",'
+              ' "{22222222-2222-2222-2222-222222222222}"\nEndProject\n')
 
 
 def stub_text(log: Path, code: int, lines: list[str]) -> str:
@@ -214,7 +216,14 @@ class ProjectsTest(LintCase):
             self.planted()
             self.file("dotnet/One.slnx", "<Solution>")
 
+        def sln_with_a_solution_folder():
+            self.file("dotnet/A/A.cs")
+            self.file("dotnet/A/A.csproj")
+            self.file("dotnet/Loose/Bad.cs")
+            self.file("dotnet/One.sln", SLN + SLN_FOLDER)
+
         rows = [
+            ("sln folder", sln_with_a_solution_folder, "dotnet/Loose/Bad.cs"),
             ("unregistered", unregistered_project,
              "dotnet/NewArea/Bad.cs, dotnet/NewArea/NewArea.csproj"),
             ("loose", loose_source, "dotnet/Loose/Bad.cs"),
