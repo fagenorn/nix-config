@@ -156,6 +156,9 @@ class EngineProject:
             "standin-keep-alive": entry("answers", str(self.renewals), str(self.answers)),
             "standin-hold": entry("hold", str(self.hold), "0"),
             "standin-branch": entry("emit", "0", '{"verdict":"ok","branch":"issue-7-topic"}'),
+            "standin-side": entry("emit", "0", json.dumps({"path": str(self.tmp / "side")})),
+            "standin-relative": entry("emit", "0", '{"path":"relative/dir"}'),
+            "standin-listed": entry("emit", "0", '{"path":["x"]}'),
         })
         land = ["gh", "pr", "merge", "7", "--repo", "example/engine", "--merge"]
         contract["bindings"]["commands"].update(

@@ -391,7 +391,25 @@ def _bound_retries_and_exhausted_route_to_children(toy: dict) -> None:
     step(toy, "draft")["on"]["out-of-bounds"] = "draft"
 
 
+def _checkout(holds: str, repository: str, mutates: bool = False) -> Callable[[dict], None]:
+    def change(toy: dict) -> None:
+        scope = step(toy, "scope")
+        scope.update(holds=holds, repository=repository)
+        if mutates:
+            scope.update(mutates=True, check={"command": "diff-scope"})
+    return change
+
+
 CASES = [
+    Case("checkout_not_among_the_in_paths", editing("toy", _checkout("head", "run.issue")),
+         [("toy", "scope", "invalid_field")]),
+    Case("checkout_on_a_step_that_holds_run", editing("toy", _checkout("run", "run.range")),
+         [("toy", "scope", "invalid_field")]),
+    Case("checkout_on_a_mutating_step", editing("toy", _checkout("head", "run.range", True)),
+         [("toy", "scope", "invalid_field")]),
+    Case("checkout_on_an_agent_step",
+         editing("toy", _set(lambda toy: step(toy, "draft"), "repository", "run.issue")),
+         [("toy", "draft", "undefined_field")]),
     Case("undefined_step_field",
          editing("toy", _set(lambda toy: step(toy, "draft"), "timeout", 5)),
          [("toy", "draft", "undefined_field")]),
@@ -743,6 +761,11 @@ class ToyProcedureTest(unittest.TestCase):
                     editing("toy", _set(lambda toy: step(toy, "scope"), "holds", value)))
                 code, out, _ = run_check("--procedures", str(directory))
                 self.assertEqual((code, out), (0, SHIPPED_OK))
+
+    def test_a_head_step_may_name_one_of_its_in_paths_as_its_checkout(self):
+        directory = broken_copy(editing("toy", _checkout("head", "run.range")))
+        code, out, _ = run_check("--procedures", str(directory))
+        self.assertEqual((code, out), (0, SHIPPED_OK))
 
     def test_a_pinned_stop_is_accepted(self):
         directory = broken_copy(

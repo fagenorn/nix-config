@@ -24,7 +24,9 @@ step bounded) and `mutates` (bool). Kind members: `command`: `command`,
 optional `subcommand`, optional `wait` (one of `WAITS`), its arguments being its `in` paths, and optional `check`
 (an object with `command` and optional `subcommand`: the command that reads
 whether the step's effect already happened; a command step with `mutates` true
-requires one and no other step carries one); `agent`: `role`,
+requires one and no other step carries one), and optional `repository` (one of the step's `in` paths: the
+checkout whose head the step's stored result holds for, only with `holds` `head` and never with `mutates`, so a
+stored result can never stand in for a mutation or its check); `agent`: `role`,
 `prompt` (a bare `*.md` name), `reply` (a bare `*.reply.json` name) and
 `outcome_from`; `decide`: `grader`; `group`: `members`, a non-empty list of
 objects with exactly `step` and `pass` (distinct strings); `call`: `procedure`,
@@ -162,7 +164,7 @@ HOLDS = ("run", "head", "live")
 COMMON_REQUIRED = ("id", "stage", "kind", "holds")
 COMMON_OPTIONAL = ("in", "on", "max_visits", "mutates")
 KIND_MEMBERS = {
-    "command": (("command",), ("subcommand", "check", "wait")),
+    "command": (("command",), ("subcommand", "check", "wait", "repository")),
     "agent": (("role", "prompt", "reply", "outcome_from"), ()),
     "decide": (("grader",), ()),
     "group": (("members",), ()),
@@ -344,6 +346,13 @@ def _kind_members(item: dict, kind: str, label: str | None, found: _Findings) ->
             invalid(f"subcommand must match {NAME_RE.pattern}.")
         if "wait" in item and item["wait"] not in WAITS:
             invalid(f"wait must be one of {', '.join(WAITS)}.")
+        if "repository" in item:
+            if not (isinstance(item["repository"], str) and item["repository"] in _listed(item)):
+                invalid("repository must be one of the step's in paths.")
+            if item.get("holds") != "head":
+                invalid("repository needs holds head.")
+            if item.get("mutates"):
+                invalid("repository cannot be named by a mutating step.")
         _check_member(item, label, found)
     elif kind == "agent":
         if "role" in item and not _is_text(item["role"]):

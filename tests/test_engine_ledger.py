@@ -322,6 +322,25 @@ class ResultOrderTest(unittest.TestCase):
             self.assertNotIn("head", second)
             self.assertNotIn("outcome", second)
 
+    def test_a_stored_result_carries_a_checkout_only_when_given(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run = new_run(tmp)
+            common = dict(result={}, at=AT, wall_seconds=0, turns=0, tokens=ZERO_TOKENS,
+                          spend_usd=0)
+            engine_ledger.store_result(run, step="scope", visit=1, head="c" * 40,
+                                       repository="/w", **common)
+            engine_ledger.store_result(run, step="scope", visit=2, **common)
+            first, second = engine_ledger.replay(run / "events.jsonl")
+            self.assertEqual(first["repository"], "/w")
+            self.assertNotIn("repository", second)
+
+    def test_a_result_stored_event_refuses_a_checkout_that_is_not_an_absolute_path(self):
+        for value in ("w", "", 3):
+            with self.subTest(value=value):
+                with self.assertRaises(engine_ledger.LedgerError):
+                    engine_ledger.validate_event({**EXAMPLES["result_stored"], "repository": value})
+        engine_ledger.validate_event({**EXAMPLES["result_stored"], "repository": "/w"})
+
     def test_a_failed_result_write_appends_no_event(self):
         with tempfile.TemporaryDirectory() as tmp:
             run = new_run(tmp)

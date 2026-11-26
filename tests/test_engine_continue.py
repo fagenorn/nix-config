@@ -12,6 +12,7 @@ import os
 import shutil
 import signal
 import tempfile
+import time
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -36,6 +37,10 @@ def gated(project: EngineProject, b_holds: str = "head", c_holds: str = "run") -
 def head(project: EngineProject) -> str:
     return project.world.git(project.root, "rev-parse", "HEAD").strip()
 
+
+
+def head_of(project: EngineProject, root: Path) -> str:
+    return project.world.git(root, "rev-parse", "HEAD").strip()
 
 
 def looped(project: EngineProject) -> Path:
@@ -288,6 +293,99 @@ class ContinueTest(unittest.TestCase):
                               if e["event"] == "process_started" and e["step"] == "a"]), 2)
         self.assertEqual(project.calls("gate"), 2)
         self.assertEqual(heads(events, "a"), [None, head(project)])
+
+    def checkout_procedures(self, project: EngineProject, middle: list[dict],
+                            stops: dict) -> Path:
+        project.world.git(project.root, "worktree", "add", "-q", "-b", "side",
+                          str(project.tmp / "side"))
+        return project.procedures(
+            [step("p", "standin-side", middle[0]["id"]), *middle,
+             step("g", "standin-gate", "done")], stops=stops)
+
+    def test_a_head_step_naming_a_checkout_is_judged_by_that_checkouts_head(self):
+        project = EngineProject(self)
+        side = project.tmp / "side"
+        b = step("b", "count-b", "g", holds="head")
+        b.update({"in": ["p.path"], "repository": "p.path"})
+        procedures = self.checkout_procedures(
+            project, [b], {"needs-owner": {"need": "owner-decision", "reenter": "g"}})
+        first = project.deliver(procedures)
+        self.assertEqual(first.returncode, 3, first.stdout + first.stderr)
+        run = json.loads(first.stdout)["run"]
+        project.world.git(project.root, "commit", "--quiet", "--allow-empty", "-m", "elsewhere")
+        second = project.deliver(procedures)
+        self.assertEqual(second.returncode, 3, second.stdout + second.stderr)
+        self.assertEqual(json.loads(second.stdout)["run"], run)
+        self.assertEqual(len(project.runs()), 1)
+        events = project.events(project.runs()[0])
+        self.assertEqual(run_continued(events)[-1]["step"], "g")
+        self.assertEqual(project.calls("b"), 1)
+        stored = [e for e in events if e["event"] == "result_stored" and e["step"] == "b"]
+        self.assertEqual([e["repository"] for e in stored], [str(side)])
+        self.assertEqual(heads(events, "b"), [head_of(project, side)])
+        project.world.git(side, "commit", "--quiet", "--allow-empty", "-m", "moved")
+        third = project.deliver(procedures)
+        self.assertEqual(third.returncode, 3, third.stdout + third.stderr)
+        self.assertEqual(json.loads(third.stdout)["run"], run)
+        events = project.events(project.runs()[0])
+        self.assertEqual(run_continued(events)[-1]["step"], "b")
+        self.assertEqual(project.calls("b"), 2)
+        self.assertEqual(heads(events, "b")[-1], head_of(project, side))
+        self.assertNotEqual(heads(events, "b")[0], heads(events, "b")[-1])
+
+    def test_a_head_that_moves_while_a_checkout_step_runs_ends_it_out_of_bounds(self):
+        project = EngineProject(self)
+        side = project.tmp / "side"
+        a = step("a", "standin-block", "g", holds="head",
+                 on={"ok": "g", "failed": "needs-owner", "out-of-bounds": "moved"})
+        a.update({"in": ["p.path"], "repository": "p.path"})
+        procedures = self.checkout_procedures(project, [a], {
+            "needs-owner": {"need": "owner-decision", "reenter": "g"},
+            "moved": {"need": "owner-decision", "reenter": "a"}})
+        first = start_deliver(self, project, procedures)
+        deadline = time.monotonic() + 30
+        while not any(e["event"] == "process_started" and e["step"] == "a"
+                      for run in project.runs() for e in project.events(run)):
+            self.assertLess(time.monotonic(), deadline, "step a never started its process")
+            time.sleep(0.05)
+        project.world.git(side, "commit", "--quiet", "--allow-empty", "-m", "moved")
+        project.release.write_text("go", encoding="utf-8")
+        stdout, stderr = first.communicate(timeout=60)
+        self.assertEqual(first.returncode, 3, stdout + stderr)
+        self.assertEqual(json.loads(stdout)["end"], "moved")
+        run = project.runs()[0]
+        events = project.events(run)
+        self.assertEqual(json.loads((run / "results/a.1.json").read_text()),
+                         {"bound": "head-moved"})
+        stored = [e for e in events if e["event"] == "result_stored" and e["step"] == "a"]
+        self.assertEqual([(e["outcome"], "head" in e, "repository" in e) for e in stored],
+                         [("out-of-bounds", False, False)])
+        self.assertEqual([e for e in events
+                          if e["event"] == "step_entered" and e["step"] == "g"], [])
+
+    def test_a_checkout_that_is_not_an_absolute_path_is_refused_without_running_its_command(self):
+        for command in ("standin-relative", "standin-listed"):
+            with self.subTest(command):
+                project = EngineProject(self)
+                b = step("b", "count-b", "g", holds="head", refused="bad")
+                b.update({"in": ["p.path"], "repository": "p.path"})
+                procedures = project.procedures(
+                    [step("p", command, "b"), b, step("g", "standin-gate", "done")],
+                    stops={"bad": {"need": "owner-decision", "reenter": "b"},
+                           "needs-owner": {"need": "owner-decision", "reenter": "g"}})
+                done = project.deliver(procedures)
+                self.assertEqual(done.returncode, 3, done.stdout + done.stderr)
+                self.assertEqual(json.loads(done.stdout)["end"], "bad")
+                self.assertEqual(project.calls("b"), 0)
+                run = project.runs()[0]
+                result = json.loads((run / "results/b.1.json").read_text())
+                self.assertEqual(result["verdict"], "refused")
+                self.assertTrue(result["reason"].startswith(
+                    "repository p.path is not an absolute path"), result)
+                stored = [e for e in project.events(run)
+                          if e["event"] == "result_stored" and e["step"] == "b"]
+                self.assertEqual([("head" in e, "repository" in e) for e in stored],
+                                 [(False, False)])
 
     def test_a_continued_run_reads_its_own_procedure_copy_not_the_source(self):
         project = EngineProject(self)

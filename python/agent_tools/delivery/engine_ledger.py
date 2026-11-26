@@ -30,7 +30,8 @@ directory is either complete or absent.
 
 Every event has `event` (its type) and `at` (RFC3339 UTC); `EVENT_MEMBERS` lists, per type, the
 other members it always carries and `EVENT_OPTIONAL` the ones it may carry besides. `result_stored` carries the
-visit's graded `outcome` and, for a step that reports one, the worktree `head`. `run_continued` names the `step`
+visit's graded `outcome` and, for a step that reports one, the worktree `head` and, for a command step that
+names a checkout, that checkout's absolute path as `repository`, the head being its head. `run_continued` names the `step`
 a continued run re-enters and, when it rewinds, the `visit` it rewinds to; a recorded one without them is still
 read, but `append_event` writes none without a `step`. A `call` event records that a step started the child run `child` for item `index`
 of `items`. An agent step visit that hits a usage limit or an API error, or gives no valid
@@ -105,7 +106,7 @@ EVENT_MEMBERS: Mapping[str, frozenset[str]] = {
 }
 # Members an event may carry besides `EVENT_MEMBERS`.
 EVENT_OPTIONAL: Mapping[str, frozenset[str]] = {
-    "result_stored": frozenset(("head", "outcome")),
+    "result_stored": frozenset(("head", "outcome", "repository")),
     "run_continued": frozenset(("step", "visit")),
 }
 # Members `append_event` requires beyond what a reader requires, so a ledger
@@ -396,6 +397,9 @@ def _check_member(event: Mapping[str, object], key: str) -> None:
     elif key == "head":
         if not isinstance(value, str) or not HEAD_RE.fullmatch(value):
             raise LedgerError("head is not a full lowercase hex commit id")
+    elif key == "repository":
+        if not isinstance(value, str) or not os.path.isabs(value):
+            raise LedgerError("repository is not an absolute path")
     elif key == "stage":
         if value not in STAGES:
             raise LedgerError("stage is not a stage")
@@ -506,13 +510,14 @@ def _write_result(path: Path, document: object) -> None:
 def store_result(run_dir: Path, *, step: str, visit: int, result: object, at: str,
                  wall_seconds: float, turns: int, tokens: Mapping[str, int],
                  spend_usd: float, head: str | None = None,
-                 outcome: str | None = None) -> Path:
+                 outcome: str | None = None, repository: str | None = None) -> Path:
     """Write the step visit's result file, then append its `result_stored` event.
 
-    `head` and `outcome` are in the event only when given."""
+    `head`, `outcome` and `repository` are in the event only when given."""
     run_dir = Path(run_dir)
     relative = f"results/{step}.{visit}.json"
-    optional = {key: value for key, value in (("head", head), ("outcome", outcome))
+    optional = {key: value for key, value in (("head", head), ("outcome", outcome),
+                                          ("repository", repository))
                 if value is not None}
     event = validate_event({"event": "result_stored", "at": at, "step": step, "visit": visit,
                             "result": relative, "wall_seconds": wall_seconds, "turns": turns,
