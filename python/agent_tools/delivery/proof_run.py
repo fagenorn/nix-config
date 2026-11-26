@@ -47,6 +47,15 @@ pass filed (`[]` for none, and for `busy`, which skips the pass). Exit 0 for `un
 3 for `unproven`, 4 for `busy`. Exit 2 with stdout empty and one stderr line `proof-run: <reason>`
 for a usage error, a `Refusal` or a `ForgeError`, a failure of the filing pass included, which comes
 after the run's own effects (a proven line stays).
+
+`proof-run observed --fixture <o/n>` reads, and writes nothing. The attempt is the first `started`
+line of the attempt record with `mode` `daily` and `project` the fixture (a `now` attempt never
+counts). It prints one compact sorted-key line `{"attempt", "end", "issue", "run", "state"}` and
+exits 75 for `not_yet` (no such attempt) or `running` (no `ended` line for it), 1 for `not_met`
+(its `ended` has `code` other than 0 or `end` other than `done`, or took over three days, or the
+engine history has no line with the attempt's root `run`, the fixture, `end` `done` and the
+attempt's issue, or no merged pull request of the fixture closes the issue), 0 for `met`, and 2 with
+`proof-run: <reason>` on stderr for a `ForgeError`.
 """
 
 from __future__ import annotations
@@ -64,6 +73,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import NamedTuple, Protocol
 
+from agent_tools import canonical
 from agent_tools.delivery import bound_issues, cleanup_issue, engine_housekeeping, engine_ledger
 from agent_tools.delivery.cleanup_issue import Refusal
 from agent_tools.project_contract import adopt_conformance
@@ -93,6 +103,8 @@ REVISION = re.compile(r"[0-9a-f]{40}")
 EXIT_UNPROVEN = 3
 EXIT_BUSY = 4
 EXIT_USAGE = 2
+EXIT_NOT_YET = 75
+OBSERVE_SECONDS = 3 * 24 * 60 * 60
 GIT_STEPS = (("fetch", "--quiet", "origin"), ("reset", "--quiet", "--hard", "origin/{branch}"),
              ("clean", "-fdq"), ("worktree", "prune"))
 ISSUE_QUERY = ("query($owner: String!, $name: String!) {{ repository(owner: $owner, name: $name) "
@@ -349,11 +361,61 @@ class _Parser(argparse.ArgumentParser):
 
 def parser() -> argparse.ArgumentParser:
     built = _Parser(prog=COMMAND, description="Prove the delivery engine on the fixture project.")
-    built.add_argument("mode", choices=("daily", "now", "file"))
-    built.add_argument("--platform-repo", required=True)
-    for flag in ("--branch", "--fixture", "--fixture-branch"):
+    built.add_argument("mode", choices=("daily", "now", "file", "observed"))
+    for flag in ("--platform-repo", "--branch", "--fixture", "--fixture-branch"):
         built.add_argument(flag)
     return built
+
+
+def _json_lines(path: Path) -> list[dict]:
+    try:
+        data = Path(path).read_bytes()
+    except FileNotFoundError:
+        return []
+    found = []
+    for raw in data.split(b"\n"):
+        try:
+            line = json.loads(raw.decode("utf-8"))
+        except (ValueError, RecursionError):
+            continue
+        if isinstance(line, dict):
+            found.append(line)
+    return found
+
+
+def _seconds_between(start: object, end: object) -> float | None:
+    try:
+        return (canonical.parse_rfc3339_utc(end) - canonical.parse_rfc3339_utc(start)).total_seconds()
+    except ValueError:
+        return None
+
+
+def observe(fixture: str, *, attempts: Path, history: Path,
+            tracker: FixtureTracker) -> tuple[int, dict]:
+    """The exit code and result line of the first scheduled (`daily`) attempt on `fixture`; reads only."""
+    first = next((line for line in _json_lines(attempts)
+                  if line.get("format") == FORMAT and line.get("event") == "started"
+                  and line.get("mode") == "daily" and line.get("project") == fixture), None)
+    if first is None:
+        return EXIT_NOT_YET, {"attempt": None, "end": None, "issue": None, "run": None,
+                              "state": "not_yet"}
+    attempt, issue = first.get("attempt"), first.get("issue")
+    ended = next((line for line in _json_lines(attempts)
+                  if line.get("format") == FORMAT and line.get("event") == "ended"
+                  and line.get("attempt") == attempt), None)
+    if ended is None:
+        return EXIT_NOT_YET, {"attempt": attempt, "end": None, "issue": issue, "run": None,
+                              "state": "running"}
+    end, run = ended.get("end"), ended.get("run")
+    line = {"attempt": attempt, "end": end, "issue": issue, "run": run}
+    took = _seconds_between(first.get("at"), ended.get("at"))
+    met = (ended.get("code") == 0 and end == "done" and took is not None and took <= OBSERVE_SECONDS
+           and isinstance(run, str) and isinstance(issue, int) and not isinstance(issue, bool)
+           and any(entry.get("run") == run and entry.get("project") == fixture
+                   and entry.get("end") == "done" and entry.get("issue") == issue
+                   for entry in _json_lines(history))
+           and tracker.closed_by_merged_pull(issue))
+    return (0, {**line, "state": "met"}) if met else (1, {**line, "state": "not_met"})
 
 
 def _exit_of(outcome: Outcome) -> int:
@@ -386,6 +448,18 @@ def _prove(args: argparse.Namespace) -> Outcome:
 def main(argv: list[str] | None = None) -> int:
     try:
         args = parser().parse_args(argv)
+        if args.mode == "observed":
+            if args.fixture is None:
+                raise Refusal("the following arguments are required: --fixture")
+            if not cleanup_issue.SLUG.fullmatch(args.fixture):
+                raise Refusal(f"not <owner>/<name>: {args.fixture}")
+            code, line = observe(args.fixture, attempts=attempts_path(),
+                                 history=engine_housekeeping.history_path(),
+                                 tracker=GitHubFixture(args.fixture))
+            print(json.dumps(line, sort_keys=True, separators=(",", ":")))
+            return code
+        if args.platform_repo is None:
+            raise Refusal("the following arguments are required: --platform-repo")
         if not cleanup_issue.SLUG.fullmatch(args.platform_repo):
             raise Refusal(f"not <owner>/<name>: {args.platform_repo}")
         if args.mode == "file":

@@ -494,6 +494,7 @@ agent-workflow-tests *args:
     tests/test_console_guest_account.py \
     tests/test_console_units.py \
     tests/test_owner_services_units.py \
+    tests/test_proof_run_units.py \
     tests/test_system_packages.py \
     home/common/agent-skills/tests/test_program_harness.py \
     home/common/agent-skills/tests/test_deliver_standard_program.py \

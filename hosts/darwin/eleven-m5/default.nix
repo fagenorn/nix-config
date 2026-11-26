@@ -51,6 +51,7 @@ in
     ./docker.nix
     ./github-runners.nix
     ./memory-watch.nix
+    ./proof-run.nix
   ];
 
   # Nobody is logged in at the screen as the owner and automatic login stays off, so launchd

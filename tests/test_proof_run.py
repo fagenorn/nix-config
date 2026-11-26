@@ -391,6 +391,146 @@ class CliTest(unittest.TestCase):
         self.assertEqual(passed.call_count, 2)
 
 
+class ObservedTest(unittest.TestCase):
+    FIXTURE = "example/fixture"
+
+    def setUp(self):
+        home = tempfile.TemporaryDirectory()
+        self.addCleanup(home.cleanup)
+        patched = mock.patch.dict(os.environ, {"HOME": home.name})
+        patched.start()
+        self.addCleanup(patched.stop)
+        self.attempts = proof_run.attempts_path()
+        self.history = proof_run.engine_housekeeping.history_path()
+        self.attempts.parent.mkdir(parents=True)
+
+    def started(self, attempt, *, mode="daily", at="2026-01-01T06:00:00Z", issue=41, project=None):
+        self.append(self.attempts, {"format": 1, "attempt": attempt, "event": "started", "mode": mode,
+                                    "project": project or self.FIXTURE, "revision": SHA_A,
+                                    "issue": issue, "at": at})
+
+    def ended(self, attempt, *, code=0, end="done", run="root-run", at="2026-01-01T06:30:00Z"):
+        self.append(self.attempts, {"format": 1, "attempt": attempt, "event": "ended", "code": code,
+                                    "end": end, "run": run, "at": at})
+
+    def line(self, run, *, issue=41, end="done"):
+        self.append(self.history, {"format": 1, "run": run, "project": self.FIXTURE, "issue": issue,
+                                   "end": end})
+
+    @staticmethod
+    def append(path, line):
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(line) + "\n")
+
+    def observe(self, merged=True):
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(proof_run.GitHubFixture, "closed_by_merged_pull",
+                               return_value=merged) as asked, \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = proof_run.main(["observed", "--fixture", self.FIXTURE])
+        self.asked = asked
+        return code, (json.loads(out.getvalue()) if out.getvalue() else None), err.getvalue()
+
+    def test_no_daily_attempt_is_not_yet(self):
+        self.started("n1", mode="now")
+        self.ended("n1")
+        self.line("root-run")
+
+        code, line, _ = self.observe()
+
+        self.assertEqual(code, 75)
+        self.assertEqual(line["state"], "not_yet")
+        self.assertEqual(sorted(line), ["attempt", "end", "issue", "run", "state"])
+
+    def test_a_running_first_attempt_is_not_yet_even_beside_a_done_child_line(self):
+        self.started("d1")
+        self.line("child-run")
+
+        code, line, _ = self.observe()
+
+        self.assertEqual((code, line["state"], line["attempt"]), (75, "running", "d1"))
+
+    def test_a_failed_first_attempt_is_not_met_whatever_follows(self):
+        self.started("d1")
+        self.ended("d1", code=3, end="stopped")
+        self.started("d2", at="2026-01-02T06:00:00Z", issue=42)
+        self.ended("d2", run="root-2", at="2026-01-02T06:30:00Z")
+        self.line("root-2", issue=42)
+
+        code, line, _ = self.observe(merged=True)
+
+        self.assertEqual((code, line["state"], line["attempt"]), (1, "not_met", "d1"))
+
+    def test_a_first_attempt_that_took_over_three_days_is_not_met(self):
+        self.started("d1")
+        self.ended("d1", at="2026-01-04T06:00:01Z")
+        self.line("root-run")
+
+        self.assertEqual(self.observe()[0], 1)
+
+    def test_a_done_attempt_without_its_root_line_is_not_met(self):
+        self.started("d1")
+        self.ended("d1")
+        self.line("child-run")
+
+        self.assertEqual(self.observe()[0], 1)
+
+    def test_a_done_first_attempt_with_a_merged_pull_closing_its_issue_is_met(self):
+        self.started("d1")
+        self.ended("d1", at="2026-01-04T06:00:00Z")
+        self.line("root-run")
+
+        code, line, _ = self.observe(merged=True)
+
+        self.assertEqual((code, line["state"]), (0, "met"))
+        self.assertEqual(line, {"attempt": "d1", "end": "done", "issue": 41, "run": "root-run",
+                                "state": "met"})
+        self.asked.assert_called_once_with(41)
+
+    def test_a_done_first_attempt_without_a_merged_pull_is_not_met(self):
+        self.started("d1")
+        self.ended("d1")
+        self.line("root-run")
+
+        code, line, _ = self.observe(merged=False)
+
+        self.assertEqual((code, line["state"]), (1, "not_met"))
+
+    def test_a_forge_error_exits_2_with_one_stderr_line(self):
+        self.started("d1")
+        self.ended("d1")
+        self.line("root-run")
+        failure = forge_api.ForgeError("payload_invalid", "no closing pull requests")
+        err = io.StringIO()
+        with mock.patch.object(proof_run.GitHubFixture, "closed_by_merged_pull", side_effect=failure), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            code = proof_run.main(["observed", "--fixture", self.FIXTURE])
+
+        self.assertEqual(code, 2)
+        self.assertTrue(err.getvalue().startswith("proof-run: "), err.getvalue())
+
+    def test_it_writes_nothing(self):
+        self.started("d1")
+        self.ended("d1")
+        self.line("root-run")
+        before = [read(path) for path in (self.attempts, self.history)]
+
+        self.observe()
+
+        self.assertEqual([read(path) for path in (self.attempts, self.history)], before)
+        self.assertFalse(proof_run.lock_path().exists())
+
+    def test_the_check_script_runs_observed(self):
+        script = "home/common/verify-pending/checks/proof-run-green"
+        text = (REPO_ROOT / script).read_text("utf-8")
+        self.assertTrue(text.startswith("#!/bin/sh\n"))
+        self.assertTrue(text.endswith(
+            'PYTHONPATH=python exec python3 -m agent_tools.delivery.proof_run observed "$@"\n'))
+        staged = subprocess.run(["git", "-C", str(REPO_ROOT), "ls-files", "-s", script],
+                                capture_output=True, text=True, check=True).stdout
+        self.assertTrue(staged.startswith("100755 "), staged)
+
+
 class GlossaryTest(unittest.TestCase):
     def test_the_project_contract_glossary_defines_proven_revision(self):
         text = (REPO_ROOT / "docs/areas/project-contract/CONTEXT.md").read_text("utf-8").splitlines()

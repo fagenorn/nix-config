@@ -248,6 +248,10 @@ PARTS: dict[str, Part] = {
       pre = c.system.activationScripts.preActivation.text;
       launchdText = c.system.activationScripts.launchd.text;
     }""", DARWIN_HOSTS),
+    "proof-run": Part("""c: u: {
+      command = c.launchd.daemons.proof-run.command;
+      plist = c.environment.launchDaemons."org.nixos.proof-run.plist".text;
+    }""", ("eleven-m5",)),
     "owner-activation": Part("""c: u: {
           pre = c.system.activationScripts.preActivation.text;
           activate = c.system.activationScripts.script.text;
