@@ -200,12 +200,13 @@ class SprintEngineTest(unittest.TestCase):
 
     def test_a_moving_run_of_the_sprints_issue_moves_it_and_names_its_sessions(self):
         self.assertEqual(self.read("sprint-moving.jsonl", LIVE), SprintEngine(
-            moving=True, waits=frozenset(), sessions=frozenset({"eng-s1"}), issues=frozenset({41})))
+            moving=True, waits=frozenset(), sessions=frozenset({"eng-s1"}), issues=frozenset({41}),
+            stages=((41, "building", "building"),)))
 
     def test_a_waiting_run_gives_its_wait_kind_and_does_not_read_moving(self):
         self.assertEqual(self.read("sprint-checks.jsonl", LIVE), SprintEngine(
             moving=False, waits=frozenset({"checks"}), sessions=frozenset({"eng-s1"}),
-            issues=frozenset({41})))
+            issues=frozenset({41}), stages=((41, "building", "building"),)))
 
     def test_a_gone_engine_moves_nothing_but_keeps_its_sessions_and_issue(self):
         self.assertEqual(self.read("sprint-moving.jsonl", DEAD), SprintEngine(

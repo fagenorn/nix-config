@@ -365,6 +365,7 @@ agent-workflow-tests *args:
     tests/test_console_view.py \
     tests/test_console_view_action.py \
     tests/test_console_view_lock_place.py \
+    tests/test_console_work_sentence.py \
     tests/test_console_done_for_now.py \
     tests/test_console_view_held_sprint.py \
     tests/test_console_draft_facts.py \
@@ -425,6 +426,7 @@ agent-workflow-tests *args:
     tests/test_console_page.py \
     tests/test_console_page_action.py \
     tests/test_console_page_move.py \
+    tests/test_console_page_work.py \
     tests/test_console_page_done_for_now.py \
     tests/test_console_page_held_sprint.py \
     tests/test_console_long_permission_card.py \
@@ -482,6 +484,7 @@ agent-workflow-tests *args:
     tests/test_console_sprint_engine.py \
     tests/test_console_movement.py \
     tests/test_console_movement_check.py \
+    tests/test_console_issue_titles.py \
     tests/test_console_spend.py \
     tests/test_console_engine_spend.py \
     tests/test_console_transcript_digest.py \
