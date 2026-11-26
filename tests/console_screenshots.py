@@ -258,8 +258,7 @@ Contract:
   (the notice of a refused click whose card the forge's state removed); its two widths are
   served by two consoles, since the click cannot be repeated. On a page with no merge the opened step's `created` member is left out (a
   base console refuses it) and both shots wait only for the card, which is the before picture.
-- `live-several` reads its issues' titles from a stand-in tracker on a console that takes a `title_reader`, and a base
-  console draws its stage phrase, which is the before picture.
+- `live-several` reads issue titles from a stand-in tracker; a base console takes no `title_reader` and draws its stage phrase.
 - The before pictures are the base commit's service, view and page together: this module imports
   nothing from `agent_tools` that the base commit lacks, so running it with `PYTHONPATH` at an
   archive of the base commit's `python/` (`git archive <base> python`) serves the base page over the
