@@ -256,7 +256,7 @@ the record that the manager delivered an issue outlives the run and its cleanup.
 
 `ago_text(elapsed_ms)` is `just now` under a minute, `<m> min ago` under an hour, `<h> h ago` under
 a day, else `1 day ago` or `<d> days ago`; a negative count is 0. `age_text(elapsed_ms)` is `goal set `
-plus that. `progress_text(landed, total, in_delivery, queued, held)` is `<landed> of <total> landed`
+plus that. `progress_text(landed, total, in_delivery, queued, held)` is `<landed> of <total> went in`
 followed by `, <n> in delivery`, `, <n> queued` and `, <n> merged, not yet proven` for each non-zero
 count, in that order. The view states and texts are the constants `ON_TRACK`, `WAITING`, `QUIET`, `CLOSING`,
 `DONE` and their `_TEXT`; `CLOSED_OUT` is the view's stage for a run's `done` (not a report stage).
@@ -705,7 +705,7 @@ project, goal, at)` (replacing an earlier one); `manager.stopped` for a pending 
 `manager.stop_failed` for a pending id with a string `reason` sets `reason` and `failed_at`; every
 other row changes nothing, and folding `a + b` equals folding `b` onto the fold of `a`.
 `pending_due(stop, now_ms)` is true when `failed_at` is `None` or `STOP_RETRY_MS` have passed since
-it. `closing_text(landed, held, dropped)` is `<landed> landed` then `, <held> merged, not
+it. `closing_text(landed, held, dropped)` is `<landed> went in` then `, <held> merged, not
 yet proven` and `, <dropped> dropped` for each non-zero count. The new texts are `STOP_TEXT`,
 `STOPPING_TEXT`, `STOPPED_TEXT`, `CLOSING_MEMBER`, `SUMMARY_NUMBER`, `NOT_ENDED`, `ENDED`,
 `ALREADY_STOPPING`, `STOP_FAILED_TEXT` and `UNSTOPPED_TEXT`.
@@ -858,7 +858,7 @@ NOW_STAGE_TEXT = "{stage} {count} of {total}: {milestone}"
 NOW_QUIET_TEXT = "last seen {phrase}"
 CHECK_LINE_TEXT = "Your check: {question}"
 NOW_CI_TEXT = "waiting for GitHub's automatic checks on the proposed change"
-NOW_COMMITTING_TEXT = "a delivery is committing"
+NOW_COMMITTING_TEXT = "a delivery is saving its changes"
 NOW_RELEASE_TEXT = "waiting for a release step"
 NOW_LOCK_TEXT = "waiting its turn to merge"
 NOW_LOCK_POSITION_TEXT = "waiting its turn to merge, position {n}"
@@ -3245,7 +3245,7 @@ def pending_due(stop: PendingStop, now_ms: int) -> bool:
 
 
 def closing_text(landed: int, held: int, dropped: int) -> str:
-    text = f"{landed} landed"
+    text = f"{landed} went in"
     for count, label in ((held, "merged, not yet proven"), (dropped, "dropped")):
         if count:
             text += f", {count} {label}"
@@ -3278,7 +3278,7 @@ def age_text(elapsed_ms: int) -> str:
 
 
 def progress_text(landed: int, total: int, in_delivery: int, queued: int, held: int) -> str:
-    text = f"{landed} of {total} landed"
+    text = f"{landed} of {total} went in"
     for count, label in ((in_delivery, "in delivery"), (queued, "queued"), (held, "merged, not yet proven")):
         if count:
             text += f", {count} {label}"

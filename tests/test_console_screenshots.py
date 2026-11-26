@@ -1810,9 +1810,9 @@ class ScreenshotFixtureTest(unittest.TestCase):
         row = ((offered, offered_spend),)
         for deeper in ((False, (), False, ""), (True, row, False, shots.DEEPER_ESTIMATE),
                        (True, row, True, intro),
-                       (True, row, True, intro + "Earlier deeper answers here spent about  tokens,  each."),
+                       (True, row, True, intro + "Earlier deeper answers here spent about  each."),
                        (True, row, True, intro + "Earlier deeper answers here spent about "
-                        "544,000 tokens, $0.38 each."),
+                        "$0.38 each."),
                        (True, row, True, intro + "No earlier deeper answer here to estimate its "
                         "spend from."),
                        (True, ((offered, light_spend),), True, shots.DEEPER_ESTIMATE),
@@ -1931,7 +1931,7 @@ class ScreenshotFixtureTest(unittest.TestCase):
 
     def test_the_deeper_seed_holds_a_deeper_answer_with_its_spend_and_an_offer_with_its_estimate(
             self) -> None:
-        spent = re.compile(r"Spent ([\d,]+) tokens, about \$(\d+\.\d\d)")
+        spent = re.compile(r"Spent about \$(\d+\.\d\d)")
         for state in ("deeper-offer", "deeper-answer"):
             with self.subTest(state=state), tempfile.TemporaryDirectory() as tmp:
                 now_s = time.time()
@@ -1963,21 +1963,19 @@ class ScreenshotFixtureTest(unittest.TestCase):
                 deep_spent = spent.fullmatch(deep["spend_text"])
                 self.assertIsNotNone(light_spent)
                 self.assertIsNotNone(deep_spent)
-                (light_t, light_d), (deep_t, deep_d) = light_spent.groups(), deep_spent.groups()
-                self.assertEqual((light_t, deep_t), ("544,000", "2,184,000"))
+                (light_d,), (deep_d,) = light_spent.groups(), deep_spent.groups()
                 # From the published per-million rates: sonnet 3/0.30/15, opus 5/0.50/25.
                 self.assertEqual((light_d, deep_d), ("0.38", "2.76"))
-                self.assertGreater(float(deep_d) / int(deep_t.replace(",", "")),
-                                   float(light_d) / int(light_t.replace(",", "")))
+                self.assertGreater(float(deep_d), float(light_d))
                 (offer,) = threads[shots.DEEPER_OFFER_THREAD]["questions"]
                 self.assertEqual((offer["state"], offer["deep"], offer["deep_offer"]),
                                  ("answered", False, True))
                 self.assertIs(threads[shots.DEEPER_OFFER_THREAD]["follow_up"], True)
-                self.assertEqual(spent.fullmatch(offer["spend_text"]).group(1), "362,000")
+                self.assertEqual(spent.fullmatch(offer["spend_text"]).group(1), "0.25")
                 self.assertEqual(
                     offer["deep_text"],
                     "Dig deeper asks again on a stronger model for up to 20 minutes. "
-                    "Earlier deeper answers here spent about 2,184,000 tokens, $" + deep_d
+                    "Earlier deeper answers here spent about $" + deep_d
                     + " each.")
                 self.assertEqual(all_sprints(view), [])
                 self.assertEqual(view["statement"]["inbox_items"], 0)
@@ -3780,23 +3778,23 @@ class ScreenshotReadingTest(unittest.TestCase):
 
         def offer(text):
             confirm = f'<div class="ask-deep-confirm"><p class="ask-deep-estimate">{text}</p></div>'
-            return panel(row("a", "Spent 1 tokens, about $0.01") + confirm)
+            return panel(row("a", "Spent about $0.01") + confirm)
 
-        one = row("a", "Spent 1 tokens, about $0.01", goal=False)
-        two = row("c", "Spent 2 tokens, about $0.02")
+        one = row("a", "Spent about $0.01", goal=False)
+        two = row("c", "Spent about $0.02")
         hidden = panel(one + two).replace("<li", '<li style="display:none"', 1)
-        estimate = "Earlier deeper answers here spent about 2,184,000 tokens, $2.76 each."
+        estimate = "Earlier deeper answers here spent about $2.76 each."
         self.assertEqual(
             self.read_pages([panel(one + two), hidden, "<p>none</p>"], shots.DEEPER_READING),
-            [[True, [["a b", "Spent 1 tokens, about $0.01"], ["c b", "Spent 2 tokens, about $0.02"]],
+            [[True, [["a b", "Spent about $0.01"], ["c b", "Spent about $0.02"]],
               True],
-             [True, [["c b", "Spent 2 tokens, about $0.02"]], True],
+             [True, [["c b", "Spent about $0.02"]], True],
              [False, [], False]])
         self.assertEqual(
             self.read_pages([offer(estimate), offer("No estimate."), "<p>none</p>"],
                             shots.OFFER_READING),
-            [[True, [["a b", "Spent 1 tokens, about $0.01"]], True, estimate],
-             [True, [["a b", "Spent 1 tokens, about $0.01"]], True, "No estimate."],
+            [[True, [["a b", "Spent about $0.01"]], True, estimate],
+             [True, [["a b", "Spent about $0.01"]], True, "No estimate."],
              [False, [], False, ""]])
 
     def test_the_jargon_count_counts_each_visible_review_phrase(self) -> None:

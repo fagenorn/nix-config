@@ -252,6 +252,7 @@ LANDING = "landing"
 DONE = "done"
 WORKING = "working"
 STAGES = (QUEUED, PLANNING, PLAN_REVIEW, BUILDING, FINAL_REVIEW, VERIFYING, LANDING, DONE, WORKING)
+STAGE_WORDS: dict[str, str] = {VERIFYING: "testing", LANDING: "going in"}
 
 CHILD_PHASE_PREFIX = "\u25b8 "
 
@@ -270,9 +271,14 @@ class IssueStage:
     locking: bool = False
 
 
+def stage_words(stage: str) -> str:
+    """The stage in words the owner reads; the stage value itself stays the wire's."""
+    return STAGE_WORDS.get(stage, stage)
+
+
 def stage_text(stage: IssueStage) -> str:
     if stage.stage != BUILDING or stage.task is None:
-        return stage.stage
+        return stage_words(stage.stage)
     if stage.tasks is None:
         return f"building task {stage.task}"
     return f"building task {stage.task} of {stage.tasks}"
@@ -582,7 +588,7 @@ def run_summary(issues: Sequence[IssueStage], moved: str) -> str:
     if not issues:
         return f"No issue in delivery yet, {moved}"
     counts = Counter(i.stage for i in issues)
-    parts = ", ".join(f"{counts[stage]} {stage}" for stage in SUMMARY_ORDER if counts[stage])
+    parts = ", ".join(f"{counts[stage]} {stage_words(stage)}" for stage in SUMMARY_ORDER if counts[stage])
     n = len(issues)
     return f"{n} {'issue' if n == 1 else 'issues'} in delivery: {parts}, {moved}"
 

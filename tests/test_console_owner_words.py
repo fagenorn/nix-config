@@ -8,7 +8,9 @@ import re
 import unittest
 from pathlib import Path
 
-from agent_tools.console import owner_words, view
+from agent_tools.console import answer, deliveries, engine_runs, owner_words, sprints, view
+from agent_tools.delivery import procedure_check
+from agent_tools.delivery.engine_ledger import RunState
 from agent_tools.delivery.routing import index_table
 
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures
@@ -21,6 +23,7 @@ ORDINARY = REPO_ROOT / "tests/fixtures/console/owner-words-ordinary.txt"
 PAGE = REPO_ROOT / "python/agent_tools/console/page.html"
 PAGE_TEXT_MODULES = ("view", "sprints", "engine_runs", "guest", "capacity")
 LITERAL_MODULES = ("answer", "approve", "contract_draft")
+SPRINT_LITERAL_MODULES = ("answer", "card_entries")
 OWNER_FACING = re.compile(r"(?:_TEXT|_LABEL|_SENTENCE|_LINE|_LEAD)$|^HEADLINE$")
 STR = r'"((?:[^"\\\n]|\\.)*)"'
 CLASS_POSITIONS = (
@@ -95,6 +98,38 @@ def console_text_words():
     read = lambda m: (root / (m + ".py")).read_text(encoding="utf-8")
     return ([w for m in PAGE_TEXT_MODULES for w in text_constants(read(m))]
             + [w for m in LITERAL_MODULES for w in module_literals(read(m))])
+
+
+def blank_fields(text):
+    """A format field reads as a number, so a text such as "issue #{issue}" is still found."""
+    return re.sub(r"\$?\{[^{}]*\}", "1", text)
+
+
+def prose(texts):
+    return [t for t in texts if re.search(r"\s", t)]
+
+
+def engine_state(stage):
+    return RunState(run="r", project="o/p", issue=1, stage=stage, step=None, wait=None, stop=None, done=False,
+                    last_event=None, process=None, alive=True, engine_alive=True)
+
+
+def sprint_page_words():
+    root = REPO_ROOT / "python/agent_tools/console"
+    read = lambda m: (root / (m + ".py")).read_text(encoding="utf-8")
+    stages = sprints.REPORT_STAGES + sprints.CLOSING_STAGES + deliveries.STAGES
+    summary = deliveries.run_summary([deliveries.IssueStage(n, s) for n, s in enumerate(deliveries.STAGES, 1)],
+                                     "moved just now")
+    return (page_words(PAGE.read_text(encoding="utf-8"))
+            + [w for m in PAGE_TEXT_MODULES for w in text_constants(read(m))]
+            + [w for m in SPRINT_LITERAL_MODULES for w in prose(module_literals(read(m)))]
+            + [sprints.closing_text(1, 1, 1), sprints.progress_text(1, 4, 1, 1, 1)]
+            + [view.CLOSING_OUTCOME_TEXT.get(s, deliveries.stage_words(s)) for s in stages]
+            + [summary]
+            + [engine_runs.line_text(engine_state(s)) for s in procedure_check.STAGES]
+            + [answer.LOOK_APPROVES.format(option="Approve this head", head="aaaaaaa", pr=12, issue=7),
+               answer.LOOK_RECORDING.format(head="aaaaaaa", issue=7),
+               answer.LOOK_MOVED.format(found="bbbbbbb", head="aaaaaaa")])
 
 
 def words(text):
@@ -232,3 +267,43 @@ class FixedWordsTest(unittest.TestCase):
         for text in (sprints.NOW_LOCK_TEXT, view.HEADLINE, guest.SHARING_OFF_TEXT, answer.LOOK_APPROVES,
                      approve.FAILING_WHY, approve.APPLIED_NOTE):
             self.assertIn(text, words)
+
+    def test_the_sprint_and_page_words_use_no_listed_word(self):
+        flagged = [t for t in sprint_page_words() if owner_words.found(blank_fields(t))]
+        self.assertEqual(flagged, [])
+
+    def test_the_completed_lines_are_among_the_scanned_words(self):
+        scanned = sprint_page_words()
+        for text in (sprints.closing_text(1, 1, 1), engine_runs.line_text(engine_state("verifying")),
+                     answer.LOOK_RECORDING.format(head="aaaaaaa", issue=7),
+                     deliveries.run_summary([deliveries.IssueStage(n, s) for n, s in enumerate(deliveries.STAGES, 1)],
+                                            "moved just now")):
+            self.assertIn(text, scanned)
+
+    def test_each_shown_stage_word_uses_no_listed_word(self):
+        for stage in sprints.REPORT_STAGES + sprints.CLOSING_STAGES + deliveries.STAGES:
+            with self.subTest(stage=stage):
+                self.assertEqual(owner_words.found(view.CLOSING_OUTCOME_TEXT.get(stage, deliveries.stage_words(stage))), [])
+        self.assertEqual(deliveries.stage_words("verifying"), "testing")
+        self.assertEqual(deliveries.stage_words("landing"), "going in")
+
+    def test_a_run_line_and_a_delivery_summary_show_the_stage_in_plain_words(self):
+        self.assertEqual(deliveries.run_summary([deliveries.IssueStage(1, "landing")], "quiet for 45 min"),
+                         "1 issue in delivery: 1 going in, quiet for 45 min")
+        self.assertEqual(engine_runs.line_text(engine_state("verifying")), "testing, moving")
+        self.assertEqual(engine_runs.line_text(engine_state("landing")), "going in, moving")
+
+    def test_the_stage_values_on_the_wire_are_unchanged(self):
+        self.assertEqual((deliveries.VERIFYING, deliveries.LANDING, sprints.LANDED), ("verifying", "landing", "landed"))
+        self.assertEqual(deliveries.stage_text(deliveries.IssueStage(12, "verifying")), "testing")
+        entry = engine_runs.engine_entry(engine_state("verifying"), None)
+        self.assertEqual((entry["stage"], entry["stage_text"]), ("verifying", "testing"))
+
+    def test_blank_fields_puts_a_number_in_each_format_field(self):
+        self.assertEqual(blank_fields("{commit} at ${tokens}"), "1 at 1")
+        self.assertEqual(owner_words.found(blank_fields("{commit} at ${tokens}")), [])
+        self.assertNotEqual(owner_words.found("{commit} at ${tokens}"), [])
+        self.assertEqual(words(blank_fields("on issue #{issue}.")), ["issue #1"])
+
+    def test_prose_keeps_only_texts_with_whitespace(self):
+        self.assertEqual(prose(["commit", "the adoption commit", "adopt.commit.failed"]), ["the adoption commit"])

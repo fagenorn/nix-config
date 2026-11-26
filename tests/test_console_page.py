@@ -748,7 +748,7 @@ class ActivationPageTest(unittest.TestCase):
 
     def test_a_running_line_has_no_activate(self) -> None:
         running = dict(ACTIVATION, state="running", activate=False,
-                       text="Activating this host at 0123456789ab. The console may restart before it reports.")
+                       text="Switching this computer to the new version (0123456789ab). The console may restart before it reports.")
         frame = dict(view([project(0, [], quiet=True)]), activation=running)
         (snap,) = render([{"frame": frame}, {"snapshot": True}])
         self.assertFalse([n for n in nodes(snap["projects"]) if has_class(n, "activate")])
@@ -3796,7 +3796,7 @@ class PageCheckAnswerTest(unittest.TestCase):
     def test_each_kind_renders_its_answers(self) -> None:
         cases = {
             "manual-check": {"ans-passed": "Passed", "ans-failed": "Failed", "ans-note": "Send note"},
-            "verdict": {"ans-passed": "Accept as passed", "ans-failed": "Close as not verified"},
+            "verdict": {"ans-passed": "Accept as passed", "ans-failed": "Close without proof it works"},
             "approval": {"ans-approve": "Approve"},
             "paid-approval": {"ans-approve": "Approve"},
             "stale-check": {"ans-keep": "Keep waiting", "ans-drop": "Accept without the host"},
@@ -5381,7 +5381,7 @@ class PageFailedStartTest(unittest.TestCase):
 
 
 MOVED_LINE = ("Nothing was recorded: the proposed change is now at bbbbbbb, not at aaaaaaa, "
-              "the head these pictures show. The manager will send the new pictures.")
+              "the version these pictures show. The manager will send the new pictures.")
 FAILED_LINE = "GitHub had a problem and did not take the answer. Try again in a moment."
 
 
@@ -5883,7 +5883,7 @@ class PageSprintReportTest(unittest.TestCase):
             fold = detail(opened)
             self.assertTrue(fold["open"])
             for expected in ("#12", "building task 2 of 4", "#13", "landed",
-                             "Next: start the resume slice", "Milestone: Importer resumes"):
+                             "Next: start the resume slice", "Task list: Importer resumes"):
                 self.assertIn(expected, full(fold))
             last = fold["children"][-1]
             self.assertEqual((last["tag"], last["cls"], full(last)),
@@ -6513,7 +6513,7 @@ class PageSprintEndTest(unittest.TestCase):
         self.assertEqual(
             [(full(n), n["cls"]) for n in of_class(row, "p", "closing-landed")
              + of_class(row, "p", "closing-held") + of_class(row, "p", "closing-dropped")],
-            [("Landed: #12, #14", "closing-landed"), ("Merged, not yet proven: #15", "closing-held"),
+            [("Went in: #12, #14", "closing-landed"), ("Merged, not yet proven: #15", "closing-held"),
              ("Dropped: #13", "closing-dropped")])
         (link,) = of_class(row, "a", "tracker")
         self.assertEqual(link["href"], "https://github.com/o/p/milestone/3")
@@ -6580,7 +6580,7 @@ class PageSprintEndTest(unittest.TestCase):
         (fold,) = of_class(line, "details", "sprint-detail")
         shown = visible_text(fold)
         for expected in (CLOSING["summary"], "Next time: cut smaller slices",
-                         "1 landed, 1 dropped", "Landed: #12, #14", "Merged, not yet proven: #15"):
+                         "1 landed, 1 dropped", "Went in: #12, #14", "Merged, not yet proven: #15"):
             self.assertIn(expected, shown)
         self.assertEqual(len(of_class(fold, "a", "tracker")), 1)
         (label,) = [c for c in fold["children"] if c["tag"] == "summary"]
@@ -7041,7 +7041,7 @@ KEY_B = "brief:" + "b" * 16
 APPROVING_TEXT = "Approving in five seconds."
 APPROVED_TEXT = "Approved, the sprint is starting"
 REPLIED_TEXT = "Reply sent, waiting for a new brief"
-LABELS = ("What done looks like", "Excluded", "Slices", "Risks", "What I expect to ask")
+LABELS = ("What done looks like", "Excluded", "Steps", "Risks", "What I expect to ask")
 
 
 def approvals(snap: dict) -> list:
@@ -7119,7 +7119,7 @@ class PageBriefTest(unittest.TestCase):
                 following = after(label)
                 self.assertEqual(following["tag"], "p")
                 self.assertEqual(full(following), "None")
-        slices = after("Slices")
+        slices = after("Steps")
         self.assertEqual(slices["tag"], "ul")
         self.assertEqual([full(li) for li in slices["children"]], ["checkpoint", "resume"])
         self.assertEqual([n for n in nodes(card) if n["tag"] == "ul" and n["children"] == []], [])
@@ -11411,7 +11411,7 @@ class RegisterApplyPageTest(unittest.TestCase):
         self.assertEqual(post["url"], "/api/plan-answer")
         self.assertEqual(posted(post), {"plan_id": item["plan_id"], "id": "contract-draft",
                                         "subject": "commit-signed", "value": "no"})
-        self.assertIn("Answered, turning signed commits off", full(snap["inbox"]))
+        self.assertIn("Answered, turning signing off", full(snap["inbox"]))
 
     def test_a_failed_step_card_offers_try_again(self) -> None:
         (snap,) = render([START, {"frame": cards([TRY_ITEM], FAILED_SHOWN)}, {"snapshot": True}])
@@ -11693,16 +11693,16 @@ class PageSpendFigureTest(unittest.TestCase):
         found = figures(snap["projects"])
         self.assertEqual(len(found), 3)
         (sprint,) = figures(of_class(snap["projects"], "li", "sprint")[0])
-        self.assertEqual(full(sprint), "1.2M tokens, about $3.40")
+        self.assertEqual(full(sprint), "about $3.40")
         self.assertEqual(sprint["href"], "/spend#sprint=" + "a" * 16)
         self.assertEqual(sprint["title"], "Estimated at API list prices")
         (parent,) = [n for n, above in with_ancestors(snap["projects"]) if sprint in n["children"]]
         self.assertEqual((parent["tag"], parent["cls"]), ("p", "sp-spend"))
         (run,) = figures(of_class(snap["projects"], "li", "run")[0])
-        self.assertEqual(full(run), "12.3k tokens, about $0.07")
+        self.assertEqual(full(run), "about $0.07")
         self.assertEqual(run["href"], "/spend#run=wf_a")
         (ended,) = figures(of_class(snap["projects"], "li", "finished-line")[0])
-        self.assertEqual(full(ended), "2.5M tokens, about $1,234.50")
+        self.assertEqual(full(ended), "about $1,234.50")
         self.assertEqual(ended["href"], "/spend#sprint=" + "d" * 16)
 
     def test_an_approximate_figure_says_so_in_its_title(self) -> None:
@@ -11796,7 +11796,7 @@ class PageSpendFigureTest(unittest.TestCase):
         self.assertEqual(role(snap["active"]), "tell")
         self.assertEqual(snap["field"]["value"], "keep the schema")
         (sprint,) = figures(of_class(snap["projects"], "li", "sprint")[0])
-        self.assertEqual(full(sprint), "1.3M tokens, about $5.15")
+        self.assertEqual(full(sprint), "about $5.15")
 
 
 SPEND_FRAME_WITHOUT = {k: v for k, v in SPEND_FRAME.items() if k != "spend"}

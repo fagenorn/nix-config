@@ -161,14 +161,13 @@ GH_MISSING = ("gh is not installed on this computer. Install it and sign it in w
               "then try again.")
 NOT_TAKEN = "GitHub did not take the answer. Try again, or answer it on GitHub."
 UNEXPECTED_FAILURE = "the console ran into a problem it did not expect. Try again, or answer it on GitHub."
-LOOK_MOVED = ("Nothing was recorded: the proposed change is now at {found}, not at {head}, the head "
+LOOK_MOVED = ("Nothing was recorded: the proposed change is now at {found}, not at {head}, the version "
               "these pictures show. The manager will send the new pictures.")
 LOOK_CLOSED = "Nothing was recorded: the proposed change is {state}."
-LOOK_APPROVES = ("Choosing \"{option}\" records your approval of {head}, proposed change #{pr}, on "
-                 "issue #{issue}.")
+LOOK_APPROVES = "Choosing \"{option}\" records your approval of {head}, proposed change #{pr}."
 ACTION_APPROVES = ("Choosing \"{option}\" lets the manager run exactly this command once, within 60 "
                    "minutes of your answer:")
-LOOK_RECORDING = "Recording your approval of {head} on issue #{issue}."
+LOOK_RECORDING = "Recording your approval of {head}."
 LOOK_UNTRUSTED = ("GitHub took the approval, but not as the repository's owner or a member, so the "
                   "merge would not count it. Sign gh in as the owner, then Retry.")
 LOOK_PICTURES_DIFFER = ("Nothing was recorded: this answer's approval is already on the issue for other "

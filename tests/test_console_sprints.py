@@ -1206,9 +1206,9 @@ class PendingStopTest(unittest.TestCase):
 
 class ClosingTextTest(unittest.TestCase):
     def test_the_closing_wording(self):
-        self.assertEqual(sprints.closing_text(2, 0, 0), "2 landed")
-        self.assertEqual(sprints.closing_text(1, 1, 1), "1 landed, 1 merged, not yet proven, 1 dropped")
-        self.assertEqual(sprints.closing_text(0, 0, 2), "0 landed, 2 dropped")
+        self.assertEqual(sprints.closing_text(2, 0, 0), "2 went in")
+        self.assertEqual(sprints.closing_text(1, 1, 1), "1 went in, 1 merged, not yet proven, 1 dropped")
+        self.assertEqual(sprints.closing_text(0, 0, 2), "0 went in, 2 dropped")
         self.assertEqual(sprints.first_line("  \n first \nsecond"), "first")
 
 
@@ -1347,9 +1347,9 @@ class AgeTest(unittest.TestCase):
             with self.subTest(elapsed=elapsed):
                 self.assertEqual(sprints.ago_text(elapsed), text)
         self.assertEqual(sprints.progress_text(3, 7, 2, 2, 0),
-                         "3 of 7 landed, 2 in delivery, 2 queued")
-        self.assertEqual(sprints.progress_text(0, 0, 0, 0, 0), "0 of 0 landed")
-        self.assertEqual(sprints.progress_text(1, 4, 0, 0, 3), "1 of 4 landed, 3 merged, not yet proven")
+                         "3 of 7 went in, 2 in delivery, 2 queued")
+        self.assertEqual(sprints.progress_text(0, 0, 0, 0, 0), "0 of 0 went in")
+        self.assertEqual(sprints.progress_text(1, 4, 0, 0, 3), "1 of 4 went in, 3 merged, not yet proven")
         self.assertEqual(sprints.QUIET_TEXT.format(minutes=16), "quiet for 16 min \u2014 may be stuck")
 
 

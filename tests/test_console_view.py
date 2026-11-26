@@ -518,7 +518,7 @@ class DeliveryViewTest(unittest.TestCase):
         table = [
             ((IssueStage(1, "landing"), IssueStage(2, "working"),
               IssueStage(3, "working"), IssueStage(4, "queued")), 16 * 60_000,
-             "4 issues in delivery: 1 landing, 2 working, 1 queued, quiet for 16 min"),
+             "4 issues in delivery: 1 going in, 2 working, 1 queued, quiet for 16 min"),
             ((IssueStage(856, "building", 3, 5),), 0,
              "1 issue in delivery: 1 building, moved just now"),
             ((IssueStage(5, "planning"), IssueStage(6, "done"),
@@ -1656,7 +1656,7 @@ class SprintReportViewTest(unittest.TestCase):
         shown = entry(line(it, T0_MS + 5 * MIN))
         self.assertEqual(shown["progress"],
                          {"landed": 3, "in_delivery": 2, "queued": 2, "held": 0, "total": 7})
-        self.assertEqual(shown["progress_text"], "3 of 7 landed, 2 in delivery, 2 queued")
+        self.assertEqual(shown["progress_text"], "3 of 7 went in, 2 in delivery, 2 queued")
         self.assertEqual(shown["state_text"], "on track")
         self.assertEqual(shown["status"], "two slices are building")
         self.assertEqual(shown["status_at"], iso(R))
@@ -1666,7 +1666,7 @@ class SprintReportViewTest(unittest.TestCase):
         held = reported(started(A), R, issues=SEVEN[:6] + ((7, "held"),))
         shown = entry(line(held, T0_MS + 5 * MIN))
         self.assertEqual(shown["progress_text"],
-                         "3 of 7 landed, 2 in delivery, 1 queued, 1 merged, not yet proven")
+                         "3 of 7 went in, 2 in delivery, 1 queued, 1 merged, not yet proven")
         self.assertEqual(shown["progress"]["held"], 1)
 
     def test_state_drafting_the_brief(self):
@@ -1859,7 +1859,7 @@ class SprintReportViewTest(unittest.TestCase):
         shown = entry(line(it, R + 4 * MIN))
         self.assertEqual(shown["issues"], [
             {"issue": 14, "stage": "held", "stage_text": "merged, not yet proven"},
-            {"issue": 15, "stage": "landed", "stage_text": "landed"},
+            {"issue": 15, "stage": "landed", "stage_text": "went in"},
             {"issue": 16, "stage": "final review", "stage_text": "final review"}])
         self.assertEqual(shown["progress"],
                          {"landed": 1, "in_delivery": 1, "queued": 0, "held": 1, "total": 3})
@@ -2230,7 +2230,7 @@ class SprintWaitViewTest(unittest.TestCase):
                 shown = self.shown(movement)
                 self.assertEqual(shown["state"], "on_track")
                 self.assertEqual(shown["ball"], "manager")
-                self.assertEqual(shown["now_text"], "a delivery is committing")
+                self.assertEqual(shown["now_text"], "a delivery is saving its changes")
         with self.subTest("a branch of another issue"):
             self.assertEqual(
                 self.shown(moving(branches=((99, now - 5 * MIN),)))["state"], "quiet")
@@ -2326,7 +2326,7 @@ class SprintWaitViewTest(unittest.TestCase):
              "waiting for GitHub's automatic checks on the proposed change"),
             ("no CI", moving(pulls=(dataclasses.replace(pull, running_ms=None),),
                              read_ms=now - MIN, release_ms=now - MIN),
-             "a delivery is committing"),
+             "a delivery is saving its changes"),
             ("only a release", moving(release_ms=now - MIN), "waiting for a release step"),
             ("a release and a lock wait", moving(release_ms=now - MIN, locks=((4, now - MIN),)),
              "waiting for a release step"),
@@ -2368,9 +2368,9 @@ class SprintWaitViewTest(unittest.TestCase):
              "waiting for GitHub's automatic checks on the proposed change"),
             ("a merged pull request after a commit",
              (PullRequest(40, frozenset({4}), False, seen),), LocalReading((), False),
-             "a delivery is committing"),
+             "a delivery is saving its changes"),
             ("a deleted branch", (), LocalReading(((5, seen),), False),
-             "a delivery is committing"),
+             "a delivery is saving its changes"),
             ("a finished release", (), LocalReading((), True), "waiting for a release step"))
         for label, pulls, local, sentence in cases:
             with self.subTest(label):
@@ -2414,7 +2414,7 @@ class SprintRunLineViewTest(unittest.TestCase):
              moving(pulls=(PullMovement(40, frozenset({4}), now - MIN, None),), read_ms=now - MIN),
              "waiting for GitHub's automatic checks on the proposed change"),
             ("a commit on its branch", moving(branches=((4, now - 5 * MIN),)),
-             "a delivery is committing"),
+             "a delivery is saving its changes"),
             ("a release step", moving(release_ms=now - MIN), "waiting for a release step"),
             ("the order, CI first",
              moving(pulls=(pull,), read_ms=now - MIN, release_ms=now - MIN,
@@ -2424,14 +2424,14 @@ class SprintRunLineViewTest(unittest.TestCase):
              "waiting for a release step"),
             ("committing before release and lock",
              moving(branches=((4, now - MIN),), release_ms=now - MIN, locks=((4, now - MIN),)),
-             "a delivery is committing"))
+             "a delivery is saving its changes"))
         for label, movement, sentence in cases:
             with self.subTest(label):
                 view = self.shown(movement)
                 r = self.run_line(view)
                 self.assertEqual((r["quiet"], r["moved_text"]), (False, sentence))
                 self.assertEqual(r["wait_text"], sentence)
-                self.assertEqual(r["summary"], "1 issue in delivery: 1 landing, " + sentence)
+                self.assertEqual(r["summary"], "1 issue in delivery: 1 going in, " + sentence)
                 for word in ("quiet", "stuck", "stalled"):
                     self.assertNotIn(word, r["moved_text"])
                     self.assertNotIn(word, r["summary"])
@@ -2482,7 +2482,7 @@ class SprintRunLineViewTest(unittest.TestCase):
             r = self.run_line(self.shown(None))
             self.assertEqual((r["quiet"], r["moved_text"], r["wait_text"]),
                              (True, "quiet for 45 min", None))
-            self.assertEqual(r["summary"], "1 issue in delivery: 1 landing, quiet for 45 min")
+            self.assertEqual(r["summary"], "1 issue in delivery: 1 going in, quiet for 45 min")
         with self.subTest("a lock wait last seen 16 minutes ago"):
             view = self.shown(moving(locks=((4, now - 16 * MIN),)))
             r = self.run_line(view)
@@ -2734,7 +2734,7 @@ class SprintEndViewTest(unittest.TestCase):
         self.assertEqual(shown["closing"], {
             "at": iso(C), "summary": SUMMARY, "first_line": "Importer resumes after a crash",
             "differently": "cut smaller slices", "landed": [12], "held": [14], "dropped": [13],
-            "counts_text": "1 landed, 1 merged, not yet proven, 1 dropped"})
+            "counts_text": "1 went in, 1 merged, not yet proven, 1 dropped"})
         self.assertIs(shown["stoppable"], False)
         self.assertEqual(shown["ended_at"], iso(C))
         self.assertIsNone(shown["stop_text"])
@@ -2753,11 +2753,11 @@ class SprintEndViewTest(unittest.TestCase):
         self.assertEqual(shown["milestone"], it.report.milestone)
         self.assertEqual(shown["tracker_url"], it.report.tracker_url)
         self.assertEqual(shown["issues"], [
-            {"issue": 12, "stage": "landed", "stage_text": "landed"},
+            {"issue": 12, "stage": "landed", "stage_text": "went in"},
             {"issue": 13, "stage": "dropped", "stage_text": "dropped"},
             {"issue": 14, "stage": "held", "stage_text": "merged, not yet proven"}])
         self.assertEqual(shown["closing"]["counts_text"],
-                         "1 landed, 1 merged, not yet proven, 1 dropped")
+                         "1 went in, 1 merged, not yet proven, 1 dropped")
 
     def test_a_done_sprint_folds_into_finished_sprints_after_24_hours(self):
         C = R + 5 * MIN
@@ -4067,7 +4067,7 @@ class WaitingLineTest(unittest.TestCase):
         second = read([hold, window], datetime(2026, 11, 18, 9, 1, tzinfo=timezone.utc))
         self.assertEqual(second["statement"]["inbox_items"], 0)
         self.assertEqual([(w["until"], w["text"]) for w in entry(second)["waits"]],
-                         [(None, "Due now: the next verification pass asks you here")])
+                         [(None, "Due now: the next check that it works in real use asks you here")])
         third = read([hold, window, prompt], datetime(2026, 11, 18, 9, 16, tzinfo=timezone.utc))
         self.assertEqual(third["statement"]["inbox_items"], 1)
         self.assertEqual(third["inbox"]["open"][0]["key"], f"{WAIT_SLUG}#619/12")
@@ -4086,9 +4086,9 @@ class WaitingLineTest(unittest.TestCase):
             "not_released": "Waiting for the release to be seen: no release yet includes its merge",
             "no_when": "Waiting with no date: its wording states a wait, but its check after release names no date "
                        "for that wait",
-            "due": "Due now: the next verification pass asks you here",
-            "due_command": "Due now: the next verification pass asks you here, "
-                           "unless it refuses the command as not a verification command"}
+            "due": "Due now: the next check that it works in real use asks you here",
+            "due_command": "Due now: the next check that it works in real use asks you here, "
+                           "unless it refuses the command as not one of its own"}
         shown = self.view_of(*(self.waiting(key=f"k-{reason}", reason=reason, until=None) for reason in texts))
         self.assertEqual({w["key"]: (w["until"], w["text"]) for w in entry(shown)["waits"]},
                          {f"k-{reason}": (None, text) for reason, text in texts.items()})
@@ -4096,9 +4096,9 @@ class WaitingLineTest(unittest.TestCase):
         self.assertEqual(set(WAIT_TEXT), {"window_opening", "not_released", "not_deployed", "ci_not_passed",
                                           "unknown", "no_when", "due", "due_command"})
         self.assertEqual(WAIT_TEXT["window_opening"],
-                         "Waiting for the next verification pass to start its wait: what it waits for has been seen")
+                         "Waiting for the next check that it works in real use to start its wait: what it waits for has been seen")
         self.assertEqual(WAIT_TEXT["not_deployed"], "Waiting for the deploy to be seen: no deploy is known to include its merge")
-        self.assertEqual(WAIT_TEXT["ci_not_passed"], "Waiting for GitHub's automatic checks to pass at its commit")
+        self.assertEqual(WAIT_TEXT["ci_not_passed"], "Waiting for GitHub's automatic checks to pass on the latest version of the change")
         self.assertEqual(WAIT_TEXT["unknown"], "Waiting: the tracker could not say whether it is due yet")
 
     def test_a_wait_no_sprint_owns_is_under_its_project(self):

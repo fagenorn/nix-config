@@ -612,7 +612,7 @@ A shown sprint reads its manager's latest report (`SprintState.report`); with no
 `issues` is `[]` and `waiting` is 0. A sprint ended by a closing report (#980) shows its closing
 only: `progress`, `progress_text`, `status`, `status_at` and `next` are null whatever its last report
 said, and each of `issues`, ordered by number, is an issue of the closing with its closing stage
-(`landed`, `held` or `dropped`) and `stage_text` `landed`, `merged, not yet proven` or `dropped`;
+(`landed`, `held` or `dropped`) and `stage_text` `went in`, `merged, not yet proven` or `dropped`;
 `milestone` and `tracker_url` stay the report's. The report's pictures are shown only while its
 status is (a report and no closing), as `pictures`, else `[]`. Each reported issue, ordered by number, has an effective
 `stage`: the report's own when it is `landed` or `held` (an outcome the manager reported is kept
@@ -827,7 +827,7 @@ from agent_tools.console.deliveries import (
     DeliveryState,
     moved_text,
     run_summary,
-    stage_text,
+    stage_text, stage_words,
 )
 from agent_tools.console.event_log import (
     Event, INBOX_CHANGED, INBOX_GONE, INBOX_SEEN, PROJECT_QUESTION_ANSWERED,
@@ -980,7 +980,7 @@ NEW_REPLY_TEXT = "New reply from the manager of {title}"
 NEW_REPLIES_TEXT = "{n} new replies from managers"
 HEADLINE = "Nothing needs you"
 OUTSIDE_LABEL = "Outside sprints"
-CLOSING_OUTCOME_TEXT = {LANDED: "landed", HELD: "merged, not yet proven", DROPPED: "dropped"}
+CLOSING_OUTCOME_TEXT = {LANDED: "went in", HELD: "merged, not yet proven", DROPPED: "dropped"}
 FINISHED_LABEL = "Finished sprints"
 QUESTIONS_LABEL = "Questions"
 UNMANAGED_LABEL = "Not yet managed"
@@ -1002,9 +1002,9 @@ ASK_RAN_TEXT = "Ran: {text}"
 ASK_UNKNOWN_TEXT = "Could not find out: {text}"
 ASK_BACK_TEXT = "Question for you: {text}"
 ASK_DEEP_WORKING_TEXT = "Digging deeper"
-ASK_SPENT_TEXT = "Spent {tokens} tokens, about ${dollars}"
+ASK_SPENT_TEXT = "Spent about ${dollars}"
 ASK_DEEP_ESTIMATE_TEXT = ("Dig deeper asks again on a stronger model for up to {minutes} minutes. "
-                          "Earlier deeper answers here spent about {tokens} tokens, ${dollars} each.")
+                          "Earlier deeper answers here spent about ${dollars} each.")
 ASK_DEEP_NO_ESTIMATE_TEXT = ("Dig deeper asks again on a stronger model for up to {minutes} minutes. "
                              "No earlier deeper answer here to estimate its spend from.")
 DEEP_ESTIMATE_COUNT = 5
@@ -1051,15 +1051,15 @@ REGISTER_TYPE_SENTENCE = "Type the answer on its card and press Enter."
 CHOOSE_SENTENCE = "Choose an option with its number and press Enter, or answer on the tracker."
 ANSWER_SENTENCE = "Answer it here, or on the tracker."
 WAIT_TEXT = {
-    "window_opening": "Waiting for the next verification pass to start its wait: what it waits for has been seen",
+    "window_opening": "Waiting for the next check that it works in real use to start its wait: what it waits for has been seen",
     "not_released": "Waiting for the release to be seen: no release yet includes its merge",
     "not_deployed": "Waiting for the deploy to be seen: no deploy is known to include its merge",
-    "ci_not_passed": "Waiting for GitHub's automatic checks to pass at its commit",
+    "ci_not_passed": "Waiting for GitHub's automatic checks to pass on the latest version of the change",
     "unknown": "Waiting: the tracker could not say whether it is due yet",
     "no_when": "Waiting with no date: its wording states a wait, but its check after release names no date for that wait",
-    "due": "Due now: the next verification pass asks you here",
-    "due_command": ("Due now: the next verification pass asks you here, "
-                    "unless it refuses the command as not a verification command"),
+    "due": "Due now: the next check that it works in real use asks you here",
+    "due_command": ("Due now: the next check that it works in real use asks you here, "
+                    "unless it refuses the command as not one of its own"),
 }
 STALE_SENTENCE = ("The tracker could not be read for {projects}; "
                   "each item shows when it was last read.")
@@ -1071,9 +1071,9 @@ ACTIVATION_TOOLING_TEXT = "A change to the agent tooling merged at {commit} and 
 ACTIVATION_CONFIGURATION_TEXT = "A change to the host configuration merged at {commit} and is not active on this host."
 AGENT_TOOLING = ("python/", "home/common/agent-", "home/common/claude-code/", "home/common/codex/",
                  "patches/agent-plugins/", "lib/agent-")
-ACTIVATING_TEXT = "Activating this host at {commit}. The console may restart before it reports."
-ACTIVATED_TEXT = "Activated this host at {commit}."
-ACTIVATION_FAILED_TEXT = "Activating this host at {commit} failed: {reason}. {next_step}"
+ACTIVATING_TEXT = "Switching this computer to the new version ({commit}). The console may restart before it reports."
+ACTIVATED_TEXT = "Switched this computer to the new version ({commit})."
+ACTIVATION_FAILED_TEXT = "Switching this computer to the new version ({commit}) failed: {reason}. {next_step}"
 ACTIVATE_LABEL = "Activate"
 OUTCOME_MS = 24 * 3600 * 1000
 SHARING_OFF = MappingProxyType({
@@ -1331,7 +1331,7 @@ def _effective_stages(state: SprintState) -> list[tuple[int, str, str]]:
     for issue, stage in sorted(state.report.issues):
         run = seen.get(issue)
         if stage in (LANDED, HELD) or run is None:
-            rows.append((issue, stage, CLOSING_OUTCOME_TEXT.get(stage, stage)))
+            rows.append((issue, stage, CLOSING_OUTCOME_TEXT.get(stage, stage_words(stage))))
         elif run.stage == RUN_DONE:
             rows.append((issue, CLOSED_OUT, CLOSED_OUT))
         else:
@@ -1744,8 +1744,8 @@ def _stage_phrase(stages: Sequence[tuple[int, str, str]], milestone: str) -> str
         stage = LANDED
     else:
         stage = min(counts, key=lambda name: (-counts[name], name))
-    return NOW_STAGE_TEXT.format(stage=stage, count=counts[stage], total=len(stages),
-                                 milestone=milestone)
+    return NOW_STAGE_TEXT.format(stage=CLOSING_OUTCOME_TEXT.get(stage, stage_words(stage)),
+                                 count=counts[stage], total=len(stages), milestone=milestone)
 
 
 def sprint_now(state: SprintState, quota: Wait | None, listed: Collection[str], waiting: int,

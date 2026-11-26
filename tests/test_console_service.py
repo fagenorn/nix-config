@@ -1807,7 +1807,7 @@ class WaitClockTest(Case):
         current[0] = {**waiting, "wait": {"reason": "due", "until": None, "what": "Read the hourly rows."}}
         svc.poll_tracker()
         shown = json.loads(svc.view_bytes)
-        self.assertEqual(shown["entries"][0]["waits"][0]["text"], "Due now: the next verification pass asks you here")
+        self.assertEqual(shown["entries"][0]["waits"][0]["text"], "Due now: the next check that it works in real use asks you here")
         self.assertEqual(shown["statement"]["inbox_items"], 0)
         svc.close()
 

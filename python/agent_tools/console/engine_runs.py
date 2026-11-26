@@ -42,6 +42,7 @@ from typing import BinaryIO, Callable, Collection, Iterable, Mapping
 
 from agent_tools.canonical import parse_rfc3339_utc
 from agent_tools.console import spend as spend_module, sprints
+from agent_tools.console.deliveries import stage_words
 from agent_tools.delivery import engine_ledger
 from agent_tools.delivery.engine_ledger import LedgerError, RunState
 
@@ -51,7 +52,7 @@ WAIT_TEXT = {"usage-limit": "waiting out a usage limit",
              "lock": sprints.NOW_LOCK_TEXT, "checks": sprints.NOW_CI_TEXT}
 NEED_TEXT = {"owner-decision": "your decision", "owner-look": "your check of the pictures", "retry": "a retry",
              "nothing": "nothing"}
-NOT_RUNNING_TEXT = "the engine is not running"
+NOT_RUNNING_TEXT = "its steps are not running"
 ENDED_SHOWN_MS = 24 * 60 * 60 * 1000
 EVENTS_NAME = "events.jsonl"
 
@@ -60,7 +61,7 @@ def stage_text(state: RunState) -> str | None:
     """The stage in words, with the task of a fan-out; None before the first step."""
     if state.stage == "building" and state.fanout:
         return f"building task {state.fanout['task']} of {state.fanout['tasks']}"
-    return state.stage
+    return stage_words(state.stage) if state.stage else state.stage
 
 
 def reading(state: RunState) -> str:

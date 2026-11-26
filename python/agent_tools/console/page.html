@@ -691,18 +691,13 @@ function spendIndex(spend) {
   }
   return index;
 }
-function spendCount(n) {
-  if (n < 1000) return String(Math.round(n));
-  const scale = n < 1e6 ? [1e3, "k"] : n < 1e9 ? [1e6, "M"] : [1e9, "B"];
-  return (n / scale[0]).toFixed(1).replace(/\.0$/, "") + scale[1];
-}
 function spendDollars(dollars) {
   const parts = dollars.toFixed(2).split(".");
   return parts[0].replace(/\B(?=(\d{3})+(?!\d))/g, ",") + "." + parts[1];
 }
 function spendFigure(kind, id, found = spendNow[kind].get(id)) {
   if (!found || !(found.tokens > 0)) return null;
-  const link = el("a", "spend", spendCount(found.tokens) + " tokens, about $" + spendDollars(found.dollars));
+  const link = el("a", "spend", "about $" + spendDollars(found.dollars));
   link.href = "/spend#" + kind + "=" + encodeURIComponent(id);
   link.setAttribute("title", "Estimated at API list prices" + (found.approximate ? ", approximate" : ""));
   return link;
@@ -730,7 +725,7 @@ function lineFold(key, nameNode, words, outside, root, engineRuns) {
   if (engineRuns.length > 0) {
     const engineList = el("ul");
     for (const run of engineRuns) engineList.appendChild(phrase("li", "run engine", el("span", "issue", "#" + run.issue), phrase("span", "stage", run.text, ...engineUntil(run)), spendFigure("run", run.run_id, run.spend || null)));
-    fold.appendChild(phrase("div", "outside", el("h3", "", "Engine runs"), engineList));
+    fold.appendChild(phrase("div", "outside", el("h3", "", "Work running outside a sprint"), engineList));
   }
   if (outside.sessions.length === 0) return fold;
   const list = el("ul");
@@ -809,7 +804,7 @@ function sprintDetail(sprint) {
   const reportPictures = pictureGallery("report/" + sprint.sprint_id + "@" + sprint.status_at, sprint.pictures);
   if (reportPictures !== null) fold.appendChild(reportPictures);
   if (typeof sprint.milestone === "string") {
-    fold.appendChild(el("p", "milestone", "Milestone: " + sprint.milestone));
+    fold.appendChild(el("p", "milestone", "Task list: " + sprint.milestone));
   }
   if (closed) {
     fold.appendChild(closingReport(sprint));
@@ -1629,7 +1624,7 @@ function commandSummary(summary) {
   if (summary.runs.length > 0) line("summary-runs", "Runs " + summaryList(summary.runs));
   line("summary-writes", summary.writes.length > 0 ? "Writes or deletes " + summaryList(summary.writes) : "No write the console recognises");
   for (const script of summary.scripts) line("summary-script", "Runs a " + script.program + " script of " + script.lines + (script.lines === 1 ? " line" : " lines") + " the console does not read" + (script.paths.length > 0 ? "; it names " + summaryList(script.paths) : ""));
-  if (summary.outside.length > 0) line("summary-outside", "Outside the worktree: " + summaryList(summary.outside));
+  if (summary.outside.length > 0) line("summary-outside", "Outside its own copy of the project: " + summaryList(summary.outside));
   return box;
 }
 function permissionCard(item) {
@@ -4396,7 +4391,7 @@ function start(item, state) {
     if (value === "retry") return begin(item, state, { adopt: true, body, words: "Answered, trying again" });
     if (value === "signing_off") {
       const change = { plan_id: item.plan_id, id: "contract-draft", subject: "commit-signed", value: "no" };
-      return begin(item, state, { plan: true, body: change, words: "Answered, turning signed commits off" });
+      return begin(item, state, { plan: true, body: change, words: "Answered, turning signing off" });
     }
     return begin(item, state, { defer: true, body, words: "Set aside until the plan changes" });
   }
@@ -4705,7 +4700,7 @@ function drawBrief(rec, item, lead) {
   const gallery = pictureGallery(briefId(item), item.pictures);
   rec.parts.replaceChildren(
     el("p", "meta", "What done looks like"), el("p", "", parts.done),
-    ...listPart("Excluded", parts.excluded), ...listPart("Slices", parts.slices),
+    ...listPart("Excluded", parts.excluded), ...listPart("Steps", parts.slices),
     ...listPart("Risks", parts.risks), ...listPart("What I expect to ask", parts.asks),
     ...(gallery === null ? [] : [gallery]),
   );
@@ -4845,7 +4840,7 @@ function actionLine(item, state, lead, card) {
 }
 const ANSWER_LABELS = {
   "manual-check": { passed: "Passed", failed: "Failed" },
-  verdict: { passed: "Accept as passed", failed: "Close as not verified" },
+  verdict: { passed: "Accept as passed", failed: "Close without proof it works" },
   approval: { approve: "Approve" },
   "paid-approval": { approve: "Approve" },
   "stale-check": { keep: "Keep waiting", drop: "Accept without the host" },
@@ -5444,7 +5439,7 @@ function closingReport(sprint) {
     box.appendChild(el("p", "differently", "Next time: " + closing.differently));
   }
   if (typeof closing.counts_text === "string") box.appendChild(el("p", "closing-counts", closing.counts_text));
-  for (const [label, key] of [["Landed", "landed"], ["Merged, not yet proven", "held"], ["Dropped", "dropped"]]) {
+  for (const [label, key] of [["Went in", "landed"], ["Merged, not yet proven", "held"], ["Dropped", "dropped"]]) {
     const numbers = Array.isArray(closing[key]) ? closing[key] : [];
     if (numbers.length > 0) {
       box.appendChild(el("p", "closing-" + key, label + ": " + numbers.map((n) => "#" + n).join(", ")));
