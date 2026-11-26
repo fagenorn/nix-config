@@ -18,7 +18,8 @@ at the next activation after that default is cleared.
 `omlx-restart` restarts the server only while it is idle or stopped. While `/health`
 reports a loaded model, a preload or an answer it cannot read, it prints the
 `oMLX: restart deferred (...)` line and keeps the marker; `omlx-restart --now`
-applies it regardless. Activation and the downloader both go through it, never
+applies it regardless. `omlx-restart --reactive`, which the memory watcher runs (see
+"Reactive restart"), restarts only while `/api/status` shows no request in flight. Activation and the downloader both go through it, never
 through a kill of their own. While a restart is deferred, an admin-UI save can
 overwrite the declared change in the files; the next activation writes it again.
 Applying `omlx-configure` alone does not restart active work.
@@ -118,6 +119,10 @@ owner's capacity number: whether it holds is a question for the lead.
 | `omlxJetsamPriority` | 190 | oMLX's jetsam priority; the kernel ends the lowest band first. 180 is its default band (`JETSAM_PRIORITY_DEFAULT`), where unmanaged processes such as the agents' test workers run. `memory-floor` raises the running pid to 190 and never lowers a higher value. | The xnu `kern_memorystatus.h` and `kern_memorystatus.c` sources linked in "The memory floor", and the 24 Nov `jetsam_priority ... from=180` line of `/var/log/memory-floor.log`. |
 | `fseventsdRestartMinutes` | 60 | The shortest time between two `fseventsd-trim` restarts. | See "What makes fseventsd grow". |
 | `unownedAlertGiB` | 5 | Unowned memory over which the watcher sends `unowned_memory`, once per episode. | The lead's 25 Nov reading: 35 GiB unowned before an oMLX restart, about 0 after. |
+| `omlxRestartTriggerGiB` | 25 | Unowned plus compressor memory over which a sample counts toward a reactive oMLX restart. | The lead's choice; unowned memory grew about 3 GiB an hour on 26 Nov. |
+| `omlxRestartSamples` | 3 | Consecutive samples over the trigger before the watcher asks for the restart. | The lead's choice. |
+| `omlxRestartRoomGiB` | 16 | Available memory the watcher needs before it asks for a restart (provisional). | Estimate: on 26 Nov 138 of 160 samples over the trigger had at least 16 GiB free. |
+| `omlxRestartMinMinutes` | 30 | The shortest time between the end of one reactive restart and the next attempt. | The lead's choice. |
 
 `verifyRunGiB`, `ciJobGiB` and `macosGiB` are provisional: nobody has measured
 them. The day line shows whether they hold.
@@ -327,6 +332,33 @@ the lines the verify-slot history gains. The first sample of a source records a 
 source that could not be read changes nothing. A CI job or a RAM disk that starts and ends between two samples
 is not recorded, because those are read as a snapshot each minute.
 
+### Reactive restart
+
+Unowned memory does not come back until oMLX restarts, so the watcher restarts it when the
+growth is real and the server is idle.
+
+- Trigger: the fresh census's unowned memory plus the compressor is over
+  `omlxRestartTriggerGiB`. A sample over it adds one to the streak, a sample at or under it ends the
+  episode, and a sample without a fresh census zeroes the streak and keeps the episode.
+- Episode: one restart per episode. The attempt is due once the streak reaches
+  `omlxRestartSamples` and the episode has not restarted oMLX yet.
+- Room: available memory under `omlxRestartRoomGiB` defers the attempt.
+- Gap: a restart less than `omlxRestartMinMinutes` after the last restart's end (the time the
+  gate returned) defers the attempt.
+- Gate: the watcher runs `omlx-restart --reactive`. It reads the API key like the server does, asks
+  the authenticated `/api/status` for `active_requests` and `waiting_requests`, and restarts only
+  when both are zero and no model but the pinned one is loaded or loading. A server that is gone
+  before the signal is a deferral, not a restart. Every state it cannot read defers. It never
+  uses `--now`, never reloads a held plist, and leaves the `.restart-needed` marker untouched.
+- Outcomes: a restarted or interrupted outcome ends the episode and sends `omlx_restarted` once. A
+  deferred or failed one is only recorded, and the next due sample tries again.
+- State: `~/.omlx/memory/omlx-restart.json`, apart from the watcher's own state. It is saved
+  before the gate runs, so a run stopped after the gate may have signalled is recorded as
+  interrupted and never signals twice.
+- Records: `~/.omlx/memory/omlx-restarts.jsonl` holds one line per attempt.
+- Log: every attempt adds one `omlx_restart outcome=<outcome> available_gib=... unowned_gib=...
+  compressor_gib=... reason=...` line to `~/.omlx/logs/memory-watch.log`.
+
 ### Alerts
 
 Alerts go to the owner's Telegram bot. The owner sets it up on the console page,
@@ -339,7 +371,7 @@ the error is logged in `~/.omlx/logs/memory-watch.log`, and the watcher exits 3
 on every sample until the alert is sent. With `enabled` false, alerts are
 recorded in the alerts log only.
 
-There are nine kinds:
+The kinds:
 
 - `jetsam`: the kernel's memory killer ended oMLX.
 - `low_memory`: available memory fell under `floorGiB` while a model was loaded
@@ -355,6 +387,8 @@ There are nine kinds:
 - `jetsam_priority_unset`: `memory-floor` could not set oMLX's kernel jetsam
   priority, or the value did not hold after a set (once per episode).
 - `unowned_memory`: unowned memory passed `unownedAlertGiB` (once per episode).
+- `omlx_restarted`: the watcher restarted oMLX, or a restart it began was interrupted
+  (once per episode).
 
 ### What makes fseventsd grow
 
