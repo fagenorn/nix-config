@@ -438,5 +438,24 @@ class PartEnvironmentTest(SplitCase):
         self.assertEqual(environment["KEEP"], "1")
 
 
+class CommittedSplitTest(unittest.TestCase):
+    def test_the_committed_timings_split_each_engine_file_into_parts_that_hold_each_class_once(self):
+        timings = suite_runner.load_timings()
+        environment = {**os.environ, "PYTHONPATH": os.pathsep.join(
+            [PYTHON_PATH, *([os.environ["PYTHONPATH"]] if os.environ.get("PYTHONPATH") else [])])}
+        for member in ("tests/test_engine_stubbed_run.py", "tests/test_engine_land_recovery.py"):
+            with self.subTest(member=member):
+                listing = suite_runner.test_classes(member, environment, REPO_ROOT)
+                self.assertGreaterEqual(len(listing), 2)
+                units = suite_runner.plan_units([member], timings, lambda _member: listing)
+                self.assertGreaterEqual(len(units), 2)
+                held = collections.Counter(name for unit in units for name in unit.classes)
+                self.assertEqual(held, collections.Counter(name for name, _ in listing))
+                self.assertEqual(set(held.values()), {1})
+                others = {name for unit in units[1:] for name in unit.classes}
+                self.assertEqual(units[0].excluded,
+                                 tuple(name for name, _ in listing if name in others))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -35,35 +35,37 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 EVAL_TREE_SCRIPT = "home/common/agent-skills/evals/tests/test-run-eval-tree.sh"
 
 # Members over 30 s of wall time on the run the committed suite timings were last
-# refreshed from: https://github.com/fagenorn/nix-config/actions/runs/44426940077
-# (job `Agent Workflow Tests`, head b31db72b4). A refresh from a newer run replaces both.
+# refreshed from: https://github.com/fagenorn/nix-config/actions/runs/45685707401
+# (job `Agent Workflow Tests`, head 9cfe0b8b4). A refresh from a newer run replaces both.
 SLOW_ON_LAST_FULL_RUN: tuple[str, ...] = (
-    "home/common/agent-skills/tests/test_deliver_standard_program.py",
-    "tests/test_forge_land_lock.py",
-    "tests/test_console_approve_service.py",
-    "home/common/agent-skills/tests/test_deliver_batch_program.py",
+    "tests/test_engine_stubbed_run.py",
+    "tests/test_engine_land_recovery.py",
+    "tests/test_landing.py",
     "tests/test_verify_checks.py",
-    "tests/test_verify_pending_owner.py",
+    "tests/test_closing.py",
+    "home/common/agent-skills/tests/test_conformance.py",
     "tests/test_console_bypass_proof_wakes.py",
-    "tests/test_console_service.py",
-    "tests/test_release_sync.py",
-    "tests/test_console_manager_service.py",
-    "tests/test_guard_policy.py",
-    "tests/test_release_driver.py",
-    "tests/test_console_sprint_command.py",
-    "tests/test_console_register_service.py",
-    "tests/test_verify_pending.py",
-    "tests/test_console_messages.py",
-    "tests/test_console_capacity_check.py",
-    "home/common/agent-skills/tests/test_adopt_apply.py",
-    "tests/test_console_pictures.py",
+    "tests/test_verify_pending_owner.py",
     "tests/test_release_lock.py",
-    "tests/test_console_stops.py",
-    "tests/test_release_crash_matrix.py",
-    "tests/test_console_screenshots.py",
+    "tests/test_console_sprint_command.py",
+    "tests/test_release_driver.py",
+    "tests/test_release_sync.py",
+    "tests/test_guard_policy.py",
+    "home/common/agent-skills/tests/test_conformance_registry.py",
+    "tests/test_console_capacity_check.py",
+    "tests/test_host_readings.py",
+    "tests/test_engine_fanout.py",
     "tests/test_console_page.py",
-    "tests/test_console_activation.py",
-    "tests/test_forge_adapter.py",
+    "tests/test_engine_stubbed_world.py",
+    "tests/test_verify_pending.py",
+    "home/common/agent-skills/tests/test_node_lint.py",
+    "tests/test_release_crash_matrix.py",
+    "tests/test_engine_check.py",
+    "tests/test_console_approve_service.py",
+    "tests/test_verified_tree.py",
+    "tests/test_claude_account_routing.py",
+    "tests/test_engine_session.py",
+    "home/common/agent-skills/tests/test_adopt_apply.py",
 )
 
 # A unittest module that meets its peers at the barrier. It holds a live token
