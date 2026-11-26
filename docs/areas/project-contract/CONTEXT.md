@@ -35,7 +35,7 @@ _Avoid_: ratchet, baseline file
 The versioned JSON file the platform ships, listing its deprecations and migrations. A project's contract schema version is checked against it.
 
 **Platform package**:
-The one flake package nix-config publishes for Linux and macOS, holding the agent commands, the standards directory and the platform manifest. A project's CI fetches it and every host installs the same build; every merge to main is a revision (ADR-system-005).
+The one flake package nix-config publishes for Linux and macOS, holding the agent commands, the standards directory and the platform manifest. A project's CI fetches it and every host installs the same build; every merge to main is a revision (ADR-system-005), and it ships the Python and .NET commands side by side while areas move (ADR-system-007).
 _Avoid_: platform bundle
 
 **Platform command**:
