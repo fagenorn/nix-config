@@ -163,6 +163,13 @@ class WatcherDeclarationTest(unittest.TestCase):
         self.assertEqual(self.budget["unownedAlertGiB"], 5)
         self.assertIn(f"--unowned-alert-gib {self.budget['unownedAlertGiB']} ", self.watch["command"])
 
+    def test_the_watcher_passes_the_verify_alert_line(self):
+        self.assertEqual(self.budget["verifyAlertGiB"], 2.5)
+        self.assertLess(self.budget["verifyAlertGiB"], self.budget["verifyRunGiB"])
+        match = re.search(r"--verify-alert-gib (\S+) ", self.watch["command"])
+        self.assertIsNotNone(match)
+        self.assertEqual(float(match.group(1)), self.budget["verifyAlertGiB"])
+
     def test_the_watcher_leaves_the_alert_settings_to_the_shared_module(self):
         for needle in ("--alert-settings", "--alert-log", "--telegram-api", "telegram.json", "sops", "--gh", "--repo"):
             with self.subTest(needle=needle):
@@ -274,7 +281,7 @@ class GuideTest(unittest.TestCase):
                 self.assertIn(needle, self.section)
 
     def test_the_guide_marks_the_unmeasured_allowances_provisional(self):
-        for key in ("verifyRunGiB", "ciJobGiB", "macosGiB"):
+        for key in ("verifyRunGiB", "ciJobGiB", "macosGiB", "verifyAlertGiB"):
             with self.subTest(key=key):
                 lines = [line for line in self.section.splitlines() if line.startswith(f"| `{key}` |")]
                 self.assertTrue(lines)
@@ -314,7 +321,10 @@ class GuideTest(unittest.TestCase):
 
     def test_the_guide_lists_the_unowned_alert(self):
         self.assertIn("- `unowned_memory`:", self.alerts)
-        self.assertIn("There are nine kinds", self.alerts)
+
+    def test_the_guide_lists_the_verify_tree_alert(self):
+        self.assertIn("- `verify_tree`:", self.alerts)
+        self.assertIn("There are ten kinds", self.alerts)
 
     def test_the_guide_states_what_makes_fseventsd_grow(self):
         for needle in (

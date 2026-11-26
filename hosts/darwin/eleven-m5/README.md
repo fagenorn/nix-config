@@ -118,6 +118,7 @@ owner's capacity number: whether it holds is a question for the lead.
 | `omlxJetsamPriority` | 190 | oMLX's jetsam priority; the kernel ends the lowest band first. 180 is its default band (`JETSAM_PRIORITY_DEFAULT`), where unmanaged processes such as the agents' test workers run. `memory-floor` raises the running pid to 190 and never lowers a higher value. | The xnu `kern_memorystatus.h` and `kern_memorystatus.c` sources linked in "The memory floor", and the 24 Nov `jetsam_priority ... from=180` line of `/var/log/memory-floor.log`. |
 | `fseventsdRestartMinutes` | 60 | The shortest time between two `fseventsd-trim` restarts. | See "What makes fseventsd grow". |
 | `unownedAlertGiB` | 5 | Unowned memory over which the watcher sends `unowned_memory`, once per episode. | The lead's 25 Nov reading: 35 GiB unowned before an oMLX restart, about 0 after. |
+| `verifyAlertGiB` | 2.5 | The whole-tree footprint of one verification run over which the watcher sends `verify_tree`, once per run (provisional). | Under `verifyRunGiB`, so the lead hears of a run before it passes its allowance. |
 
 `verifyRunGiB`, `ciJobGiB` and `macosGiB` are provisional: nobody has measured
 them. The day line shows whether they hold.
@@ -343,7 +344,7 @@ the error is logged in `~/.omlx/logs/memory-watch.log`, and the watcher exits 3
 on every sample until the alert is sent. With `enabled` false, alerts are
 recorded in the alerts log only.
 
-There are nine kinds:
+There are ten kinds:
 
 - `jetsam`: the kernel's memory killer ended oMLX.
 - `low_memory`: available memory fell under `floorGiB` while a model was loaded
@@ -359,6 +360,9 @@ There are nine kinds:
 - `jetsam_priority_unset`: `memory-floor` could not set oMLX's kernel jetsam
   priority, or the value did not hold after a set (once per episode).
 - `unowned_memory`: unowned memory passed `unownedAlertGiB` (once per episode).
+- `verify_tree`: a verify run's whole process tree passed `verifyAlertGiB`; one
+  alert per run, sent once its history line is read, naming its command
+  (assignment values redacted), repository and peak.
 
 ### What makes fseventsd grow
 

@@ -1,9 +1,9 @@
 """`omlx-memory-watch`: the eleven-m5 memory watcher, one sample per run.
 
 `omlx-memory-watch sample --state-dir DIR --floor-gib N --others-budget-gib N
---unowned-alert-gib N --omlx-jetsam-priority N --host NAME [--label org.nixos.omlx] [--health-url URL] [--vm-stat PATH]
-[--sysctl PATH] [--launchctl PATH] [--ps PATH] [--footprint PATH] [--hdiutil PATH] [--slot-history FILE]
-[--colima-pid-file FILE] [--alert-settings FILE] [--alert-log FILE] [--telegram-api URL] [--census-record FILE]
+--unowned-alert-gib N --verify-alert-gib N --omlx-jetsam-priority N --host NAME [--label org.nixos.omlx]
+[--health-url URL] [--vm-stat PATH] [--sysctl PATH] [--launchctl PATH] [--ps PATH] [--footprint PATH]
+[--hdiutil PATH] [--slot-history FILE] [--colima-pid-file FILE] [--alert-settings FILE] [--alert-log FILE] [--telegram-api URL] [--census-record FILE]
 [--now ISO8601]` takes one reading of the host and
 records it. Used memory is (anonymous pages - purgeable pages + wired pages + compressor pages)
 x the page size of `vm_stat`; available is `hw.memsize` minus used. A model is loaded when the
@@ -61,8 +61,12 @@ An alert is queued when the service's `runs` changed and its last exit reason is
 killer's (`jetsam`), and when available memory falls under the floor while a model is loaded
 (`low_memory`, once per episode). `unowned_memory` is queued once per episode when a fresh census's
 unowned memory is over `--unowned-alert-gib` (strictly); an unowned figure at or under the line closes
-the episode, and a sample without a fresh census changes nothing. The first sample only records a
-baseline for the other alerts. Each queued alert
+the episode, and a sample without a fresh census changes nothing. `verify_tree` is queued once per
+`verify_run` event whose `tree_peak_bytes` is an integer strictly over `--verify-alert-gib` (a finite
+number above 0): each history line is read once, so a run alerts once, whatever day its peak belongs
+to. It names the run's first three command words, with the value of a `NAME=value` word replaced by
+`<redacted>` and any word cut to 60 characters, and its repository cut to 100. The first sample only
+records a baseline for the other alerts. Each queued alert
 is delivered through `agent_tools.hosts.host_alerts`, in order, before the state is written;
 one that fails stays queued, is logged once and is retried by the next sample.
 
@@ -122,6 +126,7 @@ import argparse
 import copy
 import http.client
 import json
+import math
 import os
 import re
 import subprocess
@@ -175,6 +180,9 @@ VM_FIELDS = {
 LAUNCHCTL_FIELDS = {"runs": "runs", "pid": "pid", "jetsam priority": "jetsam_priority"}
 FOOTPRINT_LINE = re.compile(r"^\s*phys_footprint:\s*(\d+) B\s*$", re.MULTILINE)
 SEE = "See hosts/darwin/eleven-m5/README.md, Memory budget."
+ALERT_WORD = 60
+ALERT_REPOSITORY = 100
+ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
 
 class ReadingError(Exception):
@@ -357,14 +365,42 @@ def _fold_peak(state: dict, name: str, value: int, at: str) -> None:
         state["census_peaks"][name] = {"bytes": value, "at": at}
 
 
-def _fold_verify(state: dict, events: list[dict], now: datetime) -> None:
-    """Count each `verify_run` and fold its tree peak when the peak's local date is the state's day."""
+def alert_command(command: str) -> str:
+    """The first words of `command` for an alert: assignment values redacted, long words cut."""
+    words = []
+    for word in command.split()[:verify_history.COMMAND_WORDS]:
+        if ASSIGNMENT.match(word):
+            word = word.partition("=")[0] + "=<redacted>"
+        words.append(word if len(word) <= ALERT_WORD else word[:ALERT_WORD] + "…")
+    return " ".join(words) or "(no command)"
+
+
+def alert_repository(repository: str | None) -> str:
+    """The repository an alert names: the placeholder for none, a long name cut."""
+    if repository is None:
+        return verify_history.NO_REPOSITORY
+    return repository if len(repository) <= ALERT_REPOSITORY else repository[:ALERT_REPOSITORY] + "…"
+
+
+def _queue_verify_tree(state: dict, event: dict, peak: int, reading: dict, alert_bytes: int) -> None:
+    state["pending"].append({
+        "kind": "verify_tree", "logged": False,
+        "text": f"{reading['host']}: a verify run's process tree reached {peak / GIB:.1f} GiB, over the "
+                f"{alert_bytes / GIB:.1f} GiB alert line: {alert_command(event['command'])} in "
+                f"{alert_repository(event['repository'])}. {SEE}",
+    })
+
+
+def _fold_verify(state: dict, events: list[dict], reading: dict, now: datetime, alert_bytes: int) -> None:
+    """Count each `verify_run`, alert on a tree over the line, and fold the peak dated in the state's day."""
     local = now if now.tzinfo else now.astimezone()
     for event in events:
         if event["kind"] != "verify_run":
             continue
         state["verify_runs"] += 1
         peak, at = event.get("tree_peak_bytes"), event.get("tree_peak_at")
+        if _is_int(peak) and peak > alert_bytes:
+            _queue_verify_tree(state, event, peak, reading, alert_bytes)
         if not _is_int(peak) or not isinstance(at, str):
             continue
         if datetime.fromisoformat(at).astimezone(local.tzinfo).date().isoformat() == state["day"]:
@@ -535,7 +571,7 @@ def _fold_unowned(state: dict, census: dict | None, reading: dict, alert_bytes: 
 
 
 def decide(state, reading: dict, now: datetime, floor_bytes: int, others_budget_bytes: int,
-           unowned_alert_bytes: int):
+           unowned_alert_bytes: int, verify_alert_bytes: int):
     """Fold one reading into the state; answer the new state, the finished day's line or None, and the sample line."""
     day = now.date().isoformat()
     line = None
@@ -609,7 +645,7 @@ def decide(state, reading: dict, now: datetime, floor_bytes: int, others_budget_
         state["low_memory_open"] = False
     _fold_fseventsd(state, reading["fseventsd"], reading["host"])
     events = omlx_memory_events.fold_events(state, reading["observed"])
-    _fold_verify(state, events, now)
+    _fold_verify(state, events, reading, now, verify_alert_bytes)
     _fold_floor(state, reading["floor"], reading, events)
     _fold_unowned(state, census, reading, unowned_alert_bytes)
     return state, line, _sample_line(reading, now, census, events)
@@ -957,7 +993,8 @@ def sample(args) -> int:
     except OSError as error:
         print(f"{PROG}: the last sample line was not recovered ({type(error).__name__}: {error})", file=sys.stderr)
     state, line, record = decide(
-        previous, reading, now, args.floor_gib * GIB, args.others_budget_gib * GIB, args.unowned_alert_gib * GIB)
+        previous, reading, now, args.floor_gib * GIB, args.others_budget_gib * GIB, args.unowned_alert_gib * GIB,
+        int(args.verify_alert_gib * GIB))
     failed = deliver_pending(state, args, now)
     for entry in state["floor_log"]:
         print(entry, end="", flush=True)
@@ -965,6 +1002,16 @@ def sample(args) -> int:
     state["last_sample"] = {"day": state["day"], "line": record}
     write_state(directory, state, line, record)
     return 3 if failed else 0
+
+
+def _alert_gib(text: str) -> float:
+    try:
+        value = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{text!r} is not a number") from None
+    if not math.isfinite(value) or value <= 0:
+        raise argparse.ArgumentTypeError(f"{text!r} is not a finite number above 0")
+    return value
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -975,6 +1022,7 @@ def build_parser() -> argparse.ArgumentParser:
     one.add_argument("--floor-gib", type=int, required=True)
     one.add_argument("--others-budget-gib", type=int, required=True)
     one.add_argument("--unowned-alert-gib", type=int, required=True)
+    one.add_argument("--verify-alert-gib", type=_alert_gib, required=True)
     one.add_argument("--omlx-jetsam-priority", type=int, required=True)
     one.add_argument("--host", required=True)
     one.add_argument("--label", default="org.nixos.omlx")

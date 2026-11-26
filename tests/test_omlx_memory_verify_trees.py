@@ -7,11 +7,13 @@ Run: just agent-workflow-tests
 """
 
 import json
+import subprocess
+import sys
 import unittest
 
 from tests.test_omlx_memory_events import held_line
 from tests.test_omlx_memory_records import RecordsCase
-from tests.test_omlx_memory_watch import state
+from tests.test_omlx_memory_watch import SEE, state
 
 TIER = "fast"
 
@@ -109,6 +111,122 @@ class VerifyTreeRecordTest(VerifyTreeCase):
         self.assertIsNone(line["peak_verify_gib"])
         self.assertEqual(line["verify_runs"], 0)
         self.assertEqual(self.read_state()["verify_records_since"], "2026-11-25")
+
+
+class VerifyTreeAlertTest(VerifyTreeCase):
+    def setUp(self):
+        super().setUp()
+        self.sample_with("2026-11-24T12:00:00")
+
+    def sample_ok(self, now, *extra):
+        result = self.sample(*extra, now=now)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def texts(self):
+        return [request["body"]["text"] for request in self.bot.requests]
+
+    def test_a_verify_tree_over_the_alert_line_sends_exactly_one_alert_naming_it(self):
+        self.settings_on()
+        self.run_line("2026-11-24T12:00:10Z", 30.0, 3.0, "2026-11-24T12:00:20Z")
+        self.sample_with("2026-11-24T12:01:00")
+        self.sample_with("2026-11-24T12:02:00")
+        self.assertEqual(self.texts(), [
+            "eleven-m5: a verify run's process tree reached 3.0 GiB, over the 2.5 GiB alert line: just test in "
+            "fagenorn/nix-config. " + SEE])
+        self.assertEqual(self.read_state()["pending"], [])
+
+    def test_a_stub_verify_run_whose_tree_reaches_3_gib_is_recorded_and_alerted_once(self):
+        self.settings_on()
+        report = self.d / "tree-report.json"
+        report.write_text(json.dumps({
+            "unit": "byte", "bytes per unit": 1, "errors": [], "total footprint": 3 * GIB,
+            "processes": [{"pid": 1, "name": "python3", "footprint": GIB},
+                          {"pid": 2, "name": "node", "footprint": 5 * GIB // 2}],
+        }))
+        fake = self.d / "tree-footprint"
+        fake.write_text(
+            '#!/bin/sh\nwhile [ $# -gt 0 ]; do if [ "$1" = "-j" ]; then dest="$2"; fi; shift; done\n'
+            f'cp "{report}" "$dest"\n')
+        fake.chmod(0o755)
+        history = self.d / "slots" / "history.jsonl"
+        (self.d / "work").mkdir()
+        (self.d / "home").mkdir()
+        self.sample_ok("2026-11-24T12:00:30", "--slot-history", str(history))
+        run = subprocess.run(
+            [sys.executable, "-m", "agent_tools.delivery.verify_slot", "run", "--", sys.executable, "-c",
+             "import time; time.sleep(0.5)"],
+            cwd=self.d / "work", capture_output=True, text=True, timeout=60,
+            env={**self.env, "HOME": str(self.d / "home"), "VERIFY_SLOT_DIR": str(self.d / "slots"),
+                 "VERIFY_SLOT_FOOTPRINT": str(fake)})
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.sample_ok("2026-11-24T12:01:00", "--slot-history", str(history))
+        self.sample_ok("2026-11-24T12:02:00", "--slot-history", str(history))
+        [event] = self.sample_lines()[-2]["events"]
+        self.assertEqual((event["kind"], event["tree_peak_bytes"], event["repository"]), ("verify_run", 3 * GIB, None))
+        [text] = self.texts()
+        self.assertIn("reached 3.0 GiB, over the 2.5 GiB alert line", text)
+        self.assertIn("in (no repository).", text)
+
+    def test_the_queued_alert_reaches_host_alerts_as_verify_tree(self):
+        self.run_line("2026-11-24T12:00:10Z", 30.0, 3.0, "2026-11-24T12:00:20Z")
+        self.sample_with("2026-11-24T12:01:00")
+        [line] = self.alert_log.read_text().splitlines()
+        self.assertIn(
+            " verify_tree recorded only, alerts disabled: eleven-m5: a verify run's process tree reached 3.0 GiB",
+            line)
+
+    def test_the_alert_line_comes_from_the_flag(self):
+        self.settings_on()
+        self.run_line("2026-11-24T12:00:10Z", 30.0, 3.0, "2026-11-24T12:00:20Z")
+        self.sample_ok("2026-11-24T12:01:00", "--verify-alert-gib", "3.5")
+        self.run_line("2026-11-24T12:01:10Z", 30.0, 3.6, "2026-11-24T12:01:20Z")
+        self.sample_ok("2026-11-24T12:02:00", "--verify-alert-gib", "3.5")
+        [text] = self.texts()
+        self.assertIn("reached 3.6 GiB, over the 3.5 GiB alert line", text)
+
+    def test_a_tree_at_the_line_or_unmeasured_sends_nothing(self):
+        self.settings_on()
+        self.run_line("2026-11-24T12:00:10Z", 30.0, 2.5, "2026-11-24T12:00:20Z")
+        self.run_line("2026-11-24T12:00:30Z", 30.0, None, None)
+        self.sample_with("2026-11-24T12:01:00")
+        self.assertEqual(self.texts(), [])
+        events = self.sample_lines()[-1]["events"]
+        self.assertEqual([event["kind"] for event in events], ["verify_run", "verify_run"])
+        self.assertEqual(events[0]["tree_peak_bytes"], int(2.5 * GIB))
+
+    def test_the_alert_redacts_assignments_and_bounds_what_it_names(self):
+        self.settings_on()
+        self.run_line("2026-11-24T12:00:10Z", 30.0, 2.6, "2026-11-24T12:00:20Z",
+                      command="env API_TOKEN=example just", repository=None)
+        self.run_line("2026-11-24T12:00:30Z", 30.0, 2.7, "2026-11-24T12:00:40Z", command="x" * 5000)
+        self.run_line("2026-11-24T12:00:50Z", 30.0, 2.8, "2026-11-24T12:01:00Z", repository="r" * 150)
+        self.sample_with("2026-11-24T12:01:30")
+        redacted, long_word, long_repository = self.texts()
+        self.assertIn(": env API_TOKEN=<redacted> just in (no repository).", redacted)
+        self.assertNotIn("example", redacted)
+        self.assertIn(": " + "x" * 60 + "… in fagenorn/nix-config.", long_word)
+        self.assertLess(len(long_word), 4096)
+        self.assertIn("just test in " + "r" * 100 + "….", long_repository)
+
+    def test_a_non_positive_or_non_finite_alert_line_is_a_usage_error(self):
+        for value in ("0", "-1", "nan"):
+            with self.subTest(value=value):
+                result = self.sample("--verify-alert-gib", value, now="2026-11-24T12:01:00")
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn("argument --verify-alert-gib:", result.stderr)
+
+    def test_a_failed_send_is_retried_without_a_second_alert(self):
+        self.settings.unlink()
+        self.run_line("2026-11-24T12:00:10Z", 30.0, 3.0, "2026-11-24T12:00:20Z")
+        failed = self.sample(now="2026-11-24T12:01:00")
+        self.assertEqual(failed.returncode, 3, failed.stderr)
+        [line] = self.alert_log.read_text().splitlines()
+        self.assertIn(" verify_tree not sent (", line)
+        self.settings_on()
+        self.sample_with("2026-11-24T12:02:00")
+        self.sample_with("2026-11-24T12:03:00")
+        self.assertEqual(len(self.texts()), 1)
+        self.assertEqual(self.read_state()["pending"], [])
 
 
 if __name__ == "__main__":

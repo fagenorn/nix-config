@@ -54,4 +54,6 @@ rec {
   fseventsdRestartMinutes = 60;
   # Unowned memory (system footprint minus process footprints) over which the watcher alerts.
   unownedAlertGiB = 5;
+  # The whole-tree footprint of one verification run over which the watcher alerts (provisional).
+  verifyAlertGiB = 2.5;
 }
