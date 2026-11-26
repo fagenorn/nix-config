@@ -1,12 +1,16 @@
 """The verify-slot timeout share: how much of a repository's recent requests gave up waiting for a slot.
 
 Run: python3 -m agent_tools.delivery.verify_slot_timeouts --repository OWNER/REPO [--hours N] [--history FILE]
+     [--command TEXT] [--max-timed-out N]
 
 The requests are the readable history records of the repository started within the last `--hours` hours (not
-after now). A request timed out when it exited 75 without ever holding a slot. The verdict is `met` when the
-timed-out share is strictly below the share before the queue (`BASELINE_TIMED_OUT` of `BASELINE_REQUESTS`),
-compared in integers, and `not_yet` while fewer than `MIN_REQUESTS` requests are in the window. One JSON line is
-printed. Exit 0 met, 1 not met, 75 not yet, 2 when the history cannot be read or the hours are not positive.
+after now); with `--command` only those of that command. A request timed out when it exited 75 without ever
+holding a slot. The verdict is `met` when the timed-out share is strictly below the share before the queue
+(`BASELINE_TIMED_OUT` of `BASELINE_REQUESTS`), compared in integers, and `not_yet` while fewer than `MIN_REQUESTS`
+requests are in the window. With `--max-timed-out` the window is judged by count alone, whatever its size: `not_met`
+when more than N requests timed out, else `met`, and `not_yet` only when no request is in the window; `MIN_REQUESTS`
+gates the share rule only. One JSON line is printed. Exit 0 met, 1 not met, 75 not yet, 2 when the history cannot be
+read or the hours or the maximum are not valid.
 """
 
 import argparse
@@ -32,12 +36,20 @@ def _positive_hours(text: str) -> int:
     return value
 
 
-def count_requests(records: list[dict], repository: str, hours: int, now: datetime) -> tuple[int, int]:
-    """The requests of `repository` started in the window, and how many of those timed out."""
+def _non_negative(text: str) -> int:
+    value = int(text)
+    if value < 0:
+        raise argparse.ArgumentTypeError("the maximum must not be negative")
+    return value
+
+
+def count_requests(records: list[dict], repository: str, hours: int, now: datetime,
+                   command: str | None = None) -> tuple[int, int]:
+    """The requests of `repository` (of `command` when given) started in the window, and how many timed out."""
     earliest = now - timedelta(hours=hours)
     requests = timed_out = 0
     for record in records:
-        if record["repository"] != repository:
+        if record["repository"] != repository or (command is not None and record["command"] != command):
             continue
         if not earliest <= canonical.parse_rfc3339_utc(record["started"]) <= now:
             continue
@@ -52,6 +64,8 @@ def main(argv=None) -> int:
     parser.add_argument("--repository", required=True)
     parser.add_argument("--hours", type=_positive_hours, default=DEFAULT_HOURS)
     parser.add_argument("--history", type=Path, default=None)
+    parser.add_argument("--command", default=None)
+    parser.add_argument("--max-timed-out", type=_non_negative, default=None)
     args = parser.parse_args(argv)
     try:
         path = args.history or verify_history.history_path(verify_slot.slot_dir())
@@ -59,8 +73,16 @@ def main(argv=None) -> int:
     except OSError as error:
         print(f"verify-slot-timeouts: {error}", file=sys.stderr)
         return UNREADABLE
-    requests, timed_out = count_requests(records, args.repository.lower(), args.hours, datetime.now(timezone.utc))
-    if requests < MIN_REQUESTS:
+    requests, timed_out = count_requests(records, args.repository.lower(), args.hours, datetime.now(timezone.utc),
+                                         args.command)
+    if args.max_timed_out is not None:
+        if timed_out > args.max_timed_out:
+            verdict, code = "not_met", NOT_MET
+        elif requests >= 1:
+            verdict, code = "met", MET
+        else:
+            verdict, code = "not_yet", NOT_YET
+    elif requests < MIN_REQUESTS:
         verdict, code = "not_yet", NOT_YET
     elif timed_out * BASELINE_REQUESTS < BASELINE_TIMED_OUT * requests:
         verdict, code = "met", MET
@@ -68,7 +90,8 @@ def main(argv=None) -> int:
         verdict, code = "not_met", NOT_MET
     print(json.dumps({"verdict": verdict, "repository": args.repository.lower(), "hours": args.hours,
                       "requests": requests, "timed_out": timed_out, "baseline_timed_out": BASELINE_TIMED_OUT,
-                      "baseline_requests": BASELINE_REQUESTS}))
+                      "baseline_requests": BASELINE_REQUESTS, "command": args.command,
+                      "max_timed_out": args.max_timed_out}))
     return code
 
 
