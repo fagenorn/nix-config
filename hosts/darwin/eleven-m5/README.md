@@ -85,10 +85,11 @@ number changed in one place cannot drift from the rest.
 
 The budget is `totalGiB` - `omlxCeilingGiB` - `omlxOverCeilingGiB` - `floorGiB`
 = 256 - 192 - 2 - 10 = 52 GiB for everything but the model. The allowances add
-up to 8 + 1 + 2 x 4 + 4 x 3 + 12 + 5 = 46 GiB, so 6 GiB are unallocated (the 6 GiB the
-floor gave up, see "Why the floor is 10 GiB"). The
-5 GiB for the agent's Claude sessions had to come from somewhere, and
-`verifyRunGiB` went from 6 to 4 to pay for it. The 52 GiB others budget is the
+up to 8 + 1 + 4 x 3 + 4 x 3 + 12 + 5 = 50 GiB, so 2 GiB are unallocated. The
+5 GiB for the agent's Claude sessions came from `verifyRunGiB` going from 6 to 4,
+and on 26 Nov the owner moved it from 4 to 3 and `verify_slots` from 2 to 4,
+because on 25 Nov 92 of 306 slot requests gave up after their 600 s wait; no
+verify tree in the manager's sampler or the floor log passed 1.7 GiB. The 52 GiB others budget is the
 owner's capacity number: whether it holds is a question for the lead.
 
 | Name | Value | What it bounds | Source |
@@ -98,8 +99,8 @@ owner's capacity number: whether it holds is a question for the lead.
 | `omlxOverCeilingGiB` | 2 | How far the server's footprint may pass its ceiling before the budget stops holding. | Estimate of the overshoot the guard allows; the server's footprint read 187360249992 B (174.5 GiB), under its ceiling. |
 | `colimaGiB` | 8 | The Colima VM's memory, passed as `--memory`. | `~/.colima/default/colima.yaml` shows `memory: 8`. |
 | `colimaOverheadGiB` | 1 | What the VM's host-side processes take beyond its memory. | Estimate, checked against the day line. |
-| `verifySlots` | 2 | Verification runs that may hold a slot at once. | Read from `verify_slots` in `home/common/agent-skills/host-declarations/eleven-m5.json`. |
-| `verifyRunGiB` | 4 | One verification run's memory (provisional). | Estimate; `peak_others_gib` in the day line tests it. |
+| `verifySlots` | 4 | Verification runs that may hold a slot at once. | Read from `verify_slots` in `home/common/agent-skills/host-declarations/eleven-m5.json`. |
+| `verifyRunGiB` | 3 | One verification run's memory (provisional). | Owner's decision of 26 Nov; no verify tree passed 1.7 GiB in the manager's sampler or the floor log; those tree samples are the evidence for the per-run estimate. `peak_others_gib` in the day line combines all non-model memory, so it tests only the aggregate others budget, not this estimate. |
 | `agentSessionsGiB` | 5 | What the agent's Claude sessions take together. | 4.5 GiB of Claude sessions at the 24 Nov panic. |
 | `ciRunners` | 4 | CI jobs that may run at once, one per runner. | Counted in `default.nix` from `config.services.github-runners`, not declared in `memory-budget.nix`. |
 | `ciJobGiB` | 3 | One CI job's memory (provisional). | Estimate; `peak_others_gib` in the day line tests it. |

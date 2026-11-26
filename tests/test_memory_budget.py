@@ -52,11 +52,12 @@ class MemoryBudgetTest(unittest.TestCase):
             b["colimaGiB"] + b["colimaOverheadGiB"] + b["verifySlots"] * b["verifyRunGiB"]
             + b["ciRunners"] * b["ciJobGiB"] + b["macosGiB"] + b["agentSessionsGiB"]
         )
+        self.assertEqual(allowances, 50)
         self.assertLessEqual(allowances, b["othersBudgetGiB"])
         for key, value in (
             ("floorSamples", 3), ("floorGraceSeconds", 5), ("fastSampleSeconds", 2), ("slowSampleSeconds", 10),
             ("floorMarginGiB", 16), ("floorFallGiB", 2), ("floorMinTreeGiB", 1), ("runBoundGiB", 24), ("agentSessionsGiB", 5),
-            ("verifyRunGiB", 4),
+            ("verifyRunGiB", 3), ("verifySlots", 4),
         ):
             with self.subTest(key=key):
                 self.assertEqual(b[key], value)

@@ -17,8 +17,9 @@ rec {
     (builtins.fromJSON (
       builtins.readFile ../../../home/common/agent-skills/host-declarations/eleven-m5.json
     )).verify_slots;
-  # One verification run's memory (provisional, checked against the day line); 4 leaves room for agentSessionsGiB.
-  verifyRunGiB = 4;
+  # One verification run's memory (provisional, checked against the day line).
+  # No verify tree passed 1.7 GiB when measured, so 3 pays for four slots.
+  verifyRunGiB = 3;
   # One CI job's memory (provisional, checked against the day line).
   ciJobGiB = 3;
   # What macOS and its daemons take (provisional, checked against the day line).

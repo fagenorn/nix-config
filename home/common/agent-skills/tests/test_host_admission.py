@@ -34,11 +34,11 @@ class HostAdmissionTest(unittest.TestCase):
         self.assertIsNone(host_admission.verify_budget_seconds(committed))
         self.assertEqual(host_admission.route_slots(committed, host_admission.ENGINE_ROUTE), 8)
 
-    def test_the_eleven_m5_declaration_is_the_shared_one_with_two_verify_slots_and_a_600_second_budget(self):
+    def test_the_eleven_m5_declaration_is_the_shared_one_with_four_verify_slots_and_a_600_second_budget(self):
         eleven = json.loads((HOST_DECLARATIONS / "eleven-m5.json").read_text(encoding="utf-8"))
         shared = json.loads(COMMITTED_DECLARATION.read_text(encoding="utf-8"))
         self.assertEqual(host_admission.validate_declaration(eleven), eleven)
-        self.assertEqual(host_admission.verify_slots(eleven), 2)
+        self.assertEqual(host_admission.verify_slots(eleven), 4)
         self.assertEqual(host_admission.verify_budget_seconds(eleven), 600)
         self.assertEqual({k: v for k, v in eleven.items()
                           if k not in ("verify_slots", "verify_budget_seconds")}, shared)
