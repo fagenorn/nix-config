@@ -1,7 +1,9 @@
 """Compare a suite timing report with the base branch's and say when the suite grew (issue 1385).
 
 Usage: `python -m agent_tools.delivery.suite_timing compare --head <path> --base <path>
---base-label <label> [--threshold <seconds>]`
+--base-label <label> [--threshold <seconds>]`, or `python -m agent_tools.delivery.suite_timing
+join --workflow <path> --shard-job <job> --shards-dir <dir> --out <path> --needs-result
+<result>`
 
 CI runs this module from source (it has no command-table row, after
 `agent_tools.delivery.suite_runner`); decision: ADR-delivery-015. It reads two timing
@@ -49,24 +51,68 @@ printed. CI sends only stdout to the job summary.
 Exits. 0 whether the suite grew or not, and with no baseline. 2 for a usage error, a
 `--threshold` that is not finite and at least 0, or a head report that is refused:
 `suite-timing: <reason>` goes to stderr and nothing to stdout.
+
+Join. CI runs the suite as shards, each uploading its runner report as the artifact
+`suite-timing-shard-<n>-attempt-<a>-<success|failure>` (`<a>` the run attempt, the last
+word the job's status when it uploaded) holding `suite-timing.json`; `join` makes one
+report of them, a verdict on each shard and an exit status. Every line goes to stdout,
+prefixed `suite-timing: `.
+
+1. The shards expected are `1..N`, N read from the workflow, never from the reports: in
+   the job `--shard-job` (its `  <job>:` line once), exactly one line
+   `        shard: [1, ..., N]` listing 1 to N. A workflow that is unreadable or declares
+   otherwise prints `<workflow path>: <reason>`, writes nothing and exits 1.
+2. The artifacts are the subdirectories of `--shards-dir` (a missing one is none). A name
+   of another form, two names of one shard and attempt, or a shard above N prints its
+   reason, writes nothing and exits 1. For each shard its highest attempt is read, so a
+   rerun supersedes the earlier attempt.
+3. Each picked artifact's report must be a valid shard report (a runner report with
+   `shard` and `shard_count` whose counts agree with its rows) of that shard and of N
+   shards. A refused report fails its shard and blocks the joined report; the surviving
+   reports do not stand in for it.
+4. One line for each shard, in order, the first that applies: `shard i of N failed: it
+   wrote no report`; `... failed: its report is invalid: <reason>`; `... failed: <f> of
+   <m> members failed: <those members, in row order>`; `... failed: its job had failed
+   when it uploaded a passing report`; else `shard i of N passed: <m> members in <w>s`.
+5. When every shard has a valid report and no member is in two of them, the joined report
+   is written to `--out`; a member in two prints its reason and nothing is written. Its
+   keys are `version` 1, `members`, `passed`, `failed` (sums), `jobs` (the largest),
+   `shard_count`, `wall_seconds` (the slowest shard's), `member_seconds` (the sum),
+   `cpu_seconds` (the sum), `timings` (every row, slowest first, ties by shard then row
+   order) and `shard_summaries` (`shard`, `members`, `failed`, `wall_seconds` of each),
+   so `compare` reads it as it reads a runner report.
+6. The last line is `failed shards: <numbers>` and the exit 1 when any shard failed. Else,
+   when `--needs-result` (the shard jobs' conclusion) is not `success`, it is the line
+   `the shard jobs concluded <result> though every shard uploaded a passing report from a
+   passing job` then `unconfirmed shards: 1, ..., N`, exit 1. Else `every shard passed`,
+   exit 0. 2 is a usage error.
+
+This module imports only the standard library and `agent_tools` modules that do, because
+CI runs it with the runner image's system `python3`.
 """
 
 import argparse
 import json
 import math
+import re
 import statistics
 import sys
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
 
 from agent_tools import canonical
+from agent_tools.delivery import suite_runner
 
 DEFAULT_THRESHOLD = 60.0
 FACTOR_FLOOR_SECONDS = 1.0
 SLOWEST_ROWS = 10
 REPORT_VERSION = 1
+SHARD_REPORT = "suite-timing.json"
+SHARD_ARTIFACT_RE = re.compile(
+    r"suite-timing-shard-([1-9][0-9]*)-attempt-([1-9][0-9]*)-(success|failure)")
+_MATRIX_LINE_RE = re.compile(r"        shard: \[([1-9][0-9]*(?:, [1-9][0-9]*)*)\]")
 
 
 class ReportError(ValueError):
@@ -193,6 +239,211 @@ def summary_line(head: dict, comparison: Comparison | None, *, threshold: float,
             f"within the {threshold:g}s threshold: {figures} {tail}")
 
 
+def declared_shard_count(workflow_text: str, job: str) -> int:
+    """The N of the one `        shard: [1, ..., N]` line in the block of the job `job`."""
+    lines = workflow_text.splitlines()
+    heads = [index for index, line in enumerate(lines) if line == f"  {job}:"]
+    if len(heads) != 1:
+        raise ReportError(f"job {job} is not declared once")
+    block: list[str] = []
+    for line in lines[heads[0] + 1:]:
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#") and len(line) - len(line.lstrip(" ")) <= 2:
+            break
+        block.append(line)
+    matches = [match for line in block if (match := _MATRIX_LINE_RE.fullmatch(line))]
+    if len(matches) != 1:
+        raise ReportError(f"job {job} has no one 'shard: [1, ..., N]' matrix line")
+    listed = [int(number) for number in matches[0].group(1).split(", ")]
+    if listed != list(range(1, len(listed) + 1)):
+        raise ReportError(f"the matrix shards are {listed}, not 1 to {len(listed)}")
+    return len(listed)
+
+
+def load_shard_report(path: Path) -> dict:
+    """`load_report` of a shard's report, and its shard and counts checked as the runner
+    writes them; raise `ReportError` with the reason."""
+    report = load_report(path)
+    for key in ("shard", "shard_count", "members", "passed", "failed", "jobs"):
+        value = report.get(key)
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ReportError(f"{key} is {value!r}, not an integer")
+    if not 1 <= report["shard"] <= report["shard_count"]:
+        raise ReportError(f"shard {report['shard']} is not within 1 to {report['shard_count']}")
+    for key in ("members", "passed", "failed"):
+        if report[key] < 0:
+            raise ReportError(f"{key} is {report[key]}, below 0")
+    if report["jobs"] < 1:
+        raise ReportError(f"jobs is {report['jobs']}, below 1")
+    for key in ("wall_seconds", "cpu_seconds"):
+        if not _is_number(report.get(key)):
+            raise ReportError(f"{key} is not a finite number of at least 0")
+    for index, row in enumerate(report["timings"]):
+        if not isinstance(row.get("passed"), bool):
+            raise ReportError(f"timings[{index}]: passed is not a boolean")
+    members, failed, rows = report["members"], report["failed"], report["timings"]
+    if members != len(rows):
+        raise ReportError(f"members is {members} but timings has {len(rows)} rows")
+    unpassed = sum(1 for row in rows if not row["passed"])
+    if failed != unpassed:
+        raise ReportError(f"failed is {failed} but {unpassed} timing rows did not pass")
+    if report["passed"] != members - failed:
+        raise ReportError(f"passed is {report['passed']}, not members {members} minus "
+                          f"failed {failed}")
+    return report
+
+
+def pick_artifacts(names: Iterable[str]) -> dict[int, tuple[int, str, str]]:
+    """Each shard's `(attempt, status, name)` of its highest attempt among the artifact
+    `names`; raise `ReportError` for a name of another form or a shard attempt named twice."""
+    picked: dict[int, tuple[int, str, str]] = {}
+    seen: dict[tuple[int, int], str] = {}
+    for name in sorted(names):
+        match = SHARD_ARTIFACT_RE.fullmatch(name)
+        if match is None:
+            raise ReportError(f"artifact {name} is not "
+                              "suite-timing-shard-<n>-attempt-<a>-<success|failure>")
+        shard, attempt, status = int(match[1]), int(match[2]), match[3]
+        if (shard, attempt) in seen:
+            raise ReportError(f"artifacts {seen[shard, attempt]} and {name} are both "
+                              f"shard {shard} attempt {attempt}")
+        seen[shard, attempt] = name
+        if shard not in picked or attempt > picked[shard][0]:
+            picked[shard] = (attempt, status, name)
+    return picked
+
+
+def join_reports(reports: Sequence[dict], count: int) -> dict:
+    """One report of the `count` shard reports; raise `ReportError` when they are not
+    exactly shards 1 to `count` of `count` or one member is in two of them."""
+    if len(reports) != count:
+        raise ReportError(f"{len(reports)} shard reports, expected {count}")
+    by_shard: dict[int, dict] = {}
+    for shard_report in reports:
+        if shard_report["shard_count"] != count:
+            raise ReportError(f"shard {shard_report['shard']} is of {shard_report['shard_count']}"
+                              f" shards, expected {count}")
+        if shard_report["shard"] in by_shard:
+            raise ReportError(f"shard {shard_report['shard']} is reported twice")
+        by_shard[shard_report["shard"]] = shard_report
+    if sorted(by_shard) != list(range(1, count + 1)):
+        raise ReportError(f"the shards are {sorted(by_shard)}, not 1 to {count}")
+    owner: dict[str, int] = {}
+    rows: list[tuple[float, int, int, dict]] = []
+    for shard in range(1, count + 1):
+        for position, row in enumerate(by_shard[shard]["timings"]):
+            if row["member"] in owner:
+                raise ReportError(f"member {row['member']} is in shard {owner[row['member']]} "
+                                  f"and shard {shard}")
+            owner[row["member"]] = shard
+            rows.append((-row["seconds"], shard, position, row))
+    rows.sort(key=lambda entry: entry[:3])
+    ordered = [by_shard[shard] for shard in range(1, count + 1)]
+    return {
+        "version": REPORT_VERSION,
+        "members": sum(r["members"] for r in ordered),
+        "passed": sum(r["passed"] for r in ordered),
+        "failed": sum(r["failed"] for r in ordered),
+        "jobs": max(r["jobs"] for r in ordered),
+        "shard_count": count,
+        "wall_seconds": max(r["wall_seconds"] for r in ordered),
+        "member_seconds": sum(r["member_seconds"] for r in ordered),
+        "cpu_seconds": round(sum(r["cpu_seconds"] for r in ordered), 1),
+        "timings": [entry[3] for entry in rows],
+        "shard_summaries": [{"shard": r["shard"], "members": r["members"],
+                             "failed": r["failed"], "wall_seconds": r["wall_seconds"]}
+                            for r in ordered],
+    }
+
+
+def _say(text: str) -> None:
+    print(f"suite-timing: {text}")
+
+
+def _shard_verdicts(shards_dir: Path, count: int) -> tuple[dict[int, dict], list[str], list[int]]:
+    """The valid report of each shard that has one, the line of each shard 1 to `count` and
+    the numbers of the shards that failed; raise `ReportError` for the artifact set."""
+    names = sorted(entry.name for entry in shards_dir.iterdir()
+                   if entry.is_dir()) if shards_dir.is_dir() else []
+    picked = pick_artifacts(names)
+    for shard in sorted(picked):
+        if shard > count:
+            raise ReportError(f"artifact {picked[shard][2]} is shard {shard}, "
+                              f"the workflow declares {count}")
+    reports: dict[int, dict] = {}
+    lines: list[str] = []
+    failed: list[int] = []
+    for shard in range(1, count + 1):
+        head = f"shard {shard} of {count}"
+        if shard not in picked:
+            lines.append(f"{head} failed: it wrote no report")
+            failed.append(shard)
+            continue
+        _, status, name = picked[shard]
+        try:
+            report = load_shard_report(shards_dir / name / SHARD_REPORT)
+            if (report["shard"], report["shard_count"]) != (shard, count):
+                raise ReportError(f"shard {report['shard']} of {report['shard_count']} in "
+                                  f"artifact {name}, expected {shard} of {count}")
+        except ReportError as error:
+            lines.append(f"{head} failed: its report is invalid: {error}")
+            failed.append(shard)
+            continue
+        reports[shard] = report
+        if report["failed"] > 0:
+            names_failed = ", ".join(row["member"] for row in report["timings"]
+                                     if not row["passed"])
+            lines.append(f"{head} failed: {report['failed']} of {report['members']} members "
+                         f"failed: {names_failed}")
+            failed.append(shard)
+        elif status == "failure":
+            lines.append(f"{head} failed: its job had failed when it uploaded a passing report")
+            failed.append(shard)
+        else:
+            lines.append(f"{head} passed: {report['members']} members in "
+                         f"{report['wall_seconds']:g}s")
+    return reports, lines, failed
+
+
+def _join(args: argparse.Namespace) -> int:
+    try:
+        count = declared_shard_count(args.workflow.read_text(encoding="utf-8"), args.shard_job)
+    except (OSError, UnicodeDecodeError) as error:
+        _say(f"{args.workflow}: cannot read: {error}")
+        return 1
+    except ReportError as error:
+        _say(f"{args.workflow}: {error}")
+        return 1
+    try:
+        reports, lines, failed = _shard_verdicts(args.shards_dir, count)
+    except ReportError as error:
+        _say(str(error))
+        return 1
+    for line in lines:
+        _say(line)
+    joined_ok = True
+    if len(reports) == count:
+        try:
+            joined = join_reports([reports[shard] for shard in range(1, count + 1)], count)
+        except ReportError as error:
+            _say(str(error))
+            joined_ok = False
+        else:
+            suite_runner.write_report(args.out, joined)
+    if failed:
+        _say(f"failed shards: {', '.join(str(shard) for shard in failed)}")
+        return 1
+    if not joined_ok:
+        return 1
+    if args.needs_result != "success":
+        _say(f"the shard jobs concluded {args.needs_result} though every shard uploaded a "
+             "passing report from a passing job")
+        _say(f"unconfirmed shards: {', '.join(str(shard) for shard in range(1, count + 1))}")
+        return 1
+    _say("every shard passed")
+    return 0
+
+
 def _threshold(text: str) -> float:
     try:
         value = float(text)
@@ -211,7 +462,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     compare_parser.add_argument("--base", type=Path, required=True)
     compare_parser.add_argument("--base-label", required=True)
     compare_parser.add_argument("--threshold", type=_threshold, default=DEFAULT_THRESHOLD)
+    join_parser = commands.add_parser("join")
+    join_parser.add_argument("--workflow", type=Path, required=True)
+    join_parser.add_argument("--shard-job", required=True)
+    join_parser.add_argument("--shards-dir", type=Path, required=True)
+    join_parser.add_argument("--out", type=Path, required=True)
+    join_parser.add_argument("--needs-result", required=True)
     args = parser.parse_args(argv)
+    if args.command == "join":
+        return _join(args)
     try:
         head = load_report(args.head)
     except ReportError as error:

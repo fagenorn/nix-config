@@ -7,6 +7,7 @@ report the suite runner wrote.
 """
 
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -15,7 +16,9 @@ from pathlib import Path
 
 from agent_tools.delivery import suite_runner
 from agent_tools.delivery.suite_runner import MemberResult
-from agent_tools.delivery.suite_timing import compare, load_report, speed_factor, summary_line
+from agent_tools.delivery.suite_timing import (
+    ReportError, compare, declared_shard_count, join_reports, load_report, load_shard_report,
+    speed_factor, summary_line)
 
 TIER = "fast"
 
@@ -33,6 +36,51 @@ def report(seconds: dict[str, float]) -> dict:
         "timings": [{"member": f"tests/test_{name}.py", "seconds": value,
                      "cpu_seconds": 0.0, "passed": True} for name, value in rows],
     }
+
+
+def shard_report(index: int, count: int, seconds: dict[str, float], failed=()) -> dict:
+    """What the runner writes for one shard: `report(seconds)` plus the counts and the shard."""
+    made = report(seconds)
+    for row in made["timings"]:
+        row["passed"] = row["member"] not in {f"tests/test_{name}.py" for name in failed}
+    broken = sum(1 for row in made["timings"] if not row["passed"])
+    return {**made, "members": len(seconds), "passed": len(seconds) - broken, "failed": broken,
+            "jobs": 4, "wall_seconds": max(seconds.values()), "cpu_seconds": 0.0,
+            "shard": index, "shard_count": count}
+
+
+def write_artifact(root: Path, made: dict | str, attempt: int = 1, status: str = "success",
+                   name: str | None = None) -> Path:
+    shard = made["shard"] if isinstance(made, dict) else 0
+    path = root / (name or f"suite-timing-shard-{shard}-attempt-{attempt}-{status}")
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "suite-timing.json").write_text(
+        made if isinstance(made, str) else json.dumps(made), encoding="utf-8")
+    return path
+
+
+def workflow(root: Path, shards: str = "1, 2") -> Path:
+    path = root / "ci.yaml"
+    path.write_text("\n".join([
+        "jobs:", "  agent-workflow-tests-shard:", "    strategy:", "      matrix:",
+        f"        shard: [{shards}]", "  agent-workflow-tests:",
+        "    name: Agent Workflow Tests", ""]), encoding="utf-8")
+    return path
+
+
+def run_module(root: Path, *arguments: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [sys.executable, "-m", "agent_tools.delivery.suite_timing", *arguments],
+        capture_output=True, text=True, check=False, cwd=root,
+        env={"PYTHONPATH": PYTHON_PATH, "PATH": "/usr/bin:/bin"})
+
+
+def join(root: Path, needs: str = "success", shards_dir: Path | None = None
+         ) -> subprocess.CompletedProcess:
+    return run_module(
+        root, "join", "--workflow", str(root / "ci.yaml"), "--shard-job",
+        "agent-workflow-tests-shard", "--shards-dir", str(shards_dir or root / "shards"),
+        "--out", str(root / "out" / "suite-timing.json"), "--needs-result", needs)
 
 
 def line_for(base: dict[str, float], head: dict[str, float]) -> str:
@@ -256,6 +304,214 @@ class CommandTest(unittest.TestCase):
         self.assertEqual(comparison.growth, 0.0)
 
 
+class JoinTest(unittest.TestCase):
+    def test_join_reports_orders_rows_slowest_first_ties_by_shard(self):
+        joined = join_reports([shard_report(2, 2, {"c": 5, "d": 1}),
+                               shard_report(1, 2, {"a": 5, "b": 2})], 2)
+        self.assertEqual([row["member"] for row in joined["timings"]],
+                         ["tests/test_a.py", "tests/test_c.py", "tests/test_b.py",
+                          "tests/test_d.py"])
+        self.assertEqual(joined["shard_summaries"], [
+            {"shard": 1, "members": 2, "failed": 0, "wall_seconds": 5},
+            {"shard": 2, "members": 2, "failed": 0, "wall_seconds": 5}])
+        self.assertEqual(list(joined), [
+            "version", "members", "passed", "failed", "jobs", "shard_count", "wall_seconds",
+            "member_seconds", "cpu_seconds", "timings", "shard_summaries"])
+
+    def test_the_declared_shard_count_is_read_from_the_shard_job_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            text = workflow(Path(directory)).read_text(encoding="utf-8")
+        job = "agent-workflow-tests-shard"
+        self.assertEqual(declared_shard_count(text, job), 2)
+        self.assertEqual(declared_shard_count(text + "        shard: [1, 2, 3]\n", job), 2)
+        cases = {
+            "no shard job": (text, "other-job"),
+            "two matrix lines": (text.replace(
+                "    strategy:", "    strategy:\n      matrix:\n        shard: [1, 2]"), job),
+            "not from 1": (text.replace("[1, 2]", "[2, 3]"), job),
+        }
+        for label, (made, name) in cases.items():
+            with self.subTest(label), self.assertRaises(ReportError):
+                declared_shard_count(made, name)
+
+
+class JoinCommandTest(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        self.shards = self.root / "shards"
+        self.out = self.root / "out" / "suite-timing.json"
+
+    def lines(self, result: subprocess.CompletedProcess) -> list[str]:
+        return result.stdout.splitlines()
+
+    def test_the_shard_reports_join_into_one_report_the_compare_reads(self):
+        workflow(self.root)
+        write_artifact(self.shards, shard_report(1, 2, {"a": 30, "b": 10}))
+        write_artifact(self.shards, shard_report(2, 2, {"c": 20, "d": 15}))
+        result = join(self.root)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        joined = load_report(self.out)
+        self.assertEqual([row["member"] for row in joined["timings"]],
+                         ["tests/test_a.py", "tests/test_c.py", "tests/test_d.py",
+                          "tests/test_b.py"])
+        self.assertEqual((joined["member_seconds"], joined["members"], joined["shard_count"],
+                          joined["wall_seconds"]), (75, 4, 2, 30))
+        self.assertEqual(self.lines(result), [
+            "suite-timing: shard 1 of 2 passed: 2 members in 30s",
+            "suite-timing: shard 2 of 2 passed: 2 members in 20s",
+            "suite-timing: every shard passed"])
+        compared = run_module(self.root, "compare", "--head", str(self.out), "--base",
+                              str(self.out), "--base-label", "main")
+        self.assertEqual(compared.returncode, 0, compared.stderr)
+
+    def test_a_failed_shard_fails_the_join_naming_it_and_still_writes_the_report(self):
+        workflow(self.root)
+        write_artifact(self.shards, shard_report(1, 2, {"a": 30, "b": 10}))
+        write_artifact(self.shards, shard_report(2, 2, {"c": 20, "d": 15}, failed=("c",)),
+                       status="failure")
+        result = join(self.root, needs="failure")
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("suite-timing: shard 2 of 2 failed: 1 of 2 members failed: "
+                      "tests/test_c.py", self.lines(result))
+        self.assertEqual(self.lines(result)[-1], "suite-timing: failed shards: 2")
+        self.assertEqual(load_report(self.out)["failed"], 1)
+
+    def test_shards_that_left_no_report_are_named_from_the_declaration(self):
+        workflow(self.root, "1, 2, 3, 4")
+        result = join(self.root, needs="failure")
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(self.lines(result), [
+            *(f"suite-timing: shard {i} of 4 failed: it wrote no report" for i in range(1, 5)),
+            "suite-timing: failed shards: 1, 2, 3, 4"])
+        self.assertFalse(self.out.exists())
+
+    def test_a_shard_whose_job_failed_is_named_though_its_report_passed(self):
+        workflow(self.root)
+        write_artifact(self.shards, shard_report(1, 2, {"a": 30}))
+        write_artifact(self.shards, shard_report(2, 2, {"c": 20}), status="failure")
+        result = join(self.root, needs="failure")
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("suite-timing: shard 2 of 2 failed: its job had failed when it "
+                      "uploaded a passing report", self.lines(result))
+        self.assertEqual(self.lines(result)[-1], "suite-timing: failed shards: 2")
+        self.assertTrue(self.out.exists())
+
+    def test_a_rerun_attempt_supersedes_the_earlier_one(self):
+        workflow(self.root)
+        write_artifact(self.shards, shard_report(1, 2, {"a": 30}))
+        write_artifact(self.shards, shard_report(2, 2, {"c": 20}, failed=("c",)),
+                       attempt=1, status="failure")
+        write_artifact(self.shards, shard_report(2, 2, {"c": 20}), attempt=2)
+        result = join(self.root)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.lines(result)[-1], "suite-timing: every shard passed")
+        self.assertEqual(load_report(self.out)["failed"], 0)
+
+    def test_an_invalid_incomplete_or_inconsistent_set_fails_and_writes_nothing(self):
+        one, two = (shard_report(1, 2, {"a": 3, "b": 1}), shard_report(2, 2, {"c": 2, "d": 1}))
+
+        def arrange(first=one, second=two, extra=None):
+            def made():
+                write_artifact(self.shards, first)
+                if second is not None:
+                    write_artifact(self.shards, second)
+                for name in extra or ():
+                    (self.shards / name).mkdir()
+            return made
+
+        def broken(**changes):
+            return {**two, **changes}
+
+        def unreadable():
+            write_artifact(self.shards, shard_report(1, 1, {"a": 1}))
+            for shard in (2, 3, 4):
+                write_artifact(self.shards, '{"version": 1', name=(
+                    f"suite-timing-shard-{shard}-attempt-1-success"))
+
+        reasoned = "suite-timing: shard 2 of 2 failed: its report is invalid: "
+        cases = {
+            "wrong shard and unreadable files": (
+                "1, 2, 3, 4", unreadable, [
+                    "suite-timing: shard 1 of 4 failed: its report is invalid: shard 1 of 1 "
+                    "in artifact suite-timing-shard-1-attempt-1-success, expected 1 of 4"],
+                "suite-timing: failed shards: 1, 2, 3, 4"),
+            "a shard without a report": (
+                "1, 2, 3", arrange(first=shard_report(1, 3, {"a": 3}), second=None),
+                ["suite-timing: shard 3 of 3 failed: it wrote no report"],
+                "suite-timing: failed shards: 2, 3"),
+            "failed count against the rows": (
+                "1, 2", arrange(second=broken(
+                    timings=[{**row, "passed": row["member"] != "tests/test_c.py"}
+                             for row in two["timings"]], passed=2)),
+                [reasoned + "failed is 0 but 1 timing rows did not pass"],
+                "suite-timing: failed shards: 2"),
+            "passed count": (
+                "1, 2", arrange(second=broken(passed=5)),
+                [reasoned + "passed is 5, not members 2 minus failed 0"],
+                "suite-timing: failed shards: 2"),
+            "passed that is text": (
+                "1, 2", arrange(second=broken(passed="2")),
+                [reasoned + "passed is '2', not an integer"],
+                "suite-timing: failed shards: 2"),
+            "members against the rows": (
+                "1, 2", arrange(second=broken(members=3)),
+                [reasoned + "members is 3 but timings has 2 rows"],
+                "suite-timing: failed shards: 2"),
+            "an artifact of no shard": (
+                "1, 2", arrange(extra=("suite-timing-shard-x",)),
+                [], "suite-timing: artifact suite-timing-shard-x is not "
+                    "suite-timing-shard-<n>-attempt-<a>-<success|failure>"),
+            "one shard and attempt twice": (
+                "1, 2", arrange(extra=("suite-timing-shard-2-attempt-1-failure",)),
+                [], "suite-timing: artifacts suite-timing-shard-2-attempt-1-failure and "
+                    "suite-timing-shard-2-attempt-1-success are both shard 2 attempt 1"),
+            "a shard the workflow does not declare": (
+                "1, 2", arrange(extra=("suite-timing-shard-3-attempt-1-success",)),
+                [], "suite-timing: artifact suite-timing-shard-3-attempt-1-success is shard 3, "
+                    "the workflow declares 2"),
+            "a member in two shards": (
+                "1, 2", arrange(second=shard_report(2, 2, {"a": 2, "c": 1})),
+                [], "suite-timing: member tests/test_a.py is in shard 1 and shard 2"),
+            "a matrix that skips a shard": (
+                "1, 2, 4", arrange(),
+                [], f"suite-timing: {self.root / 'ci.yaml'}: the matrix shards are "
+                    "[1, 2, 4], not 1 to 3"),
+        }
+        for label, (shards, setup, expected, last) in cases.items():
+            with self.subTest(label):
+                shutil.rmtree(self.shards, ignore_errors=True)
+                self.shards.mkdir()
+                workflow(self.root, shards)
+                setup()
+                result = join(self.root)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertFalse(self.out.exists())
+                for line in expected:
+                    self.assertIn(line, self.lines(result))
+                if label == "wrong shard and unreadable files":
+                    self.assertTrue(any(
+                        line.startswith("suite-timing: shard 2 of 4 failed: its report is "
+                                        "invalid: ") for line in self.lines(result)))
+                self.assertEqual(self.lines(result)[-1], last)
+
+    def test_shard_jobs_that_did_not_succeed_fail_the_join_though_every_report_passed(self):
+        workflow(self.root)
+        write_artifact(self.shards, shard_report(1, 2, {"a": 30}))
+        write_artifact(self.shards, shard_report(2, 2, {"c": 20}))
+        for outcome in ("failure", "cancelled", "skipped"):
+            with self.subTest(outcome):
+                result = join(self.root, needs=outcome)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                lines = self.lines(result)
+                self.assertIn(f"suite-timing: the shard jobs concluded {outcome} though every "
+                              "shard uploaded a passing report from a passing job", lines)
+                self.assertEqual(lines[-1], "suite-timing: unconfirmed shards: 1, 2")
+                self.assertTrue(self.out.exists())
+                self.out.unlink()
+
+
 class CompatibilityTest(unittest.TestCase):
     def test_growth_just_over_the_threshold_survives_the_runners_report(self):
         base = [MemberResult(0, "tests/test_a.py", 0, 10.0, 1.0),
@@ -283,6 +539,21 @@ class CompatibilityTest(unittest.TestCase):
             path = Path(directory) / "nested" / "report.json"
             suite_runner.write_report(path, written)
             self.assertEqual(load_report(path), written)
+
+    def test_a_shard_report_the_runner_writes_is_a_valid_shard_report(self):
+        results = [MemberResult(0, "tests/test_a.py", 0, 1.0, 0.5),
+                   MemberResult(1, "tests/test_b.py", 1, 2.0, 0.5)]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "report.json"
+            suite_runner.write_report(path, suite_runner.timing_report(
+                results, jobs=4, wall_seconds=2.0, shard=(1, 2)))
+            loaded = load_shard_report(path)
+            self.assertEqual((loaded["shard"], loaded["shard_count"], loaded["failed"]),
+                             (1, 2, 1))
+            suite_runner.write_report(path, suite_runner.timing_report(
+                results, jobs=4, wall_seconds=2.0))
+            with self.assertRaisesRegex(ReportError, "shard"):
+                load_shard_report(path)
 
 
 if __name__ == "__main__":
