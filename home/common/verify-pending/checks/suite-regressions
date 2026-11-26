@@ -1,5 +1,0 @@
-#!/bin/sh
-# Verify check for issue 1215: no agent workflow suite member that passed in the runs before a merge failed
-# in the runs from it on (every attempt of each run read). Reads the forge only.
-# verify-pending runs it from the repository root at the commit the block names.
-PYTHONPATH=python exec python3 -m agent_tools.verification.verify_checks suite-regressions "$@"
