@@ -18,6 +18,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
+from agent_tools.claims import forge_land_lock
 from agent_tools.console import permit, prompt_card, sprint, sprints
 from agent_tools.release import release
 from agent_tools.console.permit import (ALLOW, DENY, Forge, ForgeUnreadable, Grant, judge,
@@ -42,6 +43,15 @@ class FakeForge:
         self.pr_error = None
         self.release_pr = None
         self.release_error = None
+        self.land = forge_land_lock.Hold(None, (), None, None)
+        self.land_error = None
+        self.land_calls = []
+
+    def read_land(self, slug, branch):
+        self.land_calls.append(("land", slug, branch))
+        if self.land_error is not None:
+            raise self.land_error
+        return self.land
 
     def read_pr(self, slug, number):
         self.calls.append(("pr", slug, number))
@@ -64,7 +74,8 @@ class FakeForge:
         return self.release_pr if self.release_pr is not None and self.release_pr["branch"] == branch else None
 
     def forge(self, read_pr=None):
-        return Forge(read_pr or self.read_pr, self.read_run, self.read_required, self.read_release_pr)
+        return Forge(read_pr or self.read_pr, self.read_run, self.read_required, self.read_release_pr,
+                     self.read_land)
 
 
 class JudgeTest(unittest.TestCase):
@@ -433,7 +444,8 @@ class JudgeTest(unittest.TestCase):
         def unreadable(slug, base):
             raise ForgeUnreadable("x")
 
-        forge = Forge(self.fake.read_pr, self.fake.read_run, unreadable, self.fake.read_release_pr)
+        forge = Forge(self.fake.read_pr, self.fake.read_run, unreadable, self.fake.read_release_pr,
+                      self.fake.read_land)
         self.fake.run = {**self.fake.run, "failed": []}
         first = judge(self.rerun, self.grant, forge)
         self.release_run("push", failed=[])
@@ -714,11 +726,14 @@ class JudgeTest(unittest.TestCase):
         the open pull request. Each call lasts `took` seconds on `clock` when one is given."""
         answers = [*stderrs]
         calls = []
+        lock_read = "git/ref/" + forge_land_lock.lock_ref("main").removeprefix("refs/")
 
         def run(argv, **kwargs):
             calls.append(argv)
             if clock is not None:
                 clock[0] += took
+            if any(lock_read in part for part in argv):
+                return mock.Mock(returncode=1, stdout="", stderr="gh: Not Found (HTTP 404)")
             if answers:
                 return mock.Mock(returncode=1, stdout="", stderr=answers.pop(0))
             return mock.Mock(returncode=0, stdout=self.PULL_JSON, stderr="")
@@ -740,7 +755,7 @@ class JudgeTest(unittest.TestCase):
         with stack:
             verdict = judge(self.merge, self.grant, permit.FORGE)
         self.assertEqual((ALLOW, {"pr": 7, "head": SHA}), (verdict.decision, dict(verdict.target)))
-        self.assertEqual(3, len(calls))
+        self.assertEqual(4, len(calls))
         self.assertEqual(2, len(sleeps))
         self.assertTrue(all(0 < pause <= 5 for pause in sleeps), sleeps)
 
@@ -790,7 +805,7 @@ class JudgeTest(unittest.TestCase):
                 return read(*args)
             return call
         forge = Forge(reader(self.fake.read_pr), reader(self.fake.read_run), reader(self.fake.read_required),
-                      reader(self.fake.read_release_pr))
+                      reader(self.fake.read_release_pr), reader(self.fake.read_land))
         with mock.patch.object(permit.forge_api, "api_get", side_effect=api_get), \
                 mock.patch("time.sleep", side_effect=pause), \
                 mock.patch("time.monotonic", side_effect=lambda: clock[0]):
@@ -817,7 +832,7 @@ class JudgeTest(unittest.TestCase):
                 return read(*args)
             return call
         forge = Forge(reader(self.fake.read_pr), reader(self.fake.read_run), reader(self.fake.read_required),
-                      reader(self.fake.read_release_pr))
+                      reader(self.fake.read_release_pr), reader(self.fake.read_land))
         with mock.patch.object(permit.forge_api.subprocess, "run", side_effect=run), \
                 mock.patch("time.monotonic", side_effect=lambda: clock[0]):
             verdict = judge(self.rerun, self.grant, forge)
@@ -1091,7 +1106,8 @@ class ReaderTest(unittest.TestCase):
                         "checks": [{"context": "Agent Workflow Tests", "app_id": 15368}], "contexts": []}}
         grant = Grant(slug="o/r", root="/r", strategy="merge", delete_branch=True,
                       branch_pattern="issue-<num>-<slug>", issues=frozenset({12}), others=frozenset())
-        forge = Forge(permit.read_pr, permit.read_run, permit.read_required, permit.read_release_pr)
+        forge = Forge(permit.read_pr, permit.read_run, permit.read_required, permit.read_release_pr,
+                      permit.read_land)
         command = "gh run rerun 55 --failed --repo o/r"
         with self.forge_reads(payloads):
             earlier = (permit.Rerun(53, ("tests/test_a.py",)), permit.Rerun(54, ("tests/test_b.py",)))
@@ -1127,7 +1143,8 @@ class ReaderTest(unittest.TestCase):
                         "checks": [{"context": "Agent Workflow Tests", "app_id": 15368}], "contexts": []}}
         grant = Grant(slug="o/r", root="/r", strategy="merge", delete_branch=True,
                       branch_pattern="issue-<num>-<slug>", issues=frozenset({12}), others=frozenset())
-        forge = Forge(permit.read_pr, permit.read_run, permit.read_required, permit.read_release_pr)
+        forge = Forge(permit.read_pr, permit.read_run, permit.read_required, permit.read_release_pr,
+                      permit.read_land)
         with self.forge_reads(payloads):
             verdict = judge("gh run rerun 55 --failed --repo o/r", grant, forge)
         self.assertEqual((ALLOW, 1), (verdict.decision, verdict.target["count"]))

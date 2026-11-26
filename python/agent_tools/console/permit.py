@@ -62,7 +62,9 @@ never None. The checks run in this order, the first that applies deciding:
   `NOT_GRANTED`. Then `forge.read_pr` is read: a head repository other than the slug, a branch that
   carries no issue under `grant.branch_pattern`, or an issue not in `grant.issues` is `NOT_OWN_PR`,
   except that an issue in `grant.others` is `SHARED_ISSUE`; a pull request whose head differs from
-  the command's `--match-head-commit` is `STALE_HEAD`. Else `ALLOW` with target `{"pr", "head"}`.
+  the command's `--match-head-commit` is `STALE_HEAD`. Then `forge.read_land` of the pull request's
+  base is read, and a failed condition of `forge_land_lock.merge_problem` is `LAND_LEASE`; a merge by
+  hand is never judged. Else `ALLOW` with target `{"pr", "head"}`.
 - Rerun: another `--repo` is `OTHER_REPO`; other words are `NOT_GRANTED`. Then `read_run`. Two kinds of
   run are the project's release runs, read through `read_release_pr` (the one open pull request from
   the contract's integration branch into its default branch, for a run of the slug's own repository on
@@ -172,6 +174,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
+from agent_tools.claims import forge_land_lock
 from agent_tools.console import deliveries
 from agent_tools.console.event_log import PERMIT_JUDGED
 from agent_tools.project_contract import resolve_project
@@ -201,6 +204,7 @@ RERUN_LIMIT = ("Pull request {pr} has had its head {head} rerun twice, by {rerun
 RERUN_LIMIT_TIP = ("The head {head} of {branch} has had its release rerun twice, by {reruns}, and a third "
                    "rerun is refused: the head must be reported or fixed.")
 STALE_HEAD = "Pull request {pr} is not at the head the merge names."
+LAND_LEASE = "Pull request {pr} does not hold the land lease: {problem}."
 FORGE_UNREADABLE = "The forge could not be read to judge this command: {reason}"
 PORTS_EXHAUSTED = ("the host ran out of local network ports, so the lookup could not connect; this is a "
                    "passing host condition, not a refusal of the command, and it can be tried again")
@@ -327,6 +331,7 @@ class Forge:
     read_run: Callable[[str, int], Mapping]
     read_required: Callable[[str, str], frozenset[str]]
     read_release_pr: Callable[[str, str | None, str], Mapping | None]
+    read_land: Callable[[str, str], forge_land_lock.Hold]
 
 
 @dataclass(frozen=True)
@@ -338,7 +343,8 @@ class Memoized(Forge):
             def read(*args):
                 return _replay(self.cache.get((name, args)))
             return read
-        return Forge(cached("pr"), cached("run"), cached("required"), cached("release"))
+        return Forge(cached("pr"), cached("run"), cached("required"), cached("release"),
+                     cached("land"))
 
 
 def _replay(entry):
@@ -365,7 +371,7 @@ def memoized(forge: Forge) -> Memoized:
         return call
     return Memoized(cached("pr", forge.read_pr), cached("run", forge.read_run),
                     cached("required", forge.read_required),
-                    cached("release", forge.read_release_pr), cache)
+                    cached("release", forge.read_release_pr), cached("land", forge.read_land), cache)
 
 
 @contextlib.contextmanager
@@ -530,7 +536,11 @@ def read_required(slug: str, base: str) -> frozenset[str]:
     return frozenset(found)
 
 
-FORGE = Forge(read_pr, read_run, read_required, read_release_pr)
+def read_land(slug: str, branch: str) -> forge_land_lock.Hold:
+    return _lookup(lambda: forge_land_lock.read_hold(slug, branch), f"the land lock of {branch}")
+
+
+FORGE = Forge(read_pr, read_run, read_required, read_release_pr, read_land)
 
 
 def rerun_record(events: Sequence, held: Mapping[tuple[str | None, str], tuple[Rerun, ...]] | None = None
@@ -828,6 +838,10 @@ def _judge_merge(parts: list[str], grant: Grant, forge: Forge) -> Verdict:
         return _with_verb(refusal, MERGE)
     if pull["head"] != target["head"]:
         return _deny(MERGE, STALE_HEAD.format(pr=target["pr"]))
+    problem = forge_land_lock.merge_problem(forge.read_land(grant.slug, pull["base"]), pull["base"],
+                                            target["pr"], target["head"], pinned=True)
+    if problem is not None:
+        return _deny(MERGE, LAND_LEASE.format(pr=target["pr"], problem=problem))
     return _allow(MERGE, target)
 
 
