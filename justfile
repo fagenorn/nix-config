@@ -440,6 +440,7 @@ agent-workflow-tests *args:
     tests/test_console_reports.py \
     tests/test_console_screenshots.py \
     tests/test_console_permission_shots.py \
+    tests/test_console_screenshot_clock.py \
     tests/test_console_sprint_command.py \
     tests/test_console_sprint_action.py \
     tests/test_console_pictures.py \

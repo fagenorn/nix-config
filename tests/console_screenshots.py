@@ -178,22 +178,19 @@ Contract:
   and pending adoption work, a `reconcile` plan (#1333): the row seeds the reading the console takes
   of a pre-commit hook whose runner is not on the plain PATH and of a `devenv.nix`, so the plan
   proposes the same command, and the first is the Apply card, the second the plan after Not now.
-  `REGISTER_READING` reads the card's first
-  line, the proposal's draft row and whether that row has a Change button, and `REGISTER_SHOWN`
-  holds what each state must read on a page that proposes it (`proposes(state)`, which is
-  `shows_facts()` for `register-draft` and `proposes_reconcile()` for the reconcile pair); on
-  a page that does not (the base commit's) the reading is `REGISTER_BASE`, which is the before
-  picture, and any other reading fails. The base commit's register-draft has no facts and drafts the
-  commit environment as a main row with a Change button, so that row is its reading; its reconcile
-  row has no draft, so its Apply card opens on the plan's own first line and shows nothing.
-  `WIDTHS` are the two viewport widths each is shot at (`BETWEEN_WIDTHS` are read, never shot). `capture`
+  `REGISTER_READING` reads the card's first line, the proposal's draft row and whether that row has a Change button, and
+  `REGISTER_SHOWN` holds what each state must read on a page that proposes it (`proposes(state)`, which is
+  `shows_facts()` for `register-draft` and `proposes_reconcile()` for the reconcile pair); on a page that does not (the
+  base commit's) the reading is `REGISTER_BASE`, which is the before picture, and any other reading fails. The base
+  commit's register-draft has no facts and drafts the commit environment as a main row with a Change button, so that row
+  is its reading; its reconcile row has no draft, so its Apply card opens on the plan's own first line and shows
+  nothing. `WIDTHS` are the two viewport widths each is shot at (`BETWEEN_WIDTHS` are read, never shot). `capture`
   writes `<state>-<width>.png` for every pair, so a full run writes 114 files.
-- Each state is a fresh fixture console: a registry of three projects (`owner/web`,
-  `owner/api`, `owner/docs`) and an event log seeded for that state with event times relative
-  to one clock reading, served by the real `ConsoleService` on a loopback port. Nothing is
-  written through the service, nothing is mocked in the page, and the launcher is an inert
-  stand-in that records what it is given and starts nothing (without one the view would say
-  managers are not available on this host).
+- Each state is a fresh fixture console: a registry of three projects (`owner/web`, `owner/api`, `owner/docs`) and an
+  event log seeded for that state, served by the real `ConsoleService` on a loopback port. Its event times, file times
+  and the service's clock all come from the run's one reading (`console_screenshot_clock.READING`, or `--now`). Nothing
+  is written through the service, nothing is mocked in the page, and the launcher is an inert stand-in that records what
+  it is given and starts nothing (without one the view would say managers are not available on this host).
 - The sandbox rule: every path the fixture touches lies under one temporary root, and
   `main` points `HOME`, `CLAUDE_ACCOUNTS_DIR`, `CLAUDE_CONFIG_DIR`, `XDG_STATE_HOME` and
   `XDG_CONFIG_HOME` under another for the run, so the owner's real accounts directory and real
@@ -289,6 +286,7 @@ from agent_tools.console.service import ConsoleService
 from agent_tools.console.sprints import TELL_MINUTE_TEXT, Question, SprintState, create_secret
 from agent_tools.system.forge_api import ForgeError
 
+from . import console_screenshot_clock as shot_clock
 from .console_land_queue import land_queue_reader
 from .console_screenshot_permissions import HELD_PROMPTS, PERMISSION_MANAGER, hold_permission, keep_permission
 from .console_test_support import hook_body, write_registry
@@ -2815,8 +2813,8 @@ def build_fixture(root: Path, state: str, now_s: float, *,
         for name in ("work-main", "work-spare", *colleague):
             (accounts / "profiles" / name).mkdir(parents=True, exist_ok=True)
         if colleague:
-            # The directory's own mark: the console owns the account to the colleague only while the
-            # row's identity is the directory's, and his pool row carries a token only then.
+            # Stamped before marked, as a stamp moves the birth time the mark reads; his pool row has a token only then.
+            shot_clock.stamp(accounts / "profiles" / "colleague-1", now_s)
             colleague_identity = account_add.mark(accounts / "profiles" / "colleague-1")
     log = EventLog(fixture.store, clock=lambda: at[0])
     try:
@@ -2837,6 +2835,7 @@ def build_fixture(root: Path, state: str, now_s: float, *,
         _write_desk_spend(fixture, now_s, *sprint_ids)
     elif state in DEEPER_STATES:
         _write_deeper(fixture, now_s)
+    shot_clock.stamp(root, now_s)
     return fixture
 
 
@@ -3011,7 +3010,7 @@ def start_service(fixture: Fixture, now_s: float, launches: list | None = None, 
         dispatch=lambda job: job(),
         repo_of=lambda cwd: cwd, ping_log=lambda: None,
         **({} if guest_dir is None else guest_door_kwargs(ConsoleService, guest_dir)),
-        **_tailnet_kwargs(guest_dir, tailnet_readable, bound), **forge)
+        **_tailnet_kwargs(guest_dir, tailnet_readable, bound), **forge, **shot_clock.service_clocks(now_s))
     bound.append(service)
     service.start()
     if guest_dir is not None and "status_reader" in inspect.signature(ConsoleService).parameters:
@@ -3110,7 +3109,7 @@ class _Serve:
 
 def capture(out: Path, states: Sequence[str] = STATES, widths: Sequence[int] = WIDTHS, *,
             read: tuple[str, str] = (READ_QUESTION, READ_ANSWER), sheets: bool = False,
-            mutate: bool = False, composite: str | None = None) -> list[Shot]:
+            mutate: bool = False, composite: str | None = None, now: float = shot_clock.READING) -> list[Shot]:
     if composite is not None and not sheets:
         raise ValueError("a composite is made of the sheets: pass sheets with it")
     try:
@@ -3133,10 +3132,9 @@ def capture(out: Path, states: Sequence[str] = STATES, widths: Sequence[int] = W
                 for group in groups:
                     with tempfile.TemporaryDirectory(prefix="console-shots-") as tmp, \
                             tempfile.TemporaryDirectory(prefix="cg-", dir="/tmp") as door:
-                        now_s = datetime.now(timezone.utc).timestamp()
-                        fixture = build_fixture(Path(tmp).resolve(), state, now_s, read=read)
+                        fixture = build_fixture(Path(tmp).resolve(), state, now, read=read)
                         service = start_service(
-                            fixture, now_s,
+                            fixture, now,
                             guest_dir=Path(door) if state in SHARING_STATES else None,
                             tailnet_readable=state != "sharing-unreadable")
                         serve = None
@@ -3589,6 +3587,7 @@ def main(argv: list[str] | None = None) -> int:
                         help="also write <state>-sheet.png, the state's widths side by side")
     parser.add_argument("--states", help="a comma list of the states to shoot (default every state)")
     parser.add_argument("--composite", help="with --sheets, also write NAME, the shot states' sheets side by side")
+    shot_clock.add_flag(parser)
     args = parser.parse_args(argv)
     states = STATES
     if args.states is not None:
@@ -3600,6 +3599,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--composite goes with --sheets")
     if (args.question is None) != (args.answer_file is None):
         parser.error("--question and --answer-file go together")
+    now = shot_clock.parsed_reading(parser, args.now)
     real = args.question is not None
     if real:
         text = Path(args.answer_file).read_text(encoding="utf-8")
@@ -3608,9 +3608,9 @@ def main(argv: list[str] | None = None) -> int:
         os.environ.update(sandbox_environ(Path(tmp).resolve()))
         try:
             taken = (capture(Path(args.out), states=("question-read",), read=(args.question, text),
-                             sheets=args.sheets, composite=args.composite)
+                             sheets=args.sheets, composite=args.composite, now=now)
                      if real else capture(Path(args.out), states=states, sheets=args.sheets,
-                                          composite=args.composite))
+                                          composite=args.composite, now=now))
         except Unavailable as error:
             print(f"console-screenshots: {error}", file=sys.stderr)
             return 2
