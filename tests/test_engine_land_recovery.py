@@ -12,7 +12,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.delivery import engine_caps, land_tally, landing
+from agent_tools.delivery import size_caps, land_tally, landing
 from tests.engine_fixture import AdoptedFixtures
 from tests.engine_step_coverage import StepCoverage, test_ids
 from tests.engine_stubbed_world import StubbedRun
@@ -490,7 +490,7 @@ class ShapeTest(unittest.TestCase):
                 self.assertEqual(steps[step]["on"]["exhausted"], stop)
 
     def test_the_attempt_has_exactly_the_step_cap(self):
-        self.assertEqual(len(procedure("land-attempt")["steps"]), engine_caps.PROCEDURE_STEPS)
+        self.assertEqual(len(procedure("land-attempt")["steps"]), size_caps.PROCEDURE_STEPS)
 
     def test_every_counted_step_is_a_step_of_the_attempt(self):
         self.assertLessEqual(set(land_tally.COUNTED_STEPS) - {land_tally.ATTEMPT}, set(steps_of("land-attempt")))
