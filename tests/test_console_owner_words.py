@@ -6,7 +6,7 @@ import json
 import unittest
 from pathlib import Path
 
-from agent_tools.console import owner_words
+from agent_tools.console import owner_words, view
 from agent_tools.delivery.routing import index_table
 
 TIER = "fast"
@@ -80,3 +80,7 @@ class GlossaryTest(unittest.TestCase):
         for case in cases:
             with self.subTest(text=case["text"]):
                 self.assertEqual([w for w, _ in owner_words.unglossed(case["text"])], case["flagged"])
+
+class ViewGlossaryTest(unittest.TestCase):
+    def test_the_view_carries_the_glossary_in_order(self):
+        self.assertEqual(view.derive_view([])["glossary"], owner_words.entries())

@@ -545,7 +545,7 @@ async function run() {
     } else if ("click" in step) {
       const target = byClass(step.click, scopeOf(step), step.nth);
       if (target.disabled !== true) {
-        for (const fn of target.listeners.click || []) fn({ type: "click", preventDefault() {} });
+        for (const fn of target.listeners.click || []) fn({ type: "click", preventDefault() {}, stopPropagation() {} });
       }
     } else if ("check" in step) {
       const target = byClass(step.check.cls, scopeOf(step), step.check.nth);

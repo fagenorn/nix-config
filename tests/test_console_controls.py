@@ -7,6 +7,8 @@ import unittest
 from datetime import timedelta
 from pathlib import Path
 
+from agent_tools.console import owner_words
+
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 from .console_screenshots import CONTROL_SELECTOR
 from .test_console_spend_page import render_spend, spend_view_fixture
@@ -65,7 +67,7 @@ DESK_CONTROLS: dict = {
         "draft-cancel", "draft-change", "goal-send", "goal-cancel", "viewer-prev", "viewer-next",
         "viewer-close", "cap", "pic-thumb", "sprint-check", "draft-pick", "activate",
         "share-open", "share-close", "share-on", "share-edit", "share-project",
-        "share-add", "adoption-failed-dismiss", "release-decline", "permission-refuse"),
+        "share-add", "adoption-failed-dismiss", "release-decline", "permission-refuse", "gloss"),
     **_roles(AREA_ONLY, "tell", "reply-text", "note-text", "words-text", "kept-words-text", "ask-text",
              "follow-text"),
     **_roles(LINE_ONLY, "draft-text", "confirm-text", "account-name", "acct-remove-name",
@@ -78,7 +80,7 @@ GUEST_CONTROLS: dict = {"pool-add": QUIET_ONLY, "guest-signin": PRIMARY_ONLY, "g
                         "pool-remove-send": DANGER_ONLY, "pool-remove-cancel": QUIET_ONLY}
 GUEST_CHECKBOXES = frozenset({"guest-tick"})  # a native tick has no kind: it is neither a button nor a typed field
 SPEND_CONTROLS: dict = {"span": QUIET_ONLY}
-BARE_BUTTONS = frozenset({"cap", "pic-thumb", "sprint-check", "draft-pick", "thread-open"})
+BARE_BUTTONS = frozenset({"cap", "pic-thumb", "sprint-check", "draft-pick", "thread-open", "gloss"})
 BARE_FIELDS = frozenset({"goal-text"})
 BARE_ROLES = BARE_BUTTONS | BARE_FIELDS
 
@@ -165,6 +167,8 @@ def desk_scenarios() -> list:
         begin, {"frame": view([own_notice])}, {"open": "notices:owner/p00"},
         {"click": "notice-open"}, snapshot]
     return [
+        [START, {"frame": {**with_sprints([{**REPORTED, "status": "waiting on the land lock"}]),
+                           "glossary": owner_words.entries()}}, snapshot],
         [begin, {"frame": view([asking(project(0, []), ASK_ANSWERED)])}, {"click": "ask-open"},
          {"type": {"class": "ask-text", "text": "what runs?"}}, snapshot],
         # a thread's follow-up box under its last answer (#1178)

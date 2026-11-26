@@ -407,6 +407,7 @@ agent-workflow-tests *args:
     tests/test_console_page.py \
     tests/test_console_page_action.py \
     tests/test_console_page_move.py \
+    tests/test_console_page_gloss.py \
     tests/test_console_long_permission_card.py \
     tests/test_console_controls.py \
     tests/test_console_goal_box.py \
