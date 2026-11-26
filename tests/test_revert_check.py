@@ -49,7 +49,12 @@ GREET_ID = "checks.check_greet.GreetCheck.test_greet_keeps_the_name"
 BRANCH = "issue-1-topic"
 SLEEPER = ("import os\nimport time\nimport unittest\n\n\nclass SleepCheck(unittest.TestCase):\n"
            "    def test_sleeps(self):\n        open({marker!r}, 'w').write(str(os.getpid()))\n        time.sleep(30)\n")
-BOM_CHECK = "import unittest\n\n\nclass BomCheck(unittest.TestCase):\n    def test_passes(self):\n        self.assertTrue(True)\n"
+READONLY = (
+    "import os\nimport unittest\n\n\nclass RoCheck(unittest.TestCase):\n"
+    "    def test_a_leaves(self):\n        os.makedirs('ro/sub')\n        open('ro/sub/x', 'w').write('x')\n"
+    "        os.chmod('ro/sub', 0o555)\n\n"
+    "    def test_b_sees_clean(self):\n        self.assertFalse(os.path.exists('ro'))\n")
+BOM_CHECK ="import unittest\n\n\nclass BomCheck(unittest.TestCase):\n    def test_passes(self):\n        self.assertTrue(True)\n"
 STATEFUL = (
     "import os\nimport unittest\n\n\nclass StateCheck(unittest.TestCase):\n"
     "    def test_a_writes(self):\n        os.makedirs('data', exist_ok=True)\n"
@@ -170,6 +175,9 @@ class CommandTest(unittest.TestCase):
         hook = repository.main / ".git/hooks/post-checkout"
         hook.write_text(f"#!/bin/sh\ntouch '{repository.tmp / 'hooked'}'\n")
         hook.chmod(0o755)
+        index_hook = repository.main / ".git/hooks/post-index-change"
+        index_hook.write_text(f"#!/bin/sh\ntouch '{repository.tmp / 'index-hooked'}'\necho hooked >> {FAREWELL_PATH}\n")
+        index_hook.chmod(0o755)
         scratch = scratch_directory(self)
         before = repository.snapshot()
         code, result = repository.run({"REVERT_CHECK_SCRATCH": scratch})
@@ -178,6 +186,7 @@ class CommandTest(unittest.TestCase):
         self.assertEqual(repository.snapshot(), before)
         self.assertEqual(os.listdir(scratch), [])
         self.assertFalse((repository.tmp / "hooked").exists())
+        self.assertFalse((repository.tmp / "index-hooked").exists())
         listed = [line for line in before[2].splitlines() if line.startswith("worktree ")]
         self.assertEqual(sorted(listed), sorted(f"worktree {p}" for p in (repository.main, repository.worktree)))
 
@@ -428,6 +437,69 @@ class CheckTest(unittest.TestCase):
                        environ=os.environ, budget_seconds=0)
         self.assertEqual(result["still_passing"], [])
         self.assertEqual(result["reason"], "the check ran out of its 0 s budget after 0 of 2 new tests")
+
+    def test_a_newline_in_the_scratch_root_never_redirects_the_cleanup(self):
+        repository = FixtureRepository(self)
+        repository.commit(PROOF_CHANGE)
+        parent = Path(scratch_directory(self))
+        victim = parent / "victim"
+        victim.mkdir()
+        (victim / "keep.txt").write_text("keep")
+        root = parent / "victim\nroot"
+        root.mkdir()
+        result = check(str(repository.worktree), "main", scratch_root=str(root), environ=os.environ)
+        self.assertEqual((result["still_passing"], result["reason"]), ([GREET_ID], ""))
+        self.assertEqual((victim / "keep.txt").read_text(), "keep")
+        self.assertEqual(os.listdir(victim), ["keep.txt"])
+        self.assertEqual(os.listdir(root), [])
+
+    def test_a_populated_read_only_directory_is_removed_between_tests_and_at_the_end(self):
+        repository = FixtureRepository(self)
+        repository.commit({"checks/check_readonly.py": READONLY})
+        scratch = scratch_directory(self)
+        self.addCleanup(subprocess.run, ["chmod", "-R", "u+rwx", scratch])
+        result = check(str(repository.worktree), "main", scratch_root=scratch, environ=os.environ)
+        self.assertEqual(result["new_tests"], ["checks.check_readonly.RoCheck.test_a_leaves",
+                                               "checks.check_readonly.RoCheck.test_b_sees_clean"])
+        self.assertEqual(result["still_passing"], result["new_tests"])
+        self.assertEqual(result["reason"], "")
+        self.assertEqual(os.listdir(scratch), [])
+
+    def test_a_package_root_whose_name_a_namespace_directory_of_the_scratch_root_shares_stays_reachable(self):
+        repository = FixtureRepository(self, {
+            "tests/check_old.py": "", "src/tests/__init__.py": "", "src/pkg/__init__.py": "",
+            "src/pkg/calc.py": "def add(a, b):\n    return a + b\n"})
+        repository.commit({"checks/check_calc.py": (
+            "import unittest\n\n\nclass CalcCheck(unittest.TestCase):\n"
+            "    def test_add(self):\n        from pkg.calc import add\n        self.assertEqual(add(1, 2), 3)\n")})
+        result = check(str(repository.worktree), "main", scratch_root=scratch_directory(self), environ=os.environ)
+        self.assertEqual(result["new_tests"], ["checks.check_calc.CalcCheck.test_add"])
+        self.assertEqual(result["still_passing"], result["new_tests"])
+        self.assertEqual(result["reason"], "")
+
+    def test_a_watcher_that_cannot_spawn_the_test_reports_why(self):
+        repository = FixtureRepository(self)
+        repository.commit(PROOF_CHANGE)
+        with mock.patch("agent_tools.delivery.revert_check.TEST_PYTHON", "/nonexistent/python"):
+            result = check(str(repository.worktree), "main", scratch_root=scratch_directory(self),
+                           environ=os.environ)
+        self.assertEqual(result["new_tests"], [FAREWELL_ID, GREET_ID])
+        self.assertEqual(result["still_passing"], [])
+        self.assertTrue(result["reason"].startswith("a test could not be started: "), result["reason"])
+        self.assertIn("/nonexistent/python", result["reason"])
+
+    def test_repeated_diamond_inheritance_without_a_testcase_ancestor_is_discovered_in_linear_work(self):
+        levels = 20
+        lines = ["class P0: pass", "class Q0(P0): pass", "class R0(P0): pass"]
+        for level in range(1, levels + 1):
+            lines += [f"class P{level}(Q{level - 1}, R{level - 1}): pass", f"class Q{level}(P{level}): pass",
+                      f"class R{level}(P{level}): pass"]
+        lines.append(f"class Leaf(P{levels}):\n    def test_leaf(self): pass")
+        started = time.monotonic()
+        self.assertEqual(case_ids("\n".join(lines) + "\n"), frozenset())
+        self.assertLess(time.monotonic() - started, 2)
+        self.assertEqual(case_ids("\n".join(["import unittest", "class P0(unittest.TestCase): pass", *lines[1:]]) + "\n"),
+                         frozenset({"Leaf.test_leaf"}))
 
     def test_the_wall_bound_covers_the_budget_and_one_more_test(self):
         self.assertGreaterEqual(PLATFORM_WALL_SECONDS["revert-check"], BUDGET_SECONDS + TEST_SECONDS)

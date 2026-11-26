@@ -140,6 +140,7 @@ class DirectProcedureTest(unittest.TestCase):
                 for member in ("still_passing", "reason"):
                     self.assertIn(f"{check}.{member}", step(direct, review)["in"])
                     self.assertIn("{{" + f"{check}.{member}" + "}}", prompt)
+                self.assertIn("covers only the tests that completed", prompt)
         for check in ("revert-check", "lite-revert-check", "escalated-revert-check", "full-revert-check"):
             with self.subTest(check=check):
                 one = step(direct, check)

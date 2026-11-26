@@ -36,12 +36,17 @@ exit or a timeout is not. The tests' `PYTHONPATH` is the checkout, then `<checko
 distinct non-empty `D` that is the parent of a top-level package tracked at the merge base (a tracked
 `<pkg>/__init__.py` whose parent directory holds no `__init__.py`), sorted, then the inherited entries
 whose real path is not the run's worktree or inside it, so the reverted source is what a test
-imports; `PYTHONPYCACHEPREFIX` is the scratch directory's own, so no bytecode lands elsewhere. The git
-variables of `engine_shell.REPOSITORY_ENV` are dropped from every child.
+imports; `PYTHONPYCACHEPREFIX` is the scratch directory's own, so no bytecode lands elsewhere. A top-level
+directory of the checkout that shares its name with a package of such a `<D>` and holds no `__init__.py`
+gets an empty one too (so it stays ahead of that `<D>`) and `<D>` stays on the path. The git variables of
+`engine_shell.REPOSITORY_ENV` are dropped from every child, and no hook of the repository runs
+(`core.hooksPath=/dev/null` on every git command).
 
-The scratch directory is always removed; a removal that fails adds `the scratch worktree <path> could
-not be removed: <error>` to `reason`. The run's worktree, index, refs and worktree list are never
-written: the only git commands run against it are reads.
+The scratch directory is always removed, a directory below it that is not writable included (the guard names
+it in hex, so no byte of the path can end the line, and the checker deletes only a path of the shape the
+guard makes); a removal that fails adds `the scratch worktree <path, as Python writes it> could not be
+removed: <error>` to `reason` and leaves the guard alive to retry. The run's worktree, index, refs and
+worktree list are never written: the only git commands run against it are reads.
 
 Every failure is still `ok` with exit 0 and a `reason`: an unreadable `HEAD` or merge base is `the
 merge base of HEAD and origin/<branch> could not be read: <git's last stderr line>`; a scratch that
@@ -56,6 +61,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import inspect
 import json
 import os
 import shutil
@@ -73,21 +79,37 @@ BUDGET_SECONDS = 1200
 SCRATCH_ENV = "REVERT_CHECK_SCRATCH"
 GIT_SECONDS = 120
 WATCH_SECONDS = 0.1
+TEST_PYTHON = sys.executable
+HOLDER_PREFIX = "revert-check-"
+
+
+def force_remove(path):
+    """Remove `path` and all below it, making each directory below it writable first; what stays raises."""
+    pending = [] if os.path.islink(path) else [path]
+    while pending:
+        directory = pending.pop()
+        try:
+            os.chmod(directory, 0o700)
+            with os.scandir(directory) as entries:
+                pending.extend(entry.path for entry in entries if entry.is_dir(follow_symlinks=False))
+        except OSError:
+            pass
+    shutil.rmtree(path)
+
 
 # Both helpers take the checker's pid in argv rather than reading their parent's: a checker stopped before the
 # helper's interpreter has started leaves the helper a parent that is already init, and the pid in argv still
 # tells them it is gone.
 
 # Runs as `python -I -c GUARD <checker pid> <scratch root>`, in a session of its own (an engine stop kills only
-# the checker's group): it makes the scratch directory, tells the checker its path on one line (`!<error>` when
-# it cannot be made) and, once the checker is gone, removes the directory again until it is gone, so a stop at
-# any point of the scratch's life leaves nothing behind.
-GUARD = """
-import os, shutil, sys, tempfile, time
+# the checker's group): it makes the scratch directory, tells the checker its path on one line, the path's bytes
+# in hex so no byte of it can end the line (`!<error>` when it cannot be made) and, once the checker is gone,
+# removes the directory again until it is gone, so a stop at any point of the scratch's life leaves nothing behind.
+GUARD = "import os, shutil, sys, tempfile, time\n" + inspect.getsource(force_remove) + """
 parent = int(sys.argv[1])
 try:
-    holder = os.path.realpath(tempfile.mkdtemp(prefix="revert-check-", dir=sys.argv[2]))
-    line = holder
+    holder = os.path.realpath(tempfile.mkdtemp(prefix=%r, dir=sys.argv[2]))
+    line = os.fsencode(holder).hex()
 except OSError as error:
     holder, line = None, "!" + str(error).replace("\\n", " ")
 try:
@@ -99,14 +121,19 @@ if holder is None:
 while os.getppid() == parent:
     time.sleep(%s)
 for _ in range(100):
-    shutil.rmtree(holder, ignore_errors=True)
+    try:
+        force_remove(holder)
+    except OSError:
+        pass
     if not os.path.exists(holder):
         break
     time.sleep(%s)
-""" % (WATCH_SECONDS, WATCH_SECONDS)
+""" % (HOLDER_PREFIX, WATCH_SECONDS, WATCH_SECONDS)
 
-# Runs as `python -I -c WATCHER <id> <checker pid>`: the test's session leader. It runs the test and, once the
-# checker is gone, kills its whole session.
+# Runs as `python -I -c WATCHER <id> <checker pid> [<python>]`: the test's session leader. It runs the test
+# (`<python> -m unittest <id>`, with no standard stream of the test shared with it) and, once the checker is gone,
+# kills its whole session. When it cannot start the test it writes why to its own standard error and exits 1, and
+# nothing else of it ever reaches that stream, so a message there is a launch error and never a test's outcome.
 WATCHER = """
 import os, signal, subprocess, sys, threading, time
 parent = int(sys.argv[2])
@@ -115,23 +142,36 @@ def watch():
         time.sleep(%s)
     os.killpg(0, signal.SIGKILL)
 threading.Thread(target=watch, daemon=True).start()
-sys.exit(subprocess.Popen([sys.executable, "-m", "unittest", sys.argv[1]]).wait())
+try:
+    child = subprocess.Popen([sys.argv[3] if len(sys.argv) > 3 else sys.executable, "-m", "unittest", sys.argv[1]],
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+except OSError as error:
+    sys.stderr.write(str(error).replace("\\n", " ") + "\\n")
+    sys.exit(1)
+sys.exit(child.wait())
 """ % WATCH_SECONDS
 
 RunGit = Callable[..., "subprocess.CompletedProcess[bytes]"]
 
 
-def _reaches_testcase(name: str, classes: Mapping[str, ast.ClassDef], seen: frozenset[str] = frozenset()) -> bool:
-    if name in seen:
-        return False
-    for base in classes[name].bases:
-        if isinstance(base, ast.Name) and base.id == "TestCase":
-            return True
-        if isinstance(base, ast.Attribute) and base.attr == "TestCase":
-            return True
-        if isinstance(base, ast.Name) and base.id in classes and _reaches_testcase(base.id, classes, seen | {name}):
-            return True
-    return False
+def _testcase_classes(classes: Mapping[str, ast.ClassDef]) -> set[str]:
+    """The names of the classes whose bases reach `TestCase`, each class visited once."""
+    children: dict[str, list[str]] = {}
+    found: set[str] = set()
+    for name, node in classes.items():
+        for base in node.bases:
+            if (isinstance(base, ast.Name) and base.id == "TestCase") or (
+                    isinstance(base, ast.Attribute) and base.attr == "TestCase"):
+                found.add(name)
+            elif isinstance(base, ast.Name) and base.id in classes:
+                children.setdefault(base.id, []).append(name)
+    pending = list(found)
+    while pending:
+        for child in children.get(pending.pop(), ()):
+            if child not in found:
+                found.add(child)
+                pending.append(child)
+    return found
 
 
 def case_ids(source: str | bytes) -> frozenset[str]:
@@ -141,9 +181,10 @@ def case_ids(source: str | bytes) -> frozenset[str]:
     except (SyntaxError, ValueError):
         return frozenset()
     classes = {node.name: node for node in tree.body if isinstance(node, ast.ClassDef)}
+    reaching = _testcase_classes(classes)
     return frozenset(
         f"{name}.{member.name}"
-        for name, node in classes.items() if _reaches_testcase(name, classes)
+        for name, node in classes.items() if name in reaching
         for member in node.body
         if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)) and member.name.startswith("test"))
 
@@ -157,7 +198,8 @@ def _git_runner(environ: Mapping[str, str]) -> RunGit:
     env = {name: value for name, value in environ.items() if name not in REPOSITORY_ENV}
 
     def run_git(*args: str, index: str | None = None) -> "subprocess.CompletedProcess[bytes]":
-        return subprocess.run(["git", *args], capture_output=True, stdin=subprocess.DEVNULL, timeout=GIT_SECONDS,
+        # No hook of the repository runs: a hook such as post-index-change runs in the run's worktree.
+        return subprocess.run(["git", "-c", "core.hooksPath=/dev/null", *args], capture_output=True, stdin=subprocess.DEVNULL, timeout=GIT_SECONDS,
                               env={**env, "GIT_INDEX_FILE": index} if index else env)
     return run_git
 
@@ -212,14 +254,24 @@ def _python_path(scratch: str, worktree: str, inherited: str, inits: set[str]) -
         parent = os.path.dirname(package)
         if parent and os.path.join(parent, "__init__.py") not in inits:
             roots.setdefault(parent, set()).add(os.path.relpath(package, parent).split(os.sep)[0])
-    # A root whose package shares a name with a top-level entry of the scratch root would shadow it
-    # (a regular package beats a namespace directory whatever the path order), so the scratch root's own
-    # names stay ahead of every added root.
-    roots = {root: names for root, names in roots.items() if not names & taken}
+    # A regular package of a root beats a namespace directory of the scratch root that shares its name
+    # (whatever the path order), so such a directory becomes a regular package itself, which the scratch
+    # root's place ahead of every added root then keeps first. A root that cannot be kept apart (the
+    # directory is a symlink of the merge base) is left out.
+    usable = []
+    for root in sorted(roots):
+        try:
+            for name in sorted(roots[root] & taken):
+                directory = os.path.join(scratch, name)
+                if os.path.isdir(directory) and not os.path.exists(os.path.join(directory, "__init__.py")):
+                    _write(scratch, f"{name}/__init__.py", b"")
+        except RuntimeError:
+            continue
+        usable.append(root)
     run = os.path.realpath(worktree)
     kept = [entry for entry in inherited.split(os.pathsep)
             if entry and os.path.realpath(entry) != run and not os.path.realpath(entry).startswith(run + os.sep)]
-    return os.pathsep.join([scratch, *(os.path.join(scratch, root) for root in sorted(roots)), *kept])
+    return os.pathsep.join([scratch, *(os.path.join(scratch, root) for root in usable), *kept])
 
 
 def _write(root: str, path: str, data: bytes) -> None:
@@ -239,7 +291,10 @@ def _write(root: str, path: str, data: bytes) -> None:
 
 def _checkout(worktree: str, holder: str, tree: str, blobs: Mapping[str, bytes], run_git: RunGit) -> None:
     """A fresh checkout of the merge base at `tree` with the head version of each new-test file over it."""
-    shutil.rmtree(tree, ignore_errors=True)
+    try:
+        force_remove(tree)
+    except FileNotFoundError:
+        pass
     done = run_git("-C", worktree, "checkout-index", "-a", "-f", f"--prefix={tree}/", index=os.path.join(holder, "index"))
     if done.returncode:
         raise OSError(f"git checkout-index: {_last_line(done)}")
@@ -260,16 +315,25 @@ def _guard(scratch_root: str | None) -> tuple["subprocess.Popen[str]", str]:
     if not line or line.startswith("!"):
         guard.wait()
         raise OSError(line[1:] or "the scratch guard exited without making a directory")
-    return guard, line
+    try:
+        holder = os.fsdecode(bytes.fromhex(line))
+    except ValueError:
+        holder = ""
+    if not os.path.isabs(holder) or not os.path.basename(holder).startswith(HOLDER_PREFIX):
+        # Nothing is deleted on the strength of a path that is not the guard's own: the guard, which
+        # still holds its directory, removes it once this process is gone.
+        raise OSError("the scratch guard named no scratch directory")
+    return guard, holder
 
 
 def _passes(identifier: str, scratch: str, env: Mapping[str, str], test_seconds: float) -> bool:
+    """Whether the test exits 0; an OSError when the watcher could not start it."""
     process = subprocess.Popen(
-        [sys.executable, "-I", "-c", WATCHER, identifier, str(os.getpid())], cwd=scratch, env=dict(env),
-        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        [sys.executable, "-I", "-c", WATCHER, identifier, str(os.getpid()), TEST_PYTHON], cwd=scratch,
+        env=dict(env), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
         start_new_session=True)
     try:
-        return process.wait(timeout=test_seconds) == 0
+        _, error = process.communicate(timeout=test_seconds)
     except subprocess.TimeoutExpired:
         return False
     finally:
@@ -278,6 +342,11 @@ def _passes(identifier: str, scratch: str, env: Mapping[str, str], test_seconds:
         except OSError:
             pass
         process.wait()
+        if process.stderr:
+            process.stderr.close()
+    if process.returncode and error.strip():
+        raise OSError(error.decode(errors="replace").strip().splitlines()[-1])
+    return process.returncode == 0
 
 
 def check(worktree: str, integration_branch: str, *, environ: Mapping[str, str], scratch_root: str | None,
@@ -340,27 +409,31 @@ def _run_in_scratch(worktree: str, result: dict, found: list[tuple[str, str]], b
     except Exception as error:
         result["reason"] = f"the check failed: {type(error).__name__}: {error}"
     finally:
+        removed = True
         if holder is not None:
-            _remove(holder, result)
+            removed = _remove(holder, result)
         if guard is not None:
-            guard.kill()
-            guard.wait()
+            if removed:
+                guard.kill()
             if guard.stdout:
                 guard.stdout.close()
+            if removed:
+                guard.wait()
 
 
-def _remove(holder: str, result: dict) -> None:
+def _remove(holder: str, result: dict) -> bool:
+    """Remove the scratch directory; False (with the reason added) when it remains, for the guard to retry."""
     problem = ""
     try:
-        shutil.rmtree(holder)
+        force_remove(holder)
     except FileNotFoundError:
         pass
     except OSError as error:
         problem = f"{type(error).__name__}: {error}"
-        shutil.rmtree(holder, ignore_errors=True)
     if problem:
-        message = f"the scratch worktree {holder} could not be removed: {problem}"
+        message = f"the scratch worktree {holder!r} could not be removed: {problem}"
         result["reason"] = f"{result['reason']} {message}".strip()
+    return not os.path.exists(holder)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
