@@ -60,6 +60,10 @@ merge and merges only when its verdict is `already_held` or `moved`, never on ex
 `acquired` also exits 0 and means the lock was lost and taken again, so the base may have moved and
 the holder resyncs first. A release holder merges only on `already_held` (ADR-claims-009). A lock
 held as a lease (D13) is also taken over by the first waiter in line, sooner than this watch.
+A waiter whose watch ran out first reads the lease the holder keeps at the lock: one still beating
+within its bound restarts the watch, as a refresh does, at every place in the queue; a holder with
+none, or with a lapsed or overdue one, is taken over as before, and a failed read of the leases or
+of the queue takes nothing over in that poll.
 
 D5, a lock moves to the caller's new head (verdict `moved`: the lock sat at an earlier head of the
 same pull request) only when every open pull request containing it is the caller's; a branch
@@ -234,7 +238,10 @@ alone; a failed read of the leases takes nothing over. Both ages use the forge's
 poll's own queue read, never a host clock. The holder that lost the lock asks again with `--wait
 --lease` and queues at the forge's clock of that moment, behind every earlier registration
 (ADR-claims-012). A lease can be forged: it can cut a hold short, and the holder waits again; it
-grants nothing, since the lock is still granted by D1's create and swap only.
+grants nothing, since the lock is still granted by D1's create and swap only. A lease at the lock
+that beats within its bound keeps its holder from D4's idle takeover whatever the beat ref does,
+for the first in line and for every waiter behind it; its absence, its lapse and its bound leave
+the holder to D4 as before.
 """
 import re
 import time
@@ -415,6 +422,19 @@ def trusted(leases: list[Waiter], now: int) -> list[Waiter]:
     return [w for w in leases if max(w.since, w.beat) <= now + QUEUE_SKEW]
 
 
+def effective(leases: Collection[Waiter]) -> Waiter | None:
+    """D13: the lease that counts, the one with the largest `(<since>, <beat>, name)`; None for none."""
+    return max(leases, key=lambda w: (w.since, w.beat, w.ref), default=None)
+
+
+def lease_late(lease: Waiter, now: int) -> str | None:
+    """D13: `"lapsed"` when the lease's beat is more than `LEASE_LAPSE` behind the forge's clock `now`,
+    else `"bound"` when its `<since>` is `HOLD_BOUND` old, else None."""
+    if now - lease.beat > LEASE_LAPSE:
+        return "lapsed"
+    return "bound" if now - lease.since >= HOLD_BOUND else None
+
+
 def drop_leases(slug: str, node: Callable[[], str], leases: Collection[Waiter]) -> None:
     """D13: delete leases by compare-and-swap; one that changed, is gone or fails is left alone."""
     for lease in leases:
@@ -518,7 +538,8 @@ def acquire_once(slug: str, branch: str, sha: str, mine: list[fm.Pull],
                  seen: Callable[[str | None], None] | None = None,
                  attempts: Attempts | None = None,
                  behind: Callable[[str | None], bool] | None = None,
-                 overdue: Callable[[str, int | None], str | None] | None = None) -> Outcome:
+                 overdue: Callable[[str, int | None], str | None] | None = None,
+                 live: Callable[[str, int | None], bool] | None = None) -> Outcome:
     """One acquire attempt (D1, D2, D3, D5); `idle(lock)` lets a `held` lock be taken over.
 
     `behind`, a waiter's (D12), makes the attempt read the lock before it writes. It is asked
@@ -527,7 +548,9 @@ def acquire_once(slug: str, branch: str, sha: str, mine: list[fm.Pull],
     `held_by` for a closed one). A lock at the caller's own sha or pull request never asks,
     and neither does an idle one. `overdue`, a first-in-line waiter's (D13), is asked with the
     lock and its holder's pull request for a `held` lock `idle` did not take: `"lapsed"` or
-    `"bound"` takes it over, None leaves it held."""
+    `"bound"` takes it over, None leaves it held. `live` is asked, with the same two arguments,
+    of a `held` lock `idle` would take: true, a holder's lease still beating within its bound,
+    leaves it held and `overdue` decides."""
     ref = lock_ref(branch)
 
     def observe() -> str | None:
@@ -558,7 +581,7 @@ def acquire_once(slug: str, branch: str, sha: str, mine: list[fm.Pull],
     theirs = _on_branch(slug, lock, branch)
     kind, pr = _kind(lock, theirs, {p.number for p in mine}, branch)
     if kind == "held":
-        if idle(lock):
+        if idle(lock) and (live is None or not live(lock, pr)):
             kind = "idle"
         else:
             late = overdue(lock, pr) if overdue is not None else None
@@ -680,12 +703,10 @@ def wait_acquire(args: Any, node: Callable[[], str],
             leases = [w for w in read_leases(args.repo, args.branch) if w.pr == pr]
         except forge_api.ForgeError:
             return None
-        live = trusted([w for w in leases if w.oid == lock], queue.now)  # D4: `hold` beats only these
-        if not live:
+        lease = effective(trusted([w for w in leases if w.oid == lock], queue.now))  # D4: `hold` beats only these
+        if lease is None:
             return None
-        lease = max(live, key=lambda w: (w.since, w.beat))
-        late = ("lapsed" if queue.now - lease.beat > LEASE_LAPSE
-                else "bound" if queue.now - lease.since >= HOLD_BOUND else None)
+        late = lease_late(lease, queue.now)
         if late is not None:
             taken[:] = leases
             return late
@@ -693,8 +714,29 @@ def wait_acquire(args: Any, node: Callable[[], str],
         poll[3] = wake if not poll[3] else min(poll[3], wake)
         return None
 
+    def live(lock: str, pr: int | None) -> bool:
+        """D4, D13: true for a lock whose holder's lease at it still beats within its bound, which
+        restarts the watch; a failed read of the leases or of this poll's queue is true as well."""
+        if pr is None:
+            return False
+        try:
+            leases = [w for w in read_leases(args.repo, args.branch) if w.pr == pr and w.oid == lock]
+        except forge_api.ForgeError:
+            return True
+        if not leases:
+            return False
+        consult()
+        if queue.position is None:
+            return True
+        lease = effective(trusted(leases, queue.now))
+        if lease is None or lease_late(lease, queue.now) is not None:
+            return False
+        watch[1] = monotonic()
+        return True
+
     def attempt(sha: str, mine: list[fm.Pull]) -> Outcome:
-        return acquire_once(args.repo, args.branch, sha, mine, idle, node, seen, behind=behind, overdue=overdue)
+        return acquire_once(args.repo, args.branch, sha, mine, idle, node, seen, behind=behind, overdue=overdue,
+                            live=live)
 
     try:
         first = False
@@ -714,7 +756,7 @@ def wait_acquire(args: Any, node: Callable[[], str],
                     # D5: the release's own lock at the head it started from; release it, try again.
                     # D12: unqueued, so the lock just given up is not left free behind a waiter.
                     failure = fm.cas_ref(args.repo, node(), lock_ref(args.branch), args.sha, fm.ZERO_OID)
-                    outcome = acquire_once(args.repo, args.branch, sha, mine, idle, node, seen)
+                    outcome = acquire_once(args.repo, args.branch, sha, mine, idle, node, seen, live=live)
                     if failure and outcome.verdict == "held_by" and outcome.lock_sha == args.sha:
                         raise forge_api.ForgeError(failure.code, "compare-and-swap delete not applied and "
                                                    "the lock is unchanged", transient=failure.transient)

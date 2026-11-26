@@ -2,6 +2,7 @@
 from unittest import mock
 
 from agent_tools.claims import forge_land_lock as land_lock
+from agent_tools.system import forge_api
 
 from . import test_forge_land_lock as base
 from .test_forge_land_lock import (
@@ -234,3 +235,97 @@ class LeaseTest(base.QueueTest):
         self.assertLess(land_lock.HOLD_BOUND, land_lock.IDLE_AFTER)
         self.assertLess(land_lock.IDLE_AFTER, land_lock.BOUND)
         self.assertEqual(land_lock.HOLD_MAX, land_lock.BOUND)
+
+    def test_a_holder_whose_beat_repeats_keeps_a_lease_beating_within_its_bound_from_the_idle_takeover(self):
+        """The beat reads C at every poll, so the idle watch never restarts; the lease does."""
+        self.world.reset()
+        self.lock(B, refuse_to=(C, D))
+        self.pulls(A, pull(11, sha=A))
+        self.pulls(B, pull(12, sha=B))
+        for sha, parent in ((B, C), (C, D), (D, None)):
+            self.world.respond_json("gh", ["api", f"repos/{SLUG}/git/commits/{sha}"],
+                                    {"sha": sha, "parents": [{"sha": parent}] if parent else []})
+        self.world.set_ref(BEAT, C)
+        refreshes, beats, holds, state = [], [], [], {"refreshed": None, "held": None, "leased": False}
+
+        def hook(elapsed):
+            if state["refreshed"] is None or elapsed - state["refreshed"] >= 60:
+                state["refreshed"] = elapsed
+                refreshes.extend([run(*land("refresh", B)), run(*land("refresh", B))])
+                beats.append(self.world.refs().get(BEAT))
+            if elapsed >= 1700 and not state["leased"]:
+                state["leased"] = True
+                state["held"] = elapsed
+                holds.append(run(*land("acquire", B, "--lease")))
+            elif state["leased"] and elapsed - state["held"] >= 60:
+                state["held"] = elapsed
+                holds.append(run(*land("hold", B)))
+        code, out = self.leased(self.clock(hook))
+        self.assertEqual((code, out["verdict"], out["took_over"]), (0, "acquired", "bound"))
+        self.assertGreaterEqual(out["waited_s"], 2900)
+        self.assertLess(out["waited_s"], 2900 + land_lock.FAST_POLL + 20)
+        self.assertEqual([(c, o["verdict"]) for c, o in refreshes], [(0, "refreshed")] * len(refreshes))
+        self.assertEqual(set(beats), {C})
+        self.assertEqual(self.world.refs()[REF], A)
+
+    def test_a_holder_renewing_only_through_acquire_lease_is_never_taken_over_as_idle(self):
+        answers = []
+
+        def hook(elapsed):
+            if elapsed >= 1900:
+                answers.append(run(*land("acquire", B, "--lease")))
+        code, out = self.leased(self.clock(hook, alive=-100))
+        self.assertEqual((code, out["verdict"], out["waited_s"], out["pr"], out["position"]),
+                         (3, "land-contended", 3000, 12, 2))
+        self.assertTrue(answers)
+        for answer_code, answer in answers:
+            self.assertEqual((answer_code, answer["verdict"]), (0, "already_held"))
+            self.assertEqual(answer["lease"]["since"], EPOCH + 1920)
+        self.assertEqual(self.world.refs()[REF], B)
+        self.assertEqual([a for a in self.lock_swaps() if a[-3] == f"before={B}"], [])
+
+    def test_a_lease_that_lapsed_or_passed_its_bound_does_not_stop_the_idle_takeover(self):
+        for name in ("lapsed", "past_bound"):
+            with self.subTest(lease=name):
+                self.world.reset()
+                self.prepare(B)
+                self.leased_by = {}
+                hook = None
+                if name == "lapsed":
+                    self.lease(12, 2000, 2000)
+                else:
+                    def hook(elapsed):
+                        if elapsed >= 1000:
+                            self.lease(12, 1000, elapsed)
+                code, out = self.leased(self.clock(hook, alive=-100))
+                self.assertEqual((code, out["verdict"], out["took_over"], out["waited_s"]),
+                                 (0, "acquired", "idle", 2760))
+
+    def test_a_failed_read_at_the_idle_deadline_takes_nothing_over_that_poll(self):
+        for name in ("leases", "queue"):
+            with self.subTest(failed=name):
+                self.world.reset()
+                self.prepare(B)
+                self.leased_by = {}
+                clock, failed = self.clock(alive=-100), []
+
+                def fail_once(real, due=lambda: True):
+                    def read(*args):
+                        if not failed and due():
+                            failed.append(True)
+                            raise forge_api.ForgeError("gh_failed", "x")
+                        return real(*args)
+                    return read
+                if name == "leases":
+                    patch = mock.patch.object(land_lock, "read_leases", fail_once(land_lock.read_leases))
+                else:
+                    self.lease(12, 2000, 2000)
+                    def due():
+                        return clock.monotonic() - clock.start >= 2700
+                    look = fail_once(land_lock.Queue.look, due)
+                    patch = mock.patch.object(land_lock.Queue, "look", lambda queue, *args: look(queue, *args))
+                with patch:
+                    code, out = self.leased(clock)
+                self.assertEqual(failed, [True])
+                self.assertEqual((code, out["verdict"], out["took_over"], out["waited_s"]),
+                                 (0, "acquired", "idle", 2880))
