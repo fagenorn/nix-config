@@ -54,8 +54,8 @@ earliest on a tie, the five largest kept), `census_samples` (samples with a fres
 reset each day, and `records_since`, the day of the first sample that kept them: it is set once and
 carried across days, so a day rolled over from a state without it reports null. `records_since_at`,
 that first sample's time, is kept with it for the post-deploy check. `verify_runs` (reset each day) counts
-the `verify_run` events whose peak is dated on that day (a run whose peak is dated on another day is left
-out, as the line's description above says) and `verify_records_since` is the day of the first sample that kept them, set
+the `verify_run` events read that day except a run whose peak is dated on another day (a run with no peak
+is counted in the day that reads it, as the line's description above says) and `verify_records_since` is the day of the first sample that kept them, set
 once and carried across days like `records_since`, so an upgrade dates them from its own day. The state also keeps `last_sample`,
 `{day, line}`, the last sample line: the state is replaced first and the line appended after, so a run
 stopped between the two leaves the line in the state, and the next run appends it if the file does not

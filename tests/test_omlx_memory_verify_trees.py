@@ -86,6 +86,17 @@ class VerifyTreeRecordTest(VerifyTreeCase):
         self.assertIsNone(line["peak_verify_at"])
         self.assertEqual(line["verify_runs"], 2)
 
+    def test_a_run_without_a_peak_counts_in_the_day_that_reads_it(self):
+        self.sample_with("2026-11-24T23:58:00")
+        self.run_line("2026-11-24T23:50:00Z", 600.0, None, None)
+        self.sample_with("2026-11-25T00:00:10")
+        [line] = self.day_lines()
+        self.assertEqual((line["day"], line["verify_runs"], line["peak_verify_gib"]), ("2026-11-24", 0, None))
+        self.assertEqual(self.read_state()["verify_runs"], 1)
+        self.run_line("2026-11-25T00:01:00Z", 60.0, None, None)
+        self.sample_with("2026-11-25T00:04:00")
+        self.assertEqual(self.read_state()["verify_runs"], 2)
+
     def test_a_peak_before_midnight_read_after_it_lands_in_the_finished_day_not_the_new_one(self):
         self.sample_with("2026-11-24T23:58:00")
         self.run_line("2026-11-24T23:50:00Z", 600.0, 4.0, "2026-11-24T23:59:50Z")
