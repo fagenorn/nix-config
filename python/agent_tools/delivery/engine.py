@@ -39,8 +39,9 @@ current directory belongs to, to `done` or a stop, or continues the issue's open
 ends that run `superseded`, need `nothing`, and the same call starts a new run from `<dir>`), and prints one line of compact sorted-key
 JSON when it ends (`engine_shell` is the contract). Once its run exists it drops the history
 lines older than 180 days and deletes the run directories of issues closed more than 14 days
-ago, never changing its own exit; a run that ends in `done` or a stop appends one line to
-`~/.agents/state/engine/history.jsonl`. A `group` step runs
+ago, never changing its own exit; a run that ends in `done`, a stop or a fault, and each child run
+likewise, appends one line to `~/.agents/state/engine/history.jsonl`, its steps carrying role, turns,
+start-up, procedure and the bounds of their role. A `group` step runs
 its members beside each other; a `call` step runs a child procedure once per item as child runs of
 their own (a `run.json` with a `parent`), never more than `parallel` at once, and admits no further
 child once one faults; `engine status` reads the root run, never a child:

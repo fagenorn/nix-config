@@ -115,8 +115,9 @@ refusal is the outcome `refused` (issue 1515).
 An outcome the step's `on` does not map is a `Fault` (a fired bound is graded first). A run ends with `run_done` or `stop_reached`.
 
 Once the run exists and before its first step, `engine_housekeeping.housekeep` prunes the history and
-sweeps expired run directories; a run that ends in done or a stop then appends one history line
-(`_record_history`) before its lock is released. Neither changes the call's code or result line.
+sweeps expired run directories; a run that ends in done or a stop, or whose walk raises a `Fault`
+(`end` `fault`), then appends one history line (`engine_housekeeping.record_history`) before its lock
+is released, and so does each child run. Neither changes the call's code or result line.
 
 Single writer: under the issue's creation lock the shell takes `<run>/lock`, an exclusive `flock` held
 until its walk ends, for the root run and for each child run (released on every path). The probe for a held
@@ -485,7 +486,7 @@ def _supersede(run_dir: Path, clock: Callable[[], datetime]) -> None:
     step = next((e["step"] for e in reversed(ledger) if e["event"] == "step_entered"), ENTRY)
     with engine_stop.publication(run_dir):
         _record_stop(run_dir, step, procedure_terms.SUPERSEDED, "nothing", "", False)
-    _record_history(run_dir, clock)
+    engine_housekeeping.record_history(run_dir, clock)
 
 
 def deliver(issue: int, procedures_dir: Path, *, clock: Callable[[], datetime] | None = None,
@@ -595,9 +596,13 @@ def deliver(issue: int, procedures_dir: Path, *, clock: Callable[[], datetime] |
             _continue(run_dir, table, inputs)
         engine_housekeeping.housekeep(project=project, run=run_dir.name, clock=clock,
                                       tracker=tracker_factory, identity=identity)
-        code, line = _walk(run_dir, table, _Scope(run_dir, holder, slots))
+        try:
+            code, line = _walk(run_dir, table, _Scope(run_dir, holder, slots))
+        except Fault:
+            engine_housekeeping.record_history(run_dir, clock, fault=True)
+            raise
         if code in (EXIT_DONE, EXIT_STOP):
-            _record_history(run_dir, clock)
+            engine_housekeeping.record_history(run_dir, clock)
         return code, line
     except (engine_ledger.LedgerError, engine_core.CoreError, UnknownCommand,
             OSError, ValueError, KeyError) as error:
@@ -717,19 +722,6 @@ def _recorded_attempt(path: Path) -> object:
     except (OSError, ValueError):
         return None
     return document.get("attempt") if isinstance(document, dict) else None
-
-
-def _record_history(run_dir: Path, clock: Callable[[], datetime]) -> None:
-    """Append the run's history line; a failure is one stderr line, never the delivery's result."""
-    try:
-        state = engine_ledger.fold(engine_ledger.read_run(run_dir),
-                                   engine_ledger.replay(run_dir / "events.jsonl"),
-                                   lambda pid, started: False)
-        engine_housekeeping.append_history(engine_housekeeping.history_line(state, clock()),
-                                           engine_housekeeping.history_path())
-    except Exception as error:
-        sys.stderr.write(f"engine: the history line of run {run_dir.name} was not recorded: "
-                         f"{type(error).__name__}: {' '.join(str(error).split())}\n")
 
 
 def _lock_creation(issue: int) -> int:
@@ -1180,7 +1172,14 @@ def _child(run_dir: Path, table: CommandTable, run: dict, step: dict,
             if not _names_child(run_dir, child_dir.name):
                 shutil.rmtree(child_dir, ignore_errors=True)
             raise
-        _, line = _walk(child_dir, table, scope, action.recheck)
+        now = lambda: datetime.now(timezone.utc)  # noqa: E731
+        try:
+            code, line = _walk(child_dir, table, scope, action.recheck)
+        except Fault:
+            engine_housekeeping.record_history(child_dir, now, fault=True)
+            raise
+        if code in (EXIT_DONE, EXIT_STOP):
+            engine_housekeeping.record_history(child_dir, now)
         if line["end"] == procedure_terms.QUOTA_WAIT:
             raise _Quota(line["detail"])
         if line["end"] == engine_stop.STOPPED_BY_REQUEST:
@@ -1320,7 +1319,8 @@ def _visit_session(run_dir: Path, root: str, step: dict, action: engine_core.Sta
     def store(result: dict, outcome: str | None) -> None:
         engine_ledger.store_result(run_dir, step=name, visit=visit, result=result, at=_now(),
                                    wall_seconds=wall, turns=reading.turns, tokens=reading.tokens,
-                                   spend_usd=reading.spend_usd, outcome=outcome)
+                                   spend_usd=reading.spend_usd, outcome=outcome,
+                                   startup_seconds=engine_session.startup_seconds(launched, reading))
 
     bound = (engine_session.WALL_TIME if launched.timed_out
              else engine_session.CAP_SUBTYPES.get(reading.subtype))

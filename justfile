@@ -207,6 +207,7 @@ agent-workflow-tests *args:
     tests/test_engine_continue.py \
     tests/test_engine_resume.py \
     tests/test_engine_housekeeping.py \
+    tests/test_engine_history_steps.py \
     tests/test_engine_stop.py \
     tests/test_engine_caps.py \
     tests/test_engine_fanout.py \

@@ -105,7 +105,7 @@ EVENT_MEMBERS: Mapping[str, frozenset[str]] = {
 }
 # Members an event may carry besides `EVENT_MEMBERS`.
 EVENT_OPTIONAL: Mapping[str, frozenset[str]] = {
-    "result_stored": frozenset(("head", "outcome")),
+    "result_stored": frozenset(("head", "outcome", "startup_seconds")),
     "run_continued": frozenset(("step", "visit")),
 }
 # Members `append_event` requires beyond what a reader requires, so a ledger
@@ -386,7 +386,7 @@ def _check_member(event: Mapping[str, object], key: str) -> None:
     elif key == "turns":
         if not _is_int(value) or value < 0:  # type: ignore[operator]
             raise LedgerError("turns must be a non-negative integer")
-    elif key in ("wall_seconds", "spend_usd"):
+    elif key in ("wall_seconds", "spend_usd", "startup_seconds"):
         if not _is_number(value) or value < 0:  # type: ignore[operator]
             raise LedgerError(f"{key} must be a finite non-negative number")
     elif key == "tokens":
@@ -506,13 +506,14 @@ def _write_result(path: Path, document: object) -> None:
 def store_result(run_dir: Path, *, step: str, visit: int, result: object, at: str,
                  wall_seconds: float, turns: int, tokens: Mapping[str, int],
                  spend_usd: float, head: str | None = None,
-                 outcome: str | None = None) -> Path:
+                 outcome: str | None = None, startup_seconds: float | None = None) -> Path:
     """Write the step visit's result file, then append its `result_stored` event.
 
-    `head` and `outcome` are in the event only when given."""
+    `head`, `outcome` and `startup_seconds` are in the event only when given."""
     run_dir = Path(run_dir)
     relative = f"results/{step}.{visit}.json"
-    optional = {key: value for key, value in (("head", head), ("outcome", outcome))
+    optional = {key: value for key, value in (("head", head), ("outcome", outcome),
+                                              ("startup_seconds", startup_seconds))
                 if value is not None}
     event = validate_event({"event": "result_stored", "at": at, "step": step, "visit": visit,
                             "result": relative, "wall_seconds": wall_seconds, "turns": turns,
@@ -668,7 +669,8 @@ def fold(run: Mapping[str, object], events: Sequence[Mapping[str, object]],
         if kind in ("step_entered", "transition_taken") and visit not in entries:
             entries[visit] = {"step": visit[0], "visit": visit[1], "outcome": None,
                               "wall_seconds": None, "waits": [], "tokens": None,
-                              "spend_usd": None, "account": None}
+                              "spend_usd": None, "account": None, "role": None, "turns": None,
+                              "startup_seconds": None, "procedure": run.get("procedure")}
             current = visit
         if kind in ("session_starting", "session_resuming", "session_answered") and event["session"] not in sessions:
             sessions.append(event["session"])
@@ -679,6 +681,8 @@ def fold(run: Mapping[str, object], events: Sequence[Mapping[str, object]],
             fanout = {"task": event["index"] + 1, "tasks": event["items"]}
         elif kind in ("session_starting", "session_answered") and visit in entries:
             entries[visit]["account"] = event["account"]  # the last launch's answer wins
+            if kind == "session_starting":
+                entries[visit]["role"] = event["role"]
         elif kind == "outcome_graded" and visit in entries:
             entries[visit]["outcome"] = event["outcome"]
             graded.add(visit)
@@ -710,7 +714,9 @@ def fold(run: Mapping[str, object], events: Sequence[Mapping[str, object]],
             open_processes.pop((event["step"], event["visit"]), None)
             if visit in entries:
                 entries[visit].update(wall_seconds=event["wall_seconds"],
-                                      tokens=dict(event["tokens"]), spend_usd=event["spend_usd"])
+                                      tokens=dict(event["tokens"]), spend_usd=event["spend_usd"],
+                                      turns=event["turns"],
+                                      startup_seconds=event.get("startup_seconds"))
     process = list(open_processes.values())[-1] if open_processes else None
     running = alive(process["pid"], process["started"]) if process is not None else False
     engine = ({"pid": holder["pid"], "started": holder["started"]}
