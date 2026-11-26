@@ -299,7 +299,7 @@ summary { min-height: 24px; }
 .sprint-tell .tell-send { align-self: flex-start; }
 .sprint-acts { flex: 1 0 100%; display: flex; flex-wrap: wrap; align-items: flex-start; gap: 4px 10px; }
 .sprint-acts .sprint-tell { flex: 1 0 100%; }
-.sprint-more { margin-top: 6px; font-size: .8125rem; }
+.sprint-more { margin-top: 20px; padding-top: 12px; border-top: 1px solid var(--hair); font-size: .8125rem; }
 .sprint-more summary { list-style: none; }
 .sprint-more summary::-webkit-details-marker { display: none; }
 .tell { width: 100%; box-sizing: border-box; min-height: 3.5rem; resize: vertical; }
@@ -1130,6 +1130,14 @@ function drawSprint(item, entry, sprint) {
     item.appendChild(el("span", "manager", sprint.manager_text));
   }
   if (typeof sprint.manager_until === "string") item.appendChild(timeEl("weekday", sprint.manager_until, "until"));
+  // Tell the manager keeps one place, directly under the status lines, open report or closed.
+  const controls = el("div", "sprint-acts");
+  const hasControls = !guestDoor || sprint.steer === true;
+  if (hasControls) {
+    controls.appendChild(tellBox(item, entry, sprint));
+    if (guestDoor) controls.dataset.steer = "1";
+    item.appendChild(controls);
+  }
   const retrying = retries.get(sprint.sprint_id);
   const [verb, label] = sprint.retry === true ? ["retry", "Retry"]
     : sprint.move === true ? ["move", "Move to another account"] : [null, null];
@@ -1156,14 +1164,7 @@ function drawSprint(item, entry, sprint) {
   if (typeof sprint.reach_text === "string") {
     item.appendChild(el("span", "unreachable", sprint.reach_text));
   }
-  if (guestDoor && sprint.steer !== true) return;
-  const controls = el("div", "sprint-acts");
-  controls.appendChild(tellBox(item, entry, sprint));
-  if (guestDoor) {
-    controls.dataset.steer = "1";
-    item.appendChild(controls);
-    return;
-  }
+  if (guestDoor) return;
   const more = el("details", "sprint-more");
   more.dataset.key = "more:" + sprint.sprint_id;
   if (moreWasOpen) more.open = true;
@@ -1174,7 +1175,6 @@ function drawSprint(item, entry, sprint) {
   markBusy(button, state !== undefined && state.phase === "sending");
   more.appendChild(button);
   fold.appendChild(more);
-  item.appendChild(controls);
 }
 function stopControls(item, entry, sprint) {
   const id = sprint.sprint_id;
