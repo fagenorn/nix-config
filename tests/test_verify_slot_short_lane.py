@@ -7,6 +7,7 @@ Run: just agent-workflow-tests
 
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -19,8 +20,36 @@ from agent_tools.delivery.verify_slot import (
 from .test_verify_slot import (
     CHILD, PLACE_PATTERN, WAITED_PATTERN, SlotHarness, is_place, places, read_place, read_until,
     wait_for)
+from .process_liveness import process_alive
 
 TIER = "integration"
+
+PAIR = """
+import os, subprocess, sys, time
+directory = sys.argv[1]
+GRANDCHILD = '''
+import os, signal, sys, time
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+path = os.path.join(sys.argv[1], "grandchild.pid")
+with open(path + ".tmp", "w") as handle:
+    handle.write(str(os.getpid()))
+os.replace(path + ".tmp", path)
+time.sleep(60)
+'''
+subprocess.Popen([sys.executable, "-c", GRANDCHILD, directory])
+while not os.path.exists(os.path.join(directory, "grandchild.pid")):
+    time.sleep(0.02)
+with open(os.path.join(directory, "pair.pid"), "w") as handle:
+    handle.write(str(os.getpid()))
+time.sleep(60)
+"""
+
+
+def is_dead(pid, timeout=5):
+    deadline = time.monotonic() + timeout
+    while process_alive(pid) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    return not process_alive(pid)
 
 
 class ShortLaneTest(SlotHarness, unittest.TestCase):
@@ -177,6 +206,66 @@ class ShortLaneTest(SlotHarness, unittest.TestCase):
         self.release("l1")
         self.release("l2")
         self.assertEqual((self.finish(holder)[0], self.finish(waiter)[0]), (0, 0))
+
+    def test_a_short_command_past_its_bound_is_ended_and_reported(self):
+        self.declare_short("lint", bound=1)
+        alpha = self.worktree("alpha")
+        begin = time.monotonic()
+        code, err = self.finish(self.start("lint", argv=self.short("lint"), cwd=alpha), timeout=20)
+        elapsed = time.monotonic() - begin
+        self.assertEqual(code, verify_slot.BOUND_EXIT, err)
+        self.assertEqual(err.splitlines().count(verify_slot.SHORT_BOUND_LINE.format(bound=1)), 1)
+        self.assertLess(elapsed, 1 + verify_slot.SHORT_GRACE_SECONDS + 3)
+        self.assertTrue(is_dead(int(self.mark("lint", "pid").read_text())))
+        self.assertFalse(self.mark("lint", "end").exists())
+        (line,) = self.history()
+        self.assertEqual((line["lane"], line["exit"]), ("short", 124))
+        self.assertGreaterEqual(line["held_seconds"], 1.0)
+        self.assertEqual(verify_queue.read_holders(self.slots, verify_queue.SHORT_LANE), [])
+
+    def test_a_descendant_that_ignores_sigterm_is_killed_before_the_next_short_command_takes_the_slot(self):
+        pair_argv = [sys.executable, "-c", PAIR, str(self.marks)]
+        self.declare(verify_short_lane={
+            "slots": 1, "bound_seconds": 1,
+            "commands": {"example/alpha": [pair_argv, self.short("lint")]}})
+        alpha = self.worktree("alpha")
+        self.release("lint")
+        grace = verify_slot.SHORT_GRACE_SECONDS
+        begin = time.monotonic()
+        pair = self.start("pair", argv=pair_argv, cwd=alpha)
+        self.assertTrue(wait_for(self.mark("grandchild", "pid")))
+        lint = self.start("lint", argv=self.short("lint"), cwd=alpha)
+        self.assertTrue(wait_for(self.mark("lint", "start"), 1 + grace + 5))
+        grandchild_alive = process_alive(int(self.mark("grandchild", "pid").read_text()))
+        self.assertFalse(grandchild_alive)
+        code, err = self.finish(pair)
+        self.assertEqual(code, verify_slot.BOUND_EXIT, err)
+        self.assertGreaterEqual(time.monotonic() - begin, 1 + grace - 0.5)
+        self.assertEqual(self.finish(lint)[0], 0)
+        self.assertFalse(process_alive(int(self.mark("pair", "pid").read_text())))
+
+    def test_a_long_command_is_never_ended_at_the_short_bound(self):
+        self.declare_short("lint", bound=1)
+        proc = self.start("suite", cwd=self.worktree("alpha"))
+        self.assertTrue(wait_for(self.mark("suite", "start")))
+        time.sleep(2.5)
+        self.release("suite")
+        code, err = self.finish(proc)
+        self.assertEqual(code, 0, err)
+        self.assertNotIn(verify_slot.SHORT_BOUND_LINE.format(bound=1), err.splitlines())
+
+    def test_a_terminated_short_run_ends_its_command_group_and_frees_the_short_slot(self):
+        self.declare_short("lint", bound=30)
+        alpha = self.worktree("alpha")
+        proc = self.start("lint", argv=self.short("lint"), cwd=alpha)
+        self.assertTrue(wait_for(self.mark("lint", "start")))
+        pid = int(self.mark("lint", "pid").read_text())
+        proc.send_signal(signal.SIGTERM)
+        self.assertEqual(self.finish(proc)[0], 143)
+        self.assertTrue(is_dead(pid))
+        self.release("lint")
+        again = self.start("lint", argv=self.short("lint"), cwd=alpha)
+        self.assertEqual(self.finish(again, timeout=10)[0], 0)
 
     def test_a_line_with_an_unknown_lane_is_skipped_and_one_without_a_lane_is_read(self):
         started = (datetime.now(timezone.utc) - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")

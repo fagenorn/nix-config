@@ -128,17 +128,24 @@ prints `QUEUED_LINE` once. A waiter follows its reason line with `PLACE_LINE`, i
 and the slots' holders, and prints it again whenever either changes. A run that waited and then
 took a slot prints `WAITED_LINE` once, before the command starts. A run that took a slot at once
 prints nothing of its own. A run that reaches `--wait-limit` prints `NO_SLOT_LINE` and runs
-nothing. A command that cannot start prints `verify-slot: cannot start <argv0>: <error>`. A run
+nothing. A short command still running at its bound prints `SHORT_BOUND_LINE` once. A command
+that cannot start prints `verify-slot: cannot start <argv0>: <error>`. A run
 whose history line cannot be appended prints `HISTORY_FAILED_LINE` once.
 
 Exit codes (D8). The command's own code when it ran; a command ended by signal `s` gives
 `128 + s`. 2 for a usage or setup error (no `--`, no command after it, a bad `--wait-limit`,
 an unset or empty `HOME`, an invalid declaration, a slot directory that cannot be made),
 with nothing run. 75 (`NO_SLOT_EXIT`) when no slot came free within `--wait-limit`, with
-nothing run and its place in line reserved. 127 when the command cannot start; the slot is freed.
+nothing run and its place in line reserved. 124 (`BOUND_EXIT`) when a short command was still
+running at its lane's bound and was ended (see Signals). 127 when the command cannot start; the
+slot is freed.
 
 Signals. SIGTERM, SIGHUP and SIGINT are handled. While the command runs, the signal is
-forwarded to it and the exit code is `128 + signal` once it has ended (SIGTERM gives 143).
+forwarded to it and the exit code is `128 + signal` once it has ended (SIGTERM gives 143); a
+short command runs in its own process group and the signal goes to the whole group. A short
+command still running `bound_seconds` after it started has its group sent SIGTERM and, once
+`SHORT_GRACE_SECONDS` have passed with a member left, SIGKILL; the slot is given back only
+after the group is gone, and a signal received meanwhile still gives `128 + signal`.
 While waiting for a slot, the signal ends the wait with `128 + signal` and nothing runs.
 The slot is released on every outcome. SIGKILL cannot be forwarded: the command goes on
 running, and the slot is free as soon as this process is gone.
@@ -184,6 +191,9 @@ SLOT_DIR_ENV = "VERIFY_SLOT_DIR"
 USAGE_EXIT = 2
 REPOSITORY_LIMIT = 1
 CANNOT_START_EXIT = 127
+SHORT_BOUND_LINE = "verify-slot: this short command ran past its {bound}s bound and was ended"
+BOUND_EXIT = 124
+SHORT_GRACE_SECONDS = 5.0
 
 _open_slot = verify_queue.open_shared
 _held = verify_queue.held
@@ -264,12 +274,16 @@ class _Run:
     def __init__(self) -> None:
         self.received: int | None = None
         self.child: subprocess.Popen | None = None
+        self.grouped = False
 
     def handle(self, signum: int, _frame: object) -> None:
         self.received = signum
         if self.child is not None:
             try:
-                self.child.send_signal(signum)
+                if self.grouped:
+                    os.killpg(self.child.pid, signum)
+                else:
+                    self.child.send_signal(signum)
             except (OSError, ProcessLookupError):
                 pass
 
@@ -526,19 +540,62 @@ def _acquire(directory: Path, count: int, wait_limit: int | None, run: _Run, liv
             verify_queue.leave(ticket)
 
 
-def _run_child(argv: list[str], run: _Run) -> int:
+def _group_alive(pid: int) -> bool:
+    try:
+        os.killpg(pid, 0)
+    except (ProcessLookupError, PermissionError):  # macOS refuses a group of only zombies
+        return False
+    return True
+
+
+def _kill_group(pid: int, signum: int) -> None:
+    try:
+        os.killpg(pid, signum)
+    except (ProcessLookupError, OSError):
+        pass
+
+
+def _end_group(child: subprocess.Popen, bound: int) -> int:
+    """End a short child's whole group past its bound: TERM, the grace, KILL, then wait for it to go."""
+    _say(SHORT_BOUND_LINE.format(bound=bound))
+    pid = child.pid
+    _kill_group(pid, signal.SIGTERM)
+    grace_end = time.monotonic() + SHORT_GRACE_SECONDS
+    while (child.poll() is None or _group_alive(pid)) and time.monotonic() < grace_end:
+        time.sleep(0.05)
+    _kill_group(pid, signal.SIGKILL)  # a member that outlived the leader and the grace
+    child.wait()
+    settled = time.monotonic() + 1.0
+    while _group_alive(pid) and time.monotonic() < settled:
+        time.sleep(0.05)
+    return BOUND_EXIT
+
+
+def _wait_bounded(child: subprocess.Popen, bound: int) -> int:
+    """The child's code, or `BOUND_EXIT` once it ran `bound` seconds and its group was ended."""
+    end = time.monotonic() + bound
+    while (remaining := end - time.monotonic()) > 0:
+        try:
+            return child.wait(timeout=remaining)
+        except subprocess.TimeoutExpired:
+            pass
+    return _end_group(child, bound)
+
+
+def _run_child(argv: list[str], run: _Run, bound: int | None = None) -> int:
     if run.received is not None:
         return 128 + run.received
     try:
-        child = subprocess.Popen(argv)
+        child = subprocess.Popen(argv) if bound is None else subprocess.Popen(argv, process_group=0)
     except OSError as error:
         _say(f"verify-slot: cannot start {argv[0]}: {error}")
         return CANNOT_START_EXIT
+    run.grouped = bound is not None
     run.child = child
     # A signal that arrived while the child was being created found no child to forward to.
     if run.received is not None:
         run.handle(run.received, None)
-    code = child.wait()
+    code = child.wait() if bound is None else _wait_bounded(child, bound)
     if run.received is not None:
         return 128 + run.received
     return 128 - code if code < 0 else code
@@ -577,9 +634,10 @@ def run_command(argv: list[str], wait_limit: int | None, live: bool = False,
     count = (host_admission.DEFAULT_VERIFY_SLOTS if declaration is None
              else host_admission.verify_slots(declaration))
     lane = verify_queue.LONG_LANE
+    bound = None
     short = None if declaration is None else host_admission.short_command(declaration, group, argv)
     if short is not None:
-        count, lane = short[0], verify_queue.SHORT_LANE
+        count, lane, bound = short[0], verify_queue.SHORT_LANE, short[1]
     directory = slot_dir()
     try:
         _prepare_dir(directory)
@@ -607,7 +665,7 @@ def run_command(argv: list[str], wait_limit: int | None, live: bool = False,
         waited = taken - begin
         if held is None:
             return code
-        code = _run_child(argv, run)
+        code = _run_child(argv, run, bound)
         return code
     finally:
         if held is not None:
