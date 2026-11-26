@@ -22,6 +22,11 @@ let
     "/private/tmp/verify-pending-*"
     "/private/var/folders/*/*/T/verify-pending-*"
   ];
+  # Agent session programs: an agent process outside every root ends with its tree below the nearest one.
+  agentSessions = [
+    "claude"
+    ".claude-unwrapped"
+  ];
   # A runner's user is null for the shared account.
   runnerUsers = lib.unique (
     map (r: if r.user == null then "_github-runner" else r.user) (
@@ -89,6 +94,7 @@ in
         "--agent-user ${username}"
       ]
       ++ map (root: "--agent-root ${lib.escapeShellArg root}") agentRoots
+      ++ map (program: "--agent-session ${lib.escapeShellArg program}") agentSessions
       ++ map (user: "--runner-user ${user}") runnerUsers
       ++ [ "--record /var/db/memory-watch/floor.json" ]
     );

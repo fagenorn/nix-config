@@ -2,6 +2,10 @@
   "schema_version": 1,
   "verify_slots": 2,
   "verify_budget_seconds": 600,
+  "verify_repository_slots": {
+    "fagenorn/nix-config": 2,
+    "elevenyellow/jarbird": 1
+  },
   "verify_short_lane": {
     "slots": 1,
     "bound_seconds": 30,

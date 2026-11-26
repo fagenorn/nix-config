@@ -107,14 +107,30 @@ class CommittedPrePullRequestTest(ResolverTestCase):
         self.assertEqual(code, 0, err)
         return json.loads(out)["bindings"]
 
-    def test_the_repositorys_own_pre_pull_request_verification_is_lint_then_test_touched(self):
+    def test_the_repositorys_own_pre_pull_request_verification_ends_in_conformance(self):
         bindings = self.snapshot()
         workflow = bindings["workflow"]
         self.assertEqual(workflow["verification_before_pull_request"],
-                         ["lint", "test-touched"])
+                         ["lint", "test-touched", "conformance"])
+        self.assertEqual(bindings["commands"]["conformance"],
+                         {"argv": ["just", "conformance"], "cwd": str(REPO_ROOT), "env": []})
         self.assertEqual(bindings["commands"]["test-touched"],
                          {"argv": ["just", "test-touched"], "cwd": str(REPO_ROOT), "env": []})
         self.assertEqual(workflow["verification"], ["lint", "test"])
+
+    def test_the_conformance_id_runs_conformance_with_purpose_ci(self):
+        bindings = self.snapshot()
+        recipe = bindings["commands"]["conformance"]["argv"][1]
+        lines = (REPO_ROOT / "justfile").read_text(encoding="utf-8").splitlines()
+        start = next(i for i, line in enumerate(lines) if line.startswith(recipe + ":"))
+        body = []
+        for line in lines[start + 1:]:
+            if not line.startswith((" ", "	")):
+                break
+            body.append(line)
+        self.assertIn("conformance", bindings["workflow"]["verification_before_pull_request"])
+        self.assertTrue(any("--command conformance run --purpose ci" in line for line in body),
+                        body)
 
     def test_every_pre_pull_request_id_names_a_justfile_recipe(self):
         bindings = self.snapshot()

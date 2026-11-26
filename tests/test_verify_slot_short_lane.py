@@ -148,7 +148,7 @@ class ShortLaneTest(SlotHarness, unittest.TestCase):
                                    lane=verify_queue.SHORT_LANE)
         tickets.extend([first, second])
         result = verify_slot._decide(self.slots, 2, False, "example/alpha", "k2", "just lint",
-                                     second, lane=verify_queue.SHORT_LANE)
+                                     second, 1, lane=verify_queue.SHORT_LANE)
         self.assertIsNone(result[2])
         self.assertIsNone(result[1])
 
