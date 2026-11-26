@@ -3,7 +3,8 @@
 Usage: `python -m agent_tools.delivery.suite_timing compare --head <path> --base <path>
 --base-label <label> [--threshold <seconds>]`, or `python -m agent_tools.delivery.suite_timing
 join --workflow <path> --shard-job <job> --shards-dir <dir> --out <path> --needs-result
-<result>`
+<result>`, or `python -m agent_tools.delivery.suite_timing observed --repo <slug>
+--branch <branch> --merge <sha> --runs <n> --before-seconds <b> --target-seconds <t>`
 
 CI runs this module from source (it has no command-table row, after
 `agent_tools.delivery.suite_runner`); decision: ADR-delivery-015. It reads two timing
@@ -87,6 +88,27 @@ prefixed `suite-timing: `.
    passing job` then `unconfirmed shards: 1, ..., N`, exit 1. Else `every shard passed`,
    exit 0. 2 is a usage error.
 
+Observed. The verify check `home/common/verify-pending/checks/agent-workflow-tests-wall`
+reads the required check's wall time on `--branch` after a merge. `--repo` is
+`<owner>/<name>` of `[A-Za-z0-9_.-]+`, `--merge` 40 lowercase hex digits, `--runs` an
+integer of at least 1, the seconds finite and above 0; else stderr gets
+`suite-timing: <reason>`, nothing goes to stdout and the exit is 2. The merge run is the
+earliest (by `created_at`, then id) push run of `ci.yaml` whose `head_sha` is the merge,
+found by that sha, so a reading taken after any number of newer runs finds it. The window
+is that run and the runs after it, paged from its `created_at`, deduplicated by id and
+sorted ascending by `(created_at, id)`, the first `--runs` of them; with fewer, or with no
+merge run, the state is `not_yet` (exit 75). Each run is read on its first attempt only
+(`attempts/1/jobs`), so a rerun changes no sample. Its wall seconds are the completion of
+the job named `Agent Workflow Tests` minus the earliest start of the jobs named `Agent
+Workflow Tests Shard <n>`; a missing or unfinished job, or an unreadable time, is
+`not_yet` while the run's listed status is not `completed` and `not_met` (exit 1, the run
+named on stderr) after. The state is `met` (exit 0) when the median of the walls is
+strictly below `--target-seconds`, else `not_met`. stdout is one JSON line: `state`,
+`runs` (each `run`, `head_sha`, `wall_seconds`, `before_seconds`, `change_seconds` (wall
+minus `--before-seconds`), `conclusion` (the final job's, on the first attempt)),
+`median_seconds` (null unless every run was measured) and `target_seconds`. A forge
+failure or an unreadable listing is exit 2 with `suite-timing: <reason>`.
+
 This module imports only the standard library and `agent_tools` modules that do, because
 CI runs it with the runner image's system `python3`.
 """
@@ -99,17 +121,25 @@ import statistics
 import sys
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
+from urllib.parse import quote
 
 from agent_tools import canonical
 from agent_tools.delivery import suite_runner
+from agent_tools.system import forge_api
 
 DEFAULT_THRESHOLD = 60.0
 FACTOR_FLOOR_SECONDS = 1.0
 SLOWEST_ROWS = 10
 REPORT_VERSION = 1
 SHARD_REPORT = "suite-timing.json"
+FINAL_JOB = "Agent Workflow Tests"
+SHARD_JOB_PREFIX = "Agent Workflow Tests Shard "
+NOT_YET_EXIT = 75
+_SLUG_RE = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
+_SHA_RE = re.compile(r"[0-9a-f]{40}")
 SHARD_ARTIFACT_RE = re.compile(
     r"suite-timing-shard-([1-9][0-9]*)-attempt-([1-9][0-9]*)-(success|failure)")
 _MATRIX_LINE_RE = re.compile(r"        shard: \[([1-9][0-9]*(?:, [1-9][0-9]*)*)\]")
@@ -444,6 +474,124 @@ def _join(args: argparse.Namespace) -> int:
     return 0
 
 
+class _Unreadable(Exception):
+    """An argument or listing `observed` cannot use; the message is the reason."""
+
+
+def _positive_seconds(name: str, text: str) -> float:
+    try:
+        value = float(text)
+    except ValueError:
+        raise _Unreadable(f"{name} {text!r} is not a number") from None
+    if not math.isfinite(value) or value <= 0:
+        raise _Unreadable(f"{name} {text!r} is not a finite number above 0")
+    return value
+
+
+def _observed_arguments(args: argparse.Namespace) -> tuple[int, float, float]:
+    if _SLUG_RE.fullmatch(args.repo) is None:
+        raise _Unreadable(f"--repo {args.repo!r} is not <owner>/<name>")
+    if _SHA_RE.fullmatch(args.merge) is None:
+        raise _Unreadable(f"--merge {args.merge!r} is not 40 lowercase hex digits")
+    try:
+        runs = int(args.runs)
+    except ValueError:
+        raise _Unreadable(f"--runs {args.runs!r} is not an integer") from None
+    if runs < 1:
+        raise _Unreadable(f"--runs {args.runs!r} is below 1")
+    return (runs, _positive_seconds("--before-seconds", args.before_seconds),
+            _positive_seconds("--target-seconds", args.target_seconds))
+
+
+def _listed_runs(page: object) -> list[dict]:
+    runs = page.get("workflow_runs") if isinstance(page, dict) else None
+    if not isinstance(runs, list) or not all(
+            isinstance(run, dict) and isinstance(run.get("id"), int)
+            and not isinstance(run.get("id"), bool) and isinstance(run.get("head_sha"), str)
+            and isinstance(run.get("created_at"), str) for run in runs):
+        raise _Unreadable("a run listing is not an object with a list of runs")
+    return runs
+
+
+def _window(slug: str, branch: str, merge: str, runs: int) -> list[dict] | None:
+    """The first `runs` runs from the merge run on, or None while there are fewer or no merge run."""
+    listing = f"repos/{slug}/actions/workflows/ci.yaml/runs?branch={quote(branch, safe='')}&event=push"
+    at_merge = [run for run in _listed_runs(forge_api.api_get(f"{listing}&head_sha={merge}&per_page=100"))
+                if run["head_sha"] == merge]
+    if not at_merge:
+        return None
+    first = min(at_merge, key=lambda run: (run["created_at"], run["id"]))
+    pages = forge_api.api_pages(f"{listing}&created=>={first['created_at']}&per_page=100")
+    found = {run["id"]: run for page in pages for run in _listed_runs(page)}
+    window = sorted(found.values(), key=lambda run: (run["created_at"], run["id"]))
+    return window[:runs] if len(window) >= runs else None
+
+
+def _time(value: object) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def _first_attempt_jobs(slug: str, run_id: int) -> list[dict]:
+    listing = forge_api.api_get(f"repos/{slug}/actions/runs/{run_id}/attempts/1/jobs?per_page=100")
+    jobs = listing.get("jobs") if isinstance(listing, dict) else None
+    if not isinstance(jobs, list) or not all(isinstance(job, dict) for job in jobs):
+        raise _Unreadable(f"run {run_id}: the jobs listing is not an object with a list of jobs")
+    return jobs
+
+
+def _wall(jobs: list[dict]) -> tuple[float, object] | str:
+    """(wall seconds, the final job's conclusion) of one first attempt, or why it cannot be timed."""
+    finals = [job for job in jobs if job.get("name") == FINAL_JOB]
+    shards = [job for job in jobs if str(job.get("name", "")).startswith(SHARD_JOB_PREFIX)]
+    if not finals or not shards:
+        return f"the {FINAL_JOB} job or its shard jobs are absent"
+    if any(job.get("status") != "completed" for job in (finals[0], *shards)):
+        return f"the {FINAL_JOB} job or a shard job has not completed"
+    ended = _time(finals[0].get("completed_at"))
+    started = [_time(job.get("started_at")) for job in shards]
+    if ended is None or None in started:
+        return "a job time is missing or unreadable"
+    return (ended - min(started)).total_seconds(), finals[0].get("conclusion")
+
+
+def _observed(args: argparse.Namespace) -> int:
+    runs, before, target = _observed_arguments(args)
+    window = _window(args.repo, args.branch, args.merge, runs)
+    if window is None:
+        return _observation("not_yet", [], target)
+    rows: list[dict] = []
+    state = "met"
+    for run in window:
+        measured = _wall(_first_attempt_jobs(args.repo, run["id"]))
+        if isinstance(measured, str):
+            if run.get("status") == "completed":
+                print(f"suite-timing: run {run['id']}: {measured}", file=sys.stderr)
+                state = "not_met"
+            elif state == "met":
+                state = "not_yet"
+            continue
+        wall, conclusion = measured
+        rows.append({"run": run["id"], "head_sha": run["head_sha"], "wall_seconds": wall,
+                     "before_seconds": before, "change_seconds": wall - before,
+                     "conclusion": conclusion})
+    if state == "met":
+        median = statistics.median(row["wall_seconds"] for row in rows)
+        state = "met" if median < target else "not_met"
+        return _observation(state, rows, target, median)
+    return _observation(state, rows, target)
+
+
+def _observation(state: str, rows: list[dict], target: float, median: float | None = None) -> int:
+    sys.stdout.write(json.dumps({"state": state, "runs": rows, "median_seconds": median,
+                                 "target_seconds": target}) + "\n")
+    return {"met": 0, "not_met": 1, "not_yet": NOT_YET_EXIT}[state]
+
+
 def _threshold(text: str) -> float:
     try:
         value = float(text)
@@ -468,9 +616,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     join_parser.add_argument("--shards-dir", type=Path, required=True)
     join_parser.add_argument("--out", type=Path, required=True)
     join_parser.add_argument("--needs-result", required=True)
+    observed_parser = commands.add_parser("observed")
+    for flag in ("--repo", "--branch", "--merge", "--runs", "--before-seconds", "--target-seconds"):
+        observed_parser.add_argument(flag, required=True)
     args = parser.parse_args(argv)
     if args.command == "join":
         return _join(args)
+    if args.command == "observed":
+        try:
+            return _observed(args)
+        except (_Unreadable, forge_api.ForgeError) as error:
+            print(f"suite-timing: {error}", file=sys.stderr)
+            return 2
     try:
         head = load_report(args.head)
     except ReportError as error:

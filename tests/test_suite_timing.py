@@ -3,24 +3,29 @@
 `CompareTest` and `SpeedFactorTest` call the module's functions on reports built
 here; `CommandTest` runs `python -m agent_tools.delivery.suite_timing compare` as a
 child process over report files in a temporary directory; `CompatibilityTest` loads a
-report the suite runner wrote.
+report the suite runner wrote; `ObservedTest` runs `observed` over a stub forge and runs
+the committed wrapper.
 """
 
+import contextlib
+import io
 import json
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest import mock
 
-from agent_tools.delivery import suite_runner
+from agent_tools.delivery import suite_runner, suite_timing
 from agent_tools.delivery.suite_runner import MemberResult
 from agent_tools.delivery.suite_timing import (
     ReportError, compare, declared_shard_count, join_reports, load_report, load_shard_report,
     speed_factor, summary_line)
 
-TIER = "fast"
+TIER = "integration"  # this module reads the git index and runs a wrapper
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PYTHON_PATH = str(REPO_ROOT / "python")
@@ -554,6 +559,188 @@ class CompatibilityTest(unittest.TestCase):
                 results, jobs=4, wall_seconds=2.0))
             with self.assertRaisesRegex(ReportError, "shard"):
                 load_shard_report(path)
+
+
+MERGE = "a" * 40
+LISTING = "repos/o/r/actions/workflows/ci.yaml/runs?branch=main&event=push"
+START = datetime(2026, 11, 27, 10, 0, 0, tzinfo=timezone.utc)
+OBSERVED = ["observed", "--repo", "o/r", "--branch", "main", "--merge", MERGE, "--runs", "3",
+            "--before-seconds", "1222", "--target-seconds", "480"]
+WRAPPER = "home/common/verify-pending/checks/agent-workflow-tests-wall"
+
+
+def stamp(moment: datetime) -> str:
+    return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+class ObservedWorld:
+    """A forge for `observed`: the merge run 100 and `after` runs a minute apart, each with attempt 1 jobs."""
+
+    def __init__(self, after=2, finals=None):
+        self.ids = list(range(100, 101 + after))
+        self.finals = {100: 420, 101: 540, 102: 360, **(finals or {})}
+        self.status = {}
+        self.jobs = {}
+
+    def created(self, run_id):
+        return START + timedelta(minutes=run_id - 100)
+
+    def run(self, run_id):
+        return {"id": run_id, "head_sha": MERGE if run_id == 100 else f"{run_id:040x}",
+                "created_at": stamp(self.created(run_id)), "status": self.status.get(run_id, "completed"),
+                "run_attempt": 1}
+
+    def listing(self, run_id):
+        made = self.created(run_id)
+        offset = self.finals.get(run_id, 60)
+
+        def job(name, **fields):
+            return {"name": name, "status": "completed", "conclusion": "success", **fields}
+        return {"jobs": [job("Nix Eval"),
+                         job("Agent Workflow Tests Shard 1", started_at=stamp(made + timedelta(seconds=5))),
+                         job("Agent Workflow Tests Shard 2", started_at=stamp(made)),
+                         job("Agent Workflow Tests", completed_at=stamp(made + timedelta(seconds=offset)))]}
+
+    def gets(self):
+        gets = {f"{LISTING}&head_sha={MERGE}&per_page=100": {"workflow_runs": [self.run(100)]}}
+        for run_id in self.ids:
+            gets[f"repos/o/r/actions/runs/{run_id}/attempts/1/jobs?per_page=100"] = \
+                self.jobs.get(run_id) or self.listing(run_id)
+        return gets
+
+    def pages(self):
+        runs = [self.run(run_id) for run_id in reversed(self.ids)]
+        return {f"{LISTING}&created=>={stamp(START)}&per_page=100":
+                [{"workflow_runs": runs[at:at + 100]} for at in range(0, len(runs), 100)]}
+
+
+def call(argv, gets, pages):
+    """(exit code, parsed stdout line or None, stderr, paths read) of `suite_timing.main(argv)` over a stub forge."""
+    read = []
+
+    def api_get(path):
+        read.append(path)
+        if isinstance(gets, Exception):
+            raise gets
+        return gets[path]
+
+    def api_pages(path):
+        read.append(path)
+        return pages[path]
+    out, err = io.StringIO(), io.StringIO()
+    with mock.patch.object(suite_timing.forge_api, "api_get", side_effect=api_get), \
+            mock.patch.object(suite_timing.forge_api, "api_pages", side_effect=api_pages), \
+            contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        try:
+            code = suite_timing.main(argv)
+        except SystemExit as stop:
+            code = stop.code
+    return code, (json.loads(out.getvalue()) if out.getvalue() else None), err.getvalue(), read
+
+
+class ObservedTest(unittest.TestCase):
+    def observe(self, world, argv=OBSERVED):
+        return call(argv, world.gets(), world.pages())
+
+    def test_the_first_runs_from_the_merge_are_timed_from_first_shard_to_final_job(self):
+        code, line, _, _ = self.observe(ObservedWorld(after=2))
+
+        self.assertEqual(code, 0)
+        self.assertEqual(line["state"], "met")
+        self.assertEqual([row["run"] for row in line["runs"]], [100, 101, 102])
+        self.assertEqual([row["wall_seconds"] for row in line["runs"]], [420, 540, 360])
+        self.assertEqual([row["change_seconds"] for row in line["runs"]], [-802, -682, -862])
+        self.assertEqual([row["conclusion"] for row in line["runs"]], ["success"] * 3)
+        self.assertEqual((line["median_seconds"], line["target_seconds"]), (420, 480))
+
+        at_target = [*OBSERVED[:-1], "420"]
+        self.assertEqual(self.observe(ObservedWorld(after=2), at_target)[:2][0], 1)
+        self.assertEqual(self.observe(ObservedWorld(after=2), at_target)[1]["state"], "not_met")
+
+        code, line, _, _ = self.observe(ObservedWorld(after=1))
+        self.assertEqual((code, line["state"], line["median_seconds"]), (75, "not_yet", None))
+
+        running = ObservedWorld(after=2)
+        running.status[102] = "in_progress"
+        running.jobs[102] = running.listing(102)
+        running.jobs[102]["jobs"][-1]["status"] = "in_progress"
+        self.assertEqual(self.observe(running)[:2][0], 75)
+
+        absent = ObservedWorld(after=2)
+        gets = absent.gets()
+        gets[f"{LISTING}&head_sha={MERGE}&per_page=100"] = {"workflow_runs": []}
+        self.assertEqual(call(OBSERVED, gets, absent.pages())[0], 75)
+
+        bare = ObservedWorld(after=2)
+        bare.jobs[101] = {"jobs": [bare.listing(101)["jobs"][-1]]}
+        code, line, err, _ = self.observe(bare)
+        self.assertEqual((code, line["state"]), (1, "not_met"))
+        self.assertIn("101", err)
+
+    def test_a_late_reading_after_many_newer_runs_finds_the_same_window(self):
+        world = ObservedWorld(after=105, finals={run_id: 60 for run_id in range(103, 206)})
+
+        code, line, _, read = self.observe(world)
+
+        self.assertEqual(code, 0)
+        self.assertEqual([row["run"] for row in line["runs"]], [100, 101, 102])
+        self.assertEqual(line["median_seconds"], 420)
+        self.assertIn(f"{LISTING}&head_sha={MERGE}&per_page=100", read)
+        self.assertEqual([path for path in read if "created=>=" in path],
+                         [f"{LISTING}&created=>={stamp(START)}&per_page=100"])
+
+    def test_each_run_is_measured_on_its_first_attempt(self):
+        world = ObservedWorld(after=2)
+        gets, pages = world.gets(), world.pages()
+        pages[f"{LISTING}&created=>={stamp(START)}&per_page=100"][0]["workflow_runs"][1]["run_attempt"] = 2
+        second = world.listing(101)
+        second["jobs"] = [second["jobs"][-1]]
+        gets["repos/o/r/actions/runs/101/attempts/2/jobs?per_page=100"] = second
+
+        code, line, _, read = call(OBSERVED, gets, pages)
+
+        self.assertEqual(code, 0)
+        self.assertEqual([row["wall_seconds"] for row in line["runs"]], [420, 540, 360])
+        self.assertFalse([path for path in read if "/attempts/2/" in path])
+
+    def test_bad_arguments_or_an_unreadable_listing_exit_2(self):
+        world = ObservedWorld(after=2)
+        bad_page = {f"{LISTING}&created=>={stamp(START)}&per_page=100": [{"workflow_runs": "x"}]}
+        cases = [
+            (["--repo", "bad"], world.gets(), world.pages()),
+            (["--repo", "o/r\n"], world.gets(), world.pages()),
+            (["--merge", "abc"], world.gets(), world.pages()),
+            (["--runs", "0"], world.gets(), world.pages()),
+            (["--target-seconds", "0"], world.gets(), world.pages()),
+            (["--before-seconds", "nan"], world.gets(), world.pages()),
+            ([], world.gets(), bad_page),
+            ([], suite_timing.forge_api.ForgeError("gh_failed", "x"), world.pages()),
+        ]
+        for override, gets, pages in cases:
+            with self.subTest(override=override, gets=type(gets).__name__):
+                argv = list(OBSERVED)
+                for flag, value in zip(override[::2], override[1::2]):
+                    argv[argv.index(flag) + 1] = value
+                code, line, err, _ = call(argv, gets, pages)
+                self.assertEqual((code, line), (2, None))
+                self.assertTrue(err.startswith("suite-timing: "), err)
+
+    def test_the_check_is_committed_executable_and_runs_the_observed_command(self):
+        staged = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "ls-files", "-s", WRAPPER],
+            capture_output=True, text=True, check=True).stdout
+        bare = subprocess.run(
+            ["/bin/sh", str(REPO_ROOT / WRAPPER)], cwd=REPO_ROOT, capture_output=True,
+            text=True, stdin=subprocess.DEVNULL, timeout=60)
+        helped = subprocess.run(
+            ["/bin/sh", str(REPO_ROOT / WRAPPER), "--help"], cwd=REPO_ROOT, capture_output=True,
+            text=True, stdin=subprocess.DEVNULL, timeout=60)
+
+        self.assertTrue(staged.startswith("100755"))
+        self.assertEqual(bare.returncode, 2)
+        self.assertIn("--repo", bare.stderr)
+        self.assertEqual(helped.returncode, 0)
+        self.assertIn("--target-seconds", helped.stdout)
 
 
 if __name__ == "__main__":
