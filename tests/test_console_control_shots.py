@@ -18,6 +18,13 @@ from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- modul
 TIER = "integration"  # the real picture-run capture serves a console per state
 
 PAGE = Path(__file__).resolve().parents[1] / "python/agent_tools/console/page.html"
+SPEND = PAGE.with_name("spend.html")
+# The selector of each rule that gives a bare link or summary its 24 px floor, per stylesheet.
+FLOORS = {
+    PAGE: ("summary", ".nav", ".sprint-detail .tracker", ".closing-report .tracker",
+           '.answer:not([class*="btn-"])', "a.spend", ".signin-link, .account-add-link", ".pr-link"),
+    SPEND: (".nav",),
+}
 LINKED_SIGNIN = """(() => {
   const link = { link: "https://example.invalid/login" };
   const card = el("article", "card signin");
@@ -88,6 +95,18 @@ class PhoneTargetTest(unittest.TestCase):
         css = re.search(r"(?s)<style>(.*?)</style>", PAGE.read_text(encoding="utf-8")).group(1)
         phone = re.search(r"(?s)@media \(max-width: 480px\) \{(.*?)\n\}", css).group(1)
         self.assertIn(f"  {targets.PHONE_TALL} {{ min-height: 44px; }}", phone)
+
+    def test_every_bare_link_and_summary_rule_keeps_its_24_px_floor_without_a_browser(self) -> None:
+        for sheet, selectors in FLOORS.items():
+            css = re.search(r"(?s)<style>(.*?)</style>", sheet.read_text(encoding="utf-8")).group(1)
+            for selector in selectors:
+                with self.subTest(sheet=sheet.name, selector=selector):
+                    body = re.search(r"(?m)^" + re.escape(selector) + r" \{ ([^}]*) \}$", css)
+                    self.assertIsNotNone(body, f"no top-level rule for {selector}")
+                    self.assertIn("min-height: 24px;", body.group(1))
+                    if selector != "summary":
+                        self.assertIn("display: inline-flex;", body.group(1))
+                        self.assertIn("align-items: center;", body.group(1))
 
     def test_a_shot_with_a_small_target_fails_the_command(self) -> None:
         out = StringIO()
