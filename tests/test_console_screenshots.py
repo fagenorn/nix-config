@@ -166,7 +166,7 @@ def fake_browser(present):
                 return 0.0
             if expression == "document.documentElement.scrollWidth":
                 return 480
-            if expression == shots.SHORT_CONTROLS:
+            if expression in (shots.SHORT_CONTROLS, shots.SMALL_TARGETS):
                 return []
             return 0
 
@@ -1026,8 +1026,8 @@ def uncovered(moved, rows) -> list[str]:
 
 
 class ScreenshotFixtureTest(unittest.TestCase):
-    def test_the_set_is_fifty_nine_states_at_two_widths(self) -> None:
-        self.assertEqual(len(shots.STATES), 59)
+    def test_the_set_is_sixty_states_at_two_widths(self) -> None:
+        self.assertEqual(len(shots.STATES), 60)
         self.assertEqual(shots.STATES[shots.STATES.index("manager-cannot-hear") + 1:][:5],
                          ("permission-stale", "permission-card", "permission-long", "waiting-until",
                           "paused"))
@@ -2141,7 +2141,7 @@ class ScreenshotFixtureTest(unittest.TestCase):
                         return self.y
                     if expression == "document.documentElement.scrollWidth":
                         return 480
-                    if expression in (shots.SHORT_CONTROLS, shots.ACTS_ROW):
+                    if expression in (shots.SHORT_CONTROLS, shots.ACTS_ROW, shots.SMALL_TARGETS):
                         return []
                     return 0
 
@@ -2193,7 +2193,7 @@ class ScreenshotFixtureTest(unittest.TestCase):
                     return 0.0
                 if expression == "document.documentElement.scrollWidth":
                     return 480
-                if expression in (shots.SHORT_CONTROLS, shots.ACTS_ROW):
+                if expression in (shots.SHORT_CONTROLS, shots.ACTS_ROW, shots.SMALL_TARGETS):
                     return []
                 return 0
 
@@ -2378,7 +2378,7 @@ class ScreenshotFixtureTest(unittest.TestCase):
                     return 0.0
                 if expression == "document.documentElement.scrollWidth":
                     return 480
-                if expression in (shots.SHORT_CONTROLS, shots.ACTS_ROW):
+                if expression in (shots.SHORT_CONTROLS, shots.ACTS_ROW, shots.SMALL_TARGETS):
                     return []
                 return 0
 
@@ -2714,7 +2714,7 @@ class ScreenshotFixtureTest(unittest.TestCase):
                     self.assertEqual((running[0]["ball"], running[0]["ball_text"]),
                                      ("paused", "paused"))
                     self.assertIsNone(running[0]["now_until"])
-                elif state == "tell-box-open":
+                elif state in ("tell-box-open", "sprint-fold-open"):
                     self.assertEqual(len(running), 1)
                     self.assertEqual(running[0]["messages"], [])
                     self.assertIsInstance(running[0]["tell_text"], str)
@@ -3725,8 +3725,8 @@ class ScreenshotCaptureTest(unittest.TestCase):
 
 
 class ScreenshotReadingTest(unittest.TestCase):
-    def read_pages(self, htmls, expression):
-        """Load each markup alone in one 1440x900 Chromium page and return what `expression` reads."""
+    def read_pages(self, htmls, expression, width=1440):
+        """Load each markup alone in one `width`x900 Chromium page and return what `expression` reads."""
         try:
             from playwright.sync_api import Error, sync_playwright
         except ImportError:
@@ -3737,7 +3737,7 @@ class ScreenshotReadingTest(unittest.TestCase):
             except Error as err:
                 self.skipTest(f"no Chromium to launch: {err}")
             try:
-                page = browser.new_page(viewport={"width": 1440, "height": 900})
+                page = browser.new_page(viewport={"width": width, "height": 900})
                 found = []
                 for html in htmls:
                     page.set_content(html)

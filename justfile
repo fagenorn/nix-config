@@ -459,6 +459,8 @@ agent-workflow-tests *args:
     tests/test_console_screenshots.py \
     tests/test_console_screenshot_widths.py \
     tests/test_console_permission_shots.py \
+    tests/test_console_control_shots.py \
+    tests/test_console_sprint_end_fold.py \
     tests/test_console_screenshot_clock.py \
     tests/test_console_sprint_command.py \
     tests/test_console_manager_contract_held.py \
@@ -528,7 +530,7 @@ agent-instruction-load *args:
 verify host *args:
   PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.verification.verify_pending run --host {{host}} {{args}}
 
-# Shoot the console's sprint states against a fixture console, 118 PNGs into out (default ~/tmp/clarity-screenshots) (#1086).
+# Shoot the console's sprint states against a fixture console, 120 PNGs into out (default ~/tmp/clarity-screenshots) (#1086).
 console-screenshots out="":
   #!/usr/bin/env bash
   set -euo pipefail
