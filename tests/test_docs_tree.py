@@ -366,10 +366,13 @@ class DocsTreeTest(unittest.TestCase):
         if path.is_file():
             data = path.read_bytes()
             found = record_violations(path.relative_to(REPO_ROOT).as_posix(), data)
-            cited = set(re.findall(r"\bADR-system-(\d{3})\b", data.decode("utf-8")))
+            statement = re.search(
+                r"\bThis supersedes ((?:ADR-system-\d{3}(?:, | and )?)+)", data.decode("utf-8"))
+            if statement:
+                cited = set(re.findall(r"ADR-system-(\d{3})", statement.group(1)))
         self.assertTrue(path.is_file())
         self.assertEqual([violation.text() for violation in found], [])
-        self.assertLessEqual({"002", "003", "005"}, cited)
+        self.assertEqual(cited, {"002", "003", "005"})
 
     def test_system_002_003_and_005_name_007_as_superseding_them(self):
         directory = REPO_ROOT / "docs/areas/system/adr"
@@ -409,7 +412,7 @@ class DocsTreeTest(unittest.TestCase):
         self.assertEqual(set(layers), {
             "System", "ProjectContract", "Claims", "Guard", "Release", "Verification",
             "Delivery", "Console", "Hosts"})
-        self.assertEqual(sum(len(refs) for refs in references.values()), 31)
+        self.assertEqual(len({(project, reference) for project, refs in references.items() for reference in refs}), 31)
         for project, refs in references.items():
             for reference in refs:
                 self.assertLess(layers[reference], layers[project], f"{project} -> {reference}")
@@ -421,10 +424,24 @@ class DocsTreeTest(unittest.TestCase):
         projects = {
             "System", "ProjectContract", "Claims", "Guard", "Release", "Verification",
             "Delivery", "Console", "Hosts"}
-        self.assertEqual(len(rows), 17)
+        formats = [cells[0] for cells in rows]
+        self.assertEqual(len(formats), len(set(formats)))
+        self.assertEqual(set(formats), {
+            "`events.sqlite3` (`events` table)", "`activation.result`, `activation.log`",
+            "Not-yet exit code 75", "Command ids", "Engine step ids", "`gh` calls",
+            "Engine run files `events.jsonl`, `run.json`",
+            "Claude profile `.claude.json`, created by `claude-account add`",
+            "Claude trust files, updated after creation", "`needs-verification` label",
+            "`<!-- agent:... -->` markers", "Issue-body acceptance criteria",
+            "Fleet registry `registry.json`, `.agents/state` root", "`.agents/project.json`",
+            "Release profile grammar and adapter catalog", "Memory-watch files, cache-proxy log",
+            "Lint timing record", "Release transaction `state.json`"})
         for cells in rows:
             self.assertIn(cells[1].split()[0], projects, cells[0])
             self.assertTrue(cells[2].strip(), cells[0])
+        writers = {cells[0]: cells[2] for cells in rows}
+        self.assertIn("jq", writers["Claude profile `.claude.json`, created by `claude-account add`"])
+        self.assertEqual(writers["Claude trust files, updated after creation"], "Python")
 
     def test_no_living_file_names_a_working_artifact_outside_a_pinned_link(self):
         archived = archived_files()

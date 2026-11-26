@@ -35,7 +35,7 @@ Two repo-specific helpers in `lib/helpers.nix` drive almost everything — under
 | L1 | ProjectContract | System |
 | L0 | System (the forge transport: the `gh` calls) | none |
 
-Each shared format has one owner module and, while its area is half moved, exactly one writer. Python writes every format today. The slice that flips the row of a format's writing command changes its Writer cell to .NET in the same change.
+Each shared format has one owner module and, while its area is half moved, exactly one writer. Python writes every format today except the command ids and the profile `.claude.json` that `claude-account add` creates. The slice that flips the row of a format's writing command changes its Writer cell to .NET in the same change.
 
 | Format | Owner project · module | Writer |
 |---|---|---|
@@ -46,7 +46,8 @@ Each shared format has one owner module and, while its area is half moved, exact
 | Engine step ids | Delivery · `EngineSteps` | Python |
 | `gh` calls | System · `Forge` | Python `forge_api` for Python callers, `Forge` for .NET ones |
 | Engine run files `events.jsonl`, `run.json` | Delivery · `EngineLedger` | Python |
-| Claude profile and trust files | Console · `ClaudeProfiles`, `FolderTrust` | Python |
+| Claude profile `.claude.json`, created by `claude-account add` | Console · `ClaudeProfiles` | `claude-account` shell (`jq` copies an existing `~/.claude.json`) |
+| Claude trust files, updated after creation | Console · `FolderTrust` | Python |
 | `needs-verification` label | Verification · `HeldIssues` | Python |
 | `<!-- agent:... -->` markers | Claims · `ForgeMarkers` | Python |
 | Issue-body acceptance criteria | Claims · `IssueBody` | Python |
