@@ -529,7 +529,8 @@ only. `unmanaged` is always present, possibly empty, sorted by `root`.
                       "manager_until": "<time>" | null, "retry": <bool>, "move": <bool>,
                       "permission_text": "<bypass|auto>: <reason>" | null,
                       "progress": {"landed", "in_delivery", "queued", "held", "total"} | null,
-                      "progress_text": "<text>" | null,
+                      "progress_text": "<text>" | null, "work_text": "<sentence>" | null,
+                      "now_titled": <bool>, "legend": [{"group", "count", "text"}, ...] | null,
                       "status": "<status line>" | null, "status_at": "<report time>" | null,
                       "next": "<text>" | null, "milestone": "<text>" | null,
                       "tracker_url": "<url>" | null,
@@ -627,7 +628,15 @@ against any run), else the stage of the sprint's observation of that issue (`Spr
 where a run's `done` reads `closed out` and any other run stage is that stage with its
 `stage_text`, else the report's stage. `progress` counts the effective stages: `landed`, `held`,
 `queued`, `in_delivery` (every other stage, `closed out` included) and `total`;
-`progress_text` is `progress_text` of those counts. Observations come only from the sprint's fold,
+`progress_text` is `deliveries.progress_text` of those counts and `legend` is `deliveries.progress_legend` of them
+(null exactly when `progress` is). An issue with no observation takes the stage of its engine run (`SprintEngine.stages`) when
+that is not `landed`, `held`, `queued` or `dropped`. One classification serves the counts, the legend and the work sentence:
+each issue not `dropped` is `landed`, `held`, `queued` or else `delivery`. The work sentence (`deliveries.work_sentence`) names
+by issue title (`issue_titles`, project id to issue number to title, read from the tracker, never from the report) the issues
+in work, those the latest report moved to landed (`Report.finished`) and the next queued one; a title is left out when it
+is missing, names an issue or repeats the sprint's title, and an issue left out is counted, never numbered. `now_text` is that
+sentence (or its `NOW_QUIET_TEXT` form) with `now_titled` true when the sprint is progressing and no earlier rule spoke;
+`work_text` is the sentence when progressing and `now_text` is some other rule's, else null. Observations come only from the sprint's fold,
 never from the `deliveries` mapping: a run leaves that mapping once its final record exists, while
 the fold keeps its last stage and movement, so they outlive the run. `waiting` is the number of
 open inbox items of registered projects whose project is the sprint's and whose issue is one of the
@@ -693,11 +702,8 @@ signal is inside the window (`NOW_LOCK_POSITION_TEXT`, the place in the queue, i
 smallest `ProjectMovement.positions` is known), where an open engine wait of CI or the lock counts as fresh in the same place
 with the same words, then a usage limit and a free session slot on this host in the words of the run line
 (`engine_runs.wait_text`), a usage limit with `now_until` the earliest end time its runs' lines show (`SprintEngine.later_until`); no report, `NOW_STARTING_TEXT`; else a shown merge refusal (`sprints.merge_refused`),
-`NOW_REFUSED_TEXT` with its reason; else the stage phrase, `NOW_STAGE_TEXT`: the leading stage, its issue count, the total and
-the report's whole milestone (just the milestone when the report names no issue); either prefixed by `NOW_QUIET_TEXT` when the
-ball is `nobody`. The leading stage is the non-final, non-queued stage the most issues hold (a tie goes to the later in
-`REPORT_STAGES`); with none, `queued`; with none, `landed` when any landed, else the most common remaining stage. The sentence
-is never the status line but for a merge refusal, and never shortened (the page holds it to two lines).
+`NOW_REFUSED_TEXT` with its reason; else the work sentence (`deliveries.work_sentence`, see the report rules above); prefixed by `NOW_QUIET_TEXT` when the
+ball is `nobody`. The sentence is never the status line but for a merge refusal, and never shortened (the page holds it to two lines).
 `ended_at` is `sprints.ended_at` for every route to done (a stop, a closing, or a latest report of
 phase `done`), so the `done` state and `ended_at` never disagree; `stoppable` is true exactly when
 the sprint has no stop request, is not stopped and has not ended; `stop_text` is `STOP_FAILED_TEXT`
@@ -824,6 +830,7 @@ from types import MappingProxyType
 from agent_tools.console import (
     card_entries, contract_draft, engine_runs as engine_runs_module, inbox,
     project_question, question_records, spend as spend_module)
+from agent_tools.console import deliveries as work_words
 from agent_tools.console.activation import Activation
 from agent_tools.console.activation_run import LastRun
 from agent_tools.console.capacity import EMPTY, MoveNote
@@ -904,7 +911,6 @@ from agent_tools.console.sprints import (
     NOW_QUOTA_TEXT,
     NOW_REFUSED_TEXT,
     NOW_RELEASE_TEXT,
-    NOW_STAGE_TEXT,
     NOW_STALLED_TEXT,
     NOW_STARTING_TEXT,
     NOW_UNREAD_TEXT,
@@ -923,7 +929,6 @@ from agent_tools.console.sprints import (
     QUOTA_TEXT,
     REPLIED,
     REPLIED_TEXT,
-    REPORT_STAGES,
     RETRY_ACTION_TEXT,
     SENT,
     SENT_ENDED_TEXT,
@@ -965,7 +970,6 @@ from agent_tools.console.sprints import (
     pending_looks,
     open_faults,
     open_owner_notices,
-    progress_text,
     sprint_title,
     stated_hold,
     takes_notices,
@@ -1320,13 +1324,19 @@ def _millis(text: str) -> int:
     return int(datetime.fromisoformat(text).timestamp() * 1000)
 
 
-def _effective_stages(state: SprintState) -> list[tuple[int, str, str]]:
+def _effective_stages(
+        state: SprintState,
+        engine: engine_runs_module.SprintEngine = engine_runs_module.NO_ENGINE) -> list[tuple[int, str, str]]:
     seen = {item.issue: item.stage for item in state.observed}
+    running = {issue: (name, text) for issue, name, text in engine.stages
+               if name not in (LANDED, HELD, QUEUED, DROPPED)}
     rows = []
     for issue, stage in sorted(state.report.issues):
         run = seen.get(issue)
-        if stage in (LANDED, HELD) or run is None:
+        if stage in (LANDED, HELD) or (run is None and issue not in running):
             rows.append((issue, stage, stage))
+        elif run is None:
+            rows.append((issue, *running[issue]))
         elif run.stage == RUN_DONE:
             rows.append((issue, CLOSED_OUT, CLOSED_OUT))
         else:
@@ -1734,40 +1744,16 @@ def sprint_ball(state: SprintState, now_ms: int | None, waiting: int,
     return BALL_MANAGER if quiet_for is None else BALL_NOBODY
 
 
-def _stage_phrase(stages: Sequence[tuple[int, str, str]], milestone: str) -> str:
-    """The stage a running sprint leads with, its issue count, the total and the whole milestone;
-    just the milestone when the report names no issue. The stage is the non-final, non-queued one
-    held by the most issues (a tie goes to the later in `REPORT_STAGES`, a stage outside it ranks
-    lowest); with none, `queued`; with none, `landed` when any issue landed, else the most common
-    remaining stage (a tie goes to the alphabetically first)."""
-    if not stages:
-        return milestone
-    counts = Counter(stage for _, stage, _ in stages)
-    final = (LANDED, HELD, DROPPED, CLOSED_OUT)
-    leading = [stage for stage in counts if stage not in final and stage != QUEUED]
-    if leading:
-        stage = max(leading, key=lambda name: (
-            counts[name], REPORT_STAGES.index(name) if name in REPORT_STAGES else -1))
-    elif QUEUED in counts:
-        stage = QUEUED
-    elif LANDED in counts:
-        stage = LANDED
-    else:
-        stage = min(counts, key=lambda name: (-counts[name], name))
-    return NOW_STAGE_TEXT.format(stage=stage, count=counts[stage], total=len(stages),
-                                 milestone=milestone)
-
-
 def sprint_now(state: SprintState, quota: Wait | None, listed: Collection[str], waiting: int,
                stages: Sequence[tuple[int, str, str]], ball: str | None,
                wait: str | None = None, failed_start: bool = False,
                deaf: bool = False, prompted: bool = False,
-               hold: tuple[str, str] | None = None) -> str | None:
+               hold: tuple[str, str] | None = None, work: str | None = None) -> str | None:
     """What a running sprint is doing right now as one sentence (#1086), or None once it has
     ended; the first rule that holds, in the order the view docstring gives. `waiting`, `stages`,
     `ball`, `wait` (`sprint_wait`), `failed_start`, `deaf` (the manager holds the console's wake
     behind a prompt no one answers, #1229), `prompted` (an open permission card of its manager,
-    #1424) and `hold` (`sprints.stated_hold`, #1380) are the entry's own."""
+    #1424), `hold` (`sprints.stated_hold`, #1380) and `work` (the last rule's words) are the entry's own."""
     if ended_at(state) is not None:
         return None
     brief, report = state.brief, state.report
@@ -1808,9 +1794,12 @@ def sprint_now(state: SprintState, quota: Wait | None, listed: Collection[str], 
         return wait
     if report is None:
         return NOW_STARTING_TEXT
-    phrase = (NOW_REFUSED_TEXT.format(reason=reason) if reason is not None
-              else _stage_phrase(stages, report.milestone))
-    return NOW_QUIET_TEXT.format(phrase=phrase) if ball == BALL_NOBODY else phrase
+    if reason is not None:
+        phrase = NOW_REFUSED_TEXT.format(reason=reason)
+        return NOW_QUIET_TEXT.format(phrase=phrase) if ball == BALL_NOBODY else phrase
+    if work is not None and ball == BALL_NOBODY:
+        return NOW_QUIET_TEXT.format(phrase=work[0].lower() + work[1:])
+    return work
 
 
 def _is_new(message: Message, looked: str | None) -> bool:
@@ -1878,22 +1867,24 @@ def _sprint_entry(state: SprintState, now_ms: int | None, managers: bool, sessio
                   movement: ProjectMovement | None = None, wait_lines: Sequence[Mapping] = (),
                   waits_of: Callable[[DeliveryState], WaitSignals | None] = lambda run: None, prompted: bool = False,
                   engine: engine_runs_module.SprintEngine = engine_runs_module.NO_ENGINE,
-                  move: MoveNote | None = None, associated: Sequence[str] = (),
-                  permission_held: bool = False) -> dict:
+                  move: MoveNote | None = None, titles: Mapping[int, str] = EMPTY,
+                  associated: Sequence[str] = (), permission_held: bool = False) -> dict:
     stated_ms = _millis(state.stated_at)
     elapsed = 0 if now_ms is None else now_ms - stated_ms
     report = state.report
     closing = state.closing
     stages = (sorted((issue, stage, CLOSING_OUTCOME_TEXT[stage])
                      for issue, stage in closing.issues) if closing is not None
-              else [] if report is None else _effective_stages(state))
+              else [] if report is None else _effective_stages(state, engine))
     waiting = sprint_waiting(state, records)
     checks = sprint_checks(state, records)
+    groups = [(issue, stage if stage in (LANDED, HELD, QUEUED) else "delivery")
+              for issue, stage, _ in stages if stage != DROPPED]
     counts = {
-        "landed": sum(stage == LANDED for _, stage, _ in stages),
-        "in_delivery": sum(stage not in (LANDED, HELD, QUEUED) for _, stage, _ in stages),
-        "queued": sum(stage == QUEUED for _, stage, _ in stages),
-        "held": sum(stage == HELD for _, stage, _ in stages),
+        "landed": sum(group == LANDED for _, group in groups),
+        "in_delivery": sum(group == "delivery" for _, group in groups),
+        "queued": sum(group == QUEUED for _, group in groups),
+        "held": sum(group == HELD for _, group in groups),
         "total": len(stages),
     }
     progressing = report is not None and closing is None
@@ -1923,9 +1914,13 @@ def _sprint_entry(state: SprintState, now_ms: int | None, managers: bool, sessio
         or engine.stopped or not sprint_open_issues(state)
         or (state.manager is not None and state.manager.state == WAITING))
     hold = stated_hold(state, now_ms)
+    work = (None if report is None
+            else work_words.work_sentence(groups, report.finished, titles, sprint_title(state)))
     now_text = move.text if move is not None else sprint_now(
         state, quota, listed, waiting, stages, ball, sprint_wait(state, now_ms, listed, waits),
-        failed_start=failed, deaf=deaf, prompted=prompted, hold=hold)
+        failed_start=failed, deaf=deaf, prompted=prompted, hold=hold, work=work)
+    now_titled = (progressing and work is not None and now_text is not None and now_text in (
+        work, NOW_QUIET_TEXT.format(phrase=work[0].lower() + work[1:])))
     minute = nudges and state.manager is not None and state.manager.state == STARTED
     return {
         "type": "sprint",
@@ -1951,9 +1946,9 @@ def _sprint_entry(state: SprintState, now_ms: int | None, managers: bool, sessio
                           if manager_state == WAITING and state.manager is not None else None),
         "retry": retry, "move": move is not None and move.offer,
         "progress": counts if progressing else None,
-        "progress_text": progress_text(
-            counts["landed"], counts["total"], counts["in_delivery"], counts["queued"],
-            counts["held"]) if progressing else None,
+        "progress_text": work_words.progress_text(counts) if progressing else None,
+        "work_text": work if progressing and not now_titled else None, "now_titled": now_titled,
+        "legend": work_words.progress_legend(counts) if progressing else None,
         "status": report.status if progressing else None,
         "status_at": report.at if progressing else None,
         "next": report.next_step if progressing else None,
@@ -2012,7 +2007,7 @@ def _project_entry(state: ProjectState, sessions: Sequence[SessionState],
                    waits: Sequence[Mapping] = (), read: ReadState | None = None,
                    questions: Mapping | None = None, prompted: Collection[str] = (),
                    engine_runs: Sequence[Mapping] = (), engine_states: Sequence[engine_runs_module.RunState] = (),
-                   moves: Mapping[str, MoveNote] | None = None,
+                   moves: Mapping[str, MoveNote] | None = None, titles: Mapping[int, str] = EMPTY,
                    associated: Mapping[str, Sequence[str]] | None = None,
                    permission_held: Collection[str] = ()) -> dict:
     manager_ids: dict[str, set[str]] = {}
@@ -2036,7 +2031,7 @@ def _project_entry(state: ProjectState, sessions: Sequence[SessionState],
                               prompted=s.sprint_id in prompted,
                               engine=engine_runs_module.sprint_engine(
                                   engine_states, s.project_id, sprint_issue_numbers(s), now_ms),
-                              move=(moves or {}).get(s.sprint_id),
+                              move=(moves or {}).get(s.sprint_id), titles=titles,
                               associated=(associated or {}).get(s.sprint_id, ()),
                               permission_held=s.sprint_id in permission_held)
                 for s in group]
@@ -2348,6 +2343,7 @@ def derive_view(
     project_questions: Mapping[str, Sequence[project_question.AskedQuestion]] | None = None,
     sharing: Mapping | None = None, moves: Mapping[str, MoveNote] | None = None,
     engine_runs: Iterable[engine_runs_module.RunState] | None = None, engine_lines: bool = True,
+    issue_titles: Mapping[str, Mapping[int, str]] | None = None,
     prompted_sprints: Iterable[str] = (),
 ) -> dict:
     states = list(states)
@@ -2472,13 +2468,15 @@ def derive_view(
                               sprint_waits=sprint_waits, waits=project_waits.get(s.project_id, ()),
                               read=health.get(s.project_id), questions=asks[s.project_id], prompted=prompted,
                               engine_runs=lines.get(s.project_id, ()), engine_states=engine_states, moves=moves,
+                              titles=(issue_titles or {}).get(s.project_id, EMPTY),
                               associated=associated, permission_held=permission_held)
                for s in active]
     quiet_entries = [_project_entry(s, (), runs, now_ms, (), managers, in_sprint,
                                     finished=finished.get(s.project_id, ()), capacity=capacity,
                                     nudges=nudges, looked=looked, notices=notices[s.project_id],
                                     notice_post=notice_post[s.project_id], overlaps=overlaps[s.project_id],
-                                    read=health.get(s.project_id), questions=asks[s.project_id], prompted=prompted)
+                                    read=health.get(s.project_id), questions=asks[s.project_id], prompted=prompted,
+                                    titles=(issue_titles or {}).get(s.project_id, EMPTY))
                      for s in quiet]
     counted = {s.sprint_id for s in (*briefs, *stalls, *starts, *unprogressed)}
     counted.update(s.sprint_id for s, _ in asked)
