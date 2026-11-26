@@ -184,7 +184,7 @@ activity is at most `ACTIVE_WITHIN` seconds old; an unreadable or offset-less ti
 import os
 import re
 import stat
-from collections.abc import Callable, Collection, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -196,7 +196,7 @@ from agent_tools.claims import owner_actions
 from agent_tools.canonical import telemetry_digest
 from agent_tools.delivery import look_marker
 from agent_tools.console import pictures
-from agent_tools.console.sprints import MAX_ASK_CHARS, MAX_PICTURE_LINE_CHARS, MAX_PICTURES, cut
+from agent_tools.console.sprints import MAX_ASK_CHARS, MAX_PICTURE_LINE_CHARS, MAX_PICTURES, NOW_WAIT_TEXT, cut
 from agent_tools.system import forge_api
 from agent_tools.verification import verify_answer, verify_wait
 
@@ -1065,3 +1065,39 @@ def is_active(last_event_at: str | None, local: float | None, now: float) -> boo
         if parsed is not None and parsed.utcoffset() is not None:
             times.append(parsed.timestamp())
     return bool(times) and now - max(times) <= ACTIVE_WITHIN
+
+
+DONE_HEADLINE = "You're done for now"
+DONE_SENTENCE = "{working}; we'll put anything that needs you here."
+DONE_NONE_TEXT = "No sprint is working"
+DONE_ONE_TEXT = "1 sprint is working"
+DONE_MANY_TEXT = "{n} sprints are working"
+
+
+def _sprints(projects: Iterable[Mapping]) -> list[Mapping]:
+    return [sprint for project in projects for sprint in project["sprints"]]
+
+
+def working(projects: Iterable[Mapping]) -> int:
+    """How many sprints are working: those whose `stoppable` is true over every project entry's `sprints`,
+    the quiet projects' included, so a finished sprint never counts."""
+    return sum(1 for sprint in _sprints(projects) if sprint["stoppable"] is True)
+
+
+def done_sentence(working: int) -> str:
+    """The sentence under `DONE_HEADLINE` (a project registered, nothing open): how many sprints are working."""
+    text = DONE_NONE_TEXT if working == 0 else DONE_ONE_TEXT if working == 1 else DONE_MANY_TEXT.format(n=working)
+    return DONE_SENTENCE.format(working=text)
+
+
+def next_expected(projects: Iterable[Mapping], headline: str) -> str | None:
+    """The `now_until` with the earliest time among the sprints whose `now_text` is `NOW_WAIT_TEXT` (a wait the
+    sprint's report stated), copied as given; the engine's `later_until` is never read. The times are compared as
+    parsed at full precision (the report states microseconds), never truncated to the millisecond. None whenever
+    `headline` is not `DONE_HEADLINE` and when no sprint states a wait; a member of the view, not of the statement."""
+    if headline != DONE_HEADLINE:
+        return None
+    return min(
+        (sprint["now_until"] for sprint in _sprints(projects)
+         if sprint["now_text"] == NOW_WAIT_TEXT and isinstance(sprint["now_until"], str)),
+        key=datetime.fromisoformat, default=None)

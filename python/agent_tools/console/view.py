@@ -46,7 +46,7 @@ than `FOLD_AFTER` quiet projects are replaced by one `quiet_group` entry.
 Wire format, one object:
 
     {"statement": {"inbox_items": <open items>, "headline": "<headline>",
-                   "sentence": "<sentence>", "stale": <bool>},
+                   "sentence": "<sentence>", "stale": <bool>}, "next_expected": "<ISO time>" | null,
      "new_replies": [{"project_id", "sprint_id", "title", "message_id", "reply_at"}, ...],
      "new_replies_text": "<text>" | null,
      "capacity": {"tight": <bool>, "all_out": <bool>, "resumes_at": <ISO time> | null,
@@ -116,8 +116,8 @@ and its `DEAF_SENTENCE` are all that name it, #1247; and each open permission ca
 once, and each held sprint card (`held_sprint`). A manager's waiting state alone (a session waiting for an answer or a permission)
 counts nothing, #1424: only an open permission card does), else
 `ALL_OUT_HEADLINE` when every profile is out of usage, else `STALE_HEADLINE` when a registered
-project's tracker cannot be read, else "Nothing needs you". The sentence is `ALL_OUT_SENTENCE`
-when every profile is out of usage, else `STALE_SENTENCE` naming those projects when any is
+project's tracker cannot be read, else `inbox.DONE_HEADLINE` when a project is registered, else "Nothing needs you".
+The sentence is `ALL_OUT_SENTENCE` when every profile is out of usage, else `STALE_SENTENCE` naming those projects when any is
 stale, else `BRIEF_SENTENCE` when any brief is open, else `MANAGER_SENTENCE` when a sprint is
 stalled, else `FAILED_START_SENTENCE` when a manager failed to start, else `PROGRESS_SENTENCE`
 when a manager stopped making progress, else `SIGNIN_SENTENCE`
@@ -134,8 +134,8 @@ can answer it), else
 `REGISTER_STEP_SENTENCE` when only plan questions with no offered answer are open, else
 `NEEDS_SENTENCE` when something is open (`card_entries.HELD_MIXED_SENTENCE` beside a held card), else, with no project registered, `ADOPTING_SENTENCE` ("An adoption is
 under way; nothing is waiting on you.") when the view's `registration` (below) is running or holds
-an adoption, else the registered-project count. The
-all-out promotion never changes `inbox_items`, and the statement keeps exactly its four keys.
+an adoption, else `inbox.done_sentence` (how many sprints are working). The
+all-out promotion never changes `inbox_items`, and the statement keeps exactly its four keys; `next_expected` is `inbox.next_expected`.
 `capacity` is the `capacity_view` the caller passes (`capacity.py` defines its members), else the
 empty capacity, the same bytes as `capacity_view` over no profile. `stale` is true
 when any registered project's last read failed. An inbox item is every stored member
@@ -2150,11 +2150,8 @@ def _question_threads(questions: Sequence[project_question.AskedQuestion],
                         for group in threads]}
 
 
-def _sentence(count: int, adopting: bool = False) -> str:
-    if count == 0:
-        return ADOPTING_SENTENCE if adopting else "No project is registered yet."
-    noun = "project" if count == 1 else "projects"
-    return f"{count} registered {noun}, and nothing is waiting on you."
+def _sentence(count: int, adopting: bool = False, working: int = 0) -> str:
+    return inbox.done_sentence(working) if count else ADOPTING_SENTENCE if adopting else "No project is registered yet."
 
 
 def item_headline(item: Mapping) -> tuple[str, int]:
@@ -2313,14 +2310,14 @@ def _shown_registration(registration: Mapping | None, states: list[ProjectState]
     return dict(registration)
 
 
-def _headline(open_count: int, stale: bool, all_out: bool) -> str:
+def _headline(open_count: int, stale: bool, all_out: bool, registered: int) -> str:
     if open_count == 1:
         return "1 thing needs you"
     if open_count > 1:
         return f"{open_count} things need you"
     if all_out:
         return ALL_OUT_HEADLINE
-    return STALE_HEADLINE if stale else HEADLINE
+    return STALE_HEADLINE if stale else inbox.DONE_HEADLINE if registered else HEADLINE
 
 
 def derive_view(
@@ -2494,6 +2491,8 @@ def derive_view(
                   + len(releases) + len(prompts) + len(asked) + len(retries) + len(registering) + len(applies) + len(confirms)
                   + len(failures) + len(trusts) + len(open_items) + len(deaf) + len(held) + len(stopped_runs))
     all_out = bool(capacity["all_out"])
+    headline = _headline(open_count, bool(stale_projects), all_out, len(states))
+    next_expected = inbox.next_expected(entries + quiet_entries, headline)
     if all_out:
         sentence = ALL_OUT_SENTENCE
     elif stale_projects:
@@ -2533,7 +2532,7 @@ def derive_view(
     elif open_count:
         sentence = card_entries.HELD_MIXED_SENTENCE if held else NEEDS_SENTENCE
     else:
-        sentence = _sentence(len(states), adopting)
+        sentence = _sentence(len(states), adopting, inbox.working(entries + quiet_entries))
     new_replies = sorted(
         ({"project_id": project["project_id"], "sprint_id": sprint["sprint_id"],
           "title": sprint["title"], "message_id": message["id"], "reply_at": message["reply_at"]}
@@ -2552,9 +2551,9 @@ def derive_view(
             "projects": quiet_entries,
         })
     return {
-        "statement": {"inbox_items": open_count,
-                      "headline": _headline(open_count, bool(stale_projects), all_out),
+        "statement": {"inbox_items": open_count, "headline": headline,
                       "sentence": sentence, "stale": bool(stale_projects)},
+        "next_expected": next_expected,
         "new_replies": new_replies,
         "new_replies_text": (None if not new_replies else
                              NEW_REPLY_TEXT.format(title=new_replies[0]["title"])

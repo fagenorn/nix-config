@@ -215,7 +215,7 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .overlap { padding: 0 16px; font-size: .8125rem; color: var(--sub0); overflow-wrap: anywhere; min-width: 0; }
 .sp-who { display: flex; flex-direction: column; min-width: 0; }
 .sp-project { font-size: .75rem; color: var(--ov2); }
-.sp-now { flex: 1 0 100%; grid-column: 2 / -1; color: var(--text); display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; }
+.sp-now, .finished-line .wrap-up { flex: 1 0 100%; grid-column: 2 / -1; color: var(--text); display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; }
 .sprint .title-line { color: var(--text); font-weight: 500; overflow-wrap: anywhere; }
 .sprint-goal-full { color: var(--text); overflow-wrap: anywhere; }
 .sprint .age, .sprint .manager, .sprint .until, .sprint .status-age { color: var(--ov2); }
@@ -307,7 +307,7 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .finished-list > summary { cursor: pointer; color: var(--ov2); }
 .finished-list > ul { margin-top: 4px; }
 .finished-line summary { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 10px; padding: 3px 0; cursor: pointer; color: var(--sub0); }
-.finished-line .title-line { color: var(--text); overflow-wrap: anywhere; }
+.finished-line .title-line, .finished-line .wrap-up { color: var(--text); overflow-wrap: anywhere; }
 .finished-line .ended { color: var(--ov2); }
 .message-text { color: var(--lav); }
 .closing-report { margin-left: 4px; border-left: 1px solid var(--hair); padding: 2px 0 8px 16px; color: var(--sub0); overflow-wrap: anywhere; }
@@ -3113,7 +3113,7 @@ function questionsFold(entry, afterLine) {
 function renderStatement(view) {
   const box = document.getElementById("statement");
   const h1 = el("h1", view.statement.inbox_items > 0 ? "needs" : "", view.statement.headline);
-  const nodes = [h1, el("p", "sub", view.statement.sentence)];
+  const nodes = [h1, el("p", "sub", view.statement.sentence), ...(view.statement.inbox_items === 0 && view.next_expected ? [phrase("p", "sub next-expected", "Next update expected ", timeEl("weekday", view.next_expected, ""))] : [])];
   const cap = view.capacity ? settledCapacity(view.capacity) : view.capacity;
   if (cap && cap.all_out && cap.resumes_at) nodes.push(phrase("p", "sub", "Resumes ", timeEl("weekday", cap.resumes_at, "")));
   for (const stopped of Array.isArray(view.unstopped) ? view.unstopped : []) {
@@ -5397,12 +5397,11 @@ function finishedLine(sprint, projectId) {
   fold.dataset.key = "ended:" + sprint.sprint_id;
   const summary = el("summary");
   summary.appendChild(el("span", "title-line", sprint.title));
-  const closing = sprint.closing;
-  const counted = closing !== null && typeof closing === "object" && typeof closing.counts_text === "string";
-  summary.appendChild(el("span", "outcome", counted ? closing.counts_text : ownerWords(sprint.state_text)));
+  summary.appendChild(el("span", "outcome", typeof sprint.closing?.counts_text === "string" ? sprint.closing.counts_text.replace(/(?<!dropped)$/, ", 0 dropped") : ownerWords(sprint.state_text)));
   summary.appendChild(phrase("span", "ended", "ended ", timeEl("ago", sprint.ended_at, "")));
   if (typeof sprint.started_by === "string") summary.appendChild(el("span", "started-by", "started by " + sprint.started_by));
   if (hasNewReply(sprint)) summary.appendChild(el("span", "message-new", "new reply"));
+  if (sprint.closing?.first_line) summary.appendChild(el("span", "wrap-up", sprint.closing.first_line));
   fold.appendChild(summary);
   const spendBox = spendLine("sprint", sprint.sprint_id);
   if (spendBox !== null) fold.appendChild(spendBox);

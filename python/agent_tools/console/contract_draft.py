@@ -119,6 +119,9 @@ which no `draft` list is. `environment(fields)` is that record's value, None whe
 document does not carry, which is None. `proposed_lines(fields)` gives the `shown` line of each `PROPOSED` field
 present in a list, `[]` for a non-list or a draft without one; the ready Apply card shows them first. Its shown
 line leaves a trailing `--` off the command.
+`DRAFTED_ENVIRONMENT_LINE` is the same label with the platform's commit environment command
+(`schema_three.COMMANDS`, its trailing `--` left off), the line `register.hooks_noted` puts first on a drafted
+row whose dev-shell hooks are missing; a draft still holds no `commit-environment` record.
 
 Answers. `set_value(fields, field, value)` returns `(new_fields, None)` or `(None, text)`, refusing in order
 with `UNKNOWN_FIELD`, `EMPTY_VALUE`, `NOT_OFFERED` (a choice field), `none` for a lint or test command (every
@@ -239,6 +242,11 @@ COMMAND_FIELDS = ("lint-command", "test-command", ENVIRONMENT_FIELD)
 JSON_FIELDS = ("release", "production")
 LABELS = {**{row[0]: row[1] for row in (*_TABLE, *_PROPOSED_TABLE)},
           **{row[0]: row[1] for row in _FACT_TABLE}}
+# The registration line of a drafted row whose dev-shell hooks are missing: the environment's label with the
+# platform's commit environment command (schema 3 constant), its trailing `--` left off.
+DRAFTED_ENVIRONMENT_LINE = f"{LABELS[ENVIRONMENT_FIELD]}: " + shlex.join(
+    schema_three.COMMANDS[schema_three.CONSTANTS["/bindings/vcs/commit/environment"]]["argv"]
+).removesuffix(" --")
 POINTERS = {row[0]: row[2] for row in (*_TABLE, *_PROPOSED_TABLE)}
 OPTIONS = {**{row[0]: row[3] for row in (*_TABLE, *_PROPOSED_TABLE)}, **{f: [] for f in FACTS}}
 TEXT = {**{row[0]: row[4] for row in (*_TABLE, *_PROPOSED_TABLE)}, **{f: False for f in FACTS}}

@@ -80,11 +80,22 @@ waiter; the same argv in the same working directory takes the place back while t
 under `RESUME_SECONDS` old or while a waiter that joined after it still waits. A run ended by a
 signal or an error gives its ticket up.
 
+Short lane. The `verify_short_lane` member of the host declaration lists, per repository, the
+exact argv vectors of short commands and the count of short slots. A run whose repository and
+whole argv match one runs in the short lane: it queues on `short-ticket-*.lock` tickets and
+takes one of `short-slot-<i>.lock` (`verify_queue.slot_name`), so it never takes a long slot or
+a long ticket and a long run never takes a short one. It takes no repository lock, so any number
+of short runs of one repository may hold slots at once, and no marker: it neither registers one
+nor defers to one. Within the lane free slots go to the first waiters in service order, live
+waiters first, then ticket number. Any other run, including the same argv in another repository,
+takes the long lane as before.
+
 History. Every run that got past setup appends one line to `history.jsonl` in the slot directory
 (see `agent_tools.delivery.verify_history`), after it gave its slot and repository lock back:
 a run that took a slot, one that reached `--wait-limit` and one signalled while it waited. A run
 that held no slot records `held_seconds: null`. The line's `place` is the place the run joined the
-queue at, the place it took back for a resumed request, or null when it never joined. Its `owner` is
+queue at, the place it took back for a resumed request, or null when it never joined. Its `lane` is
+`long` or `short`, the lane the run queued in. Its `owner` is
 `CLAUDE_CODE_SESSION_ID` when set and non-empty, else null. A setup or usage error records nothing.
 A failed append prints `HISTORY_FAILED_LINE` once and leaves the exit code alone. `--report PATH`
 writes the run's history entry, the same JSON object as its `history.jsonl` line, to PATH. A caller
@@ -119,17 +130,29 @@ prints `QUEUED_LINE` once. A waiter follows its reason line with `PLACE_LINE`, i
 and the slots' holders, and prints it again whenever either changes. A run that waited and then
 took a slot prints `WAITED_LINE` once, before the command starts. A run that took a slot at once
 prints nothing of its own. A run that reaches `--wait-limit` prints `NO_SLOT_LINE` and runs
-nothing. A command that cannot start prints `verify-slot: cannot start <argv0>: <error>`. A run
+nothing. A short command still running at its bound prints `SHORT_BOUND_LINE` once. A command
+that cannot start prints `verify-slot: cannot start <argv0>: <error>`. A run
 whose history line cannot be appended prints `HISTORY_FAILED_LINE` once.
 
 Exit codes (D8). The command's own code when it ran; a command ended by signal `s` gives
 `128 + s`. 2 for a usage or setup error (no `--`, no command after it, a bad `--wait-limit`,
 an unset or empty `HOME`, an invalid declaration, a slot directory that cannot be made),
 with nothing run. 75 (`NO_SLOT_EXIT`) when no slot came free within `--wait-limit`, with
-nothing run and its place in line reserved. 127 when the command cannot start; the slot is freed.
+nothing run and its place in line reserved. 124 (`BOUND_EXIT`) when a short command was still
+running at its lane's bound and was ended (see Signals). 127 when the command cannot start; the
+slot is freed.
 
 Signals. SIGTERM, SIGHUP and SIGINT are handled. While the command runs, the signal is
-forwarded to it and the exit code is `128 + signal` once it has ended (SIGTERM gives 143).
+forwarded to it and the exit code is `128 + signal` once it has ended (SIGTERM gives 143); a
+short command runs in its own process group and the signal goes to the whole group. A short
+command still running `bound_seconds` after it started has its group sent SIGTERM and, once
+`SHORT_GRACE_SECONDS` have passed with a member left, SIGKILL; the slot is given back only
+after the group is gone, and a signal received meanwhile still gives `128 + signal`. The group
+is told before the bound line is written, and a stderr that cannot be written changes neither.
+A forwarded signal gets the same wait and KILL for a member that ignores it. When stdin is a
+terminal this run holds in the foreground, the short command's group takes the foreground and
+this run takes it back when the command ends. A `bound_seconds` above `threading.TIMEOUT_MAX`
+is an invalid declaration.
 While waiting for a slot, the signal ends the wait with `128 + signal` and nothing runs.
 The slot is released on every outcome. SIGKILL cannot be forwarded: the command goes on
 running, and the slot is free as soon as this process is gone.
@@ -175,6 +198,9 @@ SLOT_DIR_ENV = "VERIFY_SLOT_DIR"
 OWNER_ENV = "CLAUDE_CODE_SESSION_ID"
 USAGE_EXIT = 2
 CANNOT_START_EXIT = 127
+SHORT_BOUND_LINE = "verify-slot: this short command ran past its {bound}s bound and was ended"
+BOUND_EXIT = 124
+SHORT_GRACE_SECONDS = 5.0
 
 _open_slot = verify_queue.open_shared
 _held = verify_queue.held
@@ -190,18 +216,34 @@ class SlotError(Exception):
     """A usage or setup error; the command exits 2 and runs nothing."""
 
 
-def host_limits(group: str | None) -> tuple[int, int]:
-    """The declared verify slot count and `group`'s repository limit, capped at the count; defaults without one."""
+def _declaration() -> dict | None:
+    """The validated host declaration, None when the file is absent; an invalid one is a `SlotError`."""
     try:
-        declaration = host_admission.load_declaration()
+        return host_admission.load_declaration()
     except host_admission.DeclarationError as error:
         if error.reason_code == "declaration_missing":
-            return host_admission.DEFAULT_VERIFY_SLOTS, host_admission.DEFAULT_REPOSITORY_VERIFY_SLOTS
+            return None
         raise SlotError(f"the host declaration is invalid: {error}") from None
+
+
+def _limits(declaration: dict | None, group: str | None) -> tuple[int, int]:
+    """`declaration`'s verify slot count and `group`'s repository limit, capped at the count; defaults without one."""
+    if declaration is None:
+        return host_admission.DEFAULT_VERIFY_SLOTS, host_admission.DEFAULT_REPOSITORY_VERIFY_SLOTS
     limit = (host_admission.DEFAULT_REPOSITORY_VERIFY_SLOTS if group is None
              else host_admission.repository_verify_slots(declaration, group))
     count = host_admission.verify_slots(declaration)
     return count, min(limit, count)
+
+
+def host_limits(group: str | None) -> tuple[int, int]:
+    """The declared verify slot count and `group`'s repository limit, capped at the count; defaults without one."""
+    return _limits(_declaration(), group)
+
+
+def slot_count() -> int:
+    """The declared verify slot count, `DEFAULT_VERIFY_SLOTS` when no declaration exists."""
+    return host_limits(None)[0]
 
 
 def slot_dir() -> Path:
@@ -251,12 +293,16 @@ class _Run:
     def __init__(self) -> None:
         self.received: int | None = None
         self.child: subprocess.Popen | None = None
+        self.grouped = False
 
     def handle(self, signum: int, _frame: object) -> None:
         self.received = signum
         if self.child is not None:
             try:
-                self.child.send_signal(signum)
+                if self.grouped:
+                    os.killpg(self.child.pid, signum)
+                else:
+                    self.child.send_signal(signum)
             except (OSError, ProcessLookupError):
                 pass
 
@@ -307,14 +353,14 @@ def _register_live(directory: Path) -> int | None:
     return marker
 
 
-def _holders_beside(directory: Path, own: Path) -> int:
-    """The live holders of every slot file but `own`, whatever their index."""
-    return sum(1 for path in sorted(directory.glob("slot-*.lock")) if path != own and _held(path))
+def _holders_beside(directory: Path, own: Path, lane: str = verify_queue.LONG_LANE) -> int:
+    """The live holders of every slot file of `lane` but `own`, whatever their index."""
+    return sum(1 for path in verify_queue.slot_files(directory, lane) if path != own and _held(path))
 
 
-def _take_repository(directory: Path, group: str, repository_limit: int) -> int | None:
+def _take_repository(directory: Path, group: str, repository_limit: int, count: int) -> int | None:
     """The first repository lock of `group` this process gets without blocking, else None."""
-    for path in verify_queue.repository_lock_paths(directory, group, repository_limit):
+    for path in verify_queue.repository_lock_paths(directory, group, repository_limit, count):
         descriptor = _open_slot(path)
         try:
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -329,7 +375,8 @@ def _take_repository(directory: Path, group: str, repository_limit: int) -> int 
 
 
 def _try_slots(directory: Path, count: int, live: bool, group: str | None, repository_limit: int,
-               probe_marker: bool = True) -> tuple[tuple[int, int | None] | None, str | None]:
+               probe_marker: bool = True,
+               lane: str = verify_queue.LONG_LANE) -> tuple[tuple[int, int | None] | None, str | None]:
     """`((slot, group lock or None), None)` on a slot kept, else `(None, reason)` with nothing taken.
 
     A slot file that cannot be opened counts as taken, as it does for every holder count. A taken
@@ -338,10 +385,10 @@ def _try_slots(directory: Path, count: int, live: bool, group: str | None, repos
     `group` is set, it also takes one of the repository's first `repository_limit` locks, never
     past `count`, and gives the slot back while every one is held (`same_repository`). An ordinary
     run lastly gives both back while a live waiter holds the marker (`deferred`); a live run skips
-    that check, and so does a caller that passes `probe_marker=False`.
+    that check, and so does a caller that passes `probe_marker=False`. The slot files are `lane`'s.
     """
     for index in range(count):
-        path = directory / f"slot-{index}.lock"
+        path = directory / verify_queue.slot_name(lane, index)
         try:
             descriptor = _open_slot(path)
         except OSError:
@@ -354,13 +401,13 @@ def _try_slots(directory: Path, count: int, live: bool, group: str | None, repos
         except BaseException:
             os.close(descriptor)
             raise
-        if 1 + _holders_beside(directory, path) > count:
+        if 1 + _holders_beside(directory, path, lane) > count:
             os.close(descriptor)
             return None, "taken"
         held_group = None
         if group is not None:
             try:
-                held_group = _take_repository(directory, group, min(repository_limit, count))
+                held_group = _take_repository(directory, group, repository_limit, count)
             except BaseException:
                 os.close(descriptor)
                 raise
@@ -393,29 +440,37 @@ def _bounded(pause: float, start: float, wait_limit: int | None) -> float:
 
 
 def _decide(directory: Path, count: int, live: bool, group: str | None, key: str, command: str,
-            ticket: verify_queue.Ticket | None, limit: int) -> tuple:
+            ticket: verify_queue.Ticket | None, limit: int, lane: str = verify_queue.LONG_LANE) -> tuple:
     """One decision under the queue lock: `(ticket, held, reason, eligible, place, holders)`.
 
     `held` is the slot taken, `reason` why the run waits (None while it waits for an earlier
-    admitted waiter) and `eligible` whether its repository is under the limit.
+    admitted waiter) and `eligible` whether its repository is under the limit (always, short lane).
     """
+    short = lane == verify_queue.SHORT_LANE
     if ticket is None:
-        ticket = verify_queue.join(directory, key, live, group, time.time(), limit=limit)
+        ticket = verify_queue.join(directory, key, live, group, time.time(), limit=limit, lane=lane)
     queue = verify_queue.waiters(directory, ticket, time.time())
-    holders = verify_queue.read_holders(directory)
+    holders = verify_queue.read_holders(directory, lane)
     free = max(0, count - len(holders))
-    counts = verify_queue.holder_counts(
-        directory, holders, {waiter.repository for waiter in queue if waiter.repository})
-    admitted = verify_queue.admitted(queue, counts, free)
-    eligible = group is None or counts.get(group, 0) < ticket.limit
+    if short:
+        admitted, eligible = verify_queue.short_admitted(queue, free), True
+    else:
+        counts = verify_queue.holder_counts(
+            directory, holders, {waiter.repository for waiter in queue if waiter.repository})
+        admitted = verify_queue.admitted(queue, counts, free)
+        eligible = group is None or counts.get(group, 0) < ticket.limit
     place = verify_queue.place(queue, ticket.seq)
     reason = None
     if admitted and admitted[0].seq == ticket.seq:
         # A live waiter in the queue is ordered ahead by `admitted`, and one held back by its
         # repository may still hold a marker it drops only at its next poll, so the marker speaks
         # only for a live waiter of an older `verify-slot`, which no ticket shows.
-        held, reason = _try_slots(directory, count, live, group, ticket.limit,
-                                  probe_marker=not any(waiter.live for waiter in queue))
+        if short:
+            held, reason = _try_slots(directory, count, live, None, ticket.limit,
+                                      probe_marker=False, lane=lane)
+        else:
+            held, reason = _try_slots(directory, count, live, group, ticket.limit,
+                                      probe_marker=not any(waiter.live for waiter in queue))
         if held is not None:
             try:
                 verify_queue.record_holder(held[0], group, command)
@@ -430,12 +485,12 @@ def _decide(directory: Path, count: int, live: bool, group: str | None, key: str
 
 
 def _acquire(directory: Path, count: int, wait_limit: int | None, run: _Run, live: bool,
-             group: str | None, key: str, command: str,
-             limit: int) -> tuple[tuple[int, int | None] | None, int | None, int | None]:
+             group: str | None, key: str, command: str, limit: int,
+             lane: str = verify_queue.LONG_LANE) -> tuple[tuple[int, int | None] | None, int | None, int | None]:
     """`(held, None, place)` on a taken slot, else `(None, exit code, place)` with nothing to run.
 
-    `place` is where the run joined the queue, None if it never did. A live run holds the marker
-    while it waits under the limit; a run leaving without a slot gives its ticket up.
+    `place` is where the run joined the queue, None if it never did. A live long-lane run holds the
+    marker while it waits under the limit; a run leaving without a slot gives its ticket up.
     """
     marker = None
     ticket = None
@@ -449,7 +504,7 @@ def _acquire(directory: Path, count: int, wait_limit: int | None, run: _Run, liv
         while True:
             if run.received is not None:
                 return None, 128 + run.received, joined_place
-            registering = live and marker is None and eligible
+            registering = live and lane == verify_queue.LONG_LANE and marker is None and eligible
             if ((waiting or contended or registering) and wait_limit is not None
                     and time.monotonic() - start >= wait_limit):
                 _say(NO_SLOT_LINE.format(limit=wait_limit))
@@ -470,7 +525,7 @@ def _acquire(directory: Path, count: int, wait_limit: int | None, run: _Run, liv
                 continue
             try:
                 ticket, held, reason, eligible, place, holders = _decide(
-                    directory, count, live, group, key, command, ticket, limit)
+                    directory, count, live, group, key, command, ticket, limit, lane)
                 if joined_place is None:
                     joined_place = place
                 if marker is not None and not eligible and held is None:
@@ -502,19 +557,105 @@ def _acquire(directory: Path, count: int, wait_limit: int | None, run: _Run, liv
             verify_queue.leave(ticket)
 
 
-def _run_child(argv: list[str], run: _Run) -> int:
+def _group_alive(pid: int) -> bool:
+    try:
+        os.killpg(pid, 0)
+    except (ProcessLookupError, PermissionError):  # macOS refuses a group of only zombies
+        return False
+    return True
+
+
+def _kill_group(pid: int, signum: int) -> None:
+    try:
+        os.killpg(pid, signum)
+    except (ProcessLookupError, OSError):
+        pass
+
+
+def _foreground(pgrp: int) -> None:
+    """Make `pgrp` the foreground group of the terminal on stdin, whatever the signals say."""
+    blocked = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTTOU})
+    try:
+        os.tcsetpgrp(0, pgrp)
+    except OSError:
+        pass
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, blocked)
+
+
+def _owns_terminal() -> bool:
+    """Whether this process's group is the foreground group of the terminal on stdin."""
+    try:
+        return os.isatty(0) and os.tcgetpgrp(0) == os.getpgrp()
+    except OSError:
+        return False
+
+
+def _reap_group(child: subprocess.Popen) -> None:
+    """Wait the grace for a short child's group to go, KILL what is left, then wait for it to go."""
+    pid = child.pid
+    grace_end = time.monotonic() + SHORT_GRACE_SECONDS
+    while (child.poll() is None or _group_alive(pid)) and time.monotonic() < grace_end:
+        time.sleep(0.05)
+    _kill_group(pid, signal.SIGKILL)  # a member that outlived the leader and the grace
+    child.wait()
+    settled = time.monotonic() + 1.0
+    while _group_alive(pid) and time.monotonic() < settled:
+        time.sleep(0.05)
+
+
+def _end_group(child: subprocess.Popen, bound: int) -> int:
+    """End a short child's whole group past its bound; the group is told first, the report is best effort."""
+    _kill_group(child.pid, signal.SIGTERM)
+    try:
+        _say(SHORT_BOUND_LINE.format(bound=bound))
+    except OSError:  # a caller that closed its stderr still gets the group ended and its slot held
+        os.dup2(os.open(os.devnull, os.O_WRONLY), 2)  # the unwritten text must not fail the exit flush
+    _reap_group(child)
+    return BOUND_EXIT
+
+
+def _wait_bounded(child: subprocess.Popen, bound: int) -> int:
+    """The child's code, or `BOUND_EXIT` once it ran `bound` seconds and its group was ended."""
+    end = time.monotonic() + bound
+    while (remaining := end - time.monotonic()) > 0:
+        try:
+            return child.wait(timeout=remaining)
+        except subprocess.TimeoutExpired:
+            pass
+    return _end_group(child, bound)
+
+
+def _run_child(argv: list[str], run: _Run, bound: int | None = None) -> int:
     if run.received is not None:
         return 128 + run.received
+    interactive = bound is not None and _owns_terminal()
     try:
-        child = subprocess.Popen(argv)
+        if bound is None:
+            child = subprocess.Popen(argv)
+        elif interactive:
+            # Its own group, made the terminal's foreground before it runs, so a read of stdin does not stop it.
+            child = subprocess.Popen(
+                argv, process_group=0, preexec_fn=lambda: _foreground(os.getpgrp()))
+        else:
+            child = subprocess.Popen(argv, process_group=0)
     except OSError as error:
         _say(f"verify-slot: cannot start {argv[0]}: {error}")
         return CANNOT_START_EXIT
+    run.grouped = bound is not None
     run.child = child
     # A signal that arrived while the child was being created found no child to forward to.
     if run.received is not None:
         run.handle(run.received, None)
-    code = child.wait()
+    try:
+        code = child.wait() if bound is None else _wait_bounded(child, bound)
+        if bound is not None and (interactive or run.received is not None):
+            # A forwarded signal ends the leader, not a member that ignores it; and the terminal's own
+            # interrupt goes to the child's foreground group alone, so the wrapper never learns of it.
+            _reap_group(child)
+    finally:
+        if interactive:
+            _foreground(os.getpgrp())
     if run.received is not None:
         return 128 + run.received
     return 128 - code if code < 0 else code
@@ -549,7 +690,13 @@ def run_command(argv: list[str], wait_limit: int | None, live: bool = False,
         group = repository_group(Path.cwd())
     except OSError:
         group = None
-    count, limit = host_limits(group)
+    declaration = _declaration()
+    count, limit = _limits(declaration, group)
+    lane = verify_queue.LONG_LANE
+    bound = None
+    short = None if declaration is None else host_admission.short_command(declaration, group, argv)
+    if short is not None:
+        count, lane, bound = short[0], verify_queue.SHORT_LANE, short[1]
     directory = slot_dir()
     try:
         _prepare_dir(directory)
@@ -568,7 +715,8 @@ def run_command(argv: list[str], wait_limit: int | None, live: bool = False,
     waited, held_seconds = 0.0, None
     try:
         try:
-            held, code, joined = _acquire(directory, count, wait_limit, run, live, group, key, command, limit)
+            held, code, joined = _acquire(
+                directory, count, wait_limit, run, live, group, key, command, limit, lane)
         except OSError as error:
             raise SlotError(f"cannot take a slot in {directory}: {error}") from None
         acquired = True
@@ -576,7 +724,7 @@ def run_command(argv: list[str], wait_limit: int | None, live: bool = False,
         waited = taken - begin
         if held is None:
             return code
-        code = _run_child(argv, run)
+        code = _run_child(argv, run, bound)
         return code
     finally:
         if held is not None:
@@ -590,7 +738,7 @@ def run_command(argv: list[str], wait_limit: int | None, live: bool = False,
             signal.signal(number, handler)
         if acquired:
             entry = verify_history.entry(group, argv, started, waited, held_seconds, code, joined,
-                                         owner=os.environ.get(OWNER_ENV) or None)
+                                         owner=os.environ.get(OWNER_ENV) or None, lane=lane)
             _record(directory, entry)
             if report is not None:
                 _report(Path(report), entry)
