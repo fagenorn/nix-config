@@ -354,6 +354,7 @@ agent-workflow-tests *args:
     tests/test_verify_slot_short_lane.py \
     tests/test_verify_slot_timeouts.py \
     tests/test_verify_queue.py \
+    tests/test_verify_tree.py \
     tests/test_verification_command.py \
     tests/test_touched_tests.py \
     tests/test_console_event_log.py \

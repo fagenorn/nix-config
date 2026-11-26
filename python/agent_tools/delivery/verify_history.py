@@ -6,7 +6,8 @@ A line is `json.dumps(record, sort_keys=True, separators=(",", ":"), allow_nan=F
 newline, UTF-8, with exactly these keys:
 
     {"command":"just test","exit":0,"held_seconds":412.3,"lane":"long","owner":"...","place":2,
-     "repository":"owner/repo","started":"2026-11-23T19:24:20Z","waited_seconds":12.0}
+     "repository":"owner/repo","started":"2026-11-23T19:24:20Z","tree_peak_at":"2026-11-23T19:24:30Z",
+     "tree_peak_bytes":3221225472,"waited_seconds":12.0}
 
 `repository` is the run's lowercased `owner/repo`, or null outside a repository. `command` is the
 first `COMMAND_WORDS` whitespace-separated words of the argv. `started` is the UTC instant the run
@@ -16,7 +17,9 @@ the slot and repository lock given back, or null when no slot was taken. Both ar
 decimal. `exit` is the code the run returns. `place` is the place the run joined the queue at (at
 re-join for a resumed request), or null when it never joined. `lane` is `"long"` or `"short"`, the
 lane the run queued and ran in. `owner` is the session that asked
-the run (the caller's session id as set, in full), or null when none is set.
+the run (the caller's session id as set, in full), or null when none is set. `tree_peak_bytes` is the
+largest footprint, in bytes, that `agent_tools.delivery.verify_tree` read of the command's whole process
+tree while it ran, and `tree_peak_at` the UTC instant of that reading; both are null when nothing was read.
 
 The file is created with mode 0666, so every account of the host appends to it; it is opened
 without following a symlink or blocking, and a path that is not a regular file with a single link
@@ -28,7 +31,9 @@ host clears its temporary directory at boot.
 the types above (`held_seconds` a number or null, the numbers finite and not below 0, `place`
 absent as in older lines, null or an integer of at least 1; `lane` absent as in older lines or one
 of `LANES`; `owner` absent as in older lines, null
-or a string); any other line, a torn last one included, is skipped and counted. Over the runs that
+or a string; `tree_peak_bytes` absent as in older lines, null or an integer of at least 0 and
+`tree_peak_at` absent, null or an RFC 3339 UTC string, the two both set or both null or absent);
+any other line, a torn last one included, is skipped and counted. Over the runs that
 started in the window, per repository (`NO_REPOSITORY` for null), it gives `runs`, the median and
 the nearest-rank 90th percentile (the value at rank `ceil(0.9 * n)` of the sorted values) of the wait over every run,
 and of the hold over the runs that held a slot, plus the sum of those holds. Its line is
@@ -80,7 +85,8 @@ def history_path(directory: Path) -> Path:
 
 def entry(repository: str | None, argv: Sequence[str], started: datetime, waited: float,
           held: float | None, exit_code: int, place: int | None, owner: str | None = None,
-          lane: str = "long") -> dict:
+          lane: str = "long", tree_peak_bytes: int | None = None,
+          tree_peak_at: str | None = None) -> dict:
     """The record of one run, with its argv cut to `COMMAND_WORDS` words and its owner kept whole."""
     return {
         "command": " ".join(" ".join(argv).split()[:COMMAND_WORDS]),
@@ -91,6 +97,8 @@ def entry(repository: str | None, argv: Sequence[str], started: datetime, waited
         "place": place,
         "repository": repository,
         "started": started.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "tree_peak_at": tree_peak_at,
+        "tree_peak_bytes": tree_peak_bytes,
         "waited_seconds": round(waited, 1),
     }
 
@@ -170,6 +178,17 @@ def _is_owner(value: object) -> bool:
     return value is None or type(value) is str
 
 
+def _is_tree(record: Mapping) -> bool:
+    """Both tree keys null or absent, or a byte count of at least 0 with the UTC time it was read."""
+    peak, at = record.get("tree_peak_bytes"), record.get("tree_peak_at")
+    if peak is None or at is None:
+        return peak is None and at is None
+    if type(peak) is not int or peak < 0:
+        return False
+    canonical.parse_rfc3339_utc(at)
+    return True
+
+
 def _readable(line: bytes) -> dict | None:
     """The record `line` holds, or None when it is not a readable record."""
     try:
@@ -184,7 +203,8 @@ def _readable(line: bytes) -> dict | None:
               and (record["held_seconds"] is None or _is_seconds(record["held_seconds"]))
               and _is_place(record.get("place"))
               and _is_lane(record)
-              and _is_owner(record.get("owner")))
+              and _is_owner(record.get("owner"))
+              and _is_tree(record))
     except (ValueError, KeyError, RecursionError, OverflowError):
         return None
     return record if ok else None

@@ -96,7 +96,11 @@ a run that took a slot, one that reached `--wait-limit` and one signalled while 
 that held no slot records `held_seconds: null`. The line's `place` is the place the run joined the
 queue at, the place it took back for a resumed request, or null when it never joined. Its `lane` is
 `long` or `short`, the lane the run queued in. Its `owner` is
-`CLAUDE_CODE_SESSION_ID` when set and non-empty, else null. A setup or usage error records nothing.
+`CLAUDE_CODE_SESSION_ID` when set and non-empty, else null. Its `tree_peak_bytes` and `tree_peak_at`
+are the largest footprint of the command's whole process tree and the time it was read, measured
+while the command ran by `agent_tools.delivery.verify_tree` (both null when nothing was read, as
+when the command never started or the host has no `footprint`); `VERIFY_SLOT_FOOTPRINT` names
+another footprint program beside `VERIFY_SLOT_DIR`, a test seam. A setup or usage error records nothing.
 A failed append prints `HISTORY_FAILED_LINE` once and leaves the exit code alone. `--report PATH`
 writes the run's history entry, the same JSON object as its `history.jsonl` line, to PATH. A caller
 reads it to learn the run's wait and hold, and a path that cannot be written is reported and changes nothing.
@@ -171,7 +175,7 @@ import subprocess
 import sys
 import time
 
-from agent_tools.delivery import host_admission, verify_history, verify_queue
+from agent_tools.delivery import host_admission, verify_history, verify_queue, verify_tree
 from agent_tools.project_contract.derived_values import normalize_remote_url
 
 NO_SLOT_LINE = "verify-slot: no verify slot came free within {limit}s; nothing ran"
@@ -294,6 +298,7 @@ class _Run:
         self.received: int | None = None
         self.child: subprocess.Popen | None = None
         self.grouped = False
+        self.tree: tuple[int | None, str | None] = (None, None)
 
     def handle(self, signum: int, _frame: object) -> None:
         self.received = signum
@@ -647,6 +652,8 @@ def _run_child(argv: list[str], run: _Run, bound: int | None = None) -> int:
     # A signal that arrived while the child was being created found no child to forward to.
     if run.received is not None:
         run.handle(run.received, None)
+    sampler = verify_tree.TreePeak(child.pid, verify_tree.footprint_path())
+    sampler.start()
     try:
         code = child.wait() if bound is None else _wait_bounded(child, bound)
         if bound is not None and (interactive or run.received is not None):
@@ -654,6 +661,7 @@ def _run_child(argv: list[str], run: _Run, bound: int | None = None) -> int:
             # interrupt goes to the child's foreground group alone, so the wrapper never learns of it.
             _reap_group(child)
     finally:
+        run.tree = sampler.stop()
         if interactive:
             _foreground(os.getpgrp())
     if run.received is not None:
@@ -738,7 +746,8 @@ def run_command(argv: list[str], wait_limit: int | None, live: bool = False,
             signal.signal(number, handler)
         if acquired:
             entry = verify_history.entry(group, argv, started, waited, held_seconds, code, joined,
-                                         owner=os.environ.get(OWNER_ENV) or None, lane=lane)
+                                         owner=os.environ.get(OWNER_ENV) or None, lane=lane,
+                                         tree_peak_bytes=run.tree[0], tree_peak_at=run.tree[1])
             _record(directory, entry)
             if report is not None:
                 _report(Path(report), entry)
