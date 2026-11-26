@@ -21,6 +21,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from agent_tools.delivery import comment_lint
+from agent_tools.delivery.never_rise import Snapshot
 from agent_tools.delivery.suite_runner import REPORT_ENV, suite_members
 from agent_tools.delivery.touched_tests import (
     SELECTION_ENV, build_trigger, default_capture, default_execute, main, parse_assignments,
@@ -461,6 +463,13 @@ class RecipeTest(unittest.TestCase):
         for variable in ("CLAUDE_SETTINGS_PATH", "CLAUDE_GUARD_BASE_POLICY_PATH"):
             self.assertIn(variable, helper)
             self.assertIn(variable, (REPO_ROOT / guard_test).read_text(encoding="utf-8"))
+
+    def test_the_helper_comment_stays_within_the_comment_length_rule(self):
+        data = self.justfile.encode("utf-8")
+        snapshot = Snapshot("HEAD", {}, contents={"justfile": data})
+        length = next(e for e in comment_lint.enforcers(None) if e.rule == comment_lint.LENGTH_RULE)
+        recipe_line = self.justfile[:self.justfile.index("\nclaude-guard-test-env:\n")].count("\n") + 1
+        self.assertNotIn(recipe_line, [v.line for v in length.find(snapshot)])
 
     def test_the_helper_prints_the_settings_and_the_base_policy_under_their_own_names(self):
         store = "/nix/store/h1-"
