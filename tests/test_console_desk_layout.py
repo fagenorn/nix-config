@@ -1,4 +1,4 @@
-"""The picture run's desk with one card and seven running sprints (#1807).
+"""The picture run's desk with one card and seven running sprints.
 
 Run: just agent-workflow-tests
 """
@@ -14,6 +14,8 @@ from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
 from unittest import mock
+
+from agent_tools.delivery import comment_lint, never_rise
 
 from . import console_screenshot_desk as desk
 from . import console_screenshots as shots
@@ -106,6 +108,15 @@ class SevenSprintsSeedTest(unittest.TestCase):
     def test_the_seven_sprints_state_follows_failed_start(self) -> None:
         self.assertEqual(shots.STATES[shots.STATES.index("failed-start") + 1], desk.SEVEN_SPRINTS)
         self.assertEqual(desk.SEVEN_SPRINTS, "seven-sprints")
+
+    def test_the_desk_files_name_no_issue_in_a_comment(self) -> None:
+        paths = ("tests/console_screenshot_desk.py", "tests/test_console_desk_layout.py", "tests/console_screenshots.py")
+        contents = {path: (ROOT / path).read_bytes() for path in paths}
+        snapshot = never_rise.Snapshot(revision="HEAD", line_counts={}, contents=contents)
+        found = comment_lint.enforcers("fagenorn/nix-config")[0].find(snapshot)
+        named = [v.text() for v in found
+                 if "1807" in contents[v.path].decode().split("\n")[v.line - 1]]
+        self.assertEqual(named, [])
 
     def test_main_passes_the_widths_to_capture(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -1,4 +1,4 @@
-"""The picture run's desk with one card and seven running sprints (#1807), and the run's choice of states and widths."""
+"""The picture run's desk with one card and seven running sprints, and the run's choice of states and widths."""
 from __future__ import annotations
 
 import argparse

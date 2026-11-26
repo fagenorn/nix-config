@@ -49,7 +49,7 @@ Contract:
   so the spend figures show; `failed-start` is a sprint whose first launch was refused, with its
   card carrying the reason and the Retry and Drop the sprint buttons; `seven-sprints` is the desk with one card
   (`owner/web`'s question) and seven running sprints over the three projects, the Work column's full-width case
-  (#1807), shot at any widths with `--widths`; `goal-open` is the sprint block of `tell-box-open` with the top
+  shot at any widths with `--widths`; `goal-open` is the sprint block of `tell-box-open` with the top
   bar's goal field focused so its box is open; `goal-near` is `goal-open` with 1900
   characters typed, so the count reads near the limit; `goal-over` is it with 2100 characters
   typed, so the count reads over the limit, Send is unavailable and the hint beside it says how much to cut (#1214);
