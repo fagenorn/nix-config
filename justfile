@@ -209,6 +209,7 @@ agent-workflow-tests *args:
     tests/test_engine_fixture.py \
     tests/test_engine_stubbed_run.py \
     tests/test_engine_stubbed_world.py \
+    tests/test_engine_step_coverage.py \
     tests/test_independent_review.py \
     tests/test_issue_setup.py \
     tests/test_closing.py \
@@ -274,6 +275,7 @@ agent-workflow-tests *args:
     tests/test_owner_actions.py \
     tests/test_forge_land_lock.py \
     tests/test_forge_land_lease.py \
+    tests/test_forge_land_deadline.py \
     tests/test_landing_reading.py \
     tests/test_verified_tree.py \
     tests/test_transaction_core.py \
@@ -355,6 +357,7 @@ agent-workflow-tests *args:
     tests/test_console_view.py \
     tests/test_console_view_action.py \
     tests/test_console_view_lock_place.py \
+    tests/test_console_view_held_sprint.py \
     tests/test_console_draft_facts.py \
     tests/test_console_failed_start.py \
     tests/test_console_activation.py \
@@ -413,6 +416,7 @@ agent-workflow-tests *args:
     tests/test_console_page.py \
     tests/test_console_page_action.py \
     tests/test_console_page_move.py \
+    tests/test_console_page_held_sprint.py \
     tests/test_console_long_permission_card.py \
     tests/test_console_controls.py \
     tests/test_console_goal_box.py \
@@ -442,8 +446,10 @@ agent-workflow-tests *args:
     tests/test_console_notices.py \
     tests/test_console_reports.py \
     tests/test_console_screenshots.py \
+    tests/test_console_screenshot_widths.py \
     tests/test_console_permission_shots.py \
     tests/test_console_sprint_command.py \
+    tests/test_console_manager_contract_held.py \
     tests/test_console_sprint_action.py \
     tests/test_console_sprint_warnings.py \
     tests/test_console_pictures.py \
@@ -509,7 +515,7 @@ agent-instruction-load *args:
 verify host *args:
   PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.verification.verify_pending run --host {{host}} {{args}}
 
-# Shoot the console's sprint states against a fixture console, 116 PNGs into out (default ~/tmp/clarity-screenshots) (#1086).
+# Shoot the console's sprint states against a fixture console, 118 PNGs into out (default ~/tmp/clarity-screenshots) (#1086).
 console-screenshots out="":
   #!/usr/bin/env bash
   set -euo pipefail
