@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 
 from agent_tools.delivery.record_lint import record_violations
+from agent_tools.delivery.routing import index_table
 from agent_tools.project_contract.adopt_links import links
 
 
@@ -44,14 +45,30 @@ OWNER_WORDS = (
 )
 
 
-def owner_words(text: str) -> dict[str, str]:
-    """The glossary table of `docs/guides/owner-words.md`: each row's first cell mapped to its second."""
-    found = {}
-    for line in text.splitlines():
-        cells = [c.strip() for c in line.strip().strip("|").split("|")]
-        if line.startswith("|") and len(cells) == 2 and set(cells[0]) - set("-: ") and cells[0] != "Word":
-            found[cells[0]] = cells[1]
-    return found
+def owner_word_problems(text: str) -> list[str]:
+    """What is wrong with the rendered glossary table of `docs/guides/owner-words.md`, one line each.
+
+    Rows come from `index_table`, so a line in a fence or an HTML comment is not a row. A row with other
+    than two cells, an empty word or gloss, or a word that an earlier row already gave is a problem.
+    """
+    problems = []
+    seen = set()
+    for row in index_table(text)[1:]:
+        if len(row) != 2:
+            problems.append(f"row of {len(row)} cells: {row}")
+            continue
+        word, gloss = row
+        if not word or not gloss:
+            problems.append(f"empty word or gloss: {row}")
+        if word in seen:
+            problems.append(f"duplicate word: {word}")
+        seen.add(word)
+    return problems
+
+
+def owner_words(text: str) -> set[str]:
+    """The words the rendered glossary table of `docs/guides/owner-words.md` defines."""
+    return {row[0] for row in index_table(text)[1:] if len(row) == 2}
 
 
 def markdown_section(text: str, name: str) -> str:
@@ -440,12 +457,22 @@ class DocsTreeTest(unittest.TestCase):
                 self.assertIn(f"| {term} | Delivery |", context_map)
 
     def test_the_owner_words_glossary_gives_each_listed_word_a_gloss(self):
-        glossary = owner_words(
-            (REPO_ROOT / "docs/guides/owner-words.md").read_text(encoding="utf-8"))
+        text = (REPO_ROOT / "docs/guides/owner-words.md").read_text(encoding="utf-8")
+        self.assertEqual(owner_word_problems(text), [])
         for word in OWNER_WORDS:
             with self.subTest(word=word):
-                self.assertIn(word, glossary)
-                self.assertNotEqual(glossary[word].strip(), "")
+                self.assertIn(word, owner_words(text))
+
+    def test_the_glossary_reader_ignores_a_definition_hidden_in_a_comment(self):
+        text = (
+            "| Word | In everyday words |\n|---|---|\n| held |  |\n"
+            "<!--\n| held | Finished and merged, but not done. |\n-->\n"
+        )
+        self.assertEqual(owner_word_problems(text), ["empty word or gloss: ['held', '']"])
+
+    def test_the_glossary_reader_reports_a_word_given_twice(self):
+        text = "| Word | In everyday words |\n|---|---|\n| held | One. |\n| held | Two. |\n"
+        self.assertEqual(owner_word_problems(text), ["duplicate word: held"])
 
     def test_the_index_reaches_the_plain_words_rule_the_glossary_and_the_audit(self):
         index = (REPO_ROOT / "docs/README.md").read_text(encoding="utf-8")
