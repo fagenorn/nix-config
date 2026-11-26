@@ -424,6 +424,7 @@ agent-workflow-tests *args:
     tests/test_console_answer.py \
     tests/test_console_sprints.py \
     tests/test_console_manager_identity.py \
+    tests/test_console_contract_plain_words.py \
     tests/test_console_action_card.py \
     tests/test_console_revive.py \
     tests/test_console_idle.py \
