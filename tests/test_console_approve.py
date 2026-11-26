@@ -284,7 +284,7 @@ class MergeFailureTest(unittest.TestCase):
             (failed("gh: Not allowed (HTTP 405)"),
              "the forge refused the merge; the repository's rules do not allow it yet"),
             (failed("gh: Not Found (HTTP 404)"),
-             "the forge does not know the repository or the pull request"),
+             "the forge does not know the repository or the proposed change"),
             (failed("gh: Server (HTTP 500)"),
              "the forge answered in a way the console does not understand")]
         for error, words in table:
@@ -416,7 +416,7 @@ class WordsTest(unittest.TestCase):
               "Install gh on this computer and sign it in, " + again)),
             (ForgeError("gh_timeout", "api"),
              ("the forge took too long to answer",
-              "Choose Try again; the console first looks for a pull request the forge may have "
+              "Choose Try again; the console first looks for a proposed change the forge may have "
               "opened already.")),
             (ForgeError("gh_failed", "error connecting to api.github.com", transient=True),
              ("the forge could not be reached",
@@ -426,9 +426,9 @@ class WordsTest(unittest.TestCase):
             (ForgeError("gh_failed", "gh: Forbidden (HTTP 403)"),
              ("gh is not signed in, or may not open pull requests on this repository", sign_in)),
             (ForgeError("gh_failed", "gh: Validation Failed (HTTP 422)"),
-             ("the forge refused the pull request",
+             ("the forge refused the proposed change",
               "Check on the forge that the adoption's branch differs from develop and has no "
-              "pull request open already, " + again)),
+              "proposed change open already, " + again)),
             (ForgeError("gh_failed", "gh: Not Found (HTTP 404)"),
              ("the forge does not know the repository or the branch",
               "Check that origin is the GitHub repository and that the adoption's branch "
@@ -580,7 +580,7 @@ class WordsTest(unittest.TestCase):
 
     def test_the_running_headline_and_the_plan_branch(self):
         self.assertEqual(approve.running_headline("r"),
-                         "Applying the adoption of r and opening its pull request…")
+                         "Applying the adoption of r and opening its proposed change…")
         self.assertEqual(approve.branch_of(PID), BRANCH)
 
 
@@ -700,7 +700,7 @@ class ApplyWordsTest(unittest.TestCase):
                                         "branch": None, "commit": None}),
                 ("push_failed", None, {"reason": approve.PUSH_REFUSED,
                                        "note": approve.PUSH_NOTE}),
-                ("open_failed", None, {"reason": "the forge refused the pull request",
+                ("open_failed", None, {"reason": "the forge refused the proposed change",
                                        "note": approve.OPEN_NOTE}),
                 *(("opened", state, {}) for state in ("open", "ready", "merged", "closed"))]
         for step, state, over in rows:
@@ -964,9 +964,9 @@ class EntryTest(unittest.TestCase):
 
     def test_waiting_and_ready_read_as_one_sentence_in_one_style(self):
         for state, sentence in (
-                ("open", "The pull request of sample-app is not ready to merge yet."),
-                (None, "The pull request of sample-app is not ready to merge yet."),
-                ("ready", "The pull request of sample-app is ready to merge.")):
+                ("open", "The proposed change of sample-app is not ready to merge yet."),
+                (None, "The proposed change of sample-app is not ready to merge yet."),
+                ("ready", "The proposed change of sample-app is ready to merge.")):
             with self.subTest(state=state):
                 entry = approve.entry(self.adoption("opened", state), running=False,
                                       name="sample-app")
@@ -974,11 +974,11 @@ class EntryTest(unittest.TestCase):
 
     def test_a_failing_pull_request_says_a_check_failed(self):
         entry = approve.entry(self.adoption("opened", "failing"), running=False, name="r")
-        self.assertEqual(entry["headline"], "The pull request of r has a failed check.")
+        self.assertEqual(entry["headline"], "The proposed change of r has a failed check.")
         self.assertIsNone(entry["note"])
 
     def test_the_entry_per_step_and_pull_state(self):
-        waits = ("The pull request of r was merged; waiting for develop on origin to carry it "
+        waits = ("The proposed change of r was merged; waiting for develop on origin to carry it "
                  "before registering.")
         url = "https://example.test/pull/7"
         table = [
@@ -999,18 +999,18 @@ class EntryTest(unittest.TestCase):
               [], "N", None)),
             (self.adoption("open_failed", reason="refused", note="N"),
              ("open_failed", None,
-              "The adoption of r was pushed, but its pull request was not opened: refused.",
+              "The adoption of r was pushed, but its proposed change was not opened: refused.",
               [], "N", None)),
             (self.adoption("opened", "open"),
-             ("opened", "open", "The pull request of r is not ready to merge yet.",
+             ("opened", "open", "The proposed change of r is not ready to merge yet.",
               [], None, url)),
             (self.adoption("opened", "ready"),
-             ("opened", "ready", "The pull request of r is ready to merge.",
+             ("opened", "ready", "The proposed change of r is ready to merge.",
               [], None, url)),
             (self.adoption("opened", "merged"),
              ("opened", "merged", waits, [], None, url)),
             (self.adoption("opened", "closed"),
-             ("opened", "closed", "The pull request of r was closed without merging.",
+             ("opened", "closed", "The proposed change of r was closed without merging.",
               [], approve.CLOSED_NOTE, url)),
         ]
         for adoption, (step, state, headline, lines, note, link) in table:
@@ -1026,7 +1026,7 @@ class EntryTest(unittest.TestCase):
                                  (adoption["branch"], adoption["commit"]))
 
     def test_a_merged_adoption_reads_its_registration_state(self):
-        waits = ("The pull request of r was merged; waiting for develop on origin to carry it "
+        waits = ("The proposed change of r was merged; waiting for develop on origin to carry it "
                  "before registering.")
         stamp = {"project_id": None, "reason": None, "note": None, "at": "t"}
         table = [
@@ -1054,7 +1054,7 @@ class EntryTest(unittest.TestCase):
         self.assertIsNone(approve.entry(None, running=False, name="r"))
         self.assertEqual(approve.entry(None, running=True, name="r"), {
             "status": "running", "step": None, "state": None,
-            "headline": "Applying the adoption of r and opening its pull request…",
+            "headline": "Applying the adoption of r and opening its proposed change…",
             "lines": [], "note": None, "branch": None, "commit": None, "url": None})
 
 
@@ -1064,14 +1064,14 @@ class EntryTest(unittest.TestCase):
              "Check that the repository's origin can be reached from this host and accepts the "
              "push, then press Try again.", approve.PUSH_NOTE),
             ("open_failed",
-             "Press Try again; the console first looks for a pull request the forge may have "
+             "Press Try again; the console first looks for a proposed change the forge may have "
              "opened already.",
-             "Choose Try again; the console first looks for a pull request the forge may have "
+             "Choose Try again; the console first looks for a proposed change the forge may have "
              "opened already."),
             ("open_failed",
-             f"Check on the forge that {BRANCH} differs from develop and has no pull request "
+             f"Check on the forge that {BRANCH} differs from develop and has no proposed change "
              "open already, then press Try again.",
-             f"Check on the forge that {BRANCH} differs from develop and has no pull request "
+             f"Check on the forge that {BRANCH} differs from develop and has no proposed change "
              "open already, then choose Try again."),
             ("apply_failed",
              "Commit or set aside the uncommitted change in /srv/r, then press Approve again.",

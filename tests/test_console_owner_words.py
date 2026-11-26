@@ -18,8 +18,9 @@ TIER = "fast"
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CASES = REPO_ROOT / "tests/fixtures/console/owner-words-cases.json"
 PAGE = REPO_ROOT / "python/agent_tools/console/page.html"
-PAGE_TEXT_MODULES = ("view", "sprints", "engine_runs", "guest", "capacity", "answer", "approve")
-OWNER_FACING = re.compile(r"(?:_TEXT|_LABEL|_SENTENCE|_LINE|_LEAD|_WHY|_NOTE|_APPROVES)$|^HEADLINE$")
+PAGE_TEXT_MODULES = ("view", "sprints", "engine_runs", "guest", "capacity")
+LITERAL_MODULES = ("answer", "approve")
+OWNER_FACING = re.compile(r"(?:_TEXT|_LABEL|_SENTENCE|_LINE|_LEAD)$|^HEADLINE$")
 STR = r'"((?:[^"\\\n]|\\.)*)"'
 CLASS_POSITIONS = (
     r'\b(?:el|phrase)\(\s*"[^"]*"\s*,\s*' + STR,
@@ -68,9 +69,31 @@ def text_constants(source):
     return out
 
 
+def module_literals(source):
+    """Every string literal of the module the owner may read: no docstring, no `raise` argument, no option flag.
+
+    The refusals, headlines and notes of `answer` and `approve` are module constants under many names and
+    f-strings inside functions, so these two modules are scanned by literal, not by name.
+    """
+    tree = ast.parse(source)
+    skipped = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Raise):
+            skipped |= {id(n) for n in ast.walk(node)}
+        body = getattr(node, "body", None)
+        if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and body \
+                and isinstance(body[0], ast.Expr):
+            skipped.add(id(body[0].value))
+    return [n.value for n in ast.walk(tree)
+            if isinstance(n, ast.Constant) and isinstance(n.value, str) and id(n) not in skipped
+            and not n.value.startswith("-")]
+
+
 def console_text_words():
     root = REPO_ROOT / "python/agent_tools/console"
-    return [w for m in PAGE_TEXT_MODULES for w in text_constants((root / (m + ".py")).read_text(encoding="utf-8"))]
+    read = lambda m: (root / (m + ".py")).read_text(encoding="utf-8")
+    return ([w for m in PAGE_TEXT_MODULES for w in text_constants(read(m))]
+            + [w for m in LITERAL_MODULES for w in module_literals(read(m))])
 
 
 def G(word):
@@ -162,6 +185,29 @@ class FixedWordsTest(unittest.TestCase):
         for text in (sprints.FAULT_UNKNOWN, sprints.FAULT_WITHDRAWN_ALREADY):
             with self.subTest(text=text):
                 self.assertEqual(owner_words.unglossed(text), [])
+
+    def test_the_active_reports_issue_stages_use_no_unglossed_glossary_word(self):
+        from agent_tools.console import sprints
+        for stage in (sprints.LANDED, sprints.HELD):
+            with self.subTest(stage=stage):
+                report = sprints.Report(at="t", status="s", phase="p", milestone="m", tracker_url="u",
+                                        issues=((14, stage),), inbox=(), next_step="n")
+                state = sprints.SprintState("s", "p", "g", 1, "t", report=report)
+                ((_, _, text),) = view._effective_stages(state)
+                self.assertEqual(owner_words.unglossed(text), [])
+        self.assertEqual(view._effective_stages(state)[0][2], "merged, not yet proven")
+
+    def test_the_look_and_adoption_refusals_are_among_the_scanned_words(self):
+        from agent_tools.console import answer, approve
+        words = console_text_words()
+        for text in (answer.LOOK_MOVED, answer.LOOK_CLOSED, approve.FAILING, approve.NOT_READY_PULL,
+                     approve.MERGING, "The proposed change of "):
+            self.assertIn(text, words)
+
+    def test_module_literals_reads_function_strings_and_skips_docstrings_raises_and_flags(self):
+        source = ('"""held doc"""\nA = "guard"\ndef f(n):\n    """rerun doc"""\n'
+                  '    if n:\n        raise ValueError("a claim")\n    run(["git", "--verify"])\n    return f"The look of {n} is held."\n')
+        self.assertEqual(module_literals(source), ["guard", "The look of ", " is held.", "git"])
 
     def test_a_failing_adoptions_reason_names_the_link_the_card_shows(self):
         from agent_tools.console import approve

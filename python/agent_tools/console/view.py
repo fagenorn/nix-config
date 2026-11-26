@@ -1331,7 +1331,7 @@ def _effective_stages(state: SprintState) -> list[tuple[int, str, str]]:
     for issue, stage in sorted(state.report.issues):
         run = seen.get(issue)
         if stage in (LANDED, HELD) or run is None:
-            rows.append((issue, stage, stage))
+            rows.append((issue, stage, CLOSING_OUTCOME_TEXT.get(stage, stage)))
         elif run.stage == RUN_DONE:
             rows.append((issue, CLOSED_OUT, CLOSED_OUT))
         else:

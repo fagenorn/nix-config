@@ -1252,7 +1252,7 @@ class RowTest(unittest.TestCase):
         waiting = register.view_entry(None, latest, adoption=self.opened_adoption("open"),
                                       approve=None)
         self.assertEqual(waiting["lines"], [])
-        self.assertEqual(waiting["line"], "The pull request of r is not ready to merge yet.")
+        self.assertEqual(waiting["line"], "The proposed change of r is not ready to merge yet.")
         closed = register.view_entry(
             None, latest, adoption=self.opened_adoption("closed", approve.CLOSED_NOTE),
             approve=None)

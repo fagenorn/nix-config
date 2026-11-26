@@ -1858,7 +1858,7 @@ class SprintReportViewTest(unittest.TestCase):
                       IssueStage(16, "final review"))
         shown = entry(line(it, R + 4 * MIN))
         self.assertEqual(shown["issues"], [
-            {"issue": 14, "stage": "held", "stage_text": "held"},
+            {"issue": 14, "stage": "held", "stage_text": "merged, not yet proven"},
             {"issue": 15, "stage": "landed", "stage_text": "landed"},
             {"issue": 16, "stage": "final review", "stage_text": "final review"}])
         self.assertEqual(shown["progress"],
@@ -3980,7 +3980,7 @@ class RegisterFailureViewTest(unittest.TestCase):
         entry = register.view_entry(None, latest, adoption=adoption, approve=None)
         shown = derive_view([], registration=entry)
         self.assertEqual(shown["registration"]["line"],
-                         "The pull request of sample-app is not ready to merge yet.")
+                         "The proposed change of sample-app is not ready to merge yet.")
         self.assertEqual(shown["registration"]["adoption"]["lines"], [])
         self.assertEqual(shown["registration"]["adoption"]["url"],
                          "https://github.com/o/sample-app/pull/7")

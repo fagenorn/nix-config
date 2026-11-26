@@ -5380,7 +5380,7 @@ class PageFailedStartTest(unittest.TestCase):
         self.assertIs(drop["disabled"], False)
 
 
-MOVED_LINE = ("Nothing was recorded: the pull request is now at bbbbbbb, not at aaaaaaa, "
+MOVED_LINE = ("Nothing was recorded: the proposed change is now at bbbbbbb, not at aaaaaaa, "
               "the head these pictures show. The manager will send the new pictures.")
 FAILED_LINE = "GitHub had a problem and did not take the answer. Try again in a moment."
 
@@ -6645,7 +6645,7 @@ class PageSprintGlanceTest(unittest.TestCase):
                   "issues": [
                       {"issue": 11, "stage": "landed", "stage_text": "landed"},
                       {"issue": 12, "stage": "building", "stage_text": "building task 2 of 4"},
-                      {"issue": 13, "stage": "held", "stage_text": "held"},
+                      {"issue": 13, "stage": "held", "stage_text": "merged, not yet proven"},
                       {"issue": 14, "stage": "queued", "stage_text": "queued"},
                       {"issue": 15, "stage": "closed out", "stage_text": "closed out"}]}
         empty = {**REPORTED,
@@ -10312,8 +10312,8 @@ class RegisterControlTest(unittest.TestCase):
         self.assertNotIn("adopt-project apply", shown)
 
     def test_an_open_or_ready_adoption_is_one_sentence_with_no_lines_link_or_close(self) -> None:
-        for sentence in ("The pull request of r is not ready to merge yet.",
-                         "The pull request of r is ready to merge."):
+        for sentence in ("The proposed change of r is not ready to merge yet.",
+                         "The proposed change of r is ready to merge."):
             with self.subTest(sentence=sentence):
                 (snap,) = render([
                     START, {"frame": {**frame([]), "registration": {
@@ -10328,7 +10328,7 @@ class RegisterControlTest(unittest.TestCase):
                 self.assertTrue(has_class(drawn[0], "register-line"))
 
     def test_an_adoption_with_a_drafted_contract_draws_no_draft_rows(self) -> None:
-        sentence = "The pull request of r is not ready to merge yet."
+        sentence = "The proposed change of r is not ready to merge yet."
         (snap,) = render([
             START, {"frame": {**frame([]), "registration": {
                 **READY_SHOWN, "approve": None, "lines": [], "draft": None, "draft_more": None,

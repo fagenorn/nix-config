@@ -61,7 +61,7 @@ class LookMovedWordsTest(unittest.TestCase):
     def test_the_moved_head_line_asks_nothing_of_the_owner(self):
         self.assertEqual(
             answer.LOOK_MOVED.format(found="bbbbbbb", head="aaaaaaa"),
-            "Nothing was recorded: the pull request is now at bbbbbbb, not at aaaaaaa, the head "
+            "Nothing was recorded: the proposed change is now at bbbbbbb, not at aaaaaaa, the head "
             "these pictures show. The manager will send the new pictures.")
 
 

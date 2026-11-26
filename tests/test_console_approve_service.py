@@ -445,7 +445,7 @@ class ApplyCardTest(ApproveCase):
         self.assertEqual(self.approve_plan(card["plan_id"])[0], 204)
         self.assertEqual(self.apply_cards(), [])
         self.assertEqual(self.view()["registration"]["line"],
-                         "Applying the adoption of reconcile and opening its pull request…")
+                         "Applying the adoption of reconcile and opening its proposed change…")
         gate.set()
         self.until("opened")
         for worker in self.approval_threads():
@@ -791,7 +791,7 @@ class PlanApproveRunTest(ApproveCase):
         self.assertEqual(shown["status"], "done")
         self.assertEqual(shown["adoption"]["status"], "running")
         self.assertEqual(shown["adoption"]["headline"],
-                         "Applying the adoption of reconcile and opening its pull request…")
+                         "Applying the adoption of reconcile and opening its proposed change…")
         self.assertIsNone(shown["approve"])
         gate.set()
         self.assertEqual(self.until("opened")["adoption"]["status"], "done")
@@ -808,7 +808,7 @@ class PlanApproveRunTest(ApproveCase):
         self.assertEqual(self.steps(), ["applied", "opened"])
         self.assertEqual(shown["adoption"], {
             "status": "done", "step": "opened", "state": "open",
-            "headline": "The pull request of reconcile is not ready to merge yet.",
+            "headline": "The proposed change of reconcile is not ready to merge yet.",
             "lines": [],
             "note": None, "branch": BRANCH, "commit": COMMIT, "url": URL})
         self.assertIsNone(shown["approve"])
@@ -932,12 +932,12 @@ class PlanApproveRunTest(ApproveCase):
         adoption = self.card_words()
         self.assertEqual(
             adoption["headline"],
-            "The adoption of reconcile was pushed, but its pull request was not opened: the "
-            "forge refused the pull request.")
+            "The adoption of reconcile was pushed, but its proposed change was not opened: the "
+            "forge refused the proposed change.")
         self.assertEqual(
             adoption["note"],
-            "Check on the forge that the adoption's branch differs from develop and has no pull "
-            "request open already, then choose Try again.")
+            "Check on the forge that the adoption's branch differs from develop and has no proposed "
+            "change open already, then choose Try again.")
         for text in (adoption["headline"], *adoption["lines"], adoption["note"]):
             for word in ("HTTP", "422", "gh_failed"):
                 self.assertNotIn(word, text)
@@ -986,7 +986,7 @@ class PlanApproveRunTest(ApproveCase):
         self.assertEqual(card["why"], approve.NO_SLUG_NOTE)
         self.assertEqual(
             card["headline"],
-            "The adoption of reconcile was pushed, but its pull request was not opened: the "
+            "The adoption of reconcile was pushed, but its proposed change was not opened: the "
             "repository's origin is not on GitHub.")
         for text in (card["why"], card["headline"]):
             self.assertIsNone(re.search(
@@ -1028,7 +1028,7 @@ class AdoptionPollTest(ApproveCase):
             "plan_id": PID_B, "number": 7, "commit": COMMIT, "merge": True, "why": None}])
         self.assertEqual(self.view()["statement"]["inbox_items"], 1)
         self.assertEqual(self.adoption()["headline"],
-                         "The pull request of reconcile is ready to merge.")
+                         "The proposed change of reconcile is ready to merge.")
         self.assertEqual(self.forge.calls[-1], ("state", "fixture/r", 7))
 
     def test_a_merged_pull_request_closes_the_item(self):
@@ -1038,7 +1038,7 @@ class AdoptionPollTest(ApproveCase):
         self.poll("merged")
         self.assertEqual(self.items(), [])
         self.assertEqual(self.adoption()["headline"],
-                         "The pull request of reconcile was merged; waiting for develop on "
+                         "The proposed change of reconcile was merged; waiting for develop on "
                          "origin to carry it before registering.")
         self.assertIsNone(self.adoption()["note"])
 
@@ -1048,7 +1048,7 @@ class AdoptionPollTest(ApproveCase):
         self.poll("closed")
         self.assertEqual(self.items(), [])
         self.assertEqual(self.card_words()["headline"],
-                         "The pull request of reconcile was closed without merging.")
+                         "The proposed change of reconcile was closed without merging.")
         self.assertEqual(self.view()["registration"]["line"], "Register reconcile: needs you")
 
     def test_a_closed_adoption_asks_for_a_clean_up_and_is_approved_again_with_the_same_plan(self):
@@ -1110,7 +1110,7 @@ class AdoptionPollTest(ApproveCase):
         self.poll("open")
         self.assertEqual(self.items(), [])
         self.assertEqual(self.adoption()["headline"],
-                         "The pull request of reconcile is not ready to merge yet.")
+                         "The proposed change of reconcile is not ready to merge yet.")
 
     def test_an_unchanged_state_appends_nothing(self):
         self.opened()
@@ -1211,7 +1211,7 @@ class AdoptionMergeTest(ApproveCase):
         self.poll("closed")
         self.assertEqual(self.items(), [])
         self.assertEqual(self.card_words()["headline"],
-                         "The pull request of reconcile was closed without merging.")
+                         "The proposed change of reconcile was closed without merging.")
         self.refused_merge(approve.CLOSED_PULL)
 
     def test_a_closed_pull_request_of_an_earlier_registration_keeps_its_reason(self):
@@ -2401,7 +2401,7 @@ class MergedRegistrationTest(ApproveCase):
         self.assertEqual(self.retry_items(), [])
         self.assertEqual(self.view()["statement"]["inbox_items"], 0)
         self.assertEqual(self.adoption()["headline"],
-                         "The pull request of reconcile was merged; waiting for develop on "
+                         "The proposed change of reconcile was merged; waiting for develop on "
                          "origin to carry it before registering.")
         fake.report = GREEN
         self.poll("merged")
@@ -2417,7 +2417,7 @@ class MergedRegistrationTest(ApproveCase):
         self.assertEqual(self.registrations(), [])
         self.assertEqual(json.loads(self.registry.read_text())["projects"], [])
         self.assertEqual(self.card_words()["headline"],
-                         "The pull request of reconcile was closed without merging.")
+                         "The proposed change of reconcile was closed without merging.")
         self.assertEqual(self.retry_items(), [])
 
     def test_another_refusal_is_shown_with_its_reason_and_retry_runs_it_again(self):
@@ -2691,7 +2691,7 @@ class MergedRegistrationRealTest(MergedRealCase):
         self.assertEqual(json.loads(self.registry.read_text())["projects"], [])
         self.assertEqual(results, ["waiting"])
         self.assertEqual(self.adoption()["headline"],
-                         "The pull request of repo was merged; waiting for main on origin to "
+                         "The proposed change of repo was merged; waiting for main on origin to "
                          "carry it before registering.")
         self.assertEqual(self.retry_items(), [])
         self.assertEqual(git(self.repo, "rev-parse", "HEAD").strip(), self.tip)

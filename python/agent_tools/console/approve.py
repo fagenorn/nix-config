@@ -143,8 +143,8 @@ adoption, else exactly the keys `status`, `step`, `state`, `headline`, `lines`, 
 `commit` and `url` (`lines` is `[]` for every step, though `apply_items` shows the `lines` of a failed apply's
 `evidence` on its card; a failed push reads `The adoption of <name> was
 applied, but its branch was not pushed: <reason>.` and a failed open `The adoption of <name> was
-pushed, but its pull request was not opened: <reason>.`; an open pull request reads `The
-pull request of <name> is not ready to merge yet.`, and a failing one `The pull request of <name> has a
+pushed, but its proposed change was not opened: <reason>.`; an open pull request reads `The
+proposed change of <name> is not ready to merge yet.`, and a failing one `The proposed change of <name> has a
 failed check.`; `running` gives status `running`, the running
 headline and None elsewhere; a
 merged pull request's headline reads its registration: waiting, `registering`, registered or
@@ -261,21 +261,21 @@ RECORD_BYTES = 65536
 UNAVAILABLE = "approving an adoption is not available on this host"
 STALE = "that plan is no longer the one shown; approve the plan shown now"
 NOT_READY = "only a ready plan can be approved"
-OPENED = "the pull request of this plan is already open"
+OPENED = "the proposed change of this plan is already open"
 MERGE_UNAVAILABLE = "merging an adoption is not available on this host"
-NO_PULL = "this plan has no pull request the console opened"
+NO_PULL = "this plan has no proposed change the console opened"
 STALE_CARD = "this card is out of date; the page now shows the current one"
-CLOSED_PULL = "the pull request of this plan was closed without merging"
-FOUND = "the console did not open this pull request"
-UNREAD = "the console has not read the pull request's head yet"
-MOVED = "the pull request's branch holds commits the console did not push"
-RETARGETED = "the pull request no longer targets the branch the console opened it against"
-FAILING = "a check of the pull request failed"
-NOT_READY_PULL = "the pull request is not ready to merge yet"
-MERGING = "the pull request of this plan is being merged"
-MERGED_ELSEWHERE = ("the pull request was merged on the forge with commits the console did not "
+CLOSED_PULL = "the proposed change of this plan was closed without merging"
+FOUND = "the console did not open this proposed change"
+UNREAD = "the console has not read the proposed change's head yet"
+MOVED = "the proposed change's branch holds commits the console did not push"
+RETARGETED = "the proposed change no longer targets the branch the console opened it against"
+FAILING = "a check of the proposed change failed"
+NOT_READY_PULL = "the proposed change is not ready to merge yet"
+MERGING = "the proposed change of this plan is being merged"
+MERGED_ELSEWHERE = ("the proposed change was merged on the forge with commits the console did not "
                     "push")
-MERGED_ELSEWHERE_BASE = ("the pull request was merged on the forge into a branch other than the "
+MERGED_ELSEWHERE_BASE = ("the proposed change was merged on the forge into a branch other than the "
                          "one the console opened it against")
 MOVED_WHY = ("Its branch holds commits the console did not push. Review them on the forge and "
              "merge it there, or close it and choose Apply it again.")
@@ -317,7 +317,7 @@ APPLY_REASONS = (
     ("adopt.commit.", "the adoption commit did not pass its own checks"),
 )
 APPLIED_NOTE = "Choose Try again to push the branch and open its proposed change."
-MERGED = "the pull request of this plan was already merged"
+MERGED = "the proposed change of this plan was already merged"
 NOT_REFUSED = "that registration is not waiting for a retry"
 RETRY_AGAIN = "choose Retry."
 RETRY_OPTION = "Retry"
@@ -783,7 +783,7 @@ def forge_failure(error: BaseException, base: str) -> tuple[str, str]:
                 "Install gh on this computer and sign it in, then choose Try again.")
     if error.code == "gh_timeout":
         return ("the forge took too long to answer",
-                "Choose Try again; the console first looks for a pull request the forge may have "
+                "Choose Try again; the console first looks for a proposed change the forge may have "
                 "opened already.")
     if error.code == "gh_failed":
         if error.transient:
@@ -796,9 +796,9 @@ def forge_failure(error: BaseException, base: str) -> tuple[str, str]:
                     "Sign gh in on this computer with an account that may open pull requests on "
                     "the repository, then choose Try again.")
         if status == 422:
-            return ("the forge refused the pull request",
+            return ("the forge refused the proposed change",
                     f"Check on the forge that the adoption's branch differs from {base} and has "
-                    "no pull request open already, then choose Try again.")
+                    "no proposed change open already, then choose Try again.")
         if status == 404:
             return ("the forge does not know the repository or the branch",
                     "Check that origin is the GitHub repository and that the adoption's branch "
@@ -825,7 +825,7 @@ def merge_failure(error: BaseException) -> str:
         if status == 405:
             return "the forge refused the merge; the repository's rules do not allow it yet"
         if status == 404:
-            return "the forge does not know the repository or the pull request"
+            return "the forge does not know the repository or the proposed change"
     return "the forge answered in a way the console does not understand"
 
 
@@ -937,7 +937,7 @@ def reason_of(text: object) -> str:
 
 
 def waiting_line(name: str, base: str) -> str:
-    return (f"The pull request of {name} was merged; waiting for {base} on origin to carry it "
+    return (f"The proposed change of {name} was merged; waiting for {base} on origin to carry it "
             "before registering.")
 
 
@@ -958,7 +958,7 @@ def refused_line(name: str, reason: str, note: str) -> str:
 
 
 def running_headline(name: str) -> str:
-    return f"Applying the adoption of {name} and opening its pull request…"
+    return f"Applying the adoption of {name} and opening its proposed change…"
 
 
 def entry(adoption: Mapping | None, *, running: bool, name: str,
@@ -984,11 +984,11 @@ def entry(adoption: Mapping | None, *, running: bool, name: str,
             f"The adoption of {name} was applied, but its branch was not pushed: {reason}")
     elif step == "open_failed":
         headline = _sentence(
-            f"The adoption of {name} was pushed, but its pull request was not opened: {reason}")
+            f"The adoption of {name} was pushed, but its proposed change was not opened: {reason}")
     else:
         note = None
         if state == "ready":
-            headline = f"The pull request of {name} is ready to merge."
+            headline = f"The proposed change of {name} is ready to merge."
         elif state == "merged":
             registration = adoption.get("registration")
             result = registration["result"] if registration else "waiting"
@@ -1002,12 +1002,12 @@ def entry(adoption: Mapping | None, *, running: bool, name: str,
             else:
                 headline = waiting_line(name, adoption["base"])
         elif state == "closed":
-            headline = f"The pull request of {name} was closed without merging."
+            headline = f"The proposed change of {name} was closed without merging."
             note = CLOSED_NOTE
         elif state == "failing":
-            headline = f"The pull request of {name} has a failed check."
+            headline = f"The proposed change of {name} has a failed check."
         else:
-            headline = f"The pull request of {name} is not ready to merge yet."
+            headline = f"The proposed change of {name} is not ready to merge yet."
     return {"status": "done", "step": step, "state": state, "headline": headline,
             "lines": [], "note": note, "branch": branch, "commit": commit,
             "url": pull["url"] if pull else None}
