@@ -17,7 +17,7 @@ FAKE_PULL_MODE and FAKE_REQUIRED_MODE injecting failures. `run_facts`, `jobs_fac
 `required_facts` build those payloads; each defaults to a pull request check run that passes.
 `check_run_forge`, `check_run_accepts`, `check_run_refusals`, `check_run_spellings`, `check_run_reads`,
 `check_run_permit`, `rerun_production` and `FAKE_SHELL_SCRIPT` (the shell the guard asks for its host,
-answered from FAKE_SHELL_GH_HOST, FAKE_SHELL_MODE) hold the scenarios of that check, beside the
+answered from FAKE_SHELL_GH_HOST, FAKE_SHELL_GH_CONFIG_DIR, FAKE_SHELL_XDG_CONFIG_HOME, FAKE_SHELL_MODE) hold the scenarios of that check, beside the
 suite to keep it under the size budget.
 """
 
@@ -42,8 +42,9 @@ if sys.argv[1:4] != ["-l", "-i", "-c"] or len(sys.argv) != 5:
     print("unexpected fake-shell argv: " + repr(sys.argv[1:]), file=sys.stderr)
     raise SystemExit(64)
 environment = {k: v for k, v in os.environ.items() if k != "GH_HOST"}
-if "FAKE_SHELL_GH_HOST" in environment:
-    environment["GH_HOST"] = environment["FAKE_SHELL_GH_HOST"]
+for name in ("GH_HOST", "GH_CONFIG_DIR", "XDG_CONFIG_HOME"):
+    if "FAKE_SHELL_" + name in environment:
+        environment[name] = environment["FAKE_SHELL_" + name]
 os.execve("/bin/sh", ["sh", "-c", sys.argv[4]], environment)
 '''
 
@@ -103,6 +104,9 @@ def check_run_accepts(slug, head):
         ("any-app check", "", {"FAKE_REQUIRED_JSON": required_facts(contexts=(), checks=(("Tests", -1),))}),
         ("session on github.com", "", {"GH_HOST": "github.com"}),
         ("shell on github.com", "", {"FAKE_SHELL_GH_HOST": "github.com"}),
+        ("session and shell on one gh config directory", "", {"GH_CONFIG_DIR": "/gh", "XDG_CONFIG_HOME": "/xdg"}),
+        ("shell restating the session gh config directory", "", {
+            "GH_CONFIG_DIR": "/gh", "FAKE_SHELL_GH_CONFIG_DIR": "/gh"}),
         ("failed job on page two of 101", "", {"FAKE_JOBS_JSON": jobs_pages(("Tests",))}),
         ("failed job beside the required one", "", {
             "FAKE_JOBS_JSON": jobs_facts(failed=("Tests", "Lint and tests")), "FAKE_REQUIRED_JSON": required}),
@@ -144,6 +148,12 @@ def check_run_refusals(slug, head):
             '"total_count": 101, "jobs": [{"name": "Tests"', '"total_count": 7, "jobs": [{"name": "Tests"'))),
         ("session on another host", forge(GH_HOST="ghe.example.com")),
         ("shell startup file on another host", forge(FAKE_SHELL_GH_HOST="ghe.example.com")),
+        ("shell startup file on another gh config directory", forge(FAKE_SHELL_GH_CONFIG_DIR="/home/u/.config/gh-ghe")),
+        ("shell startup file on another gh config directory than the session's", forge(
+            GH_CONFIG_DIR="/gh", FAKE_SHELL_GH_CONFIG_DIR="/gh-ghe")),
+        ("shell startup file unsetting the session gh config directory", forge(
+            GH_CONFIG_DIR="/gh", FAKE_SHELL_GH_CONFIG_DIR="")),
+        ("shell startup file on another XDG config home", forge(FAKE_SHELL_XDG_CONFIG_HOME="/home/u/.xdg-ghe")),
         ("shell cannot be started", forge(FAKE_SHELL_MODE="fail")),
         ("shell prints no answer", forge(FAKE_SHELL_MODE="silent")),
         ("no shell named", forge(SHELL="")),

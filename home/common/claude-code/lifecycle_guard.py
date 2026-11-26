@@ -650,10 +650,11 @@ branch, from a branch that is neither long-lived branch, at the run's head and b
 required set is the forge's protection of the integration branch, read as the console permit reads it, not the checks
 the contract declares. The reads inherit the session's environment minus the token variables, and the jobs are read
 page by page until every one is seen. The rerun runs in the session's shell, so the guard asks that shell for its
-host: the user's `$SHELL`, started as a login, interactive shell, prints `$GH_HOST` once per command. A host other than
-github.com, or a shell that cannot be started, times out or prints no answer, leaves the rule in place, so the reads
-and the rerun cannot meet on different hosts, whether the host comes from the session's environment or from a shell
-startup file. Every pull request the run lists is read, and one that cannot be read or is not a pull request document
+host: the user's `$SHELL`, started as a login, interactive shell, prints `$GH_HOST`, `$GH_CONFIG_DIR` and
+`$XDG_CONFIG_HOME` once per command. A host other than github.com, a shell that cannot be started, times out or prints
+no answer, or a `GH_CONFIG_DIR` or `XDG_CONFIG_HOME` that differs from the hook's own (gh's default host comes from the
+configuration those name) leaves the rule in place, so the reads and the rerun cannot meet on different hosts, whether
+the host comes from the session's environment or from a shell startup file. Every pull request the run lists is read, and one that cannot be read or is not a pull request document
 leaves the rule in place, whichever other pull request qualifies. A read that fails, times
 out or answers another shape leaves the rule in place, and a deadline too near refuses. Only the narrowed hits of the
 named project are dropped, each row by its own integration branch, with every read made once per command; a
@@ -4186,17 +4187,24 @@ def is_own_open_pull_request(document, slug, head, branch, row):
     )
 
 
-SHELL_HOST_MARK = "GUARD-SHELL-HOST"
-SHELL_HOST_SCRIPT = f"printf '\\n{SHELL_HOST_MARK}<%s>\\n' \"$GH_HOST\""
-SHELL_HOST_ANSWER = re.compile(rf"^{SHELL_HOST_MARK}<([^<>\r\n]*)>$", re.MULTILINE)
+SHELL_HOST_VARIABLES = ("GH_HOST", "GH_CONFIG_DIR", "XDG_CONFIG_HOME")
+SHELL_HOST_MARKS = {name: f"GUARD-SHELL-{name}" for name in SHELL_HOST_VARIABLES}
+SHELL_HOST_SCRIPT = "".join(
+    f"printf '\\n{SHELL_HOST_MARKS[name]}<%s>\\n' \"${name}\"; " for name in SHELL_HOST_VARIABLES)
+SHELL_HOST_ANSWERS = {
+    name: re.compile(rf"^{mark}<([^<>\r\n]*)>$", re.MULTILINE) for name, mark in SHELL_HOST_MARKS.items()}
 
 
 def shell_selected_host(deadline, child_timeout):
-    """The `GH_HOST` the session's shell exports ("" when it exports none), or None when the shell
-    cannot be asked. The shell is `$SHELL`, an absolute path, started as a login, interactive shell
-    as the session starts it, so a host a startup file selects shows; the last marked line of its
-    output answers. The child is bounded when it starts; a deadline too near raises
-    `DeadlineExhausted`, which is not caught."""
+    """The `GH_HOST` the session's shell exports ("" when it exports none) when the shell leaves the
+    gh configuration the hook reads where it is, else None, as it is when the shell cannot be asked.
+    Without a `GH_HOST`, gh takes the one host of the configuration under `GH_CONFIG_DIR`, else
+    `XDG_CONFIG_HOME`, so a startup file that changes either selects a host the hook's own reads
+    never see: an answer whose `GH_CONFIG_DIR` or `XDG_CONFIG_HOME` differs from the hook's is None.
+    The shell is `$SHELL`, an absolute path, started as a login, interactive shell as the session
+    starts it, so a startup file's choice shows; the last marked line of each variable answers. The
+    child is bounded when it starts; a deadline too near raises `DeadlineExhausted`, which is not
+    caught."""
     shell = os.environ.get("SHELL", "")
     if not os.path.isabs(shell) or not os.access(shell, os.X_OK):
         return None
@@ -4207,8 +4215,12 @@ def shell_selected_host(deadline, child_timeout):
             check=False, stdin=subprocess.DEVNULL, env=gh_lookup_env(), timeout=timeout)
     except (subprocess.TimeoutExpired, OSError, ValueError):
         return None
-    answers = SHELL_HOST_ANSWER.findall(done.stdout)
-    return answers[-1] if answers else None
+    answers = {name: SHELL_HOST_ANSWERS[name].findall(done.stdout) for name in SHELL_HOST_VARIABLES}
+    if not all(answers.values()):
+        return None
+    if any(answers[name][-1] != os.environ.get(name, "") for name in SHELL_HOST_VARIABLES[1:]):
+        return None
+    return answers["GH_HOST"][-1]
 
 
 def is_pull_request_document(document):
