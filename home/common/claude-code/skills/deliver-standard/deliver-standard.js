@@ -140,7 +140,7 @@ const CLAIMING = !CONT || !!CONT.claim_incomplete
 const FORGE_TIMEOUT = 'Give each forge-claim command a Bash timeout of 20 minutes (1200000 ms). Only a land acquire command that ends in --wait gets more: the flag takes no value, so write nothing after it, and the command itself waits for up to 50 minutes and then answers land-contended by itself, so give it a Bash timeout of 60 minutes (3600000 ms) and never run it in the background. The reason for both: forge-claim retries a forge outage itself before it prints its one JSON line.'
 const BASE_RULES = `
 Hard rules for this step (they override anything else you remember):
-- Work only in the worktree path you are given. Never commit in the shared checkout. Never git stash. Never sed -i (use python for edits).
+- Work only in the worktree path you are given; the one exception is the job scratch directory your brief names, for scratch, probe and one-off script files. Never commit in the shared checkout. Never git stash. Never sed -i.
 - Do everything in the FOREGROUND inside this one turn: run long commands with a long Bash timeout; never use run_in_background, never end your turn while anything you started is pending, never sleep or use sleep workarounds. Your final message is your return value.
 - Do not dispatch subagents unless this step says so.
 - File any issue with forge-issue create, each blocking edge as --blocked-by <n> or --blocks <n>; never file one another way. Exit 1 with an issue: repair it with forge-issue link; create_unconfirmed: search for its title before filing again.
@@ -155,6 +155,11 @@ const REPLY_ALONE = 'Call StructuredOutput alone in its own message, never besid
 // A reviewer that detaches the worktree to run a script at the commit under review leaves the next setup a detached
 // HEAD. This sentence is added in readReview(), the same line in deliver-batch.js, so no review step can miss it.
 const READ_ONLY = 'Never check out, switch, reset or stash in the worktree: read another commit with git show.'
+// These three lines are the same lines in deliver-batch.js. Every implementer and reviewer brief starts with the tool
+// rules and PROBE_RULE, the text the testing standard states as its rule on stress probes.
+const PROBE_RULE = 'A stress probe with large or deeply nested inputs fixes a finite cap on time and peak memory before it starts, starts at a size that fits in 1 GiB, grows in steps (for example doubling), measures time and peak memory at each step and stops before a step whose projected peak would exceed the cap or at the first step that grows faster than its input, never an unbounded loop or one giant input on a shared host. A test that proves a memory bound measures the peak at a small capped size (for example with tracemalloc at a nesting depth whose peak stays under a few hundred MiB) and passes only when that peak is within the claimed limit, never by running the large case.'
+const TOOL_RULES = dir => `Change files only with the Edit and Write tools, never with a shell heredoc or an inline interpreter writing them; put scratch and probe files in ${dir} (create it with mkdir -p), never under /tmp; run a one-off evaluation as a script file kept in that directory and run by path, never as an inline program handed to an interpreter on its command line or through a heredoc.`
+const WORKERS = ['implementer', 'reviewer', 'reviewer-lite']
 
 const SEV = { type: 'string', enum: ['critical', 'important', 'minor'] }
 // incomplete is the verdict of a review that could not finish; readReview() below reads every reply of this schema.
@@ -522,13 +527,14 @@ const ROUNDS = {
   implementer: `Work in rounds: put a round's lookups in one message, send its independent edits as several Edit calls in one message, and run the tests once per round of edits, never one small call per turn.`,
 }
 const withRounds = (prompt, opts) => (opts && ROUNDS[opts.agentType] ? `${ROUNDS[opts.agentType]}\n${prompt}` : prompt)
+const withWork = (prompt, opts) => (opts && WORKERS.includes(opts.agentType) ? `${TOOL_RULES(`${setup.plan_dir}/scratch`)}\n${PROBE_RULE}\n${prompt}` : prompt)
 // Every step that replies through a schema ends with the one sentence about that reply.
 const withReply = (prompt, opts) => (opts && opts.schema ? `${prompt}\n${REPLY_ALONE}` : prompt)
 // optional: a step whose failure the caller recovers (the diff-size measurement) is not reported as a dead agent.
 const call = async (prompt, opts, optional) => {
   let reply
   try {
-    reply = await agent(withRounds(withReply(prompt, opts), opts), opts)
+    reply = await agent(withRounds(withWork(withReply(prompt, opts), opts), opts), opts)
   } catch (error) {
     if (!optional) DEAD.push(opts && opts.label)
     throw error
@@ -1628,6 +1634,7 @@ const staleOf = ck => (Array.isArray(ck.stale) ? ck.stale.filter(Number.isIntege
 const CX_USE = 'Use the codex-collaboration skill (invoke it with the Skill tool) to run that Codex'
 const CX_WAIT = 'this step may dispatch the Codex reviewer that skill uses, and must wait for its result in this turn.'
 const CX_NONE = 'If Codex cannot be run, return available false with the reason in raw_summary; never substitute your own review.'
+const CX_PROBE = `Pass this rule to Codex as the caller's input, for any probe it runs: ${PROBE_RULE}`
 // A codex-unavailable stop says why (a usage limit and its reset time), so no diagnosis run is needed.
 const codexWhy = r => (!r ? 'the Codex review step returned nothing' : typeof r.raw_summary === 'string' && r.raw_summary.trim() ? r.raw_summary : 'the Codex review step gave no reason')
 // A Codex refusal whose message is the provider's usage or quota limit (the provider's wording is matched, so "Disk
@@ -1796,7 +1803,7 @@ ${RULES}`, { label: 'direct-impl', phase: 'Tasks', agentType: 'implementer', mod
     if (lost) return lost
     const codexP = REVIEW_CODE ? call(`${CTX}
 ${PLAN_REF} Acceptance criteria: ${ACS}.
-Run the project's configured independent code review: the contract's workflow.review.code is the command ${REVIEW_CODE}. ${CX_USE} diff review over the delivery range ${RANGE} in the worktree ${W}, with no review package; ${CX_WAIT} Return Codex's Important or Critical findings as they are (correctness defects with a concrete failing input, unmet criteria) without adding your own review; verdict pass if none. ${CX_NONE}
+Run the project's configured independent code review: the contract's workflow.review.code is the command ${REVIEW_CODE}. ${CX_USE} diff review over the delivery range ${RANGE} in the worktree ${W}, with no review package; ${CX_WAIT} Return Codex's Important or Critical findings as they are (correctness defects with a concrete failing input, unmet criteria) without adding your own review; verdict pass if none. ${CX_NONE} ${CX_PROBE}
 ${RULES}`, { label: 'direct-codex', phase: 'Final review', agentType: 'clerk', model: CLERK_MODEL, effort: 'high', schema: CODEX }) : Promise.resolve(null)
     // The stored plan's risk, not this run's reply, picks the reviewer, so a resumed review keeps the implementer's
     // choice.
@@ -2166,7 +2173,7 @@ if (BLOCKED_TASK && newDecision !== null) {
 }
 const codexPlanCall = () => call(`${CTX}
 Plan: ${plan.plan_root} (task files beside it). Acceptance criteria: ${JSON.stringify(plan.acceptance)}.${SPEC}
-Run the project's configured independent plan review: the contract's workflow.review.plan is the command ${REVIEW_PLAN}. ${CX_USE} plan review over the plan at that path against issue #${ISSUE} in the worktree ${W}, giving it the code map ${CODE_MAP} as its code map input; ${CX_WAIT} Return Codex's Important or Critical findings as they are without adding your own review; verdict pass if none. ${CX_NONE}
+Run the project's configured independent plan review: the contract's workflow.review.plan is the command ${REVIEW_PLAN}. ${CX_USE} plan review over the plan at that path against issue #${ISSUE} in the worktree ${W}, giving it the code map ${CODE_MAP} as its code map input; ${CX_WAIT} Return Codex's Important or Critical findings as they are without adding your own review; verdict pass if none. ${CX_NONE} ${CX_PROBE}
 ${RULES}`, { label: 'plan-codex', phase: 'Plan', agentType: 'clerk', model: CLERK_MODEL, effort: 'high', schema: CODEX })
 // The skip was decided on the plan before a revise or an amend; a plan that is no longer small gets the Codex plan
 // review it skipped, before it is marked reviewed. Owed from the first call, so a stop of it keeps the review due on a
@@ -2437,7 +2444,7 @@ ${RULES}`, { label: 'diff-size', phase: 'Final review', agentType: 'clerk', mode
 }
 const codexP = REVIEW_CODE ? call(`${CTX}
 ${PLAN_REF} Acceptance criteria: ${ACS}. Pass this definition to Codex with those criteria, as the caller's input: ${CRITICAL_MEANS} Set ac on a finding that names an unmet criterion, at any severity.
-Run the project's configured independent code review: the contract's workflow.review.code is the command ${REVIEW_CODE}. ${CX_USE} diff review over the delivery range ${RANGE} in the worktree ${W}, with no review package;${EXTRA_RANGES()} ${CX_WAIT} Return Codex's Important or Critical findings as they are (correctness defects with a concrete failing input, unmet criteria) without adding your own review; verdict pass if none. ${CX_NONE}
+Run the project's configured independent code review: the contract's workflow.review.code is the command ${REVIEW_CODE}. ${CX_USE} diff review over the delivery range ${RANGE} in the worktree ${W}, with no review package;${EXTRA_RANGES()} ${CX_WAIT} Return Codex's Important or Critical findings as they are (correctness defects with a concrete failing input, unmet criteria) without adding your own review; verdict pass if none. ${CX_NONE} ${CX_PROBE}
 ${RULES}`, { label: 'final-codex', phase: 'Final review', agentType: 'clerk', model: CLERK_MODEL, effort: 'high', schema: FINAL_CODEX }) : Promise.resolve(null)
 const finals = await parallel(groups.map((g, gi) => () => readReview(`${CTX}
 ${PLAN_REF} Acceptance criteria: ${ACS}.

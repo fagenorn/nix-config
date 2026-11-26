@@ -171,9 +171,16 @@ const REPLY_ALONE = 'Call StructuredOutput alone in its own message, never besid
 // A reviewer that detaches the worktree to run a script at the commit under review leaves the next run's setup stopping
 // on the detached HEAD. The same line is in deliver-standard.js, added in readReview() so no review step misses it.
 const READ_ONLY = 'Never check out, switch, reset or stash in the worktree: read another commit with git show.'
+// These three lines are the same lines in deliver-standard.js. Every implementer and reviewer brief starts with the tool
+// rules and PROBE_RULE, the text the testing standard states as its rule on stress probes.
+const PROBE_RULE = 'A stress probe with large or deeply nested inputs fixes a finite cap on time and peak memory before it starts, starts at a size that fits in 1 GiB, grows in steps (for example doubling), measures time and peak memory at each step and stops before a step whose projected peak would exceed the cap or at the first step that grows faster than its input, never an unbounded loop or one giant input on a shared host. A test that proves a memory bound measures the peak at a small capped size (for example with tracemalloc at a nesting depth whose peak stays under a few hundred MiB) and passes only when that peak is within the claimed limit, never by running the large case.'
+const TOOL_RULES = dir => `Change files only with the Edit and Write tools, never with a shell heredoc or an inline interpreter writing them; put scratch and probe files in ${dir} (create it with mkdir -p), never under /tmp; run a one-off evaluation as a script file kept in that directory and run by path, never as an inline program handed to an interpreter on its command line or through a heredoc.`
+const WORKERS = ['implementer', 'reviewer', 'reviewer-lite']
+const SCRATCH_UNDER = w => `the deliver-standard/scratch directory under the git dir that git -C ${w} rev-parse --absolute-git-dir prints`
+const withWork = (prompt, opts, w) => (opts && WORKERS.includes(opts.agentType) ? `${TOOL_RULES(SCRATCH_UNDER(w))}\n${PROBE_RULE}\n${prompt}` : prompt)
 const BASE_RULES = `
 Hard rules for this step (they override anything else you remember):
-- Work only in the worktree path you are given. Never commit in the shared checkout. Never git stash. Never sed -i (use python for edits).
+- Work only in the worktree path you are given; the one exception is the job scratch directory your brief names, for scratch, probe and one-off script files. Never commit in the shared checkout. Never git stash. Never sed -i.
 - Do everything in the FOREGROUND inside this one turn: run long commands with a long Bash timeout; never use run_in_background, never end your turn while anything you started is pending, never sleep or use sleep workarounds. Your final message is your return value.
 - Do not dispatch subagents unless this step says so.
 - Never run a host activation, deploy or release command.
@@ -876,7 +883,7 @@ const land = async (n, ready, via = {}) => {
   const lost = []
   const silence = label => (lost.includes(label) ? 'answered twice with no usable review' : 'returned nothing')
   const out = (outcome, extra) => ({ issue: n, outcome, ...(pr ? { pr } : {}), ...(lost.length ? { lost_reviews: lost.slice() } : {}), ...(extra || {}) })
-  const call = (prompt, label, opts) => ask(agent(prompt, { label, phase: 'Land', ...opts }), label)
+  const call = (prompt, label, opts) => ask(agent(withWork(prompt, opts, W), { label, phase: 'Land', ...opts }), label)
   // every FINDINGS reply of a landing is read here. An unusable one (see unusable) runs the same step once more as
   // <label>-again; a second is answered as null, so it spends no fix round. The step did answer, so the breaker is left
   // alone: the row names it in lost_reviews.
@@ -1604,7 +1611,7 @@ let sweepNo = 0
 // carsMaybe stays set and the next drain asks again.
 let carsMaybe = true
 const TRAIN_LIFECYCLE = { agentType: 'clerk', model: DEFAULT_CLERK_MODEL, effort: 'low' }
-const trainCall = (prompt, label, opts) => ask(agent(prompt, { label, phase: 'Land', ...opts }), label)
+const trainCall = (prompt, label, opts) => ask(agent(withWork(prompt, opts, '<the scratch worktree>'), { label, phase: 'Land', ...opts }), label)
 const SWEEP_SCHEMA = { type: 'object', properties: { ok: { type: 'boolean' }, closed: { type: 'array', items: { type: 'integer' } }, deleted: STRS, detail: { type: 'string' } }, required: ['ok'] }
 const CARS_SCHEMA = { type: 'array', items: { type: 'object', properties: { issue: { type: 'integer' }, head: { type: 'string' }, pr: { type: 'integer' } }, required: ['issue', 'head', 'pr'] } }
 const TRAIN_READY_SCHEMA = {
