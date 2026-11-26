@@ -1,7 +1,7 @@
 #!/bin/sh
 # Verify check for the eleven-m5 memory floor after deploy: `week` is a quiet week (no panic report,
-# no oMLX jetsam exit since the floor daemon started) and `priority` is oMLX's declared kernel
-# priority held without a reset. verify-pending runs it from the repository root at the commit the
-# block names, so `python` below is that commit's agent_tools source.
-# Exit 0 met, 1 not met, 75 not yet.
+# no oMLX jetsam exit since the floor daemon started), `priority` is oMLX's declared kernel priority
+# held without a reset, and `session-kill` is a run-bound kill of an agent tree outside every root.
+# verify-pending runs it from the repository root at the commit the block names, so `python` below is
+# that commit's agent_tools source. Exit 0 met, 1 not met, 75 not yet.
 PYTHONPATH=python exec python3 -m agent_tools.hosts.memory_floor_check "$@"
