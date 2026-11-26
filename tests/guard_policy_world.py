@@ -128,8 +128,7 @@ class GuardPolicyWorld:
         self.base.write_text(json.dumps(document), encoding="utf-8")
         return document
 
-    @staticmethod
-    def git(root: Path, *args: str) -> str:
+    def git(self, root: Path, *args: str) -> str:
         return subprocess.run(
             [REAL_GIT, "-C", str(root), *args], capture_output=True, text=True, timeout=120,
             check=True, env={**os.environ, "GIT_CONFIG_GLOBAL": os.devnull,

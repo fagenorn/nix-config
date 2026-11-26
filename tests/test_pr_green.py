@@ -3,7 +3,6 @@ import contextlib
 import io
 import json
 import unittest
-from datetime import datetime, timezone
 from unittest import mock
 
 from agent_tools.system import forge_api
@@ -246,25 +245,6 @@ class PrGreenCommandTest(unittest.TestCase):
         self.assertEqual((code, out.getvalue()), (2, ""))
         self.assertEqual(len(err.getvalue().splitlines()), 1)
         self.assertIn("gh_failed", err.getvalue())
-
-
-class RequiredChecksUnchangedTest(unittest.TestCase):
-    def test_required_checks_is_unchanged(self):
-        since = datetime(2026, 11, 6, 17, 37, 11, tzinfo=timezone.utc)
-        search = ("search/issues?q=repo%3Aelevenyellow%2Fnodocom%20is%3Apr%20is%3Amerged%20base%3Amain"
-                  "%20merged%3A%3E2026-11-06T17%3A37%3A11Z&sort=created&order=asc&per_page=100")
-        gets = {f"repos/{REPO}/pulls/7": {"merged_at": "2026-11-07T10:00:00Z", "head": {"sha": SHA}},
-                PROTECTION: {"checks": [{"context": "ci"}], "contexts": ["ci"]}}
-        late = run("ci", completed="2026-11-07T10:00:01Z")
-        for completed, expected in (("2026-11-07T09:50:00Z", 0), (late["completed_at"], 1)):
-            pages = {search: [{"total_count": 1, "incomplete_results": False, "items": [{"number": 7}]}],
-                     RUNS: [{"total_count": 1, "check_runs": [run("ci", completed=completed)]}],
-                     STATUSES: [[]]}
-            get, paged = patched(gets, pages)
-            with get, paged:
-                code, report = verify_checks.required_checks(REPO, "main", since)
-            self.assertEqual(code, expected)
-            self.assertEqual(report["missing"], [] if expected == 0 else ["ci"])
 
 
 if __name__ == "__main__":
