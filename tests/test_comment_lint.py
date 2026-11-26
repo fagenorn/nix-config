@@ -512,6 +512,14 @@ class RuleTest(unittest.TestCase):
             path: (REPO_ROOT / path).read_bytes() for path in paths})
         self.assertEqual(found("B18", snap), [])
 
+    def test_the_publish_hold_helper_docstring_stays_within_the_comment_cap(self):
+        path = "tests/console_test_support.py"
+        source = (REPO_ROOT / path).read_text()
+        start = next(number for number, row in enumerate(source.splitlines(), 1)
+                     if row.startswith("def hold_the_publish("))
+        snap = Snapshot("a" * 40, {}, contents={path: source.encode()})
+        self.assertNotIn(Violation("B19", path, start + 1), found("B19", snap))
+
     def test_a_module_docstring_sharing_its_closing_line_with_code_is_header(self):
         doc = '"""one\ntwo\nthree\nfour\nfive\nsix"""; import os\n'
         self.assertTrue(comment_syntax.blocks("a.py", doc)[0].header)

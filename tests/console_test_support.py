@@ -88,14 +88,10 @@ def wait_until(condition):
 
 @contextlib.contextmanager
 def hold_the_publish(svc, kind, wait=5):
-    """Hold a hook's republish until the reading thread is at the ingest lock.
+    """Hold a hook's republish, under `svc._ingest`, until the reading thread is at the ingest lock.
 
-    The hook route answers before it ingests, and the ingest commits the row before it republishes the view,
-    all under `svc._ingest`. The publisher waits, still holding the lock, for this thread to reach the lock,
-    so a view read made outside the lock sees the stale view and one made inside it sees the republish.
-    The publisher gives the reader `wait` seconds; one that never arrived in time lets the publisher go
-    on, so on leaving the block (when the block itself raised nothing) this thread fails the test then,
-    as a read the held publish did not order proves nothing.
+    A view read outside the lock sees the stale view and one made inside it sees the republish.
+    The publisher gives the reader `wait` seconds, then goes on; leaving the block then fails the test.
     """
     reader = threading.current_thread()
     arrived = threading.Event()
