@@ -21,4 +21,4 @@ One module owns a surface's words, and a stored row is read back in current word
 
 ## Checking a line
 
-Read the line aloud to someone who has never seen the repository. If they cannot say what is happening, what waits on whom and why, the line breaks this rule. [The audit of the live page](./console-page-audit-2026-11-25.md) is the measured starting point; a later change compares its own reading with it.
+Read the line aloud to someone who has never seen the repository. If they cannot say what is happening, what waits on whom and why, the line breaks this rule. [The audit of the live page](./console-page-audit-2026-11-25.md) is the measured starting point; a later change compares its own reading with it. The `sprint` command checks part of this for the manager. When a report's status line, a question's ask, context or options, or a notice uses a word of [the glossary](./owner-words.md) without its gloss, the text is still accepted, and the command prints one warning per word with its gloss. The console page shows that gloss when the owner taps or hovers over the word.

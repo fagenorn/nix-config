@@ -39,6 +39,10 @@ decides, in one place.
 a JSON object, and sends `POST /api/report` with `{"sprint_id", "secret", "report"}`, no `Origin`.
 On success it prints `sprint: report sent` and exit 0. The command validates no member beyond the
 pictures' own rules: the console decides, in one place.
+After the console accepts it, the command prints to stderr one line `sprint: warning: the owner may
+not know "<word>"; say what it is: <gloss>` per glossary word (`agent_tools.console.owner_words`) that
+the status line uses without its gloss, in glossary order and once each; the text is sent and stored as
+before and the exit stays 0.
 
 `pictures` is optional on a brief and on a report, at most 8, each member
 `{"file": "<path>", "line": "<one line, at most 140 characters>", "pair": "before" | "after"}`
@@ -129,6 +133,10 @@ On success it prints `sprint: round <id> sent, <n> questions` (`1 question` when
 0; a 200 answer without integer `round` and `questions` is `sprint: refused 200: unreadable
 answer: <error>` and exit 1. Beyond the pictures' own rules the command validates no member of the
 round: the console decides, in one place.
+After the console accepts it, the command prints to stderr one line `sprint: warning: the owner may
+not know "<word>"; say what it is: <gloss>` per glossary word (`agent_tools.console.owner_words`) that
+a question's ask, context or options uses without its gloss, in glossary order and once each; the text is sent and stored as
+before and the exit stays 0.
 
 `sprint withdraw-question` reads the secret the same way and sends `POST /api/withdraw-question` with
 `{"sprint_id", "secret", "round", "index"}`, no `Origin`, for the question `--index` (an integer of at
@@ -144,7 +152,10 @@ a JSON object (`kind` and the members of that kind), and sends `POST /api/notice
 and exit 0. The command validates no member of the notice: the console decides, in one place, and a
 refusal is `sprint: refused <status>: <text>` and exit 1. A file that cannot be read or is not a JSON
 object is exit 2 with no request sent; a 200 answer without an integer `notice` is `sprint: refused
-200: unreadable answer: <error>` and exit 1.
+200: unreadable answer: <error>` and exit 1. After the console accepts it, the command prints to stderr
+one line `sprint: warning: the owner may not know "<word>"; say what it is: <gloss>` per glossary word
+(`agent_tools.console.owner_words`) that the notice's text uses without its gloss, in glossary order
+and once each; the text is sent and stored as before and the exit stays 0.
 
 `sprint notices` reads the secret the same way and sends `POST /api/notices` with `{"sprint_id",
 "secret"}`, no `Origin`. It prints the console's answer as returned, one JSON line `{"notices":
@@ -302,12 +313,12 @@ import re
 import secrets
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
-from agent_tools.console import (manager, own_reads, permit, project_question_hook, prompt_card,
-                                 service, sprints)
+from agent_tools.console import (manager, own_reads, owner_words, permit, project_question_hook,
+                                 prompt_card, service, sprints)
 from agent_tools.console.console import port_number
 
 TIMEOUT_SECONDS = 10
@@ -556,6 +567,32 @@ def resolve_secret(args: argparse.Namespace) -> str:
 
 
 PERMIT_FAILED = "the console could not judge this command: {reason}"
+WARNING = 'sprint: warning: the owner may not know "{word}"; say what it is: {gloss}'
+
+
+def report_texts(report: dict) -> list[str]:
+    return [report["status"]] if isinstance(report.get("status"), str) else []
+
+
+def round_texts(round_: dict) -> list[str]:
+    questions = round_.get("questions")
+    texts: list[str] = []
+    for question in questions if isinstance(questions, list) else []:
+        if not isinstance(question, dict):
+            continue
+        texts += [question[k] for k in ("question", "context") if isinstance(question.get(k), str)]
+        options = question.get("options")
+        texts += [o for o in options if isinstance(o, str)] if isinstance(options, list) else []
+    return texts
+
+
+def notice_texts(notice: dict) -> list[str]:
+    return [notice["text"]] if isinstance(notice.get("text"), str) else []
+
+
+def warn(texts: Iterable[str]) -> None:
+    for word, gloss in owner_words.unglossed_in(texts):
+        print(WARNING.format(word=word, gloss=gloss), file=sys.stderr)
 
 
 class HookFailure(Exception):
@@ -925,6 +962,7 @@ def send_round(args: argparse.Namespace, sprint: str) -> str:
             raise TypeError("round and questions are not both integers")
     except (ValueError, KeyError, TypeError) as error:
         raise Refused(f"sprint: refused 200: unreadable answer: {error}") from error
+    warn(round_texts(round_))
     noun = "question" if questions == 1 else "questions"
     return f"sprint: round {sent} sent, {questions} {noun}"
 
@@ -949,7 +987,9 @@ def send_notice(args: argparse.Namespace, sprint: str) -> str:
     notice = read_object(args.notice_file, "notice")
     body = json.dumps({"sprint_id": sprint, "secret": secret, "notice": notice}).encode()
     text = ask(args.port, "POST", service.NOTICE_PATH, body)
-    return f"sprint: notice {answered_notice(text)} posted"
+    posted = answered_notice(text)
+    warn(notice_texts(notice))
+    return f"sprint: notice {posted} posted"
 
 
 def answered_notice(text: str) -> int:
@@ -993,6 +1033,7 @@ def send_report(args: argparse.Namespace, sprint: str) -> str:
     secret = resolve_secret(args)
     report = read_object(args.report_file, "report")
     send_part(args, sprint, secret, "report", report)
+    warn(report_texts(report))
     return "sprint: report sent"
 
 
