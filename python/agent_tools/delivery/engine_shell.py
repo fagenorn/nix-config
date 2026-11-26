@@ -129,7 +129,7 @@ refused, naming them. One is continued on its own procedure copy (`procedures_di
 inputs of its `run.json`: a visit whose result is stored with its outcome but lacks its grading or its
 transition (either may be the one a kill left; a group member's lacks only its grading, the group's own
 grade being the core's) is first completed from the stored outcome; unless the
-walk is already `Done`, `engine_core.reentry` (given the current repository head and the head of every checkout a stored result names) names the step to
+walk is already `Done`, `engine_core.reentry` (given the current repository head and the head and merge base of every checkout a stored result names) names the step to
 re-enter and a `run_continued` event records it; the loop then runs as for a new run. A mutating command
 step's `check` runs first on every visit that replays one a continue discarded (`RunCommand.recheck`; a
 group member's likewise, and in the child runs of a call that replays one, the first visit of each mutating
@@ -605,7 +605,7 @@ def _continue(run_dir: Path, table: CommandTable, inputs: dict) -> None:
     if isinstance(action, engine_core.Stop) and (not ledger or ledger[-1]["event"] != "stop_reached"):
         return  # the owner never saw this stop: the walk reports it before anything is re-entered
     point = engine_core.reentry(procedure, inputs, events, read_head(table.root),
-                                engine_heads.checkout_heads(ledger))
+                                engine_heads.checkout_heads(ledger), engine_heads.checkout_bases(ledger))
     if (isinstance(action, engine_core.StartSession)
             and (action.step, action.visit) == (point.step, point.visit)
             and _resumed(run_dir, ledger, action.step, action.visit) is not None):
@@ -1014,25 +1014,26 @@ def _visit(run_dir: Path, table: CommandTable, step: dict, action: engine_core.R
                                              "started": _now()})
 
     try:
-        repository = engine_heads.checkout_of(step, action.args)
+        repository, ref = engine_heads.checkout_of(step, action.args), engine_heads.base_of(step, action.args)
     except engine_heads.CheckoutRefused as error:  # no process starts, nothing is held, no wait opens
         refused = engine_commands.Ran("refused", {"reason": str(error), "verdict": "refused"}, None, 0.0)
         return _grade_command(run_dir, step, name, visit, refused, None, member, reuse_key=key)
-    settled = engine_heads.settle(scope.root, key, repository) if repository else None
+    settled = engine_heads.settle(scope.root, key, repository, ref) if repository else None
     if settled and settled.moved:
         return _head_moved(run_dir, step, name, visit, 0.0, member, key)
     if settled and settled.hit:
         hit = settled.hit
         engine_ledger.store_result(run_dir, step=name, visit=visit, result=hit.result, at=_now(),
                                    wall_seconds=0.0, turns=0, tokens=dict(NO_TOKENS), spend_usd=0,
-                                   head=settled.head, outcome="ok", repository=repository, reuse_key=key,
+                                   head=settled.mark.head, base=settled.mark.base, outcome="ok",
+                                   repository=repository, reuse_key=key,
                                    reused_from={"run": hit.run, "step": hit.step, "visit": hit.visit})
         return _graded(run_dir, step, visit, "ok", member=member)
     if wait:
         engine_ledger.append_event(run_dir, {"event": "wait_started", "at": _now(),
                                              "wait": wait, "until": None})
     held = repository or table.root
-    before = settled.head if settled else read_head(held) if step["holds"] == "head" else None
+    before = settled.mark if settled else engine_heads.read_mark(held) if step["holds"] == "head" else None
     ran = None
     if action.recheck:
         check = step["check"]
@@ -1047,7 +1048,7 @@ def _visit(run_dir: Path, table: CommandTable, step: dict, action: engine_core.R
                                   timeout=table.wall_seconds(action.command), stop=stop)
     if wait:
         engine_ledger.append_event(run_dir, {"event": "wait_ended", "at": _now(), "wait": wait})
-    after = read_head(held) if step["holds"] == "head" else None
+    after = engine_heads.read_mark(held, ref) if step["holds"] == "head" else None
     try:
         if repository is not None and before != after:
             _head_moved(run_dir, step, name, visit, ran.wall_seconds, member, key)
@@ -1068,11 +1069,13 @@ def _forward(diagnostic: bytes) -> None:
 
 
 def _bounded(run_dir: Path, step: dict, name: str, visit: int, bound: str, wall_seconds: float,
-             head: str | None, repository: str | None, member: bool, reuse_key: str | None = None) -> None:
+             mark: engine_heads.Mark | None, repository: str | None, member: bool,
+             reuse_key: str | None = None) -> None:
     """Store the result of a fired bound and grade it `out-of-bounds`."""
     engine_ledger.store_result(run_dir, step=name, visit=visit, result={"bound": bound}, at=_now(),
                                wall_seconds=wall_seconds, turns=0, tokens=dict(NO_TOKENS),
-                               spend_usd=0, head=head, outcome=procedure_terms.OUT_OF_BOUNDS,
+                               spend_usd=0, head=mark and mark.head, base=mark and mark.base,
+                               outcome=procedure_terms.OUT_OF_BOUNDS,
                                repository=repository, reuse_key=reuse_key)
     _graded(run_dir, step, visit, procedure_terms.OUT_OF_BOUNDS, bound=True, member=member)
 
@@ -1084,16 +1087,16 @@ def _head_moved(run_dir: Path, step: dict, name: str, visit: int, wall_seconds: 
 
 
 def _grade_command(run_dir: Path, step: dict, name: str, visit: int,
-                   ran: engine_commands.Ran, head: str | None, member: bool,
+                   ran: engine_commands.Ran, mark: engine_heads.Mark | None, member: bool,
                    repository: str | None = None, reuse_key: str | None = None) -> None:
     if ran.timed_out:
-        _bounded(run_dir, step, name, visit, "wall-time", ran.wall_seconds, head, repository, member,
+        _bounded(run_dir, step, name, visit, "wall-time", ran.wall_seconds, mark, repository, member,
                  reuse_key)
         return
     engine_ledger.store_result(run_dir, step=name, visit=visit, result=ran.result, at=_now(),
                                wall_seconds=ran.wall_seconds, turns=0, tokens=dict(NO_TOKENS),
-                               spend_usd=0, head=head, outcome=ran.outcome, repository=repository,
-                               reuse_key=reuse_key)
+                               spend_usd=0, head=mark and mark.head, base=mark and mark.base,
+                               outcome=ran.outcome, repository=repository, reuse_key=reuse_key)
     if ran.outcome == procedure_terms.OUT_OF_BOUNDS:  # only the engine grades a fired bound
         raise Fault(f"step {name} has no mapping for the outcome {ran.outcome}")
     _graded(run_dir, step, visit, ran.outcome, member=member)

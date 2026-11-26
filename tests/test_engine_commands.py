@@ -428,7 +428,7 @@ class SpawnSiteTest(unittest.TestCase):
                     ("engine_commands.py", "run", "subprocess.Popen"),
                     ("engine_guard.py", "_descendants", "subprocess.run"),
                     ("engine_guard.py", "judge", "subprocess.Popen"),
-                    ("engine_heads.py", "read_head", "subprocess.run"),
+                    ("engine_heads.py", "_commit", "subprocess.run"),
                     ("engine_session.py", "launch", "subprocess.Popen"),
                     ("engine_stop.py", "process_started_at", "subprocess.run")]
         self.assertEqual(spawn_sites(sources), expected)

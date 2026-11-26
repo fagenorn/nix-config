@@ -1,5 +1,5 @@
 {
-  "format": 1,
+  "format": 2,
   "inputs": ["holder", "issue", "repo", "repo_root"],
   "stops": {
     "land": {"need": "owner-decision", "reenter": "attempt"},

@@ -73,9 +73,11 @@ class ReviewCase(unittest.TestCase):
         self.head = self.world.git(self.root, "rev-parse", "HEAD").strip()
         self.base = self.world.git(self.root, "merge-base", "refs/remotes/origin/main", "HEAD").strip()
 
-    def run_review(self, *extra, routed=("/s/the-bar.md",), raw_routed=None):
+    def run_review(self, *extra, routed=("/s/the-bar.md",), raw_routed=None, head="head"):
         flag = [] if raw_routed is None and routed is None else [
             "--routed-files", json.dumps(list(routed)) if raw_routed is None else raw_routed]
+        if head is not None:
+            flag += ["--head", self.head if head == "head" else head]
         done = subprocess.run(
             [sys.executable, "-m", "agent_tools.delivery.independent_review", "code",
              "--repo-root", str(self.root), "--issue", "7", "--worktree-path", str(self.root),
@@ -133,6 +135,38 @@ class ReviewTest(ReviewCase):
 
                 self.assertEqual((code, reply["verdict"]), (2, "error"), reply)
                 self.assertEqual(self.calls(), [])
+
+    def test_a_review_without_the_routed_head_or_with_a_head_that_is_no_commit_id_is_a_usage_error(self):
+        self.arrange([CLEAN_ANSWER])
+        for head in (None, "HEAD", self.head[:12], self.head.upper()):
+            with self.subTest(head=head):
+                code, reply = self.run_review(head=head)
+
+                self.assertEqual((code, reply["verdict"]), (2, "error"), reply)
+                self.assertEqual(self.calls(), [])
+
+    def test_a_commit_landing_after_routing_is_unavailable_before_any_review_starts(self):
+        self.arrange([VALID])
+        routed = self.head
+        (self.root / "web").mkdir()
+        (self.root / "web/page.js").write_text("y = 2\n", encoding="utf-8")
+        self.world.git(self.root, "add", "-A")
+        self.world.git(self.root, "commit", "--quiet", "-m", "later")
+
+        code, reply = self.run_review(head=routed)
+
+        self.assertEqual((code, reply["verdict"], reply["findings"]), (0, "unavailable", []), reply)
+        self.assertIn("head moved since routing", reply["detail"])
+        self.assertIn(routed, reply["detail"])
+        self.assertEqual(self.calls(), [])
+
+    def test_the_range_is_the_routed_heads(self):
+        self.arrange([CLEAN_ANSWER])
+
+        code, reply = self.run_review()
+
+        self.assertEqual(code, 0, reply)
+        self.assertIn(f"base {self.base} head {self.head}", reply["raw_summary"])
 
     def test_an_unsupported_review_code_answers_none_and_starts_nothing(self):
         self.arrange([VALID], supported=False)

@@ -31,7 +31,8 @@ directory is either complete or absent.
 Every event has `event` (its type) and `at` (RFC3339 UTC); `EVENT_MEMBERS` lists, per type, the
 other members it always carries and `EVENT_OPTIONAL` the ones it may carry besides. `result_stored` carries the
 visit's graded `outcome` and, for a step that reports one, the worktree `head` and, for a command step that
-names a checkout, that checkout's absolute path as `repository`, the head being its head. A step that names a checkout also
+names a checkout, that checkout's absolute path as `repository`, the head being its head, and, when it also names a
+`base`, that merge base as `base` (`ref`, `sha`: exactly those). A step that names a checkout also
 carries `reuse_key` (a non-empty string, the command and its arguments) on every `result_stored`, and
 `reused_from` (`run`, `step`, `visit`: exactly those) when the result is the stored one of an earlier visit
 in the delivery's runs, taken instead of running the command (`engine_heads`). `run_continued` names the `step`
@@ -109,7 +110,7 @@ EVENT_MEMBERS: Mapping[str, frozenset[str]] = {
 }
 # Members an event may carry besides `EVENT_MEMBERS`.
 EVENT_OPTIONAL: Mapping[str, frozenset[str]] = {
-    "result_stored": frozenset(("head", "outcome", "repository", "reuse_key", "reused_from")),
+    "result_stored": frozenset(("head", "outcome", "repository", "reuse_key", "reused_from", "base")),
     "run_continued": frozenset(("step", "visit")),
 }
 # Members `append_event` requires beyond what a reader requires, so a ledger
@@ -403,6 +404,11 @@ def _check_member(event: Mapping[str, object], key: str) -> None:
     elif key == "repository":
         if not isinstance(value, str) or not os.path.isabs(value):
             raise LedgerError("repository is not an absolute path")
+    elif key == "base":
+        if not isinstance(value, dict) or set(value) != {"ref", "sha"} \
+                or not isinstance(value["ref"], str) or not value["ref"].startswith("refs/remotes/origin/") \
+                or not isinstance(value["sha"], str) or not HEAD_RE.fullmatch(value["sha"]):
+            raise LedgerError("base is not exactly an origin ref and a full lowercase hex commit id")
     elif key == "reused_from":
         if not isinstance(value, dict) or set(value) != {"run", "step", "visit"} \
                 or not isinstance(value["run"], str) or not RUN_ID_RE.fullmatch(value["run"]) \
@@ -520,15 +526,17 @@ def store_result(run_dir: Path, *, step: str, visit: int, result: object, at: st
                  wall_seconds: float, turns: int, tokens: Mapping[str, int],
                  spend_usd: float, head: str | None = None,
                  outcome: str | None = None, repository: str | None = None,
-                 reuse_key: str | None = None, reused_from: Mapping[str, object] | None = None) -> Path:
+                 reuse_key: str | None = None, reused_from: Mapping[str, object] | None = None,
+                 base: Mapping[str, object] | None = None) -> Path:
     """Write the step visit's result file, then append its `result_stored` event.
 
-    `head`, `outcome`, `repository`, `reuse_key` and `reused_from` are in the event only when given."""
+    `head`, `outcome`, `repository`, `reuse_key`, `reused_from` and `base` are in the event only when given."""
     run_dir = Path(run_dir)
     relative = f"results/{step}.{visit}.json"
     optional = {key: value for key, value in (("head", head), ("outcome", outcome),
                                           ("repository", repository), ("reuse_key", reuse_key),
-                                          ("reused_from", None if reused_from is None else dict(reused_from)))
+                                          ("reused_from", None if reused_from is None else dict(reused_from)),
+                                          ("base", None if base is None else dict(base)))
                 if value is not None}
     event = validate_event({"event": "result_stored", "at": at, "step": step, "visit": visit,
                             "result": relative, "wall_seconds": wall_seconds, "turns": turns,

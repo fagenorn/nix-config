@@ -13,14 +13,21 @@ checkout's head instead of the project's, and its stored result names the checko
 such a result by its own checkout's head. A checkout whose head moved while the step ran ends the step
 `out-of-bounds` and records no head (the shell's `_head_moved`).
 
+A step may also name a `base`: one of its `in` paths, whose value is a branch of the `origin` remote. The step
+then holds for the checkout's `Mark` (its head and the merge base of that head with `refs/remotes/origin/<branch>`,
+recorded as `base`, `{ref, sha}`): the base moving while the step ran ends it as the head does, `checkout_bases`
+reads the current merge base of every checkout a stored result names a base for (a continue judges that result
+stale when it differs or was never recorded), and a result is reused only at the same merge base. A merge base
+that cannot be read leaves the step unreused and its result without `base`.
+
 Reuse: such a step never mutates, so its result is a function of the command, its arguments and the checkout's
-head. Every `result_stored` of the step carries its `reuse_key` (the command, subcommand and arguments as
-compact sorted JSON, never the step id). Before the command starts the shell reads the checkout's head and
+mark. Every `result_stored` of the step carries its `reuse_key` (the command, subcommand and arguments as
+compact sorted JSON, never the step id). Before the command starts the shell reads the checkout's mark and
 `settle`s it: `reusable` searches the delivery's runs (`engine_ledger.delivery_runs` of the root run) for a
-stored result with the same `reuse_key`, the same `head` and the outcome `ok`, the last one in walk order
-winning, and a `LedgerError`, `OSError` or `ValueError` anywhere in the search is a miss. A hit is accepted only
-when the head read again after the search is the same one; otherwise the visit ends as a head that moved while
-the command ran. An accepted hit stores its document again, naming where it came from in `reused_from`, and
+stored result with the same `reuse_key`, the same `head` and `base` and the outcome `ok`, the last one in walk
+order winning, and a `LedgerError`, `OSError` or `ValueError` anywhere in the search is a miss. A hit is accepted
+only when the mark read again after the search is the same one; otherwise the visit ends as a head that moved
+while the command ran. An accepted hit stores its document again, naming where it came from in `reused_from`, and
 no process starts.
 """
 
@@ -72,27 +79,60 @@ def core_events(run_dir: Path, ledger: list[dict],
             relative = stored[(event["step"], event["visit"])]
             outcome = {"type": "outcome", "step": event["step"],
                        "outcome": event["outcome"], "result": _load(run_dir / relative)}
-            for member in ("head", "repository"):
+            for member in ("head", "repository", "base"):
                 if member in heads[(event["step"], event["visit"])]:
                     outcome[member] = heads[(event["step"], event["visit"])][member]
             events.append(outcome)
     return events
 
 
-def read_head(root: str) -> str | None:
-    """The full commit id `HEAD` names in `root`, or None when it cannot be read.
+def _commit(root: str, *words: str) -> str | None:
+    """The full commit id the Git read `words` prints in `root`, or None when it cannot be read.
 
     The repository is the one `root` is in: a variable that selects another is not passed on.
     """
     environ = {key: value for key, value in os.environ.items() if key not in REPOSITORY_ENV}
     try:
-        done = subprocess.run(["git", "rev-parse", "--verify", "--quiet", "HEAD"], cwd=root, env=environ,
+        done = subprocess.run(["git", *words], cwd=root, env=environ,
                               stdin=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                               stdout=subprocess.PIPE, text=True, timeout=30)
     except (OSError, subprocess.SubprocessError):
         return None
-    head = done.stdout.strip()
-    return head if done.returncode == 0 and engine_ledger.HEAD_RE.fullmatch(head) else None
+    found = done.stdout.strip()
+    return found if done.returncode == 0 and engine_ledger.HEAD_RE.fullmatch(found) else None
+
+
+def read_head(root: str) -> str | None:
+    """The full commit id `HEAD` names in `root`, or None when it cannot be read."""
+    return _commit(root, "rev-parse", "--verify", "--quiet", "HEAD")
+
+
+class Mark(NamedTuple):
+    """What a checkout's result holds for: its head and, for a step naming a `base`, that merge base."""
+
+    head: str | None
+    base: dict | None
+
+
+def read_mark(root: str, ref: str | None = None) -> Mark:
+    """The head of `root` and, when `ref` is given and shares history with it, the merge base."""
+    head = read_head(root)
+    sha = None if ref is None or head is None else _commit(root, "merge-base", ref, "HEAD")
+    return Mark(head, None if sha is None else {"ref": ref, "sha": sha})
+
+
+def base_of(step: Mapping, args: Sequence[tuple[str, object]]) -> str | None:
+    """The `origin` remote-tracking ref of the step's `base` branch, None when it names none.
+
+    Raises `CheckoutRefused` when the path's value is not a non-empty string that is no option.
+    """
+    path = step.get("base")
+    if path is None:
+        return None
+    value = dict(args).get(path)
+    if not (isinstance(value, str) and value and not value.startswith("-")):
+        raise CheckoutRefused(f"base {path} is not a branch name: {value!r}")
+    return f"refs/remotes/origin/{value}"
 
 
 def checkout_of(step: Mapping, args: Sequence[tuple[str, object]]) -> str | None:
@@ -115,6 +155,12 @@ def checkout_heads(ledger: list[dict]) -> dict[str, str | None]:
             if event["event"] == "result_stored" and "repository" in event}
 
 
+def checkout_bases(ledger: list[dict]) -> dict[str, str | None]:
+    """The current merge base of every checkout the ledger's stored results name a base for."""
+    return {event["repository"]: _commit(event["repository"], "merge-base", event["base"]["ref"], "HEAD")
+            for event in ledger if event["event"] == "result_stored" and "base" in event}
+
+
 def reuse_key(action) -> str:
     """The command, subcommand and arguments of a `RunCommand`, as compact sorted JSON."""
     return json.dumps([action.command, action.subcommand, [[path, value] for path, value in action.args]],
@@ -131,21 +177,22 @@ class Hit(NamedTuple):
 
 
 class Settled(NamedTuple):
-    """`settle`'s answer: the checkout's head (None when unreadable), the hit, and whether the head moved."""
+    """`settle`'s answer: the checkout's mark (no head when unreadable), the hit, and whether the mark moved."""
 
-    head: str | None
+    mark: Mark
     hit: Hit | None
     moved: bool
 
 
-def reusable(root: Path, key: str, head: str) -> Hit | None:
-    """The last stored `ok` result of `key` at `head` in the delivery's runs, None when there is none."""
+def reusable(root: Path, key: str, mark: Mark) -> Hit | None:
+    """The last stored `ok` result of `key` at `mark` in the delivery's runs, None when there is none."""
     try:
         found = None
         for run_dir in engine_ledger.delivery_runs(root):
             for event in engine_ledger.replay(run_dir / "events.jsonl"):
                 if (event["event"] == "result_stored" and event.get("reuse_key") == key
-                        and event.get("head") == head and event.get("outcome") == "ok"):
+                        and event.get("head") == mark.head and event.get("base") == mark.base
+                        and event.get("outcome") == "ok"):
                     found = (run_dir, event)
         if found is None:
             return None
@@ -155,12 +202,12 @@ def reusable(root: Path, key: str, head: str) -> Hit | None:
         return None
 
 
-def settle(root: Path, key: str, checkout: str) -> Settled:
-    """The checkout's head and the stored result reusable at it, the head read again once the search is done."""
-    head = read_head(checkout)
-    if head is None:
-        return Settled(None, None, False)
-    hit = reusable(root, key, head)
-    if hit is not None and read_head(checkout) != head:
-        return Settled(head, None, True)
-    return Settled(head, hit, False)
+def settle(root: Path, key: str, checkout: str, ref: str | None = None) -> Settled:
+    """The checkout's mark and the stored result reusable at it, the mark read again once the search is done."""
+    mark = read_mark(checkout, ref)
+    if mark.head is None or (ref is not None and mark.base is None):
+        return Settled(mark, None, False)
+    hit = reusable(root, key, mark)
+    if hit is not None and read_mark(checkout, ref) != mark:
+        return Settled(mark, None, True)
+    return Settled(mark, hit, False)

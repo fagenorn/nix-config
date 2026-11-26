@@ -162,7 +162,10 @@ class EngineFormTest(World):
         flag = self.route("building", "--diff", f"refs/remotes/origin/main...{head}")
         self.assertEqual((engine.returncode, flag.returncode), (0, 0), engine.stderr)
         doc = json.loads(engine.stdout)
-        self.assertEqual(doc, json.loads(flag.stdout))
+        control = json.loads(flag.stdout)
+        self.assertEqual((control["head"], doc["head"]), (None, head))
+        self.assertEqual({**doc, "head": None}, control)
+        self.assertEqual(doc["diff"], f"refs/remotes/origin/main...{head}")
         self.assertEqual(doc["stage"], "building")
         self.assertEqual(
             doc["change"],
@@ -223,6 +226,10 @@ class EngineFormTest(World):
             "extra diff": ("building", flags() + ["--diff", "x"]),
             "branch not at head": ("building", flags(**{"--branch": "other"})),
             "absent branch": ("building", flags(**{"--branch": "absent"})),
+            "revision branch": ("building", flags(**{"--branch": "main~0"})),
+            "peeled branch": ("building", flags(**{"--branch": "main^{commit}"})),
+            "range branch": ("building", flags(**{"--branch": "main..main"})),
+            "revision integration branch": ("building", flags(**{"--integration-branch": "main~0"})),
         }
         for name, (word, words) in cases.items():
             with self.subTest(name):

@@ -400,7 +400,24 @@ def _checkout(holds: str, repository: str, mutates: bool = False) -> Callable[[d
     return change
 
 
+def _based(base: str, repository: str | None = "run.range") -> Callable[[dict], None]:
+    def change(toy: dict) -> None:
+        scope = step(toy, "scope")
+        scope.update(holds="head", base=base)
+        if repository:
+            scope["repository"] = repository
+    return change
+
+
 CASES = [
+    Case("base_not_among_the_in_paths", editing("toy", _based("run.issue")),
+         [("toy", "scope", "invalid_field")]),
+    Case("base_without_a_checkout", editing("toy", _based("run.range", None)),
+         [("toy", "scope", "invalid_field")]),
+    Case("base_that_is_not_a_path", editing("toy", _based(7)), [("toy", "scope", "invalid_field")]),
+    Case("base_on_an_agent_step",
+         editing("toy", _set(lambda toy: step(toy, "draft"), "base", "run.issue")),
+         [("toy", "draft", "undefined_field")]),
     Case("checkout_not_among_the_in_paths", editing("toy", _checkout("head", "run.issue")),
          [("toy", "scope", "invalid_field")]),
     Case("checkout_on_a_step_that_holds_run", editing("toy", _checkout("run", "run.range")),
@@ -423,7 +440,7 @@ CASES = [
     Case("zero_max_visits",
          editing("toy", _set(lambda toy: step(toy, "draft"), "max_visits", 0)),
          [("toy", "draft", "invalid_field")]),
-    Case("unsupported_format", editing("toy", _set(lambda toy: toy, "format", 2)),
+    Case("unsupported_format", editing("toy", _set(lambda toy: toy, "format", 1)),
          [("toy", None, "invalid_field")]),
     Case("unknown_need", editing("toy", _unknown_need),
          [("toy", None, "invalid_field")]),
@@ -1215,8 +1232,9 @@ SHIPPED_MEMBERS = {
     "issue": ({"text": "t", "body": "x\n\n## Acceptance criteria\n\n- [ ] a\n", "marked": False,
                "lane_paths": {"secrets": ["secrets/"]}},
               {"text": "t", "body": "", "marked": True, "lane_paths": None}),
-    **{route: ({"routed_files": ["/s/the-bar.md"]},) for route in (
-        "route", "route-lite", "route-full", "route-lite-fixed", "route-escalated-fixed", "route-full-fixed")},
+    **{route: ({"routed_files": ["/s/the-bar.md"], "diff": "refs/remotes/origin/main...h", "head": "h"},)
+       for route in ("route", "route-lite", "route-full", "route-lite-fixed", "route-escalated-fixed",
+                     "route-full-fixed")},
     "implement": ({}, {"ineligible": True}, {"sensitive": True}, {"acceptance": []}),
     "lite-review": ({}, {"escalate": True}, CLEAN, UNNAMED),
     "full-review": ({}, CLEAN, UNNAMED),
@@ -1229,7 +1247,8 @@ SHIPPED_MEMBERS = {
                            {"id": "test", "status": "fail", "named": ["a.json"]}]},),
     "ws-check": ({"start_head": "s", "commit": "c", "whitespace_only": True, "changed_paths": ["a.json"]},),
     "fix": ({}, {"unrelated": {"test": "", "evidence": ""}}),
-    **{route: ({"routed_files": ["/s/the-bar.md"]},) for route in ("route-checks", "route-review")},
+    **{route: ({"routed_files": ["/s/the-bar.md"], "diff": "refs/remotes/origin/main...h", "head": "h"},)
+       for route in ("route-checks", "route-review")},
     **{review: ({}, {"findings": []}, UNNAMED,
                 {"findings": [], "whitespace_insignificant": True, "whitespace_evidence": "e"})
        for review in ("fix-review", "fix-review-again")},

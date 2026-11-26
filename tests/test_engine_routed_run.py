@@ -103,11 +103,16 @@ class RouteTest(Scenario):
         self.assertIn(f"{standards}/stacks/python.md", routed)
         self.assertNotIn(hint, routed)
         self.assertEqual(routed_of(self.launch(run, "lite-review")["prompt"]), routed)
+        self.assertIn(f"git diff refs/remotes/origin/main...{head}", self.launch(run, "lite-review")["prompt"])
+        merge_base = run.world.git(run.worktree_path, "merge-base", "refs/remotes/origin/main", head).strip()
+        self.assertEqual(stored_event(direct, "route-lite")["base"],
+                         {"ref": "refs/remotes/origin/main", "sha": merge_base})
         self.assertEqual(routed_of(self.launch(run, "lite-fix")["prompt"]), routed)
         reviews = [shlex.split(p["payload"]["tool_input"]["command"]) for p in payloads(run.guard_log)]
         reviews = [argv for argv in reviews if "agent_tools.delivery.independent_review" in argv]
         self.assertEqual(len(reviews), 1)
         self.assertEqual(json.loads(reviews[0][reviews[0].index("--routed-files") + 1]), routed)
+        self.assertEqual(reviews[0][reviews[0].index("--head") + 1], head)
         stdin = run.companion_launches()[0]["stdin"]
         self.assertEqual(routed_section(stdin), routed)
         self.assertIn(f"Head: {head}", stdin)

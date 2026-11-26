@@ -157,6 +157,7 @@ class EngineProject:
             "standin-hold": entry("hold", str(self.hold), "0"),
             "standin-branch": entry("emit", "0", '{"verdict":"ok","branch":"issue-7-topic"}'),
             "standin-side": entry("emit", "0", json.dumps({"path": str(self.tmp / "side")})),
+            "standin-based": entry("emit", "0", json.dumps({"path": str(self.tmp / "side"), "branch": "main"})),
             "standin-relative": entry("emit", "0", '{"path":"relative/dir"}'),
             "standin-listed": entry("emit", "0", '{"path":["x"]}'),
         })
@@ -197,7 +198,7 @@ class EngineProject:
             default = {"needs-owner": {"need": "owner-decision", "reenter": steps[0]["id"]}}
             if keep_alive:
                 default["claim-lost"] = {"need": "owner-decision", "reenter": steps[0]["id"]}
-            document = {"format": 1,
+            document = {"format": 2,
                         "inputs": list(inputs),
                         "stops": stops or default,
                         "steps": steps}
@@ -698,7 +699,7 @@ class FindingsTest(unittest.TestCase):
         project = EngineProject(self)
         directory = Path(tempfile.mkdtemp(dir=project.tmp))
         (directory / "deliver.json").write_text(
-            '{"format":1,"inputs":["issue"],"stops":{},"steps":[{"id":"a","in":'
+            '{"format":2,"inputs":["issue"],"stops":{},"steps":[{"id":"a","in":'
             + "[" * 100000 + "]" * 100000 + "}]}", encoding="utf-8")
         done = project.deliver(directory)
         self.assertEqual(done.returncode, 2, done.stdout + done.stderr)

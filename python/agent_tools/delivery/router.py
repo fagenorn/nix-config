@@ -14,7 +14,9 @@ the hint file when it exists, then each must-read record (never an index line). 
 never cut. The engine form (a first argument that is no flag) routes the stage word's stage over
 `--diff refs/remotes/origin/<integration-branch>...<head>`, `head` the worktree's HEAD read once as
 a full sha; it refuses a `--branch` whose `refs/heads/<branch>` is not that sha, and no unqualified
-name reaches Git. Every Git read is of `--repo-root`'s (or the worktree's) repository, whatever
+name reaches Git; both branch names must be literal branch names (`git check-ref-format`), never a revision
+expression. Its document also carries `diff` (that range) and `head` (that sha) as members of their own, so a
+consumer reads the revision the files were routed for; the flag form's are null. Every Git read is of `--repo-root`'s (or the worktree's) repository, whatever
 `GIT_DIR` and its siblings name. Exit 0 with that line, 2 with one `router: <reason>`
 line on stderr and nothing on stdout for a misuse.
 """
@@ -161,6 +163,7 @@ def route(args: argparse.Namespace, root: Path, platform_dir: Path) -> dict:
     return {
         "schema_version": SCHEMA_VERSION, "stage": args.stage,
         "change": {"diff": args.diff, "paths": paths},
+        "diff": args.diff, "head": getattr(args, "head", None),
         "platform_revision": revision["rev"] if revision else None,
         "shards": shards, "hint": hint, "must_read": required, "index": index,
         "index_bytes": index_size, "total_bytes": total,
@@ -196,12 +199,18 @@ def engine_form(words: Sequence[str]) -> tuple[argparse.Namespace, Path, str | N
             raise Misuse(f"--{name.replace('_', '-')} must be a branch name: {value!r}")
     worktree = Path(given.worktree_path)
     check_directory("--worktree-path", worktree)
+    for name, prefix in (("integration_branch", "refs/remotes/origin/"), ("branch", "refs/heads/")):
+        try:
+            git_read(worktree, "check-ref-format", prefix + getattr(given, name))
+        except Misuse:
+            raise Misuse(f"--{name.replace('_', '-')} must be a literal branch name: "
+                         f"{getattr(given, name)!r}") from None
     head = git_read(worktree, "rev-parse", "--verify", "HEAD")
     tip = git_read(worktree, "rev-parse", "--verify", f"refs/heads/{given.branch}")
     if tip != head:
         raise Misuse(f"branch {given.branch} is at {tip}, the worktree's HEAD is {head}")
     change = f"refs/remotes/origin/{given.integration_branch}...{head}"
-    args = argparse.Namespace(stage=ENGINE_STAGES[word], diff=change, path=None)
+    args = argparse.Namespace(stage=ENGINE_STAGES[word], diff=change, path=None, head=head)
     return args, worktree, given.platform_standards
 
 

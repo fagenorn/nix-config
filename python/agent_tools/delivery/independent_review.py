@@ -1,7 +1,7 @@
 """`independent-review`: the configured Codex diff review of a delivery range, as a platform command.
 
 `independent-review code --repo-root <root> --issue <n> --worktree-path <wt> --branch <b>
---integration-branch <int> --acceptance <JSON list> --routed-files <JSON list of paths>` prints one
+--integration-branch <int> --acceptance <JSON list> --routed-files <JSON list of paths> --head <sha>` prints one
 compact JSON line, keys sorted, `{detail, findings, raw_summary, verdict}`, and exits 0. `verdict` is
 `pass`, `findings`, `none` or `unavailable`; `findings` is a list of `{failing_input, file, severity,
 summary}` that every reply carries. A usage error is exit 2 and a resolver refusal exit 1, each with
@@ -19,8 +19,10 @@ error: diff-review review_id <id> argv <argv>: expected codex-companion task [--
 diff-review; <first failing cause>` (causes in order: executable, subcommand, reviewer,
 unsupported token).
 
-The range is `merge-base refs/remotes/origin/<integration> HEAD` to `HEAD` in the worktree; one that
-does not resolve is `unavailable`. `diff-scope` measures it (`product.changed_files` as `M`,
+`--head` is the commit the files were routed for (the router's `head`). The range is `merge-base
+refs/remotes/origin/<integration> <head>` to `<head>` in the worktree; one that does not resolve is
+`unavailable`, and so is a worktree whose `HEAD` is no longer `--head` (a commit landed after routing), the
+detail `head moved since routing`, before any process starts. `diff-scope` measures it (`product.changed_files` as `M`,
 `files[].path`, `files[].changed_lines`). More than `FILE_BUDGET` files (strictly) is cut into
 consecutive slices of that many `files[].path` entries in emitted order, each dispatched once, so
 every product file is reviewed once; exactly that many, or none, is dispatched whole. No measurement
@@ -345,8 +347,10 @@ def run_review(args: argparse.Namespace) -> dict:
         return reply("unavailable", f"binding shape error: {OPERATION} review_id {review_id} argv "
                                     f"{entry['argv']}: {EXPECTED_SHAPE}; {cause}")
     try:
-        base = _git(args.worktree_path, "merge-base", f"refs/remotes/origin/{args.integration_branch}", "HEAD")
         head = _git(args.worktree_path, "rev-parse", "HEAD")
+        if head != args.head:
+            return reply("unavailable", f"head moved since routing: routed {args.head}, HEAD is {head}")
+        base = _git(args.worktree_path, "merge-base", f"refs/remotes/origin/{args.integration_branch}", head)
     except Refusal as refusal:
         return reply("unavailable", str(refusal))
     files = measure(base, head, args.worktree_path)
@@ -402,6 +406,12 @@ def _routed_files(text: str) -> list[str]:
     return value
 
 
+def _commit(text: str) -> str:
+    if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", text):
+        raise ValueError("not a full lowercase commit id")
+    return text
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = _Parser(prog="independent-review", description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True, parser_class=_Parser)
@@ -412,6 +422,7 @@ def _parser() -> argparse.ArgumentParser:
     code.add_argument("--acceptance", type=_acceptance, required=True, help="the criteria, a JSON list")
     code.add_argument("--routed-files", type=_routed_files, required=True,
                       help="the files the reviewer reads, a JSON list of paths")
+    code.add_argument("--head", type=_commit, required=True, help="the commit the files were routed for")
     return parser
 
 

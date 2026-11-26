@@ -38,7 +38,7 @@ def listing(root) -> list[str]:
 
 def future(project: EngineProject):
     procedures = project.procedures([step("a", "standin-record", "done")])
-    rewrite(procedures / "deliver.json", format=2)
+    rewrite(procedures / "deliver.json", format=3)
     return procedures
 
 
@@ -152,7 +152,7 @@ class StartCheckTest(unittest.TestCase):
         project = EngineProject(self)
         start_deliver(self, project, project.procedures([step("a", "standin-block", "done")]))
         run = wait_for_process_started(project)
-        rewrite(run / "procedure/deliver.json", format=2)
+        rewrite(run / "procedure/deliver.json", format=3)
         done = project.deliver(project.procedures(BROKEN))
         self.assertEqual(done.returncode, 4, done.stdout + done.stderr)
         self.assertEqual(len(done.stdout.splitlines()), 1)
@@ -176,7 +176,7 @@ class StartCheckTest(unittest.TestCase):
         first = project.deliver(project.procedures([step("a", "standin-fail", "done")]))
         self.assertEqual(first.returncode, 3, first.stdout + first.stderr)
         run = project.runs()[0]
-        rewrite(run / "procedure/deliver.json", format=2)
+        rewrite(run / "procedure/deliver.json", format=3)
         creation = self.hold(creation_lock_path(runs_root(project), 1512))
         fcntl.flock(creation, fcntl.LOCK_EX)
         held = self.hold(run / "lock")

@@ -59,7 +59,7 @@ class ShippedProceduresCheckTest(PlatformHome, Rebinding, ReportAssertions, unit
         return [c["id"] for c in report["checks"] if c["status"] == "failed"]
 
     def probe(self, command: str, on: dict, step_id: str = "probe") -> dict:
-        return {"format": 1, "inputs": [], "stops": {}, "steps": [
+        return {"format": 2, "inputs": [], "stops": {}, "steps": [
             {"id": step_id, "stage": "setup", "kind": "command", "holds": "run",
              "command": command, "on": on}]}
 

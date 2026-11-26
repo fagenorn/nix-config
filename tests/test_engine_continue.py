@@ -299,12 +299,53 @@ class ContinueTest(unittest.TestCase):
         self.assertEqual(heads(events, "a"), [None, head(project)])
 
     def checkout_procedures(self, project: EngineProject, middle: list[dict],
-                            stops: dict) -> Path:
+                            stops: dict, source: str = "standin-side") -> Path:
         project.world.git(project.root, "worktree", "add", "-q", "-b", "side",
                           str(project.tmp / "side"))
         return project.procedures(
-            [step("p", "standin-side", middle[0]["id"]), *middle,
+            [step("p", source, middle[0]["id"]), *middle,
              step("g", "standin-gate", "done")], stops=stops)
+
+    def based_procedures(self, project: EngineProject) -> tuple[Path, Path]:
+        """A run holding a `b` result for the side checkout's merge base with `refs/remotes/origin/main`."""
+        b = step("b", "count-b", "g", holds="head")
+        b.update({"in": ["p.path", "p.branch"], "repository": "p.path", "base": "p.branch"})
+        procedures = self.checkout_procedures(
+            project, [b], {"needs-owner": {"need": "owner-decision", "reenter": "g"}}, "standin-based")
+        side = project.tmp / "side"
+        project.world.git(side, "commit", "--quiet", "--allow-empty", "-m", "side")
+        return procedures, side
+
+    def test_a_result_holding_for_a_merge_base_is_kept_while_the_base_is_unchanged(self):
+        project = EngineProject(self)
+        procedures, side = self.based_procedures(project)
+        first = project.deliver(procedures)
+        self.assertEqual(first.returncode, 3, first.stdout + first.stderr)
+        second = project.deliver(procedures)
+        self.assertEqual(second.returncode, 3, second.stdout + second.stderr)
+        events = project.events(project.runs()[0])
+        self.assertEqual(run_continued(events)[-1]["step"], "g")
+        self.assertEqual(project.calls("b"), 1)
+        (stored,) = [e for e in events if e["event"] == "result_stored" and e["step"] == "b"]
+        merge_base = project.world.git(side, "merge-base", "refs/remotes/origin/main", "HEAD").strip()
+        self.assertEqual(stored["base"], {"ref": "refs/remotes/origin/main", "sha": merge_base})
+        self.assertEqual(stored["head"], head_of(project, side))
+
+    def test_a_continue_after_the_integration_branch_took_the_topics_commits_runs_the_step_again(self):
+        project = EngineProject(self)
+        procedures, side = self.based_procedures(project)
+        first = project.deliver(procedures)
+        self.assertEqual(first.returncode, 3, first.stdout + first.stderr)
+        project.world.git(project.root, "update-ref", "refs/remotes/origin/main", head_of(project, side))
+        second = project.deliver(procedures)
+        self.assertEqual(second.returncode, 3, second.stdout + second.stderr)
+        events = project.events(project.runs()[0])
+        self.assertEqual(run_continued(events)[-1]["step"], "b")
+        self.assertEqual(project.calls("b"), 2)
+        stored = [e for e in events if e["event"] == "result_stored" and e["step"] == "b"]
+        self.assertEqual([e["head"] for e in stored], [head_of(project, side)] * 2)
+        self.assertNotEqual(stored[0]["base"], stored[1]["base"])
+        self.assertNotIn("reused_from", stored[1])
 
     def test_a_head_step_naming_a_checkout_is_judged_by_that_checkouts_head(self):
         project = EngineProject(self)
@@ -415,6 +456,26 @@ class ContinueTest(unittest.TestCase):
         self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
         self.assertEqual(json.loads(second.stdout)["end"], "done")
         self.assertEqual(project.calls("d"), 1)
+
+    def test_a_run_saved_in_the_previous_procedure_format_is_superseded_by_a_new_run(self):
+        project = EngineProject(self)
+        procedures = gated(project)
+        first = project.deliver(procedures)
+        self.assertEqual(first.returncode, 3, first.stdout + first.stderr)
+        (old,) = project.runs()
+        saved = old / "procedure/deliver.json"
+        document = json.loads(saved.read_text(encoding="utf-8"))
+        self.assertEqual(document["format"], 2)
+        saved.write_text(json.dumps({**document, "format": 1}), encoding="utf-8")
+        second = project.deliver(procedures)
+        self.assertEqual(second.returncode, 3, second.stdout + second.stderr)
+        (earlier, later) = project.runs()
+        self.assertEqual(earlier, old)
+        stops = [e for e in project.events(old) if e["event"] == "stop_reached"]
+        self.assertEqual((stops[-1]["stop"], stops[-1]["need"]), ("superseded", "nothing"))
+        self.assertEqual(json.loads(second.stdout)["run"], later.name)
+        self.assertEqual(json.loads((later / "procedure/deliver.json").read_text())["format"], 2)
+        self.assertEqual(project.calls("a"), 2)
 
     def seed(self, project: EngineProject, procedures: Path, *tokens: str) -> list[Path]:
         root = project.world.home / ".agents/state/engine/runs"
@@ -618,6 +679,30 @@ class ReuseTest(unittest.TestCase):
         self.assertEqual([e for e in project.events(kids[1])
                           if e["event"] == "process_started" and e["step"] == "r"], [])
 
+    def test_a_moved_merge_base_runs_the_checkout_step_again_at_the_same_head(self):
+        for moved in (False, True):
+            with self.subTest(moved=moved):
+                project = EngineProject(self)
+                side = project.tmp / "side"
+                r = self.checkout_step("r", "count-b", "g")
+                r.update({"in": ["p.path", "p.branch"], "base": "p.branch"})
+                project.world.git(project.root, "worktree", "add", "-q", "-b", "side", str(side))
+                c = {"id": "c", "stage": "setup", "kind": "call", "procedure": "kid", "holds": "live",
+                     "on": {"done": "done", "needs-owner": "needs-owner"}}
+                steps = [step("p", "standin-based", "r"), r, step("g", "standin-gate", "done")]
+                procedures = project.procedures(
+                    [c], stops={"needs-owner": {"need": "owner-decision", "reenter": "c"}},
+                    children={"kid": {"steps": steps, "inputs": ["issue"], "stops": {
+                        "needs-owner": {"need": "owner-decision", "reenter": "p"}}}})
+                project.world.git(side, "commit", "--quiet", "--allow-empty", "-m", "side")
+                _, kids = self.delivered_twice(project, procedures, lambda: moved and project.world.git(
+                    project.root, "update-ref", "refs/remotes/origin/main", head_of(project, side)))
+                self.assertEqual(project.calls("b"), 2 if moved else 1)
+                (first,), (second,) = (self.stored(project, kid, "r") for kid in kids)
+                self.assertEqual(second["head"], first["head"])
+                self.assertEqual("reused_from" in second, not moved)
+                self.assertEqual(second["base"] != first["base"], moved)
+
     def test_a_moved_head_runs_the_checkout_step_again(self):
         project = EngineProject(self)
         procedures = self.child_procedures(project, self.checkout_step("r", "count-b", "g"))
@@ -679,7 +764,7 @@ class HeldReuseTest(unittest.TestCase):
             root, checkout, head = self.world(tmp)
             with mock.patch.object(engine_heads, "read_head", side_effect=[head, "b" * 40]):
                 self.assertEqual(engine_heads.settle(root, self.KEY, str(checkout)),
-                                 Settled(head, None, True))
+                                 Settled(engine_heads.Mark(head, None), None, True))
             with mock.patch.object(engine_heads, "read_head", side_effect=[head, head]):
                 settled = engine_heads.settle(root, self.KEY, str(checkout))
             self.assertEqual(settled.hit[:3], (root.name, "r", 1))

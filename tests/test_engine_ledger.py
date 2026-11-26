@@ -341,6 +341,28 @@ class ResultOrderTest(unittest.TestCase):
                     engine_ledger.validate_event({**EXAMPLES["result_stored"], "repository": value})
         engine_ledger.validate_event({**EXAMPLES["result_stored"], "repository": "/w"})
 
+    def test_a_stored_result_carries_its_merge_base_only_when_given(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run = new_run(tmp)
+            common = dict(result={}, at=AT, wall_seconds=0, turns=0, tokens=ZERO_TOKENS,
+                          spend_usd=0)
+            base = {"ref": "refs/remotes/origin/main", "sha": "d" * 40}
+            engine_ledger.store_result(run, step="scope", visit=1, head="c" * 40, repository="/w",
+                                       base=base, **common)
+            engine_ledger.store_result(run, step="scope", visit=2, **common)
+            first, second = engine_ledger.replay(run / "events.jsonl")
+            self.assertEqual(first["base"], base)
+            self.assertNotIn("base", second)
+
+    def test_a_result_stored_event_refuses_a_merge_base_that_is_not_exactly_an_origin_ref_and_a_commit(self):
+        good = {"ref": "refs/remotes/origin/main", "sha": "d" * 40}
+        engine_ledger.validate_event({**EXAMPLES["result_stored"], "base": good})
+        for value in ("d" * 40, {"ref": good["ref"]}, {**good, "extra": 1}, {**good, "sha": "D" * 40},
+                      {**good, "sha": "d"}, {**good, "ref": "refs/heads/main"}, {**good, "ref": 3}):
+            with self.subTest(value=value):
+                with self.assertRaises(engine_ledger.LedgerError):
+                    engine_ledger.validate_event({**EXAMPLES["result_stored"], "base": value})
+
     def test_a_failed_result_write_appends_no_event(self):
         with tempfile.TemporaryDirectory() as tmp:
             run = new_run(tmp)

@@ -1,4 +1,4 @@
-Review the delivery diff for issue {{run.issue}} against its acceptance criteria {{implement.acceptance}}. Read it with read-only git in the current directory, which shares branch {{preflight.branch}}: git diff origin/{{preflight.integration_branch}}...{{preflight.branch}}. The changed files are under {{preflight.worktree_path}}.
+Review the delivery diff for issue {{run.issue}} against its acceptance criteria {{implement.acceptance}}. Read it with read-only git in the current directory, which shares branch {{preflight.branch}}: git diff {{route-full.diff}}. The changed files are under {{preflight.worktree_path}}.
 
 Routed files (the standards, hints and decision records routed to this change; read them and no other standards): {{route-full.routed_files}}
 

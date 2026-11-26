@@ -1,5 +1,5 @@
 {
-  "format": 1,
+  "format": 2,
   "keep_alive": {"command": "forge-claim", "subcommand": "renew", "in": ["run.repo", "run.issue", "run.holder"]},
   "inputs": ["holder", "issue", "repo", "repo_root"],
   "stops": {
@@ -18,7 +18,7 @@
     {"id": "checks", "stage": "verifying", "kind": "command", "command": "verified-tree", "subcommand": "run", "holds": "live", "max_visits": 3,
      "in": ["preflight.worktree_path"],
      "on": {"passed": "route-checks", "failed": "route-checks", "dirty": "route-checks", "error": "verify", "refused": "verify", "out-of-bounds": "verify", "exhausted": "verify"}},
-    {"id": "route-checks", "stage": "verifying", "kind": "command", "command": "router", "subcommand": "final-review", "holds": "head", "repository": "preflight.worktree_path", "max_visits": 3,
+    {"id": "route-checks", "stage": "verifying", "kind": "command", "command": "router", "subcommand": "final-review", "holds": "head", "repository": "preflight.worktree_path", "base": "preflight.integration_branch", "max_visits": 3,
      "in": ["preflight.worktree_path", "preflight.integration_branch", "preflight.branch"],
      "on": {"ok": "round", "failed": "verify-route-failed", "refused": "verify-route-failed", "out-of-bounds": "verify-route-failed", "exhausted": "verify"}},
     {"id": "round", "stage": "verifying", "kind": "command", "command": "verify-rounds", "subcommand": "round", "holds": "live", "max_visits": 3,
@@ -33,7 +33,7 @@
     {"id": "ws-check", "stage": "verifying", "kind": "command", "command": "verify-rounds", "subcommand": "fix-range", "holds": "live", "max_visits": 2,
      "in": ["preflight.worktree_path", "round.head"],
      "on": {"read": "route-review", "unread": "route-review", "error": "verify", "refused": "verify", "out-of-bounds": "verify", "exhausted": "verify"}},
-    {"id": "route-review", "stage": "verifying", "kind": "command", "command": "router", "subcommand": "final-review", "holds": "head", "repository": "preflight.worktree_path", "max_visits": 2,
+    {"id": "route-review", "stage": "verifying", "kind": "command", "command": "router", "subcommand": "final-review", "holds": "head", "repository": "preflight.worktree_path", "base": "preflight.integration_branch", "max_visits": 2,
      "in": ["preflight.worktree_path", "preflight.integration_branch", "preflight.branch"],
      "on": {"ok": "fix-review", "failed": "verify-route-failed", "refused": "verify-route-failed", "out-of-bounds": "verify-route-failed", "exhausted": "verify"}},
     {"id": "fix-review", "stage": "verifying", "kind": "agent", "role": "reviewer", "prompt": "verify-fix-review.md", "reply": "verify-fix-review.reply.json", "outcome_from": "verdict", "holds": "run", "max_visits": 4,

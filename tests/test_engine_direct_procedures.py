@@ -22,7 +22,7 @@ IMPLEMENTED = {"status": "done", "start_head": SHA, "commit": SHA, "notes": "n",
                "acceptance": [{"id": "AC1", "text": "t", "kind": "code", "result": "r"}],
                "sensitive": False, "ineligible": False}
 INDEPENDENT = {"verdict": "pass", "findings": []}
-ROUTED = {"routed_files": ["/s/the-bar.md"]}
+ROUTED = {"routed_files": ["/s/the-bar.md"], "diff": f"refs/remotes/origin/main...{SHA}", "head": SHA}
 
 
 STANDARDS_DIRECTORIES = (REPO_ROOT / "home/common/agent-skills/standards", REPO_ROOT / "docs/standards")
@@ -167,6 +167,26 @@ class DirectProcedureTest(unittest.TestCase):
         direct = load(PROCEDURES, "direct")
         self.assertIn("route-lite.routed_files", step(direct, "lite-independent")["in"])
         self.assertIn("route-full.routed_files", step(direct, "full-independent")["in"])
+
+    def test_the_reviewers_read_the_diff_their_route_names_and_the_independent_reviews_its_head(self):
+        direct = load(PROCEDURES, "direct")
+        for name, route in (("lite-review", "route-lite"), ("escalated", "route-lite"),
+                            ("full-review", "route-full")):
+            item = step(direct, name)
+            prompt = (PROCEDURES / item["prompt"]).read_text(encoding="utf-8")
+            self.assertIn("git diff {{" + route + ".diff}}", prompt, name)
+            self.assertNotIn("git diff origin/", prompt, name)
+            self.assertIn(f"{route}.diff", item["in"], name)
+        for name, route in (("lite-independent", "route-lite"), ("full-independent", "route-full")):
+            self.assertIn(f"{route}.head", step(direct, name)["in"], name)
+
+    def test_every_route_step_holds_for_its_checkouts_merge_base_with_the_integration_branch(self):
+        routers = [item for name in ("direct", "verify") for item in load(PROCEDURES, name)["steps"]
+                   if item["kind"] == "command" and item["command"] == "router"]
+        self.assertGreaterEqual(len(routers), 8)
+        for item in routers:
+            self.assertEqual(item["base"], "preflight.integration_branch", item["id"])
+            self.assertIn("preflight.integration_branch", item["in"], item["id"])
 
     def test_a_route_that_does_not_end_ok_stops_route_failed(self):
         fix = {"status": "done", "start_head": SHA, "commit": "b" * 40, "notes": "n", "tests": [], "declines": []}
