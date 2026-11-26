@@ -962,13 +962,105 @@ class CarryVerbTest(unittest.TestCase):
         self.assertEqual((code, out["verdict"], out["reason"], out["comment_id"]), (0, "needed", "not-merges", None))
         self.assertEqual(self.posted(), [])
 
-    def test_carry_own_files_with_a_picture_flag_is_a_usage_error(self):
-        for flag in ("--before", "--after", "--picture"):
-            with self.subTest(flag=flag):
+    def touched(self):
+        compares = self.merges()
+        compares[f"compare/{A}...{HEAD}"] = cmp([PAGE])
+        return compares
+
+    def pm(self, *extra):
+        return run("carry", *POST, "--from", A, "--own-files", *extra)
+
+    def both(self):
+        return ["--before", str(self.before), "--after", str(self.after)]
+
+    def test_carry_own_files_carries_by_matching_pictures_when_a_merge_touched_an_own_file(self):
+        self.seed([self.pics(5)], self.touched())
+        code, out = self.pm(*self.both())
+        self.assertEqual((code, out["verdict"], out["from"], out["reason"], out["rule"], out["pictures"],
+                          out["comment_id"]), (0, "carried", A, None, "picture-match", self.DIG, 100))
+        self.assertEqual(self.world.stored()[-1]["body"].splitlines()[0],
+                         f"<!-- agent:look-carry v1 issue=7 pr=12 from={A} to={HEAD} pictures={self.DIG} "
+                         f"rule=picture-match -->")
+        self.assertEqual(len(self.posted()), 1)
+        code, out = run(*STATUS)
+        self.assertEqual((code, out["verdict"], out["comment_id"], out["kept_from"]), (0, "approved", 5, A))
+
+    def test_carry_own_files_names_the_pictures_that_differ(self):
+        with self.subTest("pair"):
+            self.seed([self.pics(5)], self.touched())
+            self.after.write_bytes(b"after, moved")
+            code, out = self.pm(*self.both())
+            self.assertEqual((code, out["verdict"], out["reason"], out["rule"], out["comment_id"]),
+                             (0, "needed", f"pictures-differ: {self.before}, {self.after}", "picture-match", None))
+            self.assertEqual(self.posted(), [])
+        with self.subTest("one picture"):
+            self.world = ForgeWorld(self)
+            shot = self.tmp / "shot.png"
+            shot.write_bytes(b"other")
+            digest = lm.picture_digest([(None, lm.picture_id(b"shot"))])
+            self.seed([self.pics(5, pictures=digest)], self.touched())
+            code, out = self.pm("--picture", str(shot))
+            self.assertEqual((code, out["verdict"], out["reason"], out["rule"], out["comment_id"]),
+                             (0, "needed", f"pictures-differ: {shot}", "picture-match", None))
+            self.assertEqual(self.posted(), [])
+
+    def test_carry_own_files_names_a_picture_that_could_not_be_rendered(self):
+        for name in ("missing", "empty"):
+            with self.subTest(name):
                 self.world = ForgeWorld(self)
-                code, out = self.own_files_run(flag, str(self.before))
-                self.assertEqual((code, out["verdict"], out["error"]), (2, "error", "usage"))
-                self.assertEqual(self.world.argvs("gh"), [])
+                self.seed([self.pics(5)], self.touched())
+                if name == "missing":
+                    path = self.tmp / "none.png"
+                else:
+                    path = self.after
+                    path.write_bytes(b"")
+                code, out = self.pm("--before", str(self.before), "--after", str(path))
+                self.assertEqual((code, out["verdict"], out["reason"], out["rule"], out["pictures"],
+                                  out["comment_id"]),
+                                 (0, "needed", f"pictures-unrendered: {path}", "picture-match", None, None))
+                self.assertEqual(self.posted(), [])
+
+    def test_carry_own_files_with_matching_pictures_refuses_a_non_merge_commit(self):
+        compares = self.merges([(A, [FORK]), (HEAD, [A])])
+        compares[f"compare/{A}...{HEAD}"] = cmp([PAGE])
+        self.seed([self.pics(5)], compares)
+        code, out = self.pm(*self.both())
+        self.assertEqual((code, out["verdict"], out["reason"], out["comment_id"]), (0, "needed", "not-merges", None))
+        self.assertEqual(self.posted(), [])
+
+    def test_carry_own_files_with_pictures_prefers_the_own_files_rule(self):
+        self.seed([self.pics(5)])
+        code, out = self.pm(*self.both())
+        self.assertEqual((code, out["verdict"], out["rule"], out["pictures"], out["comment_id"]),
+                         (0, "carried", "own-files", None, 100))
+        self.assertEqual(self.world.stored()[-1]["body"].splitlines()[0],
+                         f"<!-- agent:look-carry v1 issue=7 pr=12 from={A} to={HEAD} rule=own-files -->")
+
+    def test_carry_own_files_with_pictures_and_no_approved_digest_is_own_files_touched(self):
+        self.seed([self.plain(5)], self.touched())
+        code, out = self.pm(*self.both())
+        self.assertEqual((code, out["verdict"], out["reason"], out["rule"]),
+                         (0, "needed", "own-files-touched", "own-files"))
+        self.assertEqual(self.posted(), [])
+
+    def test_a_repeat_carry_by_matching_pictures_writes_its_own_line_once(self):
+        self.seed([self.pics(5), comment(6, lm.carry_body(7, 12, A, HEAD, self.DIG))], self.touched())
+        code, out = self.pm(*self.both())
+        self.assertEqual((code, out["verdict"], out["rule"], out["comment_id"]), (0, "carried", "picture-match", 100))
+        self.assertEqual(len(self.posted()), 1)
+        self.assertTrue(self.world.stored()[-1]["body"].splitlines()[0].endswith("rule=picture-match -->"))
+        code, out = self.pm(*self.both())
+        self.assertEqual((code, out["verdict"], out["rule"], out["comment_id"]), (0, "carried", "picture-match", 100))
+        self.assertEqual(len(self.posted()), 1)
+
+    def test_a_truncated_compare_never_carries_by_matching_pictures(self):
+        compares = self.merges()
+        compares[f"compare/{A}...{HEAD}"] = cmp([f"docs/f{n}.md" for n in range(lm.COMPARE_FILE_LIMIT)])
+        self.seed([self.pics(5)], compares)
+        code, out = self.pm(*self.both())
+        self.assertEqual((code, out["verdict"], out["reason"], out["rule"], out["pictures"]),
+                         (0, "needed", "own-files-touched", "own-files", None))
+        self.assertEqual(self.posted(), [])
 
     def test_status_reads_an_own_files_carry_line_as_a_kept_approval(self):
         self.seed([self.pics(5), self.own_files_comment(6)])
