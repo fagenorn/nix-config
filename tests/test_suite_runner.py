@@ -1210,6 +1210,66 @@ TMPDIR_MEMBER = (
     "        self.assertEqual(os.environ.get('SUITE_RUNNER_TEST_FAIL'), None)\n")
 
 
+# A member that lists its TMPDIR when it starts, puts a file in it, and stays until the other
+# member has done the same, so the two overlap (issue 1882).
+OWN_TMPDIR_MEMBER = textwrap.dedent('''\
+    import json
+    import os
+    import tempfile
+    import time
+    import unittest
+    from pathlib import Path
+
+    SEEN = Path(os.environ["SUITE_RUNNER_TEST_SEEN"])
+    NAME = Path(__file__).name
+
+
+    class Member(unittest.TestCase):
+        def test_member(self):
+            tmp = Path(tempfile.gettempdir())
+            listing = sorted(path.name for path in tmp.iterdir())
+            (tmp / f"file-of-{NAME}").write_text("x")
+            (SEEN / f"{NAME}.json").write_text(json.dumps(
+                {"tmpdir": str(tmp), "listing": listing}))
+            deadline = time.monotonic() + 60
+            while len(list(SEEN.iterdir())) < 2:
+                if time.monotonic() > deadline:
+                    self.fail("the other member never started")
+                time.sleep(0.01)
+            self.assertEqual(os.environ.get("SUITE_RUNNER_TEST_FAIL"), None)
+''')
+
+
+class ParallelMemberTmpdirTest(RunnerCase):
+    def run_pair(self, env: dict) -> tuple[subprocess.CompletedProcess, list[dict]]:
+        seen = self.barrier / f"own-tmpdir-{len(list(self.barrier.iterdir()))}"
+        seen.mkdir()
+        members = [self.member(name, OWN_TMPDIR_MEMBER) for name in ("test_a.py", "test_b.py")]
+        result = self.run_suite("--jobs", "2", *members,
+                                env={"SUITE_RUNNER_TEST_SEEN": str(seen), **env})
+        records = [json.loads(path.read_text()) for path in sorted(seen.iterdir())]
+        return result, records
+
+    def test_each_parallel_member_gets_its_own_empty_tmpdir_removed_after_it_ends(self):
+        for name, extra, code in (("passing", {}, 0), ("failing", {"SUITE_RUNNER_TEST_FAIL": "1"}, 1)):
+            for scratch in ("disk", "named"):
+                with self.subTest(name, scratch=scratch):
+                    root = self.barrier / f"root-{name}-{scratch}"
+                    root.mkdir()
+                    env = ({"SUITE_RUNNER_SCRATCH": "disk", "TMPDIR": str(root)}
+                           if scratch == "disk" else {"SUITE_RUNNER_SCRATCH": str(root)})
+                    result, records = self.run_pair({**env, **extra})
+                    self.assertEqual(result.returncode, code, result.stdout + result.stderr)
+                    self.assertEqual(len(records), 2, result.stdout + result.stderr)
+                    tmpdirs = [Path(record["tmpdir"]) for record in records]
+                    self.assertNotEqual(tmpdirs[0], tmpdirs[1])
+                    for record, tmpdir in zip(records, tmpdirs):
+                        self.assertEqual(record["listing"], [])
+                        self.assertEqual(tmpdir.parent.parent, root)
+                        self.assertTrue(tmpdir.parent.name.startswith("suite-runner-tmp-"))
+                    self.assertEqual(list(root.iterdir()), [])
+
+
 class ScratchRootTest(unittest.TestCase):
     def test_the_choice_follows_the_variable_then_the_memory_directory(self):
         with tempfile.TemporaryDirectory() as memory:

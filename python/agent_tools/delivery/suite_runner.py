@@ -25,6 +25,13 @@ runs (`usable_memory_root`: a `noexec` mount would make tests skip their fake co
 `TMPDIR` to it and removes it when the run ends, so a test's files, forced flushes included,
 stay in memory. `SUITE_RUNNER_SCRATCH=disk` keeps the inherited `TMPDIR`; any other value is the
 directory the run's scratch directory is created in. A host without `/dev/shm` runs as before.
+Own directory per parallel member (issue 1882). With more than one job, each member also gets
+its own empty `TMPDIR`, a `member<N>-*` directory inside the run's scratch directory, removed
+when the member ends, pass or fail, so a test that lists its temporary directory never sees
+another member's files. Where no scratch root applies (a host without `/dev/shm`, or
+`SUITE_RUNNER_SCRATCH=disk`) the run's `suite-runner-tmp-*` directory is created in the
+inherited temporary directory for that purpose and removed when the run ends. A serial run
+(`--jobs 1`) is unchanged: one member at a time shares the run's directory or the inherited one.
 A run killed before its cleanup leaves its directory; the next run removes this user's
 `suite-runner-tmp-*` directories there that are a day old (`sweep_stale_scratch`).
 
@@ -496,7 +503,11 @@ def _run_serial(members: Sequence[str], environment: Mapping[str, str],
 
 
 def _run_parallel(members: Sequence[str], order: Sequence[int], jobs: int,
-                  environment: Mapping[str, str], out: _Output) -> list[MemberResult | None]:
+                  environment: Mapping[str, str], out: _Output,
+                  scratch: str | None = None) -> list[MemberResult | None]:
+    """Run `members` at most `jobs` at a time. With `scratch`, a directory that exists, each
+    member runs with its own empty `TMPDIR` created in it and removed once the member has
+    ended, however it ended (issue 1882)."""
     results: list[MemberResult | None] = [None] * len(members)
     stop = threading.Event()
     next_index = 0
@@ -517,20 +528,30 @@ def _run_parallel(members: Sequence[str], order: Sequence[int], jobs: int,
                 next_index += 1
                 out.write(_line(f"{PREFIX} start {member}"))
                 started = time.monotonic()
+                env = environment
+                member_tmp = None
                 try:
+                    if scratch is not None:
+                        member_tmp = tempfile.mkdtemp(prefix=f"member{index}-", dir=scratch)
+                        env = {**environment, "TMPDIR": member_tmp}
                     process = subprocess.Popen(
-                        member_command(member), env=environment, stdin=subprocess.DEVNULL,
+                        member_command(member), env=env,
+                        stdin=subprocess.DEVNULL,
                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
                 except OSError as error:
                     process, output = None, _line(str(error))
-            if process is not None:
-                # Read the merged output to its end, then reap: what
-                # communicate() does for one pipe and no input. Signal handlers
-                # run on the main thread only, so this reap is never
-                # interrupted (issue 497 D2).
-                with process.stdout:
-                    output = process.stdout.read()
-            result = _reap(index, member, process, started)
+            try:
+                if process is not None:
+                    # Read the merged output to its end, then reap: what
+                    # communicate() does for one pipe and no input. Signal handlers
+                    # run on the main thread only, so this reap is never
+                    # interrupted (issue 497 D2).
+                    with process.stdout:
+                        output = process.stdout.read()
+                result = _reap(index, member, process, started)
+            finally:
+                if member_tmp is not None:
+                    shutil.rmtree(member_tmp, ignore_errors=True)
             if output and not output.endswith(b"\n"):
                 output += b"\n"
             # One write per block, before this worker takes its next member.
@@ -628,6 +649,8 @@ def run_suite(members: Sequence[str], *, jobs: int, out: BinaryIO,
     removal error propagating (issue 499). When `scratch_root(os.environ)` names a
     directory, every member's `TMPDIR` is a `suite-runner-tmp-*` directory created there
     for the run and removed the same way (issue 1283); otherwise `TMPDIR` is inherited.
+    With `jobs` above 1 each member's `TMPDIR` is its own directory in the run's scratch
+    directory, removed when it ends (issue 1882).
     When `REPORT_ENV` is non-empty, its value is resolved against the working directory
     before the first member starts, and after the report lines `write_report` writes the
     timing report there; an `OSError` propagates (issue 1385).
@@ -643,12 +666,18 @@ def run_suite(members: Sequence[str], *, jobs: int, out: BinaryIO,
             sweep_stale_scratch(root, time.time())
             environment["TMPDIR"] = stack.enter_context(
                 tempfile.TemporaryDirectory(prefix=SCRATCH_PREFIX, dir=root))
+        scratch = environment.get("TMPDIR") if root is not None else None
+        if jobs > 1 and scratch is None:
+            # No scratch root (a host without `/dev/shm`, or `disk`): the run's directory is
+            # created in the inherited temporary directory (issue 1882).
+            scratch = stack.enter_context(
+                tempfile.TemporaryDirectory(prefix=SCRATCH_PREFIX, dir=tempfile.gettempdir()))
         started = time.monotonic()
         if jobs == 1:
             results = _run_serial(members, environment, output)
         else:
             order = schedule_order(members, timings or {})
-            results = _run_parallel(members, order, jobs, environment, output)
+            results = _run_parallel(members, order, jobs, environment, output, scratch)
         missing = [member for member, result in zip(members, results) if result is None]
         if missing:
             raise RuntimeError(f"members left without a result: {', '.join(missing)}")
