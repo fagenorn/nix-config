@@ -19,7 +19,9 @@ it, and each service process the host runs for the system (the process only, not
 The selection is pure over a process table, so it runs against stubbed tables. The enforcement loop
 reaches the machine only through `Io`: it samples available memory, ends the largest workload while
 memory stays under the floor for the declared samples (and any workload over the run bound), and
-records each kill. A floor kill must be able to help: the largest remaining workload is ended only
+records each kill. A reading slower than `fastSampleSeconds` logs one
+`slow_reading reading=<available|services|omlx_pid|table> seconds=<n>` line and is kept in the record
+(`slow_readings`, the count, and `slow_reading_recent`, the last entries), and changes no decision. A floor kill must be able to help: the largest remaining workload is ended only
 when its footprint is at least the declared minimum and, added to available memory, reaches the
 floor. When it is not, nothing is ended, and the episode logs one `floor_unmet` line (available
 memory and the largest candidate's size) and keeps it in the record (`floor_unmets`, the count, and `floor_unmet_recent`, the last entries, each with
@@ -385,10 +387,30 @@ def _complain(error: ReadingError) -> None:
     print(f"{PROG}: {error}", file=sys.stderr)
 
 
-def _candidates(io: Io, owners: Owners) -> tuple[list[Workload], int | None] | None:
+def _timed(limits: Limits, io: Io, record: dict, out: Callable[[str], None], name: str, call: Callable):
+    """Run one reading; when it takes longer than the fast interval, even by failing, log and record it."""
+    start = io.clock()
+    try:
+        return call()
+    finally:
+        elapsed = io.clock() - start
+        if elapsed > limits.fast_seconds:
+            at = io.now().isoformat(timespec="seconds")
+            seq = record.get("slow_readings", 0) + 1
+            record["slow_readings"] = seq
+            entry = {"seq": seq, "at": at, "reading": name, "seconds": round(elapsed, 1)}
+            record["slow_reading_recent"] = [*record.get("slow_reading_recent", []), entry][-RECENT:]
+            out(f"{at} slow_reading reading={name} seconds={elapsed:.1f}\n")
+
+
+def _candidates(
+    limits: Limits, io: Io, owners: Owners, record: dict, out: Callable[[str], None]
+) -> tuple[list[Workload], int | None] | None:
     """The workloads, largest first, and the oMLX pid; None, after naming the cause, when an input is unreadable."""
     try:
-        services, omlx_pid, table = io.services(), io.omlx_pid(), io.table()
+        services = _timed(limits, io, record, out, "services", io.services)
+        omlx_pid = _timed(limits, io, record, out, "omlx_pid", io.omlx_pid)
+        table = _timed(limits, io, record, out, "table", io.table)
     except ReadingError as error:
         _complain(error)
         return None
@@ -399,7 +421,7 @@ def enforce_once(
     limits: Limits, owners: Owners, io: Io, loop: Loop, record: dict, out: Callable[[str], None]
 ) -> float:
     try:
-        available = io.available()
+        available = _timed(limits, io, record, out, "available", io.available)
     except ReadingError as error:
         _complain(error)
         _stamp(limits, io, loop, record, None, limits.fast_seconds)
@@ -411,12 +433,13 @@ def enforce_once(
 
     def end(workload: Workload, reason: str) -> bool:
         """End one workload and read memory again; False when that reading failed."""
-        nonlocal available
+        nonlocal available, fresh
+        fresh = None
         before = available
         attempted.add(workload.root_pid)
         signals = end_workload(workload, io, limits.grace_seconds)
         try:
-            available = io.available()
+            available = _timed(limits, io, record, out, "available", io.available)
             readable = True
         except ReadingError as error:
             _complain(error)
@@ -436,14 +459,15 @@ def enforce_once(
         out(kill_line(entry))
         return readable
 
-    first = _candidates(io, owners)
+    first = _candidates(limits, io, owners, record, out)
+    fresh = first
     unreadable = first is None
     for workload in first[0] if first else ():
         if workload.size > limits.run_bound_bytes and not end(workload, "run_bound"):
             unreadable = True
             break
     while not unreadable and loop.streak >= limits.floor_samples:
-        again = _candidates(io, owners)
+        again, fresh = fresh or _candidates(limits, io, owners, record, out), None
         if again is None:
             break
         remaining = [w for w in again[0] if w.root_pid not in attempted]
@@ -532,6 +556,8 @@ def _stamp(limits: Limits, io: Io, loop: Loop, record: dict, available: int | No
     record.setdefault("recent", [])
     record.setdefault("floor_unmets", 0)
     record.setdefault("floor_unmet_recent", [])
+    record.setdefault("slow_readings", 0)
+    record.setdefault("slow_reading_recent", [])
     record.update(
         at=at, floor_bytes=limits.floor_bytes, run_bound_bytes=limits.run_bound_bytes,
         min_tree_bytes=limits.min_tree_bytes,
@@ -615,14 +641,25 @@ def read_omlx_pid(launchctl: str, label: str) -> int | None:
         raise ReadingError(f"launchctl output not parseable ({error})") from None
 
 
+def memory_reader(vm_stat: str, sysctl: str) -> Callable[[], int]:
+    """A reader of available memory: `vm_stat` runs on every call, and the host's memory size is read once it succeeds."""
+    total: str | None = None
+
+    def available() -> int:
+        nonlocal total
+        used = _run("vm_stat", [vm_stat])
+        if total is None:
+            total = _run("sysctl", [sysctl, "-n", "hw.memsize"])
+        return read_available(used, total)
+
+    return available
+
+
 def build_io(args, owners: Owners) -> Io:
     footprint, cwd = _libproc_readers(args.libproc)
     relevant = {owners.agent_uid, *(uid for uid, _ in owners.runners)}
 
-    def available() -> int:
-        return read_available(
-            _run("vm_stat", [args.vm_stat]), _run("sysctl", [args.sysctl, "-n", "hw.memsize"])
-        )
+    available = memory_reader(args.vm_stat, args.sysctl)
 
     def table() -> dict[int, Proc]:
         try:
@@ -750,11 +787,7 @@ def _log_line(line: str) -> None:
 
 
 def gate(args) -> int:
-    def available() -> int:
-        return read_available(
-            _run("vm_stat", [args.vm_stat]), _run("sysctl", [args.sysctl, "-n", "hw.memsize"])
-        )
-
+    available = memory_reader(args.vm_stat, args.sysctl)
     wait_for_floor(available, args.floor_gib * GIB, args.interval_seconds, time.sleep, _log_line)
     return 0
 

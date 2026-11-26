@@ -143,7 +143,8 @@ The margin is an estimate, not a guarantee. A burst that drains more than 7 GiB 
 under 11 s outruns it, and so does a fall with no eligible workload, one of at least
 `floorMinTreeGiB` that frees enough to matter. The daemon also sleeps after each
 sample, and it scans processes after each sample, so a scan slow under load adds to
-the 11 s; peak sub-minute drain and scan latency under load are unmeasured. If a
+the 11 s; peak sub-minute drain is unmeasured, and scan latency under load is named
+by the `slow_reading` lines (see the memory floor below). If a
 fall is ever seen that is faster than 39 GiB in one minute, or the reaction time
 grows, raise the floor again in `memory-budget.nix`.
 
@@ -237,6 +238,12 @@ it may end would bring memory over the floor, it ends nothing and logs one
 `floor_unmet available_gib=<n> largest_gib=<n>` line per episode (`largest_gib` is the largest
 candidate, 0.0 with none), keeps it in its record, and the sampler sends one `floor_unmet`
 alert. It logs again only when memory has been over the floor and a new episode starts.
+
+A reading slower than `fastSampleSeconds` (available memory, the service list,
+oMLX's pid or the process table) logs one
+`slow_reading reading=<available|services|omlx_pid|table> seconds=<n>` line and is
+kept in the record (`slow_readings`, the count, and `slow_reading_recent`, the last
+entries); it changes no decision.
 
 Each kill is one line:
 
