@@ -54,7 +54,7 @@ Contract:
   characters typed, so the count reads near the limit; `goal-over` is it with 2100 characters
   typed, so the count reads over the limit, Send is unavailable and the hint beside it says how much to cut (#1214);
   `inbox-card` is `owner/web`'s question card with
-  two options and an owner check beside it; `question-words` and `question-refused` are
+  two options and an owner check beside it, and `owner/api`'s question as the second row; `question-words` and `question-refused` are
   `owner/web`'s look-check question card (Approve, Approve with one fix, Ask for changes, the last
   two marked as needing words) with Ask for changes picked: `question-words` with the words
   `LOOK_WORDS` typed in the card's words box (`WORDS_CARD`: the picked option, the words, the one
@@ -2556,6 +2556,8 @@ def _seed_state(seed: _Seed, state: str, web_root: str = "",
         seed.sprint(web, "Add resumable uploads", started=30 * MINUTE, report=6 * MINUTE,
                     asks=True)
         seed.check(web, 11, 3 * MINUTE)
+        seed.sprint(api, "Keep the importer fast", started=60 * MINUTE, report=45 * MINUTE,
+                    asks=True)
     elif state in ("look-card", "look-moved", "look-failed"):
         sid, goal = seed.sprint(web, "Fix the settings page", started=30 * MINUTE, report=6 * MINUTE)
         seed.look(web, sid, goal, moved=state == "look-moved", failed=state == "look-failed")

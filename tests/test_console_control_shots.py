@@ -2,6 +2,7 @@
 
 Run: just agent-workflow-tests
 """
+import re
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -15,6 +16,20 @@ from . import test_console_screenshots as screenshot_tests
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures
 
 TIER = "integration"  # the real picture-run capture serves a console per state
+
+PAGE = Path(__file__).resolve().parents[1] / "python/agent_tools/console/page.html"
+LINKED_SIGNIN = """(() => {
+  const link = { link: "https://example.invalid/login" };
+  const card = el("article", "card signin");
+  const act = el("div", "act");
+  act.appendChild(signinLinkNode("signin-link", link));
+  card.appendChild(act);
+  document.getElementById("inbox").appendChild(card);
+  document.getElementById("capacity").remove();
+  document.getElementById("accounts").hidden = false;
+  document.getElementById("account-add").appendChild(signinLinkNode("account-add-link", link));
+  return __READ__;
+})()""".replace("__READ__", targets.SMALL_TARGETS)
 
 
 class PhoneTargetTest(unittest.TestCase):
@@ -41,14 +56,38 @@ class PhoneTargetTest(unittest.TestCase):
             'style="width:135px;height:32px;padding:0;border:0">Tell</button></div>',
             '<div id="inbox"><article class="card"><button class="pic-thumb btn-quiet btn-bare" '
             'style="width:30px;height:30px;padding:0;border:0"></button></article></div>',
+            '<div id="inbox"><ul class="rest"><li class="row"><button class="send btn-quiet" '
+            'style="width:120px;height:32px;padding:0;border:0">Send answer</button></li></ul></div>',
         ]
         pages = [f"<body>{body}</body>" for body in bodies]
         read = screenshot_tests.ScreenshotReadingTest.read_pages
         phone = [["a.nav 39x20px"], [], ["button.- 20x32px"], ["summary.- 100x20px"], [], [],
-                 ["button.send 40px under 44"], ["button.tell-open 32px under 44"], []]
+                 ["button.send 40px under 44"], ["button.tell-open 32px under 44"], [],
+                 ["button.send 32px under 44"]]
         self.assertEqual(read(self, pages, targets.SMALL_TARGETS, width=390), phone)
-        wide = phone[:6] + [[], [], []]
+        wide = phone[:6] + [[], [], [], []]
         self.assertEqual(read(self, pages, targets.SMALL_TARGETS, width=1440), wide)
+
+    def test_a_link_alone_on_its_line_is_a_target_and_one_in_running_text_is_not(self) -> None:
+        alone = '<div class="card"><p>Ready.</p><a href="/pr" class="pr-link">Open the pull request</a></div>'
+        prose = '<div class="card">Ready, see <a href="/pr">the pull request</a> now.</div>'
+        read = screenshot_tests.ScreenshotReadingTest.read_pages
+        (missed, exempt) = read(self, [f"<body>{alone}</body>", f"<body>{prose}</body>"],
+                                targets.SMALL_TARGETS, width=390)
+        self.assertEqual(exempt, [])
+        (line,) = missed
+        self.assertRegex(line, r"^a\.pr-link \d+(\.\d+)?x(1\d|[0-9])(\.\d+)?px$")
+
+    def test_the_sign_in_links_shown_after_a_sign_in_starts_are_24_px_targets_at_390_px(self) -> None:
+        read = screenshot_tests.ScreenshotReadingTest.read_pages
+        (small,) = read(self, [PAGE.read_text(encoding="utf-8")], LINKED_SIGNIN,
+                        width=targets.PHONE_WIDTH)
+        self.assertEqual(small, [])
+
+    def test_the_phone_block_sets_44_px_on_exactly_the_controls_the_reading_measures(self) -> None:
+        css = re.search(r"(?s)<style>(.*?)</style>", PAGE.read_text(encoding="utf-8")).group(1)
+        phone = re.search(r"(?s)@media \(max-width: 480px\) \{(.*?)\n\}", css).group(1)
+        self.assertIn(f"  {targets.PHONE_TALL} {{ min-height: 44px; }}", phone)
 
     def test_a_shot_with_a_small_target_fails_the_command(self) -> None:
         out = StringIO()

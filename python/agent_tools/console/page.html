@@ -335,7 +335,7 @@ summary { min-height: 24px; }
 .earlier summary::-webkit-details-marker { display: none; }
 .earlier summary:hover { background: rgba(202, 211, 245, .05); }
 .earlier summary b { font-weight: 600; color: var(--sub0); }
-.answer:not([class*="btn-"]) { color: var(--lav); text-underline-offset: 3px; }
+.answer:not([class*="btn-"]) { display: inline-flex; align-items: center; min-height: 24px; color: var(--lav); text-underline-offset: 3px; }
 .side { margin-top: 12px; }
 .side h2 { display: flex; align-items: baseline; gap: 10px; }
 .side h2 span { font-weight: 400; font-size: .8125rem; color: var(--ov2); }
@@ -458,14 +458,14 @@ a.spend:hover { color: var(--sub0); text-decoration-line: underline; }
 .cap-none { color: var(--ov2); }
 .signin-run { margin: 6px 0 0; color: var(--sub0); }
 .signin-failed { color: var(--red); }
-.signin-link { color: var(--blue); overflow-wrap: anywhere; }
+.signin-link, .account-add-link { display: inline-flex; align-items: center; min-height: 24px; color: var(--blue); overflow-wrap: anywhere; }
 .signin-code { flex: 1 1 14rem; max-width: 24rem; }
 .signin-route { flex-basis: 100%; margin: 0; color: var(--sub0); }
 .signin-forward { font: 500 .8125rem/1.4 ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace; padding: 0 4px; background: var(--mantle); border-radius: 4px; overflow-wrap: anywhere; user-select: all; }
 .account-add { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-size: .8125rem; color: var(--sub0); }
 .account-name, .account-code { flex: 1 1 10rem; max-width: 16rem; }
 .account-add-note { margin: 0; color: var(--text); }
-.account-add-link { color: var(--blue); }
+.pr-link { display: inline-flex; align-items: center; min-height: 24px; }
 .account-add-reason { color: var(--sub0); }
 .register { margin-top: 24px; font-size: .8125rem; color: var(--sub0); }
 .register-form { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
@@ -555,7 +555,7 @@ html:has(#viewer:not([hidden])) { overflow: hidden; }
   .sprint-check { display: flex; align-items: flex-start; min-height: 44px; }
   .sprint-checks .wait { min-height: 44px; }
   .sprint-checks .live-fault { min-height: 44px; }
-  .sprint-acts .tell-open, #inbox .card :is(button, a, summary):is(.btn-primary, .btn-quiet, .btn-danger, .btn-option):not(.btn-bare) { min-height: 44px; }
+  .sprint-acts .tell-open, #inbox :is(.card, .row) :is(button, a, summary):is(.btn-primary, .btn-quiet, .btn-danger, .btn-option):not(.btn-bare) { min-height: 44px; }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .001ms !important; animation-delay: 0s !important; transition-duration: .001ms !important; }

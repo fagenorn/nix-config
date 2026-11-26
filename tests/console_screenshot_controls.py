@@ -6,7 +6,7 @@ every `a[href]` and `summary`, the whole of `TARGET_SELECTOR`):
 - A control under 32 px tall fails (`SHORT_CONTROLS`, read after the state is drawn): a rendered,
   visible button, input, textarea, select, `btn-` link or `btn-` summary.
 - A control under 24 by 24 px fails at every width (`SMALL_TARGETS`), except a link in running
-  text (an `a` whose computed display is `inline`).
+  text (an `a` whose computed display is `inline` and whose parent holds text of its own beside it).
 - While `PHONE_MEDIA` matches, a card answer or Tell the manager (`PHONE_TALL`) under 44 px tall
   fails (`SMALL_TARGETS`).
 
@@ -20,7 +20,7 @@ PHONE_WIDTH = 390
 PHONE_MEDIA = "(max-width: 480px)"
 CONTROL_SELECTOR = 'button, input, textarea, select, a[class*="btn-"], summary[class*="btn-"]'
 TARGET_SELECTOR = f"{CONTROL_SELECTOR}, a[href], summary"
-PHONE_TALL = (".sprint-acts .tell-open, #inbox .card :is(button, a, summary)"
+PHONE_TALL = (".sprint-acts .tell-open, #inbox :is(.card, .row) :is(button, a, summary)"
               ":is(.btn-primary, .btn-quiet, .btn-danger, .btn-option):not(.btn-bare)")
 
 ACTS_ROW = """Array.from(document.querySelectorAll('li[data-project]')).filter((line) => {
@@ -42,12 +42,14 @@ SHORT_CONTROLS = f"""Array.from(document.querySelectorAll({json.dumps(CONTROL_SE
 
 SMALL_TARGETS = r"""(() => {
   const round = (x) => Math.round(x * 100) / 100;
+  const inText = (n) => Array.from(n.parentNode.childNodes).some(
+    (c) => c.nodeType === Node.TEXT_NODE && c.textContent.trim() !== "");
   const tall = matchMedia(__MEDIA__).matches
     ? new Set(document.querySelectorAll(__TALL__)) : new Set();
   return Array.from(document.querySelectorAll(__TARGETS__)).filter((n) => {
     const style = getComputedStyle(n);
     return n.getClientRects().length > 0 && style.visibility !== "hidden"
-      && !(n.tagName === "A" && style.display === "inline");
+      && !(n.tagName === "A" && style.display === "inline" && inText(n));
   }).flatMap((n) => {
     const box = n.getBoundingClientRect();
     const role = (n.getAttribute("class") || "").trim().split(/\s+/)[0] || "-";
