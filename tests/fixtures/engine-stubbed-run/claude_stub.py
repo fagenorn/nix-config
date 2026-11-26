@@ -164,6 +164,8 @@ def main(argv: list[str]) -> int:
     if "--resume" in words and record is not None and record.exists():
         result["structured_output"] = json.loads(record.read_text(encoding="utf-8"))["structured_output"]
     else:
+        if record is not None:
+            record.unlink(missing_ok=True)
         run_entry(result, scenario, name)
         if record is not None and "structured_output" in result:
             record.parent.mkdir(parents=True, exist_ok=True)

@@ -15,13 +15,12 @@ shape, so the check then fails if the skip lost a step. It names only the tests 
 Across modules, `check_scopes` holds the coverage modules to one rule: every procedure `deliver` reaches,
 through `call` steps, is in the scope of at least one module of `COVERAGE_MODULES`, every judged procedure
 is reachable, and every procedure file is reachable or named in `UNREACHABLE`. A new coverage module is
-registered in `COVERAGE_MODULES`. `toy` and `toy-child` are exempt because the engine refuses to run
+registered in `COVERAGE_MODULES` and in `scopes`. `toy` and `toy-child` are exempt because the engine refuses to run
 `toy` and nothing calls either; the exemption fails once `deliver` reaches either or its file is gone.
 """
 
 from __future__ import annotations
 
-import importlib
 import json
 import types
 import unittest
@@ -105,12 +104,16 @@ def reachable(procedures: Path, entry: str = "deliver") -> tuple[str, ...]:
 
 
 def scopes() -> dict[str, tuple[str, ...]]:
-    return {module: importlib.import_module(module).STEPS.names for module in COVERAGE_MODULES}
+    # Imported here: each coverage module imports this one, so a top-level import would be circular.
+    from tests import test_engine_land_recovery, test_engine_stubbed_run, test_engine_verify_rounds
+    modules = (test_engine_stubbed_run, test_engine_land_recovery, test_engine_verify_rounds)
+    return {module.__name__: module.STEPS.names for module in modules}
 
 
 def check_scopes(procedures: Path, scopes: Mapping[str, tuple[str, ...]],
                  exempt: tuple[str, ...] = UNREACHABLE) -> None:
-    files = {path.stem for path in procedures.glob("*.json") if not path.name.endswith(".reply.json")}
+    files = {path.stem for path in procedures.glob("*.json")
+             if path.is_file() and not path.name.endswith(".reply.json")}
     reach = set(reachable(procedures))
     judged = {name for scope in scopes.values() for name in scope}
     groups = (

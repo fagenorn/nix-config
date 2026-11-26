@@ -341,6 +341,15 @@ class StubTest(unittest.TestCase):
         resumed = self.launch(run, {"status": "third"}, "--resume", "s-5")
         self.assertEqual(json.loads(resumed.stdout)["structured_output"], {"status": "second"})
 
+    def test_a_fresh_launch_with_no_entry_clears_the_record_a_resume_would_replay(self):
+        run = StubbedRun(self)
+        self.launch(run, {"status": "first"}, "--session-id", "s-6")
+        for flag in ("--session-id", "--resume"):
+            argv = self.stub_argv(run, {"status": "unused"}, flag, "s-6")
+            (run.tmp / "stub-scenario.json").write_text("{}", encoding="utf-8")
+            done = subprocess.run(argv, input="prompt", env=run.env, capture_output=True, text=True, timeout=120)
+            self.assertNotIn("structured_output", json.loads(done.stdout), flag)
+
 
 if __name__ == "__main__":
     unittest.main()

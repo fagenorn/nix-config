@@ -91,6 +91,20 @@ class ProcedureScopeTest(unittest.TestCase):
                 self.assertIn(f"exempt procedures deliver reaches or that are gone: ['{name}']",
                               refusal(procedures, scopes()))
 
+    def test_an_exempt_procedure_whose_file_is_replaced_by_a_non_file_fails_naming_it(self):
+        for name in UNREACHABLE:
+            for kind in ("directory", "dangling symlink"):
+                with self.subTest(name=name, kind=kind):
+                    procedures = self.copy()
+                    path = procedures / f"{name}.json"
+                    path.unlink()
+                    if kind == "directory":
+                        path.mkdir()
+                    else:
+                        path.symlink_to(procedures / "absent-target")
+                    self.assertIn(f"exempt procedures deliver reaches or that are gone: ['{name}']",
+                                  refusal(procedures, scopes()))
+
     def test_a_call_to_a_procedure_with_no_file_fails_naming_it(self):
         procedures = self.copy()
         add_call(procedures, "deliver", "ghost", "ghost-call")
