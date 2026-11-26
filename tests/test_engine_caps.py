@@ -1,4 +1,4 @@
-"""Contract tests for the engine size caps (`agent_tools.delivery.engine_caps`, #1513).
+"""Contract tests for the engine size caps (`agent_tools.delivery.size_caps`, #1513).
 
 Each cap is tested at its limit and one past it against a temporary package or
 procedures directory, then once against the shipped tree.
@@ -26,8 +26,8 @@ from pathlib import Path
 from typing import Callable
 from unittest import mock
 
-from agent_tools.delivery import engine, engine_caps, engine_graders
-from agent_tools.delivery.engine_caps import Breach
+from agent_tools.delivery import engine, engine_graders, procedure_check, size_caps
+from agent_tools.delivery.size_caps import Breach
 from agent_tools.delivery.engine_graders import GRADERS, Grader
 from tests.guard_policy_world import install_platform_manifest_in_environ
 
@@ -126,7 +126,7 @@ def base_package(core: int = 10, engine: int = 10) -> Path:
 
 
 def measure(pkg: Path, procedures: Path | None = None, graders=GRADERS) -> tuple[Breach, ...]:
-    return engine_caps.breaches(pkg, procedures or procedures_copy(), graders)
+    return size_caps.breaches(pkg, procedures or procedures_copy(), graders)
 
 
 class BoundaryTest(unittest.TestCase):
@@ -150,16 +150,16 @@ class BoundaryTest(unittest.TestCase):
                         (pkg / "engine_core.py").write_bytes(body)
                         self.assertEqual(measure(pkg), expected)
                     pkg = base_package(core=10, engine=0)
-                    (pkg / "engine.py").write_bytes(separator.join(b"x = 1" for _ in range(7290)) + separator)
+                    (pkg / "engine.py").write_bytes(separator.join(b"x = 1" for _ in range(7990)) + separator)
                     self.assertEqual(measure(pkg), ())
-                    (pkg / "engine.py").write_bytes(separator.join(b"x = 1" for _ in range(7291)) + separator)
-                    self.assertEqual(measure(pkg), (Breach("engine package", 7301, 7300, "lines"),))
+                    (pkg / "engine.py").write_bytes(separator.join(b"x = 1" for _ in range(7991)) + separator)
+                    self.assertEqual(measure(pkg), (Breach("engine package", 8001, 8000, "lines"),))
 
-    def test_a_package_of_7300_lines_passes_and_7301_is_refused(self):
-        self.assertEqual(measure(base_package(core=600, engine=6700)), ())
+    def test_a_package_of_8000_lines_passes_and_8001_is_refused(self):
+        self.assertEqual(measure(base_package(core=600, engine=7400)), ())
         self.assertEqual(
-            measure(base_package(core=600, engine=6701)),
-            (Breach("engine package", 7301, 7300, "lines"),),
+            measure(base_package(core=600, engine=7401)),
+            (Breach("engine package", 8001, 8000, "lines"),),
         )
 
     def test_the_package_is_the_engine_modules_and_what_they_import(self):
@@ -176,12 +176,12 @@ class BoundaryTest(unittest.TestCase):
         }
         pkg = package(files)
         self.assertEqual(
-            [p.name for p in engine_caps.engine_modules(pkg)],
+            [p.name for p in size_caps.engine_modules(pkg)],
             ["deep.py", "engine.py", "engine_core.py", "engine_x.py", "helper.py", "other.py", "rel.py"],
         )
         self.assertEqual(measure(pkg), ())
-        (pkg / "helper.py").write_text("import agent_tools.delivery.deep\n" + pad(7299), encoding="utf-8")
-        self.assertEqual(measure(pkg), (Breach("engine package", 7360, 7300, "lines"),))
+        (pkg / "helper.py").write_text("import agent_tools.delivery.deep\n" + pad(7999), encoding="utf-8")
+        self.assertEqual(measure(pkg), (Breach("engine package", 8060, 8000, "lines"),))
 
     def test_a_procedure_of_40_steps_passes_and_41_is_refused(self):
         copy = procedures_copy()
@@ -244,10 +244,10 @@ class BoundaryTest(unittest.TestCase):
         graders = {f"g-{i:02d}": Grader(("ok",), _short) for i in range(25)}
         graders["long"] = Grader(("ok",), long_grader(41))
         self.assertEqual(
-            measure(base_package(core=601, engine=6700), copy, graders),
+            measure(base_package(core=601, engine=7400), copy, graders),
             (
                 Breach("core", 601, 600, "lines"),
-                Breach("engine package", 7301, 7300, "lines"),
+                Breach("engine package", 8001, 8000, "lines"),
                 Breach("graders", 26, 25, "graders"),
                 Breach("grader long", 41, 40, "lines"),
                 Breach("procedure chain", 41, 40, "steps"),
@@ -293,7 +293,7 @@ class BoundaryTest(unittest.TestCase):
 
     def test_a_prompt_removed_after_enumeration_is_a_value_error(self):
         copy = procedures_copy()
-        real = engine_caps.procedure_check._inside
+        real = size_caps.procedure_terms._inside
 
         def vanish(directory, name):
             found = real(directory, name)
@@ -301,7 +301,7 @@ class BoundaryTest(unittest.TestCase):
                 found.unlink()
             return found
 
-        with mock.patch.object(engine_caps.procedure_check, "_inside", vanish):
+        with mock.patch.object(size_caps.procedure_terms, "_inside", vanish):
             with self.assertRaises(ValueError) as caught:
                 measure(base_package(), copy)
         self.assertNotIn("\n", str(caught.exception))
@@ -333,7 +333,7 @@ class BoundaryTest(unittest.TestCase):
 
 CAP_NAMES = {
     "CORE_LINES": 600,
-    "PACKAGE_LINES": 7300,
+    "PACKAGE_LINES": 8000,
     "PROCEDURE_STEPS": 40,
     "GRADER_COUNT": 25,
     "GRADER_LINES": 40,
@@ -343,7 +343,7 @@ CAP_NAMES = {
 
 class StaticImmunityTest(unittest.TestCase):
     def setUp(self):
-        self.tree = ast.parse((DELIVERY / "engine_caps.py").read_text(encoding="utf-8"))
+        self.tree = ast.parse((DELIVERY / "size_caps.py").read_text(encoding="utf-8"))
 
     def test_the_caps_are_int_literals_assigned_once(self):
         for name in CAP_NAMES:
@@ -358,11 +358,11 @@ class StaticImmunityTest(unittest.TestCase):
                 value = assigns[0].value
                 self.assertIsInstance(value, ast.Constant)
                 self.assertIs(type(value.value), int)
-        self.assertEqual({name: getattr(engine_caps, name) for name in CAP_NAMES}, CAP_NAMES)
+        self.assertEqual({name: getattr(size_caps, name) for name in CAP_NAMES}, CAP_NAMES)
 
     def test_the_measurement_takes_no_cap_and_reads_no_environment(self):
         self.assertEqual(
-            list(inspect.signature(engine_caps.breaches).parameters),
+            list(inspect.signature(size_caps.breaches).parameters),
             ["package_dir", "procedures_dir", "graders"],
         )
         names = {node.id for node in ast.walk(self.tree) if isinstance(node, ast.Name)}
@@ -380,10 +380,10 @@ class StaticImmunityTest(unittest.TestCase):
 
 class ShippedTreeTest(unittest.TestCase):
     def test_the_shipped_tree_passes_every_cap(self):
-        self.assertEqual(engine_caps.breaches(DELIVERY, PROCEDURES, engine_graders.GRADERS), ())
-        names = {p.name for p in engine_caps.engine_modules(DELIVERY)}
+        self.assertEqual(size_caps.breaches(DELIVERY, PROCEDURES, engine_graders.GRADERS), ())
+        names = {p.name for p in size_caps.engine_modules(DELIVERY)}
         self.assertLessEqual(
-            {"engine.py", "engine_caps.py", "engine_core.py", "engine_graders.py", "engine_ledger.py", "procedure_check.py"},
+            {"engine.py", "engine_check.py", "engine_core.py", "engine_graders.py", "engine_ledger.py", "procedure_terms.py"},
             names,
         )
         result = subprocess.run(
@@ -395,8 +395,21 @@ class ShippedTreeTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.stdout, '{"procedures":["close-out","deliver","direct","land","land-attempt","setup","toy","toy-child","verify"],"verdict":"ok"}\n')
 
+    def test_the_package_measure_leaves_out_the_check_process(self):
+        names = {p.name for p in size_caps.engine_modules(DELIVERY)}
+        self.assertEqual(names & {"procedure_check.py", "size_caps.py"}, set())
+        self.assertLessEqual({"engine.py", "engine_check.py", "engine_core.py", "engine_graders.py",
+                              "engine_ledger.py", "procedure_terms.py"}, names)
+        self.assertEqual(size_caps.breaches(DELIVERY, PROCEDURES, engine_graders.GRADERS), ())
+        self.assertEqual((size_caps.PACKAGE_LINES, size_caps.CORE_LINES), (8000, 600))
+
+    def test_no_engine_module_imports_the_validator_or_the_cap_checker(self):
+        for path in size_caps.engine_modules(DELIVERY):
+            with self.subTest(module=path.name):
+                self.assertEqual(size_caps._imports(path, DELIVERY) & {"procedure_check", "size_caps"}, set())
+
     def test_the_engine_reads_rule_ids_only_through_the_reader(self):
-        names = {p.name for p in engine_caps.engine_modules(DELIVERY)}
+        names = {p.name for p in size_caps.engine_modules(DELIVERY)}
         self.assertIn("rule_reader.py", names)
         for heavy in ("rule_ids.py", "citation_lint.py", "look_marker.py", "context_map_lint.py"):
             self.assertNotIn(heavy, names)
@@ -420,10 +433,10 @@ def package_copy(edit: Callable[[Path], None]) -> Path:
 def grow(path: Path, target: int) -> None:
     assert path.read_bytes().endswith(b"\n")
     with path.open("a", encoding="utf-8") as handle:
-        while engine_caps.physical_lines(path) < target:
+        while size_caps.physical_lines(path) < target:
             handle.write("# pad\n")
             handle.flush()
-    assert engine_caps.physical_lines(path) == target
+    assert size_caps.physical_lines(path) == target
 
 
 def run_copy(root: Path, *args: str, extra_env: dict[str, str] | None = None) -> tuple[int, str, str]:
@@ -452,7 +465,7 @@ def check_in_process(graders) -> tuple[int, str, str]:
     out, err = io.StringIO(), io.StringIO()
     with mock.patch.object(engine_graders, "GRADERS", graders):
         with redirect_stdout(out), redirect_stderr(err):
-            code = engine.main(["check"])
+            code = procedure_check.main([f"--procedures={PROCEDURES}"])
     return code, out.getvalue(), err.getvalue()
 
 
@@ -469,16 +482,16 @@ class CheckRefusesTest(unittest.TestCase):
         self.assertIn(CORE_BREACH, document["breaches"])
         self.assertEqual(document["refusals"], [])
 
-    def test_check_refuses_an_engine_package_over_7300_lines(self):
+    def test_check_refuses_an_engine_package_over_8000_lines(self):
         def edit(d: Path) -> None:
-            total = sum(engine_caps.physical_lines(p) for p in engine_caps.engine_modules(d))
+            total = sum(size_caps.physical_lines(p) for p in size_caps.engine_modules(d))
             ledger = d / "engine_ledger.py"
-            grow(ledger, engine_caps.physical_lines(ledger) + 7301 - total)
+            grow(ledger, size_caps.physical_lines(ledger) + 8001 - total)
 
         code, out, _ = run_copy(package_copy(edit))
         document = json.loads(out)
         self.assertEqual(code, 1)
-        self.assertIn({"cap": 7300, "size": 7301, "thing": "engine package", "unit": "lines"}, document["breaches"])
+        self.assertIn({"cap": 8000, "size": 8001, "thing": "engine package", "unit": "lines"}, document["breaches"])
         self.assertNotIn("core", [b["thing"] for b in document["breaches"]])
 
     def test_check_refuses_a_41st_step_naming_the_procedure(self):
@@ -559,9 +572,9 @@ class CheckRefusesTest(unittest.TestCase):
     def test_a_filesystem_error_while_measuring_is_usage(self):
         error = FileNotFoundError(2, "No such file or directory", "toy-review.md")
         out, err = io.StringIO(), io.StringIO()
-        with mock.patch.object(engine_caps, "_breaches", side_effect=error):
+        with mock.patch.object(size_caps, "_breaches", side_effect=error):
             with redirect_stdout(out), redirect_stderr(err):
-                code = engine.main(["check"])
+                code = procedure_check.main([f"--procedures={PROCEDURES}"])
         self.assertEqual((code, out.getvalue()), (2, ""))
         self.assertEqual(len(err.getvalue().splitlines()), 1)
 
@@ -617,15 +630,16 @@ class ImmunityTest(unittest.TestCase):
         code, out, _ = run_copy(self.root, extra_env=extra_env)
         self.assertEqual(code, 1)
         self.assertIn(CORE_BREACH, json.loads(out)["breaches"])
-        tree = ast.parse((DELIVERY / "engine.py").read_text(encoding="utf-8"))
-        names = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
-        attrs = {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
-        self.assertEqual((names | attrs) & {"environ", "environb", "getenv"}, set())
+        for module in ("engine.py", "engine_check.py", "procedure_check.py", "size_caps.py"):
+            tree = ast.parse((DELIVERY / module).read_text(encoding="utf-8"))
+            names = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+            attrs = {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
+            self.assertEqual((names | attrs) & {"environ", "environb", "getenv"}, set(), module)
 
 
 class PackageLocationTest(unittest.TestCase):
     def test_the_package_is_located_through_its_resources_not_file(self):
-        tree = ast.parse((DELIVERY / "engine.py").read_text(encoding="utf-8"))
+        tree = ast.parse((DELIVERY / "procedure_check.py").read_text(encoding="utf-8"))
         assigns = [
             node
             for node in tree.body
@@ -635,7 +649,8 @@ class PackageLocationTest(unittest.TestCase):
         self.assertEqual(len(assigns), 1)
         used = {n.id for n in ast.walk(assigns[0].value) if isinstance(n, ast.Name)}
         self.assertNotIn("__file__", used)
-        self.assertEqual(engine.ENGINE_DIR.resolve(), DELIVERY.resolve())
+        self.assertEqual(procedure_check.ENGINE_DIR.resolve(), DELIVERY.resolve())
+        self.assertFalse(hasattr(engine, "ENGINE_DIR"))
 
 
 if __name__ == "__main__":

@@ -94,7 +94,6 @@ ALLOWED_IMPORTS: dict[str, frozenset[str]] = {
         "agent_tools.delivery.skipped_test_lint",  # conformance_checks
         "agent_tools.delivery.copied_test_lint",  # conformance_checks
         "agent_tools.delivery.instruction_surface_lint",  # conformance_checks
-        "agent_tools.delivery.engine_caps",  # conformance_checks
         "agent_tools.delivery.engine_commands",  # conformance_checks
         "agent_tools.delivery.procedure_check",  # conformance_checks
         "agent_tools.release.railway_deploy_adapter",  # host_readiness
