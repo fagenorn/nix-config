@@ -9,11 +9,14 @@ The declaration is authored host policy installed at exactly
 `$HOME/.agents/share/host-declaration.json` (D2). It declares, per route,
 whether the route is supported and, when it is, the agent slots one root
 session may hold at once. It also states, optionally, the host's verify slot
-count (`verify_slots`), which `agent_tools.delivery.verify_slot` reads, and
+count (`verify_slots`), which `agent_tools.delivery.verify_slot` reads,
 `verify_budget_seconds`, the hold in seconds a repository's median verify run
-should stay within, which `verify-slot report` reads. Nothing else is
-declared: admission reasons over declared `agent_slots` only, never CPU, memory
-or load.
+should stay within, which `verify-slot report` reads, and
+`verify_repository_slots`, a map of `owner/repo` to the number of that
+repository's runs that may hold verify slots at once, which
+`agent_tools.delivery.verify_slot` reads (`DEFAULT_REPOSITORY_VERIFY_SLOTS` for
+a repository it does not name). Nothing else is declared: admission reasons
+over declared `agent_slots` only, never CPU, memory or load.
 The `engine` route has no role sets: it counts one slot per live engine
 session, so a supported engine route is valid with one slot or more.
 """
@@ -61,9 +64,14 @@ REASON_CODES = (
 UNSUPPORTED_ALTERNATIVE = "/deliver-standard <issue>"
 
 DEFAULT_VERIFY_SLOTS = 1
+DEFAULT_REPOSITORY_VERIFY_SLOTS = 1
+# The lowercased `owner/repo` slug: an owner never begins with a dot, a
+# repository name may (`example/.github`) but is never `.` or `..`.
+REPOSITORY_NAME_PATTERN = re.compile(r"[a-z0-9_-][a-z0-9_.-]*/(?!\.{1,2}$)[a-z0-9_.-]+")
 
 _DECLARATION_MEMBERS = frozenset({"schema_version", "routes"})
-_OPTIONAL_DECLARATION_MEMBERS = frozenset({"verify_slots", "verify_budget_seconds"})
+_OPTIONAL_DECLARATION_MEMBERS = frozenset(
+    {"verify_slots", "verify_budget_seconds", "verify_repository_slots"})
 _SUPPORTED_MEMBERS = frozenset({"support", "agent_slots"})
 _UNSUPPORTED_MEMBERS = frozenset({"support"})
 
@@ -111,7 +119,8 @@ def validate_declaration(value: object) -> dict:
 
     Exact members at every level (D2): the top is `{schema_version, routes}`
     plus the optional `verify_slots` and `verify_budget_seconds`, each a plain
-    int >= 1;
+    int >= 1, and `verify_repository_slots`, an object whose keys are
+    lowercase `owner/repo` and whose values are plain ints >= 1;
     `schema_version` is a plain int equal to 1; `routes` is a non-empty object
     whose keys match the route grammar and are not `direct`; a supported route
     is exactly `{"support": "supported", "agent_slots": <int >= floor>}` and an
@@ -130,6 +139,13 @@ def validate_declaration(value: object) -> dict:
         budget = value["verify_budget_seconds"]
         if type(budget) is not int or budget < 1:
             raise _invalid("verify_budget_seconds")
+    if "verify_repository_slots" in value:
+        limits = value["verify_repository_slots"]
+        if not isinstance(limits, dict) or any(
+                not REPOSITORY_NAME_PATTERN.fullmatch(name)
+                or type(limit) is not int or limit < 1
+                for name, limit in limits.items()):
+            raise _invalid("verify_repository_slots")
     version = value["schema_version"]
     if type(version) is not int or version != DECLARATION_SCHEMA_VERSION:
         raise _invalid("schema_version")
@@ -206,6 +222,15 @@ def verify_slots(declaration: dict) -> int:
 def verify_budget_seconds(declaration: dict) -> int | None:
     """The host's verify hold budget in seconds, or `None` when undeclared."""
     return declaration.get("verify_budget_seconds")
+
+
+def repository_verify_slots(declaration: dict, repository: str) -> int:
+    """The verify slots `repository` may hold at once, `DEFAULT_REPOSITORY_VERIFY_SLOTS` if unnamed.
+
+    `declaration` is one `validate_declaration` already accepted.
+    """
+    return declaration.get("verify_repository_slots", {}).get(
+        repository, DEFAULT_REPOSITORY_VERIFY_SLOTS)
 
 
 def route_slots(declaration: dict, route: str) -> int:
