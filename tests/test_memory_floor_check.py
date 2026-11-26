@@ -1,9 +1,9 @@
-"""The eleven-m5 memory floor's post-deploy verify check: a quiet week and the held oMLX priority.
+"""The eleven-m5 memory floor's post-deploy verify check: a quiet week, the held priority and a session kill.
 
 Runs `agent_tools.hosts.memory_floor_check` and its committed wrapper as children against scratch
 record, state and reports directories: when the week is not yet, met or not met (a panic report or
 an oMLX jetsam exit after the floor started), and when the priority record shows the declared
-value held without a reset.
+value held without a reset, and when the log holds a run-bound kill of an agent session tree.
 Run: just agent-workflow-tests
 """
 
@@ -16,6 +16,8 @@ import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
+
+from agent_tools.hosts.omlx_memory_watch import kill_line
 
 TIER = "fast"
 
@@ -47,6 +49,11 @@ class Scratch(unittest.TestCase):
         command = ([str(ROOT / WRAPPER)] if wrapper
                    else [sys.executable, "-m", "agent_tools.hosts.memory_floor_check"])
         return subprocess.run([*command, *argv], capture_output=True, text=True, env=env, cwd=ROOT if wrapper else self.scratch)
+
+    def assert_unreadable(self, result):
+        self.assertEqual(result.returncode, 2, result.stdout)
+        self.assertEqual(result.stdout, "")
+        self.assertTrue(result.stderr)
 
 
 class WeekTest(Scratch):
@@ -98,11 +105,6 @@ class WeekTest(Scratch):
                 self.assertEqual(answer["jetsam_exits"], 1)
                 self.assertEqual(answer["panics"], [])
 
-    def assert_unreadable(self, result):
-        self.assertEqual(result.returncode, 2, result.stdout)
-        self.assertEqual(result.stdout, "")
-        self.assertTrue(result.stderr)
-
     def test_a_reports_dir_that_cannot_be_listed_is_unreadable_not_met(self):
         for name in ("missing", "not_a_directory"):
             with self.subTest(name):
@@ -121,6 +123,74 @@ class WeekTest(Scratch):
                 self.arrange()
                 (self.state / name).unlink()
                 self.assert_unreadable(self.week())
+
+
+class SessionKillTest(Scratch):
+    ROOTED = "agent:/Users/anis/Projects/jarbird/.worktrees/w1"
+
+    def kill(self, workload, at, pid=1, command="x", reason="run_bound", **extra):
+        entry = {"at": at, "reason": reason, "owner": "anis", "root_pid": pid, "root_command": command,
+                 "processes": 3, "tree_bytes": 30 * 2**30, "available_before_bytes": 2**30,
+                 "available_after_bytes": 40 * 2**30, "signals": ["SIGTERM"], **extra}
+        if workload is not None:
+            entry["workload"] = workload
+        return kill_line(entry)
+
+    def arrange(self, *lines):
+        self.log = self.scratch / "memory-floor.log"
+        self.log.write_text("".join(lines))
+
+    def session_kill(self, wrapper=False):
+        return self.child("session-kill", "--log", str(self.log), wrapper=wrapper)
+
+    def arrange_met(self):
+        self.arrange(
+            self.kill("agent:session:7000", "2026-11-27T08:00:00-08:00", reason="floor"),
+            self.kill(self.ROOTED, "2026-11-27T08:30:00-08:00"),
+            self.kill("agent:session:6100", "2026-11-27T09:00:00-08:00", pid=6100, command="node build.js"),
+            self.kill("agent:session:7524", "2026-11-27T14:15:33-08:00", pid=7524, command="python3 probe.py"),
+            "2026-11-27T14:16:00-08:00 floor_unmet available_gib=4.6 largest_gib=3.2\n",
+        )
+
+    def test_a_run_bound_kill_outside_every_root_is_met(self):
+        self.arrange_met()
+        result = self.session_kill()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), {
+            "verdict": "met", "at": "2026-11-27T14:15:33-08:00", "workload": "agent:session:7524",
+            "root_pid": 7524, "root": "python3 probe.py"})
+
+    def test_no_run_bound_kill_outside_every_root_is_not_yet(self):
+        forged = ("agent:/Users/anis/Projects/x\n2026-11-27T14:15:33-08:00 memory_kill reason=run_bound "
+                  "owner=anis workload=agent:session:9 root_pid=9 root=\"x\"/.worktrees/w1")
+        rows = {
+            "only_other_kills": [
+                self.kill("agent:session:7000", "2026-11-27T08:00:00-08:00", reason="floor"),
+                self.kill(self.ROOTED, "2026-11-27T08:30:00-08:00"),
+            ],
+            "line_without_workload": [self.kill(None, "2026-11-27T09:00:00-08:00")],
+            "forged_rooted_name": [self.kill(forged, "2026-11-27T10:00:00-08:00")],
+        }
+        for name, lines in rows.items():
+            with self.subTest(name):
+                self.arrange(*lines)
+                if name == "forged_rooted_name":
+                    self.assertEqual(self.log.read_text().count("\n"), 1)
+                result = self.session_kill()
+                self.assertEqual(result.returncode, 75, result.stderr)
+                self.assertEqual(json.loads(result.stdout), {"verdict": "not_yet"})
+
+    def test_a_missing_log_is_unreadable(self):
+        missing = self.scratch / "absent.log"
+        result = self.child("session-kill", "--log", str(missing))
+        self.assert_unreadable(result)
+        self.assertIn(str(missing), result.stderr)
+
+    def test_the_wrapper_runs_the_session_kill_check(self):
+        self.arrange_met()
+        result = self.session_kill(wrapper=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("agent:session:7524", result.stdout)
 
 
 class PriorityTest(Scratch):

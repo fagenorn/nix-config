@@ -240,6 +240,9 @@ class FloorDaemonTest(unittest.TestCase):
             with self.subTest(user=user):
                 self.assertEqual(command.count(f"--runner-user {user} "), 1)
         self.assertEqual(command.count("--runner-user "), len(users))
+        self.assertEqual(command.count("--agent-session claude "), 1)
+        self.assertEqual(command.count("--agent-session .claude-unwrapped "), 1)
+        self.assertGreater(command.index("--agent-session "), command.rindex("--agent-root "))
 
 
 class GuideTest(unittest.TestCase):
