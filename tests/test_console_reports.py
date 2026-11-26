@@ -421,7 +421,7 @@ class SprintBallViewTest(unittest.TestCase):
         self.assertEqual((shown["ball"], shown["ball_text"]),
                          ("nobody", "nothing running, may be stuck"))
         self.assertNotEqual(shown["state_text"], "on track")
-        self.assertEqual(shown["now_text"], "last seen building 1 of 7: Importer resumes")
+        self.assertEqual(shown["now_text"], "last seen working on 2 issues.")
 
     def test_a_working_manager_session_reads_manager_working_past_the_threshold(self):
         s = reported(with_manager(started(A)), T0_MS)
@@ -488,7 +488,7 @@ class SprintBallViewTest(unittest.TestCase):
         self.assertEqual(NOW_WAIT_TEXT, "waiting until")
         got = self.shown(waiting, T0_MS + 120 * MIN, idle)
         self.assertEqual((got["now_text"], got["now_until"]),
-                         ("last seen building 1 of 7: Importer resumes", None))
+                         ("last seen working on 2 issues.", None))
         got = self.shown(paused, PAST, idle)
         self.assertEqual((got["now_text"], got["now_until"]),
                          ("paused: the lead freed the account", None))
@@ -540,7 +540,7 @@ class SprintBallViewTest(unittest.TestCase):
             (with_manager(started(A)), [], {"capacity": out()}, NOW_QUOTA_TEXT),
             (stopping, [], {}, NOW_STOPPING_TEXT),
             (stopping, [waiting], {}, NOW_STOPPING_TEXT),
-            (reported(started(A), T0_MS), [], {}, "building 1 of 7: Importer resumes"),
+            (reported(started(A), T0_MS), [], {}, "Working on 2 issues."),
         )
         for s, sessions, extra, text in table:
             with self.subTest(text=text, sessions=len(sessions)):
@@ -549,20 +549,20 @@ class SprintBallViewTest(unittest.TestCase):
                 self.assertIn(shown["ball"], BALL_TEXT)
                 self.assertEqual(shown["ball_text"], BALL_TEXT[shown["ball"]])
 
-    def test_the_now_sentence_names_the_leading_stage_its_count_and_the_milestone(self):
+    def test_the_now_sentence_counts_the_issues_in_work_when_no_title_is_known(self):
         run = observed(reported(started(A), T0_MS, issues=((4, "queued"),)), T0_MS + MIN,
                        IssueStage(4, "building"))
         cases = (
             (reported(started(A), T0_MS, issues=((1, "building"), (2, "building"), (3, "queued"))),
-             T0_MS + MIN, "building 2 of 3: Importer resumes"),
+             T0_MS + MIN, "Working on 2 issues."),
             (reported(started(A), T0_MS, issues=((1, "planning"), (2, "building"))),
-             T0_MS + MIN, "building 1 of 2: Importer resumes"),
+             T0_MS + MIN, "Working on 2 issues."),
             (reported(started(A), T0_MS, issues=((1, "queued"), (2, "queued"))),
-             T0_MS + MIN, "queued 2 of 2: Importer resumes"),
+             T0_MS + MIN, "Nothing is being worked on right now."),
             (reported(started(A), T0_MS, issues=((1, "landed"), (2, "held"))),
-             T0_MS + MIN, "went in 1 of 2: Importer resumes"),
-            (reported(started(A), T0_MS, issues=()), T0_MS + MIN, "Importer resumes"),
-            (run, T0_MS + 2 * MIN, "building 1 of 1: Importer resumes"),
+             T0_MS + MIN, "Nothing is being worked on right now."),
+            (reported(started(A), T0_MS, issues=()), T0_MS + MIN, "Nothing is being worked on right now."),
+            (run, T0_MS + 2 * MIN, "Working on 1 issue."),
         )
         for s, now, text in cases:
             with self.subTest(text=text):
@@ -601,15 +601,15 @@ class SprintBallViewTest(unittest.TestCase):
                 self.assertEqual(shown["ball"], ball)
                 self.assertTrue(shown["now_text"])
                 self.assertNotEqual(shown["now_text"], status)
-                self.assertFalse(shown["now_text"].startswith("Working on"))
+                self.assertNotIn("ship the importer", shown["now_text"].lower())
 
-    def test_a_long_milestone_is_kept_whole(self):
+    def test_the_milestone_is_not_on_the_now_line(self):
         milestone = " ".join(["word"] * 80)
         s = reported(started(A), T0_MS)
         s = dataclasses.replace(s, report=dataclasses.replace(s.report, milestone=milestone))
-        text = self.shown(s, T0_MS + MIN)["now_text"]
-        self.assertEqual(text, "building 1 of 7: " + milestone)
-        self.assertNotIn("\u2026", text)
+        shown = self.shown(s, T0_MS + MIN)
+        self.assertNotIn(milestone, shown["now_text"])
+        self.assertEqual(shown["milestone"], milestone)
 
     def test_an_ended_sprint_has_no_ball_and_no_now_sentence(self):
         stopped = dataclasses.replace(started(A), stopped_at=iso(T0_MS))
@@ -641,7 +641,7 @@ class MergeRefusedViewTest(unittest.TestCase):
         later = reported(refused, T0_MS + MIN)
         self.assertEqual(self.shown(refused, T0_MS + MIN)["now_text"], self.REFUSAL)
         self.assertEqual(self.shown(later, T0_MS + 2 * MIN)["now_text"],
-                         "building 1 of 7: Importer resumes")
+                         "Working on 2 issues.")
 
     def test_a_run_that_closes_out_never_clears_the_refusal(self):
         refused = reported(started(A), T0_MS, status=self.REFUSAL)
@@ -655,9 +655,9 @@ class MergeRefusedViewTest(unittest.TestCase):
             ("Merge refused: the pull request is behind its base",
              "merge refused: the pull request is behind its base"),
             ("MERGE REFUSED:   checks are red", "merge refused: checks are red"),
-            ("merge refused:", "building 1 of 7: Importer resumes"),
+            ("merge refused:", "Working on 2 issues."),
             ("two slices building, merge refused: checks are red",
-             "building 1 of 7: Importer resumes"),
+             "Working on 2 issues."),
         )
         for status, now_text in table:
             with self.subTest(status=status):

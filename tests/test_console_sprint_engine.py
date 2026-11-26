@@ -58,7 +58,7 @@ class SprintEngineMovementTest(unittest.TestCase):
         live = engine_state("sprint-moving.jsonl", LIVE)
         got = shown(engine_runs=[live])
         self.assertEqual((got["state"], got["ball"], got["ball_text"], got["now_text"]),
-                         ("on_track", "manager", "manager working", "building 1 of 7: Importer resumes"))
+                         ("on_track", "manager", "manager working", "Working on 2 issues."))
         self.assertNotIn("stuck", json.dumps(got))
         with self.subTest("no engine run"):
             self.assertEqual(shown()["state"], "quiet")
@@ -183,7 +183,7 @@ class SprintEngineWaitTest(unittest.TestCase):
 
     def test_a_moving_run_beside_a_waiting_one_names_no_wait(self):
         runs = [engine_state("sprint-moving.jsonl", LIVE, issue=4), engine_state("sprint-checks.jsonl", LIVE, issue=5)]
-        self.assertEqual(shown(engine_runs=runs)["now_text"], "building 1 of 7: Importer resumes")
+        self.assertEqual(shown(engine_runs=runs)["now_text"], "Working on 2 issues.")
 
     def test_the_forge_is_not_read_for_an_issue_an_engine_run_carries(self):
         ci_on_4 = moving(pulls=(PullMovement(40, frozenset({4}), NOW - MIN, None),), read_ms=NOW - MIN)
@@ -197,7 +197,7 @@ class SprintEngineWaitTest(unittest.TestCase):
 
     def test_with_no_clock_no_engine_wait_is_named(self):
         got = entry(line(BASE, None, sessions=[idle_session], engine_runs=[engine_state("sprint-checks.jsonl", LIVE)]))
-        self.assertEqual(got["now_text"], "building 1 of 7: Importer resumes")
+        self.assertEqual(got["now_text"], "Working on 2 issues.")
 
 
 if __name__ == "__main__":
@@ -211,7 +211,7 @@ class GuestSprintEngineTest(unittest.TestCase):
                   "now_ms": NOW, "engine_runs": [engine_state("sprint-moving.jsonl", LIVE), stopped]}
         owner = view.derive_view(**inputs)
         guest_view = view.derive_view(**guest.scoped(inputs, frozenset({"p00"})))
-        reading = ("on_track", "manager", "building 1 of 7: Importer resumes")
+        reading = ("on_track", "manager", "Working on 2 issues.")
         for derived in (owner, guest_view):
             got = entry(derived)
             self.assertEqual((got["state"], got["ball"], got["now_text"]), reading)

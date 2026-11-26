@@ -32,7 +32,7 @@ from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- modul
 
 
 def fixture_paths(fixture):
-    paths = [value for field in dataclasses.fields(fixture) if field.name not in ("holding", "deaf", "activating", "registering", "adopting", "refusing", "prompting")
+    paths = [value for field in dataclasses.fields(fixture) if field.name not in ("holding", "deaf", "activating", "registering", "adopting", "refusing", "prompting", "titled")
              for value in ([getattr(fixture, field.name)] if field.name != "projects"
                            else list(fixture.projects))]
     return paths
@@ -2673,7 +2673,7 @@ class ScreenshotFixtureTest(unittest.TestCase):
                         continue
                     self.assertEqual(sprint["manager_state"], "started", sprint["title"])
                     self.assertIsNone(sprint["manager_text"], sprint["title"])
-                    self.assertFalse(sprint["now_text"].startswith("Working on"), sprint["title"])
+                    self.assertIsNone(re.search(r"#\d", sprint["now_text"]), sprint["title"])
                     self.assertNotEqual(sprint["now_text"], sprint["title"])
                     self.assertNotEqual(sprint["now_text"], sprint["status"])
                     self.assertEqual(
@@ -2694,7 +2694,7 @@ class ScreenshotFixtureTest(unittest.TestCase):
                 elif state == "stuck":
                     self.assertEqual([s["ball"] for s in running], ["nobody"])
                     self.assertEqual(running[0]["now_text"],
-                                     "last seen building 1 of 2: the upload form")
+                                     "last seen working on 1 issue.")
                 elif state == "manager-cannot-hear":
                     self.assertEqual([s["ball"] for s in running], ["owner"])
                     self.assertEqual(
@@ -2733,7 +2733,7 @@ class ScreenshotFixtureTest(unittest.TestCase):
                     self.assertTrue(any(s["closing"] for s in ended))
                 elif state == "owner-check":
                     self.assertEqual([s["ball"] for s in running], ["manager"])
-                    self.assertEqual(running[0]["now_text"], "building 1 of 3: the upload form")
+                    self.assertEqual(running[0]["now_text"], "Working on 1 issue.")
                     self.assertEqual(
                         [c["text"] for c in running[0]["checks"]],
                         ["Your check: Do the before and after pictures read well?"])

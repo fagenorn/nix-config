@@ -134,7 +134,7 @@ def sprint_page_words():
     return (page_words(PAGE.read_text(encoding="utf-8"))
             + [w for m in PAGE_TEXT_MODULES for w in text_constants(read(m))]
             + [w for m in SPRINT_LITERAL_MODULES for w in prose(module_literals(read(m)))]
-            + [sprints.closing_text(1, 1, 1), sprints.progress_text(1, 4, 1, 1, 1)]
+            + [sprints.closing_text(1, 1, 1), deliveries.progress_text({"landed": 1, "in_delivery": 1, "queued": 1, "held": 1})]
             + [view.CLOSING_OUTCOME_TEXT.get(s, deliveries.stage_words(s)) for s in stages]
             + [summary]
             + [engine_runs.line_text(engine_state(s)) for s in procedure_check.STAGES]
