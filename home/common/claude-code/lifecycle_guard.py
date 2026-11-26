@@ -648,19 +648,20 @@ head: the run (an Actions run the pull request triggered, of the project's repos
 failed job that is a required check), the pull request (open, from the project's repository into the row's integration
 branch, from a branch that is neither long-lived branch, at the run's head and branch) and the required checks. The
 required set is the forge's protection of the integration branch, read as the console permit reads it, not the checks
-the contract declares. The reads inherit the session's environment minus the token variables, and the jobs are read
-page by page until every one is seen. The rerun runs in the session's shell, so the guard asks that shell for its
-host: the user's `$SHELL`, started as a login, interactive shell, prints `$GH_HOST`, `$GH_CONFIG_DIR` and
-`$XDG_CONFIG_HOME` once per command. A host other than github.com, a shell that cannot be started, times out or prints
-no answer, a shell `GH_HOST` that is not the hook's own (one empty and the other github.com included: gh's default
-host need not be github.com), or a `GH_CONFIG_DIR` or `XDG_CONFIG_HOME` that differs from the hook's own (gh's default
-host comes from the configuration those name) leaves the rule in place, so the reads and the rerun cannot meet on different hosts, whether
-the host comes from the session's environment or from a shell startup file. Every pull request the run lists is read, and one that cannot be read or is not a pull request document
-leaves the rule in place, whichever other pull request qualifies. A read that fails, times
-out or answers another shape leaves the rule in place, and a deadline too near refuses. Only the narrowed hits of the
-named project are dropped, each row by its own integration branch, with every read made once per command; a
-broader rule and every other hit still refuse. The rerun then goes to whatever judges `gh run rerun` next: in a manager
-session, the console permit, with its per-head cap and refusals.
+the contract declares. The reads inherit the session's environment minus the token variables, with `GH_HOST` pinned to
+github.com (where a host-less `--repo` rerun goes, whatever gh's default host is), and the jobs are read page by page
+until every one is seen. The rerun runs in the session's shell, so the guard asks that shell for its host: the user's
+`$SHELL`, started as a login, interactive shell, prints `$GH_HOST`, `$GH_CONFIG_DIR` and `$XDG_CONFIG_HOME` once per
+command. A host other than github.com, a shell that cannot be started, times out or prints no answer, a shell
+`GH_HOST` that is not the hook's own (one empty and the other github.com included: gh's default host need not be
+github.com), or a `GH_CONFIG_DIR` or `XDG_CONFIG_HOME` that differs from the hook's own (gh's default host comes from
+the configuration those name) leaves the rule in place, so the reads and the rerun cannot meet on different hosts,
+whether the host comes from the session's environment or from a shell startup file. Every pull request the run lists
+is read, and one that cannot be read or is not a pull request document leaves the rule in place, whichever other pull
+request qualifies. A read that fails, times out or answers another shape leaves the rule in place, and a deadline too
+near refuses. Only the narrowed hits of the named project are dropped, each row by its own integration branch, with
+every read made once per command; a broader rule and every other hit still refuse. The rerun then goes to whatever
+judges `gh run rerun` next: in a manager session, the console permit, with its per-head cap and refusals.
 
 Known limits: a production command reached by another name (a bare `just` that runs the default recipe, a script or
 alias), words fed on stdin, a program's own directory option (`env -C`, `make -C`) and a one-word command handed to a
@@ -4085,14 +4086,16 @@ def pull_request_rerun_form(command):
 def forge_read(gh_bin, path, deadline, child_timeout, paged=False):
     """The parsed JSON `gh api path` prints, or None when the read fails, times out or is
     not JSON; a `paged` read prints the list of every page. The child inherits the
-    environment minus the token variables and is bounded when it starts; a deadline too
-    near raises `DeadlineExhausted`, which is not caught."""
+    environment minus the token variables, with `GH_HOST` set to github.com, so the read
+    never reaches gh's configured default host, which a host-less rerun does not reach. It
+    is bounded when it starts; a deadline too near raises `DeadlineExhausted`, which is not
+    caught."""
     timeout = bounded_timeout(deadline, child_timeout)
     try:
         done = subprocess.run(
             [gh_bin, "api", *(["--paginate", "--slurp"] if paged else []), path],
             capture_output=True, text=True, check=False,
-            env=gh_lookup_env(), timeout=timeout)
+            env={**gh_lookup_env(), "GH_HOST": "github.com"}, timeout=timeout)
         return json.loads(done.stdout) if done.returncode == 0 else None
     except (subprocess.TimeoutExpired, OSError, ValueError, RecursionError):
         return None

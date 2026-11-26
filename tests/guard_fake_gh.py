@@ -146,6 +146,8 @@ def check_run_refusals(slug, head):
         ("pages disagree on the total", forge(FAKE_JOBS_JSON=jobs_pages(("Tests",), total=101).replace(
             '"total_count": 101, "jobs": [{"name": "Tests"', '"total_count": 7, "jobs": [{"name": "Tests"'))),
         ("session on another host", forge(GH_HOST="ghe.example.com")),
+        ("reads reaching gh's default host beside a rerun that reaches github.com", forge(
+            FAKE_GH_DEFAULT_HOST="ghe.example.com", FAKE_GITHUB_COM_LOGGED_OUT="1")),
         ("shell startup file on another host", forge(FAKE_SHELL_GH_HOST="ghe.example.com")),
         ("shell startup file naming github.com beside a session with no host", forge(
             FAKE_SHELL_GH_HOST="github.com")),
@@ -394,6 +396,10 @@ if stage is None:
     print("unexpected fake-gh argv: " + repr(argv), file=sys.stderr)
     raise SystemExit(64)
 
+host = os.environ.get("GH_HOST") or os.environ.get("FAKE_GH_DEFAULT_HOST", "github.com")
+if host == "github.com" and os.environ.get("FAKE_GITHUB_COM_LOGGED_OUT"):
+    print("gh: not logged in to github.com", file=sys.stderr)
+    raise SystemExit(4)
 mode = os.environ.get("FAKE_" + stage.upper() + "_MODE", "ok")
 if mode == "nonzero":
     print("fake " + stage + " failure", file=sys.stderr)
