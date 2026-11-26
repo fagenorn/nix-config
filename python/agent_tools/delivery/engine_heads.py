@@ -16,8 +16,8 @@ such a result by its own checkout's head. A checkout whose head moved while the 
 A step may also name a `base`: one of its `in` paths, whose value is a branch of the `origin` remote. The step
 then holds for the checkout's `Mark` (its head and the merge base of that head with `refs/remotes/origin/<branch>`,
 recorded as `base`, `{ref, sha}`): the base moving while the step ran ends it as the head does, `checkout_bases`
-reads the current merge base of every checkout a stored result names a base for (a continue judges that result
-stale when it differs or was never recorded), and a result is reused only at the same merge base. A merge base
+reads the current merge base of every checkout and base ref a stored result names, keyed by both (a continue
+judges that result stale when its own ref's merge base differs or was never recorded), and a result is reused only at the same merge base. A merge base
 that cannot be read leaves the step unreused and its result without `base`.
 
 Reuse: such a step never mutates, so its result is a function of the command, its arguments and the checkout's
@@ -155,9 +155,10 @@ def checkout_heads(ledger: list[dict]) -> dict[str, str | None]:
             if event["event"] == "result_stored" and "repository" in event}
 
 
-def checkout_bases(ledger: list[dict]) -> dict[str, str | None]:
-    """The current merge base of every checkout the ledger's stored results name a base for."""
-    return {event["repository"]: _commit(event["repository"], "merge-base", event["base"]["ref"], "HEAD")
+def checkout_bases(ledger: list[dict]) -> dict[tuple[str, str], str | None]:
+    """The current merge base of every checkout and base ref the ledger's stored results name, by both."""
+    return {(event["repository"], event["base"]["ref"]):
+            _commit(event["repository"], "merge-base", event["base"]["ref"], "HEAD")
             for event in ledger if event["event"] == "result_stored" and "base" in event}
 
 

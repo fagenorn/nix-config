@@ -770,6 +770,25 @@ class HeldReuseTest(unittest.TestCase):
             self.assertEqual(settled.hit[:3], (root.name, "r", 1))
             self.assertFalse(settled.moved)
 
+    def test_each_base_ref_of_one_checkout_is_read_on_its_own(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            checkout = never_rise_world.repo(tmp)
+            never_rise_world.write(checkout, "a.txt", "a")
+            never_rise_world.commit_all(checkout)
+            c0 = never_rise_world.git(checkout, "rev-parse", "HEAD").strip()
+            never_rise_world.write(checkout, "b.txt", "b")
+            never_rise_world.commit_all(checkout)
+            c1 = never_rise_world.git(checkout, "rev-parse", "HEAD").strip()
+            for ref in ("refs/remotes/origin/main", "refs/remotes/origin/other"):
+                never_rise_world.git(checkout, "update-ref", ref, c0)
+            never_rise_world.git(checkout, "update-ref", "refs/remotes/origin/main", c1)
+            ledger = [{"event": "result_stored", "repository": str(checkout),
+                       "base": {"ref": ref, "sha": c0}}
+                      for ref in ("refs/remotes/origin/main", "refs/remotes/origin/other")]
+            self.assertEqual(engine_heads.checkout_bases(ledger),
+                             {(str(checkout), "refs/remotes/origin/main"): c1,
+                              (str(checkout), "refs/remotes/origin/other"): c0})
+
     def test_an_unreadable_run_in_the_delivery_is_a_miss(self):
         with tempfile.TemporaryDirectory() as tmp:
             root, checkout, head = self.world(tmp)

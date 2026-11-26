@@ -32,7 +32,7 @@ Every event has `event` (its type) and `at` (RFC3339 UTC); `EVENT_MEMBERS` lists
 other members it always carries and `EVENT_OPTIONAL` the ones it may carry besides. `result_stored` carries the
 visit's graded `outcome` and, for a step that reports one, the worktree `head` and, for a command step that
 names a checkout, that checkout's absolute path as `repository`, the head being its head, and, when it also names a
-`base`, that merge base as `base` (`ref`, `sha`: exactly those). A step that names a checkout also
+`base`, that merge base as `base` (`ref`, `sha`: exactly those; `base` is carried only beside `repository`). A step that names a checkout also
 carries `reuse_key` (a non-empty string, the command and its arguments) on every `result_stored`, and
 `reused_from` (`run`, `step`, `visit`: exactly those) when the result is the stored one of an earlier visit
 in the delivery's runs, taken instead of running the command (`engine_heads`). `run_continued` names the `step`
@@ -447,6 +447,8 @@ def validate_event(event: object) -> dict:
         raise LedgerError(f"{kind} does not have exactly its members")
     if kind == "run_continued" and "visit" in event and "step" not in event:
         raise LedgerError("run_continued names a visit without a step")
+    if kind == "result_stored" and "base" in event and "repository" not in event:
+        raise LedgerError("result_stored names a base without a repository")
     # `step` and `visit` are checked before `result`, which is derived from them.
     for key in sorted(event, key=lambda name: name == "result"):
         _check_member(event, key)

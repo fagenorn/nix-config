@@ -688,12 +688,50 @@ class ContinueTest(unittest.TestCase):
         tail = [{"type": "entered", "step": "g"}, {"type": "outcome", "step": "g", "outcome": "failed", "result": {}}]
         events = [{"type": "entered", "step": "r"}, outcome, *tail]
         heads = {"/w/one": "w1"}
-        self.assertEqual(reentry(doc, INPUTS, events, "w1", heads, {"/w/one": "b1"}), Reentry("g", 1, ()))
-        self.assertEqual(reentry(doc, INPUTS, events, "w1", heads, {"/w/one": "b2"}), Reentry("r", 1, ("r",)))
+        main = ("/w/one", "refs/remotes/origin/main")
+        other = ("/w/one", "refs/remotes/origin/other")
+        self.assertEqual(reentry(doc, INPUTS, events, "w1", heads, {main: "b1"}), Reentry("g", 1, ()))
+        self.assertEqual(reentry(doc, INPUTS, events, "w1", heads, {main: "b2"}), Reentry("r", 1, ("r",)))
+        self.assertEqual(reentry(doc, INPUTS, events, "w1", heads, {other: "b1"}), Reentry("r", 1, ("r",)))
         self.assertEqual(reentry(doc, INPUTS, events, "w1", heads, {}), Reentry("r", 1, ("r",)))
         self.assertEqual(reentry(doc, INPUTS, events, "w1", heads), Reentry("r", 1, ("r",)))
         unrecorded = [{"type": "entered", "step": "r"}, {k: v for k, v in outcome.items() if k != "base"}, *tail]
-        self.assertEqual(reentry(doc, INPUTS, unrecorded, "w1", heads, {"/w/one": "b1"}), Reentry("r", 1, ("r",)))
+        self.assertEqual(reentry(doc, INPUTS, unrecorded, "w1", heads, {main: "b1"}), Reentry("r", 1, ("r",)))
+
+    def test_two_merge_bases_of_one_checkout_are_judged_each_by_its_own_ref(self) -> None:
+        def step(name: str, after: str) -> dict:
+            return {"id": name, "stage": "setup", "kind": "command", "command": "diff-scope", "holds": "head",
+                    "repository": "run.range", "base": "run.range", "in": ["run.range"],
+                    "on": {"ok": after, "failed": "needs-owner"}}
+
+        doc = inline(
+            [
+                step("r1", "r2"), step("r2", "g"),
+                {"id": "g", "stage": "building", "kind": "command", "command": "diff-scope", "holds": "run",
+                 "in": ["run.range"], "on": {"ok": "done", "failed": "needs-owner"}},
+            ],
+            "g",
+        )
+        main = ("/w/one", "refs/remotes/origin/main")
+        other = ("/w/one", "refs/remotes/origin/other")
+
+        def outcome(name: str, ref: str, sha: str) -> dict:
+            return {"type": "outcome", "step": name, "outcome": "ok", "result": {}, "head": "w1",
+                    "repository": "/w/one", "base": {"ref": ref, "sha": sha}}
+
+        events = [
+            {"type": "entered", "step": "r1"}, outcome("r1", main[1], "b1"),
+            {"type": "entered", "step": "r2"}, outcome("r2", other[1], "c1"),
+            {"type": "entered", "step": "g"},
+            {"type": "outcome", "step": "g", "outcome": "failed", "result": {}},
+        ]
+        heads = {"/w/one": "w1"}
+        self.assertEqual(reentry(doc, INPUTS, events, "w1", heads, {main: "b2", other: "c1"}),
+                         Reentry("r1", 1, ("r1",)))
+        self.assertEqual(reentry(doc, INPUTS, events, "w1", heads, {main: "b1", other: "c1"}),
+                         Reentry("g", 1, ()))
+        self.assertEqual(reentry(doc, INPUTS, events, "w1", heads, {main: "b1", other: "c2"}),
+                         Reentry("r2", 1, ("r2",)))
 
     def test_a_step_that_names_no_base_is_never_judged_by_one(self) -> None:
         doc = inline(

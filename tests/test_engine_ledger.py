@@ -356,12 +356,20 @@ class ResultOrderTest(unittest.TestCase):
 
     def test_a_result_stored_event_refuses_a_merge_base_that_is_not_exactly_an_origin_ref_and_a_commit(self):
         good = {"ref": "refs/remotes/origin/main", "sha": "d" * 40}
-        engine_ledger.validate_event({**EXAMPLES["result_stored"], "base": good})
+        engine_ledger.validate_event({**EXAMPLES["result_stored"], "repository": "/w", "base": good})
         for value in ("d" * 40, {"ref": good["ref"]}, {**good, "extra": 1}, {**good, "sha": "D" * 40},
                       {**good, "sha": "d"}, {**good, "ref": "refs/heads/main"}, {**good, "ref": 3}):
             with self.subTest(value=value):
                 with self.assertRaises(engine_ledger.LedgerError):
-                    engine_ledger.validate_event({**EXAMPLES["result_stored"], "base": value})
+                    engine_ledger.validate_event(
+                        {**EXAMPLES["result_stored"], "repository": "/w", "base": value})
+
+    def test_a_result_stored_event_refuses_a_merge_base_without_a_repository(self):
+        base = {"ref": "refs/remotes/origin/main", "sha": "d" * 40}
+        with self.assertRaises(engine_ledger.LedgerError) as raised:
+            engine_ledger.validate_event({**EXAMPLES["result_stored"], "base": base})
+        self.assertIn("base without a repository", str(raised.exception))
+        engine_ledger.validate_event({**EXAMPLES["result_stored"], "base": base, "repository": "/w"})
 
     def test_a_failed_result_write_appends_no_event(self):
         with tempfile.TemporaryDirectory() as tmp:

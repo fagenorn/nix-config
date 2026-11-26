@@ -92,7 +92,7 @@ Continuing
     from `head`, or, when its outcome event names a `repository`, from
     `heads[repository]` (stale if absent there; `head` is not used), and, for
     a step that names a `base`, when the recorded base `sha` is absent or differs
-    from `bases[repository]`; `run`
+    from `bases[(repository, ref)]`, `ref` being the recorded base's; `run`
     never; only a step's latest outcome is judged), else the
     pending step, else the stop's `reenter` step with its latest arrival's visit
     (None when never reached); a run at a stop declared `pinned` skips the stale rule and
@@ -553,7 +553,8 @@ def replay(procedure: Mapping, inputs: Mapping[str, object], events: Sequence[Ma
 
 def reentry(
     procedure: Mapping, inputs: Mapping[str, object], events: Sequence[Mapping], head: str | None,
-    heads: Mapping[str, str | None] | None = None, bases: Mapping[str, str | None] | None = None,
+    heads: Mapping[str, str | None] | None = None,
+    bases: Mapping[tuple[str, str], str | None] | None = None,
 ) -> Reentry:
     walk = _walk(procedure, inputs, events, [])
     if walk.pending is None and walk.position == "done":
@@ -566,7 +567,7 @@ def reentry(
         holds = steps[step_id]["holds"]
         current = head if repository is None else (heads or {}).get(repository)
         moved = steps[step_id].get("base") is not None and (
-            not isinstance(base, dict) or base["sha"] != (bases or {}).get(repository))
+            not isinstance(base, dict) or base["sha"] != (bases or {}).get((repository, base["ref"])))
         if holds == "live" or (holds == "head" and (current is None or recorded != current or moved)):
             arrival = walk.arrivals[index]
             if (arrival.step, arrival.visit) not in stale:
