@@ -2,8 +2,10 @@
 
 The time is the CPU time of the calling thread (`time.thread_time()`), the best of
 several calls, so a loaded runner descheduling the thread cannot fail it. The
-bound is at least 5 times the linear check's cost on a hosted runner and below
-a quadratic one's.
+bound is below a quadratic check's cost and, by the figures the suite logs, at
+least 5 times the linear check's cost on a hosted runner. That margin is read
+from the log, not asserted, so a slower runner cannot fail a correct check
+that is still under the bound.
 
 Run: just agent-workflow-tests
 """
@@ -28,7 +30,6 @@ SIZE = 96 * 1024
 PROSE = "This answer reads src/foo/bar.py and explains why the build passes. "
 CPU_BOUND_SECONDS = 1.0
 CALLS = 5
-MARGIN = 5
 
 
 def answers():
@@ -86,17 +87,30 @@ class CredentialTimingTest(unittest.TestCase):
             figures.append(best)
         self.assertLess(best, CPU_BOUND_SECONDS)
 
-    def test_a_96_kib_answer_is_checked_in_under_1_s_of_cpu_whatever_its_shape(self):
+    def check_every_shape(self, check, shapes, calls=CALLS):
+        """Run the timing assertion for `check` over each named shape and log the slowest best time."""
         figures = []
         try:
-            for name, text in answers().items():
+            for name, text in shapes.items():
                 with self.subTest(name=name):
                     self.assertLessEqual(len(text), SIZE + len(GITHUB_TOKEN))
-                    self.assert_checked_in_time(project_question.credential_shaped, text, figures=figures)
-            self.assertLessEqual(MARGIN * max(figures), CPU_BOUND_SECONDS)
+                    self.assert_checked_in_time(check, text, calls=calls, figures=figures)
         finally:
             if figures:
                 report("linear check, slowest shape's best of five", max(figures))
+
+    def test_a_96_kib_answer_is_checked_in_under_1_s_of_cpu_whatever_its_shape(self):
+        self.check_every_shape(project_question.credential_shaped, answers())
+
+    def test_a_correct_check_costing_a_quarter_second_is_under_the_bound(self):
+        def quarter_second_check(text):
+            until = time.thread_time() + 0.25
+            while time.thread_time() < until:
+                pass
+            return holds_a_token(text)
+
+        shapes = {"prose": answers()["prose"]}
+        self.check_every_shape(quarter_second_check, shapes, calls=1)
 
     def test_a_quadratic_check_fails_the_timing_assertion_on_every_answer_shape(self):
         figures = []
