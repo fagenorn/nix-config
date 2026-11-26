@@ -211,7 +211,7 @@ def check_run_refusals(slug, head):
 
 def check_run_reads(slug, forge, run_id=55, branch="main"):
     """The `gh` arguments the check makes, in order, for run `run_id` of `slug`, reading each pull
-    request that the run of the `forge` answers lists (the default run lists pull request 7)."""
+    request that the run of the `forge` answers lists (the default run lists one, numbered 7)."""
     base = f"repos/{slug}"
     pulls = json.loads(forge.get("FAKE_RUN_JSON") or run_facts(slug, ""))["pull_requests"]
     return [["api", f"{base}/actions/runs/{run_id}"], ["api", "--paginate", "--slurp", f"{base}/actions/runs/{run_id}/jobs?per_page=100"],
