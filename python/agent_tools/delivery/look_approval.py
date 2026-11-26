@@ -111,7 +111,7 @@ Every call prints one JSON object on one stdout line with `command` (`look-appro
    the base). A `pictures` field that is not a digest names no rule.
    Output keys, in order: `command`, `action`, `repo`, `issue`, `pr`, `head`, `verdict`, `from` (the
    head of the latest approval, or null), `reason` (null unless `needed`), `rule` (`pictures`,
-   `look-files` or null; null for `unmarked`, `approved`, `no-approval`, `source-differs` and
+   `look-files`, `own-files`, `picture-match` or null; null for `unmarked`, `approved`, `no-approval`, `source-differs` and
    `pictures-unreadable`), `pictures` (the digest of the given files, null when none were given)
    and `comment_id` (or null). `verdict`, decided in this order after the reads each needs:
    `unmarked` (exit 0: nothing else read), `approved` (0: a trusted live exact `approved` marker
@@ -135,8 +135,8 @@ Every call prints one JSON object on one stdout line with `command` (`look-appro
    names the smallest such trusted live line, and no such line is `untrusted`. A forge error is the
    `status` forge error, `look_marker.Unreadable` being `payload_invalid`. `carry` never posts a
    `look` marker.
-   With `--own-files` (a flag with no value, a usage error with any of `--before`,
-   `--after` and `--picture`, before any `gh` call) the rule is `own-files` and `pictures` is null:
+   With `--own-files` (a flag with no value; `--before`, `--after` and `--picture` are then not read
+   before any `gh` call, see the picture-match paragraph) the rule is `own-files` and `pictures` is null:
    no pictures or set file is read, so an approval with a pictures digest and one without are
    carried alike (a `fix` answer is never a candidate); an approval whose `pictures` field is not a
    digest has no `own_line` for any reader, so it is `needed` with `pictures-unreadable`. The
@@ -149,6 +149,22 @@ Every call prints one JSON object on one stdout line with `command` (`look-appro
    `look_marker.merged_under_look`), all decide an own-files line with `look_marker.own_files_untouched`
    through `look_marker.kept`, so the writer and every reader agree. Without the flag `carry` reads
    only the line of its own rule: an own-files line short-circuits nothing.
+   Picture match: `--own-files` with pictures given falls back to the pictures when a merge touched an
+   own file. `--own-files` opens no picture first: a sync that touched no own file carries by the
+   own-files rule (`rule` `own-files`, `pictures` null). When `settle_own_files` is false, the approval is
+   `approved` with a digest, pictures were given, `look_marker.own_file_changed` names a file and
+   `look_marker.merge_added_file` names none (every touched file is one the pull request itself changed),
+   the pictures are read, and it is `carried` with `rule` `picture-match`, `pictures` the digest and the
+   `look_marker.carry_sentence` line exactly when that digest equals the approval's. When
+   `own_file_changed` names nothing (a truncated or unreadable listing), or a merge introduced a file
+   `merge_added_file` names, the answer stays the bare `own-files-touched` with `rule` `own-files`, no
+   picture read and nothing posted. `moved` and `not-merges` are decided first, so a non-merge commit
+   never carries by pictures. A mismatch is `needed` with `pictures-differ: ` and every given path joined
+   by `, ` in flag order before, after, picture. A picture file that cannot be opened or reads zero bytes
+   is `needed` with `pictures-unrendered: <first such path>` (`pictures` null); without `--own-files` an
+   unreadable picture is still a usage error. An approval with no `pictures` field keeps the bare
+   `own-files-touched`. The reuse check is the strict `look_marker.carry_line` of the picture-match form,
+   so a digest-only line of the pair does not stop the write. `rule` may therefore be `picture-match`.
    An approval with a `pictures` digest and no picture given (the manager took the pictures)
    is carried by the own-files rule once the pictures' inputs are also unchanged: it is decided as
    `--own-files` is, then `A...H` must list no file of a look file set at the base (`.github/look-files.json`,
@@ -437,6 +453,7 @@ def carry(args: argparse.Namespace) -> int:
         return needed("pictures-unreadable")
     state["rule"] = rule
     inputs = False
+    match = bool(args.own_files and candidate.pictures is not None and args.paths)
     if rule == lm.PICTURES_RULE:
         if args.digest is None:
             # The pictures were not taken here (the manager took them): the approval stands when the pull
@@ -457,8 +474,21 @@ def carry(args: argparse.Namespace) -> int:
             return needed("not-merges")
         if rule == lm.OWN_FILES_RULE:
             if not lm.settle_own_files(args.from_head, args.head, base, read):
-                touched = lm.own_file_changed(args.from_head, args.head, _seen(args, base, read)) if inputs else None
-                return needed("own-files-touched" if touched is None else f"own-files-touched: {touched}")
+                touched = lm.own_file_changed(args.from_head, args.head, _seen(args, base, read)) \
+                    if inputs or match else None
+                if match and touched is not None \
+                        and lm.merge_added_file(args.from_head, args.head, _seen(args, base, read)) is None:
+                    # A merge changed an own file: the approval stands when the pictures re-rendered byte-identical.
+                    rule = state["rule"] = lm.PICTURE_MATCH_RULE
+                    args.digest, unrendered = _read_pictures(args.paths)
+                    if unrendered is not None:
+                        return needed(f"pictures-unrendered: {unrendered}")
+                    if args.digest != candidate.pictures:
+                        return needed("pictures-differ: " + ", ".join(path for _, path in args.paths))
+                elif inputs and touched is not None:
+                    return needed(f"own-files-touched: {touched}")
+                else:
+                    return needed("own-files-touched")
             if inputs:
                 if read(lm.contents_path(base)) is None:
                     return needed("no-look-files")
@@ -472,11 +502,16 @@ def carry(args: argparse.Namespace) -> int:
                 return needed("look-files-differ")
     except lm.Unreadable as error:
         raise forge_api.ForgeError("payload_invalid", str(error)) from None
-    existing = candidate.own_line if rule == lm.OWN_FILES_RULE else candidate.line
+    if rule == lm.OWN_FILES_RULE:
+        existing = candidate.own_line
+    elif rule == lm.PICTURE_MATCH_RULE:
+        existing = lm.carry_line(comments, args.issue, args.pr, args.from_head, args.head, args.digest, rule)
+    else:
+        existing = candidate.line
     if existing is not None:
         return finish("carried", comment_id=existing)
-    pictures = args.digest if rule == lm.PICTURES_RULE else None
-    named = lm.OWN_FILES_RULE if rule == lm.OWN_FILES_RULE else None
+    pictures = args.digest if rule in (lm.PICTURES_RULE, lm.PICTURE_MATCH_RULE) else None
+    named = rule if rule in (lm.OWN_FILES_RULE, lm.PICTURE_MATCH_RULE) else None
     fields = lm.carry_fields(args.issue, args.pr, args.from_head, args.head, pictures, named)
     result = forge_markers.write(args.repo, args.issue, lm.CARRY_KIND, fields,
                                  lm.carry_sentence(args.pr, args.from_head, args.head, rule, inputs), match=fields,
@@ -568,17 +603,34 @@ def _carry_usage(args: argparse.Namespace) -> None:
             raise UsageError(f"{name} {value!r} is not 40 lowercase hex")
     if args.from_head == args.head:
         raise UsageError("from and head are the same sha")
-    if args.own_files and (args.before or args.after or args.picture):
-        raise UsageError("--own-files takes no --before, --after or --picture")
+    args.paths = [(role, path) for role, paths in (("before", args.before), ("after", args.after),
+                                                    (None, args.picture)) for path in paths]
+    args.digest = None
+    if args.own_files:
+        return  # the pictures are opened only if a merge touched an own file (`carry`, `_read_pictures`)
     ids: list[tuple[str | None, str]] = []
-    for role, paths in (("before", args.before), ("after", args.after), (None, args.picture)):
-        for path in paths:
-            try:
-                with open(path, "rb") as handle:
-                    ids.append((role, lm.picture_id(handle.read())))
-            except OSError as error:
-                raise UsageError(f"the picture {path!r} is unreadable: {error}") from None
+    for role, path in args.paths:
+        try:
+            with open(path, "rb") as handle:
+                ids.append((role, lm.picture_id(handle.read())))
+        except OSError as error:
+            raise UsageError(f"the picture {path!r} is unreadable: {error}") from None
     args.digest = lm.picture_digest(ids) if ids else None
+
+
+def _read_pictures(paths: list[tuple[str | None, str]]) -> tuple[str | None, str | None]:
+    """The digest of the given picture files, else (None, the first path that cannot be opened or is empty)."""
+    ids: list[tuple[str | None, str]] = []
+    for role, path in paths:
+        try:
+            with open(path, "rb") as handle:
+                data = handle.read()
+        except OSError:
+            return None, path
+        if not data:
+            return None, path
+        ids.append((role, lm.picture_id(data)))
+    return lm.picture_digest(ids), None
 
 
 def main(argv: list[str] | None = None) -> int:

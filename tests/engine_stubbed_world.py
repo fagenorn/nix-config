@@ -38,6 +38,7 @@ The environment always sets `LANDING_BOUND_SECONDS` to 0 (no wait on a lock or a
 The replies' `merge`, `same_head`, `leave` and `upstream` effects (see the launcher stand-in) are given the
 run's worktree and bare origin when they name none. `extra_files` (relative path to text) is passed to
 `FixtureProject`: each file is committed on `main` after the adoption, outside every branch diff.
+A resumed session that answered replays its recorded answer and runs no effect again.
 `answer(step, entry)` sets `replies[step]` to `entry` with its effects filled the same way and rewrites
 the scenario file (`self.scenario`) the stub reads, so the next `deliver()` answers `step` with `entry`.
 
@@ -89,6 +90,12 @@ IMPLEMENTED = {
               "sensitive": False, "ineligible": False, "tests": ["checks/check_greet.py"]},
     "commit": {"path": "fixture/farewell.py",
                "text": 'def farewell(name: str) -> str:\n    return f"Goodbye, {name}."\n'}}
+VALIDATOR_UNIMPORTABLE_ENGINE = (
+    "import sys\n"
+    "sys.modules['agent_tools.delivery.procedure_check'] = None\n"
+    "sys.modules['agent_tools.delivery.size_caps'] = None\n"
+    "from agent_tools.delivery import engine\n"
+    "sys.exit(engine.main(sys.argv[1:]))\n")
 NOT_BEFORE = {"not_before": "2099-01-01T00:00:00Z"}
 EVIDENCE_CHECK = {"ac": "AC2", "kind": "evidence", "host": "any", "when": NOT_BEFORE,
                   "run": {"command": "test"}}
@@ -273,12 +280,16 @@ class StubbedRun:
         for name in ("implementer", "reviewer", "reviewer-lite"):
             shutil.copy(ROLES / f"{name}.md", home / ".claude/agents" / f"{name}.md")
 
-    def deliver(self, procedures: Path | None = None) -> subprocess.CompletedProcess:
-        """`engine deliver <issue>` in the fixture checkout, with the procedures in `procedures` when given."""
+    def deliver(self, procedures: Path | None = None, *,
+                validator_unimportable: bool = False) -> subprocess.CompletedProcess:
+        """`engine deliver <issue>` in the fixture checkout, with the procedures in `procedures` when given.
+
+        `validator_unimportable` runs the engine in a process that cannot import the check or the cap checker.
+        """
         extra = ["--procedures", str(procedures)] if procedures is not None else []
-        return subprocess.run([sys.executable, "-m", "agent_tools.delivery.engine", "deliver",
-                               str(self.issue), *extra], cwd=self.fixture.root, env=self.env,
-                              capture_output=True, text=True, timeout=600)
+        entry = ["-c", VALIDATOR_UNIMPORTABLE_ENGINE] if validator_unimportable else ["-m", "agent_tools.delivery.engine"]
+        return subprocess.run([sys.executable, *entry, "deliver", str(self.issue), *extra],
+                              cwd=self.fixture.root, env=self.env, capture_output=True, text=True, timeout=600)
 
     def slot_history(self) -> list[dict]:
         """The lines the verification slot recorded, `[]` when it recorded none."""
