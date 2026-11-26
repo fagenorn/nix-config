@@ -1,6 +1,6 @@
 # Words the owner does not know
 
-Each internal word the console or a manager may use, with its one-line gloss in everyday words. Use the gloss the first time the word appears in anything the owner reads, or use the gloss instead of the word ([the plain-words rule](./write-for-the-owner.md)). A later check reads the table: the first cell of each row is the word, the second is its gloss, and a row may not leave its gloss empty.
+Each internal word the console or a manager may use, with its one-line gloss in everyday words. Use the gloss the first time the word appears in anything the owner reads, or use the gloss instead of the word ([the plain-words rule](./write-for-the-owner.md)). The console keeps a copy of this table in `python/agent_tools/console/owner_words.py` and checks what the owner reads against it, and a test fails when the two differ: the first cell of each row is the word, the second is its gloss, and a row may not leave its gloss empty.
 
 | Word | In everyday words |
 |---|---|

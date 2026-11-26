@@ -1,0 +1,49 @@
+[
+  {
+    "text": "waiting on the land lock",
+    "flagged": [
+      "land lock"
+    ]
+  },
+  {
+    "text": "Waiting on the LAND LOCK",
+    "flagged": [
+      "land lock"
+    ]
+  },
+  {
+    "text": "the land\tlock\nand a rerun",
+    "flagged": [
+      "land lock",
+      "rerun"
+    ]
+  },
+  {
+    "text": "a guardrail, a reclaim, held2, looked",
+    "flagged": []
+  },
+  {
+    "text": "\u0130guard refused it",
+    "flagged": [
+      "guard"
+    ]
+  },
+  {
+    "text": "loo\u212a at it",
+    "flagged": []
+  },
+  {
+    "text": "the land lock (A turn-taking token: only one change at a time may be merged into the branch where finished changes are collected, so a change waits until it holds the lock.)",
+    "flagged": []
+  },
+  {
+    "text": "the ci and the guard (A safety check that refuses a risky command before it runs, such as pushing code or merging a change.)",
+    "flagged": [
+      "CI"
+    ]
+  },
+  {
+    "text": "two slices, three pull requests",
+    "flagged": []
+  }
+]
