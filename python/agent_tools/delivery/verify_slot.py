@@ -78,11 +78,22 @@ waiter; the same argv in the same working directory takes the place back while t
 under `RESUME_SECONDS` old or while a waiter that joined after it still waits. A run ended by a
 signal or an error gives its ticket up.
 
+Short lane. The `verify_short_lane` member of the host declaration lists, per repository, the
+exact argv vectors of short commands and the count of short slots. A run whose repository and
+whole argv match one runs in the short lane: it queues on `short-ticket-*.lock` tickets and
+takes one of `short-slot-<i>.lock` (`verify_queue.slot_name`), so it never takes a long slot or
+a long ticket and a long run never takes a short one. It takes no repository lock, so any number
+of short runs of one repository may hold slots at once, and no marker: it neither registers one
+nor defers to one. Within the lane free slots go to the first waiters in service order, live
+waiters first, then ticket number. Any other run, including the same argv in another repository,
+takes the long lane as before.
+
 History. Every run that got past setup appends one line to `history.jsonl` in the slot directory
 (see `agent_tools.delivery.verify_history`), after it gave its slot and repository lock back:
 a run that took a slot, one that reached `--wait-limit` and one signalled while it waited. A run
 that held no slot records `held_seconds: null`. The line's `place` is the place the run joined the
-queue at, the place it took back for a resumed request, or null when it never joined. A setup or
+queue at, the place it took back for a resumed request, or null when it never joined. Its `lane` is
+`long` or `short`, the lane the run queued in. A setup or
 usage error records nothing. A failed append prints `HISTORY_FAILED_LINE` once and leaves the exit
 code alone. `--report PATH` writes the run's history entry, the same JSON object as its
 `history.jsonl` line, to PATH. A caller reads it to learn the run's wait and hold, and a path that
@@ -188,14 +199,21 @@ class SlotError(Exception):
     """A usage or setup error; the command exits 2 and runs nothing."""
 
 
-def slot_count() -> int:
-    """The declared verify slot count, `DEFAULT_VERIFY_SLOTS` when no declaration exists."""
+def _declaration() -> dict | None:
+    """The validated host declaration, None when the file is absent; an invalid one is a `SlotError`."""
     try:
-        declaration = host_admission.load_declaration()
+        return host_admission.load_declaration()
     except host_admission.DeclarationError as error:
         if error.reason_code == "declaration_missing":
-            return host_admission.DEFAULT_VERIFY_SLOTS
+            return None
         raise SlotError(f"the host declaration is invalid: {error}") from None
+
+
+def slot_count() -> int:
+    """The declared verify slot count, `DEFAULT_VERIFY_SLOTS` when no declaration exists."""
+    declaration = _declaration()
+    if declaration is None:
+        return host_admission.DEFAULT_VERIFY_SLOTS
     return host_admission.verify_slots(declaration)
 
 
@@ -302,9 +320,9 @@ def _register_live(directory: Path) -> int | None:
     return marker
 
 
-def _holders_beside(directory: Path, own: Path) -> int:
-    """The live holders of every slot file but `own`, whatever their index."""
-    return sum(1 for path in sorted(directory.glob("slot-*.lock")) if path != own and _held(path))
+def _holders_beside(directory: Path, own: Path, lane: str = verify_queue.LONG_LANE) -> int:
+    """The live holders of every slot file of `lane` but `own`, whatever their index."""
+    return sum(1 for path in verify_queue.slot_files(directory, lane) if path != own and _held(path))
 
 
 def _take_repository(directory: Path, group: str, repository_limit: int) -> int | None:
@@ -324,7 +342,8 @@ def _take_repository(directory: Path, group: str, repository_limit: int) -> int 
 
 
 def _try_slots(directory: Path, count: int, live: bool, group: str | None, repository_limit: int,
-               probe_marker: bool = True) -> tuple[tuple[int, int | None] | None, str | None]:
+               probe_marker: bool = True,
+               lane: str = verify_queue.LONG_LANE) -> tuple[tuple[int, int | None] | None, str | None]:
     """`((slot, group lock or None), None)` on a slot kept, else `(None, reason)` with nothing taken.
 
     A slot file that cannot be opened counts as taken, as it does for every holder count. A taken
@@ -333,10 +352,10 @@ def _try_slots(directory: Path, count: int, live: bool, group: str | None, repos
     `group` is set, it also takes one of the repository's `repository_limit` locks, and gives the
     slot back while every one is held (`same_repository`). An ordinary run lastly gives both back
     while a live waiter holds the marker (`deferred`); a live run skips that check, and so does a
-    caller that passes `probe_marker=False`.
+    caller that passes `probe_marker=False`. The slot files are `lane`'s.
     """
     for index in range(count):
-        path = directory / f"slot-{index}.lock"
+        path = directory / verify_queue.slot_name(lane, index)
         try:
             descriptor = _open_slot(path)
         except OSError:
@@ -349,7 +368,7 @@ def _try_slots(directory: Path, count: int, live: bool, group: str | None, repos
         except BaseException:
             os.close(descriptor)
             raise
-        if 1 + _holders_beside(directory, path) > count:
+        if 1 + _holders_beside(directory, path, lane) > count:
             os.close(descriptor)
             return None, "taken"
         held_group = None
@@ -388,30 +407,38 @@ def _bounded(pause: float, start: float, wait_limit: int | None) -> float:
 
 
 def _decide(directory: Path, count: int, live: bool, group: str | None, key: str, command: str,
-            ticket: verify_queue.Ticket | None) -> tuple:
+            ticket: verify_queue.Ticket | None, lane: str = verify_queue.LONG_LANE) -> tuple:
     """One decision under the queue lock: `(ticket, held, reason, eligible, place, holders)`.
 
     `held` is the slot taken, `reason` why the run waits (None while it waits for an earlier
-    admitted waiter) and `eligible` whether its repository is under the limit.
+    admitted waiter) and `eligible` whether its repository is under the limit (always, short lane).
     """
+    short = lane == verify_queue.SHORT_LANE
     if ticket is None:
-        ticket = verify_queue.join(directory, key, live, group, time.time())
+        ticket = verify_queue.join(directory, key, live, group, time.time(), lane=lane)
     queue = verify_queue.waiters(directory, ticket, time.time())
-    holders = verify_queue.read_holders(directory)
+    holders = verify_queue.read_holders(directory, lane)
     free = max(0, count - len(holders))
-    counts = verify_queue.holder_counts(
-        directory, holders, {waiter.repository for waiter in queue if waiter.repository},
-        REPOSITORY_LIMIT)
-    admitted = verify_queue.admitted(queue, counts, free, REPOSITORY_LIMIT)
-    eligible = group is None or counts.get(group, 0) < REPOSITORY_LIMIT
+    if short:
+        admitted, eligible = verify_queue.short_admitted(queue, free), True
+    else:
+        counts = verify_queue.holder_counts(
+            directory, holders, {waiter.repository for waiter in queue if waiter.repository},
+            REPOSITORY_LIMIT)
+        admitted = verify_queue.admitted(queue, counts, free, REPOSITORY_LIMIT)
+        eligible = group is None or counts.get(group, 0) < REPOSITORY_LIMIT
     place = verify_queue.place(queue, ticket.seq)
     reason = None
     if admitted and admitted[0].seq == ticket.seq:
         # A live waiter in the queue is ordered ahead by `admitted`, and one held back by its
         # repository may still hold a marker it drops only at its next poll, so the marker speaks
         # only for a live waiter of an older `verify-slot`, which no ticket shows.
-        held, reason = _try_slots(directory, count, live, group, REPOSITORY_LIMIT,
-                                  probe_marker=not any(waiter.live for waiter in queue))
+        if short:
+            held, reason = _try_slots(directory, count, live, None, REPOSITORY_LIMIT,
+                                      probe_marker=False, lane=lane)
+        else:
+            held, reason = _try_slots(directory, count, live, group, REPOSITORY_LIMIT,
+                                      probe_marker=not any(waiter.live for waiter in queue))
         if held is not None:
             try:
                 verify_queue.record_holder(held[0], group, command)
@@ -427,11 +454,12 @@ def _decide(directory: Path, count: int, live: bool, group: str | None, key: str
 
 def _acquire(directory: Path, count: int, wait_limit: int | None, run: _Run, live: bool,
              group: str | None, key: str,
-             command: str) -> tuple[tuple[int, int | None] | None, int | None, int | None]:
+             command: str,
+             lane: str = verify_queue.LONG_LANE) -> tuple[tuple[int, int | None] | None, int | None, int | None]:
     """`(held, None, place)` on a taken slot, else `(None, exit code, place)` with nothing to run.
 
-    `place` is where the run joined the queue, None if it never did. A live run holds the marker
-    while it waits under the limit; a run leaving without a slot gives its ticket up.
+    `place` is where the run joined the queue, None if it never did. A live long-lane run holds the
+    marker while it waits under the limit; a run leaving without a slot gives its ticket up.
     """
     marker = None
     ticket = None
@@ -445,7 +473,7 @@ def _acquire(directory: Path, count: int, wait_limit: int | None, run: _Run, liv
         while True:
             if run.received is not None:
                 return None, 128 + run.received, joined_place
-            registering = live and marker is None and eligible
+            registering = live and lane == verify_queue.LONG_LANE and marker is None and eligible
             if ((waiting or contended or registering) and wait_limit is not None
                     and time.monotonic() - start >= wait_limit):
                 _say(NO_SLOT_LINE.format(limit=wait_limit))
@@ -466,7 +494,7 @@ def _acquire(directory: Path, count: int, wait_limit: int | None, run: _Run, liv
                 continue
             try:
                 ticket, held, reason, eligible, place, holders = _decide(
-                    directory, count, live, group, key, command, ticket)
+                    directory, count, live, group, key, command, ticket, lane)
                 if joined_place is None:
                     joined_place = place
                 if marker is not None and not eligible and held is None:
@@ -545,7 +573,13 @@ def run_command(argv: list[str], wait_limit: int | None, live: bool = False,
         group = repository_group(Path.cwd())
     except OSError:
         group = None
-    count = slot_count()
+    declaration = _declaration()
+    count = (host_admission.DEFAULT_VERIFY_SLOTS if declaration is None
+             else host_admission.verify_slots(declaration))
+    lane = verify_queue.LONG_LANE
+    short = None if declaration is None else host_admission.short_command(declaration, group, argv)
+    if short is not None:
+        count, lane = short[0], verify_queue.SHORT_LANE
     directory = slot_dir()
     try:
         _prepare_dir(directory)
@@ -564,7 +598,8 @@ def run_command(argv: list[str], wait_limit: int | None, live: bool = False,
     waited, held_seconds = 0.0, None
     try:
         try:
-            held, code, joined = _acquire(directory, count, wait_limit, run, live, group, key, command)
+            held, code, joined = _acquire(
+                directory, count, wait_limit, run, live, group, key, command, lane)
         except OSError as error:
             raise SlotError(f"cannot take a slot in {directory}: {error}") from None
         acquired = True
@@ -585,7 +620,7 @@ def run_command(argv: list[str], wait_limit: int | None, live: bool = False,
         for number, handler in previous.items():
             signal.signal(number, handler)
         if acquired:
-            entry = verify_history.entry(group, argv, started, waited, held_seconds, code, joined)
+            entry = verify_history.entry(group, argv, started, waited, held_seconds, code, joined, lane)
             _record(directory, entry)
             if report is not None:
                 _report(Path(report), entry)

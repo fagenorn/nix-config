@@ -1004,8 +1004,9 @@ class VerifySlotTest(SlotHarness, unittest.TestCase):
         entries = {entry["repository"]: entry for entry in self.history()}
         self.assertEqual(len(self.history()), 2)
         for entry in entries.values():
-            self.assertEqual(set(entry), {"command", "exit", "held_seconds", "place", "repository",
-                                          "started", "waited_seconds"})
+            self.assertEqual(set(entry), {"command", "exit", "held_seconds", "lane", "place",
+                                          "repository", "started", "waited_seconds"})
+            self.assertEqual(entry["lane"], "long")
         command = " ".join(" ".join([sys.executable, "-c", CHILD]).split()[:3])
         beta_entry, alpha_entry = entries["example/beta"], entries["example/alpha"]
         self.assertEqual(beta_entry["exit"], 4)
