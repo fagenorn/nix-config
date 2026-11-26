@@ -299,6 +299,10 @@ class GuideTest(unittest.TestCase):
             with self.subTest(needle=needle):
                 self.assertIn(needle, self.section)
 
+    def test_the_guide_says_a_run_peaked_on_another_day_is_not_counted(self):
+        self.assertIn("whose peak is dated on another day", self.section)
+        self.assertIn("counted in no `verify_runs`", self.section)
+
     def test_the_guide_names_the_recorded_events(self):
         for needle in (
             "ram_disk_attached", "vm_started", "floor_kill", "verify_run", "verify_started", "ci_job_started",
