@@ -16,9 +16,10 @@ no markers. A `skipIf` or `skipif` whose first argument (or `condition=`) is the
 name `False`, and a `skipUnless` whose is `True`, never skips and is no marker; any
 other condition is one.
 
-C# markers: C1 `Skip` followed by `=` at the top level of the arguments of a
-`Fact`, `Theory`, `SkippableFact`, `SkippableTheory` or `InlineData` attribute, and
-`Ignore`, `IgnoreReason` or `Explicit` followed by `=` and a value other than `false`
+C# markers: C1 `Skip` followed by `=` (any value), and `Explicit` followed by `=` and a
+value other than `false` or `null`, at the top level of the arguments of a `Fact`,
+`Theory`, `SkippableFact`, `SkippableTheory`, `InlineData`, `MemberData` or
+`ClassData` attribute, and `Ignore`, `IgnoreReason` or `Explicit` followed by `=` and a value other than `false`
 or `null` at the top level of the arguments of a `TestCase` or `TestCaseSource`
 attribute;
 C2 an attribute named `Ignore` or `Explicit`; C3 `Skip`, `SkipWhen`, `SkipUnless`
@@ -69,12 +70,12 @@ PYTEST_OWNERS = frozenset({"pytest", "mark"})
 PYTEST_NAMES = frozenset({"skip", "skipif", "importorskip"})
 DECORATOR_NAMES = frozenset({"skip", "skipIf", "skipUnless"})
 INERT_CONDITIONS = {"skipIf": "False", "skipif": "False", "skipUnless": "True"}
-CS_SKIP_KEYS = frozenset({"Skip"})
 CS_FACT_KEYS = frozenset({"Skip", "Explicit"})
 CS_IGNORE_KEYS = frozenset({"Ignore", "IgnoreReason", "Explicit"})
 CS_ARGUMENT_KEYS = {
     "Fact": CS_FACT_KEYS, "Theory": CS_FACT_KEYS, "SkippableFact": CS_FACT_KEYS,
-    "SkippableTheory": CS_FACT_KEYS, "InlineData": CS_SKIP_KEYS,
+    "SkippableTheory": CS_FACT_KEYS, "InlineData": CS_FACT_KEYS,
+    "MemberData": CS_FACT_KEYS, "ClassData": CS_FACT_KEYS,
     "TestCase": CS_IGNORE_KEYS, "TestCaseSource": CS_IGNORE_KEYS,
     "TestFixture": CS_IGNORE_KEYS, "TestFixtureSource": CS_IGNORE_KEYS}
 CS_OFF_VALUES = frozenset({"false", "null"})

@@ -19,6 +19,7 @@ import unittest
 from pathlib import Path
 
 from agent_tools.delivery import never_rise, rule_ids, skipped_test_lint
+from agent_tools.delivery.dotnet_solution import SOLUTION_ROOT
 from agent_tools.delivery.never_rise import Rise, Snapshot, Violation
 
 from .never_rise_world import commit_all, fixture_env, mark_base, repo, write
@@ -136,6 +137,21 @@ class SkippedTestLintTest(unittest.TestCase):
         expected = "".join(
             f"{line}\n" for path in sorted(files) for line in lines_of(path, files[path]))
         self.assertEqual((done.returncode, done.stdout), (1, expected))
+
+    def test_a_planted_xunit_file_under_the_solution_root_counts_each_skip_and_zero_once_fixed(self):
+        fixtures = Path(__file__).resolve().parents[1] / "tests/fixtures/dotnet-lint"
+        path = f"{SOLUTION_ROOT}/Planted.Tests/SkippedTests.cs"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = repo(tmp)
+            write(root, path, (fixtures / "SkippedTests.cs.fixture").read_text("utf-8"))
+            commit_all(root)
+            planted = self.run_command("--repo-root", str(root))
+            write(root, path, (fixtures / "SkippedTestsFixed.cs.fixture").read_text("utf-8"))
+            commit_all(root)
+            fixed = self.run_command("--repo-root", str(root))
+        expected = "".join(f"B23 {path}:{n}\n" for n in (8, 12, 15, 19, 23, 27, 31, 35, 39))
+        self.assertEqual((planted.returncode, planted.stdout), (1, expected))
+        self.assertEqual((fixed.returncode, fixed.stdout), (0, ""))
 
     def test_a_skipped_suite_counts_each_test_inside_it_and_a_test_counts_once(self):
         def klass(count):
