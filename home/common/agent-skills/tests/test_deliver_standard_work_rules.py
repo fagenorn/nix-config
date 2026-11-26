@@ -139,6 +139,19 @@ class WorkRulesTest(unittest.TestCase):
             self.assertEqual([len(f) for f in found], [1, 1], prefix)
             self.assertEqual(found[0], found[1], prefix)
 
+    def test_the_comment_above_the_probe_rule_stays_within_the_comment_cap(self):
+        for path in (program.PROGRAM, program.PROGRAM.with_name("deliver-batch.js")):
+            with self.subTest(path.name):
+                lines = path.read_text(encoding="utf-8").splitlines()
+                end = next(i for i, line in enumerate(lines) if line.startswith("const PROBE_RULE = "))
+                start = end
+                while lines[start - 1].startswith("//"):
+                    start -= 1
+                block = lines[start:end]
+                self.assertTrue(block)
+                self.assertLessEqual(len(block), 5)
+                self.assertLessEqual(max(len(line) for line in block), 120)
+
 
 if __name__ == "__main__":
     unittest.main()

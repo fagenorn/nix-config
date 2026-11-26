@@ -171,8 +171,8 @@ const REPLY_ALONE = 'Call StructuredOutput alone in its own message, never besid
 // A reviewer that detaches the worktree to run a script at the commit under review leaves the next run's setup stopping
 // on the detached HEAD. The same line is in deliver-standard.js, added in readReview() so no review step misses it.
 const READ_ONLY = 'Never check out, switch, reset or stash in the worktree: read another commit with git show.'
-// These three lines are the same lines in deliver-standard.js. Every implementer and reviewer brief starts with the tool
-// rules and PROBE_RULE, the text the testing standard states as its rule on stress probes.
+// These three lines are the same lines in deliver-standard.js. Every implementer and reviewer brief starts with the
+// tool rules and PROBE_RULE, the text the testing standard states as its rule on stress probes.
 const PROBE_RULE = 'A stress probe with large or deeply nested inputs fixes a finite cap on time and peak memory before it starts, starts at a size that fits in 1 GiB, grows in steps (for example doubling), measures time and peak memory at each step and stops before a step whose projected peak would exceed the cap or at the first step that grows faster than its input, never an unbounded loop or one giant input on a shared host. A test that proves a memory bound measures the peak at a small capped size (for example with tracemalloc at a nesting depth whose peak stays under a few hundred MiB) and passes only when that peak is within the claimed limit, never by running the large case.'
 const TOOL_RULES = dir => `Change files only with the Edit and Write tools, never with a shell heredoc or an inline interpreter writing them; put scratch and probe files in ${dir} (create it with mkdir -p), never under /tmp; run a one-off evaluation as a script file kept in that directory and run by path, never as an inline program handed to an interpreter on its command line or through a heredoc.`
 const WORKERS = ['implementer', 'reviewer', 'reviewer-lite']
