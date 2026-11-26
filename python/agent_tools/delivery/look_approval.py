@@ -149,21 +149,22 @@ Every call prints one JSON object on one stdout line with `command` (`look-appro
    `look_marker.merged_under_look`), all decide an own-files line with `look_marker.own_files_untouched`
    through `look_marker.kept`, so the writer and every reader agree. Without the flag `carry` reads
    only the line of its own rule: an own-files line short-circuits nothing.
-   Picture match (issue 1892): `--own-files` with pictures given falls back to the pictures when a merge
-   touched an own file. (I1) `--own-files` opens no picture first: a sync that touched no own file carries
-   by the own-files rule (`rule` `own-files`, `pictures` null). (I2) When `settle_own_files` is false, the
-   approval is `approved` with a digest, pictures were given and `look_marker.own_file_changed` names a file,
+   Picture match: `--own-files` with pictures given falls back to the pictures when a merge touched an
+   own file. `--own-files` opens no picture first: a sync that touched no own file carries by the
+   own-files rule (`rule` `own-files`, `pictures` null). When `settle_own_files` is false, the approval is
+   `approved` with a digest, pictures were given, `look_marker.own_file_changed` names a file and
+   `look_marker.merge_added_file` names none (every touched file is one the pull request itself changed),
    the pictures are read, and it is `carried` with `rule` `picture-match`, `pictures` the digest and the
-   `look_marker.carry_sentence` line exactly when that digest equals the approval's. (I2a) When
-   `own_file_changed` names nothing (a truncated or unreadable listing) the answer stays the bare
-   `own-files-touched` with `rule` `own-files`, no picture read and nothing posted. (I3) `moved` and
-   `not-merges` are decided first, so a non-merge commit never carries by pictures. (I4) A mismatch is
-   `needed` with `pictures-differ: ` and every given path joined by `, ` in flag order before, after,
-   picture. (I5) A picture file that cannot be opened or reads zero bytes is `needed` with
-   `pictures-unrendered: <first such path>` (`pictures` null); without `--own-files` an unreadable picture
-   is still a usage error. (I6) An approval with no `pictures` field keeps the bare `own-files-touched`.
-   (I7) The reuse check is the strict `look_marker.carry_line` of the picture-match form, so a digest-only
-   line of the pair does not stop the write. `rule` may therefore be `picture-match`.
+   `look_marker.carry_sentence` line exactly when that digest equals the approval's. When
+   `own_file_changed` names nothing (a truncated or unreadable listing), or a merge introduced a file
+   `merge_added_file` names, the answer stays the bare `own-files-touched` with `rule` `own-files`, no
+   picture read and nothing posted. `moved` and `not-merges` are decided first, so a non-merge commit
+   never carries by pictures. A mismatch is `needed` with `pictures-differ: ` and every given path joined
+   by `, ` in flag order before, after, picture. A picture file that cannot be opened or reads zero bytes
+   is `needed` with `pictures-unrendered: <first such path>` (`pictures` null); without `--own-files` an
+   unreadable picture is still a usage error. An approval with no `pictures` field keeps the bare
+   `own-files-touched`. The reuse check is the strict `look_marker.carry_line` of the picture-match form,
+   so a digest-only line of the pair does not stop the write. `rule` may therefore be `picture-match`.
    An approval with a `pictures` digest and no picture given (the manager took the pictures)
    is carried by the own-files rule once the pictures' inputs are also unchanged: it is decided as
    `--own-files` is, then `A...H` must list no file of a look file set at the base (`.github/look-files.json`,
@@ -475,7 +476,8 @@ def carry(args: argparse.Namespace) -> int:
             if not lm.settle_own_files(args.from_head, args.head, base, read):
                 touched = lm.own_file_changed(args.from_head, args.head, _seen(args, base, read)) \
                     if inputs or match else None
-                if match and touched is not None:
+                if match and touched is not None \
+                        and lm.merge_added_file(args.from_head, args.head, _seen(args, base, read)) is None:
                     # A merge changed an own file: the approval stands when the pictures re-rendered byte-identical.
                     rule = state["rule"] = lm.PICTURE_MATCH_RULE
                     args.digest, unrendered = _read_pictures(args.paths)

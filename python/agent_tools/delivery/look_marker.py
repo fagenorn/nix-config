@@ -239,6 +239,7 @@ class Candidate:
     pictures: str | None = None
     line: int | None = None
     own_line: int | None = None
+    matched: bool = False  # `line` is a picture-match line only: it holds only where `merges_only` does
 
 
 @dataclass(frozen=True)
@@ -394,9 +395,8 @@ def carry_fields(issue: int, pr: int, approved_head: str, head: str, pictures: s
                  rule: str | None = None) -> dict[str, str]:
     """The fields of a look-carry line, in marker order; ValueError outside the grammar.
 
-    A digest names the pictures rule; None names the look-files rule; `rule` of
-    `OWN_FILES_RULE` names the own-files rule and takes no digest; `rule` of `PICTURE_MATCH_RULE`
-    names the digest and the rule, in that order, and requires the digest.
+    A digest names the pictures rule, None the look-files rule; `rule` of `OWN_FILES_RULE` takes no
+    digest and `PICTURE_MATCH_RULE` requires one, the line naming both.
     """
     _positive("issue", issue)
     _positive("pr", pr)
@@ -448,14 +448,16 @@ def carry_matches(fields: Mapping[str, str], issue: int, pr: int, approved_head:
     when `rule` is None (the reader); None names the look-files rule and the line holds no `pictures`
     field; `rule` of `OWN_FILES_RULE` names the own-files rule, a line with `rule=own-files` and no
     `pictures` field; `rule` of `PICTURE_MATCH_RULE` names the strict picture-match form, a line
-    holding this digest and `rule=picture-match` (the writer's contention). The reader and the
-    writer's contention share it.
+    holding this digest and `rule=picture-match` (the writer's contention); `PICTURES_RULE` names
+    the strict digest-only form. The reader and the writer's contention share it.
     """
     wanted = {"issue": str(issue), "pr": str(pr), "from": approved_head, "to": head}
     if any(fields.get(key) != value for key, value in wanted.items()):
         return False
     if rule == OWN_FILES_RULE:
         return fields.get("rule") == OWN_FILES_RULE and "pictures" not in fields
+    if rule == PICTURES_RULE:
+        return fields.get("pictures") == pictures and "rule" not in fields
     if rule == PICTURE_MATCH_RULE:
         return fields.get("pictures") == pictures and fields.get("rule") == PICTURE_MATCH_RULE
     if pictures is not None:
@@ -671,7 +673,10 @@ def carry_candidate(comments: Iterable[Mapping[str, Any]], issue: int, pr: int, 
         return Candidate(issue, latest.fields["head"], latest.fields["answer"], latest.comment_id)
     line = carry_line(comments, issue, pr, latest.fields["head"], head, pictures)
     own = carry_line(comments, issue, pr, latest.fields["head"], head, None, OWN_FILES_RULE)
-    return Candidate(issue, latest.fields["head"], latest.fields["answer"], latest.comment_id, pictures, line, own)
+    matched = line is not None and carry_line(comments, issue, pr, latest.fields["head"], head, pictures,
+                                              PICTURES_RULE) is None
+    return Candidate(issue, latest.fields["head"], latest.fields["answer"], latest.comment_id, pictures, line, own,
+                     matched)
 
 
 def carry_rule(comments: Iterable[Mapping[str, Any]], candidate: Candidate) -> str | None:
@@ -866,6 +871,19 @@ def own_file_changed(approved_head: str, head: str, carry: Carry) -> str | None:
     return named[0] if named else None
 
 
+def merge_added_file(approved_head: str, head: str, carry: Carry) -> str | None:
+    """The first name `B...H` lists that `B...A` does not, from the reads `own_files_untouched` uses; else None.
+
+    A file no commit of the pull request changed before the approval, so a merge itself introduced it.
+    """
+    own = compare_files(carry.reads.get(compare_path(carry.base, approved_head)))
+    whole = compare_files(carry.reads.get(compare_path(carry.base, head)))
+    if own is None or whole is None:
+        return None
+    named = sorted(set(whole) - set(own))
+    return named[0] if named else None
+
+
 def picture_input_changed(approved_head: str, head: str, carry: Carry) -> str | None:
     """The first name `A...H` lists that a picture was rendered from, else None.
 
@@ -973,7 +991,7 @@ def kept(candidate: Candidate, head: str, carry: Carry) -> Kept:
         if candidate.line is None:
             return Kept(False)
         found = merges_only(candidate.head, head, carry)
-        if found.kept or found.need:
+        if found.kept or found.need or candidate.matched:
             return found
         base, reads = carry.base, carry.reads
         contents = contents_path(base)

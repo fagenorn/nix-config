@@ -1053,6 +1053,20 @@ class CarryVerbTest(unittest.TestCase):
         self.assertEqual((code, out["verdict"], out["rule"], out["comment_id"]), (0, "carried", "picture-match", 100))
         self.assertEqual(len(self.posted()), 1)
 
+    def test_carry_own_files_with_matching_pictures_refuses_a_file_the_merge_introduced(self):
+        introduced = ("docs/new.md",)
+        for name, merged in (("only the new file", introduced), ("an own file and the new file", (PAGE, *introduced))):
+            with self.subTest(name):
+                self.world = ForgeWorld(self)
+                compares = self.merges()
+                compares[f"compare/{A}...{HEAD}"] = cmp(merged)
+                compares[f"compare/{B}...{HEAD}"] = cmp([PAGE, *introduced], commits=[(A, [FORK]), (HEAD, [A, self.X])])
+                self.seed([self.pics(5)], compares)
+                code, out = self.pm(*self.both())
+                self.assertEqual((code, out["verdict"], out["reason"], out["rule"], out["pictures"],
+                                  out["comment_id"]), (0, "needed", "own-files-touched", "own-files", None, None))
+                self.assertEqual(self.posted(), [])
+
     def test_a_truncated_compare_never_carries_by_matching_pictures(self):
         compares = self.merges()
         compares[f"compare/{A}...{HEAD}"] = cmp([f"docs/f{n}.md" for n in range(lm.COMPARE_FILE_LIMIT)])
@@ -1073,6 +1087,19 @@ class CarryVerbTest(unittest.TestCase):
         self.seed([self.pics(5), self.pm_line(6)], compares)
         code, out = run(*STATUS)
         self.assertEqual((code, out["verdict"], out["comment_id"], out["kept_from"]), (0, "approved", 5, A))
+
+    def test_status_holds_a_picture_match_line_only_where_every_commit_is_a_merge(self):
+        served = {f"compare/{B}...{A}": cmp([PAGE], commits=[(A, [FORK])]),
+                  f"compare/{A}...{HEAD}": cmp(["docs/x.md"]),
+                  f"compare/{B}...{HEAD}": cmp(commits=[(A, [FORK]), (HEAD, [A])]),
+                  f"contents/.github/look-files.json?ref={B}": CONSOLE}
+        for name, line, expected in (("digest-only line", comment(6, self.LINE), (0, "approved", 5, A)),
+                                     ("picture-match line", self.pm_line(6), (0, "needed", None, None))):
+            with self.subTest(name):
+                self.world = ForgeWorld(self)
+                self.seed([self.pics(5), line], served)
+                code, out = run(*STATUS)
+                self.assertEqual((code, out["verdict"], out["comment_id"], out["kept_from"]), expected)
 
     def test_a_picture_match_line_with_no_or_another_digest_carries_nothing(self):
         for change in ({"pictures": None}, {"pictures": "0" * 64}):
