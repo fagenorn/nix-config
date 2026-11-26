@@ -777,6 +777,119 @@ class VerifySlotTest(SlotHarness, unittest.TestCase):
         self.assertIsNotNone(held[1])
         self.assertEqual(take(1), (None, "same_repository"))
 
+    def test_declared_repositories_hold_up_to_their_own_limits_and_an_unnamed_one_holds_one(self):
+        self.declare(verify_slots=5, verify_repository_slots={"example/alpha": 2, "example/beta": 1})
+        urls = {"alpha-one": "git@github.com:example/alpha.git", "alpha-two": "https://github.com/Example/alpha",
+                "alpha-three": "ssh://git@github.com/example/alpha.git", "beta-one": "git@github.com:example/beta.git",
+                "beta-two": "git@github.com:example/beta.git", "gamma-one": "git@github.com:example/gamma.git",
+                "gamma-two": "git@github.com:example/gamma.git"}
+        where = {name: self.repository(name, url) for name, url in urls.items()}
+        runs = {name: self.start(name, cwd=where[repo]) for name, repo in (
+            ("a1", "alpha-one"), ("a2", "alpha-two"), ("b1", "beta-one"), ("g1", "gamma-one"))}
+        for name in runs:
+            self.assertTrue(wait_for(self.mark(name, "start")))
+        for name, repo in (("a3", "alpha-three"), ("b2", "beta-two"), ("g2", "gamma-two")):
+            runs[name] = self.start(name, cwd=where[repo])
+            self.assertEqual(read_place(runs[name])[2][0], SAME_REPOSITORY_LINE)
+            self.assertFalse(self.mark(name, "start").exists())
+        runs["a1"].kill()
+        runs["a1"].wait()
+        self.assertTrue(wait_for(self.mark("a3", "start")))
+        self.assertFalse(self.mark("a1", "end").exists())
+        for name in ("b1", "g1"):
+            self.release(name)
+        for name in ("b2", "g2"):
+            self.assertTrue(wait_for(self.mark(name, "start")))
+        for name in runs:
+            self.release(name)
+        for name, proc in runs.items():
+            if name != "a1":
+                self.assertEqual(self.finish(proc)[0], 0)
+
+    def test_a_live_run_under_its_repositorys_declared_limit_waits_ahead_without_being_held_back(self):
+        self.declare(verify_slots=2, verify_repository_slots={"example/alpha": 2})
+        where = {name: self.repository(name, f"git@github.com:example/{name.split('-')[0]}.git")
+                 for name in ("alpha-one", "alpha-two", "beta", "gamma")}
+        first, beta = self.start("a1", cwd=where["alpha-one"]), self.start("b", cwd=where["beta"])
+        for name in ("a1", "b"):
+            self.assertTrue(wait_for(self.mark(name, "start")))
+        ordinary = self.start("c", cwd=where["gamma"])
+        read_place(ordinary)
+        live = self.start("a2", "--live", cwd=where["alpha-two"])
+        place, _, lines = read_place(live)
+        self.assertEqual((lines[0], place), (WAITING_LINE.format(count=2), 1))
+        self.release("b")
+        self.assertTrue(wait_for(self.mark("a2", "start")))
+        self.assertFalse(self.mark("c", "start").exists())
+        self.release("a1")
+        self.assertTrue(wait_for(self.mark("c", "start")))
+        self.release("a2")
+        self.release("c")
+        for proc in (first, beta, live, ordinary):
+            self.assertEqual(self.finish(proc)[0], 0)
+
+    def test_an_older_waiter_held_back_by_its_repository_leaves_the_free_slot_to_another_repository(self):
+        self.declare(verify_slots=2, verify_repository_slots={"example/alpha": 2})
+        alpha = self.repository("alpha", "git@github.com:example/alpha.git")
+        beta = self.repository("beta", "git@github.com:example/beta.git")
+        first = self.start("a1", cwd=alpha)
+        self.assertTrue(wait_for(self.mark("a1", "start")))
+        ticket = self.slots / "ticket-000000000100.lock"
+        older = verify_queue.open_shared(ticket)
+        try:
+            fcntl.flock(older, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            os.write(older, json.dumps({"key": "older", "live": False, "repository": "example/alpha",
+                                        "reserved_until": None}).encode())
+            other = self.start("b", cwd=beta)
+            self.assertTrue(wait_for(self.mark("b", "start")))
+            self.assertTrue(ticket.exists())
+        finally:
+            os.close(older)
+        self.release("a1")
+        self.release("b")
+        self.assertEqual((self.finish(first)[0], self.finish(other)[0]), (0, 0))
+
+    def test_a_holder_of_a_higher_repository_lock_holds_back_a_repository_whose_limit_fell(self):
+        self.declare(verify_slots=2, verify_repository_slots={"example/alpha": 1})
+        alpha = self.repository("alpha", "git@github.com:example/alpha.git")
+        beta = self.repository("beta", "git@github.com:example/beta.git")
+        self.slots.mkdir()
+        old = [verify_queue.open_shared(self.slots / "slot-1.lock"),
+               verify_queue.open_shared(verify_queue.repository_lock_paths(self.slots, "example/alpha", 2)[1])]
+        try:
+            for descriptor in old:
+                fcntl.flock(descriptor, fcntl.LOCK_EX)
+            first = self.start("a", cwd=alpha)
+            _, holders, lines = read_place(first)
+            self.assertEqual((lines[0], holders), (SAME_REPOSITORY_LINE, "a verify run"))
+            other = self.start("b", cwd=beta)
+            self.assertTrue(wait_for(self.mark("b", "start")))
+            self.assertFalse(self.mark("a", "start").exists())
+        finally:
+            for descriptor in old:
+                os.close(descriptor)
+        self.assertTrue(wait_for(self.mark("a", "start")))
+        self.release("a")
+        self.release("b")
+        self.assertEqual((self.finish(first)[0], self.finish(other)[0]), (0, 0))
+
+    def test_a_declared_limit_above_the_slot_count_builds_no_lock_past_the_count(self):
+        self.slots.mkdir()
+        taken = []
+        self.addCleanup(lambda: [os.close(fd) for fd in taken])
+        with mock.patch.object(verify_queue, "repository_lock_paths",
+                               wraps=verify_queue.repository_lock_paths) as paths:
+            results = [verify_slot._try_slots(self.slots, 2, True, "example/alpha", 1_000_000_000)
+                       for _ in range(3)]
+        for held, _ in results:
+            taken.extend(held or ())
+        self.assertEqual([reason for _, reason in results], [None, None, "taken"])
+        self.assertTrue(all(fd is not None for held, _ in results[:2] for fd in held))
+        self.assertTrue(all(call.args[2] <= 2 for call in paths.call_args_list))
+        self.assertEqual({path.name for path in self.slots.glob("repo-*.lock")},
+                         {path.name for path in verify_queue.repository_lock_paths(
+                             self.slots, "example/alpha", 2)})
+
     def test_a_waiter_behind_a_paused_earlier_waiter_prints_the_holders_that_left(self):
         self.declare(verify_slots=2)
         holders = [self.start("x"), self.start("y")]

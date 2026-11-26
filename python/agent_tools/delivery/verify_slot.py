@@ -48,14 +48,16 @@ that the holders of all `slot-*.lock` files, itself included, number at most the
 count, and gives its slot back and waits otherwise. A count lowered while a higher-numbered
 slot is still held therefore never admits a run beside that holder.
 
-Repositories. `verify-slot run` never admits two holders of one repository at once, since
-two suites of one project share resources such as a single test database. The
+Repositories. `verify-slot run` admits at most a repository's declared number of holders at
+once (`verify_repository_slots`, 1 for a repository the declaration does not name), since
+two suites of one project may share resources such as a single test database. The
 repository is the `origin` remote of the working directory, normalized to `owner/repo` and
 lowercased; a run outside a repository, or in one without `origin`, is its own group and is
-excluded by no other run. A holder takes an exclusive non-blocking `flock` on `repo-<digest>.lock`
-(`GROUP_LOCK`) in the slot directory only after it took its slot and passed the count recheck,
-and gives the slot back and waits while another holder has it. The lock is taken after the slot
-so a waiter holds neither and a live waiter still goes first (ADR-delivery-016 D6): ordinary
+excluded by no other run. A holder takes an exclusive non-blocking `flock` on one of its
+repository's `repository_lock_paths`, never past the slot count (`GROUP_LOCK` names the first),
+in the slot directory only after it took its slot and passed the count recheck, and gives the
+slot back and waits while another holder has each. The lock is taken after the slot so a
+waiter holds neither and a live waiter still goes first (ADR-delivery-016 D6): ordinary
 runs of other repositories defer to a live run only while its repository is under the limit:
 a live waiter that its repository holds back holds no marker and gets no priority. Live runs
 take the repository lock like ordinary ones. The lock file is not a slot file and no count
@@ -67,8 +69,8 @@ directory under `queue.lock` (see `agent_tools.delivery.verify_queue`) and holds
 `flock` on it while it waits, so a SIGKILLed waiter leaves the queue at once. A holder writes
 its repository and command into its slot file, which is how a waiter counts the holders of each
 repository. Free slots go one at a time, in service order (live waiters, then ticket number),
-to the waiters whose repository holds fewer slots than `REPOSITORY_LIMIT`; only the first
-admitted waiter takes a slot, so no later waiter takes one before it. A waiter that its
+to the waiters whose repository holds fewer slots than the limit in their own ticket; only the
+first admitted waiter takes a slot, so no later waiter takes one before it. A waiter that its
 repository holds back keeps its place and blocks no one. An ordinary run still probes the live
 marker when it takes a slot, so it defers to a waiting live run of an older `verify-slot`; while
 a live ticket is queued the marker is not probed, since the queue already serves live waiters first
@@ -101,9 +103,9 @@ declaration or a history that cannot be read.
 
 Count (D1). It is the `verify_slots` member of the host declaration
 (`agent_tools.delivery.host_admission`), `DEFAULT_VERIFY_SLOTS` (1) when the declaration
-file is absent. A declaration entry that exists and is invalid, or is not a file, is a setup
-error: nothing runs. `HOME` locates the declaration, so an unset or empty `HOME` is a setup
-error too.
+file is absent; a repository's limit is its `verify_repository_slots` member. A declaration
+entry that exists and is invalid, or is not a file, is a setup error: nothing runs. `HOME`
+locates the declaration, so an unset or empty `HOME` is a setup error too.
 
 `--wait-limit SECONDS` (a positive integer) bounds the wait for a slot; without it the wait
 has no limit. The limit is checked before each further try, so a slot freed after it is not
@@ -171,7 +173,6 @@ PROBE_SECONDS = 1.0
 DEFAULT_SLOT_DIR = "/tmp/agent-verify-slots"
 SLOT_DIR_ENV = "VERIFY_SLOT_DIR"
 USAGE_EXIT = 2
-REPOSITORY_LIMIT = 1
 CANNOT_START_EXIT = 127
 
 _open_slot = verify_queue.open_shared
@@ -188,15 +189,17 @@ class SlotError(Exception):
     """A usage or setup error; the command exits 2 and runs nothing."""
 
 
-def slot_count() -> int:
-    """The declared verify slot count, `DEFAULT_VERIFY_SLOTS` when no declaration exists."""
+def host_limits(group: str | None) -> tuple[int, int]:
+    """The declared verify slot count and `group`'s own repository limit; defaults without a declaration."""
     try:
         declaration = host_admission.load_declaration()
     except host_admission.DeclarationError as error:
         if error.reason_code == "declaration_missing":
-            return host_admission.DEFAULT_VERIFY_SLOTS
+            return host_admission.DEFAULT_VERIFY_SLOTS, host_admission.DEFAULT_REPOSITORY_VERIFY_SLOTS
         raise SlotError(f"the host declaration is invalid: {error}") from None
-    return host_admission.verify_slots(declaration)
+    limit = (host_admission.DEFAULT_REPOSITORY_VERIFY_SLOTS if group is None
+             else host_admission.repository_verify_slots(declaration, group))
+    return host_admission.verify_slots(declaration), limit
 
 
 def slot_dir() -> Path:
@@ -330,10 +333,10 @@ def _try_slots(directory: Path, count: int, live: bool, group: str | None, repos
     A slot file that cannot be opened counts as taken, as it does for every holder count. A taken
     slot is kept only while the holders of all slot files, this one included, number at most
     `count`: a count lowered beneath a still-held higher slot is honoured (`taken`). Then, when
-    `group` is set, it also takes one of the repository's `repository_limit` locks, and gives the
-    slot back while every one is held (`same_repository`). An ordinary run lastly gives both back
-    while a live waiter holds the marker (`deferred`); a live run skips that check, and so does a
-    caller that passes `probe_marker=False`.
+    `group` is set, it also takes one of the repository's first `repository_limit` locks, never
+    past `count`, and gives the slot back while every one is held (`same_repository`). An ordinary
+    run lastly gives both back while a live waiter holds the marker (`deferred`); a live run skips
+    that check, and so does a caller that passes `probe_marker=False`.
     """
     for index in range(count):
         path = directory / f"slot-{index}.lock"
@@ -355,7 +358,7 @@ def _try_slots(directory: Path, count: int, live: bool, group: str | None, repos
         held_group = None
         if group is not None:
             try:
-                held_group = _take_repository(directory, group, repository_limit)
+                held_group = _take_repository(directory, group, min(repository_limit, count))
             except BaseException:
                 os.close(descriptor)
                 raise
@@ -388,29 +391,28 @@ def _bounded(pause: float, start: float, wait_limit: int | None) -> float:
 
 
 def _decide(directory: Path, count: int, live: bool, group: str | None, key: str, command: str,
-            ticket: verify_queue.Ticket | None) -> tuple:
+            ticket: verify_queue.Ticket | None, limit: int) -> tuple:
     """One decision under the queue lock: `(ticket, held, reason, eligible, place, holders)`.
 
     `held` is the slot taken, `reason` why the run waits (None while it waits for an earlier
     admitted waiter) and `eligible` whether its repository is under the limit.
     """
     if ticket is None:
-        ticket = verify_queue.join(directory, key, live, group, time.time())
+        ticket = verify_queue.join(directory, key, live, group, time.time(), limit=limit)
     queue = verify_queue.waiters(directory, ticket, time.time())
     holders = verify_queue.read_holders(directory)
     free = max(0, count - len(holders))
     counts = verify_queue.holder_counts(
-        directory, holders, {waiter.repository for waiter in queue if waiter.repository},
-        REPOSITORY_LIMIT)
-    admitted = verify_queue.admitted(queue, counts, free, REPOSITORY_LIMIT)
-    eligible = group is None or counts.get(group, 0) < REPOSITORY_LIMIT
+        directory, holders, {waiter.repository for waiter in queue if waiter.repository})
+    admitted = verify_queue.admitted(queue, counts, free)
+    eligible = group is None or counts.get(group, 0) < ticket.limit
     place = verify_queue.place(queue, ticket.seq)
     reason = None
     if admitted and admitted[0].seq == ticket.seq:
         # A live waiter in the queue is ordered ahead by `admitted`, and one held back by its
         # repository may still hold a marker it drops only at its next poll, so the marker speaks
         # only for a live waiter of an older `verify-slot`, which no ticket shows.
-        held, reason = _try_slots(directory, count, live, group, REPOSITORY_LIMIT,
+        held, reason = _try_slots(directory, count, live, group, ticket.limit,
                                   probe_marker=not any(waiter.live for waiter in queue))
         if held is not None:
             try:
@@ -426,8 +428,8 @@ def _decide(directory: Path, count: int, live: bool, group: str | None, key: str
 
 
 def _acquire(directory: Path, count: int, wait_limit: int | None, run: _Run, live: bool,
-             group: str | None, key: str,
-             command: str) -> tuple[tuple[int, int | None] | None, int | None, int | None]:
+             group: str | None, key: str, command: str,
+             limit: int) -> tuple[tuple[int, int | None] | None, int | None, int | None]:
     """`(held, None, place)` on a taken slot, else `(None, exit code, place)` with nothing to run.
 
     `place` is where the run joined the queue, None if it never did. A live run holds the marker
@@ -466,7 +468,7 @@ def _acquire(directory: Path, count: int, wait_limit: int | None, run: _Run, liv
                 continue
             try:
                 ticket, held, reason, eligible, place, holders = _decide(
-                    directory, count, live, group, key, command, ticket)
+                    directory, count, live, group, key, command, ticket, limit)
                 if joined_place is None:
                     joined_place = place
                 if marker is not None and not eligible and held is None:
@@ -545,7 +547,7 @@ def run_command(argv: list[str], wait_limit: int | None, live: bool = False,
         group = repository_group(Path.cwd())
     except OSError:
         group = None
-    count = slot_count()
+    count, limit = host_limits(group)
     directory = slot_dir()
     try:
         _prepare_dir(directory)
@@ -564,7 +566,7 @@ def run_command(argv: list[str], wait_limit: int | None, live: bool = False,
     waited, held_seconds = 0.0, None
     try:
         try:
-            held, code, joined = _acquire(directory, count, wait_limit, run, live, group, key, command)
+            held, code, joined = _acquire(directory, count, wait_limit, run, live, group, key, command, limit)
         except OSError as error:
             raise SlotError(f"cannot take a slot in {directory}: {error}") from None
         acquired = True
