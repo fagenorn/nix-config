@@ -3405,7 +3405,7 @@ class NoCommitTaskTest(unittest.TestCase):
             self.assertFalse(label.startswith(("final-", "renew-final", "verify", "pr")), label)
         self.assertNotIn("partial", result["cont"])
         self.assertEqual([d.get("no_change") for d in result["cont"]["done"]], [True, True])
-        again, calls = run(args=dict(ARGS, cont=result["cont"]))
+        again, calls = run(args=dict(ARGS, cont=result["cont"]), patch={"setup": {"head": SHA}})
         self.assertEqual(again["stage"], "no-changes")
         self.assertEqual(labels(calls), ["setup"])
 
@@ -9229,7 +9229,7 @@ class SourceTest(unittest.TestCase):
             """The text without the #740 FORGE_TIMEOUT sentence (and its template-literal quoting), which each program adds in its own task."""
             return text.replace(" ${FORGE_TIMEOUT}", "").replace("`", "'")
 
-        for name in ("LAND_ACQUIRE", "LEASE_HOLD", "LOCK_RETURN", "RELEASE_AGAIN"):
+        for name in ("LAND_ACQUIRE", "LEASE_HOLD", "LEASE_BEAT", "LOCK_RETURN", "RELEASE_AGAIN"):
             with self.subTest(name=name):
                 self.assertEqual(bare(line(mine, name)), bare(line(batch, name)))
         # #941: the resolve scope and the probe before the land lock are one text in both programs.

@@ -248,6 +248,8 @@ const SLUG = SETUP.slug, INT = SETUP.integration_branch, MAX = SETUP.max_paralle
 // them.
 const LAND_ACQUIRE = (sha, wait, lease = false) => `forge-claim land acquire --repo ${SLUG} --branch ${INT} --sha ${sha}${wait ? ' --wait' : ''}${lease ? ' --lease' : ''}`
 const LEASE_HOLD = (sha, seconds) => `forge-claim land hold --repo ${SLUG} --branch ${INT} --sha ${sha}${seconds ? ` --seconds ${seconds}` : ''}`
+// A step that runs while the lease is held starts the beat first, byte for byte as deliver-standard.js has it.
+const LEASE_BEAT = sha => `First start the lease beat: run alone and exactly: ${LEASE_HOLD(sha)} --detach\nIt returns at once and leaves a background process that beats the land lease every 60 seconds for the whole step and stops by itself when your session ends. Go on only when it prints beating. When it prints anything else (not_held, unleased, an error or nothing) the lease is lost or not beating: stop at once, run nothing more and answer as you do when the step cannot be done (a failed or blocked answer, never a success) with lease lost in its notes or detail.\nThe background beat tells you nothing later, so immediately before every git push and every merge this step makes, run alone and exactly: ${LEASE_HOLD(sha)}\nWhen it prints not_held, do not push or merge: stop and answer as above.\n`
 const LOCK_RETURN = `Return its verdict (acquired, already_held, moved, land-contended, held_by, lost_to, or error on any other exit), lock_sha, by, detail, waited_s and waited_on from its output, and position and ahead when it prints them. ${FORGE_TIMEOUT}`
 const RELEASE_AGAIN = maybe => `When it prints not_held with lock_sha ${maybe}, run alone and exactly: forge-claim land release --repo ${SLUG} --branch ${INT} --sha ${maybe}, then return the verdict of that second release.\n`
 const RELEASE_FIRST = (sha, maybe) => `First, before anything below, release the cross-host landing lock of the branch ${INT}: run alone and exactly: forge-claim land release --repo ${SLUG} --branch ${INT} --sha ${sha}
@@ -884,6 +886,9 @@ const land = async (n, ready, via = {}) => {
   const silence = label => (lost.includes(label) ? 'answered twice with no usable review' : 'returned nothing')
   const out = (outcome, extra) => ({ issue: n, outcome, ...(pr ? { pr } : {}), ...(lost.length ? { lost_reviews: lost.slice() } : {}), ...(extra || {}) })
   const call = (prompt, label, opts) => ask(agent(withWork(prompt, opts, W), { label, phase: 'Land', ...opts }), label)
+  // The beat a step starts first while this landing holds the lease (a train holds none); a step that runs after
+  // the lock was released for a conflict holds nothing and starts none.
+  const held = () => (LEASE && lockHeld && lockSha ? LEASE_BEAT(lockSha) : '')
   // every FINDINGS reply of a landing is read here. An unusable one (see unusable) runs the same step once more as
   // <label>-again; a second is answered as null, so it spends no fix round. The step did answer, so the breaker is left
   // alone: the row names it in lost_reviews.
@@ -1015,7 +1020,7 @@ ${RULES}`, `land-ask-${n}`, { ...clerk, schema: ASK_SCHEMA })
     const label = `land-record-${n}-${c.record}`
     // The move may land and its answer be lost: the release then also tries expected (P10).
     if (!lockless && expected !== lockSha) lockMaybe = expected
-    const rec = await call(`The head of PR #${pr} of issue #${n} of ${SLUG} changed to ${expected} and passed its gate. Record it in the PR body.
+    const rec = await call(`${publish && !lockless ? held() : ''}The head of PR #${pr} of issue #${n} of ${SLUG} changed to ${expected} and passed its gate. Record it in the PR body.
 ${publish ? `First push that head, which is a reviewed fix commit not pushed yet: git -C ${W} fetch origin, confirm git -C ${W} rev-parse HEAD prints ${expected}, then run git -C ${W} push origin ${B}. When HEAD is another commit or the push fails, change nothing else and return ok false with the head you read.\n` : ''}1. Run gh pr view ${pr} --repo ${SLUG} --json body,headRefOid and confirm headRefOid is ${expected}. If it is not, change nothing and return ok false with the head it shows.
 2. Make a fresh directory with mktemp -d and write the body to a file in it, rewriting only the Accepted head line (the last line of the Evidence section) to exactly this text, everything else unchanged:
 Accepted head: ${expected}
@@ -1082,7 +1087,7 @@ ${RULES}`, `land-status-${n}-${c.record}`, { ...clerk, schema: STATUS_SCHEMA })
     c.sync++
     if (early || prelock) c.early++
     const label = `land-sync-${n}-${c.sync}`
-    const sy = early ? { status: 'conflicted', conflicted: true, head: expected, notes: `the probe before the land lock found a conflict with ${INT}${(early.files || []).length ? ` in ${early.files.join(', ')}` : ''}` } : await call(`Issue #${n} of ${SLUG} is being landed into ${INT}. Bring the branch ${B} up to date in the worktree ${W}.
+    const sy = early ? { status: 'conflicted', conflicted: true, head: expected, notes: `the probe before the land lock found a conflict with ${INT}${(early.files || []).length ? ` in ${early.files.join(', ')}` : ''}` } : await call(`${held()}Issue #${n} of ${SLUG} is being landed into ${INT}. Bring the branch ${B} up to date in the worktree ${W}.
 1. git -C ${W} fetch origin. If origin/${INT} is an ancestor of HEAD (git -C ${W} merge-base --is-ancestor origin/${INT} HEAD succeeds), change nothing and answer status current with head (git -C ${W} rev-parse HEAD, the full sha). When that head is not ${expected} (an earlier run of this step may have merged and pushed before it was interrupted), the answer also carries these facts, read without changing anything, every sha in full: ${AHEAD_FACTS(W, expected)}; and pushed (true only when git -C ${W} rev-parse origin/${B} prints that head).
 2. Otherwise merge it: git -C ${W} merge origin/${INT}. A clean merge: answer status done, conflicted false, head (the full sha of the merge commit).
 3. If the merge conflicts, do not resolve it: run git merge --abort inside ${W}, confirm no merge is left in progress (git -C ${W} rev-parse -q --verify MERGE_HEAD fails), and answer status conflicted, conflicted true, with head (the full sha of HEAD, unchanged) and the conflicting files in notes. A later step resolves it.
@@ -1160,7 +1165,7 @@ ${RULES}`, rlabel, { phase: 'Land', agentType: 'implementer', model: 'sonnet', s
       const after = followup ? SYNC_AFTER(W, mc, head) : ''
       c.syncReview++
       const reviewLabel = `land-sync-review-${n}-${c.syncReview}`, rereviewLabel = `land-sync-rereview-${n}-${c.syncReview}`
-      const rv = await readReview(`Issue #${n} of ${SLUG}, worktree ${W}, branch ${B}.
+      const rv = await readReview(`${held()}Issue #${n} of ${SLUG}, worktree ${W}, branch ${B}.
 Review the conflict resolution in merge commit ${mc}: git -C ${W} show --cc ${mc} and the resolved files ${JSON.stringify(merge.resolved_files || [])}; the tests run: ${JSON.stringify(merge.tests || [])}. Report Important or Critical defects only: a dropped change from either side, a broken merge of intent, a resolved file whose tests were not run.${merge.markers_checked === true ? '' : MARKERS_UNCHECKED}${followup ? DESCENDS(W, mc, head) : ''} Do not edit anything.
 ${RULES}`, reviewLabel, { agentType: 'reviewer', schema: SYNC_REVIEW_SCHEMA(followup) })
       // From here on the merge is resolved, so a landing that ends is a sync-review row, never a conflict one. Its
@@ -1180,7 +1185,7 @@ ${RULES}`, reviewLabel, { agentType: 'reviewer', schema: SYNC_REVIEW_SCHEMA(foll
         // One fix round per reviewed merge. It is no resync, so it spends neither MAX_SYNCS nor MERGE_REFUSAL_RETRIES,
         // and like the resolution it runs outside the lock. Only a fix the re-review passes is recorded: advance()
         // below takes the lock at it and waits for its checks.
-        const fix = await call(`Issue #${n} of ${SLUG}, worktree ${W}, branch ${B}.
+        const fix = await call(`${held()}Issue #${n} of ${SLUG}, worktree ${W}, branch ${B}.
 ${SYNC_FIX(W, mc, found, after)} Do not push: the program pushes the commit once its report records its tests and its review passes. ${PUSH_TESTS(GUARDS)}. ${COMMIT_SCOPE} ${IMPL_RETURN}
 ${RULES}`, `land-sync-fix-${n}-${c.syncReview}`, { agentType: 'implementer', model: 'sonnet', schema: IMPL })
         // As shipFix in deliver-standard.js: the fix starts at the reviewed merge, no commit is accepted only as a
@@ -1195,7 +1200,7 @@ ${RULES}`, `land-sync-fix-${n}-${c.syncReview}`, { agentType: 'implementer', mod
         }
         // the commit is not pushed yet; with no test command recorded it is never pushed or merged in this run.
         if (moved && !tested(fix)) return syncStop(UNTESTED, found[0], fix, { review: rv, ...tried })
-        const rr = await readReview(`Issue #${n} of ${SLUG}, worktree ${W}, branch ${B}.
+        const rr = await readReview(`${held()}Issue #${n} of ${SLUG}, worktree ${W}, branch ${B}.
 ${SYNC_REREVIEW(W, mc, found, fix, moved, after)}
 ${RULES}`, rereviewLabel, { agentType: 'reviewer', schema: FINDINGS })
         if (!rr) return syncStop(`the sync re-review ${silence(rereviewLabel)}`, found[0], fix, { review: rv, ...tried })
@@ -1343,7 +1348,7 @@ ${RULES}`, `land-pr-${n}`, { agentType: 'clerk', model: DEFAULT_CLERK_MODEL, eff
         if (mode === 'first') lockHeld = true
         return out('ci-failed', { failing: failingNames, ...extra })
       }
-      const fix = await call(`Issue #${n} of ${SLUG}: the checks of PR #${pr} failed at ${expected}: ${JSON.stringify(failingNames)}. Details: ${details || 'none given'}.
+      const fix = await call(`${mode === 'first' ? held() : ''}Issue #${n} of ${SLUG}: the checks of PR #${pr} failed at ${expected}: ${JSON.stringify(failingNames)}. Details: ${details || 'none given'}.
 ${mode === 'first' ? `${FIX_OFF_LOCK(lockSha)}\n` : mode === 'unasked' ? `${FIX_NO_LOCK}\n` : `${FIX_LEFT_QUEUE}\n`}Work in the worktree ${W} on branch ${B}. Find the cause in this branch's changes, fix the failing checks with the smallest change and a regression test, and commit. Do not push: the program pushes the commit once its report records its tests and its review passes. ${PUSH_TESTS(GUARDS)}. Never weaken, skip or delete a test or check to make it pass. ${COMMIT_SCOPE} ${IMPL_RETURN}
 When the failure has no cause in the code (an infrastructure, cache or network error in a setup step), change and commit nothing: ${RERUN_ALL(UNSET, SLUG, expected)}, do not wait for them, and return status done with the head unchanged (commit equal to start_head, ${expected}) and the error you saw in notes; the program then polls the checks itself.
 ${RULES}`, `land-fix-${n}`, { agentType: 'implementer', model: 'sonnet', schema: mode === 'first' ? { ...IMPL, properties: { ...IMPL.properties, lock_released: { type: 'boolean' } } } : IMPL })
@@ -1478,7 +1483,7 @@ ${stalePoll ? `${STALE_RERUN(UNSET, SLUG)}\n` : ''}${RULES}`, label, { ...lifecy
       }
 
       // One call: renew, the pre-merge lock check (a lock retaken after a loss rechecks first), then the merge (O3).
-      const mg = await recall(() => call(`${RENEW_FIRST}
+      const mg = await recall(() => call(`${held()}${RENEW_FIRST}
 Then re-check the cross-host landing lock of the branch ${INT} for PR #${pr}: run alone and exactly: ${LAND_ACQUIRE(expected, false, LEASE)}
 ${LOCK_RETURN} Return it as lock.
 Only when lock's verdict is already_held or moved, merge PR #${pr} of issue #${n} of ${SLUG} into ${INT}; a re-run must not merge twice.
