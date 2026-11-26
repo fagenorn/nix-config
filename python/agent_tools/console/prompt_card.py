@@ -97,7 +97,6 @@ ALLOWED = "allowed"
 REFUSED = "refused"
 UNEXPLAINED = "unexplained"
 CLOSED = "closed"
-ENDED = "ended"
 CLOSE_REASONS = ("expired", ENDED)
 PHASES = ("ask", "wait", "close")
 NONCE = re.compile(r"[0-9a-f]{32}")

@@ -36,6 +36,19 @@ from .test_deliver_batch_program import (
 TIER = "integration"
 
 
+def beat(hold):
+    """The lease beat a held step starts first: `hold --detach`, which returns at once and beats in a background process
+    for the whole step, the stop on anything but beating, and the one-shot hold before each push and merge. Written out
+    here, not read from the program."""
+    return (f"First start the lease beat: run alone and exactly: {hold} --detach\n"
+            "It returns at once and leaves a background process that beats the land lease every 60 seconds for the whole step and stops by itself when your session ends. "
+            "Go on only when it prints beating. "
+            "When it prints anything else (not_held, unleased, an error or nothing) the lease is lost or not beating: stop at once, run nothing more and answer as you do when the step cannot be done "
+            "(a failed or blocked answer, never a success) with lease lost in its notes or detail.\n"
+            f"The background beat tells you nothing later, so immediately before every git push and every merge this step makes, run alone and exactly: {hold}\n"
+            "When it prints not_held, do not push or merge: stop and answer as above.\n")
+
+
 class ConflictedSyncOutsideLockTest(unittest.TestCase):
     """A sync merge that conflicts is aborted under the land lock and resolved, tested, reviewed and fixed outside it; the
     reviewed head is read green before it takes the lock again, waiting, and a clean merge never leaves it."""
@@ -577,6 +590,67 @@ class BatchGreenFirstTest(unittest.TestCase):
         self.assertIn(f"--sha {B} --wait --lease", prompt(calls, "land-lock-1-1"))
         self.assertLess(labels(calls).index("land-record-1-1"), labels(calls).index("land-lock-1-1"))
 
+    HOLD = f"forge-claim land hold --repo owner/repo --branch dev --sha {SHA}"
+
+    def test_the_sync_step_under_the_lease_beats_it_in_the_background_for_its_whole_length(self):
+        """A sync merge that runs its tests holds the lease for minutes; a beat sent once lapses at 180 s."""
+        result, calls, _ = run(replies={"land-take-1": dict(self.TAKEN, behind=True), "land-sync-1-1": self.MERGED})
+        self.assertEqual(row(result, 1)["outcome"], "landed")
+        text = prompt(calls, "land-sync-1-1")
+        self.assertEqual(text.count("forge-claim land hold"), 2)  # the detached beat, and the hold before the push
+        self.assertIn(beat(self.HOLD), text)
+        self.assertEqual(text.count("--detach\n"), 1)
+        self.assertLess(text.index("--detach\n"), text.index("4. After a clean merge, push"))
+        # No step that holds nothing starts one: the pull request step, the checks read before the lock and the take.
+        for label in ("land-pr-1", "land-take-1"):
+            self.assertNotIn("forge-claim land hold", prompt(calls, label))
+
+    def test_the_merge_step_under_the_lease_beats_it_before_the_recheck_and_the_merge(self):
+        """A landing that goes straight from the take to the merge keeps the lease beating through a slow merge."""
+        result, calls, _ = run()
+        self.assertEqual(row(result, 1)["outcome"], "landed")
+        merge = prompt(calls, "land-merge-1")
+        self.assertTrue(merge.startswith("First start the lease beat: run alone and exactly: forge-claim land hold --repo owner/repo --branch dev --sha "), merge[:120])
+        self.assertEqual(merge.count("--detach\n"), 1)
+        self.assertLess(merge.index("--detach\n"), merge.index("re-check the cross-host landing lock"))
+        self.assertLess(merge.index("--detach\n"), merge.index("gh pr merge"))
+
+    def test_a_sync_step_that_reports_the_lease_lost_is_followed_by_no_push_and_no_merge(self):
+        """The loss is injected into the held sync step, whose last step is a push: nothing lands after it."""
+        lost = {"status": "blocked", "conflicted": False, "notes": "lease lost"}
+        result, calls, _ = run(replies={"land-take-1": dict(self.TAKEN, behind=True), "land-sync-1-1": lost})
+        self.assertEqual((row(result, 1)["outcome"], row(result, 1)["stage"]), ("stopped", "land-sync"))
+        after = calls[labels(calls).index("land-sync-1-1") + 1:]
+        # Only the release follows: no push, checks or merge step.
+        self.assertEqual([c["label"] for c in after], ["land-unlock-1"])
+        self.assertIn("immediately before every git push and every merge this step makes", prompt(calls, "land-sync-1-1"))
+
+    def test_a_merge_step_that_reports_the_lease_lost_merges_nothing_more(self):
+        lost = {"merged": False, "notes": "lease lost"}
+        result, calls, _ = run(replies={"land-merge-1": lost})
+        self.assertEqual((row(result, 1)["outcome"], row(result, 1)["stage"]), ("stopped", "merge"))
+        self.assertEqual(labels(calls).count("land-merge-1"), 1)
+
+    def test_a_conflicted_sync_beats_while_it_aborts_and_the_resolution_outside_the_lock_starts_none(self):
+        out = run_full(replies={"land-sync-1-1": ABORTED, "land-take-1": [dict(self.TAKEN, behind=True), {}], "land-checks-1-2": green(B)})
+        calls = out["calls"]
+        self.assertIn(beat(self.HOLD), prompt(calls, "land-sync-1-1"))
+        self.assertNotIn("forge-claim land hold", prompt(calls, "land-sync-resolve-1-1"))
+
+    def test_a_clean_merge_with_commits_on_top_beats_through_its_review_and_fix(self):
+        """The review and the fix of a clean merge with a follow-up commit run while the lease is still held."""
+        found = {"verdict": "findings", "descends": True, "findings": [{"severity": "important", "summary": "dropped a change", "failing_input": "x"}]}
+        merged = {"status": "done", "conflicted": False, "head": C, "merge_commit": B, "notes": "ok"}
+        fixed = {"status": "done", "start_head": C, "commit": "d" * 40, "notes": "ok", "tests": ["t"]}
+        out = run_full(replies={"land-take-1": dict(self.TAKEN, behind=True), "land-sync-1-1": merged, "land-sync-review-1-1": found,
+                                "land-sync-fix-1-1": fixed, "land-checks-1-2": green("d" * 40)})
+        calls = out["calls"]
+        ls = labels(calls)
+        self.assertNotIn("land-unlock-1", ls[:ls.index("land-sync-rereview-1-1")])
+        for label in ("land-sync-1-1", "land-sync-review-1-1", "land-sync-fix-1-1", "land-sync-rereview-1-1"):
+            with self.subTest(label=label):
+                self.assertIn(beat(self.HOLD), prompt(calls, label))
+
     def test_a_red_check_at_a_synced_head_releases_the_lock_before_the_fix(self):
         red = {"state": "failed", "head": B, "failing": ["ci"]}
         result, calls, _ = run(replies={"land-take-1": [dict(self.TAKEN, behind=True), {}], "land-sync-1-1": self.MERGED,
@@ -590,3 +664,20 @@ class BatchGreenFirstTest(unittest.TestCase):
         self.assertLess(ls.index("land-checks-1-3"), len(ls) - 1 - ls[::-1].index("land-take-1"))
         self.assertNotIn("forge-claim land", prompt(calls, "land-checks-1-3"))
         self.assertIn(f"--sha {FIX} --wait --lease", prompt(calls, "land-take-1"))
+
+
+class DiagnosisBeatTest(unittest.TestCase):
+    """A red poll under the lease is diagnosed with the lease held, so the fix step starts the beat first."""
+
+    OWN_RED = base.OwnRedOutsideLockTest
+
+    def test_the_diagnosis_under_the_lease_starts_the_beat_before_it_reads_a_log(self):
+        """The diagnosis keeps the lease while it reads the job log, which can outlast the 3-minute lapse."""
+        own = self.OWN_RED
+        out = run_full(replies=dict(own.HELD_RED, **{"land-fix-1": dict(own.FIXED, tests=["t"], lock_released=True),
+                                                     "land-record-1-1": {"ok": True, "head": FIX}, "land-checks-1-3": green(FIX)}))
+        fix = prompt(out["calls"], "land-fix-1")
+        detach = f"forge-claim land hold --repo owner/repo --branch dev --sha {SHA} --detach\n"
+        self.assertIn(detach, fix)
+        self.assertLess(fix.index(detach), fix.index("decide first, quickly"))
+        self.assertLess(fix.index(detach), fix.index(own.RELEASE))

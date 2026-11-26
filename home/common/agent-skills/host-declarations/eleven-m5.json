@@ -6,6 +6,13 @@
     "fagenorn/nix-config": 2,
     "elevenyellow/jarbird": 1
   },
+  "verify_short_lane": {
+    "slots": 1,
+    "bound_seconds": 30,
+    "commands": {
+      "fagenorn/nix-config": [["just", "lint"]]
+    }
+  },
   "routes": {
     "claude-code": {
       "support": "supported",

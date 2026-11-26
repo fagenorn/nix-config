@@ -401,7 +401,7 @@ def _restore(tmp: Path, root: Path | None, project_id: str, before: list[dict],
         return entry["project_id"] == project_id and entry["root"] in mine
 
     try:
-        if any(ours(entry) for entry in service.read_fleet(agent_platform.registry_path()) or []):
+        if any(ours(entry) for entry in register.read_fleet(agent_platform.registry_path()) or []):
             with agent_platform.registry_transaction() as entries:
                 agent_platform.write_registry([entry for entry in entries if not ours(entry)])
     except Exception as error:  # noqa: BLE001 -- the comparison below decides
@@ -440,7 +440,7 @@ def _restore(tmp: Path, root: Path | None, project_id: str, before: list[dict],
     shutil.rmtree(tmp, ignore_errors=True)
     if os.path.lexists(tmp):
         leftovers.append(str(tmp))
-    after = service.read_fleet(agent_platform.registry_path()) or []
+    after = register.read_fleet(agent_platform.registry_path()) or []
     if (sorted(after, key=lambda e: e["project_id"])
             != sorted(before, key=lambda e: e["project_id"])):
         leftovers.append(str(agent_platform.registry_path()))
@@ -573,7 +573,7 @@ def _decide(args, fetch, post, tmp_root, project_id, poll, settle, shown) -> tup
     except (OSError, ValueError):
         return NOT_YET, {"status": "no_token"}
     registry = agent_platform.registry_path()
-    registry_before = service.read_fleet(registry)
+    registry_before = register.read_fleet(registry)
     if registry_before is None and os.path.lexists(registry):
         return NOT_YET, {"status": "registry_unreadable"}
     registry_before = registry_before or []

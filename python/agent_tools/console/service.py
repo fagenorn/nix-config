@@ -690,7 +690,7 @@ keeps that root, so a granted retry clears the card it answers. Any other except
 trust_check_failed <Type>` and 500 `checking failed`.
 
 Folder trust at start (#1183, ADR-console-034): when the service is given `trust_at_start`,
-`start()` starts `TRUST_START_THREAD`, which reads the registry once with `read_fleet` and runs
+`start()` starts `TRUST_START_THREAD`, which reads the registry once with `register.read_fleet` and runs
 `_grant_trust` with cause `console-start` for every registered project in every target
 (`~/.claude.json` when given a `trust_home`, and every profile), one row per project, in registry
 order, off the ingest lock. A pair already trusted reads `already` and is not written; a `failed`
@@ -1417,7 +1417,7 @@ with its traceback, or the whole returned report with its failed `checks`); one 
 ends the run. The console never writes the registry: the child does.
 
 Movement (#1110, the reading `movement.py` makes and ADR-console-042 uses):
-when the service is given a `pull_reader`, a thread, `MOVEMENT_THREAD`, started by `start()`, calls
+when the service is given a `pull_reader` (or a `title_reader`, which then only reads titles), a thread, `MOVEMENT_THREAD`, started by `start()`, calls
 `poll_movement()` at once and then every `movement_seconds` (`MOVEMENT_SECONDS`, two minutes). One
 poll reads, one project after another and never inside the ingest lock, each registered project
 with at least one sprint that has not ended (`sprints.ended_at` is None); first, under the lock, it
@@ -1443,6 +1443,8 @@ it reads as no movement), `console: movement_release_invalid <project_id> <trans
 release store holds a transaction that is not readable; one line until a good read, and it moves
 nothing) and `console: movement_poll_failed <Type>: <message>` (an exception escaped a round; the
 loop goes on). The cost is two forge calls per project with a running sprint per `MOVEMENT_SECONDS`.
+Issue titles: with a `title_reader` (`movement.read_titles`) the thread then calls `poll_titles()`: at most one
+forge call per project per `MOVEMENT_SECONDS`, none once its titles are known, `console: titles_read_failed <project_id> <Type>: <message>` on a failure (`movement.py`).
 The sessions half (#1185): under the same lock the poll computes, per running project,
 `view.sprint_sessions_of` (the live sessions that carry a running sprint's manager name, are its
 `manager_session` or run a delivery of one of its issues); only for a project with at least one
@@ -2306,35 +2308,6 @@ def default_choice_file() -> Path:
     """The file the console keeps its profile choice in: `chosen-profile` in the accounts directory."""
     accounts = os.environ.get("CLAUDE_ACCOUNTS_DIR") or str(Path.home() / ".claude-accounts")
     return Path(accounts) / manager.CHOICE_FILE
-
-
-def signature(path: Path) -> tuple[int, int, int] | None:
-    """What the registry file looks like now; None when it cannot be statted."""
-    try:
-        stat = os.stat(path)
-    except OSError:
-        return None
-    return stat.st_mtime_ns, stat.st_size, stat.st_ino
-
-
-def read_fleet(path: Path) -> list[dict] | None:
-    """The registered entries, or None when the registry is not a reading."""
-    try:
-        document = json.loads(Path(path).read_bytes().decode("utf-8"))
-    except FileNotFoundError:
-        return None
-    except (OSError, ValueError) as error:
-        return _unreadable(f"{type(error).__name__}: {error}")
-    violations = agent_platform.validate_registry(document)
-    if violations:
-        first = violations[0]
-        return _unreadable(f"{first['pointer']}: {first['message']}")
-    return list(document["projects"])
-
-
-def _unreadable(reason: str) -> None:
-    print(f"console: registry_unreadable {reason}", file=sys.stderr)
-    return None
 
 
 class ConsoleHandler(http.server.BaseHTTPRequestHandler):
@@ -4572,6 +4545,7 @@ class ConsoleService(ActionPermit):
                  tracker_seconds: float = TRACKER_SECONDS,
                  adoption_seconds: float = ADOPTION_SECONDS,
                  pull_reader: Callable[..., tuple[movement.PullRequest, ...]] | None = None,
+                 title_reader: Callable[..., Mapping[int, str]] | None = None,
                  local_reader: Callable[[str, str | None], movement.LocalReading] = movement.read_local,
                  session_reader: Callable[[Sequence[Path], Sequence[movement.SessionTarget]],
                                           tuple[movement.SessionReading, ...]] = movement.read_sessions,
@@ -4804,6 +4778,9 @@ class ConsoleService(ActionPermit):
         self._adoption_seconds = adoption_seconds
         self._adoption_thread: threading.Thread | None = None
         self._pull_reader = pull_reader
+        self._title_reader = title_reader
+        self._titles: dict[str, dict[int, str]] = {}
+        self._titles_asked: dict[str, frozenset[int]] = {}
         self._local_reader = local_reader
         self._session_reader = session_reader
         self._movement_seconds = movement_seconds
@@ -4946,7 +4923,7 @@ class ConsoleService(ActionPermit):
             self._access = guest.access_list(events)
             self._settle_stops()
             self._publish()
-            self._signature = signature(self.registry)
+            self._signature = register.signature(self.registry)
             self.refresh()
             self.poll_sessions()
             self.poll_deliveries()
@@ -5205,7 +5182,7 @@ class ConsoleService(ActionPermit):
             pin_launches=self._pin_launches.launched,
             managers=self._launcher is not None, pending=self._pending,
             nudges=self._nudger is not None, looked=self._looked, movement=self._movement, engine_runs=self._engine_states,
-            moves=self._move_notes)
+            moves=self._move_notes, issue_titles=self._titles)
         return inputs
 
     def _publish(self, *, guests: bool = True) -> None:
@@ -5328,7 +5305,7 @@ class ConsoleService(ActionPermit):
     def refresh(self) -> list[Event]:
         """Append the difference between the registry and the log, and publish."""
         with self._ingest:
-            entries = read_fleet(self.registry)
+            entries = register.read_fleet(self.registry)
             if entries is None:
                 return []
             appended = self.log.append(registry_changes(self._states, entries))
@@ -6334,7 +6311,7 @@ class ConsoleService(ActionPermit):
         Runs after the adder returned, so the add deadline bounds creation only, and before the
         sign-in starts. Nothing here fails the add: an unreadable registry grants nothing.
         """
-        entries = read_fleet(self.registry)
+        entries = register.read_fleet(self.registry)
         if entries is None:
             if os.path.lexists(self.registry):
                 print(f"console: trust_account_registry_unreadable{' ' + name if named else ''}",
@@ -6358,7 +6335,7 @@ class ConsoleService(ActionPermit):
         only around its bookkeeping, and every write goes through the folder-trust writer lock.
         Stops between projects once `close` began; one failing project does not stop the rest.
         """
-        entries = read_fleet(self.registry)
+        entries = register.read_fleet(self.registry)
         if entries is None:
             if os.path.lexists(self.registry):
                 print("console: trust_start_registry_unreadable", file=sys.stderr)
@@ -6379,7 +6356,7 @@ class ConsoleService(ActionPermit):
         """
         if self._adopter is None:
             raise sprints.Refused(register.UNAVAILABLE)
-        entries = read_fleet(self.registry)
+        entries = register.read_fleet(self.registry)
         if entries is None:
             if os.path.lexists(self.registry):
                 raise sprints.Refused(register.registry_unreadable())
@@ -6413,7 +6390,7 @@ class ConsoleService(ActionPermit):
                 self._fold(self.log.append([register.ended(register.dismissed(latest))]))
                 self._publish()
                 return
-        entries = read_fleet(self.registry)
+        entries = register.read_fleet(self.registry)
         if entries is None:
             if os.path.lexists(self.registry):
                 raise sprints.Refused(register.registry_unreadable())
@@ -11105,37 +11082,21 @@ class ConsoleService(ActionPermit):
             belong = belonging[project_id]
             if belong or absent[project_id]:
                 try:
-                    targets = ()
-                    if belong:
-                        if registry is None:
-                            registry = sessions.read_session_registry(self._session_dirs())
-                        targets = tuple(
-                            movement.SessionTarget(
-                                sid, registry[sid].pid if sid in registry else None, belong[sid],
-                                nudged[project_id].get(sid, ()))
-                            for sid in sorted(belong))
-                    targets += tuple(
-                        movement.SessionTarget(sid, None, absent[project_id][sid], (), True)
-                        for sid in sorted(absent[project_id]))
+                    if belong and registry is None:
+                        registry = sessions.read_session_registry(self._session_dirs())
+                    targets = movement.session_targets(
+                        belong, absent[project_id], nudged[project_id], registry or {})
                     at = int(self._clock() * 1000)
                     readings = self._session_reader(self._projects_dirs(), targets)
                     local = dataclasses.replace(local, sessions=tuple(readings), sessions_ms=at)
                 except Exception as error:
                     print(f"console: movement_sessions_failed {project_id} "
                           f"{type(error).__name__}: {error}", file=sys.stderr)
-            pulls = None
             slug = self._slug_of(root) if self._pull_reader is not None else None
-            if slug is not None:
-                try:
-                    pulls = answer.with_retries(
-                        lambda: self._pull_reader(slug, pattern, cancelled=self._stop.is_set),
-                        clock=self._monotonic, sleep=self._write_sleep)
-                except Exception as error:
-                    if (isinstance(error, ForgeError) and error.code == "cancelled") or self._stop.is_set():
-                        return
-                    print(f"console: movement_read_failed {project_id} "
-                          f"{type(error).__name__}: {error}", file=sys.stderr)
-            if self._stop.is_set():
+            ended, pulls = (False, None) if slug is None else self._forge_read(
+                project_id, "movement_read_failed",
+                lambda: self._pull_reader(slug, pattern, cancelled=self._stop.is_set))
+            if ended or self._stop.is_set():
                 return
             key = f"release {project_id}"
             if local.invalid:
@@ -11152,6 +11113,44 @@ class ConsoleService(ActionPermit):
                     locking=locking, live=live)
                 self._publish()
 
+    def _forge_read(self, project_id: str, line: str, read: Callable[[], object]) -> tuple[bool, object]:
+        """`read()` with retries: (True, None) when the poll ended, (False, None) on a failure, else (False, answer)."""
+        try:
+            return False, answer.with_retries(read, clock=self._monotonic, sleep=self._write_sleep)
+        except Exception as error:
+            if (isinstance(error, ForgeError) and error.code == "cancelled") or self._stop.is_set():
+                return True, None
+            print(f"console: {line} {project_id} {type(error).__name__}: {error}", file=sys.stderr)
+            return False, None
+
+    def poll_titles(self) -> None:
+        """One read of the issue titles of every project with a running sprint; see the module docstring."""
+        if self._title_reader is None:
+            return
+        with self._ingest:
+            plan = movement.titles_plan(self._sprints.values(), self._states, self._titles, self._titles_asked)
+            for table in (self._titles, self._titles_asked):
+                for project_id in table.keys() - plan.keys():
+                    del table[project_id]
+            roots = {project_id: self._states[project_id].root for project_id in plan}
+        for project_id, (batch, asked) in sorted(plan.items()):
+            if self._stop.is_set():
+                return
+            slug = self._slug_of(roots[project_id]) if batch else None
+            if slug is None:
+                continue
+            ended, found = self._forge_read(
+                project_id, "titles_read_failed",
+                lambda: self._title_reader(slug, batch, cancelled=self._stop.is_set))
+            if ended:
+                return
+            with self._ingest:
+                if project_id in self._states and not self._closed:
+                    if found:
+                        self._titles.setdefault(project_id, {}).update(found)
+                    self._titles_asked[project_id] = asked
+                    self._publish()
+
     def _live_issues(self, project_id: str) -> tuple[frozenset[int], frozenset[int]]:
         """Under the ingest lock: the issues of the runs in sessions not ended, and those of them sitting in a lock step."""
         sids = {sid for sid, session in self._sessions.items()
@@ -11165,10 +11164,11 @@ class ConsoleService(ActionPermit):
     def _move(self) -> None:
         while True:
             try:
-                self.poll_movement()
+                if self._pull_reader is not None:
+                    self.poll_movement()
+                self.poll_titles()
             except Exception as error:
-                print(f"console: movement_poll_failed {type(error).__name__}: {error}",
-                      file=sys.stderr)
+                print(f"console: movement_poll_failed {type(error).__name__}: {error}", file=sys.stderr)
             if self._stop.wait(self._movement_seconds):
                 return
 
@@ -11199,7 +11199,7 @@ class ConsoleService(ActionPermit):
 
     def _watch(self) -> None:
         while not self._stop.wait(self._poll_seconds):
-            current = signature(self.registry)
+            current = register.signature(self.registry)
             if current == self._signature:
                 continue
             try:
@@ -11241,7 +11241,7 @@ class ConsoleService(ActionPermit):
             self._adoption_thread = threading.Thread(
                 target=self._adopt, name=ADOPTION_THREAD, daemon=True)
             self._adoption_thread.start()
-        if self._pull_reader is not None:
+        if self._pull_reader is not None or self._title_reader is not None:
             self._movement_thread = threading.Thread(
                 target=self._move, name=MOVEMENT_THREAD, daemon=True)
             self._movement_thread.start()

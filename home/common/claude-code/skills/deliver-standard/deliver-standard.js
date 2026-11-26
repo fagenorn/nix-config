@@ -2358,10 +2358,17 @@ Re-review only these previously reported findings for task ${t.n} against the fi
   else tip = impl.commit
   if (partial === t.n) partial = undefined
 }
-// When every task ended with no commit, the branch holds nothing to review, verify or land: the final review would get
-// an empty range and the pull request no commit. Read from the done record (no_change), which a resume carries, never
-// from a head. The tasks' outputs are in place and recorded; the owner closes the issue.
-if (plan.tasks.length && plan.tasks.every(t => taskLog.some(d => d.n === t.n && d.no_change === true))) {
+// Every task ended with no commit and the branch is not ahead of its base: nothing to review or land. no_change is
+// read from the done record a resume carries. A branch ahead holds commits whatever each task's reply said, so it is
+// reviewed. Comparisons are between commit ids only: a declared branch's base is a ref name (origin/dev), never a
+// sha. An unread head says nothing about the branch, so it stops at setup instead.
+const aheadOfBase = (head, base) => isCommit(head) && isCommit(base) && !sameSha(head, base)
+const branchAhead = aheadOfBase(tip, setup.base_sha) || declared(plan).some(b => aheadOfBase(branchTips[b.name], b.head))
+const everyNoChange = plan.tasks.length > 0 && plan.tasks.every(t => taskLog.some(d => d.n === t.n && d.no_change === true))
+if (everyNoChange && !isCommit(tip)) {
+  return stop('setup', { missing: ['head'], details: `every task is recorded with no new commit, but the setup read no head of ${setup.branch}: whether the branch is ahead of its base is not established, so it is neither sent to the final review nor stopped as empty; read the head and resume` })
+}
+if (everyNoChange && !branchAhead) {
   return stop('no-changes', { details: `every task ended with no commit: the branch ${setup.branch} holds nothing to review or land. The tasks' outputs are in place; close the issue by hand, or amend the plan if a file change was meant` })
 }
 
@@ -2888,9 +2895,12 @@ if (LOOK_ANSWER && (LOOK_ANSWER.answer === 'changes' || LOOK_ANSWER.answer === '
   const lostClaim = await renew('look-fix', 'Verify')
   if (lostClaim) return lostClaim
   const lookFix = await call(`${CTX}\n${PLAN_REF} The owner looked at the pull request head and asked for changes; the owner's words are the one finding of this fix round: ${JSON.stringify(asked)}. Fix it in the worktree, with a regression test for each real defect, then commit. ${FIX_TESTS} ${COMMIT_SCOPE} ${IMPL_RETURN}\n${RULES}`, { label: 'look-fix', phase: 'Verify', agentType: 'implementer', model: 'sonnet', schema: IMPL })
-  if (noteUntested('look-fix', lookFix, setup.head)) return stop('look-fix', { fix: lookFix, details: UNTESTED })
-  if (!implDone(lookFix) || sameSha(lookFix.commit, lookFix.start_head)) return stop('look-fix', { fix: lookFix })
-  const lookReview = await readReview(`${CTX}\nRe-review only this owner finding against the fix: ${span(lookFix)}; the implementer's notes: ${lookFix.notes}. Findings: ${JSON.stringify(asked)}. Report the finding if it is still unresolved and any new Important or Critical defect the fix introduced.`, { label: 'look-fix-review', phase: 'Verify', agentType: 'reviewer', schema: FINDINGS })
+  // Whether the fix changed anything is read against the head the owner looked at, which the program recorded, never
+  // against the start_head the reply names: an earlier attempt's commit is already in that start.
+  const lookBase = lookAt && present(lookAt.head) ? lookAt.head : setup.head
+  if (noteUntested('look-fix', lookFix, lookBase)) return stop('look-fix', { fix: lookFix, details: UNTESTED })
+  if (!implDone(lookFix) || sameSha(lookFix.commit, lookBase)) return stop('look-fix', { fix: lookFix })
+  const lookReview = await readReview(`${CTX}\nRe-review only this owner finding against the fix: ${span({ start_head: lookBase, commit: lookFix.commit })}; the implementer's notes: ${lookFix.notes}. Findings: ${JSON.stringify(asked)}. Report the finding if it is still unresolved and any new Important or Critical defect the fix introduced.`, { label: 'look-fix-review', phase: 'Verify', agentType: 'reviewer', schema: FINDINGS })
   if (!lookReview || findingsOf(lookReview).length) return stop('look-fix-review', { review: lookReview })
   VERIFY_CACHED = false
   verified = null
@@ -3006,8 +3016,12 @@ released and not_held are both fine (give it a Bash timeout of 20 minutes). Retu
 const FIX_NO_LOCK = `The landing lock of the branch ${INT} is not held and was not asked for yet: run no forge-claim command.`
 const FIX_LEFT_QUEUE = `The land lock was released before this fix; run no forge-claim command.`
 const LEASE_WAIT_TIMEOUT = 'The acquire carries --wait --lease: give it a Bash timeout of 60 minutes (3600000 ms) and never run it in the background.'
-// A step that runs while the lease is held beats it first, whatever the beat answers.
-const LEASE_BEAT = sha => `First run alone and exactly: ${LEASE_HOLD(sha)}; whatever it answers, go on.\n`
+// A step that runs while the lease is held starts the beat first: `hold --detach` beats once, answers not_held at
+// once when the lease is gone, and leaves a process that beats every 60 s for the step's whole length, however long
+// its own commands run; it ends by itself, at its bound or when the session that started it is gone. The step goes on
+// only when it printed beating, and runs the one-shot hold again before each push and merge, since the background
+// beat tells it nothing.
+const LEASE_BEAT = sha => `First start the lease beat: run alone and exactly: ${LEASE_HOLD(sha)} --detach\nIt returns at once and leaves a background process that beats the land lease every 60 seconds for the whole step and stops by itself when your session ends. Go on only when it prints beating. When it prints anything else (not_held, unleased, an error or nothing) the lease is lost or not beating: stop at once, run nothing more and answer as you do when the step cannot be done (a failed or blocked answer, never a success) with lease lost in its notes or detail.\nThe background beat tells you nothing later, so immediately before every git push and every merge this step makes, run alone and exactly: ${LEASE_HOLD(sha)}\nWhen it prints not_held, do not push or merge: stop and answer as above.\n`
 const BEHIND_AFTER = `Only when lock's verdict is acquired, already_held or moved, run git -C ${W} fetch origin and return behind true when git -C ${W} merge-base --is-ancestor origin/${INT} HEAD fails (the base moved past the head), else false; otherwise run nothing else and return only lock.`
 // The probe a landing runs before it asks for the land lock, the same text in deliver-batch.js. git merge-tree
 // --write-tree (git 2.38 or later) merges in memory, touching neither the worktree nor the index, and its exit status
@@ -3448,7 +3462,7 @@ ${RULES}`, { label: `sync-resolve-${syncs}`, phase: 'Ship', agentType: 'implemen
     if (aborted || merge.conflicted || followup) {
       cleanSince = false
       const sr = await readReview(`${CTX}
-Review the conflict resolution in merge commit ${merge.merge_commit}: git -C ${W} show --cc ${merge.merge_commit} and the resolved files ${JSON.stringify(merge.resolved_files || [])}; the tests run: ${JSON.stringify(merge.tests || [])}. Report Important or Critical defects only: a dropped change from either side, a broken merge of intent, a resolved file whose tests were not run.${merge.markers_checked === true ? '' : MARKERS_UNCHECKED}${followup ? DESCENDS(W, mc, merge.head) : ''}`, { label: `sync-review-${syncs}`, phase: 'Ship', agentType: 'reviewer', schema: SYNC_REVIEW_SCHEMA(followup) })
+${lockHeld ? LEASE_BEAT(lockSha) : ''}Review the conflict resolution in merge commit ${merge.merge_commit}: git -C ${W} show --cc ${merge.merge_commit} and the resolved files ${JSON.stringify(merge.resolved_files || [])}; the tests run: ${JSON.stringify(merge.tests || [])}. Report Important or Critical defects only: a dropped change from either side, a broken merge of intent, a resolved file whose tests were not run.${merge.markers_checked === true ? '' : MARKERS_UNCHECKED}${followup ? DESCENDS(W, mc, merge.head) : ''}`, { label: `sync-review-${syncs}`, phase: 'Ship', agentType: 'reviewer', schema: SYNC_REVIEW_SCHEMA(followup) })
       if (!sr) return stop('sync-review', { pr: PR, review: sr })
       // Only the review's own proof accepts a head that is not the merge commit; a missing answer is no proof.
       if (followup && sr.descends !== true) return stop('sync', { pr: PR, sync: merge, details: `the resolution names the head ${merge.head} and the merge commit ${mc}, and the head does not descend from it: only a reviewed merge commit lands` })
@@ -3458,8 +3472,8 @@ Review the conflict resolution in merge commit ${merge.merge_commit}: git -C ${W
         const w = await shipFix({
           stage: 'sync-fix', label: `fix-sync-${syncs}`, reviewLabel: `fix-sync-review-${syncs}`,
           rebuttal: true,
-          fixPrompt: `${CTX}\n${SYNC_FIX(W, merge.merge_commit, findingsOf(sr), after)} Do not push. ${FIX_TESTS} ${COMMIT_SCOPE} ${IMPL_RETURN}\n${RULES}`,
-          reviewPrompt: (fix, moved) => `${CTX}\n${SYNC_REREVIEW(W, merge.merge_commit, findingsOf(sr), fix, moved, after)}`,
+          fixPrompt: `${CTX}\n${lockHeld ? LEASE_BEAT(lockSha) : ''}${SYNC_FIX(W, merge.merge_commit, findingsOf(sr), after)} Do not push. ${FIX_TESTS} ${COMMIT_SCOPE} ${IMPL_RETURN}\n${RULES}`,
+          reviewPrompt: (fix, moved) => `${CTX}\n${lockHeld ? LEASE_BEAT(lockSha) : ''}${SYNC_REREVIEW(W, merge.merge_commit, findingsOf(sr), fix, moved, after)}`,
         })
         if (!w.ok) return stop('sync-fix', { pr: PR, review: sr, fix: w.fix, ...(w.details ? { details: w.details } : {}) })
         if (!w.review || findingsOf(w.review).length) return stop('sync-review', { pr: PR, review: w.review, sync_review: sr, fix: w.fix })
@@ -3499,7 +3513,7 @@ ${RULES}`, { label, phase: 'Ship', agentType: 'clerk', model: DEFAULT_CLERK_MODE
         log(`${failingNames.join(', ') || 'a check'} failed at the head the lock was taken at; its fix is reviewed outside the land lock`)
         if (fix.lock_released !== true) await unlock(true)
       } : null,
-      fixPrompt: `${CTX}\n${PLAN_REF} The checks of PR #${PR} failed at ${expected}: ${failing}. Log tail: ${ck.details || 'none given'}.${mode === 'first' ? `\n${FIX_OFF_LOCK(lockSha)}\n` : mode === 'unasked' ? `\n${FIX_NO_LOCK}\n` : mode === 'left' ? `\n${FIX_LEFT_QUEUE}\n` : ' '}Find the cause in this branch's changes (git -C ${W} diff ${RANGE}), fix it with the smallest change and a regression test that fails without it, then commit. Do not push: the next checks step pushes. Never weaken, skip or delete a test or check to make it pass. ${FIX_TESTS} ${COMMIT_SCOPE} ${IMPL_RETURN}
+      fixPrompt: `${CTX}\n${PLAN_REF} The checks of PR #${PR} failed at ${expected}: ${failing}. Log tail: ${ck.details || 'none given'}.${mode === 'first' ? `\n${lockHeld ? LEASE_BEAT(lockSha) : ''}${FIX_OFF_LOCK(lockSha)}\n` : mode === 'unasked' ? `\n${FIX_NO_LOCK}\n` : mode === 'left' ? `\n${FIX_LEFT_QUEUE}\n` : ' '}Find the cause in this branch's changes (git -C ${W} diff ${RANGE}), fix it with the smallest change and a regression test that fails without it, then commit. Do not push: the next checks step pushes. Never weaken, skip or delete a test or check to make it pass. ${FIX_TESTS} ${COMMIT_SCOPE} ${IMPL_RETURN}
 When the failure has no cause in the code (an infrastructure, cache or network error in a setup step), change and commit nothing: ${RERUN_ALL(UNSET, SLUG, expected)}, do not wait for them, and return status done with the head unchanged (commit equal to start_head, ${expected}) and the error you saw in notes; the program then polls the checks itself.\n${RULES}`,
       reviewPrompt: fix => `${CTX}\nReview this fix for failing checks: ${span(fix)}; the failure it answers: ${failing} (${ck.details || 'no log'}); notes: ${fix.notes}. Report Important or Critical defects only, above all a weakened, skipped or deleted test or check, or a fix with no regression test. Do not edit anything.`,
     })

@@ -8,6 +8,7 @@ import inspect
 import io
 import json
 import os
+import signal
 import socket
 import sys
 import tempfile
@@ -15,6 +16,7 @@ import textwrap
 import threading
 import time
 import unittest
+import unittest.mock
 from contextlib import redirect_stderr
 from pathlib import Path
 
@@ -829,6 +831,132 @@ class RunTest(unittest.TestCase):
         self.assertIs(runs_for("linux"), SignIns)
         self.assertIs(runs_for("darwin"), SignIns)
         self.assertIsNone(runs_for("win32"))
+
+
+class KillGroupTest(unittest.TestCase):
+    """An ended client group reads as ended once its leader has exited.
+
+    macOS answers EPERM, not ESRCH, to `killpg` on a group holding none of the caller's processes.
+    """
+
+    def client(self, code):
+        client = signin_run.start_client(
+            [sys.executable, "-c", code], cwd=tempfile.gettempdir(), env=dict(os.environ))
+        self.addCleanup(client.close_output)
+        self.addCleanup(self.end, client)
+        return client
+
+    @staticmethod
+    def end(client):
+        if client._process.poll() is None:
+            with contextlib.suppress(OSError):
+                os.killpg(client.pid, signal.SIGKILL)
+        client.wait()
+
+    def exited(self):
+        client = self.client("pass")
+        client.wait()
+        return client
+
+    def test_on_macos_an_error_from_a_group_whose_leader_has_exited_is_an_ended_group(self):
+        for error in (PermissionError(1, "Operation not permitted"), ProcessLookupError(3, "x")):
+            with self.subTest(error=type(error).__name__):
+                client = self.exited()
+                with unittest.mock.patch.object(signin_run.sys, "platform", "darwin"), \
+                        unittest.mock.patch.object(signin_run.os, "killpg", side_effect=error):
+                    client.kill_group()
+
+    def test_on_macos_a_permission_error_from_a_group_whose_leader_is_unreaped_is_an_ended_group(self):
+        client = self.client("pass")
+        until(self, lambda: os.waitid(os.P_PID, client.pid,
+                                      os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None, 10)
+        with unittest.mock.patch.object(signin_run.sys, "platform", "darwin"), \
+                unittest.mock.patch.object(signin_run.os, "killpg", side_effect=PermissionError):
+            client.kill_group()
+
+    def test_on_macos_a_permission_error_from_a_group_whose_leader_still_runs_is_raised(self):
+        client = self.client("import time; time.sleep(60)")
+        with unittest.mock.patch.object(signin_run.sys, "platform", "darwin"), \
+                unittest.mock.patch.object(signin_run, "EXIT_GRACE", 0.05), \
+                unittest.mock.patch.object(signin_run.os, "killpg", side_effect=PermissionError):
+            with self.assertRaises(PermissionError):
+                client.kill_group()
+
+    def test_on_macos_a_permission_error_from_a_leader_mid_exit_is_an_ended_group(self):
+        client = self.client("import time; time.sleep(60)")
+        calls = [0]
+        real_waitid = os.waitid
+
+        def waitid(*args):
+            calls[0] += 1
+            if calls[0] == 3:
+                os.kill(client.pid, signal.SIGKILL)
+            return None if calls[0] < 3 else real_waitid(*args)
+
+        with unittest.mock.patch.object(signin_run.sys, "platform", "darwin"), \
+                unittest.mock.patch.object(signin_run.os, "waitid", waitid), \
+                unittest.mock.patch.object(signin_run.os, "killpg", side_effect=PermissionError):
+            client.kill_group()
+        self.assertGreaterEqual(calls[0], 3)
+
+    def test_a_permission_error_after_the_leader_exited_is_raised_off_macos(self):
+        code = ("import subprocess, sys\n"
+                "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+                "print(child.pid, flush=True)\n")
+        client = self.client(code)
+        grandchild = int(os.read(client.output(), 32).split()[0])
+        self.addCleanup(os.kill, grandchild, signal.SIGKILL)
+        client.wait()
+        with unittest.mock.patch.object(signin_run.sys, "platform", "linux"), \
+                unittest.mock.patch.object(signin_run.os, "killpg", side_effect=PermissionError):
+            with self.assertRaises(PermissionError):
+                client.kill_group()
+        self.assertTrue(process_alive(grandchild))
+
+    def test_on_macos_a_permission_error_while_the_waiter_holds_the_exit_is_an_ended_group(self):
+        client = self.client("pass")
+        reaped, release = threading.Event(), threading.Event()
+        real_waitpid = os.waitpid
+
+        def waitpid(pid, flags):
+            result = real_waitpid(pid, flags)
+            if pid == client.pid:
+                reaped.set()
+                release.wait(30)
+            return result
+
+        with unittest.mock.patch.object(os, "waitpid", waitpid):
+            waiter = threading.Thread(target=client.wait)
+            waiter.start()
+            self.addCleanup(waiter.join, 30)
+            self.addCleanup(release.set)
+            self.assertTrue(reaped.wait(10))
+            with unittest.mock.patch.object(signin_run.sys, "platform", "darwin"), \
+                    unittest.mock.patch.object(signin_run.os, "killpg",
+                                               side_effect=PermissionError):
+                client.kill_group()
+            self.assertTrue(waiter.is_alive())
+            release.set()
+            waiter.join(10)
+        self.assertFalse(waiter.is_alive())
+
+    def test_any_other_error_is_raised_even_when_the_leader_has_exited(self):
+        client = self.exited()
+        with unittest.mock.patch.object(signin_run.os, "killpg", side_effect=OSError(22, "bad")):
+            with self.assertRaises(OSError):
+                client.kill_group()
+
+    def test_a_running_group_is_ended_with_every_process_in_it(self):
+        code = ("import subprocess, sys, time\n"
+                "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+                "print(child.pid, flush=True)\n"
+                "time.sleep(60)\n")
+        client = self.client(code)
+        grandchild = int(os.read(client.output(), 32).split()[0])
+        self.assertTrue(process_alive(grandchild))
+        client.kill_group()
+        self.assertEqual(client.wait(), -signal.SIGKILL)
+        until(self, lambda: not process_alive(grandchild), 5)
 
 
 if __name__ == "__main__":
