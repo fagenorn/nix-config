@@ -72,6 +72,7 @@ PLATFORM_MODULES: Mapping[str, str] = MappingProxyType({
     "look-approval": "delivery.look_approval",
     "resolve-project": "project_contract.resolve_project",
     "verified-tree": "verification.verified_tree",
+    "verify-rounds": "delivery.verify_rounds",
 })
 LIFECYCLE_ARGV: Mapping[str, tuple[str, ...]] = MappingProxyType({
     "git-push": ("git", "-C", "{0}", "push", "origin", "{1}"),
@@ -94,6 +95,7 @@ PLATFORM_WALL_SECONDS: Mapping[str, float] = MappingProxyType({
     "look-approval": 300,
     "resolve-project": 300,
     "verified-tree": 14400,
+    "verify-rounds": 300,
 })
 PROJECT_WALL_SECONDS = 3600
 PROJECT_DECLARATION = CommandDeclaration((), {})
