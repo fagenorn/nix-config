@@ -111,7 +111,7 @@ test-touched:
 
 # Run Conformance over every rule as the required CI check does (the conformance command).
 conformance:
-  nix shell '{{justfile_directory()}}#agent-platform' --command conformance run --purpose ci --lint-times
+  nix shell {{quote(justfile_directory() + "#agent-platform")}} --command conformance run --purpose ci --lint-times
 
 # Print the two variables the lifecycle guard's test reads, from the built ./result (`test-touched` builds first).
 claude-guard-test-env:

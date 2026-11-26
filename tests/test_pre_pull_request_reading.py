@@ -139,6 +139,16 @@ class DeliveryAfterTheMergeTest(unittest.TestCase):
                 code, document = run(Forge([[pull(1900, AFTER, body)]]))
                 self.assertEqual((code, document), (75, NOT_YET))
 
+    def test_a_result_credited_to_another_command_or_a_ci_run_after_the_command_does_not_count(self):
+        bodies = ["## Evidence\nConformance passed only in CI\n",
+                  "## Evidence\nconformance skipped, lint passed\n",
+                  "## Evidence\nconformance did not pass, lint passed\n",
+                  "## Evidence\nconformance passed on CI\n"]
+        for body in bodies:
+            with self.subTest(body=body):
+                code, document = run(Forge([[pull(1900, AFTER, body)]]))
+                self.assertEqual((code, document), (75, NOT_YET))
+
     def test_a_longer_word_is_not_the_command(self):
         bodies = ["## Evidence\nlint pass, conformance-report pass, test-touched pass\n",
                   "## Evidence\nlint pass, pre-conformance pass\n"]
@@ -146,6 +156,27 @@ class DeliveryAfterTheMergeTest(unittest.TestCase):
             with self.subTest(body=body):
                 code, document = run(Forge([[pull(1900, AFTER, body)]]))
                 self.assertEqual((code, document), (75, NOT_YET))
+
+    def test_a_risk_statement_under_a_bold_merge_danger_heading_is_not_a_result(self):
+        body = "**Evidence**\nlint passed\n**Merge danger**\nConformance could fail on older hosts\n"
+        code, document = run(Forge([[pull(1900, AFTER, body)]]))
+        self.assertEqual((code, document), (75, NOT_YET))
+
+    def test_a_subheading_under_evidence_does_not_end_the_section(self):
+        body = "## Evidence\n### Local verification\nconformance passed (41 checks)\n## Merge danger\nnone\n"
+        code, document = run(Forge([[pull(1900, AFTER, body)]]))
+        self.assertEqual((code, document), (0, met(1900)))
+
+    def test_a_delivery_branched_directly_at_the_merge_commit_is_met(self):
+        code, document = run(Forge([[pull(1900, AFTER, RAN, "identical")]]))
+        self.assertEqual((code, document), (0, met(1900)))
+
+    def test_a_body_that_is_not_text_is_unreadable_not_a_crash(self):
+        for body in [{"text": "Evidence"}, ["Evidence"], 7]:
+            with self.subTest(body=body):
+                code, document = run(Forge([[pull(1900, AFTER, body)]]))
+                self.assertEqual(code, 75)
+                self.assertEqual(document["status"], "forge_unreadable")
 
     def test_a_pull_with_no_evidence_heading_is_not_a_delivery(self):
         for body in ["manual change", None, "## Why\nEvidence of the bug: conformance passed\n"]:
@@ -181,6 +212,14 @@ class PagingTest(unittest.TestCase):
         self.assertEqual(document["status"], "forge_unreadable")
         self.assertEqual(len(forge.read_of("pulls?state=all")), 10)
         self.assertEqual(forge.read_of("page=11"), [])
+
+    def test_exactly_ten_full_pages_still_read_a_qualifying_oldest_delivery(self):
+        full = [pull(5000 - i, LATER, "manual change") for i in range(100)]
+        pages = [full] * 9 + [[pull(1900, AFTER, RAN)] + [pull(4000 - i, LATER, "manual change") for i in range(99)]]
+        forge = Forge(pages)
+        code, document = run(forge)
+        self.assertEqual((code, document), (0, met(1900)))
+        self.assertEqual(len(forge.read_of("pulls?state=all")), 10)
 
     def test_a_forge_error_is_not_yet(self):
         def failing(path):

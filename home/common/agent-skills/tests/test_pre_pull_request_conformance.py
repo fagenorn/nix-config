@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import json
 import shlex
+import subprocess
+import tempfile
 import unittest
+from pathlib import Path
 
 from .conformance_test_support import (
     REPO_ROOT,
@@ -46,6 +49,9 @@ def ci_run_line() -> str:
             return following.removeprefix("run: ")
     raise AssertionError("the CI workflow has no Run conformance step")
 
+FLAKE_ARGUMENT = "{{justfile_directory()}}#agent-platform"
+QUOTED_FLAKE = '{{quote(justfile_directory() + "#agent-platform")}}'
+
 
 class PrePullRequestConformanceTest(ReportAssertions, unittest.TestCase):
     def test_the_conformance_command_names_both_broken_rules_in_one_run(self):
@@ -70,12 +76,22 @@ class PrePullRequestConformanceTest(ReportAssertions, unittest.TestCase):
     def test_the_recipe_runs_conformance_as_the_ci_workflow_does(self):
         lines = recipe_lines("conformance")
         ci = shlex.split(ci_run_line())
-        expected = ["{{justfile_directory()}}#agent-platform" if t == ".#agent-platform" else t
-                    for t in ci]
+        expected = [FLAKE_ARGUMENT if t == ".#agent-platform" else t for t in ci]
         self.assertEqual(len(lines), 1)
         self.assertEqual(ci.count(".#agent-platform"), 1)
-        self.assertEqual(shlex.split(lines[0]), expected)
+        self.assertEqual(shlex.split(lines[0].replace(QUOTED_FLAKE, FLAKE_ARGUMENT)), expected)
         self.assertEqual(conformance_tail(lines[0]), ["run", "--purpose", "ci", "--lint-times"])
+
+    def test_a_checkout_path_with_an_apostrophe_still_reaches_nix_as_one_argument(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            checkout = Path(tmp) / "Sam's Projects"
+            checkout.mkdir()
+            (checkout / "justfile").write_text((REPO_ROOT / "justfile").read_text("utf-8"), "utf-8")
+            proc = subprocess.run(["just", "--dry-run", "conformance"], cwd=checkout, text=True,
+                                  capture_output=True, check=False)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            rendered = shlex.split(proc.stderr.strip())
+        self.assertEqual(rendered[:3], ["nix", "shell", f"{checkout.resolve()}#agent-platform"])
 
 
 if __name__ == "__main__":

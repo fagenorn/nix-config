@@ -9,9 +9,13 @@ A candidate is a pull request created after the boundary whose body has an Evide
 counts only when its branch started from a commit that contains the merge (the first commit's first
 parent is `ahead` of or `identical` to it). The check is met when a counting candidate's Evidence
 section lists a local result of the command: a clause naming it, not preceded in that clause by the
-word CI, and followed by a result word (pass, passed, fail, failed). Otherwise it is not yet (exit
-75); a forge failure or a payload of the wrong shape is `forge_unreadable`, also exit 75. The
-check never reports not met: the verify block's expiry ends a hold that never meets.
+word CI, not followed by "in CI" or "only CI", and followed by a result word (pass, passed, fail,
+failed) in its own comma part or in a later part that opens with only a quantifier ("all passed");
+a skip or a negation between the command and the result voids it. The Evidence section runs to the
+next heading of its level or higher (a bold or plain "Merge danger" line also ends it). Otherwise
+it is not yet (exit 75); a forge failure or a payload of the wrong shape (a body that is not text
+included) is `forge_unreadable`, also exit 75. The check never reports not met: the verify block's
+expiry ends a hold that never meets.
 """
 
 import argparse
@@ -28,10 +32,14 @@ NOT_YET = 75
 PAGES = 10
 PAGE = 100
 COUNTING = ("ahead", "identical")
-HEADING = re.compile(r"^(?:#{1,6}\s*)?(?:\*\*)?Evidence(?:\*\*)?:?$", re.IGNORECASE)
-SECTION_END = re.compile(r"^#{1,6}\s")
+HEADING = re.compile(r"^(?:(#{1,6})\s*)?(?:\*\*)?Evidence:?(?:\*\*)?:?$", re.IGNORECASE)
+MARKDOWN_HEADING = re.compile(r"^(#{1,6})\s")
+BOLD_HEADING = re.compile(r"^\*\*[^*]+\*\*:?$")
 CLAUSES = re.compile(r"\n|;|\.(?=\s|$)")
 CI_WORD = re.compile(r"\bCI\b", re.IGNORECASE)
+CI_AFTER = re.compile(r"\b(?:in|on|by|via|under|from|at|through|only)\s+(?:the\s+)?CI\b|\bCI\s+only\b", re.IGNORECASE)
+NEGATION = re.compile(r"\b(?:skip|skipped|skipping|not|never|without)\b|n't", re.IGNORECASE)
+QUANTIFIER_OPENING = re.compile(r"^\s*(?:(?:all|both|every|each|everything|and|they|it|were|was|have|has)\s+)*$", re.IGNORECASE)
 RESULT_WORD = re.compile(r"\b(?:pass|passed|fail|failed)\b", re.IGNORECASE)
 
 Read = Callable[[str], Any]
@@ -41,18 +49,31 @@ class Unreadable(Exception):
     """A forge answer of the wrong shape: printed as `forge_unreadable`."""
 
 
-def evidence_section(body: str | None) -> str | None:
-    """The lines after the first Evidence heading of `body` up to the next heading, or None."""
-    lines, found = (body or "").splitlines(), None
+def _ends_section(line: str, level: int | None) -> bool:
+    """Whether `line` is a heading that closes an Evidence section opened at markdown `level` (None: not a # heading)."""
+    heading = MARKDOWN_HEADING.match(line)
+    if heading and (level is None or len(heading.group(1)) <= level):
+        return True
+    if heading is None and level is None and BOLD_HEADING.match(line.strip()):
+        return True
+    return line.strip().lstrip("#*").strip().lower().startswith("merge danger")
+
+
+def evidence_section(body: Any) -> str | None:
+    """The lines after the first Evidence heading of `body` up to the next heading of its level, or None."""
+    if body is not None and not isinstance(body, str):
+        raise Unreadable(f"a pull request body is not text: {type(body).__name__}")
+    lines, found, level = (body or "").splitlines(), None, None
     for index, line in enumerate(lines):
-        if HEADING.match(line.strip()):
-            found = index + 1
+        match = HEADING.match(line.strip())
+        if match:
+            found, level = index + 1, len(match.group(1)) if match.group(1) else None
             break
     if found is None:
         return None
     section = []
     for line in lines[found:]:
-        if SECTION_END.match(line) or line.strip().lower().startswith("merge danger"):
+        if _ends_section(line, level):
             break
         section.append(line)
     return "\n".join(section)
@@ -63,8 +84,23 @@ def ran_locally(section: str, command: str) -> bool:
     named = re.compile(r"(?<![\w./-])" + re.escape(command) + r"(?![\w./-])", re.IGNORECASE)
     for clause in CLAUSES.split(section):
         for occurrence in named.finditer(clause):
-            if not CI_WORD.search(clause[:occurrence.start()]) and RESULT_WORD.search(clause[occurrence.end():]):
-                return True
+            if CI_WORD.search(clause[:occurrence.start()]):
+                continue
+            after = clause[occurrence.end():]
+            if CI_AFTER.search(after) or not _result_follows(after):
+                continue
+            return True
+    return False
+
+
+def _result_follows(after: str) -> bool:
+    """Whether a result word in `after` belongs to the command: its own comma part, or a part opening with a quantifier."""
+    for index, part in enumerate(after.split(",")):
+        result = RESULT_WORD.search(part)
+        if NEGATION.search(part[:result.start()] if result else part):
+            return False
+        if result and (index == 0 or QUANTIFIER_OPENING.match(part[:result.start()])):
+            return True
     return False
 
 
@@ -81,16 +117,16 @@ def _list(payload: Any, what: str) -> list:
     return payload
 
 
-def _pulls_after(read: Read, slug: str, boundary: datetime) -> list[dict]:
-    """The pull requests created after `boundary`, read newest first."""
+def _pulls_after(read: Read, slug: str, boundary: datetime) -> tuple[list[dict], bool]:
+    """The pull requests created after `boundary`, read newest first, and whether the list is complete."""
     found = []
     for page in range(1, PAGES + 1):
         pulls = _list(read(f"repos/{slug}/pulls?state=all&sort=created&direction=desc"
                            f"&per_page={PAGE}&page={page}"), "pulls")
         found += [p for p in pulls if _when(p["created_at"]) > boundary]
         if len(pulls) < PAGE or _when(pulls[-1]["created_at"]) <= boundary:
-            return found
-    raise Unreadable(f"the pull requests after the merge exceed {PAGES * PAGE}")
+            return found, True
+    return found, False
 
 
 def _started_after(read: Read, slug: str, merge: str, number: int) -> bool:
@@ -108,13 +144,16 @@ def _started_after(read: Read, slug: str, merge: str, number: int) -> bool:
 def reading(read: Read, slug: str, merge: str, command: str) -> tuple[int, dict]:
     since = read(f"repos/{slug}/commits/{merge}")["commit"]["committer"]["date"]
     candidates = []
-    for pull in _pulls_after(read, slug, _when(since)):
+    pulls, complete = _pulls_after(read, slug, _when(since))
+    for pull in pulls:
         section = evidence_section(pull.get("body"))
         if section is not None:
             candidates.append((_when(pull["created_at"]), pull["number"], section))
     for _, number, section in sorted(candidates, key=lambda c: (c[0], c[1])):
         if ran_locally(section, command) and _started_after(read, slug, merge, number):
             return 0, {"status": "met", "since": since, "pr": number, "command": command}
+    if not complete:
+        raise Unreadable(f"the pull requests after the merge reach {PAGES * PAGE} and none read met")
     return NOT_YET, {"status": "not_yet", "since": since, "pr": None, "command": command}
 
 
@@ -134,7 +173,7 @@ def main(argv: list[str] | None = None, *, read: Read = forge_api.api_get) -> in
     args = build_parser().parse_args(argv)
     try:
         code, document = reading(read, args.repo, args.merge, args.command)
-    except (ForgeError, Unreadable, KeyError, IndexError, TypeError, ValueError) as error:
+    except (ForgeError, Unreadable, AttributeError, KeyError, IndexError, TypeError, ValueError) as error:
         _print({"status": "forge_unreadable", "reason": str(error)})
         return NOT_YET
     _print(document)
