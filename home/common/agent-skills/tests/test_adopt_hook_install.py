@@ -14,6 +14,7 @@ import stat
 import subprocess
 import tempfile
 import time
+import tracemalloc
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -32,6 +33,8 @@ DECLARED = "{ pkgs, ... }: {\n  git-hooks.hooks.needs-dev-shell.enable = true;\n
 UNDECLARED = "{ pkgs, ... }: {\n  packages = [ pkgs.hello ];\n}\n"
 HELLO_FAILURE = "needs-dev-shell: hello not found"
 PASSED = "needs-dev-shell....Passed"
+MEMORY_DEPTH = 20_000
+MEMORY_LIMIT = 64 * 1024 * 1024
 
 INSTALLER_SCRIPT = r"""
 echo "dev-shell sees global hooks path: $(git config --global --get core.hooksPath || echo none)"
@@ -350,6 +353,30 @@ class HookInstallRuleTest(unittest.TestCase):
                     started = time.monotonic()
                     self.assertEqual(hook_install.declares_hooks(text), expected)
                     self.assertLess(time.monotonic() - started, 1.0, (size, body))
+
+    def test_declares_hooks_peak_memory_stays_under_64_mib_on_capped_nested_input(self):
+        depth = MEMORY_DEPTH
+        cases = {
+            "nested sets": lambda switch: (
+                "{ pkgs, ... }: { git-hooks = { " + "a = { " * depth + "}; " * depth + "};" + switch + " }"),
+            "nested list": lambda switch: (
+                "{ pkgs, ... }: { x = " + "[ " * depth + "] " * depth + ";" + switch + " }"),
+            "sibling sets": lambda switch: (
+                "{ pkgs, ... }: { git-hooks = { " + "a = { b = { }; }; " * depth + "};" + switch + " }")}
+        for name, build in cases.items():
+            for state, expected in (("false", False), ("true", True)):
+                label = f"{name} with the switch {state}"
+                with self.subTest(label):
+                    text = build(" git-hooks.hooks.x.enable = " + state + ";")
+                    self.assertLessEqual(len(text), hook_install.TEXT_LIMIT, label)
+                    tracemalloc.start()
+                    try:
+                        result = hook_install.declares_hooks(text)
+                        _, peak = tracemalloc.get_traced_memory()
+                    finally:
+                        tracemalloc.stop()
+                    self.assertEqual(result, expected, label)
+                    self.assertLess(peak, MEMORY_LIMIT, label)
 
     def test_hook_install_source_carries_no_over_long_comment_block(self):
         path = Path(hook_install.__file__)
