@@ -19,7 +19,7 @@ other condition is one.
 C# markers: C1 `Skip` followed by `=` (any value), and `Explicit` followed by `=` and a
 value other than `false` or `null`, at the top level of the arguments of a `Fact`,
 `Theory`, `SkippableFact`, `SkippableTheory`, `InlineData`, `MemberData` or
-`ClassData` attribute, and `Ignore`, `IgnoreReason` or `Explicit` followed by `=` and a value other than `false`
+`ClassData` attribute (a generic name such as `ClassData<TClass>` included), and `Ignore`, `IgnoreReason` or `Explicit` followed by `=` and a value other than `false`
 or `null` at the top level of the arguments of a `TestCase` or `TestCaseSource`
 attribute;
 C2 an attribute named `Ignore` or `Explicit`; C3 `Skip`, `SkipWhen`, `SkipUnless`
@@ -162,6 +162,30 @@ def argument_skips(tokens: tuple[Token, ...], pairs: dict[int, int], open_: int,
     return found
 
 
+def after_type_arguments(tokens: tuple[Token, ...], i: int, end: int) -> int:
+    """The index after the generic type arguments `< ... >` that start at token `i`, else `i`.
+
+    A generic attribute name (`ClassData<TClass>`) carries them between its name and its `(`; the
+    angle brackets nest, and only names, dots, commas, `?`, `[`, `]` and `::` may sit inside. An
+    unclosed or foreign run reads as no type arguments.
+    """
+    if i >= end or tokens[i].text != "<":
+        return i
+    depth, j = 0, i
+    while j < end:
+        text = tokens[j].text
+        if text == "<":
+            depth += 1
+        elif text == ">":
+            depth -= 1
+            if depth == 0:
+                return j + 1
+        elif not (tokens[j].kind == "name" or text in (".", ",", "?", "[", "]", "::")):
+            return i
+        j += 1
+    return i
+
+
 def attribute_markers(tokens: tuple[Token, ...], pairs: dict[int, int],
                       section: tuple[int, int]) -> list[int]:
     found, i, end = [], section[0] + 1, section[1] - 1
@@ -176,8 +200,10 @@ def attribute_markers(tokens: tuple[Token, ...], pairs: dict[int, int],
             if tokens[i - 1].text in ("[", ",", ".", ":"):
                 if name in CS_DISABLING_ATTRIBUTES:
                     found.append(i)
-                elif name in CS_ARGUMENT_KEYS and before_paren(tokens, i):
-                    found.extend(argument_skips(tokens, pairs, i + 1, CS_ARGUMENT_KEYS[name]))
+                elif name in CS_ARGUMENT_KEYS:
+                    open_ = after_type_arguments(tokens, i + 1, end)
+                    if open_ < end and tokens[open_].text == "(":
+                        found.extend(argument_skips(tokens, pairs, open_, CS_ARGUMENT_KEYS[name]))
         i += 1
     return found
 

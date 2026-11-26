@@ -96,6 +96,13 @@ CSHARP = [
     ok("[Fact]"), ok("public void FactPlain() { Run(49); }"),
     ok("[Paging(Skip = 10)]"), ok("public void List() { }"),
     ok("[Ignore]"), ok("public int Cache { get; set; }"),
+    ok("[Theory]"), ok('[ClassData<SkippedRows>(Skip = "x")]'),
+    bad("public void GenericClassRowSkipped(int n) { Run(61); }"),
+    ok("[Theory]"), ok("[ClassData<Rows<int>>(Explicit = true)]"),
+    bad("public void NestedGenericRowExplicit(int n) { Run(62); }"),
+    ok("[Theory]"), ok("[ClassData<Rows<int>>(Explicit = false)]"),
+    ok("public void NestedGenericRowRuns(int n) { Run(63); }"),
+    ok("[Fact]"), ok("[Paging<Page>(Skip = 10)]"), ok("public void GenericOther() { Run(64); }"),
     ok("}"),
 ]
 WEB = [
