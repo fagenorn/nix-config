@@ -93,7 +93,8 @@ class EventSampleTest(RecordsCase):
             {"kind": "verify_ended", "pid": 25168, "command": "just test"},
             {"kind": "verify_started", "pid": 25432, "command": "just test"},
             {"kind": "verify_run", "repository": "o/r", "command": "just test", "exit": 0,
-             "held_from": "2026-11-24T11:50:00+00:00", "held_until": "2026-11-24T11:58:00+00:00"},
+             "held_from": "2026-11-24T11:50:00+00:00", "held_until": "2026-11-24T11:58:00+00:00",
+             "tree_peak_bytes": None, "tree_peak_at": None},
             {"kind": "floor_kill", "at": "2026-11-24T12:33:05+00:00", "reason": "floor", "owner": "anis",
              "root_pid": 300, "signals": "term+kill", "tree_gib": 146.0},
         ])

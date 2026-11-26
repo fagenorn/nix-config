@@ -287,7 +287,7 @@ class GuideTest(unittest.TestCase):
     def test_the_guide_names_the_sample_records(self):
         for needle in (
             "~/.omlx/memory/samples/<day>.jsonl", "peak_unowned_gib", "peak_unowned_at", "census_samples",
-            "records_since", "14 days",
+            "records_since", "14 days", "peak_verify_gib", "peak_verify_at", "verify_runs",
         ):
             with self.subTest(needle=needle):
                 self.assertIn(needle, self.section)
@@ -295,7 +295,7 @@ class GuideTest(unittest.TestCase):
     def test_the_guide_names_the_recorded_events(self):
         for needle in (
             "ram_disk_attached", "vm_started", "floor_kill", "verify_run", "verify_started", "ci_job_started",
-            "hdiutil info", "vz.pid", "between two samples",
+            "hdiutil info", "vz.pid", "between two samples", "tree_peak_bytes",
         ):
             with self.subTest(needle=needle):
                 self.assertIn(needle, self.section)

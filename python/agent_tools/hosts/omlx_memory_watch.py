@@ -24,10 +24,11 @@ gets one line per finished day: `day`, the peaks and minimum in GiB (null where 
 `others_budget_gib`, `over_budget`, `jetsam_exits`, `peak_ci_jobs`, `samples`,
 `loaded_samples`, `min_loaded_available_gib`, `floor_gib`, `omlx_jetsam_priority` and
 `declared_jetsam_priority`, then `peak_fseventsd_gib` and `fseventsd_restarts`, then for each of
-`sys_footprint`, `process_footprint`, `unowned`, `wired`, `anonymous` and `compressions` a
+`sys_footprint`, `process_footprint`, `unowned`, `wired`, `anonymous`, `compressions` and `verify` a
 `peak_<name>_gib` and a `peak_<name>_at` (the first sample, as ISO 8601, that held that peak; null
-where unmeasured), `peak_owners` (the day's five largest `{name, pid, gib, at}`), `census_samples`
-and `records_since`.
+where unmeasured; for `verify` the largest single verify-run tree and the run's own peak time, kept
+only on its local day), `peak_owners` (the day's five largest `{name, pid, gib, at}`), `census_samples`,
+`records_since` and `verify_runs` (the verify runs read that day).
 
 Each successful sample also appends one line to `DIR/samples/<day>.jsonl` (directory 0700, file 0600):
 `at`, `used_bytes`, `available_bytes`, `loaded`, `omlx_bytes`, `ci_jobs`, `wired_bytes`,
@@ -49,7 +50,9 @@ the census figures only from a fresh census), `peak_owners` (each `(name, pid)` 
 earliest on a tie, the five largest kept), `census_samples` (samples with a fresh census), all three
 reset each day, and `records_since`, the day of the first sample that kept them: it is set once and
 carried across days, so a day rolled over from a state without it reports null. `records_since_at`,
-that first sample's time, is kept with it for the post-deploy check. The state also keeps `last_sample`,
+that first sample's time, is kept with it for the post-deploy check. `verify_runs` (reset each day) counts
+the `verify_run` events and `verify_records_since` is the day of the first sample that kept them, set
+once and carried across days like `records_since`, so an upgrade dates them from its own day. The state also keeps `last_sample`,
 `{day, line}`, the last sample line: the state is replaced first and the line appended after, so a run
 stopped between the two leaves the line in the state, and the next run appends it if the file does not
 end with it before it reads anything else.
@@ -147,11 +150,12 @@ CENSUS_TIMEOUT = 50
 CENSUS_FRESH_SECONDS = 150
 SAMPLE_DAYS = 14
 SAMPLES_DIR = "samples"
-PEAK_FIGURES = ("sys_footprint", "process_footprint", "unowned", "wired", "anonymous", "compressions")
+PEAK_FIGURES = ("sys_footprint", "process_footprint", "unowned", "wired", "anonymous", "compressions", "verify")
 CENSUS_DEFAULTS = {
     "census_peaks": {}, "peak_owners": [], "census_samples": 0, "records_since": None, "records_since_at": None,
     "unowned_open": False, "last_sample": None,
 }
+VERIFY_DEFAULTS = {"verify_runs": 0, "verify_records_since": None}
 TOP_OWNERS = 5
 FLOOR_RECORD = "/var/db/memory-watch/floor.json"
 FLOOR_DEFAULTS = {"floor_kills_seen": None, "floor_unmet_seen": None, "priority_unset_open": False, "floor_log": []}
@@ -278,7 +282,7 @@ def fresh_day(since: str, day: str) -> dict:
         "min_loaded_available_bytes": None, "peak_ci_jobs": 0, "jetsam_exits": 0, "omlx_runs": None,
         "omlx_jetsam_priority": None, "low_memory_open": False, "pending": [],
         **FSEVENTSD_DEFAULTS, **FLOOR_DEFAULTS, "floor_log": [], **copy.deepcopy(CENSUS_DEFAULTS),
-        **omlx_memory_events.EVENT_DEFAULTS,
+        **VERIFY_DEFAULTS, **omlx_memory_events.EVENT_DEFAULTS,
     }
 
 
@@ -321,6 +325,7 @@ def _day_line(state: dict, floor_bytes: int, others_budget_bytes: int, declared:
         ],
         "census_samples": state["census_samples"],
         "records_since": state["records_since"],
+        "verify_runs": state["verify_runs"],
     }
 
 
@@ -350,6 +355,20 @@ def _fold_peak(state: dict, name: str, value: int, at: str) -> None:
     held = state["census_peaks"].get(name)
     if held is None or value > held["bytes"]:
         state["census_peaks"][name] = {"bytes": value, "at": at}
+
+
+def _fold_verify(state: dict, events: list[dict], now: datetime) -> None:
+    """Count each `verify_run` and fold its tree peak when the peak's local date is the state's day."""
+    local = now if now.tzinfo else now.astimezone()
+    for event in events:
+        if event["kind"] != "verify_run":
+            continue
+        state["verify_runs"] += 1
+        peak, at = event.get("tree_peak_bytes"), event.get("tree_peak_at")
+        if not _is_int(peak) or not isinstance(at, str):
+            continue
+        if datetime.fromisoformat(at).astimezone(local.tzinfo).date().isoformat() == state["day"]:
+            _fold_peak(state, "verify", peak, at)
 
 
 def _fold_owners(state: dict, owners, at: str) -> None:
@@ -523,7 +542,7 @@ def decide(state, reading: dict, now: datetime, floor_bytes: int, others_budget_
     if state is None:
         state = fresh_day(day, day)
     else:
-        state = {**FSEVENTSD_DEFAULTS, **FLOOR_DEFAULTS, **copy.deepcopy(CENSUS_DEFAULTS),
+        state = {**FSEVENTSD_DEFAULTS, **FLOOR_DEFAULTS, **copy.deepcopy(CENSUS_DEFAULTS), **VERIFY_DEFAULTS,
                  **omlx_memory_events.EVENT_DEFAULTS, **state,
                  "pending": [dict(entry) for entry in state["pending"]]}
         state["floor_log"] = list(state["floor_log"])
@@ -534,12 +553,14 @@ def decide(state, reading: dict, now: datetime, floor_bytes: int, others_budget_
                         "fseventsd_restarts_seen", "fseventsd_held_open", "fseventsd_failed_open",
                         "floor_kills_seen", "floor_unmet_seen", "priority_unset_open", "floor_log",
                         "records_since", "records_since_at", "unowned_open", "last_sample",
-                        *omlx_memory_events.EVENT_DEFAULTS):
+                        "verify_records_since", *omlx_memory_events.EVENT_DEFAULTS):
                 carried[key] = state[key]
             state = carried
     if state["records_since"] is None:
         state["records_since"] = day
         state["records_since_at"] = now.isoformat()
+    if state["verify_records_since"] is None:
+        state["verify_records_since"] = day
     used, available, loaded = reading["used_bytes"], reading["available_bytes"], reading["loaded"]
     omlx = reading["omlx_bytes"]
     footprint = "unknown" if omlx is None else f"{omlx / GIB:.1f}"
@@ -588,6 +609,7 @@ def decide(state, reading: dict, now: datetime, floor_bytes: int, others_budget_
         state["low_memory_open"] = False
     _fold_fseventsd(state, reading["fseventsd"], reading["host"])
     events = omlx_memory_events.fold_events(state, reading["observed"])
+    _fold_verify(state, events, now)
     _fold_floor(state, reading["floor"], reading, events)
     _fold_unowned(state, census, reading, unowned_alert_bytes)
     return state, line, _sample_line(reading, now, census, events)

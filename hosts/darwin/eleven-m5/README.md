@@ -185,11 +185,12 @@ used, available, wired, anonymous and compressed bytes, and, from a census no
 older than 150 s, the system and process footprints, the unowned bytes and the
 top owners. The files of the last 14 days are kept. The day's line in
 `memory-peaks.jsonl` gains a `peak_<figure>_gib` and a `peak_<figure>_at` for
-`sys_footprint`, `process_footprint`, `unowned`, `wired`, `anonymous` and
-`compressions` (for example `peak_unowned_gib` and `peak_unowned_at`), the
-`peak_owners` of the day, `census_samples` (how many samples had a census) and
+`sys_footprint`, `process_footprint`, `unowned`, `wired`, `anonymous`,
+`compressions` and `verify` (for example `peak_unowned_gib` and `peak_unowned_at`),
+the `peak_owners` of the day, `census_samples` (how many samples had a census) and
 `records_since`, the day the records began, so an earlier line without them is
-not a day with no peak.
+not a day with no peak. `peak_verify_gib` is the day's largest single verify-run
+tree and `peak_verify_at` its time, and `verify_runs` is the verify runs read that day.
 
 ### When you add a workload
 
@@ -322,8 +323,11 @@ that pid is a live process: other Virtualization processes are not Colima's. `ci
 `ci_job_ended` come from the `Runner.Worker` pids of `ps -axwwo pid=,args=`, and `floor_kill` from the new
 entries of the floor record. `verify_started` and `verify_ended` come from the live `verify-slot run`
 local processes of that listing (not a remote run through `ssh`), and `verify_run` (when the slot was
-held, from `held_from` to `held_until`) from
-the lines the verify-slot history gains. The first sample of a source records a baseline and no event, and a
+held, from `held_from` to `held_until`, with `tree_peak_bytes` and `tree_peak_at`) from
+the lines the verify-slot history gains. `verify-slot run` measures its command's tree every 2 s while the
+command runs and writes the largest reading into its history line, so a verify run is never missed between
+two samples (a peak shorter than one read interval can be). A peak before midnight read after it stays out
+of both days. The first sample of a source records a baseline and no event, and a
 source that could not be read changes nothing. A CI job or a RAM disk that starts and ends between two samples
 is not recorded, because those are read as a snapshot each minute.
 

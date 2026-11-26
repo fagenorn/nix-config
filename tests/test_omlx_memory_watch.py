@@ -96,6 +96,7 @@ DAY_LINE = {
     "peak_anonymous_gib": None, "peak_anonymous_at": None,
     "peak_compressions_gib": None, "peak_compressions_at": None,
     "peak_owners": [], "census_samples": 0, "records_since": None,
+    "peak_verify_gib": None, "peak_verify_at": None, "verify_runs": 0,
 }
 
 
