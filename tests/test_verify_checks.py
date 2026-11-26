@@ -473,8 +473,7 @@ class ConsoleStateTest(unittest.TestCase):
             def log_message(self, *args):
                 pass
 
-        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        threading.Thread(target=server.serve_forever, daemon=True).start()
+        server = loopback_server(Handler)
         self.addCleanup(server.server_close)
         self.addCleanup(server.shutdown)
         return server.server_address[1]
@@ -530,8 +529,7 @@ class ConsoleFailedStartTest(unittest.TestCase):
             def log_message(self, *args):
                 pass
 
-        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        threading.Thread(target=server.serve_forever, daemon=True).start()
+        server = loopback_server(Handler)
         self.addCleanup(server.server_close)
         self.addCleanup(server.shutdown)
         return server.server_address[1]
@@ -972,7 +970,7 @@ DOMAIN = "Domain does not support specified action"
 def loopback_server(handler):
     """A loopback `ThreadingHTTPServer` on port 0 serving `handler`, in a daemon thread."""
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
+    threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True).start()
     return server
 
 
