@@ -16,9 +16,9 @@ The page of ordinary sentences in `tests/fixtures/console/owner-words-ordinary.t
 Nothing clears a word: a text that also explains the word, in brackets or elsewhere, still has the word found.
 
 The four names: `ROWS` (the `(do_not_write, write_instead, patterns)` rows), `Found` (a `row`, `pattern`,
-`word` and `sentence`), `found(text)` (the first match of each word of each row in `text`, in list order) and
-`found_in(texts)` (the first `Found` of each word of each row across `texts`, in list order). A word that
-two patterns of a row both find is one word. `SEPARATORS`, `MAIN` and `CHANGE` are the shared fragments.
+`word` and `sentence`), `found(text)` (the first match of each pattern in `text`, in list order) and
+`found_in(texts)` (the first `Found` of each pattern across `texts`, in list order). A word that
+two patterns of a row both find is one word. `SEPARATORS`, `MAIN`, `GUARD` and `CHANGE` are the shared fragments.
 """
 import re
 from collections.abc import Iterable
@@ -28,6 +28,11 @@ SEPARATORS = "[ \t\n\r\f\v]+"
 
 MAIN = ("(?-i:main)(?! (?!(?:and|or|but|now|yet|again|already|since|after|before|first|today|too|so|then"
         "|is|was|with|by|at|in|for|yesterday|tomorrow|tonight)(?![0-9A-Za-z]))[A-Za-z])")
+# "the guard", unless a person is meant: a verb of a person at a gate, or a gate, door or post later in the sentence.
+GUARD = ("the guard(?:['’]s)?(?! (?:opened|closed|watched|stood|waved|walked|nodded|smiled|patrolled|locked|unlocked"
+         "|yawned|saluted|looked|waited)(?![0-9A-Za-z]))"
+         "(?![^.!?]*(?<![0-9A-Za-z])(?:gates?|doors?|prison|castle|palace|museum|bank|duty|shift|uniform|badge)"
+         "(?![0-9A-Za-z]))(?: (?:policy|policies|rules?|hooks?|decisions?))?")
 CHANGE = "(?:changes?|fix(?:es)?|PRs?|pull requests?|deliver(?:y|ies)|issues?)"
 ROWS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("land lock, merge lock", "its turn to merge", ("land locks?", "merge locks?")),
@@ -44,7 +49,7 @@ ROWS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
       "(?P<w>landed|landing) (?:on|in|into) " + MAIN)),
     ("slice", "step", ("slices?",)),
     ("brief version", "the new version of the plan", ("brief versions?",)),
-    ("the guard, a guard refusal", "the safety check", ("the guard(?:['’]s)? (?:policy|policies|rules?|hooks?|decisions?)", "guard refusals?")),
+    ("the guard, a guard refusal", "the safety check", (GUARD, "guard refusals?")),
     ("a claim on files", "a note of the files it is working on",
      ("claims? on (?:(?:the|its|their|these|those) )?files?",)),
     ("look card", "your look at how it appears", ("look cards?",)),
@@ -99,7 +104,7 @@ def _sentence(text: str, start: int, end: int) -> str:
 
 
 def found(text: str) -> list[Found]:
-    """The first match of each word of each row in `text`, longest match first among overlaps, in list order."""
+    """The first match of each pattern in `text` (one word two patterns find counts once), longest match first among overlaps, in list order."""
     matches = []
     for row, patterns in enumerate(_PATTERNS):
         for pattern, rx in enumerate(patterns):
@@ -110,17 +115,28 @@ def found(text: str) -> list[Found]:
     for start, end, row, pattern in sorted(matches, key=lambda m: (-(m[1] - m[0]), m[0], m[2], m[3])):
         if all(end <= k[0] or k[1] <= start for k in kept):
             kept.append((start, end, row, pattern))
-    first: dict[tuple[int, str], tuple[int, int, int]] = {}
+    # One warning per pattern, then one per surface word of a row: two patterns that find one word warn once.
+    firsts: dict[tuple[int, int], tuple[int, int]] = {}
     for start, end, row, pattern in sorted(kept, key=lambda k: (k[0], k[2], k[3])):
-        first.setdefault((row, _fold(text[start:end]).casefold()), (pattern, start, end))
+        firsts.setdefault((row, pattern), (start, end))
+    seen: dict[tuple[int, str], tuple[int, int, int]] = {}
+    for (row, pattern), (start, end) in sorted(firsts.items(), key=lambda i: (i[1], i[0])):
+        seen.setdefault((row, _fold(text[start:end]).casefold()), (pattern, start, end))
     return [Found(row, pattern, _fold(text[start:end]), _sentence(text, start, end))
-            for (row, _), (pattern, start, end) in sorted(first.items(), key=lambda i: (i[0][0], i[1]))]
+            for (row, _), (pattern, start, end) in sorted(seen.items(), key=lambda i: (i[0][0], i[1][0]))]
 
 
 def found_in(texts: Iterable[str]) -> list[Found]:
-    """The first `Found` of each word of each row across `texts`, in list order."""
-    first: dict[tuple[int, str], Found] = {}
+    """The first `Found` of each pattern across `texts`, in list order; one word two patterns find is one."""
+    patterns: set[tuple[int, int]] = set()
+    words: set[tuple[int, str]] = set()
+    first: dict[tuple[int, int], Found] = {}
     for text in texts:
         for f in found(text):
-            first.setdefault((f.row, f.word.casefold()), f)
-    return [first[key] for key in sorted(first, key=lambda k: (first[k].row, first[k].pattern))]
+            if (f.row, f.pattern) in patterns:
+                continue
+            patterns.add((f.row, f.pattern))
+            if (f.row, f.word.casefold()) not in words:
+                words.add((f.row, f.word.casefold()))
+                first[(f.row, f.pattern)] = f
+    return [first[key] for key in sorted(first)]

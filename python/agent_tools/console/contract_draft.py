@@ -197,7 +197,7 @@ def _none(label: str) -> list[dict]:
 
 # id, label, pointers (the first is the field's member), options, text.
 _TABLE = (
-    ("integration-branch", "branch finished work merges into", ("/bindings/vcs/integration_branch",),
+    ("integration-branch", "main version finished work merges into", ("/bindings/vcs/integration_branch",),
      [], True),
     ("lint-command", "house-rule checks command", ("/bindings/commands/lint",), [], True),
     ("test-command", "test command", ("/bindings/commands/test",), [], True),
@@ -1021,6 +1021,8 @@ LEGACY_REASONS = (
     ("The plan refused the commits run in its development shell:",
      f"The plan refused the {LABELS[ENVIRONMENT_FIELD]}:"),
     ("choose the branch finished work merges into to go on.", PLAN_AGAIN.split(": ", 1)[1]),
+    ("The plan refused the branch finished work merges into:",
+     f"The plan refused the {LABELS['integration-branch']}:"),
 )
 
 

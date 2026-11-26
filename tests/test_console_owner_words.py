@@ -156,12 +156,20 @@ def none_refusal(field):
     return contract_draft.set_value([{"field": field}], field, "none")[1]
 
 
+def refusal(field):
+    """The card text the console completes when the plan refuses `field`."""
+    error = {"repair_id": "adopt.draft.invalid",
+             "violations": [{"pointer": contract_draft.POINTERS[field][0], "message": "it is not a value"}]}
+    return contract_draft.refused_field(error)[1]
+
+
 def built_words():
     """The texts a function completes from one word or name, which a literal scan cannot see."""
     return ([register.behind("/x/r", 1, True)["headline"], register.behind("/x/r", 3, False)["headline"]]
             + [contract_draft._ask(field, "r", 1) for field in
                ("integration-branch", "lint-command", "test-command", contract_draft.ENVIRONMENT_FIELD)]
             + [none_refusal("lint-command"), none_refusal("test-command")]
+            + [refusal(field) for field in (*contract_draft.FIELDS, *contract_draft.PROPOSED)]
             + [stopped_line(name) for name in stop_names()])
 
 
@@ -224,8 +232,8 @@ class ListTest(unittest.TestCase):
         self.assertEqual((hit.word, hit.sentence), ("land lock", "Waiting on the land lock now."))
 
     def test_found_in_counts_a_word_once_across_texts_in_list_order(self):
-        hits = owner_words.found_in(["the guard's policy said no", "rerun now", "rerun later"])
-        self.assertEqual([f.word for f in hits], ["rerun", "the guard's policy"])
+        hits = owner_words.found_in(["the guard said no", "rerun now", "rerun later"])
+        self.assertEqual([f.word for f in hits], ["rerun", "the guard"])
         self.assertEqual(hits[0].sentence, "rerun now")
         self.assertEqual(owner_words.found_in([]), [])
 
@@ -234,6 +242,21 @@ class ListTest(unittest.TestCase):
         self.assertEqual((hit.word, hit.sentence), ("landed", "The fix landed."))
         (hit,) = owner_words.found_in(["We landed the change.", "The fix landed."])
         self.assertEqual(hit.sentence, "We landed the change.")
+
+    def test_the_singular_and_plural_of_one_word_are_found_once(self):
+        self.assertEqual(words("Open a pull request. Close the pull requests."), ["pull request"])
+        self.assertEqual(words("The commit moved. Two commits left."), ["commit"])
+        self.assertEqual([f.word for f in owner_words.found_in(["a pull request", "the pull requests"])],
+                         ["pull request"])
+
+    def test_no_refusal_card_text_uses_a_listed_word(self):
+        for field in (*contract_draft.FIELDS, *contract_draft.PROPOSED):
+            with self.subTest(field=field):
+                self.assertEqual(owner_words.found(refusal(field)), [])
+
+    def test_a_refusal_stored_before_the_label_changed_is_shown_in_todays_words(self):
+        old = "The plan refused the branch finished work merges into: it is not a value"
+        self.assertEqual(owner_words.found(contract_draft.current_reason(old)), [])
 
     def test_no_replacement_uses_a_listed_word(self):
         for _, instead, _ in owner_words.ROWS:

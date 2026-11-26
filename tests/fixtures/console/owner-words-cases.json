@@ -261,5 +261,43 @@
     "found": [
       "change's head"
     ]
+  },
+  {
+    "text": "The guard refused the push.",
+    "found": [
+      "The guard"
+    ]
+  },
+  {
+    "text": "the guard said no",
+    "found": [
+      "the guard"
+    ]
+  },
+  {
+    "text": "Blocked by the guard.",
+    "found": [
+      "the guard"
+    ]
+  },
+  {
+    "text": "The guard watched the visitors. He waved.",
+    "found": []
+  },
+  {
+    "text": "The guard at the museum said hello.",
+    "found": []
+  },
+  {
+    "text": "Open a pull request. Close the pull requests.",
+    "found": [
+      "pull request"
+    ]
+  },
+  {
+    "text": "The commit moved. Two commits left.",
+    "found": [
+      "commit"
+    ]
   }
 ]

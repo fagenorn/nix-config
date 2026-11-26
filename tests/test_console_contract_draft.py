@@ -592,7 +592,7 @@ class ContractDraftTest(unittest.TestCase):
                              {"field", "line", "value", "options", "text", "more", "fact", "placeholder"})
         texts = [entry["line"] for entry in lines]
         for line in (
-            "branch finished work merges into: trunk (read from its remote)",
+            "main version finished work merges into: trunk (read from its remote)",
             f"project id and issue tracker: GitHub, as {ID} (read from its remote)",
             "it makes no releases",
             "it declares no production rules",
