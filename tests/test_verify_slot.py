@@ -315,6 +315,13 @@ class VerifySlotTest(SlotHarness, unittest.TestCase):
                             verify_slot.group_lock_name("example/beta"))
         self.assertFalse(Path(verify_slot.group_lock_name("example/alpha")).match("slot-*.lock"))
 
+    def test_a_trailing_slash_on_the_origin_url_does_not_change_the_repository(self):
+        urls = ("https://github.com/Example/alpha.git/", "https://github.com/example/alpha/",
+                "git@github.com:example/alpha.git/", "ssh://git@github.com/example/alpha.git//")
+        for number, url in enumerate(urls):
+            self.assertEqual(verify_slot.repository_group(self.repository(f"slash-{number}", url)),
+                             "example/alpha")
+
     def test_with_one_slot_a_second_run_waits_until_the_first_ends(self):
         first = self.start("a")
         self.assertTrue(wait_for(self.mark("a", "start")))
@@ -780,7 +787,7 @@ class VerifySlotTest(SlotHarness, unittest.TestCase):
         self.assertIsNotNone(held[1])
         self.assertEqual(take(1), (None, "same_repository"))
 
-    def test_declared_repositories_hold_up_to_their_own_limits_and_an_unnamed_one_holds_one(self):
+    def test_a_repository_declared_two_runs_two_at_once_and_an_unnamed_one_runs_one(self):
         self.declare(verify_slots=5, verify_repository_slots={"example/alpha": 2, "example/beta": 1})
         urls = {"alpha-one": "git@github.com:example/alpha.git", "alpha-two": "https://github.com/Example/alpha",
                 "alpha-three": "ssh://git@github.com/example/alpha.git", "beta-one": "git@github.com:example/beta.git",
@@ -808,6 +815,27 @@ class VerifySlotTest(SlotHarness, unittest.TestCase):
         for name, proc in runs.items():
             if name != "a1":
                 self.assertEqual(self.finish(proc)[0], 0)
+
+    def test_a_declared_limit_far_above_the_slot_count_still_leaves_a_ticket_every_reader_parses(self):
+        self.declare(verify_slots=2, verify_repository_slots={"example/alpha": 10**4096})
+        where = {name: self.repository(name, f"git@github.com:example/{name}.git")
+                 for name in ("alpha", "beta", "gamma")}
+        holders = [self.start("b", cwd=where["beta"]), self.start("g", cwd=where["gamma"])]
+        for name in ("b", "g"):
+            self.assertTrue(wait_for(self.mark(name, "start")))
+        waiter = self.start("a", cwd=where["alpha"])
+        read_place(waiter)
+        tickets = [verify_queue.open_shared(path) for path in self.slots.glob("ticket-*.lock")]
+        try:
+            limits = [verify_queue._parse(descriptor) for descriptor in tickets]
+        finally:
+            for descriptor in tickets:
+                os.close(descriptor)
+        self.assertEqual([record["repository_limit"] for record in limits], [2])
+        for name in ("b", "g", "a"):
+            self.release(name)
+        for proc in (*holders, waiter):
+            self.assertEqual(self.finish(proc)[0], 0)
 
     def test_a_live_run_under_its_repositorys_declared_limit_waits_ahead_without_being_held_back(self):
         self.declare(verify_slots=2, verify_repository_slots={"example/alpha": 2})

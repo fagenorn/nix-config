@@ -191,7 +191,7 @@ class SlotError(Exception):
 
 
 def host_limits(group: str | None) -> tuple[int, int]:
-    """The declared verify slot count and `group`'s own repository limit; defaults without a declaration."""
+    """The declared verify slot count and `group`'s repository limit, capped at the count; defaults without one."""
     try:
         declaration = host_admission.load_declaration()
     except host_admission.DeclarationError as error:
@@ -200,7 +200,8 @@ def host_limits(group: str | None) -> tuple[int, int]:
         raise SlotError(f"the host declaration is invalid: {error}") from None
     limit = (host_admission.DEFAULT_REPOSITORY_VERIFY_SLOTS if group is None
              else host_admission.repository_verify_slots(declaration, group))
-    return host_admission.verify_slots(declaration), limit
+    count = host_admission.verify_slots(declaration)
+    return count, min(limit, count)
 
 
 def slot_dir() -> Path:
