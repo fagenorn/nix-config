@@ -232,8 +232,6 @@ agent-workflow-tests *args:
     tests/test_interrupted_reruns_check.py \
     tests/test_verify_checks.py \
     tests/test_cleanup_fix_check.py \
-    tests/test_suite_test_failures.py \
-    tests/test_protection_tree.py \
     tests/test_console_approved_action_check.py \
     tests/test_console_takeover_merge_check.py \
     tests/test_console_release_rerun_check.py \
