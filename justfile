@@ -251,8 +251,10 @@ agent-workflow-tests *args:
     tests/test_memory_floor_priority.py \
     tests/test_memory_floor_gate.py \
     tests/test_memory_floor_check.py \
+    tests/test_memory_floor_speed.py \
     tests/test_interrupted_reruns_check.py \
     tests/test_verify_checks.py \
+    tests/test_loopback_server.py \
     tests/test_cleanup_fix_check.py \
     tests/test_console_approved_action_check.py \
     tests/test_console_takeover_merge_check.py \
@@ -303,6 +305,7 @@ agent-workflow-tests *args:
     tests/test_release_lock.py \
     tests/test_guard_policy.py \
     tests/test_git_pre_push_hook.py \
+    tests/test_guard_sandbox_git.py \
     tests/test_release_adapter_core.py \
     tests/test_codesigned_artifact_adapter.py \
     tests/test_launchd_agent_adapter.py \
@@ -414,6 +417,7 @@ agent-workflow-tests *args:
     tests/test_console_controls.py \
     tests/test_console_goal_box.py \
     tests/test_console_service.py \
+    tests/test_console_publish_hold.py \
     tests/test_console_close.py \
     tests/test_console_stream.py \
     tests/test_console_sessions.py \

@@ -244,6 +244,20 @@ def console_records(numbers) -> list[Path]:
         if int(p.name[:3]) in numbers)
 
 
+def guide_table(text: str, header: str) -> list[list[str]]:
+    lines = text.splitlines()
+    if header not in lines:
+        return []
+    rows = []
+    for line in lines[lines.index(header) + 1:]:
+        if not line.startswith("|"):
+            break
+        if line.startswith("|---"):
+            continue
+        rows.append([cell.strip() for cell in line.strip().strip("|").split("|")])
+    return rows
+
+
 def console_form_findings(numbers) -> list[tuple[str, str, int]]:
     return [
         (p.name, v.rule, v.line)
@@ -382,6 +396,88 @@ class DocsTreeTest(unittest.TestCase):
             if found:
                 breaches[relative] = [violation.rule for violation in found]
         self.assertEqual(breaches, {})
+
+    def test_system_record_007_keeps_the_record_form_and_supersedes_002_003_and_005(self):
+        path = REPO_ROOT / "docs/areas/system/adr/007-agent-tools-moves-to-dotnet-under-one-reference-graph.md"
+        found, cited = [], set()
+        if path.is_file():
+            data = path.read_bytes()
+            found = record_violations(path.relative_to(REPO_ROOT).as_posix(), data)
+            cited = {int(number) for number in re.findall(r"ADR-system-(\d{3})", data.decode("utf-8"))} - {7}
+        self.assertTrue(path.is_file())
+        self.assertEqual([violation.text() for violation in found], [])
+        self.assertEqual(cited, {2, 3, 5})
+
+    def test_system_002_003_and_005_name_007_as_superseding_them(self):
+        directory = REPO_ROOT / "docs/areas/system/adr"
+        names = (
+            "002-one-agent-tools-package.md",
+            "003-agent-tools-subpackages-are-the-areas.md",
+            "005-the-flake-publishes-one-platform-package.md")
+        cited = {
+            name: {int(number) for number in re.findall(
+                r"ADR-system-(\d{3})", (directory / name).read_text(encoding="utf-8"))}
+            for name in names}
+        self.assertEqual([name for name, numbers in cited.items() if 7 not in numbers], [])
+
+    def test_system_records_but_005_and_006_keep_the_record_form(self):
+        paths = [
+            path for path in sorted((REPO_ROOT / "docs/areas/system/adr").glob("*.md"))
+            if not path.name.startswith(("005-", "006-"))]
+        self.assertTrue(paths)
+        pairs = sorted(
+            (path.name, violation.rule)
+            for path in paths
+            for violation in record_violations(path.relative_to(REPO_ROOT).as_posix(), path.read_bytes()))
+        self.assertEqual(pairs, [])
+
+    def test_the_architecture_guide_tables_31_references_each_to_a_lower_layer(self):
+        text = (REPO_ROOT / "docs/guides/architecture.md").read_text(encoding="utf-8")
+        rows = guide_table(text, "| Layer | Project | References |")
+        layers = {}
+        references = {}
+        for cells in rows:
+            project = cells[1].split()[0]
+            layers[project] = int(cells[0].lstrip("L"))
+            references[project] = [] if cells[2] == "none" else cells[2].split(", ")
+        forbidden = {
+            frozenset(pair) for pair in (
+                ("Release", "Verification"), ("Release", "Delivery"), ("Claims", "Guard"),
+                ("Delivery", "Guard"), ("Console", "Guard"))}
+        self.assertEqual(len(rows), 9)
+        self.assertEqual(set(layers), {
+            "System", "ProjectContract", "Claims", "Guard", "Release", "Verification",
+            "Delivery", "Console", "Hosts"})
+        self.assertEqual(len({(project, reference) for project, refs in references.items() for reference in refs}), 31)
+        for project, refs in references.items():
+            for reference in refs:
+                self.assertLess(layers[reference], layers[project], f"{project} -> {reference}")
+                self.assertNotIn(frozenset({project, reference}), forbidden)
+
+    def test_the_architecture_guide_names_an_owner_and_a_writer_for_every_shared_format(self):
+        text = (REPO_ROOT / "docs/guides/architecture.md").read_text(encoding="utf-8")
+        rows = guide_table(text, "| Format | Owner project · module | Writer |")
+        projects = {
+            "System", "ProjectContract", "Claims", "Guard", "Release", "Verification",
+            "Delivery", "Console", "Hosts"}
+        formats = [cells[0] for cells in rows]
+        self.assertEqual(len(formats), len(set(formats)))
+        self.assertEqual(set(formats), {
+            "`events.sqlite3` (`events` table)", "`activation.result`, `activation.log`",
+            "Not-yet exit code 75", "Command ids", "Engine step ids", "`gh` calls",
+            "Engine run files `events.jsonl`, `run.json`",
+            "Claude profile `.claude.json`, created by `claude-account add`",
+            "Claude trust files, updated after creation", "`needs-verification` label",
+            "`<!-- agent:... -->` markers", "Issue-body acceptance criteria",
+            "Fleet registry `registry.json`, `.agents/state` root", "`.agents/project.json`",
+            "Release profile grammar and adapter catalog", "Memory-watch files, cache-proxy log",
+            "Lint timing record", "Release transaction `state.json`"})
+        for cells in rows:
+            self.assertIn(cells[1].split()[0], projects, cells[0])
+            self.assertTrue(cells[2].strip(), cells[0])
+        writers = {cells[0]: cells[2] for cells in rows}
+        self.assertIn("jq", writers["Claude profile `.claude.json`, created by `claude-account add`"])
+        self.assertEqual(writers["Claude trust files, updated after creation"], "Python")
 
     def test_no_living_file_names_a_working_artifact_outside_a_pinned_link(self):
         archived = archived_files()

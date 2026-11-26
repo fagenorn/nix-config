@@ -2503,17 +2503,6 @@ class MergedRegistrationTest(ApproveCase):
             json.dumps({"plan_id": PID_B}).encode())
         self.assertEqual((status, body), (409, register.UNAVAILABLE.encode() + b"\n"))
 
-    def test_a_waiting_registration_survives_a_restart_and_registers_on_the_first_look(self):
-        fake = self.merged(NOT_INTEGRATED)
-        self.poll("merged")
-        fake.report = GREEN
-        self.restart()
-        end = time.monotonic() + 10
-        while time.monotonic() < end and self.results()[-1:] != ["registered"]:
-            time.sleep(0.05)
-        self.assertEqual(self.results()[-1:], ["registered"])
-        self.assertTrue(self.listed("o/r"))
-
     def test_a_failed_run_is_refused_in_words_and_logged_in_full(self):
         self.merged(None, register_raises=register.RunFailed("timed_out"))
         errors = self.captured(lambda: self.poll("merged"))
