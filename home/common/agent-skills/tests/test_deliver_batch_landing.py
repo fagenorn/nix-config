@@ -663,3 +663,20 @@ class BatchGreenFirstTest(unittest.TestCase):
         self.assertLess(ls.index("land-checks-1-3"), len(ls) - 1 - ls[::-1].index("land-take-1"))
         self.assertNotIn("forge-claim land", prompt(calls, "land-checks-1-3"))
         self.assertIn(f"--sha {FIX} --wait --lease", prompt(calls, "land-take-1"))
+
+
+class DiagnosisBeatTest(unittest.TestCase):
+    """A red poll under the lease is diagnosed with the lease held, so the fix step starts the beat before it reads a log."""
+
+    OWN_RED = base.OwnRedOutsideLockTest
+
+    def test_the_diagnosis_under_the_lease_starts_the_beat_before_it_reads_a_log(self):
+        """The diagnosis keeps the lease while it reads the job log, which can outlast the 3-minute lapse."""
+        own = self.OWN_RED
+        out = run_full(replies=dict(own.HELD_RED, **{"land-fix-1": dict(own.FIXED, tests=["t"], lock_released=True),
+                                                     "land-record-1-1": {"ok": True, "head": FIX}, "land-checks-1-3": green(FIX)}))
+        fix = prompt(out["calls"], "land-fix-1")
+        detach = f"forge-claim land hold --repo owner/repo --branch dev --sha {SHA} --detach\n"
+        self.assertIn(detach, fix)
+        self.assertLess(fix.index(detach), fix.index("decide first, quickly"))
+        self.assertLess(fix.index(detach), fix.index(own.RELEASE))

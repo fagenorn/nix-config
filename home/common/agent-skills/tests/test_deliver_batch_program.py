@@ -6589,16 +6589,6 @@ class OwnRedOutsideLockTest(unittest.TestCase):
         self.assertIn(f"{LAND_RELEASE}{FIX}\n", prompt(calls, "close-out-1"))
         self.assertIn("#1: ci failed at the head the lock was taken at; its fix is reviewed outside the land lock", out["logs"])
 
-    def test_the_diagnosis_under_the_lease_starts_the_beat_before_it_reads_a_log(self):
-        """The diagnosis keeps the lease while it reads the job log, which can outlast the 3-minute lapse."""
-        out = run_full(replies=dict(self.HELD_RED, **{"land-fix-1": dict(self.FIXED, tests=["t"], lock_released=True),
-                                                      "land-record-1-1": {"ok": True, "head": FIX}, "land-checks-1-3": green(FIX)}))
-        fix = prompt(out["calls"], "land-fix-1")
-        detach = f"forge-claim land hold --repo owner/repo --branch dev --sha {SHA} --detach\n"
-        self.assertIn(detach, fix)
-        self.assertLess(fix.index(detach), fix.index("decide first, quickly"))
-        self.assertLess(fix.index(detach), fix.index(self.RELEASE))
-
     def test_a_release_the_fix_step_did_not_report_is_made_before_the_review(self):
         out = run_full(replies=dict(self.HELD_RED, **{"land-fix-1": dict(self.FIXED, tests=["t"], lock_released=False),
                                                       "land-record-1-1": {"ok": True, "head": FIX}, "land-checks-1-3": green(FIX)}))

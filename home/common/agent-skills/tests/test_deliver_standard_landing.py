@@ -733,3 +733,22 @@ class LandQueueDemoTest(unittest.TestCase):
         self.assertIn("--wait --lease", prompt(calls, "land-take"))
         self.assertIn("--match-head-commit " + D, prompt(calls, "merge"))
         self.assertEqual(clock.now, self.MERGE + self.SYNC + self.CI + self.MERGE)
+
+
+class DiagnosisBeatTest(unittest.TestCase):
+    """A red poll under the lease is diagnosed with the lease held, so the fix step starts the beat before it reads a log."""
+
+    def test_the_diagnosis_under_the_lease_starts_the_beat_before_it_reads_a_log(self):
+        """The diagnosis keeps the lease while it reads the job log, which can outlast the 3-minute lapse."""
+        own = base.OwnRedOutsideLockTest
+        out = run_out(replies={"merge": [base.MergeRefusedBehindTest.POLICY, base.MergeRefusedBehindTest.MERGED], "checks-2": RED},
+                      patch={"fix-ci": dict(own.FIXED, lock_released=True)})
+        fix = prompt(out["calls"], "fix-ci")
+        detach = f"forge-claim land hold --repo owner/repo --branch dev --sha {SHA} --detach\n"
+        self.assertIn(detach, fix)
+        self.assertLess(fix.index(detach), fix.index("decide first, quickly"))
+        self.assertLess(fix.index(detach), fix.index(own.RELEASE))
+        # Outside the lease (not asked for yet) the fix holds nothing and starts no beat.
+        outside = run_out(replies={"green-checks-1": green_read(FIX)},
+                          patch={"pr": {"green": red_read(RED)}, "fix-ci": {"start_head": SHA, "commit": FIX}})
+        self.assertNotIn("forge-claim land hold", prompt(outside["calls"], "fix-ci"))
