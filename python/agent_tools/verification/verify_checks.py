@@ -97,6 +97,17 @@ to the landed time. Otherwise it is `not_yet` (75) while the verifier's clock is
 session. A malformed `--repo` or `--since` is a usage error (2) before any read; an unreadable log, git or forge
 is 2.
 
+`engine-direct-past-implement --since SHA [--runs-root DIR] [--log PATH] [--repo-root DIR]`
+(`verify_checks.engine_direct_past_implement`) is met when the first direct-lane engine delivery after activation
+entered a step other than `preflight` and `implement` within two days of the activation. The anchor is found as
+`console-manager-merge` finds it (none: `not_yet`, 75). The runs are those under `--runs-root` (default the engine's
+runs root) whose `run.json` has procedure `direct` and a `started` at or after the anchor; one counts when its
+events hold a `step_entered` of `implement` and its `results/implement.1.json` is not `ineligible`. Only the first
+such run by `(started, id)` is judged: a first `outcome_graded` of `implement` that is not `done` is not met (1);
+else the first `step_entered` after that grade, at or before anchor plus two days, is met (0), a later one not met;
+with none it is not met once the clock is past that bound, else `not_yet`. The report is `{"met", "verdict",
+"anchor", "run", "implement", "entered", "at"}`.
+
 `console-notice-lists --port N --notice PROJECT=N1,N2,... [--notice ...]` (`verify_checks.console_notice_lists`,
 issue 1291) reads `GET http://127.0.0.1:N/api/state` (no answer, a status other than 200 or a body that is not a
 JSON object is `unreachable`, exit 75) and looks up each wanted project among the entries of `"type": "project"`,
@@ -150,6 +161,7 @@ from agent_tools.project_contract import agent_platform
 from agent_tools.project_contract.adopt_apply import run_leashed
 from agent_tools.canonical import parse_rfc3339_utc
 from agent_tools.claims import forge_markers, forge_owner_action
+from agent_tools.delivery.engine_ledger import runs_root as engine_runs_root
 from agent_tools.system import forge_api
 from agent_tools.verification import verify_answer, verify_issues
 
@@ -799,6 +811,98 @@ def console_manager_merge(repo: str, since: str, *, log: Path | None = None,
     return 1, {"met": False, "verdict": "not_met", **_MANAGER_MERGE_EMPTY}
 
 
+PAST_IMPLEMENT_WINDOW = timedelta(days=2)
+
+
+def _past_implement_events(run_dir: Path) -> list[tuple[str, str, datetime | None, dict]]:
+    """The (event, step, time, whole line) of each parsing line of a run's `events.jsonl`, in file order."""
+    found = []
+    try:
+        text = (run_dir / "events.jsonl").read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return found
+    for line in text.splitlines():
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(event, dict) or not isinstance(event.get("event"), str):
+            continue
+        try:
+            at = parse_rfc3339_utc(event.get("at"))
+        except ValueError:
+            at = None
+        found.append((event["event"], event.get("step"), at, event))
+    return found
+
+
+def _past_implement_runs(runs_root: Path, anchor: datetime) -> list[tuple[datetime, str, Path]]:
+    """The (started, id, directory) of each direct run started at or after `anchor`, earliest first."""
+    runs = []
+    try:
+        names = sorted(path for path in runs_root.iterdir() if path.is_dir())
+    except OSError:
+        return runs
+    for run_dir in names:
+        try:
+            document = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+            started = parse_rfc3339_utc(document["started"])
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+        if isinstance(document, dict) and document.get("procedure") == "direct" and started >= anchor:
+            runs.append((started, run_dir.name, run_dir))
+    return sorted(runs)
+
+
+def _implement_ineligible(run_dir: Path) -> bool:
+    try:
+        reply = json.loads((run_dir / "results" / "implement.1.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return isinstance(reply, dict) and reply.get("ineligible") is True
+
+
+def past_implement_verdict(runs_root: Path, anchor: datetime, now: datetime) -> tuple[int, dict]:
+    """The first direct engine run from `anchor` on that entered `implement` got a reply and a later step in time."""
+    report = {"met": False, "verdict": "not_yet", "anchor": _stamp(anchor), "run": None,
+              "implement": None, "entered": None, "at": None}
+    for started, run_id, run_dir in _past_implement_runs(runs_root, anchor):
+        events = _past_implement_events(run_dir)
+        if (not any(kind == "step_entered" and step == "implement" for kind, step, _, _ in events)
+                or _implement_ineligible(run_dir)):
+            continue
+        report["run"] = run_id
+        grade = next((index for index, (kind, step, _, _) in enumerate(events)
+                      if kind == "outcome_graded" and step == "implement"), None)
+        graded = events[grade][3].get("outcome") if grade is not None else None
+        report["implement"] = graded if isinstance(graded, str) else None
+        if graded is not None and graded != "done":
+            return 1, {**report, "verdict": "not_met"}
+        end = anchor + PAST_IMPLEMENT_WINDOW
+        for kind, step, at, _ in (events[grade:] if grade is not None else ()):
+            if kind == "step_entered" and step not in ("preflight", "implement"):
+                report.update(entered=step, at=None if at is None else _stamp(at))
+                if at is not None and at <= end:
+                    return 0, {**report, "met": True, "verdict": "met"}
+                return 1, {**report, "verdict": "not_met"}
+        if now > end:
+            return 1, {**report, "verdict": "not_met"}
+        return 75, report
+    return 75, report
+
+
+def engine_direct_past_implement(since: str, *, runs_root: Path | None = None, log: Path | None = None,
+                                 repo_root: Path = Path("."), now: datetime | None = None) -> tuple[int, dict]:
+    """The first direct engine delivery after activation of `since` got past `implement` within two days."""
+    store = log if log is not None else agent_platform.state_root() / "console" / "events.sqlite3"
+    anchor = _manager_merge_anchor(_log_rows(store, ("activation.finished",)), since, repo_root)
+    if anchor is None:
+        return 75, {"met": False, "verdict": "not_yet", "anchor": None, "run": None,
+                    "implement": None, "entered": None, "at": None}
+    return past_implement_verdict(runs_root if runs_root is not None else engine_runs_root(), anchor,
+                                  now if now is not None else _utcnow())
+
+
 def _proxy_answers(port: int, timeout: float) -> bool:
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
     try:
@@ -1094,6 +1198,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     manager_merge.add_argument("--since", type=_merge_sha, required=True)
     manager_merge.add_argument("--log", type=Path)
     manager_merge.add_argument("--repo-root", type=Path, default=Path("."))
+    past_implement = checks.add_parser(
+        "engine-direct-past-implement",
+        help="the first direct engine delivery after activation entered a step after implement in time")
+    past_implement.add_argument("--since", type=_merge_sha, required=True)
+    past_implement.add_argument("--runs-root", type=Path)
+    past_implement.add_argument("--log", type=Path)
+    past_implement.add_argument("--repo-root", type=Path, default=Path("."))
     notices = checks.add_parser(
         "console-notice-lists",
         help="issue 1291: the owner's notice for each project names every one of its issues")
@@ -1133,6 +1244,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 2
         except forge_api.ForgeError as error:
             print(f"verify-checks: forge_error: {error.code}", file=sys.stderr)
+            return 2
+        print(json.dumps(report, sort_keys=True))
+        return code
+    if args.check == "engine-direct-past-implement":
+        try:
+            code, report = engine_direct_past_implement(args.since, runs_root=args.runs_root, log=args.log,
+                                                        repo_root=args.repo_root)
+        except (ToolError, GitError) as error:
+            print(f"verify-checks: {getattr(error, 'kind', 'git_error')}: {error}", file=sys.stderr)
             return 2
         print(json.dumps(report, sort_keys=True))
         return code
