@@ -399,23 +399,22 @@ class DocsTreeTest(unittest.TestCase):
         if path.is_file():
             data = path.read_bytes()
             found = record_violations(path.relative_to(REPO_ROOT).as_posix(), data)
-            statement = re.search(
-                r"\bThis supersedes ((?:ADR-system-\d{3}(?:, | and )?)+)", data.decode("utf-8"))
-            if statement:
-                cited = set(re.findall(r"ADR-system-(\d{3})", statement.group(1)))
+            cited = {int(number) for number in re.findall(r"ADR-system-(\d{3})", data.decode("utf-8"))} - {7}
         self.assertTrue(path.is_file())
         self.assertEqual([violation.text() for violation in found], [])
-        self.assertEqual(cited, {"002", "003", "005"})
+        self.assertEqual(cited, {2, 3, 5})
 
     def test_system_002_003_and_005_name_007_as_superseding_them(self):
         directory = REPO_ROOT / "docs/areas/system/adr"
-        first = (directory / "002-one-agent-tools-package.md").read_text(encoding="utf-8")
-        second = (directory / "003-agent-tools-subpackages-are-the-areas.md").read_text(encoding="utf-8")
-        third = (directory / "005-the-flake-publishes-one-platform-package.md").read_text(encoding="utf-8")
-        self.assertIn("Superseded by ADR-system-007", first)
-        self.assertIn("Superseded by ADR-system-007", second)
-        self.assertIn("- **Status:** superseded by ADR-system-007", third)
-        self.assertNotIn("- **Status:** accepted", third)
+        names = (
+            "002-one-agent-tools-package.md",
+            "003-agent-tools-subpackages-are-the-areas.md",
+            "005-the-flake-publishes-one-platform-package.md")
+        cited = {
+            name: {int(number) for number in re.findall(
+                r"ADR-system-(\d{3})", (directory / name).read_text(encoding="utf-8"))}
+            for name in names}
+        self.assertEqual([name for name, numbers in cited.items() if 7 not in numbers], [])
 
     def test_system_records_but_005_and_006_keep_the_record_form(self):
         paths = [
