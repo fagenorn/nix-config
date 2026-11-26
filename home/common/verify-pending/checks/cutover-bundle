@@ -1,5 +1,0 @@
-#!/bin/sh
-# Verify check for issue 579 (C3): a #70 bundle (a --bundle FILE, else the bundles retained in history) that
-# verify_bundle accepts as approved binds the commit at origin/cutover-130-candidate. verify-pending runs it from the
-# repository root at the commit the block names.
-PYTHONPATH=python exec python3 -m agent_tools.verification.verify_checks cutover-bundle "$@"

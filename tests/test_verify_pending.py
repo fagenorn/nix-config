@@ -976,16 +976,6 @@ class WorkspaceTest(GitRepos):
         self.second = self.commit("two")
         self.lag(self.first)
 
-    def test_every_workspace_has_the_shape_readers_recognise(self):
-        with vx.workspace(self.root, self.first) as one, vx.workspace(self.root, self.first) as two:
-            for wt in (one, two):
-                self.assertTrue(vx.is_workspace(str(wt)), wt)
-                self.assertTrue(vx.is_workspace(os.path.realpath(wt)), wt)
-            self.assertNotEqual(one, two)
-        self.assertFalse(vx.is_workspace("/tmp/verify-pending-abc/wt"))
-        self.assertFalse(vx.is_workspace("/tmp/verify-pending-abcdefgh/other"))
-        self.assertFalse(vx.is_workspace("/tmp/elsewhere-abcdefgh/wt"))
-
     def test_a_commit_only_origin_holds_is_fetched_and_checked_out_detached(self):
         with vx.workspace(self.root, self.second) as wt:
             self.assertEqual((wt / "f").read_text(), "two\n")
@@ -1003,6 +993,15 @@ class WorkspaceTest(GitRepos):
         with mock.patch.object(vx, "_git", wraps=vx._git) as git:
             self.assertTrue(vx.ensure_commit(self.root, self.first))
         self.assertEqual([call.args[1] for call in git.call_args_list], ["cat-file"])
+
+    def test_overlapping_workspaces_for_one_commit_get_distinct_prefixed_paths(self):
+        # The memory monitor recognises a check's processes by the `verify-pending-` parent name.
+        with vx.workspace(self.root, self.first) as one, vx.workspace(self.root, self.first) as two:
+            self.assertNotEqual(one, two)
+            self.assertNotEqual(one.parent, two.parent)
+            self.assertTrue(one.parent.name.startswith("verify-pending-"))
+            self.assertTrue(two.parent.name.startswith("verify-pending-"))
+            self.assertEqual((one / "f").read_text(), (two / "f").read_text())
 
     def test_cleanup_after_an_error_and_an_unknown_commit(self):
         with self.assertRaises(RuntimeError):

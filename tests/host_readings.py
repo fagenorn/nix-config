@@ -311,6 +311,10 @@ PARTS: dict[str, Part] = {
     inherit (d) command;
     inherit (d.serviceConfig) UserName StartInterval KeepAlive;
   };
+  census = let d = c.launchd.daemons.memory-census; in {
+    inherit (d) command;
+    inherit (d.serviceConfig) UserName StartInterval RunAtLoad KeepAlive StandardOutPath;
+  };
   floor = let d = c.launchd.daemons.memory-floor; in {
     inherit (d) command;
     inherit (d.serviceConfig) KeepAlive RunAtLoad StandardOutPath;

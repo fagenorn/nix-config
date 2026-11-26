@@ -1,8 +1,9 @@
 """`engine`: run the delivery engine's commands (#1508).
 
 `engine check [--procedures <dir>]` reads the procedure files of a directory (default: the
-package's `procedures` directory) and prints one line of compact sorted-key JSON, starting
-no process and opening no socket:
+package's `procedures` directory) and prints one line of compact sorted-key JSON,
+starting one process, the procedure check (`python -m agent_tools.delivery.procedure_check`, whose
+contract is that module's docstring), and opening no socket:
 
 - exit 0: `{"procedures": [<names>], "verdict": "ok"}`;
 - exit 1: `{"breaches": [{"cap", "size", "thing", "unit"}, ...], "refusals": [{"defect",
@@ -14,7 +15,7 @@ no process and opening no socket:
 The procedure format and every refusal code are `procedure_check`'s contract. In a directory
 an onboarded project owns, the command ids checked are the platform's plus the project's,
 the ones `engine deliver` accepts; elsewhere they are the platform's. The check also lists
-in `breaches` each cap of `engine_caps` the core, the engine package, a procedure, the
+in `breaches` each cap of `size_caps` the core, the engine package, a procedure, the
 graders or a prompt file exceeds; nothing changes a cap.
 
 `engine status <issue> [--project <slug>]` reads the newest run of the issue under
@@ -54,7 +55,9 @@ child once one faults; `engine status` reads the root run, never a child:
 - exit 2, stdout empty and one stderr line: a usage error, a host whose settings load no
   lifecycle guard hook, a host declaration that does not admit the engine route (printed with its
   reason code first), or a refusal before any run is created or continued (two open runs of the
-  issue included), which creates no run directory.
+  issue included), which creates no run directory;
+- exit 2 with one stdout line and nothing on stderr: the procedure set the verdict refuses prints
+  `engine check`'s refused line instead, a new run's before any run directory is created.
 
 `engine stop <issue> [--project <slug>]` asks the run of the issue that is running on this host
 to stop: it writes the run's `stop-request` file naming the lock holder, signals no process,
@@ -70,20 +73,12 @@ appends no event, waits for nothing, and prints one line of compact sorted-key J
 from __future__ import annotations
 
 import argparse
-import importlib.resources
 import json
 import sys
 from pathlib import Path
 
-from agent_tools.delivery import (
-    engine_caps,
-    engine_graders,
-    engine_ledger,
-    engine_shell,
-    procedure_check,
-)
+from agent_tools.delivery import engine_check, engine_ledger, engine_shell, procedure_terms
 
-ENGINE_DIR = Path(importlib.resources.files("agent_tools.delivery"))
 PROCEDURES_DIR = Path(__file__).with_name("procedures")
 
 
@@ -185,6 +180,9 @@ def _stop_run(issue: int, project: str | None) -> int:
 def _deliver(issue: int, procedures: Path) -> int:
     try:
         code, line = engine_shell.deliver(issue, procedures)
+    except engine_shell.ProcedureRefused as error:
+        sys.stdout.write(compact(error.document))
+        return engine_shell.EXIT_REFUSED
     except engine_shell.Refused as error:
         return _usage(str(error))
     except engine_shell.Fault as error:
@@ -208,18 +206,12 @@ def main(argv: list[str] | None = None) -> int:
     if not args.procedures.is_dir():
         return _usage(f"--procedures is not a directory: {args.procedures}")
     try:
-        commands = engine_shell.check_declarations()
-        result = procedure_check.check_directory(args.procedures, commands)
-        breaches = engine_caps.breaches(ENGINE_DIR, args.procedures, engine_graders.GRADERS)
-    except (procedure_check.DeclarationError, engine_shell.Refused, ValueError) as error:
+        code, document = engine_check.verdict(args.procedures, engine_shell.check_project_commands(),
+                                              caps=True)
+    except (procedure_terms.DeclarationError, engine_shell.Refused, engine_check.CheckError) as error:
         return _usage(str(error))
-    if result.refusals or breaches:
-        sys.stdout.write(compact({"breaches": [b.as_json() for b in breaches],
-                                  "refusals": [r.as_json() for r in result.refusals],
-                                  "verdict": "refused"}))
-        return 1
-    sys.stdout.write(compact({"procedures": list(result.procedures), "verdict": "ok"}))
-    return 0
+    sys.stdout.write(compact(document))
+    return code
 
 
 if __name__ == "__main__":

@@ -2,7 +2,7 @@
 
 Usage: `python -m agent_tools.delivery.touched_tests --base REF [--root DIR]
 [--source-root DIR]... [--pair SOURCE=TEST]... [--cover SOURCE_GLOB=MEMBER_GLOB]...
-[--suite-file PATH] [--build-when GLOB]... [--build-command CMD]`
+[--suite-file PATH] [--build-when GLOB]... [--build-command CMD] [--env-from MEMBER=CMD]...`
 
 A project's `test-touched` recipe runs this module (it has no command-table row, after
 `agent_tools.delivery.verification_command`). It reads no project policy: the base, the
@@ -38,6 +38,20 @@ the pair tests of changed pair sources that are not members. With no match no bu
 the selection is the rules above. `--build-when` without `--build-command` is a usage error
 (exit 2), as is a `--pair` or `--cover` value with no `=` or an empty side.
 
+Environment member: `--env-from MEMBER=CMD` names a test file that needs variables only a
+build gives it. When MEMBER is selected, the build command runs first (unless a full
+selection already ran it), then CMD runs from the root and prints one `NAME=VALUE` line per
+variable (blank lines are skipped; any other line, or a non-zero exit, is the result with no
+suite run: the exit code, or 2 for a bad line), and MEMBER runs through the suite runner on its
+own with those variables added to the environment. The other selected members run first, as
+without the flag, and the result is the first non-zero exit of the runs. When
+`SUITE_RUNNER_REPORT` is set and the selection runs in more than one process, each process
+writes its timing report to a temporary file and the runs' reports are merged into one report
+at the `SUITE_RUNNER_REPORT` path (resolved against the root) covering the whole selection;
+a run that wrote no report adds no rows. `--env-from` without
+`--build-command` is a usage error (exit 2), as is a value with no `=` or an empty side, or
+the same MEMBER twice.
+
 Selection file: when the environment variable `VERIFIED_TREE_SELECTION` (`SELECTION_ENV`)
 names a path, the selection is written there before anything runs, as one line of JSON with
 sorted keys: `base`, `changed`, `full`, `full_because` and `selected`, even when nothing is
@@ -60,10 +74,12 @@ import os
 import shlex
 import subprocess
 import sys
+import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
-from agent_tools.delivery.suite_runner import suite_members
+from agent_tools.delivery.suite_runner import (
+    REPORT_ENV, REPORT_VERSION, suite_members, write_report)
 
 
 SELECTION_ENV = "VERIFIED_TREE_SELECTION"
@@ -183,9 +199,45 @@ def parse_covers(parser: argparse.ArgumentParser, values: Sequence[str]) -> dict
     return _parse_mapping(parser, "--cover", "SOURCE_GLOB=MEMBER_GLOB", values)
 
 
-def default_execute(argv: list[str], cwd: Path) -> int:
+def default_execute(argv: list[str], cwd: Path, extra: Mapping[str, str] | None = None) -> int:
     env = {k: v for k, v in os.environ.items() if k != SELECTION_ENV}
+    env.update(extra or {})
     return subprocess.run(argv, cwd=cwd, env=env).returncode
+
+
+def default_capture(argv: list[str], cwd: Path) -> tuple[int, str]:
+    env = {k: v for k, v in os.environ.items() if k != SELECTION_ENV}
+    result = subprocess.run(argv, cwd=cwd, env=env, stdout=subprocess.PIPE, text=True)
+    return result.returncode, result.stdout
+
+
+def parse_assignments(output: str) -> dict[str, str]:
+    assignments: dict[str, str] = {}
+    for line in output.splitlines():
+        if not line.strip():
+            continue
+        name, separator, value = line.partition("=")
+        if not separator or not name.isidentifier():
+            raise ValueError(f"not a NAME=VALUE line: {line!r}")
+        assignments[name] = value
+    return assignments
+
+
+def merge_reports(reports: Sequence[Mapping]) -> dict:
+    """One timing report over the runs' reports: counts and times summed, rows slowest first."""
+    rows = sorted((row for report in reports for row in report["timings"]),
+                  key=lambda row: -row["seconds"])
+    return {
+        "version": REPORT_VERSION,
+        "members": sum(report["members"] for report in reports),
+        "passed": sum(report["passed"] for report in reports),
+        "failed": sum(report["failed"] for report in reports),
+        "jobs": max(report["jobs"] for report in reports),
+        "wall_seconds": round(sum(report["wall_seconds"] for report in reports), 1),
+        "member_seconds": sum(report["member_seconds"] for report in reports),
+        "cpu_seconds": round(sum(report["cpu_seconds"] for report in reports), 1),
+        "timings": rows,
+    }
 
 
 def _say(stream, line: str) -> None:
@@ -193,7 +245,8 @@ def _say(stream, line: str) -> None:
 
 
 def main(argv: Sequence[str] | None = None, *,
-         execute: Callable[[list[str], Path], int] | None = None) -> int:
+         execute: Callable[..., int] | None = None,
+         capture: Callable[[list[str], Path], tuple[int, str]] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="touched-tests")
     parser.add_argument("--base", required=True)
     parser.add_argument("--root", default=None)
@@ -203,12 +256,20 @@ def main(argv: Sequence[str] | None = None, *,
     parser.add_argument("--suite-file", default="justfile")
     parser.add_argument("--build-when", action="append", default=[])
     parser.add_argument("--build-command", default=None)
+    parser.add_argument("--env-from", action="append", default=[])
     args = parser.parse_args(argv)
     pairs = parse_pairs(parser, args.pair)
     covers = parse_covers(parser, args.cover)
     if args.build_when and not args.build_command:
         parser.error("--build-when needs --build-command")
+    env_commands = _parse_mapping(parser, "--env-from", "MEMBER=CMD", args.env_from)
+    if env_commands and not args.build_command:
+        parser.error("--env-from needs --build-command")
+    for member, commands in env_commands.items():
+        if len(commands) > 1:
+            parser.error(f"--env-from names {member!r} twice")
     run = execute or default_execute
+    capture_output = capture or default_capture
     root = Path(args.root) if args.root else Path.cwd()
     try:
         changed = changed_paths(root, args.base)
@@ -234,8 +295,8 @@ def main(argv: Sequence[str] | None = None, *,
         except OSError as error:
             _say(sys.stderr, f"test-touched: cannot write the selection to {target}: {error}")
 
-    code = 0
-    if chosen["full"]:
+    built = chosen["full"]
+    if built:
         _say(sys.stderr, f"test-touched: building with {args.build_command}: "
                          f"{chosen['full_because'][0]} changed")
         code = run(shlex.split(args.build_command), root)
@@ -244,10 +305,50 @@ def main(argv: Sequence[str] | None = None, *,
     selected = chosen["selected"]
     if not selected:
         _say(sys.stdout, f"test-touched: no suite member is touched by {args.base}...HEAD")
-        return code
+        return 0
+    prepared: dict[str, dict[str, str]] = {}
+    for member in selected:
+        if member not in env_commands:
+            continue
+        if not built:
+            _say(sys.stderr, f"test-touched: building with {args.build_command}: "
+                             f"{member} needs its build environment")
+            code = run(shlex.split(args.build_command), root)
+            if code != 0:
+                return code
+            built = True
+        code, output = capture_output(shlex.split(env_commands[member][0]), root)
+        if code != 0:
+            return code
+        try:
+            prepared[member] = parse_assignments(output)
+        except ValueError as error:
+            _say(sys.stderr, f"test-touched: {env_commands[member][0]}: {error}")
+            return 2
     _say(sys.stderr, f"test-touched: running {len(selected)}: {' '.join(selected)}")
-    return run([sys.executable, "-m", "agent_tools.delivery.suite_runner", *selected], root)
-
+    runner = [sys.executable, "-m", "agent_tools.delivery.suite_runner"]
+    plain = [m for m in selected if m not in prepared]
+    launches: list[tuple[list[str], dict[str, str] | None]] = []
+    if plain:
+        launches.append((plain, None))
+    launches.extend(([member], prepared[member]) for member in selected if member in prepared)
+    report_value = os.environ.get(REPORT_ENV, "")
+    merging = bool(report_value) and len(launches) > 1
+    results: list[int] = []
+    with tempfile.TemporaryDirectory(prefix="touched-tests-report-") as scratch:
+        parts: list[Path] = []
+        for index, (members_run, extra) in enumerate(launches):
+            argv_run = [*runner, *members_run]
+            if merging:
+                parts.append(Path(scratch) / f"{index}.json")
+                extra = {**(extra or {}), REPORT_ENV: str(parts[-1])}
+            results.append(run(argv_run, root) if extra is None
+                           else run(argv_run, root, extra))
+        written = [json.loads(part.read_text(encoding="utf-8"))
+                   for part in parts if part.is_file()]
+        if written:
+            write_report(root / report_value, merge_reports(written))
+    return next((code for code in results if code != 0), 0)
 
 if __name__ == "__main__":
     sys.exit(main())

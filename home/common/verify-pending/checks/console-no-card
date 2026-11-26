@@ -1,4 +1,0 @@
-#!/bin/sh
-# Verify check for issue 1327: the console lists no inbox card with any of the given keys. verify-pending runs it
-# from the repository root at the commit the block names.
-PYTHONPATH=python exec python3 -m agent_tools.verification.verify_checks console-no-card "$@"
