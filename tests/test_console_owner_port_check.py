@@ -175,7 +175,8 @@ class ConnectAsTest(unittest.TestCase):
     def test_the_probe_script_connects_and_reports_a_missing_socket_as_unknown(self):
         import socket
         import tempfile
-        with tempfile.TemporaryDirectory() as tmp:
+        # A short path: Darwin allows 104 bytes in a socket pathname, and its temporary root is long.
+        with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
             sock = os.path.join(tmp, "s")
             server = socket.socket(socket.AF_UNIX)
             self.addCleanup(server.close)

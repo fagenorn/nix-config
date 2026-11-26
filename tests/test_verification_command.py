@@ -541,8 +541,9 @@ CI_STEP_CLASSES = {
     ("ci.yaml", "flake-checker", INSTALL): SETUP,
     ("ci.yaml", "nix-eval", CHECKOUT): SETUP,
     ("ci.yaml", "nix-eval", INSTALL): SETUP,
+    ("ci.yaml", "agent-workflow-tests-shard", CHECKOUT): SETUP,
+    ("ci.yaml", "agent-workflow-tests-shard", INSTALL): SETUP,
     ("ci.yaml", "agent-workflow-tests", CHECKOUT): SETUP,
-    ("ci.yaml", "agent-workflow-tests", INSTALL): SETUP,
     ("ci.yaml", "flake-checker", "DeterminateSystems/flake-checker-action@v5"):
         ("not-lint", "annotates flake.lock health and never fails a run"),
     ("ci.yaml", "nix-eval", CI_EVAL): ("not-lint", "evaluates a host configuration"),
@@ -554,12 +555,22 @@ CI_STEP_CLASSES = {
         ("not-lint", "runs the platform package with no home configuration"),
     ("ci.yaml", "nix-eval", "nix build --no-link '.#checks.x86_64-linux.omlx-adapter'"):
         ("not-lint", "tests the adapter against its pinned upstream"),
-    ("ci.yaml", "agent-workflow-tests",
+    ("ci.yaml", "agent-workflow-tests-shard",
      "WORKFLOW_POLICY_SURFACE=source nix shell --inputs-from . nixpkgs#just nixpkgs#nodejs "
      "--command just agent-workflow-tests"):
-        ("not-lint", "the suite, the test member agent-workflow-tests"),
+        ("not-lint", "the suite, the test member agent-workflow-tests, one shard"),
+    ("ci.yaml", "agent-workflow-tests-shard", "actions/upload-artifact@v4"):
+        ("not-lint", "uploads the shard's suite timing report"),
+    ("ci.yaml", "agent-workflow-tests", "actions/download-artifact@v4"):
+        ("not-lint", "downloads the shards' suite timing reports"),
+    ("ci.yaml", "agent-workflow-tests",
+     "PYTHONPATH=python python3 -m agent_tools.delivery.suite_timing join "
+     "--workflow .github/workflows/ci.yaml --shard-job agent-workflow-tests-shard "
+     "--shards-dir suite-timing/shards --out suite-timing/suite-timing.json "
+     '--needs-result "$SHARDS_RESULT"'):
+        ("not-lint", "joins the shard reports and fails naming each failed shard"),
     ("ci.yaml", "agent-workflow-tests", "actions/upload-artifact@v4"):
-        ("not-lint", "uploads the suite timing report"),
+        ("not-lint", "uploads the joined suite timing report"),
     ("ci.yaml", "suite-timing-baseline", "actions/download-artifact@v4"):
         ("not-lint", "downloads the run's suite timing report"),
     ("ci.yaml", "suite-timing-baseline", "actions/cache/save@v4"):

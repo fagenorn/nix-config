@@ -25,6 +25,14 @@ runs (`usable_memory_root`: a `noexec` mount would make tests skip their fake co
 `TMPDIR` to it and removes it when the run ends, so a test's files, forced flushes included,
 stay in memory. `SUITE_RUNNER_SCRATCH=disk` keeps the inherited `TMPDIR`; any other value is the
 directory the run's scratch directory is created in. A host without `/dev/shm` runs as before.
+Own directory per parallel member. With more than one job, each member also gets
+its own empty `TMPDIR`, a `member<N>-*` directory inside the run's scratch directory, removed
+when the member ends, pass or fail, so a test that lists its temporary directory never sees
+another member's files. A directory that cannot be removed is named in the member's output
+and fails the member. Where no scratch root applies (a host without `/dev/shm`, or
+`SUITE_RUNNER_SCRATCH=disk`) the run's `suite-runner-tmp-*` directory is created in the
+inherited temporary directory for that purpose and removed when the run ends. A serial run
+(`--jobs 1`) is unchanged: one member at a time shares the run's directory or the inherited one.
 A run killed before its cleanup leaves its directory; the next run removes this user's
 `suite-runner-tmp-*` directories there that are a day old (`sweep_stale_scratch`).
 
@@ -54,7 +62,7 @@ Jobs and order (issue 604). At most `--jobs N` members run at once. The default 
 `SUITE_RUNNER_JOBS` when that variable is set and non-empty, else `min(8, CPUs - 2)` with a
 floor of 1 (also when the CPU count is unknown); an explicit `--jobs` wins over both, and a
 bad `SUITE_RUNNER_JOBS` is a usage error (exit 2); the hosted CI job sets it to 4, the vCPUs
-of its runner (`.github/workflows/ci.yaml:101`). In parallel mode members start
+of the hosted CI job's shards. In parallel mode members start
 longest-first (LPT): the order comes from `python/agent_tools/delivery/suite_timings.json`, a
 committed map of member path to wall seconds taken from a full run's timing table, with
 members it does not name starting first in list order, ties in list order, and a missing or
@@ -63,6 +71,18 @@ list order for ties. Refresh the file from a run's `suite-runner: <wall>s wall .
 rows when the suite's shape changes; a stale file only costs wall time.
 `tests/test_suite_runner.py` names the run the file was last refreshed from and its members
 slower than 30 s, and a refresh from a newer run replaces both.
+
+Shards. When `SUITE_RUNNER_SHARD` is set and non-empty it reads `<index>/<count>` with
+`1 <= index <= count`, both decimal numbers without a sign or a leading zero, and the runner
+runs only that shard of the members, so independent jobs each run one part of the suite. The
+partition is a pure function of the member list and the committed timings, so every job
+computes the same one: members are taken longest first by their recorded seconds, ties in
+list order, a member the file does not name weighing the mean of the recorded members' times
+(0.0 when none is recorded), each going to the shard with the smallest total weight, then the
+fewest members, then the lowest index; a shard keeps list order. Every member is in exactly
+one shard. Any other text, and a shard with no member, is a usage error (exit 2) raised
+before anything starts. The report of a sharded run ends with the keys `shard` and
+`shard_count`; an unsharded run's report is unchanged. Members do not inherit the variable.
 
 Output. In parallel mode each member's stdout and stderr are captured together and printed
 as one block when it exits, from `suite-runner: begin <member>` to
@@ -147,7 +167,7 @@ import sys
 import tempfile
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import BinaryIO, Callable, Mapping, Sequence
 
@@ -162,6 +182,9 @@ RESERVED_CPUS = 2
 # The path of the JSON timing report, relative to the working directory (issue 1385).
 REPORT_ENV = "SUITE_RUNNER_REPORT"
 REPORT_VERSION = 1
+# `<index>/<count>`: run only that shard of the members, so CI jobs split the suite between them.
+SHARD_ENV = "SUITE_RUNNER_SHARD"
+SHARD_PATTERN = re.compile(r"[1-9][0-9]*/[1-9][0-9]*")
 TIMINGS_FILE = Path(__file__).with_name("suite_timings.json")
 INTERRUPTED = f"{PREFIX} interrupted, waiting for running members"
 INTERRUPT_EXIT = 130
@@ -239,6 +262,20 @@ def default_jobs(cpu_count: int | None, environ: Mapping[str, str]) -> int:
         except argparse.ArgumentTypeError as error:
             raise UsageError(f"{JOBS_ENV}: {error}") from None
     return max(1, min(MAX_DEFAULT_JOBS, (cpu_count or 1) - RESERVED_CPUS))
+
+
+def shard_from(environ: Mapping[str, str]) -> tuple[int, int] | None:
+    """The `(index, count)` that `SHARD_ENV` names, None when it is unset or empty. Text
+    other than `<index>/<count>` with `1 <= index <= count` raises `UsageError`."""
+    text = environ.get(SHARD_ENV, "")
+    if not text:
+        return None
+    if SHARD_PATTERN.fullmatch(text):
+        index, count = (int(part) for part in text.split("/"))
+        if index <= count:
+            return index, count
+    raise UsageError(
+        f"{SHARD_ENV}: {text!r} is not <index>/<count> with 1 <= index <= count")
 
 
 def load_timings(path: Path = TIMINGS_FILE) -> dict[str, float]:
@@ -347,6 +384,28 @@ def unit_order(units: Sequence[Unit]) -> list[int]:
     return unknown + known
 
 
+def assign_shards(members: Sequence[str], timings: Mapping[str, float],
+                  count: int) -> list[list[str]]:
+    """`count` shards of `members`, shard 1 first, each in list order; every member is in
+    exactly one. Members go longest first by recorded seconds (ties in list order), one the
+    file does not name weighing the mean of the recorded members' times (0.0 when none is
+    recorded; entries for other names are ignored), each to the shard with the smallest
+    (weight total, member count, index). A pure function of its arguments."""
+    if count < 1:
+        raise ValueError(f"a shard count is at least 1, not {count}")
+    recorded = [timings[member] for member in members if member in timings]
+    unknown = sum(recorded) / len(recorded) if recorded else 0.0
+    weights = [timings.get(member, unknown) for member in members]
+    order = sorted(range(len(members)), key=lambda i: (-weights[i], i))
+    shards: list[list[int]] = [[] for _ in range(count)]
+    totals = [0.0] * count
+    for i in order:
+        target = min(range(count), key=lambda s: (totals[s], len(shards[s]), s))
+        shards[target].append(i)
+        totals[target] += weights[i]
+    return [[members[i] for i in sorted(shard)] for shard in shards]
+
+
 SUITE_RECIPE = "agent-workflow-tests *args:"
 
 
@@ -411,7 +470,8 @@ def member_environment(parent: Mapping[str, str], cache: str) -> dict[str, str]:
     one wrote there. An inherited `AGENT_PLATFORM_ROOT` is dropped: the suite
     runs from source, so a member never inherits a platform package's root
     (ADR-system-005). An inherited `REPORT_ENV` is dropped too, so a runner nested in a
-    member never writes to the outer run's report path (issue 1385). `parent` is not modified, and every other variable is
+    member never writes to the outer run's report path (issue 1385), and so is `SHARD_ENV`, so
+    a runner nested in a member runs its whole list. `parent` is not modified, and every other variable is
     copied unchanged.
 
     The three part variables a split member's parts get are dropped as well, so a nested
@@ -420,6 +480,7 @@ def member_environment(parent: Mapping[str, str], cache: str) -> dict[str, str]:
     environment = dict(parent)
     environment.pop("AGENT_PLATFORM_ROOT", None)
     environment.pop(REPORT_ENV, None)
+    environment.pop(SHARD_ENV, None)
     for name in (PART_ENV, PART_DIR_ENV, PART_MEMBER_ENV):
         environment.pop(name, None)
     inherited = environment.get("GIT_CONFIG_PARAMETERS", "")
@@ -680,10 +741,13 @@ def _run_serial(members: Sequence[str], environment: Mapping[str, str],
 
 
 def _run_parallel(units: Sequence[Unit], order: Sequence[int], jobs: int,
-                  environments: Sequence[Mapping[str, str]], out: _Output
+                  environments: Sequence[Mapping[str, str]], out: _Output,
+                  scratch: str | None = None
                   ) -> tuple[list[MemberResult | None], list[str | None]]:
     """Run `units`, `jobs` at a time, in `order`: each one's result, and the `part_failure` of
-    each (None for a whole member), indexed by unit."""
+    each (None for a whole member), indexed by unit. With `scratch`, a directory that exists,
+    each unit runs with its own empty `TMPDIR` created in it and removed once the unit has
+    ended, however it ended; one that cannot be removed fails its unit."""
     results: list[MemberResult | None] = [None] * len(units)
     failures: list[str | None] = [None] * len(units)
     stop = threading.Event()
@@ -706,23 +770,42 @@ def _run_parallel(units: Sequence[Unit], order: Sequence[int], jobs: int,
                 next_index += 1
                 out.write(_line(f"{PREFIX} start {label}"))
                 started = time.monotonic()
+                env = environments[index]
+                member_tmp = None
                 try:
+                    if scratch is not None:
+                        member_tmp = tempfile.TemporaryDirectory(
+                            prefix=f"member{index}-", dir=scratch)
+                        env = {**env, "TMPDIR": member_tmp.name}
                     process = subprocess.Popen(
-                        unit_command(unit), env=environments[index], stdin=subprocess.DEVNULL,
+                        unit_command(unit), env=env, stdin=subprocess.DEVNULL,
                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
                 except OSError as error:
                     process, output = None, _line(str(error))
-            if process is not None:
-                # Read the merged output to its end, then reap: what
-                # communicate() does for one pipe and no input. Signal handlers
-                # run on the main thread only, so this reap is never
-                # interrupted (issue 497 D2).
-                with process.stdout:
-                    output = process.stdout.read()
-            result = _reap(index, label, process, started)
+            removal_error = None
+            try:
+                if process is not None:
+                    # Read the merged output to its end, then reap: what
+                    # communicate() does for one pipe and no input. Signal handlers
+                    # run on the main thread only, so this reap is never
+                    # interrupted (issue 497 D2).
+                    with process.stdout:
+                        output = process.stdout.read()
+                result = _reap(index, label, process, started)
+            finally:
+                if member_tmp is not None:
+                    try:
+                        member_tmp.cleanup()
+                    except OSError as error:
+                        removal_error = error
             failures[index] = part_failure(unit, result, output)
             if output and not output.endswith(b"\n"):
                 output += b"\n"
+            if removal_error is not None:
+                output += _line(f"{PREFIX} {label}: {member_tmp.name} was not removed: "
+                                f"{removal_error}")
+                if result.passed:
+                    result = replace(result, returncode=1)
             # One write per block, before this worker takes its next member.
             with out.lock:
                 out.write(_line(f"{PREFIX} begin {label}") + output
@@ -766,13 +849,14 @@ def _run_parallel(units: Sequence[Unit], order: Sequence[int], jobs: int,
 
 
 def timing_report(results: Sequence[MemberResult], *, jobs: int,
-                  wall_seconds: float) -> dict:
+                  wall_seconds: float, shard: tuple[int, int] | None = None) -> dict:
     """The JSON-ready report of a completed run: the summary's figures of `report_lines`, but
-    member times unrounded and rows slowest first by those times."""
+    member times unrounded and rows slowest first by those times. A sharded run's report
+    ends with the keys `shard` and `shard_count`."""
     ordered = sorted(results, key=lambda result: result.index)
     failed = sum(1 for result in ordered if not result.passed)
     rows = sorted(ordered, key=lambda r: (-r.seconds, r.index))
-    return {
+    report = {
         "version": REPORT_VERSION,
         "members": len(ordered),
         "passed": len(ordered) - failed,
@@ -785,6 +869,9 @@ def timing_report(results: Sequence[MemberResult], *, jobs: int,
                      "cpu_seconds": round(result.cpu_seconds, 1), "passed": result.passed}
                     for result in rows],
     }
+    if shard is not None:
+        report["shard"], report["shard_count"] = shard
+    return report
 
 
 def write_report(path: Path, report: dict) -> None:
@@ -804,7 +891,8 @@ def write_report(path: Path, report: dict) -> None:
 
 
 def run_suite(members: Sequence[str], *, jobs: int, out: BinaryIO,
-              timings: Mapping[str, float] | None = None) -> int:
+              timings: Mapping[str, float] | None = None,
+              shard: tuple[int, int] | None = None) -> int:
     """Run every member and write the report; 0 when all passed, else 1.
     Parallel runs start the units of `plan_units` (a long member's parts, else the member) in
     `unit_order`, serial runs start whole members in list order.
@@ -818,9 +906,12 @@ def run_suite(members: Sequence[str], *, jobs: int, out: BinaryIO,
     removal error propagating (issue 499). When `scratch_root(os.environ)` names a
     directory, every member's `TMPDIR` is a `suite-runner-tmp-*` directory created there
     for the run and removed the same way (issue 1283); otherwise `TMPDIR` is inherited.
+    With `jobs` above 1 each member's `TMPDIR` is its own directory in the run's scratch
+    directory, removed when it ends; a directory that cannot be removed fails its member.
     When `REPORT_ENV` is non-empty, its value is resolved against the working directory
     before the first member starts, and after the report lines `write_report` writes the
-    timing report there; an `OSError` propagates (issue 1385).
+    timing report there, with `shard` recorded in it when given; an `OSError` propagates
+    (issue 1385).
     """
     output = _Output(out)
     report_value = os.environ.get(REPORT_ENV, "")
@@ -829,10 +920,16 @@ def run_suite(members: Sequence[str], *, jobs: int, out: BinaryIO,
     with tempfile.TemporaryDirectory(prefix="suite-runner-pycache-") as cache, \
             contextlib.ExitStack() as stack:
         environment = member_environment(os.environ, cache)
-        if root is not None:
-            sweep_stale_scratch(root, time.time())
-            environment["TMPDIR"] = stack.enter_context(
-                tempfile.TemporaryDirectory(prefix=SCRATCH_PREFIX, dir=root))
+        # Without a scratch root (a host without `/dev/shm`, or `disk`) a parallel run still needs
+        # a directory to hold its members' own directories, so it is made in the inherited one.
+        parent = root if root is not None else (tempfile.gettempdir() if jobs > 1 else None)
+        scratch = None
+        if parent is not None:
+            sweep_stale_scratch(parent, time.time())
+            scratch = stack.enter_context(
+                tempfile.TemporaryDirectory(prefix=SCRATCH_PREFIX, dir=parent))
+            if root is not None:
+                environment["TMPDIR"] = scratch
         started = time.monotonic()
         failed_parts: dict[str, list[str]] = {}
         if jobs == 1:
@@ -850,7 +947,7 @@ def run_suite(members: Sequence[str], *, jobs: int, out: BinaryIO,
             environments = [unit_environment(environment, unit, parts_root, cwd)
                             for unit in units]
             unit_results, failures = _run_parallel(
-                units, unit_order(units), jobs, environments, output)
+                units, unit_order(units), jobs, environments, output, scratch)
             labels = [unit.label for unit in units]
             for unit, failure in zip(units, failures):
                 if failure is not None:
@@ -866,7 +963,8 @@ def run_suite(members: Sequence[str], *, jobs: int, out: BinaryIO,
                               failed_parts=failed_parts)
         output.write(b"".join(_line(line) for line in report))
         if report_path is not None:
-            write_report(report_path, timing_report(results, jobs=jobs, wall_seconds=wall))
+            write_report(report_path, timing_report(
+                results, jobs=jobs, wall_seconds=wall, shard=shard))
         return 0 if all(result.passed for result in results) else 1
 
 
@@ -908,8 +1006,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     except UsageError as error:
         parser.error(str(error))
     try:
-        return run_suite(args.members, jobs=args.jobs, out=sys.stdout.buffer,
-                         timings=load_timings())
+        shard = shard_from(os.environ)
+    except UsageError as error:
+        parser.error(str(error))
+    timings = load_timings()
+    members = args.members
+    if shard is not None:
+        index, count = shard
+        if index <= len(members):  # a larger index is an empty shard; never allocate for it
+            members = assign_shards(members, timings, min(count, len(members)))[index - 1]
+        else:
+            members = []
+        if not members:
+            parser.error(f"shard {index} of {count} has no member")
+    try:
+        return run_suite(members, jobs=args.jobs, out=sys.stdout.buffer,
+                         timings=timings, shard=shard)
     except KeyboardInterrupt:
         return INTERRUPT_EXIT
 

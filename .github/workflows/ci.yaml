@@ -75,34 +75,68 @@ jobs:
       - name: Check the global agent corpus is project-agnostic
         run: nix build --no-link '.#checks.x86_64-linux.agnostic-lint'
 
-  # A required context since issue 608: everything the Nix Eval comment says applies here.
-  agent-workflow-tests:
-    name: Agent Workflow Tests
+  # The suite's shards: each runs the members SUITE_RUNNER_SHARD assigns it from the committed timings.
+  # The matrix list is the one place the shard count is declared, and the join reads it from here.
+  # fail-fast is off so that every shard finishes and reports its times and failures.
+  agent-workflow-tests-shard:
+    name: Agent Workflow Tests Shard ${{ matrix.shard }}
     # Hosted Ubuntu checks out sources but does not activate the managed local
     # skill surfaces, so the suite runs against the source surface.
     if: github.event_name != 'schedule'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         # Full history: suite modules build fixtures from pinned ancestor
-        # commits and refuse to skip when one is missing (issue 436).
+        # commits and refuse to skip when one is missing.
         with:
           fetch-depth: 0
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@v4
       - name: Run agent workflow tests
-        # The hosted runner has 4 vCPUs: keep the job count the CI run has always used.
-        # The runner also writes the run's suite time and every member's time, slowest
-        # first, for the next step to upload (issue 1385, ADR-delivery-015).
+        # The hosted runner has 4 vCPUs. The runner writes this shard's suite time and every member's time,
+        # slowest first, for the next step to upload (ADR-delivery-015).
         env:
           SUITE_RUNNER_JOBS: "4"
           SUITE_RUNNER_REPORT: suite-timing/suite-timing.json
+          SUITE_RUNNER_SHARD: ${{ matrix.shard }}/${{ strategy.job-total }}
         run: WORKFLOW_POLICY_SURFACE=source nix shell --inputs-from . nixpkgs#just nixpkgs#nodejs --command just agent-workflow-tests
-      # The one step `if:` a required job may carry (ADR-delivery-015 D8): it runs after
-      # the suite, so it cannot skip it, and a failed suite keeps the job red. A completed
-      # red suite still uploads its times. A suite that never wrote a report fails here.
+      # The one step if: a suite job may carry (ADR-delivery-015 D8): a completed red suite still uploads its times.
+      # The name carries the attempt, so a rerun's report supersedes the earlier one, and the job's status here.
+      - name: Upload shard timing
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: suite-timing-shard-${{ matrix.shard }}-attempt-${{ github.run_attempt }}-${{ job.status }}
+          path: suite-timing/suite-timing.json
+          if-no-files-found: error
+
+  # The required context; everything the Nix Eval comment says applies here. It runs whatever the shards concluded,
+  # because a job skipped after a failed need reports success to branch protection, and it fails naming each shard
+  # that failed or wrote no report. It joins the shards' reports into the suite-timing artifact the jobs below read.
+  agent-workflow-tests:
+    name: Agent Workflow Tests
+    needs: agent-workflow-tests-shard
+    if: ${{ always() && github.event_name != 'schedule' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Download shard timings
+        uses: actions/download-artifact@v4
+        with:
+          pattern: suite-timing-shard-*
+          path: suite-timing/shards
+      - name: Join the shards
+        env:
+          SHARDS_RESULT: ${{ needs.agent-workflow-tests-shard.result }}
+        run: PYTHONPATH=python python3 -m agent_tools.delivery.suite_timing join --workflow .github/workflows/ci.yaml --shard-job agent-workflow-tests-shard --shards-dir suite-timing/shards --out suite-timing/suite-timing.json --needs-result "$SHARDS_RESULT"
       - name: Upload suite timing
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
