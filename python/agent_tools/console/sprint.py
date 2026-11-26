@@ -333,11 +333,11 @@ optional:
                and sends its id
 
 example:
-  {"status": "two slices are building and one has landed", "phase": "running",
+  {"status": "two parts of the job are being built and one is finished", "phase": "running",
    "milestone": "Importer resumes after a crash",
    "tracker_url": "https://github.com/example/importer/milestone/3",
    "issues": [{"issue": 12, "stage": "building"}, {"issue": 13, "stage": "landed"}],
-   "inbox": [12], "next": "start the resume slice when 12 lands"}
+   "inbox": [12], "next": "start the resume part when 12 is finished"}
 """
 CLOSING_HELP = """the closing report's members, all required:
   summary:     what the sprint did, at most 4000 characters; its first line is at most
