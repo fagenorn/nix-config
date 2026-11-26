@@ -2,6 +2,8 @@ Re-review only the previously reported findings against the fix: git diff {{full
 The implementer's declines: {{full-fix.declines}}
 Each decline names a finding by its step and its 1-based place in that step's list (full-review:2 is the second finding of the review, full-independent:1 the first of the independent review) and gives the reason no code changed for it. A declined finding whose reason holds is resolved; one whose reason does not hold is still unresolved.
 
+Routed files (the standards, hints and decision records routed to this change; read them and no other standards): {{route-full-fixed.routed_files}}
+
 The previously reported findings come from three sources: the review's findings {{full-review.findings}}, the independent review's findings {{full-independent.findings}}, and the code criteria of {{implement.acceptance}} that the review's grading {{full-review.acceptance}} did not show met with evidence.
 
 Report any finding still unresolved and any new Important or Critical defect the fix introduced, each with a concrete failing input and a path:line file. A finding that is still unresolved names in restates the earlier finding it is, as full-review:2; a new defect leaves restates out. Return verdict pass when there is none, else findings. These findings may be acceptance criteria the review did not see shown met, and the notes then carry the evidence produced for each (the command, its exit status and last lines; the diff is empty when nothing had to change): a criterion that evidence shows met is resolved, and one without it, or whose command failed, is still unresolved. Do not edit anything.

@@ -73,11 +73,13 @@ class ReviewCase(unittest.TestCase):
         self.head = self.world.git(self.root, "rev-parse", "HEAD").strip()
         self.base = self.world.git(self.root, "merge-base", "refs/remotes/origin/main", "HEAD").strip()
 
-    def run_review(self, *extra):
+    def run_review(self, *extra, routed=("/s/the-bar.md",), raw_routed=None):
+        flag = [] if raw_routed is None and routed is None else [
+            "--routed-files", json.dumps(list(routed)) if raw_routed is None else raw_routed]
         done = subprocess.run(
             [sys.executable, "-m", "agent_tools.delivery.independent_review", "code",
              "--repo-root", str(self.root), "--issue", "7", "--worktree-path", str(self.root),
-             "--branch", "topic", "--integration-branch", "main", "--acceptance", ACCEPTANCE, *extra],
+             "--branch", "topic", "--integration-branch", "main", "--acceptance", ACCEPTANCE, *flag, *extra],
             capture_output=True, text=True, timeout=300, env=self.world.env, cwd=self.world.tmp)
         lines = done.stdout.splitlines()
         self.assertEqual(len(lines), 1, done.stdout + done.stderr)
@@ -103,6 +105,34 @@ class ReviewTest(ReviewCase):
                                              "--cwd", str(self.root), "--json"])
         for text in (self.base, self.head, "AC1", "diff-review"):
             self.assertIn(text, call["stdin"])
+
+    def test_routed_files_replace_the_standards_section_of_the_packet(self):
+        self.arrange([CLEAN_ANSWER])
+
+        code, reply = self.run_review(routed=["/s/the-bar.md", "/s/stacks/python.md"])
+
+        self.assertEqual(code, 0, reply)
+        (call,) = self.calls()
+        self.assertIn("Routed files:\n/s/the-bar.md\n/s/stacks/python.md", call["stdin"])
+        self.assertNotIn("Standards:", call["stdin"])
+        self.assertNotIn("stacks/\n", call["stdin"])
+
+    def test_a_review_without_routed_files_is_a_usage_error(self):
+        self.arrange([CLEAN_ANSWER])
+
+        code, reply = self.run_review(routed=None)
+
+        self.assertEqual((code, reply["verdict"]), (2, "error"), reply)
+        self.assertEqual(self.calls(), [])
+
+    def test_routed_files_that_are_not_a_list_of_strings_are_a_usage_error(self):
+        self.arrange([CLEAN_ANSWER])
+        for raw in ('["/s/the-bar.md", 3]', '{"a": 1}'):
+            with self.subTest(raw=raw):
+                code, reply = self.run_review(raw_routed=raw)
+
+                self.assertEqual((code, reply["verdict"]), (2, "error"), reply)
+                self.assertEqual(self.calls(), [])
 
     def test_an_unsupported_review_code_answers_none_and_starts_nothing(self):
         self.arrange([VALID], supported=False)

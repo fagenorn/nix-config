@@ -1,12 +1,12 @@
 """`independent-review`: the configured Codex diff review of a delivery range, as a platform command.
 
 `independent-review code --repo-root <root> --issue <n> --worktree-path <wt> --branch <b>
---integration-branch <int> --acceptance <JSON list>` prints one compact JSON line, keys sorted,
-`{detail, findings, raw_summary, verdict}`, and exits 0. `verdict` is `pass`, `findings`, `none` or
-`unavailable`; `findings` is a list of `{failing_input, file, severity, summary}` that every reply
-carries. A usage error is exit 2 and a resolver refusal exit 1, each with `verdict` `error` and an
-empty `findings`. The contract is `codex-collaboration`'s SKILL.md ("Direct configured review") and
-DIFF-REVIEW.md; the tail model and effort are the skill's, and a test pins them.
+--integration-branch <int> --acceptance <JSON list> --routed-files <JSON list of paths>` prints one
+compact JSON line, keys sorted, `{detail, findings, raw_summary, verdict}`, and exits 0. `verdict` is
+`pass`, `findings`, `none` or `unavailable`; `findings` is a list of `{failing_input, file, severity,
+summary}` that every reply carries. A usage error is exit 2 and a resolver refusal exit 1, each with
+`verdict` `error` and an empty `findings`. The contract is `codex-collaboration`'s SKILL.md ("Direct
+configured review") and DIFF-REVIEW.md; the tail model and effort are the skill's, and a test pins them.
 
 Routing reads `capabilities["review.code"]["state"]` of the resolved project: `unsupported` is
 `none` and starts no process; `blocked` is `unavailable`, its detail naming the `reason_code`;
@@ -31,10 +31,12 @@ thread; the reply lists them in slice order.
 The packet goes on stdin, with no positional argument and no diff: the operation name, invocation
 directory, worktree, branch and shas; the scope; the criteria and issue number (routing context);
 the declared verification ids (context only) and the `AGENTS.md`/`CLAUDE.md` that exist at the
-worktree root; the standards paths; the read-only rules; and the reviewer output contract as a
-requirement. A slice's packet is DIFF-REVIEW.md's over-budget form: a scoped scope paragraph, the
-slice's paths with their `changed_lines` and the per-path `git diff` protocol, and the requirement
-that the review start with `scoped to <N> of <M> product files`.
+worktree root; the routed files (`--routed-files`, required: a JSON list of path strings, written as
+`Routed files:` one per line where the standards paths once stood, with no fallback); the read-only
+rules; and the reviewer output contract as a requirement. A slice's packet is DIFF-REVIEW.md's
+over-budget form: a scoped scope paragraph, the slice's paths with their `changed_lines` and the
+per-path `git diff` protocol, and the requirement that the review start with `scoped to <N> of <M>
+product files`.
 
 The invocation is `entry["argv"] + ["--model", MODEL, "--effort", EFFORT, "--cwd", <worktree>,
 "--json"]` in `entry["cwd"]`, with the entry's declared env names removed, for `ATTEMPT_SECONDS`.
@@ -88,7 +90,6 @@ EXPECTED_SHAPE = f"expected {COMPANION} task [--fresh] --reviewer {OPERATION}"
 HEADINGS = ("Critical", "Important", "Minor")
 FILE_TOKEN = re.compile(r"[A-Za-z0-9_./-]+:[0-9]+")
 TOKEN_EDGES = "()[]{}<>`'\",.;"
-STANDARDS = ("~/.agents/standards/the-bar.md", "~/.agents/standards/stacks/")
 
 READ_ONLY_RULES = (
     "Remain read-only: do not edit files, mutate Git, create commits, branches or worktrees, "
@@ -214,7 +215,6 @@ def packet(args: argparse.Namespace, snapshot: Mapping, base: str, head: str,
            slice_files: Sequence[Mapping] | None, total: int) -> str:
     root = Path(args.worktree_path)
     context = [str(root / name) for name in ("AGENTS.md", "CLAUDE.md") if (root / name).is_file()]
-    standards = [os.path.expanduser(path) for path in STANDARDS] + list(snapshot["bindings"]["paths"]["standards"])
     sections = [
         f"Operation: {OPERATION}\nInvocation directory: {os.getcwd()}\nWorktree root: {args.worktree_path}\n"
         f"Branch: {args.branch}\nBase: {base}\nHead: {head}",
@@ -225,7 +225,7 @@ def packet(args: argparse.Namespace, snapshot: Mapping, base: str, head: str,
         "Context only, not a request to run anything (the runtime is read-only): the project verifies "
         f"with {', '.join(snapshot['bindings']['workflow']['verification'])}.\nApplicable instruction "
         "files:\n" + "\n".join(context),
-        "Standards:\n" + "\n".join(standards),
+        "Routed files:\n" + "\n".join(args.routed_files),
         "Read-only rules:\n" + READ_ONLY_RULES,
     ]
     requirement = OUTPUT_CONTRACT
@@ -395,6 +395,13 @@ def _acceptance(text: str) -> list:
     return value
 
 
+def _routed_files(text: str) -> list[str]:
+    value = json.loads(text)
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise ValueError("not a JSON list of strings")
+    return value
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = _Parser(prog="independent-review", description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True, parser_class=_Parser)
@@ -403,6 +410,8 @@ def _parser() -> argparse.ArgumentParser:
         code.add_argument(flag, required=True)
     code.add_argument("--issue", type=int, required=True)
     code.add_argument("--acceptance", type=_acceptance, required=True, help="the criteria, a JSON list")
+    code.add_argument("--routed-files", type=_routed_files, required=True,
+                      help="the files the reviewer reads, a JSON list of paths")
     return parser
 
 

@@ -1,5 +1,7 @@
 Fix the review findings of issue {{run.issue}} in the worktree {{preflight.worktree_path}} on branch {{preflight.branch}} (origin/{{preflight.integration_branch}} is the base). Work only there: run git as git -C <worktree> and name every file by its absolute path. Never push, open a pull request, run git stash, run sed -i or run a destructive git command.
 
+Routed files (the standards, hints and decision records routed to this change; read them and no other standards): {{route-full.routed_files}}
+
 The findings to act on are:
 - every critical or important finding of the review: {{full-review.findings}}
 - every critical or important finding of the independent review: {{full-independent.findings}}

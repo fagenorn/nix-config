@@ -275,6 +275,7 @@ class StubbedRun:
         declaration = home / ".agents/share/host-declaration.json"
         declaration.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(REPO_ROOT / "home/common/agent-skills/host-declaration.json", declaration)
+        shutil.copytree(REPO_ROOT / "home/common/agent-skills/standards", home / ".agents/standards")
         (home / ".claude/agents").mkdir(parents=True, exist_ok=True)
         for name in ("implementer", "reviewer", "reviewer-lite"):
             shutil.copy(ROLES / f"{name}.md", home / ".claude/agents" / f"{name}.md")

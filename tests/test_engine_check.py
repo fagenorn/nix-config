@@ -1215,6 +1215,8 @@ SHIPPED_MEMBERS = {
     "issue": ({"text": "t", "body": "x\n\n## Acceptance criteria\n\n- [ ] a\n", "marked": False,
                "lane_paths": {"secrets": ["secrets/"]}},
               {"text": "t", "body": "", "marked": True, "lane_paths": None}),
+    **{route: ({"routed_files": ["/s/the-bar.md"]},) for route in (
+        "route", "route-lite", "route-full", "route-lite-fixed", "route-escalated-fixed", "route-full-fixed")},
     "implement": ({}, {"ineligible": True}, {"sensitive": True}, {"acceptance": []}),
     "lite-review": ({}, {"escalate": True}, CLEAN, UNNAMED),
     "full-review": ({}, CLEAN, UNNAMED),
@@ -1338,7 +1340,7 @@ class ShippedProcedureTest(unittest.TestCase):
     def test_no_shipped_prompt_asks_for_a_forge_command(self):
         names = ["setup-applies.md", "hold-draft.md", "hold-regrade.md"] + [
             f"direct-{kind}.md" for kind in (
-                "implement", "review-lite", "review", "fix-lite", "fix-escalated", "fix-full",
+                "implement", "review-lite", "review", "review-escalated", "fix-lite", "fix-escalated", "fix-full",
                 "rereview-lite", "rereview-escalated", "rereview-full")] + [
             f"verify-{kind}.md" for kind in ("fix", "fix-review", "retest")]
         for name in names:

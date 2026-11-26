@@ -18,6 +18,7 @@ IMPLEMENTED = {"status": "done", "start_head": SHA, "commit": SHA, "notes": "n",
                "acceptance": [{"id": "AC1", "text": "t", "kind": "code", "result": "r"}],
                "sensitive": False, "ineligible": False}
 INDEPENDENT = {"verdict": "pass", "findings": []}
+ROUTED = {"routed_files": ["/s/the-bar.md"]}
 
 
 def reported(name: str, outcome: str, result: dict) -> list[dict]:
@@ -30,7 +31,8 @@ def lite_review(verdict: str, findings: list[dict]) -> dict:
 
 
 def to_the_lite_group() -> list[dict]:
-    return reported("preflight", "clear", PREFLIGHT) + reported("implement", "done", IMPLEMENTED)
+    return (reported("preflight", "clear", PREFLIGHT) + reported("route", "ok", ROUTED)
+            + reported("implement", "done", IMPLEMENTED) + reported("route-lite", "ok", ROUTED))
 
 
 def lite_round(review: dict, independent: bool = True) -> list[dict]:
@@ -63,6 +65,7 @@ class DirectProcedureTest(unittest.TestCase):
             "claim-lost": {"need": "owner-decision", "reenter": "preflight"},
             "ineligible": {"need": "owner-decision", "reenter": "preflight"},
             "task": {"need": "owner-decision", "reenter": "implement"},
+            "route-failed": {"need": "owner-decision", "reenter": "preflight"},
             "direct-review": {"need": "owner-decision", "reenter": "implemented"},
             "direct-fix": {"need": "owner-decision", "reenter": "implemented"},
             "codex-unavailable": {"need": "retry", "reenter": "implemented"}})
@@ -75,15 +78,43 @@ class DirectProcedureTest(unittest.TestCase):
             "verify-fix-review": {"need": "owner-decision", "reenter": "checks"}})
 
     def test_the_route_prompts_differ_only_by_their_producers(self):
-        producers = {"lite": ("lite-review", "lite-independent", "lite-fix"),
-                     "escalated": ("escalated", "lite-independent", "escalated-fix"),
-                     "full": ("full-review", "full-independent", "full-fix")}
+        producers = {"lite": ("lite-review", "lite-independent", "lite-fix", "route-lite", "route-lite-fixed"),
+                     "escalated": ("escalated", "lite-independent", "escalated-fix", "route-lite",
+                                   "route-escalated-fixed"),
+                     "full": ("full-review", "full-independent", "full-fix", "route-full", "route-full-fixed")}
         for kind in ("fix", "rereview"):
             texts = set()
-            for route, (review, independent, fix) in producers.items():
+            for route, (review, independent, fix, routed, fixed) in producers.items():
                 text = (PROCEDURES / f"direct-{kind}-{route}.md").read_text(encoding="utf-8")
+                text = text.replace(fixed, "ROUTE") if kind == "rereview" else text.replace(routed, "ROUTE")
                 texts.add(text.replace(fix, "FIX").replace(independent, "INDEPENDENT").replace(review, "REVIEW"))
             self.assertEqual(len(texts), 1, kind)
+
+    def test_the_escalated_and_full_review_prompts_differ_only_by_their_route(self):
+        escalated = (PROCEDURES / "direct-review-escalated.md").read_text(encoding="utf-8")
+        full = (PROCEDURES / "direct-review.md").read_text(encoding="utf-8")
+        self.assertEqual(escalated.replace("route-lite", "ROUTE"), full.replace("route-full", "ROUTE"))
+
+    def test_the_independent_reviews_read_their_reviewers_route(self):
+        direct = load(PROCEDURES, "direct")
+        self.assertIn("route-lite.routed_files", step(direct, "lite-independent")["in"])
+        self.assertIn("route-full.routed_files", step(direct, "full-independent")["in"])
+
+    def test_a_route_that_does_not_end_ok_stops_route_failed(self):
+        fix = {"status": "done", "start_head": SHA, "commit": "b" * 40, "notes": "n", "tests": [], "declines": []}
+        before = {
+            "route": reported("preflight", "clear", PREFLIGHT),
+            "route-lite": (reported("preflight", "clear", PREFLIGHT) + reported("route", "ok", ROUTED)
+                           + reported("implement", "done", IMPLEMENTED)),
+            "route-lite-fixed": (to_the_lite_group() + lite_round(lite_review("findings", NAMED))
+                                 + reported("lite-fix", "done", fix)),
+        }
+        for name, events in before.items():
+            for outcome in ("failed", "refused", "out-of-bounds"):
+                with self.subTest(step=name, outcome=outcome):
+                    done = replayed(events + reported(name, outcome, {}))
+                    self.assertIsInstance(done.action, Stop)
+                    self.assertEqual(done.action.name, "route-failed")
 
     def test_a_blocked_group_reaches_its_tally(self):
         direct = load(PROCEDURES, "direct")
@@ -113,7 +144,8 @@ class DirectProcedureTest(unittest.TestCase):
         routes = {
             "escalated": to_the_lite_group() + lite_round(escalate) + reported("escalated", "pass", unusable),
             "lite-rereview": to_the_lite_group() + lite_round(lite_review("findings", NAMED))
-            + reported("lite-fix", "done", fix) + reported("lite-rereview", "pass", unusable),
+            + reported("lite-fix", "done", fix) + reported("route-lite-fixed", "ok", ROUTED)
+            + reported("lite-rereview", "pass", unusable),
         }
         for name, events in routes.items():
             with self.subTest(name=name):
