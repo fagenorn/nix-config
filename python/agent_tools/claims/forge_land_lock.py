@@ -233,7 +233,7 @@ default 0) reads the lock at once and every `LEASE_BEAT` seconds (60) of `monoto
 not at S answers `not_held` (exit 3) at
 once, one at S with a lease at S rewrites its `<beat>` to the forge's clock, one at S with none
 answers `unleased` (exit 0) and writes nothing; after N seconds it answers `held` with `lease` and
-`held_s`, the seconds since `<since>`. `hold --detach [--seconds N]` (issue 1904; N defaults to
+`held_s`, the seconds since `<since>`. `hold --detach [--seconds N]` (N defaults to
 `HOLD_MAX`) is for a step that runs its own long commands and so cannot sit in a foreground `hold`: it
 beats once at once and answers that read when it is `not_held` (exit 3) or `unleased`; otherwise it
 starts the same `hold --seconds N` as a sibling process of its own session with no streams, which
@@ -291,7 +291,7 @@ FREE_GRACE = 60  # D12: a lock watched free this long is tried by a waiter that 
 CLOSED_GRACE = POLL + 30  # D12: and one seen closed this long; the first in line sees that in a whole poll
 # D13: a lease held this long is taken over by the first in line. It must outlast the required check the holder waits
 # for under it: the slowest of the last 48 passing Agent Workflow Tests runs on 26 Nov 2026 took 1807 s (the median
-# 1250 s), and 2400 s is that worst case with a margin of a third (issue 1904); it stays under IDLE_AFTER.
+# 1250 s), and 2400 s is that worst case with a margin of a third; it stays under IDLE_AFTER.
 HOLD_BOUND = 2400
 LEASE_BEAT = 60  # D13: `hold` rewrites the beat of its lease this often
 LEASE_LAPSE = 180  # D13: a lease whose beat is this far behind the forge's clock has lapsed
@@ -1002,7 +1002,7 @@ def _proc(pid: int) -> tuple[int, str, str] | None:
 
 
 def find_owner() -> tuple[int, str] | None:
-    """Issue 1904: the pid and start time of the nearest ancestor of this process that is not a shell (the session
+    """The pid and start time of the nearest ancestor of this process that is not a shell (the session
     that runs the step), or None when there is none to be found."""
     pid = os.getppid()
     for _ in range(OWNER_DEPTH):
@@ -1029,7 +1029,7 @@ def owner_alive(pid: int, started: str | None) -> bool:
 
 
 def spawn_beater(args: Any, seconds: int, owner: tuple[int, str] | None = None) -> int:
-    """Issue 1904: start `hold --seconds <seconds>` for `args`' lock as a sibling process of its own session with no
+    """Start `hold --seconds <seconds>` for `args`' lock as a sibling process of its own session with no
     streams; it ends by itself, so nothing waits for it, and with an `owner` it ends when that process is gone.
     Returns its pid."""
     argv = [*sibling_argv("claims.forge_claim"), "land", "hold", "--repo", args.repo, "--branch", args.branch,
@@ -1042,7 +1042,7 @@ def spawn_beater(args: Any, seconds: int, owner: tuple[int, str] | None = None) 
 
 
 def _detach(args: Any) -> tuple[int, dict[str, Any]]:
-    """Issue 1904: beat once; unless that read found the lock gone or unleased, leave the beating to a background `hold`."""
+    """Beat once; unless that read found the lock gone or unleased, leave the beating to a background `hold`."""
     seconds = args.seconds or HOLD_MAX
     code, out = _hold(_Once(args))
     if code != 0 or out["verdict"] != "held":

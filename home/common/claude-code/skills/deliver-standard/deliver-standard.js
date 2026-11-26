@@ -3006,7 +3006,7 @@ released and not_held are both fine (give it a Bash timeout of 20 minutes). Retu
 const FIX_NO_LOCK = `The landing lock of the branch ${INT} is not held and was not asked for yet: run no forge-claim command.`
 const FIX_LEFT_QUEUE = `The land lock was released before this fix; run no forge-claim command.`
 const LEASE_WAIT_TIMEOUT = 'The acquire carries --wait --lease: give it a Bash timeout of 60 minutes (3600000 ms) and never run it in the background.'
-// A step that runs while the lease is held starts the beat first (issue 1904): `hold --detach` beats once, answers not_held at
+// A step that runs while the lease is held starts the beat first: `hold --detach` beats once, answers not_held at
 // once when the lease is gone, and leaves a process that beats every 60 s for the step's whole length, however long its own
 // commands run; it ends by itself, at its bound or when the session that started it is gone. The step goes on only when it
 // printed beating, and runs the one-shot hold again before each push and merge, since the background beat tells it nothing.
