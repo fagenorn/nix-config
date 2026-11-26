@@ -139,12 +139,16 @@ def group_lock_name(group: str) -> str:
     return GROUP_LOCK.format(digest=_group_digest(group))
 
 
-def repository_lock_paths(directory: Path, group: str, limit: int) -> list[Path]:
-    """The `limit` lock files of one repository; the first is the name older runs already use."""
+def repository_lock_paths(directory: Path, group: str, limit: int, count: int) -> list[Path]:
+    """The first `limit` lock files of one repository, never more than the host's slot `count`.
+
+    The first is the name older runs already use. However large a caller's `limit`, the list holds
+    at most `count` paths (and always the first), so it never grows past the slot count.
+    """
     digest = _group_digest(group)
     paths = [directory / group_lock_name(group)]
     paths.extend(directory / EXTRA_GROUP_LOCK.format(digest=digest, index=index)
-                 for index in range(1, limit))
+                 for index in range(1, min(limit, count)))
     return paths
 
 

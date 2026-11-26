@@ -175,7 +175,7 @@ Contract:
   repository with no contract whose ready plan is drafted in schema 3 (`FACT_LINE`),
   served with a stand-in adopter and forge so the plan can be
   applied: `register-apply` is the ready Apply card of a project whose dev-shell hooks are not installed,
-  opening on the line that says Apply installs them (`register.HOOKS_LINE`) before the plan's own (`REGISTER_PLAN_LINES`), with the registration entry reduced to "needs you"
+  opening on the line naming the development shell (`contract_draft.DRAFTED_ENVIRONMENT_LINE`), then the line that says Apply installs the hooks (`register.HOOKS_LINE`), before the plan's own (`REGISTER_PLAN_LINES`), with the registration entry reduced to "needs you"
   and no draft beside it; `register-draft` is the same plan after the owner chose Not now (the
   `adoption.deferred` row is seeded), so no card asks and the registration's draft rows show with
   the project id as a fact line with no Change control. `register-reconcile-apply` and
@@ -2363,7 +2363,7 @@ def _seed_registration(seed: _Seed, state: str, root: str) -> None:
     seed.put(MINUTE, event_log.REGISTRATION_ENDED, None, {
         "by": "owner", "root": root, "project_id": f"owner/{REGISTER_NAME}", "result": "planned",
         "outcome": "changes", "headline": f"What adopting {REGISTER_NAME} would change.",
-        "lines": [*filter(None, [getattr(register, "HOOKS_LINE", None)]), *REGISTER_PLAN_LINES], "note": None, "plan_id": REGISTER_PLAN_ID,
+        "lines": [*filter(None, [getattr(contract_draft, "DRAFTED_ENVIRONMENT_LINE", None), getattr(register, "HOOKS_LINE", None)]), *REGISTER_PLAN_LINES], "note": None, "plan_id": REGISTER_PLAN_ID,
         "state": "ready", "questions": [], "answered": [], "draft": fields, "remote": None})
     if state == "register-draft":
         seed.put(MINUTE / 2, event_log.ADOPTION_DEFERRED, None, {"plan_id": REGISTER_PLAN_ID})
