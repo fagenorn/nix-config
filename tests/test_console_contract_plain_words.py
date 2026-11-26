@@ -28,10 +28,12 @@ class ContractPlainWordsTest(unittest.TestCase):
 
     def test_the_printed_examples_of_owner_copy_use_no_internal_word(self):
         text = run_sprint("contract").stdout
-        report = json.loads(text.partition("```json\n")[2].partition("```")[0])
-        copy = [report["status"], report["next"]]
+        blocks = re.findall(r"```json\n(.*?)\n\s*```", text, re.S)
+        self.assertEqual(len(blocks), 2)
+        report, closing = (json.loads(block) for block in blocks)
+        copy = [report["status"], report["next"], closing["summary"], closing["differently"]]
         copy += re.findall(r"for example `([^`]*)`", text)
-        self.assertGreaterEqual(len(copy), 3)
+        self.assertGreaterEqual(len(copy), 5)
         for line in copy:
             with self.subTest(line=line):
                 self.assertIsNone(UNGLOSSED.search(line))

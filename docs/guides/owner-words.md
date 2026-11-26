@@ -4,7 +4,7 @@ Each internal word the console or a manager may use, with its one-line gloss in 
 
 | Word | In everyday words |
 |---|---|
-| land lock | A turn-taking token: only one change at a time may be merged into the main branch, so a change waits until it holds the lock. |
+| land lock | A turn-taking token: only one change at a time may be merged into the branch where finished changes are collected, so a change waits until it holds the lock. |
 | slice | One small piece of a larger job, made so that it can be built, checked and finished on its own. |
 | held | Finished and merged, but not counted as done until a check afterwards shows it works for real. |
 | verify | A check that a change does what it was meant to do. One kind runs before the change is merged, when it has not shipped yet. Another kind runs after the change is live, on a schedule, and only for a change kept open until real use proves it works; it may take several passes. Say which kind is meant. |

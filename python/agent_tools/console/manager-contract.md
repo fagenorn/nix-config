@@ -159,9 +159,9 @@ A delivery stops at awaiting look when its issue carries that criterion: its pul
    - `differently`: what you would do differently next time, at most 4000 characters.
 
    ```json
-   {"summary": "The importer resumes after a crash.\nSlice 12 landed, slice 13 is held for verification and slice 14 was dropped.",
+   {"summary": "The importer resumes after a crash.\nPart 12 is finished, part 13 is finished but still being checked in real use, and part 14 was dropped.",
     "issues": [{"issue": 12, "stage": "landed"}, {"issue": 13, "stage": "held"}, {"issue": 14, "stage": "dropped"}],
-    "differently": "I would cut the checkpoint slice smaller."}
+    "differently": "I would cut the checkpoint part smaller."}
    ```
 2. Refused with `an issue of this sprint is neither landed nor dropped`: an issue of your latest report has no outcome in the closing report. Settle the missing issues' outcome first, then send the closing report again.
 3. A message of kind `stop` means the owner stopped the sprint: finish what is mid-merge, start nothing new, send the closing report listing every unfinished issue as `dropped`, and end your turn.

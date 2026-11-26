@@ -58,7 +58,7 @@ def owner_word_problems(text: str) -> list[str]:
             problems.append(f"row of {len(row)} cells: {row}")
             continue
         word, gloss = row
-        if not word or not gloss:
+        if not word or not re.sub(r"<!--.*?-->", "", gloss).strip():
             problems.append(f"empty word or gloss: {row}")
         if word in seen:
             problems.append(f"duplicate word: {word}")
@@ -469,6 +469,15 @@ class DocsTreeTest(unittest.TestCase):
             "<!--\n| held | Finished and merged, but not done. |\n-->\n"
         )
         self.assertEqual(owner_word_problems(text), ["empty word or gloss: ['held', '']"])
+
+    def test_the_glossary_reader_rejects_a_gloss_that_renders_empty(self):
+        text = "| Word | In everyday words |\n|---|---|\n| held | <!-- explanation pending --> |\n"
+        self.assertEqual(owner_word_problems(text), ["empty word or gloss: ['held', '<!-- explanation pending -->']"])
+
+    def test_the_land_lock_gloss_names_no_branch_the_project_may_not_have(self):
+        text = (REPO_ROOT / "docs/guides/owner-words.md").read_text(encoding="utf-8")
+        gloss = next(row[1] for row in index_table(text)[1:] if row[0] == "land lock")
+        self.assertNotIn("main", gloss)
 
     def test_the_glossary_reader_reports_a_word_given_twice(self):
         text = "| Word | In everyday words |\n|---|---|\n| held | One. |\n| held | Two. |\n"
