@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
@@ -32,16 +33,78 @@ class HostAdmissionTest(unittest.TestCase):
         self.assertEqual(host_admission.validate_declaration(committed), committed)
         self.assertEqual(host_admission.verify_slots(committed), 1)
         self.assertIsNone(host_admission.verify_budget_seconds(committed))
+        self.assertNotIn("verify_repository_slots", committed)
         self.assertEqual(host_admission.route_slots(committed, host_admission.ENGINE_ROUTE), 8)
 
-    def test_the_eleven_m5_declaration_is_the_shared_one_with_two_verify_slots_and_a_600_second_budget(self):
+    def test_the_eleven_m5_declaration_lets_nix_config_hold_two_verify_slots_and_jarbird_one(self):
         eleven = json.loads((HOST_DECLARATIONS / "eleven-m5.json").read_text(encoding="utf-8"))
         shared = json.loads(COMMITTED_DECLARATION.read_text(encoding="utf-8"))
         self.assertEqual(host_admission.validate_declaration(eleven), eleven)
         self.assertEqual(host_admission.verify_slots(eleven), 2)
         self.assertEqual(host_admission.verify_budget_seconds(eleven), 600)
+        self.assertEqual(eleven["verify_repository_slots"],
+                         {"fagenorn/nix-config": 2, "elevenyellow/jarbird": 1})
+        self.assertEqual(host_admission.repository_verify_slots(eleven, "fagenorn/nix-config"), 2)
+        self.assertEqual(host_admission.repository_verify_slots(eleven, "elevenyellow/jarbird"), 1)
+        self.assertEqual(host_admission.repository_verify_slots(eleven, "example/other"), 1)
         self.assertEqual({k: v for k, v in eleven.items()
-                          if k not in ("verify_slots", "verify_budget_seconds")}, shared)
+                          if k not in ("verify_slots", "verify_budget_seconds",
+                                       "verify_repository_slots", "verify_short_lane")}, shared)
+
+    def test_the_eleven_m5_declaration_makes_nix_config_lint_short_with_a_30_second_bound(self):
+        eleven = json.loads((HOST_DECLARATIONS / "eleven-m5.json").read_text(encoding="utf-8"))
+        shared = json.loads(COMMITTED_DECLARATION.read_text(encoding="utf-8"))
+        short = host_admission.short_command
+        self.assertEqual(short(eleven, "fagenorn/nix-config", ["just", "lint"]), (1, 30))
+        for repository, argv in (("fagenorn/nix-config", ["just", "test-touched"]),
+                                 ("fagenorn/nix-config", ["just", "test"]),
+                                 ("elevenyellow/jarbird", ["just", "lint"])):
+            with self.subTest(repository, argv=argv):
+                self.assertIsNone(short(eleven, repository, argv))
+        self.assertIsNone(short(shared, "fagenorn/nix-config", ["just", "lint"]))
+
+    def test_a_declared_short_command_is_matched_by_repository_and_exact_argv(self):
+        supported = {"claude-code": {"support": "supported", "agent_slots": 7}}
+        value = {**declaration(**supported), "verify_short_lane": {
+            "slots": 2, "bound_seconds": 9,
+            "commands": {"example/alpha": [["just", "lint"], ["make", "fmt"]]}}}
+        self.assertEqual(host_admission.validate_declaration(value), value)
+        short = host_admission.short_command
+        self.assertEqual(short(value, "example/alpha", ["just", "lint"]), (2, 9))
+        self.assertEqual(short(value, "example/alpha", ("make", "fmt")), (2, 9))
+        for repository, argv in (("example/alpha", ["just"]),
+                                 ("example/alpha", ["just", "lint", "--fix"]),
+                                 ("example/beta", ["just", "lint"]),
+                                 (None, ["just", "lint"])):
+            with self.subTest(repository, argv=argv):
+                self.assertIsNone(short(value, repository, argv))
+        self.assertIsNone(short(declaration(**supported), "example/alpha", ["just", "lint"]))
+
+    def test_a_verify_short_lane_that_is_not_the_declared_shape_is_refused(self):
+        supported = {"claude-code": {"support": "supported", "agent_slots": 7}}
+        good = {"slots": 1, "bound_seconds": 30, "commands": {"example/alpha": [["just", "lint"]]}}
+        lane = lambda **change: {**good, **change}
+        self.assertEqual(host_admission.validate_declaration(
+            {**declaration(**supported), "verify_short_lane": good}),
+            {**declaration(**supported), "verify_short_lane": good})
+        largest = {**declaration(**supported),
+                   "verify_short_lane": lane(bound_seconds=int(threading.TIMEOUT_MAX))}
+        self.assertEqual(host_admission.validate_declaration(largest), largest)
+        cases = [("not an object", "just lint"),
+                 ("missing commands", {"slots": 1, "bound_seconds": 30}),
+                 ("extra member", lane(live=True))]
+        cases += [(f"slots {bad!r}", lane(slots=bad)) for bad in (0, True, "1", 1.5)]
+        cases += [(f"bound {bad!r}", lane(bound_seconds=bad)) for bad in (0, -1, True, int(threading.TIMEOUT_MAX) + 1, 10 ** 310)]
+        cases += [("commands a list", lane(commands=[["just", "lint"]]))]
+        cases += [(f"key {key!r}", lane(commands={key: [["just", "lint"]]}))
+                  for key in ("Example/Alpha", "alpha", "example/..")]
+        cases += [(f"value {bad!r}", lane(commands={"example/alpha": bad}))
+                  for bad in ([], [[]], [["just", 1]], [["just", ""]], "just lint")]
+        for label, bad in cases:
+            with self.subTest(label), self.assertRaises(host_admission.DeclarationError) as raised:
+                host_admission.validate_declaration({**declaration(**supported), "verify_short_lane": bad})
+            self.assertEqual(raised.exception.reason_code, "declaration_invalid")
+            self.assertEqual(str(raised.exception), "verify_short_lane")
 
     def test_every_host_declaration_names_a_flake_host_and_validates(self):
         flake = (REPO / "flake.nix").read_text(encoding="utf-8")
@@ -95,6 +158,36 @@ class HostAdmissionTest(unittest.TestCase):
             with self.subTest(bad), self.assertRaises(host_admission.DeclarationError) as raised:
                 host_admission.validate_declaration(value)
             self.assertEqual(raised.exception.reason_code, "declaration_invalid")
+
+    def test_verify_repository_slots_is_an_optional_map_of_repository_to_count(self):
+        supported = {"support": "supported", "agent_slots": 7}
+        named = {**declaration(**{"claude-code": supported}),
+                 "verify_repository_slots": {"example/alpha": 2, "example/beta": 1,
+                                             "example/.github": 3}}
+        empty = {**declaration(**{"claude-code": supported}), "verify_repository_slots": {}}
+        without = declaration(**{"claude-code": supported})
+        self.assertEqual(host_admission.validate_declaration(named), named)
+        self.assertEqual(host_admission.validate_declaration(empty), empty)
+        self.assertEqual(host_admission.validate_declaration(without), without)
+        self.assertEqual(host_admission.repository_verify_slots(named, "example/alpha"), 2)
+        self.assertEqual(host_admission.repository_verify_slots(named, "example/beta"), 1)
+        self.assertEqual(host_admission.repository_verify_slots(named, "example/gamma"), 1)
+        self.assertEqual(host_admission.repository_verify_slots(named, "example/.github"), 3)
+        self.assertEqual(host_admission.repository_verify_slots(empty, "example/alpha"), 1)
+        self.assertEqual(host_admission.repository_verify_slots(without, "example/alpha"), 1)
+        self.assertEqual(host_admission.DEFAULT_REPOSITORY_VERIFY_SLOTS, 1)
+
+    def test_a_verify_repository_slots_that_is_not_a_map_of_owner_repo_to_a_positive_int_is_refused(self):
+        supported = {"support": "supported", "agent_slots": 7}
+        for bad in ([], "example/alpha", 2, {"example/alpha": 0}, {"example/alpha": -1},
+                    {"example/alpha": True}, {"example/alpha": 1.5}, {"example/alpha": "2"},
+                    {"Example/Alpha": 2}, {"alpha": 2}, {"a/b/c": 2}, {"/alpha": 2}, {"": 1},
+                    {"example/.": 1}, {"example/..": 1}, {".example/alpha": 1}):
+            value = {**declaration(**{"claude-code": supported}), "verify_repository_slots": bad}
+            with self.subTest(bad=bad), self.assertRaises(host_admission.DeclarationError) as raised:
+                host_admission.validate_declaration(value)
+            self.assertEqual(raised.exception.reason_code, "declaration_invalid")
+            self.assertEqual(str(raised.exception), "verify_repository_slots")
 
     def test_invalid_declarations_are_refused(self):
         supported = {"support": "supported", "agent_slots": 7}

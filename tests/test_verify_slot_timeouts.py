@@ -26,10 +26,10 @@ def stamp(moment):
     return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def request(repository=REPOSITORY, timed_out=False, age=timedelta(hours=1)):
+def request(repository=REPOSITORY, timed_out=False, age=timedelta(hours=1), waited=600.0, command="just test"):
     """One history record started `age` before now; a timeout is exit 75 with no hold."""
-    return {"command": "just test", "exit": 75 if timed_out else 0, "held_seconds": None if timed_out else 12.0,
-            "repository": repository, "started": stamp(datetime.now(timezone.utc) - age), "waited_seconds": 600.0,
+    return {"command": command, "exit": 75 if timed_out else 0, "held_seconds": None if timed_out else 12.0,
+            "repository": repository, "started": stamp(datetime.now(timezone.utc) - age), "waited_seconds": waited,
             "place": None}
 
 
@@ -76,6 +76,9 @@ class VerifySlotTimeoutsTest(unittest.TestCase):
         result = self.run_check(*DEPLOYED, "--history", str(self.history))
         self.assertEqual(result.returncode, 75, result.stderr)
         self.assertEqual(json.loads(result.stdout)["verdict"], "not_yet")
+        limited = self.run_check(*DEPLOYED, "--history", str(self.history), "--median-wait-below", "600")
+        self.assertEqual(limited.returncode, 75, limited.stderr)
+        self.assertEqual(json.loads(limited.stdout)["verdict"], "not_yet")
 
     def test_other_repositories_older_and_future_requests_do_not_count(self):
         self.write(requests(20)
@@ -104,6 +107,89 @@ class VerifySlotTimeoutsTest(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertEqual(result.stdout, "")
         self.assertTrue(result.stderr.startswith("verify-slot-timeouts: "), result.stderr)
+
+    def test_a_morning_of_twelve_timed_out_lint_requests_fails_a_none_timed_out_check(self):
+        self.write(requests(12, timed_out=12, command="just lint") + requests(30))
+        result = self.run_check(*DEPLOYED, "--command", "just lint", "--max-timed-out", "0",
+                                "--history", str(self.history))
+        self.assertEqual(result.returncode, 1, result.stderr)
+        answer = json.loads(result.stdout)
+        self.assertEqual(answer["verdict"], "not_met")
+        self.assertEqual(answer["requests"], 12)
+        self.assertEqual(answer["timed_out"], 12)
+        self.assertEqual(answer["command"], "just lint")
+        self.assertEqual(answer["max_timed_out"], 0)
+
+    def test_a_none_timed_out_check_judges_a_window_of_any_size(self):
+        lint = {"command": "just lint"}
+        rows = [
+            (requests(1, timed_out=1, **lint), (1, "not_met", 1, 1)),
+            (requests(1, **lint), (0, "met", 1, 0)),
+            (requests(25, **lint) + requests(1, timed_out=1, **lint), (1, "not_met", 26, 1)),
+            (requests(5, timed_out=5), (75, "not_yet", 0, 0)),
+        ]
+        for records, expected in rows:
+            with self.subTest(expected=expected):
+                self.write(records)
+                result = self.run_check(*DEPLOYED, "--command", "just lint", "--max-timed-out", "0",
+                                        "--history", str(self.history))
+                answer = json.loads(result.stdout)
+                self.assertEqual((result.returncode, answer["verdict"], answer["requests"], answer["timed_out"]),
+                                 expected, result.stderr)
+
+    def test_a_lint_day_with_no_timeout_meets_a_none_timed_out_check_whatever_other_commands_did(self):
+        self.write(requests(25, command="just lint") + requests(40, timed_out=40))
+        result = self.run_check(*DEPLOYED, "--command", "just lint", "--max-timed-out", "0",
+                                "--history", str(self.history))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        answer = json.loads(result.stdout)
+        self.assertEqual(answer["verdict"], "met")
+        self.assertEqual(answer["requests"], 25)
+        self.assertEqual(answer["timed_out"], 0)
+
+    def test_a_negative_max_timed_out_is_a_usage_error(self):
+        result = self.run_check(*DEPLOYED, "--max-timed-out", "-1", "--history", str(self.history))
+        self.assertEqual(result.returncode, 2)
+
+    def test_a_day_under_the_share_whose_median_wait_reaches_the_limit_is_not_met(self):
+        self.write(requests(9, waited=0.0) + requests(1, waited=600.0) + requests(10, timed_out=10, waited=600.0))
+        result = self.run_check(*DEPLOYED, "--median-wait-below", "600")
+        self.assertEqual(result.returncode, 1, result.stderr)
+        answer = json.loads(result.stdout)
+        self.assertEqual(answer["verdict"], "not_met")
+        self.assertEqual(answer["requests"], 20)
+        self.assertEqual(answer["timed_out"], 10)
+        self.assertEqual(answer["median_waited_seconds"], 600.0)
+        self.assertEqual(answer["median_wait_below"], 600)
+
+    def test_a_day_under_the_share_and_under_the_median_wait_limit_is_met(self):
+        self.write(requests(20, timed_out=5, waited=100.0)
+                   + requests(25, waited=900.0, repository="other/repo")
+                   + requests(25, waited=900.0, age=timedelta(hours=30)))
+        result = self.run_check(*DEPLOYED, "--median-wait-below", "600")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        answer = json.loads(result.stdout)
+        self.assertEqual(answer["verdict"], "met")
+        self.assertEqual(answer["requests"], 20)
+        self.assertEqual(answer["median_waited_seconds"], 100.0)
+
+    def test_a_short_median_wait_does_not_meet_a_share_at_the_baseline(self):
+        self.write(requests(149, timed_out=85, waited=10.0))
+        result = self.run_check(*DEPLOYED, "--median-wait-below", "600")
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["verdict"], "not_met")
+
+    def test_without_the_wait_limit_the_line_carries_no_wait_figures(self):
+        self.write(requests(30, timed_out=10))
+        result = self.run_check(*DEPLOYED)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(set(json.loads(result.stdout)), {"verdict", "repository", "hours", "requests", "timed_out",
+                                                          "baseline_timed_out", "baseline_requests"})
+
+    def test_a_wait_limit_that_is_not_positive_is_refused(self):
+        result = self.run_check(*DEPLOYED, "--median-wait-below", "0")
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.stdout, "")
 
     def test_the_wrapper_is_committed_executable_and_runs_the_check(self):
         listing = subprocess.run(["git", "-C", str(ROOT), "ls-files", "-s", WRAPPER],

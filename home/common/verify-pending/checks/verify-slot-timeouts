@@ -1,5 +1,7 @@
 #!/bin/sh
 # Verify check: the share of one repository's verify-slot requests that timed out over the last hours stays below
-# the share before the queue (85 of 149). verify-pending runs it from the repository root at the commit the block
-# names. Exit 0 met, 1 not met, 75 not yet, 2 unreadable.
+# the share before the queue (85 of 149); with --median-wait-below SECONDS the median wait must also stay below
+# SECONDS. verify-pending runs it from the repository root at the commit the block names. With --command only
+# that command's requests count; with --max-timed-out N any window is judged by count (MIN_REQUESTS gates only
+# the share rule). Exit 0 met, 1 not met, 75 not yet, 2 unreadable.
 PYTHONPATH=python exec python3 -B -m agent_tools.delivery.verify_slot_timeouts "$@"

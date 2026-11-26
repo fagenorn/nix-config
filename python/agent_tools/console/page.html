@@ -78,20 +78,14 @@ summary { min-height: 24px; }
 .conn { color: var(--ov2); font-size: .8125rem; }
 .nav { color: var(--sub0); font-size: .8125rem; text-decoration: none; white-space: nowrap; display: inline-flex; align-items: center; min-height: 24px; }
 .nav:hover { color: var(--text); }
-.cap { display: flex; flex: 0 0 auto; flex-wrap: nowrap; white-space: nowrap; overflow: hidden; align-items: center; gap: 4px 16px; margin-left: auto; min-width: 0; max-width: 100%; padding: 0; background: none; font: inherit; font-size: .8125rem; color: var(--sub0); text-align: left; cursor: pointer; }
+.cap { display: flex; flex: 0 0 auto; flex-wrap: nowrap; white-space: nowrap; overflow: hidden; align-items: center; gap: 0; margin-left: auto; min-width: 0; max-width: 100%; padding: 0; background: none; font: inherit; font-size: .8125rem; color: var(--sub0); text-align: left; cursor: pointer; }
 .cap > * { flex: none; }
 .cap-state { display: inline-flex; align-items: center; gap: 7px; font-weight: 600; }
 .cap-fine { color: var(--green); }
 .cap-tight { color: var(--yellow); }
 .cap-out { color: var(--red); }
-.cap-acct { display: inline-flex; align-items: center; gap: 7px; white-space: nowrap; min-width: 0; max-width: 100%; }
-.cap-acct b { font-weight: 600; color: var(--sub1); max-width: 9rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.meter { display: block; flex: none; width: 34px; height: 4px; border-radius: 2px; background: var(--s1); overflow: hidden; }
-.meter i { display: block; height: 100%; background: var(--sub0); }
-.cap-excluded .meter i { background: var(--s2); }
-.cap-pc { color: var(--sub1); }
-.cap-signin, .cap-no-reading, .cap-signed-out { color: var(--ov2); }
-.cap-excluded, .cap-excl, .cap-pin-mark { color: var(--ov2); }
+.cap-signed-out { color: var(--ov2); }
+.cap-excluded { color: var(--ov2); }
 .acct-panel { position: absolute; top: calc(100% + 6px); right: 16px; z-index: 20; width: min(600px, calc(100vw - 32px)); max-height: calc(100vh - 6rem); overflow-y: auto; padding: 12px 16px; background: var(--base); border: 1px solid var(--s1); border-radius: 12px; box-shadow: 0 28px 48px -24px rgba(8, 9, 16, .9); font-size: .84375rem; color: var(--sub0); }
 .acct-panel[hidden] { display: none; }
 .acct-panel:focus-visible { outline: none; }
@@ -222,7 +216,7 @@ summary { min-height: 24px; }
 .overlap { padding: 0 16px; font-size: .8125rem; color: var(--sub0); overflow-wrap: anywhere; min-width: 0; }
 .sp-who { display: flex; flex-direction: column; min-width: 0; }
 .sp-project { font-size: .75rem; color: var(--ov2); }
-.sp-now { flex: 1 0 100%; grid-column: 2 / -1; color: var(--text); display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; }
+.sp-now, .finished-line .wrap-up { flex: 1 0 100%; grid-column: 2 / -1; color: var(--text); display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; }
 .sprint .title-line { color: var(--text); font-weight: 500; overflow-wrap: anywhere; }
 .sprint-goal-full { color: var(--text); overflow-wrap: anywhere; }
 .sprint .age, .sprint .manager, .sprint .until, .sprint .status-age { color: var(--ov2); }
@@ -265,7 +259,7 @@ summary { min-height: 24px; }
 .pool-yours b { color: var(--lav); }
 .pool-remove-box { flex: 1 0 100%; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 7px; padding-left: 16px; color: var(--sub1); }
 .pool-remove-box p { flex-basis: 100%; margin: 0; }
-.cap-owner, .acct-owner { color: var(--ov2); overflow-wrap: anywhere; margin-right: 6px; }
+.acct-owner { color: var(--ov2); overflow-wrap: anywhere; margin-right: 6px; }
 .own-account { margin-bottom: 24px; font-size: .8125rem; color: var(--sub0); }
 .guest-account { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin-top: 8px; }
 .guest-account p { flex-basis: 100%; margin: 0; }
@@ -314,7 +308,7 @@ summary { min-height: 24px; }
 .finished-list > summary { cursor: pointer; color: var(--ov2); }
 .finished-list > ul { margin-top: 4px; }
 .finished-line summary { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 10px; padding: 3px 0; cursor: pointer; color: var(--sub0); }
-.finished-line .title-line { color: var(--text); overflow-wrap: anywhere; }
+.finished-line .title-line, .finished-line .wrap-up { color: var(--text); overflow-wrap: anywhere; }
 .finished-line .ended { color: var(--ov2); }
 .message-text { color: var(--lav); }
 .closing-report { margin-left: 4px; border-left: 1px solid var(--hair); padding: 2px 0 8px 16px; color: var(--sub0); overflow-wrap: anywhere; }
@@ -551,7 +545,6 @@ html:has(#viewer:not([hidden])) { overflow: hidden; }
   .statement h1 { font-size: 2rem; }
   .top-in { flex-wrap: wrap; }
   .cap { margin-left: 0; }
-  .cap-extra { display: none; }
   .sprint-check { display: flex; align-items: flex-start; min-height: 44px; }
   .sprint-checks .wait { min-height: 44px; }
   .sprint-checks .live-fault { min-height: 44px; }
@@ -1428,6 +1421,19 @@ function stallHeaders() {
 function stallBody(item) {
   return JSON.stringify({ project_id: item.project_id, sprint_id: item.sprint_id });
 }
+function stallAct(pairs) {
+  const act = el("div", "act");
+  for (const [button, state] of pairs) {
+    const sending = state !== undefined && state.phase === "sending";
+    if (sending) button.setAttribute("disabled", "");
+    markBusy(button, sending);
+    act.appendChild(button);
+  }
+  for (const [, state] of pairs) {
+    if (state !== undefined && state.phase === "failed") act.appendChild(el("span", "fail", state.failure + state.reason));
+  }
+  return act;
+}
 function stallCard(item) {
   const card = el("article", "card stall");
   card.appendChild(el("p", "q", item.headline));
@@ -1438,23 +1444,11 @@ function stallCard(item) {
     () => stallPost(item, "again", "Could not try again: ", () => fetch("/api/retry-manager", {
       method: "POST", headers: stallHeaders(), body: stallBody(item),
     })));
-  if (again !== undefined && again.phase === "sending") retry.setAttribute("disabled", "");
-  markBusy(retry, again !== undefined && again.phase === "sending");
-  const act = el("div", "act");
-  act.appendChild(retry);
   const withdrawn = actionButton("stall-withdraw btn-danger", "Drop the sprint",
     () => stallPost(item, "withdraw", "Could not drop: ", () => fetch("/api/withdraw", {
       method: "POST", headers: stallHeaders(), body: stallBody(item),
     })));
-  if (away !== undefined && away.phase === "sending") withdrawn.setAttribute("disabled", "");
-  markBusy(withdrawn, away !== undefined && away.phase === "sending");
-  act.appendChild(withdrawn);
-  for (const state of [again, away]) {
-    if (state !== undefined && state.phase === "failed") {
-      act.appendChild(el("span", "fail", state.failure + state.reason));
-    }
-  }
-  card.appendChild(act);
+  card.appendChild(stallAct([[retry, again], [withdrawn, away]]));
   return card;
 }
 function isFailedStart(item) {
@@ -1470,23 +1464,11 @@ function failedStartCard(item) {
     () => stallPost(item, "start-retry", "Could not retry: ", () => fetch("/api/retry-manager", {
       method: "POST", headers: stallHeaders(), body: stallBody(item),
     })));
-  if (again !== undefined && again.phase === "sending") retry.setAttribute("disabled", "");
-  markBusy(retry, again !== undefined && again.phase === "sending");
-  const act = el("div", "act");
-  act.appendChild(retry);
   const withdrawn = actionButton("start-withdraw btn-danger", "Drop the sprint",
     () => stallPost(item, "start-withdraw", "Could not drop: ", () => fetch("/api/withdraw", {
       method: "POST", headers: stallHeaders(), body: stallBody(item),
     })));
-  if (away !== undefined && away.phase === "sending") withdrawn.setAttribute("disabled", "");
-  markBusy(withdrawn, away !== undefined && away.phase === "sending");
-  act.appendChild(withdrawn);
-  for (const state of [again, away]) {
-    if (state !== undefined && state.phase === "failed") {
-      act.appendChild(el("span", "fail", state.failure + state.reason));
-    }
-  }
-  card.appendChild(act);
+  card.appendChild(stallAct([[retry, again], [withdrawn, away]]));
   return card;
 }
 function isProgress(item) {
@@ -1682,23 +1664,19 @@ function progressCard(item) {
     () => stallPost(item, "continue", "Could not continue: ", () => fetch("/api/continue", {
       method: "POST", headers: stallHeaders(), body: stallBody(item),
     })));
-  if (going !== undefined && going.phase === "sending") onward.setAttribute("disabled", "");
-  markBusy(onward, going !== undefined && going.phase === "sending");
-  const act = el("div", "act");
-  act.appendChild(onward);
   const withdrawn = actionButton("progress-withdraw btn-danger", "Drop the sprint",
     () => stallPost(item, "progress-withdraw", "Could not drop: ", () => fetch("/api/withdraw", {
       method: "POST", headers: stallHeaders(), body: stallBody(item),
     })));
-  if (away !== undefined && away.phase === "sending") withdrawn.setAttribute("disabled", "");
-  markBusy(withdrawn, away !== undefined && away.phase === "sending");
-  act.appendChild(withdrawn);
-  for (const state of [going, away]) {
-    if (state !== undefined && state.phase === "failed") {
-      act.appendChild(el("span", "fail", state.failure + state.reason));
-    }
-  }
-  card.appendChild(act);
+  card.appendChild(stallAct([[onward, going], [withdrawn, away]]));
+  return card;
+}
+function isHeldSprint(item) { return item.reason === "held_sprint"; }
+function heldSprintCard(item) {
+  const card = el("article", "card held-sprint");
+  card.appendChild(el("p", "q", item.headline));
+  card.appendChild(el("span", "reason", item.last_status));
+  card.appendChild(phrase("p", "meta", "nothing has moved since ", timeEl("since", item.waiting_since, "")));
   return card;
 }
 function signinWords(s) {
@@ -3140,7 +3118,7 @@ function questionsFold(entry, afterLine) {
 function renderStatement(view) {
   const box = document.getElementById("statement");
   const h1 = el("h1", view.statement.inbox_items > 0 ? "needs" : "", view.statement.headline);
-  const nodes = [h1, el("p", "sub", view.statement.sentence)];
+  const nodes = [h1, el("p", "sub", view.statement.sentence), ...(view.statement.inbox_items === 0 && view.next_expected ? [phrase("p", "sub next-expected", "Next update expected ", timeEl("weekday", view.next_expected, ""))] : [])];
   const cap = view.capacity ? settledCapacity(view.capacity) : view.capacity;
   if (cap && cap.all_out && cap.resumes_at) nodes.push(phrase("p", "sub", "Resumes ", timeEl("weekday", cap.resumes_at, "")));
   for (const stopped of Array.isArray(view.unstopped) ? view.unstopped : []) {
@@ -3290,84 +3268,31 @@ function ownerMark(cls, p) {
 function renderCapacity(view) {
   const box = document.getElementById("capacity");
   const cap = settledCapacity(view.capacity);
-  const known = (v) => v !== null && v !== undefined;
-  const readings = cap.profiles.filter((p) => counted(p) && p.state !== "unknown" && !signedOut(p));
-  const eligible = readings.filter((p) => !excludedProfile(p));
-  const asks = (p) => p.signin !== null && typeof p.signin === "object" && p.signin.ask === true;
-  const listed = cap.profiles.filter((p) => counted(p) && (readings.includes(p) || signedOut(p)
-    || excludedProfile(p) || pinnedProfile(p) || asks(p)));
+  const eligible = cap.profiles.filter((p) => counted(p) && p.state !== "unknown" && !signedOut(p) && !excludedProfile(p));
+  // The sign-in need is the inbox's set: the owner's own accounts that ask, or are signed out. A colleague's waits for him.
+  const need = cap.profiles.filter((p) => !(typeof p.owner === "string" && p.owner !== "")
+    && (signedOut(p) || (p.signin !== null && typeof p.signin === "object" && p.signin.ask === true))).length;
   const nodes = [];
-  let tightest = null;
-  for (const p of eligible) {
-    if (tightest === null) tightest = p;
-    else if (tightest.state !== "out") {
-      if (p.state === "out") tightest = p;
-      else if (known(p.week_left) && (!known(tightest.week_left) || p.week_left < tightest.week_left)) tightest = p;
-    }
-  }
   if (eligible.length) {
     const [tone, word, mark] = cap.all_out ? ["cap-out", "out", "stop-icon"]
       : cap.tight ? ["cap-tight", "tight", "clock-icon"] : ["cap-fine", "fine", "tick-icon"];
     const state = el("span", "cap-state " + tone);
     state.appendChild(icon(mark));
-    state.appendChild(el("span", "", word));
+    if (cap.all_out && typeof cap.resumes_at === "string" && Number.isFinite(Date.parse(cap.resumes_at))) {
+      state.appendChild(phrase("span", "", "out until ", timeEl("weekday", cap.resumes_at, "")));
+    } else state.appendChild(el("span", "", word));
     nodes.push(state);
-  }
-  for (const p of listed) {
-    if (signedOut(p) || !readings.includes(p)) {
-      const acct = el("span", (signedOut(p) ? "cap-acct cap-signed-out" : "cap-acct cap-no-reading")
-        + (excludedProfile(p) ? " cap-excluded" : "") + (pinnedProfile(p) ? " cap-pinned" : ""));
-      const who = el("b", "", p.profile);
-      who.setAttribute("title", p.profile);
-      acct.appendChild(who);
-      const owner = ownerMark("cap-owner", p);
-      if (owner !== null) acct.appendChild(owner);
-      if (excludedProfile(p)) acct.appendChild(el("span", "cap-excl", "excluded"));
-      if (pinnedProfile(p)) acct.appendChild(el("span", "cap-pin-mark", "pinned"));
-      if (signedOut(p)) {
-        const waits = typeof p.owner === "string" && p.owner !== "";
-        acct.appendChild(el("span", "cap-signin", waits ? "waits for " + p.owner + " to sign in" : "signed out"));
-      }
-      else if (asks(p)) acct.appendChild(el("span", "cap-signin", signinWords(p.signin)));
-      nodes.push(acct);
-      continue;
-    }
-    const acct = el("span", (p.state === "out" ? "cap-acct cap-out" : "cap-acct")
-      + (excludedProfile(p) ? " cap-excluded" : "") + (pinnedProfile(p) ? " cap-pinned" : "")
-      + (p === tightest ? " cap-tightest" : ""));
-    const shares = [known(p.week_left) ? p.week_left + "% of the week left" : "week unknown"];
-    if (known(p.five_hour_left)) shares.push(p.five_hour_left + "% of 5 hours");
-    acct.setAttribute("title", shares.join(", "));
-    const name = el("b", "", p.profile);
-    name.setAttribute("title", p.profile);
-    acct.appendChild(name);
-    const owner = ownerMark("cap-owner", p);
-    if (owner !== null) acct.appendChild(owner);
-    if (excludedProfile(p)) acct.appendChild(el("span", "cap-excl", "excluded"));
-    if (pinnedProfile(p)) acct.appendChild(el("span", "cap-pin-mark", "pinned"));
-    if (known(p.week_left)) {
-      const meter = el("span", "meter");
-      meter.setAttribute("aria-hidden", "true");
-      const fill = el("i");
-      fill.style.width = p.week_left + "%";
-      meter.appendChild(fill);
-      acct.appendChild(meter);
-    }
-    if (p.state === "out") acct.appendChild(outWords(p, ""));
-    else if (p.state === "reset") acct.appendChild(el("span", "cap-pc", "reset, not yet used"));
-    else acct.appendChild(el("span", "cap-pc", known(p.week_left) ? p.week_left + "%" : "week unknown"));
-    if (asks(p)) acct.appendChild(el("span", "cap-signin", signinWords(p.signin)));
-    nodes.push(acct);
-  }
-  if (cap.profiles.some(excludedProfile) && cap.profiles.every((p) => excludedProfile(p) || signedOut(p))) {
+  } else if (cap.profiles.some(excludedProfile) && cap.profiles.every((p) => excludedProfile(p) || signedOut(p))) {
     nodes.push(el("span", "cap-none", "every profile excluded"));
+  } else if (need === 0) {
+    // Only signed-out profiles stand in the pool (a colleague's, since the owner's would count in need): the pool waits on a sign-in, it is not unread.
+    const standing = cap.profiles.filter((p) => counted(p) && !excludedProfile(p));
+    nodes.push(el("span", "cap-none", cap.no_reading ? cap.no_reading
+      : standing.length && standing.every(signedOut) ? "waits for a sign-in"
+      : cap.profiles.some(counted) ? "no reading yet" : "no accounts"));
   }
-  if (cap.no_reading) nodes.push(el("span", "cap-none", cap.no_reading));
-  if (!nodes.length) nodes.push(el("span", "cap-none", "no accounts"));
-  if (eligible.length) {
-    for (const n of nodes.slice(1)) {
-      if (!/(^| )cap-tightest( |$)/.test(n.className)) n.className += " cap-extra";
-    }
+  if (need > 0) {
+    nodes.push(el("span", "cap-need", (nodes.length ? ", " : "") + need + (need === 1 ? " needs sign-in" : " need sign-in")));
   }
   box.replaceChildren(...nodes);
 }
@@ -3390,16 +3315,16 @@ function accountRow(shown, view) {
   const out = p.state === "out";
   if (signedOut(p)) detail.appendChild(el("span", "acct-week", "signed out"));
   else if (p.state === "unknown") detail.appendChild(el("span", "acct-week", "no reading yet"));
-  else if (out) {
-    detail.appendChild(outWords(p, "acct-week"));
+  else if (out || p.state === "reset") {
+    detail.appendChild(out ? outWords(p, "acct-week") : el("span", "acct-week", "reset, not yet used"));
     if (known(p.week_left)) detail.appendChild(el("span", "acct-week-left", p.week_left + "% of the week left"));
-  } else if (p.state === "reset") detail.appendChild(el("span", "acct-week", "reset, not yet used"));
-  else detail.appendChild(el("span", "acct-week", known(p.week_left) ? p.week_left + "% of the week left" : "week unknown"));
+  } else detail.appendChild(el("span", "acct-week", known(p.week_left) ? p.week_left + "% of the week left" : "week unknown"));
   if (known(p.five_hour_left)) detail.appendChild(el("span", "acct-five", p.five_hour_left + "% of 5 hours"));
   if (known(p.next_reset) && !out && Number.isFinite(Date.parse(p.next_reset))) {
     detail.appendChild(phrase("span", "acct-reset", "resets ", timeEl("weekday", p.next_reset, "")));
   }
-  const words = signinWords(p.signin);
+  const words = signedOut(p) && typeof p.owner === "string" && p.owner !== ""
+    ? "waits for " + p.owner + " to sign in" : signinWords(p.signin);
   if (words !== "") detail.appendChild(el("span", "acct-signin-words", words));
   if (typeof p.account === "string" && p.account !== "") {
     const account = el("span", "acct-account", p.account);
@@ -5187,6 +5112,7 @@ function drawInbox(view, guest = null) {
   const stalls = open.filter(isStall);
   const starts = open.filter(isFailedStart);
   const progress = open.filter(isProgress);
+  const heldSprints = open.filter(isHeldSprint);
   const signins = open.filter(isSignin);
   const signinRuns = guest === null && view.signin_runs !== null && typeof view.signin_runs === "object" ? view.signin_runs : {};
   for (const [profile, run] of Object.entries(signinRuns)) {
@@ -5197,7 +5123,7 @@ function drawInbox(view, guest = null) {
     signins.push({ type: "inbox_item", reason: "signin", key: "signin/" + profile, project_id: null, profile,
       headline: "Sign in to " + profile, action: "signin", run, signin: null, answered: false, waiting_since: null });
   }
-  const tracked = open.filter((item) => !isBrief(item) && !isStall(item) && !isFailedStart(item) && !isProgress(item) && !isSignin(item) && !isAdoption(item) && !isRelease(item) && !isPermission(item) && !isLookCard(item));
+  const tracked = open.filter((item) => !isBrief(item) && !isStall(item) && !isFailedStart(item) && !isProgress(item) && !isHeldSprint(item) && !isSignin(item) && !isAdoption(item) && !isRelease(item) && !isPermission(item) && !isLookCard(item));
   const looks = open.filter(isLookCard);
   for (const [key, state] of [...stallPosts]) {
     const id = key.split("\n")[1];
@@ -5285,6 +5211,7 @@ function drawInbox(view, guest = null) {
   for (const item of stalls) section.appendChild(stallCard(item));
   for (const item of starts) section.appendChild(failedStartCard(item));
   for (const item of progress) section.appendChild(progressCard(item));
+  for (const item of heldSprints) section.appendChild(heldSprintCard(item));
   for (const item of signins) section.appendChild(signinCard(item));
   for (const [id, state] of answers) {
     if (present.has(id) || !keptWords(state)) continue;
@@ -5475,12 +5402,11 @@ function finishedLine(sprint, projectId) {
   fold.dataset.key = "ended:" + sprint.sprint_id;
   const summary = el("summary");
   summary.appendChild(el("span", "title-line", sprint.title));
-  const closing = sprint.closing;
-  const counted = closing !== null && typeof closing === "object" && typeof closing.counts_text === "string";
-  summary.appendChild(el("span", "outcome", counted ? closing.counts_text : ownerWords(sprint.state_text)));
+  summary.appendChild(el("span", "outcome", typeof sprint.closing?.counts_text === "string" ? sprint.closing.counts_text.replace(/(?<!dropped)$/, ", 0 dropped") : ownerWords(sprint.state_text)));
   summary.appendChild(phrase("span", "ended", "ended ", timeEl("ago", sprint.ended_at, "")));
   if (typeof sprint.started_by === "string") summary.appendChild(el("span", "started-by", "started by " + sprint.started_by));
   if (hasNewReply(sprint)) summary.appendChild(el("span", "message-new", "new reply"));
+  if (sprint.closing?.first_line) summary.appendChild(el("span", "wrap-up", sprint.closing.first_line));
   fold.appendChild(summary);
   const spendBox = spendLine("sprint", sprint.sprint_id);
   if (spendBox !== null) fold.appendChild(spendBox);

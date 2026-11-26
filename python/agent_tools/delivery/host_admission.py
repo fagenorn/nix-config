@@ -9,9 +9,16 @@ The declaration is authored host policy installed at exactly
 `$HOME/.agents/share/host-declaration.json` (D2). It declares, per route,
 whether the route is supported and, when it is, the agent slots one root
 session may hold at once. It also states, optionally, the host's verify slot
-count (`verify_slots`), which `agent_tools.delivery.verify_slot` reads, and
+count (`verify_slots`), which `agent_tools.delivery.verify_slot` reads,
 `verify_budget_seconds`, the hold in seconds a repository's median verify run
-should stay within, which `verify-slot report` reads. Nothing else is
+should stay within, which `verify-slot report` reads,
+`verify_repository_slots`, a map of `owner/repo` to the number of that
+repository's runs that may hold verify slots at once, which
+`agent_tools.delivery.verify_slot` reads (`DEFAULT_REPOSITORY_VERIFY_SLOTS` for
+a repository it does not name), and `verify_short_lane`, which
+names, per repository, the short commands that run beside the verify slots in
+their own lane, with that lane's slot count and per-command time bound;
+`agent_tools.delivery.verify_slot` reads it through `short_command`. Nothing else is
 declared: admission reasons over declared `agent_slots` only, never CPU, memory
 or load.
 The `engine` route has no role sets: it counts one slot per live engine
@@ -24,7 +31,9 @@ import json
 import os
 from pathlib import Path
 import re
+import threading
 from types import MappingProxyType
+from typing import Sequence
 
 HOST_ADMISSION_INTERFACE_VERSION = 1
 DECLARATION_SCHEMA_VERSION = 1
@@ -61,9 +70,16 @@ REASON_CODES = (
 UNSUPPORTED_ALTERNATIVE = "/deliver-standard <issue>"
 
 DEFAULT_VERIFY_SLOTS = 1
+DEFAULT_REPOSITORY_VERIFY_SLOTS = 1
+# The lowercased `owner/repo` slug: an owner never begins with a dot, a
+# repository name may (`example/.github`) but is never `.` or `..`.
+REPOSITORY_NAME_PATTERN = re.compile(r"[a-z0-9_-][a-z0-9_.-]*/(?!\.{1,2}$)[a-z0-9_.-]+")
 
 _DECLARATION_MEMBERS = frozenset({"schema_version", "routes"})
-_OPTIONAL_DECLARATION_MEMBERS = frozenset({"verify_slots", "verify_budget_seconds"})
+SHORT_LANE_MEMBERS = frozenset({"slots", "bound_seconds", "commands"})
+
+_OPTIONAL_DECLARATION_MEMBERS = frozenset(
+    {"verify_slots", "verify_budget_seconds", "verify_repository_slots", "verify_short_lane"})
 _SUPPORTED_MEMBERS = frozenset({"support", "agent_slots"})
 _UNSUPPORTED_MEMBERS = frozenset({"support"})
 
@@ -106,12 +122,34 @@ def _reject_non_finite(token: str) -> object:
     raise _invalid(f"non-finite number: {token}")
 
 
+def _short_lane_valid(lane: object) -> bool:
+    """Whether `lane` is exactly `{slots, bound_seconds, commands}` of the declared shape."""
+    if not isinstance(lane, dict) or set(lane) != SHORT_LANE_MEMBERS:
+        return False
+    if any(type(lane[name]) is not int or lane[name] < 1 for name in ("slots", "bound_seconds")):
+        return False
+    if lane["bound_seconds"] > threading.TIMEOUT_MAX:  # a bound no timer can count down
+        return False
+    commands = lane["commands"]
+    if not isinstance(commands, dict):
+        return False
+    return all(
+        isinstance(repository, str) and REPOSITORY_NAME_PATTERN.fullmatch(repository)
+        and isinstance(argvs, list) and argvs
+        and all(isinstance(argv, list) and argv
+                and all(isinstance(word, str) and word for word in argv) for argv in argvs)
+        for repository, argvs in commands.items())
+
+
 def validate_declaration(value: object) -> dict:
     """Return `value` when it is a valid declaration; raise `DeclarationError`.
 
     Exact members at every level (D2): the top is `{schema_version, routes}`
     plus the optional `verify_slots` and `verify_budget_seconds`, each a plain
-    int >= 1;
+    int >= 1, `verify_repository_slots`, an object whose keys are
+    lowercase `owner/repo` and whose values are plain ints >= 1, and
+    `verify_short_lane`, `{slots, bound_seconds, commands}` with
+    two such ints and `commands` mapping `owner/repo` to non-empty argv lists;
     `schema_version` is a plain int equal to 1; `routes` is a non-empty object
     whose keys match the route grammar and are not `direct`; a supported route
     is exactly `{"support": "supported", "agent_slots": <int >= floor>}` and an
@@ -130,6 +168,15 @@ def validate_declaration(value: object) -> dict:
         budget = value["verify_budget_seconds"]
         if type(budget) is not int or budget < 1:
             raise _invalid("verify_budget_seconds")
+    if "verify_short_lane" in value and not _short_lane_valid(value["verify_short_lane"]):
+        raise _invalid("verify_short_lane")
+    if "verify_repository_slots" in value:
+        limits = value["verify_repository_slots"]
+        if not isinstance(limits, dict) or any(
+                not REPOSITORY_NAME_PATTERN.fullmatch(name)
+                or type(limit) is not int or limit < 1
+                for name, limit in limits.items()):
+            raise _invalid("verify_repository_slots")
     version = value["schema_version"]
     if type(version) is not int or version != DECLARATION_SCHEMA_VERSION:
         raise _invalid("schema_version")
@@ -206,6 +253,30 @@ def verify_slots(declaration: dict) -> int:
 def verify_budget_seconds(declaration: dict) -> int | None:
     """The host's verify hold budget in seconds, or `None` when undeclared."""
     return declaration.get("verify_budget_seconds")
+
+
+def short_command(declaration: dict, repository: str | None,
+                  argv: Sequence[str]) -> tuple[int, int] | None:
+    """`(slots, bound_seconds)` when `argv` is a declared short command of `repository`, else `None`.
+
+    Matching is exact: a prefix, a longer argv or another repository never matches.
+    `declaration` is one `validate_declaration` already accepted.
+    """
+    lane = declaration.get("verify_short_lane")
+    if lane is None or repository is None:
+        return None
+    if list(argv) not in lane["commands"].get(repository, ()):
+        return None
+    return lane["slots"], lane["bound_seconds"]
+
+
+def repository_verify_slots(declaration: dict, repository: str) -> int:
+    """The verify slots `repository` may hold at once, `DEFAULT_REPOSITORY_VERIFY_SLOTS` if unnamed.
+
+    `declaration` is one `validate_declaration` already accepted.
+    """
+    return declaration.get("verify_repository_slots", {}).get(
+        repository, DEFAULT_REPOSITORY_VERIFY_SLOTS)
 
 
 def route_slots(declaration: dict, route: str) -> int:
