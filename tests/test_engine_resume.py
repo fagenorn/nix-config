@@ -153,7 +153,8 @@ class SupersededTest(unittest.TestCase):
         (old / "procedure/deliver.json").write_bytes(b"not json")
         done = project.deliver(procedures)
         self.assertEqual(done.returncode, 2, done.stdout + done.stderr)
-        self.assertEqual(done.stdout, "")
+        self.assertIn(("unreadable_procedure", "deliver"),
+                      [(r["defect"], r["procedure"]) for r in json.loads(done.stdout)["refusals"]])
         self.assertEqual((old / "events.jsonl").read_bytes(), b"")
         self.assertEqual(project.runs(), [old])
 
