@@ -20,6 +20,7 @@ STAGES = ("setup", "planning", "plan review", "building", "final review",
           "verifying", "awaiting look", "landing", "closing out", "done")
 NEEDS = ("owner-decision", "owner-look", "retry", "nothing")
 ROLES = ("planner", "implementer", "reviewer", "reviewer-lite")
+WHOLE_SHELL_ROLES = ("implementer",)
 WAITS = ("usage-limit", "host-slot", "lock", "checks")
 EXHAUSTED = "exhausted"
 OUT_OF_BOUNDS = "out-of-bounds"

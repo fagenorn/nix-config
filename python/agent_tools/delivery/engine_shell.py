@@ -212,9 +212,7 @@ SUPPLIED_INPUTS = ("holder", "issue", "repo", "repo_root")
 RUNNABLE_KINDS = ("command", "agent", "decide", "group", "call")
 QUOTA_NEED = "retry"
 ABSENT = "absent"
-REPOSITORY_ENV = ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
-                  "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE",
-                  "GIT_PREFIX", "GIT_IMPLICIT_WORK_TREE")
+REPOSITORY_ENV = engine_session.REPOSITORY_ENV
 NO_TOKENS = {"input": 0, "cache_write": 0, "cache_read": 0, "output": 0}
 
 
@@ -240,8 +238,8 @@ def platform_revision(environ: Mapping[str, str]) -> str:
     return Path(root).parent.parent.name if root else "source"
 
 
-def _guard() -> engine_guard.Hook | engine_guard.Unavailable:
-    return engine_guard.locate(engine_guard.settings_path(os.environ))
+def _guard(directory: str | None = None) -> engine_guard.Hook | engine_guard.Unavailable:
+    return engine_guard.locate(engine_guard.settings_path(os.environ), directory)
 
 
 def _host() -> str:
@@ -1267,6 +1265,14 @@ def _visit_session(run_dir: Path, root: str, step: dict, action: engine_core.Sta
     again, and the session is launched under `resumed.attempt`."""
     name, visit = action.step, action.visit
     role = engine_session.read_role(engine_session.roles_dir(os.environ), step["role"])
+    cwd = root
+    if (w := step.get("worktree")) is not None:
+        args = dict(action.args)
+        cwd = engine_session.own_worktree(args.get(w["path"]), args.get(w["branch"]), root)
+        if cwd is None:
+            raise Fault(f"step {name} names the worktree {args.get(w['path'])!r} on "
+                        f"{args.get(w['branch'])!r}, which is not a worktree of the project on that branch")
+        role = replace(role, whole_shell=True)
     staged = run_dir / "procedure"
     schema = _load(staged / action.reply)
     if resumed is None:
@@ -1302,7 +1308,7 @@ def _visit_session(run_dir: Path, root: str, step: dict, action: engine_core.Sta
                 "session": session, "role": role.name,
                 "account": os.environ.get("CLAUDE_ACCOUNT") or "console"})
         launched, reading, stopped, no_reply = _launch_until_answered(
-            run_dir, root, (name, visit, session), prompt, (role, schema, system), scope.stop,
+            run_dir, cwd, (name, visit, session), prompt, (role, schema, system), scope.stop,
             defer=member, resumed=resumed)
     if stopped is not None:
         return stopped
@@ -1392,7 +1398,7 @@ def _launch_until_answered(
             started.append(pid)
             event("process_started", step=name, visit=visit, pid=pid, started=_now())
 
-        guard = _guard()
+        guard = _guard(root)
         if isinstance(guard, engine_guard.Unavailable):
             raise Fault(f"step {name} was not launched: the host's settings no longer load the "
                         f"lifecycle guard hook: {guard.reason}")

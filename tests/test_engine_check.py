@@ -331,6 +331,17 @@ def _tool_denied_stop(toy: dict) -> None:
     toy["stops"]["tool-denied"] = {"need": "retry", "reenter": "draft"}
 
 
+def _worktree_on_a_reviewer(toy: dict) -> None:
+    step(toy, "review-a")["in"].append("run.issue")
+    step(toy, "review-a")["worktree"] = {"path": "run.issue", "branch": "run.issue"}
+
+
+def _worktree_of(path: str, branch: str) -> Callable[[dict], None]:
+    def change(toy: dict) -> None:
+        step(toy, "draft")["worktree"] = {"path": path, "branch": branch}
+    return change
+
+
 def _superseded_stop(toy: dict) -> None:
     toy["stops"]["superseded"] = {"need": "retry", "reenter": "draft"}
 
@@ -557,7 +568,15 @@ CASES = [
          [("toy", None, "invalid_field")]),
     Case("stop_named_tool_denied", editing("toy", _tool_denied_stop),
          [("toy", None, "invalid_field")]),
-    Case("stop_named_superseded", editing("toy", _superseded_stop),
+    Case("worktree_on_a_reviewer_step", editing("toy", _worktree_on_a_reviewer),
+         [("toy", "review-a", "invalid_field")]),
+    Case("worktree_path_not_an_input", editing("toy", _worktree_of("draft.nowhere", "run.issue")),
+         [("toy", "draft", "invalid_field")]),
+    Case("worktree_branch_not_an_input", editing("toy", _worktree_of("run.issue", "draft.nowhere")),
+         [("toy", "draft", "invalid_field")]),
+    Case("worktree_not_an_object", editing("toy", _set(lambda toy: step(toy, "draft"), "worktree", "run.issue")),
+         [("toy", "draft", "invalid_field")]),
+    Case("stop_named_superseded",editing("toy", _superseded_stop),
          [("toy", None, "invalid_field")]),
     Case("no_reply_to_a_reader_of_the_reply", editing("toy", _no_reply_to_review),
          [("toy", "children", "unproduced_input"), ("toy", "review-a", "unproduced_input"),

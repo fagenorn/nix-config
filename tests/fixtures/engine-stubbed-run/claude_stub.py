@@ -15,7 +15,7 @@ origin and merges `origin/main` into the worktree (a conflict is resolved with t
 committed, or aborted when `resolve` is absent); `"same_head": {"worktree"}` answers
 `start_head` and `commit` both as the worktree's HEAD and commits nothing;
 `"leave": {"worktree", "path", "text"}` writes that file in the worktree after every other effect
-and neither adds nor commits it (one untracked file, no head moved). It appends `{"argv", "key", "prompt"}` as one JSON line to `<log>`, `key` being the
+and neither adds nor commits it (one untracked file, no head moved). It appends `{"argv", "cwd", "key", "prompt"}` (`cwd` being its working directory) as one JSON line to `<log>`, `key` being the
 step id (never the visit), writes `{"account": "stub"}` to the file named by
 `CLAUDE_ACCOUNT_ANSWER` when that is set, and prints
 `tests/fixtures/engine-session/result-normal.json` with `structured_output` replaced by the
@@ -152,7 +152,8 @@ def main(argv: list[str]) -> int:
     step, visit = step_and_visit(words)
     name = next((n for n in (f"{step}.{visit}", step) if n in scenario), None)
     with open(log, "a", encoding="utf-8") as handle:
-        handle.write(json.dumps({"argv": words, "key": step, "prompt": prompt}, sort_keys=True) + "\n")
+        handle.write(json.dumps({"argv": words, "cwd": os.getcwd(), "key": step, "prompt": prompt},
+                                sort_keys=True) + "\n")
     answer = os.environ.get("CLAUDE_ACCOUNT_ANSWER")
     if answer:
         Path(answer).write_text(json.dumps({"account": "stub"}), encoding="utf-8")
