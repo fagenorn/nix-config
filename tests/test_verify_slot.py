@@ -910,7 +910,7 @@ class VerifySlotTest(SlotHarness, unittest.TestCase):
         self.addCleanup(lambda: [os.close(fd) for fd in taken])
         with mock.patch.object(verify_queue, "repository_lock_paths",
                                wraps=verify_queue.repository_lock_paths) as paths:
-            results = [verify_slot._try_slots(self.slots, 2, True, "example/alpha", 1_000_000_000)
+            results = [verify_slot._try_slots(self.slots, 2, True, "example/alpha", 50)
                        for _ in range(3)]
         for held, _ in results:
             taken.extend(held or ())
