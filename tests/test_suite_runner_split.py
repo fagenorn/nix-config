@@ -14,6 +14,7 @@ import io
 import json
 import os
 import re
+import subprocess
 import sys
 import tempfile
 import textwrap
@@ -47,7 +48,7 @@ RECORDING = textwrap.dedent('''\
                 os.write(descriptor, line.encode())
             finally:
                 os.close(descriptor)
-            if os.environ.get("SPLIT_TEST_FAIL") == type(self).__name__:
+            if type(self).__name__ in os.environ.get("SPLIT_TEST_FAIL", "").split(","):
                 self.fail("deliberate failure")
 ''')
 
@@ -364,6 +365,19 @@ class FailureTest(SplitCase):
                     [line for line in lines if line.startswith("suite-runner: failed part ")],
                     [f"suite-runner: failed part {expected}"])
                 self.assertEqual(_FAILED_MEMBER.findall(output), ["test_big.py"])
+
+    def test_a_part_with_two_failing_classes_names_both_as_suite_part_prints_them(self):
+        self.write("test_big.py", BIG_MEMBER)
+        part = suite_runner.Unit(0, "test_big.py", classes=("A", "B", "C"), excluded=("D",),
+                                 part=1, parts=2)
+        done = subprocess.run(
+            [*sibling_argv("delivery.suite_part"), "test_big.py", "--except", "D"],
+            cwd=self.work, env=self.environment(SPLIT_TEST_FAIL="B,C"), stdin=subprocess.DEVNULL,
+            capture_output=True, timeout=120)
+        self.assertEqual(done.returncode, 1, done.stderr)
+        failed = MemberResult(0, part.label, done.returncode, 1.0, 1.0)
+        self.assertEqual(suite_runner.part_failure(part, failed, done.stdout + done.stderr),
+                         "test_big.py::B,C")
 
     def test_the_failed_part_line_falls_back_to_the_parts_label(self):
         part = suite_runner.Unit(0, "m.py", classes=("A",), excluded=("B",), part=1, parts=2)

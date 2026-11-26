@@ -3,7 +3,7 @@
 Each case writes a stub member into a fresh work directory and starts
 `python -m agent_tools.delivery.suite_part` there as a child process. The stub's tests
 append their id to the file `SUITE_PART_RECORD` names, so a case reads what ran, in what
-order, and whether a fixture ran at all. `SUITE_PART_FAIL` names the class (or `module`,
+order, and whether a fixture ran at all. `SUITE_PART_FAIL` names the classes (comma-separated; or `module`,
 or `E-setup`) whose test, fixture or class setup fails.
 """
 
@@ -44,7 +44,7 @@ def tearDownModule():
 class Recording(unittest.TestCase):
     def note(self):
         record(self.id())
-        if os.environ.get("SUITE_PART_FAIL") == type(self).__name__:
+        if type(self).__name__ in os.environ.get("SUITE_PART_FAIL", "").split(","):
             self.fail("planned failure")
 
 
@@ -184,6 +184,8 @@ class SuitePartTest(unittest.TestCase):
         rows = (
             (["--except", "A"], "D", "suite-part: failed classes D"),
             (["--only", "A", "--only", "B"], "B", "suite-part: failed classes B"),
+            (["--only", "A", "--only", "B"], "A,B", "suite-part: failed classes A,B"),
+            (["--except", "E"], "A,B,D", "suite-part: failed classes A,B,D"),
             (["--only", "E"], "E-setup", "suite-part: failed classes E"),
             (["--only", "A"], "module", "suite-part: failed classes setUpModule"),
         )

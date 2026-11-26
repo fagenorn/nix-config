@@ -156,7 +156,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                             testLoader=loader, exit=False)
     result = program.result
     if not result.wasSuccessful():
-        print(FAILED_CLASSES + ", ".join(failed_classes(result)), file=sys.stderr)
+        print(FAILED_CLASSES + ",".join(failed_classes(result)), file=sys.stderr)
     return exit_code(result)
 
 
