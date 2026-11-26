@@ -9,6 +9,11 @@ module checks nothing. `finish` is the module teardown: it counts the tests of a
 `setUpClass` skipped or failed as selected (the class was entered, its tests never ran), checks, and
 resets the selection and the visits, so the next suite in the same interpreter starts clean.
 A check judges only the procedures it names: a visited step of another procedure is ignored.
+Inside a part of the module's own member (the three suite runner variables name the part, the directory
+its parts share and the member), a partial selection is written to that directory as the part's own file,
+and a part that then finds every part's file checks their union, failing on a module test no part selected;
+a selection that covers the module checks alone and writes nothing. A part takes no lock and waits for no
+other part: the part that writes last sees every file.
 `test_ids` names the module's tests with a fresh loader, so a `-k` filter on the shared default loader
 cannot narrow it, and leaves out each test a decorator skips: a decorator skip is part of the module's
 shape, so the check then fails if the skip lost a step. It names only the tests of `base`.
@@ -17,10 +22,13 @@ shape, so the check then fails if the skip lost a step. It names only the tests 
 from __future__ import annotations
 
 import json
+import os
 import types
 import unittest
 from collections.abc import Iterable
 from pathlib import Path
+
+from agent_tools.delivery.suite_runner import PART_DIR_ENV, PART_ENV, PART_MEMBER_ENV
 
 Step = tuple[str, str]
 PROCEDURE_NAMES = ("setup", "deliver", "direct", "verify", "land", "close-out")
@@ -56,24 +64,58 @@ class StepCoverage:
     def check(self, module_tests: Iterable[str]) -> None:
         if not set(module_tests) <= self._selected:
             return
+        self._compare(self._recorded)
+
+    def _compare(self, recorded: set[Step]) -> None:
         declared = self.declared()
-        unvisited = sorted(f"{procedure}.{step}" for procedure, step in declared - self._recorded)
-        undeclared = sorted(f"{procedure}.{step}" for procedure, step in self._recorded - declared
+        unvisited = sorted(f"{procedure}.{step}" for procedure, step in declared - recorded)
+        undeclared = sorted(f"{procedure}.{step}" for procedure, step in recorded - declared
                              if procedure in self._names)
         if unvisited or undeclared:
             raise AssertionError(f"steps no run visited: {unvisited}; steps no procedure declares: {undeclared}")
 
+    def _join(self, module_tests: set[str], part: tuple[int, int, Path]) -> None:
+        number, parts, directory = part
+        record = {"selected": sorted(self._selected), "recorded": sorted([p, s] for p, s in self._recorded)}
+        directory.mkdir(parents=True, exist_ok=True)
+        scratch = directory / f"{number}.tmp"
+        scratch.write_text(json.dumps(record), "utf-8")
+        os.replace(scratch, directory / f"{number}.json")
+        if sorted(path.name for path in directory.glob("*.json")) != sorted(f"{n}.json" for n in range(1, parts + 1)):
+            return
+        records = [json.loads((directory / f"{n}.json").read_text("utf-8")) for n in range(1, parts + 1)]
+        selected = {test_id for entry in records for test_id in entry["selected"]}
+        if missing := sorted(module_tests - selected):
+            raise AssertionError(f"tests no part selected: {missing}")
+        self._compare({(procedure, step) for entry in records for procedure, step in entry["recorded"]})
 
     def finish(self, module: types.ModuleType, base: type[unittest.TestCase] = unittest.TestCase) -> None:
         entered = [test for test in _flattened(unittest.TestLoader().loadTestsFromModule(module))
                    if vars(type(test)).get("_classSetupFailed")]
         try:
             self._selected.update(test.id() for test in entered)
-            self.check(test_ids(module, base))
+            module_tests = test_ids(module, base)
+            part = _part_of(module)
+            if part is None or module_tests <= self._selected:
+                self.check(module_tests)
+            else:
+                self._join(module_tests, part)
         finally:
             for test in entered:
                 type(test)._classSetupFailed = False
             self.reset()
+
+
+def _part_of(module: types.ModuleType) -> tuple[int, int, Path] | None:
+    """The part number, the part count and the shared directory when this process is a part of the module's member."""
+    part, directory, member = (os.environ.get(name, "") for name in (PART_ENV, PART_DIR_ENV, PART_MEMBER_ENV))
+    path = getattr(module, "__file__", None)
+    if not (part and directory and member and path) or Path(path).resolve() != Path(member).resolve():
+        return None
+    number, _, parts = part.partition("/")
+    if not (number.isdigit() and parts.isdigit()):
+        return None
+    return int(number), int(parts), Path(directory)
 
 
 def _flattened(suite: unittest.TestSuite) -> Iterable[unittest.TestCase]:
