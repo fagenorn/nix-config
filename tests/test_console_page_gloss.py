@@ -11,8 +11,8 @@ from agent_tools.console import owner_words
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures
 from .test_console_guest_page import GUEST, harness
 from .test_console_page import (
-    HEADSUP_W, PROGRESS, REPORTED, SPRINT, START, PageNoticeTest, frame, full, has_class, nodes, of_class,
-    project, question, render, sprint_lines, view, with_notices, with_sprints)
+    BRIEF, HEADSUP_W, PROGRESS, REPORTED, SPRINT, START, PageNoticeTest, frame, full, has_class, nodes, of_class,
+    project, question, render, sprint_lines, view, with_notices, with_sprints, approvals)
 
 TIER = "fast"
 
@@ -72,6 +72,31 @@ class PageGlossTest(unittest.TestCase):
         (mark,) = marks(status_line(snap))
         self.assertEqual(mark["expanded"], "false")
         self.assertEqual(gloss_texts(snap), [])
+
+    def test_a_mark_keeps_keyboard_focus_through_its_own_redraw(self) -> None:
+        opened, closed = render([
+            START, {"frame": f("waiting on the land lock")}, {"focus_on": "gloss"}, {"click": "gloss"},
+            {"snapshot": True}, {"click": "gloss"}, {"snapshot": True}])
+        for snap, state in ((opened, "true"), (closed, "false")):
+            (mark,) = marks(status_line(snap))
+            self.assertEqual(mark["expanded"], state)
+            self.assertTrue(mark["focused"])
+
+    def test_an_options_mark_keeps_keyboard_focus_through_its_own_redraw(self) -> None:
+        item = question(0, "May I wait?", ["Wait", "Ask the CI"], "Wait")
+        qf = {**frame([item]), "glossary": GLOSS}
+        (snap,) = render([START, {"frame": qf}, {"focus_on": "gloss"}, {"click": "gloss"}, {"snapshot": True}])
+        (box,) = [n for n in nodes(snap["inbox"]) if has_class(n, "opt-glosses")]
+        (mark,) = marks(box)
+        self.assertEqual(mark["expanded"], "true")
+        self.assertTrue(mark["focused"])
+
+    def test_closing_a_gloss_with_the_keyboard_never_approves_the_current_brief(self) -> None:
+        both = {**f("waiting on the land lock"), "inbox": {"open": [BRIEF], "answered": []}}
+        steps = [START, {"frame": both}, {"focus_on": "gloss"}, {"click": "gloss"}, {"click": "gloss"},
+                 {"key": "Enter", "follow": True}, {"clock": 6000}, {"snapshot": True}]
+        (snap,) = render(steps)
+        self.assertEqual(approvals(snap), [])
 
     def test_an_open_gloss_stays_open_across_an_unchanged_redraw(self) -> None:
         (snap,) = render([

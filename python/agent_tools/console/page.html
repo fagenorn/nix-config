@@ -674,13 +674,14 @@ function glossFound(text) {
 function glossMark(into, id, word, gloss, redraw) {
   const mark = el("button", "gloss btn-quiet btn-bare", word);
   mark.type = "button";
+  mark.dataset.gloss = id;
   mark.setAttribute("title", gloss);
   mark.setAttribute("aria-expanded", String(openGlosses.has(id)));
   mark.addEventListener("click", (event) => {
     event.stopPropagation();
-    if (openGlosses.has(id)) openGlosses.delete(id);
-    else openGlosses.add(id);
-    redraw();
+    if (!openGlosses.delete(id)) openGlosses.add(id);
+    redraw(); // the redraw replaces the focused mark: focus the new one so a second Enter is not read as the inbox's answer key
+    [...document.querySelectorAll("button.gloss")].find((n) => n.dataset.gloss === id)?.focus({ preventScroll: true });
   });
   into.appendChild(mark);
   if (openGlosses.has(id)) into.appendChild(el("span", "gloss-text", " (" + gloss + ")"));
