@@ -128,6 +128,11 @@ class DeliveryAfterTheMergeTest(unittest.TestCase):
             "## Evidence\n- conformance: pass (purpose ci, 41 checks)\n",
             "## Evidence\nCI on this pull request runs the full declared verification. conformance passed\n",
             "## Evidence\n" + DELIVERY_LINE,
+            "## Evidence\nconformance: pass; the verification above ran the pre-pull-request list, and CI on this PR "
+            "runs the full declared verification\n",
+            "## Evidence\nconformance: pass; CI on this pull request will run the full declared verification\n",
+            "## Evidence\n- conformance: pass (Conformance over every rule, as the required check runs it)\n",
+            "## Evidence\n- conformance: pass (purpose: ci, 41 checks)\n",
             "## Evidence\nconformance passed (41 rules); the verification above ran the pre-pull-request list, "
             "and CI on this pull request runs the full declared verification\n",
         ]
@@ -167,7 +172,11 @@ class DeliveryAfterTheMergeTest(unittest.TestCase):
                 self.assertEqual((code, document), (75, NOT_YET))
 
     def test_another_commands_result_after_an_absent_or_pending_result_does_not_count(self):
-        bodies = ["conformance: n/a, lint passed", "conformance: no run, lint passed",
+        bodies = ["conformance: postponed, lint passed", "conformance: queued, lint passed",
+                  "conformance: tbd, lint passed", "conformance: omitted, lint passed",
+                  "conformance: missing, lint passed", "conformance: -, lint passed",
+                  "conformance: n.a., lint passed", "conformance expected to pass",
+                  "conformance, none, -, lint passed", "conformance: n/a, lint passed", "conformance: no run, lint passed",
                   "conformance: none, lint passed", "conformance: will run on the pull request, lint passed",
                   "conformance timed out, lint passed", "| conformance | n/a | lint | passed |"]
         for body in bodies:
@@ -180,6 +189,16 @@ class DeliveryAfterTheMergeTest(unittest.TestCase):
                   "conformance passed\n(GitHub Actions)\n", "conformance passed on GitHub Actions\n",
                   "conformance: passed (the required check)\n", "conformance passed on CI on this pull request "
                   "runs the full declared verification\n"]
+        for body in bodies:
+            with self.subTest(body=body):
+                code, document = run(Forge([[pull(1900, AFTER, "## Evidence\n" + body)]]))
+                self.assertEqual((code, document), (75, NOT_YET))
+
+    def test_ci_named_after_a_preposition_or_blank_line_or_by_a_bare_synonym_does_not_count(self):
+        bodies = ["conformance passed\nOn CI.\n", "conformance passed\nRan in CI only.\n",
+                  "- conformance passed\n\n  (in CI)\n", "conformance passed in Actions\n",
+                  "conformance passed (Conformance workflow)\n", "conformance passed on the runner\n",
+                  "conformance passed as CI on this pull request runs the full declared verification\n"]
         for body in bodies:
             with self.subTest(body=body):
                 code, document = run(Forge([[pull(1900, AFTER, "## Evidence\n" + body)]]))

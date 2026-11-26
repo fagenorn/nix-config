@@ -9,13 +9,15 @@ A candidate is a pull request created after the boundary whose body has an Evide
 counts only when its branch started from a commit that contains the merge (the first commit's first
 parent is `ahead` of or `identical` to it). The check is met when a counting candidate's Evidence
 section lists a local result of the command: a clause naming it, not preceded in that clause by a CI
-name (CI, GitHub Actions, a required or status check, a pipeline), with no CI name anywhere after it
-on the same logical line (the idioms "purpose ci" and "ci rules" excepted; a wrapped continuation
-line joins the line above), and followed by a result word (pass, passed, fail, failed) in its own
-comma part or in a later one, with no skip, negation, n/a, none, timeout or pending word in the parts
-up to the result (so a list such as "conformance, lint and test-touched passed" counts). The sentence
-the delivery programs write, "CI on this pull request runs the full declared verification", is not
-a CI qualifier and is ignored. The Evidence section runs to the
+name (CI, GitHub Actions, a required or status check, a pipeline, a workflow, a runner), with no CI name
+anywhere after it on the same logical line (a wrapped continuation line, or a line opening with a CI name
+even after a blank line, joins the line above), and followed by a result word (pass, passed, fail, failed)
+reached through nothing but counting filler ("all 41 checks ran"), so any other wording between the command
+and the result ("postponed", "n/a", "expected to") is no result. A command that opens a list ("conformance,
+lint and test-touched passed") shares the result with the names after it. The repository's own words for
+the command ("purpose ci", "ci rules", "as the required check runs it") are not CI names, and neither is the
+sentence the delivery programs write, "CI on this pull request runs the full declared verification" (also
+reworded, as a subject; after a preposition it is a CI qualifier). The Evidence section runs to the
 next heading of its level or higher (a bold or plain "Merge danger" line also ends it). Otherwise
 it is not yet (exit 75); a forge failure or a payload of the wrong shape (a body that is not text
 included) is `forge_unreadable`, also exit 75. The check never reports not met: the verify block's
@@ -41,16 +43,23 @@ MARKDOWN_HEADING = re.compile(r"^(#{1,6})\s")
 BOLD_HEADING = re.compile(r"^\*\*[^*]+\*\*:?$")
 CLAUSES = re.compile(r";|\.(?=\s|$)")
 CI_WORD = re.compile(r"\b(?:CI|GitHub\s+Actions|(?:required|status)\s+checks?|pipelines?|continuous\s+integration)\b"
-                     r"|\.github/workflows", re.IGNORECASE)
-CI_BOILERPLATE = re.compile(r"(\b(?:on|in|by|via|under|only|from)\s+)?\bCI\s+on\s+this\s+pull\s+request\s+runs\s+"
-                            r"the\s+full\s+declared\s+verification\b", re.IGNORECASE)
+                     r"|(?-i:\bActions\b)|(?<![\w./-])(?:workflows?|runners?)(?![\w./-])|\.github/workflows",
+                     re.IGNORECASE)
+PREPOSITION = r"(?:on|in|by|via|under|only|from|as|at|within|through|per|using|with|for|during|against)"
+CI_BOILERPLATE = re.compile(rf"(\b{PREPOSITION}\s+)?\bCI\s+(?:on\s+this\s+(?:pull\s+request|PR)\s+)?"
+                            r"(?:will\s+|would\s+)?runs?\b[^.;\n]*", re.IGNORECASE)
+CI_LEADING = re.compile(rf"^\(?\s*(?:(?:{PREPOSITION}|ran|run|runs|running|executed|the|an?|and|but)\s+)*"
+                        + CI_WORD.pattern, re.IGNORECASE)
 LIST_ITEM = re.compile(r"^\s*(?:[-*+]\s|\d+[.)]\s|\||#)")
-CI_IDIOM = re.compile(r"(?:--)?\bpurpose\s+ci\b|\bci\s+rules?\b", re.IGNORECASE)
-NEGATION = re.compile(r"\b(?:skip|skipped|skipping|not|never|without|pending|todo|unknown|deferred|blocked"
-                      r"|waiting|running|unavailable|none|n/a|na|later|soon|will|would|should|shall|timeout"
-                      r"|timed\s*out|cancell?ed|aborted|crashed|errored)\b"
-                      r"|\bno\b(?!\s+(?:fail\w*|error\w*|issues?|problems?|warnings?|regress\w*))|n't",
+CI_IDIOM = re.compile(r"\bpurpose:?\s+ci\b|\bci\s+rules?\b|\bas\s+the\s+required\s+check\s+runs\s+it\b",
                       re.IGNORECASE)
+PUNCT = r"[\s:()\[\]|*_`'\"=>\u2013\u2014-]"
+FILLER = re.compile(rf"(?:{PUNCT}|\d+|(?:all|every|ran|runs?|checks?|rules?|tests?|suites?|members?|is|are|was|were"
+                    r"|has|have|been|now|locally|and|the|of|ok|clean|green"
+                    r"|no\s+(?:fail\w*|error\w*|issues?|problems?|warnings?|regress\w*))\b)*", re.IGNORECASE)
+NAME = r"[A-Za-z][\w-]*"
+LIST_PART = re.compile(rf"\s*(?:and\s+)?{NAME}(?:\s+and\s+{NAME})*\s*")
+LIST_START = re.compile(r"\s*(?:,|and\b)", re.IGNORECASE)
 RESULT_WORD = re.compile(r"\b(?:pass|passed|fail|failed)\b", re.IGNORECASE)
 
 Read = Callable[[str], Any]
@@ -90,18 +99,25 @@ def evidence_section(body: Any) -> str | None:
     return "\n".join(section)
 
 
-def _without_boilerplate(section: str) -> str:
-    """`section` without the delivery programs' sentence about CI, unless a preposition makes it a qualifier."""
+def _normalized(section: str) -> str:
+    """`section` without the repository's own words for the command and the delivery programs' sentence about CI.
+
+    The sentence ("CI on this pull request runs ...", also reworded) is dropped only as a subject: after a
+    preposition ("on CI on this pull request runs ...") it stays a CI qualifier.
+    """
+    section = CI_IDIOM.sub("", section)
     return CI_BOILERPLATE.sub(lambda m: m.group(0) if m.group(1) else "", section)
 
 
 def _logical_lines(section: str) -> list[str]:
-    """The lines of `section`, each indented, parenthesised or plain non-item line after a text line joined to it."""
+    """The lines of `section`, each wrapped continuation (indented, parenthesised or opening with a CI name) joined."""
     joined: list[str] = []
     for line in section.splitlines():
-        continues = joined and joined[-1].strip() and line.strip() and not LIST_ITEM.match(line)
-        if continues and (line[0].isspace() or line.lstrip().startswith("(") or CI_WORD.match(line.lstrip())):
-            joined[-1] += " " + line.strip()
+        text, last = line.strip(), next((i for i in range(len(joined) - 1, -1, -1) if joined[i].strip()), None)
+        if text and last is not None and not LIST_ITEM.match(line) and CI_LEADING.match(text):
+            joined[last] += " " + text
+        elif text and last == len(joined) - 1 and not LIST_ITEM.match(line) and (line[0].isspace() or text[0] == "("):
+            joined[last] += " " + text
         else:
             joined.append(line)
     return joined
@@ -110,13 +126,12 @@ def _logical_lines(section: str) -> list[str]:
 def ran_locally(section: str, command: str) -> bool:
     """Whether a clause of `section` names `command` with no CI before it, none after it on its line, and a result."""
     named = re.compile(r"(?<![\w./-])" + re.escape(command) + r"(?![\w./-])", re.IGNORECASE)
-    for line in _logical_lines(_without_boilerplate(section)):
+    for line in _logical_lines(_normalized(section)):
         clauses = CLAUSES.split(line)
         for index, clause in enumerate(clauses):
             for occurrence in named.finditer(clause):
                 after = clause[occurrence.end():]
-                rest_of_line = " ".join([after, *clauses[index + 1:]])
-                if CI_WORD.search(clause[:occurrence.start()]) or CI_WORD.search(CI_IDIOM.sub("", rest_of_line)):
+                if CI_WORD.search(clause[:occurrence.start()]) or CI_WORD.search(" ".join([after, *clauses[index + 1:]])):
                     continue
                 if _result_follows(after):
                     return True
@@ -124,10 +139,21 @@ def ran_locally(section: str, command: str) -> bool:
 
 
 def _result_follows(after: str) -> bool:
-    """Whether a result word follows in `after`, in its own comma part or a later one, with no negation before it."""
-    for part in after.split(","):
+    """Whether `after` (the text after the command) reaches a result word through nothing but known filler.
+
+    A command that opens a list ("conformance, lint and test-touched passed") shares the result with the names
+    listed after it. Otherwise only counting words ("all 41 checks ran") may stand between the command and its
+    result, so any other wording ("postponed", "n/a", "expected to") means no result of this command.
+    """
+    parts, listing = after.split(","), bool(LIST_START.match(after))
+    for position, part in enumerate(parts):
         result = RESULT_WORD.search(part)
-        if NEGATION.search(part[:result.start()] if result else part):
+        before = part[:result.start()] if result else part
+        if listing:
+            fits = LIST_PART.fullmatch(before) or (not before.strip() and (result or position == 0))
+        else:
+            fits = FILLER.fullmatch(before)
+        if not fits:
             return False
         if result:
             return True
