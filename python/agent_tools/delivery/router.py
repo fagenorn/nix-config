@@ -1,13 +1,21 @@
 """router: the routed set of one change at one stage, computed with no model and no network.
 
     router --repo-root <abs> --stage <stage> (--path <p>... | --diff <range>) [--platform-standards <abs>]
+    router <building|final-review> --worktree-path <abs> --integration-branch <name> --branch <name>
+        [--platform-standards <abs>]
 
 At `planning` and `plan review` the change is its `--path` arguments; from `building` on it is the
 paths of `--diff <range>`. Prints one JSON line (`schema_version` 1) naming files, never pasting
 them: the bar, the stack shards the extensions choose, the project shards whose `governs` globs
 match, the stage's hint file, the records the changed files cite, a one-line index of the records
 of each matching context-map area, each shard's rule ids, the platform revision and the total
-size in bytes. A wide change is never cut. Exit 0 with that line, 2 with one `router: <reason>`
+size in bytes, and `routed_files`: every file to read, as absolute paths, each shard in order, then
+the hint file when it exists, then each must-read record (never an index line). A wide change is
+never cut. The engine form (a first argument that is no flag) routes the stage word's stage over
+`--diff refs/remotes/origin/<integration-branch>...<head>`, `head` the worktree's HEAD read once as
+a full sha; it refuses a `--branch` whose `refs/heads/<branch>` is not that sha, and no unqualified
+name reaches Git. Every Git read is of `--repo-root`'s (or the worktree's) repository, whatever
+`GIT_DIR` and its siblings name. Exit 0 with that line, 2 with one `router: <reason>`
 line on stderr and nothing on stdout for a misuse.
 """
 
@@ -15,13 +23,16 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path, PurePosixPath
+from typing import NoReturn
 
 from agent_tools.delivery import hint_phases, routing
 from agent_tools.delivery.context_map_lint import CITATION_RE
+from agent_tools.delivery.issue_setup import REPOSITORY_ENV
 from agent_tools.delivery.rule_ids import rule_headings
 from agent_tools.project_contract import agent_platform
 
@@ -29,6 +40,7 @@ COMMAND = "router"
 SCHEMA_VERSION = 1
 PATH_STAGES = ("planning", "plan review")
 GIT_TIMEOUT = 60
+ENGINE_STAGES: Mapping[str, str] = {"building": "building", "final-review": "final review"}
 
 
 class Misuse(Exception):
@@ -57,13 +69,28 @@ def check_path(path: str) -> str:
     return path
 
 
+def git_read(root: Path, *args: str) -> str:
+    """One Git read of `root`'s own repository: the variables that select another one are dropped."""
+    env = {k: v for k, v in os.environ.items() if k not in REPOSITORY_ENV}
+    try:
+        done = subprocess.run(["git", "-C", str(root), *args], capture_output=True,
+                              stdin=subprocess.DEVNULL, timeout=GIT_TIMEOUT, env=env)
+    except (OSError, subprocess.SubprocessError) as error:
+        raise Misuse(f"cannot read git {' '.join(args)}: {error}") from error
+    if done.returncode != 0:
+        reason = " ".join(done.stderr.decode("utf-8", errors="replace").split())
+        raise Misuse(f"cannot read git {' '.join(args)}: {reason}")
+    return done.stdout.decode("utf-8", errors="replace").strip()
+
+
 def diff_paths(root: Path, change: str) -> list[str]:
     if change.startswith("-"):
         raise Misuse(f"--diff must be a revision range: {change!r}")
+    env = {k: v for k, v in os.environ.items() if k not in REPOSITORY_ENV}
     try:
         done = subprocess.run(
             ["git", "-C", str(root), "diff", "--name-only", "-z", "--no-renames", change, "--"],
-            capture_output=True, stdin=subprocess.DEVNULL, timeout=GIT_TIMEOUT)
+            capture_output=True, stdin=subprocess.DEVNULL, timeout=GIT_TIMEOUT, env=env)
     except (OSError, subprocess.SubprocessError) as error:
         raise Misuse(f"git diff failed: {error}") from error
     if done.returncode != 0:
@@ -136,26 +163,66 @@ def route(args: argparse.Namespace, root: Path, platform_dir: Path) -> dict:
         "change": {"diff": args.diff, "paths": paths},
         "platform_revision": revision["rev"] if revision else None,
         "shards": shards, "hint": hint, "must_read": required, "index": index,
-        "index_bytes": index_size, "total_bytes": total}
+        "index_bytes": index_size, "total_bytes": total,
+        "routed_files": ([s["path"] for s in shards] + ([hint["path"]] if hint else [])
+                         + [m["path"] for m in required])}
+
+
+class EngineParser(argparse.ArgumentParser):
+    def error(self, message: str) -> NoReturn:
+        raise Misuse(message)
+
+
+def check_directory(name: str, path: Path) -> None:
+    if not path.is_absolute():
+        raise Misuse(f"{name} must be absolute: {path}")
+    if not path.is_dir():
+        raise Misuse(f"not a directory: {path}")
+
+
+def engine_form(words: Sequence[str]) -> tuple[argparse.Namespace, Path, str | None]:
+    word, flags = words[0], list(words[1:])
+    if word not in ENGINE_STAGES:
+        raise Misuse(f"unknown stage {word}; one of {', '.join(ENGINE_STAGES)}")
+    parser = EngineParser(prog=COMMAND, add_help=False, allow_abbrev=False)
+    parser.add_argument("--worktree-path", required=True)
+    parser.add_argument("--integration-branch", required=True)
+    parser.add_argument("--branch", required=True)
+    parser.add_argument("--platform-standards")
+    given = parser.parse_args(flags)
+    for name in ("integration_branch", "branch"):
+        value = getattr(given, name)
+        if not value or value.startswith("-"):
+            raise Misuse(f"--{name.replace('_', '-')} must be a branch name: {value!r}")
+    worktree = Path(given.worktree_path)
+    check_directory("--worktree-path", worktree)
+    head = git_read(worktree, "rev-parse", "--verify", "HEAD")
+    tip = git_read(worktree, "rev-parse", "--verify", f"refs/heads/{given.branch}")
+    if tip != head:
+        raise Misuse(f"branch {given.branch} is at {tip}, the worktree's HEAD is {head}")
+    change = f"refs/remotes/origin/{given.integration_branch}...{head}"
+    args = argparse.Namespace(stage=ENGINE_STAGES[word], diff=change, path=None)
+    return args, worktree, given.platform_standards
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog=COMMAND)
-    parser.add_argument("--repo-root", required=True)
-    parser.add_argument("--stage", required=True, choices=hint_phases.HINT_STAGES)
-    parser.add_argument("--path", action="append")
-    parser.add_argument("--diff")
-    parser.add_argument("--platform-standards")
-    args = parser.parse_args(argv)
-    root = Path(args.repo_root)
-    platform_dir = (Path(args.platform_standards) if args.platform_standards
-                    else agent_platform.standards_dir())
+    words = list(sys.argv[1:] if argv is None else argv)
+    engine = bool(words) and not words[0].startswith("-")
+    if not engine:
+        parser = argparse.ArgumentParser(prog=COMMAND)
+        parser.add_argument("--repo-root", required=True)
+        parser.add_argument("--stage", required=True, choices=hint_phases.HINT_STAGES)
+        parser.add_argument("--path", action="append")
+        parser.add_argument("--diff")
+        parser.add_argument("--platform-standards")
+        args = parser.parse_args(words)
+        root, standards = Path(args.repo_root), args.platform_standards
     try:
+        if engine:
+            args, root, standards = engine_form(words)
+        platform_dir = Path(standards) if standards else agent_platform.standards_dir()
         for name, path in (("--repo-root", root), ("--platform-standards", platform_dir)):
-            if not path.is_absolute():
-                raise Misuse(f"{name} must be absolute: {path}")
-            if not path.is_dir():
-                raise Misuse(f"not a directory: {path}")
+            check_directory(name, path)
         doc = route(args, root, platform_dir)
     except (Misuse, ValueError, OSError) as error:
         print(f"{COMMAND}: {error}", file=sys.stderr)
