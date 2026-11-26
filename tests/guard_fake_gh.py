@@ -11,7 +11,8 @@ and status. It lives beside the suite to keep both files under the size budget (
 
 The rerun check reads four more endpoints, one stage each: `run` (an Actions run), `jobs` (its jobs),
 `pull` (a pull request) and `required` (a branch's required status checks), answered from FAKE_RUN_JSON,
-FAKE_JOBS_JSON, FAKE_PULL_JSON and FAKE_REQUIRED_JSON, with FAKE_RUN_MODE, FAKE_JOBS_MODE,
+FAKE_JOBS_JSON, FAKE_PULL_JSON and FAKE_REQUIRED_JSON (the jobs are read with `--paginate --slurp`, so a
+JSON object answers as one page and a JSON list as the pages), with FAKE_RUN_MODE, FAKE_JOBS_MODE,
 FAKE_PULL_MODE and FAKE_REQUIRED_MODE injecting failures. `run_facts`, `jobs_facts`, `pull_facts` and
 `required_facts` build those payloads; each defaults to a pull request check run that passes.
 `check_run_forge`, `check_run_accepts`, `check_run_refusals`, `check_run_spellings`, `check_run_reads`,
@@ -37,6 +38,13 @@ def jobs_facts(failed=("Tests",), passed=(), total=None):
     jobs = ([{"name": n, "conclusion": "failure"} for n in failed]
             + [{"name": n, "conclusion": "success"} for n in passed])
     return json.dumps({"total_count": total if total is not None else len(jobs), "jobs": jobs})
+
+
+def jobs_pages(failed, passed=100, total=101):
+    """The JSON list of two pages of a run's jobs: `passed` successful jobs, then the `failed` ones."""
+    page = [{"name": f"job-{n}", "conclusion": "success"} for n in range(passed)]
+    last = [{"name": n, "conclusion": "failure"} for n in failed]
+    return json.dumps([{"total_count": total, "jobs": page}, {"total_count": total, "jobs": last}])
 
 
 def pull_facts(slug, head, state="open", head_repo=None, base_repo=None, branch="issue-12-x",
@@ -70,6 +78,8 @@ def check_run_accepts(slug, head):
         ("tokens set", "", {"GITHUB_TOKEN": "x", "GH_TOKEN": "y"}),
         ("Actions-bound check", "", {"FAKE_REQUIRED_JSON": required_facts(contexts=(), checks=(("Tests", 15368),))}),
         ("any-app check", "", {"FAKE_REQUIRED_JSON": required_facts(contexts=(), checks=(("Tests", -1),))}),
+        ("session on github.com", "", {"GH_HOST": "github.com"}),
+        ("failed job on page two of 101", "", {"FAKE_JOBS_JSON": jobs_pages(("Tests",))}),
         ("failed job beside the required one", "", {
             "FAKE_JOBS_JSON": jobs_facts(failed=("Tests", "Lint and tests")), "FAKE_REQUIRED_JSON": required}),
     ]
@@ -105,6 +115,10 @@ def check_run_refusals(slug, head):
         ("pull-request deploy run", forge(FAKE_JOBS_JSON=jobs_facts(failed=("deploy-preview",)))),
         ("no failed job", forge(FAKE_JOBS_JSON=jobs_facts(failed=(), passed=("Tests",)))),
         ("truncated jobs", forge(FAKE_JOBS_JSON=jobs_facts(total=101))),
+        ("page two missing", forge(FAKE_JOBS_JSON=jobs_pages(("Tests",), total=102))),
+        ("pages disagree on the total", forge(FAKE_JOBS_JSON=jobs_pages(("Tests",), total=101).replace(
+            '"total_count": 101, "jobs": [{"name": "Tests"', '"total_count": 7, "jobs": [{"name": "Tests"'))),
+        ("session on another host", forge(GH_HOST="ghe.example.com")),
         ("sibling job with a malformed conclusion", forge(FAKE_JOBS_JSON=json.dumps({"total_count": 2, "jobs": [
             {"name": "Tests", "conclusion": "failure"}, {"name": "Lint", "conclusion": 42}]}))),
         ("run nested past the recursion limit", forge(FAKE_RUN_JSON="[" * 30000 + "]" * 30000)),
@@ -143,7 +157,7 @@ def check_run_refusals(slug, head):
 def check_run_reads(slug, run_id=55, branch="main"):
     """The `gh` arguments the check makes, in order, for run `run_id` of `slug` and its one listed pull request."""
     base = f"repos/{slug}"
-    return [["api", f"{base}/actions/runs/{run_id}"], ["api", f"{base}/actions/runs/{run_id}/jobs?per_page=100"],
+    return [["api", f"{base}/actions/runs/{run_id}"], ["api", "--paginate", "--slurp", f"{base}/actions/runs/{run_id}/jobs?per_page=100"],
             ["api", f"{base}/pulls/7"],
             ["api", f"{base}/branches/{branch}/protection/required_status_checks"]]
 
@@ -244,16 +258,6 @@ elif len(argv) == 2 and argv[0] == "api":
         stage = "run"
         slug = parts[1] + "/" + parts[2]
         number = parts[5]
-    elif (
-        len(parts) == 7
-        and parts[0] == "repos"
-        and parts[3] == "actions"
-        and parts[4] == "runs"
-        and parts[6] == "jobs?per_page=100"
-    ):
-        stage = "jobs"
-        slug = parts[1] + "/" + parts[2]
-        number = parts[5]
     elif len(parts) == 5 and parts[0] == "repos" and parts[3] == "pulls":
         stage = "pull"
         slug = parts[1] + "/" + parts[2]
@@ -324,6 +328,17 @@ elif (
         stage = "commits"
         slug = parts[1] + "/" + parts[2]
         number = parts[4]
+    elif (
+        len(parts) == 7
+        and parts[0] == "repos"
+        and parts[3] == "actions"
+        and parts[4] == "runs"
+        and parts[6] == "jobs"
+        and argv[3].endswith("/jobs?per_page=100")
+    ):
+        stage = "jobs"
+        slug = parts[1] + "/" + parts[2]
+        number = parts[5]
 if stage is None:
     print("unexpected fake-gh argv: " + repr(argv), file=sys.stderr)
     raise SystemExit(64)
@@ -399,5 +414,8 @@ else:
         '{"required_status_checks":{"contexts":["Nix Eval"]},'
         '"enforce_admins":{"enabled":true}}'
     )
-print(os.environ.get("FAKE_" + stage.upper() + "_JSON", default))
+answer = os.environ.get("FAKE_" + stage.upper() + "_JSON", default)
+if stage == "jobs" and isinstance(json.loads(answer), dict):
+    answer = "[" + answer + "]"
+print(answer)
 '''

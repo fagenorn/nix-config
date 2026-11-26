@@ -172,7 +172,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
-from agent_tools.console import deliveries
+from agent_tools.console import deliveries, permission
 from agent_tools.console.event_log import PERMIT_JUDGED
 from agent_tools.project_contract import resolve_project
 from agent_tools.system import forge_api
@@ -801,6 +801,12 @@ def rerun_landing(command: str, grant: Grant) -> int | None:
             or parts[:3] + parts[4:] != ["gh", "run", "rerun", "--failed", "--repo", grant.slug]):
         return None
     return int(parts[3])
+
+
+def rule_member(verdict: Verdict, slug: str | None) -> dict:
+    """`{"rule": ...}` for an allowed rerun of a project whose guard policy declares the rerun rule, else `{}`."""
+    rule = permission.rerun_rule(slug) if verdict.decision == ALLOW and verdict.verb == RERUN else None
+    return {} if rule is None else {"rule": rule}
 
 
 def landing_key(verdict: Verdict) -> tuple | None:

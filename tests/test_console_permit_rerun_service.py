@@ -2,9 +2,14 @@
 
 Run: just agent-workflow-tests
 """
+import json
+import sqlite3
+import tempfile
 import unittest
+from pathlib import Path
+from unittest import mock
 
-from agent_tools.console import permit
+from agent_tools.console import permission, permit
 
 from . import console_test_support as support
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures
@@ -163,6 +168,45 @@ class PermitRerunServiceTest(PermitCase):
         self.assertTrue(svc.permit_landed(sid, self.secret(sid), "s-1", "t-1", self.RERUN))
         self.assertFalse(svc.permit_landed(sid, self.secret(sid), "s-1", "t-1", self.RERUN))
         self.assertEqual(self.rows("permit.landed"), [self.landed_row(sid)])
+
+    def test_a_landing_whose_append_is_rolled_back_can_be_retried(self):
+        svc, sid = self.boot()
+        self.assertEqual(self.judge(svc, sid, self.RERUN, call="t-1").decision, "allow")
+        with mock.patch.object(svc.log, "append", side_effect=sqlite3.OperationalError("rolled back")):
+            with self.assertRaises(sqlite3.OperationalError):
+                svc.permit_landed(sid, self.secret(sid), "s-1", "t-1", self.RERUN)
+        self.assertEqual(self.rows("permit.landed"), [])
+        self.assertTrue(svc.permit_landed(sid, self.secret(sid), "s-1", "t-1", self.RERUN))
+        self.assertEqual(self.rows("permit.landed"), [self.landed_row(sid)])
+
+    def test_an_allowed_rerun_records_the_rerun_rule_the_guards_policy_declares_for_its_project(self):
+        def policy(changes):
+            path = Path(self.enterContext(tempfile.TemporaryDirectory())) / "policy.json"
+            row = {"default_branch": "main", "integration_branch": "main", "required_checks": [], "evidence": {},
+                   "production": {"changes": changes, "read_only": [], "release_profile": "p"}}
+            path.write_text(json.dumps({"derived_repositories": {SLUG: row}, "derivation": None}))
+            return path
+
+        declared = {"id": "deploy-rerun", "argv": ["gh", "run", "rerun"]}
+        rules = {"declared": (policy([declared]), declared),
+                 "program path": (policy([{"id": "d", "argv": ["/usr/bin/gh", "run", "rerun"]}]),
+                                  {"id": "d", "argv": ["/usr/bin/gh", "run", "rerun"]}),
+                 "gh run only": (policy([{"id": "d", "argv": ["gh", "run"]}]), None),
+                 "no policy": (Path("/nonexistent/policy.json"), None)}
+        for name, (path, rule) in rules.items():
+            with self.subTest(name), mock.patch.object(permission, "policy_file", return_value=path):
+                svc, sid = self.boot()
+                self.assertEqual(self.judge(svc, sid, self.RERUN, call="t-1").decision, "allow")
+                row = self.rows("permit.judged")[-1]
+                self.assertEqual(rule, row.get("rule"))
+                self.assertEqual(rule is not None, "rule" in row)
+        with self.subTest("a refused rerun"), mock.patch.object(permission, "policy_file", return_value=rules["declared"][0]):
+            svc, sid = self.boot()
+            for call in ("t-1", "t-2", "t-3"):
+                self.judge(svc, sid, self.RERUN, call=call)
+            rows = self.rows("permit.judged")
+            self.assertEqual(["allow", "allow", "deny"], [row["decision"] for row in rows])
+            self.assertEqual([True, True, False], ["rule" in row for row in rows])
 
 
 if __name__ == "__main__":

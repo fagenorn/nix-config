@@ -648,7 +648,9 @@ head: the run (an Actions run the pull request triggered, of the project's repos
 failed job that is a required check), the pull request (open, from the project's repository into the row's integration
 branch, from a branch that is neither long-lived branch, at the run's head and branch) and the required checks. The
 required set is the forge's protection of the integration branch, read as the console permit reads it, not the checks
-the contract declares. The reads inherit the session's environment minus the token variables. A read that fails, times
+the contract declares. The reads inherit the session's environment minus the token variables, and the jobs are read
+page by page until every one is seen. A session whose `GH_HOST` names a host other than github.com leaves the rule in
+place, so the reads and the rerun cannot meet on different hosts. A read that fails, times
 out or answers another shape leaves the rule in place, and a deadline too near refuses. Only the narrowed hits of the
 named project are dropped, each row by its own integration branch, with every read made once per command; a
 broader rule and every other hit still refuse. The rerun then goes to whatever judges `gh run rerun` next: in a manager
@@ -4075,14 +4077,16 @@ def pull_request_rerun_form(command):
     return f"{found.group(2)}/{found.group(3)}".lower(), int(found.group(1))
 
 
-def forge_read(gh_bin, path, deadline, child_timeout):
+def forge_read(gh_bin, path, deadline, child_timeout, paged=False):
     """The parsed JSON `gh api path` prints, or None when the read fails, times out or is
-    not JSON. The child inherits the environment minus the token variables and is bounded
-    when it starts; a deadline too near raises `DeadlineExhausted`, which is not caught."""
+    not JSON; a `paged` read prints the list of every page. The child inherits the
+    environment minus the token variables and is bounded when it starts; a deadline too
+    near raises `DeadlineExhausted`, which is not caught."""
     timeout = bounded_timeout(deadline, child_timeout)
     try:
         done = subprocess.run(
-            [gh_bin, "api", path], capture_output=True, text=True, check=False,
+            [gh_bin, "api", *(["--paginate", "--slurp"] if paged else []), path],
+            capture_output=True, text=True, check=False,
             env=gh_lookup_env(), timeout=timeout)
         return json.loads(done.stdout) if done.returncode == 0 else None
     except (subprocess.TimeoutExpired, OSError, ValueError, RecursionError):
@@ -4135,22 +4139,27 @@ def run_document_facts(document, slug):
     return head, branch, [entry["number"] for entry in listed]
 
 
-def failed_job_names(document):
-    """The names of the failed jobs of a complete job listing, or None when it is not one."""
-    if not isinstance(document, dict) or not is_count(document.get("total_count")):
+def failed_job_names(pages):
+    """The names of the failed jobs of a complete job listing, the list of its pages, or None
+    when it is not one: every page reports one `total_count`, which the jobs of all pages meet."""
+    if not isinstance(pages, list) or not pages or not all(isinstance(page, dict) for page in pages):
         return None
-    jobs = document.get("jobs")
-    if not isinstance(jobs, list) or len(jobs) != document["total_count"]:
+    total = pages[0].get("total_count")
+    if not is_count(total) or any(page.get("total_count") != total for page in pages):
         return None
-    names = set()
-    for job in jobs:
-        if not isinstance(job, dict) or not isinstance(job.get("name"), str):
+    names, seen = set(), 0
+    for page in pages:
+        if not isinstance(page.get("jobs"), list):
             return None
-        if job.get("conclusion") is not None and not isinstance(job["conclusion"], str):
-            return None
-        if job.get("conclusion") in JOB_FAILED_CONCLUSIONS:
-            names.add(job["name"])
-    return names
+        seen += len(page["jobs"])
+        for job in page["jobs"]:
+            if not isinstance(job, dict) or not isinstance(job.get("name"), str):
+                return None
+            if job.get("conclusion") is not None and not isinstance(job["conclusion"], str):
+                return None
+            if job.get("conclusion") in JOB_FAILED_CONCLUSIONS:
+                names.add(job["name"])
+    return names if seen == total else None
 
 
 def is_own_open_pull_request(document, slug, head, branch, row):
@@ -4180,19 +4189,21 @@ def pull_request_check_run(gh_bin, slug, run_id, row, deadline, child_timeout, m
     the row's integration branch. Any read that fails, or any other shape, is False. The
     row's declared `required_checks` are never consulted. `memo`, a dict shared by the calls
     of one command, holds each read once."""
+    if os.environ.get("GH_HOST", "").strip().lower() not in ("", "github.com"):
+        return False
     memo = {} if memo is None else memo
 
-    def read(path):
+    def read(path, paged=False):
         key = (slug.lower(), path)
         if key not in memo:
-            memo[key] = forge_read(gh_bin, f"repos/{slug}/{path}", deadline, child_timeout)
+            memo[key] = forge_read(gh_bin, f"repos/{slug}/{path}", deadline, child_timeout, paged)
         return memo[key]
 
     run = run_document_facts(read(f"actions/runs/{run_id}"), slug)
     if run is None:
         return False
     head, branch, numbers = run
-    failed = failed_job_names(read(f"actions/runs/{run_id}/jobs?per_page=100"))
+    failed = failed_job_names(read(f"actions/runs/{run_id}/jobs?per_page=100", paged=True))
     if not failed:
         return False
     for number in numbers:

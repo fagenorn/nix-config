@@ -1100,12 +1100,12 @@ own `permit.judged` rows (`permit.rerun_record`, folded) each head's allowed rer
 ADR-console-106), judges with `permit.judge` over `permit.memoized(permit_forge)`, then under the lock again takes the
 sprint, its checks and the grant afresh and judges once more over the memo's frozen replay: any refusal, any difference
 or any read the memo did not hold is `permit.MOVED`. Each decided verdict appends one `permit.judged` row under that
-lock `{"sprint_id", "session_id", "tool_use_id", "repo", "verb", "decision", "reason", "target"}`; an allowed merge or
-rerun is also remembered by `permit.landing_key` with the service's clock. `permit_landed(sprint_id, secret, session_id,
-tool_use_id, command)` is True, and appends one `permit.landed` row `{"sprint_id", "session_id", "tool_use_id", "repo",
-"verb": "merge", "target": {"pr", "head"}}`, or `"verb": "rerun", "target": {"run"}`, only when the command is exactly
-such a merge or the granted rerun of that run (`permit.landing_of`) and the allow of that same tool call was judged at
-most `PERMIT_LANDED_SECONDS` (30 minutes) ago and has not landed; otherwise it is False and appends nothing.
+lock `{"sprint_id", "session_id", "tool_use_id", "repo", "verb", "decision", "reason", "target"}` (an allowed rerun adds
+`"rule"`, `permit.rule_member`); an allowed merge or rerun is also remembered by `permit.landing_key` with the service's
+clock. `permit_landed(sprint_id, secret, session_id, tool_use_id, command)` is True, and appends one `permit.landed` row
+of the same members less `"decision"` and `"reason"` (`target` `{"pr", "head"}` for a merge, `{"run"}` for a rerun),
+only when the command is exactly that merge or the granted rerun and its call's allow was judged at most
+`PERMIT_LANDED_SECONDS` (30 minutes) ago and has not landed; otherwise it is False and appends nothing.
 
 An approved action (`action_permit`): a body with a `nonce` is a signed body that carries no secret and no
 command text, which `action_permit.reply` answers through `permit_action` and `permit_action_landed`; only
@@ -9652,7 +9652,7 @@ class ConsoleService(ActionPermit):
         self._apply(self.log.append([(PERMIT_JUDGED, sprint.project_id, {
             "sprint_id": sprint.sprint_id, "session_id": session_id, "tool_use_id": tool_use_id,
             "repo": slug, "verb": verdict.verb, "decision": verdict.decision, "reason": verdict.reason,
-            "target": dict(verdict.target)})]))
+            "target": dict(verdict.target), **permit.rule_member(verdict, slug)})]))
         return verdict
 
     def permit(self, sprint_id: str, secret: str, session_id: str, tool_use_id: str,
@@ -9709,13 +9709,13 @@ class ConsoleService(ActionPermit):
         key = (sprint_id, session_id, tool_use_id, slug, *landing[1])
         with self._ingest:
             self._manager_sprint(sprint_id, secret)
-            judged = self._permit_allows.pop(key, None)
+            judged = self._permit_allows.get(key)
             if judged is None or self._clock() - judged > PERMIT_LANDED_SECONDS:
                 return False
             self._apply(self.log.append([(PERMIT_LANDED, sprint.project_id, {
                 "sprint_id": sprint_id, "session_id": session_id, "tool_use_id": tool_use_id,
                 "repo": slug, "verb": landing[0], "target": dict(landing[2])})]))
-            return True
+            return self._permit_allows.pop(key) is not None
 
     def withdraw_notice(self, sprint_id: str, secret: str, notice_id: int) -> int:
         """Append one `notice.withdrawn` event for an open notice of the sprint; the notice's id."""
