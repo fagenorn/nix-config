@@ -10,6 +10,9 @@ from io import StringIO
 from pathlib import Path
 from unittest import mock
 
+from agent_tools.delivery import comment_lint
+from agent_tools.delivery.never_rise import Snapshot
+
 from . import console_screenshot_controls as targets
 from . import console_screenshots as shots
 from . import test_console_screenshots as screenshot_tests
@@ -19,6 +22,8 @@ TIER = "integration"  # the real picture-run capture serves a console per state
 
 PAGE = Path(__file__).resolve().parents[1] / "python/agent_tools/console/page.html"
 SPEND = PAGE.with_name("spend.html")
+PAGE_TESTS = Path(__file__).with_name("test_console_page.py")
+PAGE_TESTS_LINES = 12126  # the file is over the 1,500-line budget (B17), so it may not grow
 # The selector of each rule that gives a bare link or summary its 24 px floor, per stylesheet.
 FLOORS = {
     PAGE: ("summary", ".nav", ".sprint-detail .tracker", ".closing-report .tracker",
@@ -142,3 +147,19 @@ class SprintFoldShotTest(unittest.TestCase):
     def test_the_sprint_fold_state_follows_the_tell_box_state(self) -> None:
         self.assertEqual(shots.STATES.index("sprint-fold-open"),
                          shots.STATES.index("tell-box-open") + 1)
+
+
+class PageTestsFileTest(unittest.TestCase):
+    def test_the_page_test_file_is_no_longer_than_it_was_on_the_integration_branch(self) -> None:
+        self.assertLessEqual(len(PAGE_TESTS.read_text(encoding="utf-8").splitlines()), PAGE_TESTS_LINES)
+
+    def test_the_size_cap_comment_for_the_tap_sizes_carries_no_reference_or_long_line(self) -> None:
+        snapshot = Snapshot("a" * 40, {}, contents={PAGE_TESTS.name: PAGE_TESTS.read_bytes()})
+        lines = PAGE_TESTS.read_text(encoding="utf-8").splitlines()
+        mine = {number for number, line in enumerate(lines, 1) if line.lstrip().startswith("#") and "End the sprint fold" in line}
+        self.assertEqual(len(mine), 1)
+        for enforcer in comment_lint.enforcers(None):
+            if enforcer.rule == comment_lint.MARKER_RULE:
+                continue
+            with self.subTest(rule=enforcer.rule):
+                self.assertEqual({v.line for v in enforcer.find(snapshot)} & mine, set())

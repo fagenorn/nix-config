@@ -15,8 +15,6 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from agent_tools.console import answer as console_answer
-from agent_tools.delivery import comment_lint
-from agent_tools.delivery.never_rise import Snapshot
 from agent_tools.console import capacity as console_capacity
 from agent_tools.console import digest as console_digest
 from agent_tools.console import signin as console_signin
@@ -189,22 +187,9 @@ class PageTest(unittest.TestCase):
         # stay focusable while sending (about 150 bytes compressed, over the 2 the cap had left).
         # Raised from 71 KB by #1432: a sprint's declared live fault line, its Withdraw and the same line on an
         # ended sprint's finished line (about 0.5 KB compressed) did not fit the 279 bytes the cap had left.
-        # Raised from 72 KB by the merge of #1274 with #1432 and #1424: each side fit under its cap, and merged the
-        # page is 74199 bytes. Raised from 73 KB: a long command's permission card summary and fold did not fit.
-        # Raised again for the phone tap sizes and the End the sprint fold.
+        # Raised from 72 KB by the merge of #1274 with #1432 and #1424: each side fit under its cap, merged 74199 bytes.
+        # Raised from 73 KB: a long command's card summary and fold, the phone tap sizes and the End the sprint fold.
         self.assertLess(len(gzip.compress(self.data, 9)), 75520)
-
-    def test_the_size_cap_comment_for_the_tap_sizes_carries_no_reference_or_long_line(self) -> None:
-        path = Path(__file__)
-        snapshot = Snapshot("a" * 40, {}, contents={path.name: path.read_bytes()})
-        lines = path.read_text(encoding="utf-8").splitlines()
-        mine = {number for number, line in enumerate(lines, 1) if line.lstrip().startswith("#") and "End the sprint fold" in line}
-        self.assertEqual(len(mine), 1)
-        for enforcer in comment_lint.enforcers(None):
-            if enforcer.rule == comment_lint.MARKER_RULE:
-                continue
-            with self.subTest(rule=enforcer.rule):
-                self.assertEqual({v.line for v in enforcer.find(snapshot)} & mine, set())
 
     def test_the_top_bar_carries_one_spend_link(self) -> None:
         header = self.text[self.text.index('<header class="top">'):self.text.index("</header>")]
