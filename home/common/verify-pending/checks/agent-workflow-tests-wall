@@ -1,0 +1,4 @@
+#!/bin/sh
+# Verify check: the first --runs push runs of ci.yaml on --branch from --merge on, each timed on its first attempt from
+# its first shard's start to the end of the Agent Workflow Tests job. Exit 0 met, 1 not met, 75 not yet, 2 unreadable.
+PYTHONPATH=python exec python3 -B -m agent_tools.delivery.suite_timing observed "$@"
