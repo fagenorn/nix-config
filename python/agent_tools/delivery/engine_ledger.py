@@ -71,7 +71,7 @@ from agent_tools.canonical import (
     reject_duplicate_keys,
     reject_nonfinite_literal,
 )
-from agent_tools.delivery.procedure_check import (
+from agent_tools.delivery.procedure_terms import (
     INPUT_RE, NAME_RE, NEEDS, ROLES, STAGES, WAITS, _inside)
 
 RUN_ID_RE = re.compile(r"^([1-9][0-9]*)-([0-9]{8}T[0-9]{6}Z)-([a-z0-9]{4})$")
