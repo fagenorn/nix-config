@@ -1006,9 +1006,6 @@ def _visit(run_dir: Path, table: CommandTable, step: dict, action: engine_core.R
     engine_ledger.append_event(run_dir, {"event": "step_entered", "at": _now(), "step": name,
                                          "visit": visit, "stage": step["stage"]})
     wait = step.get("wait")
-    if wait:
-        engine_ledger.append_event(run_dir, {"event": "wait_started", "at": _now(),
-                                             "wait": wait, "until": None})
 
     def started(pid: int) -> None:
         engine_ledger.append_event(run_dir, {"event": "process_started", "at": _now(),
@@ -1017,9 +1014,12 @@ def _visit(run_dir: Path, table: CommandTable, step: dict, action: engine_core.R
 
     try:
         repository = engine_heads.checkout_of(step, action.args)
-    except engine_heads.CheckoutRefused as error:  # no process starts and nothing is held
+    except engine_heads.CheckoutRefused as error:  # no process starts, nothing is held, no wait opens
         refused = engine_commands.Ran("refused", {"reason": str(error), "verdict": "refused"}, None, 0.0)
         return _grade_command(run_dir, step, name, visit, refused, None, member)
+    if wait:
+        engine_ledger.append_event(run_dir, {"event": "wait_started", "at": _now(),
+                                             "wait": wait, "until": None})
     held = repository or table.root
     before = read_head(held) if step["holds"] == "head" else None
     ran = None

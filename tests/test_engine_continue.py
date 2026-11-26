@@ -387,6 +387,20 @@ class ContinueTest(unittest.TestCase):
                 self.assertEqual([("head" in e, "repository" in e) for e in stored],
                                  [(False, False)])
 
+    def test_a_refused_checkout_opens_no_wait_its_step_declares(self):
+        project = EngineProject(self)
+        b = step("b", "count-b", "g", holds="head", refused="bad")
+        b.update({"in": ["p.path"], "repository": "p.path", "wait": "checks"})
+        procedures = project.procedures(
+            [step("p", "standin-relative", "b"), b, step("g", "standin-gate", "done")],
+            stops={"bad": {"need": "owner-decision", "reenter": "b"},
+                   "needs-owner": {"need": "owner-decision", "reenter": "g"}})
+        done = project.deliver(procedures)
+        self.assertEqual(done.returncode, 3, done.stdout + done.stderr)
+        kinds = [e["event"] for e in project.events(project.runs()[0])]
+        self.assertEqual(kinds.count("wait_started"), kinds.count("wait_ended"))
+        self.assertNotIn("wait_started", kinds)
+
     def test_a_continued_run_reads_its_own_procedure_copy_not_the_source(self):
         project = EngineProject(self)
         procedures = gated(project)
