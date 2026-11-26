@@ -255,7 +255,7 @@ class LeaseTest(base.QueueTest):
         return code, out, spawn
 
     def test_hold_detach_beats_once_and_leaves_a_background_beater_for_the_whole_step(self):
-        """A step whose own command runs for minutes cannot run `hold --seconds` beside it: it starts the beater and goes on."""
+        """A step whose own command runs for minutes cannot run `hold --seconds` beside it: it starts a beater."""
         self.lock(A)
         self.pulls(A, pull(11, sha=A))
         self.lease(11, -30, -30, sha=A)
@@ -348,7 +348,7 @@ class LeaseTest(base.QueueTest):
         return mock.patch.object(land_lock.subprocess, "run", side_effect=run_ps)
 
     def test_the_owner_is_the_nearest_ancestor_that_is_not_a_shell(self):
-        """C2: the lander's session, past the launcher's bash and the tool's zsh, which the next step's shell outlives."""
+        """C2: the lander's session, past the launcher's bash and the tool's zsh, which the next shell outlives."""
         table = {300: (200, "/bin/zsh"), 200: (100, "-bash"), 100: (50, "/usr/bin/claude"), 50: (1, "/sbin/launchd")}
         with mock.patch.object(land_lock.os, "getppid", return_value=300), self.ps(table):
             self.assertEqual(land_lock.find_owner(), (100, "Thu Nov 26 07:28:26 2026"))

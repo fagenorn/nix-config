@@ -3007,9 +3007,10 @@ const FIX_NO_LOCK = `The landing lock of the branch ${INT} is not held and was n
 const FIX_LEFT_QUEUE = `The land lock was released before this fix; run no forge-claim command.`
 const LEASE_WAIT_TIMEOUT = 'The acquire carries --wait --lease: give it a Bash timeout of 60 minutes (3600000 ms) and never run it in the background.'
 // A step that runs while the lease is held starts the beat first: `hold --detach` beats once, answers not_held at
-// once when the lease is gone, and leaves a process that beats every 60 s for the step's whole length, however long its own
-// commands run; it ends by itself, at its bound or when the session that started it is gone. The step goes on only when it
-// printed beating, and runs the one-shot hold again before each push and merge, since the background beat tells it nothing.
+// once when the lease is gone, and leaves a process that beats every 60 s for the step's whole length, however long
+// its own commands run; it ends by itself, at its bound or when the session that started it is gone. The step goes on
+// only when it printed beating, and runs the one-shot hold again before each push and merge, since the background
+// beat tells it nothing.
 const LEASE_BEAT = sha => `First start the lease beat: run alone and exactly: ${LEASE_HOLD(sha)} --detach\nIt returns at once and leaves a background process that beats the land lease every 60 seconds for the whole step and stops by itself when your session ends. Go on only when it prints beating. When it prints anything else (not_held, unleased, an error or nothing) the lease is lost or not beating: stop at once, run nothing more and answer as you do when the step cannot be done (a failed or blocked answer, never a success) with lease lost in its notes or detail.\nThe background beat tells you nothing later, so immediately before every git push and every merge this step makes, run alone and exactly: ${LEASE_HOLD(sha)}\nWhen it prints not_held, do not push or merge: stop and answer as above.\n`
 const BEHIND_AFTER = `Only when lock's verdict is acquired, already_held or moved, run git -C ${W} fetch origin and return behind true when git -C ${W} merge-base --is-ancestor origin/${INT} HEAD fails (the base moved past the head), else false; otherwise run nothing else and return only lock.`
 // The probe a landing runs before it asks for the land lock, the same text in deliver-batch.js. git merge-tree

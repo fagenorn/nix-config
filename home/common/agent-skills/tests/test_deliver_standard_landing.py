@@ -101,8 +101,8 @@ class GreenFirstTest(unittest.TestCase):
         self.assertIn(beat(self.HOLD.replace(SHA, self.D)), prompt(calls, "merge"))
 
     def test_a_held_step_beats_the_lease_in_the_background_for_its_whole_length(self):
-        """The beat is a detached `hold` for the step's whole length (it rewrites the beat every 60 s itself) that returns
-        at once, so the step's own long command runs beside it in the foreground; a beat sent once would lapse at 180 s."""
+        """The beat is a detached `hold` for the step's whole length (it beats every 60 s itself) that returns at once,
+        so the step's own long command runs beside it in the foreground; a beat sent once would lapse at 180 s."""
         calls = self.synced()["calls"]
         for label in ("sync-1", "land-push-2", "merge"):
             with self.subTest(label=label):
@@ -736,7 +736,7 @@ class LandQueueDemoTest(unittest.TestCase):
 
 
 class DiagnosisBeatTest(unittest.TestCase):
-    """A red poll under the lease is diagnosed with the lease held, so the fix step starts the beat before it reads a log."""
+    """A red poll under the lease is diagnosed with the lease held, so the fix step starts the beat first."""
 
     def test_the_diagnosis_under_the_lease_starts_the_beat_before_it_reads_a_log(self):
         """The diagnosis keeps the lease while it reads the job log, which can outlast the 3-minute lapse."""

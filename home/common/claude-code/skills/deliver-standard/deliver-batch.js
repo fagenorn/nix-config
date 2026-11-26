@@ -886,8 +886,8 @@ const land = async (n, ready, via = {}) => {
   const silence = label => (lost.includes(label) ? 'answered twice with no usable review' : 'returned nothing')
   const out = (outcome, extra) => ({ issue: n, outcome, ...(pr ? { pr } : {}), ...(lost.length ? { lost_reviews: lost.slice() } : {}), ...(extra || {}) })
   const call = (prompt, label, opts) => ask(agent(withWork(prompt, opts, W), { label, phase: 'Land', ...opts }), label)
-  // The beat a step starts first while this landing holds the lease (a train holds none); a step that runs after the lock
-  // was released for a conflict holds nothing and starts none.
+  // The beat a step starts first while this landing holds the lease (a train holds none); a step that runs after
+  // the lock was released for a conflict holds nothing and starts none.
   const held = () => (LEASE && lockHeld && lockSha ? LEASE_BEAT(lockSha) : '')
   // every FINDINGS reply of a landing is read here. An unusable one (see unusable) runs the same step once more as
   // <label>-again; a second is answered as null, so it spends no fix round. The step did answer, so the breaker is left

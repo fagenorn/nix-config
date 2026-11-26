@@ -593,7 +593,7 @@ class BatchGreenFirstTest(unittest.TestCase):
     HOLD = f"forge-claim land hold --repo owner/repo --branch dev --sha {SHA}"
 
     def test_the_sync_step_under_the_lease_beats_it_in_the_background_for_its_whole_length(self):
-        """A sync merge that runs its tests holds the lease for minutes; a beat sent once at its start lapses at 180 s."""
+        """A sync merge that runs its tests holds the lease for minutes; a beat sent once lapses at 180 s."""
         result, calls, _ = run(replies={"land-take-1": dict(self.TAKEN, behind=True), "land-sync-1-1": self.MERGED})
         self.assertEqual(row(result, 1)["outcome"], "landed")
         text = prompt(calls, "land-sync-1-1")
@@ -616,12 +616,13 @@ class BatchGreenFirstTest(unittest.TestCase):
         self.assertLess(merge.index("--detach\n"), merge.index("gh pr merge"))
 
     def test_a_sync_step_that_reports_the_lease_lost_is_followed_by_no_push_and_no_merge(self):
-        """The loss is injected into the held sync step, whose last step is a push: nothing lands under that lease after it."""
+        """The loss is injected into the held sync step, whose last step is a push: nothing lands after it."""
         lost = {"status": "blocked", "conflicted": False, "notes": "lease lost"}
         result, calls, _ = run(replies={"land-take-1": dict(self.TAKEN, behind=True), "land-sync-1-1": lost})
         self.assertEqual((row(result, 1)["outcome"], row(result, 1)["stage"]), ("stopped", "land-sync"))
         after = calls[labels(calls).index("land-sync-1-1") + 1:]
-        self.assertEqual([c["label"] for c in after], ["land-unlock-1"])  # only the release: no push, checks or merge step
+        # Only the release follows: no push, checks or merge step.
+        self.assertEqual([c["label"] for c in after], ["land-unlock-1"])
         self.assertIn("immediately before every git push and every merge this step makes", prompt(calls, "land-sync-1-1"))
 
     def test_a_merge_step_that_reports_the_lease_lost_merges_nothing_more(self):
@@ -666,7 +667,7 @@ class BatchGreenFirstTest(unittest.TestCase):
 
 
 class DiagnosisBeatTest(unittest.TestCase):
-    """A red poll under the lease is diagnosed with the lease held, so the fix step starts the beat before it reads a log."""
+    """A red poll under the lease is diagnosed with the lease held, so the fix step starts the beat first."""
 
     OWN_RED = base.OwnRedOutsideLockTest
 
