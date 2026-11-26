@@ -509,7 +509,7 @@ class ContractDraftTest(unittest.TestCase):
         self.assertEqual(reading["environments"], [])
 
     def test_a_refusal_of_the_commit_environment_reopens_its_field(self):
-        wanted = ("commit-environment", "The plan refused the commits run in its development shell: m")
+        wanted = ("commit-environment", "The plan refused the changes are saved in its development shell: m")
         for pointer in ("/bindings/commands/commit-environment/argv/0",
                         "/bindings/vcs/commit/environment"):
             error = {"repair_id": "adopt.draft.invalid",
@@ -546,7 +546,7 @@ class ContractDraftTest(unittest.TestCase):
         error = {"code": "adopt_failure", "repair_id": "adopt.draft.invalid",
                  "violations": [{"pointer": "/bindings/commands/lint/argv", "message": message}]}
         refused = cd.refused_field(error)
-        text = f"The plan refused the lint command: {message}"
+        text = f"The plan refused the house-rule checks command: {message}"
         self.assertEqual(refused, ("lint-command", text))
         wider = {"repair_id": "adopt.draft.invalid",
                  "violations": [{"pointer": "/production/none", "message": "m  x"}]}
@@ -632,7 +632,7 @@ class ContractDraftTest(unittest.TestCase):
             else:
                 self.assertIsNone(cd.placeholder(field))
         self.assertEqual([f for f in cd.FIELDS if cd.placeholder(f) is None], [])
-        self.assertEqual(cd.placeholder("lint-command"), "the lint command")
+        self.assertEqual(cd.placeholder("lint-command"), "the house-rule checks command")
         self.assertEqual(cd.placeholder("test-command"), "the test command")
         for entry in cd.shown(fields):
             self.assertEqual(entry["placeholder"], cd.placeholder(entry["field"]))
@@ -904,7 +904,7 @@ class ContractDraftTest(unittest.TestCase):
         self.assertIs(cd.carried(none, {"plan": {}}), none)
         self.assertIs(cd.carried(full, {"plan": {}}), full)
         self.assertIsNone(cd.carried(None, {"plan": {}}))
-        line = "commits run in its development shell: devenv shell (found in its files)"
+        line = "changes are saved in its development shell: devenv shell (found in its files)"
         entries = cd.shown(fields)
         self.assertEqual([(e["line"], e["more"]) for e in entries], [(line, False)])
         self.assertIsNone(cd.more_line(fields))

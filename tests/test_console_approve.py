@@ -279,7 +279,7 @@ class MergeFailureTest(unittest.TestCase):
             (ForgeError("gh_timeout", "x"), "the forge took too long to answer"),
             (failed("connecting", True), "the forge could not be reached"),
             (failed("gh: Forbidden (HTTP 403)"),
-             "gh is not signed in, or may not merge pull requests on this repository"),
+             "gh is not signed in, or may not merge proposed changes on this repository"),
             (failed("gh: Conflict (HTTP 409)"), approve.MOVED),
             (failed("gh: Not allowed (HTTP 405)"),
              "the forge refused the merge; the repository's rules do not allow it yet"),
@@ -407,7 +407,7 @@ FORGE_ERRORS = (
 class WordsTest(unittest.TestCase):
     def test_each_forge_failure_reads_its_reason_and_next_step(self):
         again = "then choose Try again."
-        sign_in = ("Sign gh in on this computer with an account that may open pull requests on "
+        sign_in = ("Sign gh in on this computer with an account that may propose changes on "
                    "the repository, " + again)
         cases = [
             (KeyError("x"), (register.UNEXPECTED, approve.OPEN_NOTE)),
@@ -422,15 +422,15 @@ class WordsTest(unittest.TestCase):
              ("the forge could not be reached",
               "Check this host's network connection, " + again)),
             (ForgeError("gh_failed", "gh: Bad credentials (HTTP 401)"),
-             ("gh is not signed in, or may not open pull requests on this repository", sign_in)),
+             ("gh is not signed in, or may not propose changes on this repository", sign_in)),
             (ForgeError("gh_failed", "gh: Forbidden (HTTP 403)"),
-             ("gh is not signed in, or may not open pull requests on this repository", sign_in)),
+             ("gh is not signed in, or may not propose changes on this repository", sign_in)),
             (ForgeError("gh_failed", "gh: Validation Failed (HTTP 422)"),
              ("the forge refused the proposed change",
               "Check on the forge that the adoption's branch differs from develop and has no "
               "proposed change open already, " + again)),
             (ForgeError("gh_failed", "gh: Not Found (HTTP 404)"),
-             ("the forge does not know the repository or the branch",
+             ("the forge does not know the repository or the adoption's change",
               "Check that origin is the GitHub repository and that the adoption's branch "
               "reached it, " + again)),
             (ForgeError("payload_invalid", "x"),
@@ -466,16 +466,16 @@ class WordsTest(unittest.TestCase):
         self.assertEqual(words(error(repair_id="adopt.worktree.dirty")), (
             "an uncommitted change in the repository overlaps what the plan changes",
             "Set aside the uncommitted change in r, then choose Apply it again. To keep the "
-            "change instead, commit it, then register the repository again to make a new "
+            "change instead, save it in the repository, then register the repository again to make a new "
             "plan."))
         self.assertEqual(words(error(repair_id="adopt.worktree.retained"), KEPT), (
             "an earlier attempt of this plan is still kept", approve.RETAINED_NOTE))
         self.assertEqual(words(error(repair_id="adopt.worktree.unavailable")), (
-            "the adoption's branch or worktree could not be created", commit_note))
+            "the adoption's copy of the project could not be created", commit_note))
         self.assertEqual(words(error(repair_id="adopt.commit.failed"), KEPT), (
-            "the adoption commit could not be made", commit_note))
+            "the adoption's change could not be saved", commit_note))
         self.assertEqual(words(error(repair_id="adopt.commit.failed")), (
-            "the adoption commit could not be made", commit_note))
+            "the adoption's change could not be saved", commit_note))
         for kept in (KEPT, None):
             self.assertEqual(words(error(repair_id="adopt.gate.no-new-broken-link"), kept), (
                 "the no-new-broken-link check did not pass",
@@ -492,7 +492,7 @@ class WordsTest(unittest.TestCase):
                 ("adopt.plan.unknown_id", "the stored plan could not be used"),
                 ("adopt.resolver.failed", "the project contract could not be read"),
                 ("adopt.commit.unresolved_policy",
-                 "the adoption commit did not pass its own checks")):
+                 "the adoption's change did not pass its own checks")):
             with self.subTest(repair=repair):
                 self.assertEqual(words(error(repair_id=repair)), (reason, commit_note))
                 self.assertEqual(words(error(repair_id=repair), KEPT), (reason, commit_note))
@@ -599,8 +599,8 @@ class ApplyWordsTest(unittest.TestCase):
         got_none = approve.apply_failure("r", self.SIGNING, None)
         self.assertEqual(got_none, (approve.SIGNING_REASON, approve.SIGNING_NOTE))
         self.assertEqual(got_kept, (approve.SIGNING_REASON, approve.SIGNING_NOTE))
-        self.assertEqual(approve.SIGNING_REASON, "the project asks for signed commits and this "
-                                                 "computer could not sign the adoption commit")
+        self.assertEqual(approve.SIGNING_REASON, "the project asks for signed changes and this "
+                                                 "computer could not sign the adoption's change")
         self.assertEqual(approve.SIGNING_NOTE, "Set up a signing key on this computer, then "
                                                "choose Apply it again.")
         adoption = {**step_payload("apply_failed", reason=got_kept[0], note=got_kept[1],
@@ -608,8 +608,8 @@ class ApplyWordsTest(unittest.TestCase):
                     "at": "t", "pull_state": None, "pull_at": None}
         self.assertEqual(
             approve.entry(adoption, running=False, name="r")["headline"],
-            "The adoption of r was not applied: the project asks for signed commits and this "
-            "computer could not sign the adoption commit.")
+            "The adoption of r was not applied: the project asks for signed changes and this "
+            "computer could not sign the adoption's change.")
 
     def test_every_apply_note_is_at_most_two_sentences(self):
         notes = []
@@ -645,10 +645,10 @@ class ApplyWordsTest(unittest.TestCase):
         items = approve.apply_items(latest, adoption, entry, "approve")
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0]["questions"][0]["options"],
-                         ["Apply it again", "Turn signed commits off", "Not now"])
+                         ["Apply it again", "Turn signing off", "Not now"])
         self.assertEqual(items[0]["values"], ["apply", "signing_off", "not_now"])
         self.assertEqual(items[0]["why"], approve.SIGNING_NOTE)
-        self.assertEqual(approve.SIGNING_OFF_OPTION, "Turn signed commits off")
+        self.assertEqual(approve.SIGNING_OFF_OPTION, "Turn signing off")
         self.assertEqual(approve.SIGNING_OFF_VALUE, "signing_off")
         self.assertEqual(approve.SIGNING_FIELD, "commit-signed")
         for draft in (None, [{**latest["draft"][0], "value": "no"}]):
@@ -832,7 +832,7 @@ class EvidenceTest(unittest.TestCase):
 
     def test_a_failed_hook_is_named_in_the_reason_with_the_hook_note(self):
         reason, note = approve.apply_failure("r", self.hook_error(), None)
-        self.assertEqual(reason, "the project's pre-commit hook stopped the adoption commit: "
+        self.assertEqual(reason, "the project's pre-commit hook stopped saving the adoption's change: "
                                  "it ended with exit status 1")
         self.assertEqual(note, approve.HOOK_NOTE)
         for text in (reason, note):
@@ -840,7 +840,7 @@ class EvidenceTest(unittest.TestCase):
             self.assertFalse([word for word in BANNED if word in text])
         commit_note = register.unknown_step("r", "apply").replace("Try again", "Apply it again", 1)
         self.assertEqual(approve.apply_failure("r", self.hook_error(hook=None), None),
-                         ("the adoption commit could not be made", commit_note))
+                         ("the adoption's change could not be saved", commit_note))
 
     def signing_latest(self):
         return {"plan_id": PID, "root": "/x/r", "at": "t1", "lines": [],
@@ -883,7 +883,7 @@ class EvidenceTest(unittest.TestCase):
         items = approve.apply_items(self.signing_latest(), adoption, entry, "approve")
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0]["questions"][0]["options"],
-                         ["Apply it again", "Turn signed commits off", "Not now"])
+                         ["Apply it again", "Turn signing off", "Not now"])
         self.assertEqual(items[0]["why"], note)
         self.assertEqual(items[0]["lines"], ["hook said no"])
 

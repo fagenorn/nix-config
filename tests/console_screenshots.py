@@ -340,7 +340,7 @@ ADOPTION_CARD = "#inbox .adoption"
 REGISTER_NAME = "sample-app"
 REGISTER_PLAN_ID = "sha256:" + "6" * 64
 REGISTER_PLAN_LINES = ["moves 2 agent files under .agents/", "writes the project contract"]
-PROPOSAL_LINE = "commits run in its development shell: devenv shell (found in its files)"
+PROPOSAL_LINE = "changes are saved in its development shell: devenv shell (found in its files)"
 FACT_LINE = "project id and issue tracker: GitHub, as owner/sample-app (read from its remote)"
 REGISTER_SHOWN = {"register-draft": (None, FACT_LINE, False),
                   "register-reconcile-apply": (PROPOSAL_LINE, None, False),
@@ -355,7 +355,7 @@ REGISTER_READING = """(() => {
   const first = document.querySelector('.apply-lines li');
   const row = Array.from(document.querySelectorAll('ul.register-draft > li')).find((item) => {
     const line = item.querySelector('.draft-line');
-    return shown(line) && /^(commits run in its development shell|project id and issue tracker)/.test(line.textContent.trim());
+    return shown(line) && /^(changes are saved in its development shell|project id and issue tracker)/.test(line.textContent.trim());
   });
   const change = row ? row.querySelector('button.draft-change') : null;
   return [shown(first) ? first.textContent.trim() : null,

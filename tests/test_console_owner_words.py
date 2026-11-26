@@ -8,7 +8,8 @@ import re
 import unittest
 from pathlib import Path
 
-from agent_tools.console import answer, deliveries, engine_runs, owner_words, sprints, view
+from agent_tools.console import answer, approve, contract_draft, deliveries, engine_runs, owner_words, register, sprints, view
+from agent_tools.console.event_log import Event
 from agent_tools.delivery import procedure_check
 from agent_tools.delivery.engine_ledger import RunState
 from agent_tools.delivery.routing import index_table
@@ -22,8 +23,9 @@ CASES = REPO_ROOT / "tests/fixtures/console/owner-words-cases.json"
 ORDINARY = REPO_ROOT / "tests/fixtures/console/owner-words-ordinary.txt"
 PAGE = REPO_ROOT / "python/agent_tools/console/page.html"
 PAGE_TEXT_MODULES = ("view", "sprints", "engine_runs", "guest", "capacity")
-LITERAL_MODULES = ("answer", "approve", "contract_draft")
+LITERAL_MODULES = ("answer", "approve", "contract_draft", "register")
 SPRINT_LITERAL_MODULES = ("answer", "card_entries")
+COMMANDS = frozenset({contract_draft.NPM["lint"]})
 OWNER_FACING = re.compile(r"(?:_TEXT|_LABEL|_SENTENCE|_LINE|_LEAD)$|^HEADLINE$")
 STR = r'"((?:[^"\\\n]|\\.)*)"'
 CLASS_POSITIONS = (
@@ -81,6 +83,10 @@ def module_literals(source):
     """
     tree = ast.parse(source)
     skipped = set()
+    for stmt in tree.body:
+        names = [t.id for t in getattr(stmt, "targets", [getattr(stmt, "target", None)]) if isinstance(t, ast.Name)]
+        if any(n.startswith("LEGACY_") for n in names) and getattr(stmt, "value", None) is not None:
+            skipped |= {id(n) for n in ast.walk(stmt.value)}
     for node in ast.walk(tree):
         if isinstance(node, ast.Raise):
             skipped |= {id(n) for n in ast.walk(node)}
@@ -130,6 +136,22 @@ def sprint_page_words():
             + [answer.LOOK_APPROVES.format(option="Approve this head", head="aaaaaaa", pr=12, issue=7),
                answer.LOOK_RECORDING.format(head="aaaaaaa", issue=7),
                answer.LOOK_MOVED.format(found="bbbbbbb", head="aaaaaaa")])
+
+
+def built_words():
+    """The registration texts a function completes from one word, which a literal scan cannot see."""
+    return ([register.behind("/x/r", 1, True)["headline"], register.behind("/x/r", 3, False)["headline"]]
+            + [contract_draft._ask(field, "r", 1) for field in
+               ("integration-branch", "lint-command", "test-command", contract_draft.ENVIRONMENT_FIELD)])
+
+
+def console_words():
+    root = REPO_ROOT / "python/agent_tools/console"
+    read = lambda m: (root / (m + ".py")).read_text(encoding="utf-8")
+    found = (sprint_page_words()
+             + [w for m in ("approve", "contract_draft", "register") for w in prose(module_literals(read(m)))]
+             + built_words())
+    return [w for w in found if w not in COMMANDS]
 
 
 def words(text):
@@ -216,7 +238,6 @@ class NoGlossTest(unittest.TestCase):
 
 class FixedWordsTest(unittest.TestCase):
     def test_the_look_and_adoption_refusals_are_among_the_scanned_words(self):
-        from agent_tools.console import answer, approve
         words = console_text_words()
         for text in (answer.LOOK_MOVED, answer.LOOK_CLOSED, approve.FAILING, approve.NOT_READY_PULL,
                      approve.MERGING, "The proposed change of "):
@@ -228,7 +249,6 @@ class FixedWordsTest(unittest.TestCase):
         self.assertEqual(module_literals(source), ["guard", "The look of ", " is held.", "git"])
 
     def test_a_failing_adoptions_reason_names_the_link_the_card_shows(self):
-        from agent_tools.console import approve
         label = "Open the proposed change on GitHub"
         self.assertIn(label, PAGE.read_text(encoding="utf-8"))
         self.assertIn(label, approve.FAILING_WHY)
@@ -262,7 +282,7 @@ class FixedWordsTest(unittest.TestCase):
         self.assertEqual(text_constants(source), ["Claim", "your look", "x", "held ", "ab", "Top", "Line"])
 
     def test_console_text_words_reads_the_modules_the_page_shows(self):
-        from agent_tools.console import answer, approve, guest, sprints
+        from agent_tools.console import guest
         words = console_text_words()
         for text in (sprints.NOW_LOCK_TEXT, view.HEADLINE, guest.SHARING_OFF_TEXT, answer.LOOK_APPROVES,
                      approve.FAILING_WHY, approve.APPLIED_NOTE):
@@ -307,3 +327,44 @@ class FixedWordsTest(unittest.TestCase):
 
     def test_prose_keeps_only_texts_with_whitespace(self):
         self.assertEqual(prose(["commit", "the adoption commit", "adopt.commit.failed"]), ["the adoption commit"])
+
+    def test_the_consoles_fixed_words_use_no_listed_word(self):
+        flagged = [t for t in console_words() if owner_words.found(blank_fields(t))]
+        self.assertEqual(flagged, [])
+
+    def test_the_adoption_and_registration_texts_are_among_the_scanned_words(self):
+        scanned = console_words()
+        for text in (approve.FAILING_WHY, approve.APPLIED_NOTE, register.HOOKS_LEFT_LINE, register.CONFIRM_ASK,
+                     "checks a proposed change must pass", register.behind("/x/r", 1, True)["headline"],
+                     contract_draft._ask("lint-command", "r", 1)):
+            self.assertIn(text, scanned)
+
+    def test_a_drafted_command_is_not_scanned(self):
+        self.assertNotIn("npm run lint", console_words())
+        source = (REPO_ROOT / "python/agent_tools/console/contract_draft.py").read_text(encoding="utf-8")
+        self.assertIn("npm run lint", prose(module_literals(source)))
+
+    def test_module_literals_skips_the_words_kept_to_read_stored_records(self):
+        source = 'LEGACY_WORDS = (("old commit text", "new"),)\nA = "a commit"\n'
+        self.assertEqual(module_literals(source), ["a commit"])
+
+
+class StoredWordsTest(unittest.TestCase):
+    OLD = "the project asks for signed commits and this computer could not sign the adoption commit"
+
+    def test_an_old_signing_failure_still_offers_turning_signing_off(self):
+        from .test_console_approve import KEPT, PID, step_payload
+        events = [Event(1, "t", approve.STEP, None, step_payload(
+            "apply_failed", reason=self.OLD, note=approve.SIGNING_NOTE, kept=KEPT, branch=None, commit=None))]
+        latest = {"plan_id": PID, "root": "/x/r", "at": "t1", "lines": [],
+                  "draft": [{"field": "commit-signed", "label": "signed commits",
+                             "value": "yes", "source": "x", "options": [], "text": False,
+                             "reason": None, "ask": None}]}
+        adoption = approve.adoptions(events)["p1"]
+        entry = approve.entry(adoption, running=False, name="r")
+        items = approve.apply_items(latest, adoption, entry, "approve")
+        self.assertEqual(adoption["reason"], approve.SIGNING_REASON)
+        self.assertNotEqual(approve.SIGNING_REASON, self.OLD)
+        self.assertEqual(items[0]["values"], ["apply", "signing_off", "not_now"])
+        self.assertEqual(items[0]["questions"][0]["options"], ["Apply it again", "Turn signing off", "Not now"])
+        self.assertEqual(entry["headline"], "The adoption of r was not applied: " + approve.SIGNING_REASON + ".")

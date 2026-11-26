@@ -1484,7 +1484,7 @@ class ScreenshotFixtureTest(unittest.TestCase):
                 code = shots.main(["--out", tmp])
             return code, out.getvalue()
 
-        line = "commits run in its development shell: devenv shell (found in its files)"
+        line = "changes are saved in its development shell: devenv shell (found in its files)"
         self.assertEqual(shots.REGISTER_SHOWN, {"register-draft": (None, shots.FACT_LINE, False),
                                                 "register-reconcile-apply": (line, None, False),
                                                 "register-reconcile-draft": (None, line, True)})

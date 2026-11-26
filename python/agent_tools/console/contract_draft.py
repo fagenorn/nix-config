@@ -109,7 +109,7 @@ one whose value is not `none`, or a refusal, and `replanned(fields)` opens the i
 `PLAN_AGAIN` so an answer plans again, unless a card is already open.
 
 Reconcile proposal. `PROPOSED` lists the one field a reconcile plan proposes alone (#1333), never drafted:
-`commit-environment` (`commits run in its development shell`), a typed choice with the one option
+`commit-environment` (`changes are saved in its development shell`), a typed choice with the one option
 `none`, never open. `reconcile_fields(root, reading)` is `[]` unless `reading["stranded"]` is not empty and an
 `ENVIRONMENTS` file is in `reading["environments"]`; otherwise it is that one record with the command of the first
 file (source `files`). `amends(fields)` is true for a non-empty list whose every record is a `PROPOSED` field,
@@ -198,7 +198,7 @@ def _none(label: str) -> list[dict]:
 _TABLE = (
     ("integration-branch", "branch finished work merges into", ("/bindings/vcs/integration_branch",),
      [], True),
-    ("lint-command", "lint command", ("/bindings/commands/lint",), [], True),
+    ("lint-command", "house-rule checks command", ("/bindings/commands/lint",), [], True),
     ("test-command", "test command", ("/bindings/commands/test",), [], True),
     ("release", "how it is released", ("/release",),
      [{"value": "unsupported", "label": "It makes no releases"}], True),
@@ -212,13 +212,13 @@ RETIRED_FIELDS: tuple[str, ...] = (
     "plans-path", "docs-paths", "context-paths", "standards-paths", "hints-paths", "operations-paths",
     "rejections-paths", "build-command", "review-plan-command", "review-code-command", "max-parallel",
     "attempt-budget", "projections", "light-lane")
-PLAN_AGAIN = ("The console now drafts fewer settings, so the plan is made again: choose the branch "
-              "finished work merges into to go on.")
+PLAN_AGAIN = ("The console now drafts fewer settings, so the plan is made again: choose the main "
+              "version finished work merges into to go on.")
 # The field a reconcile plan proposes alone; `draft` never adds it.
 _PROPOSED_TABLE = (
-    (ENVIRONMENT_FIELD, "commits run in its development shell",
+    (ENVIRONMENT_FIELD, "changes are saved in its development shell",
      ("/bindings/vcs/commit/environment", "/bindings/commands/commit-environment"),
-     _none("Commits run outside a development shell"), True),
+     _none("Changes are saved outside a development shell"), True),
 )
 # id, label, the pointers the platform derives for it.
 _FACT_TABLE = (
@@ -253,7 +253,7 @@ MAIN: tuple[str, ...] = ("integration-branch", "lint-command", "test-command", *
 _JSON = "the value as JSON"
 PLACEHOLDERS = {
     "integration-branch": "a branch name",
-    "lint-command": "the lint command",
+    "lint-command": "the house-rule checks command",
     "test-command": "the test command",
     ENVIRONMENT_FIELD: "the development shell command",
     "release": _JSON,
@@ -816,12 +816,12 @@ def _ask(field: str, name: str, remotes: int) -> str:
         return (f"Which branch does finished work of {name} merge into?\n"
                 f"{tail}: choose a branch or type its name.")
     if field in ("lint-command", "test-command"):
-        verb = "lints" if field == "lint-command" else "tests"
+        verb = "runs the house-rule checks of" if field == "lint-command" else "tests"
         return (f"Which command {verb} {name}?\nThe console found none in its files: "
                 "type the command that runs it.")
     if field == ENVIRONMENT_FIELD:
-        return (f"Which command opens the development shell the commits of {name} run in?\n"
-                "Its commit hooks need its development shell: type the command, or say they need none.")
+        return (f"Which command opens the development shell the changes of {name} are saved in?\n"
+                "Its git hooks need its development shell: type the command, or say they need none.")
     if field in FACTS:
         return ""
     return f"What should the {LABELS[field]} of {name} be?"

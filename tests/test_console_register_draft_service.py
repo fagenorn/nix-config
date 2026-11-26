@@ -83,7 +83,7 @@ class FactRefusalTest(DraftCase):
         self.assertEqual(reg["result"], "drafting")
         (question,) = reg["questions"]
         self.assertEqual((question["subject"], question["why"]),
-                         ("lint-command", "The plan refused the lint command: must not be empty"))
+                         ("lint-command", "The plan refused the house-rule checks command: must not be empty"))
         self.assertEqual(self.failure_cards(), [])
 
     def test_a_saved_draft_without_facts_gets_them_before_it_plans(self):

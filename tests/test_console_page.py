@@ -10145,7 +10145,7 @@ CONFIRM_ITEM = {
     "values": ["register", "not_now"], "items": [], "answers": [], "answered": False,
     "waiting_since": "2026-11-15T08:00:00+00:00"}
 
-BEHIND_HEADLINE = "r is 1 commit behind its remote, which already has a project contract."
+BEHIND_HEADLINE = "r is 1 change behind its remote, which already has a project contract."
 BEHIND_WHY = "Choose Update it to bring the checkout up to its remote; the console then plans from it."
 BEHIND_ITEM = {
     **CONFIRM_ITEM, "reason": "register_behind",
@@ -11402,7 +11402,7 @@ class RegisterApplyPageTest(unittest.TestCase):
 
     def test_turn_signed_commits_off_posts_the_draft_change(self) -> None:
         item = {**APPLY_ITEM, "questions": [{**APPLY_ITEM["questions"][0], "options": [
-            "Apply it again", "Turn signed commits off", "Not now"]}],
+            "Apply it again", "Turn signing off", "Not now"]}],
             "values": ["apply", "signing_off", "not_now"]}
         (snap,) = render([START, {"frame": cards([item], READY_SHOWN)},
                           {"respond": {"status": 204, "text": ""}}, {"key": "2"},

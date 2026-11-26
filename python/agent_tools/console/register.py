@@ -117,8 +117,8 @@ the row's headline, `why` its note, options `TRY_OPTION` then `LATER_OPTION`, va
 a confirmation for a root that is not the waiting one.
 
 Behind row (#1233, ADR-console-070). `RESULTS` ends with `behind`. `behind(root, count, contract)` is
-the row of a checkout that is `count` commits behind its remote: `result` `behind`, `plan_id` None,
-`lines` and `questions` empty, `note` `BEHIND_NOTE`, `headline` `<name> is <N> commit(s) behind its
+the row of a checkout that is `count` changes behind its remote: `result` `behind`, `plan_id` None,
+`lines` and `questions` empty, `note` `BEHIND_NOTE`, `headline` `<name> is <N> change(s) behind its
 remote, which already has a project contract.` or `... which has no project contract yet.` by `contract`.
 `behind_waiting(latest)` is true when the latest row's `result` is `behind` and its note is `BEHIND_NOTE`
 (`dismissed` sets `LATER_NOTE`, so `Not now` ends it). A behind row is neither `waiting` nor `failing`:
@@ -228,7 +228,7 @@ OUTCOME_TEXT = {
     "reconcile": "it has agent files or a contract to bring up to date",
 }
 HOOKS_LINE = "installs its git hooks on this host (not installed now)"
-HOOKS_LEFT_LINE = "leaves its git hooks uninstalled on this host (no commit environment to install them in)"
+HOOKS_LEFT_LINE = "leaves its git hooks uninstalled on this host (no environment for saving changes to install them in)"
 MEMBERS = {"by", "root", "project_id", "result", "outcome", "headline", "lines", "note"}
 EXTRA = {"plan_id", "state", "questions", "answered"}
 EXTENDED = MEMBERS | EXTRA | {"draft", "remote"}
@@ -608,7 +608,7 @@ def failed(root: str, kind: str, verb: str = "plan") -> dict:
 
 def behind(root: str, count: int, contract: bool) -> dict:
     """The row of a checkout behind its remote: the one Update card asks before the console updates it."""
-    headline = (f"{name_of(root)} is {_count(count, 'commit')} behind its remote, which "
+    headline = (f"{name_of(root)} is {_count(count, 'change')} behind its remote, which "
                 + ("already has a project contract." if contract else "has no project contract yet."))
     return _row(root, None, "behind", None, headline, [], BEHIND_NOTE)
 

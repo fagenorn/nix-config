@@ -553,7 +553,7 @@ class ApplyCardTest(ApproveCase):
         self.run_approval("apply_failed")
         (card,) = self.apply_cards()
         shown = self.view()["registration"]
-        self.assertIn("signed commits", card["headline"])
+        self.assertIn("signed changes", card["headline"])
         self.assertEqual(card["why"], approve.SIGNING_NOTE)
         self.assertEqual(card["questions"][0]["options"], ["Apply it again", "Not now"])
         self.assertEqual(shown["line"], "Register reconcile: needs you")
@@ -2735,7 +2735,7 @@ class ReconcileProposalTest(ApproveCase):
     READ_UNSTRANDED = {**READ_STRANDED, "stranded": []}
     TOOK = {**READY, "plan": {**READY["plan"], "commit_environment": ["devenv", "shell", "--"]}}
     LEFT = READY
-    LINE = "commits run in its development shell: devenv shell (found in its files)"
+    LINE = "changes are saved in its development shell: devenv shell (found in its files)"
     draft_answer = DraftCase.draft_answer
     answered_draft = DraftCase.answered_draft
 
@@ -2764,7 +2764,7 @@ class ReconcileProposalTest(ApproveCase):
         (_, row), = self.rows("registration.ended")[-1:]
         self.assertIsNone(row["draft"])
         self.assertFalse([x for x in card["lines"]
-                          if x.startswith("commits run in its development shell")])
+                          if x.startswith("changes are saved in its development shell")])
 
     def test_a_plan_that_did_not_take_the_command_carries_no_proposal(self):
         fake = Fake(plan=self.LEFT)
@@ -2774,7 +2774,7 @@ class ReconcileProposalTest(ApproveCase):
         (_, row), = self.rows("registration.ended")[-1:]
         self.assertIsNone(row["draft"])
         self.assertFalse([x for x in card["lines"]
-                          if x.startswith("commits run in its development shell")])
+                          if x.startswith("changes are saved in its development shell")])
 
     def test_the_owner_changes_the_proposal_to_none_and_to_another_command(self):
         fake = Fake(plan=[
@@ -2788,12 +2788,12 @@ class ReconcileProposalTest(ApproveCase):
         self.assertIsNone(fake.environments[-1])
         self.assertIsNone(fake.contracts[-1][0])
         (card,) = self.apply_cards()
-        self.assertEqual(card["lines"][0], "commits run in its development shell: none (set by you)")
+        self.assertEqual(card["lines"][0], "changes are saved in its development shell: none (set by you)")
         self.answered_draft(self.PID_C, "commit-environment", "nix develop -c")
         self.assertEqual(fake.environments[-1], "nix develop -c")
         (card,) = self.apply_cards()
         self.assertEqual(card["lines"][0],
-                         "commits run in its development shell: nix develop -c (set by you)")
+                         "changes are saved in its development shell: nix develop -c (set by you)")
 
     def test_an_answer_to_another_question_resends_the_command(self):
         took = {**DRAFT, "plan": {**DRAFT["plan"], "commit_environment": ["devenv", "shell", "--"]}}

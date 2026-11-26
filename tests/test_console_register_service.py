@@ -1815,7 +1815,7 @@ class RegisterRemoteTest(Case):
         row = self.settled_row(checkout)
         self.assertEqual(row["result"], "behind")
         self.assertEqual(row["headline"],
-                         "checkout is 1 commit behind its remote, which already has a project contract.")
+                         "checkout is 1 change behind its remote, which already has a project contract.")
         self.assertEqual(fake.calls, [])
         self.assertEqual(reads, [])
         self.assertEqual([p["result"] for _, p in self.rows("registration.ended")], ["behind"])

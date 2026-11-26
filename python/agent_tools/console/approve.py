@@ -84,7 +84,9 @@ Words. The notes name the option of the card they sit on: `Try again` on a resum
 again` on a failed apply and on a closed pull request; none says `press` or `Approve`.
 `current_note(note)` is a stored note in the words of today: it applies each pair of `LEGACY_WORDS`
 (the words an earlier release stored for its buttons) with `str.replace`, None stays None, and the
-stored row is never rewritten. Every reason and note is plain: none holds an error code, a repair
+stored row is never rewritten. `current_reason(reason)` does the same for a stored reason with
+`LEGACY_REASONS`, and `adoptions` stores each step's reason through it, so a failure stored before the
+rewording still equals `SIGNING_REASON` and still offers `SIGNING_OFF_OPTION`. Every reason and note is plain: none holds an error code, a repair
 id, an HTTP status, a run kind or an exception name.
 `branch_of(plan_id)` is the branch apply creates for the plan.
 `forge_failure(error, base)` is `(reason, note)` for a failed pull request lookup or open, by
@@ -101,8 +103,8 @@ removed, noted `RETAINED_NOTE`); `SIGNING_REPAIR` (`adopt.commit.signing_unavail
 a repair id with a prefix of `APPLY_REASONS`; else `it could not be applied`. It reads no violation
 message, so a formatter's output, a worktree path or a plan id never reaches a card (the service
 logs them), except the failing hook that `commit_evidence(error, None)` names for `COMMIT_REPAIR`
-(reason `the project's <hook> hook stopped the adoption commit: <hook_why(exit)>`, note
-`HOOK_NOTE`) and for `SIGNING_REPAIR` (the reason stays `SIGNING_REASON`, so `Turn signed commits
+(reason `the project's <hook> hook stopped saving the adoption's change: <hook_why(exit)>`, note
+`HOOK_NOTE`) and for `SIGNING_REPAIR` (the reason stays `SIGNING_REASON`, so `Turn signing
 off` is still offered, and the note is `hook_signing_note(hook, why)`, two sentences).
 `kept` is not read: no note mentions a leftover copy except `RETAINED_NOTE`, none asks an
 agent to remove anything, and every note is at most two sentences. A signing failure whose plan
@@ -251,7 +253,7 @@ ANSI_OSC = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
 CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 HEX_RUN = re.compile(r"[0-9a-f]{12,}")
 HOOK_NOTE = ("The hook ran in a fresh copy of the repository, in the development environment the "
-             "project contract names for its commit, or in none when it names none. Make it pass "
+             "project contract names for saving a change, or in none when it names none. Make it pass "
              "there, then choose Apply it again.")
 BRANCH = re.compile(r"adopt-[0-9a-f]{12}")
 COMMIT = re.compile(r"[0-9a-f]{40}")
@@ -268,16 +270,16 @@ STALE_CARD = "this card is out of date; the page now shows the current one"
 CLOSED_PULL = "the proposed change of this plan was closed without merging"
 FOUND = "the console did not open this proposed change"
 UNREAD = "the console has not read the proposed change's head yet"
-MOVED = "the proposed change's branch holds commits the console did not push"
-RETARGETED = "the proposed change no longer targets the branch the console opened it against"
+MOVED = "the proposed change holds changes the console did not push"
+RETARGETED = "the proposed change no longer goes into the version the console opened it against"
 FAILING = "a check of the proposed change failed"
 NOT_READY_PULL = "the proposed change is not ready to merge yet"
 MERGING = "the proposed change of this plan is being merged"
-MERGED_ELSEWHERE = ("the proposed change was merged on the forge with commits the console did not "
+MERGED_ELSEWHERE = ("the proposed change was merged on the forge with changes the console did not "
                     "push")
 MERGED_ELSEWHERE_BASE = ("the proposed change was merged on the forge into a branch other than the "
                          "one the console opened it against")
-MOVED_WHY = ("Its branch holds commits the console did not push. Review them on the forge and "
+MOVED_WHY = ("It holds changes the console did not push. Review them on the forge and "
              "merge it there, or close it and choose Apply it again.")
 RETARGETED_WHY = ("Its target branch is no longer the one the console opened it against. Review it on "
                   "the forge, or close it and choose Apply it again.")
@@ -287,13 +289,13 @@ UNREAD_WHY = "The console has not read its proposed change's head yet; Merge is 
 CLOSED_WHY = "Its proposed change was closed without merging. Register the project again to adopt it."
 PUSH_NOTE = ("Check that the repository's origin can be reached from this host and accepts the "
              "push, then choose Try again.")
-OPEN_NOTE = ("Check that gh is signed in on this host and can open pull requests on the "
+OPEN_NOTE = ("Check that gh is signed in on this host and can propose changes on the "
              "repository, then choose Try again.")
 NO_SLUG = "the repository's origin is not on GitHub"
 NO_BASE = "the project contract names no integration branch"
 NO_SLUG_NOTE = ("Open a proposed change for the adoption's branch yourself on the forge that hosts "
                 "origin, then choose Not now.")
-NO_BASE_NOTE = ("Open a proposed change for the adoption's branch yourself against the branch the "
+NO_BASE_NOTE = ("Open a proposed change for the adoption's branch yourself against the version the "
                 "project merges into, then choose Not now.")
 PUSH_REFUSED = "origin refused the push or could not be reached"
 CLOSED_NOTE = ("Ask an agent to delete the adoption's branch on this computer and on origin, then "
@@ -303,8 +305,8 @@ DISCARD_REASON = "the copy that the last attempt left on this computer could not
 RETAINED_NOTE = ("Choose Apply it again to remove the copy that attempt left on this computer and "
                  "apply the plan again.")
 SIGNING_REPAIR = "adopt.commit.signing_unavailable"
-SIGNING_REASON = ("the project asks for signed commits and this computer could not sign the "
-                  "adoption commit")
+SIGNING_REASON = ("the project asks for signed changes and this computer could not sign the "
+                  "adoption's change")
 SIGNING_NOTE = "Set up a signing key on this computer, then choose Apply it again."
 SIGNING_FIELD = "commit-signed"
 MANIFEST_NOTE = "Run just switch on this computer to install them, then choose Apply it again."
@@ -314,9 +316,9 @@ APPLY_REASONS = (
     ("adopt.operation.", "one of the plan's changes could not be written"),
     ("adopt.plan.", "the stored plan could not be used"),
     ("adopt.resolver.", "the project contract could not be read"),
-    ("adopt.commit.", "the adoption commit did not pass its own checks"),
+    ("adopt.commit.", "the adoption's change did not pass its own checks"),
 )
-APPLIED_NOTE = "Choose Try again to push the branch and open its proposed change."
+APPLIED_NOTE = "Choose Try again to push the adoption and open its proposed change."
 MERGED = "the proposed change of this plan was already merged"
 NOT_REFUSED = "that registration is not waiting for a retry"
 RETRY_AGAIN = "choose Retry."
@@ -326,7 +328,7 @@ APPLY_ASK = "Apply this adoption?"
 APPLY_OPTION = "Apply it"
 APPLY_AGAIN_OPTION = "Apply it again"
 TRY_AGAIN_OPTION = "Try again"
-SIGNING_OFF_OPTION = "Turn signed commits off"
+SIGNING_OFF_OPTION = "Turn signing off"
 NOT_NOW_OPTION = "Not now"
 APPLY_VALUE = "apply"
 NOT_NOW_VALUE = "not_now"
@@ -351,6 +353,19 @@ LEGACY_WORDS = (
      "again.", MANIFEST_NOTE),
     ("Switch this computer to its current configuration to install them, then choose Retry.",
      register.MANIFEST_STEP.removesuffix(register.AGAIN) + RETRY_AGAIN),
+)
+# Reasons a console of an earlier release stored for a failed step, by the words it used then; the
+# signing pair comes first because its old text holds the old words of the commit pair after it.
+LEGACY_REASONS = (
+    ("the project asks for signed commits and this computer could not sign the adoption commit",
+     SIGNING_REASON),
+    ("the adoption commit did not pass its own checks", "the adoption's change did not pass its own checks"),
+    ("the adoption's branch or worktree could not be created",
+     "the adoption's copy of the project could not be created"),
+    ("the forge does not know the repository or the branch",
+     "the forge does not know the repository or the adoption's change"),
+    ("the adoption commit could not be made", "the adoption's change could not be saved"),
+    (" hook stopped the adoption commit: ", " hook stopped saving the adoption's change: "),
 )
 NOT_INTEGRATED = "adopt.registration.not_integrated"
 UNCHECKED = "the adoption on the remote did not pass the registration's checks"
@@ -518,6 +533,14 @@ def current_note(note: str | None) -> str | None:
     return note
 
 
+def current_reason(reason: str | None) -> str | None:
+    if reason is None:
+        return None
+    for old, new in LEGACY_REASONS:
+        reason = reason.replace(old, new)
+    return reason
+
+
 def adoptions(events: Iterable[Event], state: dict | None = None) -> dict[str, dict]:
     result = dict(state or {})
     for event in events:
@@ -528,6 +551,7 @@ def adoptions(events: Iterable[Event], state: dict | None = None) -> dict[str, d
         try:
             if event.kind == STEP:
                 _, _, payload = step_row(event.payload)
+                payload = {**payload, "reason": current_reason(payload["reason"])}
                 opened = payload["step"] == "opened"
                 result[payload["plan_id"]] = {
                     **payload, "at": event.at, "pull_state": "open" if opened else None,
@@ -792,15 +816,15 @@ def forge_failure(error: BaseException, base: str) -> tuple[str, str]:
         found = forge_api.HTTP_STATUS.search(error.detail)
         status = int(found.group(1)) if found else None
         if status in (401, 403):
-            return ("gh is not signed in, or may not open pull requests on this repository",
-                    "Sign gh in on this computer with an account that may open pull requests on "
+            return ("gh is not signed in, or may not propose changes on this repository",
+                    "Sign gh in on this computer with an account that may propose changes on "
                     "the repository, then choose Try again.")
         if status == 422:
             return ("the forge refused the proposed change",
                     f"Check on the forge that the adoption's branch differs from {base} and has "
                     "no proposed change open already, then choose Try again.")
         if status == 404:
-            return ("the forge does not know the repository or the branch",
+            return ("the forge does not know the repository or the adoption's change",
                     "Check that origin is the GitHub repository and that the adoption's branch "
                     "reached it, then choose Try again.")
     return ("the forge answered in a way the console does not understand", OPEN_NOTE)
@@ -819,7 +843,7 @@ def merge_failure(error: BaseException) -> str:
         found = forge_api.HTTP_STATUS.search(error.detail)
         status = int(found.group(1)) if found else None
         if status in (401, 403):
-            return "gh is not signed in, or may not merge pull requests on this repository"
+            return "gh is not signed in, or may not merge proposed changes on this repository"
         if status == 409:
             return MOVED
         if status == 405:
@@ -840,9 +864,9 @@ def hook_why(code: int) -> str:
 
 
 def hook_signing_note(hook: str, why: str) -> str:
-    return (f"The project's {hook} hook also stopped the commit: {why}. Make it pass in a fresh "
-            "copy of the repository, in the development environment the project contract names for "
-            "its commit or in none when it names none, and set up a signing key on this computer, "
+    return (f"The project's {hook} hook also stopped saving the change: {why}. Make it pass in a "
+            "fresh copy of the repository, in the development environment the project contract names "
+            "for saving a change or in none when it names none, and set up a signing key on this computer, "
             "then choose Apply it again.")
 
 
@@ -895,14 +919,14 @@ def apply_failure(name: str, error: Mapping, kept: Mapping | None) -> tuple[str,
     if repair == "adopt.worktree.dirty":
         return ("an uncommitted change in the repository overlaps what the plan changes",
                 f"Set aside the uncommitted change in {name}, then choose Apply it again. To "
-                "keep the change instead, commit it, then register the repository again to make "
+                "keep the change instead, save it in the repository, then register the repository again to make "
                 "a new plan.")
     if repair == "adopt.worktree.retained":
         return ("an earlier attempt of this plan is still kept", RETAINED_NOTE)
     if repair == DISCARD_REPAIR:
         return (DISCARD_REASON, RETAINED_NOTE)
     if repair == "adopt.worktree.unavailable":
-        return ("the adoption's branch or worktree could not be created", commit_note)
+        return ("the adoption's copy of the project could not be created", commit_note)
     found = commit_evidence(error, None) if repair in (SIGNING_REPAIR, COMMIT_REPAIR) else None
     hook = found["hook"] if found else None
     if repair == SIGNING_REPAIR:
@@ -911,8 +935,8 @@ def apply_failure(name: str, error: Mapping, kept: Mapping | None) -> tuple[str,
         return (SIGNING_REASON, hook_signing_note(hook, found["why"]))
     if repair == COMMIT_REPAIR:
         if hook is None:
-            return ("the adoption commit could not be made", commit_note)
-        return (f"the project's {hook} hook stopped the adoption commit: {found['why']}",
+            return ("the adoption's change could not be saved", commit_note)
+        return (f"the project's {hook} hook stopped saving the adoption's change: {found['why']}",
                 HOOK_NOTE)
     if repair.startswith(GATE_PREFIX):
         return (f"the {repair[len(GATE_PREFIX):]} check did not pass",
