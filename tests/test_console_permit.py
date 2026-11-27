@@ -1013,7 +1013,7 @@ class ReaderTest(unittest.TestCase):
     def test_a_pull_request_with_a_missing_member_is_unreadable(self):
         for broken in ({**self.PULL, "head": {**self.PULL["head"], "repo": None}},
                        {**self.PULL, "head": {**self.PULL["head"], "sha": 7}},
-                       {**self.PULL, "base": {}}):
+                       {**self.PULL, "base": {}}, {**self.PULL, "base": {**self.PULL["base"], "ref": ""}}):
             with self.subTest(broken), self.reply({"repos/o/r/pulls/7": broken}):
                 with self.assertRaises(ForgeUnreadable):
                     permit.read_pr("o/r", 7)

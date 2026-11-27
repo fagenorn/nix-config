@@ -42,7 +42,7 @@ PR = 7
 PR_BRANCH = "bypass-proof-pr"
 TEMPLATE = REPO_ROOT / ".agents/project.json"
 
-PR_FIELDS = "state,baseRefName,headRefName,headRefOid,mergeStateStatus,url,statusCheckRollup"
+PR_FIELDS = "state,baseRefName,headRefName,headRefOid,mergeStateStatus,url,statusCheckRollup,isCrossRepository"
 PROOF_FIELDS = "state,headRefOid"
 LOOK_FIELDS = "title,body,closingIssuesReferences"
 PLAN_GATED = ('{"message": "Upgrade to GitHub Pro or make this repository public to enable this '
@@ -243,7 +243,7 @@ class BypassProofWorld:
         self.state = {"prs": {str(PR): {
             "state": "OPEN", "baseRefName": "main", "headRefName": PR_BRANCH,
             "headRefOid": self.pr_head, "mergeStateStatus": "UNSTABLE",
-            "url": f"https://github.com/{SLUG}/pull/{PR}",
+            "url": f"https://github.com/{SLUG}/pull/{PR}", "isCrossRepository": False,
             "statusCheckRollup": [{"__typename": "StatusContext",
                                    "context": bypass_proof.REQUIRED_CHECK, "state": "FAILURE"}],
             "title": "bypass proof", "body": "A pull request whose required check fails on purpose.",

@@ -2466,6 +2466,7 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             {"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "NEUTRAL"},
             {"__typename": "StatusContext", "state": "SUCCESS"},
         ],
+        "isCrossRepository": False,
     }
 
     def release_env(self, **overrides):
@@ -5699,7 +5700,8 @@ class ClaudePermissionGuardTest(unittest.TestCase):
     def test_a_failing_row_check_refuses_with_no_fallback(self):
         """Issue 377 R2, D3."""
         for mode, why in (("unavailable", "unavailable (registry_invalid)"),
-                          ("garbage", "unreadable report (exit 0)")):
+                          ("garbage", "unreadable report (exit 0)"),
+                          ("badbytes", "unreadable report (exit 0)")):
             self.assert_unconfirmed(NODO, why, env={"FAKE_DERIVE_MODE": mode})
         absent = Path(self.fixture_dir.name) / "absent-row-check"
         self.assert_unconfirmed(NODO, "could not start (", exact=False, guard_args=(

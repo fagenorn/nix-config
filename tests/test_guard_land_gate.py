@@ -20,6 +20,7 @@ from agent_tools.claims import forge_land_lock as land_lock
 from .guard_fake_gh import FAKE_GH_SCRIPT
 from .guard_land_check import write_land_bin, write_land_gh
 from .pre_push_world import FAKE_DERIVE
+from .process_liveness import process_alive
 
 TIER = "integration"
 
@@ -93,13 +94,15 @@ class GuardLandGateTest(unittest.TestCase):
     def pr(self, **over):
         pr = {"state": "OPEN", "baseRefName": "main", "headRefName": "issue-1-topic", "headRefOid": HEAD,
               "mergeStateStatus": "CLEAN", "url": "https://github.com/fagenorn/nix-config/pull/1",
-              "statusCheckRollup": [{"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "SUCCESS"}]}
+              "statusCheckRollup": [{"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "SUCCESS"}],
+              "isCrossRepository": False}
         pr.update(over)
         return {k: v for k, v in pr.items() if v is not None}
 
     def stub(self, text, code):
         path = self.tmp / "stub-land"
-        path.write_text(f"#!{sys.executable}\nimport sys\nsys.stdout.write({text!r})\nsys.exit({code})\n",
+        data = text if isinstance(text, bytes) else text.encode()
+        path.write_text(f"#!{sys.executable}\nimport sys\nsys.stdout.buffer.write({data!r})\nsys.exit({code})\n",
                         encoding="utf-8")
         path.chmod(0o755)
         return path
@@ -171,9 +174,7 @@ class GuardLandGateTest(unittest.TestCase):
         pid = int(pidfile.read_text(encoding="utf-8"))
         give_up = time.monotonic() + 5
         while True:
-            try:
-                os.kill(pid, 0)
-            except ProcessLookupError:
+            if not process_alive(pid):
                 return
             if time.monotonic() > give_up:
                 self.fail(f"the land check's gh {pid} outlived the verdict")
@@ -221,6 +222,47 @@ class GuardLandGateTest(unittest.TestCase):
             f"the land lock {dev} is at {OTHER[:7]}, not at the head {HEAD[:7]} of pull request 5")
         result = self.guard(command, {**env, **self.refs({LOCK: OTHER})}, cwd=repo)
         self.assertEqual((0, ""), (result.returncode, result.stderr))
+
+    def test_a_fork_head_named_like_the_integration_branch_is_judged_by_the_base_lock(self):
+        repo = self.make_repo("git@github.com:acme/widgets.git")
+        command = f"gh pr merge 5 --repo acme/widgets --merge --match-head-commit {HEAD}"
+        pr = self.pr(baseRefName="main", headRefName="dev", url="https://github.com/acme/widgets/pull/5",
+                     isCrossRepository=True)
+        env = {"FAKE_PR_JSON": json.dumps(pr), "FAKE_PROTECTION_MODE": "nonzero"}
+        self.assertRefused(
+            self.guard(command, {**env, **self.refs({LOCK: OTHER})}, cwd=repo),
+            f"the land lock {LOCK} is at {OTHER[:7]}, not at the head {HEAD[:7]} of pull request 5")
+        result = self.guard(command, {**env, **self.refs({land_lock.lock_ref("dev"): OTHER})}, cwd=repo)
+        self.assertEqual((0, ""), (result.returncode, result.stderr))
+        for cross in (None, "false"):
+            with self.subTest(cross=cross):
+                unreadable = {**pr, "isCrossRepository": cross}
+                result = self.guard(command, {**env, "FAKE_PR_JSON": json.dumps(unreadable)}, cwd=repo)
+                self.assertEqual(
+                    (2, FAILED + "cannot read whether the PR head is in this repository\n"),
+                    (result.returncode, result.stderr))
+
+    def test_an_integration_branch_with_a_plus_is_merged_with_no_lock_and_judged_under_one(self):
+        name = "release+next"
+        self.base_policy.write_text(json.dumps({
+            "authorized_owners": ["fagenorn", "acme"], "integration_bases": {"acme/widgets": name},
+            "git_bin": shutil.which("git"), "gh_bin": str(self.fake_gh), "jq_bin": shutil.which("jq")}),
+            encoding="utf-8")
+        repo = self.make_repo("git@github.com:acme/widgets.git")
+        pr = self.pr(baseRefName="main", headRefName=name, url="https://github.com/acme/widgets/pull/5")
+        command = f"gh pr merge 5 --repo acme/widgets --merge --match-head-commit {HEAD}"
+        env = {"FAKE_PR_JSON": json.dumps(pr), "FAKE_PROTECTION_MODE": "nonzero"}
+        result = self.guard(command, env, cwd=repo)
+        self.assertEqual((0, ""), (result.returncode, result.stderr))
+
+    def test_child_output_that_is_not_utf8_is_a_failure_even_in_an_ignored_field(self):
+        admit = b'{"verdict": "admit", "ignored": "\xff"}'
+        refuse = b'{"verdict": "refuse", "reason": "no", "ignored": "\xff"}'
+        for name, data, code in (("admit", admit, 0), ("refuse", refuse, 3)):
+            with self.subTest(name):
+                result = self.guard(MERGE, land=self.stub(data, code))
+                self.assertEqual(2, result.returncode)
+                self.assertTrue(result.stderr.startswith(FAILED), result.stderr)
 
     def test_an_unreadable_head_with_a_lock_is_refused(self):
         env = {"FAKE_PR_JSON": json.dumps(self.pr(headRefOid=None)), **self.refs({LOCK: OTHER})}

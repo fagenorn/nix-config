@@ -424,8 +424,10 @@ def read_pr(slug: str, number: int) -> Mapping:
     if not _SHA.fullmatch(sha):
         raise ForgeUnreadable(f"{what} has no readable head")
     repo = _member(_member(head, "repo", dict, what), "full_name", str, what)
-    return {"branch": _member(head, "ref", str, what), "repo": repo, "head": sha,
-            "base": _member(base, "ref", str, what)}
+    base_ref = _member(base, "ref", str, what)
+    if not base_ref:
+        raise ForgeUnreadable(f"{what} has no readable base")
+    return {"branch": _member(head, "ref", str, what), "repo": repo, "head": sha, "base": base_ref}
 
 
 def _pages(path: str, what: str) -> list:

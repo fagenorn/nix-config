@@ -168,6 +168,9 @@ def _hold_seconds(value: str) -> int:
 REPO = _pattern(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", "repo")
 HOLDER = _pattern(r"[A-Za-z0-9][A-Za-z0-9.-]*/[A-Za-z0-9][A-Za-z0-9._-]*", "holder")
 BRANCH = _pattern(r"[A-Za-z0-9_][A-Za-z0-9_./-]*", "branch")
+# `land permit` judges a branch the project declares, so it takes any name git allows, not only the
+# names a claim records; the argv is never read by a shell and `read_ref` quotes it into the path.
+PERMIT_BRANCH = _pattern(r"[^\s\x00-\x1f\x7f~^:?*\[\\-][^\s\x00-\x1f\x7f~^:?*\[\\]*", "branch")
 SHA = _pattern(r"[0-9a-f]{40}", "sha")
 REASON = _pattern(r"[A-Za-z0-9._:/@+-]+", "reason")
 
@@ -191,7 +194,7 @@ def build_parser() -> argparse.ArgumentParser:
     for name in forge_land_lock.ACTIONS:
         sub = actions.add_parser(name)
         sub.add_argument("--repo", required=True, type=REPO)
-        sub.add_argument("--branch", required=True, type=BRANCH)
+        sub.add_argument("--branch", required=True, type=PERMIT_BRANCH if name == "permit" else BRANCH)
         sub.add_argument("--sha", required=name != "permit", type=SHA, default=None)
         if name == "permit":
             sub.add_argument("--pr", required=True, type=_issue)

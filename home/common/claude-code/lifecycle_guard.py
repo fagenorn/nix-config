@@ -414,7 +414,7 @@ the guard's allowed-row table; the guard never reads it at run time. The shape f
 
 The mergeability check (issue 476) reads two more facts from the same PR
 lookup, whose `--json` field list is
-`state,baseRefName,headRefName,headRefOid,mergeStateStatus,url,statusCheckRollup`.
+`state,baseRefName,headRefName,headRefOid,mergeStateStatus,url,statusCheckRollup,isCrossRepository`.
 Each merge arm runs it after its own shape judgment (the feature arm's
 permanent-head refusal, the release arm's integration-into-default check) and
 before its first gate (the feature arm's integration-base exemption and
@@ -499,7 +499,9 @@ contract; `--admin` is in no merge form, so it is refused by the grammar before 
 
 The land check asks whether the merge holds the land lease. Each merge arm runs it right after the look gate, so before
 the feature arm's integration-base exemption and protection lookup and before the release arm's rollup predicate: the
-feature arm for its PR's base branch, the release arm for its head, the integration branch. The guard imports nothing,
+feature arm for its PR's base branch, the release arm for its head, the integration branch, or for its base branch when
+the PR's `isCrossRepository` is true, since a fork's branch of that name is no branch of this repository (a value that
+is not a boolean is `land check failed: cannot read whether the PR head is in this repository`). The guard imports nothing,
 so the judgment is the store script `--land-bin` names (`forge-claim land permit`), run as `<land-bin> --repo <slug>
 --branch <branch> --pr <n>` with `--sha <headRefOid>` when that is 40 lowercase hex characters and `--pinned` when the
 merge carries `--match-head-commit` (held equal to the PR head by the mergeability check), in its own session with the
@@ -1463,6 +1465,8 @@ def bounded_child_diagnostic(child):
     for name, output in (("stderr", child.stderr), ("stdout", child.stdout)):
         if not output:
             continue
+        if isinstance(output, bytes):
+            output = output.decode("utf-8", errors="replace")
         normalized = "".join(
             character if character.isprintable() else " "
             for character in output
@@ -4864,15 +4868,16 @@ def row_check_env(dropped=()):
 def session_child(argv, env, timeout):
     """The `CompletedProcess` of `argv`, or None when it ran past `timeout`.
 
-    The child runs once with no stdin, `env`, its output captured as text (an
-    undecodable byte is replaced) and its own session, so one SIGKILL to its
-    process group on the bound takes its descendants with it. The pipes are not
-    read again after the kill; only the direct child is reaped. An `OSError`
-    from starting it propagates.
+    The child runs once with no stdin, `env`, its output captured as bytes (a
+    caller decodes protocol output strictly, and `bounded_child_diagnostic`
+    replaces an undecodable byte only to show it) and its own session, so one
+    SIGKILL to its process group on the bound takes its descendants with it. The
+    pipes are not read again after the kill; only the direct child is reaped. An
+    `OSError` from starting it propagates.
     """
     child = subprocess.Popen(
         argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        text=True, errors="replace", env=env, start_new_session=True)
+        env=env, start_new_session=True)
     try:
         stdout, stderr = child.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
@@ -6061,7 +6066,7 @@ def land_problem(context, number, pr_facts, branch, head_commit):
     if child is None:
         return block("land check timed out")
     try:
-        verdict = json.loads(child.stdout)
+        verdict = json.loads(child.stdout.decode("utf-8"))
     except ValueError:
         verdict = None
     verdict = verdict if isinstance(verdict, dict) else {}
@@ -6125,7 +6130,8 @@ def validate_merge(text, context, compiled):
     try:
         pr_lookup = subprocess.run(
             [context.gh_bin, "pr", "view", number, "--repo", repository, "--json",
-             "state,baseRefName,headRefName,headRefOid,mergeStateStatus,url,statusCheckRollup"],
+             "state,baseRefName,headRefName,headRefOid,mergeStateStatus,url,statusCheckRollup,"
+             "isCrossRepository"],
             capture_output=True, text=True, timeout=context.timeout, check=False,
             env=gh_lookup_env())
     except subprocess.TimeoutExpired:
@@ -6738,7 +6744,10 @@ def validate_release_merge(
     status = look_problem(context, number, pr_facts, head_commit, subject)
     if status is not None:
         return status
-    status = land_problem(context, number, pr_facts, head, head_commit)
+    cross_repository = pr_facts.get("isCrossRepository")
+    if not isinstance(cross_repository, bool):
+        return block("land check failed: cannot read whether the PR head is in this repository")
+    status = land_problem(context, number, pr_facts, base if cross_repository else head, head_commit)
     if status is not None:
         return status
     return jq_status(

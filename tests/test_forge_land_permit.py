@@ -63,14 +63,13 @@ class LandPermitTest(base.Base):
         self.lock(base.A)
         self.lease(11, 0, 0, base.A)
         self.forge_time(land_lock.LEASE_LAPSE + 1)
-        real = land_lock.read_leases
+        real = land_lock.forge_now
 
-        def moved(slug, branch):
-            found = real(slug, branch)
+        def moved():
+            now = real()
             self.world.set_ref(REF, base.B)
-            self.world.set_ref(waiter(11, 0, 0, base.A).ref, None)
-            return found
-        with mock.patch.object(land_lock, "read_leases", moved):
+            return now
+        with mock.patch.object(land_lock, "forge_now", moved):
             code, out = base.run(*PERMIT, "--sha", base.A, "--pinned")
         self.assertEqual((code, out["verdict"], out["lock_sha"]), (3, "refuse", base.A))
         self.assertEqual(out["reason"], f"the land lock {REF} moved from {base.A[:7]} to {base.B[:7]} "
@@ -179,6 +178,18 @@ class LandPermitTest(base.Base):
         code, out = base.run(*PERMIT, "--sha", base.A, "--pinned")
         self.assertEqual((code, out["verdict"]), (1, "error"))
         self.assertEqual(len(self.reads(LOCK_READ)), 1)
+
+    def test_a_branch_name_git_allows_is_judged_and_one_it_forbids_is_a_usage_error(self):
+        self.lock(None)
+        for branch in ("release+next", "rel@x,y=1", "a" * 100):
+            with self.subTest(branch):
+                code, out = base.run("land", "permit", "--repo", base.SLUG, "--branch", branch, "--pr", "11",
+                                     "--sha", base.A, "--pinned")
+                self.assertEqual((code, out["verdict"]), (0, "admit"))
+        for branch in ("-x", "a b", "a~b", "a:b", "a\\b", ""):
+            with self.subTest(branch):
+                code, out = base.run("land", "permit", "--repo", base.SLUG, "--branch", branch, "--pr", "11")
+                self.assertEqual((code, out["error"]), (2, "usage"))
 
     def test_permit_without_a_pull_request_is_a_usage_error(self):
         code, out = base.run("land", "permit", "--repo", base.SLUG, "--branch", base.BRANCH, "--sha", base.A)

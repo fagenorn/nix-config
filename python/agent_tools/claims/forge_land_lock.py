@@ -260,7 +260,8 @@ effective one at the lock whichever pull request owns it; a poll reads the lease
 read takes nothing over in it; its absence, its lapse and its bound leave
 the holder to D4 as before.
 
-D14, the merge permit. `permit --repo R --branch B --pr N [--sha HEAD] [--pinned]` answers whether
+D14, the merge permit. `permit --repo R --branch B --pr N [--sha HEAD] [--pinned]` (B is any name git
+allows for a branch, since it names a branch the project declares) answers whether
 a merge of pull request N at HEAD may go on; it writes nothing, is never retried, and prints the D7
 object with `verdict` `admit` (exit 0) or `refuse` (exit 3) and `lock_sha`, a refusal adding
 `reason`; a forge error is exit 1 and a usage error exit 2. It reads the lock; no lock is the

@@ -48,7 +48,7 @@ if (
     and argv[0:2] == ["pr", "view"]
     and argv[3] == "--repo"
     and argv[5] == "--json"
-    and argv[6] == "state,baseRefName,headRefName,headRefOid,mergeStateStatus,url,statusCheckRollup"
+    and argv[6] == "state,baseRefName,headRefName,headRefOid,mergeStateStatus,url,statusCheckRollup,isCrossRepository"
 ):
     stage, number, slug, branch = "pr", argv[2], argv[4], "main"
 elif (
@@ -149,7 +149,7 @@ if stage == "pr":
         '"mergeStateStatus":"CLEAN",'
         '"url":"https://github.com/' + slug + "/pull/" + number + '",'
         '"statusCheckRollup":[{"__typename":"CheckRun",'
-        '"status":"COMPLETED","conclusion":"SUCCESS"}]}'
+        '"status":"COMPLETED","conclusion":"SUCCESS"}],"isCrossRepository":false}'
     )
 elif stage == "body":
     default = '{"title": "", "body": "", "closingIssuesReferences": []}'
@@ -215,6 +215,9 @@ if mode == "slow":
     time.sleep(max(0.0, float(os.environ["FAKE_DERIVE_UNTIL"]) - time.time()))
 if mode == "garbage":
     print("{")
+    raise SystemExit(0)
+if mode == "badbytes":
+    sys.stdout.buffer.write(b'{"ignored": "\\xff"}')
     raise SystemExit(0)
 report = {"schema_version": 1, "repository": slug, "row": None, "refused": [], "cause": None}
 if mode == "unavailable":

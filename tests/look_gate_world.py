@@ -56,7 +56,7 @@ MARKED_BODY = ("## Acceptance criteria\n\n"
                "- [ ] [human] before merge: the page heading at 390 px — measured: the owner, on the console\n")
 UNMARKED_BODY = ("## Acceptance criteria\n\n"
                  "- [ ] [code] the footer reads well — measured: a test\n")
-PR_FIELDS = "state,baseRefName,headRefName,headRefOid,mergeStateStatus,url,statusCheckRollup"
+PR_FIELDS = "state,baseRefName,headRefName,headRefOid,mergeStateStatus,url,statusCheckRollup,isCrossRepository"
 SHA = "a" * 40
 PASS = {"verdict": "pass", "findings": []}
 PLAN = {"status": "planned", "plan_root": "/r/plan.md",
