@@ -3,9 +3,11 @@
 Run: just console-screenshots [out]   (Playwright and its Chromium come from nixpkgs)
 
 Contract:
-- `STATES` names the fifty-seven screens the sprint block, the finished list, the message life, the
+- `STATES` names the fifty-nine screens the sprint block, the finished list, the message life, the
   Spend page, the notices fold, the desk's spend figures and the controls must read well on (`tell-box-open` is
-  the sprint block with its Tell box opened; `owner-check` is the sprint block with a held
+  the sprint block with its Tell box opened; `sprint-fold-open` is the sprint block of `tell-box-open`
+  with its own fold and its End the sprint fold opened (`open_end_fold`); on a base console End the
+  sprint opens beside Tell the manager, the before picture; `owner-check` is the sprint block with a held
   issue's owner check beside it; `spend-page` is the `/spend` page over seeded transcripts: a
   running sprint's manager session, an outside-sprint session and one workflow run, with spend on
   at least four of the last seven days; `notices-fold` is `owner/web`'s open Notices fold
@@ -55,7 +57,7 @@ Contract:
   characters typed, so the count reads near the limit; `goal-over` is it with 2100 characters
   typed, so the count reads over the limit, Send is unavailable and the hint beside it says how much to cut (#1214);
   `inbox-card` is `owner/web`'s question card with
-  two options and an owner check beside it; `question-words` and `question-refused` are
+  two options and an owner check beside it, and `owner/api`'s question as the second row; `question-words` and `question-refused` are
   `owner/web`'s look-check question card (Approve, Approve with one fix, Ask for changes, the last
   two marked as needing words) with Ask for changes picked: `question-words` with the words
   `LOOK_WORDS` typed in the card's words box (`WORDS_CARD`: the picked option, the words, the one
@@ -227,8 +229,8 @@ Contract:
   (the box closed, the wrong text or project, or the field clipping the filled text); or when any shot has a visible
   project line whose Ask a question button sits on another row than its Give it a goal button (their vertical centres
   differ by more than 4 px, `ACTS_ROW`); or when any shot is not taken from the top of the page (`window.scrollY` is
-  not 0 right before its full-page capture); or when any shot has a rendered, visible button, input, textarea, select,
-  `btn-` link or `btn-` summary under 32 px tall (`SHORT_CONTROLS`, read after the state is drawn). When any shot
+  not 0 right before its full-page capture); or when any shot has a control under 32 px tall, under 24 by 24 px, or (card answer, Tell the manager) under 44 px
+  while `PHONE_MEDIA` matches (`console_screenshot_controls.control_report`). When any shot
   misses a `STYLE_CHECKS` row, the line names each miss: the row's computed style is read after the capture, with
   probes and steps as `StyleCheck` and `STYLE_STEPS` say (`look-card` is shot with its viewer closed, then opens its
   first picture, so the viewer rows read it open). The style reading and its steps run only when `style_applies()`
@@ -252,6 +254,7 @@ Contract:
   (the notice of a refused click whose card the forge's state removed); its two widths are
   served by two consoles, since the click cannot be repeated. On a page with no merge the opened step's `created` member is left out (a
   base console refuses it) and both shots wait only for the card, which is the before picture.
+- `live-several` reads issue titles from a stand-in tracker; a base console takes no `title_reader` and draws its stage phrase.
 - The before pictures are the base commit's service, view and page together: this module imports
   nothing from `agent_tools` that the base commit lacks, so running it with `PYTHONPATH` at an
   archive of the base commit's `python/` (`git archive <base> python`) serves the base page over the
@@ -288,12 +291,16 @@ from agent_tools.console.service import ConsoleService
 from agent_tools.console.sprints import TELL_MINUTE_TEXT, Question, SprintState, create_secret
 from agent_tools.system.forge_api import ForgeError
 
+from . import console_screenshot_stand_ins as stand_ins
 from . import console_screenshot_clock as shot_clock
 from .console_land_queue import land_queue_reader
+from .console_screenshot_controls import (ACTS_ROW, CONTROL_SELECTOR, SHORT_CONTROLS, SMALL_TARGETS,
+                                          control_report, open_end_fold)
 from .console_screenshot_permissions import HELD_PROMPTS, PERMISSION_MANAGER, hold_permission, keep_permission
+from .console_screenshot_stand_ins import UnixHTTPConnection as _UnixHTTPConnection, door_connection as _door_connection
 from .console_test_support import hook_body, write_registry
 
-STATES = ("live-several", "waiting-on-you", "stuck", "held-sprint", "tell-box-open",
+STATES = ("live-several", "waiting-on-you", "stuck", "held-sprint", "tell-box-open", "sprint-fold-open",
           "message-sent", "message-picked-up", "message-replied", "message-not-picked-up", "finished-list",
           "nothing-running", "waiting-its-turn", "manager-cannot-hear", "permission-stale", "permission-card",
           "permission-long", "waiting-until", "paused",
@@ -647,6 +654,7 @@ class Fixture:
     adopting: bool = False
     refusing: bool = False
     prompting: str = ""
+    titled: bool = False
 
 
 @dataclass(frozen=True)
@@ -1332,7 +1340,6 @@ STYLE_CHECKS += (
     _narrow("viewer-pair-direction", _LOOK, ".viewer-pair", "flex-direction", "equals", "column",
             "row"),
 )
-CONTROL_SELECTOR = 'button, input, textarea, select, a[class*="btn-"], summary[class*="btn-"]'
 KINDS = ("btn-primary", "btn-quiet", "btn-danger", "btn-option", "field-line", "field-area",
          "field-code")
 BUTTON_KINDS = KINDS[:4]
@@ -2080,6 +2087,7 @@ class Shot:
     tell: tuple[bool, str | None, str | None, bool] | None = None
     scroll_y: float = 0.0
     short: tuple[str, ...] = ()
+    small: tuple[str, ...] = ()
     ask: tuple[bool, str | None, str | None] | None = None
     goal: tuple[bool, str | None, str | None, bool | None] | None = None
     acts: tuple[str, ...] = ()
@@ -2136,10 +2144,13 @@ class _Seed:
     def sprint(self, project: str, title: str, *, started: float, report: float | None = None,
                landed: bool = False, asks: bool = False, close: float | None = None,
                stop: float | None = None, held: bool = False,
-               look: bool = False, report_extra: Mapping | None = None) -> tuple[str, str]:
+               look: bool = False, report_extra: Mapping | None = None,
+               issues: Sequence[Mapping] | None = None,
+               then: tuple[float, Sequence[Mapping]] | None = None) -> tuple[str, str]:
         """One approved sprint with a started manager; returns `(sprint_id, goal)`.
 
-        `report_extra` is merged into the `sprint.reported` row's `report`."""
+        `report_extra` is merged into the `sprint.reported` row's `report`; `issues` replaces its default issue
+        rows, and `then` is a second `sprint.reported` row, that many seconds ago, with those issue rows."""
         self.count += 1
         sid = f"{self.count:016x}"
         goal = f"{title}."
@@ -2154,15 +2165,18 @@ class _Seed:
             "risks": ["a partial write"], "asks": []}})
         approved = self.put(started - 60, "brief.approved", project, {**base, "version": 1})
         self.put(started - 70, "sprint.read", project, {"sprint_id": sid, "through": approved.seq})
-        issues = ([{"issue": 12, "stage": "landed"}, {"issue": 13, "stage": "landed"}] if landed
+        issues = issues or ([{"issue": 12, "stage": "landed"}, {"issue": 13, "stage": "landed"}] if landed
                   else [{"issue": 11, "stage": "held"}, {"issue": 12, "stage": "building"},
                         {"issue": 13, "stage": "queued"}] if held
                   else [{"issue": 12, "stage": "building"}, {"issue": 13, "stage": "queued"}])
         if report is not None:
-            self.put(report, "sprint.reported", project, {**base, "report": {
-                "status": "the first slice is in review", "phase": "running",
-                "milestone": MILESTONES[title], "tracker_url": TRACKER_URL, "issues": issues,
-                "inbox": [], "next": "merge the first slice", **(report_extra or {})}})
+            member = {"status": "the first slice is in review", "phase": "running",
+                      "milestone": MILESTONES[title], "tracker_url": TRACKER_URL, "issues": issues,
+                      "inbox": [], "next": "merge the first slice", **(report_extra or {})}
+            self.put(report, "sprint.reported", project, {**base, "report": member})
+            if then is not None:
+                self.put(then[0], "sprint.reported", project, {
+                    **base, "report": {**member, "issues": list(then[1])}})
         if asks:
             self.put(MINUTE * 4, "questions.asked", project, {**base, "blocker": False, "questions": [{
                 "question": "Which store should the checkpoint use?",
@@ -2428,11 +2442,17 @@ def _seed_state(seed: _Seed, state: str, web_root: str = "",
         _seed_adoption(seed, state, web_root)
         return ()
     if state == "live-several":
-        seed.sprint(api, "Keep the importer fast", started=60 * MINUTE, report=45 * MINUTE)
+        seed.sprint(api, "Keep the importer fast", started=60 * MINUTE, report=45 * MINUTE,
+                    issues=[{"issue": 31, "stage": "building"}, {"issue": 32, "stage": "queued"}])
         seed.sprint(api, "Retire the old exporter", started=5 * 60 * MINUTE,
                     report=3 * 60 * MINUTE, landed=True, close=2 * 60 * MINUTE)
-        seed.sprint(web, "Add resumable uploads", started=30 * MINUTE, report=6 * MINUTE, asks=True)
-        seed.sprint(web, "Fix the settings page", started=20 * MINUTE, report=2 * MINUTE)
+        seed.sprint(web, "Add resumable uploads", started=30 * MINUTE, report=6 * MINUTE,
+                    asks=True, issues=[{"issue": 41, "stage": "building"}, {"issue": 42, "stage": "queued"}])
+        settings = [{"issue": 21, "stage": "held"}, {"issue": 22, "stage": "landing"},
+                    {"issue": 23, "stage": "building"}, {"issue": 24, "stage": "queued"}]
+        seed.sprint(web, "Fix the settings page", started=20 * MINUTE, report=4 * MINUTE, issues=settings,
+                    then=(2 * MINUTE, [{**row, "stage": "landed"} if row["issue"] == 22 else row
+                                       for row in settings]))
     elif state == "waiting-on-you":
         seed.sprint(web, "Add resumable uploads", started=30 * MINUTE, report=6 * MINUTE, asks=True)
     elif state == "stuck":
@@ -2489,7 +2509,7 @@ def _seed_state(seed: _Seed, state: str, web_root: str = "",
             seed.account("colleague-1", 0.95, session=0.5, week_in=2 * 86400, session_in=3 * 3600)
     elif state == "waiting-its-turn":
         seed.sprint(web, "Add resumable uploads", started=60 * MINUTE, report=45 * MINUTE)
-    elif state in ("tell-box-open", "goal-open", "goal-near", "goal-over"):
+    elif state in ("tell-box-open", "sprint-fold-open", "goal-open", "goal-near", "goal-over"):
         seed.sprint(web, "Add resumable uploads", started=20 * MINUTE, report=2 * MINUTE)
     elif state.startswith("message-"):
         sid, goal = seed.sprint(web, "Add resumable uploads", started=20 * MINUTE,
@@ -2514,6 +2534,8 @@ def _seed_state(seed: _Seed, state: str, web_root: str = "",
     elif state == "inbox-card":
         seed.sprint(web, "Add resumable uploads", started=30 * MINUTE, report=6 * MINUTE, asks=True)
         seed.check(web, 11, 3 * MINUTE)
+        seed.sprint(api, "Keep the importer fast", started=60 * MINUTE, report=45 * MINUTE,
+                    asks=True)
     elif state in ("look-card", "look-moved", "look-failed"):
         sid, goal = seed.sprint(web, "Fix the settings page", started=30 * MINUTE, report=6 * MINUTE)
         seed.look(web, sid, goal, moved=state == "look-moved", failed=state == "look-failed")
@@ -2766,7 +2788,7 @@ def build_fixture(root: Path, state: str, now_s: float, *,
         accounts=accounts, config=config, state=state_dir, projects=projects,
         holding=(12,) if state == "waiting-its-turn" else (), deaf=state == "manager-cannot-hear",
         activating=ACTIVATION_PATHS.get(state, ()), registering=state in REGISTER_STATES,
-        adopting=state in ADOPTION_STATES, refusing=state == "adoption-failed")
+        adopting=state in ADOPTION_STATES, refusing=state == "adoption-failed", titled=state == "live-several")
     write_registry(fixture.registry, [
         {"project_id": name, "root": str(path)} for name, path in zip(PROJECTS, projects)])
     at = [_iso(now_s)]
@@ -2895,19 +2917,6 @@ def proposes(state: str) -> bool:
     return proposes_reconcile() if state.startswith("register-reconcile") else shows_facts()
 
 
-class _UnixHTTPConnection(http.client.HTTPConnection):
-    """An HTTP client of a guest door that is a Unix socket at `path`."""
-
-    def __init__(self, path: str, timeout: float = 5):
-        super().__init__("localhost", timeout=timeout)
-        self._path = path
-
-    def connect(self) -> None:
-        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self.sock.settimeout(self.timeout)
-        self.sock.connect(self._path)
-
-
 def guest_door_kwargs(constructor, folder: Path) -> dict:
     """The constructor arguments that open the guest door: the branch's socket, else the base's port."""
     if "guest_socket" in inspect.signature(constructor).parameters:
@@ -2918,12 +2927,6 @@ def guest_door_kwargs(constructor, folder: Path) -> dict:
 def guest_door(service) -> str | tuple[str, int]:
     """Where `service` listens for guests: its socket path, else (the base commit) its address."""
     return service.guest_socket if hasattr(service, "guest_socket") else service.guest_address
-
-
-def _door_connection(door: str | tuple[str, int], timeout: float) -> http.client.HTTPConnection:
-    if isinstance(door, str):
-        return _UnixHTTPConnection(door, timeout)
-    return http.client.HTTPConnection(*door, timeout=timeout)
 
 
 def _tailnet_kwargs(guest_dir: Path | None, readable: bool, service: list) -> dict:
@@ -2968,17 +2971,20 @@ def start_service(fixture: Fixture, now_s: float, launches: list | None = None, 
         profile_dirs=lambda: sorted((fixture.accounts / "profiles").glob("*")), token_path=fixture.token, sprint_secrets=fixture.secrets,
         session_poll_seconds=3600, nudger=lambda nudge: None, launcher=launcher,
         activity=lambda root: None,
-        slug_of=(lambda root: "owner/web") if fixture.holding else (lambda root: None),
+        slug_of=(lambda root: "owner/web") if fixture.holding or fixture.titled else (lambda root: None),
         branch_pattern_of=lambda repo: "issue-<num>-<slug>" if fixture.holding else None,
         dispatch=lambda job: job(),
         repo_of=lambda cwd: cwd, ping_log=lambda: None,
         **({} if guest_dir is None else guest_door_kwargs(ConsoleService, guest_dir)),
-        **_tailnet_kwargs(guest_dir, tailnet_readable, bound), **forge, **shot_clock.service_clocks(now_s))
+        **_tailnet_kwargs(guest_dir, tailnet_readable, bound), **(stand_ins.title_kwargs(ConsoleService) if fixture.titled else {}),
+        **forge, **shot_clock.service_clocks(now_s))
     bound.append(service)
     service.start()
     if guest_dir is not None and "status_reader" in inspect.signature(ConsoleService).parameters:
         service.poll_serve()
     service.poll_spend()
+    if fixture.titled:
+        stand_ins.poll_titles(service)
     if fixture.activating:
         service.poll_activation()
     if fixture.holding:
@@ -3203,17 +3209,6 @@ GOAL_READING = """(() => {
           field ? shown && field.scrollHeight <= field.clientHeight + 1 : null];
 })()"""
 
-ACTS_ROW = """Array.from(document.querySelectorAll('li[data-project]')).filter((line) => {
-  const give = line.querySelector('button.give-goal');
-  const ask = line.querySelector('button.ask-open');
-  if (!give || !ask || line.getClientRects().length === 0) return false;
-  const centre = (node) => {
-    const rect = node.getBoundingClientRect();
-    return rect.top + rect.height / 2;
-  };
-  return Math.abs(centre(give) - centre(ask)) > 4;
-}).map((line) => line.dataset.project)"""
-
 THREAD_READING = f"""(() => {{
   const fold = document.querySelector('details[data-key="questions:owner/web"]');
   const homes = Array.from(document.querySelectorAll(
@@ -3261,11 +3256,6 @@ JARGON_COUNT = r"""(() => {
 })()"""
 
 
-SHORT_CONTROLS = f"""Array.from(document.querySelectorAll({json.dumps(CONTROL_SELECTOR)})).filter(
-  (n) => n.getClientRects().length > 0 && getComputedStyle(n).visibility !== "hidden").map(
-  (n) => [n, n.getBoundingClientRect().height]).filter(([n, h]) => h < 32).map(
-  ([n, h]) => n.tagName.toLowerCase() + "." + (n.getAttribute("class") || "").split(/\\s+/)[0]
-    + " " + Math.round(h * 100) / 100 + "px")"""
 SCROLL_TOP = "window.scrollTo(0, 0)"
 SCROLL_Y = "window.scrollY"
 
@@ -3392,6 +3382,8 @@ def _shoot(browser, url: str, state: str, width: int, out: Path, *, question: st
             page.click("button.tell-open")
             page.wait_for_selector(".tell-hint")
             tell = tuple(page.evaluate(TELL_READING))
+        if state == "sprint-fold-open":
+            open_end_fold(page)
         paneled = (state in ("ask-box", "ask-goal", "questions-open", "question-read",
                              *DEEPER_STATES)
                    and page.query_selector(READING_PANEL) is not None)
@@ -3470,6 +3462,7 @@ def _shoot(browser, url: str, state: str, width: int, out: Path, *, question: st
         jargon = page.evaluate(JARGON_COUNT)
         scroll_y = page.evaluate(SCROLL_Y)
         short = tuple(page.evaluate(SHORT_CONTROLS))
+        small = tuple(page.evaluate(SMALL_TARGETS))
         acts = tuple(page.evaluate(ACTS_ROW))
         path = out / f"{state}-{width}.png"
         shot_clock.screenshot(page, path)
@@ -3507,7 +3500,7 @@ def _shoot(browser, url: str, state: str, width: int, out: Path, *, question: st
     return Shot(state, width, path, scroll_width, squeezed, jargon, tell, scroll_y=scroll_y,
                 short=short, ask=ask, goal=goal, acts=acts, thread=thread, reading=reading,
                 card=card, activation=activation, register=register, style=style, checked=checked, broke=broke,
-                deeper=deeper)
+                deeper=deeper, small=small)
 
 
 def sheet(browser, paths: Sequence[Path], out: Path) -> Path:
@@ -3668,16 +3661,15 @@ def main(argv: list[str] | None = None) -> int:
     for shot in scrolled:
         print(f"console-screenshots: {shot.path.name} is not taken from the top of the page "
               f"(scrolled {shot.scroll_y:g} px)")
-    short = [shot for shot in taken if shot.short]
-    for shot in short:
-        print(f"console-screenshots: {shot.path.name} has a control under 32 px "
-              f"({', '.join(shot.short)})")
+    controlled = control_report(taken)
+    for line in controlled:
+        print(line)
     broken = [shot for shot in taken if shot.style]
     for shot in broken:
         print(f"console-screenshots: {shot.path.name} breaks a page style "
               f"({'; '.join(shot.style)})")
     return 1 if (wide or squeezed or jargon or closed or unasked or unfilled or unthreaded or unread
-                 or undeep or unlined or proposals or uncarded or offrow or scrolled or short or broken) else 0
+                 or undeep or unlined or proposals or uncarded or offrow or scrolled or controlled or broken) else 0
 
 
 if __name__ == "__main__":

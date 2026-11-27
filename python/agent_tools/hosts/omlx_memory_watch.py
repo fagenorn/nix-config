@@ -1,9 +1,9 @@
 """`omlx-memory-watch`: the eleven-m5 memory watcher, one sample per run.
 
 `omlx-memory-watch sample --state-dir DIR --floor-gib N --others-budget-gib N
---unowned-alert-gib N --omlx-jetsam-priority N --host NAME [--label org.nixos.omlx] [--health-url URL] [--vm-stat PATH]
-[--sysctl PATH] [--launchctl PATH] [--ps PATH] [--footprint PATH] [--hdiutil PATH] [--slot-history FILE]
-[--colima-pid-file FILE] [--alert-settings FILE] [--alert-log FILE] [--telegram-api URL] [--census-record FILE]
+--unowned-alert-gib N --verify-alert-gib N --omlx-jetsam-priority N --host NAME [--label org.nixos.omlx]
+[--health-url URL] [--vm-stat PATH] [--sysctl PATH] [--launchctl PATH] [--ps PATH] [--footprint PATH]
+[--hdiutil PATH] [--slot-history FILE] [--colima-pid-file FILE] [--alert-settings FILE] [--alert-log FILE] [--telegram-api URL] [--census-record FILE]
 [--now ISO8601]` takes one reading of the host and
 records it. Used memory is (anonymous pages - purgeable pages + wired pages + compressor pages)
 x the page size of `vm_stat`; available is `hw.memsize` minus used. A model is loaded when the
@@ -24,14 +24,20 @@ gets one line per finished day: `day`, the peaks and minimum in GiB (null where 
 `others_budget_gib`, `over_budget`, `jetsam_exits`, `peak_ci_jobs`, `samples`,
 `loaded_samples`, `min_loaded_available_gib`, `floor_gib`, `omlx_jetsam_priority` and
 `declared_jetsam_priority`, then `peak_fseventsd_gib` and `fseventsd_restarts`, then for each of
-`sys_footprint`, `process_footprint`, `unowned`, `wired`, `anonymous` and `compressions` a
+`sys_footprint`, `process_footprint`, `unowned`, `wired`, `anonymous`, `compressions` and `verify` a
 `peak_<name>_gib` and a `peak_<name>_at` (the first sample, as ISO 8601, that held that peak; null
-where unmeasured), `peak_owners` (the day's five largest `{name, pid, gib, at}`), `census_samples`
-and `records_since`.
+where unmeasured; for `verify` the largest single verify-run tree and the run's own peak time, kept
+only on its local day; the first sample after midnight also folds a run whose peak was on the finished
+day into that day's line, where it counts as one of its `verify_runs`; a run read later whose peak
+was on another day is in its event and alert only and counts in no `verify_runs`), `peak_owners` (the day's five
+largest `{name, pid, gib, at}`), `census_samples`, `records_since` and `verify_runs` (the verify runs
+read that day).
 
 Each successful sample also appends one line to `DIR/samples/<day>.jsonl` (directory 0700, file 0600):
 `at`, `used_bytes`, `available_bytes`, `loaded`, `omlx_bytes`, `ci_jobs`, `wired_bytes`,
-`anonymous_bytes`, `compressions_bytes` (null when `vm_stat` prints no `Compressions` line), then
+`anonymous_bytes`, `compressions_bytes` (null when `vm_stat` prints no `Compressions` line), `compressor_bytes`,
+`floor_kills` (the floor record's `kills`, null when the record was not read, so a line holds proof its floor
+events were collected), then
 `sys_footprint_bytes`, `process_footprint_bytes`, `unowned_bytes`, `top_owners`, `census_at` and
 `census_seconds`, which are null without a fresh census, and last `events`, the list of changes since the previous
 sample (RAM disks from `hdiutil info -plist`, the Colima VM from the pid in `--colima-pid-file`, default
@@ -49,7 +55,10 @@ the census figures only from a fresh census), `peak_owners` (each `(name, pid)` 
 earliest on a tie, the five largest kept), `census_samples` (samples with a fresh census), all three
 reset each day, and `records_since`, the day of the first sample that kept them: it is set once and
 carried across days, so a day rolled over from a state without it reports null. `records_since_at`,
-that first sample's time, is kept with it for the post-deploy check. The state also keeps `last_sample`,
+that first sample's time, is kept with it for the post-deploy check. `verify_runs` (reset each day) counts
+the `verify_run` events read that day except a run whose peak is dated on another day (a run with no peak
+is counted in the day that reads it, as the line's description above says) and `verify_records_since` is the day of the first sample that kept them, set
+once and carried across days like `records_since`, so an upgrade dates them from its own day. The state also keeps `last_sample`,
 `{day, line}`, the last sample line: the state is replaced first and the line appended after, so a run
 stopped between the two leaves the line in the state, and the next run appends it if the file does not
 end with it before it reads anything else.
@@ -58,10 +67,24 @@ An alert is queued when the service's `runs` changed and its last exit reason is
 killer's (`jetsam`), and when available memory falls under the floor while a model is loaded
 (`low_memory`, once per episode). `unowned_memory` is queued once per episode when a fresh census's
 unowned memory is over `--unowned-alert-gib` (strictly); an unowned figure at or under the line closes
-the episode, and a sample without a fresh census changes nothing. The first sample only records a
-baseline for the other alerts. Each queued alert
+the episode, and a sample without a fresh census changes nothing. `verify_tree` is queued once per
+`verify_run` event whose `tree_peak_bytes` is an integer strictly over `--verify-alert-gib` (a finite
+number above 0): each history line is read once, so a run alerts once, whatever day its peak belongs
+to. It names the run's first three command words, with the value of a `NAME=value` word replaced by
+`<redacted>` and any word cut to 60 characters, and its repository cut to 100. The first sample only
+records a baseline for the other alerts. Each queued alert
 is delivered through `agent_tools.hosts.host_alerts`, in order, before the state is written;
-one that fails stays queued, is logged once and is retried by the next sample.
+one that fails stays queued, is logged once and is retried by the next sample. A missing settings file
+means alerts are not configured: the queue holds its alerts (`held`), the watch logs
+`host alerts are not configured` to stderr once a day and the sample exits 0; an unreadable, wrongly
+owned, too open or malformed file is still a refusal, on a sample with no alert too (exit 3). The settings are
+read once per sample, without blocking on a FIFO; each delivery's own outcome says whether the file was
+missing. Each queued alert carries `at`. Each sample drops a held alert older than 24 hours (or with no `at`)
+with one line in the alert log, and keeps the newest of each kind per day with its `count`, before and after
+delivery; the rules are in `agent_tools.hosts.omlx_alert_queue`. An alert that failed with settings present
+(a refusal, a Telegram outage) is neither bounded nor expired: it is retried until sent. A restart alert the
+reactive restart could not deliver for want of a settings file moves from its outbox to this queue, held.
+When settings exist, held alerts standing for more than one are replaced by one `alert_backlog` summary alert.
 
 `fseventsd --record FILE --limit-gib N [--min-restart-minutes 60] [--label com.apple.fseventsd]
 [--launchctl PATH] [--footprint PATH] [--kill PATH] [--now ISO8601]` runs as root: it reads the
@@ -109,8 +132,14 @@ queues `jetsam_priority_unset` once per episode. Each `floor_unmet_recent` entry
 `floor_unmet_seen` to `floor_unmets`, which a record without it counts as 0, so the first episode after
 a healthy sample alerts). A missing or non-JSON record queues nothing.
 
-Exit 0: recorded, every alert delivered or recorded. 3: recorded, at least one alert not sent
-(stderr `host alert not sent: <reason>`). 1: `vm_stat`, `sysctl`, `launchctl` or `ps` failed
+With `--restart-command` (and the four `--restart-*` numbers) `sample` also runs `omlx_reactive_restart.step`
+after `decide`: it restarts oMLX through that command once unowned plus compressor memory stays over the
+trigger while the server serves no request. Its state is `omlx-restart.json` and its records are
+`omlx-restarts.jsonl` in the state directory; the module docstring has the rules. Without the option
+nothing of it is read or written.
+
+Exit 0: recorded, every alert delivered, recorded or held for want of a settings file. 3: recorded, at least
+one alert refused (stderr `host alert not sent: <reason>`) or the restart state unreadable. 1: `vm_stat`, `sysctl`, `launchctl` or `ps` failed
 or printed nothing parseable (stderr names it; nothing is written). 2: usage. A failed
 `footprint` is not a failed reading.
 """
@@ -119,6 +148,7 @@ import argparse
 import copy
 import http.client
 import json
+import math
 import os
 import re
 import subprocess
@@ -128,10 +158,11 @@ import time
 import urllib.parse
 import urllib.request
 from datetime import date, datetime, timedelta
+from functools import partial
 from pathlib import Path
 
 from agent_tools.delivery import verify_history, verify_slot
-from agent_tools.hosts import host_alerts, omlx_memory_events
+from agent_tools.hosts import host_alerts, omlx_alert_queue, omlx_memory_events, omlx_reactive_restart
 
 GIB = 1024**3
 PROG = "omlx-memory-watch"
@@ -147,14 +178,16 @@ CENSUS_TIMEOUT = 50
 CENSUS_FRESH_SECONDS = 150
 SAMPLE_DAYS = 14
 SAMPLES_DIR = "samples"
-PEAK_FIGURES = ("sys_footprint", "process_footprint", "unowned", "wired", "anonymous", "compressions")
+PEAK_FIGURES = ("sys_footprint", "process_footprint", "unowned", "wired", "anonymous", "compressions", "verify")
 CENSUS_DEFAULTS = {
     "census_peaks": {}, "peak_owners": [], "census_samples": 0, "records_since": None, "records_since_at": None,
     "unowned_open": False, "last_sample": None,
 }
+VERIFY_DEFAULTS = {"verify_runs": 0, "verify_records_since": None}
 TOP_OWNERS = 5
 FLOOR_RECORD = "/var/db/memory-watch/floor.json"
 FLOOR_DEFAULTS = {"floor_kills_seen": None, "floor_unmet_seen": None, "priority_unset_open": False, "floor_log": []}
+ALERT_DEFAULTS = {"alerts_unconfigured_day": None}
 COLIMA_PID_FILE = ".colima/_lima/colima/vz.pid"
 PID_FILE_BYTES = 64
 STATE_NAME = "memory-watch.json"
@@ -171,6 +204,9 @@ VM_FIELDS = {
 LAUNCHCTL_FIELDS = {"runs": "runs", "pid": "pid", "jetsam priority": "jetsam_priority"}
 FOOTPRINT_LINE = re.compile(r"^\s*phys_footprint:\s*(\d+) B\s*$", re.MULTILINE)
 SEE = "See hosts/darwin/eleven-m5/README.md, Memory budget."
+ALERT_WORD = 60
+ALERT_REPOSITORY = 100
+ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
 
 class ReadingError(Exception):
@@ -277,8 +313,8 @@ def fresh_day(since: str, day: str) -> dict:
         "peak_omlx_bytes": None, "min_available_bytes": None, "samples": 0, "loaded_samples": 0,
         "min_loaded_available_bytes": None, "peak_ci_jobs": 0, "jetsam_exits": 0, "omlx_runs": None,
         "omlx_jetsam_priority": None, "low_memory_open": False, "pending": [],
-        **FSEVENTSD_DEFAULTS, **FLOOR_DEFAULTS, "floor_log": [], **copy.deepcopy(CENSUS_DEFAULTS),
-        **omlx_memory_events.EVENT_DEFAULTS,
+        **FSEVENTSD_DEFAULTS, **FLOOR_DEFAULTS, **ALERT_DEFAULTS, "floor_log": [], **copy.deepcopy(CENSUS_DEFAULTS),
+        **VERIFY_DEFAULTS, **omlx_memory_events.EVENT_DEFAULTS,
     }
 
 
@@ -321,6 +357,7 @@ def _day_line(state: dict, floor_bytes: int, others_budget_bytes: int, declared:
         ],
         "census_samples": state["census_samples"],
         "records_since": state["records_since"],
+        "verify_runs": state["verify_runs"],
     }
 
 
@@ -352,6 +389,69 @@ def _fold_peak(state: dict, name: str, value: int, at: str) -> None:
         state["census_peaks"][name] = {"bytes": value, "at": at}
 
 
+def alert_command(command: str) -> str:
+    """The first words of `command` for an alert: assignment values redacted, long words cut."""
+    words = []
+    for word in command.split()[:verify_history.COMMAND_WORDS]:
+        if ASSIGNMENT.match(word):
+            word = word.partition("=")[0] + "=<redacted>"
+        words.append(word if len(word) <= ALERT_WORD else word[:ALERT_WORD] + "…")
+    return " ".join(words) or "(no command)"
+
+
+def alert_repository(repository: str | None) -> str:
+    """The repository an alert names: the placeholder for none, a long name cut."""
+    if repository is None:
+        return verify_history.NO_REPOSITORY
+    return repository if len(repository) <= ALERT_REPOSITORY else repository[:ALERT_REPOSITORY] + "…"
+
+
+def _queue_verify_tree(state: dict, event: dict, peak: int, reading: dict, alert_bytes: int) -> None:
+    state["pending"].append({
+        "kind": "verify_tree", "logged": False,
+        "text": f"{reading['host']}: a verify run's process tree reached {peak / GIB:.1f} GiB, over the "
+                f"{alert_bytes / GIB:.1f} GiB alert line: {alert_command(event['command'])} in "
+                f"{alert_repository(event['repository'])}. {SEE}",
+    })
+
+
+def _local_day(at: str, now: datetime) -> str:
+    """The local day of the instant `at`: the host's zone with its own offset at `at`, else `now`'s zone."""
+    zone = None if now.astimezone().utcoffset() == now.utcoffset() else now.tzinfo
+    return datetime.fromisoformat(at).astimezone(zone).date().isoformat()
+
+
+def _amend_day_line(line: dict, peak: int, at: str) -> None:
+    """Count a run into the finished day's line and keep its peak there when it is the day's highest."""
+    line["verify_runs"] += 1
+    if line["peak_verify_gib"] is None or _gib(peak) > line["peak_verify_gib"]:
+        line["peak_verify_gib"], line["peak_verify_at"] = _gib(peak), at
+
+
+def _fold_verify(state: dict, events: list[dict], reading: dict, now: datetime, alert_bytes: int,
+                 line: dict | None) -> None:
+    """Alert on each tree over the line; count each `verify_run` and fold its peak into the day the peak is dated in.
+
+    That day is the state's, or the finished day's `line` when this sample rolled the day over. A run whose peak is
+    dated on any other day is in its event and alert only: counting it would give the day a run with no peak.
+    """
+    for event in events:
+        if event["kind"] != "verify_run":
+            continue
+        peak, at = event.get("tree_peak_bytes"), event.get("tree_peak_at")
+        if _is_int(peak) and peak > alert_bytes:
+            _queue_verify_tree(state, event, peak, reading, alert_bytes)
+        day = _local_day(at, now) if _is_int(peak) and isinstance(at, str) else None
+        if line is not None and day == line["day"]:
+            _amend_day_line(line, peak, at)
+            continue
+        if day is not None and day != state["day"]:
+            continue
+        state["verify_runs"] += 1
+        if day == state["day"]:
+            _fold_peak(state, "verify", peak, at)
+
+
 def _fold_owners(state: dict, owners, at: str) -> None:
     kept = {(owner["name"], owner["pid"]): owner for owner in state["peak_owners"]}
     for owner in owners if isinstance(owners, list) else []:
@@ -372,7 +472,8 @@ def _sample_line(reading: dict, now: datetime, census: dict | None, events: list
         "at": now.isoformat(), "used_bytes": reading["used_bytes"], "available_bytes": reading["available_bytes"],
         "loaded": reading["loaded"], "omlx_bytes": reading["omlx_bytes"], "ci_jobs": reading["ci_jobs"],
         "wired_bytes": reading["wired_bytes"], "anonymous_bytes": reading["anonymous_bytes"],
-        "compressions_bytes": reading["compressions_bytes"],
+        "compressions_bytes": reading["compressions_bytes"], "compressor_bytes": reading["compressor_bytes"],
+        "floor_kills": _int((reading["floor"] or {}).get("kills")),
         **{key: found.get(key) for key in keys},
         "census_at": found.get("at"), "census_seconds": found.get("seconds"), "events": events,
     }
@@ -516,14 +617,15 @@ def _fold_unowned(state: dict, census: dict | None, reading: dict, alert_bytes: 
 
 
 def decide(state, reading: dict, now: datetime, floor_bytes: int, others_budget_bytes: int,
-           unowned_alert_bytes: int):
+           unowned_alert_bytes: int, verify_alert_bytes: int):
     """Fold one reading into the state; answer the new state, the finished day's line or None, and the sample line."""
     day = now.date().isoformat()
     line = None
     if state is None:
         state = fresh_day(day, day)
     else:
-        state = {**FSEVENTSD_DEFAULTS, **FLOOR_DEFAULTS, **copy.deepcopy(CENSUS_DEFAULTS),
+        state = {**FSEVENTSD_DEFAULTS, **FLOOR_DEFAULTS, **ALERT_DEFAULTS, **copy.deepcopy(CENSUS_DEFAULTS),
+                 **VERIFY_DEFAULTS,
                  **omlx_memory_events.EVENT_DEFAULTS, **state,
                  "pending": [dict(entry) for entry in state["pending"]]}
         state["floor_log"] = list(state["floor_log"])
@@ -534,12 +636,14 @@ def decide(state, reading: dict, now: datetime, floor_bytes: int, others_budget_
                         "fseventsd_restarts_seen", "fseventsd_held_open", "fseventsd_failed_open",
                         "floor_kills_seen", "floor_unmet_seen", "priority_unset_open", "floor_log",
                         "records_since", "records_since_at", "unowned_open", "last_sample",
-                        *omlx_memory_events.EVENT_DEFAULTS):
+                        "verify_records_since", *omlx_memory_events.EVENT_DEFAULTS):
                 carried[key] = state[key]
             state = carried
     if state["records_since"] is None:
         state["records_since"] = day
         state["records_since_at"] = now.isoformat()
+    if state["verify_records_since"] is None:
+        state["verify_records_since"] = day
     used, available, loaded = reading["used_bytes"], reading["available_bytes"], reading["loaded"]
     omlx = reading["omlx_bytes"]
     footprint = "unknown" if omlx is None else f"{omlx / GIB:.1f}"
@@ -588,6 +692,7 @@ def decide(state, reading: dict, now: datetime, floor_bytes: int, others_budget_
         state["low_memory_open"] = False
     _fold_fseventsd(state, reading["fseventsd"], reading["host"])
     events = omlx_memory_events.fold_events(state, reading["observed"])
+    _fold_verify(state, events, reading, now, verify_alert_bytes, line)
     _fold_floor(state, reading["floor"], reading, events)
     _fold_unowned(state, census, reading, unowned_alert_bytes)
     return state, line, _sample_line(reading, now, census, events)
@@ -821,6 +926,7 @@ def take_reading(args, previous: dict | None = None) -> dict:
         "fseventsd": read_fseventsd_record(args.fseventsd_record), "floor": floor,
         "wired_bytes": vm["wired"] * page, "anonymous_bytes": vm["anonymous"] * page,
         "compressions_bytes": None if compressions is None else compressions * page,
+        "compressor_bytes": vm["compressor"] * page,
         "census": read_fseventsd_record(args.census_record),
         "observed": _observe(args, processes, (previous or {}).get("history_seen")),
     }
@@ -907,21 +1013,107 @@ def write_state(directory: Path, document: dict, line: dict | None, sample: dict
         _append_sample(directory, document["day"], sample)
 
 
-def deliver_pending(state: dict, args, now: datetime) -> bool:
-    kept, failed = [], False
+def _probe_settings(args) -> tuple[str | None, str | None]:
+    """One read of the settings file: (why it is missing, why it is refused); both None when it reads."""
+    try:
+        host_alerts.read_settings(args.alert_settings)
+    except host_alerts.SettingsMissing as error:
+        return str(error), None
+    except host_alerts.SettingsError as error:
+        return None, str(error)
+    return None, None
+
+
+def _bound_pending(state: dict, args, now: datetime) -> None:
+    """Stamp the alerts, drop expired held ones with one log line and keep the newest of a kind per day."""
     for entry in state["pending"]:
+        if "at" not in entry:
+            entry["at"] = now.isoformat()
+    state["pending"], expired = omlx_alert_queue.compact(state["pending"], now)
+    if expired:
+        host_alerts.record_note(
+            "memory_watch", omlx_alert_queue.expiry_line(expired), log=args.alert_log, now=now)
+
+
+def deliver_pending(state: dict, args, now: datetime) -> bool:
+    """Deliver the queue; True when the settings refuse. A missing settings file holds the alerts, logged once a day.
+
+    The settings are read once up front, for a sample with nothing to send, and each delivery's own outcome
+    says whether the file was missing, so a file that appears or changes mid-sample is classified as it was read.
+    """
+    _bound_pending(state, args, now)
+    missing, refusal = _probe_settings(args)
+    entries = state["pending"]
+    if missing is None and refusal is None:
+        entries = omlx_alert_queue.summarize(entries, args.host, now)
+    if entries:
+        missing = None
+    kept, failed = [], False
+    for entry in entries:
         outcome = host_alerts.deliver(
             entry["kind"], entry["text"], settings=args.alert_settings, log=args.alert_log,
             api=args.telegram_api or host_alerts.API, now=now, record_failure=not entry["logged"])
         if outcome.status == "failed":
+            if outcome.missing:
+                missing = outcome.error
+                kept.append({**entry, "logged": True, "held": True})
+                continue
             failed = True
             print(f"host alert not sent: {outcome.error}", file=sys.stderr)
             kept.append({**entry, "logged": True})
     state["pending"] = kept
+    _bound_pending(state, args, now)
+    if not entries and refusal is not None:
+        failed = True
+        print(f"host alert not sent: {refusal}", file=sys.stderr)
+    if missing is not None and state["alerts_unconfigured_day"] != state["day"]:
+        state["alerts_unconfigured_day"] = state["day"]
+        held = sum(1 for entry in state["pending"] if entry.get("held"))
+        print(f"host alerts are not configured ({missing}); {held} held", file=sys.stderr)
     return failed
 
 
+def _restart_limits(args) -> omlx_reactive_restart.Limits | None:
+    """The reactive restart's limits, None without `--restart-command`; a missing number is a usage error."""
+    if args.restart_command is None:
+        return None
+    numbers = (args.restart_trigger_gib, args.restart_samples, args.restart_room_gib, args.restart_min_minutes)
+    if any(number is None for number in numbers):
+        build_parser().error(
+            "--restart-command needs --restart-trigger-gib, --restart-samples, --restart-room-gib "
+            "and --restart-min-minutes")
+    return omlx_reactive_restart.Limits(
+        str(args.restart_command), args.restart_trigger_gib * GIB, args.restart_samples,
+        args.restart_room_gib * GIB, timedelta(minutes=args.restart_min_minutes))
+
+
+def _restart_step(
+    args, limits, directory: Path, reading: dict, now: datetime, started: float, persist, state: dict,
+) -> bool:
+    def send(kind: str, text: str, logged: bool) -> str:
+        outcome = host_alerts.deliver(
+            kind, text, settings=args.alert_settings, log=args.alert_log,
+            api=args.telegram_api or host_alerts.API, now=now, record_failure=not logged)
+        if outcome.status != "failed":
+            return outcome.status
+        if outcome.missing:
+            # No settings file: the watch's own queue holds the alert, so its bound and summary apply to it.
+            state["pending"].append(
+                {"kind": kind, "text": text, "logged": True, "held": True, "at": now.isoformat()})
+            return "held"
+        print(f"host alert not sent: {outcome.error}", file=sys.stderr)
+        return outcome.status
+
+    return omlx_reactive_restart.step(
+        directory, fresh_census(reading["census"], now), reading, now, limits,
+        elapsed=lambda: timedelta(seconds=time.monotonic() - started),
+        gate=partial(omlx_reactive_restart.run_gate, timeout=omlx_reactive_restart.GATE_TIMEOUT_SECONDS),
+        deliver=send, persist=persist)
+
+
 def sample(args) -> int:
+    started = time.monotonic()
+    limits = _restart_limits(args)
     now = args.now if args.now is not None else datetime.now().astimezone()
     directory = args.state_dir
     try:
@@ -935,14 +1127,37 @@ def sample(args) -> int:
     except OSError as error:
         print(f"{PROG}: the last sample line was not recovered ({type(error).__name__}: {error})", file=sys.stderr)
     state, line, record = decide(
-        previous, reading, now, args.floor_gib * GIB, args.others_budget_gib * GIB, args.unowned_alert_gib * GIB)
-    failed = deliver_pending(state, args, now)
+        previous, reading, now, args.floor_gib * GIB, args.others_budget_gib * GIB, args.unowned_alert_gib * GIB,
+        int(args.verify_alert_gib * GIB))
     for entry in state["floor_log"]:
         print(entry, end="", flush=True)
     state["floor_log"] = []
     state["last_sample"] = {"day": state["day"], "line": record}
-    write_state(directory, state, line, record)
+    saved = []
+
+    def persist() -> None:
+        # The restart step calls this once its attempt is saved, so the sample line it counts can be recovered.
+        saved.append(True)
+        write_state(directory, state, line, record)
+
+    restart_failed = limits is not None and _restart_step(
+        args, limits, directory, reading, now, started, persist, state)
+    failed = deliver_pending(state, args, now) or restart_failed
+    if saved:
+        write_state(directory, state, None)
+    else:
+        write_state(directory, state, line, record)
     return 3 if failed else 0
+
+
+def _alert_gib(text: str) -> float:
+    try:
+        value = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{text!r} is not a number") from None
+    if not math.isfinite(value) or value <= 0:
+        raise argparse.ArgumentTypeError(f"{text!r} is not a finite number above 0")
+    return value
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -953,6 +1168,7 @@ def build_parser() -> argparse.ArgumentParser:
     one.add_argument("--floor-gib", type=int, required=True)
     one.add_argument("--others-budget-gib", type=int, required=True)
     one.add_argument("--unowned-alert-gib", type=int, required=True)
+    one.add_argument("--verify-alert-gib", type=_alert_gib, required=True)
     one.add_argument("--omlx-jetsam-priority", type=int, required=True)
     one.add_argument("--host", required=True)
     one.add_argument("--label", default="org.nixos.omlx")
@@ -971,6 +1187,9 @@ def build_parser() -> argparse.ArgumentParser:
     one.add_argument("--fseventsd-record", type=Path, default=Path(FSEVENTSD_RECORD))
     one.add_argument("--floor-record", type=Path, default=Path(FLOOR_RECORD))
     one.add_argument("--census-record", type=Path, default=Path(CENSUS_RECORD))
+    one.add_argument("--restart-command", type=Path, default=None)
+    for name in ("trigger-gib", "samples", "room-gib", "min-minutes"):
+        one.add_argument(f"--restart-{name}", type=int, default=None)
     one.add_argument("--now", type=datetime.fromisoformat, default=None)
     trim = commands.add_parser("fseventsd", help="restart fseventsd above its limit and record its size")
     trim.add_argument("--record", type=Path, required=True)

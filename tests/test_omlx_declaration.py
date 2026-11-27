@@ -4,6 +4,9 @@ Reads the declaration through tests/host_readings.py, so it runs on any machine;
 must be `git add`-ed first.
 Run: just agent-workflow-tests
 """
+from pathlib import Path
+import subprocess
+import tempfile
 import unittest
 
 from . import host_readings
@@ -82,3 +85,46 @@ class OmlxDeclarationTest(unittest.TestCase):
             self.assertNotIn(forbidden, self.got["reload"])
         self.assertRegex(self.got["restart"], r"--reload-bin /nix/store/[0-9a-z]{32}-omlx-reload")
         self.assertIn("--restart-bin /nix/store/", self.got["restart"])
+
+    def test_the_reactive_branch_pipes_the_key_from_sops_and_takes_no_caller_arguments(self):
+        text = self.got["restart"]
+        start = text.index('if [ "$#" -eq 1 ] && [ "$1" = --reactive ]; then')
+        branch = text[start : text.index("\nfi\n", start)]
+        for needle in (
+            "-d --extract '[\"omlx_api_key\"]'",
+            "SOPS_AGE_KEY_FILE=/Users/",
+            "--status-url http://127.0.0.1:8000/api/status",
+            f"--pinned-model {JARBIRD}",
+            "--reactive",
+        ):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, branch)
+        self.assertLess(branch.index("sops"), branch.index("|"))
+        self.assertLess(branch.index("|"), branch.index("omlx-restart.py"))
+        self.assertNotIn('"$@"', branch)
+        self.assertNotIn("OMLX_API_KEY", text)
+        self.assertNotIn("export", text)
+        self.assertTrue(text.rstrip().splitlines()[-1].endswith('"$@"'))
+
+    def test_the_reactive_kill_keeps_pkills_no_match_status(self):
+        scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        root = Path(scratch.name)
+        stub = root / "pkill"
+        stub.write_text('#!/bin/sh\nexit "$(cat "$(dirname "$0")/rc")"\n')
+        stub.chmod(0o755)
+        text = self.got["killReactive"]
+        self.assertIn("/usr/bin/pkill", text)
+        script = root / "kill"
+        script.write_text(text.replace("/usr/bin/pkill", str(stub)))
+        for code in (0, 1, 2):
+            with self.subTest(code=code):
+                (root / "rc").write_text(str(code))
+                self.assertEqual(subprocess.run(["sh", str(script)]).returncode, code)
+        restart = self.got["restart"]
+        self.assertRegex(restart, r"--restart-bin /nix/store/[0-9a-z]{32}-omlx-kill-reactive")
+        reactive = restart[: restart.index("\nfi\n")]
+        self.assertNotRegex(reactive, r"-omlx-kill ")
+        exec_line = next(line for line in restart.splitlines() if "omlx-restart.py" in line and "exec" in line)
+        self.assertEqual(exec_line.count("-omlx-kill-reactive"), 0)
+        self.assertRegex(restart.split("\nfi\n", 1)[1], r"--restart-bin /nix/store/[0-9a-z]{32}-omlx-kill \\")

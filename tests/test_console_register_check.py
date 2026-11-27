@@ -182,7 +182,7 @@ class RealConsoleTest(Case):
 
         def fetch(url):
             holds = any(entry["project_id"] == self.PID for entry in
-                        register_check.service.read_fleet(agent_platform.registry_path()) or [])
+                        register.read_fleet(agent_platform.registry_path()) or [])
             if holds:
                 seen.append(True)
             answer = register_check.default_fetch(url)
@@ -380,7 +380,7 @@ class RestoreTest(Case):
             if box[0] is None:
                 return view(None)
             holds = any(entry["project_id"] == self.PID for entry in
-                        register_check.service.read_fleet(agent_platform.registry_path()) or [])
+                        register.read_fleet(agent_platform.registry_path()) or [])
             if final is not None and confirmed and not holds:
                 return 200, final
             registration = {
@@ -647,7 +647,7 @@ class StubTest(Case):
                 seeded([entry])
                 left = register_check._restore(tmp, fixture, pid, [entry] if kept else [])
                 self.assertEqual(left, [])
-                held = register_check.service.read_fleet(agent_platform.registry_path())
+                held = register.read_fleet(agent_platform.registry_path())
                 self.assertEqual(held, [entry] if kept else [])
 
     def test_a_quiet_group_without_its_projects_proves_nothing(self):

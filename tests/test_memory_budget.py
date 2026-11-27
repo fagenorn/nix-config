@@ -163,6 +163,32 @@ class WatcherDeclarationTest(unittest.TestCase):
         self.assertEqual(self.budget["unownedAlertGiB"], 5)
         self.assertIn(f"--unowned-alert-gib {self.budget['unownedAlertGiB']} ", self.watch["command"])
 
+    def test_the_watcher_passes_the_verify_alert_line(self):
+        self.assertEqual(self.budget["verifyAlertGiB"], 2.5)
+        self.assertLess(self.budget["verifyAlertGiB"], self.budget["verifyRunGiB"])
+        match = re.search(r"--verify-alert-gib (\S+) ", self.watch["command"])
+        self.assertIsNotNone(match)
+        self.assertEqual(float(match.group(1)), self.budget["verifyAlertGiB"])
+
+    def test_the_watcher_passes_the_reactive_restart_numbers(self):
+        budget, command = self.budget, self.watch["command"]
+        numbers = tuple(
+            budget[key] for key in
+            ("omlxRestartTriggerGiB", "omlxRestartSamples", "omlxRestartRoomGiB", "omlxRestartMinMinutes"))
+        self.assertEqual(numbers, (25, 3, 16, 30))
+        self.assertRegex(command, r"--restart-command /nix/store/[0-9a-z]{32}-omlx-restart/bin/omlx-restart ")
+        for needle in ("--restart-trigger-gib 25 ", "--restart-samples 3 ", "--restart-room-gib 16 ",
+                       "--restart-min-minutes 30 "):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, command)
+        for needle in ("--now", "--reactive"):
+            with self.subTest(needle=needle):
+                self.assertNotIn(needle, command)
+        lines = (HOST / "memory-budget.nix").read_text(encoding="utf-8").splitlines()
+        index = next(i for i, line in enumerate(lines) if line.strip().startswith("omlxRestartRoomGiB"))
+        self.assertIn("138 of 160", lines[index - 1])
+        self.assertIn("provisional", lines[index - 2] + lines[index - 1])
+
     def test_the_watcher_leaves_the_alert_settings_to_the_shared_module(self):
         for needle in ("--alert-settings", "--alert-log", "--telegram-api", "telegram.json", "sops", "--gh", "--repo"):
             with self.subTest(needle=needle):
@@ -274,7 +300,7 @@ class GuideTest(unittest.TestCase):
                 self.assertIn(needle, self.section)
 
     def test_the_guide_marks_the_unmeasured_allowances_provisional(self):
-        for key in ("verifyRunGiB", "ciJobGiB", "macosGiB"):
+        for key in ("verifyRunGiB", "ciJobGiB", "macosGiB", "verifyAlertGiB"):
             with self.subTest(key=key):
                 lines = [line for line in self.section.splitlines() if line.startswith(f"| `{key}` |")]
                 self.assertTrue(lines)
@@ -287,15 +313,19 @@ class GuideTest(unittest.TestCase):
     def test_the_guide_names_the_sample_records(self):
         for needle in (
             "~/.omlx/memory/samples/<day>.jsonl", "peak_unowned_gib", "peak_unowned_at", "census_samples",
-            "records_since", "14 days",
+            "records_since", "14 days", "peak_verify_gib", "peak_verify_at", "verify_runs",
         ):
             with self.subTest(needle=needle):
                 self.assertIn(needle, self.section)
 
+    def test_the_guide_says_a_run_peaked_on_another_day_is_not_counted(self):
+        self.assertIn("whose peak is dated on another day", self.section)
+        self.assertIn("counted in no `verify_runs`", self.section)
+
     def test_the_guide_names_the_recorded_events(self):
         for needle in (
             "ram_disk_attached", "vm_started", "floor_kill", "verify_run", "verify_started", "ci_job_started",
-            "hdiutil info", "vz.pid", "between two samples",
+            "hdiutil info", "vz.pid", "between two samples", "tree_peak_bytes",
         ):
             with self.subTest(needle=needle):
                 self.assertIn(needle, self.section)
@@ -312,9 +342,33 @@ class GuideTest(unittest.TestCase):
             with self.subTest(needle=needle):
                 self.assertNotIn(needle, self.alerts)
 
-    def test_the_guide_lists_the_unowned_alert(self):
-        self.assertIn("- `unowned_memory`:", self.alerts)
-        self.assertIn("There are nine kinds", self.alerts)
+    def test_the_guide_lists_every_alert_kind(self):
+        kinds = re.findall(r"^- `([a-z_]+)`:", self.alerts, re.MULTILINE)
+        self.assertEqual(kinds, [
+            "jetsam", "low_memory", "fseventsd_restarted", "fseventsd_held", "fseventsd_restart_failed",
+            "memory_kill", "floor_unmet", "jetsam_priority_unset", "unowned_memory", "verify_tree",
+            "omlx_restarted"])
+
+    def test_the_guide_states_the_reactive_restart(self):
+        restart = self.between(self.section, "### Reactive restart", "\n### ")
+        self.assertTrue(restart, "the guide has no `### Reactive restart` subsection")
+        for needle in (
+            "omlx-restart --reactive", "/api/status", "active_requests", "waiting_requests",
+            "~/.omlx/memory/omlx-restart.json", "~/.omlx/memory/omlx-restarts.jsonl", "omlx_restart outcome=",
+            "--now", ".restart-needed",
+        ):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, restart)
+
+    def test_the_guide_tables_the_reactive_restart_numbers(self):
+        budget = self.got["budget"]
+        for key in ("omlxRestartTriggerGiB", "omlxRestartSamples", "omlxRestartRoomGiB", "omlxRestartMinMinutes"):
+            with self.subTest(key=key):
+                lines = [line for line in self.section.splitlines() if line.startswith(f"| `{key}` | {budget[key]} |")]
+                self.assertEqual(len(lines), 1)
+                if key == "omlxRestartRoomGiB":
+                    self.assertIn("provisional", lines[0])
+                    self.assertIn("138 of 160", lines[0])
 
     def test_the_guide_states_what_makes_fseventsd_grow(self):
         for needle in (

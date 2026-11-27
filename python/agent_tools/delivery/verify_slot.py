@@ -52,9 +52,10 @@ Repositories. `verify-slot run` admits at most a repository's declared number of
 once (`verify_repository_slots`, 1 for a repository the declaration does not name), since
 two suites of one project may share resources such as a single test database. The
 repository is the `origin` remote of the working directory, normalized to `owner/repo` and
-lowercased; a run outside a repository, or in one without `origin`, is its own group and is
-excluded by no other run. A holder takes an exclusive non-blocking `flock` on one of its
-repository's `repository_lock_paths`, never past the slot count (`GROUP_LOCK` names the first),
+lowercased (a remote it cannot normalize is kept whole, minus any `user:password@` after its scheme);
+a run outside a repository, or in one without `origin`, is its own group and is excluded by no other
+run. A holder takes an exclusive non-blocking `flock` on one of its repository's `repository_lock_paths`,
+never past the slot count (`GROUP_LOCK` names the first),
 in the slot directory only after it took its slot and passed the count recheck, and gives the
 slot back and waits while another holder has each. The lock is taken after the slot so a
 waiter holds neither and a live waiter still goes first (ADR-delivery-016 D6): ordinary
@@ -96,7 +97,11 @@ a run that took a slot, one that reached `--wait-limit` and one signalled while 
 that held no slot records `held_seconds: null`. The line's `place` is the place the run joined the
 queue at, the place it took back for a resumed request, or null when it never joined. Its `lane` is
 `long` or `short`, the lane the run queued in. Its `owner` is
-`CLAUDE_CODE_SESSION_ID` when set and non-empty, else null. A setup or usage error records nothing.
+`CLAUDE_CODE_SESSION_ID` when set and non-empty, else null. Its `tree_peak_bytes` and `tree_peak_at`
+are the largest footprint of the command's whole process tree and the time it was read, measured
+while the command ran by `agent_tools.delivery.verify_tree` (both null when nothing was read, as
+when the command never started or the host has no `footprint`); `VERIFY_SLOT_FOOTPRINT` names
+another footprint program beside `VERIFY_SLOT_DIR`, a test seam. A setup or usage error records nothing.
 A failed append prints `HISTORY_FAILED_LINE` once and leaves the exit code alone. `--report PATH`
 writes the run's history entry, the same JSON object as its `history.jsonl` line, to PATH. A caller
 reads it to learn the run's wait and hold, and a path that cannot be written is reported and changes nothing.
@@ -145,7 +150,8 @@ slot is freed.
 Signals. SIGTERM, SIGHUP and SIGINT are handled. While the command runs, the signal is
 forwarded to it and the exit code is `128 + signal` once it has ended (SIGTERM gives 143); a
 short command runs in its own process group and the signal goes to the whole group. A short
-command still running `bound_seconds` after it started has its group sent SIGTERM and, once
+command still running its bound after it started (its own `bound_seconds` when its entry in the
+declaration carries one, else the lane's) has its group sent SIGTERM and, once
 `SHORT_GRACE_SECONDS` have passed with a member left, SIGKILL; the slot is given back only
 after the group is gone, and a signal received meanwhile still gives `128 + signal`. The group
 is told before the bound line is written, and a stderr that cannot be written changes neither.
@@ -165,16 +171,18 @@ import json
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import re
 import signal
 import stat
 import subprocess
 import sys
 import time
 
-from agent_tools.delivery import host_admission, verify_history, verify_queue
+from agent_tools.delivery import host_admission, verify_history, verify_queue, verify_tree
 from agent_tools.project_contract.derived_values import normalize_remote_url
 
-NO_SLOT_LINE = "verify-slot: no verify slot came free within {limit}s; nothing ran"
+CREDENTIALS = re.compile(r"^([A-Za-z][A-Za-z0-9+.-]*://)[^/@]*@")
+NO_SLOT_LINE ="verify-slot: no verify slot came free within {limit}s; nothing ran"
 WAITING_LINE = "verify-slot: all {count} verify slots of this host are taken; waiting"
 WAITED_LINE = "verify-slot: waited {seconds:.1f}s for a verify slot"
 DEFERRING_LINE = "verify-slot: a live-fault verify run is waiting for a slot; this run waits behind it"
@@ -279,7 +287,7 @@ def repository_group(cwd: Path) -> str | None:
     url = result.stdout.strip()
     if result.returncode != 0 or not url:
         return None
-    return (normalize_remote_url(url) or url).lower()
+    return (normalize_remote_url(url) or CREDENTIALS.sub(r"\1", url)).lower()
 
 
 def _say(line: str) -> None:
@@ -294,6 +302,7 @@ class _Run:
         self.received: int | None = None
         self.child: subprocess.Popen | None = None
         self.grouped = False
+        self.tree: tuple[int | None, str | None] = (None, None)
 
     def handle(self, signum: int, _frame: object) -> None:
         self.received = signum
@@ -647,6 +656,8 @@ def _run_child(argv: list[str], run: _Run, bound: int | None = None) -> int:
     # A signal that arrived while the child was being created found no child to forward to.
     if run.received is not None:
         run.handle(run.received, None)
+    sampler = verify_tree.TreePeak(child.pid, verify_tree.footprint_path())
+    sampler.start()
     try:
         code = child.wait() if bound is None else _wait_bounded(child, bound)
         if bound is not None and (interactive or run.received is not None):
@@ -654,6 +665,7 @@ def _run_child(argv: list[str], run: _Run, bound: int | None = None) -> int:
             # interrupt goes to the child's foreground group alone, so the wrapper never learns of it.
             _reap_group(child)
     finally:
+        run.tree = sampler.stop()
         if interactive:
             _foreground(os.getpgrp())
     if run.received is not None:
@@ -738,7 +750,8 @@ def run_command(argv: list[str], wait_limit: int | None, live: bool = False,
             signal.signal(number, handler)
         if acquired:
             entry = verify_history.entry(group, argv, started, waited, held_seconds, code, joined,
-                                         owner=os.environ.get(OWNER_ENV) or None, lane=lane)
+                                         owner=os.environ.get(OWNER_ENV) or None, lane=lane,
+                                         tree_peak_bytes=run.tree[0], tree_peak_at=run.tree[1])
             _record(directory, entry)
             if report is not None:
                 _report(Path(report), entry)

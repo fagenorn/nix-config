@@ -10,7 +10,10 @@
     "slots": 1,
     "bound_seconds": 30,
     "commands": {
-      "fagenorn/nix-config": [["just", "lint"]]
+      "fagenorn/nix-config": [
+        ["just", "lint"],
+        {"argv": ["just", "conformance"], "bound_seconds": 90}
+      ]
     }
   },
   "routes": {

@@ -203,12 +203,14 @@ import json
 import os
 import re
 import subprocess
+import sys
 import threading
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import NamedTuple
 
 from agent_tools.console import contract_draft, event_log, folder_trust, manager, plan_questions
+from agent_tools.project_contract import agent_platform
 from agent_tools.system import siblings
 
 ENDED = event_log.REGISTRATION_ENDED
@@ -1022,3 +1024,32 @@ class Adopter:
 
 def adopter_for(platform: str) -> Adopter | None:
     return Adopter() if manager.supported(platform) else None
+
+
+def signature(path: Path) -> tuple[int, int, int] | None:
+    """What the registry file looks like now; None when it cannot be statted."""
+    try:
+        stat = os.stat(path)
+    except OSError:
+        return None
+    return stat.st_mtime_ns, stat.st_size, stat.st_ino
+
+
+def read_fleet(path: Path) -> list[dict] | None:
+    """The registered entries, or None when the registry is not a reading."""
+    try:
+        document = json.loads(Path(path).read_bytes().decode("utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as error:
+        return _unreadable(f"{type(error).__name__}: {error}")
+    violations = agent_platform.validate_registry(document)
+    if violations:
+        first = violations[0]
+        return _unreadable(f"{first['pointer']}: {first['message']}")
+    return list(document["projects"])
+
+
+def _unreadable(reason: str) -> None:
+    print(f"console: registry_unreadable {reason}", file=sys.stderr)
+    return None
