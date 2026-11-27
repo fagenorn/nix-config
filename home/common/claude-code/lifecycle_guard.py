@@ -80,12 +80,6 @@ heredoc body, a comment, `nohup.out` and a word handed to `xargs` or `timeout` a
 so does a slugged branch or worktree name such as `issue-7-refuse-nohup`. A commit message that names a word is
 refused; reword it or use `git commit -F`.
 
-A session whose environment holds a non-empty `CLAUDE_READ_ONLY_SHELL` is refused every command that is not one plain
-call of a program in `READ_ONLY_PROGRAMS` (`read_only_plain`). A plain call has no pipe, list, redirection,
-substitution, expansion, glob, backslash or wrapper, `git` takes a listed subcommand as its second word and no option
-naming or abbreviating `--output`, and `sed` runs only as `sed -n <line>[,<line>]p <file>...`. The refusal
-(`READ_ONLY_SHELL_REFUSAL`) names the Read and Grep tools.
-
 Transmitting git invocations
 ----------------------------
 
@@ -99,53 +93,73 @@ row-check child runs.
 
 What is refused:
 
-- A global option outside `GIT_GLOBAL_OPTIONS`, a closed table of each option and the number of words it takes (an
-  attached `=value` counts only for the one-word long options). `-c`, `--config-env`, `--exec-path=<dir>` and any
-  unknown option are refused for every subcommand, because a `-c` value such as `core.pager`, `core.fsmonitor` or
-  `core.sshCommand` runs a command from any of them.
-- A subcommand outside `GIT_LOCAL_SUBCOMMANDS`, a closed list of the subcommands that cannot transmit refs: an alias
-  (repository, global or `-c` config), an external `git-<name>` program, a transport (`send-pack`, `http-push`,
-  `subtree`) and the subcommands that run a caller-supplied command (`submodule`, `bisect`, `filter-branch`,
-  `difftool`, `mergetool`).
-- A `git-<name>` program in any spelling (`git-push`, `/usr/libexec/git-core/git-send-pack`, `git-lfs`), since one on
-  `PATH` is an alias by another spelling. An argument such as a branch or path named `git-<x>` is refused too, inside
-  an otherwise admitted lifecycle command as well, once its grammar check has passed; this workflow's branches start
-  with `issue-`.
-- A git run cut by an opening operator (`(`, `{`, or a backtick with an even number of backtick tokens before the git
-  word in its segment) before its subcommand is certain: no subcommand word remains, or the subcommand is the last
-  word and may be glued to the substitution (`` git add`echo -x` `` runs the alias `add-x`). `git $(printf p) origin
-  x` and `git -C $(pwd) status` are refused; `(git status)`, `` `git status` ``, `echo $(which git)` and `git log
+- A global option outside `GIT_GLOBAL_OPTIONS`, a closed table of each option
+  and the number of words it takes (an attached `=value` counts only for the
+  one-word long options). `-c`, `--config-env`, `--exec-path=<dir>` and any
+  unknown option are refused for every subcommand, because a `-c` value such as
+  `core.pager`, `core.fsmonitor` or `core.sshCommand` runs a command from any
+  of them.
+- A subcommand outside `GIT_LOCAL_SUBCOMMANDS`, a closed list of the
+  subcommands that cannot transmit refs: an alias (repository, global or `-c`
+  config), an external `git-<name>` program, a transport (`send-pack`,
+  `http-push`, `subtree`) and the subcommands that run a caller-supplied command
+  (`submodule`, `bisect`, `filter-branch`, `difftool`, `mergetool`).
+- A `git-<name>` program in any spelling (`git-push`,
+  `/usr/libexec/git-core/git-send-pack`, `git-lfs`), since one on `PATH` is an
+  alias by another spelling. An argument such as a branch or path named
+  `git-<x>` is refused too, inside an otherwise admitted lifecycle command as
+  well, once its grammar check has passed; this workflow's branches start with
+  `issue-`.
+- A git run cut by an opening operator (`(`, `{`, or a backtick with an even
+  number of backtick tokens before the git word in its segment) before its
+  subcommand is certain: no subcommand word remains, or the subcommand is the
+  last word and may be glued to the substitution (`` git add`echo -x` `` runs
+  the alias `add-x`). `git $(printf p) origin x` and `git -C $(pwd) status` are
+  refused; `(git status)`, `` `git status` ``, `echo $(which git)` and `git log
   $(printf HEAD) -1` pass.
-- A bare git word (no subcommand after its global options) whose subcommand the shell supplies from elsewhere: at an
-  argument position in a command where a pipe comes before it or a redirection (`<`, `<<`, `<<<`) appears anywhere,
-  whichever segment or grouping the pipe or redirection belongs to (`echo p origin t | xargs git`, `echo p | { true;
-  xargs git; }`, `{ xargs git; } <<< 'push …'`, `exec <f; xargs git`, a pipe followed by a newline, also inside
-  evaluator text), whether the git word is plain, the last word `"$(which git)"` or `${G:-git}` (the brace forms
-  `${G-git}` and `${G:=git}` too), and a git word that is the output of an unglued `$(…)` or backtick substitution
-  that words follow (`$(echo git) p origin t`, `xargs $(echo git) p`, a substitution that ends the segment before it
-  closes, and the quoted `"$(which git)" push …`). `which git`, `brew install git`, `echo $(which git)` and `xargs
-  git status` pass; so does `x="$(which git)" y`, whose output is assigned. `ps aux | grep git`, `echo $(which git)
-  status` and a `which git` that follows a pipe or shares a command with a redirection are refused; write `grep
+- A bare git word (no subcommand after its global options) whose subcommand the
+  shell supplies from elsewhere: at an argument position in a command where a
+  pipe comes before it or a redirection (`<`, `<<`, `<<<`) appears anywhere,
+  whichever segment or grouping the pipe or redirection belongs to (`echo p
+  origin t | xargs git`, `echo p | { true; xargs git; }`, `{ xargs git; } <<<
+  'push …'`, `exec <f; xargs git`, a pipe followed by a newline, also inside
+  evaluator text), whether the git word is plain, the last word `"$(which
+  git)"` or `${G:-git}` (the brace forms `${G-git}` and `${G:=git}` too), and a
+  git word that is the output of an unglued `$(…)` or backtick substitution that
+  words follow (`$(echo git) p origin t`, `xargs $(echo git) p`, a substitution
+  that ends the segment before it closes, and the quoted `"$(which git)" push
+  …`). `which git`, `brew install git`, `echo $(which git)` and `xargs git
+  status` pass; so does `x="$(which git)" y`, whose output is assigned.
+  `ps aux | grep git`, `echo $(which git) status` and a `which git` that follows
+  a pipe or shares a command with a redirection are refused; write `grep
   '[g]it'`.
-- A command option hidden from the option scan: the scan also reads a word that holds an expansion and does not start
-  with `-` (`"${X:---exec=sh p.sh}"`, a `-` after one of `:=+?-` starts a candidate), and the words that follow the
+- A command option hidden from the option scan: the scan also reads a word that
+  holds an expansion and does not start with `-` (`"${X:---exec=sh p.sh}"`, a
+  `-` after one of `:=+?-` starts a candidate), and the words that follow the
   operator which cut the run (`git rebase $(x) --exec …`).
-- `git config` naming `core.hooksPath` (issue 672 D8): any later word of the invocation, the words after an operator
-  in the same segment included, that equals `core.hookspath` or starts with `core.hookspath=`, compared lowercase, so
-  the get, set and unset spellings, `--global`, `--local`, `--file` and `git config set`/`unset` all refuse as `git
-  config naming core.hooksPath would change which hook judges a push; read it with git rev-parse --git-path hooks`.
-  Any other key passes, `git config --get core.hooksPathX` included. `--no-verify` and `-n` on `git push` stay refused
-  as an unsafe push form.
-- Clearing the agent session marker (issue 672 D3), in every repository: a segment refuses with `clearing or unsetting
-  CLAUDECODE would hide the agent session from the pre-push hook` when a non-operator token assigns `CLAUDECODE` in
-  any position (a prefix, a standalone assignment, an `export`/`declare`/`typeset`/`local`/`readonly` argument), when
-  a token is exactly `CLAUDECODE`, `-uCLAUDECODE` or `--unset=CLAUDECODE` (`unset [-v]`, `export -n`, `declare +x`,
-  `env -u`), when an `env` word has `-`, `-i`, `--ignore-environment` (or a prefix of it) or a short cluster holding
-  `i` among its options, when an `env` unset option names it in any spelling (`-u CLAUDECODE`, `-vuCLAUDECODE`,
-  `--unset CLAUDECODE`, an abbreviation such as `--unse=CLAUDECODE`), or when an `exec` word has a cluster holding
-  `c`; the same tests apply to evaluator text, so `sh -c 'unset CLAUDECODE; …'` and `sh -c 'env -i ./push.sh'`
-  refuse. A read (`$CLAUDECODE`) never refuses. A bare-word mention such as `printenv CLAUDECODE` refuses too; write
-  `echo $CLAUDECODE` instead.
+- `git config` naming `core.hooksPath` (issue 672 D8): any later word of the
+  invocation, the words after an operator in the same segment included, that
+  equals `core.hookspath` or starts with `core.hookspath=`, compared lowercase,
+  so the get, set and unset spellings, `--global`, `--local`, `--file` and `git
+  config set`/`unset` all refuse as `git config naming core.hooksPath would
+  change which hook judges a push; read it with git rev-parse --git-path
+  hooks`. Any other key passes, `git config --get core.hooksPathX` included.
+  `--no-verify` and `-n` on `git push` stay refused as an unsafe push form.
+- Clearing the agent session marker (issue 672 D3), in every repository: a
+  segment refuses with `clearing or unsetting CLAUDECODE would hide the agent
+  session from the pre-push hook` when a non-operator token assigns
+  `CLAUDECODE` in any position (a prefix, a standalone assignment, an
+  `export`/`declare`/`typeset`/`local`/`readonly` argument), when a token is
+  exactly `CLAUDECODE`, `-uCLAUDECODE` or `--unset=CLAUDECODE` (`unset [-v]`,
+  `export -n`, `declare +x`, `env -u`), when an `env` word has `-`, `-i`,
+  `--ignore-environment` (or a prefix of it) or a short cluster holding `i`
+  among its options, when an `env` unset option names it in any spelling (`-u
+  CLAUDECODE`, `-vuCLAUDECODE`, `--unset CLAUDECODE`, an abbreviation such as
+  `--unse=CLAUDECODE`), or when an `exec` word has a cluster holding `c`; the
+  same tests apply to evaluator text, so `sh -c 'unset CLAUDECODE; …'` and `sh
+  -c 'env -i ./push.sh'` refuse. A read (`$CLAUDECODE`) never refuses. A
+  bare-word mention such as `printenv CLAUDECODE` refuses too; write `echo
+  $CLAUDECODE` instead.
 
 The same rule judges a git word at a command position, at an argument position and in raw text. At an argument
 position it is `git_argument_problem`, whatever runs the word (`xargs git p`, `timeout 5 git p`, `find -exec git p`);
@@ -652,16 +666,19 @@ shell other than the one the probe starts is not seen.
 Key files and MCP tools
 -----------------------
 
-The guard also serves the PreToolUse matchers `Edit|Write|MultiEdit|NotebookEdit` and `^mcp__` (issue 1150). A file
-tool names its file in `tool_input.file_path` (`tool_input.notebook_path` for NotebookEdit), a non-empty string, else
-the call is refused as invalid hook input. An MCP call's input is not read. The base and the detaching checks of the
-Bash path do not run for these tools.
+The guard also serves the PreToolUse matchers `Edit|Write|MultiEdit|NotebookEdit`
+and `^mcp__` (issue 1150). A file tool names its file in `tool_input.file_path`
+(`tool_input.notebook_path` for NotebookEdit), a non-empty string, else the call is
+refused as invalid hook input. An MCP call's input is not read. The base and the
+detaching checks of the Bash path do not run for these tools.
 
-An MCP call is refused by exact tool name, in any cwd and with none, when a project's `production.mcp_tools` lists it:
-the first declaring project by sorted slug names the refusal, and no child process runs. The sentence is
+An MCP call is refused by exact tool name, in any cwd and with none, when a
+project's `production.mcp_tools` lists it: the first declaring project by sorted
+slug names the refusal, and no child process runs. The sentence is
 
-    `<tool>` changes the production of <slug> (production MCP tool), so it runs only through the release profile
-    <release_profile> with release transaction preview and release transaction run.
+    `<tool>` changes the production of <slug> (production MCP tool), so it runs
+    only through the release profile <release_profile> with release transaction
+    preview and release transaction run.
 
 A write's path is resolved against `cwd` (a relative path with no absolute `cwd` is not judged). Three spellings are
 checked, each in the file system's own case: the path as named with `..` collapsed, the path with its directories
@@ -674,11 +691,12 @@ only after a glob matches a component suffix of a spelling, and the base policy 
 starts no child process and a bad base policy refuses only a key-file candidate. A repository lookup that fails (times
 out or cannot start) for a candidate refuses; a compiled policy that does not load refuses nothing. The sentence is
 
-    `<relative>` is a key file of <slug> (key file glob <glob>), so it changes only through the release profile
-    <release_profile> with release transaction preview and release transaction run.
+    `<relative>` is a key file of <slug> (key file glob <glob>), so it changes only
+    through the release profile <release_profile> with release transaction preview
+    and release transaction run.
 
-Known limits: a key file written by a Bash command, a hard link to a key file under another name, and an MCP tool
-reached under another name are not seen.
+Known limits: a key file written by a Bash command, a hard link to a key file under
+another name, and an MCP tool reached under another name are not seen.
 
 Guard policy
 ------------
@@ -700,17 +718,22 @@ documents the script, the compiler and the activation step that writes the compi
 files, so neither file is a valid instance of the other, and each member has one trust rule:
 
     authorized_owners          base policy      Store value only.
-    integration_bases          base policy      Store value only; the compiled policy never removes or
-                                                changes a literal row.
-    git_bin, gh_bin, jq_bin    base policy      Store value only; the only programs the guard runs
-                                                besides the row check.
-    derived_repositories       compiled policy  A candidate row per slug, used only after the row check
+    integration_bases          base policy      Store value only; the compiled
+                                                policy never removes or changes a
+                                                literal row.
+    git_bin, gh_bin, jq_bin    base policy      Store value only; the only
+                                                programs the guard runs besides
+                                                the row check.
+    derived_repositories       compiled policy  A candidate row per slug, used
+                                                only after the row check
                                                 confirms it in this invocation.
-    production                 compiled policy  A row's declared production rules (commands, key_files,
-                                                mcp_tools), read unconfirmed: they only refuse (issues
-                                                1149, 1150).
-    derivation                 compiled policy  Recorded for the reader; null or an object; the guard does
-                                                not interpret it.
+    production                 compiled policy  A row's declared production rules
+                                                (commands, key_files, mcp_tools),
+                                                read unconfirmed: they only
+                                                refuse (issues 1149, 1150).
+    derivation                 compiled policy  Recorded for the reader; null or
+                                                an object; the guard does not
+                                                interpret it.
 
 The guard loads the base policy on every call, after the detaching-word check. It reads the compiled policy on every
 call that passes the detaching check and the base-policy load, for the production rules (issue 1149 D4), and runs the
@@ -805,6 +828,19 @@ as `literal_conflict`: the project gets no row and the literal row stays, and ea
 compiled policy cannot subtract from the base, so a repository can carry both only when the compiled policy was edited
 or a literal row was added after the last compile, and the guard refuses it at step 1 above (issue 377 D5). What the
 guard authorizes is the base `authorized_owners` and `integration_bases` plus the derived rows the row check confirms.
+
+Tests
+-----
+
+`tests/test_claude_permission_guard.py` takes the built settings through `CLAUDE_SETTINGS_PATH` and the built base
+policy through `CLAUDE_GUARD_BASE_POLICY_PATH`, runs under `python3 -m unittest` with `python/` on `PYTHONPATH`, and
+passes a fixture compiled policy and a stub row check on every invocation, so it never reads this host's compiled
+policy or fleet registry, and a look check fixture that runs `look-approval judge` from source as `--look-bin`. Three
+tests, `test_a_compiled_policy_round_trips_through_the_guard`,
+`test_a_compiled_policy_loads_whatever_branch_names_the_fleet_carries` and
+`test_an_arcwave_shaped_project_is_judged_by_its_compiled_row`, run `guard-policy derive` from source as the row check
+over a fixture fleet, and `test_the_row_check_never_sees_a_hostile_shell_environment` runs the built
+`claude-guard-row-check` with `HOME` at an empty fixture fleet.
 """
 
 import argparse
@@ -971,15 +1007,6 @@ DETACHING_DEFAULT_PATTERN = re.compile(
 # quote (`no$''hup`), then every backslash, quote, brace and comma, which
 # rebuilds `no''hup`, `no\hup` and `no{,}hup`.
 DETACHING_DELETED = re.compile(r"\$(?=['\"])|[\\'\"{},]")
-# A read-only shell session runs one plain call of a listed program: only the hook sees the whole command.
-READ_ONLY_SHELL_ENV = "CLAUDE_READ_ONLY_SHELL"
-READ_ONLY_PROGRAMS = ("git log", "git show", "git diff", "git ls-tree", "git ls-files", "git status",
-                      "git rev-parse", "git merge-base", "grep", "ls", "wc", "cat", "head", "tail", "sed -n")
-READ_ONLY_SHELL_REFUSAL = (
-    "Refused because a read-only session allows only one plain command per Bash call: split a pipeline or "
-    f"command list into separate calls, each one of {', '.join(READ_ONLY_PROGRAMS[:-1])} or "
-    f"{READ_ONLY_PROGRAMS[-1]} with no `|`, `;`, `&&`, redirection, expansion, glob, backslash or git "
-    "`--output`, or use the Read and Grep tools to read and search files.")
 CD_PRELUDE_PROBLEM = (
     "the directory the verb runs in cannot be resolved: a directory change is "
     "accepted only as one leading cd <absolute directory> && before a single "
@@ -993,8 +1020,6 @@ CD_PRELUDE_PROBLEM = (
 # history expansion).
 PLAIN_WORD = re.compile(r"[A-Za-z0-9_./:@%+=,-]+")
 DOUBLE_QUOTE_ACTIVE = frozenset('"$`\\!')
-READ_ONLY_PIECE = re.compile(
-    f"({PLAIN_WORD.pattern})|'([^']*)'|\"([^{re.escape(''.join(sorted(DOUBLE_QUOTE_ACTIVE)))}]*)\"")
 LIFECYCLE_VERBS = (
     ("git", "push"), ("git", "branch", "-d"), ("gh", "pr", "create"),
     ("gh", "pr", "merge"), ("gh", "release", "create"),
@@ -2996,28 +3021,6 @@ def detaching_word(command):
         if word is not None:
             return None if detaching_mention_allowed(command) else word
     return None
-
-
-def read_only_plain(command):
-    """True only for one plain call of a listed read program, read as the module docstring says."""
-    words, end = [], 0
-    for piece in READ_ONLY_PIECE.finditer(command):
-        gap = command[end:piece.start()]
-        if gap.strip(" \t") or (not words or gap) and command[piece.start()] == "=":
-            return False
-        text = "".join(part or "" for part in piece.groups())
-        words[-1:] = [words[-1] + text] if words and not gap else [*words[-1:], text]
-        end = piece.end()
-    if re.search(r"[\\\x00-\x08\x0a-\x1f]", command) or command[end:].strip(" \t"):
-        return False
-    words = words or [""]
-    if words[0] == "sed":
-        return (len(words) >= 4 and words[1] == "-n" and re.fullmatch(r"(?:\d+|\$)(?:,(?:\d+|\$))?p", words[2])
-                is not None and not any(word.startswith("-") for word in words[3:]))
-    git = words[0] == "git"
-    names = [word.split("=", 1)[0].lower() for word in words[2:]] if git else []
-    return (" ".join(words[:2]) if git else words[0]) in READ_ONLY_PROGRAMS and not any(
-        name.startswith("--output") or len(name) >= 3 and "--output".startswith(name) for name in names)
 
 
 def lifecycle_words(command):
@@ -6827,12 +6830,9 @@ def main():
     if not isinstance(command, str):
         return block("invalid hook input: expected tool_input.command to be a string")
 
-    limited = os.environ.get(READ_ONLY_SHELL_ENV)
     word = detaching_word(command)
     if word is not None:
-        return block(READ_ONLY_SHELL_REFUSAL if limited else f"detaching command `{word}` refused: {DETACHING_ROUTES}")
-    if limited and not read_only_plain(command):
-        return block(READ_ONLY_SHELL_REFUSAL)
+        return block(f"detaching command `{word}` refused: {DETACHING_ROUTES}")
 
     base, reason = load_base_policy(args.base_policy)
     if base is None:

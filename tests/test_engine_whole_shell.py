@@ -20,6 +20,7 @@ from unittest import mock
 
 from agent_tools.delivery import engine_guard, engine_session
 from tests.engine_fixture import AdoptedFixtures
+from tests.engine_guards import real_guard
 from tests.engine_permission_model import client_admits
 from tests.engine_procedure_copies import PROCEDURES
 from tests.engine_step_coverage import StepCoverage
@@ -391,6 +392,37 @@ class WholeShellDeliverTest(Scenario):
 
         self.assertEqual(done.returncode, 2, done.stdout + done.stderr)
         self.assertEqual(run.launches(), [])
+
+
+class RealGuardTest(unittest.TestCase):
+    def test_the_lifecycle_guard_judges_a_read_pipeline_alike_in_every_session(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            wrapper = real_guard(Path(tmp) / "guard")
+            fixture = ROOT / "tests/fixtures/engine-session/result-denied-1740.json"
+            recorded = json.loads(fixture.read_text(encoding="utf-8"))[
+                "permission_denials"][0]["tool_input"]["command"]
+            absent = {k: v for k, v in os.environ.items() if k != "CLAUDE_READ_ONLY_SHELL"}
+            environments = {"absent": absent, "set": {**absent, "CLAUDE_READ_ONLY_SHELL": "1"}}
+            commands = ("git log --oneline -3 | head", recorded, "nohup git log")
+            seen: dict[str, dict[str, tuple[int, str]]] = {}
+            for name, env in environments.items():
+                for command in commands:
+                    with self.subTest(environment=name, command=command):
+                        done = subprocess.run(
+                            [str(wrapper)],
+                            input=json.dumps({"tool_name": "Bash", "tool_input": {"command": command}}),
+                            env=env, cwd=tmp, capture_output=True, text=True, timeout=60,
+                            check=False)
+                        seen.setdefault(name, {})[command] = (done.returncode, done.stderr)
+                        if command == commands[2]:
+                            self.assertEqual(done.returncode, 2, done.stderr)
+                            self.assertIn("detaching command `nohup` refused", done.stderr)
+                            self.assertIn("background mode", done.stderr)
+                        else:
+                            self.assertEqual(done.returncode, 0, done.stderr)
+            for command in commands:
+                with self.subTest(command=command):
+                    self.assertEqual(seen["absent"].get(command), seen["set"].get(command))
 
 
 if __name__ == "__main__":
