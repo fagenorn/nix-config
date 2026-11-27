@@ -116,3 +116,37 @@ class RecordNeverRiseTest(ReportAssertions, unittest.TestCase):
             facts = self.passed_facts(root)
             self.assertEqual([facts["added_record_count"], facts["added_records"]],
                              [9, paths[:8]])
+
+    ADDED_LINE = "added record "
+
+    def added_lines(self, root: Path) -> list[str]:
+        """The records the run's stderr names, one `ADDED_LINE` line each."""
+        code, _, err = run("run", "--purpose", "ci", "--repo-root", str(root))
+        self.assertIn(code, (0, 1), err)
+        return [line[len(self.ADDED_LINE):] for line in err.splitlines()
+                if line.startswith(self.ADDED_LINE)]
+
+    def test_a_branch_adding_nine_records_names_every_one_in_the_ci_output(self):
+        with fixture() as tmp:
+            root, _ = self.record_root(tmp)
+            paths = [f"docs/areas/demo/adr/00{n}-r{n}.md" for n in range(1, 10)]
+            for n, path in enumerate(paths, 1):
+                self.record(root, path, n, f"Paragraph {n}.\n")
+            self.assertEqual(self.added_lines(root), paths)
+
+    def test_two_records_sharing_their_first_200_characters_are_both_named(self):
+        stem = "docs/areas/demo/adr/001-" + "a" * 200
+        paths = [f"{stem}-{tail}.md" for tail in ("one", "two")]
+        with fixture() as tmp:
+            root, _ = self.record_root(tmp)
+            for path in paths:
+                self.record(root, path, 1, "One paragraph.\n")
+            self.assertEqual(paths[0][:200], paths[1][:200])
+            self.assertEqual(self.added_lines(root), paths)
+
+    def test_a_branch_adding_no_record_names_none(self):
+        with fixture() as tmp:
+            root, _ = self.record_root(tmp)
+            write_file(root, "notes/plain.txt")
+            commit_all(root, "note")
+            self.assertEqual(self.added_lines(root), [])
