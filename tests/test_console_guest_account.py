@@ -1260,33 +1260,35 @@ class GuestAccountChangeRefusalTest(GuestAccountCase):
         self.assertEqual(self.changes(), before)
         self.assertEqual(self.post(REMOVE, fresh), (204, b""))
 
-    def test_a_directory_replaced_while_a_second_profile_drains_is_never_changed(self):
+    def test_a_profile_replaced_during_either_profiles_drain_is_never_changed(self):
         svc = self.begin()
-        first, second = self.shared_account()
-        body = self.change_body()
         for route in (REMOVE, SIGNOUT):
-            with self.subTest(route=route):
-                with svc._ingest:
-                    svc._probing.add(second)
-                answers = []
-                thread = threading.Thread(
-                    target=lambda: answers.append(self.post(route, body)), daemon=True)
-                thread.start()
-                try:
-                    until(self, lambda: second in svc._removing)
-                    self.replace_dir(first)
-                finally:
+            for draining, replaced in ((1, 0), (0, 1)):
+                with self.subTest(route=route, draining=draining, replaced=replaced):
+                    pair = self.shared_account()
+                    body = self.change_body()
+                    before = self.changes()
                     with svc._ingest:
-                        svc._probing.discard(second)
-                        svc._idle.notify_all()
-                    thread.join(10)
-                self.assertFalse(thread.is_alive())
-                self.assertEqual(answers[0], (409, guest.NOT_YOUR_ACCOUNT_TEXT.encode() + b"\n"))
-                self.assertEqual((self.signed_out, self.removed_calls), ([], []))
-                self.assertEqual(svc._removing, set())
-                self.assertTrue((self.profiles / first).is_dir())
-                self.assertTrue((self.profiles / second).is_dir())
-                return
+                        svc._probing.add(pair[draining])
+                    answers = []
+                    thread = threading.Thread(
+                        target=lambda: answers.append(self.post(route, body)), daemon=True)
+                    thread.start()
+                    try:
+                        until(self, lambda: pair[draining] in svc._removing)
+                        with svc._ingest:  # the worker holds it until it waits, so the drain has begun
+                            self.replace_dir(pair[replaced])
+                    finally:
+                        with svc._ingest:
+                            svc._probing.discard(pair[draining])
+                            svc._idle.notify_all()
+                        thread.join(10)
+                    self.assertFalse(thread.is_alive())
+                    self.assertEqual(
+                        answers[0], (409, guest.NOT_YOUR_ACCOUNT_TEXT.encode() + b"\n"))
+                    self.assertEqual((self.changes(), svc._removing), (before, set()))
+                    for name in pair:
+                        shutil.rmtree(self.profiles / name)
 
     def test_a_change_waiting_for_the_drain_meets_the_owners_replacement_and_leaves_it(self):
         svc = self.begin()

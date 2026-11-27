@@ -23,7 +23,7 @@ fold of its own, so `engine status` and this view agree. The rules the readings 
 - P2. A live engine ends any step past its bound, so a live engine is moving and no step bound is read.
 - P3. Waits are keyed by the ledger's `WAITS`; the `checks` and `lock` waits keep the sprint wording.
 - P4. The reading is the first that holds of: done, stopped, not running (no live engine), waiting, moving.
-- P5. Engine run states live in memory and are not logged; a restart reads each ledger once from its start.
+- P5. Engine run states live in memory and are not logged (but for the ending of P10); a restart reads each ledger once from its start.
 - P6. The newest root run of each (project, issue) is shown once it entered a step; a done run or one stopped
   with need `nothing` leaves the page a day after its last event.
 - P7. A fan-out reads `building task n of m` from the newest `call` event since the last step entered.
@@ -31,6 +31,10 @@ fold of its own, so `engine status` and this view agree. The rules the readings 
 - P9. A sprint reads `sprint_engine` of its issues: a run that reads moving or waiting moves it at once whatever its
   age, a run in any other reading moves nothing, a shown run carries its issue, and the sessions of every run of its
   issues are its engine sessions.
+- P10. A shown run that ended (read done, or stopped with need `nothing`) is logged once as `engine_run.ended`
+  (`ENGINE_RUN_ENDED`, project column the run's project, payload `{"run_id", "issue", "stage", "done"}`), so the digest
+  names the delivery and a restart, which folds the run ids of those rows (`ended_runs`), names it no second time;
+  a run already hidden a day after it ended is never logged.
 
 No line says a run is quiet or stuck: a live engine is moving, whatever the time since its last event.
 """
@@ -43,8 +47,11 @@ from typing import BinaryIO, Callable, Collection, Iterable, Mapping
 from agent_tools.canonical import parse_rfc3339_utc
 from agent_tools.console import spend as spend_module, sprints
 from agent_tools.console.deliveries import stage_words
+from agent_tools.console.event_log import Event
 from agent_tools.delivery import engine_ledger
 from agent_tools.delivery.engine_ledger import LedgerError, RunState
+
+ENGINE_RUN_ENDED = "engine_run.ended"
 
 READINGS = ("moving", "waiting", "stopped", "not_running", "done")
 WAIT_TEXT = {"usage-limit": "waiting out a usage limit",
@@ -122,6 +129,30 @@ def engine_entry(state: RunState, now_ms: int | None, spend: Mapping | None = No
             "need": state.stop["need"] if kind == "stopped" else None,  # type: ignore[index]
             "last_event_at": state.last_event,
             "spend": spend_module.run_figure(spend, state.run)}
+
+
+def ended_changes(states: Iterable[RunState], recorded: Collection[str],
+                  now_ms: int) -> list[tuple[str, str, dict]]:
+    """The `engine_run.ended` rows to append: one per shown run that ended (see P10) and is not in `recorded`."""
+    changes = []
+    for state in states:
+        entry = engine_entry(state, now_ms)
+        if entry is None or state.run in recorded or not _ended(state, entry["reading"]):
+            continue
+        changes.append((ENGINE_RUN_ENDED, state.project,
+                        {"run_id": state.run, "issue": state.issue, "stage": state.stage, "done": state.done}))
+    return changes
+
+
+def ended_runs(events: Iterable[Event], known: Collection[str] = frozenset()) -> frozenset[str]:
+    """The run ids the log holds an `engine_run.ended` row of, added to `known`."""
+    found = set(known)
+    for event in events:
+        if event.kind == ENGINE_RUN_ENDED and isinstance(event.payload, dict):
+            run = event.payload.get("run_id")
+            if isinstance(run, str):
+                found.add(run)
+    return frozenset(found)
 
 
 def project_lines(states: Iterable[RunState], now_ms: int | None,

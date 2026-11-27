@@ -128,3 +128,31 @@ class OmlxDeclarationTest(unittest.TestCase):
         exec_line = next(line for line in restart.splitlines() if "omlx-restart.py" in line and "exec" in line)
         self.assertEqual(exec_line.count("-omlx-kill-reactive"), 0)
         self.assertRegex(restart.split("\nfi\n", 1)[1], r"--restart-bin /nix/store/[0-9a-z]{32}-omlx-kill \\")
+
+    def test_the_kill_signals_the_uid_it_is_given_and_keeps_pkills_status(self):
+        scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        root = Path(scratch.name)
+        stub = root / "pkill"
+        stub.write_text('#!/bin/sh\nhere="$(dirname "$0")"\necho "$*" > "$here/args"\nexit "$(cat "$here/rc")"\n')
+        stub.chmod(0o755)
+        text = self.got["kill"]
+        self.assertIn("/usr/bin/pkill", text)
+        self.assertNotIn("id -u", text)
+        script = root / "kill"
+        script.write_text(text.replace("/usr/bin/pkill", str(stub)))
+        for code in (0, 1, 2):
+            with self.subTest(code=code):
+                (root / "rc").write_text(str(code))
+                self.assertEqual(subprocess.run(["sh", str(script), "4242"]).returncode, code)
+                self.assertEqual((root / "args").read_text().split(), ["-U", "4242", "-x", "omlx-server"])
+        gated = self.got["restart"].split("\nfi\n", 1)[1]
+        self.assertIn(f"--server-user {self.got['serverUser']} \\", gated)
+        self.assertNotEqual(self.got["serverUser"], "root")
+
+    def test_the_host_guide_says_a_restart_after_a_formula_upgrade_must_not_stay_pending(self):
+        guide = (Path(__file__).resolve().parents[1] / "hosts/darwin/eleven-m5/README.md").read_text()
+        text = " ".join(guide.split())
+        self.assertIn("After a formula upgrade the restart must not stay pending", text)
+        self.assertIn("the old process runs deleted code", text)
+        self.assertIn("nothing was restarted", text)

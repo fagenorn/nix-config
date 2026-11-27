@@ -454,6 +454,7 @@ agent-workflow-tests *args:
     tests/test_console_inbox.py \
     tests/test_console_tracker.py \
     tests/test_console_digest.py \
+    tests/test_console_delivery_ended.py \
     tests/test_console_writes.py \
     tests/test_console_answer.py \
     tests/test_console_sprints.py \
