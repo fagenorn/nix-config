@@ -519,6 +519,7 @@ agent-workflow-tests *args:
     tests/test_console_guest_socket_check.py \
     tests/test_console_guest_service.py \
     tests/test_console_guest_page.py \
+    tests/test_console_host_alerts_page.py \
     tests/test_console_guest_actions.py \
     tests/test_console_guest_account.py \
     tests/test_console_units.py \

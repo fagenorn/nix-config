@@ -554,7 +554,8 @@ class GuestPageTest(unittest.TestCase):
 
     def test_the_guest_bytes_hide_the_owner_header_before_the_script(self) -> None:
         markup = GUEST[:GUEST.index(b"<script>")].decode()
-        for ident in ("spend-link", "sharing-open", "accounts", "sharing", "goal", "capacity"):
+        for ident in ("spend-link", "sharing-open", "accounts", "sharing", "goal", "capacity",
+                      "host-alerts-open", "host-alerts"):
             (tag,) = re.findall(r'<[^>]*\bid="' + ident + r'"[^>]*>', markup)
             self.assertRegex(tag, r"\shidden(\s|>|$)", tag)
         snap = harness([START, {"frame": view([])}, SNAP], None)[-1]
