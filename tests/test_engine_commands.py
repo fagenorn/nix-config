@@ -21,7 +21,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.delivery import size_caps, engine_commands
+from agent_tools.delivery import size_caps, engine_commands, router
 from agent_tools.delivery.engine_commands import (
     LIFECYCLE_ARGV, LIFECYCLE_WALL_SECONDS, PLATFORM_MODULES, PLATFORM_WALL_SECONDS, PROJECT_WALL_SECONDS, CommandTable, Invocation,
     UnknownCommand, argument, command_text, grade, run)
@@ -59,6 +59,16 @@ class TableTest(unittest.TestCase):
              "--holder", "h/7-20261122T000000Z-abcd", "--branch", "issue-7-x",
              "--worktree-path", "/w"), "/root"))
         self.assertEqual(invocation.argv[0], sys.executable)
+
+    def test_the_router_runs_as_a_platform_command_with_its_stage_as_subcommand(self):
+        invocation = table().invocation("router", "final-review", (
+            ("preflight.worktree_path", "/w"), ("preflight.integration_branch", "main"),
+            ("preflight.branch", "b")))
+        self.assertEqual(invocation, Invocation(
+            (*sibling_argv("delivery.router"), "final-review", "--worktree-path", "/w",
+             "--integration-branch", "main", "--branch", "b"), "/root"))
+        self.assertEqual(load_commands()["router"].outcomes("final-review"), ("ok", "failed"))
+        self.assertEqual(set(load_commands()["router"].subcommands), set(router.ENGINE_STAGES))
 
     def test_diff_scope_keeps_its_positional_range(self):
         self.assertEqual(
@@ -418,9 +428,9 @@ class SpawnSiteTest(unittest.TestCase):
                     ("engine_commands.py", "run", "subprocess.Popen"),
                     ("engine_guard.py", "_descendants", "subprocess.run"),
                     ("engine_guard.py", "judge", "subprocess.Popen"),
+                    ("engine_heads.py", "_commit", "subprocess.run"),
                     ("engine_session.py", "own_worktree", "subprocess.run"),
                     ("engine_session.py", "launch", "subprocess.Popen"),
-                    ("engine_shell.py", "read_head", "subprocess.run"),
                     ("engine_stop.py", "process_started_at", "subprocess.run")]
         self.assertEqual(spawn_sites(sources), expected)
         self.assertEqual(unguarded_in(sources), {})

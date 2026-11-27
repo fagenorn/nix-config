@@ -86,10 +86,14 @@ Continuing
     group arrival is owed too. `RunCall.recheck` is true exactly for a pending
     `call` step whose `owed` is above zero: the shell then checks the first
     visit of every mutating command in the call's child runs.
-    `reentry(procedure, inputs, events, head)` answers where a continue should
-    re-enter: the earliest stale result by arrival order (`live` is always
-    stale, `head` is stale when the recorded head is absent, `head` is None or
-    they differ, `run` never; only a step's latest outcome is judged), else the
+    `reentry(procedure, inputs, events, head, heads, bases)` answers where a continue
+    should re-enter: the earliest stale result by arrival order (`live` is
+    always stale; `head` is stale when its recorded head is absent or differs
+    from `head`, or, when its outcome event names a `repository`, from
+    `heads[repository]` (stale if absent there; `head` is not used), and, for
+    a step that names a `base`, when the recorded base `sha` is absent or differs
+    from `bases[(repository, ref)]`, `ref` being the recorded base's; `run`
+    never; only a step's latest outcome is judged), else the
     pending step, else the stop's `reenter` step with its latest arrival's visit
     (None when never reached); a run at a stop declared `pinned` skips the stale rule and
     re-enters at the stop's `reenter` step with an empty `stale` (the stop comes after an effect no
@@ -270,7 +274,7 @@ class _Walk:
     pending: _Pending | None
     transitions: list[Transition]
     arrivals: list[_Arrival]
-    produced: dict[str, tuple[int, int, object]]
+    produced: dict[str, tuple[int, int, object, object, object]]
     total: dict[str, int]
     owed: dict[tuple[str, str], int] = field(default_factory=dict)
 
@@ -291,7 +295,7 @@ def _walk(procedure: Mapping, inputs: Mapping[str, object], events: Sequence[Map
     visits: dict[str, int] = {}
     total: dict[str, int] = {}
     results: dict[str, dict] = {}
-    produced: dict[str, tuple[int, int, object]] = {}
+    produced: dict[str, tuple[int, int, object, object, object]] = {}
     owed: dict[tuple[str, str], int] = {}
     transitions: list[Transition] = []
     arrivals: list[_Arrival] = []
@@ -409,7 +413,8 @@ def _walk(procedure: Mapping, inputs: Mapping[str, object], events: Sequence[Map
             if not isinstance(outcome, str):
                 raise CoreError(f"outcome of {name!r} is not a string")
             results[name] = result
-            produced[name] = (len(arrivals) - 1, total[name], event.get("head"))
+            produced[name] = (len(arrivals) - 1, total[name], event.get("head"), event.get("repository"),
+                              event.get("base"))
             pending.outcomes[name] = outcome
             del pending.waiting[name]
             return "" if pending.waiting else grade_group(pending)
@@ -423,7 +428,8 @@ def _walk(procedure: Mapping, inputs: Mapping[str, object], events: Sequence[Map
             if call_outcome([entry["end"] for entry in entries]) != outcome:
                 raise CoreError(f"call {step['id']!r} outcome {outcome!r} disagrees with its ends")
         results[step["id"]] = result
-        produced[step["id"]] = (len(arrivals) - 1, current.visit, event.get("head"))
+        produced[step["id"]] = (len(arrivals) - 1, current.visit, event.get("head"), event.get("repository"),
+                                event.get("base"))
         return follow(step, outcome, current.visit)
 
     def rewind(arrival: _Arrival) -> tuple[str, _Pending | None]:
@@ -546,18 +552,23 @@ def replay(procedure: Mapping, inputs: Mapping[str, object], events: Sequence[Ma
 
 
 def reentry(
-    procedure: Mapping, inputs: Mapping[str, object], events: Sequence[Mapping], head: str | None
+    procedure: Mapping, inputs: Mapping[str, object], events: Sequence[Mapping], head: str | None,
+    heads: Mapping[str, str | None] | None = None,
+    bases: Mapping[tuple[str, str], str | None] | None = None,
 ) -> Reentry:
     walk = _walk(procedure, inputs, events, [])
     if walk.pending is None and walk.position == "done":
         raise CoreError("a run that reached done has no re-entry point")
     steps = {item["id"]: item for item in procedure["steps"]}
     stale: list[tuple[str, int]] = []
-    for step_id, (index, _visit, recorded) in sorted(
+    for step_id, (index, _visit, recorded, repository, base) in sorted(
         walk.produced.items(), key=lambda item: (item[1][0], item[1][1], item[0])
     ):
         holds = steps[step_id]["holds"]
-        if holds == "live" or (holds == "head" and (head is None or recorded != head)):
+        current = head if repository is None else (heads or {}).get(repository)
+        moved = steps[step_id].get("base") is not None and (
+            not isinstance(base, dict) or base["sha"] != (bases or {}).get((repository, base["ref"])))
+        if holds == "live" or (holds == "head" and (current is None or recorded != current or moved)):
             arrival = walk.arrivals[index]
             if (arrival.step, arrival.visit) not in stale:
                 stale.append((arrival.step, arrival.visit))

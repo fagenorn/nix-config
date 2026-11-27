@@ -30,7 +30,12 @@ directory is either complete or absent.
 
 Every event has `event` (its type) and `at` (RFC3339 UTC); `EVENT_MEMBERS` lists, per type, the
 other members it always carries and `EVENT_OPTIONAL` the ones it may carry besides. `result_stored` carries the
-visit's graded `outcome` and, for a step that reports one, the worktree `head`. `run_continued` names the `step`
+visit's graded `outcome` and, for a step that reports one, the worktree `head` and, for a command step that
+names a checkout, that checkout's absolute path as `repository`, the head being its head, and, when it also names a
+`base`, that merge base as `base` (`ref`, `sha`: exactly those; `base` is carried only beside `repository`). A step that names a checkout also
+carries `reuse_key` (a non-empty string, the command and its arguments) on every `result_stored`, and
+`reused_from` (`run`, `step`, `visit`: exactly those) when the result is the stored one of an earlier visit
+in the delivery's runs, taken instead of running the command (`engine_heads`). `run_continued` names the `step`
 a continued run re-enters and, when it rewinds, the `visit` it rewinds to; a recorded one without them is still
 read, but `append_event` writes none without a `step`. A `call` event records that a step started the child run `child` for item `index`
 of `items`. An agent step visit that hits a usage limit or an API error, or gives no valid
@@ -106,7 +111,7 @@ EVENT_MEMBERS: Mapping[str, frozenset[str]] = {
 }
 # Members an event may carry besides `EVENT_MEMBERS`.
 EVENT_OPTIONAL: Mapping[str, frozenset[str]] = {
-    "result_stored": frozenset(("head", "outcome")),
+    "result_stored": frozenset(("head", "outcome", "repository", "reuse_key", "reused_from", "base")),
     "run_continued": frozenset(("step", "visit")),
 }
 # Members `append_event` requires beyond what a reader requires, so a ledger
@@ -397,6 +402,20 @@ def _check_member(event: Mapping[str, object], key: str) -> None:
     elif key == "head":
         if not isinstance(value, str) or not HEAD_RE.fullmatch(value):
             raise LedgerError("head is not a full lowercase hex commit id")
+    elif key == "repository":
+        if not isinstance(value, str) or not os.path.isabs(value):
+            raise LedgerError("repository is not an absolute path")
+    elif key == "base":
+        if not isinstance(value, dict) or set(value) != {"ref", "sha"} \
+                or not isinstance(value["ref"], str) or not value["ref"].startswith("refs/remotes/origin/") \
+                or not isinstance(value["sha"], str) or not HEAD_RE.fullmatch(value["sha"]):
+            raise LedgerError("base is not exactly an origin ref and a full lowercase hex commit id")
+    elif key == "reused_from":
+        if not isinstance(value, dict) or set(value) != {"run", "step", "visit"} \
+                or not isinstance(value["run"], str) or not RUN_ID_RE.fullmatch(value["run"]) \
+                or not isinstance(value["step"], str) or not NAME_RE.fullmatch(value["step"]) \
+                or not _is_int(value["visit"]) or value["visit"] < 1:
+            raise LedgerError("reused_from is not exactly a run id, a step id and a visit")
     elif key == "stage":
         if value not in STAGES:
             raise LedgerError("stage is not a stage")
@@ -429,6 +448,8 @@ def validate_event(event: object) -> dict:
         raise LedgerError(f"{kind} does not have exactly its members")
     if kind == "run_continued" and "visit" in event and "step" not in event:
         raise LedgerError("run_continued names a visit without a step")
+    if kind == "result_stored" and "base" in event and "repository" not in event:
+        raise LedgerError("result_stored names a base without a repository")
     # `step` and `visit` are checked before `result`, which is derived from them.
     for key in sorted(event, key=lambda name: name == "result"):
         _check_member(event, key)
@@ -507,13 +528,18 @@ def _write_result(path: Path, document: object) -> None:
 def store_result(run_dir: Path, *, step: str, visit: int, result: object, at: str,
                  wall_seconds: float, turns: int, tokens: Mapping[str, int],
                  spend_usd: float, head: str | None = None,
-                 outcome: str | None = None) -> Path:
+                 outcome: str | None = None, repository: str | None = None,
+                 reuse_key: str | None = None, reused_from: Mapping[str, object] | None = None,
+                 base: Mapping[str, object] | None = None) -> Path:
     """Write the step visit's result file, then append its `result_stored` event.
 
-    `head` and `outcome` are in the event only when given."""
+    `head`, `outcome`, `repository`, `reuse_key`, `reused_from` and `base` are in the event only when given."""
     run_dir = Path(run_dir)
     relative = f"results/{step}.{visit}.json"
-    optional = {key: value for key, value in (("head", head), ("outcome", outcome))
+    optional = {key: value for key, value in (("head", head), ("outcome", outcome),
+                                          ("repository", repository), ("reuse_key", reuse_key),
+                                          ("reused_from", None if reused_from is None else dict(reused_from)),
+                                          ("base", None if base is None else dict(base)))
                 if value is not None}
     event = validate_event({"event": "result_stored", "at": at, "step": step, "visit": visit,
                             "result": relative, "wall_seconds": wall_seconds, "turns": turns,
@@ -550,6 +576,23 @@ def store_session_file(run_dir: Path, name: str, data: bytes) -> Path:
         raise LedgerError(f"sessions/{name} is already stored")
     _publish(path, data)
     return path
+
+
+def delivery_runs(run_dir: Path) -> list[Path]:
+    """`run_dir`, then each run its `call` events name (siblings of it) and that run's own, depth first.
+
+    Every run is listed once, in `call` event order; `LedgerError` when a ledger cannot be replayed."""
+    base, seen, found = Path(run_dir).parent, set(), []
+
+    def visit(path: Path) -> None:
+        seen.add(path.name)
+        found.append(path)
+        for event in replay(path / "events.jsonl"):
+            if event["event"] == "call" and event["child"] not in seen:
+                visit(base / event["child"])
+
+    visit(Path(run_dir))
+    return found
 
 
 def replay(events_path: Path) -> list[dict]:

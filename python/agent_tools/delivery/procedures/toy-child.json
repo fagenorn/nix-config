@@ -1,5 +1,5 @@
 {
-  "format": 1,
+  "format": 2,
   "keep_alive": {"command": "forge-claim", "subcommand": "renew", "in": ["run.repo", "run.issue", "run.holder"]},
   "inputs": ["holder", "issue", "item", "repo"],
   "stops": {"child-stop": {"need": "retry", "reenter": "claim"},

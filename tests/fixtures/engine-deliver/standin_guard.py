@@ -15,6 +15,10 @@ mode except `sleep` appends one compact JSON line
                               as the real guard's policy row check does
   tee <log> <guard>           runs <guard> with the same stdin bytes, forwards its
                               stderr, exits with its code
+  moving <needle> <worktree> <mode> <mode words...>
+                              when <needle> is a substring of the payload's tool_input.command, first
+                              points <worktree>'s refs/remotes/origin/main at its HEAD (a fetch that
+                              brought the branch in); then behaves as <mode> on the stdin already read
   only <needle> <mode> <mode words...>
                               exits 0 and logs nothing when <needle> is not a
                               substring of the payload's tool_input.command;
@@ -47,6 +51,16 @@ def behave(mode: str, words: list[str], data: bytes) -> int:
             handle.write(f"{os.getpid()}\n{grandchild.pid}\n")
         time.sleep(120)
         return 0
+    if mode == "moving":
+        needle, worktree, inner, rest = words[0], words[1], words[2], words[3:]
+        try:
+            command = json.loads(data)["tool_input"]["command"]
+        except (ValueError, KeyError, TypeError):
+            command = ""
+        if needle in command:
+            subprocess.run(["git", "-C", worktree, "update-ref", "refs/remotes/origin/main", "HEAD"],
+                           check=True, stdin=subprocess.DEVNULL)
+        return behave(inner, rest, data)
     if mode == "only":
         needle, inner, rest = words[0], words[1], words[2:]
         try:

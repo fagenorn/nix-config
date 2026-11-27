@@ -70,6 +70,7 @@ PLATFORM_MODULES: Mapping[str, str] = MappingProxyType({
     "landing": "delivery.landing",
     "look-approval": "delivery.look_approval",
     "resolve-project": "project_contract.resolve_project",
+    "router": "delivery.router",
     "verified-tree": "verification.verified_tree",
     "verify-rounds": "delivery.verify_rounds",
 })
@@ -93,6 +94,7 @@ PLATFORM_WALL_SECONDS: Mapping[str, float] = MappingProxyType({
     "landing": 3600,
     "look-approval": 300,
     "resolve-project": 300,
+    "router": 300,
     "verified-tree": 14400,
     "verify-rounds": 300,
 })

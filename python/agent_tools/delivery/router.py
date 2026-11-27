@@ -1,13 +1,27 @@
 """router: the routed set of one change at one stage, computed with no model and no network.
 
     router --repo-root <abs> --stage <stage> (--path <p>... | --diff <range>) [--platform-standards <abs>]
+    router <building|final-review> --worktree-path <abs> --integration-branch <name> --branch <name>
+        [--platform-standards <abs>]
 
 At `planning` and `plan review` the change is its `--path` arguments; from `building` on it is the
 paths of `--diff <range>`. Prints one JSON line (`schema_version` 1) naming files, never pasting
 them: the bar, the stack shards the extensions choose, the project shards whose `governs` globs
 match, the stage's hint file, the records the changed files cite, a one-line index of the records
 of each matching context-map area, each shard's rule ids, the platform revision and the total
-size in bytes. A wide change is never cut. Exit 0 with that line, 2 with one `router: <reason>`
+size in bytes, and `routed_files`: every file to read, as absolute paths, each shard in order, then
+the hint file when it exists, then each must-read record (never an index line). A wide change is
+never cut. The engine form (a first argument that is no flag) routes the stage word's stage over
+`--diff <merge base>..<head>`, `head` the worktree's HEAD and `merge base` the merge base of
+`refs/remotes/origin/<integration-branch>` and `head`, each read once as a full sha (the range names two
+commits and no ref, so a later fetch cannot change it); it refuses a `--branch` whose `refs/heads/<branch>`
+is not that sha, and no unqualified name reaches Git; both branch names must be literal branch names
+(`git check-ref-format`), never a revision expression. Its document also carries `diff` (that range),
+`head` and `merge_base` (those shas) as members of their own, so a consumer reads the revision the files
+were routed for; the flag form's `head` and `merge_base` are null. The engine form reads the project's routing
+inputs (the Layer-2 shards and index, the map, the records) and the citations of the changed files from `head`'s
+commit, so an unstaged edit changes neither; the flag form reads the working tree. Every Git read is of `--repo-root`'s (or the worktree's) repository, whatever
+`GIT_DIR` and its siblings name. Exit 0 with that line, 2 with one `router: <reason>`
 line on stderr and nothing on stdout for a misuse.
 """
 
@@ -15,13 +29,16 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path, PurePosixPath
+from typing import NoReturn
 
 from agent_tools.delivery import hint_phases, routing
 from agent_tools.delivery.context_map_lint import CITATION_RE
+from agent_tools.delivery.issue_setup import REPOSITORY_ENV
 from agent_tools.delivery.rule_ids import rule_headings
 from agent_tools.project_contract import agent_platform
 
@@ -29,6 +46,7 @@ COMMAND = "router"
 SCHEMA_VERSION = 1
 PATH_STAGES = ("planning", "plan review")
 GIT_TIMEOUT = 60
+ENGINE_STAGES: Mapping[str, str] = {"building": "building", "final-review": "final review"}
 
 
 class Misuse(Exception):
@@ -39,7 +57,35 @@ def regular_size(path: Path) -> int | None:
     return path.stat().st_size if path.is_file() else None
 
 
-def project_files(root: Path) -> dict[str, bytes]:
+def git_bytes(root: Path, *args: str) -> bytes:
+    """One Git read of `root`'s own repository: the variables that select another one are dropped."""
+    env = {k: v for k, v in os.environ.items() if k not in REPOSITORY_ENV}
+    try:
+        done = subprocess.run(["git", "-C", str(root), *args], capture_output=True,
+                              stdin=subprocess.DEVNULL, timeout=GIT_TIMEOUT, env=env)
+    except (OSError, subprocess.SubprocessError) as error:
+        raise Misuse(f"cannot read git {' '.join(args)}: {error}") from error
+    if done.returncode != 0:
+        reason = " ".join(done.stderr.decode("utf-8", errors="replace").split())
+        raise Misuse(f"cannot read git {' '.join(args)}: {reason}")
+    return done.stdout
+
+
+def committed_files(root: Path, commit: str) -> dict[str, bytes]:
+    """The inputs `read_project` reads, as `commit` holds them (the working tree is not read)."""
+    listing = git_bytes(root, "ls-tree", "-r", "-z", commit, "--", "docs").split(b"\0")
+    found = {}
+    for row in listing:
+        info, _, raw = row.partition(b"\t")
+        name = raw.decode("utf-8", errors="surrogateescape")
+        if info.split(b" ")[:1] in ([b"100644"], [b"100755"]) and routing.is_input(name):
+            found[name] = git_bytes(root, "cat-file", "blob", f"{commit}:{name}")
+    return found
+
+
+def project_files(root: Path, commit: str | None = None) -> dict[str, bytes]:
+    if commit is not None:
+        return committed_files(root, commit)
     found = {}
     patterns = (f"{routing.LAYER2_DIR}/*.md", routing.CONTEXT_MAP, "docs/areas/*/adr/*.md")
     for pattern in patterns:
@@ -57,13 +103,19 @@ def check_path(path: str) -> str:
     return path
 
 
+def git_read(root: Path, *args: str) -> str:
+    """One Git read of `root`'s own repository, as stripped text."""
+    return git_bytes(root, *args).decode("utf-8", errors="replace").strip()
+
+
 def diff_paths(root: Path, change: str) -> list[str]:
     if change.startswith("-"):
         raise Misuse(f"--diff must be a revision range: {change!r}")
+    env = {k: v for k, v in os.environ.items() if k not in REPOSITORY_ENV}
     try:
         done = subprocess.run(
             ["git", "-C", str(root), "diff", "--name-only", "-z", "--no-renames", change, "--"],
-            capture_output=True, stdin=subprocess.DEVNULL, timeout=GIT_TIMEOUT)
+            capture_output=True, stdin=subprocess.DEVNULL, timeout=GIT_TIMEOUT, env=env)
     except (OSError, subprocess.SubprocessError) as error:
         raise Misuse(f"git diff failed: {error}") from error
     if done.returncode != 0:
@@ -89,13 +141,25 @@ def rules(text: bytes) -> list[str]:
     return [f"{prefix}{number}" for prefix, number, _ in ids]
 
 
-def must_read(root: Path, project: routing.Project, paths: list[str]) -> list[dict]:
+def committed_text(root: Path, commit: str, path: str) -> str | None:
+    """The text of `path` as `commit` holds it, None when the commit holds no such file."""
+    kind = git_bytes(root, "ls-tree", "-z", commit, "--", path).split(b"\t")[0].split(b" ")[:2]
+    if kind not in ([b"100644", b"blob"], [b"100755", b"blob"]):
+        return None
+    return git_bytes(root, "cat-file", "blob", f"{commit}:{path}").decode("utf-8", errors="replace")
+
+
+def must_read(root: Path, project: routing.Project, paths: list[str],
+              commit: str | None = None) -> list[dict]:
     known = {r.id: r for area in project.areas for r in area.records}
     cited: set[str] = set()
     for path in paths:
-        target = root / path
-        if target.is_file():
-            text = target.read_text(encoding="utf-8", errors="replace")
+        if commit is not None:
+            text = committed_text(root, commit, path)
+        else:
+            target = root / path
+            text = target.read_text(encoding="utf-8", errors="replace") if target.is_file() else None
+        if text is not None:
             cited.update(f"ADR-{slug}-{number}" for slug, number in CITATION_RE.findall(text))
     records = sorted((known[i] for i in cited if i in known), key=lambda r: r.path)
     return [{"id": r.id, "path": str(root / r.path), "bytes": len(project.files[r.path])}
@@ -105,7 +169,8 @@ def must_read(root: Path, project: routing.Project, paths: list[str]) -> list[di
 def route(args: argparse.Namespace, root: Path, platform_dir: Path) -> dict:
     paths = change_paths(args, root)
     platform = routing.load_platform(platform_dir)
-    project = routing.read_project(project_files(root))
+    pinned = getattr(args, "head", None)  # the commit the route is for: read the project at it, not the tree
+    project = routing.read_project(project_files(root, pinned))
     names = sorted({name for path in paths for name in routing.stack_shards(path)})
     shards = [{"layer": "bar", "path": str(platform_dir / routing.BAR),
                "bytes": len(platform.files[routing.BAR]), "rules": rules(platform.files[routing.BAR])}]
@@ -123,7 +188,7 @@ def route(args: argparse.Namespace, root: Path, platform_dir: Path) -> dict:
     hint_path = root / hint_phases.HINT_DIR / hint_phases.hint_file(args.stage)
     size = regular_size(hint_path)
     hint = None if size is None else {"path": str(hint_path), "bytes": size}
-    required = must_read(root, project, paths)
+    required = must_read(root, project, paths, pinned)
     areas = [a for a in project.areas
              if any(routing.glob_matches(g, p) for g in a.globs for p in paths)]
     index = [{"area": a.name, "records": [routing.index_line(r) for r in a.records]} for a in areas]
@@ -134,28 +199,77 @@ def route(args: argparse.Namespace, root: Path, platform_dir: Path) -> dict:
     return {
         "schema_version": SCHEMA_VERSION, "stage": args.stage,
         "change": {"diff": args.diff, "paths": paths},
+        "diff": args.diff, "head": getattr(args, "head", None),
+        "merge_base": getattr(args, "merge_base", None),
         "platform_revision": revision["rev"] if revision else None,
         "shards": shards, "hint": hint, "must_read": required, "index": index,
-        "index_bytes": index_size, "total_bytes": total}
+        "index_bytes": index_size, "total_bytes": total,
+        "routed_files": ([s["path"] for s in shards] + ([hint["path"]] if hint else [])
+                         + [m["path"] for m in required])}
+
+
+class EngineParser(argparse.ArgumentParser):
+    def error(self, message: str) -> NoReturn:
+        raise Misuse(message)
+
+
+def check_directory(name: str, path: Path) -> None:
+    if not path.is_absolute():
+        raise Misuse(f"{name} must be absolute: {path}")
+    if not path.is_dir():
+        raise Misuse(f"not a directory: {path}")
+
+
+def engine_form(words: Sequence[str]) -> tuple[argparse.Namespace, Path, str | None]:
+    word, flags = words[0], list(words[1:])
+    if word not in ENGINE_STAGES:
+        raise Misuse(f"unknown stage {word}; one of {', '.join(ENGINE_STAGES)}")
+    parser = EngineParser(prog=COMMAND, add_help=False, allow_abbrev=False)
+    parser.add_argument("--worktree-path", required=True)
+    parser.add_argument("--integration-branch", required=True)
+    parser.add_argument("--branch", required=True)
+    parser.add_argument("--platform-standards")
+    given = parser.parse_args(flags)
+    for name in ("integration_branch", "branch"):
+        value = getattr(given, name)
+        if not value or value.startswith("-"):
+            raise Misuse(f"--{name.replace('_', '-')} must be a branch name: {value!r}")
+    worktree = Path(given.worktree_path)
+    check_directory("--worktree-path", worktree)
+    for name, prefix in (("integration_branch", "refs/remotes/origin/"), ("branch", "refs/heads/")):
+        try:
+            git_read(worktree, "check-ref-format", prefix + getattr(given, name))
+        except Misuse:
+            raise Misuse(f"--{name.replace('_', '-')} must be a literal branch name: "
+                         f"{getattr(given, name)!r}") from None
+    head = git_read(worktree, "rev-parse", "--verify", "HEAD")
+    tip = git_read(worktree, "rev-parse", "--verify", f"refs/heads/{given.branch}")
+    if tip != head:
+        raise Misuse(f"branch {given.branch} is at {tip}, the worktree's HEAD is {head}")
+    merge_base = git_read(worktree, "merge-base", f"refs/remotes/origin/{given.integration_branch}", head)
+    args = argparse.Namespace(stage=ENGINE_STAGES[word], diff=f"{merge_base}..{head}", path=None,
+                              head=head, merge_base=merge_base)
+    return args, worktree, given.platform_standards
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog=COMMAND)
-    parser.add_argument("--repo-root", required=True)
-    parser.add_argument("--stage", required=True, choices=hint_phases.HINT_STAGES)
-    parser.add_argument("--path", action="append")
-    parser.add_argument("--diff")
-    parser.add_argument("--platform-standards")
-    args = parser.parse_args(argv)
-    root = Path(args.repo_root)
-    platform_dir = (Path(args.platform_standards) if args.platform_standards
-                    else agent_platform.standards_dir())
+    words = list(sys.argv[1:] if argv is None else argv)
+    engine = bool(words) and not words[0].startswith("-")
+    if not engine:
+        parser = argparse.ArgumentParser(prog=COMMAND)
+        parser.add_argument("--repo-root", required=True)
+        parser.add_argument("--stage", required=True, choices=hint_phases.HINT_STAGES)
+        parser.add_argument("--path", action="append")
+        parser.add_argument("--diff")
+        parser.add_argument("--platform-standards")
+        args = parser.parse_args(words)
+        root, standards = Path(args.repo_root), args.platform_standards
     try:
+        if engine:
+            args, root, standards = engine_form(words)
+        platform_dir = Path(standards) if standards else agent_platform.standards_dir()
         for name, path in (("--repo-root", root), ("--platform-standards", platform_dir)):
-            if not path.is_absolute():
-                raise Misuse(f"{name} must be absolute: {path}")
-            if not path.is_dir():
-                raise Misuse(f"not a directory: {path}")
+            check_directory(name, path)
         doc = route(args, root, platform_dir)
     except (Misuse, ValueError, OSError) as error:
         print(f"{COMMAND}: {error}", file=sys.stderr)

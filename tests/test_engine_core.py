@@ -350,7 +350,7 @@ def absent_member_procedure(members: list[str]) -> dict:
     """A decide `d` reading `.verdict` of each of `members`, behind a group `g` of those that are steps."""
     steps = [{"id": "d", "stage": "final review", "kind": "decide", "grader": "probe", "holds": "run",
               "in": [f"{name}.verdict" for name in members], "on": {"seen": "done"}}]
-    return {"format": 1, "inputs": [], "stops": {}, "steps": steps}
+    return {"format": 2, "inputs": [], "stops": {}, "steps": steps}
 
 
 class AbsentMemberTest(unittest.TestCase):
@@ -649,6 +649,156 @@ class ContinueTest(unittest.TestCase):
         unrecorded = copy.deepcopy(E1)
         del unrecorded[-1]["head"]
         self.assertEqual(reentry(toy(), INPUTS, unrecorded, "h1").stale, ("review",))
+
+    def test_a_head_result_naming_a_checkout_is_judged_by_that_checkouts_head(self) -> None:
+        doc = inline(
+            [
+                {"id": "r", "stage": "setup", "kind": "command", "command": "diff-scope", "holds": "head",
+                 "in": ["run.range"], "on": {"ok": "g", "failed": "needs-owner"}},
+                {"id": "g", "stage": "building", "kind": "command", "command": "diff-scope", "holds": "run",
+                 "in": ["run.range"], "on": {"ok": "done", "failed": "needs-owner"}},
+            ],
+            "g",
+        )
+        events = [
+            {"type": "entered", "step": "r"},
+            {"type": "outcome", "step": "r", "outcome": "ok", "result": {}, "head": "w1", "repository": "/w/one"},
+            {"type": "entered", "step": "g"},
+            {"type": "outcome", "step": "g", "outcome": "failed", "result": {}},
+        ]
+        self.assertEqual(reentry(doc, INPUTS, events, "w1", {"/w/one": "w1"}), Reentry("g", 1, ()))
+        self.assertEqual(reentry(doc, INPUTS, events, "w1", {"/w/one": "w2"}), Reentry("r", 1, ("r",)))
+        self.assertEqual(reentry(doc, INPUTS, events, "w1", {}), Reentry("r", 1, ("r",)))
+        self.assertEqual(reentry(doc, INPUTS, events, None, {"/w/one": "w1"}), Reentry("g", 1, ()))
+
+    def test_a_result_holding_for_a_merge_base_is_stale_when_that_base_moved_or_was_never_recorded(self) -> None:
+        doc = inline(
+            [
+                {"id": "r", "stage": "setup", "kind": "command", "command": "diff-scope", "holds": "head",
+                 "repository": "run.range", "base": "run.range", "in": ["run.range"],
+                 "on": {"ok": "g", "failed": "needs-owner"}},
+                {"id": "g", "stage": "building", "kind": "command", "command": "diff-scope", "holds": "run",
+                 "in": ["run.range"], "on": {"ok": "done", "failed": "needs-owner"}},
+            ],
+            "g",
+        )
+        base = {"ref": "refs/remotes/origin/main", "sha": "b1"}
+        outcome = {"type": "outcome", "step": "r", "outcome": "ok", "result": {}, "head": "w1",
+                   "repository": "/w/one", "base": base}
+        tail = [{"type": "entered", "step": "g"}, {"type": "outcome", "step": "g", "outcome": "failed", "result": {}}]
+        events = [{"type": "entered", "step": "r"}, outcome, *tail]
+        heads = {"/w/one": "w1"}
+        main = ("/w/one", "refs/remotes/origin/main")
+        other = ("/w/one", "refs/remotes/origin/other")
+        self.assertEqual(reentry(doc, INPUTS, events, "w1", heads, {main: "b1"}), Reentry("g", 1, ()))
+        self.assertEqual(reentry(doc, INPUTS, events, "w1", heads, {main: "b2"}), Reentry("r", 1, ("r",)))
+        self.assertEqual(reentry(doc, INPUTS, events, "w1", heads, {other: "b1"}), Reentry("r", 1, ("r",)))
+        self.assertEqual(reentry(doc, INPUTS, events, "w1", heads, {}), Reentry("r", 1, ("r",)))
+        self.assertEqual(reentry(doc, INPUTS, events, "w1", heads), Reentry("r", 1, ("r",)))
+        unrecorded = [{"type": "entered", "step": "r"}, {k: v for k, v in outcome.items() if k != "base"}, *tail]
+        self.assertEqual(reentry(doc, INPUTS, unrecorded, "w1", heads, {main: "b1"}), Reentry("r", 1, ("r",)))
+
+    def test_two_merge_bases_of_one_checkout_are_judged_each_by_its_own_ref(self) -> None:
+        def step(name: str, after: str) -> dict:
+            return {"id": name, "stage": "setup", "kind": "command", "command": "diff-scope", "holds": "head",
+                    "repository": "run.range", "base": "run.range", "in": ["run.range"],
+                    "on": {"ok": after, "failed": "needs-owner"}}
+
+        doc = inline(
+            [
+                step("r1", "r2"), step("r2", "g"),
+                {"id": "g", "stage": "building", "kind": "command", "command": "diff-scope", "holds": "run",
+                 "in": ["run.range"], "on": {"ok": "done", "failed": "needs-owner"}},
+            ],
+            "g",
+        )
+        main = ("/w/one", "refs/remotes/origin/main")
+        other = ("/w/one", "refs/remotes/origin/other")
+
+        def outcome(name: str, ref: str, sha: str) -> dict:
+            return {"type": "outcome", "step": name, "outcome": "ok", "result": {}, "head": "w1",
+                    "repository": "/w/one", "base": {"ref": ref, "sha": sha}}
+
+        events = [
+            {"type": "entered", "step": "r1"}, outcome("r1", main[1], "b1"),
+            {"type": "entered", "step": "r2"}, outcome("r2", other[1], "c1"),
+            {"type": "entered", "step": "g"},
+            {"type": "outcome", "step": "g", "outcome": "failed", "result": {}},
+        ]
+        heads = {"/w/one": "w1"}
+        self.assertEqual(reentry(doc, INPUTS, events, "w1", heads, {main: "b2", other: "c1"}),
+                         Reentry("r1", 1, ("r1",)))
+        self.assertEqual(reentry(doc, INPUTS, events, "w1", heads, {main: "b1", other: "c1"}),
+                         Reentry("g", 1, ()))
+        self.assertEqual(reentry(doc, INPUTS, events, "w1", heads, {main: "b1", other: "c2"}),
+                         Reentry("r2", 1, ("r2",)))
+
+    def test_a_step_that_names_no_base_is_never_judged_by_one(self) -> None:
+        doc = inline(
+            [
+                {"id": "r", "stage": "setup", "kind": "command", "command": "diff-scope", "holds": "head",
+                 "repository": "run.range", "in": ["run.range"], "on": {"ok": "g", "failed": "needs-owner"}},
+                {"id": "g", "stage": "building", "kind": "command", "command": "diff-scope", "holds": "run",
+                 "in": ["run.range"], "on": {"ok": "done", "failed": "needs-owner"}},
+            ],
+            "g",
+        )
+        events = [
+            {"type": "entered", "step": "r"},
+            {"type": "outcome", "step": "r", "outcome": "ok", "result": {}, "head": "w1", "repository": "/w/one"},
+            {"type": "entered", "step": "g"},
+            {"type": "outcome", "step": "g", "outcome": "failed", "result": {}},
+        ]
+        self.assertEqual(reentry(doc, INPUTS, events, "w1", {"/w/one": "w1"}, {}), Reentry("g", 1, ()))
+
+    def test_a_group_members_checkout_head_is_judged_from_its_own_outcome(self) -> None:
+        doc = inline(
+            [
+                {"id": "grp", "stage": "setup", "kind": "group", "holds": "run",
+                 "members": [{"step": "x", "pass": ["ok"]}, {"step": "y", "pass": ["ok"]}],
+                 "on": {"pass": "g", "blocked": "needs-owner"}},
+                {"id": "x", "stage": "setup", "kind": "command", "command": "diff-scope", "holds": "head",
+                 "in": ["run.range"]},
+                {"id": "y", "stage": "setup", "kind": "command", "command": "diff-scope", "holds": "run",
+                 "in": ["run.range"]},
+                {"id": "g", "stage": "building", "kind": "command", "command": "diff-scope", "holds": "run",
+                 "in": ["run.range"], "on": {"ok": "done", "failed": "needs-owner"}},
+            ],
+            "g",
+        )
+        events = [
+            {"type": "entered", "step": "grp"},
+            {"type": "entered", "step": "x"},
+            {"type": "outcome", "step": "x", "outcome": "ok", "result": {}, "head": "w1", "repository": "/w/one"},
+            {"type": "entered", "step": "y"},
+            {"type": "outcome", "step": "y", "outcome": "ok", "result": {}},
+            {"type": "entered", "step": "g"},
+            {"type": "outcome", "step": "g", "outcome": "failed", "result": {}},
+        ]
+        fresh = reentry(doc, INPUTS, events, "w1", {"/w/one": "w1"})
+        self.assertEqual(fresh.stale, ())
+        moved = reentry(doc, INPUTS, events, "w1", {"/w/one": "w2"})
+        self.assertEqual(moved, Reentry("grp", 1, ("grp",)))
+
+    def test_an_entered_step_after_a_head_result_never_hides_it(self) -> None:
+        doc = inline(
+            [
+                {"id": "r", "stage": "setup", "kind": "command", "command": "diff-scope", "holds": "head",
+                 "in": ["run.range"], "on": {"ok": "m", "failed": "needs-owner"}},
+                {"id": "m", "stage": "building", "kind": "command", "command": "diff-scope", "holds": "run",
+                 "mutates": True, "check": {"command": "diff-scope"}, "in": ["run.range"],
+                 "on": {"ok": "g", "failed": "needs-owner"}},
+                {"id": "g", "stage": "building", "kind": "command", "command": "diff-scope", "holds": "run",
+                 "in": ["run.range"], "on": {"ok": "done", "failed": "needs-owner"}},
+            ],
+            "g",
+        )
+        events = [
+            {"type": "entered", "step": "r"},
+            {"type": "outcome", "step": "r", "outcome": "ok", "result": {}, "head": "h0"},
+            {"type": "entered", "step": "m"},
+        ]
+        self.assertEqual(reentry(doc, INPUTS, events, "h1"), Reentry("r", 1, ("r",)))
 
     def test_the_earliest_stale_result_in_executed_order_wins(self) -> None:
         doc = toy()

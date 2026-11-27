@@ -43,6 +43,13 @@ LIMIT = {"stdout": json.dumps({"status": 1, "error": "You've hit your usage limi
          "exit": 1}
 
 
+def routed_in(stdin: str) -> list[str]:
+    """The routed files of a packet: the JSON list on the line after its `Routed files` heading."""
+    lines = stdin.split("\n")
+    heading = next(index for index, line in enumerate(lines) if line.startswith("Routed files"))
+    return json.loads(lines[heading + 1])
+
+
 class ReviewCase(unittest.TestCase):
     def arrange(self, answers, *, supported=True, argv=None, files=("src/a.py",)):
         self.world = GuardPolicyWorld(self)
@@ -73,11 +80,17 @@ class ReviewCase(unittest.TestCase):
         self.head = self.world.git(self.root, "rev-parse", "HEAD").strip()
         self.base = self.world.git(self.root, "merge-base", "refs/remotes/origin/main", "HEAD").strip()
 
-    def run_review(self, *extra):
+    def run_review(self, *extra, routed=("/s/the-bar.md",), raw_routed=None, head="head", merge_base="base"):
+        flag = [] if raw_routed is None and routed is None else [
+            "--routed-files", json.dumps(list(routed)) if raw_routed is None else raw_routed]
+        if head is not None:
+            flag += ["--head", self.head if head == "head" else head]
+        if merge_base is not None:
+            flag += ["--merge-base", self.base if merge_base == "base" else merge_base]
         done = subprocess.run(
             [sys.executable, "-m", "agent_tools.delivery.independent_review", "code",
              "--repo-root", str(self.root), "--issue", "7", "--worktree-path", str(self.root),
-             "--branch", "topic", "--integration-branch", "main", "--acceptance", ACCEPTANCE, *extra],
+             "--branch", "topic", "--integration-branch", "main", "--acceptance", ACCEPTANCE, *flag, *extra],
             capture_output=True, text=True, timeout=300, env=self.world.env, cwd=self.world.tmp)
         lines = done.stdout.splitlines()
         self.assertEqual(len(lines), 1, done.stdout + done.stderr)
@@ -103,6 +116,106 @@ class ReviewTest(ReviewCase):
                                              "--cwd", str(self.root), "--json"])
         for text in (self.base, self.head, "AC1", "diff-review"):
             self.assertIn(text, call["stdin"])
+
+    def test_routed_files_replace_the_standards_section_of_the_packet(self):
+        self.arrange([CLEAN_ANSWER])
+
+        code, reply = self.run_review(routed=["/s/the-bar.md", "/s/stacks/python.md"])
+
+        self.assertEqual(code, 0, reply)
+        (call,) = self.calls()
+        self.assertEqual(routed_in(call["stdin"]), ["/s/the-bar.md", "/s/stacks/python.md"])
+        self.assertNotIn("Standards:", call["stdin"])
+        self.assertNotIn("stacks/\n", call["stdin"])
+
+    def test_a_routed_path_holding_a_newline_stays_one_path_in_the_packet(self):
+        self.arrange([CLEAN_ANSWER])
+        routed = ["/s/the-bar.md", "/w/odd\nname/docs/standards/web.md"]
+
+        code, reply = self.run_review(routed=routed)
+
+        self.assertEqual(code, 0, reply)
+        (call,) = self.calls()
+        self.assertEqual(routed_in(call["stdin"]), routed)
+
+    def test_a_review_without_routed_files_is_a_usage_error(self):
+        self.arrange([CLEAN_ANSWER])
+
+        code, reply = self.run_review(routed=None)
+
+        self.assertEqual((code, reply["verdict"]), (2, "error"), reply)
+        self.assertEqual(self.calls(), [])
+
+    def test_routed_files_that_are_not_a_list_of_strings_are_a_usage_error(self):
+        self.arrange([CLEAN_ANSWER])
+        for raw in ('["/s/the-bar.md", 3]', '{"a": 1}'):
+            with self.subTest(raw=raw):
+                code, reply = self.run_review(raw_routed=raw)
+
+                self.assertEqual((code, reply["verdict"]), (2, "error"), reply)
+                self.assertEqual(self.calls(), [])
+
+    def test_a_review_without_the_routed_head_or_with_a_head_that_is_no_commit_id_is_a_usage_error(self):
+        self.arrange([CLEAN_ANSWER])
+        for head in (None, "HEAD", self.head[:12], self.head.upper()):
+            with self.subTest(head=head):
+                code, reply = self.run_review(head=head)
+
+                self.assertEqual((code, reply["verdict"]), (2, "error"), reply)
+                self.assertEqual(self.calls(), [])
+
+    def test_a_commit_landing_after_routing_is_unavailable_before_any_review_starts(self):
+        self.arrange([VALID])
+        routed = self.head
+        (self.root / "web").mkdir()
+        (self.root / "web/page.js").write_text("y = 2\n", encoding="utf-8")
+        self.world.git(self.root, "add", "-A")
+        self.world.git(self.root, "commit", "--quiet", "-m", "later")
+
+        code, reply = self.run_review(head=routed)
+
+        self.assertEqual((code, reply["verdict"], reply["findings"]), (0, "unavailable", []), reply)
+        self.assertIn("head moved since routing", reply["detail"])
+        self.assertIn(routed, reply["detail"])
+        self.assertEqual(self.calls(), [])
+
+    def test_the_range_is_the_routed_heads(self):
+        self.arrange([CLEAN_ANSWER])
+
+        code, reply = self.run_review()
+
+        self.assertEqual(code, 0, reply)
+        self.assertIn(f"base {self.base} head {self.head}", reply["raw_summary"])
+
+    def test_the_range_is_the_routed_merge_base_though_the_integration_ref_moved(self):
+        self.arrange([CLEAN_ANSWER])
+        self.world.git(self.root, "update-ref", "refs/remotes/origin/main", self.head)
+
+        code, reply = self.run_review()
+
+        self.assertEqual(code, 0, reply)
+        self.assertIn(f"base {self.base} head {self.head}", reply["raw_summary"])
+        (call,) = self.calls()
+        self.assertIn(f"Base: {self.base}", call["stdin"])
+
+    def test_a_merge_base_that_is_no_ancestor_of_the_head_is_unavailable(self):
+        self.arrange([CLEAN_ANSWER])
+        orphan = self.world.git(self.root, "commit-tree", "HEAD^{tree}", "-m", "orphan").strip()
+        for merge_base in ("c" * 40, orphan):
+            with self.subTest(merge_base=merge_base):
+                code, reply = self.run_review(merge_base=merge_base)
+
+                self.assertEqual((code, reply["verdict"], reply["findings"]), (0, "unavailable", []), reply)
+                self.assertEqual(self.calls(), [])
+
+    def test_a_review_without_the_routed_merge_base_or_with_one_that_is_no_commit_id_is_a_usage_error(self):
+        self.arrange([CLEAN_ANSWER])
+        for merge_base in (None, "main", self.base[:12]):
+            with self.subTest(merge_base=merge_base):
+                code, reply = self.run_review(merge_base=merge_base)
+
+                self.assertEqual((code, reply["verdict"]), (2, "error"), reply)
+                self.assertEqual(self.calls(), [])
 
     def test_an_unsupported_review_code_answers_none_and_starts_nothing(self):
         self.arrange([VALID], supported=False)

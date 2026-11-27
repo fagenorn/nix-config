@@ -4,7 +4,8 @@ A procedure directory holds procedure files `<name>.json` (every `*.json` not en
 reply schema files `*.reply.json`. A procedure's name is its file stem and matches `^[a-z][a-z0-9-]*$`. Every file is strict
 JSON: a duplicate key or a non-finite literal makes it unreadable.
 
-Header. A procedure is an object with these members: `format` (the integer 1, the only version number), `inputs` (distinct
+Header. A procedure is an object with these members: `format` (the integer 2, the only version number; 2 added a step's `repository` and `base`, so a run saved in
+format 1 is superseded), `inputs` (distinct
 names matching `^[a-z][a-z0-9_]*$`), `stops` (stop name -> object with `need`, one of `NEEDS`, and `reenter`, a step
 id, and optional `pinned`, a bool: a continue re-enters a pinned stop's `reenter` step without rewinding to an earlier
 stale result) and `steps` (a non-empty list), all required, and `keep_alive`, optional (a procedure with none runs no keep-alive): an
@@ -25,7 +26,11 @@ step bounded) and `mutates` (bool). Kind members: `command`: `command`,
 optional `subcommand`, optional `wait` (one of `WAITS`), its arguments being its `in` paths, and optional `check`
 (an object with `command` and optional `subcommand`: the command that reads
 whether the step's effect already happened; a command step with `mutates` true
-requires one and no other step carries one); `agent`: `role`,
+requires one and no other step carries one), and optional `repository` (one of the step's `in` paths: the
+checkout whose head the step's stored result holds for, only with `holds` `head` and never with `mutates`, so a
+stored result can never stand in for a mutation or its check), and optional `base` (one of the step's `in` paths, a branch
+of the origin remote whose merge base with the checkout's head the result also holds for; only with `repository`);
+`agent`: `role`,
 `prompt` (a bare `*.md` name), `reply` (a bare `*.reply.json` name),
 `outcome_from` and optional `worktree` (an object of exactly `path` and `branch`, each one of the step's
 `in` paths, only on a step whose `role` is in `WHOLE_SHELL_ROLES`); `decide`: `grader`; `group`: `members`, a non-empty list of
@@ -150,6 +155,7 @@ PLATFORM_LISTS: Mapping[str, frozenset[str]] = {
     "landing": frozenset(),
     "look-approval": frozenset({"acs", "covers"}),
     "resolve-project": frozenset(),
+    "router": frozenset({"shards", "must_read", "index", "routed_files"}),
     "verified-tree": frozenset({"results"}),
     "verify-rounds": frozenset({"changed_paths", "guards", "problems", "results"}),
 }
@@ -164,7 +170,7 @@ HOLDS = ("run", "head", "live")
 COMMON_REQUIRED = ("id", "stage", "kind", "holds")
 COMMON_OPTIONAL = ("in", "on", "max_visits", "mutates")
 KIND_MEMBERS = {
-    "command": (("command",), ("subcommand", "check", "wait")),
+    "command": (("command",), ("subcommand", "check", "wait", "repository", "base")),
     "agent": (("role", "prompt", "reply", "outcome_from"), ("worktree",)),
     "decide": (("grader",), ()),
     "group": (("members",), ()),
@@ -363,6 +369,18 @@ def _kind_members(item: dict, kind: str, label: str | None, found: _Findings) ->
             invalid(f"subcommand must match {NAME_RE.pattern}.")
         if "wait" in item and item["wait"] not in WAITS:
             invalid(f"wait must be one of {', '.join(WAITS)}.")
+        if "repository" in item:
+            if not (isinstance(item["repository"], str) and item["repository"] in _listed(item)):
+                invalid("repository must be one of the step's in paths.")
+            if item.get("holds") != "head":
+                invalid("repository needs holds head.")
+            if item.get("mutates"):
+                invalid("repository cannot be named by a mutating step.")
+        if "base" in item:
+            if not (isinstance(item["base"], str) and item["base"] in _listed(item)):
+                invalid("base must be one of the step's in paths.")
+            if "repository" not in item:
+                invalid("base needs repository.")
         _check_member(item, label, found)
     elif kind == "agent":
         if "role" in item and not _is_text(item["role"]):

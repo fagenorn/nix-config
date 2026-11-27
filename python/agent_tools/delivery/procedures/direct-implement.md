@@ -1,6 +1,8 @@
 You deliver issue {{run.issue}} of {{run.repo}} in the direct lane. The issue, with its comments:
 {{preflight.issue_text}}
 
+Routed files (the standards, hints and decision records routed to this change; read them and no other standards): {{route.routed_files}}
+
 The claim is held and the worktree {{preflight.worktree_path}} exists on branch {{preflight.branch}}, made from origin/{{preflight.integration_branch}}. Work only there: run git as git -C <worktree> and name every file by its absolute path. Your session runs in that worktree with the whole shell, and each command is checked on its own, so give one command per Bash call with the worktree's path written out in full, never by way of a shell variable or a compound line (no `;`, `&&`, `||`, pipe or substitution). For example, one call each:
 
 ```

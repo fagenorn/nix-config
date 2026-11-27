@@ -131,7 +131,7 @@ refused, naming them. One is continued on its own procedure copy (`procedures_di
 inputs of its `run.json`: a visit whose result is stored with its outcome but lacks its grading or its
 transition (either may be the one a kill left; a group member's lacks only its grading, the group's own
 grade being the core's) is first completed from the stored outcome; unless the
-walk is already `Done`, `engine_core.reentry` (given the current repository head) names the step to
+walk is already `Done`, `engine_core.reentry` (given the current repository head and the head and merge base of every checkout a stored result names) names the step to
 re-enter and a `run_continued` event records it; the loop then runs as for a new run. A mutating command
 step's `check` runs first on every visit that replays one a continue discarded (`RunCommand.recheck`; a
 group member's likewise, and in the child runs of a call that replays one, the first visit of each mutating
@@ -140,7 +140,8 @@ under the same guard, wall bound and stop polling as the command: the outcome `a
 any other outcome stands for it, its document stored as the visit's result, and the keep-alive runs before
 that check as before any visit of the step. A `run_continued` carries no `head`; a `result_stored` carries
 the visit's graded `outcome` and, for a command step that holds `head`, the repository head only when it
-is the same before and after the step's process. None are open: a new run is created.
+is the same before and after the step's process (a step naming a `repository` reads and records its checkout's
+head by the rule in `engine_heads`, which also holds the rule for reusing a stored result). None are open: a new run is created.
 
 The leftover rule comes after the procedure rule and before every other rule, for a continued and a
 superseded run: the process group of the run's last `process_started` whose visit stored no result is
@@ -176,7 +177,6 @@ import os
 import secrets
 import shutil
 import socket
-import subprocess
 import sys
 import tempfile
 import threading
@@ -190,11 +190,12 @@ from typing import Callable, Mapping
 
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
 from agent_tools.delivery import (
-    engine_check, engine_commands, engine_core, engine_guard, engine_housekeeping, engine_ledger,
-    engine_reply, engine_session, engine_slots, engine_stop, host_admission, procedure_terms,
+    engine_check, engine_commands, engine_core, engine_guard, engine_heads, engine_housekeeping,
+    engine_ledger, engine_reply, engine_session, engine_slots, engine_stop, host_admission, procedure_terms,
     rule_reader,
 )
 from agent_tools.delivery.engine_commands import CommandTable, UnknownCommand
+from agent_tools.delivery.engine_heads import REPOSITORY_ENV, core_events, read_head  # noqa: F401  re-exported
 from agent_tools.delivery.engine_ledger import creation_lock_path
 from agent_tools.project_contract import agent_platform, resolve_project
 
@@ -212,7 +213,6 @@ SUPPLIED_INPUTS = ("holder", "issue", "repo", "repo_root")
 RUNNABLE_KINDS = ("command", "agent", "decide", "group", "call")
 QUOTA_NEED = "retry"
 ABSENT = "absent"
-REPOSITORY_ENV = engine_session.REPOSITORY_ENV
 NO_TOKENS = {"input": 0, "cache_write": 0, "cache_read": 0, "output": 0}
 
 
@@ -308,47 +308,6 @@ def _refuse_unrunnable(procedure: dict, directory: Path, supplied: tuple[str, ..
             raise Refused(str(error)) from error
         _refuse_unrunnable(document, directory, given, child, (*calling, name), validated)
         validated.add((child, given))
-
-
-def core_events(run_dir: Path, ledger: list[dict],
-                computed: frozenset[str] = frozenset()) -> list[dict]:
-    """The core's events for a run's ledger events; every other ledger event is skipped.
-
-    An `outcome_graded` of a step in `computed` (a group, graded by the core) is skipped.
-    """
-    heads = {(e["step"], e["visit"]): e for e in ledger if e["event"] == "result_stored"}
-    stored = {key: e["result"] for key, e in heads.items()}
-    events: list[dict] = []
-    for event in ledger:
-        if event["event"] == "step_entered":
-            events.append({"type": "entered", "step": event["step"]})
-        elif event["event"] == "run_continued":
-            events.append({"type": "continued", "step": event.get("step"),
-                           "visit": event.get("visit")})
-        elif event["event"] == "outcome_graded" and event["step"] not in computed:
-            relative = stored[(event["step"], event["visit"])]
-            outcome = {"type": "outcome", "step": event["step"],
-                       "outcome": event["outcome"], "result": _load(run_dir / relative)}
-            if "head" in heads[(event["step"], event["visit"])]:
-                outcome["head"] = heads[(event["step"], event["visit"])]["head"]
-            events.append(outcome)
-    return events
-
-
-def read_head(root: str) -> str | None:
-    """The full commit id `HEAD` names in `root`, or None when it cannot be read.
-
-    The repository is the one `root` is in: a variable that selects another is not passed on.
-    """
-    environ = {key: value for key, value in os.environ.items() if key not in REPOSITORY_ENV}
-    try:
-        done = subprocess.run(["git", "rev-parse", "--verify", "--quiet", "HEAD"], cwd=root, env=environ,
-                              stdin=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                              stdout=subprocess.PIPE, text=True, timeout=30)
-    except (OSError, subprocess.SubprocessError):
-        return None
-    head = done.stdout.strip()
-    return head if done.returncode == 0 and engine_ledger.HEAD_RE.fullmatch(head) else None
 
 
 def _resolve() -> tuple[dict, CommandTable]:
@@ -647,7 +606,8 @@ def _continue(run_dir: Path, table: CommandTable, inputs: dict) -> None:
         return
     if isinstance(action, engine_core.Stop) and (not ledger or ledger[-1]["event"] != "stop_reached"):
         return  # the owner never saw this stop: the walk reports it before anything is re-entered
-    point = engine_core.reentry(procedure, inputs, events, read_head(table.root))
+    point = engine_core.reentry(procedure, inputs, events, read_head(table.root),
+                                engine_heads.checkout_heads(ledger), engine_heads.checkout_bases(ledger))
     if (isinstance(action, engine_core.StartSession)
             and (action.step, action.visit) == (point.step, point.visit)
             and _resumed(run_dir, ledger, action.step, action.visit) is not None):
@@ -871,7 +831,7 @@ def _walk(run_dir: Path, table: CommandTable, scope: _Scope,
                                   stop)
                     if lost is not None:
                         return lost
-                _visit(run_dir, table, steps[action.step], action, stop)
+                _visit(run_dir, table, steps[action.step], action, scope)
             except engine_stop.Stopped:
                 return _stopped(run_dir, action.step)
             ran += 1
@@ -1034,21 +994,39 @@ def _graded(run_dir: Path, step: dict, visit: int, outcome: str, *, bound: bool 
 
 
 def _visit(run_dir: Path, table: CommandTable, step: dict, action: engine_core.RunCommand,
-           stop: Callable[[], bool], member: bool = False) -> None:
-    name, visit = action.step, action.visit
+           scope: _Scope, member: bool = False) -> None:
+    name, visit, stop = action.step, action.visit, scope.stop
+    key = engine_heads.reuse_key(action) if step.get("repository") else None
     engine_ledger.append_event(run_dir, {"event": "step_entered", "at": _now(), "step": name,
                                          "visit": visit, "stage": step["stage"]})
     wait = step.get("wait")
-    if wait:
-        engine_ledger.append_event(run_dir, {"event": "wait_started", "at": _now(),
-                                             "wait": wait, "until": None})
 
     def started(pid: int) -> None:
         engine_ledger.append_event(run_dir, {"event": "process_started", "at": _now(),
                                              "step": name, "visit": visit, "pid": pid,
                                              "started": _now()})
 
-    before = read_head(table.root) if step["holds"] == "head" else None
+    try:
+        repository, ref = engine_heads.checkout_of(step, action.args), engine_heads.base_of(step, action.args)
+    except engine_heads.CheckoutRefused as error:  # no process starts, nothing is held, no wait opens
+        refused = engine_commands.Ran("refused", {"reason": str(error), "verdict": "refused"}, None, 0.0)
+        return _grade_command(run_dir, step, name, visit, refused, None, member, reuse_key=key)
+    settled = engine_heads.settle(scope.root, key, repository, ref) if repository else None
+    if settled and settled.moved:
+        return _head_moved(run_dir, step, name, visit, 0.0, member, key)
+    if settled and settled.hit:
+        hit = settled.hit
+        engine_ledger.store_result(run_dir, step=name, visit=visit, result=hit.result, at=_now(),
+                                   wall_seconds=0.0, turns=0, tokens=dict(NO_TOKENS), spend_usd=0,
+                                   head=settled.mark.head, base=settled.mark.base, outcome="ok",
+                                   repository=repository, reuse_key=key,
+                                   reused_from={"run": hit.run, "step": hit.step, "visit": hit.visit})
+        return _graded(run_dir, step, visit, "ok", member=member)
+    if wait:
+        engine_ledger.append_event(run_dir, {"event": "wait_started", "at": _now(),
+                                             "wait": wait, "until": None})
+    held = repository or table.root
+    before = settled.mark if settled else engine_heads.read_mark(held) if step["holds"] == "head" else None
     ran = None
     if action.recheck:
         check = step["check"]
@@ -1063,9 +1041,13 @@ def _visit(run_dir: Path, table: CommandTable, step: dict, action: engine_core.R
                                   timeout=table.wall_seconds(action.command), stop=stop)
     if wait:
         engine_ledger.append_event(run_dir, {"event": "wait_ended", "at": _now(), "wait": wait})
-    after = read_head(table.root) if step["holds"] == "head" else None
+    after = engine_heads.read_mark(held, ref) if step["holds"] == "head" else None
     try:
-        _grade_command(run_dir, step, name, visit, ran, before if before == after else None, member)
+        if repository is not None and (before != after or engine_heads.names_another_range(ran.result, before, ref)):
+            _head_moved(run_dir, step, name, visit, ran.wall_seconds, member, key)
+        else:
+            _grade_command(run_dir, step, name, visit, ran, before if before == after else None, member,
+                           repository, key)
     finally:  # forwarding a diagnostic never decides whether the step is graded
         _forward(ran.stderr)
 
@@ -1079,18 +1061,35 @@ def _forward(diagnostic: bytes) -> None:
         pass
 
 
+def _bounded(run_dir: Path, step: dict, name: str, visit: int, bound: str, wall_seconds: float,
+             mark: engine_heads.Mark | None, repository: str | None, member: bool,
+             reuse_key: str | None = None) -> None:
+    """Store the result of a fired bound and grade it `out-of-bounds`."""
+    engine_ledger.store_result(run_dir, step=name, visit=visit, result={"bound": bound}, at=_now(),
+                               wall_seconds=wall_seconds, turns=0, tokens=dict(NO_TOKENS),
+                               spend_usd=0, head=mark and mark.head, base=mark and mark.base,
+                               outcome=procedure_terms.OUT_OF_BOUNDS,
+                               repository=repository, reuse_key=reuse_key)
+    _graded(run_dir, step, visit, procedure_terms.OUT_OF_BOUNDS, bound=True, member=member)
+
+
+def _head_moved(run_dir: Path, step: dict, name: str, visit: int, wall_seconds: float,
+                member: bool, reuse_key: str | None = None) -> None:
+    """End a step whose checkout's head moved while it ran: its own outcome is discarded, no head kept."""
+    _bounded(run_dir, step, name, visit, "head-moved", wall_seconds, None, None, member, reuse_key)
+
+
 def _grade_command(run_dir: Path, step: dict, name: str, visit: int,
-                   ran: engine_commands.Ran, head: str | None, member: bool) -> None:
+                   ran: engine_commands.Ran, mark: engine_heads.Mark | None, member: bool,
+                   repository: str | None = None, reuse_key: str | None = None) -> None:
     if ran.timed_out:
-        engine_ledger.store_result(run_dir, step=name, visit=visit, result={"bound": "wall-time"},
-                                   at=_now(), wall_seconds=ran.wall_seconds, turns=0,
-                                   tokens=dict(NO_TOKENS), spend_usd=0, head=head,
-                                   outcome=procedure_terms.OUT_OF_BOUNDS)
-        _graded(run_dir, step, visit, procedure_terms.OUT_OF_BOUNDS, bound=True, member=member)
+        _bounded(run_dir, step, name, visit, "wall-time", ran.wall_seconds, mark, repository, member,
+                 reuse_key)
         return
     engine_ledger.store_result(run_dir, step=name, visit=visit, result=ran.result, at=_now(),
                                wall_seconds=ran.wall_seconds, turns=0, tokens=dict(NO_TOKENS),
-                               spend_usd=0, head=head, outcome=ran.outcome)
+                               spend_usd=0, head=mark and mark.head, base=mark and mark.base,
+                               outcome=ran.outcome, repository=repository, reuse_key=reuse_key)
     if ran.outcome == procedure_terms.OUT_OF_BOUNDS:  # only the engine grades a fired bound
         raise Fault(f"step {name} has no mapping for the outcome {ran.outcome}")
     _graded(run_dir, step, visit, ran.outcome, member=member)
@@ -1104,7 +1103,7 @@ def _member(run_dir: Path, table: CommandTable, step: dict,
             line = stopped[1]
             raise engine_session.EngineStop(line["end"], line["need"], line["detail"], step["id"])
     else:
-        _visit(run_dir, table, step, action, scope.stop, member=True)
+        _visit(run_dir, table, step, action, scope, member=True)
 
 
 def _group(run_dir: Path, table: CommandTable, steps: dict[str, dict],

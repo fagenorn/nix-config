@@ -1,12 +1,12 @@
 """`independent-review`: the configured Codex diff review of a delivery range, as a platform command.
 
 `independent-review code --repo-root <root> --issue <n> --worktree-path <wt> --branch <b>
---integration-branch <int> --acceptance <JSON list>` prints one compact JSON line, keys sorted,
-`{detail, findings, raw_summary, verdict}`, and exits 0. `verdict` is `pass`, `findings`, `none` or
-`unavailable`; `findings` is a list of `{failing_input, file, severity, summary}` that every reply
-carries. A usage error is exit 2 and a resolver refusal exit 1, each with `verdict` `error` and an
-empty `findings`. The contract is `codex-collaboration`'s SKILL.md ("Direct configured review") and
-DIFF-REVIEW.md; the tail model and effort are the skill's, and a test pins them.
+--integration-branch <int> --acceptance <JSON list> --routed-files <JSON list of paths> --head <sha>` prints one
+compact JSON line, keys sorted, `{detail, findings, raw_summary, verdict}`, and exits 0. `verdict` is
+`pass`, `findings`, `none` or `unavailable`; `findings` is a list of `{failing_input, file, severity,
+summary}` that every reply carries. A usage error is exit 2 and a resolver refusal exit 1, each with
+`verdict` `error` and an empty `findings`. The contract is `codex-collaboration`'s SKILL.md ("Direct
+configured review") and DIFF-REVIEW.md; the tail model and effort are the skill's, and a test pins them.
 
 Routing reads `capabilities["review.code"]["state"]` of the resolved project: `unsupported` is
 `none` and starts no process; `blocked` is `unavailable`, its detail naming the `reason_code`;
@@ -19,8 +19,12 @@ error: diff-review review_id <id> argv <argv>: expected codex-companion task [--
 diff-review; <first failing cause>` (causes in order: executable, subcommand, reviewer,
 unsupported token).
 
-The range is `merge-base refs/remotes/origin/<integration> HEAD` to `HEAD` in the worktree; one that
-does not resolve is `unavailable`. `diff-scope` measures it (`product.changed_files` as `M`,
+`--head` and `--merge-base` are the commits the files were routed for (the router's `head` and
+`merge_base`, each a full commit id). The range is `--merge-base` to `--head` in the worktree, and
+the review reads no integration ref, so a fetch after routing changes neither end. It is `unavailable`
+for a worktree whose `HEAD` is no longer `--head` (a commit landed after routing), the detail `head
+moved since routing`, for a merge base that is no commit or is not an ancestor of the head (`merge base
+<sha> is not an ancestor of <head>`), before any process starts. `diff-scope` measures it (`product.changed_files` as `M`,
 `files[].path`, `files[].changed_lines`). More than `FILE_BUDGET` files (strictly) is cut into
 consecutive slices of that many `files[].path` entries in emitted order, each dispatched once, so
 every product file is reviewed once; exactly that many, or none, is dispatched whole. No measurement
@@ -31,10 +35,13 @@ thread; the reply lists them in slice order.
 The packet goes on stdin, with no positional argument and no diff: the operation name, invocation
 directory, worktree, branch and shas; the scope; the criteria and issue number (routing context);
 the declared verification ids (context only) and the `AGENTS.md`/`CLAUDE.md` that exist at the
-worktree root; the standards paths; the read-only rules; and the reviewer output contract as a
-requirement. A slice's packet is DIFF-REVIEW.md's over-budget form: a scoped scope paragraph, the
-slice's paths with their `changed_lines` and the per-path `git diff` protocol, and the requirement
-that the review start with `scoped to <N> of <M> product files`.
+worktree root; the routed files (`--routed-files`, required: a JSON list of path strings, written as
+`Routed files (a JSON list of paths):` and that list on the next line, whole, so a path holding a newline stays one
+path, where the standards paths once stood, with no fallback); the read-only
+rules; and the reviewer output contract as a requirement. A slice's packet is DIFF-REVIEW.md's
+over-budget form: a scoped scope paragraph, the slice's paths with their `changed_lines` and the
+per-path `git diff` protocol, and the requirement that the review start with `scoped to <N> of <M>
+product files`.
 
 The invocation is `entry["argv"] + ["--model", MODEL, "--effort", EFFORT, "--cwd", <worktree>,
 "--json"]` in `entry["cwd"]`, with the entry's declared env names removed, for `ATTEMPT_SECONDS`.
@@ -88,7 +95,6 @@ EXPECTED_SHAPE = f"expected {COMPANION} task [--fresh] --reviewer {OPERATION}"
 HEADINGS = ("Critical", "Important", "Minor")
 FILE_TOKEN = re.compile(r"[A-Za-z0-9_./-]+:[0-9]+")
 TOKEN_EDGES = "()[]{}<>`'\",.;"
-STANDARDS = ("~/.agents/standards/the-bar.md", "~/.agents/standards/stacks/")
 
 READ_ONLY_RULES = (
     "Remain read-only: do not edit files, mutate Git, create commits, branches or worktrees, "
@@ -214,7 +220,6 @@ def packet(args: argparse.Namespace, snapshot: Mapping, base: str, head: str,
            slice_files: Sequence[Mapping] | None, total: int) -> str:
     root = Path(args.worktree_path)
     context = [str(root / name) for name in ("AGENTS.md", "CLAUDE.md") if (root / name).is_file()]
-    standards = [os.path.expanduser(path) for path in STANDARDS] + list(snapshot["bindings"]["paths"]["standards"])
     sections = [
         f"Operation: {OPERATION}\nInvocation directory: {os.getcwd()}\nWorktree root: {args.worktree_path}\n"
         f"Branch: {args.branch}\nBase: {base}\nHead: {head}",
@@ -225,7 +230,7 @@ def packet(args: argparse.Namespace, snapshot: Mapping, base: str, head: str,
         "Context only, not a request to run anything (the runtime is read-only): the project verifies "
         f"with {', '.join(snapshot['bindings']['workflow']['verification'])}.\nApplicable instruction "
         "files:\n" + "\n".join(context),
-        "Standards:\n" + "\n".join(standards),
+        "Routed files (a JSON list of paths):\n" + json.dumps(args.routed_files),
         "Read-only rules:\n" + READ_ONLY_RULES,
     ]
     requirement = OUTPUT_CONTRACT
@@ -345,8 +350,12 @@ def run_review(args: argparse.Namespace) -> dict:
         return reply("unavailable", f"binding shape error: {OPERATION} review_id {review_id} argv "
                                     f"{entry['argv']}: {EXPECTED_SHAPE}; {cause}")
     try:
-        base = _git(args.worktree_path, "merge-base", f"refs/remotes/origin/{args.integration_branch}", "HEAD")
         head = _git(args.worktree_path, "rev-parse", "HEAD")
+        if head != args.head:
+            return reply("unavailable", f"head moved since routing: routed {args.head}, HEAD is {head}")
+        base = args.merge_base
+        if _git(args.worktree_path, "merge-base", base, head) != base:
+            return reply("unavailable", f"merge base {base} is not an ancestor of {head}")
     except Refusal as refusal:
         return reply("unavailable", str(refusal))
     files = measure(base, head, args.worktree_path)
@@ -395,6 +404,19 @@ def _acceptance(text: str) -> list:
     return value
 
 
+def _routed_files(text: str) -> list[str]:
+    value = json.loads(text)
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise ValueError("not a JSON list of strings")
+    return value
+
+
+def _commit(text: str) -> str:
+    if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", text):
+        raise ValueError("not a full lowercase commit id")
+    return text
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = _Parser(prog="independent-review", description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True, parser_class=_Parser)
@@ -403,6 +425,11 @@ def _parser() -> argparse.ArgumentParser:
         code.add_argument(flag, required=True)
     code.add_argument("--issue", type=int, required=True)
     code.add_argument("--acceptance", type=_acceptance, required=True, help="the criteria, a JSON list")
+    code.add_argument("--routed-files", type=_routed_files, required=True,
+                      help="the files the reviewer reads, a JSON list of paths")
+    code.add_argument("--head", type=_commit, required=True, help="the commit the files were routed for")
+    code.add_argument("--merge-base", type=_commit, required=True,
+                      help="the merge base the router resolved for that commit")
     return parser
 
 

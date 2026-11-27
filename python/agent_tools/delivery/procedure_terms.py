@@ -15,7 +15,7 @@ from typing import Mapping
 
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
 
-FORMAT = 1
+FORMAT = 2
 STAGES = ("setup", "planning", "plan review", "building", "final review",
           "verifying", "awaiting look", "landing", "closing out", "done")
 NEEDS = ("owner-decision", "owner-look", "retry", "nothing")

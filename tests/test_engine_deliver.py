@@ -156,6 +156,13 @@ class EngineProject:
             "standin-keep-alive": entry("answers", str(self.renewals), str(self.answers)),
             "standin-hold": entry("hold", str(self.hold), "0"),
             "standin-branch": entry("emit", "0", '{"verdict":"ok","branch":"issue-7-topic"}'),
+            "standin-side": entry("emit", "0", json.dumps({"path": str(self.tmp / "side")})),
+            "standin-based": entry("emit", "0", json.dumps({"path": str(self.tmp / "side"), "branch": "main"})),
+            "standin-misrouted-base": entry("emit", "0", json.dumps({"verdict": "ok", "merge_base": "1" * 40})),
+            "standin-misrouted-head": entry("emit", "0", json.dumps({"verdict": "ok", "head": "2" * 40})),
+            "standin-nul": entry("emit", "0", '{"path":"/tmp/a\\u0000b","branch":"main"}'),
+            "standin-relative": entry("emit", "0", '{"path":"relative/dir"}'),
+            "standin-listed": entry("emit", "0", '{"path":["x"]}'),
         })
         land = ["gh", "pr", "merge", "7", "--repo", "example/engine", "--merge"]
         contract["bindings"]["commands"].update(
@@ -194,7 +201,7 @@ class EngineProject:
             default = {"needs-owner": {"need": "owner-decision", "reenter": steps[0]["id"]}}
             if keep_alive:
                 default["claim-lost"] = {"need": "owner-decision", "reenter": steps[0]["id"]}
-            document = {"format": 1,
+            document = {"format": 2,
                         "inputs": list(inputs),
                         "stops": stops or default,
                         "steps": steps}
@@ -695,7 +702,7 @@ class FindingsTest(unittest.TestCase):
         project = EngineProject(self)
         directory = Path(tempfile.mkdtemp(dir=project.tmp))
         (directory / "deliver.json").write_text(
-            '{"format":1,"inputs":["issue"],"stops":{},"steps":[{"id":"a","in":'
+            '{"format":2,"inputs":["issue"],"stops":{},"steps":[{"id":"a","in":'
             + "[" * 100000 + "]" * 100000 + "}]}", encoding="utf-8")
         done = project.deliver(directory)
         self.assertEqual(done.returncode, 2, done.stdout + done.stderr)

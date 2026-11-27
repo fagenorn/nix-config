@@ -56,9 +56,9 @@ UNRELATED = {"reply": {"status": "blocked", "notes": "n", "tests": [], "outside_
 NEW_FILE_FIX = {
     "fix.1": fixing("fixture/second.py", "SECOND = 1\n", tests=["checks/check_format.py"]),
     "fix.2": fixing("fixture/third.py", "THIRD = 1\n", tests=["checks/check_format.py"])}
-STOPS = ("verify", "verify-unrelated", "verify-fix", "verify-fix-review")
-VERIFY_STEPS = ("round", "fix", "fixed", "ws-check", "fix-review", "narrowing", "fix-review-again",
-                "narrowing-again", "rerun", "retest", "retested")
+STOPS = ("verify", "verify-route-failed", "verify-unrelated", "verify-fix", "verify-fix-review")
+VERIFY_STEPS = ("route-checks", "round", "route-review", "fix", "fixed", "ws-check", "fix-review", "narrowing",
+                "fix-review-again", "narrowing-again", "rerun", "retest", "retested")
 BOUNDS = (("checks", 3), ("round", 3), ("fix", 2), ("fixed", 2), ("ws-check", 2), ("fix-review", 4),
           ("narrowing", 4), ("fix-review-again", 4), ("narrowing-again", 2), ("rerun", 2))
 
