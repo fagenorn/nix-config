@@ -272,6 +272,24 @@ class Queued:
         self.jobs.pop(0)()
 
 
+PROC_PID_DOMAIN = "linux:21b1c3eb3a554a8792391e610443b8b8:pid:[4026532224]"
+
+
+def fake_proc(root):
+    """A procfs under `root` for pid 2164 (`procStart` 976) in the pid domain `PROC_PID_DOMAIN`.
+
+    Returns the `proc` and `machine_id` keywords `process_matches` and `liveness_unreadable` take.
+    """
+    root = Path(root)
+    (root / "proc" / "self" / "ns").mkdir(parents=True)
+    (root / "proc" / "self" / "stat").write_text("1 (x) S")
+    os.symlink("pid:[4026532224]", root / "proc" / "self" / "ns" / "pid")
+    (root / "proc" / "2164").mkdir()
+    (root / "proc" / "2164" / "stat").write_text("2164 (a) S " + " ".join(["0"] * 18) + " 976 0 0\n")
+    (root / "machine-id").write_text("21b1c3eb3a554a8792391e610443b8b8\n")
+    return dict(proc=root / "proc", machine_id=root / "machine-id")
+
+
 def profile_dir(store, name):
     path = Path(store).parent.parent / "accounts" / "profiles" / name
     path.mkdir(parents=True, exist_ok=True)

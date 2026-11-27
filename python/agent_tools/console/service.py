@@ -470,7 +470,7 @@ closing report to give, or a withdrawn sprint's stop is pending (`_pending`: its
 manager would keep running on the account the change leaves, and deleting the profile would delete the session
 registry that stop reads. A started manager on it with no stopper refuses the same way. One conclusive
 listing (`sessions.read_session_registry(..., strict=True)`: a directory or a session file it cannot read,
-or a liveness it cannot judge, is a failure, never a manager gone) is read off the lock before the sign-out
+or a liveness it cannot judge or a pid-domain or proc read that fails, is a failure, never a manager gone) is read off the lock before the sign-out
 for a colleague's profile, also when the record names no manager on it, and only the sessions on
 that profile count: a manager's session it does not show on the profile whose `_settled` (the console's own
 start when a restart lost it) is under `sprints.STOP_SETTLE_MS` old refuses the same way, as does one it
