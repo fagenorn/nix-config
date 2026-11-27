@@ -1,4 +1,4 @@
-"""A refused signature points at the setting that asks for it when the contract authors one (#1095).
+"""A refused signature points at the setting that asks for it when the contract authors one.
 
 The apply error is the one source of that fact: the console never reads the checkout to learn it.
 
