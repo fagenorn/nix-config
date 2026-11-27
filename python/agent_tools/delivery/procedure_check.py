@@ -157,6 +157,7 @@ PLATFORM_LISTS: Mapping[str, frozenset[str]] = {
 # A command whose subcommands publish different lists: the member must be one the step's own subcommand lists.
 SUBCOMMAND_LISTS: Mapping[tuple[str, str], frozenset[str]] = {
     ("verify-rounds", "round"): frozenset({"guards", "problems", "results"}),
+    ("verify-rounds", "round-reviewed"): frozenset({"guards", "problems", "results"}),
     ("verify-rounds", "fix-range"): frozenset({"changed_paths"}),
     ("verify-rounds", "retested"): frozenset(),
 }
