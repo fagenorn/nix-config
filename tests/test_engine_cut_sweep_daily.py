@@ -8,12 +8,16 @@ no thread writes after the kill, and that a deliberately broken continue is told
 
 from __future__ import annotations
 
+import json
+import signal
+import subprocess
 import sys
 import time
 import unittest
 
-from tests.engine_cut_sweep import (BROKEN_CUT, RESULT_NAME, CutPoint, cut_at, cut_points, deliver, live_started,
-                                    settle)
+from tests.engine_cut_sweep import (BROKEN_CUT, RESULT_NAME, CutPoint, cut_at, cut_points, deliver, end_spawned,
+                                    live_started, settle)
+from tests.guard_policy_world import REPO_ROOT
 from tests.engine_fixture import AdoptedFixtures
 from tests.engine_procedure_copies import PROCEDURES
 from tests.engine_step_coverage import StepCoverage
@@ -22,6 +26,7 @@ from tests.guard_policy_world import install_platform_manifest_in_environ
 from tests.test_engine_stubbed_run import Scenario
 
 TIER = "nightly"  # walks the stubbed delivery once per cut point
+PROBE = REPO_ROOT / "tests/fixtures/engine-stubbed-run/cut_spawn_probe.py"
 
 FIXTURES = AdoptedFixtures()
 STEPS = StepCoverage(PROCEDURES, ())
@@ -123,6 +128,31 @@ class CutHarnessTest(Scenario):
 
         self.assertTrue(str(raised.exception).startswith("cut run processes still alive after 1.0 s: ["),
                         str(raised.exception))
+        deadline = time.monotonic() + 5
+        while live_started(run) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertEqual(live_started(run), [])
+
+    def test_a_process_spawned_just_before_the_cut_that_the_ledger_never_recorded_is_still_found(self):
+        run = self.stubbed()
+        runs = run.world.home / ".agents/state/engine/runs/probe-run"
+        runs.mkdir(parents=True)
+        (runs / "run.json").write_text(json.dumps({"procedure": "direct", "sequence": 1}), encoding="utf-8")
+        (runs / "events.jsonl").write_text("", encoding="utf-8")
+        point = CutPoint("direct#1", "step_entered", "x", 1, 1)
+        env = {**run.env, "ENGINE_CUT_AT": json.dumps(point.to_json()), "ENGINE_CUT_LOG": str(run.tmp / "cuts.log")}
+        run.test.addCleanup(end_spawned, run)
+
+        done = subprocess.run([sys.executable, str(PROBE), str(runs)], cwd=run.fixture.root, env=env,
+                              start_new_session=True, capture_output=True, text=True, timeout=60)
+
+        self.assertEqual(done.returncode, -signal.SIGKILL, done.stdout + done.stderr)
+        pid = int(done.stdout.split()[0])
+        self.assertEqual([e["event"] for e in StubbedRun.events(runs)], ["step_entered"])
+        self.assertEqual(live_started(run), [pid])
+        with self.assertRaises(AssertionError) as raised:
+            settle(run, wait=1.0)
+        self.assertIn(str(pid), str(raised.exception))
         deadline = time.monotonic() + 5
         while live_started(run) and time.monotonic() < deadline:
             time.sleep(0.05)

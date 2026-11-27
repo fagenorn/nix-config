@@ -25,6 +25,8 @@ from tests.process_liveness import process_alive
 
 CUT_ENGINE = REPO_ROOT / "tests/fixtures/engine-stubbed-run/cut_engine.py"
 RESULT_FILE = "result-file"
+CUT_LOG_NAME = "cuts.log"  # in `run.tmp`: where `cut_at` logs, and so where `live_started` finds the spawn record
+SPAWNED_SUFFIX = ".spawned"
 RESULT_NAME = re.compile(r"[a-z][a-z0-9-]*\.[1-9][0-9]*\.json")
 
 
@@ -66,6 +68,7 @@ def deliver(run: StubbedRun, *, cut: CutPoint | None = None, log: Path | None = 
     if broken:
         env["ENGINE_BREAK_CONTINUE"] = "1"
     run.test.addCleanup(run.end_started)
+    run.test.addCleanup(end_spawned, run)
     return subprocess.run([sys.executable, str(CUT_ENGINE), "deliver", str(run.issue)], cwd=run.fixture.root,
                           env=env, start_new_session=True, capture_output=True, text=True, timeout=600)
 
@@ -80,17 +83,44 @@ def cut_points(log: Path) -> tuple[CutPoint, ...]:
     return tuple(CutPoint.from_json(document) for document in _logged(log))
 
 
+def _spawned(run: StubbedRun) -> list[dict]:
+    """Every `{pid, started}` the cut engine spawned, as it recorded them beside the cut log (see `cut_engine.py`):
+    the ledger lacks a process spawned just before the cut, whose `process_started` is never written."""
+    return _logged(run.tmp / (CUT_LOG_NAME + SPAWNED_SUFFIX))
+
+
+def _live(event: dict) -> bool:
+    try:
+        os.kill(event["pid"], 0)  # cheap: most spawned processes are long gone
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        pass
+    return engine_stop.same_process(event["pid"], event["started"]) and process_alive(event["pid"])
+
+
 def live_started(run: StubbedRun) -> list[int]:
-    """The pids of every process a run recorded as started that is still that process and not a zombie."""
+    """The pids of every process a run started that is still that process and not a zombie: those its ledger
+    recorded as started and those the cut engine recorded at spawn."""
     pids = []
     with mock.patch.dict(os.environ, {"PATH": run.env["PATH"]}):  # the fake forge leaves `ps` off this process's
         for directory in run.run_dirs():
             for event in run.events(directory):
-                if (event["event"] == "process_started"
-                        and engine_stop.same_process(event["pid"], event["started"])
-                        and process_alive(event["pid"])):
+                if event["event"] == "process_started" and _live(event):
                     pids.append(event["pid"])
+        pids.extend(event["pid"] for event in _spawned(run) if event["pid"] not in pids and _live(event))
     return pids
+
+
+def end_spawned(run: StubbedRun) -> None:
+    """End every process the cut engine recorded at spawn that is still that process."""
+    with mock.patch.dict(os.environ, {"PATH": run.env["PATH"]}):
+        for event in _spawned(run):
+            if engine_stop.same_process(event["pid"], event["started"]):
+                try:
+                    os.killpg(event["pid"], signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
 
 
 def settle(run: StubbedRun, wait: float = 60.0) -> None:
@@ -101,11 +131,12 @@ def settle(run: StubbedRun, wait: float = 60.0) -> None:
         pids = live_started(run)
     if pids:
         run.end_started()
+        end_spawned(run)
         raise AssertionError(f"cut run processes still alive after {wait} s: {pids}")
 
 
 def cut_at(run: StubbedRun, point: CutPoint) -> subprocess.CompletedProcess:
-    log = run.tmp / "cuts.log"
+    log = run.tmp / CUT_LOG_NAME
     done = deliver(run, cut=point, log=log)
     logged = _logged(log)
     if done.returncode != -signal.SIGKILL or not logged or logged[-1] != {**point.to_json(), "cut": True}:

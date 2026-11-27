@@ -6,6 +6,8 @@ behaves as `python -m agent_tools.delivery.engine`.
 - `ENGINE_CUT_AT`: a JSON object `{run, event, step, visit, occurrence}`. The write that makes exactly that point
   is followed by SIGKILL to the process group, while the lock that serialises every writer is still held.
 - `ENGINE_CUT_LOG`: a file that receives one JSON line per point written, `{run, event, step, visit, occurrence, cut}`.
+  With it set, `<log>.spawned` also receives one `{pid, started}` line per process the engine spawns, written under
+  the same lock as the spawn, so the harness can find a process the ledger never recorded.
 - `ENGINE_BREAK_CONTINUE=1`: a continue never resumes an interrupted session, so it launches the step afresh.
 
 A point is `run` (`<procedure>#<n>`, the n-th run of that procedure among the run directories beside the run, by
@@ -19,13 +21,16 @@ import dataclasses
 import json
 import os
 import signal
+import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 from agent_tools.delivery import engine, engine_ledger, engine_resume
 
 RESULT_FILE = "result-file"
+SPAWNED_SUFFIX = ".spawned"
 LOCK = threading.RLock()
 LABELS: dict[str, str] = {}
 TARGET = json.loads(os.environ["ENGINE_CUT_AT"]) if os.environ.get("ENGINE_CUT_AT") else None
@@ -100,9 +105,32 @@ def wrap_resumed(original):
     return resumed
 
 
-engine_ledger._append_line = wrap_append(engine_ledger._append_line)
-engine_ledger._write_result = wrap_result(engine_ledger._write_result)
-if os.environ.get("ENGINE_BREAK_CONTINUE") == "1":
-    engine_resume.resumed = wrap_resumed(engine_resume.resumed)
+def wrap_popen(original):
+    """Record every process the engine spawns, under the same lock as the writes.
 
-sys.exit(engine.main(sys.argv[1:]))
+    The engine writes `process_started` only after `Popen` returns, and starts each process in its own session, so
+    a process spawned just before the cut is never recorded in the ledger and survives the kill. The spawn and its
+    record are one step under `LOCK`: a cut cannot land between them, and none can start once it has.
+    """
+    def init(self, *args, **kwargs):
+        with LOCK:
+            original(self, *args, **kwargs)
+            if LOG:
+                with open(LOG + SPAWNED_SUFFIX, "a", encoding="utf-8") as spawned:
+                    spawned.write(json.dumps({"pid": self.pid, "started": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime())}) + "\n")
+                    spawned.flush()
+    return init
+
+
+def install() -> None:
+    engine_ledger._append_line = wrap_append(engine_ledger._append_line)
+    engine_ledger._write_result = wrap_result(engine_ledger._write_result)
+    subprocess.Popen.__init__ = wrap_popen(subprocess.Popen.__init__)
+    if os.environ.get("ENGINE_BREAK_CONTINUE") == "1":
+        engine_resume.resumed = wrap_resumed(engine_resume.resumed)
+
+
+if __name__ == "__main__":
+    install()
+    sys.exit(engine.main(sys.argv[1:]))
