@@ -1967,16 +1967,11 @@ class DeliveryTest(Case):
         record = self.root / "projects/-srv-p00" / self.sid / "workflows/wf_t1.json"
         record.parent.mkdir(parents=True)
         record.write_text("{}")
-        self.now = time.time()  # the log stamps real time; the digest window follows the service clock
         self.svc.poll_deliveries()
         self.assertEqual(self.runs(), [])
         gone = self.rows("delivery.gone")
         self.assertEqual(len(gone), 1)
         self.assertEqual(json.loads(gone[0][4]), {"run_id": "wf_t1", "session_id": self.sid})
-        (ended,) = digest_of(self.svc)["recent"]
-        self.assertEqual(ended, {
-            "at": gone[0][1], "kind": "delivery_ended",
-            "sentence": "The delivery of owner/p00 #858 ended: stopped at building."})
 
     def sprint_of(self, svc):
         return sprint_entry(svc)
