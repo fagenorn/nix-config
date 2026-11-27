@@ -596,7 +596,7 @@ class ForgeCommandTest(unittest.TestCase):
         self.assertEqual(len(self.forge.stored()), 2)
 
     def planned_issue(self, holder=None):
-        """The preflight report of issue 7 once a plan was noted for HOLDER's run (no note when `holder` is None)."""
+        """The preflight report of the issue once a plan was noted for HOLDER's run (no note when `holder` is None)."""
         self.register_reads({"number": 7, "title": "Add a greeting", "body": "Say hi.", "state": "open",
                              "labels": []})
         self.forge.comment_store(SLUG, 7)
