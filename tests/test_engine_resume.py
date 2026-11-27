@@ -507,6 +507,30 @@ class ResumeTest(unittest.TestCase):
         self.assertEqual(self.entered(run), [1])
         self.assertEqual(run_continued(self.project.events(run)), [])
 
+    def second_denial_after_a_cut(self, event: str) -> None:
+        log = install_answers(self.project, [
+            self.denying("git log | head"), self.normal(), self.denying("rm x", "toolu_02")])
+        procedures = one_step(self.project)
+        first = self.project.deliver(procedures)
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        (run,) = self.project.runs()
+        self.cut(run, event, drop=("results/draft.1.json", "sessions/draft.1.denied.json"))
+        done = self.project.deliver(procedures)
+        self.assertEqual(done.returncode, 3, done.stdout + done.stderr)
+        line = json.loads(done.stdout)
+        self.assertEqual(line["end"], "tool-denied")
+        records = self.records(log)
+        self.assertEqual(len(records), 3)
+        self.assertEqual(after(records[2]["argv"], "--resume"), after(records[0]["argv"], "--session-id"))
+        self.assertLess(line["detail"].index(repr("git log | head")), line["detail"].index(repr("rm x")))
+        self.assertEqual(len(list((run / "sessions").glob("*.denied.prompt.md"))), 1)
+
+    def test_a_run_killed_once_the_first_denial_was_saved_and_denied_again_stops_at_tool_denied_naming_both(self):
+        self.second_denial_after_a_cut("session_answered")
+
+    def test_a_run_killed_after_the_reask_was_announced_and_denied_again_stops_at_tool_denied_naming_both(self):
+        self.second_denial_after_a_cut("session_resuming")
+
     def test_a_run_killed_after_two_launches_were_announced_and_neither_started_sends_the_saved_reask(self):
         log = install_answers(self.project, [self.denying("git log | head"), self.normal(), self.normal()])
         procedures = one_step(self.project)

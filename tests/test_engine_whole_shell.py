@@ -289,6 +289,7 @@ class RealGuardTest(unittest.TestCase):
         "nohup git log",
         "setsid git log",
         "git log & disown",
+        "gh pr create --repo example/x --fill",
         "gh pr merge 1 --repo example/x --merge",
         "gh release create v1 --repo example/x",
     )
