@@ -86,7 +86,7 @@ again` on a failed apply and on a closed pull request; none says `press` or `App
 (the words an earlier release stored for its buttons) with `str.replace`, None stays None, and the
 stored row is never rewritten. `current_reason(reason)` does the same for a stored reason with
 `LEGACY_REASONS`, and `adoptions` stores each step's reason through it, so a failure stored before the
-rewording still equals `SIGNING_REASON` and still offers `SIGNING_OFF_OPTION`. Every reason and note is plain: none holds an error code, a repair
+rewording still equals `SIGNING_REASON`. Every reason and note is plain: none holds an error code, a repair
 id, an HTTP status, a run kind or an exception name.
 `branch_of(plan_id)` is the branch apply creates for the plan.
 `forge_failure(error, base)` is `(reason, note)` for a failed pull request lookup or open, by
@@ -98,19 +98,21 @@ allow the merge yet, 404 that the forge does not know the pull request). `apply_
 for an apply error object, by the first rule that matches: `plan_stale`; the dirty, retained and
 unavailable worktree repairs; `DISCARD_REPAIR` (`adopt.discard.failed`, a copy that could not be
 removed, noted `RETAINED_NOTE`); `SIGNING_REPAIR` (`adopt.commit.signing_unavailable`, reason
-`SIGNING_REASON`, note `SIGNING_NOTE`); `COMMIT_REPAIR` (`adopt.commit.failed`); a failed
+`SIGNING_REASON`, note `SIGNING_NOTE`, or `COMMITTED_SIGNING_NOTE` when a violation's pointer is
+`SIGNING_POINTER`: the apply's own word that the contract saved in the repository is schema 2 and
+authors the signing, so the checkout is never read); `COMMIT_REPAIR` (`adopt.commit.failed`); a failed
 `adopt.gate.*` gate; an uninstalled platform manifest (`MANIFEST_NOTE`, which names `just switch`);
 a repair id with a prefix of `APPLY_REASONS`; else `it could not be applied`. It reads no violation
 message, so a formatter's output, a worktree path or a plan id never reaches a card (the service
 logs them), except the failing hook that `commit_evidence(error, None)` names for `COMMIT_REPAIR`
 (reason `the project's <hook> hook stopped saving the adoption's change: <hook_why(exit)>`, note
-`HOOK_NOTE`) and for `SIGNING_REPAIR` (the reason stays `SIGNING_REASON`, so `Turn signing
-off` is still offered, and the note is `hook_signing_note(hook, why)`, two sentences).
+`HOOK_NOTE`) and for `SIGNING_REPAIR` (the reason stays `SIGNING_REASON` and the note is
+`hook_signing_note(hook, why, settings=...)`, which also names the repository's settings when they ask
+for the signing; two sentences either way).
 `kept` is not read: no note mentions a leftover copy except `RETAINED_NOTE`, none asks an
-agent to remove anything, and every note is at most two sentences. A signing failure whose plan
-holds a drafted `commit-signed` of `yes` offers a third option, `SIGNING_OFF_OPTION` (value
-`SIGNING_OFF_VALUE`), which the page sends as a draft change to `no`; no note carries a path, a
-branch, a hash or a command other than `just switch`.
+agent to remove anything, and every note is at most two sentences. A signing failure offers only
+`Apply it again` and `Not now`: signing is a platform constant, so no card turns it off
+(ADR-console-037); no note carries a path, a branch, a hash or a command other than `just switch`.
 `commit_evidence(error, kept)` is `{hook, why, lines}` for the `commit_output` member of an apply
 error (None unless that member is exactly `{hook, exit, lines}` with `lines` a list of strings,
 `hook` None or matching `HOOK`, `exit` None or an int that is not a bool, and `hook` and `exit`
@@ -308,7 +310,12 @@ SIGNING_REPAIR = "adopt.commit.signing_unavailable"
 SIGNING_REASON = ("the project asks for signed changes and this computer could not sign the "
                   "adoption's change")
 SIGNING_NOTE = "Set up a signing key on this computer, then choose Apply it again."
-SIGNING_FIELD = "commit-signed"
+# The pointer of the violation an apply refuses with when the contract's own `signed` setting asked
+# for the signature (`adopt_apply.SIGNING_POINTER`, the same literal).
+SIGNING_POINTER = "/bindings/vcs/commit/signed"
+COMMITTED_SIGNING_NOTE = ("This project's own settings in its repository ask for signed changes. Set up a "
+                          "signing key on this computer and choose Apply it again, or change those settings "
+                          "in the repository, then register it again.")
 MANIFEST_NOTE = "Run just switch on this computer to install them, then choose Apply it again."
 COMMIT_REPAIR = "adopt.commit.failed"
 APPLY_REASONS = (
@@ -328,11 +335,9 @@ APPLY_ASK = "Apply this adoption?"
 APPLY_OPTION = "Apply it"
 APPLY_AGAIN_OPTION = "Apply it again"
 TRY_AGAIN_OPTION = "Try again"
-SIGNING_OFF_OPTION = "Turn signing off"
 NOT_NOW_OPTION = "Not now"
 APPLY_VALUE = "apply"
 NOT_NOW_VALUE = "not_now"
-SIGNING_OFF_VALUE = "signing_off"
 DEFER_STALE = "that plan is no longer the one shown"
 NOT_OFFERED = "that plan is not waiting for an answer"
 # Notes a console of an earlier release stored, by the words they used for the buttons then.
@@ -622,20 +627,12 @@ def retry_entries(adoptions: Mapping[str, Mapping],
     return items
 
 
-def _signing_draft(latest: Mapping) -> bool:
-    draft = latest.get("draft")
-    return isinstance(draft, list) and any(
-        isinstance(row, Mapping) and row.get("field") == SIGNING_FIELD and row.get("value") == "yes"
-        for row in draft)
-
-
 def apply_items(latest: Mapping | None, adoption: Mapping | None, entry: Mapping | None,
                 action: str | None, *, deferred: Collection[str] = frozenset()) -> list[dict]:
     if latest is None or action is None or latest["plan_id"] in deferred:
         return []
     plan_id = latest["plan_id"]
     name = register.name_of(latest["root"])
-    signing_off = False
     if action == "approve" and adoption is None:
         key, ask, why = (f"register-apply/{plan_id}/{latest['at']}", APPLY_ASK,
                          folder_trust.TRUST_SENTENCE)
@@ -650,16 +647,11 @@ def apply_items(latest: Mapping | None, adoption: Mapping | None, entry: Mapping
         if action == "approve":
             first, value = APPLY_AGAIN_OPTION, APPLY_VALUE
             since = adoption["pull_at"] or adoption["at"]
-            signing_off = (adoption["step"] == "apply_failed"
-                           and adoption["reason"] == SIGNING_REASON and _signing_draft(latest))
         else:
             first, value, since = TRY_AGAIN_OPTION, RETRY_VALUE, adoption["at"]
     else:
         return []
     options, values = [first, NOT_NOW_OPTION], [value, NOT_NOW_VALUE]
-    if signing_off:
-        options, values = ([first, SIGNING_OFF_OPTION, NOT_NOW_OPTION],
-                           [value, SIGNING_OFF_VALUE, NOT_NOW_VALUE])
     return [{
         "type": "inbox_item", "reason": "register_apply", "key": key,
         "project_id": None, "root": latest["root"], "name": name,
@@ -866,11 +858,12 @@ def hook_why(code: int) -> str:
     return f"it ended with exit status {code}"
 
 
-def hook_signing_note(hook: str, why: str) -> str:
+def hook_signing_note(hook: str, why: str, *, settings: bool = False) -> str:
+    again = ("then choose Apply it again, or change the project's own settings in its repository and "
+             "register it again." if settings else "then choose Apply it again.")
     return (f"The project's {hook} hook also stopped saving the change: {why}. Make it pass in a "
             "fresh copy of the repository, in the development environment the project contract names "
-            "for saving a change or in none when it names none, and set up a signing key on this computer, "
-            "then choose Apply it again.")
+            f"for saving a change or in none when it names none, and set up a signing key on this computer, {again}")
 
 
 def evidence_line(text: str, worktree: str | None) -> str | None:
@@ -913,6 +906,12 @@ def commit_evidence(error: Mapping, kept: Mapping | None) -> dict | None:
             "lines": shown[-EVIDENCE_LINES:]}
 
 
+def settings_ask_for_signing(error: Mapping) -> bool:
+    violations = error.get("violations")
+    return isinstance(violations, list) and any(
+        isinstance(item, Mapping) and item.get("pointer") == SIGNING_POINTER for item in violations)
+
+
 def apply_failure(name: str, error: Mapping, kept: Mapping | None) -> tuple[str, str]:
     repair = error.get("repair_id") or ""
     commit_note = register.unknown_step(name, "apply").replace("Try again", "Apply it again", 1)
@@ -933,9 +932,10 @@ def apply_failure(name: str, error: Mapping, kept: Mapping | None) -> tuple[str,
     found = commit_evidence(error, None) if repair in (SIGNING_REPAIR, COMMIT_REPAIR) else None
     hook = found["hook"] if found else None
     if repair == SIGNING_REPAIR:
+        settings = settings_ask_for_signing(error)
         if hook is None:
-            return (SIGNING_REASON, SIGNING_NOTE)
-        return (SIGNING_REASON, hook_signing_note(hook, found["why"]))
+            return (SIGNING_REASON, COMMITTED_SIGNING_NOTE if settings else SIGNING_NOTE)
+        return (SIGNING_REASON, hook_signing_note(hook, found["why"], settings=settings))
     if repair == COMMIT_REPAIR:
         if hook is None:
             return ("the adoption's change could not be saved", commit_note)

@@ -1,9 +1,10 @@
 <!--
 Layer 1 — stack shard, the data-access part (EF Core, raw SQL on Postgres, System.Text.Json) of the .NET stack. Project-independent .NET idioms
 and traps: true for any project on this stack, so nothing here may name a repo,
-a service, or a folder. Loaded only when the diff touches *.cs / *.csproj /
-*.slnx. Every entry is version-stamped, because a framework trap that got fixed
-is a trap no longer.
+a service, or a folder. Loaded with dotnet.md only when the project file that
+governs a changed path, or a build file it inherits, references a
+Microsoft.EntityFrameworkCore or Npgsql package. Every entry is
+version-stamped, because a framework trap that got fixed is a trap no longer.
 -->
 
 # .NET data access and serialization

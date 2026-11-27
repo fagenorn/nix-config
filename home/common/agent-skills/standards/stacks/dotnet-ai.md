@@ -1,9 +1,10 @@
 <!--
 Layer 1 — stack shard, the AI-framework part (Microsoft.Agents.AI, Microsoft.Extensions.AI) of the .NET stack. Project-independent .NET idioms
 and traps: true for any project on this stack, so nothing here may name a repo,
-a service, or a folder. Loaded only when the diff touches *.cs / *.csproj /
-*.slnx. Every entry is version-stamped, because a framework trap that got fixed
-is a trap no longer.
+a service, or a folder. Loaded with dotnet.md only when the project file that
+governs a changed path, or a build file it inherits, references a
+Microsoft.Agents.AI or Microsoft.Extensions.AI package. Every entry is
+version-stamped, because a framework trap that got fixed is a trap no longer.
 -->
 
 # .NET AI framework seams

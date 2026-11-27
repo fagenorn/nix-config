@@ -35,7 +35,7 @@ Direct user instruction > Layer 2 (project) > Layer 1 (stack) > Layer 0 (the bar
 
 ## Loading
 
-Nobody reads a whole standards corpus. Briefs paste **Layer 0 in full** (~600 tokens), plus **only the shards whose globs intersect the change**: a Layer-1 shard when the diff's file extensions match it, a Layer-2 shard when its `governs:` glob matches a touched path. Reviewer Standards-axis briefs take the same set plus the Fowler smell baseline. Reviewers read the pasted brief and load no skills of their own.
+Nobody reads a whole standards corpus. Briefs paste **Layer 0 in full** (~600 tokens), plus **only the shards whose globs intersect the change**: a Layer-1 shard when the diff's file extensions match it (a stack's package-specific file only when the project file governing a touched path references one of the packages it answers to), a Layer-2 shard when its `governs:` glob matches a touched path. Reviewer Standards-axis briefs take the same set plus the Fowler smell baseline. Reviewers read the pasted brief and load no skills of their own.
 
 ## The Layer-2 contract
 

@@ -142,7 +142,7 @@ class CommitFailureCardTest(CommitFailureCase):
         self.hooked("#!/bin/sh\nexit 1\n", signed=True)
         card = self.failed()
         self.assertTrue(card["headline"].endswith(approve.SIGNING_REASON + "."))
-        why = approve.hook_signing_note("pre-commit", "it ended with exit status 1")
+        why = approve.hook_signing_note("pre-commit", "it ended with exit status 1", settings=True)
         self.assertEqual(card["why"], why)
         self.assertIn("pre-commit hook", why)
         self.assertEqual(self.last_evidence(),
@@ -187,8 +187,8 @@ class CommitEnvironmentApprovalTest(CommitFailureCase):
         self.hooked("#!/bin/sh\nexit 1\n", signed=True, environment=INSIDE)
         card = self.failed()
         self.assertTrue(card["headline"].endswith(approve.SIGNING_REASON + "."))
-        self.assertEqual(card["why"],
-                         approve.hook_signing_note("pre-commit", "it ended with exit status 1"))
+        self.assertEqual(card["why"], approve.hook_signing_note(
+            "pre-commit", "it ended with exit status 1", settings=True))
         self.assertNotIn(UNTRUE, card["why"])
         self.assertTrue((self.kept_worktree() / ".entered").is_file())
 
