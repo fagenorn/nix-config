@@ -26,8 +26,8 @@ from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- modul
 PORT = 27184
 
 
-def check_command(case, command, home, launcher, tailscale=None):
-    """The command's words; the first word is `launcher`, the console launcher of the platform package the host installs (from the host's own reading), `tailscale` the client path a host reads Serve status from (#1237, #1299)."""
+def check_command(case, command, home, launcher, tailscale=None, lock_bump=None):
+    """The command's words; the first word is `launcher`, the console launcher of the platform package the host installs (from the host's own reading), `tailscale` the client path a host reads Serve status from (#1237, #1299), `lock_bump` the project, branch and platform repository its lock bumps name (a host that bumps nothing has none)."""
     words = shlex.split(command)
     case.assertEqual(words[0], launcher)
     case.assertEqual(words[1:5], ["--port", str(PORT), "--guest-socket",
@@ -36,10 +36,14 @@ def check_command(case, command, home, launcher, tailscale=None):
     if tailscale is not None:
         case.assertEqual(rest[:2], ["--tailscale", tailscale], command)
         rest = rest[2:]
-    case.assertEqual(len(rest), 2, command)
+    bumped = [] if lock_bump is None else [
+        "--lock-bump-project", lock_bump["project"], "--lock-bump-branch", lock_bump["branch"],
+        "--platform-repo", lock_bump["platformRepo"]]
+    case.assertEqual(len(rest), 2 + len(bumped), command)
     # The one default screenshot folder a manual check's pictures may come from (issue 1112).
     case.assertEqual(rest[0], "--screenshots")
     case.assertRegex(rest[1], r"^/(home|Users)/[^/ ]+/tmp/clarity-screenshots$")
+    case.assertEqual(rest[2:], bumped, command)
 
 
 def assert_outside_sandbox(case, env):
@@ -74,7 +78,11 @@ class LinuxUnit(unittest.TestCase):
     def test_the_port_is_the_consoles_fixed_port(self):
         self.assertEqual(PORT, service.DEFAULT_PORT)
         check_command(self, self.got["command"], self.got["home"], self.got["launcher"],
-                      "/mnt/c/Program Files/Tailscale/tailscale.exe")
+                      "/mnt/c/Program Files/Tailscale/tailscale.exe", self.got["lockBump"])
+
+    def test_the_linux_host_bumps_no_project(self):
+        self.assertIsNone(self.got["lockBump"])
+        self.assertNotIn("--lock-bump-project", shlex.split(self.got["command"]))
 
     def test_the_service_runs_the_console_command_and_restarts_it_on_exit(self):
         # home-manager 25.11 normalizes ExecStart and Environment to lists.
@@ -139,7 +147,7 @@ class DarwinAgent(unittest.TestCase):
             with self.subTest(host=host):
                 got, plist = self.got[host], self.plist[host]
                 command = got["command"]
-                check_command(self, command, got["home"], got["launcher"], got["tailscaleClient"])
+                check_command(self, command, got["home"], got["launcher"], got["tailscaleClient"], got["lockBump"])
                 self.assertEqual(got["daemonCommand" if got["atBoot"] else "agentCommand"], command)
                 self.assertEqual(plist["ProgramArguments"],
                                  ["/bin/sh", "-c", f"/bin/wait4path /nix/store && exec {command}"])
@@ -155,6 +163,20 @@ class DarwinAgent(unittest.TestCase):
         menu_bar = self.got["mbp"]
         self.assertIsNone(menu_bar["tailscaleClient"])
         self.assertNotIn("--tailscale", shlex.split(menu_bar["command"]))
+
+    def test_only_the_proof_host_bumps_and_only_the_fixture(self):
+        bumping = self.got["eleven-m5"]
+        self.assertEqual(bumping["lockBump"], {"project": "fagenorn/engine-fixture", "branch": "main",
+                                               "platformRepo": "fagenorn/nix-config"})
+        words = shlex.split(bumping["command"])
+        self.assertEqual(words[-6:], ["--lock-bump-project", "fagenorn/engine-fixture", "--lock-bump-branch",
+                                      "main", "--platform-repo", "fagenorn/nix-config"])
+        for flag in ("--lock-bump-project", "--lock-bump-branch", "--platform-repo"):
+            self.assertEqual(words.count(flag), 1, flag)
+        idle = self.got["mbp"]
+        self.assertIsNone(idle["lockBump"])
+        self.assertEqual([flag for flag in ("--lock-bump-project", "--lock-bump-branch", "--platform-repo")
+                          if flag in shlex.split(idle["command"])], [])
 
     def test_a_boot_host_runs_the_console_as_a_daemon_of_the_owner(self):
         for got, plist in self.hosts():
