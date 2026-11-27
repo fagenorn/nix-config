@@ -246,6 +246,15 @@ class ReactiveRestartTest(RecordsCase):
         self.assertEqual(len(self.calls()), 1)
         self.assertEqual([record["at"] for record in self.records()], [at("12:05")])
 
+    def test_a_host_with_no_alert_settings_restarts_and_keeps_the_alert_without_failing(self):
+        self.settings.unlink()
+        self.over_at(at("12:00"), at("12:01"), at("12:02"), at("12:03"))
+        self.assertEqual(self.calls(), ["--reactive"])
+        [outbox] = json.loads(self.restart_state.read_text())["outbox"]
+        self.assertIs(outbox["logged"], True)
+        self.assertIsNotNone(outbox["alert"])
+        self.assertEqual(self.bot.requests, [])
+
     def test_an_unreadable_restart_state_makes_no_attempt(self):
         self.state_dir.mkdir(mode=0o700)
         self.restart_state.write_text("[]")

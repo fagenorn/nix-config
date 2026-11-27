@@ -397,13 +397,20 @@ class ParseTest(unittest.TestCase):
 
 
 class AlertTest(WatchCase):
-    def test_unusable_settings_keep_the_alert_log_it_once_and_exit_3(self):
+    def backlog(self, count, day="2026-11-24", hour=0):
+        kinds = ("memory_kill", "low_memory")
+        return [{"kind": kinds[i % 2], "text": f"eleven-m5: alert {i}.", "logged": True, "held": True,
+                 "at": f"{day}T{hour + i // 60:02d}:{i % 60:02d}:00"} for i in range(count)]
+
+    def test_a_malformed_settings_file_keeps_the_alert_logs_it_once_and_exits_3(self):
         self.put_state(QUEUED)
+        self.settings.write_text("not json")
+        self.settings.chmod(0o600)
         for _ in range(2):
             result = self.sample()
             self.assertEqual(result.returncode, 3)
             self.assertIn("host alert not sent: settings file", result.stderr)
-            self.assertIn("is missing", result.stderr)
+            self.assertIn("is not a JSON object", result.stderr)
         lines = self.alert_log.read_text().splitlines()
         self.assertEqual(len(lines), 1)
         self.assertIn("jetsam not sent", lines[0])
@@ -411,6 +418,67 @@ class AlertTest(WatchCase):
         entry = self.read_state()["pending"][0]
         self.assertIs(entry["logged"], True)
         self.assertEqual(self.bot.requests, [])
+
+    def test_a_wrongly_owned_or_wide_settings_file_still_exits_3(self):
+        self.put_state(QUEUED)
+        self.settings_on()
+        self.settings.chmod(0o644)
+        result = self.sample()
+        self.assertEqual(result.returncode, 3)
+        self.assertIn("wider than 0600", result.stderr)
+
+    def test_no_settings_file_is_not_a_failure_and_is_logged_once_a_day(self):
+        self.put_state(QUEUED)
+        first = self.sample(now="2026-11-24T12:00:00")
+        second = self.sample(now="2026-11-24T12:01:00")
+        self.assertEqual((first.returncode, second.returncode), (0, 0), first.stderr + second.stderr)
+        self.assertIn("host alerts are not configured", first.stderr)
+        self.assertNotIn("host alert not sent", first.stderr)
+        self.assertEqual(second.stderr, "")
+        next_day = self.sample(now="2026-11-25T00:30:00")
+        self.assertEqual(next_day.returncode, 0, next_day.stderr)
+        self.assertIn("host alerts are not configured", next_day.stderr)
+        [entry] = self.read_state()["pending"]
+        self.assertEqual((entry["kind"], entry["logged"], entry["held"]), ("jetsam", True, True))
+        self.assertEqual(len(self.alert_log.read_text().splitlines()), 1)
+        self.assertEqual(self.bot.requests, [])
+
+    def test_a_backlog_is_bounded_to_the_newest_alert_of_each_kind_per_day(self):
+        early = self.backlog(60, day="2026-11-23", hour=13)
+        late = self.backlog(100, day="2026-11-24")
+        self.put_state(state(pending=early + late))
+        self.assertEqual(self.sample(now="2026-11-24T12:00:00").returncode, 0)
+        kept = self.read_state()["pending"]
+        self.assertEqual([(e["kind"], e["at"], e["count"]) for e in kept], [
+            ("memory_kill", "2026-11-23T13:58:00", 30), ("low_memory", "2026-11-23T13:59:00", 30),
+            ("memory_kill", "2026-11-24T01:38:00", 50), ("low_memory", "2026-11-24T01:39:00", 50)])
+        self.assertFalse(self.alert_log.exists())
+
+    def test_alerts_older_than_24_hours_are_dropped_with_one_summary_line(self):
+        old = self.backlog(5, day="2026-11-22")
+        legacy = {"kind": "low_memory", "text": "eleven-m5: legacy.", "logged": True}
+        fresh = {"kind": "jetsam", "text": "eleven-m5: fresh.", "logged": True, "held": True,
+                 "at": "2026-11-24T06:00:00"}
+        self.put_state(state(pending=old + [legacy, fresh]))
+        self.assertEqual(self.sample(now="2026-11-24T12:00:00").returncode, 0)
+        self.assertEqual([e["text"] for e in self.read_state()["pending"]], ["eleven-m5: fresh."])
+        [line] = self.alert_log.read_text().splitlines()
+        self.assertIn("dropped 6 pending alerts older than 24 hours", line)
+        self.assertIn("low_memory x3", line)
+        self.assertIn("memory_kill x3", line)
+
+    def test_a_backlog_becomes_one_summary_when_the_settings_appear(self):
+        self.put_state(state(pending=self.backlog(170)))
+        self.assertEqual(self.sample().returncode, 0)
+        self.assertEqual(len(self.read_state()["pending"]), 2)
+        self.settings_on()
+        self.assertEqual(self.sample(now="2026-11-24T12:05:00").returncode, 0)
+        [request] = self.bot.requests
+        text = request["body"]["text"]
+        self.assertTrue(text.startswith("eleven-m5: 170 alerts were held while host alerts were not configured"), text)
+        self.assertIn("since 2026-11-24T02:48:00", text)
+        self.assertIn("low_memory x85, memory_kill x85", text)
+        self.assertEqual(self.read_state()["pending"], [])
 
     def test_a_kept_alert_is_sent_once_the_settings_work(self):
         self.put_state(QUEUED)

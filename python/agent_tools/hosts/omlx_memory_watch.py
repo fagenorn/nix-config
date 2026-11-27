@@ -63,7 +63,13 @@ unowned memory is over `--unowned-alert-gib` (strictly); an unowned figure at or
 the episode, and a sample without a fresh census changes nothing. The first sample only records a
 baseline for the other alerts. Each queued alert
 is delivered through `agent_tools.hosts.host_alerts`, in order, before the state is written;
-one that fails stays queued, is logged once and is retried by the next sample.
+one that fails stays queued, is logged once and is retried by the next sample. A missing settings file
+means alerts are not configured: the queue holds its alerts (`held`), the watch logs
+`host alerts are not configured` to stderr once a day and the sample exits 0; an unreadable, wrongly
+owned, too open or malformed file is still a refusal. Each queued alert carries `at`. Each sample drops a
+tried alert older than 24 hours (or with no `at`) with one line in the alert log, and keeps the newest of
+each kind per day with its `count`; the rules are in `agent_tools.hosts.omlx_alert_queue`. When settings
+exist, held alerts standing for more than one are replaced by one `alert_backlog` summary alert.
 
 `fseventsd --record FILE --limit-gib N [--min-restart-minutes 60] [--label com.apple.fseventsd]
 [--launchctl PATH] [--footprint PATH] [--kill PATH] [--now ISO8601]` runs as root: it reads the
@@ -117,8 +123,8 @@ trigger while the server serves no request. Its state is `omlx-restart.json` and
 `omlx-restarts.jsonl` in the state directory; the module docstring has the rules. Without the option
 nothing of it is read or written.
 
-Exit 0: recorded, every alert delivered or recorded. 3: recorded, at least one alert not sent
-(stderr `host alert not sent: <reason>`). 1: `vm_stat`, `sysctl`, `launchctl` or `ps` failed
+Exit 0: recorded, every alert delivered, recorded or held for want of a settings file. 3: recorded, at least
+one alert refused (stderr `host alert not sent: <reason>`) or the restart state unreadable. 1: `vm_stat`, `sysctl`, `launchctl` or `ps` failed
 or printed nothing parseable (stderr names it; nothing is written). 2: usage. A failed
 `footprint` is not a failed reading.
 """
@@ -140,7 +146,7 @@ from functools import partial
 from pathlib import Path
 
 from agent_tools.delivery import verify_history, verify_slot
-from agent_tools.hosts import host_alerts, omlx_memory_events, omlx_reactive_restart
+from agent_tools.hosts import host_alerts, omlx_alert_queue, omlx_memory_events, omlx_reactive_restart
 
 GIB = 1024**3
 PROG = "omlx-memory-watch"
@@ -164,7 +170,8 @@ CENSUS_DEFAULTS = {
 TOP_OWNERS = 5
 FLOOR_RECORD = "/var/db/memory-watch/floor.json"
 FLOOR_DEFAULTS = {"floor_kills_seen": None, "floor_unmet_seen": None, "priority_unset_open": False, "floor_log": []}
-COLIMA_PID_FILE = ".colima/_lima/colima/vz.pid"
+ALERT_DEFAULTS = {"alerts_unconfigured_day": None}
+COLIMA_PID_FILE =".colima/_lima/colima/vz.pid"
 PID_FILE_BYTES = 64
 STATE_NAME = "memory-watch.json"
 PEAKS_NAME = "memory-peaks.jsonl"
@@ -286,7 +293,7 @@ def fresh_day(since: str, day: str) -> dict:
         "peak_omlx_bytes": None, "min_available_bytes": None, "samples": 0, "loaded_samples": 0,
         "min_loaded_available_bytes": None, "peak_ci_jobs": 0, "jetsam_exits": 0, "omlx_runs": None,
         "omlx_jetsam_priority": None, "low_memory_open": False, "pending": [],
-        **FSEVENTSD_DEFAULTS, **FLOOR_DEFAULTS, "floor_log": [], **copy.deepcopy(CENSUS_DEFAULTS),
+        **FSEVENTSD_DEFAULTS, **FLOOR_DEFAULTS, **ALERT_DEFAULTS, "floor_log": [], **copy.deepcopy(CENSUS_DEFAULTS),
         **omlx_memory_events.EVENT_DEFAULTS,
     }
 
@@ -533,7 +540,7 @@ def decide(state, reading: dict, now: datetime, floor_bytes: int, others_budget_
     if state is None:
         state = fresh_day(day, day)
     else:
-        state = {**FSEVENTSD_DEFAULTS, **FLOOR_DEFAULTS, **copy.deepcopy(CENSUS_DEFAULTS),
+        state = {**FSEVENTSD_DEFAULTS, **FLOOR_DEFAULTS, **ALERT_DEFAULTS, **copy.deepcopy(CENSUS_DEFAULTS),
                  **omlx_memory_events.EVENT_DEFAULTS, **state,
                  "pending": [dict(entry) for entry in state["pending"]]}
         state["floor_log"] = list(state["floor_log"])
@@ -918,17 +925,49 @@ def write_state(directory: Path, document: dict, line: dict | None, sample: dict
         _append_sample(directory, document["day"], sample)
 
 
-def deliver_pending(state: dict, args, now: datetime) -> bool:
-    kept, failed = [], False
+def _settings_missing(args) -> str | None:
+    """The reason when the settings file does not exist (alerts are not configured), else None."""
+    try:
+        host_alerts.read_settings(args.alert_settings)
+    except host_alerts.SettingsMissing as error:
+        return str(error)
+    except host_alerts.SettingsError:
+        return None
+    return None
+
+
+def _bound_pending(state: dict, args, now: datetime) -> None:
+    """Stamp this sample's alerts, drop expired ones with one log line and keep the newest of a kind per day."""
     for entry in state["pending"]:
+        if "at" not in entry and not entry["logged"]:
+            entry["at"] = now.isoformat()
+    state["pending"], expired = omlx_alert_queue.compact(state["pending"], now)
+    if expired:
+        host_alerts.record_note(
+            "memory_watch", omlx_alert_queue.expiry_line(expired), log=args.alert_log, now=now)
+
+
+def deliver_pending(state: dict, args, now: datetime) -> bool:
+    """Deliver the queue; True when an alert was refused. A missing settings file holds it, logged once a day."""
+    _bound_pending(state, args, now)
+    missing = _settings_missing(args)
+    entries = state["pending"] if missing else omlx_alert_queue.summarize(state["pending"], args.host, now)
+    kept, failed = [], False
+    for entry in entries:
         outcome = host_alerts.deliver(
             entry["kind"], entry["text"], settings=args.alert_settings, log=args.alert_log,
             api=args.telegram_api or host_alerts.API, now=now, record_failure=not entry["logged"])
         if outcome.status == "failed":
+            if missing:
+                kept.append({**entry, "logged": True, "held": True})
+                continue
             failed = True
             print(f"host alert not sent: {outcome.error}", file=sys.stderr)
             kept.append({**entry, "logged": True})
     state["pending"] = kept
+    if missing and kept and state["alerts_unconfigured_day"] != state["day"]:
+        state["alerts_unconfigured_day"] = state["day"]
+        print(f"host alerts are not configured ({missing}); {len(kept)} held", file=sys.stderr)
     return failed
 
 
@@ -947,19 +986,27 @@ def _restart_limits(args) -> omlx_reactive_restart.Limits | None:
 
 
 def _restart_step(args, limits, directory: Path, reading: dict, now: datetime, started: float, persist) -> bool:
+    refused, held = [], []
+
     def send(kind: str, text: str, logged: bool) -> str:
         outcome = host_alerts.deliver(
             kind, text, settings=args.alert_settings, log=args.alert_log,
             api=args.telegram_api or host_alerts.API, now=now, record_failure=not logged)
         if outcome.status == "failed":
-            print(f"host alert not sent: {outcome.error}", file=sys.stderr)
+            if _settings_missing(args) is None:
+                refused.append(True)
+                print(f"host alert not sent: {outcome.error}", file=sys.stderr)
+            else:
+                held.append(True)
         return outcome.status
 
-    return omlx_reactive_restart.step(
+    failed = omlx_reactive_restart.step(
         directory, fresh_census(reading["census"], now), reading, now, limits,
         elapsed=lambda: timedelta(seconds=time.monotonic() - started),
         gate=partial(omlx_reactive_restart.run_gate, timeout=omlx_reactive_restart.GATE_TIMEOUT_SECONDS),
         deliver=send, persist=persist)
+    # An alert kept only because no settings file exists stays in the outbox but is not a failure.
+    return failed and (bool(refused) or not held)
 
 
 def sample(args) -> int:
