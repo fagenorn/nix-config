@@ -64,7 +64,7 @@ public sealed record SolutionGraph(IReadOnlyList<ProjectFile> Projects, IReadOnl
                 declarations.Add($"{rel}: ProjectReference to {reference} outside a project file");
             }
 
-            sawSharedSetting |= rel == SharedProps && settings.Count > 0;
+            sawSharedSetting |= rel == SharedProps && settings.Any(setting => !NotTrue(setting));
         }
 
         if (!sawSharedSetting)
@@ -95,13 +95,23 @@ public sealed record SolutionGraph(IReadOnlyList<ProjectFile> Projects, IReadOnl
         return violations.Order(StringComparer.Ordinal).ToList();
     }
 
+    // MSBuild matches item and property names without regard to case.
     private static IEnumerable<XElement> Elements(XDocument document, string localName) =>
-        document.Descendants().Where(element => element.Name.LocalName == localName);
+        document.Descendants().Where(element => IsNamed(element, localName));
+
+    private static bool IsNamed(XElement element, string localName) =>
+        string.Equals(element.Name.LocalName, localName, StringComparison.OrdinalIgnoreCase);
 
     private static bool IsConditional(XElement element) =>
         element.Attribute("Condition") is not null || element.Name.LocalName is "Choose" or "When" or "Otherwise";
 
+    // Only a property group directly under the project root is evaluated with the project;
+    // one inside a target takes effect, if at all, only when the target runs.
+    private static bool AssignedDuringEvaluation(XElement setting) =>
+        setting.Parent is { } group && IsNamed(group, "PropertyGroup") && group.Parent == setting.Document?.Root;
+
     private static bool NotTrue(XElement setting) =>
-        setting.AncestorsAndSelf().Any(IsConditional)
+        !AssignedDuringEvaluation(setting)
+            || setting.AncestorsAndSelf().Any(IsConditional)
             || !string.Equals(setting.Value.Trim(), "true", StringComparison.OrdinalIgnoreCase);
 }

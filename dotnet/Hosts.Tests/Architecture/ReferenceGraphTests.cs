@@ -113,6 +113,52 @@ public sealed class ReferenceGraphTests
     }
 
     [Fact]
+    public void ALowercaseReferenceElementIsRead()
+    {
+        using var planted = new PlantedSolution();
+        planted.Props("true");
+        planted.Source(
+            "System/System.csproj",
+            "<Project Sdk=\"Microsoft.NET.Sdk\"><ItemGroup>"
+                + "<projectreference Include=\"../Hosts/Hosts.csproj\" /></ItemGroup></Project>");
+        planted.Project("Hosts");
+
+        var violations = Violations(planted);
+
+        Assert.Equal(new[] { "System -> Hosts: reference outside the edge table" }, violations);
+    }
+
+    [Fact]
+    public void ALowercaseTransitiveOverrideIsAViolation()
+    {
+        using var planted = new PlantedSolution();
+        planted.Props("true");
+        planted.Source(
+            "System/System.csproj",
+            "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup>"
+                + "<disabletransitiveprojectreferences>false</disabletransitiveprojectreferences>"
+                + "</PropertyGroup></Project>");
+
+        var violations = Violations(planted);
+
+        Assert.Equal(new[] { "System/System.csproj: DisableTransitiveProjectReferences is not true" }, violations);
+    }
+
+    [Fact]
+    public void ASharedSettingInsideATargetIsAViolation()
+    {
+        using var planted = new PlantedSolution();
+        planted.Source(
+            "Directory.Build.props",
+            "<Project><Target Name=\"Never\">" + TransitiveTrue + "</Target></Project>");
+        planted.Project("System");
+
+        var violations = Violations(planted);
+
+        Assert.Equal(new[] { "Directory.Build.props: DisableTransitiveProjectReferences is not true" }, violations);
+    }
+
+    [Fact]
     public void ABackslashReferenceIsRead()
     {
         using var planted = new PlantedSolution();

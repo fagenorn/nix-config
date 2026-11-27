@@ -37,9 +37,33 @@ public sealed class SelfStartTests
     [InlineData(
         "var info = new ProcessStartInfo { FileName = Environment.ProcessPath! };"
             + " using var p = new Process { StartInfo = info }; p.Start();")]
+    [InlineData("var exe = Environment.ProcessPath!; Process.Start(new ProcessStartInfo(exe));")]
+    [InlineData(
+        "var exe = Environment.ProcessPath!; var info = new ProcessStartInfo { FileName = exe }; Process.Start(info);")]
+    [InlineData(
+        "var exe = Environment.ProcessPath!; var info = new ProcessStartInfo(); info.FileName = exe; Process.Start(info);")]
+    [InlineData("Process.Start(arguments: \"commands\", fileName: \"agent-tools\");")]
+    [InlineData("Process.Start(new ProcessStartInfo(arguments: \"commands\", fileName: \"agent-tools\"));")]
+    [InlineData("Process.Start(startInfo: new ProcessStartInfo(Environment.ProcessPath!));")]
+    [InlineData("var url = \"http://host\"; Process.Start(Environment.ProcessPath!);")]
     public void StartingTheToolsOwnBinaryIsAViolation(string source)
     {
         Assert.Equal(new[] { OwnBinary }, ViolationsOfHostsSource(source));
+    }
+
+    [Theory]
+    [InlineData("// Process.Start(Environment.ProcessPath!);")]
+    [InlineData("/* Process.Start(Environment.ProcessPath!); */")]
+    [InlineData("/// <summary>Process.Start(Environment.ProcessPath!);</summary>\nvar x = 1;")]
+    public void ACommentThatNamesALaunchIsNoViolation(string source)
+    {
+        Assert.Empty(ViolationsOfHostsSource(source));
+    }
+
+    [Fact]
+    public void NamedArgumentsOfAnotherProgramAreNoViolation()
+    {
+        Assert.Empty(ViolationsOfHostsSource("Process.Start(arguments: \"agent-tools\", fileName: \"git\");"));
     }
 
     [Fact]
