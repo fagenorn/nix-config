@@ -644,6 +644,12 @@ class ContinueTest(unittest.TestCase):
         self.assertEqual(reentry(doc, INPUTS, events, "h1"), Reentry("scope", 1, ("scope",)))
         self.assertEqual(next_action(doc, INPUTS, events + [C("scope", 1)]), SCOPE(2))
 
+    def test_a_read_result_is_stale_whatever_the_head(self) -> None:
+        doc = toy()
+        step(doc, "scope")["holds"] = "read"
+        events = pair("scope", "ok") + [{"type": "entered", "step": "draft"}]
+        self.assertEqual(reentry(doc, INPUTS, events, "h1"), Reentry("scope", 1, ("scope",)))
+
     def test_an_unreadable_or_unrecorded_head_is_stale(self) -> None:
         self.assertEqual(reentry(toy(), INPUTS, E1, None).stale, ("review",))
         unrecorded = copy.deepcopy(E1)
