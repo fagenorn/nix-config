@@ -392,6 +392,35 @@ class CallTest(unittest.TestCase):
                          {"items": [{"end": "done", "item": None, "run": kid.name}]})
         self.assertEqual(run_document(kid)["inputs"], {"issue": 1517})
 
+    def test_a_call_publishes_the_members_its_returns_names_beside_its_items(self):
+        project = EngineProject(self)
+        procedures = project.procedures(
+            [{"id": "once", "stage": "landing", "kind": "call", "holds": "run", "procedure": "solo",
+              "returns": ["work.argv"], "on": {"done": "done", "child-stop": "needs-owner"}}],
+            children={"solo": child([step("work", "standin-json", "done", failed="child-stop")],
+                                    inputs=("issue",))})
+        done = project.deliver(procedures, issue=1517)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        (root,) = roots(project)
+        (kid,) = children_of(project)
+        self.assertEqual(result(root, "once.1.json"),
+                         {"items": [{"end": "done", "item": None, "run": kid.name}],
+                          "argv": result(kid, "work.1.json")["argv"]})
+
+    def test_a_call_whose_child_stops_returns_no_member(self):
+        project = EngineProject(self)
+        procedures = project.procedures(
+            [{"id": "once", "stage": "landing", "kind": "call", "holds": "run", "procedure": "solo",
+              "returns": ["work.argv"], "on": {"done": "done", "child-stop": "needs-owner"}}],
+            children={"solo": child([step("work", "standin-fail", "done", failed="child-stop")],
+                                    inputs=("issue",))})
+        done = project.deliver(procedures, issue=1517)
+        self.assertEqual(done.returncode, 3, done.stdout + done.stderr)
+        (root,) = roots(project)
+        (kid,) = children_of(project)
+        self.assertEqual(result(root, "once.1.json"),
+                         {"items": [{"end": "child-stop", "item": None, "run": kid.name}]})
+
     def test_a_call_over_an_empty_list_runs_no_child_and_is_done(self):
         project = EngineProject(self)
         done = project.deliver(project.procedures(FAN("standin-json", 2),

@@ -103,7 +103,8 @@ Calls
     `{"items": [{"end": <end>, ...}, ...]}`, one entry per item (one entry for
     a call without `each`). The outcome must be `call_outcome` of those ends:
     `done` when every end is `done` (and for no ends), else the first end that
-    is not `done`, in list order.
+    is not `done`, in list order. The result may carry other members beside
+    `items` (those the call's `returns` names), readable as `<call>.<member>`.
 
 `CoreError` is raised for: an event that is not a dict or whose type is not in
 `EVENT_TYPES`, at any position; an `entered` naming a step but the pending one

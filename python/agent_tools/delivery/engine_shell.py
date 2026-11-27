@@ -103,7 +103,7 @@ admitted in list order, and admission stops at the first fault, while the
 children already admitted finish, and a worker that cannot start stops admission
 the same way. The parent records a `call` event for each child before that child
 walks (a child whose event cannot be recorded is removed unwalked), stores `{"items": [{"end", "item", "run"}, ...]}`
-and takes `engine_core.call_outcome` of the ends. A fault in any child faults
+and the members its `returns` names (`engine_resume.returned`), and takes `engine_core.call_outcome` of the ends. A fault in any child faults
 the parent with no call outcome. `engine status` reads the root run, never a
 child. A group's and a call's wait runs under `engine_session.reaping`, so a SIGTERM ends
 every live session, admits no further child, starts no further step in any walk and exits
@@ -1245,7 +1245,7 @@ def _call(run_dir: Path, table: CommandTable, run: dict, step: dict,
     ends = [entries[index] for index in range(len(items))]
     outcome = engine_core.call_outcome([entry["end"] for entry in ends])
     engine_ledger.store_result(run_dir, step=action.step, visit=action.visit,
-                               result={"items": ends}, at=_now(),
+                               result={"items": ends, **engine_resume.returned(step, ends)}, at=_now(),
                                wall_seconds=time.monotonic() - started, turns=0,
                                tokens=dict(NO_TOKENS), spend_usd=0, outcome=outcome)
     _graded(run_dir, step, action.visit, outcome)
