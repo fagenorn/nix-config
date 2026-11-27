@@ -17,6 +17,7 @@ import re
 import unittest
 from pathlib import Path
 
+from agent_tools.delivery import engine_graders, review_findings
 from agent_tools.delivery.engine_graders import GRADERS
 from agent_tools.delivery.engine_reply import cites_rules, without_unknown_rules
 from agent_tools.delivery.review_findings import (
@@ -122,7 +123,11 @@ STALE = {"verdict": "findings", "findings": [dict(IMPORTANT, restates="lite-revi
 UNNAMED = {"verdict": "findings", "findings": [dict(IMPORTANT, file="", failing_input=" ")]}
 ACCEPTANCE = [{"id": "AC1", "text": "t", "kind": "code", "result": "r"},
               {"id": "AC5", "text": "t", "kind": "evidence", "result": "r"}]
+AMBIGUOUS = [*ACCEPTANCE, {"id": "AC5", "text": "t", "kind": "code", "result": "r"}]
 BLANK_EVIDENCE = dict(IMPORTANT, file="", failing_input="", summary="AC5 has no evidence")
+MINOR_RESTATING = {"verdict": "findings", "findings": [dict(MINOR, restates="lite-review:1")]}
+EVIDENCE_RESTATING = {"verdict": "findings", "findings": [
+    dict(IMPORTANT, summary="AC5 has no evidence", restates="lite-review:1")]}
 MERGE = ("merge-review", {"verdict": "findings", "findings": [IMPORTANT]})
 MERGED = Round((MERGE,), FIX, ("merge-rereview", PASS))
 CASES = [
@@ -179,6 +184,16 @@ CASES = [
                      restates="lite-review:1")]}),
             acceptance=ACCEPTANCE)],
      [(1, "lite-review:1", "dropped"), (1, "lite-rereview:1", "open")]),
+    ("a minor restatement does not hold the blocker it restates open",
+     [Round((REVIEWED,), FIX, ("lite-rereview", MINOR_RESTATING))],
+     [(1, "lite-review:1", "fixed"), (1, "lite-rereview:1", "dropped")]),
+    ("a landing re-review that stops on a minor restatement keeps the blocker open",
+     [Round((MERGE,), FIX, ("merge-rereview", {"verdict": "findings", "findings": [
+         dict(MINOR, restates="merge-review:1")]}))],
+     [(1, "merge-review:1", "open")]),
+    ("an evidence-worded restatement of a blocker is kept and holds the blocker open",
+     [Round((REVIEWED,), FIX, ("lite-rereview", EVIDENCE_RESTATING), acceptance=ACCEPTANCE)],
+     [(1, "lite-review:1", "open")]),
 ]
 
 
@@ -198,8 +213,10 @@ class DispositionTest(unittest.TestCase):
                    {"verdict": "findings", "findings": [dict(MINOR, file="", failing_input="")]},
                    {"verdict": "findings", "findings": [BLANK_EVIDENCE]},
                    {"verdict": "findings", "findings": [dict(BLANK_EVIDENCE, summary="AC1 has no evidence")]},
-                   {"verdict": "findings", "findings": [dict(BLANK_EVIDENCE, summary="AC50 has no evidence")]}]
-        for acceptance in (None, ACCEPTANCE):
+                   {"verdict": "findings", "findings": [dict(BLANK_EVIDENCE, summary="AC50 has no evidence")]},
+                   {"verdict": "findings", "findings": [dict(BLANK_EVIDENCE, restates="lite-review:1")]},
+                   {"verdict": "findings", "findings": [dict(BLANK_EVIDENCE, file="tests/AC5/p.py", summary="s")]}]
+        for acceptance in (None, ACCEPTANCE, AMBIGUOUS):
             for reply in replies:
                 with self.subTest(reply=reply, acceptance=acceptance):
                     members = {"implement.acceptance": acceptance} if acceptance is not None else {}
@@ -209,6 +226,7 @@ class DispositionTest(unittest.TestCase):
                     self.assertIs(usable(reply, acceptance), graded != "unusable")
         self.assertTrue(usable({"verdict": "findings", "findings": [BLANK_EVIDENCE]}, ACCEPTANCE))
         self.assertFalse(usable({"verdict": "findings", "findings": [BLANK_EVIDENCE]}))
+        self.assertFalse(usable({"verdict": "findings", "findings": [BLANK_EVIDENCE]}, AMBIGUOUS))
         for reply in ({}, None, {"verdict": "unavailable", "findings": []}, {"verdict": "pass", "findings": "x"}):
             with self.subTest(reply=reply):
                 self.assertFalse(usable(reply))
@@ -225,6 +243,14 @@ class DispositionTest(unittest.TestCase):
                 self.assertIn("sync-review", landing["stops"])
         direct = json.loads((PROCEDURES / "direct.json").read_text("utf-8"))
         self.assertTrue(all(step["id"] not in LANDING_REREVIEWS for step in direct["steps"]))
+
+    def test_the_copy_of_the_finding_name_rule_is_the_graders(self):
+        for text in ("lite-review:1", "a:1", "A:1", "x:0", "x:", "AC5", "1:1", "-:1", "a-1:9", "see full-review:2 now",
+                     "", "AC5:", ":3", "full-review:10", "é:1", "a:١"):
+            with self.subTest(text=text):
+                wanted = re.search(r"[a-z][a-z0-9-]*:[1-9][0-9]*", text) is not None
+                self.assertIs(review_findings._restates_a_finding(text), wanted)
+                self.assertIs(engine_graders._restates_a_finding(text), wanted)
 
     def test_the_disposition_module_reads_nothing(self):
         tree = ast.parse((PROCEDURES.parents[0] / "review_findings.py").read_text("utf-8"))

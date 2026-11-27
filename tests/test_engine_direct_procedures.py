@@ -181,6 +181,16 @@ class DirectProcedureTest(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertIn(sentence, (PROCEDURES / name).read_text(encoding="utf-8"))
 
+    def test_every_fix_and_re_review_prompt_leaves_the_findings_the_engine_dropped_alone(self):
+        fix = ("A finding that names only criteria of other kinds than code (evidence, human or note) in its "
+               "restates or summary is dropped by the engine: leave it alone, neither fixing nor declining it.")
+        rereview = ("A finding of the review that names only criteria of other kinds than code (evidence, human "
+                    "or note) in its restates or summary was dropped by the engine: do not report it again.")
+        for route in ("full", "lite", "escalated"):
+            for name, sentence in ((f"direct-fix-{route}.md", fix), (f"direct-rereview-{route}.md", rereview)):
+                with self.subTest(name=name):
+                    self.assertIn(sentence, (PROCEDURES / name).read_text(encoding="utf-8"))
+
     def test_a_re_review_finding_naming_only_an_evidence_criterion_settles_clean_and_rides_on_its_transition(self):
         evidence = {"id": "AC2", "text": "t", "kind": "evidence", "result": "r"}
         implemented = {**IMPLEMENTED, "acceptance": [*IMPLEMENTED["acceptance"], evidence]}

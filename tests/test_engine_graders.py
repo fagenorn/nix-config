@@ -291,25 +291,56 @@ class DropTest(unittest.TestCase):
 
     def test_an_id_matches_only_as_a_whole_token(self):
         acceptance = [{"id": "AC2", "text": "t", "kind": "evidence", "result": "r"}]
-        kept = dict(EVIDENCE, summary="AC20 is unmet", restates="full-review:2")
+        kept = dict(EVIDENCE, summary="AC20 is unmet", restates="")
         self.assertEqual(graded(rereview([kept], acceptance)), ("findings", ()))
         for summary in ("AC2.", "(AC2) is unmet", "AC2, then more","AC20 and AC2 differ"):
             with self.subTest(summary=summary):
-                found = dict(EVIDENCE, summary=summary, restates="full-review:2")
+                found = dict(EVIDENCE, summary=summary, restates="")
                 self.assertEqual(graded(rereview([found], acceptance)),
                                  ("clean", ({"finding": "full-rereview:1", "criteria": ["AC2"]},)))
         for summary in ("AC2x", "_AC2", "1AC2"):
             with self.subTest(summary=summary):
-                found = dict(EVIDENCE, summary=summary, restates="full-review:2")
+                found = dict(EVIDENCE, summary=summary, restates="")
                 self.assertEqual(graded(rereview([found], acceptance)), ("findings", ()))
 
-    def test_every_one_of_the_four_members_names_a_criterion(self):
+    def test_the_restates_and_the_summary_name_a_criterion(self):
         quiet = dict(EVIDENCE, restates="", summary="s", failing_input="x", file="a.py")
-        for member in ("restates", "summary", "failing_input", "file"):
+        for member in ("restates", "summary"):
             with self.subTest(member=member):
                 finding = dict(quiet, **{member: "see AC5"})
                 self.assertEqual(graded(rereview([finding])),
                                  ("clean", ({"finding": "full-rereview:1", "criteria": ["AC5"]},)))
+
+    def test_a_file_or_a_failing_input_never_names_a_criterion(self):
+        quiet = dict(EVIDENCE, restates="", summary="s", failing_input="x", file="a.py")
+        for member, text in (("file", "tests/AC5/parser.py:8"), ("failing_input", "parse('AC5')")):
+            with self.subTest(member=member):
+                finding = dict(quiet, **{member: text})
+                self.assertEqual(graded(rereview([finding])), ("findings", ()))
+
+    def test_a_finding_restating_an_earlier_finding_is_kept_whatever_criterion_it_names(self):
+        for restates in ("full-review:1", "full-independent:2", "escalated:3"):
+            for extra in ({}, {"file": "tests/AC5/parser.py:8"}, {"kind": "security", "failing_input": "AC5"}):
+                with self.subTest(restates=restates, extra=extra):
+                    finding = dict(EVIDENCE, restates=restates, summary="still unresolved: AC5 crashes", **extra)
+                    self.assertEqual(graded(rereview([finding])), ("findings", ()))
+        for tally, build in (("direct-full-tally", full), ("direct-lite-tally", lite)):
+            with self.subTest(tally=tally):
+                finding = dict(EVIDENCE, restates="full-review:1", summary="AC5 still crashes")
+                results = {**build(acceptance=GRADED, verdict="findings", findings=[finding]),
+                           "implement.acceptance": ACCEPTANCE}
+                self.assertEqual(GRADERS[tally].grade(results), "findings")
+                self.assertEqual(GRADERS[tally].drops(results), ())
+
+    def test_an_id_declared_with_two_kinds_is_ambiguous_and_its_findings_are_kept(self):
+        code = {"id": "AC5", "text": "t", "kind": "code", "result": "r"}
+        evidence = {"id": "AC5", "text": "t", "kind": "evidence", "result": "r"}
+        for label, acceptance in (("code first", [code, evidence]), ("evidence first", [evidence, code]),
+                                  ("evidence code evidence", [evidence, code, evidence])):
+            with self.subTest(label):
+                self.assertEqual(graded(rereview([EVIDENCE], acceptance)), ("findings", ()))
+        same = graded(rereview([EVIDENCE], [evidence, dict(evidence, text="again")]))
+        self.assertEqual(same, ("clean", ({"finding": "full-rereview:1", "criteria": ["AC5"]},)))
 
     def test_an_id_outside_the_acceptance_names_nothing_and_no_acceptance_drops_nothing(self):
         unknown = dict(EVIDENCE, summary="AC9 unmet", restates="AC9")

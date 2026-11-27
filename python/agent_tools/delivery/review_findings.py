@@ -96,15 +96,34 @@ def _names(text: str, cid: str) -> bool:
     return False
 
 
+def _restates_a_finding(text: str) -> bool:
+    """Whether `text` holds a finding name, `<step>:<n>`: a step name (a lowercase letter first) and a place of 1 or more."""
+    for place, ch in enumerate(text):
+        if ch != ":" or text[place + 1:place + 2] not in tuple("123456789"):
+            continue
+        start = place
+        while start and (text[start - 1] in "-0123456789" or "a" <= text[start - 1] <= "z"):
+            start -= 1
+        if any("a" <= c <= "z" for c in text[start:place]):
+            return True
+    return False
+
+
 def _kinds(acceptance: object) -> dict[str, object]:
     if not isinstance(acceptance, list):
         return {}
-    return {c["id"]: c.get("kind") for c in acceptance
-            if isinstance(c, Mapping) and isinstance(c.get("id"), str) and c["id"].strip()}
+    kinds: dict[str, object] = {}
+    for c in acceptance:
+        if isinstance(c, Mapping) and isinstance(c.get("id"), str) and c["id"].strip():
+            kinds[c["id"]] = c.get("kind") if kinds.setdefault(c["id"], c.get("kind")) == c.get("kind") else None
+    return kinds
 
 
 def _drops(finding: Mapping[str, object], kinds: Mapping[str, object]) -> bool:
-    texts = [finding[m] for m in ("restates", "summary", "failing_input", "file") if isinstance(finding.get(m), str)]
+    restates = finding.get("restates")
+    if isinstance(restates, str) and _restates_a_finding(restates):
+        return False
+    texts = [finding[m] for m in ("restates", "summary") if isinstance(finding.get(m), str)]
     named = [cid for cid in kinds if any(_names(text, cid) for text in texts)]
     return bool(named) and all(kinds[cid] in NON_CODE_KINDS for cid in named)
 
@@ -152,7 +171,10 @@ def dispositions(rounds: Sequence[Round]) -> tuple[Disposed, ...]:
             else usable(one.rereview[1], one.acceptance))
         kinds = _kinds(one.acceptance)
         again = _named(*one.rereview) if closes else []
-        restated = {f["restates"] for _, f in again if isinstance(f.get("restates"), str)}
+        landing = one.rereview is not None and one.rereview[0] in LANDING_REREVIEWS
+        # A direct re-review settles clean past a finding it drops, so that finding restates, and holds, nothing.
+        settled = [(n, f) for n, f in again if landing or not (_minor(f) or _drops(f, kinds))]
+        restated = {f["restates"] for _, f in settled if isinstance(f.get("restates"), str)}
         for name, finding in reviewed:
             if name in one.filed:
                 value = "filed"
@@ -167,10 +189,11 @@ def dispositions(rounds: Sequence[Round]) -> tuple[Disposed, ...]:
         for name, finding in again:
             restates = finding.get("restates")
             original = originals.get(restates) if isinstance(restates, str) else None
-            if original is not None and (
-                    _minor(finding) or not (_minor(original) or _drops(original, kinds))):
-                continue
             dropping = _minor(finding) or _drops(finding, kinds)
+            represented = original is not None and (
+                _minor(finding) or not (_minor(original) or _drops(original, kinds)))
+            if represented and (landing or not dropping):
+                continue
             value = "filed" if name in one.filed else "dropped" if dropping else "open"
             disposed.append(Disposed(place, name, finding, value))
     return tuple(disposed)

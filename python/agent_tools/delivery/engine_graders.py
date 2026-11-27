@@ -15,10 +15,12 @@ may be `None` (a group member that sent no reply reads as `None`, D6).
   the suffixes).
 - `plan-settled`: a plan review's reply, as `direct-settled` grades it, except that a `findings` verdict with no
   finding at all is unusable.
-- The drop rule: a finding naming at least one criterion of `implement.acceptance` (its id in `restates`,
-  `summary`, `failing_input` or `file`, with no ASCII letter, digit or underscore beside it) and only criteria whose
-  kind is in `NON_CODE_KINDS` is dropped, whatever its severity. The four review graders above (the tallies and
-  `direct-settled`) grade as if it were absent, and their `drops` lists each one as `<step>:<place>`.
+- The drop rule: a finding naming at least one criterion of `implement.acceptance` (its id in `restates` or
+  `summary`, with no ASCII letter, digit or underscore beside it) and only criteria whose kind is in
+  `NON_CODE_KINDS` is dropped, whatever its severity. A finding whose `restates` names an earlier finding
+  (`<step>:<n>`) names no criterion, and an id declared with two kinds has no kind, so both are kept. The four
+  review graders above (the tallies and `direct-settled`) grade as if it were absent, and their `drops` lists each
+  one as `<step>:<place>`.
 - `verify-fixed`: a verify fix reply -> unrelated (a test and its evidence), not-done or done.
 - `verify-narrowing`: the fix review (read by the suffixes `.findings`, `.whitespace_insignificant` and
   `.whitespace_evidence`, so a second ask of the review is graded the same), the round and the fix's range -> unusable (a finding that is not minor
@@ -62,15 +64,36 @@ def _names(text: str, cid: str) -> bool:
     return False
 
 
+def _restates_a_finding(text: str) -> bool:
+    """Whether `text` holds a finding name, `<step>:<n>`: a step name (a lowercase letter first) and a place of 1 or more."""
+    for place, ch in enumerate(text):
+        if ch != ":" or text[place + 1:place + 2] not in tuple("123456789"):
+            continue
+        start = place
+        while start and (text[start - 1] in "-0123456789" or "a" <= text[start - 1] <= "z"):
+            start -= 1
+        if any("a" <= c <= "z" for c in text[start:place]):
+            return True
+    return False
+
+
 def _kinds(acceptance: object) -> dict[str, object]:
+    """Each criterion id and its kind; an id declared with two kinds has none, so its findings are kept."""
     if not isinstance(acceptance, list):
         return {}
-    return {c["id"]: c.get("kind") for c in acceptance
-            if isinstance(c, Mapping) and isinstance(c.get("id"), str) and c["id"].strip()}
+    kinds: dict[str, object] = {}
+    for c in acceptance:
+        if isinstance(c, Mapping) and isinstance(c.get("id"), str) and c["id"].strip():
+            kinds[c["id"]] = c.get("kind") if kinds.setdefault(c["id"], c.get("kind")) == c.get("kind") else None
+    return kinds
 
 
 def _named(finding: Mapping[str, object], kinds: Mapping[str, object]) -> list[str]:
-    texts = [finding[m] for m in ("restates", "summary", "failing_input", "file") if isinstance(finding.get(m), str)]
+    """The criteria a finding is about: those its `restates` or `summary` names, none when it restates a finding."""
+    restates = finding.get("restates")
+    if isinstance(restates, str) and _restates_a_finding(restates):
+        return []
+    texts = [finding[m] for m in ("restates", "summary") if isinstance(finding.get(m), str)]
     return [cid for cid in kinds if any(_names(text, cid) for text in texts)]
 
 
