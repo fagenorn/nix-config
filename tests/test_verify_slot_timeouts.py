@@ -26,9 +26,9 @@ def stamp(moment):
     return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def request(repository=REPOSITORY, timed_out=False, age=timedelta(hours=1), waited=600.0):
+def request(repository=REPOSITORY, timed_out=False, age=timedelta(hours=1), waited=600.0, command="just test"):
     """One history record started `age` before now; a timeout is exit 75 with no hold."""
-    return {"command": "just test", "exit": 75 if timed_out else 0, "held_seconds": None if timed_out else 12.0,
+    return {"command": command, "exit": 75 if timed_out else 0, "held_seconds": None if timed_out else 12.0,
             "repository": repository, "started": stamp(datetime.now(timezone.utc) - age), "waited_seconds": waited,
             "place": None}
 
@@ -107,6 +107,49 @@ class VerifySlotTimeoutsTest(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertEqual(result.stdout, "")
         self.assertTrue(result.stderr.startswith("verify-slot-timeouts: "), result.stderr)
+
+    def test_a_morning_of_twelve_timed_out_lint_requests_fails_a_none_timed_out_check(self):
+        self.write(requests(12, timed_out=12, command="just lint") + requests(30))
+        result = self.run_check(*DEPLOYED, "--command", "just lint", "--max-timed-out", "0",
+                                "--history", str(self.history))
+        self.assertEqual(result.returncode, 1, result.stderr)
+        answer = json.loads(result.stdout)
+        self.assertEqual(answer["verdict"], "not_met")
+        self.assertEqual(answer["requests"], 12)
+        self.assertEqual(answer["timed_out"], 12)
+        self.assertEqual(answer["command"], "just lint")
+        self.assertEqual(answer["max_timed_out"], 0)
+
+    def test_a_none_timed_out_check_judges_a_window_of_any_size(self):
+        lint = {"command": "just lint"}
+        rows = [
+            (requests(1, timed_out=1, **lint), (1, "not_met", 1, 1)),
+            (requests(1, **lint), (0, "met", 1, 0)),
+            (requests(25, **lint) + requests(1, timed_out=1, **lint), (1, "not_met", 26, 1)),
+            (requests(5, timed_out=5), (75, "not_yet", 0, 0)),
+        ]
+        for records, expected in rows:
+            with self.subTest(expected=expected):
+                self.write(records)
+                result = self.run_check(*DEPLOYED, "--command", "just lint", "--max-timed-out", "0",
+                                        "--history", str(self.history))
+                answer = json.loads(result.stdout)
+                self.assertEqual((result.returncode, answer["verdict"], answer["requests"], answer["timed_out"]),
+                                 expected, result.stderr)
+
+    def test_a_lint_day_with_no_timeout_meets_a_none_timed_out_check_whatever_other_commands_did(self):
+        self.write(requests(25, command="just lint") + requests(40, timed_out=40))
+        result = self.run_check(*DEPLOYED, "--command", "just lint", "--max-timed-out", "0",
+                                "--history", str(self.history))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        answer = json.loads(result.stdout)
+        self.assertEqual(answer["verdict"], "met")
+        self.assertEqual(answer["requests"], 25)
+        self.assertEqual(answer["timed_out"], 0)
+
+    def test_a_negative_max_timed_out_is_a_usage_error(self):
+        result = self.run_check(*DEPLOYED, "--max-timed-out", "-1", "--history", str(self.history))
+        self.assertEqual(result.returncode, 2)
 
     def test_a_day_under_the_share_whose_median_wait_reaches_the_limit_is_not_met(self):
         self.write(requests(9, waited=0.0) + requests(1, waited=600.0) + requests(10, timed_out=10, waited=600.0))

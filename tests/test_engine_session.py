@@ -344,18 +344,20 @@ class LaunchTest(unittest.TestCase):
         self.assertEqual(len(pids), 1)
         self.assertGreater(pids[0], 0)
 
-    def test_the_session_environment_drops_only_the_config_dir(self):
-        given = {"HOME": "/h", "PATH": "/p", "CLAUDE_CONFIG_DIR": "/c"}
+    def test_the_session_environment_drops_the_config_dir_and_the_bare_mode_switch(self):
+        given = {"HOME": "/h", "PATH": "/p", "CLAUDE_CONFIG_DIR": "/c", "CLAUDE_CODE_SIMPLE": "1"}
         self.assertEqual(engine_session.session_environment(given), {
             "HOME": "/h", "PATH": "/p", "CLAUDE_ACCOUNT_HOST_SETTINGS": "required"})
         self.assertEqual(given["CLAUDE_CONFIG_DIR"], "/c")
         code = ("import json,os; print(json.dumps([os.environ.get(k) for k in "
-                "('CLAUDE_CONFIG_DIR', 'ENGINE_PROBE', 'CLAUDE_ACCOUNT_HOST_SETTINGS')]))")
+                "('CLAUDE_CONFIG_DIR', 'ENGINE_PROBE', 'CLAUDE_ACCOUNT_HOST_SETTINGS', "
+                "'CLAUDE_CODE_SIMPLE')]))")
         with tempfile.TemporaryDirectory() as directory, mock.patch.dict(
-                os.environ, {"CLAUDE_CONFIG_DIR": "/c", "ENGINE_PROBE": "kept"}):
+                os.environ, {"CLAUDE_CONFIG_DIR": "/c", "ENGINE_PROBE": "kept",
+                             "CLAUDE_CODE_SIMPLE": "1"}):
             launched = launch([sys.executable, "-c", code], directory, "",
                               on_start=lambda pid: None)
-        self.assertEqual(json.loads(launched.stdout), [None, "kept", "required"])
+        self.assertEqual(json.loads(launched.stdout), [None, "kept", "required", None])
 
     def test_a_given_env_is_the_launchers_whole_environment(self):
         env = {"PATH": os.environ["PATH"], "X_ANSWER": "1"}
@@ -874,8 +876,7 @@ class DeliverSessionTest(unittest.TestCase):
                          {"input": 11, "cache_write": 22, "cache_read": 33, "output": 44})
         self.assertEqual(stored["spend_usd"], 0.4321)
         self.assertEqual(json.loads((run / "sessions/draft.1.json").read_text(encoding="utf-8")), {
-            "attempt": 1, "denials": [{"tool_name": "Write", "tool_use_id": "toolu_01",
-                         "tool_input": {"file_path": "/etc/hosts"}}],
+            "attempt": 1, "denials": [],
             "exit_code": 0, "prose": "Status: stuck. I could not draft it.",
             "problem": None, "session": self.starting()["session"], "subtype": "success"})
 
@@ -964,16 +965,19 @@ class DeliverSessionTest(unittest.TestCase):
         except ProcessLookupError:
             pass
 
-    def test_a_capped_session_denied_a_shell_command_is_still_out_of_bounds(self):
+    def test_a_capped_session_denied_a_shell_command_stops_at_tool_denied_naming_it(self):
         document = json.loads(RESULT_MAX_TURNS.read_text(encoding="utf-8"))
         document["permission_denials"] = [{"tool_name": "Bash", "tool_use_id": "toolu_03",
                                            "tool_input": {"command": "make build"}}]
         install_stub(self.project, json.dumps(document).encode("utf-8"), exit=1)
         done = self.project.deliver(self.capped_procedures(), issue=1520)
         self.assertEqual(done.returncode, 3, done.stderr)
+        line = json.loads(done.stdout)
+        self.assertEqual((line["end"], line["need"]), ("tool-denied", "owner-decision"))
+        self.assertIn(repr("make build"), line["detail"])
         run = self.run_dir()
-        self.assertEqual(json.loads((run / "results/draft.1.json").read_text(
-            encoding="utf-8")), {"bound": "turns"})
+        self.assertFalse((run / "results/draft.1.json").exists())
+        self.assertNotIn("outcome_graded", [e["event"] for e in self.project.events(run)])
 
     def test_a_session_ending_with_an_error_subtype_that_is_no_cap_is_still_a_fault(self):
         document = json.loads(RESULT_MAX_TURNS.read_text(encoding="utf-8"))
@@ -984,30 +988,6 @@ class DeliverSessionTest(unittest.TestCase):
         self.assertEqual(len(done.stderr.strip().splitlines()), 1)
         self.assertEqual([e for e in self.project.events(self.run_dir())
                           if e["event"] == "outcome_graded"], [])
-
-    def test_a_denied_shell_command_is_a_fault_not_a_graded_reply(self):
-        denial = {"tool_name": "Bash", "tool_use_id": "toolu_02",
-                  "tool_input": {"command": "PYTHONPATH=python python3 -m unittest tests.test_x"}}
-        install_stub(self.project, canned_result(
-            structured_output={"verdict": "approve"}, permission_denials=[denial]))
-        steps = [agent_step("review", "reviewer", {"approve": "done", "revise": "needs-owner"},
-                            prompt="review.md", reply="review.reply.json",
-                            outcome_from="verdict")]
-        procedures = write_procedures(self.project, steps, {
-            "review.md": "Review {{run.issue}}.\n",
-            "review.reply.json": json.dumps(REVIEW_REPLY)})
-        done = self.project.deliver(procedures, issue=1514)
-        self.assertEqual(done.returncode, 1)
-        self.assertEqual(done.stdout, "")
-        self.assertEqual(len(done.stderr.splitlines()), 1, done.stderr)
-        for word in ("review", "python3 -m unittest tests.test_x"):
-            self.assertIn(word, done.stderr)
-        run = self.run_dir()
-        kinds = [e["event"] for e in self.project.events(run)]
-        for kind in ("result_stored", "outcome_graded", "transition_taken", "run_done"):
-            self.assertNotIn(kind, kinds)
-        record = json.loads((run / "sessions/review.1.json").read_text(encoding="utf-8"))
-        self.assertEqual(record["denials"], [denial])
 
     def test_a_result_without_its_duration_records_the_engines_measure(self):
         install_stub(self.project, canned_result(duration_ms=...))
@@ -1386,18 +1366,6 @@ class DeliverSessionTest(unittest.TestCase):
         kinds = self.kinds()
         for kind in ("session_resuming", "result_stored", "outcome_graded"):
             self.assertNotIn(kind, kinds)
-
-    def test_a_denied_shell_command_on_the_resume_is_a_fault(self):
-        denial = {"tool_name": "Bash", "tool_use_id": "t", "tool_input": {"command": "rm -rf x"}}
-        log = install_stub(self.project, RESULT_MISSING,
-                           resumed=canned_result(permission_denials=[denial]))
-        done = self.project.deliver(one_step(self.project), issue=1514)
-        self.assertEqual(done.returncode, 1)
-        self.assertEqual(done.stdout, "")
-        self.assertEqual(len(done.stderr.splitlines()), 1, done.stderr)
-        self.assertIn("draft", done.stderr)
-        self.assertEqual(len(self.log(log)), 2)
-        self.assertNotIn("outcome_graded", self.kinds())
 
     def test_the_resume_is_on_disk_before_its_launch(self):
         project = self.project

@@ -13,10 +13,13 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import sys
+import tracemalloc
 import unittest
 from pathlib import Path
 from unittest import mock
 
+from agent_tools.delivery import comment_lint, never_rise
 from agent_tools.project_contract import adopt_apply, adopt_inspection, hook_install
 
 from .test_adopt_apply import ApplyTestCase, apply_repo
@@ -30,6 +33,27 @@ DECLARED = "{ pkgs, ... }: {\n  git-hooks.hooks.needs-dev-shell.enable = true;\n
 UNDECLARED = "{ pkgs, ... }: {\n  packages = [ pkgs.hello ];\n}\n"
 HELLO_FAILURE = "needs-dev-shell: hello not found"
 PASSED = "needs-dev-shell....Passed"
+MEMORY_DEPTH = 20_000
+MEMORY_LIMIT = 64 * 1024 * 1024
+
+
+def lines_run(text: str) -> int:
+    """The source lines of `hook_install` that run while `declares_hooks` reads `text`."""
+    count = 0
+    own = hook_install.__file__
+
+    def trace(frame, event, argument):
+        nonlocal count
+        if event == "line":
+            count += 1
+        return trace if frame.f_code.co_filename == own else None
+
+    sys.settrace(trace)
+    try:
+        hook_install.declares_hooks(text)
+    finally:
+        sys.settrace(None)
+    return count
 
 INSTALLER_SCRIPT = r"""
 echo "dev-shell sees global hooks path: $(git config --global --get core.hooksPath || echo none)"
@@ -264,12 +288,155 @@ class HookInstallRuleTest(unittest.TestCase):
         self.assertFalse(hook_install.left_alone(None, empty))
         self.assertTrue(stat.S_IMODE((directory / "pre-commit").stat().st_mode) & 0o100)
 
-    def test_declares_hooks_reads_a_devenv_git_hooks_setting(self):
-        for text in ("{\n  git-hooks.hooks.x.enable = true;\n}", "git-hooks = {",
-                     "  pre-commit.hooks.y.enable = true;"):
+    def test_declares_hooks_reads_only_explicit_hook_switches(self):
+        for text in ("{\n  git-hooks.hooks.x.enable = true;\n}",
+                     "{ ... }: { pre-commit.hooks.y.enable = true; }",
+                     "{ ... }: { git-hooks.hooks.shellcheck.enable = true; }",
+                     "{ git-hooks = { hooks.x.enable = true; }; }",
+                     "{ git-hooks.hooks = { x.enable = true; }; }",
+                     "{ git-hooks.hooks.x = { enable = true; }; }",
+                     "{ pre-commit = { hooks = { x = { enable = true; }; }; }; }",
+                     "{ git-hooks.hooks.x.enable = false; git-hooks.hooks.y.enable = true; }",
+                     "/* c */ { git-hooks.hooks.x.enable = true; }",
+                     "{ pkgs, ... }:\n{\n  scripts.clean.exec = \"rm -rf build/*\";\n"
+                     "  git-hooks.hooks.shellcheck.enable = true;\n  /* formatting */\n"
+                     "  languages.nix.enable = true;\n}\n",
+                     '{ ... }: { env.U = "http://x/#a"; git-hooks.hooks.x.enable = true; }',
+                     "{ s = ''\n  echo # not a comment /*\n  ''${x}\n''; git-hooks.hooks.x.enable = true; /* a */ }",
+                     '{ s = "a ${"b /*" + c} d"; git-hooks.hooks.x.enable = true; /* a */ }',
+                     "{ ... }: { config.git-hooks.hooks.shellcheck.enable = true; }",
+                     "{ config.git-hooks = { hooks.x.enable = true; }; }",
+                     "{ config = { git-hooks.hooks.x.enable = true; }; }",
+                     "{ pkgs, ... }: let pre-commit = pkgs.pre-commit; in { packages = [ pre-commit ]; "
+                     "git-hooks.hooks.x.enable = true; }",
+                     "{ pkgs ? { }, ... }: { packages = [ { } ]; git-hooks.hooks.x.enable = true; }",
+                     "{ pkgs, ... }: rec { git-hooks.hooks.x.enable = true; }",
+                     "{ lib, ... }@args: with lib; { git-hooks.hooks.x.enable = true; }",
+                     '{ git-hooks.hooks.shellcheck."enable" = true; }',
+                     '{ "git-hooks".hooks."x"."enable" = true; }',
+                     "{ ... }: ({ git-hooks.hooks.shellcheck.enable = true; })",
+                     "{ pkgs, ... }: (({ git-hooks.hooks.x.enable = true; }))",
+                     '{ git-hooks = { "hooks"."x" = { "enable" = true; }; }; }',
+                     '{ env.MSG = "${let a = 1; git-hooks.hooks.x.enable = true; in a}"; '
+                     "git-hooks.hooks.y.enable = true; }",
+                     "{ git-hooks.hooks.x = { enable = true; }; env.A = { } // { }; }"):
             self.assertTrue(hook_install.declares_hooks(text), text)
-        for text in ("# git-hooks.hooks.x", 'scripts.a.exec = "pre-commit run";', "{ }"):
+        for text in ("# git-hooks.hooks.x", 'scripts.a.exec = "pre-commit run";', "{ }", "",
+                     "git-hooks = {", "pre-commit.hooks.y.enable = true;",
+                     "{\n  git-hooks.hooks.shellcheck.enable = false;\n}",
+                     "{ pre-commit.hooks.x.enable =\n false; }",
+                     "{ config.git-hooks.hooks.x.enable = false; }",
+                     "{ git-hooks.hooks.x = { entry = \"a\"; }; }",
+                     "{ git-hooks.hooks.check.enable = false; git-hooks.hooks.check.entry = \"true\"; }",
+                     "{\n  git-hooks.hooks.x = { enable = false; };\n}",
+                     "{ git-hooks = { hooks.x = { enable = false; entry = \"a\"; }; hooks.y.enable = false; }; }",
+                     "{ packages = [ config.git-hooks.package ]; }",
+                     "{ pkgs, ... }: let pre-commit = pkgs.pre-commit; in { packages = [ pre-commit ]; }",
+                     "{ pkgs, ... }: { packages = [ pkgs.pre-commit ]; env.X = pre-commit.out; }",
+                     "{ pkgs, ... }: { packages = with pkgs; [ pre-commit.out ]; }",
+                     "{ pkgs, ... }: { packages = [ pkgs.git-hooks ]; foo = { git-hooks.hooks.x.enable = true; }; }",
+                     "{ pkgs, ... }: { packages = [ { git-hooks.hooks.x.enable = true; } ]; }",
+                     "{ pkgs, ... }: { env.hooks = { git-hooks.hooks.x.enable = true; }; }",
+                     "let git-hooks.hooks.x.enable = true; in { }",
+                     "let h = { git-hooks.hooks.x.enable = true; }; in { }",
+                     "let git-hooks = { hooks.x.enable = true; }; in { inherit git-hooks; }",
+                     "let git-hooks = import ./hooks.nix { inherit pkgs; }; in { inherit git-hooks; }",
+                     "{ pkgs, ... }: { inherit pkgs git-hooks; }",
+                     "{ cfg, ... }: { inherit (cfg) git-hooks; }",
+                     "{ cfg, lib, ... }: { config = lib.mkIf true { git-hooks.hooks.x.enable = true; }; }",
+                     "{ cfg, lib, ... }: lib.mkMerge [ { git-hooks.hooks.x.enable = true; } ]",
+                     "{ cfg, lib, ... }: lib.mkIf cfg.on { git-hooks.hooks.x.enable = true; }",
+                     "{ git-hooks.hooks.${name}.enable = true; }",
+                     "{ pkgs, ... }: { packages = builtins.attrValues { inherit (pkgs) jq pre-commit; }; }",
+                     "{ pkgs, ... }: { outputs = { inherit (pkgs) pre-commit; }; }",
+                     "/* git-hooks.hooks.x.enable = true; */ { }",
+                     '{ s = "git-hooks.hooks.x.enable = true;"; t = "/*"; } /* c */',
+                     "{ s = ''\n  git-hooks.hooks.x.enable = true;\n''; }",
+                     "{ git-hooks.hooks.shellcheck = { enable = true; } // { enable = false; }; }",
+                     "{ git-hooks.hooks.x = { enable = true; }.enable; }",
+                     "{ ... }: { git-hooks.hooks.shellcheck.enable = true; } // { git-hooks = {}; }",
+                     "{ ... }: ({ git-hooks.hooks.x.enable = true; }) // { git-hooks = {}; }",
+                     "{ ... }: ({ git-hooks.hooks.x.enable = true; } // { git-hooks = {}; })",
+                     "{ ... }: ({ git-hooks.hooks.x.enable = true; }).config",
+                     "{ git-hooks.hooks.x.enable = true; } // { }",
+                     "{ git-hooks = { hooks.x = { enable = true; } // { }; }; }",
+                     '{ git-hooks."hooks.x".enable = true; }',
+                     '{ env.MSG = "${let a = 1; git-hooks.hooks.x.enable = true; in "ok"}"; }',
+                     "{ env.MSG = ''${let a = 1; git-hooks.hooks.x.enable = true; in a}''; }",
+                     "{ pkgs, ... }: {\n  scripts.a.exec = ''\n    echo ''\\''; git-hooks.hooks.x.enable = true;\n  '';\n}\n",
+                     "{ s = '' ''\\''; git-hooks.hooks.x.enable = true; ''; }"):
             self.assertFalse(hook_install.declares_hooks(text), text)
+
+    def test_declares_hooks_reads_deeply_nested_attribute_sets_in_linear_time(self):
+        off = " git-hooks.hooks.x.enable = false;"
+        enabled = " git-hooks.hooks.x.enable = true;"
+
+        def build(depth, tail, expected):
+            nest = "a = { " * depth + "}; " * depth
+            return "{ pkgs, ... }: {" + off + " " + nest + tail + " }", expected
+
+        for tail, expected in (("", False), (enabled, True)):
+            for depth in (5_000, MEMORY_DEPTH):
+                text, _ = build(depth, tail, expected)
+                self.assertLessEqual(len(text), hook_install.TEXT_LIMIT)
+                self.assertEqual(hook_install.declares_hooks(text), expected, depth)
+            self.assertScalesLinearly(lambda size, t=tail, e=expected: build(size, t, e)[0], 1_000, 4_000)
+
+    def test_declares_hooks_reads_generated_nested_text_in_linear_time(self):
+        enabled = " git-hooks.hooks.x.enable = true;"
+        off = " git-hooks.hooks.x.enable = false;"
+
+        def cases(body, size):
+            filler = body * (size // len(body))
+            levels = min(size // 2, MEMORY_DEPTH)
+            return (
+                ("{ pkgs, ... }: { packages = [ " + filler + "];" + off + " }", False),
+                ("{ pkgs, ... }: {" + off + " packages = [ " + filler + "];" + enabled + " }", True),
+                ("{ pkgs, ... }: { x = " + "[ " * levels + "]; " + off + " }", False))
+
+        for body in ("{ } ", "[ ] ", "( ) ", "{ a = [ { } ]; } "):
+            for size in (80_000, hook_install.TEXT_LIMIT - 1_000):
+                for text, expected in cases(body, size):
+                    self.assertLessEqual(len(text), hook_install.TEXT_LIMIT, (size, body))
+                    self.assertEqual(hook_install.declares_hooks(text), expected, (size, body))
+            for index in range(3):
+                self.assertScalesLinearly(lambda size, b=body, k=index: cases(b, size)[k][0], 10_000, 40_000)
+
+    def assertScalesLinearly(self, build, small, large):
+        """Growing the input by a factor grows the lines run by under 2.5 times it; a quadratic pass squares it."""
+        ratio = lines_run(build(large)) / lines_run(build(small))
+        self.assertLess(ratio, 2.5 * (large / small), (small, large, ratio))
+
+    def test_declares_hooks_peak_memory_stays_under_64_mib_on_capped_nested_input(self):
+        depth = MEMORY_DEPTH
+        cases = {
+            "nested sets": lambda switch: (
+                "{ pkgs, ... }: { git-hooks = { " + "a = { " * depth + "}; " * depth + "};" + switch + " }"),
+            "nested list": lambda switch: (
+                "{ pkgs, ... }: { x = " + "[ " * depth + "] " * depth + ";" + switch + " }"),
+            "sibling sets": lambda switch: (
+                "{ pkgs, ... }: { git-hooks = { " + "a = { b = { }; }; " * depth + "};" + switch + " }")}
+        for name, build in cases.items():
+            for state, expected in (("false", False), ("true", True)):
+                label = f"{name} with the switch {state}"
+                with self.subTest(label):
+                    text = build(" git-hooks.hooks.x.enable = " + state + ";")
+                    self.assertLessEqual(len(text), hook_install.TEXT_LIMIT, label)
+                    tracemalloc.start()
+                    try:
+                        result = hook_install.declares_hooks(text)
+                        _, peak = tracemalloc.get_traced_memory()
+                    finally:
+                        tracemalloc.stop()
+                    self.assertEqual(result, expected, label)
+                    self.assertLess(peak, MEMORY_LIMIT, label)
+
+    def test_hook_install_source_carries_no_over_long_comment_block(self):
+        path = Path(hook_install.__file__)
+        snapshot = never_rise.Snapshot("a" * 40, {}, contents={path.name: path.read_bytes()})
+        enforcer = comment_lint.enforcers(None)[1]
+        self.assertEqual(enforcer.rule, comment_lint.LENGTH_RULE)
+        self.assertEqual(enforcer.find(snapshot), [])
 
 
 if __name__ == "__main__":
