@@ -25,7 +25,7 @@ from tests.engine_step_coverage import StepCoverage
 from tests.guard_policy_world import install_platform_manifest_in_environ
 from tests.test_engine_deliver import EngineProject
 from tests.test_engine_session import (
-    RESULT_NORMAL, SCHEMA, SESSION, SETTINGS_GUARDED, SETTINGS_UNGUARDED, SYSTEM, copy_roles,
+    RESULT_NORMAL, SCHEMA, SESSION, SETTINGS_GUARDED, SETTINGS_UNGUARDED, SYSTEM, after, copy_roles,
     install_stub, one_step,
 )
 from tests.test_engine_stubbed_run import Scenario
@@ -273,7 +273,27 @@ class WholeShellDeliverTest(Scenario):
 
 
 class RealGuardTest(unittest.TestCase):
-    def test_the_lifecycle_guard_judges_a_read_pipeline_alike_in_every_session(self):
+    READ_TABLE = (
+        "git log origin/main --oneline -5 | head -3",
+        "git show --stat HEAD | head -20",
+        "git ls-tree -r HEAD --name-only | grep -i -E 'engine|guard' | head -30",
+        "git diff origin/main...HEAD --stat | tail -5",
+        "git log --oneline -3; git status --short",
+        "ls docs && cat README.md | wc -l",
+        "sed -n '1,40p' README.md",
+        "grep -rn 'tool-denied' python | head",
+        "tail -n 20 justfile",
+    )
+    REFUSED_TABLE = (
+        "git push origin HEAD",
+        "nohup git log",
+        "setsid git log",
+        "git log & disown",
+        "gh pr merge 1 --repo example/x --merge",
+        "gh release create v1 --repo example/x",
+    )
+
+    def test_the_guard_admits_the_read_table_and_refuses_lifecycle_and_detaching_calls_in_every_session(self):
         with tempfile.TemporaryDirectory() as tmp:
             wrapper = real_guard(Path(tmp) / "guard")
             fixture = ROOT / "tests/fixtures/engine-session/result-denied-1740.json"
@@ -281,7 +301,7 @@ class RealGuardTest(unittest.TestCase):
                 "permission_denials"][0]["tool_input"]["command"]
             absent = {k: v for k, v in os.environ.items() if k != "CLAUDE_READ_ONLY_SHELL"}
             environments = {"absent": absent, "set": {**absent, "CLAUDE_READ_ONLY_SHELL": "1"}}
-            commands = ("git log --oneline -3 | head", recorded, "nohup git log")
+            commands = (recorded, *self.READ_TABLE, *self.REFUSED_TABLE)
             seen: dict[str, dict[str, tuple[int, str]]] = {}
             for name, env in environments.items():
                 for command in commands:
@@ -292,15 +312,34 @@ class RealGuardTest(unittest.TestCase):
                             env=env, cwd=tmp, capture_output=True, text=True, timeout=60,
                             check=False)
                         seen.setdefault(name, {})[command] = (done.returncode, done.stderr)
-                        if command == commands[2]:
+                        if command in self.REFUSED_TABLE:
                             self.assertEqual(done.returncode, 2, done.stderr)
-                            self.assertIn("detaching command `nohup` refused", done.stderr)
-                            self.assertIn("background mode", done.stderr)
                         else:
                             self.assertEqual(done.returncode, 0, done.stderr)
+                        if command == "nohup git log":
+                            self.assertIn("detaching command `nohup` refused", done.stderr)
+                            self.assertIn("background mode", done.stderr)
             for command in commands:
                 with self.subTest(command=command):
                     self.assertEqual(seen["absent"].get(command), seen["set"].get(command))
+
+
+class ReadOnlyRoleToolsTest(unittest.TestCase):
+    def test_every_role_an_engine_procedure_runs_without_mutating_can_call_bash(self):
+        roles: set[str] = set()
+        for path in sorted((ROOT / "python/agent_tools/delivery/procedures").glob("*.json")):
+            for step in json.loads(path.read_text(encoding="utf-8")).get("steps", ()):
+                if step.get("kind") == "agent" and step.get("mutates") is not True:
+                    roles.add(step["role"])
+        self.assertLessEqual({"reviewer-lite", "reviewer"}, roles)
+        for name in sorted(roles):
+            with self.subTest(role=name):
+                argv = list(engine_session.launch_argv(
+                    engine_session.read_role(AGENTS, name), SCHEMA, SESSION, SYSTEM))
+                if "--tools" in argv:
+                    self.assertIn("Bash", after(argv, "--tools").split(","))
+                if "--disallowedTools" in argv:
+                    self.assertNotIn("Bash", after(argv, "--disallowedTools").split(","))
 
 
 if __name__ == "__main__":
