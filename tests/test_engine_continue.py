@@ -504,8 +504,9 @@ class ContinueTest(unittest.TestCase):
         saved.write_text(json.dumps({**document, "format": 1}), encoding="utf-8")
         second = project.deliver(procedures)
         self.assertEqual(second.returncode, 3, second.stdout + second.stderr)
-        (earlier, later) = project.runs()
-        self.assertEqual(earlier, old)
+        # A run id ends in a random token, so two runs of one second sort in either order:
+        # the new run is the one that is not the old run, never the later one in the list.
+        (later,) = [run for run in project.runs() if run != old]
         stops = [e for e in project.events(old) if e["event"] == "stop_reached"]
         self.assertEqual((stops[-1]["stop"], stops[-1]["need"]), ("superseded", "nothing"))
         self.assertEqual(json.loads(second.stdout)["run"], later.name)
