@@ -152,7 +152,7 @@ class LauncherCase(unittest.TestCase):
         return "http://127.0.0.1:%d" % listener.getsockname()[1]
 
     def run_launcher(self, proxy_url, env=None, substitute=True, without_curl_and_jq=False, console_url=None,
-                     client=None, prelude=None):
+                     client=None, prelude=None, args=()):
         """`claude-account run` from a fresh copy of the mod, as a finished process.
 
         `without_curl_and_jq` points the copy's CURL and JQ at paths that do not exist; `client` is the
@@ -179,7 +179,7 @@ class LauncherCase(unittest.TestCase):
         child = {key: os.environ[key] for key in ("PATH", "TMPDIR") if key in os.environ}
         child.update(HOME=str(home), CLAUDE_ACCOUNTS_DIR=str(self.root / "accounts-state"),
                      CLAUDE_BIN=client or shutil.which("env"), **{**self.switch, **(env or {})})
-        argv = [shutil.which("bash"), str(script), "run"]
+        argv = [shutil.which("bash"), str(script), "run", *args]
         if prelude is not None:
             argv = [argv[0], "-c", prelude + '; exec "$0" "$1" run', argv[0], str(script)]
         return subprocess.run(argv, cwd=work, env=child,
@@ -676,6 +676,38 @@ class ProfileChoiceTest(LauncherCase):
                 environment = self.launch(self.closed(), self.answer_env(), console_url=url)
                 self.assertEqual(self.chosen(environment), self.path("a"))
                 self.assertEqual(self.answer.read_text(), '{"account":"a"}\n')
+
+
+class SwitchRelaunchTest(LauncherCase):
+    """A session that asks for an account switch is relaunched with the permission and tool flags it started with."""
+
+    switch = {"CLAUDE_CACHE_PROXY": "0"}
+
+    def test_the_relaunch_keeps_the_permission_and_tool_flags_of_the_first_launch(self):
+        seen = self.root / "argv.log"
+        client = self.root / "client"
+        client.write_text(
+            "#!/bin/sh\n"
+            'echo "$*" >>%s\n'
+            'if [ ! -e %s/first ]; then touch %s/first; mkdir -p "$CLAUDE_ACCOUNTS_DIR/switch"; '
+            'printf "default\\tsess-1\\n" >"$CLAUDE_ACCOUNTS_DIR/switch/$CLAUDE_ACCOUNT_LAUNCHER"; fi\n'
+            % (seen, self.root, self.root))
+        client.chmod(0o755)
+        done = self.run_launcher(
+            self.closed(), env={"CLAUDE_ACCOUNT": "default"}, client=str(client),
+            args=("--session-id", "sess-1", "--dangerously-skip-permissions", "--tools", "Read,Grep",
+                  "--disallowedTools", "Edit", "--strict-mcp-config", "--model", "opus"))
+        self.assertEqual((done.returncode, done.stderr), (0, ""))
+        first, second = seen.read_text().splitlines()
+        self.assertIn("--dangerously-skip-permissions", first)
+        self.assertEqual(second.split()[:2], ["--resume", "sess-1"])
+        for flag in ("--dangerously-skip-permissions", "--tools Read,Grep", "--disallowedTools Edit",
+                     "--strict-mcp-config"):
+            self.assertIn(flag, second)
+        self.assertNotIn("--session-id", second)
+
+    def closed(self):
+        return "http://127.0.0.1:%d" % closed_port()
 
 
 if __name__ == "__main__":

@@ -46,7 +46,7 @@ def write_run(root, label, started, events, procedure, parent=None, directory=No
 def direct_root_events(started=HOUR):
     return [
         ("step_entered", "start", started, {}),
-        ("outcome_graded", "lane", started, {"outcome": "direct"}),
+        ("transition_taken", "lane", started, {"visit": 1, "outcome": "direct", "to": "direct-lane"}),
         ("step_entered", "direct-lane", started, {}),
     ]
 
@@ -54,7 +54,7 @@ def direct_root_events(started=HOUR):
 def standard_root_events(started=HOUR):
     return [
         ("step_entered", "start", started, {}),
-        ("outcome_graded", "lane", started, {"outcome": "standard"}),
+        ("transition_taken", "lane", started, {"visit": 1, "outcome": "standard", "to": "standard-not-on-engine"}),
         ("stop_reached", "standard-not-on-engine", started,
          {"stop": "standard-not-on-engine", "need": "nothing"}),
     ]
@@ -97,6 +97,27 @@ class PastSetupVerdictTest(unittest.TestCase):
         self.assertEqual(report["entered"], "preflight")
         self.assertEqual(report["at"], stamp(2 * HOUR))
         self.assertEqual(report["anchor"], stamp(timedelta(0)))
+
+    def test_the_lane_grade_is_the_transition_the_engine_writes_for_a_decide_step(self):
+        write_run(self.root, "r", HOUR, direct_root_events(), "deliver")
+        write_run(self.root, "d", HOUR, [("step_entered", "preflight", 2 * HOUR, {})], "direct", parent="r")
+        events = (self.root / rid("r") / "events.jsonl").read_text(encoding="utf-8")
+        self.assertNotIn("outcome_graded", events)
+        self.assertIn('"event": "transition_taken", "step": "lane"', events)
+        code, report = self.verdict(3 * HOUR)
+        self.assertEqual((code, report["verdict"], report["lane"]), (0, "met", "direct"))
+
+    def test_a_delivery_started_in_the_activation_second_is_not_before_the_activation(self):
+        anchor = ANCHOR + timedelta(milliseconds=250)  # the activation row keeps microseconds, a run's start whole seconds
+        write_run(self.root, "r", timedelta(0), direct_root_events(timedelta(0)), "deliver")
+        write_run(self.root, "d", timedelta(0), [("step_entered", "preflight", HOUR, {})], "direct", parent="r")
+        code, report = verify_checks.past_setup_verdict(self.root, anchor, ANCHOR + 3 * HOUR)
+        self.assertEqual((code, report["verdict"], report["run"]), (0, "met", rid("r")))
+        shutil.rmtree(self.root)
+        self.root.mkdir()
+        write_run(self.root, "r", -timedelta(seconds=1), direct_root_events(-timedelta(seconds=1)), "deliver")
+        code, report = verify_checks.past_setup_verdict(self.root, anchor, ANCHOR + 3 * HOUR)
+        self.assertEqual((code, report["run"]), (75, None))
 
     def test_a_delivery_stopped_before_its_lane_is_lane_unknown_and_no_later_one_stands_in(self):
         for standard_issue in (False, True):

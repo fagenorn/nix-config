@@ -349,10 +349,12 @@ def denial_prompt(role: Role, calls: Sequence[str]) -> str:
     return f"These tool calls were refused:\n{refused}\n\n{guidance}{REASK_REQUEST}"
 
 
-def asked_calls(sessions: Path, name: str, visit: int) -> tuple[str, ...] | None:
-    """The calls of the launch a visit's denial re-ask was about, None when the visit made no re-ask."""
-    if not (sessions / f"{name}.{visit}.denied.prompt.md").exists():
-        return None
+def asked_record(sessions: Path, name: str, visit: int) -> dict | None:
+    """The stored record of the launch a visit's denial re-ask was about, None when the visit made no re-ask.
+
+    `{}` when the re-ask was made but no record of its launch holds denials. A record that carries its
+    `retry` text is a re-ask even where its prompt file was never written."""
+    prompted = (sessions / f"{name}.{visit}.denied.prompt.md").exists()
     head = f"{name}.{visit}.continue-"
     attempts = sorted((int(path.name[len(head):-len(".json")]) for path in sessions.glob(f"{head}*.json")
                        if path.name[len(head):-len(".json")].isdigit()), reverse=True)
@@ -363,9 +365,28 @@ def asked_calls(sessions: Path, name: str, visit: int) -> tuple[str, ...] | None
         except (OSError, ValueError):
             continue
         denials = document.get("denials") if isinstance(document, dict) else None
-        if isinstance(denials, list) and denials:
-            return calls_of(denials)
-    return ()
+        if isinstance(denials, list) and denials and (prompted or "retry" in document):
+            return document
+    return {} if prompted else None
+
+
+def asked_calls(sessions: Path, name: str, visit: int) -> tuple[str, ...] | None:
+    """The calls of the launch a visit's denial re-ask was about, None when the visit made no re-ask."""
+    document = asked_record(sessions, name, visit)
+    return None if document is None else calls_of(document.get("denials", ()))
+
+
+def asked_earlier(sessions: Path, name: str, visit: int) -> list[tuple["Launched", Reading]]:
+    """The measures of the launch a visit's denial re-ask was about, as `summed` takes an earlier launch."""
+    measured = (asked_record(sessions, name, visit) or {}).get("measured")
+    if not isinstance(measured, dict):
+        return []
+    wall, tokens = _amount(measured.get("wall_seconds")) or 0, measured.get("tokens")
+    tokens = {key: _count(tokens.get(key)) for key in TOKEN_COUNTS} if isinstance(tokens, dict) else (
+        dict.fromkeys(TOKEN_COUNTS, 0))
+    return [(Launched(0, b"", b"", wall),
+             Reading(None, None, [], None, wall, _count(measured.get("turns")), tokens,
+                     _amount(measured.get("spend_usd")) or 0))]
 
 
 def summed(launched: Launched, reading: Reading,
@@ -388,11 +409,18 @@ def reading_problem(schema: Mapping, reading: Reading) -> str | None:
 
 
 def store_record(run_dir: Path, visit_of: tuple[str, int, str, int], launched: Launched,
-                 reading: Reading, schema: Mapping, suffix: str) -> None:
+                 reading: Reading, schema: Mapping, suffix: str, retry: str | None = None) -> None:
+    """Store a launch's record; with `retry`, the prompt that asks its denials again and what the launch used,
+    so a killed engine sends that prompt on the original session and counts the launch in the visit."""
     name, visit, session, attempt = visit_of
     record = {"attempt": attempt, "denials": reading.denials, "exit_code": launched.exit_code,
               "problem": reading_problem(schema, reading), "prose": reading.prose, "session": session,
               "subtype": reading.subtype}
+    if retry is not None:
+        record["retry"] = retry
+        record["measured"] = {
+            "spend_usd": reading.spend_usd, "tokens": reading.tokens, "turns": reading.turns,
+            "wall_seconds": reading.wall_seconds if reading.wall_seconds is not None else launched.wall_seconds}
     engine_ledger.store_session_file(
         run_dir, f"{name}.{visit}{suffix}.json",
         json.dumps(record, sort_keys=True, separators=(",", ":")).encode("utf-8"))

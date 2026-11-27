@@ -469,6 +469,46 @@ class ResumeTest(unittest.TestCase):
         self.assertLess(line["detail"].index(repr("git log | head")),
                         line["detail"].index(repr("rm x")))
 
+    def test_a_run_killed_once_the_first_denial_was_saved_sends_the_reask_on_the_original_session(self):
+        log = install_answers(self.project, [self.denying("git log | head"), self.normal(), self.normal()])
+        procedures = one_step(self.project)
+        first = self.project.deliver(procedures)
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        (run,) = self.project.runs()
+        retry = (run / "sessions/draft.1.denied.prompt.md").read_text()
+        self.cut(run, "session_answered",
+                 drop=("results/draft.1.json", "sessions/draft.1.denied.json"))
+        done = self.project.deliver(procedures)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        records = self.records(log)
+        self.assertEqual(len(records), 3)
+        self.assertEqual(after(records[2]["argv"], "--resume"), after(records[0]["argv"], "--session-id"))
+        self.assertEqual(records[2]["stdin"], retry)
+        self.assertIn(repr("git log | head"), retry)
+        self.assertEqual(self.entered(run), [1])
+        self.assertEqual(run_continued(self.project.events(run)), [])
+
+    def test_a_denied_visit_whose_reask_was_cut_short_stores_the_turns_and_spend_of_every_launch(self):
+        denied = self.project.tmp / "denied-counted.json"
+        denied.write_bytes(canned_result(
+            permission_denials=[{"tool_name": "Bash", "tool_use_id": "t", "tool_input": {"command": "rm x"}}],
+            num_turns=3, total_cost_usd=0.1, duration_ms=1000,
+            usage={"input_tokens": 1, "cache_creation_input_tokens": 2,
+                   "cache_read_input_tokens": 3, "output_tokens": 4}))
+        log = install_answers(self.project, [
+            {"stdout": str(denied), "exit": 0, "account": "p1"}, self.hang(), self.normal()])
+        procedures = one_step(self.project)
+        self.kill_during_hang(procedures, log, 2)
+        done = self.project.deliver(procedures)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        (run,) = self.project.runs()
+        (stored,) = [e for e in self.project.events(run) if e["event"] == "result_stored"
+                     and (e["step"], e["visit"]) == ("draft", 1)]
+        self.assertEqual(stored["turns"], 10)  # 3 turns refused, then the normal fixture's 7
+        self.assertAlmostEqual(stored["spend_usd"], 0.5321)
+        self.assertEqual(stored["tokens"], {"input": 12, "cache_write": 24, "cache_read": 36, "output": 48})
+        self.assertAlmostEqual(stored["wall_seconds"], 13.345)
+
     def test_a_second_interruption_resumes_again_under_the_next_attempt(self):
         log = install_answers(self.project, [self.hang(), self.hang(), self.normal()])
         procedures = one_step(self.project)

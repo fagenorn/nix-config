@@ -112,7 +112,7 @@ with none it is not met once the clock is past that bound, else `not_yet`. The r
 (`verify_checks.engine_deliver_past_setup`) is met when the first direct-lane engine delivery after activation had a
 direct child run enter a step within two days of the activation. The anchor is found as `engine-direct-past-implement`
 finds it (none: `not_yet`, 75). The roots are the runs under `--runs-root` whose `run.json` has procedure `deliver`, no
-`parent` and a `started` at or after the anchor, by `(started, id)`. A root whose first `lane` grade is `standard` or
+`parent` and a `started` at or after the anchor's whole second, by `(started, id)`. A root whose first `lane` transition (a decide step's grade) is `standard` or
 whose last `stop_reached` is `standard-not-on-engine` or `look-not-on-engine` is skipped; the first other root is
 judged and no later root stands in for it. With lane `direct`, the first `step_entered` among the root's direct child
 runs (`parent` the root, procedure `direct`), at or before anchor plus two days, is met (0), a later one not met (1);
@@ -943,7 +943,7 @@ def _engine_runs(runs_root: Path) -> list[tuple[datetime, str, Path, dict]]:
 def _root_lane_and_stop(events) -> tuple[str | None, str | None]:
     """The outcome of a run's first `lane` grade and the `stop` of its last `stop_reached`, each None if absent."""
     lane = next((event.get("outcome") for kind, step, _, event in events
-                 if kind == "outcome_graded" and step == "lane"), None)
+                 if kind == "transition_taken" and step == "lane"), None)  # a decide step writes no grade
     stops = [event.get("stop") for kind, _, _, event in events if kind == "stop_reached"]
     stop = stops[-1] if stops else None
     return (lane if isinstance(lane, str) else None), (stop if isinstance(stop, str) else None)
@@ -954,9 +954,10 @@ def past_setup_verdict(runs_root: Path, anchor: datetime, now: datetime) -> tupl
     report = {"met": False, "verdict": "not_yet", "anchor": _stamp(anchor), "run": None, "lane": None,
               "stop": None, "child": None, "entered": None, "at": None}
     end = anchor + PAST_IMPLEMENT_WINDOW
+    whole_second = anchor.replace(microsecond=0)  # the ledger keeps a run's start to the second
     runs = _engine_runs(runs_root)
     for started, run_id, run_dir, document in runs:
-        if document.get("procedure") != "deliver" or "parent" in document or started < anchor:
+        if document.get("procedure") != "deliver" or "parent" in document or started < whole_second:
             continue
         lane, stop = _root_lane_and_stop(_past_implement_events(run_dir))
         if lane == "standard" or stop in NOT_DIRECT_STOPS:

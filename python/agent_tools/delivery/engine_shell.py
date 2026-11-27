@@ -701,25 +701,27 @@ def _resumed(run_dir: Path, ledger: list[dict], name: str, visit: int) -> _Resum
     if any(e["event"] == "stop_reached" for e in ledger[entered[-1]:]):
         return None
     launched = [e["attempt"] for e in here if e["event"] == "session_resuming"]
-    if any(_recorded_attempt(path) == max(launched, default=1)
-           for path in (run_dir / "sessions").glob(f"{name}.{visit}.*json")):
+    ended = [_recorded(path) for path in (run_dir / "sessions").glob(f"{name}.{visit}.*json")]
+    ended = [document for document in ended if document.get("attempt") == max(launched, default=1)]
+    retry = next((document["retry"] for document in ended if isinstance(document.get("retry"), str)), None)
+    if ended and retry is None:
         return None
     attempt = 2 + len(launched)
     started = any(e["event"] == "process_started" for e in here)
-    text = (engine_session.CONTINUE_PROMPT if started else
-            (run_dir / "sessions" / f"{name}.{visit}.prompt.md").read_text(encoding="utf-8"))
+    text = retry or (engine_session.CONTINUE_PROMPT if started else
+                     (run_dir / "sessions" / f"{name}.{visit}.prompt.md").read_text(encoding="utf-8"))
     return _Resumed(session=starting[-1]["session"],
                     system=run_dir / "sessions" / f"{name}.{visit}.system.md",
                     text=text, attempt=attempt, resume=started)
 
 
-def _recorded_attempt(path: Path) -> object:
-    """The launch attempt a stored session record names, None for a file that is no such record."""
+def _recorded(path: Path) -> dict:
+    """A stored session record, `{}` for a file that is no such record."""
     try:
         document = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return None
-    return document.get("attempt") if isinstance(document, dict) else None
+        return {}
+    return document if isinstance(document, dict) else {}
 
 
 def _record_history(run_dir: Path, clock: Callable[[], datetime]) -> None:
@@ -1375,6 +1377,8 @@ def _launch_until_answered(
     missed, text = resumed is not None, prompt
     earlier: list[tuple[engine_session.Launched, engine_session.Reading]] = []
     asked = None if resumed is None else engine_session.asked_calls(run_dir / "sessions", name, visit)
+    if resumed is not None:  # a re-asked launch's use stays in the visit when its re-ask was cut short
+        earlier = engine_session.asked_earlier(run_dir / "sessions", name, visit)
 
     def event(kind: str, **members: object) -> None:
         engine_ledger.append_event(run_dir, {"event": kind, "at": _now(), **members})
@@ -1386,11 +1390,12 @@ def _launch_until_answered(
         event("wait_started", wait=engine_session.USAGE_LIMIT, until=until)
         waiting = True
 
-    def record(launched: engine_session.Launched, reading: engine_session.Reading) -> None:
+    def record(launched: engine_session.Launched, reading: engine_session.Reading,
+               retry: str | None = None) -> None:
         engine_session.store_record(
             run_dir, (name, visit, session, attempt), launched, reading, schema,
             f".continue-{attempt}" if resumed is not None else ".denied" if asked is not None
-            else ".resume" if missed else "")
+            else ".resume" if missed else "", retry)
 
     def stop_at(launched: engine_session.Launched, reading: engine_session.Reading, end: str,
                 need: str, detail: str) -> tuple:
@@ -1440,8 +1445,8 @@ def _launch_until_answered(
             if (asked is None and not launched.timed_out
                     and reading.subtype not in engine_session.CAP_SUBTYPES
                     and reading.api_failure is None):
-                record(launched, reading)
                 text = engine_session.denial_prompt(role, calls)
+                record(launched, reading, text)  # the record holds the pending re-ask for a killed engine
                 engine_ledger.store_session_file(
                     run_dir, f"{name}.{visit}.denied.prompt.md", text.encode("utf-8"))
                 earlier.append((launched, reading))

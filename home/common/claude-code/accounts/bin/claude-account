@@ -609,8 +609,18 @@ cmd_run() {
     IFS=$'\t' read -r name session <"$request" || true
     rm -f "$request"
     [ -n "$session" ] || exit "$status"
-    # Only the conversation carries over, not the first launch's other flags.
-    set -- --resume "$session"
+    # The conversation carries over with the flags that bound what it may run, never with fewer
+    # permissions or wider tools than it started with; its other flags are not repeated.
+    carried=()
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --dangerously-skip-permissions|--strict-mcp-config) carried+=("$1") ;;
+        --tools|--disallowedTools|--allowedTools|--permission-mode)
+          if [ $# -ge 2 ]; then carried+=("$1" "$2"); shift; fi ;;
+      esac
+      shift
+    done
+    set -- --resume "$session" ${carried[@]+"${carried[@]}"}
   done
 }
 
