@@ -113,6 +113,25 @@ class WorktreeTest(unittest.TestCase):
         self.assertEqual(made["branch"], BRANCH)
         self.assertEqual(made["status"], "")
 
+    def test_a_made_worktree_leaves_the_planners_files_ignored_so_it_stays_removable_after_the_merge(self):
+        self.make()
+        plans = self.path / ".superpowers" / "plans" / "issue-7"
+        plans.mkdir(parents=True)
+        (plans / "plan.md").write_text("the plan", encoding="utf-8")
+
+        self.assertEqual(self.git("status", "--porcelain", root=self.path).strip(), "")
+        code, again = self.call("worktree")
+        self.assertEqual((code, again["verdict"]), (0, "adopted"), again)
+        self.git("worktree", "remove", str(self.path))
+        self.assertFalse(self.path.exists())
+
+    def test_the_ignore_rule_is_written_once(self):
+        self.make()
+        self.call("worktree")
+        exclude = Path(self.git("rev-parse", "--path-format=absolute", "--git-path", "info/exclude",
+                                root=self.path).strip())
+        self.assertEqual(exclude.read_text(encoding="utf-8").count(".superpowers/"), 1)
+
     def test_worktree_adopts_an_existing_clean_worktree_on_the_branch(self):
         made = self.make()
         code, again = self.call("worktree")
@@ -344,23 +363,43 @@ class ForgeCommandTest(unittest.TestCase):
             (plans / name.replace("_", "-").replace("-md", ".md")).write_text(text, encoding="utf-8")
         return tree
 
-    def plan_note(self, tree):
-        return run_setup(self.env, "plan-note", "--repo", SLUG, "--issue", "7", "--worktree-path", str(tree))
+    HOLDER = "host/41-20261122T000000Z-abcd"
+    BODY = "the plan\n\n## task-1.md\n\nfirst\n\n## task-2.md\n\nsecond\n\n## task-10.md\n\ntenth"
 
-    def test_plan_note_posts_plan_md_then_each_task_file_in_task_order_under_the_plan_marker(self):
+    def plan_read(self, tree):
+        return run_setup(self.env, "plan-read", "--issue", "7", "--worktree-path", str(tree))
+
+    def plan_note(self, tree, text=None, holder=HOLDER):
+        """`plan-note` of the plan `text` was read as (the files' own text when none is given)."""
+        digest = hashlib.sha256((text if text is not None else self.plan_read(tree)[1]["text"]).encode("utf-8")
+                                ).hexdigest()[:16]
+        return run_setup(self.env, "plan-note", "--repo", SLUG, "--issue", "7", "--worktree-path", str(tree),
+                         "--holder", holder, "--digest", digest)
+
+    def marker(self, text, holder=HOLDER):
+        digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+        return f"<!-- engine-plan:{digest} run:{holder} -->"
+
+    def test_plan_read_prints_plan_md_then_each_task_file_in_task_order_with_its_digest(self):
+        tree = self.write_plan(plan_md="the plan", task_2_md="second", task_10_md="tenth", task_1_md="first")
+
+        code, report = self.plan_read(tree)
+
+        self.assertEqual((code, report["verdict"], report["text"]), (0, "read", self.BODY), report)
+        self.assertEqual(report["digest"], hashlib.sha256(self.BODY.encode("utf-8")).hexdigest()[:16])
+
+    def test_plan_note_posts_the_plan_under_a_marker_naming_the_run_that_approved_it(self):
         self.forge.comment_store(SLUG, 7, labels=[])
         tree = self.write_plan(plan_md="the plan", task_2_md="second", task_10_md="tenth", task_1_md="first")
 
         code, report = self.plan_note(tree)
 
         self.assertEqual((code, report["verdict"]), (0, "posted"), report)
-        body = "the plan\n\n## task-1.md\n\nfirst\n\n## task-2.md\n\nsecond\n\n## task-10.md\n\ntenth"
-        digest = hashlib.sha256(body.encode("utf-8")).hexdigest()[:16]
         self.assertEqual([c["body"] for c in self.forge.stored()],
-                         [f"<!-- engine-plan:{digest} -->\n\n{body}"])
+                         [f"{self.marker(self.BODY)}\n\n{self.BODY}"])
         self.assertEqual(report["comment_id"], self.forge.stored()[0]["id"])
 
-    def test_a_second_plan_note_of_the_same_plan_posts_no_second_comment(self):
+    def test_a_second_plan_note_of_the_same_plan_and_run_posts_no_second_comment(self):
         self.forge.comment_store(SLUG, 7, labels=[])
         tree = self.write_plan(plan_md="the plan")
         _, first = self.plan_note(tree)
@@ -381,13 +420,81 @@ class ForgeCommandTest(unittest.TestCase):
         self.assertEqual(len(self.forge.stored()), 2)
         self.assertTrue(self.forge.stored()[1]["body"].endswith("the revised plan"))
 
-    def test_plan_note_without_a_plan_file_is_an_error_and_posts_nothing(self):
+    def test_approving_plan_a_again_after_plan_b_of_the_same_run_is_posted_last_not_reused(self):
+        # an older comment of plan A must not stand for the run's current plan: the implementer takes the latest
         self.forge.comment_store(SLUG, 7, labels=[])
+        tree = self.write_plan(plan_md="plan A")
+        self.plan_note(tree)
+        self.write_plan(plan_md="plan B")
+        self.plan_note(tree)
+        self.write_plan(plan_md="plan A")
 
-        code, report = self.plan_note(self.write_plan(task_1_md="first"))
+        code, report = self.plan_note(tree)
+
+        self.assertEqual((code, report["verdict"]), (0, "posted"), report)
+        stored = self.forge.stored()
+        self.assertEqual(len(stored), 3)
+        self.assertEqual(report["comment_id"], stored[2]["id"])
+        self.assertTrue(stored[2]["body"].endswith("plan A"))
+
+    def test_a_plan_comment_of_another_run_is_never_reused(self):
+        self.forge.comment_store(SLUG, 7, labels=[])
+        tree = self.write_plan(plan_md="the plan")
+        self.plan_note(tree, holder="host/41-other-run")
+
+        code, report = self.plan_note(tree)
+
+        self.assertEqual((code, report["verdict"]), (0, "posted"), report)
+        self.assertEqual([c["body"].split("\n", 1)[0].rsplit(" run:", 1)[1] for c in self.forge.stored()],
+                         ["host/41-other-run -->", f"{self.HOLDER} -->"])
+
+    def test_a_plan_changed_after_it_was_read_is_refused_and_posts_nothing(self):
+        self.forge.comment_store(SLUG, 7, labels=[])
+        tree = self.write_plan(plan_md="the reviewed plan")
+        _, read = self.plan_read(tree)
+        self.write_plan(plan_md="an edited plan")
+
+        code, report = self.plan_note(tree, text=read["text"])
+
+        self.assertEqual((code, report["verdict"], report["error"]), (1, "error", "plan_changed"))
+        self.assertEqual(self.forge.stored(), [])
+
+    def test_a_task_file_that_is_a_symbolic_link_is_never_read_or_posted(self):
+        self.forge.comment_store(SLUG, 7, labels=[])
+        outside = self.world.tmp / "outside-secret.txt"
+        outside.write_text("do not publish", encoding="utf-8")
+        tree = self.write_plan(plan_md="the plan")
+        (tree / ".superpowers" / "plans" / "issue-7" / "task-1.md").symlink_to(outside)
+
+        read_code, read = self.plan_read(tree)
+        code, report = self.plan_note(tree, text="the plan")
+
+        self.assertEqual((read_code, read["verdict"], read["error"]), (1, "error", "plan_unsafe"))
+        self.assertNotIn("do not publish", json.dumps(read))
+        self.assertEqual((code, report["verdict"], report["error"]), (1, "error", "plan_unsafe"))
+        self.assertEqual(self.forge.stored(), [])
+
+    def test_a_plan_md_or_a_plan_directory_that_is_a_symbolic_link_is_never_read(self):
+        outside = self.world.tmp / "outside-plans"
+        outside.mkdir()
+        (outside / "plan.md").write_text("do not publish", encoding="utf-8")
+        tree = self.write_plan(plan_md="the plan")
+        plans = tree / ".superpowers" / "plans" / "issue-7"
+        (plans / "plan.md").unlink()
+        (plans / "plan.md").symlink_to(outside / "plan.md")
+        self.assertEqual(self.plan_read(tree)[1]["error"], "plan_unsafe")
+        (plans / "plan.md").unlink()
+        plans.rmdir()
+        plans.symlink_to(outside, target_is_directory=True)
+
+        code, report = self.plan_read(tree)
+
+        self.assertEqual((code, report["verdict"], report["error"]), (1, "error", "plan_unsafe"))
+
+    def test_plan_read_without_a_plan_file_is_an_error(self):
+        code, report = self.plan_read(self.write_plan(task_1_md="first"))
 
         self.assertEqual((code, report["verdict"], report["error"]), (1, "error", "plan_missing"))
-        self.assertEqual(self.forge.stored(), [])
 
     def test_a_missing_flag_is_a_usage_error(self):
         code, report = run_setup(self.env, "read", "--repo", SLUG)

@@ -9,7 +9,8 @@ import unittest
 from agent_tools.delivery import engine_core, engine_session, issue_setup
 from agent_tools.delivery.engine_core import RunGroup, Stop
 from tests.test_engine_check import PROCEDURES, SHIPPED_INPUTS, UNNAMED, load, step
-from tests.test_engine_whole_shell import client_admits, whole_shell_argv, words_after
+from tests.test_engine_session import SCHEMA, SESSION, SYSTEM
+from tests.test_engine_whole_shell import AGENTS, client_admits, whole_shell_argv, words_after
 
 TIER = "fast"
 
@@ -91,6 +92,41 @@ class DirectProcedureTest(unittest.TestCase):
         self.assertIn("approved plan", planned)
         self.assertIn("every task", planned)
         self.assertIn("not eligibility", planned)
+
+    def test_the_implementer_takes_only_the_plan_comment_marked_with_this_runs_holder(self):
+        implement = next(s for s in load(PROCEDURES, "direct")["steps"] if s["id"] == "implement")
+        self.assertIn("run.holder", implement["in"])
+        text = engine_session.render_prompt(
+            (PROCEDURES / implement["prompt"]).read_text(encoding="utf-8"),
+            tuple((path, "h/run-1" if path == "run.holder" else f"<{path}>") for path in implement["in"]))
+        self.assertIn(f"ends with `{issue_setup.PLAN_RUN}h/run-1 -->`", text)
+
+    def test_every_git_command_the_planner_prompts_name_is_one_its_read_only_bash_admits(self):
+        role = engine_session.read_role(AGENTS, "planner")
+        argv = engine_session.launch_argv(role, SCHEMA, SESSION, SYSTEM)
+        allowed, denied = words_after(argv, "--allowedTools"), words_after(argv, "--disallowedTools")
+        steps = {s["id"]: s for s in load(PROCEDURES, "deliver")["steps"]}
+        named = 0
+        for name in ("plan", "plan-revise"):
+            with self.subTest(name):
+                text = engine_session.render_prompt(
+                    (PROCEDURES / steps[name]["prompt"]).read_text(encoding="utf-8"),
+                    tuple((path, "/srv/p/wt" if path == "plan-preflight.worktree_path" else f"<{path}>")
+                          for path in steps[name]["in"]))
+                commands = [c.rstrip(".:") for c in re.findall(
+                    r"\bgit (?:-C \S+ )?(?:diff|log|show|status|rev-parse|ls-files|blame|merge-base|fetch|grep)\b"
+                    r"\S*(?: [^\s,;()]+)*", text)]
+                named += len(commands)
+                for command in commands:
+                    self.assertTrue(client_admits(command, allowed, denied), command)
+        self.assertGreater(named, 0)
+
+    def test_a_git_command_with_a_directory_flag_is_not_admitted_to_the_planner(self):
+        # the form the planner prompt used to name: `git -C <worktree> diff` is no `git diff` prefix
+        role = engine_session.read_role(AGENTS, "planner")
+        argv = engine_session.launch_argv(role, SCHEMA, SESSION, SYSTEM)
+        self.assertFalse(client_admits("git -C /srv/p/wt diff origin/main...HEAD",
+                                       words_after(argv, "--allowedTools"), words_after(argv, "--disallowedTools")))
 
     def test_the_direct_review_roles(self):
         direct = load(PROCEDURES, "direct")

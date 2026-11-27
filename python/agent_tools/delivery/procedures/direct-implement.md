@@ -11,7 +11,7 @@ git -C {{preflight.worktree_path}} diff
 
 Never push, open a pull request, run git stash, run sed -i or run a destructive git command.
 
-A comment of the issue whose first line starts with `<!-- engine-plan:` is its approved plan (the latest such comment counts). When there is one, the plan decides the scope, not eligibility: skip the eligibility check below, build every task of the approved plan in order, and never return ineligible. The plan was reviewed before this step; a size or a number of files beyond the check below is no reason to stop.
+This run's approved plan is the latest comment of the issue whose first line starts with `<!-- engine-plan:` and ends with ` run:{{run.holder}} -->`; a comment with another run's mark, or none, is no plan. When there is one, the plan decides the scope, not eligibility: skip the eligibility check below, build every task of the approved plan in order, and never return ineligible. The plan was reviewed before this step; a size or a number of files beyond the check below is no reason to stop.
 
 Otherwise, with no approved plan, eligibility first: the direct lane takes an issue with concrete, checkable criteria, a few-file fix and no open design decision or preference. If the issue fails that, change nothing and return status blocked, ineligible true and the reason in notes.
 

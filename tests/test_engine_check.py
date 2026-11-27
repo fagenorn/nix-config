@@ -1222,6 +1222,7 @@ SHIPPED_MEMBERS = {
     "preflight": ({"branch": "b", "worktree_path": "/w", "integration_branch": "main", "issue_text": "t"},),
     "plan-preflight": ({"branch": "b", "worktree_path": "/w", "integration_branch": "main", "issue_text": "t"},),
     "plan": ({"evidence": "p"},),
+    **{read: ({"text": "p", "digest": "d"},) for read in ("plan-read", "plan-reread")},
     "plan-revise": ({"evidence": "p", "declines": []},),
     **{review: ({}, {"findings": []}, UNNAMED) for review in ("plan-review", "plan-rereview")},
     "issue": ({"text": "t", "body": "x\n\n## Acceptance criteria\n\n- [ ] a\n", "marked": False,
@@ -1408,20 +1409,25 @@ class ShippedProcedureTest(unittest.TestCase):
 
     def test_a_plan_review_is_graded_on_its_findings_and_the_plan_is_posted_by_reference(self):
         deliver = load(PROCEDURES, "deliver")
-        for review, graded, clear, blocked in (
-                ("plan-review", "plan-graded", "plan-note", "plan-revise"),
-                ("plan-rereview", "plan-regraded", "plan-revised-note", "plan-refused")):
+        for review, graded, clear, blocked, read in (
+                ("plan-review", "plan-graded", "plan-note", "plan-revise", "plan-read"),
+                ("plan-rereview", "plan-regraded", "plan-revised-note", "plan-refused", "plan-reread")):
             with self.subTest(review=review):
                 self.assertEqual(step(deliver, review)["on"]["pass"], graded)
                 self.assertEqual(step(deliver, review)["on"]["findings"], graded)
-                self.assertEqual(step(deliver, graded)["grader"], "direct-settled")
+                self.assertEqual(step(deliver, graded)["grader"], "plan-settled")
                 self.assertEqual(step(deliver, graded)["on"],
                                  {"clean": clear, "findings": blocked, "unusable": blocked})
+                # one snapshot: the review reads the text the read step took, the note posts that digest
+                self.assertEqual(step(deliver, read)["subcommand"], "plan-read")
+                self.assertEqual(step(deliver, read)["on"]["read"], review)
+                self.assertIn(f"{read}.text", step(deliver, review)["in"])
+                self.assertEqual(step(deliver, clear)["in"],
+                                 ["run.repo", "run.issue", "plan-preflight.worktree_path", "run.holder",
+                                  f"{read}.digest"])
         for note in ("plan-note", "plan-revised-note"):
             with self.subTest(note=note):
                 self.assertEqual(step(deliver, note)["subcommand"], "plan-note")
-                self.assertEqual(step(deliver, note)["in"],
-                                 ["run.repo", "run.issue", "plan-preflight.worktree_path"])
 
     def test_the_worktree_mismatch_is_read_before_the_claim(self):
         coverage = shipped_coverage("setup")

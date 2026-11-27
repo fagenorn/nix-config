@@ -7,4 +7,4 @@ The issue, with its comments:
 {{plan-preflight.issue_text}}
 
 The plan:
-{{plan-revise.evidence}}
+{{plan-reread.text}}

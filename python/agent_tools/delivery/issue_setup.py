@@ -30,13 +30,22 @@ change: `absent`, `adopted`, `dirty` or `mismatch`. A clean detached HEAD at the
 `note --repo <owner/name> --issue <n> --evidence <text>` posts `<text>` as one issue
 comment: `{verdict: "posted", comment_id}`.
 
-`plan-note --repo <owner/name> --issue <n> --worktree-path <p>` posts the plan the planner wrote under
-`<p>/.superpowers/plans/issue-<n>/` (`plan.md`, then each `task-<k>.md` in order of k under `## task-<k>.md`) as one
-comment whose first line is `<!-- engine-plan:<digest> -->`, the digest being the first 16 hex digits of the
-SHA-256 of the text: `{verdict: "posted", comment_id}`. A comment of the issue that already starts with that
-line answers it and nothing is posted, so a retry after an interrupted post adds no second comment. The plan
-travels by reference (the path), never as an argument, so no word in it reaches the lifecycle guard. A missing
-`plan.md` is `error` `plan_missing`.
+`plan-read --issue <n> --worktree-path <p>` prints `{verdict: "read", text, digest}`: the plan the planner wrote under
+`<p>/.superpowers/plans/issue-<n>/` (`plan.md`, then each `task-<k>.md` in order of k under `## task-<k>.md`) and the
+first 16 hex digits of the SHA-256 of that text. Only regular files whose directories below `<p>` are no symbolic link
+are read (a link on the way is `error` `plan_unsafe`); a missing `plan.md` is `error` `plan_missing`. The review reads
+this text, so the plan that is reviewed is the one `plan-note` posts.
+
+`plan-note --repo <owner/name> --issue <n> --worktree-path <p> --holder <h> --digest <d>` reads the plan again and
+refuses with `error` `plan_changed` when its digest is not `<d>` (the files changed after the review). Else it posts
+the text as one comment whose first line is `<!-- engine-plan:<digest> run:<h> -->`, `<h>` the holder of the run
+that approved it: `{verdict: "posted", comment_id}`. The latest comment of the issue that carries `<h>` answers a
+retry only when its first line is that very line, so a retry after an interrupted post adds no second comment and an
+older plan comment of the run never stands for the current one. The plan travels by reference (the path), never as
+an argument, so no word in it reaches the lifecycle guard.
+
+`worktree` also makes git ignore `.superpowers/` in the repository (its `info/exclude`) when no rule does, so the
+planner's untracked files never keep the worktree from being removed after the merge.
 
 `read --repo-root <path> --repo <owner/name> --issue <n>` prints
 `{verdict: "read", text, body, marked, lane_paths}`: `text` is `issue_text(issue, comments)`
@@ -60,6 +69,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 from collections.abc import Mapping, Sequence
@@ -76,6 +86,8 @@ PARKED_LABELS = ("needs-verification", "parked")
 PLAN_DIRECTORY = ".superpowers/plans"
 # The first line of a plan comment, with the digest of the plan text it holds: the implementer's brief names it.
 PLAN_MARKER = "<!-- engine-plan:"
+# Between the digest and the closing of the first line, the run that approved the plan: its holder.
+PLAN_RUN = " run:"
 PR_FIELDS = "number,state,headRefName,closingIssuesReferences"
 # The variables that select another repository than the one `-C` names (a copy of the engine's list).
 REPOSITORY_ENV = ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
@@ -250,31 +262,70 @@ def note(args: argparse.Namespace) -> dict:
     return _post(args.repo, args.issue, args.evidence)
 
 
-def plan_text(worktree_path: str, issue: int) -> str:
-    """`plan.md`, then each `task-<n>.md` in order of n under `## task-<n>.md`, from the planner's directory."""
-    plans = Path(worktree_path, PLAN_DIRECTORY, f"issue-{issue}")
+def _plain_file(path: Path) -> str:
+    """The text of `path`, a regular file that no symbolic link leads to (the last component included)."""
     try:
-        parts = [(plans / "plan.md").read_text(encoding="utf-8")]
-        tasks = sorted((int(m[1]), path) for path in plans.glob("task-*.md")
-                       if (m := re.fullmatch(r"task-(\d+)\.md", path.name)))
-        for number, path in tasks:
-            parts += [f"## task-{number}.md", path.read_text(encoding="utf-8")]
+        descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0))
+    except OSError as error:
+        raise Failure("plan_unsafe" if path.is_symlink() else "plan_missing",
+                      f"the plan file {path} cannot be opened: {error}") from None
+    with os.fdopen(descriptor, "rb") as handle:
+        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+            raise Failure("plan_unsafe", f"the plan file {path} is not a regular file")
+        try:
+            return handle.read().decode("utf-8")
+        except (OSError, ValueError) as error:
+            raise Failure("plan_missing", f"the plan file {path} cannot be read: {error}") from None
+
+
+def plan_text(worktree_path: str, issue: int) -> str:
+    """`plan.md`, then each `task-<n>.md` in order of n under `## task-<n>.md`, from the planner's directory.
+
+    Only regular files whose every directory below the worktree is a real directory are read: a symbolic link
+    on the way (a parent or the file) is `plan_unsafe`, so nothing outside the plan directory is published.
+    """
+    plans = Path(worktree_path)
+    for part in (*PLAN_DIRECTORY.split("/"), f"issue-{issue}"):
+        plans = plans / part
+        if plans.is_symlink():
+            raise Failure("plan_unsafe", f"{plans} is a symbolic link")
+    try:
+        names = os.listdir(plans)
     except OSError as error:
         raise Failure("plan_missing", f"the plan under {plans} cannot be read: {error}") from None
+    parts = [_plain_file(plans / "plan.md")]
+    for number, name in sorted((int(m[1]), name) for name in names if (m := re.fullmatch(r"task-(\d+)\.md", name))):
+        parts += [f"## task-{number}.md", _plain_file(plans / name)]
     return "\n\n".join(parts)
 
 
-def plan_note(args: argparse.Namespace) -> dict:
-    """Post the plan the planner wrote to the worktree once: an earlier comment of the same plan answers it."""
+def plan_digest(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
+def plan_read(args: argparse.Namespace) -> dict:
+    """The plan as the files hold it now with its digest: the one text the review reads and `plan-note` posts."""
     text = plan_text(args.worktree_path, args.issue)
-    marker = f"{PLAN_MARKER}{hashlib.sha256(text.encode('utf-8')).hexdigest()[:16]} -->"
+    return {"verdict": "read", "text": text, "digest": plan_digest(text)}
+
+
+def plan_note(args: argparse.Namespace) -> dict:
+    """Post the plan the review read, once for this run: the files must still hold the text of `--digest`."""
+    text = plan_text(args.worktree_path, args.issue)
+    digest = plan_digest(text)
+    if digest != args.digest:
+        raise Failure("plan_changed", f"the plan files hold {digest}, the plan that was reviewed is {args.digest}")
+    marker = f"{PLAN_MARKER}{digest}{PLAN_RUN}{args.holder} -->"
     try:
         comments = _comments(args.repo, args.issue)
     except forge_api.ForgeError as error:
         raise _forge_failure(error) from None
-    for comment in comments:
-        if str(comment.get("body") or "").split("\n", 1)[0].strip() == marker and "id" in comment:
-            return {"verdict": "posted", "comment_id": comment["id"]}
+    # this run's latest plan comment answers a retry only when it is the same plan; an older one never does
+    mine = [c for c in comments if "id" in c
+            and (first := str(c.get("body") or "").split("\n", 1)[0].strip()).startswith(PLAN_MARKER)
+            and first.endswith(f"{PLAN_RUN}{args.holder} -->")]
+    if mine and str(mine[-1].get("body") or "").split("\n", 1)[0].strip() == marker:
+        return {"verdict": "posted", "comment_id": mine[-1]["id"]}
     return _post(args.repo, args.issue, f"{marker}\n\n{text}")
 
 
@@ -364,7 +415,32 @@ def worktree_check(args: argparse.Namespace) -> dict:
     return _report(args, verdict, detail, _integration(args))
 
 
+def _ignore_plans(path: str) -> None:
+    """Make git ignore the planner's directory in the worktree at `path` when no rule of the repository does.
+
+    A planner session leaves its files there untracked, and `git worktree remove` refuses such a worktree after
+    the merge. The rule goes into the repository's `info/exclude` (never a tracked file) once.
+    """
+    probe = f"{PLAN_DIRECTORY}/issue-0/plan.md"
+    if _git(path, "check-ignore", "--quiet", probe, check=False).returncode == 0:
+        return
+    exclude = Path(_git(path, "rev-parse", "--path-format=absolute", "--git-path", "info/exclude").stdout.strip())
+    try:
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        with exclude.open("a", encoding="utf-8") as handle:
+            handle.write(f"{PLAN_DIRECTORY.split('/')[0]}/\n")
+    except OSError as error:
+        raise Failure("git_failed", f"cannot write {exclude}: {error}") from None
+
+
 def worktree(args: argparse.Namespace) -> dict:
+    out = _worktree(args)
+    if out["verdict"] in ("made", "adopted"):
+        _ignore_plans(args.worktree_path)
+    return out
+
+
+def _worktree(args: argparse.Namespace) -> dict:
     integration = _integration(args)
     try:
         issue_branch.fetch_origin(args.repo_root)
@@ -412,10 +488,15 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_argument("--repo", required=True)
     sub.add_argument("--issue", required=True, type=number)
     sub.add_argument("--evidence", required=True)
+    sub = commands.add_parser("plan-read")
+    sub.add_argument("--issue", required=True, type=number)
+    sub.add_argument("--worktree-path", required=True)
     sub = commands.add_parser("plan-note")
     sub.add_argument("--repo", required=True)
     sub.add_argument("--issue", required=True, type=number)
     sub.add_argument("--worktree-path", required=True)
+    sub.add_argument("--holder", required=True)
+    sub.add_argument("--digest", required=True)
     sub = commands.add_parser("read")
     sub.add_argument("--repo-root", required=True)
     sub.add_argument("--repo", required=True)
@@ -428,7 +509,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 COMMANDS = {"preflight": preflight, "worktree": worktree, "worktree-check": worktree_check,
-            "note": note, "plan-note": plan_note, "read": read, "lane": lane}
+            "note": note, "plan-read": plan_read, "plan-note": plan_note, "read": read, "lane": lane}
 
 
 def main(argv: list[str] | None = None) -> int:

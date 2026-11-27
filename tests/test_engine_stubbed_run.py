@@ -237,9 +237,11 @@ class PlannedRouteTest(Scenario):
     STANDARD = ("Add a greet() function to the fixture module, next to `secrets/x.yaml`.\n\n"
                 "## Acceptance criteria\n\n- [ ] [code] greet() returns the greeting\n")
 
-    def stubbed(self, **members):
-        # the planner's files sit untracked in the worktree, as the real repository's .gitignore leaves them
-        return super().stubbed(extra_files={".gitignore": ".superpowers/\n"}, **members)
+    # no repository rule ignores `.superpowers/` here: the planner's files stay untracked unless the engine's worktree
+    # step makes git ignore them, and the close-out removes the worktree without force after the merge
+
+    def holder(self, run: StubbedRun) -> str:
+        return json.loads((run.runs()[0] / "run.json").read_text("utf-8"))["inputs"]["holder"]
 
     def test_a_standard_issue_walks_plan_review_direct_verify_landing_to_done_with_the_plan_as_the_brief(self):
         run = self.stubbed(body=self.STANDARD, replies=PLANNED_REPLIES)
@@ -248,14 +250,17 @@ class PlannedRouteTest(Scenario):
 
         self.assertEqual(run.transitions(run.runs()[0]),
                          [("start", "done"), ("issue", "read"), ("lane", "standard"), ("plan-preflight", "clear"),
-                          ("plan", "planned"), ("plan-review", "pass"), ("plan-graded", "clean"),
-                          ("plan-note", "posted"), ("direct-lane", "done"), ("verification", "done"),
-                          ("landing", "done"), ("closing", "done")])
+                          ("plan", "planned"), ("plan-read", "read"), ("plan-review", "pass"),
+                          ("plan-graded", "clean"), ("plan-note", "posted"), ("direct-lane", "done"),
+                          ("verification", "done"), ("landing", "done"), ("closing", "done")])
         self.assertEqual(self.keys(run), ["applies", "plan", "plan-review", "implement", "lite-review"])
         self.assertIn(str(run.worktree_path), self.launch(run, "plan")["prompt"])
         self.assertIn(PLAN_TEXT, self.launch(run, "plan-review")["prompt"])
         self.assertIn(PLAN_TEXT, self.launch(run, "implement")["prompt"])
         self.assertIn(issue_setup.PLAN_MARKER, self.launch(run, "implement")["prompt"])
+        # the posted plan names this run, and the implementer is told to take only that run's plan
+        self.assertIn(f"{issue_setup.PLAN_RUN}{self.holder(run)} -->", self.launch(run, "implement")["prompt"])
+        self.assertFalse(run.worktree_path.exists())
         pulls = run.pulls()
         self.assertEqual([p["state"] for p in pulls], ["MERGED"])
         self.assertEqual(run.origin_tip("main"), pulls[0]["mergeCommit"]["oid"])
@@ -275,10 +280,11 @@ class PlannedRouteTest(Scenario):
         brief = self.launch(run, "implement")["prompt"]
         self.assertIn(REVISED_PLAN_TEXT, brief)
         self.assertNotIn(PLAN_TEXT, brief)
-        self.assertEqual(run.transitions(run.runs()[0])[3:11],
-                         [("plan-preflight", "clear"), ("plan", "planned"), ("plan-review", "findings"),
-                          ("plan-graded", "findings"), ("plan-revise", "planned"), ("plan-rereview", "pass"),
-                          ("plan-regraded", "clean"), ("plan-revised-note", "posted")])
+        self.assertEqual(run.transitions(run.runs()[0])[3:13],
+                         [("plan-preflight", "clear"), ("plan", "planned"), ("plan-read", "read"),
+                          ("plan-review", "findings"), ("plan-graded", "findings"), ("plan-revise", "planned"),
+                          ("plan-reread", "read"), ("plan-rereview", "pass"), ("plan-regraded", "clean"),
+                          ("plan-revised-note", "posted")])
 
     def test_a_pass_verdict_carrying_a_blocking_finding_is_revised_not_posted(self):
         run = self.stubbed(body=self.STANDARD, replies={**REVISED_REPLIES, "plan-review": PLAN_PASS_BLOCKED})
@@ -304,6 +310,46 @@ class PlannedRouteTest(Scenario):
         self.finish(run, "done")
 
         self.assertIn(NOHUP_PLAN_TEXT, self.launch(run, "implement")["prompt"])
+
+    def test_the_reviewer_and_the_implementer_read_the_files_not_the_text_the_planner_returned(self):
+        entry = {"reply": dict(PLANNED, evidence="A DIFFERENT RETURNED TEXT"), "leave": plan_file(PLAN_TEXT)}
+        run = self.stubbed(body=self.STANDARD, replies={**PLANNED_REPLIES, "plan": entry})
+
+        self.finish(run, "done")
+
+        self.assertIn(PLAN_TEXT, self.launch(run, "plan-review")["prompt"])
+        self.assertNotIn("A DIFFERENT RETURNED TEXT", self.launch(run, "plan-review")["prompt"])
+        self.assertIn(PLAN_TEXT, self.launch(run, "implement")["prompt"])
+
+    def test_a_plan_comment_another_run_left_is_no_plan_of_this_run(self):
+        other = {"id": 7, "body": f"{issue_setup.PLAN_MARKER}0123456789abcdef{issue_setup.PLAN_RUN}host/41-older -->"
+                                  "\n\nAN OLDER RUN'S PLAN", "user": {"login": "someone"},
+                 "created_at": "2026-11-01T00:00:00Z"}
+        run = self.stubbed(body=self.STANDARD, replies=PLANNED_REPLIES, comments=[other])
+
+        self.finish(run, "done")
+
+        brief = self.launch(run, "implement")["prompt"]
+        self.assertIn(f"{issue_setup.PLAN_RUN}{self.holder(run)} -->", brief)
+        self.assertNotIn(f"ends with `{issue_setup.PLAN_RUN}host/41-older -->`", brief)
+        stored = [c["body"] for c in run.forge.stored() if issue_setup.PLAN_MARKER in c["body"]]
+        self.assertEqual(len(stored), 2)
+        self.assertTrue(stored[-1].split("\n", 1)[0].endswith(f"{issue_setup.PLAN_RUN}{self.holder(run)} -->"))
+
+    def test_a_review_naming_no_finding_is_revised_and_a_re_review_naming_none_is_refused(self):
+        nothing = {"verdict": "findings", "findings": []}
+        first = self.stubbed(body=self.STANDARD, replies={**REVISED_REPLIES, "plan-review": nothing})
+
+        self.finish(first, "done")
+
+        self.assertIn(("plan-graded", "unusable"), first.transitions(first.runs()[0]))
+        self.assertEqual(self.keys(first)[:5], ["applies", "plan", "plan-review", "plan-revise", "plan-rereview"])
+        second = self.stubbed(body=self.STANDARD, replies={**REVISED_REPLIES, "plan-rereview": nothing})
+
+        self.finish(second, "plan-refused", "owner-decision")
+
+        self.assertEqual(second.pulls(), [])
+        self.assertEqual(self.branch_commits(second), [])
 
     def test_a_plan_refused_after_its_one_revise_ends_at_the_named_plan_stop_and_builds_nothing(self):
         run = self.stubbed(body=self.STANDARD, replies=REFUSED_REPLIES)

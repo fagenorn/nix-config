@@ -13,6 +13,8 @@ may be `None` (a group member that sent no reply reads as `None`, D6).
 - `direct-fixed`: a fix reply -> done or not-done (keys on the suffixes).
 - `direct-settled`: a re-review reply -> unusable, findings or clean (keys on
   the suffixes).
+- `plan-settled`: a plan review's reply, as `direct-settled` grades it, except that a `findings` verdict with no
+  finding at all is unusable.
 - `verify-fixed`: a verify fix reply -> unrelated (a test and its evidence), not-done or done.
 - `verify-narrowing`: the fix review (read by the suffixes `.findings`, `.whitespace_insignificant` and
   `.whitespace_evidence`, so a second ask of the review is graded the same), the round and the fix's range -> unusable (a finding that is not minor
@@ -142,6 +144,13 @@ def _direct_settled(results: Mapping[str, object]) -> str:
     return "findings" if _blocking(findings) else "clean"
 
 
+def _plan_settled(results: Mapping[str, object]) -> str:
+    """`direct-settled`, except that a `findings` verdict naming no finding at all is `unusable`, never `clean`."""
+    if _suffixed(results, ".verdict") == "findings" and _suffixed(results, ".findings") == []:
+        return "unusable"
+    return _direct_settled(results)
+
+
 def _verify_fixed(results: Mapping[str, object]) -> str:
     unrelated = results.get("fix.unrelated")
     if isinstance(unrelated, Mapping) and not _blank(unrelated.get("test")) and not _blank(unrelated.get("evidence")):
@@ -195,6 +204,7 @@ GRADERS: Mapping[str, Grader] = {
         ("no-review", "unusable", "codex-unavailable", "findings", "clean"), _direct_full_tally),
     "direct-fixed": Grader(("done", "not-done"), _direct_fixed),
     "direct-settled": Grader(("unusable", "findings", "clean"), _direct_settled),
+    "plan-settled": Grader(("unusable", "findings", "clean"), _plan_settled),
     "verify-fixed": Grader(("unrelated", "not-done", "done"), _verify_fixed),
     "verify-narrowing": Grader(("unusable", "findings", "rerun-failed-only", "rerun-all"), _verify_narrowing),
     "lane-rule": Grader(("direct", "standard"), _lane_rule),
