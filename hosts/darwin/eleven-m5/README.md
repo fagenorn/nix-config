@@ -24,6 +24,13 @@ through a kill of their own. While a restart is deferred, an admin-UI save can
 overwrite the declared change in the files; the next activation writes it again.
 Applying `omlx-configure` alone does not restart active work.
 
+`omlx-restart` signals the processes of the user the server runs as, so it works
+under `sudo` too. A run whose kill ended no server process prints `oMLX: nothing was
+restarted`, keeps the marker and exits non-zero (zero when `/health` found the server
+down). After a formula upgrade the restart must not stay pending for long: Homebrew
+deletes the old Cellar directory, so the old process runs deleted code and its
+dashboard can already fail with TemplateNotFound.
+
 The JarBird model `GLM-5.3-Flash-Abliterated-MLX-4bit`, installed by oMLX's admin
 downloader under `models/grant-ai/`, is pinned so it loads at start and is never
 evicted, and the memory guard is `custom` at a 192 GB ceiling, because the pinned

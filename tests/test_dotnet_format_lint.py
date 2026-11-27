@@ -9,9 +9,11 @@ outcome maps to its exit.
 
 import contextlib
 import errno
+import fcntl
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -20,7 +22,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.delivery.dotnet_format_lint import format_argv, main
+from agent_tools.delivery.dotnet_format_lint import cache_key, format_argv, main
 
 TIER = "integration"
 
@@ -43,21 +45,29 @@ SLN_FOLDER = ('Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "src", "src",
               ' "{22222222-2222-2222-2222-222222222222}"\nEndProject\n')
 
 
-def stub_text(log: Path, code: int, lines: list[str]) -> str:
+def stub_text(log: Path, code: int, lines: list[str], link: bool = False) -> str:
+    linking = (
+        "if '--out-link' in sys.argv:\n"
+        "    target = sys.argv[sys.argv.index('--out-link') + 1]\n"
+        "    if os.path.islink(target):\n"
+        "        os.unlink(target)\n"
+        f"    os.symlink({lines[0] if lines else ''!r}, target)\n") if link else ""
     return (
         f"#!{sys.executable} -I\n"
         "import json, os, sys\n"
         f"with open({str(log)!r}, 'a') as f:\n"
         "    f.write(json.dumps({'argv': sys.argv, 'env': dict(os.environ),"
         " 'cwd': os.getcwd()}) + '\\n')\n"
+        f"{linking}"
         f"for line in {lines!r}:\n"
         "    print(line)\n"
         f"sys.exit({code})\n")
 
 
-def write_stub(path: Path, log: Path, code: int = 0, lines: list[str] | None = None) -> Path:
+def write_stub(path: Path, log: Path, code: int = 0, lines: list[str] | None = None,
+               link: bool = False) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(stub_text(log, code, lines or []), "utf-8")
+    path.write_text(stub_text(log, code, lines or [], link), "utf-8")
     path.chmod(0o755)
     return path
 
@@ -103,15 +113,25 @@ class LintCase(unittest.TestCase):
             write_stub(out / "bin" / "dotnet", self.dotnet_log, code)
         return out
 
-    def nix(self, code: int = 0, lines: list[str] | None = None) -> None:
-        write_stub(self.stubs / "nix", self.nix_log, code, lines)
+    def nix(self, code: int = 0, lines: list[str] | None = None, link: bool = False) -> None:
+        write_stub(self.stubs / "nix", self.nix_log, code, lines, link)
 
-    def run_lint(self, root: str | Path | None = None, temp: bool = True):
+    @property
+    def cache(self) -> Path:
+        return self.home / ".cache" / "agent-platform" / "dotnet-tools"
+
+    def key_inputs(self) -> None:
+        self.file("flake.nix", "{ }\n")
+        self.file("flake.lock", "{}\n")
+        self.file("lib/agent-tools.nix", "{ }\n")
+
+    def run_lint(self, root: str | Path | None = None, temp: bool = True,
+                 home: str | None = None):
         for log in (self.nix_log, self.dotnet_log):
             log.unlink(missing_ok=True)
         env = {
             "PATH": f"{self.stubs}{os.pathsep}{os.environ['PATH']}",
-            "HOME": str(self.home),
+            "HOME": str(self.home) if home is None else home,
             "PYTHONPATH": str(REPO_ROOT / "python"),
             "DOTNET_FORMAT_LINT_LEAK": "1",
         }
@@ -123,6 +143,7 @@ class LintCase(unittest.TestCase):
             env=env, capture_output=True, text=True, timeout=60)
 
     def planted(self) -> Path:
+        self.key_inputs()
         self.file("dotnet/A/A.cs")
         self.file("dotnet/A/A.csproj")
         return self.file("dotnet/One.slnx", SLNX)
@@ -252,6 +273,7 @@ class ProjectsTest(LintCase):
             self.file("dotnet/A/Deep/B.cs")
 
         def sln():
+            self.key_inputs()
             self.file("dotnet/A/A.cs")
             self.file("dotnet/A/A.csproj")
             self.file("dotnet/One.sln", SLN)
@@ -322,9 +344,14 @@ class RunTest(LintCase):
                 self.assertEqual(Path(nix["argv"][0]).resolve(),
                                  (self.stubs / "nix").resolve())
                 self.assertEqual(Path(nix["cwd"]).resolve(), self.root)
-                self.assertEqual(nix["argv"][1:], [
-                    "--extra-experimental-features", "nix-command flakes", "build",
-                    "--no-link", "--print-out-paths", f"{self.root}#agent-platform.dotnet-tools"])
+                self.assertEqual(nix["argv"][1:4], [
+                    "--extra-experimental-features", "nix-command flakes", "build"])
+                self.assertEqual(nix["argv"][4], "--out-link")
+                self.assertEqual(nix["argv"][6:], [
+                    "--print-out-paths", f"{self.root}#agent-platform.dotnet-tools"])
+                self.assertEqual(len(nix["argv"]), 8)
+                self.assertEqual(Path(nix["argv"][5]).parent, self.cache)
+                self.assertRegex(Path(nix["argv"][5]).name, "^[0-9a-f]{64}$")
                 self.assertEqual(format_argv(slnx),
                                  ["dotnet", "format", str(slnx), "--verify-no-changes"])
                 (dotnet,) = read_log(self.dotnet_log)
@@ -351,6 +378,284 @@ class RunTest(LintCase):
                 result = self.run_lint()
                 self.assertEqual(result.returncode, expected, result.stderr)
                 self.assertEqual(result.stderr.splitlines(), [line])
+
+
+class CacheTest(LintCase):
+    def test_a_second_run_with_unchanged_key_inputs_starts_no_nix(self):
+        self.planted()
+        out = self.tools()
+        self.nix(0, [str(out)], link=True)
+        first = self.run_lint()
+        second = self.run_lint()
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertEqual(second.stdout.splitlines(), ["dotnet-format-lint: passed"])
+        self.assertEqual(read_log(self.nix_log), [])
+        (dotnet,) = read_log(self.dotnet_log)
+        self.assertEqual(Path(dotnet["argv"][0]).resolve(), (out / "bin" / "dotnet").resolve())
+
+    def test_a_changed_key_input_builds_again(self):
+        for name in ("flake.nix", "flake.lock", "lib/agent-tools.nix"):
+            with self.subTest(name):
+                shutil.rmtree(self.home / ".cache", ignore_errors=True)
+                self.planted()
+                self.nix(0, [str(self.tools())], link=True)
+                self.assertEqual(self.run_lint().returncode, 0)
+                with (self.root / name).open("a", encoding="utf-8") as handle:
+                    handle.write("# changed\n")
+                second = self.run_lint()
+                self.assertEqual(second.returncode, 0, second.stderr)
+                self.assertEqual(len(read_log(self.nix_log)), 1)
+                third = self.run_lint()
+                self.assertEqual(third.returncode, 0, third.stderr)
+                self.assertEqual(read_log(self.nix_log), [])
+
+    def test_a_cached_link_without_dotnet_builds_again(self):
+        empty = self.base / "empty-out"
+        (empty / "bin").mkdir(parents=True)
+        for name, target in {"no dotnet": empty, "dangling": self.base / "gone"}.items():
+            with self.subTest(name):
+                shutil.rmtree(self.home / ".cache", ignore_errors=True)
+                self.planted()
+                out = self.tools()
+                self.nix(0, [str(out)], link=True)
+                self.assertEqual(self.run_lint().returncode, 0)
+                (link,) = [p for p in self.cache.iterdir() if p.is_symlink()]
+                os.unlink(link)
+                os.symlink(target, link)
+                result = self.run_lint()
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.splitlines(), ["dotnet-format-lint: passed"])
+                self.assertEqual(len(read_log(self.nix_log)), 1)
+                (dotnet,) = read_log(self.dotnet_log)
+                self.assertEqual(Path(dotnet["argv"][0]).resolve(),
+                                 (out / "bin" / "dotnet").resolve())
+
+    def test_a_cached_target_with_a_colon_is_not_searched_as_a_path(self):
+        self.planted()
+        out = self.tools()
+        self.nix(0, [str(out)], link=True)
+        self.assertEqual(self.run_lint().returncode, 0)
+        (link,) = [p for p in self.cache.iterdir() if p.is_symlink()]
+        os.unlink(link)
+        os.symlink(f"{self.base / 'gone'}:{out}", link)
+        result = self.run_lint()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(read_log(self.nix_log)), 1)
+        self.assertEqual(os.readlink(link), str(out))
+
+    def test_a_tools_directory_with_a_colon_is_launched_by_its_path(self):
+        self.planted()
+        out = self.base / "tools:out"
+        (out / "bin").mkdir(parents=True)
+        write_stub(out / "bin" / "dotnet", self.dotnet_log)
+        self.nix(0, [str(out)], link=True)
+        for name in ("build", "cached"):
+            with self.subTest(name):
+                result = self.run_lint()
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.splitlines(), ["dotnet-format-lint: passed"])
+                (dotnet,) = read_log(self.dotnet_log)
+                self.assertEqual(Path(dotnet["argv"][0]).resolve(),
+                                 (out / "bin" / "dotnet").resolve())
+                self.assertEqual(len(read_log(self.nix_log)), 1 if name == "build" else 0)
+
+    def test_an_unreadable_key_input_or_home_is_tools_unavailable(self):
+        rows = ["flake.nix missing", "flake.lock missing", "lib/agent-tools.nix missing",
+                "relative home", "cache not creatable"]
+        for name in rows:
+            with self.subTest(name):
+                shutil.rmtree(self.root)
+                self.root.mkdir()
+                shutil.rmtree(self.home / ".cache", ignore_errors=True)
+                (self.home / ".cache").unlink(missing_ok=True)
+                self.planted()
+                self.nix(0, [str(self.tools())], link=True)
+                home = None
+                if name.endswith(" missing"):
+                    (self.root / name.removesuffix(" missing")).unlink()
+                elif name == "relative home":
+                    home = "relative-home"
+                else:
+                    (self.home / ".cache").write_text("x\n", "utf-8")
+                result = self.run_lint(home=home)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertEqual(result.stderr.splitlines(),
+                                 ["dotnet-format-lint: tools_unavailable"])
+                self.assertEqual(read_log(self.nix_log), [])
+                self.assertEqual(read_log(self.dotnet_log), [])
+
+
+STALE_KEY = "0" * 64
+
+
+class PruneTest(LintCase):
+    def key_links(self) -> list[str]:
+        return sorted(p.name for p in self.cache.iterdir()
+                      if p.is_symlink() and re.fullmatch("[0-9a-f]{64}", p.name))
+
+    def change_key_input(self) -> None:
+        with (self.root / "flake.lock").open("a", encoding="utf-8") as handle:
+            handle.write("# changed\n")
+
+    def stale_cache(self) -> None:
+        self.planted()
+        out = self.tools()
+        self.nix(0, [str(out)], link=True)
+        self.assertEqual(self.run_lint().returncode, 0)
+        os.symlink(out, self.cache / STALE_KEY)
+        self.change_key_input()
+
+    def run_in_process(self, unlink):
+        for log in (self.nix_log, self.dotnet_log):
+            log.unlink(missing_ok=True)
+        out, err = io.StringIO(), io.StringIO()
+        with (mock.patch.dict(os.environ, {
+                  "PATH": f"{self.stubs}{os.pathsep}{os.environ['PATH']}",
+                  "HOME": str(self.home)}),
+              mock.patch("os.unlink", side_effect=unlink),
+              contextlib.redirect_stdout(out), contextlib.redirect_stderr(err)):
+            code = main(["--root", str(self.root)])
+        return code, out.getvalue(), err.getvalue()
+
+    def failing_once(self, failure: OSError, after_removing: bool = False):
+        """An `os.unlink` whose first call on a key-named link fails and every other call works."""
+        real = os.unlink
+        failed = []
+
+        def unlink(path, *args, **kwargs):
+            if not failed and re.fullmatch("[0-9a-f]{64}", Path(path).name):
+                failed.append(path)
+                if after_removing:
+                    real(path, *args, **kwargs)
+                raise failure
+            return real(path, *args, **kwargs)
+
+        return unlink
+
+    def test_a_build_keeps_only_the_current_keys_link(self):
+        self.planted()
+        out = self.tools()
+        self.nix(0, [str(out)], link=True)
+        self.assertEqual(self.run_lint().returncode, 0)
+        (first_key,) = self.key_links()
+        (self.cache / "keep.txt").write_text("x\n", "utf-8")
+        os.symlink(out, self.cache / STALE_KEY)
+        self.change_key_input()
+        result = self.run_lint()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(read_log(self.nix_log)), 1)
+        (current,) = self.key_links()
+        self.assertNotIn(current, (first_key, STALE_KEY))
+        self.assertTrue((self.cache / "keep.txt").is_file())
+
+    def test_a_build_keeps_links_whose_names_are_not_keys(self):
+        self.planted()
+        out = self.tools()
+        self.nix(0, [str(out)], link=True)
+        self.assertEqual(self.run_lint().returncode, 0)
+        names = (f"{'1' * 64}.tmp-1-2", "other")
+        for name in names:
+            os.symlink(out, self.cache / name)
+        self.change_key_input()
+        result = self.run_lint()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(read_log(self.nix_log)), 1)
+        for name in names:
+            self.assertTrue((self.cache / name).is_symlink(), name)
+
+    def test_a_cache_hit_removes_nothing(self):
+        self.planted()
+        out = self.tools()
+        self.nix(0, [str(out)], link=True)
+        self.assertEqual(self.run_lint().returncode, 0)
+        os.symlink(out, self.cache / STALE_KEY)
+        result = self.run_lint()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(read_log(self.nix_log), [])
+        self.assertTrue((self.cache / STALE_KEY).is_symlink())
+
+    def test_a_failed_prune_is_tools_unavailable(self):
+        self.stale_cache()
+        denied = PermissionError(errno.EACCES, os.strerror(errno.EACCES))
+        code, out, err = self.run_in_process(denied)
+        self.assertEqual(code, 2, out)
+        self.assertEqual(err.splitlines(), ["dotnet-format-lint: tools_unavailable"])
+        self.assertEqual(out, "")
+        self.assertEqual(read_log(self.dotnet_log), [])
+
+    def test_a_failed_prune_leaves_a_state_the_next_unchanged_run_repairs(self):
+        self.stale_cache()
+        code, out, err = self.run_in_process(self.failing_once(
+            PermissionError(errno.EACCES, os.strerror(errno.EACCES))))
+        self.assertEqual(code, 2, out)
+        self.assertEqual(err.splitlines(), ["dotnet-format-lint: tools_unavailable"])
+        self.assertEqual(len(read_log(self.nix_log)), 1)
+        result = self.run_lint()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(read_log(self.nix_log)), 1)
+        (current,) = self.key_links()
+        self.assertNotEqual(current, STALE_KEY)
+
+    def test_a_link_another_run_already_removed_is_skipped_and_the_rest_are_pruned(self):
+        self.stale_cache()
+        other_stale = "1" * 64
+        os.symlink(self.base / "tools-out", self.cache / other_stale)
+        gone = FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT))
+        code, out, err = self.run_in_process(self.failing_once(gone, after_removing=True))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(out.splitlines(), ["dotnet-format-lint: passed"])
+        self.assertEqual(err, "")
+        self.assertEqual(len(read_log(self.dotnet_log)), 1)
+        (current,) = self.key_links()
+        self.assertNotIn(current, (STALE_KEY, other_stale))
+
+
+class LockTest(LintCase):
+    def hold_lock(self):
+        self.cache.mkdir(parents=True)
+        handle = open(self.cache / ".lock", "w", encoding="utf-8")
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        self.addCleanup(handle.close)
+        return handle
+
+    def start_lint(self) -> subprocess.Popen:
+        env = {"PATH": f"{self.stubs}{os.pathsep}{os.environ['PATH']}", "HOME": str(self.home),
+               "PYTHONPATH": str(REPO_ROOT / "python"), "TMPDIR": str(self.temp)}
+        process = subprocess.Popen(
+            [sys.executable, "-m", "agent_tools.delivery.dotnet_format_lint",
+             "--root", str(self.root)],
+            env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.addCleanup(process.kill)
+        return process
+
+    def test_a_build_waits_for_the_cache_lock(self):
+        self.planted()
+        self.nix(0, [str(self.tools())], link=True)
+        descriptor = self.hold_lock()
+        process = self.start_lint()
+        with self.assertRaises(subprocess.TimeoutExpired):
+            process.wait(timeout=1)
+        self.assertEqual(read_log(self.nix_log), [])
+        descriptor.close()
+        out, err = process.communicate(timeout=60)
+        self.assertEqual(process.returncode, 0, err)
+        self.assertEqual(len(read_log(self.nix_log)), 1)
+
+    def test_a_link_published_while_waiting_for_the_lock_is_used_without_a_build(self):
+        self.planted()
+        out = self.tools()
+        self.nix(0, [str(out)], link=True)
+        descriptor = self.hold_lock()
+        process = self.start_lint()
+        with self.assertRaises(subprocess.TimeoutExpired):
+            process.wait(timeout=1)
+        os.symlink(out, self.cache / cache_key(self.root))
+        descriptor.close()
+        stdout, err = process.communicate(timeout=60)
+        self.assertEqual(process.returncode, 0, err)
+        self.assertEqual(stdout.splitlines(), ["dotnet-format-lint: passed"])
+        self.assertEqual(read_log(self.nix_log), [])
 
 
 class RootTest(LintCase):
