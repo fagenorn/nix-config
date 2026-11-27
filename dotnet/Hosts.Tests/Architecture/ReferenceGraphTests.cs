@@ -168,6 +168,56 @@ public sealed class ReferenceGraphTests
     }
 
     [Fact]
+    public void ASemicolonListedReferenceIsReadItemByItem()
+    {
+        using var planted = new PlantedSolution();
+        planted.Props("true");
+        planted.Project("System");
+        planted.Project("Hosts.Tests");
+        planted.Source(
+            "Hosts/Hosts.csproj",
+            "<Project Sdk=\"Microsoft.NET.Sdk\"><ItemGroup>"
+                + "<ProjectReference Include=\"../Hosts.Tests/Hosts.Tests.csproj;../System/System.csproj\" />"
+                + "</ItemGroup></Project>");
+
+        var violations = Violations(planted);
+
+        Assert.Equal(new[] { "Hosts -> Hosts.Tests: reference outside the edge table" }, violations);
+    }
+
+    [Fact]
+    public void ASharedSettingInAChooseBranchIsAViolation()
+    {
+        using var planted = new PlantedSolution();
+        planted.Source(
+            "Directory.Build.props",
+            "<Project><Choose><When Condition=\"'$(Configuration)' == 'Release'\"><PropertyGroup /></When>"
+                + "<Otherwise>" + TransitiveTrue + "</Otherwise></Choose></Project>");
+        planted.Project("System");
+
+        var violations = Violations(planted);
+
+        Assert.Equal(new[] { "Directory.Build.props: DisableTransitiveProjectReferences is not true" }, violations);
+    }
+
+    [Fact]
+    public void AProjectUserFileIsAViolation()
+    {
+        using var planted = new PlantedSolution();
+        planted.Props("true");
+        planted.Project("System");
+        planted.Project("Hosts");
+        planted.Source(
+            "System/System.csproj.user",
+            "<Project><PropertyGroup><DisableTransitiveProjectReferences>false</DisableTransitiveProjectReferences>"
+                + "</PropertyGroup><ItemGroup><ProjectReference Include=\"../Hosts/Hosts.csproj\" /></ItemGroup></Project>");
+
+        var violations = Violations(planted);
+
+        Assert.Equal(new[] { "System/System.csproj.user: unsupported MSBuild file" }, violations);
+    }
+
+    [Fact]
     public void ASharedPropsReferenceIsAViolation()
     {
         using var planted = new PlantedSolution();

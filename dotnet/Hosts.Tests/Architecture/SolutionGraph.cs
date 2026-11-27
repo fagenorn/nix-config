@@ -20,7 +20,9 @@ public sealed record SolutionGraph(IReadOnlyList<ProjectFile> Projects, IReadOnl
         {
             var rel = SolutionTree.Relative(solutionRoot, file);
             var isProject = file.EndsWith(".csproj", StringComparison.Ordinal);
-            var isOther = file.EndsWith(".props", StringComparison.Ordinal) || file.EndsWith(".targets", StringComparison.Ordinal);
+            var isOther = file.EndsWith(".props", StringComparison.Ordinal)
+                || file.EndsWith(".targets", StringComparison.Ordinal)
+                || file.EndsWith(".user", StringComparison.Ordinal);
             if (!isProject && !isOther)
             {
                 continue;
@@ -47,7 +49,8 @@ public sealed record SolutionGraph(IReadOnlyList<ProjectFile> Projects, IReadOnl
             var references = Elements(document, "ProjectReference")
                 .Select(element => element.Attribute("Include")?.Value)
                 .OfType<string>()
-                .Select(include => Path.GetFileNameWithoutExtension(include.Replace('\\', '/')))
+                .SelectMany(include => include.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+                .Select(item => Path.GetFileNameWithoutExtension(item.Replace('\\', '/')))
                 .ToList();
 
             if (isProject)
@@ -95,7 +98,10 @@ public sealed record SolutionGraph(IReadOnlyList<ProjectFile> Projects, IReadOnl
     private static IEnumerable<XElement> Elements(XDocument document, string localName) =>
         document.Descendants().Where(element => element.Name.LocalName == localName);
 
+    private static bool IsConditional(XElement element) =>
+        element.Attribute("Condition") is not null || element.Name.LocalName is "Choose" or "When" or "Otherwise";
+
     private static bool NotTrue(XElement setting) =>
-        setting.AncestorsAndSelf().Any(element => element.Attribute("Condition") is not null)
+        setting.AncestorsAndSelf().Any(IsConditional)
             || !string.Equals(setting.Value.Trim(), "true", StringComparison.OrdinalIgnoreCase);
 }

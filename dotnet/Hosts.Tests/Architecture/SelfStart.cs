@@ -101,7 +101,13 @@ public static class SelfStart
             var before = text[..launch.Index];
             var escaped = Regex.Escape(receiver);
             var parts = new Parts([], []);
-            AddStartInfo(parts, Resolve(receiver, text, launch.Index));
+            var resolvedReceiver = Resolve(receiver, text, launch.Index);
+            AddStartInfo(parts, resolvedReceiver);
+            foreach (var initialized in Values(resolvedReceiver, @"\bStartInfo\s*=(?![=>])", ",;}"))
+            {
+                AddStartInfo(parts, Resolve(initialized, text, launch.Index));
+            }
+
             var assigned = LastAssignmentValue(text, $@"\b{escaped}\s*\.\s*StartInfo", launch.Index);
             if (assigned is not null)
             {

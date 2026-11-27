@@ -33,6 +33,10 @@ public sealed class SelfStartTests
     [InlineData(
         "var info = new ProcessStartInfo(\"dotnet\"); info.ArgumentList.Add(Assembly.GetEntryAssembly()!.Location);"
             + " Process.Start(info);")]
+    [InlineData("var info = new ProcessStartInfo(Environment.ProcessPath!); using var p = new Process { StartInfo = info }; p.Start();")]
+    [InlineData(
+        "var info = new ProcessStartInfo { FileName = Environment.ProcessPath! };"
+            + " using var p = new Process { StartInfo = info }; p.Start();")]
     public void StartingTheToolsOwnBinaryIsAViolation(string source)
     {
         Assert.Equal(new[] { OwnBinary }, ViolationsOfHostsSource(source));
@@ -77,6 +81,15 @@ public sealed class SelfStartTests
     {
         var source = "var mine = new ProcessStartInfo { FileName = Environment.ProcessPath! }; "
             + "using var q = new Process { StartInfo = { FileName = \"git\" } }; q.Start();";
+
+        Assert.Empty(ViolationsOfHostsSource(source));
+    }
+
+    [Fact]
+    public void AnInitializerStartInfoForAnotherProgramIsNoViolation()
+    {
+        var source = "var self = new ProcessStartInfo(Environment.ProcessPath!); var info = new ProcessStartInfo(\"git\"); "
+            + "using var p = new Process { StartInfo = info }; p.Start();";
 
         Assert.Empty(ViolationsOfHostsSource(source));
     }
