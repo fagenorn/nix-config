@@ -26,6 +26,9 @@ The log is `~/.local/state/host-alerts/alerts.log` (mode 0600, directory 0700), 
 recorded alert: `<ISO time> <kind> recorded only, alerts disabled: <text>` or
 `<ISO time> <kind> not sent (<reason>): <text>`.
 
+`SettingsMissing`, a `SettingsError`, is the refusal of a missing file alone; `record_note` adds a
+`<ISO time> <kind> <text>` line to the log.
+
 `send_test` posts `TEST_MESSAGE` whether or not `enabled` is true, writes no log line and
 answers whether Telegram accepted it; refused settings or a missing token or chat id answer
 False without a request.
@@ -59,10 +62,15 @@ class Settings:
 class Outcome:
     status: str
     error: str | None
+    missing: bool = False
 
 
 class SettingsError(Exception):
     pass
+
+
+class SettingsMissing(SettingsError):
+    """There is no settings file: alerts are not configured on this host, which is not a refusal."""
 
 
 def settings_path(home: Path | None = None) -> Path:
@@ -89,9 +97,10 @@ def read_settings(path: Path | None = None, *, uid: int | None = None) -> Settin
     path = path if path is not None else settings_path()
     uid = uid if uid is not None else os.geteuid()
     try:
-        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        # O_NONBLOCK: a FIFO with no writer must open (and be refused below), not block the caller.
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except FileNotFoundError:
-        raise SettingsError(f"settings file {path} is missing") from None
+        raise SettingsMissing(f"settings file {path} is missing") from None
     except OSError as error:
         raise SettingsError(f"settings file {path} is unreadable ({type(error).__name__})") from None
     try:
@@ -180,6 +189,12 @@ def _record(log: Path, line: str) -> None:
         os.close(descriptor)
 
 
+def record_note(kind: str, text: str, *, log: Path | None = None, now: datetime | None = None) -> None:
+    """Add one `<ISO time> <kind> <text>` line to the log, for a note that is not an alert."""
+    stamp = (now if now is not None else datetime.now().astimezone()).isoformat(timespec="seconds")
+    _record(log if log is not None else log_path(), f"{stamp} {kind} {text}\n")
+
+
 def deliver(
     kind: str,
     text: str,
@@ -195,7 +210,7 @@ def deliver(
     try:
         loaded = read_settings(settings)
     except SettingsError as error:
-        outcome = Outcome("failed", str(error))
+        outcome = Outcome("failed", str(error), isinstance(error, SettingsMissing))
     else:
         if not loaded.enabled:
             _record(log, f"{stamp} {kind} recorded only, alerts disabled: {text}\n")

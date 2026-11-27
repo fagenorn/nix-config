@@ -10,9 +10,10 @@ id, and optional `pinned`, a bool: a continue re-enters a pinned stop's `reenter
 stale result) and `steps` (a non-empty list), all required, and `keep_alive`, optional (a procedure with none runs no keep-alive): an
 object with `command`, a command id, optional `subcommand`, and `in`, a list of distinct `run.<input>` paths, the one
 keep-alive command and where its arguments come from. A procedure naming a `keep_alive` declares a stop `claim-lost`. A stop
-is never named `done`, `exhausted`, `out-of-bounds`, `quota-wait`, `superseded` or like a step. `exhausted` and `out-of-bounds` are reserved:
+is never named `done`, `exhausted`, `out-of-bounds`, `quota-wait`, `tool-denied`, `superseded` or like a step. `exhausted` and `out-of-bounds` are reserved:
 no stop, declared verdict or reply enum value carries either. `quota-wait` is the engine's own stop, taken when every account
-is out of usage (`engine_shell`); `superseded` is the engine's own stop for a continued run whose procedure
+is out of usage (`engine_shell`); `tool-denied` is the engine's own stop, taken when a session was denied
+a tool call (`engine_shell`); `superseded` is the engine's own stop for a continued run whose procedure
 copy is in a format the engine does not read (`engine_shell`).
 
 Step. Common members: `id` (never `run` or `done`), `stage` (one of `STAGES`),
@@ -25,8 +26,9 @@ optional `subcommand`, optional `wait` (one of `WAITS`), its arguments being its
 (an object with `command` and optional `subcommand`: the command that reads
 whether the step's effect already happened; a command step with `mutates` true
 requires one and no other step carries one); `agent`: `role`,
-`prompt` (a bare `*.md` name), `reply` (a bare `*.reply.json` name) and
-`outcome_from`; `decide`: `grader`; `group`: `members`, a non-empty list of
+`prompt` (a bare `*.md` name), `reply` (a bare `*.reply.json` name),
+`outcome_from` and optional `worktree` (an object of exactly `path` and `branch`, each one of the step's
+`in` paths, only on a step whose `role` is in `WHOLE_SHELL_ROLES`); `decide`: `grader`; `group`: `members`, a non-empty list of
 objects with exactly `step` and `pass` (distinct strings); `call`: `procedure`,
 optional `each` (one of the step's `in` paths) and `parallel` (an integer >= 1,
 only with `each`). A member a level does not define is `undefined_field`.
@@ -118,7 +120,7 @@ from agent_tools.delivery.engine_graders import GRADERS
 from agent_tools.delivery.engine_reply import schema_problem
 from agent_tools.delivery.procedure_terms import (
     CLAIM_LOST, EXHAUSTED, FORMAT, INPUT_RE, NAME_RE, NEEDS, NO_REPLY, OUT_OF_BOUNDS, PLACEHOLDER_RE, QUOTA_WAIT,
-    ROLES, STAGES, SUPERSEDED, WAITS, CommandDeclaration, DeclarationError, _inside, _strict_load, load_commands,
+    ROLES, STAGES, SUPERSEDED, TOOL_DENIED, WAITS, WHOLE_SHELL_ROLES, CommandDeclaration, DeclarationError, _inside, _strict_load, load_commands,
     readable_format)
 
 ENGINE_DIR = Path(importlib.resources.files("agent_tools.delivery"))
@@ -163,7 +165,7 @@ COMMON_REQUIRED = ("id", "stage", "kind", "holds")
 COMMON_OPTIONAL = ("in", "on", "max_visits", "mutates")
 KIND_MEMBERS = {
     "command": (("command",), ("subcommand", "check", "wait")),
-    "agent": (("role", "prompt", "reply", "outcome_from"), ()),
+    "agent": (("role", "prompt", "reply", "outcome_from"), ("worktree",)),
     "decide": (("grader",), ()),
     "group": (("members",), ()),
     "call": (("procedure",), ("each", "parallel")),
@@ -286,9 +288,10 @@ def _stops(doc: dict, ids: set[str], found: _Findings) -> None:
     for name, stop in stops.items():
         if not NAME_RE.fullmatch(name):
             found.add("invalid_field", f"stop name {name!r} must match {NAME_RE.pattern}.")
-        elif name in ("done", EXHAUSTED, OUT_OF_BOUNDS, QUOTA_WAIT, SUPERSEDED) or name in ids:
+        elif name in ("done", EXHAUSTED, OUT_OF_BOUNDS, QUOTA_WAIT, TOOL_DENIED, SUPERSEDED) or name in ids:
             found.add("invalid_field",
-                      f"stop name {name!r} is `done`, `{EXHAUSTED}`, `{OUT_OF_BOUNDS}`, `{QUOTA_WAIT}`, `{SUPERSEDED}` or a step id.")
+                      f"stop name {name!r} is `done`, `{EXHAUSTED}`, `{OUT_OF_BOUNDS}`, `{QUOTA_WAIT}`, `{TOOL_DENIED}`, "
+                      f"`{SUPERSEDED}` or a step id.")
         if not isinstance(stop, dict):
             found.add("invalid_field", f"stop {name!r} must be an object.")
             continue
@@ -333,6 +336,22 @@ def _file_name(value: object, suffix: str) -> bool:
             and value.endswith(suffix) and value != suffix)
 
 
+def _worktree(item: dict, label: str | None, found: _Findings) -> None:
+    """An agent step's `worktree`: an object of `path` and `branch`, each one of the step's `in` paths."""
+    worktree = item["worktree"]
+    if item.get("role") not in WHOLE_SHELL_ROLES:
+        found.add("invalid_field", f"worktree belongs only to a step whose role is one of "
+                  f"{', '.join(WHOLE_SHELL_ROLES)}.", label)
+    if not isinstance(worktree, dict):
+        found.add("invalid_field", "worktree must be an object.", label)
+        return
+    _members(worktree, ("path", "branch"), (), found, label, "worktree")
+    for member in ("path", "branch"):
+        if member in worktree and not (isinstance(worktree[member], str)
+                                       and worktree[member] in _listed(item)):
+            found.add("invalid_field", f"worktree {member} must be one of the step's in paths.", label)
+
+
 def _kind_members(item: dict, kind: str, label: str | None, found: _Findings) -> None:
     def invalid(detail: str) -> None:
         found.add("invalid_field", detail, label)
@@ -354,6 +373,8 @@ def _kind_members(item: dict, kind: str, label: str | None, found: _Findings) ->
             invalid("reply must be a bare *.reply.json file name.")
         if "outcome_from" in item and not _is_text(item["outcome_from"]):
             invalid("outcome_from must be a non-empty string.")
+        if "worktree" in item:
+            _worktree(item, label, found)
     elif kind == "decide":
         if "grader" in item and not _is_text(item["grader"]):
             invalid("grader must be a non-empty string.")
