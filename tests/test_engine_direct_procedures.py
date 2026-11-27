@@ -172,6 +172,14 @@ class DirectProcedureTest(unittest.TestCase):
                 texts.add(text.replace(fix, "FIX").replace(independent, "INDEPENDENT").replace(review, "REVIEW"))
             self.assertEqual(len(texts), 1, kind)
 
+    def test_every_re_review_prompt_carries_the_sentence_that_other_criteria_are_graded_never_findings(self):
+        sentence = ("A code criterion that is not met, or has no evidence, is an Important finding; "
+                    "criteria of other kinds are graded (give what you observed), never findings.")
+        self.assertIn(sentence, (PROCEDURES / "direct-review.md").read_text(encoding="utf-8"))
+        for name in ("direct-rereview-full.md", "direct-rereview-lite.md", "direct-rereview-escalated.md"):
+            with self.subTest(name=name):
+                self.assertIn(sentence, (PROCEDURES / name).read_text(encoding="utf-8"))
+
     def test_a_blocked_group_reaches_its_tally(self):
         direct = load(PROCEDURES, "direct")
         for route in ("lite", "full"):
