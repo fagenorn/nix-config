@@ -1,4 +1,3 @@
-# Context Map
 ## Areas
 | Area | Context file | Gist | governs |
 |---|---|---|---|
@@ -77,6 +76,7 @@
 | Lint-time issue | Delivery |
 | Live fault | Console |
 | Live-fault lane | Delivery |
+| Lock bump | Project contract |
 | Look approval | Delivery |
 | Look file set | Delivery |
 | Look marker | Delivery |

@@ -23,6 +23,10 @@ The read-only check `just switch` runs between the build and the activation, jud
 The per-host list of the projects the agent tooling manages. Verification passes and the guard's compiled policy both read it.
 _Avoid_: project list
 
+**Lock bump**:
+The one change that moves a project to a **Proven revision**: its platform lock entry, any migration that revision requires and the regenerated projections. The console service opens one lock bump pull request per project and revision with the forge credential of its adoption pull requests, merges it on green required checks with no owner approval, closes it when a newer proven revision arrives and files one nix-config issue for a red one; only the fixture project gets bumps so far.
+_Avoid_: platform upgrade, lock update
+
 **Migration**:
 One pure, named executor the platform manifest lists, which rewrites a checkout in place from one contract shape to the next.
 _Avoid_: upgrade script
