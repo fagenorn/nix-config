@@ -42,10 +42,7 @@ from typing import Mapping, NamedTuple, Sequence
 
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
 from agent_tools.delivery import engine_ledger
-
-REPOSITORY_ENV = ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
-                  "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE",
-                  "GIT_PREFIX", "GIT_IMPLICIT_WORK_TREE")
+from agent_tools.delivery.engine_session import REPOSITORY_ENV
 
 
 class CheckoutRefused(Exception):

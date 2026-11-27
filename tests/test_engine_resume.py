@@ -406,11 +406,11 @@ class ResumeTest(unittest.TestCase):
             self.assertTrue((run / f"sessions/draft.1.continue-{attempt}.prompt.md").exists())
         self.assertEqual(self.entered(run), [1])
 
-    def faulted_then_normal(self, first: dict) -> None:
+    def faulted_then_normal(self, first: dict, code: int = 1) -> None:
         log = install_answers(self.project, [first, self.normal()])
         procedures = one_step(self.project)
         faulted = self.project.deliver(procedures)
-        self.assertEqual(faulted.returncode, 1, faulted.stdout + faulted.stderr)
+        self.assertEqual(faulted.returncode, code, faulted.stdout + faulted.stderr)
         session = after(self.records(log)[0]["argv"], "--session-id")
         done = self.project.deliver(procedures)
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
@@ -429,11 +429,11 @@ class ResumeTest(unittest.TestCase):
         empty.write_bytes(b"")
         self.faulted_then_normal({"stdout": str(empty), "exit": 1, "account": "p1"})
 
-    def test_a_visit_that_faulted_on_a_denied_shell_command_is_entered_again_under_a_new_visit(self):
+    def test_a_visit_stopped_on_a_denied_shell_command_is_entered_again_under_a_new_visit(self):
         denial = {"tool_name": "Bash", "tool_use_id": "t", "tool_input": {"command": "rm -rf x"}}
         denied = self.project.tmp / "denied.json"
         denied.write_bytes(canned_result(permission_denials=[denial]))
-        self.faulted_then_normal({"stdout": str(denied), "exit": 0, "account": "p1"})
+        self.faulted_then_normal({"stdout": str(denied), "exit": 0, "account": "p1"}, code=3)
 
     def test_a_stale_earlier_result_still_rewinds_before_the_interrupted_session(self):
         log = install_answers(self.project, [self.hang(), self.normal()])

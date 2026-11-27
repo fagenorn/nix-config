@@ -1,4 +1,12 @@
-Fix the review findings of issue {{run.issue}} in the worktree {{preflight.worktree_path}} on branch {{preflight.branch}} (the findings are of the diff {{route-full.diff}}, read with git diff {{route-full.diff}}). Work only there: run git as git -C <worktree> and name every file by its absolute path. Never push, open a pull request, run git stash, run sed -i or run a destructive git command.
+Fix the review findings of issue {{run.issue}} in the worktree {{preflight.worktree_path}} on branch {{preflight.branch}} (the findings are of the diff {{route-full.diff}}, read with git diff {{route-full.diff}}). Work only there: run git as git -C <worktree> and name every file by its absolute path. Your session runs in that worktree with the whole shell, and each command is checked on its own, so give one command per Bash call with the worktree's path written out in full, never by way of a shell variable or a compound line (no `;`, `&&`, `||`, pipe or substitution). For example, one call each:
+
+```
+git -C {{preflight.worktree_path}} status --short
+git -C {{preflight.worktree_path}} log --oneline -3
+git -C {{preflight.worktree_path}} diff
+```
+
+Never push, open a pull request, run git stash, run sed -i or run a destructive git command.
 
 Routed files (the standards, hints and decision records routed to this change; read them and no other standards): {{route-full.routed_files}}
 

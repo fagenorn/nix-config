@@ -20,12 +20,16 @@ STAGES = ("setup", "planning", "plan review", "building", "final review",
           "verifying", "awaiting look", "landing", "closing out", "done")
 NEEDS = ("owner-decision", "owner-look", "retry", "nothing")
 ROLES = ("planner", "implementer", "reviewer", "reviewer-lite")
+WHOLE_SHELL_ROLES = ("implementer",)
 WAITS = ("usage-limit", "host-slot", "lock", "checks")
 EXHAUSTED = "exhausted"
 OUT_OF_BOUNDS = "out-of-bounds"
 NO_REPLY = "no-reply"
 CLAIM_LOST = "claim-lost"
 QUOTA_WAIT = "quota-wait"
+TOOL_DENIED = "tool-denied"
+TOOL_DENIED_NEED = "owner-decision"
+ENGINE_STOPS = (QUOTA_WAIT, TOOL_DENIED)
 SUPERSEDED = "superseded"
 
 NAME_RE = re.compile(r"^[a-z][a-z0-9-]*$")

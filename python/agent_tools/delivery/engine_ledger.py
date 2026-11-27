@@ -78,6 +78,7 @@ from agent_tools.canonical import (
 )
 from agent_tools.delivery.procedure_terms import (
     INPUT_RE, NAME_RE, NEEDS, ROLES, STAGES, WAITS, _inside)
+from agent_tools.project_contract import agent_platform
 
 RUN_ID_RE = re.compile(r"^([1-9][0-9]*)-([0-9]{8}T[0-9]{6}Z)-([a-z0-9]{4})$")
 TOKEN_RE = re.compile(r"^[a-z0-9]{4}$")
@@ -126,7 +127,7 @@ class LedgerError(Exception):
 
 
 def runs_root() -> Path:
-    return Path(os.environ["HOME"]) / ".agents" / "state" / "engine" / "runs"
+    return agent_platform.engine_runs_root()
 
 
 def _compact(value: object) -> str:
