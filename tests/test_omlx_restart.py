@@ -587,8 +587,6 @@ class RestartGateTest(unittest.TestCase):
         self.assertFalse(self.marker.exists())
 
     def test_a_caller_that_cannot_read_the_state_directory_is_refused_by_the_servers_user(self):
-        if os.getuid() == 0:
-            self.skipTest("root reads every directory")
         self.server_user = "root"
         self.extra = ["--now"]
         self.state.chmod(0)
