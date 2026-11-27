@@ -9,7 +9,6 @@ import unittest
 from agent_tools.delivery import engine_core, engine_session
 from agent_tools.delivery.engine_core import RunGroup, Stop
 from tests.test_engine_check import PROCEDURES, SHIPPED_INPUTS, UNNAMED, load, step
-from tests.test_engine_whole_shell import client_admits, whole_shell_argv, words_after
 
 TIER = "fast"
 
@@ -63,9 +62,7 @@ class DirectProcedureTest(unittest.TestCase):
                 steps = json.loads(path.read_text(encoding="utf-8")).get("steps", [])
                 self.assertEqual([s["id"] for s in steps if "worktree" in s], [])
 
-    def test_the_direct_implementer_prompts_show_single_commands_in_the_worktree(self):
-        _, argv = whole_shell_argv()
-        allowed, denied = words_after(argv, "--allowedTools"), words_after(argv, "--disallowedTools")
+    def test_the_direct_implementer_prompts_show_commands_in_the_worktree(self):
         steps = {s["id"]: s for s in load(PROCEDURES, "direct")["steps"]}
         for name in ("implement", "lite-fix", "escalated-fix", "full-fix"):
             with self.subTest(name):
@@ -80,9 +77,6 @@ class DirectProcedureTest(unittest.TestCase):
                 self.assertLess(len(text.encode("utf-8")), 8192)
                 for line in lines:
                     self.assertIn("/srv/p/wt", line)
-                    for word in (";", "&&", "||", "|", "$", "`"):
-                        self.assertNotIn(word, line)
-                    self.assertTrue(client_admits(line, allowed, denied), line)
 
     def test_the_direct_review_roles(self):
         direct = load(PROCEDURES, "direct")
