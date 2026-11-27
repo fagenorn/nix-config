@@ -92,6 +92,12 @@ def first_case_events() -> list[dict]:
 ENDED = datetime(2026, 11, 21, 17, tzinfo=timezone.utc)
 
 
+def measured(role: str | None, turns: int | None, bounds: dict | None = None) -> dict:
+    """The per-step members a history step carries beyond the first eight (`RUN` has no procedure)."""
+    return {"role": role, "turns": turns, "startup_seconds": None, "procedure": None,
+            "bounds": bounds}
+
+
 class HistoryLineTest(unittest.TestCase):
     def test_the_history_line_of_a_folded_run_holds_every_member(self):
         events = first_case_events()
@@ -103,12 +109,15 @@ class HistoryLineTest(unittest.TestCase):
             "end": "done", "need": None, "ended": "2026-11-21T17:00:00Z",
             "steps": [
                 {"step": "scope", "visit": 1, "outcome": "ok", "wall_seconds": 8.0, "waits": [],
-                 "tokens": ZERO, "spend_usd": 0, "account": None},
+                 "tokens": ZERO, "spend_usd": 0, "account": None, **measured(None, 0)},
                 {"step": "gate", "visit": 1, "outcome": "pass", "wall_seconds": None,
-                 "waits": [], "tokens": None, "spend_usd": None, "account": None},
+                 "waits": [], "tokens": None, "spend_usd": None, "account": None,
+                 **measured(None, None)},
                 {"step": "draft", "visit": 1, "outcome": "ok", "wall_seconds": 30.0,
                  "waits": [{"wait": "usage-limit", "seconds": 120.0}],
-                 "tokens": DRAFT_TOKENS, "spend_usd": 1.5, "account": "acct-a"}]})
+                 "tokens": DRAFT_TOKENS, "spend_usd": 1.5, "account": "acct-a",
+                 **measured("implementer", 3, {"wall_seconds": 3600, "turns": 300,
+                                               "spend_usd": 20.0})}]})
 
     def test_a_stopped_run_names_its_stop_and_need(self):
         events = recorded("stopped")
@@ -1080,7 +1089,8 @@ class DeliverHousekeepingTest(unittest.TestCase):
                     "issue": 1519, "end": end, "need": need, "ended": "2026-11-01T00:00:00Z"})
                 for entry in steps:
                     self.assertEqual(set(entry), {"step", "visit", "outcome", "wall_seconds",
-                                                  "waits", "tokens", "spend_usd", "account"})
+                                                  "waits", "tokens", "spend_usd", "account", "role",
+                                                  "turns", "startup_seconds", "procedure", "bounds"})
                 self.assertEqual([(s["step"], s["visit"], s["outcome"]) for s in steps],
                                  [("a", 1, "ok"), ("gate", 1, "accept"), ("draft", 1, outcome)])
                 first, gate, draft = steps
@@ -1144,12 +1154,13 @@ class DeliverHousekeepingTest(unittest.TestCase):
         self.assertIsNotNone(holders[0])
         self.assertEqual(holders[0]["pid"], os.getpid())
 
-    def test_a_fault_appends_no_history_line(self):
+    def test_a_fault_appends_a_fault_line(self):
         project = EngineProject(self)
         procedures = project.procedures([step("a", "standin-says-maybe", "done")])
         with self.assertRaises(engine_shell.Fault):
             deliver(project, 904, procedures, at=T0, tracker=FakeTracker({}))
-        self.assertEqual(history(project), [])
+        self.assertEqual([(line["end"], line["need"]) for line in history(project)],
+                         [("fault", None)])
 
     def test_a_tracker_error_during_the_sweep_deletes_nothing_and_the_delivery_runs(self):
         for name, error, expected in [

@@ -84,6 +84,8 @@ a recorded stop after its entry (`quota-wait`, `tool-denied`, `stopped-by-reques
 rewound to a new visit as before, its `run_continued` clearing the stop and closing an open usage-limit wait. A resumed visit
 appends no `run_continued`, so the continuing call closes every wait the killed engine left open with a
 `wait_ended` of its kind (a usage-limit or `host-slot` wait) before the visit launches.
+The same holds with earlier results stale when each stale step is a `read` command that answers as it did
+(`_unchanged`), and for a `call` visit a killed engine left interrupted (`engine_resume`, `_owed_at_entry`).
 
 A `group` step runs its members beside each other, one thread each: each member
 records `step_entered`, `process_started`, its stored result and
@@ -117,8 +119,9 @@ refusal is the outcome `refused` (issue 1515).
 An outcome the step's `on` does not map is a `Fault` (a fired bound is graded first). A run ends with `run_done` or `stop_reached`.
 
 Once the run exists and before its first step, `engine_housekeeping.housekeep` prunes the history and
-sweeps expired run directories; a run that ends in done or a stop then appends one history line
-(`_record_history`) before its lock is released. Neither changes the call's code or result line.
+sweeps expired run directories; a run that ends in done or a stop, or whose walk raises a `Fault`
+(`end` `fault`), then appends one history line (`engine_housekeeping.record_history`) before its lock
+is released, and so does each child run. Neither changes the call's code or result line.
 
 Single writer: under the issue's creation lock the shell takes `<run>/lock`, an exclusive `flock` held
 until its walk ends, for the root run and for each child run (released on every path). The probe for a held
@@ -191,7 +194,7 @@ from typing import Callable, Mapping
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
 from agent_tools.delivery import (
     engine_check, engine_commands, engine_core, engine_guard, engine_housekeeping, engine_ledger,
-    engine_reply, engine_session, engine_slots, engine_stop, host_admission, procedure_terms,
+    engine_reply, engine_resume, engine_session, engine_slots, engine_stop, host_admission, procedure_terms,
     rule_reader,
 )
 from agent_tools.delivery.engine_commands import CommandTable, UnknownCommand
@@ -485,7 +488,7 @@ def _supersede(run_dir: Path, clock: Callable[[], datetime]) -> None:
     step = next((e["step"] for e in reversed(ledger) if e["event"] == "step_entered"), ENTRY)
     with engine_stop.publication(run_dir):
         _record_stop(run_dir, step, procedure_terms.SUPERSEDED, "nothing", "", False)
-    _record_history(run_dir, clock)
+    engine_housekeeping.record_history(run_dir, clock)
 
 
 def deliver(issue: int, procedures_dir: Path, *, clock: Callable[[], datetime] | None = None,
@@ -595,12 +598,8 @@ def deliver(issue: int, procedures_dir: Path, *, clock: Callable[[], datetime] |
             _continue(run_dir, table, inputs)
         engine_housekeeping.housekeep(project=project, run=run_dir.name, clock=clock,
                                       tracker=tracker_factory, identity=identity)
-        code, line = _walk(run_dir, table, _Scope(run_dir, holder, slots))
-        if code in (EXIT_DONE, EXIT_STOP):
-            _record_history(run_dir, clock)
-        return code, line
-    except (engine_ledger.LedgerError, engine_core.CoreError, UnknownCommand,
-            OSError, ValueError, KeyError) as error:
+        return _walk_recorded(run_dir, table, _Scope(run_dir, holder, slots), clock)
+    except _WALK_ERRORS as error:
         raise Fault(str(error)) from error
     finally:
         _release(held)
@@ -623,7 +622,7 @@ def _computed(procedure: dict) -> frozenset[str]:
 def _continue(run_dir: Path, table: CommandTable, inputs: dict) -> None:
     """Record where the run's next walk re-enters; a stored but ungraded visit is graded first."""
     _end_leftover(run_dir)
-    procedure = _load(run_dir / "procedure" / f"{ENTRY}.json")
+    procedure = _load(run_dir / "procedure" / f"{engine_ledger.read_run(run_dir)['procedure']}.json")
     steps = {item["id"]: item for item in procedure["steps"]}
     computed = _computed(procedure)
     members = {member["step"] for name in computed for member in steps[name]["members"]}
@@ -649,87 +648,43 @@ def _continue(run_dir: Path, table: CommandTable, inputs: dict) -> None:
         return  # the owner never saw this stop: the walk reports it before anything is re-entered
     point = engine_core.reentry(procedure, inputs, events, read_head(table.root))
     if (isinstance(action, engine_core.StartSession)
-            and (action.step, action.visit) == (point.step, point.visit)
-            and _resumed(run_dir, ledger, action.step, action.visit) is not None):
-        for wait in _open_waits(ledger):  # no run_continued closes what the killed engine left open
+            and engine_resume.resumed(run_dir, ledger, action.step, action.visit) is not None
+            and ((action.step, action.visit) == (point.step, point.visit)
+                 or _unchanged(run_dir, table, procedure, inputs, ledger, point.stale))):
+        for wait in engine_resume.open_waits(ledger):  # no run_continued closes what the killed engine left open
             engine_ledger.append_event(run_dir, {"event": "wait_ended", "at": _now(), "wait": wait})
         return  # the interrupted visit resumes its own session: no rewind, no new visit
+    if (isinstance(action, engine_core.RunCall) and (action.step, action.visit) == (point.step, point.visit)
+            and engine_resume.named_children(ledger, action.step, action.visit)):
+        return  # the interrupted call walks its child runs again in place: no rewind, no new child run
     event = {"event": "run_continued", "at": _now(), "step": point.step}
     if point.visit is not None:
         event["visit"] = point.visit
     engine_ledger.append_event(run_dir, event)
 
 
-def _open_waits(ledger: list[dict]) -> list[str]:
-    """The kinds of the waits the ledger leaves open, oldest first (a `run_continued` closes all)."""
-    open_kinds: list[str] = []
-    for e in ledger:
-        if e["event"] == "wait_started":
-            open_kinds.append(e["wait"])
-        elif e["event"] == "wait_ended" and e["wait"] in open_kinds:
-            open_kinds.remove(e["wait"])
-        elif e["event"] == "run_continued":
-            open_kinds.clear()
-    return open_kinds
-
-
-@dataclass(frozen=True)
-class _Resumed:
-    """How a continued run launches the session its predecessor left interrupted in a visit."""
-    session: str
-    system: Path
-    text: str
-    attempt: int
-    resume: bool
-
-
-def _resumed(run_dir: Path, ledger: list[dict], name: str, visit: int) -> _Resumed | None:
-    """The interrupted visit's session to launch again, or None when the visit is to be entered
-    (again): it was never entered or never recorded a session, stored a result (graded or not), or
-    ended at a recorded stop after its entry, or whose last launch ended with its record stored (a
-    `Fault` writes nothing to the ledger, so the record's `attempt` is what tells a launch that ended
-    from one a killed engine cut short)."""
-    here = [e for e in ledger if e.get("step") == name and e.get("visit") == visit]
-    entered = [i for i, e in enumerate(ledger) if e["event"] == "step_entered"
-               and (e["step"], e["visit"]) == (name, visit)]
-    starting = [e for e in here if e["event"] == "session_starting"]
-    if not entered or not starting or any(e["event"] == "result_stored" for e in here):
-        return None
-    if any(e["event"] == "stop_reached" for e in ledger[entered[-1]:]):
-        return None
-    launched = [e["attempt"] for e in here if e["event"] == "session_resuming"]
-    if any(_recorded_attempt(path) == max(launched, default=1)
-           for path in (run_dir / "sessions").glob(f"{name}.{visit}.*json")):
-        return None
-    attempt = 2 + len(launched)
-    started = any(e["event"] == "process_started" for e in here)
-    text = (engine_session.CONTINUE_PROMPT if started else
-            (run_dir / "sessions" / f"{name}.{visit}.prompt.md").read_text(encoding="utf-8"))
-    return _Resumed(session=starting[-1]["session"],
-                    system=run_dir / "sessions" / f"{name}.{visit}.system.md",
-                    text=text, attempt=attempt, resume=started)
-
-
-def _recorded_attempt(path: Path) -> object:
-    """The launch attempt a stored session record names, None for a file that is no such record."""
-    try:
-        document = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    return document.get("attempt") if isinstance(document, dict) else None
-
-
-def _record_history(run_dir: Path, clock: Callable[[], datetime]) -> None:
-    """Append the run's history line; a failure is one stderr line, never the delivery's result."""
-    try:
-        state = engine_ledger.fold(engine_ledger.read_run(run_dir),
-                                   engine_ledger.replay(run_dir / "events.jsonl"),
-                                   lambda pid, started: False)
-        engine_housekeeping.append_history(engine_housekeeping.history_line(state, clock()),
-                                           engine_housekeeping.history_path())
-    except Exception as error:
-        sys.stderr.write(f"engine: the history line of run {run_dir.name} was not recorded: "
-                         f"{type(error).__name__}: {' '.join(str(error).split())}\n")
+def _unchanged(run_dir: Path, table: CommandTable, procedure: dict, inputs: dict, ledger: list[dict],
+               stale: tuple[str, ...]) -> bool:
+    """Whether every stale step is a `read` command that, run again under the guard, answers with the outcome its
+    latest visit stored (`engine_resume`)."""
+    steps = {item["id"]: item for item in procedure["steps"]}
+    for name in stale:
+        step = steps[name]
+        if step["holds"] != "read":
+            return False
+        entered = [i for i, e in enumerate(ledger) if e["event"] == "step_entered" and e["step"] == name]
+        visit = ledger[entered[-1]]["visit"]
+        recorded = next((e.get("outcome") for e in ledger if e["event"] == "result_stored"
+                         and (e["step"], e["visit"]) == (name, visit)), None)
+        pending = engine_core.replay(procedure, inputs,
+                                     core_events(run_dir, ledger[:entered[-1]], _computed(procedure))).action
+        if not isinstance(pending, engine_core.RunCommand) or pending.step != name:
+            return False
+        ran = engine_commands.run(table, pending.command, pending.subcommand, pending.args, guard=_guard(),
+                                  on_start=lambda pid: None, timeout=table.wall_seconds(pending.command))
+        if ran.timed_out or recorded is None or ran.outcome != recorded:
+            return False
+    return True
 
 
 def _lock_creation(issue: int) -> int:
@@ -814,6 +769,21 @@ def _forced(action, steps: dict[str, dict], first: bool):
     return action
 
 
+_WALK_ERRORS = (Fault, engine_ledger.LedgerError, engine_core.CoreError, UnknownCommand, OSError, ValueError, KeyError)
+
+
+def _walk_recorded(run_dir: Path, table: CommandTable, scope: _Scope, clock: Callable[[], datetime], recheck: bool = False) -> tuple[int, dict]:
+    """`_walk` the run, then append its history line: done or a stop, or the fault (any error in `_WALK_ERRORS`)."""
+    try:
+        code, line = _walk(run_dir, table, scope, recheck)
+    except _WALK_ERRORS:
+        engine_housekeeping.record_history(run_dir, clock, fault=True)
+        raise
+    if code in (EXIT_DONE, EXIT_STOP):
+        engine_housekeeping.record_history(run_dir, clock)
+    return code, line
+
+
 def _walk(run_dir: Path, table: CommandTable, scope: _Scope,
           recheck: bool = False) -> tuple[int, dict]:
     run = engine_ledger.read_run(run_dir)
@@ -858,7 +828,7 @@ def _walk(run_dir: Path, table: CommandTable, scope: _Scope,
                         return lost
                 stopped = _visit_session(
                     run_dir, table.root, steps[action.step], action, scope,
-                    resumed=_resumed(run_dir, ledger, action.step, action.visit))
+                    resumed=engine_resume.resumed(run_dir, ledger, action.step, action.visit))
             except engine_stop.Stopped:
                 return _stopped(run_dir, action.step)
             if stopped is not None:
@@ -1133,45 +1103,65 @@ def _group(run_dir: Path, table: CommandTable, steps: dict[str, dict],
     engine_session.raise_first([future.exception() for future in futures])
 
 
-def _names_child(run_dir: Path, child: str) -> bool:
-    """Whether the run's readable events name `child`; true too when they cannot be read."""
-    try:
-        return any(event["event"] == "call" and event["child"] == child
-                   for event in engine_ledger.replay(run_dir / "events.jsonl"))
-    except engine_ledger.LedgerError:
-        return True
+def _owed_at_entry(run_dir: Path, run: dict, action: engine_core.RunCall) -> bool:
+    """Whether the call visit was entered owing its child runs the first-visit checks (`RunCall.recheck` as it stood
+    before `step_entered` consumed it)."""
+    procedure = _load(run_dir / "procedure" / f"{run['procedure']}.json")
+    ledger = engine_ledger.replay(run_dir / "events.jsonl")
+    cut = next((i for i, e in enumerate(ledger) if e["event"] == "step_entered"
+                and (e["step"], e["visit"]) == (action.step, action.visit)), None)
+    if cut is None:
+        return False
+    pending = engine_core.replay(procedure, run["inputs"],
+                                 core_events(run_dir, ledger[:cut], _computed(procedure))).action
+    return isinstance(pending, engine_core.RunCall) and pending.recheck
 
 
 def _child(run_dir: Path, table: CommandTable, run: dict, step: dict,
            action: engine_core.RunCall, item: object, index: int, count: int,
            scope: _Scope) -> dict:
-    """Create the child run for one item, record its `call` event, walk it, and keep its end."""
+    """Walk the child run for one item (the one its `call` event names, else a new one) and keep its end."""
     held: list[int] = []
+    named = engine_resume.named_children(engine_ledger.replay(run_dir / "events.jsonl"),
+                                         action.step, action.visit).get(index)
     try:
-        child = _load(run_dir / "procedure" / f"{action.procedure}.json")
-        inputs = {name: item if name == "item" and action.items is not None
-                  else run["inputs"][name] for name in child["inputs"]}
-        creation = _lock_creation(run["issue"])
-        try:
-            child_dir = engine_ledger.create_run(
-                project=run["project"], issue=run["issue"], procedure=action.procedure,
-                procedures_dir=run_dir / "procedure",
-                platform_revision=run["platform_revision"], host=run["host"], inputs=inputs,
-                now=datetime.now(timezone.utc), parent=run_dir.name, tracker=run.get("tracker"),
-                before_publish=lambda staged: held.append(_take_run_lock(staged, _now())))
-        finally:
-            os.close(creation)
-        try:
-            engine_ledger.append_event(run_dir, {
-                "event": "call", "at": _now(), "step": action.step, "visit": action.visit,
-                "child": child_dir.name, "index": index, "items": count})
-        except BaseException:
-            # Published but never named by the parent and never walked: leave no unnamed child.
-            # A write that failed only at its fsync did name it: that child stays.
-            if not _names_child(run_dir, child_dir.name):
-                shutil.rmtree(child_dir, ignore_errors=True)
-            raise
-        _, line = _walk(child_dir, table, scope, action.recheck)
+        if named is not None:
+            child_dir = engine_ledger.runs_root() / named
+            end = engine_resume.ended(child_dir)
+            if end is not None:
+                return {"end": end, "item": item, "run": named}
+            creation = _lock_creation(run["issue"])
+            try:
+                held.append(_take_run_lock(child_dir, _now()))
+            finally:
+                os.close(creation)
+            _continue(child_dir, table, engine_ledger.read_run(child_dir)["inputs"])
+        else:
+            child = _load(run_dir / "procedure" / f"{action.procedure}.json")
+            inputs = {name: item if name == "item" and action.items is not None
+                      else run["inputs"][name] for name in child["inputs"]}
+            creation = _lock_creation(run["issue"])
+            try:
+                child_dir = engine_ledger.create_run(
+                    project=run["project"], issue=run["issue"], procedure=action.procedure,
+                    procedures_dir=run_dir / "procedure",
+                    platform_revision=run["platform_revision"], host=run["host"], inputs=inputs,
+                    now=datetime.now(timezone.utc), parent=run_dir.name, tracker=run.get("tracker"),
+                    before_publish=lambda staged: held.append(_take_run_lock(staged, _now())))
+            finally:
+                os.close(creation)
+            try:
+                engine_ledger.append_event(run_dir, {
+                    "event": "call", "at": _now(), "step": action.step, "visit": action.visit,
+                    "child": child_dir.name, "index": index, "items": count})
+            except BaseException:
+                # Published but never named by the parent and never walked: leave no unnamed child.
+                # A write that failed only at its fsync did name it: that child stays.
+                if not engine_resume.names_child(run_dir, child_dir.name):
+                    shutil.rmtree(child_dir, ignore_errors=True)
+                raise
+        owed = action.recheck or (named is not None and _owed_at_entry(run_dir, run, action))
+        _, line = _walk_recorded(child_dir, table, scope, lambda: datetime.now(timezone.utc), owed)
         if line["end"] in procedure_terms.ENGINE_STOPS:
             raise engine_session.EngineStop(line["end"], line["need"], line["detail"])
         if line["end"] == engine_stop.STOPPED_BY_REQUEST:
@@ -1185,9 +1175,18 @@ def _call(run_dir: Path, table: CommandTable, run: dict, step: dict,
           action: engine_core.RunCall, scope: _Scope) -> None:
     """Run the child procedure once per item, `parallel` at a time, and record the call's outcome."""
     started = time.monotonic()
-    engine_ledger.append_event(run_dir, {"event": "step_entered", "at": _now(),
-                                         "step": action.step, "visit": action.visit,
-                                         "stage": step["stage"]})
+    ledger = engine_ledger.replay(run_dir / "events.jsonl")
+    if not any(e["event"] == "step_entered" and (e["step"], e["visit"]) == (action.step, action.visit)
+               for e in ledger):  # a continued call is entered already
+        engine_ledger.append_event(run_dir, {"event": "step_entered", "at": _now(), "step": action.step,
+                                             "visit": action.visit, "stage": step["stage"]})
+    published = engine_resume.published_ends(run_dir, ledger, action.step, action.visit)
+    if published is not None:  # a killed engine published the result and never recorded it: record, run nothing
+        outcome = engine_core.call_outcome([entry["end"] for entry in published])
+        engine_ledger.store_result(run_dir, step=action.step, visit=action.visit, result={"items": published},
+            at=_now(), wall_seconds=0, turns=0, tokens=dict(NO_TOKENS), spend_usd=0, adopt=True, outcome=outcome)
+        _graded(run_dir, step, action.visit, outcome)
+        return
     items = [None] if action.items is None else list(action.items)
     admission = _Admission(len(items))
     entries: dict[int, dict] = {}
@@ -1258,7 +1257,7 @@ def _engine_stop_ended(run_dir: Path, step: str, ended: engine_session.EngineSto
 
 def _visit_session(run_dir: Path, root: str, step: dict, action: engine_core.StartSession,
                    scope: _Scope, member: bool = False,
-                   resumed: _Resumed | None = None) -> tuple[int, dict] | None:
+                   resumed: engine_resume.Resumed | None = None) -> tuple[int, dict] | None:
     """Run the step's session to its result; the `quota-wait` stop when no account can answer.
 
     With `resumed` the visit is already entered and its session recorded: neither is recorded
@@ -1323,7 +1322,8 @@ def _visit_session(run_dir: Path, root: str, step: dict, action: engine_core.Sta
     def store(result: dict, outcome: str | None) -> None:
         engine_ledger.store_result(run_dir, step=name, visit=visit, result=result, at=_now(),
                                    wall_seconds=wall, turns=reading.turns, tokens=reading.tokens,
-                                   spend_usd=reading.spend_usd, outcome=outcome)
+                                   spend_usd=reading.spend_usd, outcome=outcome,
+                                   startup_seconds=engine_session.startup_seconds(launched, reading))
 
     bound = (engine_session.WALL_TIME if launched.timed_out
              else engine_session.CAP_SUBTYPES.get(reading.subtype))
@@ -1359,7 +1359,7 @@ def _visit_session(run_dir: Path, root: str, step: dict, action: engine_core.Sta
 def _launch_until_answered(
         run_dir: Path, session_dir: Callable[[], str], visit_of: tuple[str, int, str], prompt: str,
         launch_of: tuple[engine_session.Role, Mapping, Path], stop: Callable[[], bool],
-        defer: bool = False, resumed: _Resumed | None = None,
+        defer: bool = False, resumed: engine_resume.Resumed | None = None,
 ) -> tuple[engine_session.Launched, engine_session.Reading, tuple[int, dict] | None, bool]:
     """Launch the session, again with `--resume` after a usage limit, a first API error (once, after
     `API_RETRY_SECONDS`) or a first miss (once, with `REASK_PROMPT`); return the first launch that is none of these,

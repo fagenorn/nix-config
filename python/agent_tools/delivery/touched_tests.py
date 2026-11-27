@@ -59,6 +59,31 @@ selected. A file that cannot be written prints `test-touched: cannot write the s
 <path>: <error>` on stderr and changes no exit code. The build and the suite runner start
 without the variable.
 
+.NET rule: `--dotnet-tests` also runs the .NET tests a change touches, and without it none of
+this happens (no `sources`, no tools, no `dotnet` key). The .NET rule reads the changed paths
+with `git diff --no-renames --name-only -z <base>...HEAD`, so a non-ASCII path arrives
+unquoted, and each name is decoded with `os.fsdecode`, so it compares with the filesystem's
+names byte for byte, while the Python selection keeps git's quoted lines. Only a changed `.cs`,
+`.csproj` or `SHARED_BUILD_FILES` name under the solution root (`SOLUTION_ROOT`) counts, and with
+none the projects are never listed. Otherwise they are every `.csproj` that
+`agent_tools.delivery.dotnet_format_lint.sources` lists there (an `OSError` prints
+`test-touched: cannot list the .NET projects: <error>` and returns 2 before anything runs).
+A changed file named in `SHARED_BUILD_FILES` selects the whole set. A changed `.cs` or
+`.csproj` belongs to the `.csproj` in its nearest ancestor directory holding one (a `.csproj`
+counts its own directory); a project whose stem ends `.Tests` is its own target, any other
+project's target is the one project whose stem is `<stem>.Tests`. A path with no project, or
+with no or several test projects, selects the whole set. With no `.csproj` under the solution
+root, no .NET target is selected. Any other path selects nothing. The
+whole set is the one solution file (a `Refusal` from `solution` prints `test-touched:
+<reason>` and returns 1 before anything runs) when it lists every test project, and the sorted
+test projects when it omits one (`listed_projects`); otherwise the targets are the sorted test
+projects. The selection file gains `dotnet`, the targets, only when there are some. The
+Python selection runs first; then, when targets exist, `dotnet test <target>` runs per target
+in order through the tools directory, with exactly `child_env(tools)` and none of the caller's environment (a `Refusal` from the tools
+prints `test-touched: .NET tools unavailable (<reason>)` and counts as exit 2), and the result
+is the first non-zero of all runs. Nothing is "touched" only when no suite member and no
+target is selected.
+
 Output: when nothing is selected, on stdout `test-touched: no suite member is touched by
 <base>...HEAD`, and the result is 0 (or the build's 0). Otherwise, on stderr,
 `test-touched: running <n>: <paths>`, and the result is the exit code of
@@ -71,18 +96,78 @@ import ast
 import fnmatch
 import json
 import os
+import posixpath
 import shlex
 import subprocess
 import sys
 import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
+from typing import NamedTuple
 
+from agent_tools.delivery.dotnet_format_lint import (
+    Refusal, child_env, listed_projects, solution, sources, tools_directory)
+from agent_tools.delivery.dotnet_solution import SOLUTION_ROOT
 from agent_tools.delivery.suite_runner import (
     REPORT_ENV, REPORT_VERSION, suite_members, write_report)
 
 
 SELECTION_ENV = "VERIFIED_TREE_SELECTION"
+SHARED_BUILD_FILES = ("Directory.Build.props", "Directory.Packages.props",
+                      "packages.lock.json", "deps.json")
+
+
+class DotnetSelection(NamedTuple):
+    whole_because: tuple[str, ...]
+    test_projects: tuple[str, ...]
+
+
+def _project_stem(path: str) -> str:
+    return posixpath.basename(path)[:-len(".csproj")]
+
+
+def _owning_project(path: str, projects: Sequence[str]) -> str | None:
+    """The one `.csproj` in the path's nearest ancestor directory holding one, if exactly one."""
+    by_directory: dict[str, list[str]] = {}
+    for project in projects:
+        by_directory.setdefault(posixpath.dirname(project), []).append(project)
+    directory = posixpath.dirname(path)
+    while directory == SOLUTION_ROOT or directory.startswith(f"{SOLUTION_ROOT}/"):
+        if directory in by_directory:
+            found = by_directory[directory]
+            return found[0] if len(found) == 1 else None
+        directory = posixpath.dirname(directory)
+    return None
+
+
+def dotnet_relevant(path: str) -> bool:
+    """Whether the .NET rule reads `path`: a `.cs`, `.csproj` or shared build file under the solution root."""
+    return path.startswith(f"{SOLUTION_ROOT}/") and (
+        posixpath.basename(path) in SHARED_BUILD_FILES or path.endswith((".cs", ".csproj")))
+
+
+def dotnet_selection(changed: Sequence[str], projects: Sequence[str]) -> DotnetSelection:
+    whole: list[str] = []
+    tests: set[str] = set()
+    for path in changed:
+        if not path.startswith(f"{SOLUTION_ROOT}/"):
+            continue
+        if posixpath.basename(path) in SHARED_BUILD_FILES:
+            whole.append(path)
+        elif path.endswith((".cs", ".csproj")):
+            project = _owning_project(path, projects)
+            stem = _project_stem(project) if project else ""
+            if project and stem.endswith(".Tests"):
+                tests.add(project)
+                continue
+            matches = [p for p in projects if _project_stem(p) == f"{stem}.Tests"] if project else []
+            if len(matches) == 1:
+                tests.add(matches[0])
+            else:
+                whole.append(path)
+    if whole:
+        return DotnetSelection(tuple(whole), ())
+    return DotnetSelection((), tuple(sorted(tests)))
 
 
 class GitError(RuntimeError):
@@ -96,6 +181,16 @@ def changed_paths(root: Path, base: str) -> list[str]:
     if result.returncode != 0:
         raise GitError(result.stderr.rstrip("\n"))
     return result.stdout.splitlines()
+
+
+def exact_changed_paths(root: Path, base: str) -> list[str]:
+    """The changed paths, NUL-delimited, so a non-ASCII name arrives unquoted."""
+    result = subprocess.run(
+        ["git", "-C", str(root), "diff", "--no-renames", "--name-only", "-z", f"{base}...HEAD"],
+        capture_output=True)
+    if result.returncode != 0:
+        raise GitError(result.stderr.decode("utf-8", errors="replace").rstrip("\n"))
+    return [os.fsdecode(name) for name in result.stdout.split(b"\0") if name]
 
 
 def build_trigger(changed: Sequence[str], globs: Sequence[str]) -> str | None:
@@ -199,7 +294,13 @@ def parse_covers(parser: argparse.ArgumentParser, values: Sequence[str]) -> dict
     return _parse_mapping(parser, "--cover", "SOURCE_GLOB=MEMBER_GLOB", values)
 
 
+class ExactEnv(dict):
+    """An environment a launch gets whole, in place of the caller's plus an overlay."""
+
+
 def default_execute(argv: list[str], cwd: Path, extra: Mapping[str, str] | None = None) -> int:
+    if isinstance(extra, ExactEnv):
+        return subprocess.run(argv, cwd=cwd, env=dict(extra)).returncode
     env = {k: v for k, v in os.environ.items() if k != SELECTION_ENV}
     env.update(extra or {})
     return subprocess.run(argv, cwd=cwd, env=env).returncode
@@ -246,7 +347,8 @@ def _say(stream, line: str) -> None:
 
 def main(argv: Sequence[str] | None = None, *,
          execute: Callable[..., int] | None = None,
-         capture: Callable[[list[str], Path], tuple[int, str]] | None = None) -> int:
+         capture: Callable[[list[str], Path], tuple[int, str]] | None = None,
+         dotnet_tools: Callable[[Path], str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="touched-tests")
     parser.add_argument("--base", required=True)
     parser.add_argument("--root", default=None)
@@ -257,6 +359,7 @@ def main(argv: Sequence[str] | None = None, *,
     parser.add_argument("--build-when", action="append", default=[])
     parser.add_argument("--build-command", default=None)
     parser.add_argument("--env-from", action="append", default=[])
+    parser.add_argument("--dotnet-tests", action="store_true")
     args = parser.parse_args(argv)
     pairs = parse_pairs(parser, args.pair)
     covers = parse_covers(parser, args.cover)
@@ -273,6 +376,7 @@ def main(argv: Sequence[str] | None = None, *,
     root = Path(args.root) if args.root else Path.cwd()
     try:
         changed = changed_paths(root, args.base)
+        exact = exact_changed_paths(root, args.base) if args.dotnet_tests else []
     except GitError as error:
         _say(sys.stderr, str(error))
         return 2
@@ -286,6 +390,31 @@ def main(argv: Sequence[str] | None = None, *,
     members = suite_members(read(args.suite_file))
     chosen = selection(changed, members, read, source_roots=args.source_root, pairs=pairs,
                        covers=covers, build_globs=args.build_when)
+    dotnet_targets: list[str] = []
+    if args.dotnet_tests and any(dotnet_relevant(p) for p in exact):
+        try:
+            projects = [p.relative_to(root).as_posix() for p in sources(root)
+                        if p.name.endswith(".csproj")]
+        except OSError as error:
+            _say(sys.stderr, f"test-touched: cannot list the .NET projects: {error}")
+            return 2
+        picked = dotnet_selection(exact, projects)
+        if picked.whole_because and projects:
+            try:
+                whole = solution(root)
+            except Refusal as refusal:
+                _say(sys.stderr, f"test-touched: {refusal.reason}")
+                return 1
+            tests = sorted(p for p in projects if _project_stem(p).endswith(".Tests"))
+            listed = listed_projects(whole)
+            if all(Path(os.path.normpath(root / p)) in listed for p in tests):
+                dotnet_targets = [whole.relative_to(root).as_posix()]
+            else:
+                dotnet_targets = tests
+        elif projects:
+            dotnet_targets = list(picked.test_projects)
+        if dotnet_targets:
+            chosen = {**chosen, "dotnet": dotnet_targets}
     target = os.environ.get(SELECTION_ENV)
     if target:
         document = json.dumps({"base": args.base, **chosen}, sort_keys=True,
@@ -303,7 +432,7 @@ def main(argv: Sequence[str] | None = None, *,
         if code != 0:
             return code
     selected = chosen["selected"]
-    if not selected:
+    if not selected and not dotnet_targets:
         _say(sys.stdout, f"test-touched: no suite member is touched by {args.base}...HEAD")
         return 0
     prepared: dict[str, dict[str, str]] = {}
@@ -325,7 +454,8 @@ def main(argv: Sequence[str] | None = None, *,
         except ValueError as error:
             _say(sys.stderr, f"test-touched: {env_commands[member][0]}: {error}")
             return 2
-    _say(sys.stderr, f"test-touched: running {len(selected)}: {' '.join(selected)}")
+    if selected:
+        _say(sys.stderr, f"test-touched: running {len(selected)}: {' '.join(selected)}")
     runner = [sys.executable, "-m", "agent_tools.delivery.suite_runner"]
     plain = [m for m in selected if m not in prepared]
     launches: list[tuple[list[str], dict[str, str] | None]] = []
@@ -348,6 +478,17 @@ def main(argv: Sequence[str] | None = None, *,
                    for part in parts if part.is_file()]
         if written:
             write_report(root / report_value, merge_reports(written))
+    if dotnet_targets:
+        try:
+            tools = (dotnet_tools or tools_directory)(root)
+        except Refusal as refusal:
+            _say(sys.stderr, f"test-touched: .NET tools unavailable ({refusal.reason})")
+            results.append(2)
+        else:
+            for dotnet_target in dotnet_targets:
+                _say(sys.stderr, f"test-touched: dotnet test {dotnet_target}")
+                results.append(run([f"{tools}/dotnet", "test", dotnet_target], root,
+                                   ExactEnv(child_env(tools))))
     return next((code for code in results if code != 0), 0)
 
 if __name__ == "__main__":

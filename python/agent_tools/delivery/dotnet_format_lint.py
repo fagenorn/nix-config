@@ -25,15 +25,27 @@ the paths relative to the root and comma separated, on stderr, exits 1 and start
 A directory or file under `<root>/dotnet` that cannot be read prints `dotnet-format-lint:
 discovery_failed (<reason>)` on stderr and exits 2; it is never read as empty.
 
-Tools. The SDK comes only from `nix build --no-link --print-out-paths
-<root>#agent-platform.dotnet-tools`, run from the root with stdin closed. That is a
-passthru of the platform package, in no launcher's closure, so the SDK is built only
-when a lint judges .NET sources and the `agent-platform` package stays free of it. The
-build must print exactly one absolute path whose `bin` holds an executable `dotnet`;
-any other outcome prints `dotnet-format-lint: tools_unavailable` on stderr and exits 2.
+Tools. The SDK is the `<root>#agent-platform.dotnet-tools` build, a passthru of the
+platform package in no launcher's closure, so it is built only when a lint judges .NET
+sources and the `agent-platform` package stays free of it. It is cached under
+`<HOME>/.cache/agent-platform/dotnet-tools/<key>`. The key is a SHA-256 over the attribute
+and the bytes of `flake.nix`, `flake.lock` and `lib/agent-tools.nix`, the files the
+attribute's evaluation reads. A link there that leads to an executable `bin/dotnet` (the
+literal path, never searched as a `PATH`) is used and no `nix` runs. Otherwise the lint
+takes an exclusive lock on `.lock` in that directory, looks again, and runs `nix build
+--out-link <that path> --print-out-paths <root>#agent-platform.dotnet-tools` from the root
+with stdin closed; the out-link is a garbage-collector root, so after a build every other
+key-named link in that directory is removed and a superseded SDK is no longer one, the
+lock keeping two runs from removing each other's link; a link of another name is kept, a
+link already gone is skipped, and a link that cannot be removed is `tools_unavailable`
+and takes the new link away again, so the next run builds and prunes again. The build must
+print exactly one absolute path whose `bin` holds an executable `dotnet`. A `HOME` that is not absolute, an unreadable key input,
+a cache directory that cannot be created, or any other build outcome prints
+`dotnet-format-lint: tools_unavailable` on stderr and exits 2. An input the attribute
+gains outside those three files must join the key.
 
-The run. `dotnet` runs by its command name, `dotnet format <solution> --verify-no-changes`,
-from `<root>/dotnet` with stdin closed and output inherited, on a `PATH` that is the
+The run. `dotnet format <solution> --verify-no-changes` runs the tools directory's `dotnet`
+by its absolute path, under the command name `dotnet`, from `<root>/dotnet` with stdin closed and output inherited, on a `PATH` that is the
 tools directory alone and an environment of only that `PATH`, the caller's `HOME` and
 `TMPDIR` (so MSBuild's and NuGet's temporary files stay in the caller's temporary
 directory), `LANG` `C` and settings that switch off telemetry, first-run work and every
@@ -48,9 +60,11 @@ be an absolute directory: <value>` and exits 2.
 """
 
 import argparse
+import contextlib
+import fcntl
+import hashlib
 import os
 import re
-import shutil
 import stat
 import subprocess
 import sys
@@ -63,6 +77,10 @@ from agent_tools.delivery.promotion_schema import symlinked_component
 
 COMMAND = "dotnet-format-lint"
 TOOLS_ATTRIBUTE = "agent-platform.dotnet-tools"
+KEY_INPUTS = ("flake.nix", "flake.lock", "lib/agent-tools.nix")
+CACHE_PARTS = (".cache", "agent-platform", "dotnet-tools")
+KEY_NAME = re.compile("[0-9a-f]{64}")
+LOCK_NAME = ".lock"
 SOURCE_SUFFIXES = (".cs", ".csproj", ".slnx", ".sln")
 SOLUTION_SUFFIXES = (".slnx", ".sln")
 IGNORED_DIRECTORIES = frozenset({"bin", "obj"})
@@ -163,10 +181,108 @@ def outside_solution(root: Path, chosen: Path, found: Sequence[Path]) -> list[Pa
     return [path for path in found if not covered(path)]
 
 
+def cache_key(root: Path) -> str:
+    """The SHA-256 hex digest over the attribute and the bytes of every `KEY_INPUTS` file.
+
+    Raises `OSError` when a key input cannot be read.
+    """
+    digest = hashlib.sha256(TOOLS_ATTRIBUTE.encode())
+    for name in KEY_INPUTS:
+        data = (root / name).read_bytes()
+        digest.update(name.encode() + b"\0" + str(len(data)).encode() + b"\0" + data)
+    return digest.hexdigest()
+
+
+def _has_dotnet(tools: str) -> bool:
+    """Whether the literal path `<tools>/dotnet` is an executable file.
+
+    The path is never searched as a `PATH`, so a `:` in `tools` is part of a name.
+    """
+    executable = f"{tools}/dotnet"
+    return os.path.isfile(executable) and os.access(executable, os.X_OK)
+
+
+def cached_tools(link: Path) -> str | None:
+    """`<target>/bin` when `link` is a symlink to an absolute target holding `dotnet`."""
+    try:
+        target = os.readlink(link) if os.path.islink(link) else ""
+    except OSError:
+        return None
+    if not os.path.isabs(target) or not _has_dotnet(f"{target}/bin"):
+        return None
+    return f"{target}/bin"
+
+
+@contextlib.contextmanager
+def _locked(cache: Path):
+    """Hold an exclusive lock on the cache directory, so publishing and pruning never interleave."""
+    try:
+        descriptor = os.open(cache / LOCK_NAME, os.O_RDWR | os.O_CREAT, 0o600)
+    except OSError:
+        raise Refusal("tools_unavailable") from None
+    try:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+        except OSError:
+            raise Refusal("tools_unavailable") from None
+        yield
+    finally:
+        os.close(descriptor)
+
+
+def prune(cache: Path, keep: str) -> None:
+    """Remove every key-named symlink in `cache` but `keep`, each one a garbage-collector root.
+
+    A link of another name is kept and one already gone is skipped. Any other
+    `OSError` is `tools_unavailable`.
+    """
+    try:
+        with os.scandir(cache) as entries:
+            stale = [entry.name for entry in entries
+                     if entry.is_symlink() and KEY_NAME.fullmatch(entry.name)
+                     and entry.name != keep]
+        for name in stale:
+            try:
+                os.unlink(cache / name)
+            except FileNotFoundError:
+                continue
+    except OSError:
+        raise Refusal("tools_unavailable") from None
+
+
 def tools_directory(root: Path) -> str:
-    """The `bin` directory of the built .NET tools, when it holds an executable `dotnet`."""
+    """The `bin` directory of the .NET tools, cached by key, when it holds an executable `dotnet`."""
+    home = os.environ.get("HOME")
+    if not home or not os.path.isabs(home):
+        raise Refusal("tools_unavailable")
+    try:
+        key = cache_key(root)
+    except OSError:
+        raise Refusal("tools_unavailable") from None
+    cache = Path(home).joinpath(*CACHE_PARTS)
+    link = cache / key
+    cached = cached_tools(link)
+    if cached is not None:
+        return cached
+    try:
+        cache.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        raise Refusal("tools_unavailable") from None
+    with _locked(cache):
+        cached = cached_tools(link)
+        if cached is not None:
+            return cached
+        return _build(root, cache, link, key)
+
+
+def _build(root: Path, cache: Path, link: Path, key: str) -> str:
+    """Build into `link` and prune the other keys, the cache lock held.
+
+    A failed prune takes the new link away again, so the next run builds and prunes again
+    instead of counting the new key a hit with the superseded root still in place.
+    """
     argv = ["nix", "--extra-experimental-features", "nix-command flakes", "build",
-            "--no-link", "--print-out-paths", f"{root}#{TOOLS_ATTRIBUTE}"]
+            "--out-link", str(link), "--print-out-paths", f"{root}#{TOOLS_ATTRIBUTE}"]
     try:
         done = subprocess.run(
             argv, cwd=root, stdin=subprocess.DEVNULL, capture_output=True, text=True,
@@ -177,8 +293,14 @@ def tools_directory(root: Path) -> str:
     if done.returncode != 0 or len(lines) != 1 or not os.path.isabs(lines[0]):
         raise Refusal("tools_unavailable")
     tools = f"{lines[0]}/bin"
-    if shutil.which("dotnet", path=tools) is None:
+    if not _has_dotnet(tools):
         raise Refusal("tools_unavailable")
+    try:
+        prune(cache, key)
+    except Refusal:
+        with contextlib.suppress(OSError):
+            os.unlink(link)
+        raise
     return tools
 
 
@@ -219,7 +341,8 @@ def run(root: Path) -> int:
         return 2
     try:
         code = subprocess.run(
-            format_argv(chosen), cwd=root / SOLUTION_ROOT, env=child_env(tools),
+            format_argv(chosen), executable=f"{tools}/dotnet", cwd=root / SOLUTION_ROOT,
+            env=child_env(tools),
             stdin=subprocess.DEVNULL, timeout=TIMEOUT_SECONDS).returncode
     except OSError:
         _say(sys.stderr, "dotnet_failed (cannot start)")

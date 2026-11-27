@@ -609,9 +609,15 @@ CASES = [
     Case("step_without_holds",
          editing("toy", _without(lambda toy: step(toy, "scope"), "holds")),
          [("toy", "scope", "invalid_field")]),
-    Case("holds_outside_the_three_values",
+    Case("holds_outside_the_four_values",
          editing("toy", _set(lambda toy: step(toy, "scope"), "holds", "forever")),
          [("toy", "scope", "invalid_field")]),
+    Case("read_hold_on_an_agent_step",
+         editing("toy", _set(lambda toy: step(toy, "draft"), "holds", "read")),
+         [("toy", "draft", "invalid_field")]),
+    Case("read_hold_on_a_mutating_command",
+         editing("toy-child", _set(lambda toy: step(toy, "claim"), "holds", "read")),
+         [("toy-child", "claim", "invalid_field")]),
     Case("group_member_without_holds",
          editing("toy", _without(lambda toy: step(toy, "review-a"), "holds")),
          [("toy", "review-a", "invalid_field")]),
@@ -693,6 +699,16 @@ class ToyProcedureTest(unittest.TestCase):
         code, out, err = run_check()
         self.assertEqual((code, err), (0, ""))
         self.assertEqual(out, SHIPPED_OK)
+
+    def test_a_run_saved_before_the_review_spent_edge_still_validates(self):
+        def saved_before_issue_1954(verify: dict) -> None:
+            round_step = step(verify, "round")
+            round_step["subcommand"] = "round"
+            del round_step["on"]["review-spent"]
+            for name in ("narrowing", "narrowing-again"):
+                step(verify, name)["on"]["findings"] = "verify-fix-review"
+        code, out, _ = run_check("--procedures", str(broken_copy(editing("verify", saved_before_issue_1954))))
+        self.assertEqual((code, out), (0, SHIPPED_OK))
 
     def test_a_command_step_may_map_out_of_bounds(self):
         def map_bound(toy: dict) -> None:

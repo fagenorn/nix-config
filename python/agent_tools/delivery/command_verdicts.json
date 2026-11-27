@@ -169,6 +169,7 @@
   },
   "program-copies": null,
   "promotion": null,
+  "proof-run": null,
   "release": null,
   "release-card": null,
   "resolve-project": {
@@ -192,6 +193,7 @@
   "verify-rounds": {
     "subcommands": {
       "round": ["passed", "retest", "fix", "spent", "verify", "error"],
+      "round-reviewed": ["passed", "retest", "fix", "spent", "review-spent", "verify", "error"],
       "fix-range": ["read", "unread", "error"],
       "retested": ["done", "untested", "dirty", "error"]
     }
