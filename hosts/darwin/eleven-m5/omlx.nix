@@ -240,6 +240,7 @@ let
           serve = serveText;
           reload = reloadText;
           restart = restartText;
+          killReactive = killReactiveText;
           hold = holdText;
           unhold = unholdText;
           inherit holdReason;
@@ -253,6 +254,10 @@ let
     [ "$status" -le 1 ] && exit 0
     exit "$status"
   '';
+  # The reactive restart keeps pkill's own status: 1 means no server process matched.
+  killReactiveText = "exec /usr/bin/pkill -U \"$(id -u)\" -x omlx-server\n";
+  killReactive = pkgs.writeShellScript "omlx-kill-reactive" killReactiveText;
+  pinnedModels = lib.attrNames (lib.filterAttrs (_: v: v.is_pinned or false) adminModels);
   # A kill only relaunches the job definition launchd holds, so a changed plist needs an unload and
   # load. A failed load keeps the root, because launchd may still hold the old definition.
   heldRoot = "/nix/var/nix/gcroots/omlx-held-serve";
@@ -306,7 +311,23 @@ let
     }'
   '';
   unholdText = "unset -f launchctl omlx_hold_record omlx_hold_root\n";
+  # The reactive branch reads the status key through sops into the program's stdin, so the key is
+  # in no argv and no environment. It runs only for exactly `--reactive` and passes fixed
+  # arguments, so no caller can point the key at another URL.
   restartText = ''
+    if [ "$#" -eq 1 ] && [ "$1" = --reactive ]; then
+      SOPS_AGE_KEY_FILE=${home}/.config/sops/age/keys.txt \
+        ${lib.getExe pkgs.sops} -d --extract '["omlx_api_key"]' ${../../../secrets/secrets.yaml} |
+        ${lib.getExe pkgs.python3} ${./omlx-restart.py} \
+          --state-dir ${home}/.omlx \
+          --restart-bin ${killReactive} \
+          --reload-bin ${reloadServer} \
+          --health-url http://127.0.0.1:8000/health \
+          --status-url http://127.0.0.1:8000/api/status \
+          ${lib.concatMapStringsSep " " (m: "--pinned-model ${m}") pinnedModels} \
+          --reactive
+      exit
+    fi
     exec ${lib.getExe pkgs.python3} ${./omlx-restart.py} \
       --state-dir ${home}/.omlx \
       --restart-bin ${killServer} \
@@ -322,6 +343,7 @@ in
     restart
   ];
   system.build.omlxConfigure = configure;
+  system.build.omlxRestart = restart;
 
   # oMLX finds the Splash launcher in /opt/homebrew/bin itself (Splash needs macOS 26.4+, M3+).
   homebrew.brews = [

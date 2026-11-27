@@ -9,20 +9,43 @@ costs one more activation, a restart that does not wait can cut off a running re
 it is removed only by a restart that succeeded, so a deferral and a failure both keep it.
 A reason starting with `launchd plist changed: ` is applied by `--reload-bin` (an unload and load
 of the job) instead of a kill, because a kill only relaunches the job definition launchd holds.
+
+`--reactive` is the gate for a restart nobody scheduled: it needs no marker, reads the API key from the
+first line of stdin and asks the authenticated `/api/status` for the requests in flight. It restarts only
+when no request is active or waiting and no model but a `--pinned-model` is loaded or loading, and it
+sends the key to a loopback `http` URL only, through a read that follows no redirect, and only after
+`lsof` shows that this account's `omlx-server` is the listener on the status port (a health answer
+cannot tell whose server answered). Every state it
+cannot read defers. Exit 0 is restarted, 75 deferred (one stderr line), 1 the kill failed.
 """
 
 import argparse
 import http.client
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 
 HEALTH_TIMEOUT_SECONDS = 5
 # The server is on this host: a proxy from the environment must never answer for it.
 DIRECT = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+LOOPBACK = {"127.0.0.1", "::1", "localhost"}
+DEFERRED = 75
+LISTENER_BIN = "/usr/sbin/lsof"
+SERVER_NAME = "omlx-server"
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+# A redirect would carry the key to another URL: the 3xx answer is raised as an HTTPError instead.
+STATUS_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect)
 UNRECORDED = "unrecorded change"
 RELOAD_PREFIX = "launchd plist changed: "
 
@@ -91,14 +114,141 @@ def restart(restart_bin, reload_bin, marker, reasons):
     return 0
 
 
+def loopback(url):
+    parts = urllib.parse.urlsplit(url)
+    return parts.scheme == "http" and parts.hostname in LOOPBACK
+
+
+def read_status(url, key):
+    """Return (status, body bytes) of the authenticated status answer, following no redirect."""
+    request = urllib.request.Request(url, headers={"Authorization": f"Bearer {key}"})
+    try:
+        with STATUS_OPENER.open(request, timeout=HEALTH_TIMEOUT_SECONDS) as response:
+            return response.status, response.read()
+    except urllib.error.HTTPError as error:
+        with error:
+            return error.code, b""
+
+
+def count_ok(value):
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def classify_health(health_url):
+    """Return None when the server is up and serving, else why the restart must wait."""
+    try:
+        status, raw = read_health(health_url)
+        if status is None:
+            return "server not running"
+        body = json.loads(raw)
+    except (OSError, ValueError, http.client.HTTPException) as error:
+        return f"server state unknown: {error}"
+    if not isinstance(body, dict):
+        return "server state unknown: health answer is not an object"
+    if status == 503 and body.get("status") == "loading":
+        return "pinned models still loading"
+    if status == 200 and body.get("status") == "healthy":
+        return None
+    return f"server state unknown: status {status} with an unexpected body"
+
+
+def own_server_listens(listener_bin, status_url):
+    """True when every listener `listener_bin` (lsof) shows on the status port is this account's oMLX server.
+
+    lsof lists only this account's sockets, so a listener of another account shows as none."""
+    port = urllib.parse.urlsplit(status_url).port or 80
+    uid = os.getuid()
+    argv = [listener_bin, "+c", "0", "-nP", "-a", "-u", str(uid), f"-iTCP:{port}", "-sTCP:LISTEN", "-Fpcu"]
+    try:
+        found = subprocess.run(
+            argv, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=HEALTH_TIMEOUT_SECONDS)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    owners: list[dict] = []
+    for line in found.stdout.splitlines():
+        if line.startswith("p"):
+            owners.append({})
+        elif owners and line[:1] in ("c", "u"):
+            owners[-1][line[0]] = line[1:]
+    return bool(owners) and all(
+        owner.get("c") == SERVER_NAME and owner.get("u") == str(uid) for owner in owners)
+
+
+def classify_reactive(health_url, status_url, key, pinned, listener_bin=LISTENER_BIN):
+    """Return None when the server holds no request and no unpinned model, else why to wait."""
+    if not (loopback(health_url) and loopback(status_url)):
+        return "endpoint is not loopback"
+    if not key:
+        return "API key unreadable"
+    why = classify_health(health_url)
+    if why is not None:
+        return why
+    # The health answer proves nothing about who answered: the key goes only to this account's server.
+    if not own_server_listens(listener_bin, status_url):
+        return "listener is not the oMLX server"
+    try:
+        status, raw = read_status(status_url, key)
+    except (OSError, http.client.HTTPException) as error:
+        return f"request status unknown: {type(error).__name__}"
+    if status != 200:
+        return f"request status unknown: status {status}"
+    unexpected = "request status unknown: unexpected body"
+    try:
+        body = json.loads(raw)
+    except ValueError:
+        return unexpected
+    if not isinstance(body, dict):
+        return unexpected
+    loaded = body.get("loaded_models")
+    counts = [body.get(name) for name in ("active_requests", "waiting_requests", "models_loading")]
+    if not all(count_ok(count) for count in counts):
+        return unexpected
+    if not isinstance(loaded, list) or not all(isinstance(model, str) for model in loaded):
+        return unexpected
+    active, waiting, loading = counts
+    others = sorted(set(loaded) - set(pinned))
+    if others:
+        return f"other model loaded: {', '.join(others)}"
+    if loading > 0:
+        return "a model is loading"
+    if active > 0 or waiting > 0:
+        return f"{active} active, {waiting} waiting requests"
+    return None
+
+
+def restart_reactive(restart_bin):
+    returncode = subprocess.run([restart_bin]).returncode
+    if returncode == 0:
+        print("oMLX: restarted (reactive)", file=sys.stderr)
+        return 0
+    if returncode == 1:
+        print("oMLX: restart deferred (no server process to signal)", file=sys.stderr)
+        return DEFERRED
+    print(f"oMLX: restart failed (exit {returncode})", file=sys.stderr)
+    return 1
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--state-dir", type=Path, required=True)
     parser.add_argument("--restart-bin", required=True)
     parser.add_argument("--reload-bin", required=True)
     parser.add_argument("--health-url", default="http://127.0.0.1:8000/health")
-    parser.add_argument("--now", action="store_true", help="restart without reading /health")
+    parser.add_argument("--status-url", default="http://127.0.0.1:8000/api/status")
+    parser.add_argument("--pinned-model", action="append", default=[])
+    parser.add_argument("--listener-bin", default=LISTENER_BIN)
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--now", action="store_true", help="restart without reading /health")
+    mode.add_argument("--reactive", action="store_true", help="restart only while no request is in flight")
     args = parser.parse_args(argv)
+
+    if args.reactive:
+        key = sys.stdin.readline().strip()
+        why = classify_reactive(args.health_url, args.status_url, key, args.pinned_model, args.listener_bin)
+        if why is not None:
+            print(f"oMLX: restart deferred ({why})", file=sys.stderr)
+            return DEFERRED
+        return restart_reactive(args.restart_bin)
 
     marker = args.state_dir / ".restart-needed"
     if not marker.exists() and not args.now:
