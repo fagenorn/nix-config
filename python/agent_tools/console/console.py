@@ -94,11 +94,17 @@ The service keeps the console's profile choice for new sessions in `$CLAUDE_ACCO
 It is also given the `--screenshots` locations (#1112), `--screenshots DIR` repeated for each: a
 picture a manual check names inside one of them, beside the project's own checkout, is stored and shown
 on the check's card (`agent_tools.console.inbox`). With none given, only the project's checkout is read.
+
+`--lock-bump-project O/N`, `--lock-bump-branch B` and `--platform-repo O/N` (all three or none) make the
+console also run a lock bump pass for that one project every ten minutes (`agent_tools.console.lock_bump`):
+each proven revision is offered to it as one pull request that is merged on green required checks. The
+record of the last bump is `~/.agents/state/console/lock-bumps.json`; each step is a `console: lock_bump` line.
 """
 
 from __future__ import annotations
 
 import argparse
+import re
 import signal
 import sqlite3
 import sys
@@ -107,8 +113,8 @@ from pathlib import Path
 
 import agent_tools
 from agent_tools.console import (
-    account_add, activation, activation_run, account_remove, approve, inbox, manager, movement, nudge, probe,
-    guest, project_question, register, service, signin, signin_run)
+    account_add, activation, activation_run, account_remove, approve, inbox, lock_bump, manager, movement, nudge,
+    probe, guest, project_question, register, service, signin, signin_run)
 from agent_tools.delivery import engine_ledger
 from agent_tools.console.event_log import EventLogError
 from agent_tools.console.write_guard import TokenError
@@ -145,11 +151,42 @@ def build_parser() -> argparse.ArgumentParser:
                              "door shares with nobody")
     parser.add_argument("--screenshots", type=Path, action="append", default=[], metavar="DIR",
                         help="a folder whose PNGs a manual check may show (repeatable)")
+    parser.add_argument("--lock-bump-project", metavar="O/N", default=None,
+                        help="the one registered project whose platform lock the console bumps (needs the "
+                             "other two lock bump flags)")
+    parser.add_argument("--lock-bump-branch", metavar="B", default=None,
+                        help="the integration branch of that project")
+    parser.add_argument("--platform-repo", metavar="O/N", default=None,
+                        help="the platform repository whose proven revisions are offered")
     return parser
 
 
+SLUG = re.compile(r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+")
+
+
+def lock_bump_flags(parser: argparse.ArgumentParser, args: argparse.Namespace) -> bool:
+    """Whether a lock bump is asked for; a partial or malformed set of its flags is a usage error."""
+    given = (args.lock_bump_project, args.lock_bump_branch, args.platform_repo)
+    if all(value is None for value in given):
+        return False
+    if any(value is None for value in given):
+        parser.error("--lock-bump-project, --lock-bump-branch and --platform-repo are given together")
+    if (SLUG.fullmatch(args.lock_bump_project) is None or SLUG.fullmatch(args.platform_repo) is None
+            or not args.lock_bump_branch):
+        parser.error("the lock bump project and platform repository are owner/name, the branch is not empty")
+    return True
+
+
+def lock_bumper(args: argparse.Namespace) -> lock_bump.Bumper | None:
+    if args.lock_bump_project is None:
+        return None
+    return lock_bump.Bumper(args.lock_bump_project, args.lock_bump_branch, args.platform_repo)
+
+
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    lock_bump_flags(parser, args)
     try:
         console = service.ConsoleService(
             service.default_store(), service.default_registry(), port=args.port, guest_socket=args.guest_socket,
@@ -186,12 +223,19 @@ def main(argv: list[str] | None = None) -> int:
     stop = threading.Event()
     for number in (signal.SIGTERM, signal.SIGINT):
         signal.signal(number, lambda *_: stop.set())
+    bumping = None
     try:
         console.start()
         print(f"console: serving http://{service.HOST}:{console.address[1]}/", flush=True)
+        bumper = lock_bumper(args)
+        if bumper is not None:
+            bumping = lock_bump.start(bumper, stop)
         while not stop.wait(1.0):
             pass
     finally:
+        stop.set()
+        if bumping is not None:
+            bumping.join(30.0)
         console.close()
     return 0
 

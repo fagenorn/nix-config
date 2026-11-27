@@ -9,6 +9,11 @@ required checks (`merged` on green, `filed` once and then `red_known` on red, `p
 record is not open is `done` and never opened again, so the next proven revision is the retry; otherwise
 a lock that is behind `latest` gets one built branch and one pull request (`opened`). The record is written
 after each forge write. A red bump is never merged or closed by the pass before a newer revision arrives.
+
+`Bumper` is the console's pass: it reads the registry and the latest proven revision, runs `bump_pass` and
+prints one `console: lock_bump <project> <action> <revision> <pull> <issue>` line per step, or one
+`console: lock_bump_failed` line when the pass is refused. `start` runs it in a daemon thread every ten
+minutes until its stop event is set, and that event is the pass's `cancel`.
 """
 
 from __future__ import annotations
@@ -16,17 +21,23 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 import tempfile
 import threading
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
-from typing import NamedTuple, Protocol
+from typing import NamedTuple, Protocol, TextIO
 
-from agent_tools.console.lock_bump_forge import Checks, OpenBump
-from agent_tools.console.lock_bump_tree import BumpRefused, branch_for
+from agent_tools.console import approve
+from agent_tools.console.lock_bump_forge import Checks, GitHubBumpForge, OpenBump
+from agent_tools.console.lock_bump_tree import BumpRefused, GitBuilder, branch_for
+from agent_tools.delivery import proof_run
 from agent_tools.project_contract import agent_platform
+from agent_tools.system import forge_api
 
 FORMAT = 1
+LOCK_BUMP_SECONDS = 600.0
+LOCK_BUMP_THREAD = "console-lock-bump"
 MARKER = "<!-- agent:lock-bump v1 -->"
 RED_MARKER = "<!-- agent:lock-bump-red v1 -->"
 OUTCOMES = frozenset(("open", "merged", "red", "closed"))
@@ -206,3 +217,70 @@ def _settle(project, latest, number, record, forge, tracker, save, cancel) -> St
         save({**record, "outcome": checks.state})
         return Step(project, "ended", latest, number, record["issue"], checks.state)
     return Step(project, "pending", latest, number, record["issue"], None)
+
+
+class PlatformTracker:
+    def __init__(self, platform_repo: str):
+        self._platform_repo = platform_repo
+
+    def create(self, title: str, body: str) -> int:
+        return forge_api.create_issue(self._platform_repo, title, body)
+
+
+def _line(step: Step) -> str:
+    fields = [step.project, step.action, step.revision[:12] if step.revision else "-",
+              "-" if step.pull is None else str(step.pull), "-" if step.issue is None else str(step.issue)]
+    return "console: lock_bump " + " ".join(fields) + (f" {step.detail}" if step.detail else "")
+
+
+class Bumper:
+    def __init__(self, project: str, branch: str, platform_repo: str, *, forge: BumpForge | None = None,
+                 tracker: Tracker | None = None, builder: Builder | None = None,
+                 registry: Callable[[], list[dict]] = agent_platform.read_registry,
+                 latest: Callable[[], str | None] | None = None, state_path: Path | None = None,
+                 out: TextIO | None = None):
+        self._project = project
+        self._branch = branch
+        self._platform_repo = platform_repo
+        self._forge = forge or GitHubBumpForge()
+        self._tracker = tracker or PlatformTracker(platform_repo)
+        self._builder = builder or GitBuilder(platform_repo)
+        self._registry = registry
+        self._latest = latest or (lambda: proof_run.latest_proven(proof_run.proven_path()))
+        self._state_path = state_path
+        self._out = out
+
+    def __call__(self, cancel: threading.Event) -> list[Step]:
+        out = self._out or sys.stderr
+        try:
+            entries = self._registry()
+            steps = bump_pass(
+                entries, project=self._project, base=self._branch, platform_repo=self._platform_repo,
+                latest=self._latest(), forge=self._forge, tracker=self._tracker, builder=self._builder,
+                state_path=self._state_path or default_state_path(), cancel=cancel)
+        except approve.Cancelled:
+            return []
+        except (BumpRefused, forge_api.ForgeError, agent_platform.PlatformManifestError) as error:
+            print(f"console: lock_bump_failed {self._project} {type(error).__name__}: {error}", file=out)
+            return []
+        for step in steps:
+            print(_line(step), file=out)
+        return steps
+
+
+def run_loop(bumper: Callable[[threading.Event], object], stop: threading.Event,
+             seconds: float = LOCK_BUMP_SECONDS) -> None:
+    while True:
+        try:
+            bumper(stop)
+        except Exception as error:
+            print(f"console: lock_bump_loop_failed {type(error).__name__}: {error}", file=sys.stderr)
+        if stop.wait(seconds):
+            return
+
+
+def start(bumper: Callable[[threading.Event], object], stop: threading.Event,
+          seconds: float = LOCK_BUMP_SECONDS) -> threading.Thread:
+    thread = threading.Thread(target=run_loop, args=(bumper, stop, seconds), name=LOCK_BUMP_THREAD, daemon=True)
+    thread.start()
+    return thread
