@@ -143,6 +143,11 @@ class Cases(unittest.TestCase):
         if os.environ.get("SUITE_PART_FAIL") == "left-setup":
             raise RuntimeError("class fixture failed")
 
+    @classmethod
+    def tearDownClass(cls):
+        if os.environ.get("SUITE_PART_FAIL") == "left-teardown":
+            raise RuntimeError("class teardown failed")
+
     def test_one(self):
         pass
 '''
@@ -150,6 +155,50 @@ class Cases(unittest.TestCase):
 ALIAS_MEMBER = '''\
 from left import Cases as LeftCases
 from right import Cases as RightCases
+'''
+
+NESTED_HOOK_MEMBER = '''\
+import unittest
+
+
+class A(unittest.TestCase):
+    def test_a(self):
+        pass
+
+
+class B(unittest.TestCase):
+    def test_b(self):
+        pass
+
+
+class C(unittest.TestCase):
+    def test_c(self):
+        pass
+
+
+def load_tests(loader, tests, pattern):
+    loaded = loader.loadTestsFromNames([__name__ + ".A", __name__ + ".B"])
+    suite = unittest.TestSuite([loaded])
+    if len(list(loaded)) == 2:
+        suite.addTests(loader.loadTestsFromTestCase(C))
+    return suite
+'''
+
+ENDING_MEMBER = '''\
+import os
+import unittest
+
+
+class A(unittest.TestCase):
+    def test_a(self):
+        pass
+
+
+def part_finished():
+    with open(os.environ["SUITE_PART_RECORD"], "a") as handle:
+        handle.write("part_finished\\n")
+    if os.environ.get("SUITE_PART_FAIL") == "ending":
+        raise AssertionError("steps no run visited: ['p.s2']")
 '''
 
 BROKEN_MEMBER = "import suite_part_missing_module\n"
@@ -333,6 +382,36 @@ class SuitePartTest(unittest.TestCase):
         self.assertEqual(failed.returncode, 1)
         lines = [line for line in failed.stderr.splitlines() if line.strip()]
         self.assertEqual(lines[-1], "suite-part: failed classes left:Cases")
+
+    def test_a_hook_that_loads_names_through_the_loader_is_filtered_once_on_its_complete_suite(self):
+        (self.work / "test_nested.py").write_text(NESTED_HOOK_MEMBER)
+        listed = self.part("test_nested.py", "--list")
+        self.assertEqual(listed.stdout.splitlines(), ["A 1", "B 1", "C 1"])
+        for args in (["--only", "A"], ["--only", "B", "--only", "C"]):
+            done = self.part("test_nested.py", *args)
+            self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn("test_c (test_nested.C", done.stderr)
+
+    def test_a_class_teardown_failure_of_an_imported_class_names_the_class_with_its_module(self):
+        (self.work / "left.py").write_text(LEFT_MODULE)
+        (self.work / "right.py").write_text(LEFT_MODULE)
+        (self.work / "test_alias.py").write_text(ALIAS_MEMBER)
+        failed = self.part("test_alias.py", "--only", "left:Cases",
+                           extra={"SUITE_PART_FAIL": "left-teardown"})
+        self.assertEqual(failed.returncode, 1, failed.stderr)
+        lines = [line for line in failed.stderr.splitlines() if line.strip()]
+        self.assertEqual(lines[-1], "suite-part: failed classes left:Cases")
+
+    def test_a_part_ends_by_calling_the_members_part_finished_and_fails_when_it_raises(self):
+        (self.work / "test_ending.py").write_text(ENDING_MEMBER)
+        passed = self.part("test_ending.py", "--only", "A")
+        self.assertEqual(passed.returncode, 0, passed.stderr)
+        self.assertEqual(self.recorded(), ["part_finished"])
+        failed = self.part("test_ending.py", "--only", "A", extra={"SUITE_PART_FAIL": "ending"})
+        self.assertEqual(failed.returncode, 1, failed.stderr)
+        self.assertIn("steps no run visited: ['p.s2']", failed.stderr)
+        lines = [line for line in failed.stderr.splitlines() if line.strip()]
+        self.assertEqual(lines[-1], "suite-part: failed classes part_finished")
 
     def test_usage_errors_exit_2_before_any_test_runs(self):
         (self.work / "run.sh").write_text("true\n")

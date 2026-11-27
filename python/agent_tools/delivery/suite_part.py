@@ -39,6 +39,14 @@ failures, errors and unexpected successes (a failing subtest counts as its test)
 error names the class of a class fixture and `setUpModule` or `tearDownModule` for a module
 fixture. A successful part prints no such line.
 
+Part end. After the run a member function `part_finished()`, when the module defines one, is
+called, whether or not a test failed: a part that ran only classes the member imports never runs
+the member's module teardown. An exception it raises prints its traceback, adds `part_finished` to
+the failed classes and fails the part. `--list` does not call it.
+
+A `load_tests` hook may call the loader itself: only the outermost call filters, so the hook sees
+every test and the filter runs once on the suite the hook returns.
+
 Exits. Those of `python -m unittest`: 1 when the result is not successful, else 5 when no
 test ran and none was skipped, else 0. A usage error exits 2 before any test runs;
 `--list` exits 0, or 1 when the suite held a loader failure or a `TestSuite` subclass.
@@ -48,6 +56,7 @@ import argparse
 import os
 import re
 import sys
+import traceback
 import unittest
 from collections.abc import Collection, Iterable, Iterator, Mapping, Sequence
 from typing import TextIO
@@ -105,7 +114,11 @@ def selected(tests: Iterable[unittest.TestCase], *, only: Collection[str] = (),
 
 
 class ClassFilterLoader(unittest.TestLoader):
-    """A loader whose suite holds only the tests `selected` keeps."""
+    """A loader whose suite holds only the tests `selected` keeps, and `names` of their classes.
+
+    A `load_tests` hook may call `loadTestsFromNames` itself and decide from what it gets; only
+    the outermost call filters, so the hook sees the complete suite and the filter runs once on
+    what the hook returns."""
 
     def __init__(self, *, only: Collection[str] = (), excluded: Collection[str] = (),
                  module: str | None = None):
@@ -113,11 +126,20 @@ class ClassFilterLoader(unittest.TestLoader):
         self.only = tuple(only)
         self.excluded = tuple(excluded)
         self.module = module
+        self.names: dict[str, str] = {}
+        self._nesting = 0
 
     def loadTestsFromNames(self, names, module=None):
-        loaded = super().loadTestsFromNames(names, module)
-        return self.suiteClass(selected(flattened(loaded), only=self.only, excluded=self.excluded,
-                                           module=self.module))
+        self._nesting += 1
+        try:
+            loaded = super().loadTestsFromNames(names, module)
+        finally:
+            self._nesting -= 1
+        if self._nesting:
+            return loaded
+        kept = selected(flattened(loaded), only=self.only, excluded=self.excluded, module=self.module)
+        self.names.update({strclass(type(test)): class_name(type(test), self.module) for test in kept})
+        return self.suiteClass(kept)
 
 
 class ClassListing:
@@ -159,9 +181,9 @@ def failed_class(test, names: Mapping[str, str], module: str | None) -> str:
     return names.get(described["parent"], described["parent"])
 
 
-def failed_classes(result: unittest.TestResult, suite: unittest.TestSuite,
+def failed_classes(result: unittest.TestResult, names: Mapping[str, str],
                    module: str | None) -> list[str]:
-    names = {strclass(type(test)): class_name(type(test), module) for test in flattened(suite)}
+    """The class names of `result`'s failures; `names` is taken before the run, which empties the suite."""
     tests = [test for test, _ in result.failures + result.errors] + list(result.unexpectedSuccesses)
     return sorted({failed_class(test, names, module) for test in tests})
 
@@ -210,10 +232,25 @@ def run_part(args: argparse.Namespace, module: str | None) -> int:
     program = unittest.main(module=None, argv=["python -m unittest", "-v", args.member],
                             testLoader=loader, exit=False)
     result = program.result
-    if not result.wasSuccessful():
-        print(FAILED_CLASSES + ",".join(failed_classes(result, program.test, module)),
+    ending = part_finished(module)
+    if not result.wasSuccessful() or ending:
+        print(FAILED_CLASSES + ",".join(sorted({*failed_classes(result, loader.names, module), *ending})),
               file=sys.stderr)
-    return exit_code(result)
+    return 1 if ending else exit_code(result)
+
+
+def part_finished(module: str | None) -> list[str]:
+    """Call the member's `part_finished()` after the run: the member's last word on a part whose
+    own module teardown may not have run. `["part_finished"]` after printing its traceback when it raises."""
+    hook = getattr(sys.modules.get(module or ""), "part_finished", None)
+    if not callable(hook):
+        return []
+    try:
+        hook()
+    except Exception:
+        traceback.print_exc()
+        return ["part_finished"]
+    return []
 
 
 def main(argv: Sequence[str] | None = None) -> int:

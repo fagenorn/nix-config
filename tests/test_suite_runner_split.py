@@ -477,6 +477,21 @@ class FailureTest(SplitCase):
         self.assertEqual(suite_runner.part_failure(part, failed, done.stdout + done.stderr),
                          "test_big.py::B,C")
 
+    def test_a_passed_part_whose_directory_cannot_be_removed_gets_a_failed_part_line(self):
+        original = tempfile.TemporaryDirectory.cleanup
+
+        def cleanup(directory):
+            original(directory)
+            if Path(directory.name).name.startswith("member"):
+                raise PermissionError(13, "Permission denied", directory.name)
+
+        with mock.patch.object(tempfile.TemporaryDirectory, "cleanup", cleanup):
+            code, output = self.run_big(SUITE_RUNNER_SCRATCH="disk")
+        self.assertEqual(code, 1, output)
+        named = [line for line in output.splitlines() if line.startswith("suite-runner: failed part ")]
+        self.assertCountEqual(named, [f"suite-runner: failed part test_big.py::{label}"
+                                      for label in ("A", "D", "B,C")])
+
     def test_the_failed_part_line_falls_back_to_the_parts_label(self):
         part = suite_runner.Unit(0, "m.py", classes=("A",), excluded=("B",), part=1, parts=2)
         failed = MemberResult(0, "m.py::A", 1, 1.0, 1.0)

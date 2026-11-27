@@ -177,7 +177,8 @@ class StepCoverageJoinTest(unittest.TestCase):
         return sorted(path.name for path in self.parts.glob("*.json"))
 
     def finish_part(self, number: int, selected: list[str], recorded: list[Step], *, of: int = 2,
-                    member: Path | None = None, module: types.ModuleType | None = None) -> None:
+                    member: Path | None = None, module: types.ModuleType | None = None,
+                    end: str = "finish") -> None:
         environment = {PART_ENV: f"{number}/{of}", PART_DIR_ENV: str(self.parts),
                        PART_MEMBER_ENV: str(member or self.member)}
         coverage = StepCoverage(self.procedures, ("p",))
@@ -185,7 +186,27 @@ class StepCoverageJoinTest(unittest.TestCase):
             coverage.select(test_id)
         coverage.record(recorded)
         with mock.patch.dict(os.environ, environment):
-            return coverage.finish(module or self.module)
+            return getattr(coverage, end)(module or self.module)
+
+    def test_a_part_whose_module_teardown_never_ran_joins_when_the_part_ends(self) -> None:
+        # The third part ran only a class its member imports: the member's module teardown never ran.
+        self.assertIsNone(self.finish_part(1, [T_A], [("p", "s1")], of=3))
+        self.assertIsNone(self.finish_part(2, [U_B], [], of=3))
+        with self.assertRaises(AssertionError) as raised:
+            self.finish_part(3, [], [], of=3, end="finish_part")
+        self.assertIn("p.s2", str(raised.exception))
+        self.assertEqual(self.part_files(), ["1.json", "2.json", "3.json"])
+
+    def test_a_part_that_ends_after_its_module_teardown_joined_does_not_join_again(self) -> None:
+        coverage = StepCoverage(self.procedures, ("p",))
+        coverage.select(T_A)
+        coverage.record([("p", "s1")])
+        environment = {PART_ENV: "1/2", PART_DIR_ENV: str(self.parts), PART_MEMBER_ENV: str(self.member)}
+        with mock.patch.dict(os.environ, environment):
+            coverage.finish(self.module)
+            (self.parts / "1.json").unlink()
+            coverage.finish_part(self.module)
+        self.assertEqual(self.part_files(), [])
 
     def test_the_last_part_to_finish_checks_the_union_and_names_a_step_no_part_visited(self) -> None:
         for order in ((1, 2), (2, 1)):

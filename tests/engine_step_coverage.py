@@ -13,7 +13,9 @@ Inside a part of the module's own member (the three suite runner variables name 
 its parts share and the member), a partial selection is written to that directory as the part's own file,
 and a part that then finds every part's file checks their union, failing on a module test no part selected;
 a selection that covers the module checks alone and writes nothing. A part takes no lock and waits for no
-other part: the part that writes last sees every file.
+other part: the part that writes last sees every file. A part that ran only classes the module imports never
+runs the module teardown, so the module's `part_finished` calls `finish_part`, which writes that part's file
+and joins when no teardown did.
 `test_ids` names the module's tests with a fresh loader, so a `-k` filter on the shared default loader
 cannot narrow it, and leaves out each test a decorator skips: a decorator skip is part of the module's
 shape, so the check then fails if the skip lost a step. It names only the tests of `base`.
@@ -48,6 +50,7 @@ class StepCoverage:
         self._names = names
         self._selected: set[str] = set()
         self._recorded: set[Step] = set()
+        self._finished = False
 
     @property
     def names(self) -> tuple[str, ...]:
@@ -101,7 +104,13 @@ class StepCoverage:
             raise AssertionError(f"tests no part selected: {missing}")
         self._compare({(procedure, step) for entry in records for procedure, step in entry["recorded"]})
 
+    def finish_part(self, module: types.ModuleType, base: type[unittest.TestCase] = unittest.TestCase) -> None:
+        """The member's `part_finished`: `finish` for a part whose module teardown never ran."""
+        if not self._finished and _part_of(module) is not None:
+            self.finish(module, base)
+
     def finish(self, module: types.ModuleType, base: type[unittest.TestCase] = unittest.TestCase) -> None:
+        self._finished = True
         entered = [test for test in _flattened(unittest.TestLoader().loadTestsFromModule(module))
                    if vars(type(test)).get("_classSetupFailed")]
         try:

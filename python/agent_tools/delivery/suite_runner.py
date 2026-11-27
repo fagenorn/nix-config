@@ -70,7 +70,7 @@ malformed file meaning list order. Serial mode keeps list order, and the report 
 list order for ties. Refresh the file from a run's `suite-runner: <wall>s wall ... <member>`
 rows when the suite's shape changes; a stale file only costs wall time.
 `tests/test_suite_runner.py` names the run the file was last refreshed from and its members
-slower than 30 s, and a refresh from a newer run replaces both.
+slower than 35 s, and a refresh from a newer run replaces both.
 
 Shards. When `SUITE_RUNNER_SHARD` is set and non-empty it reads `<index>/<count>` with
 `1 <= index <= count`, both decimal numbers without a sign or a leading zero, and the runner
@@ -798,7 +798,6 @@ def _run_parallel(units: Sequence[Unit], order: Sequence[int], jobs: int,
                         member_tmp.cleanup()
                     except OSError as error:
                         removal_error = error
-            failures[index] = part_failure(unit, result, output)
             if output and not output.endswith(b"\n"):
                 output += b"\n"
             if removal_error is not None:
@@ -806,6 +805,7 @@ def _run_parallel(units: Sequence[Unit], order: Sequence[int], jobs: int,
                                 f"{removal_error}")
                 if result.passed:
                     result = replace(result, returncode=1)
+            failures[index] = part_failure(unit, result, output)
             # One write per block, before this worker takes its next member.
             with out.lock:
                 out.write(_line(f"{PREFIX} begin {label}") + output

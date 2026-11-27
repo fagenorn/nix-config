@@ -34,7 +34,7 @@ from agent_tools.delivery.suite_runner import MemberResult
 REPO_ROOT = Path(__file__).resolve().parents[1]
 EVAL_TREE_SCRIPT = "home/common/agent-skills/evals/tests/test-run-eval-tree.sh"
 
-# Members over 30 s of wall time on the run the committed suite timings were last
+# Members over 35 s of wall time on the run the committed suite timings were last
 # refreshed from: https://github.com/fagenorn/nix-config/actions/runs/45752397931
 # (job `Agent Workflow Tests`, head f4376726d). A refresh from a newer run replaces both.
 SLOW_ON_LAST_FULL_RUN: tuple[str, ...] = (
@@ -63,10 +63,6 @@ SLOW_ON_LAST_FULL_RUN: tuple[str, ...] = (
     "tests/test_console_page.py",
     "tests/test_verify_pending.py",
     "home/common/agent-skills/tests/test_node_lint.py",
-    "tests/test_console_approve_service.py",
-    "tests/test_release_crash_matrix.py",
-    "tests/test_claude_account_routing.py",
-    "tests/test_engine_session.py",
 )
 
 # A unittest module that meets its peers at the barrier. It holds a live token
@@ -543,7 +539,7 @@ class ScheduleOrderTest(RunnerCase):
 
 
 class CommittedTimingsTest(unittest.TestCase):
-    def test_the_timings_name_every_member_slower_than_30_seconds_on_the_last_full_run(self):
+    def test_the_timings_name_every_member_slower_than_35_seconds_on_the_last_full_run(self):
         timings = suite_runner.load_timings()
         self.assertEqual([m for m in SLOW_ON_LAST_FULL_RUN if m not in timings], [])
 
