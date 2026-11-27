@@ -11,11 +11,14 @@ from pathlib import Path
 from agent_tools.console import lock_bump
 from agent_tools.console.lock_bump import Step
 from agent_tools.console.lock_bump_forge import Checks, OpenBump
-from agent_tools.console.lock_bump_tree import BumpRefused, branch_for, revision_of_branch
+from agent_tools.console.lock_bump_tree import BumpRefused, Built, branch_for, revision_of_branch
+
+TIER = "fast"
 
 REPO = Path(__file__).resolve().parent.parent
 REV_A, REV_B, REV_C = "a" * 40, "b" * 40, "c" * 40
 HEAD = "d" * 40
+BUILT = "e" * 40
 PROJECT = "octo/fixture"
 ENTRIES = [{"project_id": PROJECT, "root": "/srv/fixture"}]
 
@@ -62,6 +65,12 @@ class FakeForge:
 class FakeTracker:
     def __init__(self):
         self.issues = []
+        self.known = {}
+        self.finds = []
+
+    def find(self, project, revision):
+        self.finds.append((project, revision))
+        return self.known.get((project, revision))
 
     def create(self, title, body):
         self.issues.append((title, body))
@@ -72,6 +81,7 @@ class FakeBuilder:
     def __init__(self, pin_answer=REV_A):
         self.pin_answer = pin_answer
         self.calls = []
+        self.refusal = None
 
     def pin(self, root, slug, base, cancel=None):
         self.calls.append(("pin", root, slug, base))
@@ -79,7 +89,12 @@ class FakeBuilder:
 
     def build(self, root, slug, base, revision, cancel=None):
         self.calls.append(("build", root, slug, base, revision))
-        return branch_for(revision)
+        return Built(branch_for(revision), BUILT)
+
+    def verify(self, root, slug, revision, head, cancel=None):
+        self.calls.append(("verify", root, slug, revision, head))
+        if self.refusal:
+            raise BumpRefused(self.refusal)
 
 
 class PassCase(unittest.TestCase):
@@ -97,9 +112,10 @@ class PassCase(unittest.TestCase):
     def record(self):
         return lock_bump.read_state(self.state_path)["projects"].get(PROJECT)
 
-    def remember(self, revision, outcome, pull=7, issue=None, origin=None):
+    def remember(self, revision, outcome, pull=7, issue=None, origin=None, commit=None):
         lock_bump.write_state(self.state_path, {"format": 1, "projects": {PROJECT: {
-            "revision": revision, "pull": pull, "outcome": outcome, "issue": issue, "from": origin}}})
+            "revision": revision, "pull": pull, "outcome": outcome, "issue": issue, "from": origin,
+            "commit": commit}}})
 
     def calls_of(self, name):
         return [call for call in self.builder.calls if call[0] == name]
@@ -114,7 +130,7 @@ class OpenTest(PassCase):
         self.assertEqual(first, [Step(PROJECT, "opened", REV_B, 7, None, None)])
         self.assertEqual(second, [Step(PROJECT, "pending", REV_B, 7, None, None)])
         self.assertEqual(self.record(), {"revision": REV_B, "pull": 7, "outcome": "open", "issue": None,
-                                         "from": REV_A})
+                                         "from": REV_A, "commit": BUILT})
 
     def test_the_bump_pull_request_names_the_revision_and_carries_the_marker(self):
         self.run_pass()
@@ -154,6 +170,30 @@ class SettleTest(PassCase):
         self.assertEqual(self.forge.named("merge"), [("merge", PROJECT, 9, HEAD)])
         self.assertEqual(self.record()["outcome"], "merged")
         self.assertEqual(self.tracker.issues, [])
+
+    def test_a_head_that_is_not_the_recorded_built_commit_merges_nothing(self):
+        self.forge.open.append(OpenBump(9, REV_B))
+        self.forge.states[9] = Checks("green", HEAD, ())
+        self.remember(REV_B, "open", pull=9, commit=BUILT)
+        steps = self.run_pass()
+        self.assertEqual(steps, [Step(PROJECT, "unverified", REV_B, 9, None, "head moved")])
+        self.assertEqual((self.forge.named("merge"), self.record()["outcome"]), ([], "open"))
+
+    def test_a_head_that_does_not_hold_the_bump_merges_nothing(self):
+        self.forge.open.append(OpenBump(9, REV_B))
+        self.forge.states[9] = Checks("green", HEAD, ())
+        self.builder.refusal = "the bump branch does not lock bbbbbbbbbbbb"
+        steps = self.run_pass()
+        self.assertEqual([step.action for step in steps], ["unverified"])
+        self.assertEqual(self.forge.named("merge"), [])
+        self.assertEqual(self.calls_of("verify"), [("verify", Path("/srv/fixture"), PROJECT, REV_B, HEAD)])
+
+    def test_the_recorded_built_commit_is_merged_after_it_verifies(self):
+        self.forge.open.append(OpenBump(9, REV_B))
+        self.forge.states[9] = Checks("green", BUILT, ())
+        self.remember(REV_B, "open", pull=9, commit=BUILT)
+        self.assertEqual(self.run_pass()[0].action, "merged")
+        self.assertEqual(self.forge.named("merge"), [("merge", PROJECT, 9, BUILT)])
 
     def test_pending_checks_merge_nothing(self):
         self.forge.open.append(OpenBump(9, REV_B))
@@ -200,6 +240,23 @@ class RedTest(PassCase):
         self.assertEqual(len(self.tracker.issues), 1)
         self.assertEqual(second[0].action, "red_known")
 
+    def test_a_green_reading_after_a_red_one_never_merges_the_bump(self):
+        self.red_bump()
+        self.run_pass()
+        self.forge.states[9] = Checks("green", HEAD, ())
+        steps = self.run_pass()
+        self.assertEqual(steps, [Step(PROJECT, "red_known", REV_B, 9, 501, None)])
+        self.assertEqual(self.forge.named("merge"), [])
+        self.assertEqual(self.record()["outcome"], "red")
+
+    def test_a_red_bump_whose_issue_exists_on_the_tracker_files_no_second_issue(self):
+        self.red_bump()
+        self.tracker.known[(PROJECT, REV_B)] = 77
+        steps = self.run_pass()
+        self.assertEqual(self.tracker.issues, [])
+        self.assertEqual(steps, [Step(PROJECT, "red_known", REV_B, 9, 77, None)])
+        self.assertEqual((self.record()["outcome"], self.record()["issue"]), ("red", 77))
+
     def test_a_red_bump_closed_by_hand_is_retried_only_by_a_newer_revision(self):
         self.remember(REV_B, "red", issue=501)
         self.assertEqual(self.run_pass()[0].action, "done")
@@ -231,6 +288,39 @@ class StateTest(PassCase):
         with self.assertRaises(BumpRefused):
             self.run_pass()
         self.assertEqual(json.loads(self.state_path.read_text()), {"format": 2})
+
+
+    def test_a_null_record_is_refused_not_an_attribute_error(self):
+        self.state_path.parent.mkdir(parents=True)
+        self.state_path.write_text("null")
+        with self.assertRaises(BumpRefused):
+            self.run_pass()
+        self.assertEqual(self.state_path.read_text(), "null")
+
+
+class PlatformTrackerTest(unittest.TestCase):
+    def tracker(self, pages):
+        seen = []
+
+        def read(path):
+            seen.append(path)
+            return pages
+
+        return lock_bump.PlatformTracker("octo/platform", pages=read, create=lambda *a: 1), seen
+
+    def test_the_issue_with_this_projects_and_revisions_marker_is_found(self):
+        marker = lock_bump.red_marker(PROJECT, REV_B)
+        other = lock_bump.red_marker(PROJECT, REV_A)
+        pages = [[{"number": 3, "body": f"x\n\n{other}"}, {"number": 4, "body": "none"}],
+                 [{"number": 5, "body": f"x\n\n{marker}", "pull_request": {}},
+                  {"number": 6, "body": f"x\n\n{marker}"}]]
+        tracker, seen = self.tracker(pages)
+        self.assertEqual(tracker.find(PROJECT, REV_B), 6)
+        self.assertEqual(seen, ["repos/octo/platform/issues?state=all&per_page=100"])
+
+    def test_no_marker_finds_none(self):
+        tracker, _ = self.tracker([[{"number": 3, "body": None}, {"number": 4, "body": "no marker"}]])
+        self.assertIsNone(tracker.find(PROJECT, REV_B))
 
 
 class GlossaryTest(unittest.TestCase):

@@ -17,6 +17,8 @@ from agent_tools.project_contract import agent_platform
 from tests.test_console_lock_bump import ENTRIES, REV_B, FakeBuilder, FakeForge, FakeTracker
 from tests.accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures
 
+TIER = "fast"
+
 FLAGS = ["--lock-bump-project", "fagenorn/engine-fixture", "--lock-bump-branch", "main",
          "--platform-repo", "fagenorn/nix-config"]
 

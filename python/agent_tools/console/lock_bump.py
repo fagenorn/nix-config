@@ -1,23 +1,30 @@
 """`lock_bump`: one pass that offers a proven revision to one project as a lock bump pull request.
 
 The record `~/.agents/state/console/lock-bumps.json` is `{"format": 1, "projects": {<project>: {"revision",
-"pull", "outcome": "open"|"merged"|"red"|"closed", "issue", "from"}}}` for the last bump of each project; an
+"pull", "outcome": "open"|"merged"|"red"|"closed", "issue", "from", "commit"}}}` for the last bump of each project; an
 absent file is empty and an unreadable or malformed one is `BumpRefused`, never reset. Open bumps are read
 from the forge each pass. The pass takes only the registry entry whose `project_id` is `project`. Order:
 every open bump of another revision is closed (`replaced`); an open bump of `latest` is settled by its
-required checks (`merged` on green, `filed` once and then `red_known` on red, `pending`); a revision whose
+required checks (`merged` on green only when its head is the recorded built commit and the lock there pins
+`latest`, else `unverified`; `filed` once and then `red_known` on red, `pending`); a revision whose
 record is not open is `done` and never opened again, so the next proven revision is the retry; otherwise
 a lock that is behind `latest` gets one built branch and one pull request (`opened`). The record is written
-after each forge write. A red bump is never merged or closed by the pass before a newer revision arrives.
+after each forge write. A red bump is never merged or closed by the pass before a newer revision arrives,
+even when a later reading is green. Before it files a red issue the pass looks for one already carrying that
+project-and-revision marker in the platform repository, so a lost answer files no second issue. `commit` is
+the built commit of the bump, or null for a bump found open with no record.
 
 `Bumper` is the console's pass: it reads the registry and the latest proven revision, runs `bump_pass` and
 prints one `console: lock_bump <project> <action> <revision> <pull> <issue>` line per step, or one
 `console: lock_bump_failed` line when the pass is refused. `start` runs it in a daemon thread every ten
 minutes until its stop event is set, and that event is the pass's `cancel`.
 
-`python -m agent_tools.console.lock_bump observed --repo O/N` is the evidence check: it finds the latest merged
-`lock-bump-<revision>` pull request of the repository and judges its required contexts as the merge does.
-It prints one JSON line and exits 0 met, 1 not met, 75 when no bump has merged, 2 on a forge error.
+`python -m agent_tools.console.lock_bump observed --repo O/N --base BRANCH --since STAMP [--within-days 7]
+[--proven FILE]` is the evidence check: the revision is the first line of the proven record stamped at or
+after `STAMP` (the activation, `YYYY-MM-DDTHH:MM:SSZ`); the pull request is the one merged into `BRANCH` from
+that revision's `lock-bump-<revision>` branch, judged on its required contexts as the merge does, and merged
+within the days after `STAMP`. It prints one JSON line and exits 0 met, 1 not met (red, late, or the window
+has passed with no merge), 75 not yet, 2 on a forge or record error.
 """
 
 from __future__ import annotations
@@ -29,6 +36,7 @@ import re
 import sys
 import tempfile
 import threading
+from datetime import datetime, timedelta, timezone
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import NamedTuple, Protocol, TextIO
@@ -36,7 +44,7 @@ from typing import NamedTuple, Protocol, TextIO
 from agent_tools.console import approve
 from agent_tools.console import lock_bump_forge
 from agent_tools.console.lock_bump_forge import Checks, GitHubBumpForge, OpenBump
-from agent_tools.console.lock_bump_tree import BRANCH, BumpRefused, GitBuilder, branch_for
+from agent_tools.console.lock_bump_tree import BumpRefused, Built, GitBuilder, branch_for, revision_of_branch
 from agent_tools.delivery import proof_run
 from agent_tools.project_contract import agent_platform
 from agent_tools.system import forge_api
@@ -45,7 +53,8 @@ FORMAT = 1
 LOCK_BUMP_SECONDS = 600.0
 LOCK_BUMP_THREAD = "console-lock-bump"
 MARKER = "<!-- agent:lock-bump v1 -->"
-RED_MARKER = "<!-- agent:lock-bump-red v1 -->"
+WITHIN_DAYS = 7
+STAMP = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
 OUTCOMES = frozenset(("open", "merged", "red", "closed"))
 REVISION = re.compile(r"[0-9a-f]{40}")
 
@@ -77,12 +86,17 @@ class BumpForge(Protocol):
 class Tracker(Protocol):
     def create(self, title: str, body: str) -> int: ...
 
+    def find(self, project: str, revision: str) -> int | None: ...
+
 
 class Builder(Protocol):
     def pin(self, root: Path, slug: str, base: str, cancel: threading.Event | None = None) -> str: ...
 
     def build(self, root: Path, slug: str, base: str, revision: str,
-              cancel: threading.Event | None = None) -> str: ...
+              cancel: threading.Event | None = None) -> Built: ...
+
+    def verify(self, root: Path, slug: str, revision: str, head: str,
+               cancel: threading.Event | None = None) -> None: ...
 
 
 def default_state_path() -> Path:
@@ -94,12 +108,14 @@ def _number(value: object) -> bool:
 
 
 def _valid_record(record: object) -> bool:
-    return (isinstance(record, dict) and set(record) == {"revision", "pull", "outcome", "issue", "from"}
+    return (isinstance(record, dict) and set(record) == {"revision", "pull", "outcome", "issue", "from", "commit"}
             and isinstance(record["revision"], str) and REVISION.fullmatch(record["revision"]) is not None
             and _number(record["pull"]) and record["pull"] > 0 and record["outcome"] in OUTCOMES
             and (record["issue"] is None or _number(record["issue"]))
             and (record["from"] is None or (isinstance(record["from"], str)
-                                            and REVISION.fullmatch(record["from"]) is not None)))
+                                            and REVISION.fullmatch(record["from"]) is not None))
+            and (record["commit"] is None or (isinstance(record["commit"], str)
+                                              and REVISION.fullmatch(record["commit"]) is not None)))
 
 
 def read_state(path: Path) -> dict:
@@ -114,7 +130,8 @@ def read_state(path: Path) -> dict:
     except (ValueError, RecursionError):
         raise BumpRefused("the lock bump record is not JSON") from None
     projects = state.get("projects") if isinstance(state, dict) else None
-    if (state.get("format") != FORMAT or not isinstance(projects, dict) or set(state) != {"format", "projects"}
+    if (not isinstance(state, dict) or state.get("format") != FORMAT or not isinstance(projects, dict)
+            or set(state) != {"format", "projects"}
             or not all(_valid_record(record) for record in projects.values())):
         raise BumpRefused("the lock bump record is malformed")
     return state
@@ -139,13 +156,17 @@ def _pull_text(platform_repo: str, latest: str, pin: str) -> tuple[str, str]:
     return f"Bump the agent platform to {latest[:12]}", body
 
 
+def red_marker(project: str, revision: str) -> str:
+    return f"<!-- agent:lock-bump-red v1 {project} {revision} -->"
+
+
 def _issue_text(project: str, latest: str, pull: int, failing: Sequence[str]) -> tuple[str, str]:
     checks = ", ".join(failing)
     body = (f"The lock bump of {project} to {latest} fails: {checks}.\n\n"
             f"Pull request: https://github.com/{project}/pull/{pull}\n\n"
             + "\n".join(f"- {name}" for name in failing)
             + "\n\nOnly the lock changed, so the failure is the platform's. The project stays on its old "
-              "lock until the next proven revision is offered.\n\n" + RED_MARKER)
+              "lock until the next proven revision is offered.\n\n" + red_marker(project, latest))
     return f"Lock bump to {latest[:12]} fails {checks} on {project}", body
 
 
@@ -159,6 +180,7 @@ def bump_pass(entries: Sequence[Mapping], *, project: str, base: str, platform_r
         return [Step(project, "no_proven", None, None, None, None)]
     state = read_state(state_path)
     record = state["projects"].get(project)
+    root = Path(matching[0]["root"])
 
     def save(new: dict | None) -> None:
         nonlocal record
@@ -182,8 +204,9 @@ def bump_pass(entries: Sequence[Mapping], *, project: str, base: str, platform_r
     if current:
         number = current[0].number
         if record is None or record["revision"] != latest:
-            save({"revision": latest, "pull": number, "outcome": "open", "issue": None, "from": None})
-        return steps + [_settle(project, latest, number, record, forge, tracker, save, cancel)]
+            save({"revision": latest, "pull": number, "outcome": "open", "issue": None, "from": None,
+                  "commit": None})
+        return steps + [_settle(project, latest, number, record, forge, tracker, builder, root, save, cancel)]
     if record is not None and record["revision"] == latest:
         number = record["pull"]
         if record["outcome"] != "open":
@@ -193,44 +216,68 @@ def bump_pass(entries: Sequence[Mapping], *, project: str, base: str, platform_r
             save({**record, "outcome": ended.state})
             return steps + [step("ended", number, record["issue"], ended.state)]
         return steps + [step("pending", number)]
-    root = Path(matching[0]["root"])
     pin = builder.pin(root, project, base, cancel=cancel)
     if pin == latest:
         return steps + [step("current")]
     status = forge.compare(platform_repo, pin, latest, cancel)
     if status != "ahead":
         return steps + [step("not_behind", detail=status)]
-    branch = builder.build(root, project, base, latest, cancel=cancel)
+    built = builder.build(root, project, base, latest, cancel=cancel)
     title, body = _pull_text(platform_repo, latest, pin)
-    number = forge.open_pull(project, branch, base, title, body, cancel)
-    save({"revision": latest, "pull": number, "outcome": "open", "issue": None, "from": pin})
+    number = forge.open_pull(project, built.branch, base, title, body, cancel)
+    save({"revision": latest, "pull": number, "outcome": "open", "issue": None, "from": pin,
+          "commit": built.commit})
     return steps + [step("opened", number)]
 
 
-def _settle(project, latest, number, record, forge, tracker, save, cancel) -> Step:
+def _settle(project, latest, number, record, forge, tracker, builder, root, save, cancel) -> Step:
     checks = forge.checks(project, number, cancel)
+    if checks.state in ("merged", "closed"):
+        save({**record, "outcome": checks.state})
+        return Step(project, "ended", latest, number, record["issue"], checks.state)
+    if record["outcome"] == "red":
+        return Step(project, "red_known", latest, number, record["issue"], None)
     if checks.state == "green":
+        if record["commit"] is not None and checks.head != record["commit"]:
+            return Step(project, "unverified", latest, number, record["issue"], "head moved")
+        try:
+            builder.verify(root, project, latest, checks.head, cancel)
+        except BumpRefused as error:
+            return Step(project, "unverified", latest, number, record["issue"], str(error))
         forge.merge(project, number, checks.head, cancel)
         save({**record, "outcome": "merged"})
         return Step(project, "merged", latest, number, record["issue"], None)
     if checks.state == "red":
-        if record["issue"] is not None:
-            return Step(project, "red_known", latest, number, record["issue"], None)
-        issue = tracker.create(*_issue_text(project, latest, number, checks.failing))
+        known = tracker.find(project, latest)
+        issue = known if known is not None else tracker.create(
+            *_issue_text(project, latest, number, checks.failing))
         save({**record, "outcome": "red", "issue": issue})
-        return Step(project, "filed", latest, number, issue, None)
-    if checks.state in ("merged", "closed"):
-        save({**record, "outcome": checks.state})
-        return Step(project, "ended", latest, number, record["issue"], checks.state)
+        return Step(project, "red_known" if known is not None else "filed", latest, number, issue, None)
     return Step(project, "pending", latest, number, record["issue"], None)
 
 
 class PlatformTracker:
-    def __init__(self, platform_repo: str):
+    def __init__(self, platform_repo: str, *, pages: Callable[[str], list] = forge_api.api_pages,
+                 create: Callable[[str, str, str], int] = forge_api.create_issue):
         self._platform_repo = platform_repo
+        self._pages = pages
+        self._create = create
 
     def create(self, title: str, body: str) -> int:
-        return forge_api.create_issue(self._platform_repo, title, body)
+        return self._create(self._platform_repo, title, body)
+
+    def find(self, project: str, revision: str) -> int | None:
+        """The number of an issue of the platform repository that carries the red marker of this bump."""
+        marker = red_marker(project, revision)
+        for page in self._pages(f"repos/{self._platform_repo}/issues?state=all&per_page=100"):
+            for issue in page if isinstance(page, list) else []:
+                if not isinstance(issue, dict) or "pull_request" in issue:
+                    continue
+                number, body = issue.get("number"), issue.get("body")
+                if (isinstance(body, str) and marker in body.splitlines() and isinstance(number, int)
+                        and not isinstance(number, bool)):
+                    return number
+        return None
 
 
 def _line(step: Step) -> str:
@@ -292,22 +339,57 @@ def start(bumper: Callable[[threading.Event], object], stop: threading.Event,
     return thread
 
 
-def observe(repo: str, *, pages: Callable[[str], list], verdict: Callable[[str, int], Checks]) -> tuple[int, dict]:
-    """The exit code and the printed record of the latest merged bump of `repo`, judged on required contexts."""
+def _moment(stamp: str) -> datetime:
+    return datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+
+
+def first_proven_after(proven: Path, since: str) -> str | None:
+    """The revision of the first line of the proven record stamped at or after `since`, else None."""
+    try:
+        data = Path(proven).read_bytes()
+    except FileNotFoundError:
+        return None
+    for raw in data.split(b"\n"):
+        try:
+            line = json.loads(raw.decode("utf-8"))
+        except (ValueError, RecursionError):
+            continue
+        if not isinstance(line, dict) or line.get("format") != proof_run.FORMAT:
+            continue
+        revision, stamp = line.get("revision"), line.get("proven")
+        if (isinstance(revision, str) and REVISION.fullmatch(revision) and isinstance(stamp, str)
+                and STAMP.fullmatch(stamp) and stamp >= since):
+            return revision
+    return None
+
+
+def observe(repo: str, *, base: str, since: str, proven: Path, pages: Callable[[str], list],
+            verdict: Callable[[str, int], Checks], now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+            within_days: int = WITHIN_DAYS) -> tuple[int, dict]:
+    """The exit code and printed record of the bump of the first proven revision after `since`, merged into
+    `base` within `within_days` and judged on its required contexts."""
+    deadline = _moment(since) + timedelta(days=within_days)
+    revision = first_proven_after(proven, since)
+    late = now() > deadline
+    if revision is None:
+        return (1, {"pull": None, "state": "not_met"}) if late else (75, {"pull": None, "state": "not_yet"})
     merged = []
     for page in pages(f"repos/{repo}/pulls?state=closed&per_page=100"):
         for pull in page if isinstance(page, list) else []:
             head = pull.get("head") if isinstance(pull, dict) else None
             head = head if isinstance(head, dict) else {}
+            target = pull.get("base") if isinstance(pull.get("base"), dict) else {}
             source = head.get("repo") if isinstance(head.get("repo"), dict) else {}
-            ref, sha, number = head.get("ref"), head.get("sha"), pull.get("number")
-            if (isinstance(pull.get("merged_at"), str) and isinstance(ref, str) and BRANCH.fullmatch(ref)
-                    and source.get("full_name") == repo and isinstance(sha, str) and approve.COMMIT.fullmatch(sha)
-                    and isinstance(number, int) and not isinstance(number, bool)):
-                merged.append((pull["merged_at"], number))
+            sha, number, at = head.get("sha"), pull.get("number"), pull.get("merged_at")
+            if (isinstance(at, str) and STAMP.fullmatch(at) and revision_of_branch(head.get("ref")) == revision
+                    and target.get("ref") == base and source.get("full_name") == repo and isinstance(sha, str)
+                    and approve.COMMIT.fullmatch(sha) and isinstance(number, int) and not isinstance(number, bool)):
+                merged.append((at, number))
     if not merged:
-        return 75, {"pull": None, "state": "not_yet"}
-    number = max(merged)[1]
+        return (1, {"pull": None, "state": "not_met"}) if late else (75, {"pull": None, "state": "not_yet"})
+    at, number = min(merged)
+    if _moment(at) > deadline:
+        return 1, {"pull": number, "state": "not_met"}
     if verdict(repo, number).state == "green":
         return 0, {"pull": number, "state": "met"}
     return 1, {"pull": number, "state": "not_met"}
@@ -316,12 +398,24 @@ def observe(repo: str, *, pages: Callable[[str], list], verdict: Callable[[str, 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="lock_bump", description="Check that a lock bump merged green.")
     modes = parser.add_subparsers(dest="mode", required=True)
-    modes.add_parser("observed").add_argument("--repo", required=True, metavar="O/N")
+    observed = modes.add_parser("observed")
+    observed.add_argument("--repo", required=True, metavar="O/N")
+    observed.add_argument("--base", required=True, metavar="BRANCH")
+    observed.add_argument("--since", required=True, metavar="STAMP")
+    observed.add_argument("--within-days", type=int, default=WITHIN_DAYS)
+    observed.add_argument("--proven", type=Path, default=None, metavar="FILE")
     args = parser.parse_args(argv)
     if re.fullmatch(r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+", args.repo) is None:
         parser.error("--repo is owner/name")
+    if STAMP.fullmatch(args.since) is None:
+        parser.error("--since is YYYY-MM-DDTHH:MM:SSZ")
+    if args.within_days < 1:
+        parser.error("--within-days is a positive number")
     try:
-        code, record = observe(args.repo, pages=forge_api.api_pages, verdict=lock_bump_forge.GitHubBumpForge().verdict)
+        code, record = observe(
+            args.repo, base=args.base, since=args.since, proven=args.proven or proof_run.proven_path(),
+            pages=forge_api.api_pages, verdict=lock_bump_forge.GitHubBumpForge().verdict,
+            within_days=args.within_days)
     except forge_api.ForgeError as error:
         print(f"lock-bump: {error}", file=sys.stderr)
         return 2

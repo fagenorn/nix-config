@@ -8,6 +8,8 @@ import unittest
 from agent_tools.console import lock_bump_tree
 from agent_tools.console.lock_bump_tree import BumpRefused, branch_for, bumped_lock, pinned_revision, required_migrations
 
+TIER = "fast"
+
 REV_A = "a" * 40
 REV_B = "b" * 40
 HASH = "sha256-" + "A" * 43 + "="
@@ -73,9 +75,18 @@ class MigrationTest(unittest.TestCase):
     def test_a_supported_schema_needs_no_migration(self):
         self.assertEqual(required_migrations(MANIFEST, 3), [])
 
-    def test_a_retired_schema_steps_until_supported(self):
+    def test_a_retired_schema_with_one_step_to_a_supported_schema_runs_that_step(self):
         manifest = {**MANIFEST, "project_schema_versions": [3]}
-        self.assertEqual(required_migrations(manifest, 1), ["bindings-deploy.retire", "platform-constants.retire"])
+        self.assertEqual(required_migrations(manifest, 2), ["platform-constants.retire"])
+
+    def test_a_chain_stops_at_the_first_supported_schema(self):
+        manifest = {**MANIFEST, "project_schema_versions": [2, 3]}
+        self.assertEqual(required_migrations(manifest, 1), ["bindings-deploy.retire"])
+
+    def test_a_chain_through_a_retired_intermediate_schema_is_refused_before_any_step(self):
+        manifest = {**MANIFEST, "project_schema_versions": [3]}
+        with self.assertRaisesRegex(BumpRefused, "bindings-deploy.retire.*schema 2"):
+            required_migrations(manifest, 1)
 
     def test_a_schema_with_no_forward_step_is_refused(self):
         with self.assertRaises(BumpRefused):

@@ -13,8 +13,10 @@ from pathlib import Path
 from unittest import mock
 
 from agent_tools.console import approve, lock_bump_tree
-from agent_tools.console.lock_bump_tree import BumpRefused, GitBuilder, branch_for, bumped_lock
+from agent_tools.console.lock_bump_tree import BumpRefused, Built, GitBuilder, branch_for, bumped_lock
 from tests.test_console_lock_bump_tree import REV_A, REV_B, document, dumped, record
+
+TIER = "integration"  # it builds a sandbox git repository and runs git
 
 REV_C = "c" * 40
 SLUG = "octo/fixture"
@@ -119,7 +121,8 @@ class BuildTest(BuildFixture):
     def test_a_build_pushes_one_commit_holding_the_lock_and_the_projections(self):
         branch = branch_for(REV_B)
         main_before = self.pushed("main")
-        self.assertEqual(self.builder.build(self.root, SLUG, "main", REV_B), branch)
+        built = self.builder.build(self.root, SLUG, "main", REV_B)
+        self.assertEqual(built, Built(branch, self.pushed(branch)))
         locked = json.loads(self.show(branch, "devenv.lock"))["nodes"]["agent-platform"]["locked"]
         self.assertEqual(locked, record(REV_B))
         self.assertEqual(self.show(branch, "AGENTS.md"), "generated")
@@ -140,7 +143,7 @@ class BuildTest(BuildFixture):
     def test_a_contract_on_a_retired_schema_is_migrated_in_the_bump(self):
         self.publish({".agents/project.json": b'{"schema_version": 2}'})
         self.git("fetch", "-q", cwd=self.root)
-        branch = self.builder.build(self.root, SLUG, "main", REV_B)
+        branch = self.builder.build(self.root, SLUG, "main", REV_B).branch
         words = self.migrations_log.read_text().splitlines()
         self.assertEqual(len(words), 1)
         self.assertTrue(words[0].startswith("migrate --migration platform-constants.retire --repo-root "))
@@ -179,13 +182,26 @@ class BuildTest(BuildFixture):
         self.assertNotEqual(code, 0)
         self.assertEqual(len(self.trees()), 1)
 
-    def test_an_existing_bump_branch_is_reused_without_a_build(self):
+    def test_an_existing_bump_branch_holding_the_bump_is_reused_without_a_second_build(self):
+        branch = branch_for(REV_B)
+        first = self.builder.build(self.root, SLUG, "main", REV_B)
+        self.package_calls.clear()
+        self.assertEqual(self.builder.build(self.root, SLUG, "main", REV_B), first)
+        self.assertEqual(self.package_calls, [])
+        self.assertEqual(self.pushed(branch), first.commit)
+
+    def test_an_existing_bump_branch_that_is_unchanged_main_is_refused_not_reused(self):
         branch = branch_for(REV_B)
         self.git("push", "-q", "origin", f"HEAD:refs/heads/{branch}", cwd=self.root)
-        before = self.pushed(branch)
-        self.assertEqual(self.builder.build(self.root, SLUG, "main", REV_B), branch)
+        with self.assertRaisesRegex(BumpRefused, "does not lock"):
+            self.builder.build(self.root, SLUG, "main", REV_B)
         self.assertEqual(self.package_calls, [])
-        self.assertEqual(self.pushed(branch), before)
+
+    def test_verify_refuses_a_head_the_branch_is_no_longer_at(self):
+        built = self.builder.build(self.root, SLUG, "main", REV_B)
+        self.builder.verify(self.root, SLUG, REV_B, built.commit)
+        with self.assertRaisesRegex(BumpRefused, "not at"):
+            self.builder.verify(self.root, SLUG, REV_B, self.pushed("main"))
 
     def test_a_package_of_another_revision_is_refused_before_a_worktree(self):
         self.make_package(record(REV_C))
@@ -198,7 +214,7 @@ class BuildTest(BuildFixture):
     def test_a_contract_that_asks_for_signing_signs_the_bump(self):
         self.resolved.write_text(json.dumps({"bindings": {"vcs": {"commit": {"signed": True}}}}))
         self.git("config", "commit.gpgsign", "false", cwd=self.root)
-        branch = self.builder.build(self.root, SLUG, "main", REV_B)
+        branch = self.builder.build(self.root, SLUG, "main", REV_B).branch
         self.assertIn("gpgsig", self.git("cat-file", "commit", branch, cwd=self.origin))
         self.assertEqual(len(self.signer_log.read_text().splitlines()), 1)
 

@@ -1,3 +1,4 @@
 #!/bin/sh
-# Checks that a lock bump of the fixture merged with green required checks: exit 0 met, 1 not met, 75 not yet, 2 forge error.
+# Checks that the bump of the first revision proven after activation merged green into --base within 7 days of --since
+# (the activation stamp, YYYY-MM-DDTHH:MM:SSZ), with --repo O/N: exit 0 met, 1 not met, 75 not yet, 2 forge error.
 PYTHONPATH=python exec python3 -m agent_tools.console.lock_bump observed "$@"

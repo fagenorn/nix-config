@@ -7,6 +7,8 @@ import unittest
 from agent_tools.console.lock_bump_forge import Checks, GitHubBumpForge, OpenBump, QUERY
 from agent_tools.system.forge_api import ForgeError
 
+TIER = "fast"
+
 H = "d" * 40
 REV_A = "a" * 40
 REV_B = "b" * 40

@@ -4,7 +4,11 @@ Run: just agent-workflow-tests
 """
 import contextlib
 import io
+import json
+import shutil
+import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -14,14 +18,25 @@ from agent_tools.system import forge_api
 from agent_tools.system.forge_api import ForgeError
 from tests.test_verify_checks import committed_mode
 
+TIER = "fast"
+
 SCRIPT = "home/common/verify-pending/checks/lock-bump-merged"
 REPO = "octo/fixture"
 PATH = f"repos/{REPO}/pulls?state=closed&per_page=100"
-REV_A, REV_B, HEAD = "a" * 40, "b" * 40, "d" * 40
+REV_A, REV_B, REV_C, HEAD = "a" * 40, "b" * 40, "c" * 40, "d" * 40
 
 
-def closed(number, ref, merged_at):
-    return {"number": number, "merged_at": merged_at, "head": {"ref": ref, "sha": HEAD, "repo": {"full_name": REPO}}}
+SINCE = "2026-12-01T00:00:00Z"
+NOW = datetime(2026, 12, 3, tzinfo=timezone.utc)
+
+
+def closed(number, ref, merged_at, base="main"):
+    return {"number": number, "merged_at": merged_at, "base": {"ref": base},
+            "head": {"ref": ref, "sha": HEAD, "repo": {"full_name": REPO}}}
+
+
+def proven_line(revision, stamp):
+    return json.dumps({"format": 1, "issue": 1, "project": REPO, "proven": stamp, "revision": revision, "run": 1})
 
 
 class StandIn:
@@ -35,21 +50,65 @@ class StandIn:
 
 
 class ObservedTest(unittest.TestCase):
-    def observe(self, pulls, answer=Checks("green", HEAD, ())):
-        pages, verdict = StandIn([pulls]), StandIn(answer)
-        return lock_bump.observe(REPO, pages=pages, verdict=verdict), pages, verdict
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.proven = self.tmp / "proven.jsonl"
+        self.lines = [proven_line(REV_A, "2026-11-30T06:00:00Z"), proven_line(REV_B, "2026-12-01T06:00:00Z"),
+                      proven_line(REV_C, "2026-12-02T06:00:00Z")]
+        self.proven.write_text("\n".join(self.lines) + "\n")
 
-    def test_a_merged_bump_with_green_required_contexts_is_met(self):
+    def observe(self, pulls, answer=Checks("green", HEAD, ()), now=NOW):
+        pages, verdict = StandIn([pulls]), StandIn(answer)
+        result = lock_bump.observe(REPO, base="main", since=SINCE, proven=self.proven, pages=pages, verdict=verdict,
+                                   now=lambda: now)
+        return result, pages, verdict
+
+    def test_the_first_proven_revision_after_activation_merged_green_is_met(self):
         pulls = [closed(9, f"lock-bump-{REV_B}", "2026-12-01T07:00:00Z"), closed(8, f"lock-bump-{REV_A}", None)]
         result, pages, verdict = self.observe(pulls)
         self.assertEqual(result, (0, {"pull": 9, "state": "met"}))
         self.assertEqual((pages.calls, verdict.calls), ([(PATH,)], [(REPO, 9)]))
 
-    def test_no_merged_bump_is_not_yet(self):
-        pulls = [closed(8, f"lock-bump-{REV_A}", None), closed(7, "adopt-0123456789ab", "2026-12-01T07:00:00Z")]
+    def test_a_bump_merged_before_activation_does_not_count(self):
+        pulls = [closed(7, f"lock-bump-{REV_A}", "2026-11-30T07:00:00Z")]
         result, _, verdict = self.observe(pulls)
         self.assertEqual(result, (75, {"pull": None, "state": "not_yet"}))
         self.assertEqual(verdict.calls, [])
+
+    def test_a_later_revisions_merge_does_not_stand_for_the_first(self):
+        pulls = [closed(10, f"lock-bump-{REV_C}", "2026-12-02T07:00:00Z")]
+        result, _, verdict = self.observe(pulls)
+        self.assertEqual(result, (75, {"pull": None, "state": "not_yet"}))
+        self.assertEqual(verdict.calls, [])
+
+    def test_a_merge_into_another_base_does_not_count(self):
+        pulls = [closed(9, f"lock-bump-{REV_B}", "2026-12-01T07:00:00Z", base="release")]
+        result, _, _ = self.observe(pulls)
+        self.assertEqual(result, (75, {"pull": None, "state": "not_yet"}))
+
+    def test_a_merge_after_the_seven_days_is_not_met(self):
+        pulls = [closed(9, f"lock-bump-{REV_B}", "2026-12-08T00:00:01Z")]
+        result, _, verdict = self.observe(pulls, now=datetime(2026, 12, 9, tzinfo=timezone.utc))
+        self.assertEqual(result, (1, {"pull": 9, "state": "not_met"}))
+        self.assertEqual(verdict.calls, [])
+
+    def test_a_merge_on_the_last_day_is_met(self):
+        pulls = [closed(9, f"lock-bump-{REV_B}", "2026-12-08T00:00:00Z")]
+        result, _, _ = self.observe(pulls, now=datetime(2026, 12, 9, tzinfo=timezone.utc))
+        self.assertEqual(result, (0, {"pull": 9, "state": "met"}))
+
+    def test_no_merged_bump_is_not_yet_inside_the_window_and_not_met_after_it(self):
+        pulls = [closed(8, f"lock-bump-{REV_B}", None), closed(7, "adopt-0123456789ab", "2026-12-01T07:00:00Z")]
+        self.assertEqual(self.observe(pulls)[0], (75, {"pull": None, "state": "not_yet"}))
+        late = datetime(2026, 12, 9, tzinfo=timezone.utc)
+        self.assertEqual(self.observe(pulls, now=late)[0], (1, {"pull": None, "state": "not_met"}))
+
+    def test_no_proven_revision_after_activation_is_not_yet(self):
+        self.proven.write_text(self.lines[0] + "\n")
+        result, pages, _ = self.observe([closed(9, f"lock-bump-{REV_A}", "2026-12-01T07:00:00Z")])
+        self.assertEqual(result, (75, {"pull": None, "state": "not_yet"}))
+        self.assertEqual(pages.calls, [])
 
     def test_a_red_required_context_is_not_met(self):
         pulls = [closed(9, f"lock-bump-{REV_B}", "2026-12-01T07:00:00Z")]
@@ -61,7 +120,8 @@ class ObservedTest(unittest.TestCase):
         with mock.patch.object(forge_api, "api_pages", side_effect=ForgeError("gh_failed", "down")) as pages, \
                 mock.patch.object(forge_api, "run_gh", side_effect=AssertionError("no real gh")), \
                 contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            code = lock_bump.main(["observed", "--repo", REPO])
+            code = lock_bump.main(["observed", "--repo", REPO, "--base", "main", "--since", SINCE,
+                                   "--proven", str(self.proven)])
         self.assertEqual((code, out.getvalue()), (2, ""))
         self.assertTrue(err.getvalue().startswith("lock-bump: "))
         self.assertEqual(len(err.getvalue().splitlines()), 1)

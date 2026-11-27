@@ -4,16 +4,21 @@
 so only a kept `agent-platform` entry is ever edited and a missing or foreign one is `BumpRefused`, never a
 new entry. `bumped_lock` replaces that node's `locked` member with the proven revision's record and nothing
 else, serialised as the adoption does (sorted, indented, a trailing newline only when the input had one).
-`required_migrations` names the migrations a proven revision needs a contract to take, in order.
+`required_migrations` names the migration a proven revision needs a contract to take: one step, which must
+land on a schema the revision reads, because each real migration resolves its own output at once; a step
+that lands on a retired schema is `BumpRefused` before any file is touched.
 
 `GitBuilder` builds the bump commit. Every child runs in its own group with no stdin, no `GITHUB_TOKEN`,
 `GH_TOKEN` or repository selector, and a set `cancel` ends the build with `approve.Cancelled`. `pin` checks
 that `origin` of the checkout is the project, fetches the base and reads the lock's pinned revision there.
-`build` reuses a bump branch already on the remote; else it takes the proven revision's package (whose record
+`build` returns `Built(branch, commit)`. It reuses a bump branch already on the remote only after `verify`
+shows its head locks the proven revision (anything else is `BumpRefused`, never reused); else it takes the proven revision's package (whose record
 must be that revision of the platform repository), makes a scratch worktree at the base, writes the bumped
 lock, runs the migrations the revision requires and its projections with the package's own tools, commits
 signed as the contract's `bindings.vcs.commit.signed` says (never as the host's default does) and pushes
-that commit to the bump branch without force. The worktree and its directory are removed on every outcome.
+that commit to the bump branch without force. `verify` fetches the bump branch and refuses unless its tip
+is the named head and the lock at that head pins the proven revision. The worktree and its directory are
+removed on every outcome.
 """
 
 from __future__ import annotations
@@ -27,6 +32,7 @@ import tempfile
 import threading
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
+from typing import NamedTuple
 
 from agent_tools.canonical import reject_duplicate_keys
 from agent_tools.console import approve, manager
@@ -44,6 +50,11 @@ REVISION = re.compile(r"[0-9a-f]{40}")
 
 class BumpRefused(Exception):
     """A bump that cannot be made, in plain words."""
+
+
+class Built(NamedTuple):
+    branch: str
+    commit: str
 
 
 def branch_for(revision: str) -> str:
@@ -84,21 +95,20 @@ def bumped_lock(lock: bytes, record: Mapping[str, object]) -> bytes:
 
 def required_migrations(manifest: Mapping, schema_version: int) -> list[str]:
     supported = manifest["project_schema_versions"]
-    steps: list[str] = []
-    schema = schema_version
-    while schema not in supported:
-        try:
-            step = select_forward_step(dict(manifest), schema)
-        except AdoptError as error:
-            raise BumpRefused(f"no single migration steps forward from schema {schema}: "
-                              f"{error.repair_id}") from None
-        if step is None:
-            raise BumpRefused(f"no migration steps forward from schema {schema}")
-        steps.append(step["id"])
-        schema = step.get("to_schema")
-        if len(steps) > len(manifest["migrations"]):
-            raise BumpRefused("the migrations of the proven revision do not reach a supported schema")
-    return steps
+    if schema_version in supported:
+        return []
+    try:
+        step = select_forward_step(dict(manifest), schema_version)
+    except AdoptError as error:
+        raise BumpRefused(f"no single migration steps forward from schema {schema_version}: "
+                          f"{error.repair_id}") from None
+    if step is None:
+        raise BumpRefused(f"no migration steps forward from schema {schema_version}")
+    target = step.get("to_schema")
+    if target not in supported:
+        raise BumpRefused(f"the migration {step['id']} from schema {schema_version} lands on schema {target}, "
+                          "which the proven revision does not read, and a migration resolves its own output")
+    return [step["id"]]
 
 
 CHILD_TIMEOUT = 1800.0
@@ -189,13 +199,32 @@ class GitBuilder:
             raise BumpRefused(f"the package was not built from {self._platform_repo}@{revision}")
         return record
 
+    def verify(self, root: Path, slug: str, revision: str, head: str,
+               cancel: threading.Event | None = None) -> None:
+        """Refuse unless the bump branch's tip is `head` and the lock there pins `revision`."""
+        branch = branch_for(revision)
+        self._git(root, "the bump branch fetch", cancel, "fetch", "--quiet", "--no-tags", "origin",
+                  f"+refs/heads/{branch}:refs/remotes/origin/{branch}")
+        tip = self._git(root, "the bump branch read", cancel, "rev-parse", "--verify",
+                        f"refs/remotes/origin/{branch}").stdout.decode().strip()
+        if tip != head:
+            raise BumpRefused(f"the bump branch is at {tip[:12]}, not at {head[:12]}")
+        shown = self._git(root, "the bump lock read", cancel, "show", f"{head}:{adopt_conformance.LOCK_FILE}")
+        if pinned_revision(shown.stdout) != revision:
+            raise BumpRefused(f"the bump branch does not lock {revision[:12]}")
+
     def build(self, root: Path, slug: str, base: str, revision: str,
-              cancel: threading.Event | None = None) -> str:
+              cancel: threading.Event | None = None) -> Built:
         branch = branch_for(revision)
         found = self._git(root, "the bump branch read", cancel, "ls-remote", "--exit-code", "origin",
                           f"refs/heads/{branch}", ok=(0, 2))
         if found.returncode == 0:
-            return branch
+            words = found.stdout.decode("utf-8", "replace").split()
+            head = words[0] if words else ""
+            if approve.COMMIT.fullmatch(head) is None:
+                raise BumpRefused("the bump branch has no readable head")
+            self.verify(root, slug, revision, head, cancel)
+            return Built(branch, head)
         out = self._package(revision, cancel)
         record = self._record(out, revision)
         manifest = _json_file(out / "share" / "agent-platform" / "platform-manifest.json", "the package's manifest")
@@ -213,7 +242,7 @@ class GitBuilder:
                       f"{commit}:refs/heads/{branch}")
         finally:
             self._clean(root, tree, scratch)
-        return branch
+        return Built(branch, commit)
 
     def _edit(self, tree: Path, out: Path, manifest: object, record: dict, cancel) -> str:
         lock_file = tree / adopt_conformance.LOCK_FILE
