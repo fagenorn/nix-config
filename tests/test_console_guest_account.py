@@ -1288,6 +1288,40 @@ class GuestAccountChangeRefusalTest(GuestAccountCase):
                 self.assertTrue((self.profiles / second).is_dir())
                 return
 
+    def test_a_profile_replaced_during_either_profiles_drain_is_never_changed(self):
+        svc = self.begin()
+        for route in (REMOVE, SIGNOUT):
+            for draining, replaced in ((1, 0), (0, 1)):
+                with self.subTest(route=route, draining=draining, replaced=replaced):
+                    pair = self.shared_account()
+                    body = self.change_body()
+                    with svc._ingest:
+                        svc._probing.add(pair[draining])
+                    answers = []
+                    thread = threading.Thread(
+                        target=lambda: answers.append(self.post(route, body)), daemon=True)
+                    thread.start()
+                    try:
+                        until(self, lambda: pair[draining] in svc._removing)
+                        self.replace_dir(pair[replaced])
+                    finally:
+                        with svc._ingest:
+                            svc._probing.discard(pair[draining])
+                            svc._idle.notify_all()
+                        thread.join(10)
+                    self.assertFalse(thread.is_alive())
+                    self.assertEqual(
+                        answers[0], (409, guest.NOT_YOUR_ACCOUNT_TEXT.encode() + b"\n"))
+                    self.assertEqual((self.signed_out, self.removed_calls), ([], []))
+                    self.assertEqual(svc._removing, set())
+                    self.assertEqual(self.rows("account.removal"), [])
+                    for name in pair:
+                        self.assertTrue((self.profiles / name).is_dir())
+                    self.assertEqual(
+                        [row for row in self.acted() if row["action"] == "signout"], [])
+                    for name in pair:
+                        shutil.rmtree(self.profiles / name)
+
     def test_a_change_waiting_for_the_drain_meets_the_owners_replacement_and_leaves_it(self):
         svc = self.begin()
         for route in (REMOVE, SIGNOUT):
