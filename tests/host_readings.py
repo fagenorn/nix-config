@@ -289,6 +289,7 @@ PARTS: dict[str, Part] = {
   serve = o.serve;
   reload = o.reload;
   restart = o.restart;
+  killReactive = o.killReactive;
   launchd = c.system.activationScripts.launchd.text;
   hold = o.hold;
   unhold = o.unhold;
