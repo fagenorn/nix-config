@@ -351,13 +351,8 @@ def prove(tip: Callable[[], str], *, mode: str, root: Callable[[], Path], slug: 
           tracker: FixtureTracker, engine: Callable[[str], Sequence[str]], proven: Path,
           attempts: Path, lock: Path, env: Mapping[str, str] | None = None,
           now: Callable[[], datetime] = _utc_now) -> Outcome:
-    """One attempt on the revision `tip()` names: lock, tip, unmoved check, reset, engine.
-
-    The tip is read once the lock is held, so the revision proven is the tip at the time the operation
-    ran and never one an earlier caller read before another caller proved a newer one. `root()` names
-    the fixture's checkout, read after the attempt is recorded. A tip that cannot be read records the
-    attempt as started (revision `None`) and ended (code 2) before the error goes on; a revision found
-    unmoved records no attempt.
+    """One attempt on the tip `tip()` names, read under the lock; then unmoved check, reset, engine.
+    An unreadable tip records a started and an ended (code 2) attempt; an unmoved revision records none.
     """
     def note(attempt: str, event: str, **fields: object) -> None:
         engine_housekeeping.append_history(
