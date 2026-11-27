@@ -2,9 +2,13 @@
 
 `step` runs once per `omlx-memory-watch sample` when `--restart-command` is given. The figure is the
 fresh census's unowned bytes plus the reading's compressor bytes. A sample over the trigger adds one to
-the streak; a sample at or under it ends the episode; a sample without a fresh census zeroes the streak
-and keeps the episode. An attempt is due once the streak reaches the sample count and the episode has
-not already restarted oMLX. Available memory under the room, or a restart less than the minimum gap
+the streak; a sample at or under it ends the episode; a sample without a fresh census holds the streak and
+keeps the episode. A streak whose last fresh over sample is more than 15 minutes old (`STALE_AFTER`) is
+zeroed by the next sample (so is one whose time cannot be compared with the sample's, a UTC offset on one
+and none on the other), so a stale reading never triggers a restart. `hold_since_at` is the time of the first
+sample this rule saw: a state written by an older watcher gains it on its first sample, and the day check
+anchors on it, never on `since_at`. An attempt is due once the streak
+reaches the sample count and the episode has not already restarted oMLX. Available memory under the room, or a restart less than the minimum gap
 ago (measured from when the gate returned), defers the attempt; otherwise the gate `<command> --reactive`
 runs: exit 0 restarted, 75 deferred (the reason is in its last `oMLX: restart deferred (...)` line),
 anything else failed. A restarted or interrupted outcome ends the episode and alerts once; a deferred or
@@ -41,6 +45,7 @@ RESTARTS_NAME = "omlx-restarts.jsonl"
 LOCK_NAME = "omlx-restart.lock"
 GATE_TIMEOUT_SECONDS = 120
 REAP_SECONDS = 5
+STALE_AFTER = timedelta(minutes=15)
 DEFERRED_PREFIX = "oMLX: restart deferred ("
 ALERT_KIND = "omlx_restarted"
 SEE = "See hosts/darwin/eleven-m5/README.md, Reactive restart."
@@ -120,7 +125,7 @@ def _save(path: Path, document: dict) -> None:
 
 def _defaults(now: datetime) -> dict:
     return {
-        "since_at": now.isoformat(), "limits": None, "streak": 0, "episode_done": False,
+        "since_at": now.isoformat(), "hold_since_at": now.isoformat(), "limits": None, "streak": 0, "streak_at": None, "episode_done": False,
         "last_restart_at": None, "attempt": None, "outbox": [],
     }
 
@@ -140,6 +145,9 @@ def _load(path: Path, now: datetime) -> dict:
         raise ValueError("the restart state has a wrong field")
     if document["last_restart_at"] is not None:
         datetime.fromisoformat(document["last_restart_at"])
+    if document["streak_at"] is not None:
+        datetime.fromisoformat(document["streak_at"])
+    datetime.fromisoformat(document["hold_since_at"])
     for entry in document["outbox"]:
         entry["record"]["id"], entry["alert"], entry["recorded"], entry["logged"]
     if document["attempt"] is not None:
@@ -241,13 +249,28 @@ def _flush(directory: Path, document: dict, deliver: Callable[[str, str, bool], 
     return failed
 
 
-def _fold(document: dict, value: int | None, limits: Limits) -> None:
-    if value is None or value <= limits.trigger_bytes:
+def _stale(held: str | None, now: datetime) -> bool:
+    """True when the last over sample is unknown, older than `STALE_AFTER`, or cannot be compared with `now`
+    (one time has a UTC offset and the other has none)."""
+    if held is None:
+        return True
+    try:
+        return now - datetime.fromisoformat(held) > STALE_AFTER
+    except TypeError:
+        return True
+
+
+def _fold(document: dict, value: int | None, now: datetime, limits: Limits) -> None:
+    if document["streak"] and _stale(document["streak_at"], now):
         document["streak"] = 0
-        if value is not None:
-            document["episode_done"] = False
+    if value is None:
+        return
+    if value <= limits.trigger_bytes:
+        document["streak"] = 0
+        document["episode_done"] = False
     else:
         document["streak"] += 1
+        document["streak_at"] = now.isoformat()
 
 
 def _limits_document(limits: Limits) -> dict:
@@ -333,7 +356,7 @@ def _step(directory, census, reading, now, limits, elapsed, gate, deliver, persi
         _save(path, document)
     document["limits"] = _limits_document(limits)
     value = figure(census, reading)
-    _fold(document, value, limits)
+    _fold(document, value, now, limits)
     if value is not None and document["streak"] >= limits.samples and not document["episode_done"]:
         facts = {
             "id": uuid.uuid4().hex, "at": now.isoformat(), "available_bytes": reading["available_bytes"],
