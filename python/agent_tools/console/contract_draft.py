@@ -768,7 +768,7 @@ def committed_contract(root: str, cancel: threading.Event | None = None) -> obje
             return None
         blob = _git(root, "cat-file", "blob", spec, cancel=cancel)
         return None if blob is None else json.loads(blob.decode("utf-8"))
-    except ValueError:  # not a size, not UTF-8 (UnicodeDecodeError) or not JSON
+    except (ValueError, RecursionError):  # not a size, not UTF-8 (UnicodeDecodeError), not JSON or nested too deep
         return None
 
 

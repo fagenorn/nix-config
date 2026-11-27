@@ -1361,6 +1361,12 @@ class CommittedContractTest(unittest.TestCase):
             stopped.set()
             self.assertIsNone(cd.committed_contract(str(root), stopped))
 
+    def test_a_deeply_nested_committed_contract_reads_as_none(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            nested = "[" * 50000 + "]" * 50000
+            root = self.committed(tmp, nested)
+            self.assertIsNone(cd.committed_contract(str(root)))
+
     def test_signing_committed_reads_the_checkout_only_on_a_signing_refusal(self):
         refusal = {"repair_id": "adopt.commit.signing_unavailable"}
         with tempfile.TemporaryDirectory() as tmp:
