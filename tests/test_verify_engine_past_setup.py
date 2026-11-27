@@ -314,6 +314,8 @@ class LedgerContractTest(unittest.TestCase):
                 "stop_reached": {"step": "s", "stop": "tool-denied", "need": "owner-decision"},
                 "run_done": {}, "run_continued": {"step": "s", "visit": 1}}
         lines = [{"event": kind, "at": at, **members} for kind, members in good.items()]
+        lines.append({"event": "transition_taken", "at": at, **good["transition_taken"],
+                      "dropped": [{"finding": "full-rereview:1", "criteria": ["AC2"]}]})
         entered = good["step_entered"]
         lines += [{"event": "step_entered", "at": at, **{**entered, **bad}} for bad in (
             {"step": "Bad"}, {"step": 1}, {"visit": 0}, {"visit": True}, {"visit": "1"}, {"stage": "elsewhere"},

@@ -8,6 +8,7 @@ import unittest
 
 from agent_tools.delivery import engine_core, engine_reply, engine_session, issue_setup
 from agent_tools.delivery.engine_core import RunGroup, Stop
+from agent_tools.delivery.engine_graders import GRADERS, dropped
 from tests.test_engine_check import PROCEDURES, SHIPPED_INPUTS, UNNAMED, load, step
 
 TIER = "fast"
@@ -179,6 +180,31 @@ class DirectProcedureTest(unittest.TestCase):
         for name in ("direct-rereview-full.md", "direct-rereview-lite.md", "direct-rereview-escalated.md"):
             with self.subTest(name=name):
                 self.assertIn(sentence, (PROCEDURES / name).read_text(encoding="utf-8"))
+
+    def test_a_re_review_finding_naming_only_an_evidence_criterion_settles_clean_and_rides_on_its_transition(self):
+        evidence = {"id": "AC2", "text": "t", "kind": "evidence", "result": "r"}
+        implemented = {**IMPLEMENTED, "acceptance": [*IMPLEMENTED["acceptance"], evidence]}
+        fix = {"status": "done", "start_head": SHA, "commit": "b" * 40, "notes": "n", "tests": [], "declines": []}
+        finding = {**NAMED[0], "summary": "AC2 has no evidence", "kind": "other", "restates": "AC2"}
+        events = (reported("preflight", "clear", PREFLIGHT) + reported("implement", "done", implemented)
+                  + lite_round(lite_review("findings", NAMED)) + reported("lite-fix", "done", fix)
+                  + reported("lite-rereview", "findings", {"verdict": "findings", "findings": [finding]}))
+
+        replay = replayed(events)
+
+        self.assertIsInstance(replay.action, engine_core.Done)
+        self.assertIn(engine_core.Transition("lite-settled", "clean", "done"), replay.transitions)
+        settled = [t for t in replay.transitions if t.step == "lite-settled"][0]
+        self.assertEqual(settled.dropped, ({"finding": "lite-rereview:1", "criteria": ["AC2"]},))
+
+    def test_every_step_whose_grader_drops_findings_reads_the_acceptance(self):
+        steps = [s for s in load(PROCEDURES, "direct")["steps"]
+                 if s["kind"] == "decide" and GRADERS[s["grader"]].drops is dropped]
+        self.assertEqual({s["id"] for s in steps}, {"lite-tally", "escalated-tally", "full-tally",
+                                                    "lite-settled", "escalated-settled", "full-settled"})
+        for one in steps:
+            with self.subTest(step=one["id"]):
+                self.assertIn("implement.acceptance", one["in"])
 
     def test_a_blocked_group_reaches_its_tally(self):
         direct = load(PROCEDURES, "direct")
