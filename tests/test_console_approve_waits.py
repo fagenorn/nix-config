@@ -1,10 +1,11 @@
-"""The approve case's quick shutdown, publish-woken waits and copied reconcile repository (#1615).
+"""The approve case's quick shutdown, publish-woken waits, copied reconcile repository (#1615) and a saved contract's signing failure (#1095).
 
 Run: just agent-workflow-tests
 """
 
 from __future__ import annotations
 
+import json
 import socketserver
 import sys
 import threading
@@ -12,7 +13,7 @@ import time
 import types
 from unittest import mock
 
-from agent_tools.console import service
+from agent_tools.console import approve, service
 
 from . import approve_case_support as case_support
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1052)
@@ -310,3 +311,64 @@ class RestartedRegistrationTest(ApproveCase):
         self.assertEqual(self.results(), ["waiting"])
         gate["release"].set()
         self.listed_and_registered()
+
+
+POINTED = {"error": {**approve_service.SIGNING["error"], "violations": [
+    {"pointer": approve.SIGNING_POINTER, "message": "the contract asks for a signed commit"}]}}
+
+
+class Retaining(Fake):
+    """A `Fake` whose apply keeps the adoption's branch in the checkout, as a failed real apply does."""
+
+    repo = None
+
+    def apply(self, plan_id, *args, **kwargs):
+        result = super().apply(plan_id, *args, **kwargs)
+        git(self.repo, "branch", f"adopt-{plan_id.split(':', 1)[1][:12]}")
+        return result
+
+
+class CommittedSigningTest(ApproveCase):
+    def signed_checkout(self, result):
+        """A registered checkout whose saved contract (schema 2) asks for signing, and an apply that fails on it."""
+        adopter = Retaining(plan=READY, apply_result=result)
+        self.start(adopter)
+        self.repo = adopter.repo = reconciled(self.parent, contract=True)
+        (self.repo / "scratch.ignored").write_text("untracked\n")
+        (self.repo / ".git/info/exclude").write_text("scratch.ignored\n")
+        contract = self.repo / ".agents/project.json"
+        contract.write_text(json.dumps(
+            {"schema_version": 2, "bindings": {"vcs": {"commit": {"signed": True}}}}) + "\n")
+        git(self.repo, "commit", "-q", "-am", "signed")
+        git(self.repo, "push", "-q", "origin", "main")
+        self.registered(self.repo)
+        self.settled_row(self.repo)
+
+    def snapshot(self):
+        """Every ref but the adoption's own retained branch, the checked-out revision, the status with ignored
+        files, and every file outside .git."""
+        files = {str(path.relative_to(self.repo)): path.read_bytes() for path in sorted(self.repo.rglob("*"))
+                 if path.is_file() and ".git" not in path.relative_to(self.repo).parts}
+        refs = [line for line in git(self.repo, "for-each-ref").splitlines()
+                if not line.split()[-1].startswith("refs/heads/adopt-")]
+        return (refs, git(self.repo, "rev-parse", "HEAD"),
+                git(self.repo, "status", "--porcelain", "--ignored"), files)
+
+    def test_a_signing_failure_from_a_committed_schema_two_contract_names_its_settings_and_edits_nothing(self):
+        self.signed_checkout(POINTED)
+        git(self.repo, "branch", "other")
+        before = self.snapshot()
+        self.run_approval("apply_failed")
+        (card,) = self.apply_cards()
+        self.assertEqual(card["why"], approve.COMMITTED_SIGNING_NOTE)
+        self.assertEqual(card["questions"][0]["options"], ["Apply it again", "Not now"])
+        self.assertEqual(card["values"], ["apply", "not_now"])
+        self.assertIn("signed changes", card["headline"])
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(len(git(self.repo, "for-each-ref", "refs/heads/adopt-*").splitlines()), 1)
+
+    def test_the_note_follows_the_apply_error_and_not_the_checkout(self):
+        self.signed_checkout(approve_service.SIGNING)
+        self.run_approval("apply_failed")
+        (card,) = self.apply_cards()
+        self.assertEqual(card["why"], approve.SIGNING_NOTE)

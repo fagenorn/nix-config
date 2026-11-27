@@ -307,6 +307,45 @@ class FixedWordsTest(unittest.TestCase):
         self.assertIn(label, PAGE.read_text(encoding="utf-8"))
         self.assertIn(label, approve.FAILING_WHY)
 
+    def test_a_committed_signing_policy_names_the_repository_settings_in_plain_words(self):
+        from .test_console_approve import BANNED, INVARIANT, KEPT
+        point = {"pointer": "/bindings/vcs/commit/signed", "message": "x"}
+        signing = {"code": "verification_failed", "repair_id": approve.SIGNING_REPAIR,
+                   "violations": [{"pointer": "", "message": "x"}]}
+        committed = {**signing, "violations": [point]}
+        output = {"hook": "pre-commit", "exit": 1, "lines": []}
+        hooked, committed_hooked = ({**error, "commit_output": output} for error in (signing, committed))
+        other = {"code": "x", "repair_id": approve.COMMIT_REPAIR, "violations": [point]}
+        note, why = approve.COMMITTED_SIGNING_NOTE, "it ended with exit status 1"
+        hook_note = approve.hook_signing_note("pre-commit", why, settings=True)
+        for kept in (None, KEPT):
+            with self.subTest(kept=kept):
+                self.assertEqual(approve.apply_failure("r", committed, kept), (approve.SIGNING_REASON, note))
+                self.assertEqual(approve.apply_failure("r", signing, kept),
+                                 (approve.SIGNING_REASON, approve.SIGNING_NOTE))
+        self.assertEqual(approve.apply_failure("r", committed_hooked, None), (approve.SIGNING_REASON, hook_note))
+        self.assertEqual(approve.apply_failure("r", hooked, None),
+                         (approve.SIGNING_REASON, approve.hook_signing_note("pre-commit", why)))
+        self.assertEqual(approve.apply_failure("r", other, None)[1], approve.apply_failure(
+            "r", {**other, "violations": []}, None)[1])
+        for bad in (None, "x", [None, 3, "x", {"pointer": 3}], {"pointer": point["pointer"]}):
+            self.assertEqual(approve.apply_failure("r", {**signing, "violations": bad}, None),
+                             (approve.SIGNING_REASON, approve.SIGNING_NOTE))
+        self.assertEqual(
+            note,
+            "This project's own settings in its repository ask for signed changes. Set up a signing key "
+            "on this computer and choose Apply it again, or change those settings in the repository, "
+            "then register it again.")
+        for text in (note, hook_note):
+            with self.subTest(text=text):
+                self.assertLessEqual(len(re.findall(r"[.!?](?=\s|$)", text)), 2)
+                self.assertIsNone(INVARIANT.search(text))
+                self.assertFalse([word for word in BANNED if word in text])
+        self.assertEqual(sprint.words_found(note), [])  # the hook note names the hook, as before
+        self.assertIn("pre-commit hook", hook_note)
+        self.assertIn(why, hook_note)
+        self.assertIn("settings", hook_note)
+
     def test_page_words_reads_markup_text_and_visible_attributes(self):
         html = '<p title="Open the pull request">The land lock</p><style>.held{}</style><template id="x"><b>held</b></template><script>"use strict";</script>'
         words = page_words(html)
@@ -438,7 +477,7 @@ class StoredWordsTest(unittest.TestCase):
 
     OLD = "the project asks for signed commits and this computer could not sign the adoption commit"
 
-    def test_an_old_signing_failure_still_offers_turning_signing_off(self):
+    def test_an_old_signing_failure_reads_in_todays_words_and_offers_apply_it_again(self):
         from .test_console_approve import KEPT, PID, step_payload
         events = [Event(1, "t", approve.STEP, None, step_payload(
             "apply_failed", reason=self.OLD, note=approve.SIGNING_NOTE, kept=KEPT, branch=None, commit=None))]
@@ -451,8 +490,8 @@ class StoredWordsTest(unittest.TestCase):
         items = approve.apply_items(latest, adoption, entry, "approve")
         self.assertEqual(adoption["reason"], approve.SIGNING_REASON)
         self.assertNotEqual(approve.SIGNING_REASON, self.OLD)
-        self.assertEqual(items[0]["values"], ["apply", "signing_off", "not_now"])
-        self.assertEqual(items[0]["questions"][0]["options"], ["Apply it again", "Turn signing off", "Not now"])
+        self.assertEqual(items[0]["values"], ["apply", "not_now"])
+        self.assertEqual(items[0]["questions"][0]["options"], ["Apply it again", "Not now"])
         self.assertEqual(entry["headline"], "The adoption of r was not applied: " + approve.SIGNING_REASON + ".")
 
 
