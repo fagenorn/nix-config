@@ -300,8 +300,7 @@ def _plan_directory(worktree_path: str, issue: int):
     """The descriptor of the planner's directory, opened one component at a time below the worktree.
 
     Each directory is opened relative to its parent's descriptor with no-follow semantics, so a directory
-    replaced by a link after it was checked redirects nothing: the descriptors name the directories that were
-    opened, whatever the paths come to mean afterwards.
+    replaced by a link after it was checked redirects nothing.
     """
     try:
         held = [os.open(worktree_path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))]
@@ -344,10 +343,8 @@ def _too_large(size: int) -> Failure:
 def plan_text(worktree_path: str, issue: int, tasks: Sequence[int]) -> str:
     """`plan.md`, then `task-<n>.md` for each declared n in order of n under `## task-<n>.md`.
 
-    Only the declared task files are read: another `task-<k>.md` left by an earlier plan is no part of this one.
-    Only regular files below real directories are read (a link on the way is `plan_unsafe`), so nothing outside
-    the plan directory is published, and the files together are bounded by `PLAN_LIMIT` characters (a character
-    is at most four bytes, so no read goes past four times that) before any text is built.
+    Only declared task files and regular files below real directories are read (a link is `plan_unsafe`); the
+    files together are bounded by `PLAN_LIMIT` characters (at most four bytes each) before any text is built.
     """
     budget = PLAN_LIMIT * 4
     parts: list[str] = []
@@ -423,8 +420,7 @@ def approved_plan(worktree_path: str, issue: int, holder: str, comments: Sequenc
     """The text of the plan the run `holder` approved, or "" when it approved none that still stands.
 
     The run's record (written by `plan-note`) names the comment and the digest; the plan is that comment's body
-    only while it still is exactly the marker line of that digest and run followed by text of that digest. A
-    later comment that merely carries a marker, and an edit of the approved comment, are therefore no plan.
+    only while it is exactly the marker line of that digest and run followed by text of that digest.
     """
     try:
         with _plan_directory(worktree_path, issue) as directory:
