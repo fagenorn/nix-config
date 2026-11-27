@@ -26,7 +26,7 @@ TIER = "fast"
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PROCEDURES = REPO_ROOT / "python/agent_tools/delivery/procedures"
-FIX_STEPS = ("lite-fix", "escalated-fix", "full-fix", "merge-fix", "ci-fix")
+FIX_STEPS = ("lite-fix", "escalated-fix", "full-fix", "merge-fix", "ci-fix", "plan-revise")
 FINDINGS_PLACEHOLDER = re.compile(r"\{\{\s*[a-z-]+\.findings\s*\}\}")
 DECLINES = {"type": "array", "items": {"type": "object", "properties": {
     "finding": {"type": "string"}, "reason": {"type": "string"}}, "required": ["finding", "reason"],
@@ -99,7 +99,8 @@ class ShippedPromptTest(unittest.TestCase):
     def test_every_re_review_prompt_renders_its_fixs_declines(self):
         reviews = {step["id"]: (step, prompt) for step, _, prompt in review_steps()}
         for review, fix in (("lite-rereview", "lite-fix"), ("escalated-rereview", "escalated-fix"),
-                            ("full-rereview", "full-fix"), ("merge-rereview", "merge-fix")):
+                            ("full-rereview", "full-fix"), ("merge-rereview", "merge-fix"),
+                            ("plan-rereview", "plan-revise")):
             with self.subTest(step=review):
                 step, prompt = reviews[review]
                 placeholder = "{{" + fix + ".declines}}"

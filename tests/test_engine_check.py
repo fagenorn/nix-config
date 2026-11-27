@@ -1220,6 +1220,10 @@ SHIPPED_MEMBERS = {
     "contract": ({"capabilities": {"review.code": {"state": "available"}, "review.plan": {"state": "available"}}},
                  {"capabilities": {"review.code": {"state": "blocked"}, "review.plan": {"state": "available"}}}),
     "preflight": ({"branch": "b", "worktree_path": "/w", "integration_branch": "main", "issue_text": "t"},),
+    "plan-preflight": ({"branch": "b", "worktree_path": "/w", "integration_branch": "main", "issue_text": "t"},),
+    "plan": ({"evidence": "p"},),
+    "plan-revise": ({"evidence": "p", "declines": []},),
+    "plan-review": ({"findings": []},),
     "issue": ({"text": "t", "body": "x\n\n## Acceptance criteria\n\n- [ ] a\n", "marked": False,
                "lane_paths": {"secrets": ["secrets/"]}},
               {"text": "t", "body": "", "marked": True, "lane_paths": None}),
@@ -1353,12 +1357,14 @@ class ShippedProcedureTest(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertNotIn("gh ", (PROCEDURES / name).read_text(encoding="utf-8"))
 
-    def test_only_the_worktree_step_mutates_and_it_names_its_check(self):
+    def test_only_the_worktree_step_and_the_planner_sessions_mutate_and_the_worktree_step_names_its_check(self):
         setup = load(PROCEDURES, "setup")
         self.assertEqual([s["id"] for s in setup["steps"] if s.get("mutates")], ["worktree"])
         self.assertEqual(step(setup, "worktree")["check"],
                          {"command": "issue-setup", "subcommand": "worktree-check"})
-        self.assertEqual([s["id"] for s in load(PROCEDURES, "deliver")["steps"] if s.get("mutates")], [])
+        # only the two planner sessions: they renew the claim before a long session and write no tracked file
+        self.assertEqual([s["id"] for s in load(PROCEDURES, "deliver")["steps"] if s.get("mutates")],
+                         ["plan", "plan-revise"])
 
     def test_each_setup_outcome_reaches_the_programs_stop(self):
         setup = load(PROCEDURES, "setup")
@@ -1383,7 +1389,7 @@ class ShippedProcedureTest(unittest.TestCase):
                          {"read": "lane", "error": "no-lane", "refused": "no-lane"})
         self.assertEqual(step(deliver, "issue")["in"], ["run.repo_root", "run.repo", "run.issue"])
         self.assertEqual(step(deliver, "lane")["on"],
-                         {"direct": "direct-lane", "standard": "standard-not-on-engine"})
+                         {"direct": "direct-lane", "standard": "plan-preflight"})
         for name in setup["stops"]:
             self.assertEqual(step(deliver, "start")["on"][name], name)
         for called, procedure in (("direct-lane", "direct"), ("verification", "verify")):
@@ -1396,8 +1402,9 @@ class ShippedProcedureTest(unittest.TestCase):
         for name in ("ineligible", "task", "direct-review", "direct-fix", "codex-unavailable", "verify"):
             self.assertIn(name, deliver["stops"])
         self.assertNotIn("needs-design", deliver["stops"])
-        for name in ("standard-not-on-engine", "no-lane", "ineligible"):
+        for name in ("no-lane", "ineligible"):
             self.assertEqual(deliver["stops"][name]["reenter"], "issue", name)
+        self.assertNotIn("standard-not-on-engine", deliver["stops"])
 
     def test_the_worktree_mismatch_is_read_before_the_claim(self):
         coverage = shipped_coverage("setup")

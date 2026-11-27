@@ -75,6 +75,19 @@ UPSTREAM_IMPLEMENTED = {**IMPLEMENTED, "upstream": {"path": "fixture/farewell.py
 CONFLICTING_MAIN = {"path": "fixture/farewell.py", "text": "OTHER = 1\n"}
 CODEX_LIMIT = {"stdout": json.dumps({"status": 1, "error": "You've hit your usage limit."}), "exit": 1}
 
+PLAN_TEXT = "PLAN: task 1 adds greet() to fixture/greet.py; its proving test is checks/check_greet.py."
+REVISED_PLAN_TEXT = "REVISED PLAN: task 1 adds greet() and names checks/check_greet.py as its proving test."
+PLANNED = {"status": "planned", "evidence": PLAN_TEXT, "notes": "", "declines": [],
+           "tasks": [{"n": 1, "title": "Add greet()", "file": "task-1.md"}]}
+REVISED = dict(PLANNED, evidence=REVISED_PLAN_TEXT)
+PLAN_FINDING = {"severity": "important", "file": "task-1.md", "failing_input": "the proving test is not named",
+                "summary": "task 1 names no proving test", "kind": "plan-step-not-executable"}
+PLAN_PASS = {"verdict": "pass", "findings": []}
+PLAN_FINDINGS = {"verdict": "findings", "findings": [PLAN_FINDING]}
+PLANNED_REPLIES = {"plan": PLANNED, "plan-review": PLAN_PASS}
+REVISED_REPLIES = {"plan": PLANNED, "plan-review": PLAN_FINDINGS, "plan-revise": REVISED, "plan-rereview": PLAN_PASS}
+REFUSED_REPLIES = {**REVISED_REPLIES, "plan-rereview": PLAN_FINDINGS}
+
 
 def lite_findings(**members) -> dict:
     return dict(CLEAN_LITE, verdict="findings", findings=[FINDING], **members)
@@ -209,39 +222,89 @@ class StubbedRunTest(Scenario):
         self.assertEqual(run.world.git(run.fixture.root, "rev-parse", "main").strip(), run.origin_tip("main"))
 
 
+class PlannedRouteTest(Scenario):
+    STANDARD = ("Add a greet() function to the fixture module, next to `secrets/x.yaml`.\n\n"
+                "## Acceptance criteria\n\n- [ ] [code] greet() returns the greeting\n")
+
+    def test_a_standard_issue_walks_plan_review_direct_verify_landing_to_done_with_the_plan_as_the_brief(self):
+        run = self.stubbed(body=self.STANDARD, replies=PLANNED_REPLIES)
+
+        self.finish(run, "done")
+
+        self.assertEqual(run.transitions(run.runs()[0]),
+                         [("start", "done"), ("issue", "read"), ("lane", "standard"), ("plan-preflight", "clear"),
+                          ("plan", "planned"), ("plan-review", "pass"), ("plan-note", "posted"),
+                          ("direct-lane", "done"), ("verification", "done"), ("landing", "done"),
+                          ("closing", "done")])
+        self.assertEqual(self.keys(run), ["applies", "plan", "plan-review", "implement", "lite-review"])
+        self.assertIn(str(run.worktree_path), self.launch(run, "plan")["prompt"])
+        self.assertIn(PLAN_TEXT, self.launch(run, "plan-review")["prompt"])
+        self.assertIn(PLAN_TEXT, self.launch(run, "implement")["prompt"])
+        pulls = run.pulls()
+        self.assertEqual([p["state"] for p in pulls], ["MERGED"])
+        self.assertEqual(run.origin_tip("main"), pulls[0]["mergeCommit"]["oid"])
+        self.assertEqual(len(run.runs()), 1)
+        self.assertEqual(len([c for c in run.children(run.runs()[0])
+                              if json.loads((c / "run.json").read_text("utf-8"))["procedure"] == "direct"]), 1)
+
+    def test_a_plan_review_with_findings_gets_exactly_one_revise_and_the_revised_plan_briefs_the_implementer(self):
+        run = self.stubbed(body=self.STANDARD, replies=REVISED_REPLIES)
+
+        self.finish(run, "done")
+
+        self.assertEqual(self.keys(run), ["applies", "plan", "plan-review", "plan-revise", "plan-rereview",
+                                          "implement", "lite-review"])
+        self.assertIn("task 1 names no proving test", self.launch(run, "plan-revise")["prompt"])
+        self.assertIn(REVISED_PLAN_TEXT, self.launch(run, "plan-rereview")["prompt"])
+        brief = self.launch(run, "implement")["prompt"]
+        self.assertIn(REVISED_PLAN_TEXT, brief)
+        self.assertNotIn(PLAN_TEXT, brief)
+        self.assertEqual(run.transitions(run.runs()[0])[3:9],
+                         [("plan-preflight", "clear"), ("plan", "planned"), ("plan-review", "findings"),
+                          ("plan-revise", "planned"), ("plan-rereview", "pass"), ("plan-revised-note", "posted")])
+
+    def test_a_plan_refused_after_its_one_revise_ends_at_the_named_plan_stop_and_builds_nothing(self):
+        run = self.stubbed(body=self.STANDARD, replies=REFUSED_REPLIES)
+
+        self.finish(run, "plan-refused", "owner-decision")
+
+        self.assertEqual(self.keys(run), ["applies", "plan", "plan-review", "plan-revise", "plan-rereview"])
+        self.assertEqual(run.pulls(), [])
+        self.assertEqual(self.branch_commits(run), [])
+
+
 class LaneTest(Scenario):
     OVER_THE_RULE = "Add greet().\n\n## Acceptance criteria\n\n" + "".join(f"- [ ] c{i}\n" for i in range(4))
 
-    def test_a_body_over_the_rule_stops_at_standard_not_on_engine_with_no_lane_agent(self):
-        run = self.stubbed(body=self.OVER_THE_RULE)
+    def test_a_body_over_the_rule_is_planned_and_asks_no_lane_agent(self):
+        run = self.stubbed(body=self.OVER_THE_RULE, replies=REFUSED_REPLIES)
 
-        done = run.deliver()
+        self.stopped(run, run.deliver(), "plan-refused", "owner-decision")
 
-        self.stopped(run, done, "standard-not-on-engine", "nothing")
         self.assertIn(("lane", "standard"), run.transitions(run.runs()[0]))
-        self.assertEqual(self.keys(run), ["applies"])
+        self.assertEqual(self.keys(run)[:2], ["applies", "plan"])
         self.assertEqual(len(run.claims()), 1)
         self.assertEqual(self.branch_here(run, run.worktree_path), run.branch)
 
-    def test_a_body_naming_a_lane_path_stops_at_standard_not_on_engine(self):
-        run = self.stubbed(body="Fix `secrets/x.yaml`.\n\n## Acceptance criteria\n\n- [ ] c\n")
+    def test_a_body_naming_a_lane_path_is_planned(self):
+        run = self.stubbed(body="Fix `secrets/x.yaml`.\n\n## Acceptance criteria\n\n- [ ] c\n",
+                           replies=REFUSED_REPLIES)
 
-        self.stopped(run, run.deliver(), "standard-not-on-engine", "nothing")
+        self.stopped(run, run.deliver(), "plan-refused", "owner-decision")
 
-        self.assertEqual(self.keys(run), ["applies"])
+        self.assertEqual(self.keys(run)[:2], ["applies", "plan"])
 
-    def test_a_continued_standard_stop_reads_the_issue_again(self):
-        # The behaviour, not the stop's `reenter` value: the live `start` step is stale on every continue and is
-        # re-entered first, so only test_engine_check's structural assertion on the three stops pins `reenter`.
-        run = self.stubbed(body=self.OVER_THE_RULE)
-        self.stopped(run, run.deliver(), "standard-not-on-engine", "nothing")
+    def test_a_continued_plan_stop_reads_the_issue_again(self):
+        # The behaviour, not the stop's `reenter` value: a continue re-plans from the issue as it stands now.
+        run = self.stubbed(body=self.OVER_THE_RULE, replies=REFUSED_REPLIES)
+        self.stopped(run, run.deliver(), "plan-refused", "owner-decision")
 
-        self.stopped(run, run.deliver(), "standard-not-on-engine", "nothing")
+        self.stopped(run, run.deliver(), "plan-refused", "owner-decision")
 
         self.assertEqual(len(run.runs()), 1)
         events = run.events(run.runs()[0])
         self.assertEqual([e["event"] for e in events].count("run_continued"), 1)
-        self.assertEqual(len([e for e in events if e["event"] == "step_entered" and e.get("step") == "issue"]), 2)
+        self.assertEqual(len([e for e in events if e["event"] == "step_entered" and e.get("step") == "plan-preflight"]), 2)
 
     def test_an_issue_with_a_look_marker_stops_at_look_not_on_engine_and_never_asks_the_lane(self):
         run = self.stubbed(body=LOOK_BODY)
