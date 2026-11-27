@@ -20,6 +20,8 @@ plain off entry, and a present but unusable one carries `PROBLEM`.
 - `save` writes the typed token or else the saved one (none is `Refused(NO_TOKEN)`), the chat and
   the saved `enabled` (true when nothing is saved). A folder the writer refuses is `Refused(FOLDER)`.
 - `switch` on needs a saved token and chat (else `Refused(NOT_READY)`); off keeps the saved values.
+  A settings file that is present but unusable is `Refused(UNREADABLE)` either way and is not
+  rewritten (only a save replaces it).
 - `chats` lists the bot's chats with the typed token or else the saved one; a reason from Telegram
   is `Failed`. `test` sends the test message and answers `(delivered, sentence)`.
 - `reason_words` turns a reason of `host_alerts` into the owner's words.
@@ -28,7 +30,8 @@ plain off entry, and a present but unusable one carries `PROBLEM`.
 - no panel: 409 `UNAVAILABLE`;
 - a body its parser refuses: 400 `BAD_BODY`, no log line;
 - save and switch read, merge and write while holding `lock`, and answer 204 with an empty body and
-  the new entry; chats and test hold no lock and answer 200 `application/json`, `{"chats", "text"}`
+  the new entry, handed to `publish` (when given) before the lock is released, so the published view
+  is never older than the file; chats and test hold no lock and answer 200 `application/json`, `{"chats", "text"}`
   and `{"delivered", "text"}` as sorted compact JSON;
 - `Refused`: 409 with its sentence; `Failed`: 502 with its sentence; any other exception: 500
   `FAILED` with a log line naming the class, never the message.
@@ -39,6 +42,7 @@ This module never logs or prints: a `Reply` carries the one safe line (or None) 
 
 import json
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -73,6 +77,7 @@ DELIVERED = "Delivered: Telegram accepted the test message."
 NOT_DELIVERED = "Not delivered: {reason}."
 CHATS_FAILED = "Telegram did not give the bot's chats: {reason}."
 PROBLEM = "The saved settings could not be read; saving again replaces them."
+UNREADABLE = "The saved settings could not be read, so nothing was changed. Save the token and chat again."
 BAD_BODY = "bad host alerts"
 FAILED = "host alerts failed"
 
@@ -81,6 +86,8 @@ REASONS = {
     "HTTP 401": "Telegram refused the bot token (HTTP 401)",
     "HTTP 404": "Telegram does not know that bot token (HTTP 404)",
     "HTTP 400 chat not found": "Telegram does not know that chat (HTTP 400)",
+    "HTTP 400 chat moved to a supergroup": (
+        "that group became a supergroup, so its chat id changed: find the chat again and save the new id (HTTP 400)"),
     "HTTP 400": "Telegram refused the message (HTTP 400)",
     "HTTP 403 blocked by the user": "the chat's owner blocked the bot (HTTP 403)",
     "HTTP 403 not a member": "the bot is not a member of that chat (HTTP 403)",
@@ -207,7 +214,9 @@ def save(panel: Panel, request: Save) -> None:
 
 
 def switch(panel: Panel, enabled: bool) -> None:
-    current = _current(panel)
+    current, missing = _read(panel)
+    if current is None and not missing:
+        raise Refused(UNREADABLE)  # writing now would replace the credentials with null
     token = current.bot_token if current is not None else None
     chat = current.chat_id if current is not None else None
     if enabled and (token is None or chat is None):
@@ -253,8 +262,16 @@ def _json(document: dict) -> Reply:
     return Reply(200, "application/json", body, None)
 
 
-def respond(panel: Panel | None, route: str, body: bytes, *,
-            lock: threading.Lock) -> tuple[Reply, dict | None]:
+def _published(panel: Panel, publish: Callable[[dict], None] | None) -> dict:
+    """The entry after a write; `publish` gets it while the caller still holds the lock."""
+    current = entry(panel)
+    if publish is not None:
+        publish(current)
+    return current
+
+
+def respond(panel: Panel | None, route: str, body: bytes, *, lock: threading.Lock,
+            publish: Callable[[dict], None] | None = None) -> tuple[Reply, dict | None]:
     name = route.rsplit("-", 1)[-1]
     if panel is None:
         return _refusal(409, UNAVAILABLE, f"console: host_alerts_refused {name}"), None
@@ -273,11 +290,11 @@ def respond(panel: Panel | None, route: str, body: bytes, *,
         if route == SAVE_PATH:
             with lock:
                 save(panel, request)
-                return Reply(204, None, b"", None), entry(panel)
+                return Reply(204, None, b"", None), _published(panel, publish)
         if route == SWITCH_PATH:
             with lock:
                 switch(panel, enabled)
-                return Reply(204, None, b"", None), entry(panel)
+                return Reply(204, None, b"", None), _published(panel, publish)
         if route == CHATS_PATH:
             listed, text = chats(panel, typed)
             return _json({"chats": listed, "text": text}), None

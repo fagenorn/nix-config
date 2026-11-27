@@ -15,12 +15,16 @@ import socket
 import stat
 import tempfile
 import threading
+import time
+import tracemalloc
 import unittest
 from datetime import datetime
 from unittest import mock
 
+from agent_tools.hosts import host_alerts
 from agent_tools.hosts.host_alerts import (
     Chat,
+    MAX_RESPONSE_BYTES,
     Outcome,
     RELATIVE_LOG,
     RELATIVE_SETTINGS,
@@ -46,6 +50,36 @@ SETTINGS = {"enabled": True, "bot_token": "123:SECRET-TOKEN", "chat_id": "-10012
 TEXT = "eleven-m5: test text"
 NOW = datetime(2026, 11, 24, 12, 0)
 PROXY_VARIABLES = ("http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY", "all_proxy", "ALL_PROXY")
+
+
+CAP_BYTES = 256 * 1024 * 1024
+CAP_SECONDS = 10.0
+
+
+def grow_nested(test, run, *, start=1000, limit=128000):
+    """Run `run(depth)` at doubling nesting depths under a finite time and peak-memory cap.
+
+    Each step is measured with tracemalloc; the growth stops before a step whose projected peak
+    (twice the last) would pass `CAP_BYTES`, at `limit`, and fails at the first step whose peak grows
+    faster than its input. Answers the last depth run."""
+    depth, previous = start, None
+    while True:
+        tracemalloc.start()
+        began = time.monotonic()
+        try:
+            run(depth)
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        elapsed = time.monotonic() - began
+        test.assertLess(peak, CAP_BYTES, f"depth {depth}")
+        test.assertLess(elapsed, CAP_SECONDS, f"depth {depth}")
+        if previous is not None:
+            allowed = max(previous * 3, 4 * 1024 * 1024)  # twice the input plus noise, floored
+            test.assertLessEqual(peak, allowed, f"peak grew faster than depth at {depth}")
+        if depth * 2 > limit or peak * 2 > CAP_BYTES:
+            return depth
+        depth, previous = depth * 2, peak
 
 
 class Bot:
@@ -288,18 +322,57 @@ class ChatListTest(HostAlertsCase):
             self.assertNotIn("SECRET-TOKEN", shown)
 
     def test_a_deeply_nested_answer_is_a_reason_not_a_raise(self):
-        self.bot.body = b"[" * 60000
         live = Settings(True, TOKEN, "-1")
-        for status in (409, 200):
-            self.bot.status = status
-            chats, reason = list_chats(TOKEN, api=self.bot.api)
-            sent, why = send_message(live, "t", api=self.bot.api)
-            self.assertEqual(chats, ())
-            self.assertTrue(reason)
-            self.assertFalse(sent)
-            self.assertTrue(why)
-            for shown in (reason, why):
-                self.assertNotIn("SECRET-TOKEN", shown)
+
+        def answer(depth):
+            self.bot.body = b"[" * depth
+            for status in (409, 200):
+                self.bot.status = status
+                chats, reason = list_chats(TOKEN, api=self.bot.api)
+                sent, why = send_message(live, "t", api=self.bot.api)
+                self.assertEqual(chats, ())
+                self.assertTrue(reason)
+                self.assertFalse(sent)
+                self.assertTrue(why)
+                for shown in (reason, why):
+                    self.assertNotIn("SECRET-TOKEN", shown)
+
+        self.assertGreaterEqual(grow_nested(self, answer), 8000)
+
+    def test_a_feed_over_the_send_reply_limit_still_lists_its_chats(self):
+        group = {"id": -1001234, "title": "Ops", "type": "group"}
+        for count, size in ((30, 3000), (20, 4096)):
+            with self.subTest(count=count, size=size):
+                self.bot.body = {"ok": True, "result": [
+                    {"update_id": number, "message": {"message_id": number, "chat": group, "text": "x" * size}}
+                    for number in range(count)]}
+                self.assertGreater(len(json.dumps(self.bot.body["result"])), MAX_RESPONSE_BYTES)
+                self.assertEqual(list_chats(TOKEN, api=self.bot.api), ((Chat("-1001234", "Ops"),), ""))
+
+    def test_a_feed_longer_than_the_updates_limit_is_a_reason_not_a_truncated_parse(self):
+        with mock.patch.object(host_alerts, "MAX_UPDATES_BYTES", 2048):
+            self.bot.body = {"ok": True, "result": [
+                {"update_id": 1, "message": {"chat": {"id": -1, "title": "Ops"}, "text": "x" * 4000}}]}
+            self.assertEqual(list_chats(TOKEN, api=self.bot.api), ((), "ValueError"))
+
+    def test_a_callback_query_names_the_chat_of_its_message(self):
+        self.bot.body = {"ok": True, "result": [
+            {"update_id": 1, "callback_query": {"id": "9", "data": "go", "message": {
+                "message_id": 5, "chat": {"id": -1005555, "title": "Keyboard group", "type": "supergroup"}}}},
+            {"update_id": 2, "callback_query": {"id": "10", "data": "go"}},
+            {"update_id": 3, "callback_query": "x"},
+        ]}
+        self.assertEqual(list_chats(TOKEN, api=self.bot.api),
+                         ((Chat("-1005555", "Keyboard group"),), ""))
+
+    def test_a_group_that_became_a_supergroup_is_named_as_a_fixed_cause(self):
+        self.write(SETTINGS)
+        self.bot.status = 400
+        self.bot.body = {"ok": False, "error_code": 400,
+                         "description": "Bad Request: group chat was upgraded to a supergroup chat",
+                         "parameters": {"migrate_to_chat_id": -1009999}}
+        self.assertEqual(send_test_result(self.settings, api=self.bot.api),
+                         (False, "HTTP 400 chat moved to a supergroup"))
 
     def test_a_malformed_token_is_refused_without_a_request(self):
         self.assertEqual(list_chats("123:a/../x", api=self.bot.api), ((), "bad token"))
@@ -407,6 +480,25 @@ class SettingsFileTest(HostAlertsCase):
         with self.assertRaises(ValueError):
             write_settings(Settings(True, None, "-1"), refused)
         self.assertFalse(refused.exists())
+
+    def test_a_save_is_0600_whatever_the_umask(self):
+        path = self.scratch / "mask" / "telegram.json"
+        path.parent.mkdir(mode=0o700)
+        previous = os.umask(0o277)
+        try:
+            write_settings(Settings(True, "123:SECRET-TOKEN", "-1"), path)
+        finally:
+            os.umask(previous)
+        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+        self.assertEqual(read_settings(path), Settings(True, "123:SECRET-TOKEN", "-1"))
+
+    def test_a_deeply_nested_file_is_refused_not_a_raise(self):
+        def refuse(depth):
+            self.write("[" * depth)
+            with self.assertRaises(SettingsError):
+                read_settings(self.settings)
+
+        self.assertGreaterEqual(grow_nested(self, refuse), 8000)
 
 
 if __name__ == "__main__":

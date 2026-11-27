@@ -28,6 +28,7 @@ from agent_tools.console.host_alerts_panel import (
     SWITCH_PATH,
     TEST_PATH,
     UNAVAILABLE,
+    UNREADABLE,
     Failed,
     Panel,
     Refused,
@@ -48,7 +49,7 @@ from agent_tools.console.host_alerts_panel import (
 from agent_tools.hosts import host_alerts
 from agent_tools.hosts.host_alerts import Settings, read_settings, write_settings
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
-from tests.test_host_alerts import SETTINGS, HostAlertsCase
+from tests.test_host_alerts import SETTINGS, HostAlertsCase, grow_nested
 
 TIER = "fast"
 
@@ -151,7 +152,6 @@ class PanelTest(PanelCase):
             (parse_save, b"[]"),
             (parse_save, b"not json"),
             (parse_save, b"\xff"),
-            (parse_save, b"[" * 100000),
             (parse_switch, b'{"enabled": false, "enabled": true}'),
             (parse_switch, b'{"enabled": "no"}'),
             (parse_switch, b'{"enabled": 1}'),
@@ -167,8 +167,59 @@ class PanelTest(PanelCase):
                 self.assertEqual(str(caught.exception), BAD_BODY)
                 self.assertNotIn("SECRET", str(caught.exception))
 
+    def test_a_deeply_nested_body_is_a_bad_body_not_a_raise(self):
+        def refuse(depth):
+            for parse in (parse_save, parse_switch, parse_chats, parse_test):
+                with self.assertRaises(ValueError) as caught:
+                    parse(b"[" * depth)
+                self.assertEqual(str(caught.exception), BAD_BODY)
+
+        self.assertGreaterEqual(grow_nested(self, refuse), 8000)
+
+    def test_a_deeply_nested_settings_file_is_a_problem_entry_not_a_raise(self):
+        def view(depth):
+            self.write("[" * depth)
+            self.assertEqual(entry(self.panel), PROBLEM_ENTRY)
+
+        self.assertGreaterEqual(grow_nested(self, view), 8000)
+
+    def test_a_switch_off_never_replaces_an_unreadable_file(self):
+        self.write(SETTINGS)
+        panel = Panel(self.settings, api=self.bot.api)
+        self.assertEqual(entry(panel)["enabled"], True)
+        self.settings.chmod(0o644)
+        before = self.settings.read_bytes()
+        for wanted in (False, True):
+            with self.subTest(enabled=wanted):
+                with self.assertRaises(Refused) as caught:
+                    switch(panel, wanted)
+                self.assertEqual(str(caught.exception), UNREADABLE)
+        self.assertEqual(self.settings.read_bytes(), before)
+        self.assertEqual(stat.S_IMODE(self.settings.stat().st_mode), 0o644)
+        reply, published = respond(panel, SWITCH_PATH, b'{"enabled": false}', lock=self.lock)
+        self.assertEqual((reply.status, published), (409, None))
+        self.assertEqual(self.settings.read_bytes(), before)
+
+    def test_a_write_hands_its_entry_over_before_the_lock_is_released(self):
+        seen = []
+
+        def publish(published):
+            seen.append((published, self.lock.locked()))
+
+        reply, published = respond(self.panel, SAVE_PATH,
+                                   b'{"bot_token": "123:SECRET-TOKEN", "chat_id": "-1"}',
+                                   lock=self.lock, publish=publish)
+        self.assertEqual(reply.status, 204)
+        self.assertEqual(seen, [(published, True)])
+        respond(self.panel, SWITCH_PATH, b'{"enabled": false}', lock=self.lock, publish=publish)
+        self.assertEqual([entry_["enabled"] for entry_, _ in seen], [True, False])
+        self.assertTrue(all(held for _, held in seen))
+
     def test_reason_words_reads_each_reason_plainly(self):
         rows = [
+            ("HTTP 400 chat moved to a supergroup",
+             "that group became a supergroup, so its chat id changed: find the chat again and save the "
+             "new id (HTTP 400)"),
             ("HTTP 401", "Telegram refused the bot token (HTTP 401)"),
             ("HTTP 404", "Telegram does not know that bot token (HTTP 404)"),
             ("HTTP 400 chat not found", "Telegram does not know that chat (HTTP 400)"),

@@ -9539,15 +9539,18 @@ class ConsoleService(ActionPermit):
 
     def host_alerts_answer(self, route: str, body: bytes) -> host_alerts_panel.Reply:
         """Answer one Host alerts write on the handler's thread, holding no console lock."""
-        reply, entry = host_alerts_panel.respond(
-            self._host_alerts, route, body, lock=self._host_alerts_lock)
+        reply, _ = host_alerts_panel.respond(
+            self._host_alerts, route, body, lock=self._host_alerts_lock,
+            publish=self._publish_host_alerts)
         if reply.log is not None:
             print(reply.log, file=sys.stderr)
-        if entry is not None:
-            with self._ingest:
-                self._host_alerts_entry = entry
-                self._publish()
         return reply
+
+    def _publish_host_alerts(self, entry: dict) -> None:
+        """Publish the panel's entry; called under the settings lock so a later write is never overtaken."""
+        with self._ingest:
+            self._host_alerts_entry = entry
+            self._publish()
 
     def set_sharing(self, shared: bool) -> None:
         """Append one `sharing.tailnet` row: the guest door's switch, on or off."""

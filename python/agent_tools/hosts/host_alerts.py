@@ -10,7 +10,8 @@ it is false either may be null.
 `read_settings` refuses a file that is missing, unreadable (a symlink included), not regular,
 owned by another uid, wider than 0600, not a JSON object or lacking a field, with a
 `SettingsError` that names the path and the reason and never a field's value.
-`write_settings` writes the same object atomically with mode 0600 and raises `ValueError`
+`write_settings` writes the same object atomically with mode 0600 (set explicitly, whatever the
+umask) and raises `ValueError`
 for settings the reader would refuse, writing nothing.
 
 `send_message` posts one message to the Telegram bot API and answers `(accepted, reason)`:
@@ -45,7 +46,9 @@ fully matches (`<digits>:<token characters>`; a numeric chat id, or `@username`)
 
 `list_chats(bot_token)` posts `getUpdates` with an empty JSON body (it confirms no update) and
 answers `(chats, reason)`: each `Chat(id, title)` once, in order of first appearance, read from
-the `chat` of each `UPDATE_KINDS` member of every update. The title is the chat's title, else
+the `chat` of each `UPDATE_KINDS` member of every update and of the `message` of its
+`callback_query`. A page of up to 100 full updates is read up to `MAX_UPDATES_BYTES`, not the
+`MAX_RESPONSE_BYTES` of a send reply; a longer page is the reason `ValueError`. The title is the chat's title, else
 its first and last names, else `@username`, else its type, else its id, cut to 128 characters;
 a title that holds the token is shown as the id. The reason is `""`, `bad token` (nothing is
 requested), `HTTP <code>` with its cause, `ok false` or an exception class name; the token is
@@ -71,6 +74,7 @@ RELATIVE_SETTINGS = Path(".config/host-alerts/telegram.json")
 RELATIVE_LOG = Path(".local/state/host-alerts/alerts.log")
 TEST_MESSAGE = "Host alerts test: Telegram delivery from this host works."
 MAX_RESPONSE_BYTES = 65536
+MAX_UPDATES_BYTES = 16 * 1024 * 1024
 TOKEN_PATTERN = re.compile(r"[0-9]{1,20}:[A-Za-z0-9_-]{1,200}")
 CHAT_PATTERN = re.compile(r"-?[0-9]{1,20}|@[A-Za-z0-9_]{5,32}")
 UPDATE_KINDS = ("message", "edited_message", "channel_post", "edited_channel_post",
@@ -78,6 +82,7 @@ UPDATE_KINDS = ("message", "edited_message", "channel_post", "edited_channel_pos
 # (HTTP status, lowercase needle in Telegram's description, fixed cause shown instead of it)
 CAUSES: tuple[tuple[int, str, str], ...] = (
     (400, "chat not found", "chat not found"),
+    (400, "upgraded to a supergroup", "chat moved to a supergroup"),
     (403, "blocked by the user", "blocked by the user"),
     (403, "not a member", "not a member"),
     (403, "kicked", "removed from the chat"),
@@ -156,7 +161,7 @@ def read_settings(path: Path | None = None, *, uid: int | None = None) -> Settin
         try:
             with os.fdopen(descriptor, "rb", closefd=False) as handle:
                 document = json.loads(handle.read())
-        except (OSError, ValueError):
+        except (OSError, ValueError, RecursionError):
             document = None
     finally:
         os.close(descriptor)
@@ -209,6 +214,7 @@ def write_settings(settings: Settings, path: Path | None = None, *, uid: int | N
     descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
         with os.fdopen(descriptor, "w") as handle:
+            os.fchmod(handle.fileno(), 0o600)  # the creation mode alone is masked by the umask
             handle.write(body)
         os.replace(temporary, path)
     except BaseException:
@@ -240,8 +246,11 @@ def _cause(status: int, error: urllib.error.HTTPError) -> str:
     return ""
 
 
-def _call(token: str | None, method: str, payload: dict, api: str, timeout: float) -> tuple[object, str, str]:
-    """One bot API POST: `(body | None, reason, cause)`; never raises, never shows the token."""
+def _call(token: str | None, method: str, payload: dict, api: str, timeout: float,
+          limit: int = MAX_RESPONSE_BYTES) -> tuple[object, str, str]:
+    """One bot API POST: `(body | None, reason, cause)`; never raises, never shows the token.
+
+    A success reply is read up to `limit` bytes; a reply longer than that is not parsed (`ValueError`)."""
     try:
         request = urllib.request.Request(
             f"{api}/bot{token}/{method}",
@@ -251,7 +260,10 @@ def _call(token: str | None, method: str, payload: dict, api: str, timeout: floa
         )
         with urllib.request.urlopen(request, timeout=timeout) as response:
             code = response.status
-            body = json.loads(response.read(MAX_RESPONSE_BYTES))
+            raw = response.read(limit + 1)
+            if len(raw) > limit:
+                raise ValueError("reply too long")
+            body = json.loads(raw)
     except urllib.error.HTTPError as error:
         return None, f"HTTP {error.code}", _cause(error.code, error)
     except (urllib.error.URLError, OSError, http.client.HTTPException, ValueError, RecursionError) as error:
@@ -289,7 +301,7 @@ def list_chats(bot_token: str, *, api: str = API, timeout: float = 20.0) -> tupl
     """The chats the bot's pending updates name, each once, and a reason ("" on success)."""
     if not valid_token(bot_token):
         return (), "bad token"
-    body, reason, cause = _call(bot_token, "getUpdates", {}, api, timeout)
+    body, reason, cause = _call(bot_token, "getUpdates", {}, api, timeout, MAX_UPDATES_BYTES)
     if reason:
         return (), f"{reason} {cause}" if cause else reason
     result = body.get("result") if isinstance(body, dict) and body.get("ok") is True else None
@@ -299,8 +311,10 @@ def list_chats(bot_token: str, *, api: str = API, timeout: float = 20.0) -> tupl
     for update in result:
         if not isinstance(update, dict):
             continue
-        for kind in UPDATE_KINDS:
-            part = update.get(kind)
+        callback = update.get("callback_query")
+        parts = [update.get(kind) for kind in UPDATE_KINDS]
+        parts.append(callback.get("message") if isinstance(callback, dict) else None)
+        for part in parts:
             chat = part.get("chat") if isinstance(part, dict) else None
             identifier = chat.get("id") if isinstance(chat, dict) else None
             if isinstance(identifier, int) and not isinstance(identifier, bool):

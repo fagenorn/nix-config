@@ -12,6 +12,7 @@ import json
 import os
 import stat
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -152,6 +153,44 @@ class HostAlertsRouteTest(HostAlertsCase):
                          f"2026-11-24T12:00:00 jetsam recorded only, alerts disabled: {TEXT}\n")
         self.assertEqual(self.post(svc, SWITCH_PATH, {"enabled": True}), (204, b""))
         self.assertTrue(json.loads(self.settings.read_text())["enabled"])
+
+    def test_a_slow_save_cannot_publish_over_a_later_switch_off(self):
+        self.write(SETTINGS)
+        svc = self.start()
+        inside, release = threading.Event(), threading.Event()
+        real = svc._ingest
+        saver = []
+
+        class Gate:
+            """The console lock, held up once for the save's thread as it goes to publish."""
+
+            def __enter__(self):
+                if threading.current_thread() in saver and not inside.is_set():
+                    inside.set()
+                    test.assertTrue(release.wait(10))
+                return real.__enter__()
+
+            def __exit__(self, *exc):
+                return real.__exit__(*exc)
+
+        test = self
+
+        def answer(route, body):
+            svc.host_alerts_answer(route, json.dumps(body).encode())
+
+        with mock.patch.object(svc, "_ingest", Gate()):
+            first = threading.Thread(target=answer, args=(SAVE_PATH, {"chat_id": "-1009"}))
+            saver.append(first)
+            first.start()
+            self.assertTrue(inside.wait(10))
+            second = threading.Thread(target=answer, args=(SWITCH_PATH, {"enabled": False}))
+            second.start()
+            second.join(0.3)  # the switch must wait for the save to finish publishing
+            release.set()
+            first.join(10)
+            second.join(10)
+        self.assertFalse(read_settings(self.settings).enabled)
+        self.assertFalse(self.host_alerts_of(svc)["enabled"])
 
     def test_a_refused_chat_list_answers_502_in_owner_words_and_logs_no_token(self):
         svc = self.start()
