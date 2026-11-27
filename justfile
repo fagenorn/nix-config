@@ -460,6 +460,7 @@ agent-workflow-tests *args:
     tests/test_console_digest.py \
     tests/test_console_delivery_ended.py \
     tests/test_console_writes.py \
+    tests/test_console_host_alerts_panel.py \
     tests/test_console_answer.py \
     tests/test_console_sprints.py \
     tests/test_console_manager_identity.py \
