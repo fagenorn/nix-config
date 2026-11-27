@@ -348,7 +348,7 @@ ADOPTION_CARD = "#inbox .adoption"
 REGISTER_NAME = "sample-app"
 REGISTER_PLAN_ID = "sha256:" + "6" * 64
 REGISTER_PLAN_LINES = ["moves 2 agent files under .agents/", "writes the project contract"]
-PROPOSAL_LINE = "commits run in its development shell: devenv shell (found in its files)"
+PROPOSAL_LINE = "changes are saved in its development shell: devenv shell (found in its files)"
 FACT_LINE = "project id and issue tracker: GitHub, as owner/sample-app (read from its remote)"
 REGISTER_SHOWN = {"register-draft": (None, FACT_LINE, False),
                   "register-reconcile-apply": (PROPOSAL_LINE, None, False),
@@ -363,7 +363,7 @@ REGISTER_READING = """(() => {
   const first = document.querySelector('.apply-lines li');
   const row = Array.from(document.querySelectorAll('ul.register-draft > li')).find((item) => {
     const line = item.querySelector('.draft-line');
-    return shown(line) && /^(commits run in its development shell|project id and issue tracker)/.test(line.textContent.trim());
+    return shown(line) && /^(changes are saved in its development shell|project id and issue tracker)/.test(line.textContent.trim());
   });
   const change = row ? row.querySelector('button.draft-change') : null;
   return [shown(first) ? first.textContent.trim() : null,
@@ -553,11 +553,11 @@ OFFER_READING = """(() => {
 DEEPER_LIGHT_SNIPPET = "do not say which parts of an issue take long"
 DEEPER_SNIPPET = "Review and planning take most of the time; the tasks take most of the tokens."
 DEEPER_OFFER_SNIPPET = "The test check fails most often: 9 of the last 40 pull requests"
-DEEPER_ESTIMATE = "Earlier deeper answers here spent about 2,184,000 tokens, $2.76 each."
+DEEPER_ESTIMATE = "Earlier deeper answers here spent about $2.76 each."
 DEEPER_ROWS = {
-    "deeper-answer": ((DEEPER_LIGHT_SNIPPET, "Spent 544,000 tokens, about $0.38"),
-                      (DEEPER_SNIPPET, "Spent 2,184,000 tokens, about $2.76")),
-    "deeper-offer": ((DEEPER_OFFER_SNIPPET, "Spent 362,000 tokens, about $0.25"),)}
+    "deeper-answer": ((DEEPER_LIGHT_SNIPPET, "Spent about $0.38"),
+                      (DEEPER_SNIPPET, "Spent about $2.76")),
+    "deeper-offer": ((DEEPER_OFFER_SNIPPET, "Spent about $0.25"),)}
 # The least a finished reading holds, and the reading a page without the panel gives (None).
 DEEPER_SHOWN = {"deeper-answer": (True, DEEPER_ROWS["deeper-answer"], True),
                 "deeper-offer": (True, DEEPER_ROWS["deeper-offer"], True, DEEPER_ESTIMATE)}

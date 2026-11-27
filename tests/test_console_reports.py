@@ -27,10 +27,10 @@ from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- modul
 REPORT_PATH = "/api/report"
 CLOSE_PATH = "/api/close"
 URL = "https://github.com/owner/p00/milestone/3"
-REPORT = {"status": "two slices are building", "phase": "running", "milestone": "Importer resumes",
+REPORT = {"status": "two steps are building", "phase": "running", "milestone": "Importer resumes",
           "tracker_url": URL,
           "issues": [{"issue": 13, "stage": "landed"}, {"issue": 12, "stage": "building"}],
-          "inbox": [12], "next": "start the resume slice"}
+          "inbox": [12], "next": "start the resume step"}
 CLOSING = {"summary": "Importer resumes after a crash\nwith detail",
            "issues": [{"issue": 12, "stage": "landed"}, {"issue": 13, "stage": "dropped"}],
            "differently": "cut smaller slices"}
@@ -78,7 +78,7 @@ class ReportRouteTest(Case):
         self.assertEqual((kind, project), ("sprint.reported", "owner/p01"))
         self.assertEqual(json.loads(payload), {
             "sprint_id": sid, "goal": GOAL_TEXT, "report": CHECKED})
-        self.assertEqual(svc._sprints[sid].report.status, "two slices are building")
+        self.assertEqual(svc._sprints[sid].report.status, "two steps are building")
 
     def test_a_malformed_or_unauthorised_report_is_refused_and_appends_nothing(self):
         svc = self.open()
@@ -304,7 +304,7 @@ class ReportRouteTest(Case):
         second = self.start()
         self.assertEqual(support.log_rows(self.store)[-1], last)
         self.assertEqual(last[2], "sprint.reported")
-        self.assertEqual(second._sprints[sid].report.status, "two slices are building")
+        self.assertEqual(second._sprints[sid].report.status, "two steps are building")
 
 
 class CloseRouteTest(ReportRouteTest):

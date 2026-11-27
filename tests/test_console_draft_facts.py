@@ -69,7 +69,7 @@ class DraftFactsTest(unittest.TestCase):
         self.assertIs(entry["fact"], True)
         self.assertEqual(
             entry["line"],
-            "checks a pull request must pass: cannot be derived until "
+            "checks a proposed change must pass: cannot be derived until "
             ".github/branch-protection.json is in the repository")
 
 

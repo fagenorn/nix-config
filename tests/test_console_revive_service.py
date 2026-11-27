@@ -244,7 +244,7 @@ class ReviveServiceTest(ReviveCase):
         (woken,) = self.rows("manager.woken")
         self.assertEqual(woken["permission"], {
             "mode": "auto",
-            "reason": "production rules declared but not in the guard's policy"})
+            "reason": "production rules declared but not in the safety check's policy"})
 
     def test_a_wake_writes_the_projects_root_into_the_settings(self):
         written = []

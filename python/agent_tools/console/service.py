@@ -470,7 +470,7 @@ closing report to give, or a withdrawn sprint's stop is pending (`_pending`: its
 manager would keep running on the account the change leaves, and deleting the profile would delete the session
 registry that stop reads. A started manager on it with no stopper refuses the same way. One conclusive
 listing (`sessions.read_session_registry(..., strict=True)`: a directory or a session file it cannot read,
-or a liveness it cannot judge, is a failure, never a manager gone) is read off the lock before the sign-out
+or a liveness it cannot judge or a pid-domain or proc read that fails, is a failure, never a manager gone) is read off the lock before the sign-out
 for a colleague's profile, also when the record names no manager on it, and only the sessions on
 that profile count: a manager's session it does not show on the profile whose `_settled` (the console's own
 start when a restart lost it) is under `sprints.STOP_SETTLE_MS` old refuses the same way, as does one it
@@ -1349,10 +1349,10 @@ line, appending nothing, in this order: `nothing to activate` (no `activator`, n
 reading with nothing pending whose commit is not that of a run that failed less than a day ago,
 `view.offers_activate`);
 `an activation is already running`;
-`that commit is no longer the tip of origin's integration branch` (the body's commit is not the
+`that version is no longer the latest main version on origin` (the body's commit is not the
 shown reading's); then a fresh
-`activator.tip(root)`, read outside the ingest lock, that cannot be read (`the tip of origin's
-integration branch could not be read`) or is not the commit (the same text as before). The claim on
+`activator.tip(root)`, read outside the ingest lock, that cannot be read (`the latest main version on
+origin could not be read`) or is not the commit (the same text as before). The claim on
 the activation is one flag taken under the ingest lock together with the first three checks, so two
 concurrent requests cannot both pass; the last check releases it when it refuses. An admitted request
 calls `activator.start(root, commit, record)` on the request thread, `record` being what writes the
@@ -2111,8 +2111,8 @@ OWNER_NOTICE_WITHDRAW_PATH = "/api/owner-notice-withdraw"
 ACTIVATE_PATH = "/api/activate"
 ACTIVATE_NOTHING = "nothing to activate"
 ACTIVATE_RUNNING = "an activation is already running"
-ACTIVATE_MOVED = "that commit is no longer the tip of origin's integration branch"
-ACTIVATE_UNREADABLE = "the tip of origin's integration branch could not be read"
+ACTIVATE_MOVED = "that version is no longer the latest main version on origin"
+ACTIVATE_UNREADABLE = "the latest main version on origin could not be read"
 ROUND_ANSWER_PATH = "/api/round-answer"
 LOOK_RETRY_PATH = "/api/look-retry"
 CHECK_PATH = "/api/check-answer"

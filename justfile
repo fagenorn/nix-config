@@ -348,6 +348,7 @@ agent-workflow-tests *args:
     tests/test_suite_source.py \
     tests/test_skipped_test_lint.py \
     tests/test_copied_test_lint.py \
+    tests/test_dotnet_format_lint.py \
     tests/test_suppressions.py \
     tests/test_decision_record_wording.py \
     tests/test_module_docstring_wording.py \
@@ -459,6 +460,7 @@ agent-workflow-tests *args:
     tests/test_console_sprints.py \
     tests/test_console_manager_identity.py \
     tests/test_console_contract_plain_words.py \
+    tests/test_console_owner_words.py \
     tests/test_console_action_card.py \
     tests/test_console_revive.py \
     tests/test_console_idle.py \
@@ -477,6 +479,7 @@ agent-workflow-tests *args:
     tests/test_console_sprint_command.py \
     tests/test_console_manager_contract_held.py \
     tests/test_console_sprint_action.py \
+    tests/test_console_sprint_warnings.py \
     tests/test_console_pictures.py \
     tests/test_console_manager.py \
     tests/test_console_launch_short_id.py \

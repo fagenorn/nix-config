@@ -61,7 +61,7 @@ class LookMovedWordsTest(unittest.TestCase):
     def test_the_moved_head_line_asks_nothing_of_the_owner(self):
         self.assertEqual(
             answer.LOOK_MOVED.format(found="bbbbbbb", head="aaaaaaa"),
-            "Nothing was recorded: the pull request is now at bbbbbbb, not at aaaaaaa, the head "
+            "Nothing was recorded: the proposed change is now at bbbbbbb, not at aaaaaaa, the version "
             "these pictures show. The manager will send the new pictures.")
 
 
@@ -475,7 +475,7 @@ class LookAnswerTest(QuestionRoutes):
             self.entry(svc, sid)["look"],
             {"issue": ISSUE, "pr": PR, "head": HEAD, "state": "open", "approve_index": 2,
              "line": 'Choosing "Ask for changes" records your approval of aaaaaaa, '
-                     'pull request #12, on issue #7.'})
+                     'proposed change #12, on task #7.'})
 
     def test_an_open_look_card_is_consequential_without_the_mark(self):
         svc = self.open()

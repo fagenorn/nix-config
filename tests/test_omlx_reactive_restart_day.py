@@ -58,8 +58,27 @@ class RestartDayTest(unittest.TestCase):
         self.addCleanup(scratch.cleanup)
         self.dir = Path(scratch.name)
 
-    def put_state(self, since_at=SINCE, limits=LIMITS):
-        (self.dir / "omlx-restart.json").write_text(json.dumps({"since_at": since_at, "limits": limits}))
+    def put_state(self, since_at=SINCE, limits=LIMITS, **more):
+        """The restart state; `hold_since_at` (default `since_at`) is the first sample the hold rule saw."""
+        state = {"since_at": since_at, "hold_since_at": since_at, "limits": limits, **more}
+        (self.dir / "omlx-restart.json").write_text(json.dumps(state))
+
+    def test_a_state_an_older_watcher_wrote_is_not_yet_whatever_its_since_at(self):
+        old = {"since_at": "2026-11-20T15:00:00+00:00", "limits": LIMITS}
+        (self.dir / "omlx-restart.json").write_text(json.dumps(old))
+        for day in ("2026-11-20", "2026-11-21", PREVIOUS, TARGET):
+            self.write_day(day)
+        result = self.run_check()
+        self.assertEqual(result.returncode, 75, result.stderr)
+        self.assertEqual(self.verdict(result), {"verdict": "not_yet", "day": None})
+
+    def test_the_target_day_follows_the_first_deploy_of_the_hold_rule_not_the_older_since_at(self):
+        self.put_state(since_at="2026-11-20T15:00:00+00:00", hold_since_at=SINCE)
+        self.write_day("2026-11-21")
+        self.write_day(PREVIOUS)
+        result = self.run_check()
+        self.assertEqual(result.returncode, 75, result.stderr)
+        self.assertEqual(self.verdict(result), {"verdict": "not_yet", "day": TARGET})
 
     def write_day(self, day, samples=1440):
         with (self.dir / "memory-peaks.jsonl").open("a") as peaks:
@@ -159,6 +178,31 @@ class RestartDayTest(unittest.TestCase):
     def test_an_episode_without_its_record_is_not_met(self):
         self.healthy_target(over=("10:00", "10:01", "10:02"))
         self.assertNotMet("episode_unlogged", missing=1)
+
+    def blank_target(self, over, blank, records=()):
+        """The target day with the minutes in `blank` lacking a census (null figures)."""
+        self.healthy_target(over=over, records=records)
+        lines = minute_lines(TARGET, over=over)
+        for line in lines:
+            if datetime.fromisoformat(line["at"]).strftime("%H:%M") in blank:
+                line["unowned_bytes"] = None
+        self.write_samples(TARGET, lines)
+
+    def test_census_less_samples_hold_the_streak_for_fifteen_minutes(self):
+        over = ("10:00", "10:05", "10:10")
+        blank = ("10:01", "10:02", "10:03", "10:04", "10:06", "10:07", "10:08", "10:09")
+        with self.subTest("three fresh samples within fifteen minutes need a record"):
+            self.blank_target(over, blank)
+            self.assertNotMet("episode_unlogged", missing=1)
+        with self.subTest("and are met with one"):
+            self.blank_target(over, blank, records=[record("2026-11-28T10:10:00+00:00")])
+            self.assertMet(episodes=1, restarts=1)
+        with self.subTest("a stretch over fifteen minutes zeroes the streak"):
+            self.blank_target(("10:00", "10:01", "10:20", "10:21"), tuple(f"10:{m:02d}" for m in range(2, 20)))
+            self.assertMet(episodes=0)
+        with self.subTest("a fresh sample at the line ends the episode"):
+            self.blank_target(("10:00", "10:01", "10:04", "10:05"), ("10:03",))
+            self.assertMet(episodes=0)
 
     def test_every_retried_attempt_needs_its_own_record(self):
         over = ("10:00", "10:01", "10:02", "10:03", "10:04")

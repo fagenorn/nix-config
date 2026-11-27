@@ -49,7 +49,7 @@ class PageLongPermissionCardTest(unittest.TestCase):
             ("summary-runs", "Runs python3, cp"),
             ("summary-writes", "Writes or deletes notes/plan.md, /tmp/out.txt"),
             ("summary-script", "Runs a python3 script of 40 lines the console does not read; it names tests/test_x.py"),
-            ("summary-outside", "Outside the worktree: /tmp/out.txt")])
+            ("summary-outside", "Outside its own copy of the project: /tmp/out.txt")])
         (fold,) = of_class(card, "details", "cmd-fold")
         self.assertFalse(fold["open"])
         (pre,) = of_class(card, "pre", "cmd")
@@ -84,7 +84,7 @@ class PageLongPermissionCardTest(unittest.TestCase):
     def test_an_unrecognised_writer_says_no_write_it_recognises(self) -> None:
         card = card_of({"frame": frame([summarised(runs=["curl"], outside=["/tmp/x.bin"])])})
         self.assertEqual([t for _, t in lines_of(card)], [
-            "Runs curl", "No write the console recognises", "Outside the worktree: /tmp/x.bin"])
+            "Runs curl", "No write the console recognises", "Outside its own copy of the project: /tmp/x.bin"])
         every = " ".join(full(n) for n in nodes(card))
         self.assertNotIn("no file", every)
         self.assertNotIn("Writes no", every)

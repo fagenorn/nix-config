@@ -703,8 +703,8 @@ project, goal, at)` (replacing an earlier one); `manager.stopped` for a pending 
 `manager.stop_failed` for a pending id with a string `reason` sets `reason` and `failed_at`; every
 other row changes nothing, and folding `a + b` equals folding `b` onto the fold of `a`.
 `pending_due(stop, now_ms)` is true when `failed_at` is `None` or `STOP_RETRY_MS` have passed since
-it. `closing_text(landed, held, dropped)` is `<landed> landed` then `, <held> held for
-verification` and `, <dropped> dropped` for each non-zero count. The new texts are `STOP_TEXT`,
+it. `closing_text(landed, held, dropped)` is `<landed> went in` then `, <held> merged, not
+yet proven` and `, <dropped> dropped` for each non-zero count. The new texts are `STOP_TEXT`,
 `STOPPING_TEXT`, `STOPPED_TEXT`, `CLOSING_MEMBER`, `SUMMARY_NUMBER`, `NOT_ENDED`, `ENDED`,
 `ALREADY_STOPPING`, `STOP_FAILED_TEXT` and `UNSTOPPED_TEXT`.
 
@@ -854,8 +854,8 @@ NOW_UNREAD_TEXT = "waiting for the manager to read your message"
 NOW_STARTING_TEXT = "starting the work"
 NOW_QUIET_TEXT = "last seen {phrase}"
 CHECK_LINE_TEXT = "Your check: {question}"
-NOW_CI_TEXT = "waiting for CI on its pull request"
-NOW_COMMITTING_TEXT = "a delivery is committing"
+NOW_CI_TEXT = "waiting for GitHub's automatic checks on the proposed change"
+NOW_COMMITTING_TEXT = "a delivery is saving its changes"
 NOW_RELEASE_TEXT = "waiting for a release step"
 NOW_LOCK_TEXT = "waiting its turn to merge"
 NOW_LOCK_POSITION_TEXT = "waiting its turn to merge, position {n}"
@@ -992,8 +992,8 @@ FAULT_MEMBER = "the live fault has no valid {member}"
 FAULT_TOO_LONG = "the live fault's {member} is over {limit} characters"
 FAULT_NOT_OURS = "the live fault's issue is not an issue of this sprint's latest report"
 FAULT_TWICE = "this issue is already declared a live fault"
-FAULT_UNKNOWN = "this live fault is not known"
-FAULT_WITHDRAWN_ALREADY = "this live fault is already withdrawn"
+FAULT_UNKNOWN = "this fault is not known"
+FAULT_WITHDRAWN_ALREADY = "this fault was already withdrawn"
 _FAULT_LIMITS = {"observed": MAX_FAULT_OBSERVED_CHARS, "when": MAX_FAULT_WHEN_CHARS,
                  "proven": MAX_FAULT_PROVEN_CHARS}
 NOTICE_BLOCK_HEAD = ("Open notices of the other sprints of this project "
@@ -3248,8 +3248,8 @@ def pending_due(stop: PendingStop, now_ms: int) -> bool:
 
 
 def closing_text(landed: int, held: int, dropped: int) -> str:
-    text = f"{landed} landed"
-    for count, label in ((held, "held for verification"), (dropped, "dropped")):
+    text = f"{landed} went in"
+    for count, label in ((held, "merged, not yet proven"), (dropped, "dropped")):
         if count:
             text += f", {count} {label}"
     return text

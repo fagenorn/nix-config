@@ -1,0 +1,10 @@
+namespace Planted;
+
+public static class Placeholder
+{
+    // One is the unit value.
+    public static int One() => 1;
+
+    /* Two is the pair size. */
+    public static int Two() => 2;
+}

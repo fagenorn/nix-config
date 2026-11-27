@@ -160,12 +160,12 @@ class GithubProofTest(unittest.TestCase):
 
     def test_a_manager_that_would_not_run_in_bypass_refuses_without_a_session(self):
         fakes = Fakes(permission=Permission(
-            AUTO, "production rules declared but not in the guard's policy"))
+            AUTO, "production rules declared but not in the safety check's policy"))
         record = self.proof(fakes)
         self.assertNotIn("prove", fakes.calls)
         self.assertEqual(record["outcome"], "refused")
         self.assertIn("would not run a manager", record["reason"])
-        self.assertIn("production rules declared but not in the guard's policy", record["reason"])
+        self.assertIn("production rules declared but not in the safety check's policy", record["reason"])
         self.assertEqual(self.teardown_of(record), list(TEARDOWN_STEPS))
         self.assertEqual(len(fakes.deleted), 1)
 

@@ -1803,7 +1803,7 @@ class WaitClockTest(Case):
         current[0] = {**waiting, "wait": {"reason": "due", "until": None, "what": "Read the hourly rows."}}
         svc.poll_tracker()
         shown = json.loads(svc.view_bytes)
-        self.assertEqual(shown["entries"][0]["waits"][0]["text"], "Due now: the next verification pass asks you here")
+        self.assertEqual(shown["entries"][0]["waits"][0]["text"], "Due now: the next check that it works in real use asks you here")
         self.assertEqual(shown["statement"]["inbox_items"], 0)
         svc.close()
 
@@ -2292,7 +2292,7 @@ class MovementTest(Case):
         self.assertIn("console: movement_read_failed owner/p00 ForgeError: gh_timeout", errors)
         shown = sprint_entry(svc)
         self.assertEqual((shown["state"], shown["ball"], shown["now_text"]),
-                         ("on_track", "manager", "waiting for CI on its pull request"))
+                         ("on_track", "manager", "waiting for GitHub's automatic checks on the proposed change"))
         self.assertNotIn("may be stuck", json.dumps(shown))
         self.now = t + 22 * 60
         self.poll(svc)
@@ -2428,7 +2428,7 @@ class MovementTest(Case):
         errors = self.poll(svc)
         self.assertEqual(len(reader.calls), 2)
         self.assertNotIn("movement_read_failed", errors)
-        self.assertEqual(sprint_entry(svc)["now_text"], "waiting for CI on its pull request")
+        self.assertEqual(sprint_entry(svc)["now_text"], "waiting for GitHub's automatic checks on the proposed change")
 
     def test_only_a_project_with_a_running_sprint_is_read(self):
         reader = Script(())
@@ -2473,7 +2473,7 @@ class MovementTest(Case):
         self.now = t + 20 * 60
         errors = self.poll(svc)
         self.assertIn("console: movement_local_failed owner/p00 OSError: gone", errors)
-        self.assertEqual(sprint_entry(svc)["now_text"], "waiting for CI on its pull request")
+        self.assertEqual(sprint_entry(svc)["now_text"], "waiting for GitHub's automatic checks on the proposed change")
 
     def test_an_invalid_release_reading_is_reported_once_and_moves_nothing(self):
         self.now = 1_800_000_000.0
