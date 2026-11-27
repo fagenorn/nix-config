@@ -448,6 +448,7 @@ class LiveTreeTest(unittest.TestCase):
         text = (REPO_ROOT / "home/common/agent-skills/standards/README.md").read_text(encoding="utf-8")
         self.assertIn(".agents/knowledge/hints/", text)
         self.assertNotIn(".claude/hints/", text)
+        self.assertNotIn("REVIEW-CONTRACT.md", text)
 
     def test_a_package_routed_stack_file_header_names_its_packages_and_no_extension(self):
         stacks = REPO_ROOT / "home/common/agent-skills/standards/stacks"
@@ -462,7 +463,6 @@ class LiveTreeTest(unittest.TestCase):
                         self.assertNotIn(f"*{trigger}" if trigger.startswith(".") else trigger, header)
                     for package in packages:
                         self.assertIn(package, header)
-        self.assertNotIn("REVIEW-CONTRACT.md", text)
 
 
 if __name__ == "__main__":
