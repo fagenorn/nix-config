@@ -10,8 +10,7 @@ source roots, the pairs, the covers, the globs and the build command are all fla
 are those of the `agent-workflow-tests` recipe in `<root>/<suite file>` (`--suite-file`, default
 `justfile`), read with
 `agent_tools.delivery.suite_runner.suite_members`. The changed paths are the lines of
-`git diff --no-renames --name-only -z <base>...HEAD`, read from `<root>`, so a non-ASCII path
-arrives unquoted.
+`git diff --no-renames --name-only <base>...HEAD`, read from `<root>`.
 
 Selection rules, in member order, then the pair tests in flag order, with no duplicates.
 Apart from the pairs, only members are selected, so a nightly or unregistered test never is.
@@ -61,7 +60,9 @@ selected. A file that cannot be written prints `test-touched: cannot write the s
 without the variable.
 
 .NET rule: `--dotnet-tests` also runs the .NET tests a change touches, and without it none of
-this happens (no `sources`, no tools, no `dotnet` key). Only changed paths under the solution
+this happens (no `sources`, no tools, no `dotnet` key). The .NET rule reads the changed paths
+with `git diff --no-renames --name-only -z <base>...HEAD`, so a non-ASCII path arrives
+unquoted, while the Python selection keeps git's quoted lines. Only changed paths under the solution
 root (`SOLUTION_ROOT`) count, and with none the projects are never listed. Otherwise they are every `.csproj` that
 `agent_tools.delivery.dotnet_format_lint.sources` lists there (an `OSError` prints
 `test-touched: cannot list the .NET projects: <error>` and returns 2 before anything runs).
@@ -165,6 +166,16 @@ class GitError(RuntimeError):
 
 
 def changed_paths(root: Path, base: str) -> list[str]:
+    result = subprocess.run(
+        ["git", "-C", str(root), "diff", "--no-renames", "--name-only", f"{base}...HEAD"],
+        capture_output=True, text=True)
+    if result.returncode != 0:
+        raise GitError(result.stderr.rstrip("\n"))
+    return result.stdout.splitlines()
+
+
+def exact_changed_paths(root: Path, base: str) -> list[str]:
+    """The changed paths, NUL-delimited, so a non-ASCII name arrives unquoted."""
     result = subprocess.run(
         ["git", "-C", str(root), "diff", "--no-renames", "--name-only", "-z", f"{base}...HEAD"],
         capture_output=True)
@@ -357,6 +368,7 @@ def main(argv: Sequence[str] | None = None, *,
     root = Path(args.root) if args.root else Path.cwd()
     try:
         changed = changed_paths(root, args.base)
+        exact = exact_changed_paths(root, args.base) if args.dotnet_tests else []
     except GitError as error:
         _say(sys.stderr, str(error))
         return 2
@@ -371,14 +383,14 @@ def main(argv: Sequence[str] | None = None, *,
     chosen = selection(changed, members, read, source_roots=args.source_root, pairs=pairs,
                        covers=covers, build_globs=args.build_when)
     dotnet_targets: list[str] = []
-    if args.dotnet_tests and any(p.startswith(f"{SOLUTION_ROOT}/") for p in changed):
+    if args.dotnet_tests and any(p.startswith(f"{SOLUTION_ROOT}/") for p in exact):
         try:
             projects = [p.relative_to(root).as_posix() for p in sources(root)
                         if p.name.endswith(".csproj")]
         except OSError as error:
             _say(sys.stderr, f"test-touched: cannot list the .NET projects: {error}")
             return 2
-        picked = dotnet_selection(changed, projects)
+        picked = dotnet_selection(exact, projects)
         if picked.whole_because and projects:
             try:
                 dotnet_targets = [solution(root).relative_to(root).as_posix()]

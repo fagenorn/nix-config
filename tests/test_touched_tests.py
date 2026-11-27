@@ -614,6 +614,28 @@ class DotnetMainTest(unittest.TestCase):
         self.assertNotIn("dotnet", json.loads(documents[1]))
         self.assertEqual(self.tools_asked, [])
 
+    def test_a_non_ascii_python_path_selects_what_the_base_selected(self):
+        self.write("tests/test_alpha.py", "from pkg import café\n")
+        self.write("python/pkg/café.py", "VALUE = 1\n")
+        self.commit("fixture")
+        self.change("python/pkg/café.py")
+        quoted = subprocess.run(
+            ["git", "-C", str(self.root), "diff", "--no-renames", "--name-only", "HEAD~1...HEAD"],
+            capture_output=True, text=True, check=True).stdout.splitlines()
+        for flags in ((), ("--dotnet-tests",)):
+            with self.subTest(flags=flags):
+                self.calls.clear()
+                target = self.root / f"selection{len(flags)}.json"
+                with mock.patch.dict(os.environ, {SELECTION_ENV: str(target)}):
+                    code, out, _ = self.run_main(*flags)
+                document = json.loads(target.read_text(encoding="utf-8"))
+                self.assertEqual(self.calls, [])
+                self.assertIn("test-touched: no suite member is touched by HEAD~1...HEAD", out)
+                self.assertEqual(code, 0)
+                self.assertEqual(document["selected"], [])
+                self.assertEqual(document["changed"], quoted)
+        self.assertEqual(self.tools_asked, [])
+
     def test_without_the_flag_a_changed_source_runs_no_dotnet(self):
         self.change(f"{SOLUTION_ROOT}/Planted/Widget.cs")
         code, out, _ = self.run_main()
