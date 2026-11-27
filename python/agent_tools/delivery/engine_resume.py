@@ -63,11 +63,11 @@ def resumed(run_dir: Path, ledger: list[dict], name: str, visit: int) -> Resumed
     retry = next((document["retry"] for document in ended if isinstance(document.get("retry"), str)), None)
     if ended and retry is None:
         return None
-    # the announced re-ask launch never started: send the re-ask its predecessor saved
+    # a launch announced and never started: send the re-ask the latest earlier record saved, if it saved one
     if not ended and launched and here[-1]["event"] == "session_resuming":
-        retry = next((document["retry"] for document in records
-                      if document.get("attempt") == max(launched) - 1
-                      and isinstance(document.get("retry"), str)), None)
+        earlier = [d for d in records if isinstance(d.get("attempt"), int) and d["attempt"] < max(launched)]
+        saved = max(earlier, key=lambda document: document["attempt"], default={}).get("retry")
+        retry = saved if isinstance(saved, str) else None
     attempt = 2 + len(launched)
     started = any(e["event"] == "process_started" for e in here)
     text = retry or (engine_session.CONTINUE_PROMPT if started else

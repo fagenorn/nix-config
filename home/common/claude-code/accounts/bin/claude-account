@@ -565,7 +565,7 @@ write_answer() {
 }
 
 cmd_run() {
-  local name status request session
+  local name status request session flag
   # The answer path is this launch's own: no client, and no launch inside one, inherits it.
   ANSWER_PATH="${CLAUDE_ACCOUNT_ANSWER:-}"
   unset CLAUDE_ACCOUNT_ANSWER
@@ -611,14 +611,27 @@ cmd_run() {
     [ -n "$session" ] || exit "$status"
     # The conversation carries over with the flags that bound what it may run, never with fewer
     # permissions or wider tools than it started with; its other flags are not repeated.
+    # The tool lists take every value up to the next option, in either spelling or as --flag=value.
     carried=()
     while [ $# -gt 0 ]; do
-      case "$1" in
-        --dangerously-skip-permissions|--strict-mcp-config) carried+=("$1") ;;
-        --tools|--disallowedTools|--allowedTools|--permission-mode)
-          if [ $# -ge 2 ]; then carried+=("$1" "$2"); shift; fi ;;
-      esac
+      flag="$1"
       shift
+      case "$flag" in
+        --) break ;;
+        --dangerously-skip-permissions|--strict-mcp-config) carried+=("$flag") ;;
+        --tools=*|--allowedTools=*|--allowed-tools=*|--disallowedTools=*|--disallowed-tools=*|--permission-mode=*)
+          carried+=("$flag") ;;
+        --permission-mode)
+          if [ $# -ge 1 ]; then carried+=("$flag" "$1"); shift; fi ;;
+        --tools|--allowedTools|--allowed-tools|--disallowedTools|--disallowed-tools)
+          values=()
+          while [ $# -gt 0 ]; do
+            case "$1" in -*) break ;; esac
+            values+=("$1")
+            shift
+          done
+          if [ "${#values[@]}" -gt 0 ]; then carried+=("$flag" "${values[@]}"); fi ;;
+      esac
     done
     set -- --resume "$session" ${carried[@]+"${carried[@]}"}
   done

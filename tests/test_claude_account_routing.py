@@ -683,6 +683,50 @@ class SwitchRelaunchTest(LauncherCase):
 
     switch = {"CLAUDE_CACHE_PROXY": "0"}
 
+    def relaunched(self, *args: str) -> list[str]:
+        """The words the second launch of a session that asked for a switch got, one per line."""
+        seen = self.root / "argv.log"
+        for leftover in (seen, self.root / "first"):
+            leftover.unlink(missing_ok=True)
+        client = self.root / "client"
+        client.write_text(
+            "#!/bin/sh\n"
+            'printf "%%s\\n" "$@" >>%s\n'
+            'echo "--launch-end" >>%s\n'
+            'if [ ! -e %s/first ]; then touch %s/first; mkdir -p "$CLAUDE_ACCOUNTS_DIR/switch"; '
+            'printf "default\\tsess-1\\n" >"$CLAUDE_ACCOUNTS_DIR/switch/$CLAUDE_ACCOUNT_LAUNCHER"; fi\n'
+            % (seen, seen, self.root, self.root))
+        client.chmod(0o755)
+        done = self.run_launcher(
+            self.closed(), env={"CLAUDE_ACCOUNT": "default"}, client=str(client), args=args)
+        self.assertEqual((done.returncode, done.stderr), (0, ""))
+        launches = seen.read_text().split("--launch-end\n")
+        self.assertEqual(len(launches), 3)
+        return launches[1].splitlines()
+
+    def test_the_relaunch_keeps_every_form_of_a_tool_list_flag(self):
+        cases = {
+            "the dashed alias": (("--disallowed-tools", "Edit"), ["--disallowed-tools", "Edit"]),
+            "the equals form": (("--disallowedTools=Edit",), ["--disallowedTools=Edit"]),
+            "the dashed equals form": (("--disallowed-tools=Edit",), ["--disallowed-tools=Edit"]),
+            "the allow list alias": (("--allowed-tools", "Read", "Grep"), ["--allowed-tools", "Read", "Grep"]),
+            "every listed value": (("--disallowedTools", "Edit", "Write"), ["--disallowedTools", "Edit", "Write"]),
+            "an empty list": (("--tools", ""), ["--tools", ""]),
+            "the permission mode equals form": (("--permission-mode=plan",), ["--permission-mode=plan"]),
+        }
+        for name, (given, kept) in cases.items():
+            with self.subTest(name):
+                self.assertEqual(
+                    self.relaunched("--session-id", "sess-1", "--dangerously-skip-permissions", *given,
+                                    "--model", "opus"),
+                    ["--resume", "sess-1", "--dangerously-skip-permissions", *kept])
+
+    def test_a_value_list_ends_at_the_next_option_and_nothing_after_the_end_of_options_is_kept(self):
+        self.assertEqual(
+            self.relaunched("--disallowedTools", "Edit", "Write", "--model", "opus", "--strict-mcp-config",
+                            "--", "--tools", "Bash", "--dangerously-skip-permissions"),
+            ["--resume", "sess-1", "--disallowedTools", "Edit", "Write", "--strict-mcp-config"])
+
     def test_the_relaunch_keeps_the_permission_and_tool_flags_of_the_first_launch(self):
         seen = self.root / "argv.log"
         client = self.root / "client"

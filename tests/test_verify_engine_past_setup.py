@@ -43,6 +43,11 @@ def write_run(root, label, started, events, procedure, parent=None, directory=No
     (run / "events.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def entry(at, **members):
+    """A `step_entered` event as the ledger writes it (a step, a visit and a stage), `members` overriding."""
+    return ("step_entered", "preflight", at, {"visit": 1, "stage": "setup", **members})
+
+
 def direct_root_events(started=HOUR):
     return [
         ("step_entered", "start", started, {}),
@@ -71,7 +76,7 @@ def direct_delivery(root, run_id, started, entered):
     """A direct root `run_id`, its setup child and a direct child that enters `preflight` at `entered`."""
     write_run(root, run_id, started, direct_root_events(started), "deliver")
     write_run(root, f"{run_id}-s", started, [("step_entered", "preflight", started, {})], "setup", parent=run_id)
-    events = [] if entered is None else [("step_entered", "preflight", entered, {})]
+    events = [] if entered is None else [entry(entered)]
     write_run(root, f"{run_id}-d", started, events, "direct", parent=run_id)
 
 
@@ -86,7 +91,7 @@ class PastSetupVerdictTest(unittest.TestCase):
     def test_a_direct_child_that_entered_a_step_in_time_is_met(self):
         write_run(self.root, "r", HOUR, direct_root_events(), "deliver")
         write_run(self.root, "s", HOUR, [("step_entered", "preflight", HOUR, {})], "setup", parent="r")
-        write_run(self.root, "d", HOUR, [("step_entered", "preflight", 2 * HOUR, {})], "direct", parent="r")
+        write_run(self.root, "d", HOUR, [entry(2 * HOUR)], "direct", parent="r")
         code, report = self.verdict(3 * HOUR)
         self.assertEqual(code, 0)
         self.assertTrue(report["met"])
@@ -100,8 +105,8 @@ class PastSetupVerdictTest(unittest.TestCase):
 
     def test_the_lane_grade_is_the_transition_the_engine_writes_for_a_decide_step(self):
         write_run(self.root, "r", HOUR, direct_root_events(), "deliver")
-        write_run(self.root, "d", HOUR, [("step_entered", "preflight", 2 * HOUR, {})], "direct", parent="r")
-        events = (self.root / rid("r") / "events.jsonl").read_text(encoding="utf-8")
+        write_run(self.root, "d", HOUR, [entry(2 * HOUR)], "direct", parent="r")
+        events =(self.root / rid("r") / "events.jsonl").read_text(encoding="utf-8")
         self.assertNotIn("outcome_graded", events)
         self.assertIn('"event": "transition_taken", "step": "lane"', events)
         code, report = self.verdict(3 * HOUR)
@@ -110,7 +115,7 @@ class PastSetupVerdictTest(unittest.TestCase):
     def test_a_delivery_started_in_the_activation_second_is_not_before_the_activation(self):
         anchor = ANCHOR + timedelta(milliseconds=250)  # the activation row keeps microseconds, a run's start whole seconds
         write_run(self.root, "r", timedelta(0), direct_root_events(timedelta(0)), "deliver")
-        write_run(self.root, "d", timedelta(0), [("step_entered", "preflight", HOUR, {})], "direct", parent="r")
+        write_run(self.root, "d", timedelta(0), [entry(HOUR)], "direct", parent="r")
         code, report = verify_checks.past_setup_verdict(self.root, anchor, ANCHOR + 3 * HOUR)
         self.assertEqual((code, report["verdict"], report["run"]), (0, "met", rid("r")))
         shutil.rmtree(self.root)
@@ -178,13 +183,37 @@ class PastSetupVerdictTest(unittest.TestCase):
 
     def test_a_child_run_or_an_old_run_is_never_a_root(self):
         write_run(self.root, "p", HOUR, direct_root_events(), "deliver", parent="x")
-        write_run(self.root, "p-d", HOUR, [("step_entered", "preflight", 2 * HOUR, {})], "direct", parent="p")
+        write_run(self.root, "p-d", HOUR, [entry(2 * HOUR)], "direct", parent="p")
         direct_delivery(self.root, "old", -DAY, -DAY + HOUR)
         code, report = self.verdict(3 * HOUR)
         self.assertEqual(code, 75)
         self.assertEqual(report["verdict"], "not_yet")
         self.assertIsNone(report["run"])
 
+
+    def test_an_empty_runs_directory_is_not_yet_inside_the_window_and_not_met_once_it_has_passed(self):
+        self.assertEqual(self.verdict(3 * HOUR)[0], 75)
+        self.assertEqual(self.verdict(2 * DAY)[0], 75)
+        code, report = self.verdict(3 * DAY)
+        self.assertEqual((code, report["verdict"], report["met"], report["run"]), (1, "not_met", False, None))
+
+    def test_a_child_whose_entry_the_ledger_would_not_replay_is_no_entry(self):
+        broken = {"no visit and no stage": {"visit": ..., "stage": ...}, "no stage": {"stage": ...},
+                  "no visit": {"visit": ...}, "an unknown stage": {"stage": "somewhere"},
+                  "a zero visit": {"visit": 0}}
+        for name, missing in broken.items():
+            with self.subTest(name):
+                shutil.rmtree(self.root)
+                self.root.mkdir()
+                write_run(self.root, "r", HOUR, direct_root_events(), "deliver")
+                extra = entry(2 * HOUR)[3]
+                members = {key: value for key, value in {**extra, **missing}.items() if value is not ...}
+                write_run(self.root, "d", HOUR, [("step_entered", "preflight", 2 * HOUR, members)],
+                          "direct", parent="r")
+                code, report = self.verdict(3 * HOUR)
+                self.assertEqual((code, report["verdict"], report["met"]), (75, "not_yet", False))
+                code, report = self.verdict(3 * DAY)
+                self.assertEqual((code, report["verdict"], report["met"]), (1, "not_met", False))
 
     def test_a_directory_the_ledger_never_published_is_never_a_run(self):
         cases = {
@@ -249,7 +278,10 @@ class EngineDeliverPastSetupTest(unittest.TestCase):
         self.assertTrue(json.loads(met.stdout)["met"])
         for child in ("r", "r-s", "r-d"):
             shutil.rmtree(self.runs / rid(child))
-        self.assertEqual(run_from_root(argv).returncode, 75)
+        for now, code in ((3 * HOUR, 75), (3 * DAY, 1)):
+            self.assertEqual(verify_checks.engine_deliver_past_setup(
+                self.shas["S"], runs_root=self.runs, log=self.store, repo_root=self.repo,
+                now=ANCHOR + now)[0], code)
 
 
 if __name__ == "__main__":

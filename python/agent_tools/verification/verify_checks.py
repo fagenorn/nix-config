@@ -115,8 +115,9 @@ finds it (none: `not_yet`, 75). The roots are the runs under `--runs-root` whose
 `parent` and a `started` at or after the anchor's whole second, by `(started, id)`. A root whose first `lane` transition (a decide step's grade) is `standard` or
 whose last `stop_reached` is `standard-not-on-engine` or `look-not-on-engine` is skipped; the first other root is
 judged and no later root stands in for it. With lane `direct`, the first `step_entered` among the root's direct child
-runs (`parent` the root, procedure `direct`), at or before anchor plus two days, is met (0), a later one not met (1);
-with none it is not met once the clock is past that bound, else `not_yet`. A root with no lane grade (it stopped in
+runs (`parent` the root, procedure `direct`) whose entry has the step, visit and stage the ledger requires, at or before anchor plus two days, is
+met (0), a later one not met (1); with none it is not met once the clock is past that bound, else `not_yet`; with
+no root to judge at all it is likewise not met once the clock is past that bound. A root with no lane grade (it stopped in
 setup, or is still before the grade) is `not_yet` (75) while it has no stop and the clock is inside the window, else
 `lane_unknown` (75), since the record cannot tell a direct issue from a standard one. The report is `{"met",
 "verdict", "anchor", "run", "lane", "stop", "child", "entered", "at"}`.
@@ -970,16 +971,55 @@ def past_setup_verdict(runs_root: Path, anchor: datetime, now: datetime) -> tupl
         for _, child_id, child_dir, child in runs:
             if child.get("parent") != run_id or child.get("procedure") != "direct":
                 continue
-            for kind, step, at, _ in _past_implement_events(child_dir):
-                if kind == "step_entered":
-                    report.update(child=child_id, entered=step, at=None if at is None else _stamp(at))
-                    if at is not None and at <= end:
-                        return 0, {**report, "met": True, "verdict": "met"}
-                    return 1, {**report, "verdict": "not_met"}
+            entered = _first_step_entered(child_dir)
+            if entered is not None:
+                at = parse_rfc3339_utc(entered["at"])
+                report.update(child=child_id, entered=entered["step"], at=_stamp(at))
+                if at <= end:
+                    return 0, {**report, "met": True, "verdict": "met"}
+                return 1, {**report, "verdict": "not_met"}
         if now > end:
             return 1, {**report, "verdict": "not_met"}
         return 75, report
+    if now > end:
+        return 1, {**report, "verdict": "not_met"}
     return 75, report
+
+
+ENTRY_MEMBERS = frozenset(("event", "at", "step", "visit", "stage"))
+ENTRY_STAGES = ("setup", "planning", "plan review", "building", "final review",
+                "verifying", "awaiting look", "landing", "closing out", "done")  # the ledger's stages
+
+
+def _first_step_entered(run_dir: Path) -> dict | None:
+    """The first `step_entered` a run's events hold, shaped as the ledger replays it; else None.
+
+    None when no complete line up to it parses as an event, or when it lacks a member the ledger requires of a
+    `step_entered` (a step, a visit, a stage), carries another or holds an invalid one: `engine status` cannot
+    show a run whose ledger does not replay."""
+    try:
+        text = (run_dir / "events.jsonl").read_bytes().decode("utf-8")
+    except (OSError, ValueError):
+        return None
+    for line in text.split("\n")[:-1]:  # a last segment with no newline is a write cut short
+        try:
+            event = json.loads(line)
+        except ValueError:
+            return None
+        if not isinstance(event, dict) or not isinstance(event.get("event"), str):
+            return None
+        if event["event"] != "step_entered":
+            continue
+        step, visit = event.get("step"), event.get("visit")
+        try:
+            parse_rfc3339_utc(event.get("at"))
+        except ValueError:
+            return None
+        valid = (set(event) == ENTRY_MEMBERS and isinstance(step, str) and re.fullmatch(r"[a-z][a-z0-9-]*", step)
+                 and isinstance(visit, int) and not isinstance(visit, bool) and visit >= 1
+                 and event["stage"] in ENTRY_STAGES)
+        return event if valid else None
+    return None
 
 
 def engine_deliver_past_setup(since: str, *, runs_root: Path | None = None, log: Path | None = None,

@@ -1393,7 +1393,7 @@ def _launch_until_answered(
         engine_session.store_record(
             run_dir, (name, visit, session, attempt), launched, reading, schema,
             f".continue-{attempt}" if resumed is not None else ".denied" if asked is not None
-            else ".resume" if missed else "", retry)
+            else ".resume" if missed else "", retry, earlier)
 
     def stop_at(launched: engine_session.Launched, reading: engine_session.Reading, end: str,
                 need: str, detail: str) -> tuple:

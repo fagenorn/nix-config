@@ -409,18 +409,21 @@ def reading_problem(schema: Mapping, reading: Reading) -> str | None:
 
 
 def store_record(run_dir: Path, visit_of: tuple[str, int, str, int], launched: Launched,
-                 reading: Reading, schema: Mapping, suffix: str, retry: str | None = None) -> None:
-    """Store a launch's record; with `retry`, the prompt that asks its denials again and what the launch used,
-    so a killed engine sends that prompt on the original session and counts the launch in the visit."""
+                 reading: Reading, schema: Mapping, suffix: str, retry: str | None = None,
+                 earlier: Sequence[tuple["Launched", Reading]] = ()) -> None:
+    """Store a launch's record; with `retry`, the prompt that asks its denials again and what the launch and
+    the `earlier` launches of the visit used, so a killed engine sends that prompt on the original session and
+    counts every launch in the visit."""
     name, visit, session, attempt = visit_of
     record = {"attempt": attempt, "denials": reading.denials, "exit_code": launched.exit_code,
               "problem": reading_problem(schema, reading), "prose": reading.prose, "session": session,
               "subtype": reading.subtype}
     if retry is not None:
+        used, total = summed(launched, reading, earlier)
         record["retry"] = retry
         record["measured"] = {
-            "spend_usd": reading.spend_usd, "tokens": reading.tokens, "turns": reading.turns,
-            "wall_seconds": reading.wall_seconds if reading.wall_seconds is not None else launched.wall_seconds}
+            "spend_usd": total.spend_usd, "tokens": total.tokens, "turns": total.turns,
+            "wall_seconds": total.wall_seconds if total.wall_seconds is not None else used.wall_seconds}
     engine_ledger.store_session_file(
         run_dir, f"{name}.{visit}{suffix}.json",
         json.dumps(record, sort_keys=True, separators=(",", ":")).encode("utf-8"))
