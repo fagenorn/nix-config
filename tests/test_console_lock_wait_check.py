@@ -101,7 +101,7 @@ class LockWaitCheckTest(unittest.TestCase):
         self.assertEqual((1, "not_met", ["b" * 16]), (code, printed["status"], printed["stuck"]))
         self.assertEqual([40, 41, 42], printed["queued"])
         with self.subTest("a newer waiter that reads moving leaves it met"):
-            moving = sprint("b" * 16, issue=6, now_text="waiting for CI on its pull request")
+            moving = sprint("b" * 16, issue=6, now_text="waiting for GitHub's automatic checks on the proposed change")
             code, printed = self.run_check(pulls=(P40, P41, newer), waiters=waiters,
                                            state=state_of(older, moving))
             self.assertEqual((0, "met"), (code, printed["status"]))
@@ -133,7 +133,7 @@ class LockWaitCheckTest(unittest.TestCase):
             self.assertEqual((1, "not_met"), (code, printed["status"]))
 
     def test_a_moving_holder_with_no_waiter_sprint_here_is_not_yet(self):
-        holder = sprint(issue=4, now_text="waiting for CI on its pull request")
+        holder = sprint(issue=4, now_text="waiting for GitHub's automatic checks on the proposed change")
         code, printed = self.run_check(state=state_of(holder))
         self.assertEqual((75, "no_sprint", [40, 41]), (code, printed["status"], printed["queued"]))
         with self.subTest("a quiet holder beside a waiter's sprint that shows the wait"):

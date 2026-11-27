@@ -507,10 +507,12 @@ def _write_result(path: Path, document: object) -> None:
 def store_result(run_dir: Path, *, step: str, visit: int, result: object, at: str,
                  wall_seconds: float, turns: int, tokens: Mapping[str, int],
                  spend_usd: float, head: str | None = None,
-                 outcome: str | None = None, startup_seconds: float | None = None) -> Path:
+                 outcome: str | None = None, startup_seconds: float | None = None,
+                 adopt: bool = False) -> Path:
     """Write the step visit's result file, then append its `result_stored` event.
 
-    `head`, `outcome` and `startup_seconds` are in the event only when given."""
+    `head`, `outcome` and `startup_seconds` are in the event only when given. With `adopt` a result file already
+    published for the visit (a killed engine's, never recorded) is kept as it is and only the event is appended."""
     run_dir = Path(run_dir)
     relative = f"results/{step}.{visit}.json"
     optional = {key: value for key, value in (("head", head), ("outcome", outcome),
@@ -520,9 +522,10 @@ def store_result(run_dir: Path, *, step: str, visit: int, result: object, at: st
                             "result": relative, "wall_seconds": wall_seconds, "turns": turns,
                             "tokens": dict(tokens), "spend_usd": spend_usd, **optional})
     path = run_dir / relative
-    if os.path.lexists(path):
-        raise LedgerError(f"{relative} is already stored")
-    _write_result(path, result)
+    if not adopt:
+        if os.path.lexists(path):
+            raise LedgerError(f"{relative} is already stored")
+        _write_result(path, result)
     append_event(run_dir, event)
     return path
 

@@ -3,7 +3,8 @@
 Nothing here reads a clock or runs a subprocess. `main_checkout`,
 `own_pid_domain`, `process_matches` and `read_session_registry` read the file
 system or the process table and never raise for a missing, unreadable or
-malformed file or directory; everything else is a pure function.
+malformed file or directory, except with `strict` (a failed read raises);
+everything else is a pure function.
 
 Event kinds (stored in the event log, payloads are JSON objects):
 
@@ -109,6 +110,7 @@ missing, malformed or unverifiable value of either is a mismatch, so a record
 without them is never live. Without procfs only the pid's existence is checked.
 """
 
+import functools
 import json
 import os
 import re
@@ -255,18 +257,30 @@ def hook_transition(event: str, payload: Mapping, previous: str | None) -> str:
 
 
 def own_pid_domain(proc: Path = Path("/proc"),
-                   machine_id: Path = Path("/etc/machine-id")) -> str | None:
+                   machine_id: Path = Path("/etc/machine-id"), *,
+                   strict: bool = False) -> str | None:
+    """This process's pid domain, or None when it cannot be read; `strict` raises `OSError` instead."""
     try:
         ident = machine_id.read_text().strip()
         namespace = os.readlink(proc / "self" / "ns" / "pid")
     except (OSError, ValueError):
+        if strict:
+            raise
         return None
+    if not ident and strict:
+        raise OSError("the machine id is empty")
     return f"linux:{ident}:{namespace}" if ident else None
 
 
 def process_matches(pid: int, proc_start: str | None, pid_domain: str | None, *,
                     proc: Path = Path("/proc"),
-                    machine_id: Path = Path("/etc/machine-id")) -> bool:
+                    machine_id: Path = Path("/etc/machine-id"),
+                    strict: bool = False) -> bool:
+    """Whether `pid` still runs the process the registry file recorded.
+
+    With `strict`, a read of the pid domain or of `/proc/<pid>/stat` that fails raises `OSError`
+    instead of reading as a dead process; a process that is not there (no such stat file) is dead.
+    """
     if pid <= 0:
         return False
     if not (proc / "self" / "stat").exists():
@@ -277,17 +291,24 @@ def process_matches(pid: int, proc_start: str | None, pid_domain: str | None, *,
         except (OSError, OverflowError):
             return False
         return True
-    own = own_pid_domain(proc, machine_id)
+    own = own_pid_domain(proc, machine_id, strict=strict)
     if own is None or not isinstance(pid_domain, str) or pid_domain != own:
         return False
     try:
-        line = (proc / str(pid) / "stat").read_text()
-    except (OSError, ValueError):
+        line = (proc / str(pid) / "stat").read_bytes()
+    except (FileNotFoundError, ProcessLookupError):
         return False
-    fields = line.rsplit(")", 1)[1].split() if ")" in line else []
+    except OSError:
+        if strict:
+            raise
+        return False
+    except ValueError:
+        return False
+    # Bytes: a process name (the parenthesised field) is any bytes, not always UTF-8.
+    fields = line.rsplit(b")", 1)[1].split() if b")" in line else []
     if len(fields) < 20:
         return False
-    return isinstance(proc_start, str) and proc_start == fields[19]
+    return isinstance(proc_start, str) and proc_start == fields[19].decode("ascii", "replace")
 
 
 def profile_name(config_dir: Path) -> str:
@@ -365,7 +386,7 @@ def _json_names(directory: Path) -> list[Path]:
 
 def read_session_registry(
     directories: Iterable[Path],
-    alive: Callable[[int, str | None, str | None], bool] = process_matches,
+    alive: Callable[[int, str | None, str | None], bool] | None = None,
     strict: bool = False,
 ) -> dict[str, Observation]:
     """The live sessions each registry directory shows.
@@ -373,9 +394,13 @@ def read_session_registry(
     A directory or a file that cannot be read is skipped. With `strict` it raises instead (`OSError`,
     or `ValueError` for a file that is not JSON; a directory or a file that is not there is no
     session), so a caller that must know a session is gone is never told so by a failed read. So
-    does a liveness that cannot be judged (`liveness_unreadable`, with the default `alive`): a
+    does a liveness that cannot be judged (`liveness_unreadable`, with the default `alive` or `process_matches`) or a
+    pid-domain or proc read of the default `alive` that fails (`process_matches(strict=True)`): a
     session is then dropped as dead for no reason it could know.
     """
+    default = alive is None or alive is process_matches
+    if default:
+        alive = functools.partial(process_matches, strict=True) if strict else process_matches
     result: dict[str, Observation] = {}
     for directory in directories:
         profile = profile_of(Path(directory))
@@ -394,7 +419,7 @@ def read_session_registry(
                 if strict:
                     raise
                 continue
-            if strict and alive is process_matches and liveness_unreadable():
+            if strict and default and liveness_unreadable():
                 raise OSError("the pid domain of this process cannot be read")
             found = _observation(document, alive, profile)
             if found is not None and found.session_id not in result:

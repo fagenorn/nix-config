@@ -11,7 +11,8 @@ Members, in order:
 
 - `lint`: `agnostic-lint` (`agent_tools.delivery.agnostic_lint --root <root>`),
   `context-map-lint` (`agent_tools.delivery.context_map_lint` with the root and
-  `docs/CONTEXT-MAP.md`) and `skill-lint` (`agent_tools.skill_lint check --root <root>`).
+  `docs/CONTEXT-MAP.md`), `skill-lint` (`agent_tools.skill_lint check --root <root>`) and
+  `dotnet-format` (`agent_tools.delivery.dotnet_format_lint --root <root>`).
   No lint member builds a host configuration.
 - `test`: `nix-build` (`just build`) then `agent-workflow-tests` (`just agent-workflow-tests`),
   which runs with `WORKFLOW_POLICY_SURFACE=source` added to its environment, the way CI runs
@@ -60,6 +61,8 @@ def members(command: str, root: Path) -> tuple[Member, ...]:
                 "--context-map", str(root / "docs" / "CONTEXT-MAP.md"))),
             Member("skill-lint",
                    (*sibling_argv("skill_lint"), "check", "--root", str(root))),
+            Member("dotnet-format",
+                   (*sibling_argv("delivery.dotnet_format_lint"), "--root", str(root))),
         )
     if command == "test":
         return (

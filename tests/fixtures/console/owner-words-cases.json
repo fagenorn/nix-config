@@ -1,0 +1,303 @@
+[
+  {
+    "text": "waiting on the land lock",
+    "found": [
+      "land lock"
+    ]
+  },
+  {
+    "text": "Waiting on the LAND\tLOCK",
+    "found": [
+      "LAND LOCK"
+    ]
+  },
+  {
+    "text": "the merge lock is free",
+    "found": [
+      "merge lock"
+    ]
+  },
+  {
+    "text": "the PR is on main now",
+    "found": [
+      "PR",
+      "on main"
+    ]
+  },
+  {
+    "text": "two pull requests wait",
+    "found": [
+      "pull requests"
+    ]
+  },
+  {
+    "text": "rerun it, then rerun again",
+    "found": [
+      "rerun"
+    ]
+  },
+  {
+    "text": "CI is red",
+    "found": [
+      "CI"
+    ]
+  },
+  {
+    "text": "the held issue and the look card",
+    "found": [
+      "held issue",
+      "look card"
+    ]
+  },
+  {
+    "text": "verification passed",
+    "found": [
+      "verification"
+    ]
+  },
+  {
+    "text": "verify-fix is running",
+    "found": [
+      "verify-fix"
+    ]
+  },
+  {
+    "text": "issue 12 is landing",
+    "found": [
+      "landing",
+      "issue 12"
+    ]
+  },
+  {
+    "text": "3 landed, 1 dropped",
+    "found": [
+      "landed"
+    ]
+  },
+  {
+    "text": "landing the change now",
+    "found": [
+      "landing"
+    ]
+  },
+  {
+    "text": "the fix landed on main.",
+    "found": [
+      "landed",
+      "on main"
+    ]
+  },
+  {
+    "text": "The plane is landing at noon",
+    "found": []
+  },
+  {
+    "text": "the landing page is live",
+    "found": []
+  },
+  {
+    "text": "three slices left",
+    "found": [
+      "slices"
+    ]
+  },
+  {
+    "text": "brief version 3 is ready",
+    "found": [
+      "brief version"
+    ]
+  },
+  {
+    "text": "the guard refusal stopped it",
+    "found": [
+      "guard refusal"
+    ]
+  },
+  {
+    "text": "a claim on the files",
+    "found": [
+      "claim on the files"
+    ]
+  },
+  {
+    "text": "a live fault in billing",
+    "found": [
+      "live fault"
+    ]
+  },
+  {
+    "text": "the head moved to a new commit",
+    "found": [
+      "commit",
+      "the head"
+    ]
+  },
+  {
+    "text": "the head of the team said yes",
+    "found": []
+  },
+  {
+    "text": "the branch is synced with main",
+    "found": [
+      "the branch",
+      "synced"
+    ]
+  },
+  {
+    "text": "Sync your photos to the new phone",
+    "found": []
+  },
+  {
+    "text": "merged into main",
+    "found": [
+      "into main"
+    ]
+  },
+  {
+    "text": "The shop is on Main Street",
+    "found": []
+  },
+  {
+    "text": "the shop on main street",
+    "found": []
+  },
+  {
+    "text": "on issue #7",
+    "found": [
+      "issue #7"
+    ]
+  },
+  {
+    "text": "the milestone has five tasks",
+    "found": [
+      "milestone"
+    ]
+  },
+  {
+    "text": "Conformance and lint both passed",
+    "found": [
+      "Conformance",
+      "lint"
+    ]
+  },
+  {
+    "text": "a fix wave is due",
+    "found": [
+      "fix wave"
+    ]
+  },
+  {
+    "text": "activating this host now",
+    "found": [
+      "activating this host"
+    ]
+  },
+  {
+    "text": "AC3 is met",
+    "found": [
+      "AC3"
+    ]
+  },
+  {
+    "text": "final-review is next",
+    "found": [
+      "final-review"
+    ]
+  },
+  {
+    "text": "ready mode is done",
+    "found": [
+      "ready mode"
+    ]
+  },
+  {
+    "text": "the test is flaky",
+    "found": [
+      "flaky"
+    ]
+  },
+  {
+    "text": "it spent 5000 tokens",
+    "found": [
+      "tokens"
+    ]
+  },
+  {
+    "text": "the worktree and the engine run the workflow",
+    "found": [
+      "worktree",
+      "engine",
+      "workflow"
+    ]
+  },
+  {
+    "text": "a guardrail, reclaim, landlocked, mainly, headed, prism",
+    "found": []
+  },
+  {
+    "text": "The fix landed. We landed the change.",
+    "found": [
+      "landed"
+    ]
+  },
+  {
+    "text": "The tests passed on main yesterday.",
+    "found": [
+      "on main"
+    ]
+  },
+  {
+    "text": "The guard opened the gate.",
+    "found": []
+  },
+  {
+    "text": "the guard's policy cannot be read",
+    "found": [
+      "the guard's policy"
+    ]
+  },
+  {
+    "text": "the proposed change's head moved",
+    "found": [
+      "change's head"
+    ]
+  },
+  {
+    "text": "The guard refused the push.",
+    "found": [
+      "The guard"
+    ]
+  },
+  {
+    "text": "the guard said no",
+    "found": [
+      "the guard"
+    ]
+  },
+  {
+    "text": "Blocked by the guard.",
+    "found": [
+      "the guard"
+    ]
+  },
+  {
+    "text": "The guard watched the visitors. He waved.",
+    "found": []
+  },
+  {
+    "text": "The guard at the museum said hello.",
+    "found": []
+  },
+  {
+    "text": "Open a pull request. Close the pull requests.",
+    "found": [
+      "pull request"
+    ]
+  },
+  {
+    "text": "The commit moved. Two commits left.",
+    "found": [
+      "commit"
+    ]
+  }
+]

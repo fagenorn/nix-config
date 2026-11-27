@@ -34,7 +34,7 @@ OTHER_GOAL = "make the exporter resumable"
 FAULT = {"issue": 12, "observed": "saving the settings form drops the billing address",
          "when": "12:10 UTC today",
          "proven": "a saved form read back from the production database"}
-FAULT_TEXT = ("Live fault in production on #12: saving the settings form drops the billing "
+FAULT_TEXT = ("Fault users meet now in production on #12: saving the settings form drops the billing "
               "address, seen 12:10 UTC today, proven by a saved form read back from the "
               "production database")
 
@@ -600,7 +600,7 @@ class LiveFaultRouteTest(Case):
                 ({"Origin": self.own(svc)["Origin"]}, body, 403, b"token refused\n"),
                 (self.own(svc, Origin="http://evil.test"), body, 403, b"origin refused\n"),
                 (self.own(svc), {**body, "fault": seq + 100}, 409,
-                 b"this live fault is not known\n"),
+                 b"this fault is not known\n"),
                 (self.own(svc), {**body, "project_id": "owner/p02"}, 409,
                  b"this sprint is not open\n"),
                 (self.own(svc), {"project_id": "owner/p01", "sprint_id": a}, 400,
@@ -610,7 +610,7 @@ class LiveFaultRouteTest(Case):
             self.assertEqual((got[0], got[2]), (status, text))
         self.assertEqual(self.withdraw_fault(svc, "owner/p01", a, seq)[0], 204)
         got = self.assert_unchanged(svc, lambda: self.withdraw_fault(svc, "owner/p01", a, seq))
-        self.assertEqual((got[0], got[2]), (409, b"this live fault is already withdrawn\n"))
+        self.assertEqual((got[0], got[2]), (409, b"this fault was already withdrawn\n"))
 
     def test_live_faults_survive_a_restart(self):
         svc = self.open()
@@ -645,13 +645,13 @@ class LiveFaultRouteTest(Case):
                                               "fault": {**FAULT, "issue": 99}})
             self.assertEqual(got[0], 409)
             got = self.withdraw_fault(svc, "owner/p01", a, seq + 100)
-            self.assertEqual((got[0], got[2]), (409, b"this live fault is not known\n"))
+            self.assertEqual((got[0], got[2]), (409, b"this fault is not known\n"))
             got = self.withdraw_fault(svc, "owner/p01\nconsole: forged", a, seq)
             self.assertEqual((got[0], got[2]), (409, b"this sprint is not open\n"))
         output = stderr.getvalue()
         self.assertEqual(output.splitlines(), [
             f"console: live_fault_refused {a} {sprints.FAULT_NOT_OURS}",
-            f"console: live_fault_withdraw_refused {a} this live fault is not known",
+            f"console: live_fault_withdraw_refused {a} this fault is not known",
             f"console: live_fault_withdraw_refused {a} this sprint is not open"])
         for leaked in (secret, FAULT["observed"], FAULT["proven"], "forged"):
             self.assertNotIn(leaked, output)

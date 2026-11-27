@@ -357,19 +357,19 @@ class ActivationViewTest(Trees):
     def test_a_running_activation_reads_activating_and_offers_nothing(self):
         run = LastRun(C, "/srv/cfg", "running", None, None, None)
         line = view.derive_view([], activation=READ, activation_run=run, now_ms=NOW)["activation"]
-        self.assertEqual(line["text"], f"Activating this host at {C[:12]}. The console may restart before it reports.")
+        self.assertEqual(line["text"], f"Switching this computer to the new version ({C[:12]}). The console may restart before it reports.")
         self.assertEqual((line["state"], line["commit"], line["activate"]), ("running", C, False))
 
     def test_a_finished_activation_reads_activated_at_its_commit(self):
         run = LastRun(C, "/srv/cfg", "activated", None, None, NOW - 1000)
         line = view.derive_view([], activation=None, activation_run=run, now_ms=NOW)["activation"]
-        self.assertEqual(line["text"], f"Activated this host at {C[:12]}.")
+        self.assertEqual(line["text"], f"Switched this computer to the new version ({C[:12]}).")
         self.assertEqual((line["state"], line["commit"], line["activate"]), ("activated", C, False))
 
     def test_a_failed_activation_reads_its_reason_and_next_step(self):
         run = LastRun(C, "/srv/cfg", "failed", FAILURE, NEXT, NOW - 1000)
         line = view.derive_view([], activation=READ, activation_run=run, now_ms=NOW)["activation"]
-        self.assertEqual(line["text"], f"Activating this host at {C[:12]} failed: {FAILURE}. {NEXT}")
+        self.assertEqual(line["text"], f"Switching this computer to the new version ({C[:12]}) failed: {FAILURE}. {NEXT}")
         self.assertEqual((line["state"], line["activate"]), ("failed", True))
 
     def test_another_change_offers_activate_in_plain_words(self):
@@ -971,7 +971,7 @@ class ActivatePageWriteTest(Trees):
         status, _, body = self.post(svc, {"commit": "f" * 40})
         self.assertEqual(
             (status, body.strip()),
-            (409, b"that commit is no longer the tip of origin's integration branch"))
+            (409, b"that version is no longer the latest main version on origin"))
         self.assertEqual(self.kinds(), [])
         self.assertFalse(self.ran.exists())
 
@@ -980,7 +980,7 @@ class ActivatePageWriteTest(Trees):
         status, _, body = self.post(svc)
         self.assertEqual(
             (status, body.strip()),
-            (409, b"that commit is no longer the tip of origin's integration branch"))
+            (409, b"that version is no longer the latest main version on origin"))
         self.assertEqual(self.kinds(), [])
 
         def unreadable(root):
@@ -990,7 +990,7 @@ class ActivatePageWriteTest(Trees):
         status, _, body = self.post(other)
         self.assertEqual(
             (status, body.strip()),
-            (409, b"the tip of origin's integration branch could not be read"))
+            (409, b"the latest main version on origin could not be read"))
         self.assertEqual(self.kinds(), [])
         self.assertFalse(self.ran.exists())
 

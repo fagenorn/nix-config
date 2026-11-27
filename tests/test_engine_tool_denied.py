@@ -242,6 +242,53 @@ class FanOutDeniedTest(unittest.TestCase):
                           and e["step"] == "fan"], [])
 
 
+    def test_a_call_cut_before_it_recorded_the_stop_walks_its_tool_denied_children_again(self):
+        directory = self.project.procedures(FAN("standin-items", 2), children={
+            "fan-child": child([
+                {"id": "look", "stage": "building", "kind": "agent", "holds": "run", "role": "reviewer",
+                 "prompt": "item.md", "reply": "draft.reply.json", "outcome_from": "status",
+                 "in": ["run.item"],
+                 "on": {"drafted": "done", "stuck": "child-stop", "no-reply": "child-stop",
+                        "out-of-bounds": "child-stop"}}])})
+        (directory / "item.md").write_text("Review item {{run.item}}.\n", encoding="utf-8")
+        (directory / "draft.reply.json").write_text(json.dumps(DRAFT_REPLY), encoding="utf-8")
+        both = threading.Barrier(2, timeout=60)
+        denying = True
+
+        def fake(argv, cwd, prompt, *, on_start, timeout=None, env=None, stop=None):
+            on_start(os.getpid())
+            self.answer(env, {"account": "stub"})
+            if denying:
+                both.wait()
+                return self.denied("echo first")
+            return engine_session.Launched(0, canned_result(), b"", 0.1)
+
+        with self.project.inside(), mock.patch.object(engine_session, "launch", fake):
+            code, line = engine_shell.deliver(1919, directory)
+            self.assertEqual((code, line["end"]), (3, "tool-denied"))
+            (root,) = roots(self.project)
+            kids = children_of(self.project)
+            self.assertEqual(len(kids), 2)
+            # The engine was killed after each child stopped and before the parent recorded its own stop.
+            path = root / "events.jsonl"
+            lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+            self.assertEqual(json.loads(lines[-1])["event"], "stop_reached")
+            path.write_text("".join(lines[:-1]), encoding="utf-8")
+            denying = False
+
+            code, line = engine_shell.deliver(1919, directory)
+
+        self.assertEqual((code, line["end"]), (0, "done"), line)
+        events = self.project.events(root)
+        # The two denied children are the ones the call named; only the third item, never started, is new.
+        named = [e["child"] for e in events if e["event"] == "call"]
+        self.assertEqual(sorted(named[:2]), sorted(kid.name for kid in kids))
+        self.assertEqual(len(children_of(self.project)), 3)
+        self.assertEqual(events[-1]["event"], "run_done")
+        self.assertEqual([e["event"] for e in events].count("stop_reached"), 0)
+        for kid in children_of(self.project):
+            self.assertEqual(self.project.events(kid)[-1]["event"], "run_done", kid.name)
+
     def faulted(self) -> engine_session.Launched:
         return engine_session.Launched(1, b"", b"the client crashed\n", 0.1)
 
