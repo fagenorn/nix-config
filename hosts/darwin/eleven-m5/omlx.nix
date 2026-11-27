@@ -241,19 +241,18 @@ let
           reload = reloadText;
           restart = restartText;
           killReactive = killReactiveText;
+          kill = killText;
           hold = holdText;
           unhold = unholdText;
           inherit holdReason;
         };
       });
-  # The kill omlx-restart runs once the gate allows a restart; launchd's KeepAlive brings the
-  # server back. pkill exits 1 when no server runs, which leaves nothing to restart.
-  killServer = pkgs.writeShellScript "omlx-kill" ''
-    /usr/bin/pkill -U "$(id -u)" -x omlx-server
-    status=$?
-    [ "$status" -le 1 ] && exit 0
-    exit "$status"
-  '';
+  # The kill omlx-restart runs once the gate allows a restart, given the uid of the user the server
+  # runs as (the caller's own uid under sudo is root's, which owns no server); launchd's KeepAlive
+  # brings the server back. It keeps pkill's status: 1 means no server process matched, which
+  # omlx-restart reports as nothing restarted.
+  killText = "exec /usr/bin/pkill -U \"$1\" -x omlx-server\n";
+  killServer = pkgs.writeShellScript "omlx-kill" killText;
   # The reactive restart keeps pkill's own status: 1 means no server process matched.
   killReactiveText = "exec /usr/bin/pkill -U \"$(id -u)\" -x omlx-server\n";
   killReactive = pkgs.writeShellScript "omlx-kill-reactive" killReactiveText;
@@ -332,6 +331,7 @@ let
       --state-dir ${home}/.omlx \
       --restart-bin ${killServer} \
       --reload-bin ${reloadServer} \
+      --server-user ${username} \
       --health-url http://127.0.0.1:8000/health "$@"
   '';
   # Restarts the server for the pending marker only while it is idle; --now skips that check.
