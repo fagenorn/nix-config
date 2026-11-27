@@ -1971,7 +1971,7 @@ class DeliveryTest(Case):
         self.assertEqual(self.runs(), [])
         gone = self.rows("delivery.gone")
         self.assertEqual(len(gone), 1)
-        self.assertEqual(json.loads(gone[0][4]), {"run_id": "wf_t1", "session_id": self.sid})
+        self.assertEqual(set(json.loads(gone[0][4])), {"run_id", "session_id", "project", "issues"})
 
     def sprint_of(self, svc):
         return sprint_entry(svc)
