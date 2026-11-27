@@ -28,7 +28,7 @@ from pathlib import Path
 from agent_tools.delivery import engine_ledger, engine_session, engine_stop, procedure_terms
 
 DONE = "done"
-ENGINE_STOPS = (procedure_terms.QUOTA_WAIT, engine_stop.STOPPED_BY_REQUEST)
+ENGINE_STOPS = (*procedure_terms.ENGINE_STOPS, engine_stop.STOPPED_BY_REQUEST)
 
 
 @dataclass(frozen=True)
@@ -131,7 +131,8 @@ def published_ends(run_dir: Path, ledger: list[dict], step: str, visit: int) -> 
 def ended(child_dir: Path) -> str | None:
     """How the child run ended: `done`, the name of the procedure's own stop, or None when it is to be walked again.
 
-    A run that stopped for a usage limit or at a request, or that has no end, is walked again."""
+    A run that stopped at an engine stop (a usage limit, a denied tool call) or at a request, or that has no end,
+    is walked again."""
     state = engine_ledger.fold(engine_ledger.read_run(child_dir),
                                engine_ledger.replay(child_dir / "events.jsonl"), lambda pid, started: False)
     if state.done:
