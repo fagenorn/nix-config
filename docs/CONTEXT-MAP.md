@@ -111,6 +111,7 @@
 | Project contract | Project contract |
 | Project question | Console |
 | Projection | Project contract |
+| Proven revision | Project contract |
 | Publication-free profile | Release |
 | Question round | Console |
 | Question thread | Console |
@@ -146,5 +147,4 @@
 | Verify block | Verification |
 | Waiting since | Console |
 ## Relationships
-- **Delivery → Claims, Verification**: a delivery holds a **Claim** and lands under the **Land lock**; one that leaves evidence criteria holds its issue with a **Verify block**. **Verification → Claims**: an **Owner prompt** is an **Owner-action marker**. **Release → Guard**: the forge adapter passes each mutation through the guard. **Guard → Project contract**: a **Derived row** comes from a resolved **Project contract** and the **Fleet registry**. **Project contract → every area**: each command reads the **ResolvedProject**. **Hosts → Verification, Console**: every host runs **Verification passes** on a schedule, and the **Cache proxy** reports each **Limit reading** to the console.
-- **Console → Claims**: an **Inbox item** from the tracker is a live **Owner-action marker**, read by the claims area's marker reader; an **Inbox item** of a held check is a live **Owner prompt** of Verification, answered through the runner's owner path. **Console → Project contract**: the console's projects are the **Fleet registry**'s entries.
+- **Console → Claims**: an **Inbox item** from the tracker is a live **Owner-action marker**, read by the claims area's marker reader; an **Inbox item** of a held check is a live **Owner prompt** of Verification, answered through the runner's owner path. **Console → Project contract**: the console's projects are the **Fleet registry**'s entries. **Delivery → Claims, Verification**: a delivery holds a **Claim** and lands under the **Land lock**; one that leaves evidence criteria holds its issue with a **Verify block**. **Verification → Claims**: an **Owner prompt** is an **Owner-action marker**. **Release → Guard**: the forge adapter passes each mutation through the guard. **Guard → Project contract**: a **Derived row** comes from a resolved **Project contract** and the **Fleet registry**. **Project contract → every area**: each command reads the **ResolvedProject**. **Hosts → Verification, Console**: every host runs **Verification passes** on a schedule, and the **Cache proxy** reports each **Limit reading** to the console.

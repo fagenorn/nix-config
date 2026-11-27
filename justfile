@@ -211,6 +211,7 @@ agent-workflow-tests *args:
     tests/test_engine_cut_continue.py \
     tests/test_engine_resume.py \
     tests/test_engine_housekeeping.py \
+    tests/test_engine_history_steps.py \
     tests/test_engine_stop.py \
     tests/test_engine_caps.py \
     tests/test_engine_fanout.py \
@@ -218,6 +219,8 @@ agent-workflow-tests *args:
     tests/test_engine_fixture.py \
     tests/test_engine_stubbed_run.py \
     tests/test_engine_stubbed_world.py \
+    tests/test_proof_run.py \
+    tests/test_bound_issues.py \
     tests/test_engine_step_coverage.py \
     tests/test_independent_review.py \
     tests/test_issue_setup.py \
@@ -517,6 +520,7 @@ agent-workflow-tests *args:
     tests/test_console_guest_account.py \
     tests/test_console_units.py \
     tests/test_owner_services_units.py \
+    tests/test_proof_run_units.py \
     tests/test_system_packages.py \
     home/common/agent-skills/tests/test_program_harness.py \
     home/common/agent-skills/tests/test_deliver_standard_program.py \

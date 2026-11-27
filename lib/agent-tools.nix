@@ -101,6 +101,7 @@ let
     "plan-amend" = "delivery.plan_amend";
     "program-copies" = "delivery.program_copies";
     "pr-green" = "verification.pr_green";
+    "proof-run" = "delivery.proof_run";
     "promotion" = "delivery.promotion";
     "release" = "release.release";
     "release-card" = "console.release_card";

@@ -462,6 +462,18 @@ indexed or logged, not fseventsd's buffering for each client. The trim's
 record and `peak_fseventsd_gib` date the next growth, which is what to compare
 with the clients running then.
 
+## Daily proof run
+
+`proof-run.nix` declares the `org.nixos.proof-run` daemon. At 06:00 each day, as the owner, it runs
+`proof-run daily` for the delivery engine: when the platform repository's `main` tip is not yet
+proven, it resets the fixture project, files its fixed issue and delivers it with the real model.
+Nothing starts it at load or activation, so a switch spends no run. Its output goes to
+`~/Library/Logs/proof-run.log`; the attempt and proven records are in `~/.agents/state/engine`.
+
+To start a run at once, from a reset fixture, whatever `main` did:
+
+    proof-run now --platform-repo fagenorn/nix-config --branch main --fixture fagenorn/engine-fixture --fixture-branch main
+
 ## Retiring a model
 
 Deleting a `models` entry stops its download and its declared settings, but leaves
