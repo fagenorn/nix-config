@@ -632,32 +632,23 @@ class ApplyWordsTest(unittest.TestCase):
                 self.assertLessEqual(len(re.findall(r"[.!?](?=\s|$)", note)), 2)
                 self.assertNotIn("leftover", note)
 
-    def test_a_signing_failure_is_one_sentence_and_offers_turn_signed_commits_off(self):
-        latest = {"plan_id": PID, "root": "/x/r", "at": "t1", "lines": [],
-                  "draft": [{"field": "commit-signed", "label": "signed commits",
-                             "value": "yes", "source": "x", "options": [], "text": False,
-                             "reason": None, "ask": None}]}
+    def test_a_signing_failure_on_a_drafted_contract_offers_only_apply_it_again(self):
+        legacy = {"field": "commit-signed", "label": "signed commits", "value": "yes",
+                  "source": "x", "options": [], "text": False, "reason": None, "ask": None}
+        latest = {"plan_id": PID, "root": "/x/r", "at": "t1", "lines": []}
         adoption = {**step_payload("apply_failed", reason=approve.SIGNING_REASON,
-                                   note=approve.SIGNING_NOTE, kept=KEPT, branch=None,
-                                   commit=None),
+                                   note=approve.SIGNING_NOTE, kept=KEPT, branch=None, commit=None),
                     "at": "t", "pull_state": None, "pull_at": None}
         entry = approve.entry(adoption, running=False, name="r")
-        items = approve.apply_items(latest, adoption, entry, "approve")
-        self.assertEqual(len(items), 1)
-        self.assertEqual(items[0]["questions"][0]["options"],
-                         ["Apply it again", "Turn signing off", "Not now"])
-        self.assertEqual(items[0]["values"], ["apply", "signing_off", "not_now"])
-        self.assertEqual(items[0]["why"], approve.SIGNING_NOTE)
-        self.assertEqual(approve.SIGNING_OFF_OPTION, "Turn signing off")
-        self.assertEqual(approve.SIGNING_OFF_VALUE, "signing_off")
-        self.assertEqual(approve.SIGNING_FIELD, "commit-signed")
-        for draft in (None, [{**latest["draft"][0], "value": "no"}]):
+        for draft in ([legacy], None, [], [{**legacy, "value": "no"}]):
             with self.subTest(draft=draft):
-                items = approve.apply_items({**latest, "draft": draft}, adoption, entry,
-                                            "approve")
-                self.assertEqual(items[0]["questions"][0]["options"],
-                                 ["Apply it again", "Not now"])
+                items = approve.apply_items({**latest, "draft": draft}, adoption, entry, "approve")
+                self.assertEqual(len(items), 1)
+                self.assertEqual(items[0]["questions"][0]["options"], ["Apply it again", "Not now"])
                 self.assertEqual(items[0]["values"], ["apply", "not_now"])
+                self.assertEqual(items[0]["why"], approve.SIGNING_NOTE)
+        for name in ("SIGNING_OFF_OPTION", "SIGNING_OFF_VALUE", "SIGNING_FIELD", "_signing_draft"):
+            self.assertFalse(hasattr(approve, name), name)
 
     def test_a_stored_note_in_the_old_words_reads_in_the_new_words(self):
         old_signing = ("Set up a signing key on this computer, then choose Apply it again. To "
@@ -842,12 +833,6 @@ class EvidenceTest(unittest.TestCase):
         self.assertEqual(approve.apply_failure("r", self.hook_error(hook=None), None),
                          ("the adoption's change could not be saved", commit_note))
 
-    def signing_latest(self):
-        return {"plan_id": PID, "root": "/x/r", "at": "t1", "lines": [],
-                "draft": [{"field": "commit-signed", "label": "signed commits",
-                           "value": "yes", "source": "x", "options": [], "text": False,
-                           "reason": None, "ask": None}]}
-
     def test_a_failed_commit_card_carries_its_evidence_lines(self):
         latest = {"plan_id": PID, "root": "/x/r", "at": "t1", "lines": []}
         cases = (({"hook": None, "why": None, "lines": ["a", "b"]}, ["a", "b"]), (None, []))
@@ -880,10 +865,11 @@ class EvidenceTest(unittest.TestCase):
                                    branch=None, commit=None, evidence=evidence),
                     "at": "t", "pull_state": None, "pull_at": None}
         entry = approve.entry(adoption, running=False, name="r")
-        items = approve.apply_items(self.signing_latest(), adoption, entry, "approve")
+        items = approve.apply_items(
+            {"plan_id": PID, "root": "/x/r", "at": "t1", "lines": []}, adoption, entry, "approve")
         self.assertEqual(len(items), 1)
-        self.assertEqual(items[0]["questions"][0]["options"],
-                         ["Apply it again", "Turn signing off", "Not now"])
+        self.assertEqual(items[0]["questions"][0]["options"], ["Apply it again", "Not now"])
+        self.assertEqual(items[0]["values"], ["apply", "not_now"])
         self.assertEqual(items[0]["why"], note)
         self.assertEqual(items[0]["lines"], ["hook said no"])
 

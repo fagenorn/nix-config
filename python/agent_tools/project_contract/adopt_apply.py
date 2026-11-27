@@ -1080,6 +1080,33 @@ def signing_requested(payload: object) -> bool | None:
     return signed if isinstance(signed, bool) else None
 
 
+SIGNING_POINTER = "/bindings/vcs/commit/signed"
+
+
+def committed_signing_pointer(root: Path, revision: str) -> str:
+    """`signing_pointer` of the contract the base `revision` commits.
+
+    Read from the immutable base, never the worktree: a failing hook can rewrite or remove its copy,
+    and a drafted contract is written there though the settings never held it (a draft gives "").
+    """
+    return signing_pointer(blob_at(root, revision, CONTRACT_FILENAME))
+
+
+def signing_pointer(raw: bytes | None) -> str:
+    """`SIGNING_POINTER` when the contract `raw` is schema 2 and authors `signed` as true, else "".
+
+    A refused signature carries it as its pointer, so a caller tells a repository setting from the
+    platform's own (schema 3 authors none) without reading the checkout, which may be on another branch.
+    """
+    try:
+        contract = json.loads(raw) if raw is not None else None
+    except (ValueError, RecursionError):
+        return ""
+    if not isinstance(contract, dict) or type(contract.get("schema_version")) is not int:
+        return ""
+    return SIGNING_POINTER if contract["schema_version"] == 2 and signing_requested(contract) else ""
+
+
 ENVIRONMENT_UNRESOLVED = "adopt.commit.unresolved_environment"
 ENVIRONMENT_TIMEOUT_SECONDS = GIT_TIMEOUT_SECONDS
 
