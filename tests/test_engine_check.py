@@ -1223,7 +1223,7 @@ SHIPPED_MEMBERS = {
     "plan-preflight": ({"branch": "b", "worktree_path": "/w", "integration_branch": "main", "issue_text": "t"},),
     "plan": ({"evidence": "p"},),
     "plan-revise": ({"evidence": "p", "declines": []},),
-    "plan-review": ({"findings": []},),
+    **{review: ({}, {"findings": []}, UNNAMED) for review in ("plan-review", "plan-rereview")},
     "issue": ({"text": "t", "body": "x\n\n## Acceptance criteria\n\n- [ ] a\n", "marked": False,
                "lane_paths": {"secrets": ["secrets/"]}},
               {"text": "t", "body": "", "marked": True, "lane_paths": None}),
@@ -1405,6 +1405,23 @@ class ShippedProcedureTest(unittest.TestCase):
         for name in ("no-lane", "ineligible"):
             self.assertEqual(deliver["stops"][name]["reenter"], "issue", name)
         self.assertNotIn("standard-not-on-engine", deliver["stops"])
+
+    def test_a_plan_review_is_graded_on_its_findings_and_the_plan_is_posted_by_reference(self):
+        deliver = load(PROCEDURES, "deliver")
+        for review, graded, clear, blocked in (
+                ("plan-review", "plan-graded", "plan-note", "plan-revise"),
+                ("plan-rereview", "plan-regraded", "plan-revised-note", "plan-refused")):
+            with self.subTest(review=review):
+                self.assertEqual(step(deliver, review)["on"]["pass"], graded)
+                self.assertEqual(step(deliver, review)["on"]["findings"], graded)
+                self.assertEqual(step(deliver, graded)["grader"], "direct-settled")
+                self.assertEqual(step(deliver, graded)["on"],
+                                 {"clean": clear, "findings": blocked, "unusable": blocked})
+        for note in ("plan-note", "plan-revised-note"):
+            with self.subTest(note=note):
+                self.assertEqual(step(deliver, note)["subcommand"], "plan-note")
+                self.assertEqual(step(deliver, note)["in"],
+                                 ["run.repo", "run.issue", "plan-preflight.worktree_path"])
 
     def test_the_worktree_mismatch_is_read_before_the_claim(self):
         coverage = shipped_coverage("setup")

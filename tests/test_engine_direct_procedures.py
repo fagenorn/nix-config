@@ -6,7 +6,7 @@ import json
 import re
 import unittest
 
-from agent_tools.delivery import engine_core, engine_session
+from agent_tools.delivery import engine_core, engine_session, issue_setup
 from agent_tools.delivery.engine_core import RunGroup, Stop
 from tests.test_engine_check import PROCEDURES, SHIPPED_INPUTS, UNNAMED, load, step
 from tests.test_engine_whole_shell import client_admits, whole_shell_argv, words_after
@@ -83,6 +83,14 @@ class DirectProcedureTest(unittest.TestCase):
                     for word in (";", "&&", "||", "|", "$", "`"):
                         self.assertNotIn(word, line)
                     self.assertTrue(client_admits(line, allowed, denied), line)
+
+    def test_the_implementer_builds_an_approved_plan_and_applies_the_eligibility_check_to_no_planned_issue(self):
+        text = (PROCEDURES / "direct-implement.md").read_text(encoding="utf-8")
+        self.assertIn(issue_setup.PLAN_MARKER, text)
+        planned = text.split(issue_setup.PLAN_MARKER, 1)[1]
+        self.assertIn("approved plan", planned)
+        self.assertIn("every task", planned)
+        self.assertIn("not eligibility", planned)
 
     def test_the_direct_review_roles(self):
         direct = load(PROCEDURES, "direct")

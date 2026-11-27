@@ -7,6 +7,7 @@ origin (the worktree commands) or a fake `gh` (the forge commands).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -333,6 +334,60 @@ class ForgeCommandTest(unittest.TestCase):
         self.assertEqual((code, report["verdict"]), (0, "posted"), report)
         self.assertEqual([c["body"] for c in self.forge.stored()], ["Already fixed at main."])
         self.assertEqual(report["comment_id"], self.forge.stored()[0]["id"])
+
+    def write_plan(self, **files):
+        """A worktree holding `.superpowers/plans/issue-7/<name>` for each `name=text`; its path."""
+        tree = self.world.tmp / "plan-worktree"
+        plans = tree / ".superpowers" / "plans" / "issue-7"
+        plans.mkdir(parents=True, exist_ok=True)
+        for name, text in files.items():
+            (plans / name.replace("_", "-").replace("-md", ".md")).write_text(text, encoding="utf-8")
+        return tree
+
+    def plan_note(self, tree):
+        return run_setup(self.env, "plan-note", "--repo", SLUG, "--issue", "7", "--worktree-path", str(tree))
+
+    def test_plan_note_posts_plan_md_then_each_task_file_in_task_order_under_the_plan_marker(self):
+        self.forge.comment_store(SLUG, 7, labels=[])
+        tree = self.write_plan(plan_md="the plan", task_2_md="second", task_10_md="tenth", task_1_md="first")
+
+        code, report = self.plan_note(tree)
+
+        self.assertEqual((code, report["verdict"]), (0, "posted"), report)
+        body = "the plan\n\n## task-1.md\n\nfirst\n\n## task-2.md\n\nsecond\n\n## task-10.md\n\ntenth"
+        digest = hashlib.sha256(body.encode("utf-8")).hexdigest()[:16]
+        self.assertEqual([c["body"] for c in self.forge.stored()],
+                         [f"<!-- engine-plan:{digest} -->\n\n{body}"])
+        self.assertEqual(report["comment_id"], self.forge.stored()[0]["id"])
+
+    def test_a_second_plan_note_of_the_same_plan_posts_no_second_comment(self):
+        self.forge.comment_store(SLUG, 7, labels=[])
+        tree = self.write_plan(plan_md="the plan")
+        _, first = self.plan_note(tree)
+
+        code, second = self.plan_note(tree)
+
+        self.assertEqual((code, second["verdict"], second["comment_id"]), (0, "posted", first["comment_id"]))
+        self.assertEqual(len(self.forge.stored()), 1)
+
+    def test_a_changed_plan_is_posted_as_a_new_comment(self):
+        self.forge.comment_store(SLUG, 7, labels=[])
+        tree = self.write_plan(plan_md="the plan")
+        self.plan_note(tree)
+        self.write_plan(plan_md="the revised plan")
+
+        self.plan_note(tree)
+
+        self.assertEqual(len(self.forge.stored()), 2)
+        self.assertTrue(self.forge.stored()[1]["body"].endswith("the revised plan"))
+
+    def test_plan_note_without_a_plan_file_is_an_error_and_posts_nothing(self):
+        self.forge.comment_store(SLUG, 7, labels=[])
+
+        code, report = self.plan_note(self.write_plan(task_1_md="first"))
+
+        self.assertEqual((code, report["verdict"], report["error"]), (1, "error", "plan_missing"))
+        self.assertEqual(self.forge.stored(), [])
 
     def test_a_missing_flag_is_a_usage_error(self):
         code, report = run_setup(self.env, "read", "--repo", SLUG)

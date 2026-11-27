@@ -30,6 +30,14 @@ change: `absent`, `adopted`, `dirty` or `mismatch`. A clean detached HEAD at the
 `note --repo <owner/name> --issue <n> --evidence <text>` posts `<text>` as one issue
 comment: `{verdict: "posted", comment_id}`.
 
+`plan-note --repo <owner/name> --issue <n> --worktree-path <p>` posts the plan the planner wrote under
+`<p>/.superpowers/plans/issue-<n>/` (`plan.md`, then each `task-<k>.md` in order of k under `## task-<k>.md`) as one
+comment whose first line is `<!-- engine-plan:<digest> -->`, the digest being the first 16 hex digits of the
+SHA-256 of the text: `{verdict: "posted", comment_id}`. A comment of the issue that already starts with that
+line answers it and nothing is posted, so a retry after an interrupted post adds no second comment. The plan
+travels by reference (the path), never as an argument, so no word in it reaches the lifecycle guard. A missing
+`plan.md` is `error` `plan_missing`.
+
 `read --repo-root <path> --repo <owner/name> --issue <n>` prints
 `{verdict: "read", text, body, marked, lane_paths}`: `text` is `issue_text(issue, comments)`
 (the title, the body and every comment in order), `body` the issue body (`""` when null),
@@ -48,6 +56,7 @@ or `..` segment). A missing or malformed file declares no lane paths, so every i
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -64,6 +73,9 @@ GIT_TIMEOUT = 120
 STATUS_LINES = 40
 LANE_PATHS = ".github/lane-paths.json"
 PARKED_LABELS = ("needs-verification", "parked")
+PLAN_DIRECTORY = ".superpowers/plans"
+# The first line of a plan comment, with the digest of the plan text it holds: the implementer's brief names it.
+PLAN_MARKER = "<!-- engine-plan:"
 PR_FIELDS = "number,state,headRefName,closingIssuesReferences"
 # The variables that select another repository than the one `-C` names (a copy of the engine's list).
 REPOSITORY_ENV = ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
@@ -220,10 +232,10 @@ def lane(args: argparse.Namespace) -> dict:
     return {"verdict": chosen.lane, "reason": chosen.reason}
 
 
-def note(args: argparse.Namespace) -> dict:
+def _post(repo: str, issue: int, body: str) -> dict:
     try:
-        _, out = forge_api.run_gh(["api", "-X", "POST", f"repos/{args.repo}/issues/{args.issue}/comments",
-                                   "-f", f"body={args.evidence}"])
+        _, out = forge_api.run_gh(["api", "-X", "POST", f"repos/{repo}/issues/{issue}/comments",
+                                   "-f", f"body={body}"])
         comment = json.loads(out)
     except forge_api.ForgeError as error:
         raise _forge_failure(error) from None
@@ -232,6 +244,38 @@ def note(args: argparse.Namespace) -> dict:
     if not isinstance(comment, dict) or "id" not in comment:
         raise Failure("payload_invalid", "the comment reply has no id")
     return {"verdict": "posted", "comment_id": comment["id"]}
+
+
+def note(args: argparse.Namespace) -> dict:
+    return _post(args.repo, args.issue, args.evidence)
+
+
+def plan_text(worktree_path: str, issue: int) -> str:
+    """`plan.md`, then each `task-<n>.md` in order of n under `## task-<n>.md`, from the planner's directory."""
+    plans = Path(worktree_path, PLAN_DIRECTORY, f"issue-{issue}")
+    try:
+        parts = [(plans / "plan.md").read_text(encoding="utf-8")]
+        tasks = sorted((int(m[1]), path) for path in plans.glob("task-*.md")
+                       if (m := re.fullmatch(r"task-(\d+)\.md", path.name)))
+        for number, path in tasks:
+            parts += [f"## task-{number}.md", path.read_text(encoding="utf-8")]
+    except OSError as error:
+        raise Failure("plan_missing", f"the plan under {plans} cannot be read: {error}") from None
+    return "\n\n".join(parts)
+
+
+def plan_note(args: argparse.Namespace) -> dict:
+    """Post the plan the planner wrote to the worktree once: an earlier comment of the same plan answers it."""
+    text = plan_text(args.worktree_path, args.issue)
+    marker = f"{PLAN_MARKER}{hashlib.sha256(text.encode('utf-8')).hexdigest()[:16]} -->"
+    try:
+        comments = _comments(args.repo, args.issue)
+    except forge_api.ForgeError as error:
+        raise _forge_failure(error) from None
+    for comment in comments:
+        if str(comment.get("body") or "").split("\n", 1)[0].strip() == marker and "id" in comment:
+            return {"verdict": "posted", "comment_id": comment["id"]}
+    return _post(args.repo, args.issue, f"{marker}\n\n{text}")
 
 
 def _git(root: str, *args: str, check: bool = True) -> subprocess.CompletedProcess:
@@ -368,6 +412,10 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_argument("--repo", required=True)
     sub.add_argument("--issue", required=True, type=number)
     sub.add_argument("--evidence", required=True)
+    sub = commands.add_parser("plan-note")
+    sub.add_argument("--repo", required=True)
+    sub.add_argument("--issue", required=True, type=number)
+    sub.add_argument("--worktree-path", required=True)
     sub = commands.add_parser("read")
     sub.add_argument("--repo-root", required=True)
     sub.add_argument("--repo", required=True)
@@ -380,7 +428,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 COMMANDS = {"preflight": preflight, "worktree": worktree, "worktree-check": worktree_check,
-            "note": note, "read": read, "lane": lane}
+            "note": note, "plan-note": plan_note, "read": read, "lane": lane}
 
 
 def main(argv: list[str] | None = None) -> int:

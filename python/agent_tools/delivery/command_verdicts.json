@@ -89,6 +89,10 @@
         "posted",
         "error"
       ],
+      "plan-note": [
+        "posted",
+        "error"
+      ],
       "preflight": [
         "clear",
         "closed",
