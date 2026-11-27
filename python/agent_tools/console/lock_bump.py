@@ -11,7 +11,7 @@ record is not open is `done` and never opened again, so the next proven revision
 a lock that is behind `latest` gets one built branch and one pull request (`opened`). The record is written
 after each forge write. A red bump is never merged or closed by the pass before a newer revision arrives,
 even when a later reading is green. The red outcome is recorded before its issue is filed, and a red record
-with no issue gets one on a later pass. Before it files, the pass looks for an issue by its own account
+with no issue gets one on a later pass, and before a newer revision replaces it. Before it files, the pass looks for an issue by its own account
 carrying that project-and-revision marker in the platform repository, so a lost answer files no second
 issue and another author's marker is ignored. `commit` is
 the built commit of the bump, or null for a bump found open with no record.
@@ -201,6 +201,10 @@ def bump_pass(entries: Sequence[Mapping], *, project: str, base: str, platform_r
         return Step(project, action, latest, pull, issue, detail)
 
     steps = []
+    if (record is not None and record["revision"] != latest and record["outcome"] == "red"
+            and record["issue"] is None):
+        failing = forge.checks(project, record["pull"], cancel).failing
+        steps.append(_report(project, record["revision"], record["pull"], record, failing, tracker, save))
     open_bumps = forge.open_bumps(project, base, cancel)
     for bump in open_bumps:
         if bump.revision != latest:

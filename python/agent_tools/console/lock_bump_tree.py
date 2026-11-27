@@ -16,7 +16,8 @@ base commit it resolves, which the next `build` of that base then uses, never a 
 revision of the platform repository), makes a scratch worktree at that base commit, writes the bumped
 lock, runs the migrations the revision requires and its projections with the package's own tools and commits
 signed as the contract's `bindings.vcs.commit.signed` says (never as the host's default does). A bump branch
-already on the remote is reused only when its tree equals that commit's tree (anything else is
+already on the remote is reused only when its tree equals that commit's tree, the commit being made on the
+branch's own parent when that is the base commit or an earlier commit of it (anything else is
 `BumpRefused`); else the commit is pushed to the bump branch without force. `verify` fetches the bump
 branch and refuses unless its tip is the named head and the lock at that head pins the proven revision. The
 worktree and its directory are removed on every outcome.
@@ -239,6 +240,8 @@ class GitBuilder:
         record = self._record(out, revision)
         manifest = _json_file(out / "share" / "agent-platform" / "platform-manifest.json", "the package's manifest")
         base_commit = self._inspected.pop((str(root), base), None) or self._base_commit(root, base, cancel)
+        if head is not None:
+            base_commit = self._built_on(root, branch, head, base_commit, cancel)
         scratch = Path(tempfile.mkdtemp(prefix="lock-bump-"))
         tree = scratch / "tree"
         try:
@@ -256,6 +259,20 @@ class GitBuilder:
         finally:
             self._clean(root, tree, scratch)
         return Built(branch, commit)
+
+    def _built_on(self, root: Path, branch: str, head: str, base_commit: str, cancel) -> str:
+        """The commit to rebuild on to compare with the remote bump branch at `head`: its only parent when that
+        is `base_commit` or an earlier commit of it, so a bump pushed before the base moved is still the
+        bump; else `base_commit`."""
+        self._git(root, "the bump branch fetch", cancel, "fetch", "--quiet", "--no-tags", "origin",
+                  f"+refs/heads/{branch}:refs/remotes/origin/{branch}")
+        listing = self._git(root, "the bump branch parents", cancel, "rev-list", "--parents", "-n", "1", head)
+        parents = listing.stdout.decode().split()[1:]
+        if len(parents) != 1 or approve.COMMIT.fullmatch(parents[0]) is None:
+            return base_commit
+        inside = self._git(root, "the bump branch base", cancel, "merge-base", "--is-ancestor", parents[0],
+                           base_commit, ok=(0, 1))
+        return parents[0] if inside.returncode == 0 else base_commit
 
     def _same_tree(self, root: Path, branch: str, head: str, built: str, cancel) -> None:
         """Refuse unless the remote bump branch is at `head` and its tree is the tree of the generated `built`."""

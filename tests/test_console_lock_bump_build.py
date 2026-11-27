@@ -192,6 +192,28 @@ class BuildTest(BuildFixture):
         self.assertEqual(self.pushed(branch), first.commit)
         self.assertEqual(len(self.trees()), 1)
 
+    def test_a_bump_branch_pushed_before_main_moved_is_reused_on_the_next_pass(self):
+        first = self.builder.build(self.root, SLUG, "main", REV_B)
+        self.publish({"README": b"later\n"})
+        self.git("fetch", "-q", cwd=self.root)
+        self.package_calls.clear()
+        again = GitBuilder("octo/platform", package=self.package, origin_check=self.check_origin)
+        self.assertEqual(again.build(self.root, SLUG, "main", REV_B), first)
+        self.assertEqual(self.pushed(branch_for(REV_B)), first.commit)
+        self.assertEqual(len(self.trees()), 1)
+
+    def test_a_bump_branch_built_on_a_commit_outside_main_is_refused(self):
+        self.git("checkout", "-q", "-b", "side", cwd=self.root)
+        (self.root / "side.txt").write_bytes(b"side\n")
+        self.git("add", "--all", cwd=self.root)
+        self.git("commit", "-q", "--no-gpg-sign", "-m", "side", cwd=self.root)
+        side = self.git("rev-parse", "HEAD", cwd=self.root)
+        self.builder._inspected[(str(self.root), "main")] = side
+        self.builder.build(self.root, SLUG, "main", REV_B)
+        again = GitBuilder("octo/platform", package=self.package, origin_check=self.check_origin)
+        with self.assertRaisesRegex(BumpRefused, "differs"):
+            again.build(self.root, SLUG, "main", REV_B)
+
     def test_an_existing_bump_branch_that_is_unchanged_main_is_refused_not_reused(self):
         branch = branch_for(REV_B)
         self.git("push", "-q", "origin", f"HEAD:refs/heads/{branch}", cwd=self.root)

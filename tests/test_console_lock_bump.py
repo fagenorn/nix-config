@@ -282,6 +282,24 @@ class RedTest(PassCase):
         self.assertEqual(steps, [Step(PROJECT, "red_known", REV_B, 9, 77, None)])
         self.assertEqual((self.forge.named("merge"), self.tracker.issues, self.record()["issue"]), ([], [], 77))
 
+    def test_a_newer_revision_waits_for_the_red_issue_of_the_bump_it_replaces(self):
+        self.forge.open.append(OpenBump(9, REV_B))
+        self.forge.states[9] = Checks("red", HEAD, ("Tests",))
+        self.remember(REV_B, "red", pull=9)
+        self.tracker.stopped = True
+        with self.assertRaises(RuntimeError):
+            self.run_pass(latest=REV_C)
+        self.assertEqual((self.forge.named("close"), self.forge.named("open_pull")), ([], []))
+        self.assertEqual((self.record()["revision"], self.record()["outcome"]), (REV_B, "red"))
+        self.tracker.stopped = False
+        steps = self.run_pass(latest=REV_C)
+        self.assertEqual([(step.action, step.revision) for step in steps],
+                         [("filed", REV_B), ("replaced", REV_B), ("opened", REV_C)])
+        (title, body), = self.tracker.issues
+        self.assertIn(lock_bump.red_marker(PROJECT, REV_B), body.splitlines())
+        self.assertIn("Tests", title)
+        self.assertEqual(self.record()["revision"], REV_C)
+
     def test_a_red_bump_closed_by_hand_is_retried_only_by_a_newer_revision(self):
         self.remember(REV_B, "red", issue=501)
         self.assertEqual(self.run_pass()[0].action, "done")
