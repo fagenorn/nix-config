@@ -192,6 +192,7 @@ agent-workflow-tests *args:
     tests/test_agent_tools_layout.py \
     tests/test_agent_tools_semver.py \
     tests/test_engine_check.py \
+    tests/test_engine_check_returns.py \
     tests/test_engine_check_process.py \
     tests/test_engine_direct_procedures.py \
     tests/test_engine_graders.py \
