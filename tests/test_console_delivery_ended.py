@@ -1,4 +1,4 @@
-"""The digest names a delivery that ended, end to end through the service (#878).
+"""The digest names a delivery that ended, end to end through the service.
 
 Run: just agent-workflow-tests
 """
@@ -9,8 +9,9 @@ import unittest
 from pathlib import Path
 
 from . import console_test_support as support
-from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures
 
+TIER = "fast"
 SINGLE = Path(__file__).parent / "fixtures/console/journals/single.jsonl"
 
 

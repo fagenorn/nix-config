@@ -64,7 +64,7 @@ Event kinds read:
   no stop request, and the row's project is a string; a refused or repeated closing, and the closing
   of a sprint the owner stopped, say nothing.
 
-- `delivery.seen`, `delivery.gone` (`deliveries.DELIVERY_SEEN`, `DELIVERY_GONE`, #878): a run's issues
+- `delivery.seen`, `delivery.gone` (`deliveries.DELIVERY_SEEN`, `DELIVERY_GONE`): a run's issues
   with their stage, and a run whose journal has no reading any more. A `delivery.seen` says nothing
   itself; it is folded with `deliveries.delivery_states`, so a seen of an invalid shape is ignored and
   the last valid one of a run is the run's state. A `delivery.gone` speaks, one moment per issue of
