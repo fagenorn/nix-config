@@ -147,6 +147,29 @@ class RecordNeverRiseTest(ReportAssertions, unittest.TestCase):
     def test_a_branch_adding_no_record_names_none(self):
         with fixture() as tmp:
             root, _ = self.record_root(tmp)
+            self.record(root, self.REC, 1, "One paragraph naming the rejected alternative.\n")
+            self.mark_base(root)
             write_file(root, "notes/plain.txt")
             commit_all(root, "note")
+            code, report, by_id = self.ci(root)
+            self.assertEqual(code, 0)
+            self.assertEqual(by_id[self.CHECK_ID]["status"], "passed")
             self.assertEqual(self.added_lines(root), [])
+
+    def test_a_record_path_with_a_newline_is_one_escaped_line(self):
+        path = "docs/areas/de\nmo/adr/001-r.md"
+        with fixture() as tmp:
+            root, _ = self.record_root(tmp)
+            self.record(root, path, 1, "One paragraph.\n")
+            _, _, err = run("run", "--purpose", "ci", "--repo-root", str(root))
+            self.assertEqual([line for line in err.split("\n") if line.startswith(self.ADDED_LINE)],
+                             [self.ADDED_LINE + "docs/areas/de\\nmo/adr/001-r.md"])
+            self.assertNotIn("mo/adr/001-r.md", err.split("\n"))
+
+    def test_a_doctor_run_on_a_branch_adding_a_record_lists_none(self):
+        with fixture() as tmp:
+            root, _ = self.record_root(tmp)
+            self.record(root, self.REC, 1, "One paragraph.\n")
+            code, _, err = run("run", "--purpose", "doctor", "--repo-root", str(root))
+            self.assertIn(code, (0, 1), err)
+            self.assertNotIn(self.ADDED_LINE, err)
