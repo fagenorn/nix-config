@@ -1260,34 +1260,6 @@ class GuestAccountChangeRefusalTest(GuestAccountCase):
         self.assertEqual(self.changes(), before)
         self.assertEqual(self.post(REMOVE, fresh), (204, b""))
 
-    def test_a_directory_replaced_while_a_second_profile_drains_is_never_changed(self):
-        svc = self.begin()
-        first, second = self.shared_account()
-        body = self.change_body()
-        for route in (REMOVE, SIGNOUT):
-            with self.subTest(route=route):
-                with svc._ingest:
-                    svc._probing.add(second)
-                answers = []
-                thread = threading.Thread(
-                    target=lambda: answers.append(self.post(route, body)), daemon=True)
-                thread.start()
-                try:
-                    until(self, lambda: second in svc._removing)
-                    self.replace_dir(first)
-                finally:
-                    with svc._ingest:
-                        svc._probing.discard(second)
-                        svc._idle.notify_all()
-                    thread.join(10)
-                self.assertFalse(thread.is_alive())
-                self.assertEqual(answers[0], (409, guest.NOT_YOUR_ACCOUNT_TEXT.encode() + b"\n"))
-                self.assertEqual((self.signed_out, self.removed_calls), ([], []))
-                self.assertEqual(svc._removing, set())
-                self.assertTrue((self.profiles / first).is_dir())
-                self.assertTrue((self.profiles / second).is_dir())
-                return
-
     def test_a_profile_replaced_during_either_profiles_drain_is_never_changed(self):
         svc = self.begin()
         for route in (REMOVE, SIGNOUT):
@@ -1295,6 +1267,7 @@ class GuestAccountChangeRefusalTest(GuestAccountCase):
                 with self.subTest(route=route, draining=draining, replaced=replaced):
                     pair = self.shared_account()
                     body = self.change_body()
+                    before = self.changes()
                     with svc._ingest:
                         svc._probing.add(pair[draining])
                     answers = []
@@ -1303,7 +1276,8 @@ class GuestAccountChangeRefusalTest(GuestAccountCase):
                     thread.start()
                     try:
                         until(self, lambda: pair[draining] in svc._removing)
-                        self.replace_dir(pair[replaced])
+                        with svc._ingest:  # the worker holds it until it waits, so the drain has begun
+                            self.replace_dir(pair[replaced])
                     finally:
                         with svc._ingest:
                             svc._probing.discard(pair[draining])
@@ -1312,13 +1286,7 @@ class GuestAccountChangeRefusalTest(GuestAccountCase):
                     self.assertFalse(thread.is_alive())
                     self.assertEqual(
                         answers[0], (409, guest.NOT_YOUR_ACCOUNT_TEXT.encode() + b"\n"))
-                    self.assertEqual((self.signed_out, self.removed_calls), ([], []))
-                    self.assertEqual(svc._removing, set())
-                    self.assertEqual(self.rows("account.removal"), [])
-                    for name in pair:
-                        self.assertTrue((self.profiles / name).is_dir())
-                    self.assertEqual(
-                        [row for row in self.acted() if row["action"] == "signout"], [])
+                    self.assertEqual((self.changes(), svc._removing), (before, set()))
                     for name in pair:
                         shutil.rmtree(self.profiles / name)
 
