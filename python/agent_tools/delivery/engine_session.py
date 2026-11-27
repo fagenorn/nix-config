@@ -583,6 +583,14 @@ class Launched:
     timed_out: bool = False
 
 
+def startup_seconds(launched: Launched, reading: Reading) -> float | None:
+    """The answering launch's own start-up: the engine's clock around the process minus the client's
+    `duration_ms`; `None` when the launch timed out or the client reported no duration."""
+    if launched.timed_out or reading.wall_seconds is None:
+        return None
+    return max(0.0, launched.wall_seconds - reading.wall_seconds)
+
+
 def diagnostic(stderr: bytes) -> str:
     """The last non-blank line of `stderr`, spaces collapsed, cut to 300 characters."""
     lines = [line for line in stderr.decode("utf-8", errors="replace").splitlines()

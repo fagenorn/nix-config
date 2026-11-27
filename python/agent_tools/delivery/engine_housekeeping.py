@@ -6,10 +6,15 @@ Layout, under `~/.agents/state/engine/` (mode 0700):
     .history.jsonl.lock   the exclusive flock every append and prune of the history holds
 
 A line has exactly `format`, `run`, `project`, `issue`, `end`, `need`, `ended` and `steps`: `end` is
-`done` or the name of the stop the run reached, `need` the stop's need (null for done), `ended` the
-instant the line was written, in UTC, and `steps` the per-step summaries `engine_ledger.fold` derives.
-A run that is continued and ends again appends a second line; no earlier line is ever rewritten, so a
-run's last line is its complete one.
+`done`, `fault` (the run's walk raised a fault; `need` null) or the name of the stop the run reached,
+`need` the stop's need (null for done), `ended` the instant the line was written, in UTC, and `steps`
+the per-step summaries `engine_ledger.fold` derives. A step has `step`, `visit`, `outcome`,
+`wall_seconds`, `waits`, `tokens`, `spend_usd`, `account`, `role`, `turns`, `startup_seconds` (the
+answering launch's own, stored on its `result_stored`, never derived from waits), `procedure` and
+`bounds` (the bounds of its role in the revision that wrote the line, null for a step with no role).
+Every run appends a line of its own when it ends: a child run too, and a run whose walk faults. A run
+that is continued and ends again appends a second line; no earlier line is ever rewritten, so a run's
+last line is its complete one.
 
 A line holds no environment value, no credential, no prompt and no reply: only names, counts, outcomes
 and times from the ledger.
@@ -54,7 +59,7 @@ from typing import Iterator, Mapping
 from urllib.parse import urlsplit
 
 from agent_tools.canonical import parse_rfc3339_utc
-from agent_tools.delivery import engine_ledger
+from agent_tools.delivery import engine_ledger, engine_session
 from agent_tools.system import forge_api
 
 HISTORY_FORMAT = 1
@@ -83,18 +88,40 @@ def history_path() -> Path:
     return engine_root() / "history.jsonl"
 
 
-def history_line(state: engine_ledger.RunState, ended: datetime) -> dict:
-    """The history line of a run that is done or stopped; `ValueError` for any other run."""
+def _bounds_of(role: str | None) -> dict | None:
+    """The bounds the installed revision holds for `role`, as the line records them; `None` for none."""
+    found = engine_session.ROLE_BOUNDS.get(role) if role is not None else None
+    return None if found is None else {"wall_seconds": found.wall_seconds, "turns": found.turns,
+                                       "spend_usd": found.spend_usd}
+
+
+def history_line(state: engine_ledger.RunState, ended: datetime, *, fault: bool = False) -> dict:
+    """The history line of a run that is done or stopped, or with `fault` of one that ended in a fault;
+    `ValueError` for any other run. Each step also records the bounds of its role."""
     if state.done:
         end, need = "done", None
     elif state.stop is not None:
         end, need = state.stop["name"], state.stop["need"]
+    elif fault:
+        end, need = "fault", None
     else:
         raise ValueError("a run that is neither done nor stopped has no history line")
     return {"format": HISTORY_FORMAT, "run": state.run, "project": state.project,
             "issue": state.issue, "end": end, "need": need,
             "ended": ended.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "steps": [dict(step) for step in state.steps]}
+            "steps": [{**step, "bounds": _bounds_of(step["role"])} for step in state.steps]}
+
+
+def record_history(run_dir: Path, clock: Callable[[], datetime], *, fault: bool = False) -> None:
+    """Append the run's history line; a failure is one stderr line, never the delivery's result."""
+    try:
+        state = engine_ledger.fold(engine_ledger.read_run(run_dir),
+                                   engine_ledger.replay(run_dir / "events.jsonl"),
+                                   lambda pid, started: False)
+        append_history(history_line(state, clock(), fault=fault), history_path())
+    except Exception as error:
+        sys.stderr.write(f"engine: the history line of run {run_dir.name} was not recorded: "
+                         f"{type(error).__name__}: {' '.join(str(error).split())}\n")
 
 
 @contextmanager

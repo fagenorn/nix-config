@@ -12,6 +12,7 @@ import http.server
 import json
 import os
 from pathlib import Path
+import pwd
 import socket
 import subprocess
 import sys
@@ -310,10 +311,11 @@ class RestartGateTest(unittest.TestCase):
         self.rc = self.root / "rc"
         self.stub = self.root / "restart"
         self.stub.write_text(
-            '#!/bin/sh\nhere="$(dirname "$0")"\necho run >> "$here/calls"\n'
+            '#!/bin/sh\nhere="$(dirname "$0")"\necho "run $*" >> "$here/calls"\n'
             '[ -e "$here/rc" ] && exit "$(cat "$here/rc")"\nexit 0\n'
         )
         self.stub.chmod(0o755)
+        self.server_user = pwd.getpwuid(os.getuid()).pw_name
         self.reload_stub = self.root / "reload"
         self.reload_stub.write_text(
             '#!/bin/sh\nhere="$(dirname "$0")"\necho reload >> "$here/reload-calls"\n'
@@ -342,6 +344,7 @@ class RestartGateTest(unittest.TestCase):
             "--state-dir", str(self.state),
             "--restart-bin", str(self.stub),
             "--reload-bin", str(self.reload_stub),
+            "--server-user", self.server_user,
             "--health-url", url or self.url,
             *self.extra,
         ]
@@ -530,6 +533,79 @@ class RestartGateTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertEqual(self.marker_bytes(), before)
         self.assertIn("restart failed (exit 3)", result.stderr)
+
+    def kill_arguments(self):
+        return [line.split(" ", 1)[1] if " " in line else "" for line in self.calls.read_text().splitlines()]
+
+    def test_a_kill_that_matched_no_server_process_restarts_nothing_and_fails(self):
+        self.rc.write_text("1")
+        before = self.marker_bytes()
+        for extra in ([], ["--now"]):
+            with self.subTest(extra=extra):
+                self.extra = extra
+                result = self.run_gate()
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertEqual(self.marker_bytes(), before)
+                self.assertIn(
+                    f"oMLX: nothing was restarted (no omlx-server process of user {self.server_user}); "
+                    ".restart-needed retained",
+                    result.stderr,
+                )
+                self.assertNotIn("restarted for", result.stderr)
+
+    def test_a_server_found_down_whose_kill_matched_nothing_exits_zero_and_keeps_the_marker(self):
+        self.rc.write_text("1")
+        with socket.socket() as closed:
+            closed.bind(("127.0.0.1", 0))
+            port = closed.getsockname()[1]
+        before = self.marker_bytes()
+        result = self.run_gate(url=f"http://127.0.0.1:{port}/health")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.stub_calls(), 1)
+        self.assertEqual(self.marker_bytes(), before)
+        self.assertIn("oMLX: nothing was restarted", result.stderr)
+        self.assertNotIn("restarted for", result.stderr)
+
+    def test_the_kill_signals_the_server_users_uid_not_the_callers(self):
+        other = pwd.getpwnam("root" if os.getuid() != 0 else "nobody")
+        self.assertNotEqual(other.pw_uid, os.getuid())
+        self.server_user = other.pw_name
+        self.extra = ["--now"]
+        result = self.run_gate()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.kill_arguments(), [str(other.pw_uid)])
+        self.assertFalse(self.marker.exists())
+
+    def test_a_markerless_now_whose_kill_matched_nothing_promises_no_retry(self):
+        self.marker.unlink()
+        self.rc.write_text("1")
+        self.extra = ["--now"]
+        result = self.run_gate()
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("oMLX: nothing was restarted", result.stderr)
+        self.assertNotIn("retained", result.stderr)
+        self.assertFalse(self.marker.exists())
+
+    def test_a_caller_that_cannot_read_the_state_directory_is_refused_by_the_servers_user(self):
+        self.server_user = "root"
+        self.extra = ["--now"]
+        self.state.chmod(0)
+        self.addCleanup(self.state.chmod, 0o700)
+        result = self.run_gate()
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(self.stub_calls(), 0)
+        self.assertIn("run omlx-restart as root or with sudo", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_a_server_user_that_does_not_exist_kills_nothing_and_keeps_the_marker(self):
+        self.server_user = "omlx-no-such-user-1718"
+        self.extra = ["--now"]
+        before = self.marker_bytes()
+        result = self.run_gate()
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(self.stub_calls(), 0)
+        self.assertEqual(self.marker_bytes(), before)
+        self.assertIn("no user omlx-no-such-user-1718", result.stderr)
 
     def test_no_marker_means_nothing_to_restart(self):
         self.marker.unlink()

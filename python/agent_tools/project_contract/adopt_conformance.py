@@ -118,7 +118,7 @@ import fcntl
 import json
 import os
 import re
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from typing import NamedTuple
@@ -740,16 +740,23 @@ def read_pending(digest: str) -> dict:
     return record
 
 
+def names_origin(answers: Sequence[str | None], repo: str) -> bool:
+    """Whether every `git remote get-url` answer (the fetch and the push URL of `origin`, `None` for a
+    failed read) names `repo` on `github.com`: the one origin rule of the adoption (D13)."""
+    return len(answers) > 0 and all(
+        answer is not None and github_slug(answer) == repo for answer in answers)
+
+
 def preflight(root: Path, repo: str, branch: str) -> str:
     """The origin check, then the state read, before anything is mutated or requested.
 
     Both effective URLs of `origin` (fetch and push) must name `repo` on `github.com`.
     """
-    slugs = []
+    answers: list[str | None] = []
     for arguments in (("get-url", "origin"), ("get-url", "--push", "origin")):
         code, out = adopt_inspection.run_git(root, "remote", *arguments, local_only=True)
-        slugs.append(github_slug(out.decode("utf-8", "replace")) if code == 0 else None)
-    if any(slug != repo for slug in slugs):
+        answers.append(out.decode("utf-8", "replace") if code == 0 else None)
+    if not names_origin(answers, repo):
         raise _required_failure(
             REQUIRED_ORIGIN_MISMATCH,
             f"the remote origin is not {repo}, the repository the required check is requested on",

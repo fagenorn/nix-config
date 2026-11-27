@@ -43,7 +43,7 @@ EVENT_MEMBERS = {
     "run_continued": (),
     "run_done": (),
 }
-EVENT_OPTIONAL = {"result_stored": ("head", "outcome"), "run_continued": ("step", "visit")}
+EVENT_OPTIONAL = {"result_stored": ("head", "outcome", "startup_seconds"),"run_continued": ("step", "visit")}
 
 
 class EvidenceError(Exception):

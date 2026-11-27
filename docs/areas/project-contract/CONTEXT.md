@@ -62,6 +62,10 @@ _Avoid_: project config, settings
 A file generated from the contract or its instruction source, such as an agent's entry file. A projection is regenerated, never hand-edited.
 _Avoid_: generated file
 
+**Proven revision**:
+A nix-config `main` revision whose real-model run on the fixture project ended green: `engine deliver`, built at that revision, delivered the fixed issue to `done`, its pull request merged and its issue closed. `proof-run` records each one in `~/.agents/state/engine/proven.jsonl`; only a proven revision is offered to projects.
+_Avoid_: green revision, verified revision
+
 **Removal**:
 The step of a platform version that deletes a deprecated surface once its migration has run. A removal is announced as a deprecation first.
 
