@@ -4,7 +4,10 @@
 fresh census's unowned bytes plus the reading's compressor bytes. A sample over the trigger adds one to
 the streak; a sample at or under it ends the episode; a sample without a fresh census holds the streak and
 keeps the episode. A streak whose last fresh over sample is more than 15 minutes old (`STALE_AFTER`) is
-zeroed by the next sample, so a stale reading never triggers a restart. An attempt is due once the streak
+zeroed by the next sample (so is one whose time cannot be compared with the sample's, a UTC offset on one
+and none on the other), so a stale reading never triggers a restart. `hold_since_at` is the time of the first
+sample this rule saw: a state written by an older watcher gains it on its first sample, and the day check
+anchors on it, never on `since_at`. An attempt is due once the streak
 reaches the sample count and the episode has not already restarted oMLX. Available memory under the room, or a restart less than the minimum gap
 ago (measured from when the gate returned), defers the attempt; otherwise the gate `<command> --reactive`
 runs: exit 0 restarted, 75 deferred (the reason is in its last `oMLX: restart deferred (...)` line),
@@ -122,7 +125,7 @@ def _save(path: Path, document: dict) -> None:
 
 def _defaults(now: datetime) -> dict:
     return {
-        "since_at": now.isoformat(), "limits": None, "streak": 0, "streak_at": None, "episode_done": False,
+        "since_at": now.isoformat(), "hold_since_at": now.isoformat(), "limits": None, "streak": 0, "streak_at": None, "episode_done": False,
         "last_restart_at": None, "attempt": None, "outbox": [],
     }
 
@@ -144,6 +147,7 @@ def _load(path: Path, now: datetime) -> dict:
         datetime.fromisoformat(document["last_restart_at"])
     if document["streak_at"] is not None:
         datetime.fromisoformat(document["streak_at"])
+    datetime.fromisoformat(document["hold_since_at"])
     for entry in document["outbox"]:
         entry["record"]["id"], entry["alert"], entry["recorded"], entry["logged"]
     if document["attempt"] is not None:
@@ -245,9 +249,19 @@ def _flush(directory: Path, document: dict, deliver: Callable[[str, str, bool], 
     return failed
 
 
+def _stale(held: str | None, now: datetime) -> bool:
+    """True when the last over sample is unknown, older than `STALE_AFTER`, or cannot be compared with `now`
+    (one time has a UTC offset and the other has none)."""
+    if held is None:
+        return True
+    try:
+        return now - datetime.fromisoformat(held) > STALE_AFTER
+    except TypeError:
+        return True
+
+
 def _fold(document: dict, value: int | None, now: datetime, limits: Limits) -> None:
-    held = document["streak_at"]
-    if document["streak"] and (held is None or now - datetime.fromisoformat(held) > STALE_AFTER):
+    if document["streak"] and _stale(document["streak_at"], now):
         document["streak"] = 0
     if value is None:
         return

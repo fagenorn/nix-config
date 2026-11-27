@@ -217,8 +217,19 @@ class ReactiveRestartTest(RecordsCase):
         self.assertEqual(held["limits"], {
             "trigger_bytes": 25 * GIB, "samples": 3, "room_bytes": 16 * GIB, "min_interval_seconds": 1800})
         self.assertEqual(held["since_at"], at("12:00"))
+        self.assertEqual(held["hold_since_at"], at("12:00"))
         self.sample_at(at("12:01"))
         self.assertEqual(json.loads(self.restart_state.read_text())["since_at"], at("12:00"))
+        self.assertEqual(json.loads(self.restart_state.read_text())["hold_since_at"], at("12:00"))
+
+    def test_a_state_an_older_watcher_wrote_gains_the_first_sample_of_the_hold_rule(self):
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        self.restart_state.write_text(json.dumps({
+            "since_at": "2026-11-20T09:00:00", "limits": None, "streak": 0, "episode_done": False,
+            "last_restart_at": None, "attempt": None, "outbox": []}))
+        self.sample_at(at("12:00"))
+        held = json.loads(self.restart_state.read_text())
+        self.assertEqual((held["since_at"], held["hold_since_at"]), ("2026-11-20T09:00:00", at("12:00")))
 
     def test_the_sample_is_recoverable_when_the_gate_runs(self):
         self.over_at(at("12:00"), at("12:01"), at("12:02"))
@@ -346,13 +357,33 @@ class ReactiveStepTest(unittest.TestCase):
         for clock, unowned in steps:
             self.go(clock, unowned=unowned)
 
-    def test_three_fresh_over_samples_split_by_census_less_ones_within_fifteen_minutes_give_one_attempt(self):
+    def test_three_fresh_over_samples_inside_fifteen_minutes_split_by_census_less_ones_give_one_attempt(self):
+        self.run_clocks(("12:00", OVER), ("12:03", None), ("12:06", OVER), ("12:09", None))
+        self.assertEqual(self.gate_calls, [])
+        self.run_clocks(("12:12", OVER))
+        self.assertEqual(len(self.gate_calls), 1)
+        [record] = self.records()
+        self.assertEqual((record["outcome"], record["at"], record["streak"]), ("restarted", at("12:12"), 3))
+
+    def test_the_fifteen_minute_limit_is_on_each_gap_so_a_streak_may_span_longer_in_all(self):
+        """Highs at 12:00, 12:08 and 12:22 span 22 minutes; each gap from the last high is within 15, so one attempt."""
         self.run_clocks(("12:00", OVER), ("12:01", None), ("12:07", None), ("12:08", OVER), ("12:14", None))
         self.assertEqual(self.gate_calls, [])
         self.run_clocks(("12:22", OVER))
         self.assertEqual(len(self.gate_calls), 1)
         [record] = self.records()
         self.assertEqual((record["outcome"], record["at"], record["streak"]), ("restarted", at("12:22"), 3))
+
+    def test_a_streak_time_without_a_utc_offset_does_not_stop_the_sampling(self):
+        self.go("12:00")
+        document = self.held()
+        document["streak"], document["streak_at"] = 2, "2026-11-24T11:59:00+00:00"
+        (self.dir / self.m.RESTART_STATE_NAME).write_text(json.dumps(document))
+        self.go("12:01", unowned=None)
+        self.assertEqual(self.held()["streak"], 0)
+        self.assertEqual(self.gate_calls, [])
+        self.go("12:02")
+        self.assertEqual(self.held()["streak"], 1)
 
     def test_a_census_less_stretch_over_fifteen_minutes_zeroes_the_streak(self):
         self.run_clocks(("12:00", OVER), ("12:01", OVER), ("12:10", None), ("12:17", None), ("12:18", OVER),

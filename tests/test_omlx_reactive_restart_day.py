@@ -58,8 +58,27 @@ class RestartDayTest(unittest.TestCase):
         self.addCleanup(scratch.cleanup)
         self.dir = Path(scratch.name)
 
-    def put_state(self, since_at=SINCE, limits=LIMITS):
-        (self.dir / "omlx-restart.json").write_text(json.dumps({"since_at": since_at, "limits": limits}))
+    def put_state(self, since_at=SINCE, limits=LIMITS, **more):
+        """The restart state; `hold_since_at` (default `since_at`) is the first sample the hold rule saw."""
+        state = {"since_at": since_at, "hold_since_at": since_at, "limits": limits, **more}
+        (self.dir / "omlx-restart.json").write_text(json.dumps(state))
+
+    def test_a_state_an_older_watcher_wrote_is_not_yet_whatever_its_since_at(self):
+        old = {"since_at": "2026-11-20T15:00:00+00:00", "limits": LIMITS}
+        (self.dir / "omlx-restart.json").write_text(json.dumps(old))
+        for day in ("2026-11-20", "2026-11-21", PREVIOUS, TARGET):
+            self.write_day(day)
+        result = self.run_check()
+        self.assertEqual(result.returncode, 75, result.stderr)
+        self.assertEqual(self.verdict(result), {"verdict": "not_yet", "day": None})
+
+    def test_the_target_day_follows_the_first_deploy_of_the_hold_rule_not_the_older_since_at(self):
+        self.put_state(since_at="2026-11-20T15:00:00+00:00", hold_since_at=SINCE)
+        self.write_day("2026-11-21")
+        self.write_day(PREVIOUS)
+        result = self.run_check()
+        self.assertEqual(result.returncode, 75, result.stderr)
+        self.assertEqual(self.verdict(result), {"verdict": "not_yet", "day": TARGET})
 
     def write_day(self, day, samples=1440):
         with (self.dir / "memory-peaks.jsonl").open("a") as peaks:

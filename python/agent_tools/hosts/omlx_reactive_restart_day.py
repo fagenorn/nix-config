@@ -1,16 +1,18 @@
 """`omlx-reactive-restart-day`: the verify check that the first whole day after the reactive restart deploy held.
 
 `python3 -m agent_tools.hosts.omlx_reactive_restart_day [--state-dir DIR]` reads the restart state
-`DIR/omlx-restart.json` (default `~/.omlx/memory`) for its `since_at`, each line of
+`DIR/omlx-restart.json` (default `~/.omlx/memory`) for its `hold_since_at`, each line of
 `DIR/memory-peaks.jsonl`, the sample lines of `DIR/samples/<day>.jsonl` and the records of
 `DIR/omlx-restarts.jsonl`. It prints one JSON line and exits 0 met, 1 not met, 75 not yet, 2 (stderr
 `omlx-reactive-restart-day: <error>`, nothing on stdout) when the state, a day line, a sample line, a record or
-an event is not a JSON object, or a `since_at`, a sample `at`, a record `at` or a floor kill's `at` is not an
+an event is not a JSON object, or a `hold_since_at`, a sample `at`, a record `at` or a floor kill's `at` is not an
 ISO time.
 
-The target day T is the date of `since_at` plus one day. The first decision that applies wins:
+The target day T is the date of `hold_since_at` plus one day. That is the first sample the hold rule saw, not
+the state's older `since_at`, so a day an older watcher began is never judged by this rule. The first decision
+that applies wins:
 
-1. No state file, or a null `since_at`: `{"verdict": "not_yet", "day": null}`.
+1. No state file, or no `hold_since_at` (a state an older watcher wrote, before the new one has sampled): `{"verdict": "not_yet", "day": null}`.
 2. No day line has `day >= T` (no peaks file counts as none): `not_yet` with `day` T.
 3. No day line has `day == T` but a later one exists: `not_met`, `missing_day`.
 4. `samples/T.jsonl` is missing: `no_samples`.
@@ -91,7 +93,7 @@ def _is_int(value) -> bool:
 
 
 def _read_state(directory: Path) -> date | None:
-    """The target day, None when there is no state or its `since_at` is null."""
+    """The target day, None when there is no state or it has no `hold_since_at` yet."""
     try:
         with (directory / STATE_NAME).open(encoding="utf-8") as handle:
             state = json.load(handle)
@@ -99,11 +101,11 @@ def _read_state(directory: Path) -> date | None:
         return None
     if not isinstance(state, dict):
         raise ValueError(f"{directory / STATE_NAME} is not a JSON object")
-    since = state.get("since_at")
+    since = state.get("hold_since_at")
     if since is None:
         return None
     if not isinstance(since, str):
-        raise ValueError(f"since_at is not an ISO time: {since!r}")
+        raise ValueError(f"hold_since_at is not an ISO time: {since!r}")
     return datetime.fromisoformat(since).date() + timedelta(days=1)
 
 
