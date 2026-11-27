@@ -2,13 +2,18 @@
 
 Run: just agent-workflow-tests
 """
+import json
+import sqlite3
+import tempfile
 import unittest
+from pathlib import Path
+from unittest import mock
 
-from agent_tools.console import permit
+from agent_tools.console import permission, permit
 
 from . import console_test_support as support
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures
-from .test_console_manager_service import ROOT, SLUG, PermitCase
+from .test_console_manager_service import MERGE, NOW, ROOT, SLUG, PermitCase
 from .test_console_permit import HEAD, SHA
 
 TIER = "fast"  # a local service on a free port and the standard library
@@ -108,6 +113,109 @@ class PermitRerunServiceTest(PermitCase):
         verdict = again.permit(sid, self.secret(sid), "s-1", "t-3", rerun)
         self.assertEqual((verdict.decision, verdict.reason), ("deny", permit.RERUN_LIMIT.format(
             pr=7, head=SHA, reruns="run 55 (failing: no members reported) and run 55 (failing: no members reported)")))
+
+    RERUN = f"gh run rerun 55 --failed --repo {SLUG}"
+
+    def landed_row(self, sid, call="t-1"):
+        return {"sprint_id": sid, "session_id": "s-1", "tool_use_id": call, "repo": SLUG, "verb": "rerun",
+                "target": {"run": 55}}
+
+    def test_a_rerun_the_manager_ran_after_its_allow_is_recorded_as_landed(self):
+        svc, sid = self.boot()
+        verdict = self.judge(svc, sid, self.RERUN, call="t-1")
+        self.assertEqual((verdict.decision, verdict.verb), ("allow", "rerun"))
+        self.assertTrue(svc.permit_landed(sid, self.secret(sid), "s-1", "t-1", self.RERUN))
+        self.assertEqual(self.rows("permit.landed"), [self.landed_row(sid)])
+        with self.subTest("prefixed"):
+            svc, sid = self.boot()
+            prefixed = "env -u GITHUB_TOKEN -u GH_TOKEN " + self.RERUN
+            self.assertEqual(self.judge(svc, sid, prefixed, call="t-1").decision, "allow")
+            self.assertTrue(svc.permit_landed(sid, self.secret(sid), "s-1", "t-1", prefixed))
+            self.assertEqual(self.rows("permit.landed")[-1], self.landed_row(sid))
+
+    def test_a_rerun_lands_only_for_its_own_allowed_call_of_the_same_run_within_thirty_minutes(self):
+        now = [NOW]
+        svc, sid = self.boot(clock=lambda: now[0])
+        secret = self.secret(sid)
+        with self.subTest("before the allow"):
+            self.assertFalse(svc.permit_landed(sid, secret, "s-1", "t-1", self.RERUN))
+        self.assertEqual(self.judge(svc, sid, self.RERUN, call="t-1").decision, "allow")
+        for name, session, call, command in (
+                ("other session", "s-2", "t-1", self.RERUN),
+                ("other call", "s-1", "t-9", self.RERUN),
+                ("other run", "s-1", "t-1", f"gh run rerun 56 --failed --repo {SLUG}"),
+                ("extra flag", "s-1", "t-1", self.RERUN + " --job 9"),
+                ("other repository", "s-1", "t-1", "gh run rerun 55 --failed --repo o/other"),
+                ("merge text on the rerun's call", "s-1", "t-1", MERGE)):
+            with self.subTest(name):
+                self.assertFalse(svc.permit_landed(sid, secret, session, call, command))
+        self.assertEqual(self.rows("permit.landed"), [])
+        self.assertEqual(self.judge(svc, sid, self.RERUN, call="t-2").decision, "allow")
+        with self.subTest("denied third rerun"):
+            third = self.judge(svc, sid, self.RERUN, call="t-3")
+            self.assertEqual(third.decision, "deny")
+            self.assertFalse(svc.permit_landed(sid, secret, "s-1", "t-3", self.RERUN))
+        with self.subTest("thirty minutes"):
+            now[0] = NOW + 30 * 60
+            self.assertTrue(svc.permit_landed(sid, secret, "s-1", "t-1", self.RERUN))
+            now[0] = NOW + 30 * 60 + 1
+            self.assertFalse(svc.permit_landed(sid, secret, "s-1", "t-2", self.RERUN))
+        self.assertEqual(self.rows("permit.landed"), [self.landed_row(sid)])
+
+    def test_the_same_landed_notification_delivered_twice_records_one_row(self):
+        svc, sid = self.boot()
+        self.assertEqual(self.judge(svc, sid, self.RERUN, call="t-1").decision, "allow")
+        self.assertTrue(svc.permit_landed(sid, self.secret(sid), "s-1", "t-1", self.RERUN))
+        self.assertFalse(svc.permit_landed(sid, self.secret(sid), "s-1", "t-1", self.RERUN))
+        self.assertEqual(self.rows("permit.landed"), [self.landed_row(sid)])
+
+    def test_a_landing_whose_append_is_rolled_back_can_be_retried(self):
+        svc, sid = self.boot()
+        self.assertEqual(self.judge(svc, sid, self.RERUN, call="t-1").decision, "allow")
+        with mock.patch.object(svc.log, "append", side_effect=sqlite3.OperationalError("rolled back")):
+            with self.assertRaises(sqlite3.OperationalError):
+                svc.permit_landed(sid, self.secret(sid), "s-1", "t-1", self.RERUN)
+        self.assertEqual(self.rows("permit.landed"), [])
+        self.assertTrue(svc.permit_landed(sid, self.secret(sid), "s-1", "t-1", self.RERUN))
+        self.assertEqual(self.rows("permit.landed"), [self.landed_row(sid)])
+
+    def test_a_rerun_allow_whose_judged_append_is_rolled_back_cannot_land(self):
+        svc, sid = self.boot()
+        with mock.patch.object(svc.log, "append", side_effect=sqlite3.OperationalError("rolled back")):
+            with self.assertRaises(sqlite3.OperationalError):
+                self.judge(svc, sid, self.RERUN, call="t-1")
+        self.assertEqual(self.rows("permit.judged"), [])
+        self.assertFalse(svc.permit_landed(sid, self.secret(sid), "s-1", "t-1", self.RERUN))
+        self.assertEqual(self.rows("permit.landed"), [])
+
+    def test_an_allowed_rerun_records_the_rerun_rule_the_guards_policy_declares_for_its_project(self):
+        def policy(changes):
+            path = Path(self.enterContext(tempfile.TemporaryDirectory())) / "policy.json"
+            row = {"default_branch": "main", "integration_branch": "main", "required_checks": [], "evidence": {},
+                   "production": {"changes": changes, "read_only": [], "release_profile": "p"}}
+            path.write_text(json.dumps({"derived_repositories": {SLUG: row}, "derivation": None}))
+            return path
+
+        declared = {"id": "deploy-rerun", "argv": ["gh", "run", "rerun"]}
+        rules = {"declared": (policy([declared]), declared),
+                 "program path": (policy([{"id": "d", "argv": ["/usr/bin/gh", "run", "rerun"]}]),
+                                  {"id": "d", "argv": ["/usr/bin/gh", "run", "rerun"]}),
+                 "gh run only": (policy([{"id": "d", "argv": ["gh", "run"]}]), None),
+                 "no policy": (Path("/nonexistent/policy.json"), None)}
+        for name, (path, rule) in rules.items():
+            with self.subTest(name), mock.patch.object(permission, "policy_file", return_value=path):
+                svc, sid = self.boot()
+                self.assertEqual(self.judge(svc, sid, self.RERUN, call="t-1").decision, "allow")
+                row = self.rows("permit.judged")[-1]
+                self.assertEqual(rule, row.get("rule"))
+                self.assertEqual(rule is not None, "rule" in row)
+        with self.subTest("a refused rerun"), mock.patch.object(permission, "policy_file", return_value=rules["declared"][0]):
+            svc, sid = self.boot()
+            for call in ("t-1", "t-2", "t-3"):
+                self.judge(svc, sid, self.RERUN, call=call)
+            rows = self.rows("permit.judged")
+            self.assertEqual(["allow", "allow", "deny"], [row["decision"] for row in rows])
+            self.assertEqual([True, True, False], ["rule" in row for row in rows])
 
 
 if __name__ == "__main__":

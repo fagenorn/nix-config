@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import json
+import re
 import unittest
 
-from agent_tools.delivery import engine_core
+from agent_tools.delivery import engine_core, engine_session
 from agent_tools.delivery.engine_core import RunGroup, Stop
 from tests.test_engine_check import PROCEDURES, SHIPPED_INPUTS, UNNAMED, load, step
+from tests.test_engine_whole_shell import client_admits, whole_shell_argv, words_after
 
 TIER = "fast"
 
@@ -47,6 +50,39 @@ class DirectProcedureTest(unittest.TestCase):
         self.assertEqual([s["id"] for s in load(PROCEDURES, "direct")["steps"] if s.get("mutates")],
                          ["implement", "lite-fix", "escalated-fix", "full-fix"])
         self.assertEqual([s["id"] for s in load(PROCEDURES, "verify")["steps"] if s.get("mutates")], ["fix"])
+
+    def test_only_the_direct_implementer_steps_name_a_worktree(self):
+        named = {"path": "preflight.worktree_path", "branch": "preflight.branch"}
+        direct = {s["id"]: s["worktree"] for s in load(PROCEDURES, "direct")["steps"] if "worktree" in s}
+        self.assertEqual(direct, {"implement": named, "lite-fix": named, "escalated-fix": named,
+                                  "full-fix": named})
+        for path in sorted(PROCEDURES.glob("*.json")):
+            if path.name in ("direct.json", "command_verdicts.json"):
+                continue
+            with self.subTest(path.name):
+                steps = json.loads(path.read_text(encoding="utf-8")).get("steps", [])
+                self.assertEqual([s["id"] for s in steps if "worktree" in s], [])
+
+    def test_the_direct_implementer_prompts_show_single_commands_in_the_worktree(self):
+        _, argv = whole_shell_argv()
+        allowed, denied = words_after(argv, "--allowedTools"), words_after(argv, "--disallowedTools")
+        steps = {s["id"]: s for s in load(PROCEDURES, "direct")["steps"]}
+        for name in ("implement", "lite-fix", "escalated-fix", "full-fix"):
+            with self.subTest(name):
+                step = steps[name]
+                args = tuple((path, "/srv/p/wt" if path == "preflight.worktree_path" else f"<{path}>")
+                             for path in step["in"])
+                text = engine_session.render_prompt(
+                    (PROCEDURES / step["prompt"]).read_text(encoding="utf-8"), args)
+                blocks = re.findall(r"```[^\n]*\n(.*?)```", text, re.DOTALL)
+                lines = [line for block in blocks for line in block.splitlines() if line.strip()]
+                self.assertTrue(lines)
+                self.assertLess(len(text.encode("utf-8")), 8192)
+                for line in lines:
+                    self.assertIn("/srv/p/wt", line)
+                    for word in (";", "&&", "||", "|", "$", "`"):
+                        self.assertNotIn(word, line)
+                    self.assertTrue(client_admits(line, allowed, denied), line)
 
     def test_the_direct_review_roles(self):
         direct = load(PROCEDURES, "direct")

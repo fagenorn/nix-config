@@ -203,6 +203,8 @@ agent-workflow-tests *args:
     tests/test_engine_start_check.py \
     tests/test_engine_session.py \
     tests/test_engine_session_limits.py \
+    tests/test_engine_tool_denied.py \
+    tests/test_engine_whole_shell.py \
     tests/test_engine_reaping.py \
     tests/test_engine_keep_alive.py \
     tests/test_engine_continue.py \
@@ -269,6 +271,7 @@ agent-workflow-tests *args:
     tests/test_console_approved_action_check.py \
     tests/test_console_takeover_merge_check.py \
     tests/test_console_release_rerun_check.py \
+    tests/test_console_production_rerun_check.py \
     tests/test_issue_branch.py \
     tests/test_program_copies.py \
     tests/test_keepalive_end_turn_cap.py \
@@ -421,6 +424,7 @@ agent-workflow-tests *args:
     tests/test_console_lock_wait_check.py \
     tests/test_console_serve_probe_check.py \
     tests/test_console_run_line_check.py \
+    tests/test_verify_engine_past_implement.py \
     tests/test_console_look_check.py \
     tests/test_console_look_kept_check.py \
     tests/test_console_live_fault_check.py \

@@ -1,0 +1,3 @@
+#!/bin/sh
+# Verify check: a manager was allowed to rerun its own pull request's check run in a project declaring reruns as production, and the rerun ran.
+PYTHONPATH=python exec python3 -m agent_tools.verification.console_production_rerun "$@"
