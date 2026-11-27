@@ -14,11 +14,15 @@ A recorded dependency between two issues, stored through the forge's native depe
 _Avoid_: dependency note
 
 **Claim**:
-A marker saying one holder is delivering one issue on one branch. It stays live while the holder renews it and ends when released or landed.
+A marker saying one holder is delivering one issue on one branch. It stays live while the holder renews it and ends when released or landed. It may also name the session that holds it and that session's sprint.
 _Avoid_: lock, reservation
 
 **Decision prompt**:
 An owner-action marker that carries questions a batch needs the owner to answer, each with tick boxes. A fully ticked prompt waits for a run to read it.
+
+**Early takeover**:
+Taking a live claim over at once, without the day's wait or the owner's tick, because its holder is a session of this host that provably no longer runs (this host's session registry, read whole, holds no running record of it) and the taker is a manager of the same sprint. Anything that cannot be proved keeps the wait. The takeover reports the claimed worktree's uncommitted edits and never discards them.
+_Avoid_: steal, forced release
 
 **Land lock**:
 The single claim-like lease a delivery must hold to merge into the integration branch, so that two deliveries do not land at once. It is acquired with a wait and released after the merge; waiters register and a free lock goes to the one that has waited longest. A delivery holds it as a lease from the moment its pull request is green and, when needed, approved until its merge; the lease beats, and a holder whose beats stop for 3 minutes or that holds past 40 minutes loses it to the first waiter and waits again at the back. A release holds it too, from its fixed head until it has merged into the default branch, so that no delivery lands meanwhile; a release or a batch train holds it without a lease.
@@ -33,5 +37,5 @@ A marker that asks the owner to do something and carries a reason and tick boxes
 _Avoid_: owner ask
 
 **Stale claim**:
-A claim whose holder stopped renewing it. It is never taken over: the status call posts an owner-action marker asking the owner to release it.
+A claim whose holder stopped renewing it. Waiting alone never takes it over: the status call posts an owner-action marker asking the owner to release it, and only an early takeover ends it sooner.
 _Avoid_: dead claim

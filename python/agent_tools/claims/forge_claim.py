@@ -4,14 +4,19 @@ Source entry `python -m agent_tools.claims.forge_claim`, library `agent_tools.cl
 session at a time delivers a forge issue, and every fact is held in issue comments called
 markers. A claim is a `claim` marker and the `in-progress`
 label is only a filter over it. Contention is settled by the marker contest (D2): the smallest
-live claim comment id of the issue wins, and `acquire` never steals a claim, stale or not.
+live claim comment id of the issue wins, and `acquire` never steals a claim, stale or not, except one
+whose holder provably no longer runs (the D6 early takeover).
 
 Subcommands: each of `acquire`, `renew`, `release` and `status` takes `--repo <owner/name>
 --issue <n> --holder <host>/<batch_id>` (a session without a batch uses `<host>/session-<id>`).
 `acquire` and `renew` also take an optional `--branch <name>`, recorded as the claim's `branch`
 field (the staleness activity source); `release` takes `--reason` (default `done`); `status`
 takes no more. `acquire` posts the claim and adds the `in-progress` label. `status` reports the
-verdict and never takes a claim.
+verdict and never takes a claim. `acquire` and `renew` also record the caller's Claude Code session
+(`CLAUDE_CODE_SESSION_ID`) as `session` and its console sprint (`CONSOLE_SPRINT_ID`, never the sprint
+secret) as `sprint`, each only when the environment holds a value of its form, so a claim names the
+session that holds it; `renew` removes either field it cannot record, so a renewed claim never names
+an earlier session, and keeps a claim's `took` only when it records the same session and sprint again.
 
 D3, a renewal changes the body: `renew` rewrites the claim's first line with `renewed=<n+1>`
 so the edit always moves the server's `updated_at`, then re-lists and reports `not_held` when
@@ -31,7 +36,12 @@ the `ForgeError` code, `detail`, and `transient`, true when the error is a trans
 `error: "usage"`, `detail` the parser's message), and `-h`/`--help` alone prints argparse help
 and exits 0. Verdict-specific keys: `acquire` and `status` add `released_by_owner` (the claim
 ids ended by a ticked owner-action box), `release` adds `label_removed`, and `status` adds
-`activity_at` (UTC, null when free), `owner_action_comment_id` and `owner_action_posted`.
+`activity_at` (UTC, null when free), `owner_action_comment_id` and `owner_action_posted`. Every
+`acquire` answer, an error included, also carries `takeover`: null, or after an early takeover (D6)
+an object with `claim` (the taken claim's id), `holder` (its holder), `branch` (its branch, or null),
+`worktree` (the claimed worktree's path, null when it cannot be found in this repository) and
+`uncommitted` (that worktree's uncommitted paths from `git status --porcelain -z`, `[]` when clean,
+null when unreadable).
 
 D9, ending is append-only: `release` posts an `end` marker first, then edits the claim to
 `released=<reason>`, retires the issue's obsolete `owner-action` markers and removes
@@ -60,7 +70,7 @@ D5, server now: "now" is the server's `Date` header of `gh api --include rate_li
 claim is stale when `now - activity >= 24 hours`, where activity is the latest of the claim's own
 `updated_at` (moved by each renewal, D3) and the branch activity of D4.
 
-D6, owner-action: a stale claim is never stolen. Taking it over would end the block sooner, but a
+D6, owner-action: a stale claim is never stolen, except by the early takeover below. Taking it over would end the block sooner, but a
 holder that is merely slow, or whose renewal was delayed, would lose work it is still doing and two
 sessions would deliver the issue, so an abandoned issue waits for the owner's tick instead.
 `status` reports one by posting one `owner-action` marker (`reason=stale-claim`, `claim=<id>`,
@@ -78,6 +88,26 @@ the claim right after judging that listing's `updated_at`, so a renewal that lan
 listing is never undone. A renewal that lands between that listing and the end, or a branch push
 after the activity read, can still lose the claim; the holder's `renew` then answers `not_held`
 (D3).
+
+D6 early takeover: a claim whose holder provably no longer runs is taken over at once by a manager of
+the same sprint, with no day's wait and no owner box. `acquire` takes it when all hold: the claim
+records `session` and `sprint`; its holder's host (the text before the first `/`) is this host
+(`hostname -s`); the caller's session and sprint are recorded in its environment, the session differs
+from the claim's and the sprint equals it; and `agent_tools.claims.claim_takeover` reads the claim's
+session as gone: this host's Claude Code session registry (the default root's profiles always among
+it, whatever `CLAUDE_ACCOUNTS_DIR` names), read whole without an error, shows the caller's own session
+running and holds no record of the claim's session (a session removes its record when it exits) or
+only records whose process the console's strict process check and a conclusive reading show dead.
+Anything else, a registry, profile or record that cannot be read or a malformed record of any session
+included, keeps the rule above. `acquire` reads the claimed worktree first, then takes a fresh
+listing and ends the claim only when the fresh claim's whole body and `updated_at` are the ones it
+judged and the registry, read again, still shows the session gone. The `end` marker carries
+`reason=holder-gone`, `successor` and `sprint` (the caller's). Only the caller whose `end` is the
+claim's first, in comment order, goes on: the claim is edited to `released=holder-gone`, its
+owner-action prompts are retired (`released`), and the caller's claim records `took=<the taken
+claim's id>` and the former branch when `--branch` is absent; a caller whose `end` came second
+acquires as if the issue were free. The takeover never resets, cleans, stashes or discards the
+worktree: it reports it, reading git with no repository-selecting variable and no optional lock.
 
 The `land` subcommand (`land acquire|release|status|refresh|hold`, issue 629) is the cross-host land lock
 of `agent_tools.claims.forge_land_lock`: `main` routes it there and reports its usage errors in its
@@ -108,12 +138,14 @@ also sheds the `owner-action` label its lost-reply retirement left behind.
 """
 import argparse
 import json
+import os
 import re
 import sys
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from agent_tools.claims import claim_takeover
 from agent_tools.claims import forge_land_lock
 from agent_tools.claims import forge_owner_action
 from agent_tools.claims import forge_markers as fm
@@ -127,6 +159,7 @@ OWNER_ACTION = ("owner-action", "D93F0B")
 OWNER_ACTION_KIND = "owner-action"
 STALE_AFTER = timedelta(hours=24)
 RELEASE_BOX = "Release this claim"
+TAKEOVER_REASON = "holder-gone"
 TICKED = re.compile(rf"\s*[-*] \[[xX]\] {RELEASE_BOX}\s*")
 
 CONTENDED, FORGE_ERROR, USAGE = 3, 1, 2
@@ -366,24 +399,84 @@ def acquire(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
     match = {"issue": str(args.issue)}
     held = fm.contest(markers, CLAIM_KIND, match)
     winner = held[0] if held else None
+    takeover = None
+    if winner is not None and _holder_of(winner) != args.holder and claim_takeover.qualifies(winner, os.environ):
+        winner, takeover, markers = _take_over(args, winner, match)
     if winner is None:
-        fields = {"issue": str(args.issue), "holder": args.holder}
-        if args.branch:
-            fields["branch"] = args.branch
-        written = fm.write(args.repo, args.issue, CLAIM_KIND, fields, f"Claimed by {args.holder}.", match)
+        written = fm.write(args.repo, args.issue, CLAIM_KIND, _claim_fields(args, takeover),
+                           f"Claimed by {args.holder}.", match)
         if written.won:
             _mark_in_progress(args)
-            return 0, _result(args, "acquired", written.own_id, released_by_owner=freed)
+            return 0, _result(args, "acquired", written.own_id, released_by_owner=freed, takeover=takeover)
         winner = written.winner
         comment_id = winner.comment_id if winner is not None else None
         if _holder_of(winner) == args.holder:
-            return 0, _result(args, "already_held", comment_id, released_by_owner=freed)
-        return CONTENDED, _result(args, "lost_to", comment_id, _holder_of(winner), released_by_owner=freed)
+            return 0, _result(args, "already_held", comment_id, released_by_owner=freed, takeover=takeover)
+        return CONTENDED, _result(args, "lost_to", comment_id, _holder_of(winner), released_by_owner=freed,
+                                  takeover=None)
     if _holder_of(winner) == args.holder:
         _mark_in_progress(args)
-        return 0, _result(args, "already_held", winner.comment_id, released_by_owner=freed)
+        return 0, _result(args, "already_held", winner.comment_id, released_by_owner=freed, takeover=None)
     return CONTENDED, _result(args, "held_by", winner.comment_id, _holder_of(winner),
-                         released_by_owner=freed)
+                              released_by_owner=freed, takeover=None)
+
+
+def _unchanged(a: Marker, b: Marker) -> bool:
+    return (a.comment_id, a.body, a.updated_at) == (b.comment_id, b.body, b.updated_at)
+
+
+def _first_end(markers: list[Marker], claim_id: int) -> Marker | None:
+    """The `end` marker of lowest comment id naming the claim."""
+    return min((m for m in markers if m.kind == fm.END_KIND and m.fields.get("of") == str(claim_id)),
+               key=lambda m: m.comment_id, default=None)
+
+
+def _takeover_report(claim: Marker, report: tuple[str | None, list[str] | None]) -> dict[str, Any]:
+    return {"claim": claim.comment_id, "holder": _holder_of(claim), "branch": claim.fields.get("branch"),
+            "worktree": report[0], "uncommitted": report[1]}
+
+
+def _finish_takeover(args: argparse.Namespace, markers: list[Marker], claim: Marker,
+                     report: tuple[str | None, list[str] | None]) -> dict[str, Any]:
+    """The steps after the takeover's `end`; each is idempotent."""
+    if "released" not in claim.fields:
+        fm.edit(args.repo, claim.comment_id, fm.with_fields(claim, released=TAKEOVER_REASON))
+    if not retire_owner_actions(args.repo, args.issue, markers, claim.comment_id, "released"):
+        _retired_owner_action_label(args.repo, args.issue, markers, claim.comment_id)
+    return _takeover_report(claim, report)
+
+
+def _take_over(args: argparse.Namespace, winner: Marker, match: dict[str, str]
+               ) -> tuple[Marker | None, dict[str, Any] | None, list[Marker]]:
+    """End `winner` when its holder is provably gone: returns the winner to go on with, the report
+    (None unless this caller's `end` is the claim's first) and the newest listing. Nothing reads
+    the forge between the fresh listing and the end."""
+    report = claim_takeover.worktree_report(args.repo, winner.fields.get("branch"))
+    markers = fm.list_markers(args.repo, args.issue)
+    held = fm.contest(markers, CLAIM_KIND, match)
+    fresh = held[0] if held else None
+    if fresh is None or not _unchanged(fresh, winner) or not claim_takeover.qualifies(fresh, os.environ):
+        return fresh, None, markers
+    identity = claim_takeover.identity_fields(os.environ)
+    end_id = fm.end(args.repo, args.issue, fresh.comment_id, TAKEOVER_REASON,
+                    successor=identity["session"], sprint=identity["sprint"])
+    again = fm.list_markers(args.repo, args.issue)
+    first = _first_end(again, fresh.comment_id)
+    if first is None or first.comment_id != end_id:
+        held = fm.contest(again, CLAIM_KIND, match)
+        return (held[0] if held else None), None, again
+    return None, _finish_takeover(args, again, fresh, report), again
+
+
+def _claim_fields(args: argparse.Namespace, takeover: dict[str, Any] | None) -> dict[str, str]:
+    fields = {"issue": str(args.issue), "holder": args.holder}
+    branch = args.branch or (takeover or {}).get("branch")
+    if branch:
+        fields["branch"] = branch
+    fields.update(claim_takeover.identity_fields(os.environ))
+    if takeover:
+        fields["took"] = str(takeover["claim"])
+    return fields
 
 
 def renew(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
@@ -397,7 +490,14 @@ def renew(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
     updates = {"renewed": str(count + 1)}
     if args.branch:
         updates["branch"] = args.branch
-    fm.edit(args.repo, winner.comment_id, fm.with_fields(winner, **updates))
+    identity = claim_takeover.identity_fields(os.environ)
+    same = all(k in identity and identity[k] == winner.fields.get(k) for k in claim_takeover.IDENTITY_KEYS)
+    fields = {k: v for k, v in winner.fields.items() if k not in (*claim_takeover.IDENTITY_KEYS, "took")}
+    fields.update(updates)
+    fields.update(identity)
+    if same and winner.fields.get("took"):
+        fields["took"] = winner.fields["took"]
+    fm.edit(args.repo, winner.comment_id, fm.rewritten(winner, fields))
     again = fm.list_markers(args.repo, args.issue)
     if not any(m.comment_id == winner.comment_id and fm.is_live(m, again) for m in again):
         return CONTENDED, _result(args, "not_held", winner.comment_id)
@@ -527,6 +627,8 @@ def _error_result(args: argparse.Namespace, error: ForgeError) -> dict[str, Any]
         return forge_land_lock.result(args, "error", **fields)
     if args.command == "owner-action":
         return forge_owner_action.result(args, "error", **fields)
+    if args.command == "acquire":
+        fields["takeover"] = None
     return _result(args, "error", **fields)
 
 
@@ -558,9 +660,12 @@ def main(argv: list[str] | None = None) -> int:
         if argv[:1] == ["land"]:
             _emit(forge_land_lock.usage_result(argv, str(error)))
             return USAGE
-        _emit({"command": argv[0] if argv and argv[0] in COMMANDS else None, "repo": None,
-               "issue": None, "holder": None, "verdict": "error", "comment_id": None, "by": None,
-               "error": "usage", "detail": str(error)})
+        usage = {"command": argv[0] if argv and argv[0] in COMMANDS else None, "repo": None,
+                 "issue": None, "holder": None, "verdict": "error", "comment_id": None, "by": None,
+                 "error": "usage", "detail": str(error)}
+        if argv[:1] == ["acquire"]:
+            usage["takeover"] = None
+        _emit(usage)
         return USAGE
     except SystemExit as stop:  # -h/--help: argparse printed the help text
         return stop.code if isinstance(stop.code, int) else 0
