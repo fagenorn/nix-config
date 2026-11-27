@@ -18,8 +18,8 @@ is enforced without the row check):
   and the MCP tool names, equal to what `guard_policy.production_row` compiles from the snapshot): BYPASS,
   "production rules in place";
 - status `"declared"` and the policy loads but holds no such row, or the row is older than
-  the declaration: AUTO, "production rules declared but not in the guard's policy";
-- status `"declared"` and the policy cannot be loaded: AUTO, "the guard's policy cannot be read";
+  the declaration: AUTO, "production rules declared but not in the safety check's policy";
+- status `"declared"` and the policy cannot be loaded: AUTO, "the safety check's policy cannot be read";
   the guard drops a whole file for any malformed row, the matching row or an unrelated one, so
   such a file never yields bypass;
 - any other status (`"not_declared"` included): AUTO, "no production rules declared", the policy
@@ -54,8 +54,8 @@ NO_PRODUCTION = "no production"
 RULES_IN_PLACE = "production rules in place"
 WAKE_BLOCKED = "waking a bypass manager is not yet possible"
 NOT_DECLARED = "no production rules declared"
-NOT_ENFORCED = "production rules declared but not in the guard's policy"
-POLICY_UNREADABLE = "the guard's policy cannot be read"
+NOT_ENFORCED = "production rules declared but not in the safety check's policy"
+POLICY_UNREADABLE = "the safety check's policy cannot be read"
 UNRESOLVED = "the project's contract does not resolve"
 UNREADABLE = "the production rules could not be read"
 

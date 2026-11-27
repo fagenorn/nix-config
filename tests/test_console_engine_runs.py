@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.console import console, engine_runs, guest, inbox, service, sprints, view
+from agent_tools.console import console, deliveries, engine_runs, guest, inbox, service, sprints, view
 from agent_tools.console.engine_runs import NO_ENGINE, EngineRuns, SprintEngine
 from agent_tools.delivery import engine, engine_ledger, procedure_check
 from agent_tools.delivery.engine_ledger import RunState
@@ -86,7 +86,7 @@ class ReadingTest(unittest.TestCase):
             "moving.jsonl": (LIVE, "moving", "planning, moving"),
             "waiting.jsonl": (LIVE, "waiting", "building, waiting for a free session slot on this host"),
             "stopped.jsonl": (LIVE, "stopped", "stopped at claim lost, needs your decision"),
-            "not-running.jsonl": (DEAD, "not_running", "verifying, the engine is not running"),
+            "not-running.jsonl": (DEAD, "not_running", "testing, its steps are not running"),
             "done.jsonl": (LIVE, "done", "done"),
         }
         for fixture, (probe, reading, text) in cases.items():
@@ -120,8 +120,8 @@ class ReadingTest(unittest.TestCase):
         for stage in procedure_check.STAGES:
             with self.subTest(stage=stage):
                 state = bare_state(stage=stage, engine_alive=True)
-                self.assertEqual(engine_runs.stage_text(state), stage)
-                self.assertEqual(engine_runs.line_text(state), f"{stage}, moving")
+                self.assertEqual(engine_runs.stage_text(state), deliveries.stage_words(stage))
+                self.assertEqual(engine_runs.line_text(state), f"{deliveries.stage_words(stage)}, moving")
         self.assertIsNone(engine_runs.stage_text(bare_state()))
         fanned = poll_state("fanout.jsonl", LIVE)
         self.assertEqual(engine_runs.line_text(fanned), "building task 2 of 3, moving")
@@ -142,7 +142,7 @@ class ReadingTest(unittest.TestCase):
         state = poll_state("sprint-checks.jsonl", LIVE)
         entry = engine_runs.engine_entry(state, None)
         self.assertEqual((entry["reading"], entry["text"]),
-                         ("waiting", "building, waiting for CI on its pull request"))
+                         ("waiting", "building, waiting for GitHub's automatic checks on the proposed change"))
         self.assertEqual(engine_runs.wait_text(state), sprints.NOW_CI_TEXT)
 
     def test_wait_text_names_the_open_wait_only_while_the_run_reads_waiting(self):
@@ -505,7 +505,7 @@ class EnginePageTest(unittest.TestCase):
         item = self.drawn(run)
         self.assertEqual([c["cls"] for c in item["children"]], ["issue", "stage", "spend"])
         link = item["children"][2]
-        self.assertEqual(page.full(link), "12.3k tokens, about $1.50")
+        self.assertEqual(page.full(link), "about $1.50")
         self.assertEqual(link["href"], "/spend#run=" + RUN_ID)
         for spend in ({**run["spend"], "tokens": 0}, None):
             with self.subTest(spend=spend):
@@ -566,7 +566,7 @@ class ServiceLineTest(unittest.TestCase):
         child.kill()
         child.wait()
         svc.poll_engine_runs()
-        self.assertEqual(self.entry(svc)["engine_runs"][0]["text"], "planning, the engine is not running")
+        self.assertEqual(self.entry(svc)["engine_runs"][0]["text"], "planning, its steps are not running")
         rows = len(support.log_rows(self.store))
         svc.poll_engine_runs()
         self.assertEqual(len(support.log_rows(self.store)), rows)

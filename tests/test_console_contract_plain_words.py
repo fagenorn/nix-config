@@ -6,14 +6,12 @@ import json
 import re
 import unittest
 
+from agent_tools.console import sprint
+
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures
 from .test_console_sprint_command import run_sprint
 
 TIER = "fast"
-
-# Internal words the owner does not know (docs/guides/owner-words.md), which the contract's own
-# printed examples must not use unglossed: the examples are copied into what the owner reads.
-UNGLOSSED = re.compile(r"\b(?:slices?|land(?:s|ed|ing)?|held|claims?|verif(?:y|ied))\b", re.IGNORECASE)
 
 
 class ContractPlainWordsTest(unittest.TestCase):
@@ -26,6 +24,15 @@ class ContractPlainWordsTest(unittest.TestCase):
         self.assertIn("`docs/guides/write-for-the-owner.md`", flat)
         self.assertIn("`docs/guides/owner-words.md`", flat)
 
+    def test_the_contract_states_the_one_rule(self):
+        text = run_sprint("contract").stdout
+        section = text.partition("\n## Writing for the owner\n")[2].partition("\n## ")[0]
+        flat = " ".join(section.split())
+        self.assertIn("a person who has never seen this system understands each sentence on its own", flat)
+        self.assertIn("Never lean on a list of terms", flat)
+        self.assertIn("rewrite that sentence with the words the warning gives", flat)
+        self.assertIsNone(re.search(r"(?i)\bgloss", flat))
+
     def test_the_printed_examples_of_owner_copy_use_no_internal_word(self):
         text = run_sprint("contract").stdout
         blocks = re.findall(r"```json\n(.*?)\n\s*```", text, re.S)
@@ -36,7 +43,7 @@ class ContractPlainWordsTest(unittest.TestCase):
         self.assertGreaterEqual(len(copy), 5)
         for line in copy:
             with self.subTest(line=line):
-                self.assertIsNone(UNGLOSSED.search(line))
+                self.assertEqual([f.word for f in sprint.words_found(line)], [])
 
 
 if __name__ == "__main__":

@@ -95,8 +95,8 @@ class CommitFailureCardTest(CommitFailureCase):
         card = self.failed()
         self.assertEqual(
             card["headline"],
-            "The adoption of repo was not applied: the project's pre-commit hook stopped the "
-            "adoption commit: it ended with exit status 1.")
+            "The adoption of repo was not applied: the project's pre-commit hook stopped "
+            "saving the adoption's change: it ended with exit status 1.")
         self.assertEqual(card["why"], approve.HOOK_NOTE)
         self.assertEqual(card["lines"], [
             "hook line 7", "hook line 8", "hook line 9", "hook line 10", "hook line 11",
@@ -175,8 +175,8 @@ class CommitEnvironmentApprovalTest(CommitFailureCase):
         card = self.failed()
         self.assertEqual(
             card["headline"],
-            "The adoption of repo was not applied: the project's pre-commit hook stopped the "
-            "adoption commit: it ended with exit status 3.")
+            "The adoption of repo was not applied: the project's pre-commit hook stopped "
+            "saving the adoption's change: it ended with exit status 3.")
         self.assertEqual(card["why"], approve.HOOK_NOTE)
         self.assertNotIn(UNTRUE, card["why"])
         self.assertEqual(card["lines"], ["inside the environment"])
@@ -196,7 +196,7 @@ class CommitEnvironmentApprovalTest(CommitFailureCase):
 class ReconciledEnvironmentTest(CommitFailureCase):
     """An adopted devenv checkout whose installed hook finds its runner only in the shell reconciles through it (#1333)."""
 
-    LINE = "commits run in its development shell: devenv shell (found in its files)"
+    LINE = "changes are saved in its development shell: devenv shell (found in its files)"
 
     def arrange(self, *, devenv: bool, on_plain_path: bool = False,
                 own_environment: bool = False) -> None:
@@ -260,7 +260,7 @@ class ReconciledEnvironmentTest(CommitFailureCase):
         return json.loads(path.read_text("utf-8"))["plan"]
 
     def proposal_lines(self, card) -> list[str]:
-        return [x for x in card["lines"] if x.startswith("commits run in its development shell")]
+        return [x for x in card["lines"] if x.startswith("changes are saved in its development shell")]
 
     def test_an_adopted_devenv_checkout_whose_hook_runner_is_only_in_its_shell_reconciles_through_it(self):
         self.arrange(devenv=True)

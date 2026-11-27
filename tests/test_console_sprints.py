@@ -1206,9 +1206,9 @@ class PendingStopTest(unittest.TestCase):
 
 class ClosingTextTest(unittest.TestCase):
     def test_the_closing_wording(self):
-        self.assertEqual(sprints.closing_text(2, 0, 0), "2 landed")
-        self.assertEqual(sprints.closing_text(1, 1, 1), "1 landed, 1 held for verification, 1 dropped")
-        self.assertEqual(sprints.closing_text(0, 0, 2), "0 landed, 2 dropped")
+        self.assertEqual(sprints.closing_text(2, 0, 0), "2 went in")
+        self.assertEqual(sprints.closing_text(1, 1, 1), "1 went in, 1 merged, not yet proven, 1 dropped")
+        self.assertEqual(sprints.closing_text(0, 0, 2), "0 went in, 2 dropped")
         self.assertEqual(sprints.first_line("  \n first \nsecond"), "first")
 
 
@@ -2847,9 +2847,9 @@ class LiveFaultCheckTest(unittest.TestCase):
         self.assertEqual(sprints.withdrawable_fault(s, 5).fault_id, 5)
         self.assertEqual(sprints.withdrawable_fault(replace(s, stop_at=at(8)), 5).fault_id, 5)
         self.assertEqual(notice_refusal(sprints.withdrawable_fault, s, 9),
-                         "this live fault is not known")
+                         "this fault is not known")
         self.assertEqual(notice_refusal(sprints.withdrawable_fault, s, 6),
-                         "this live fault is already withdrawn")
+                         "this fault was already withdrawn")
 
     def test_the_fault_requests_parse_strictly(self):
         body = json.dumps({"sprint_id": SA, "secret": "s", "fault": FAULT}).encode()
