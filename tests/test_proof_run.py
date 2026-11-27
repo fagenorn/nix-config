@@ -180,7 +180,7 @@ class ProveTest(unittest.TestCase):
         outcome = proves(run, fake, SHA_B, "daily")
 
         self.assertEqual((outcome.action, outcome.code, outcome.end),
-                         ("unproven", 3, "standard-not-on-engine"))
+                         ("unproven", 3, "plan-failed"))
         self.assertEqual(read(records_of(run)["proven"]), before)
         self.assertEqual(lines(records_of(run)["attempts"])[-1]["code"], 3)
 

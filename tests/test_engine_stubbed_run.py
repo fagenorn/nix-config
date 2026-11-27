@@ -19,12 +19,13 @@ from pathlib import Path
 from unittest import mock
 
 from agent_tools.claims import forge_markers
-from agent_tools.delivery import engine_session, holding
+from agent_tools.delivery import engine_session, holding, issue_setup
 from agent_tools.delivery.review_findings import Round, dispositions
-from agent_tools.project_contract import resolve_project
 from agent_tools.verification import verify_block
 from tests.engine_fixture import AdoptedFixtures, FixtureProject
 from tests.engine_guards import payloads
+from tests.engine_plan_fixtures import (BLOCKED, NOHUP_PLAN_TEXT, PLAN_PASS_BLOCKED, PLAN_TEXT, PLANNED, PLANNED_REPLIES,
+                                        REFUSED_REPLIES, REVISED_PLAN_TEXT, REVISED_REPLIES, plan_file)
 from tests.engine_procedure_copies import (PROCEDURES, keeping_the_run, stopping_after_verify,
                                            unstructured_procedures)
 from tests.engine_step_coverage import StepCoverage, test_ids
@@ -209,39 +210,170 @@ class StubbedRunTest(Scenario):
         self.assertEqual(run.world.git(run.fixture.root, "rev-parse", "main").strip(), run.origin_tip("main"))
 
 
+class PlannedRouteTest(Scenario):
+    STANDARD = ("Add a greet() function to the fixture module, next to `secrets/x.yaml`.\n\n"
+                "## Acceptance criteria\n\n- [ ] [code] greet() returns the greeting\n")
+
+    # no repository rule ignores `.superpowers/` here: the planner's files stay untracked unless the engine's worktree
+    # step makes git ignore them, and the close-out removes the worktree without force after the merge
+
+    def holder(self, run: StubbedRun) -> str:
+        return json.loads((run.runs()[0] / "run.json").read_text("utf-8"))["inputs"]["holder"]
+
+    def test_a_standard_issue_walks_plan_review_direct_verify_landing_to_done_with_the_plan_as_the_brief(self):
+        run = self.stubbed(body=self.STANDARD, replies=PLANNED_REPLIES)
+
+        self.finish(run, "done")
+
+        self.assertEqual(run.transitions(run.runs()[0]),
+                         [("start", "done"), ("issue", "read"), ("lane", "standard"), ("plan-preflight", "clear"),
+                          ("plan", "planned"), ("plan-read", "read"), ("plan-review", "pass"),
+                          ("plan-graded", "clean"), ("plan-note", "posted"), ("direct-lane", "done"),
+                          ("verification", "done"), ("landing", "done"), ("closing", "done")])
+        self.assertEqual(self.keys(run), ["applies", "plan", "plan-review", "implement", "lite-review"])
+        self.assertIn(str(run.worktree_path), self.launch(run, "plan")["prompt"])
+        self.assertIn(PLAN_TEXT, self.launch(run, "plan-review")["prompt"])
+        self.assertIn(PLAN_TEXT, self.launch(run, "implement")["prompt"])
+        self.assertIn(f"BEGIN APPROVED PLAN\n{PLAN_TEXT}\nEND APPROVED PLAN", self.launch(run, "implement")["prompt"])
+        self.assertFalse(run.worktree_path.exists())
+        pulls = run.pulls()
+        self.assertEqual([p["state"] for p in pulls], ["MERGED"])
+        self.assertEqual(run.origin_tip("main"), pulls[0]["mergeCommit"]["oid"])
+        self.assertEqual(len(run.runs()), 1)
+        self.assertEqual(len([c for c in run.children(run.runs()[0])
+                              if json.loads((c / "run.json").read_text("utf-8"))["procedure"] == "direct"]), 1)
+
+    def test_a_plan_review_with_findings_gets_exactly_one_revise_and_the_revised_plan_briefs_the_implementer(self):
+        run = self.stubbed(body=self.STANDARD, replies=REVISED_REPLIES)
+
+        self.finish(run, "done")
+
+        self.assertEqual(self.keys(run), ["applies", "plan", "plan-review", "plan-revise", "plan-rereview",
+                                          "implement", "lite-review"])
+        self.assertIn("task 1 names no proving test", self.launch(run, "plan-revise")["prompt"])
+        self.assertIn(REVISED_PLAN_TEXT, self.launch(run, "plan-rereview")["prompt"])
+        brief = self.launch(run, "implement")["prompt"]
+        self.assertIn(REVISED_PLAN_TEXT, brief)
+        self.assertNotIn(PLAN_TEXT, brief)
+        self.assertEqual(run.transitions(run.runs()[0])[3:13],
+                         [("plan-preflight", "clear"), ("plan", "planned"), ("plan-read", "read"),
+                          ("plan-review", "findings"), ("plan-graded", "findings"), ("plan-revise", "planned"),
+                          ("plan-reread", "read"), ("plan-rereview", "pass"), ("plan-regraded", "clean"),
+                          ("plan-revised-note", "posted")])
+
+    def test_a_pass_verdict_carrying_a_blocking_finding_is_revised_not_posted(self):
+        run = self.stubbed(body=self.STANDARD, replies={**REVISED_REPLIES, "plan-review": PLAN_PASS_BLOCKED})
+
+        self.finish(run, "done")
+
+        self.assertEqual(self.keys(run)[:5], ["applies", "plan", "plan-review", "plan-revise", "plan-rereview"])
+        self.assertIn(("plan-graded", "findings"), run.transitions(run.runs()[0]))
+        self.assertNotIn(("plan-note", "posted"), run.transitions(run.runs()[0]))
+
+    def test_a_pass_re_review_carrying_a_blocking_finding_is_refused_and_builds_nothing(self):
+        run = self.stubbed(body=self.STANDARD, replies={**REVISED_REPLIES, "plan-rereview": PLAN_PASS_BLOCKED})
+
+        self.finish(run, "plan-refused", "owner-decision")
+
+        self.assertEqual(run.pulls(), [])
+        self.assertEqual(self.branch_commits(run), [])
+
+    def test_a_plan_that_mentions_nohup_is_posted_and_briefs_the_implementer(self):
+        replies = {**PLANNED_REPLIES, "plan": {"reply": PLANNED, "leave": plan_file(NOHUP_PLAN_TEXT)}}
+        run = self.stubbed(body=self.STANDARD, replies=replies)
+
+        self.finish(run, "done")
+
+        self.assertIn(NOHUP_PLAN_TEXT, self.launch(run, "implement")["prompt"])
+
+    def test_the_reviewer_and_the_implementer_read_the_files_not_the_text_the_planner_returned(self):
+        entry = {"reply": dict(PLANNED, evidence="A DIFFERENT RETURNED TEXT"), "leave": plan_file(PLAN_TEXT)}
+        run = self.stubbed(body=self.STANDARD, replies={**PLANNED_REPLIES, "plan": entry})
+
+        self.finish(run, "done")
+
+        self.assertIn(PLAN_TEXT, self.launch(run, "plan-review")["prompt"])
+        self.assertNotIn("A DIFFERENT RETURNED TEXT", self.launch(run, "plan-review")["prompt"])
+        self.assertIn(PLAN_TEXT, self.launch(run, "implement")["prompt"])
+
+    def test_a_plan_comment_another_run_left_is_no_plan_of_this_run(self):
+        other = {"id": 7, "body": f"{issue_setup.PLAN_MARKER}0123456789abcdef{issue_setup.PLAN_RUN}host/41-older -->"
+                                  "\n\nAN OLDER RUN'S PLAN", "user": {"login": "someone"},
+                 "created_at": "2026-11-01T00:00:00Z"}
+        run = self.stubbed(body=self.STANDARD, replies=PLANNED_REPLIES, comments=[other])
+
+        self.finish(run, "done")
+
+        self.assertIn(f"BEGIN APPROVED PLAN\n{PLAN_TEXT}\nEND APPROVED PLAN", self.launch(run, "implement")["prompt"])
+        stored = [c["body"] for c in run.forge.stored() if issue_setup.PLAN_MARKER in c["body"]]
+        self.assertEqual(len(stored), 2)
+        self.assertTrue(stored[-1].split("\n", 1)[0].endswith(f"{issue_setup.PLAN_RUN}{self.holder(run)} -->"))
+
+    def test_a_review_naming_no_finding_is_revised_and_a_re_review_naming_none_is_refused(self):
+        nothing = {"verdict": "findings", "findings": []}
+        first = self.stubbed(body=self.STANDARD, replies={**REVISED_REPLIES, "plan-review": nothing})
+
+        self.finish(first, "done")
+
+        self.assertIn(("plan-graded", "unusable"), first.transitions(first.runs()[0]))
+        self.assertEqual(self.keys(first)[:5], ["applies", "plan", "plan-review", "plan-revise", "plan-rereview"])
+        second = self.stubbed(body=self.STANDARD, replies={**REVISED_REPLIES, "plan-rereview": nothing})
+
+        self.finish(second, "plan-refused", "owner-decision")
+
+        self.assertEqual(second.pulls(), [])
+        self.assertEqual(self.branch_commits(second), [])
+
+    def test_a_blocked_plan_with_the_question_in_notes_and_empty_members_ends_at_the_owner_decision_stop(self):
+        run = self.stubbed(body=self.STANDARD, replies={"plan": BLOCKED})
+
+        self.finish(run, "plan-blocked", "owner-decision")
+
+        self.assertEqual(self.keys(run), ["applies", "plan"])
+        self.assertEqual(run.pulls(), [])
+
+    def test_a_plan_refused_after_its_one_revise_ends_at_the_named_plan_stop_and_builds_nothing(self):
+        run = self.stubbed(body=self.STANDARD, replies=REFUSED_REPLIES)
+
+        self.finish(run, "plan-refused", "owner-decision")
+
+        self.assertEqual(self.keys(run), ["applies", "plan", "plan-review", "plan-revise", "plan-rereview"])
+        self.assertEqual(run.pulls(), [])
+        self.assertEqual(self.branch_commits(run), [])
+
+
 class LaneTest(Scenario):
     OVER_THE_RULE = "Add greet().\n\n## Acceptance criteria\n\n" + "".join(f"- [ ] c{i}\n" for i in range(4))
 
-    def test_a_body_over_the_rule_stops_at_standard_not_on_engine_with_no_lane_agent(self):
-        run = self.stubbed(body=self.OVER_THE_RULE)
+    def test_a_body_over_the_rule_is_planned_and_asks_no_lane_agent(self):
+        run = self.stubbed(body=self.OVER_THE_RULE, replies=REFUSED_REPLIES)
 
-        done = run.deliver()
+        self.stopped(run, run.deliver(), "plan-refused", "owner-decision")
 
-        self.stopped(run, done, "standard-not-on-engine", "nothing")
         self.assertIn(("lane", "standard"), run.transitions(run.runs()[0]))
-        self.assertEqual(self.keys(run), ["applies"])
+        self.assertEqual(self.keys(run)[:2], ["applies", "plan"])
         self.assertEqual(len(run.claims()), 1)
         self.assertEqual(self.branch_here(run, run.worktree_path), run.branch)
 
-    def test_a_body_naming_a_lane_path_stops_at_standard_not_on_engine(self):
-        run = self.stubbed(body="Fix `secrets/x.yaml`.\n\n## Acceptance criteria\n\n- [ ] c\n")
+    def test_a_body_naming_a_lane_path_is_planned(self):
+        run = self.stubbed(body="Fix `secrets/x.yaml`.\n\n## Acceptance criteria\n\n- [ ] c\n",
+                           replies=REFUSED_REPLIES)
 
-        self.stopped(run, run.deliver(), "standard-not-on-engine", "nothing")
+        self.stopped(run, run.deliver(), "plan-refused", "owner-decision")
 
-        self.assertEqual(self.keys(run), ["applies"])
+        self.assertEqual(self.keys(run)[:2], ["applies", "plan"])
 
-    def test_a_continued_standard_stop_reads_the_issue_again(self):
-        # The behaviour, not the stop's `reenter` value: the live `start` step is stale on every continue and is
-        # re-entered first, so only test_engine_check's structural assertion on the three stops pins `reenter`.
-        run = self.stubbed(body=self.OVER_THE_RULE)
-        self.stopped(run, run.deliver(), "standard-not-on-engine", "nothing")
+    def test_a_continued_plan_stop_reads_the_issue_again(self):
+        # The behaviour, not the stop's `reenter` value: a continue re-plans from the issue as it stands now.
+        run = self.stubbed(body=self.OVER_THE_RULE, replies=REFUSED_REPLIES)
+        self.stopped(run, run.deliver(), "plan-refused", "owner-decision")
 
-        self.stopped(run, run.deliver(), "standard-not-on-engine", "nothing")
+        self.stopped(run, run.deliver(), "plan-refused", "owner-decision")
 
         self.assertEqual(len(run.runs()), 1)
         events = run.events(run.runs()[0])
         self.assertEqual([e["event"] for e in events].count("run_continued"), 1)
-        self.assertEqual(len([e for e in events if e["event"] == "step_entered" and e.get("step") == "issue"]), 2)
+        self.assertEqual(len([e for e in events if e["event"] == "step_entered" and e.get("step") == "plan-preflight"]), 2)
 
     def test_an_issue_with_a_look_marker_stops_at_look_not_on_engine_and_never_asks_the_lane(self):
         run = self.stubbed(body=LOOK_BODY)
@@ -1359,131 +1491,6 @@ class StepCoverageTest(Scenario):
         self.assertIn(landing, ids)
         for test_id in ids:
             self.assertTrue(test_id.rsplit(".", 1)[-1].startswith("test_"), test_id)
-
-
-class GuardWorldTest(Scenario):
-    """The stubbed world's pull-request forge and the real guard on the fixture's confirmed row."""
-
-    BRANCH = "issue-41-add-a-greeting"
-
-    def pushed(self, run: StubbedRun, branch: str | None = None) -> str:
-        """Commit one file on a new branch of the fixture, push it to the bare origin, return its tip."""
-        branch = branch or self.BRANCH
-        root = run.fixture.root
-        git = run.world.git
-        git(root, "switch", "--quiet", "-c", branch)
-        (root / f"{branch}.txt").write_text("a greeting\n", encoding="utf-8")
-        git(root, "add", "-A")
-        git(root, "commit", "--quiet", "-m", f"Work on {branch}")
-        git(root, "switch", "--quiet", "main")
-        git(root, "push", "--quiet", "origin", branch)
-        return run.origin_tip(branch)
-
-    def gh(self, run: StubbedRun, *argv: str) -> subprocess.CompletedProcess:
-        return subprocess.run(["gh", *argv], cwd=run.fixture.root, env=run.env, capture_output=True,
-                              text=True, timeout=120)
-
-    def create(self, run: StubbedRun, branch: str | None = None) -> subprocess.CompletedProcess:
-        return self.gh(run, "pr", "create", "--repo", "example/fixture", "--base", "main", "--head",
-                       branch or self.BRANCH, "--title", "Add a greeting", "--body", "Closes #41.")
-
-    def merge_text(self, head: str, number: int = 1) -> str:
-        return (f"gh pr merge {number} --repo example/fixture --merge --match-head-commit {head} "
-                f"--delete-branch")
-
-    def view(self, run: StubbedRun) -> dict:
-        done = self.gh(run, "pr", "view", "1", "--repo", "example/fixture", "--json",
-                       "headRefOid,statusCheckRollup")
-        self.assertEqual(done.returncode, 0, done.stderr)
-        return json.loads(done.stdout)
-
-    def test_the_real_guard_of_the_stubbed_world_allows_the_fixtures_push_creation_and_pinned_merge(self):
-        run = self.stubbed()
-        head = self.pushed(run)
-        self.pushed(run, "issue-41-second")
-        created = self.create(run)
-        self.assertEqual(created.returncode, 0, created.stderr)
-        root = run.fixture.root
-        texts = [
-            f"git -C {root} push origin {self.BRANCH}",
-            "gh pr create --repo example/fixture --base main --head issue-41-second "
-            '--title "Add a greeting" --body "Closes #41. Delivered by the engine."',
-            self.merge_text(head),
-        ]
-
-        for text in texts:
-            with self.subTest(text):
-                done = run.guard(text, root)
-                self.assertEqual(done.returncode, 0, done.stderr)
-
-        self.assertEqual([line["payload"]["tool_input"]["command"] for line in payloads(run.guard_log)],
-                         texts)
-
-    def test_a_run_without_required_checks_resolves_with_the_member_absent(self):
-        run = self.stubbed(required_checks=())
-
-        snapshot = resolve_project.resolve(run.fixture.root)
-
-        self.assertNotIn("required_checks", snapshot["bindings"]["vcs"]["merge"])
-
-    def test_without_declared_required_checks_the_real_guard_refuses_the_merge(self):
-        run = self.stubbed(required_checks=())
-        head = self.pushed(run)
-        self.assertEqual(self.create(run).returncode, 0)
-
-        done = run.guard(self.merge_text(head), run.fixture.root)
-
-        self.assertEqual(done.returncode, 2, done.stderr)
-        self.assertIn("protection lookup failed", done.stderr)
-
-    def test_the_fake_merge_lands_only_the_pinned_head_and_deletes_the_branch(self):
-        run = self.stubbed()
-        head = self.pushed(run)
-        self.assertEqual(self.create(run).returncode, 0)
-        args = ("pr", "merge", "1", "--repo", "example/fixture", "--merge", "--delete-branch",
-                "--match-head-commit")
-
-        wrong = self.gh(run, *args, "0" * 40)
-        self.assertEqual(wrong.returncode, 1, wrong.stderr)
-        self.assertEqual(run.pulls()[0]["state"], "OPEN")
-        right = self.gh(run, *args, head)
-
-        self.assertEqual(right.returncode, 0, right.stderr)
-        self.assertEqual(run.pulls()[0]["state"], "MERGED")
-        merge = run.origin_tip("main")
-        parents = run.world.git(run.fixture.root, "--git-dir", run.bare, "log", "-1",
-                                "--format=%P", merge).split()
-        self.assertEqual(parents[1], head)
-        self.assertEqual(len(parents), 2)
-        self.assertIsNone(run.origin_tip(self.BRANCH))
-
-    def test_a_move_head_event_moves_the_branch_on_the_first_rollup_read(self):
-        run = self.stubbed(forge_events=("move-head",))
-        head = self.pushed(run)
-        self.assertEqual(self.create(run).returncode, 0)
-
-        first = self.view(run)
-        moved = run.origin_tip(self.BRANCH)
-        second = self.view(run)
-
-        self.assertEqual(first["headRefOid"], head)
-        self.assertEqual(first["statusCheckRollup"][0]["name"], "Fixture Checks")
-        self.assertNotEqual(moved, head)
-        self.assertEqual(second["headRefOid"], moved)
-        self.assertEqual(run.origin_tip(self.BRANCH), moved)
-
-    def test_a_steal_lock_event_hands_the_lock_to_a_second_open_pull_request(self):
-        run = self.stubbed(forge_events=("steal-lock",))
-        self.pushed(run)
-        self.assertEqual(self.create(run).returncode, 0)
-
-        self.view(run)
-
-        self.assertEqual(run.lock_refs(), {"refs/agent-locks/land/main": run.stolen_sha})
-        done = self.gh(run, "api", f"repos/example/fixture/commits/{run.stolen_sha}/pulls?per_page=100")
-        self.assertEqual(done.returncode, 0, done.stderr)
-        listed = json.loads(done.stdout)
-        self.assertEqual([(p["state"], p["number"] != 1) for p in listed], [("open", True)])
 
 
 if __name__ == "__main__":
