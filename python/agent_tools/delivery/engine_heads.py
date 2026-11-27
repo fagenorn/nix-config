@@ -15,7 +15,8 @@ such a result by its own checkout's head. A checkout whose head moved while the 
 
 A step may also name a `base`: one of its `in` paths, whose value is a branch of the `origin` remote. The step
 then holds for the checkout's `Mark` (its head and the merge base of that head with `refs/remotes/origin/<branch>`,
-recorded as `base`, `{ref, sha}`): the base moving while the step ran ends it as the head does, `checkout_bases`
+recorded as `base`, `{ref, sha}`): the base moving while the step ran ends it as the head does (so does a result whose own `head` or `merge_base`
+is not the mark's, `names_another_range`: a base that moved and came back between the two reads), `checkout_bases`
 reads the current merge base of every checkout and base ref a stored result names, keyed by both (a continue
 judges that result stale when its own ref's merge base differs or was never recorded), and a result is reused only at the same merge base. A merge base
 that cannot be read leaves the step unreused and its result without `base`.
@@ -119,6 +120,18 @@ def read_mark(root: str, ref: str | None = None) -> Mark:
     head = read_head(root)
     sha = None if ref is None or head is None else _commit(root, "merge-base", ref, "HEAD")
     return Mark(head, None if sha is None else {"ref": ref, "sha": sha})
+
+
+def names_another_range(result: object, mark: Mark | None, ref: str | None) -> bool:
+    """True when a step holding a merge base got a result naming a `head` or `merge_base` other than the mark's.
+
+    The mark read before and after the process can be the same while the process read another one in
+    between (a ref that moved and moved back), so the range a result names is compared with the mark too.
+    """
+    if ref is None or mark is None or not isinstance(result, dict):
+        return False
+    held = {"head": mark.head, "merge_base": mark.base and mark.base["sha"]}
+    return any(name in result and result[name] != value for name, value in held.items())
 
 
 def base_of(step: Mapping, args: Sequence[tuple[str, object]]) -> str | None:
