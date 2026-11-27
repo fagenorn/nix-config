@@ -435,6 +435,7 @@ agent-workflow-tests *args:
     tests/test_console_lock_wait_check.py \
     tests/test_console_lock_bump_tree.py \
     tests/test_console_lock_bump_build.py \
+    tests/test_console_lock_bump_forge.py \
     tests/test_console_serve_probe_check.py \
     tests/test_console_run_line_check.py \
     tests/test_verify_engine_past_implement.py \
