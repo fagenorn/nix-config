@@ -1229,11 +1229,11 @@ UNNAMED = {"findings": [{"severity": "critical", "file": "", "failing_input": ""
 SHIPPED_MEMBERS = {
     "contract": ({"capabilities": {"review.code": {"state": "available"}, "review.plan": {"state": "available"}}},
                  {"capabilities": {"review.code": {"state": "blocked"}, "review.plan": {"state": "available"}}}),
-    "preflight": ({"branch": "b", "worktree_path": "/w", "integration_branch": "main", "issue_text": "t"},),
-    "plan-preflight": ({"branch": "b", "worktree_path": "/w", "integration_branch": "main", "issue_text": "t"},),
-    "plan": ({"evidence": "p"},),
+    **{pre: ({"branch": "b", "worktree_path": "/w", "integration_branch": "main", "issue_text": "t", "plan": "p"},)
+       for pre in ("preflight", "plan-preflight")},
+    "plan": ({"evidence": "p", "task_numbers": [1]},),
     **{read: ({"text": "p", "digest": "d"},) for read in ("plan-read", "plan-reread")},
-    "plan-revise": ({"evidence": "p", "declines": []},),
+    "plan-revise": ({"evidence": "p", "declines": [], "task_numbers": [1]},),
     **{review: ({}, {"findings": []}, UNNAMED) for review in ("plan-review", "plan-rereview")},
     "issue": ({"text": "t", "body": "x\n\n## Acceptance criteria\n\n- [ ] a\n", "marked": False,
                "lane_paths": {"secrets": ["secrets/"]}},
@@ -1432,11 +1432,11 @@ class ShippedProcedureTest(unittest.TestCase):
                 self.assertEqual(step(deliver, read)["subcommand"], "plan-read")
                 self.assertEqual(step(deliver, read)["on"]["read"], review)
                 self.assertIn(f"{read}.text", step(deliver, review)["in"])
-                self.assertEqual(step(deliver, clear)["in"],
-                                 ["run.repo", "run.issue", "plan-preflight.worktree_path", "run.holder",
-                                  f"{read}.digest"])
-        self.assertEqual([step(deliver, n)["subcommand"] for n in ("plan-note", "plan-revised-note")],
-                         ["plan-note", "plan-note"])
+                tasks = "plan.task_numbers" if review == "plan-review" else "plan-revise.task_numbers"  # no stale file
+                self.assertEqual(step(deliver, read)["in"], ["run.issue", "plan-preflight.worktree_path", tasks])
+                self.assertEqual(step(deliver, clear)["in"], ["run.repo", "run.issue", "plan-preflight.worktree_path",
+                                                              "run.holder", f"{read}.digest", tasks])
+        self.assertEqual([step(deliver, n)["subcommand"] for n in ("plan-note", "plan-revised-note")], ["plan-note"] * 2)
 
     def test_the_worktree_mismatch_is_read_before_the_claim(self):
         coverage = shipped_coverage("setup")

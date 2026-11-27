@@ -24,7 +24,7 @@ from agent_tools.delivery.review_findings import Round, dispositions
 from agent_tools.verification import verify_block
 from tests.engine_fixture import AdoptedFixtures, FixtureProject
 from tests.engine_guards import payloads
-from tests.engine_plan_fixtures import (NOHUP_PLAN_TEXT, PLAN_PASS_BLOCKED, PLAN_TEXT, PLANNED, PLANNED_REPLIES,
+from tests.engine_plan_fixtures import (BLOCKED, NOHUP_PLAN_TEXT, PLAN_PASS_BLOCKED, PLAN_TEXT, PLANNED, PLANNED_REPLIES,
                                         REFUSED_REPLIES, REVISED_PLAN_TEXT, REVISED_REPLIES, plan_file)
 from tests.engine_procedure_copies import (PROCEDURES, keeping_the_run, stopping_after_verify,
                                            unstructured_procedures)
@@ -234,9 +234,7 @@ class PlannedRouteTest(Scenario):
         self.assertIn(str(run.worktree_path), self.launch(run, "plan")["prompt"])
         self.assertIn(PLAN_TEXT, self.launch(run, "plan-review")["prompt"])
         self.assertIn(PLAN_TEXT, self.launch(run, "implement")["prompt"])
-        self.assertIn(issue_setup.PLAN_MARKER, self.launch(run, "implement")["prompt"])
-        # the posted plan names this run, and the implementer is told to take only that run's plan
-        self.assertIn(f"{issue_setup.PLAN_RUN}{self.holder(run)} -->", self.launch(run, "implement")["prompt"])
+        self.assertIn(f"BEGIN APPROVED PLAN\n{PLAN_TEXT}\nEND APPROVED PLAN", self.launch(run, "implement")["prompt"])
         self.assertFalse(run.worktree_path.exists())
         pulls = run.pulls()
         self.assertEqual([p["state"] for p in pulls], ["MERGED"])
@@ -306,9 +304,7 @@ class PlannedRouteTest(Scenario):
 
         self.finish(run, "done")
 
-        brief = self.launch(run, "implement")["prompt"]
-        self.assertIn(f"{issue_setup.PLAN_RUN}{self.holder(run)} -->", brief)
-        self.assertNotIn(f"ends with `{issue_setup.PLAN_RUN}host/41-older -->`", brief)
+        self.assertIn(f"BEGIN APPROVED PLAN\n{PLAN_TEXT}\nEND APPROVED PLAN", self.launch(run, "implement")["prompt"])
         stored = [c["body"] for c in run.forge.stored() if issue_setup.PLAN_MARKER in c["body"]]
         self.assertEqual(len(stored), 2)
         self.assertTrue(stored[-1].split("\n", 1)[0].endswith(f"{issue_setup.PLAN_RUN}{self.holder(run)} -->"))
@@ -327,6 +323,14 @@ class PlannedRouteTest(Scenario):
 
         self.assertEqual(second.pulls(), [])
         self.assertEqual(self.branch_commits(second), [])
+
+    def test_a_blocked_plan_with_the_question_in_notes_and_empty_members_ends_at_the_owner_decision_stop(self):
+        run = self.stubbed(body=self.STANDARD, replies={"plan": BLOCKED})
+
+        self.finish(run, "plan-blocked", "owner-decision")
+
+        self.assertEqual(self.keys(run), ["applies", "plan"])
+        self.assertEqual(run.pulls(), [])
 
     def test_a_plan_refused_after_its_one_revise_ends_at_the_named_plan_stop_and_builds_nothing(self):
         run = self.stubbed(body=self.STANDARD, replies=REFUSED_REPLIES)

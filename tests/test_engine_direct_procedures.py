@@ -6,7 +6,7 @@ import json
 import re
 import unittest
 
-from agent_tools.delivery import engine_core, engine_session, issue_setup
+from agent_tools.delivery import engine_core, engine_reply, engine_session, issue_setup
 from agent_tools.delivery.engine_core import RunGroup, Stop
 from tests.test_engine_check import PROCEDURES, SHIPPED_INPUTS, UNNAMED, load, step
 from tests.test_engine_session import SCHEMA, SESSION, SYSTEM
@@ -17,7 +17,7 @@ TIER = "fast"
 SHA = "a" * 40
 NAMED = [{"severity": "important", "file": "a.py:1", "failing_input": "f('')", "summary": "s", "kind": "other"}]
 GRADING = [{"id": "AC1", "met": True, "evidence": "test_x"}]
-PREFLIGHT = {"branch": "b", "worktree_path": "/w", "integration_branch": "main", "issue_text": "t"}
+PREFLIGHT = {"branch": "b", "worktree_path": "/w", "integration_branch": "main", "issue_text": "t", "plan": ""}
 IMPLEMENTED = {"status": "done", "start_head": SHA, "commit": SHA, "notes": "n", "tests": [],
                "acceptance": [{"id": "AC1", "text": "t", "kind": "code", "result": "r"}],
                "sensitive": False, "ineligible": False}
@@ -87,19 +87,60 @@ class DirectProcedureTest(unittest.TestCase):
 
     def test_the_implementer_builds_an_approved_plan_and_applies_the_eligibility_check_to_no_planned_issue(self):
         text = (PROCEDURES / "direct-implement.md").read_text(encoding="utf-8")
-        self.assertIn(issue_setup.PLAN_MARKER, text)
-        planned = text.split(issue_setup.PLAN_MARKER, 1)[1]
+        planned = text.split("\nBEGIN APPROVED PLAN\n", 1)[0]
         self.assertIn("approved plan", planned)
         self.assertIn("every task", planned)
         self.assertIn("not eligibility", planned)
 
-    def test_the_implementer_takes_only_the_plan_comment_marked_with_this_runs_holder(self):
-        implement = next(s for s in load(PROCEDURES, "direct")["steps"] if s["id"] == "implement")
-        self.assertIn("run.holder", implement["in"])
-        text = engine_session.render_prompt(
-            (PROCEDURES / implement["prompt"]).read_text(encoding="utf-8"),
-            tuple((path, "h/run-1" if path == "run.holder" else f"<{path}>") for path in implement["in"]))
-        self.assertIn(f"ends with `{issue_setup.PLAN_RUN}h/run-1 -->`", text)
+    def test_the_implementer_is_given_the_plan_the_engine_verified_not_a_comment_it_picks_by_marker(self):
+        direct = load(PROCEDURES, "direct")["steps"]
+        implement = next(s for s in direct if s["id"] == "implement")
+        self.assertIn("run.holder", next(s for s in direct if s["id"] == "preflight")["in"])
+        self.assertIn("preflight.plan", implement["in"])
+        self.assertNotIn("run.holder", implement["in"])
+        template = (PROCEDURES / implement["prompt"]).read_text(encoding="utf-8")
+        for plan, block in (("THE PLAN", "BEGIN APPROVED PLAN\nTHE PLAN\nEND APPROVED PLAN"),
+                            ("", "BEGIN APPROVED PLAN\n\nEND APPROVED PLAN")):
+            text = engine_session.render_prompt(
+                template, tuple((path, plan if path == "preflight.plan" else f"<{path}>") for path in implement["in"]))
+            self.assertIn(block, text)
+        self.assertNotIn(issue_setup.PLAN_MARKER, template)
+
+    def test_the_planner_prompts_state_the_planners_read_only_shell_and_read_the_worktree_by_path(self):
+        steps = {s["id"]: s for s in load(PROCEDURES, "deliver")["steps"]}
+        for name in ("plan", "plan-revise"):
+            with self.subTest(name):
+                text = engine_session.render_prompt(
+                    (PROCEDURES / steps[name]["prompt"]).read_text(encoding="utf-8"),
+                    tuple((path, "/srv/p/wt" if path == "plan-preflight.worktree_path" else f"<{path}>")
+                          for path in steps[name]["in"]))
+                self.assertIn("read-only git", text)
+                self.assertNotIn("Bash or Read", text)
+                self.assertIn("project root", text)  # the session's directory is not the worktree
+                self.assertIn("by their absolute path under /srv/p/wt", text)
+                self.assertIn(f"at most {issue_setup.PLAN_LIMIT} characters", text)
+                self.assertIn("task_numbers", text)
+                self.assertIn("evidence an empty string", text)  # a blocked reply fills every required member
+        plan = (PROCEDURES / steps["plan"]["prompt"]).read_text(encoding="utf-8")
+        gate = next(line for line in plan.splitlines() if "grep or deny gate" in line)
+        self.assertIn("Grep tool", gate)  # no shell grep: the planner's Bash admits read-only git only
+
+    def test_the_plan_reply_schema_takes_a_blocked_reply_with_empty_members_and_requires_the_task_numbers(self):
+        schema = json.loads((PROCEDURES / "plan.reply.json").read_text(encoding="utf-8"))
+        blocked = {"status": "blocked", "evidence": "", "tasks": [], "task_numbers": [], "declines": [],
+                   "notes": "Which option?"}
+        self.assertIsNone(engine_reply.reply_problem(schema, blocked))
+        self.assertIsNotNone(engine_reply.reply_problem(schema, {k: v for k, v in blocked.items()
+                                                                 if k != "task_numbers"}))
+        self.assertIsNotNone(engine_reply.reply_problem(schema, dict(blocked, task_numbers=["1"])))
+
+    def test_the_plan_review_reply_names_only_important_and_critical_findings(self):
+        schema = json.loads((PROCEDURES / "plan-review.reply.json").read_text(encoding="utf-8"))
+        finding = {"severity": "important", "file": "plan.md", "failing_input": "x", "summary": "s", "kind": "other"}
+        for severity, admitted in (("important", True), ("critical", True), ("minor", False)):
+            with self.subTest(severity):
+                reply = {"verdict": "findings", "findings": [dict(finding, severity=severity)]}
+                self.assertEqual(engine_reply.reply_problem(schema, reply) is None, admitted)
 
     def test_every_git_command_the_planner_prompts_name_is_one_its_read_only_bash_admits(self):
         role = engine_session.read_role(AGENTS, "planner")

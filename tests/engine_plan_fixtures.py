@@ -12,8 +12,10 @@ def plan_file(text: str) -> dict:
     return {"path": ".superpowers/plans/issue-41/plan.md", "text": text}
 
 
-PLANNED = {"status": "planned", "evidence": PLAN_TEXT, "notes": "", "declines": [],
-           "tasks": [{"n": 1, "title": "Add greet()", "file": "task-1.md"}]}
+# the stubbed planner leaves plan.md only, so the reply declares no task file: the engine reads exactly those declared
+PLANNED = {"status": "planned", "evidence": PLAN_TEXT, "notes": "", "declines": [], "tasks": [], "task_numbers": []}
+BLOCKED = {"status": "blocked", "evidence": "", "notes": "Which of the two options?", "declines": [], "tasks": [],
+           "task_numbers": []}
 PLANNED_ENTRY = {"reply": PLANNED, "leave": plan_file(PLAN_TEXT)}
 REVISED = dict(PLANNED, evidence=REVISED_PLAN_TEXT)
 REVISED_ENTRY = {"reply": REVISED, "leave": plan_file(REVISED_PLAN_TEXT)}
