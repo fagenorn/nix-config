@@ -13,10 +13,10 @@
   },
   "steps": [
     {"id": "preflight", "stage": "building", "kind": "command", "command": "issue-setup", "subcommand": "preflight", "holds": "read",
-     "in": ["run.repo_root", "run.issue"],
+     "in": ["run.repo_root", "run.issue", "run.holder"],
      "on": {"clear": "implement", "closed": "setup", "parked": "setup", "duplicate": "setup", "open-pr": "setup", "error": "setup", "refused": "setup"}},
     {"id": "implement", "stage": "building", "kind": "agent", "role": "implementer", "prompt": "direct-implement.md", "reply": "direct-implement.reply.json", "outcome_from": "status", "worktree": {"path": "preflight.worktree_path", "branch": "preflight.branch"}, "holds": "run", "mutates": true,
-     "in": ["run.issue", "run.repo", "preflight.issue_text", "preflight.worktree_path", "preflight.branch", "preflight.integration_branch"],
+     "in": ["run.issue", "run.repo", "preflight.issue_text", "preflight.plan", "preflight.worktree_path", "preflight.branch", "preflight.integration_branch"],
      "on": {"done": "implemented", "blocked": "implemented", "no-reply": "task", "out-of-bounds": "task"}},
     {"id": "implemented", "stage": "building", "kind": "decide", "grader": "direct-implemented", "holds": "run",
      "in": ["implement.ineligible", "implement.status", "implement.start_head", "implement.commit", "implement.acceptance", "implement.sensitive"],

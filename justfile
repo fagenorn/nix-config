@@ -219,6 +219,7 @@ agent-workflow-tests *args:
     tests/test_engine_slots.py \
     tests/test_engine_fixture.py \
     tests/test_engine_stubbed_run.py \
+    tests/test_engine_stubbed_guard.py \
     tests/test_engine_stubbed_world.py \
     tests/test_proof_run.py \
     tests/test_bound_issues.py \
@@ -435,6 +436,7 @@ agent-workflow-tests *args:
     tests/test_console_serve_probe_check.py \
     tests/test_console_run_line_check.py \
     tests/test_verify_engine_past_implement.py \
+    tests/test_verify_engine_past_setup.py \
     tests/test_console_look_check.py \
     tests/test_console_look_kept_check.py \
     tests/test_console_live_fault_check.py \

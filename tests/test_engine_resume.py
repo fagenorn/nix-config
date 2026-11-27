@@ -12,13 +12,14 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.delivery import engine_ledger, engine_stop
+from agent_tools.delivery import engine_ledger, engine_resume, engine_session, engine_stop
 from tests.process_liveness import process_alive
 from tests.test_engine_continue import gated
 from tests.test_engine_deliver import EngineProject, run_continued, shape, start_deliver, step
@@ -282,10 +283,10 @@ class ResumeTest(unittest.TestCase):
     def records(self, log: Path) -> list[dict]:
         return [json.loads(line) for line in log.read_text().splitlines()]
 
-    def cut(self, run: Path, event: str, *, drop: tuple[str, ...] = ()) -> int:
-        """Cut the ledger right after the first `event` line and delete the named files."""
+    def cut(self, run: Path, event: str, *, drop: tuple[str, ...] = (), nth: int = 1) -> int:
+        """Cut the ledger right after the `nth` `event` line and delete the named files."""
         lines = (run / "events.jsonl").read_text().splitlines(keepends=True)
-        cut = next(i for i, line in enumerate(lines) if json.loads(line)["event"] == event) + 1
+        cut = [i for i, line in enumerate(lines) if json.loads(line)["event"] == event][nth - 1] + 1
         (run / "events.jsonl").write_text("".join(lines[:cut]), encoding="utf-8")
         for name in drop:
             (run / name).unlink()
@@ -387,6 +388,261 @@ class ResumeTest(unittest.TestCase):
         self.assertTrue((run / "sessions/draft.1.continue-2.json").exists())
         self.assertFalse((run / "sessions/draft.1.resume.json").exists())
 
+    def denying(self, command: str, ident: str = "toolu_01") -> dict:
+        path = self.project.tmp / f"denying-{ident}.json"
+        path.write_bytes(canned_result(permission_denials=[
+            {"tool_name": "Bash", "tool_use_id": ident, "tool_input": {"command": command}}]))
+        return {"stdout": str(path), "exit": 0, "account": "p1"}
+
+    def test_a_first_denial_on_the_continued_resume_is_asked_again_once(self):
+        log = install_answers(self.project, [self.hang(), self.denying("rm x"), self.normal()])
+        procedures = one_step(self.project)
+        self.kill_during_hang(procedures, log, 1)
+        done = self.project.deliver(procedures)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        records = self.records(log)
+        self.assertEqual(len(records), 3)
+        self.assertEqual(after(records[2]["argv"], "--resume"), after(records[0]["argv"], "--session-id"))
+        (run,) = self.project.runs()
+        (prompt,) = (run / "sessions").glob("*.denied.prompt.md")
+        self.assertEqual(records[2]["stdin"], prompt.read_text())
+        self.assertIn(repr("rm x"), prompt.read_text())
+        self.assertNotIn("tool-denied", [e.get("stop") for e in self.project.events(run)])
+
+    def test_a_second_denial_after_the_continued_reask_stops_at_tool_denied_naming_both(self):
+        log = install_answers(self.project, [
+            self.hang(), self.denying("git log | head"), self.denying("rm x", "toolu_02")])
+        procedures = one_step(self.project)
+        self.kill_during_hang(procedures, log, 1)
+        done = self.project.deliver(procedures)
+        self.assertEqual(done.returncode, 3, done.stdout + done.stderr)
+        line = json.loads(done.stdout)
+        self.assertEqual(line["end"], "tool-denied")
+        self.assertLess(line["detail"].index(repr("git log | head")), line["detail"].index(repr("rm x")))
+        (run,) = self.project.runs()
+        self.assertEqual(len(self.records(log)), 3)
+        self.assertEqual(len(list((run / "sessions").glob("*.denied.prompt.md"))), 1)
+
+    def test_a_continued_denial_reask_cut_short_names_both_calls_when_the_visit_continues_again(self):
+        log = install_answers(self.project, [
+            self.hang(), self.denying("git log | head"), self.hang(), self.denying("rm x", "toolu_02")])
+        procedures = one_step(self.project)
+        self.kill_during_hang(procedures, log, 1)
+        self.kill_during_hang(procedures, log, 3)
+        done = self.project.deliver(procedures)
+        self.assertEqual(done.returncode, 3, done.stdout + done.stderr)
+        line = json.loads(done.stdout)
+        self.assertEqual(line["end"], "tool-denied")
+        self.assertEqual(len(self.records(log)), 4)
+        self.assertLess(line["detail"].index(repr("git log | head")), line["detail"].index(repr("rm x")))
+
+    def test_a_denial_reask_cut_short_names_both_calls_when_the_visit_continues(self):
+        log = install_answers(self.project, [
+            self.denying("git log | head"), self.hang(), self.denying("rm x", "toolu_02")])
+        procedures = one_step(self.project)
+        self.kill_during_hang(procedures, log, 2)
+        done = self.project.deliver(procedures)
+        self.assertEqual(done.returncode, 3, done.stdout + done.stderr)
+        line = json.loads(done.stdout)
+        self.assertEqual(line["end"], "tool-denied")
+        records = self.records(log)
+        self.assertEqual(len(records), 3)
+        self.assertEqual(after(records[2]["argv"], "--resume"),
+                         after(records[0]["argv"], "--session-id"))
+        self.assertLess(line["detail"].index(repr("git log | head")),
+                        line["detail"].index(repr("rm x")))
+        (run,) = self.project.runs()
+        self.assertEqual(len(list((run / "sessions").glob("*.denied.prompt.md"))), 1)
+        record = json.loads((run / "sessions/draft.1.continue-3.json").read_text())
+        self.assertEqual([d["tool_input"]["command"] for d in record["denials"]], ["rm x"])
+
+    def test_a_denial_reask_after_a_miss_cut_short_names_the_miss_resumes_denied_call(self):
+        log = install_answers(self.project, [
+            {"stdout": str(RESULT_MISSING), "exit": 0, "account": "p1"},
+            self.denying("git log | head"), self.hang(), self.denying("rm x", "toolu_02")])
+        procedures = one_step(self.project)
+        self.kill_during_hang(procedures, log, 3)
+        done = self.project.deliver(procedures)
+        self.assertEqual(done.returncode, 3, done.stdout + done.stderr)
+        line = json.loads(done.stdout)
+        self.assertEqual(line["end"], "tool-denied")
+        self.assertEqual(len(self.records(log)), 4)
+        self.assertLess(line["detail"].index(repr("git log | head")),
+                        line["detail"].index(repr("rm x")))
+
+    def test_a_run_killed_once_the_first_denial_was_saved_sends_the_reask_on_the_original_session(self):
+        log = install_answers(self.project, [self.denying("git log | head"), self.normal(), self.normal()])
+        procedures = one_step(self.project)
+        first = self.project.deliver(procedures)
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        (run,) = self.project.runs()
+        retry = (run / "sessions/draft.1.denied.prompt.md").read_text()
+        self.cut(run, "session_answered",
+                 drop=("results/draft.1.json", "sessions/draft.1.denied.json"))
+        done = self.project.deliver(procedures)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        records = self.records(log)
+        self.assertEqual(len(records), 3)
+        self.assertEqual(after(records[2]["argv"], "--resume"), after(records[0]["argv"], "--session-id"))
+        self.assertEqual(records[2]["stdin"], retry)
+        self.assertIn(repr("git log | head"), retry)
+        self.assertEqual(self.entered(run), [1])
+        self.assertEqual(run_continued(self.project.events(run)), [])
+
+    def test_a_run_killed_after_the_reask_was_announced_and_before_it_launched_sends_the_saved_reask(self):
+        log = install_answers(self.project, [self.denying("git log | head"), self.normal(), self.normal()])
+        procedures = one_step(self.project)
+        first = self.project.deliver(procedures)
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        (run,) = self.project.runs()
+        retry = (run / "sessions/draft.1.denied.prompt.md").read_text()
+        self.cut(run, "session_resuming",
+                 drop=("results/draft.1.json", "sessions/draft.1.denied.json"))
+        done = self.project.deliver(procedures)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        records = self.records(log)
+        self.assertEqual(len(records), 3)
+        self.assertEqual(after(records[2]["argv"], "--resume"), after(records[0]["argv"], "--session-id"))
+        self.assertEqual(records[2]["stdin"], retry)
+        self.assertIn(repr("git log | head"), retry)
+        self.assertEqual(self.entered(run), [1])
+        self.assertEqual(run_continued(self.project.events(run)), [])
+
+    def test_a_run_killed_after_the_reask_process_started_and_before_it_was_written_sends_the_saved_reask(self):
+        log = install_answers(self.project, [self.denying("git log | head"), self.normal(), self.normal()])
+        procedures = one_step(self.project)
+        first = self.project.deliver(procedures)
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        (run,) = self.project.runs()
+        retry = (run / "sessions/draft.1.denied.prompt.md").read_text()
+        self.cut(run, "process_started", nth=2,
+                 drop=("results/draft.1.json", "sessions/draft.1.denied.json"))
+        self.assertEqual(self.project.events(run)[-1]["event"], "process_started")
+        done = self.project.deliver(procedures)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        records = self.records(log)
+        self.assertEqual(len(records), 3)
+        self.assertEqual(after(records[2]["argv"], "--resume"), after(records[0]["argv"], "--session-id"))
+        self.assertEqual(records[2]["stdin"], retry)
+        self.assertIn(repr("git log | head"), retry)
+        self.assertEqual(self.entered(run), [1])
+
+    def test_a_run_killed_after_the_second_denial_was_saved_and_before_its_stop_was_recorded_stops_naming_both(self):
+        log = install_answers(self.project, [
+            self.denying("git log | head"), self.denying("rm x", "toolu_02"), self.normal()])
+        procedures = one_step(self.project)
+        first = self.project.deliver(procedures)
+        self.assertEqual(first.returncode, 3, first.stdout + first.stderr)
+        (run,) = self.project.runs()
+        lines = (run / "events.jsonl").read_text().splitlines(keepends=True)
+        self.assertEqual(json.loads(lines[-1])["event"], "stop_reached")
+        (run / "events.jsonl").write_text("".join(lines[:-1]), encoding="utf-8")
+        done = self.project.deliver(procedures)
+        self.assertEqual(done.returncode, 3, done.stdout + done.stderr)
+        line = json.loads(done.stdout)
+        self.assertEqual((line["end"], line["need"]), ("tool-denied", "owner-decision"))
+        self.assertLess(line["detail"].index(repr("git log | head")), line["detail"].index(repr("rm x")))
+        self.assertEqual(len(self.records(log)), 2)  # nothing was launched again
+        self.assertEqual(self.entered(run), [1])
+        self.assertEqual(run_continued(self.project.events(run)), [])
+        self.assertEqual([e["stop"] for e in self.project.events(run) if e["event"] == "stop_reached"],
+                         ["tool-denied"])
+
+    def second_denial_after_a_cut(self, event: str) -> None:
+        log = install_answers(self.project, [
+            self.denying("git log | head"), self.normal(), self.denying("rm x", "toolu_02")])
+        procedures = one_step(self.project)
+        first = self.project.deliver(procedures)
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        (run,) = self.project.runs()
+        self.cut(run, event, drop=("results/draft.1.json", "sessions/draft.1.denied.json"))
+        done = self.project.deliver(procedures)
+        self.assertEqual(done.returncode, 3, done.stdout + done.stderr)
+        line = json.loads(done.stdout)
+        self.assertEqual(line["end"], "tool-denied")
+        records = self.records(log)
+        self.assertEqual(len(records), 3)
+        self.assertEqual(after(records[2]["argv"], "--resume"), after(records[0]["argv"], "--session-id"))
+        self.assertLess(line["detail"].index(repr("git log | head")), line["detail"].index(repr("rm x")))
+        self.assertEqual(len(list((run / "sessions").glob("*.denied.prompt.md"))), 1)
+
+    def test_a_run_killed_once_the_first_denial_was_saved_and_denied_again_stops_at_tool_denied_naming_both(self):
+        self.second_denial_after_a_cut("session_answered")
+
+    def test_a_run_killed_after_the_reask_was_announced_and_denied_again_stops_at_tool_denied_naming_both(self):
+        self.second_denial_after_a_cut("session_resuming")
+
+    def test_a_run_killed_after_two_launches_were_announced_and_neither_started_sends_the_saved_reask(self):
+        log = install_answers(self.project, [self.denying("git log | head"), self.normal(), self.normal()])
+        procedures = one_step(self.project)
+        first = self.project.deliver(procedures)
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        (run,) = self.project.runs()
+        retry = (run / "sessions/draft.1.denied.prompt.md").read_text()
+        cut = self.cut(run, "session_resuming",
+                       drop=("results/draft.1.json", "sessions/draft.1.denied.json"))
+        lines = (run / "events.jsonl").read_text().splitlines(keepends=True)
+        again = {**json.loads(lines[cut - 1]), "attempt": 3}
+        with (run / "events.jsonl").open("a", encoding="utf-8") as events:
+            events.write(json.dumps(again) + "\n")
+        self.assertEqual([e["attempt"] for e in self.project.events(run) if e["event"] == "session_resuming"],
+                         [2, 3])
+        done = self.project.deliver(procedures)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        records = self.records(log)
+        self.assertEqual(len(records), 3)
+        self.assertEqual(after(records[2]["argv"], "--resume"), after(records[0]["argv"], "--session-id"))
+        self.assertEqual(records[2]["stdin"], retry)
+        self.assertEqual(self.entered(run), [1])
+
+    def test_a_denied_visit_whose_reask_was_cut_short_stores_the_turns_and_spend_of_every_launch(self):
+        denied = self.project.tmp / "denied-counted.json"
+        denied.write_bytes(canned_result(
+            permission_denials=[{"tool_name": "Bash", "tool_use_id": "t", "tool_input": {"command": "rm x"}}],
+            num_turns=3, total_cost_usd=0.1, duration_ms=1000,
+            usage={"input_tokens": 1, "cache_creation_input_tokens": 2,
+                   "cache_read_input_tokens": 3, "output_tokens": 4}))
+        log = install_answers(self.project, [
+            {"stdout": str(denied), "exit": 0, "account": "p1"}, self.hang(), self.normal()])
+        procedures = one_step(self.project)
+        self.kill_during_hang(procedures, log, 2)
+        done = self.project.deliver(procedures)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        (run,) = self.project.runs()
+        (stored,) = [e for e in self.project.events(run) if e["event"] == "result_stored"
+                     and (e["step"], e["visit"]) == ("draft", 1)]
+        self.assertEqual(stored["turns"], 10)  # 3 turns refused, then the normal fixture's 7
+        self.assertAlmostEqual(stored["spend_usd"], 0.5321)
+        self.assertEqual(stored["tokens"], {"input": 12, "cache_write": 24, "cache_read": 36, "output": 48})
+        self.assertAlmostEqual(stored["wall_seconds"], 13.345)
+
+    def test_a_miss_then_a_denial_then_a_cut_reask_stores_the_use_of_every_launch(self):
+        missed = self.project.tmp / "missed-counted.json"
+        missed.write_bytes(canned_result(
+            structured_output=..., num_turns=2, total_cost_usd=0.05, duration_ms=500,
+            usage={"input_tokens": 1, "cache_creation_input_tokens": 1,
+                   "cache_read_input_tokens": 1, "output_tokens": 1}))
+        denied = self.project.tmp / "denied-counted.json"
+        denied.write_bytes(canned_result(
+            permission_denials=[{"tool_name": "Bash", "tool_use_id": "t", "tool_input": {"command": "rm x"}}],
+            num_turns=3, total_cost_usd=0.1, duration_ms=1000,
+            usage={"input_tokens": 1, "cache_creation_input_tokens": 2,
+                   "cache_read_input_tokens": 3, "output_tokens": 4}))
+        log = install_answers(self.project, [
+            {"stdout": str(missed), "exit": 0, "account": "p1"},
+            {"stdout": str(denied), "exit": 0, "account": "p1"}, self.hang(), self.normal()])
+        procedures = one_step(self.project)
+        self.kill_during_hang(procedures, log, 3)
+        done = self.project.deliver(procedures)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        (run,) = self.project.runs()
+        (stored,) = [e for e in self.project.events(run) if e["event"] == "result_stored"
+                     and (e["step"], e["visit"]) == ("draft", 1)]
+        self.assertEqual(stored["turns"], 12)  # 2 + 3 + the normal fixture's 7
+        self.assertAlmostEqual(stored["spend_usd"], 0.5821)
+        self.assertEqual(stored["tokens"], {"input": 13, "cache_write": 25, "cache_read": 37, "output": 49})
+        self.assertAlmostEqual(stored["wall_seconds"], 13.845)
+
     def test_a_second_interruption_resumes_again_under_the_next_attempt(self):
         log = install_answers(self.project, [self.hang(), self.hang(), self.normal()])
         procedures = one_step(self.project)
@@ -430,10 +686,25 @@ class ResumeTest(unittest.TestCase):
         self.faulted_then_normal({"stdout": str(empty), "exit": 1, "account": "p1"})
 
     def test_a_visit_stopped_on_a_denied_shell_command_is_entered_again_under_a_new_visit(self):
-        denial = {"tool_name": "Bash", "tool_use_id": "t", "tool_input": {"command": "rm -rf x"}}
-        denied = self.project.tmp / "denied.json"
-        denied.write_bytes(canned_result(permission_denials=[denial]))
-        self.faulted_then_normal({"stdout": str(denied), "exit": 0, "account": "p1"}, code=3)
+        denied = self.denying("rm -rf x")
+        log = install_answers(self.project, [denied, denied, self.normal()])
+        procedures = one_step(self.project)
+        first = self.project.deliver(procedures)
+        self.assertEqual(first.returncode, 3, first.stdout + first.stderr)
+        session = after(self.records(log)[0]["argv"], "--session-id")
+        self.assertEqual(after(self.records(log)[1]["argv"], "--resume"), session)
+        done = self.project.deliver(procedures)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        (run,) = self.project.runs()
+        records = self.records(log)
+        self.assertEqual(len(records), 3)
+        self.assertIn("--session-id", records[2]["argv"])
+        self.assertNotIn("--resume", records[2]["argv"])
+        self.assertNotEqual(after(records[2]["argv"], "--session-id"), session)
+        self.assertEqual(self.entered(run), [1, 2])
+        self.assertEqual(len(run_continued(self.project.events(run))), 1)
+        resuming = [e for e in self.project.events(run) if e["event"] == "session_resuming"]
+        self.assertEqual([e["visit"] for e in resuming], [1])
 
     def test_a_stale_earlier_result_still_rewinds_before_the_interrupted_session(self):
         log = install_answers(self.project, [self.hang(), self.normal()])
@@ -521,6 +792,31 @@ class ResumeTest(unittest.TestCase):
         self.assertNotIn("--resume", records[1]["argv"])
         self.assertEqual(self.entered(run), [1, 2])
         self.assertEqual(len(run_continued(self.project.events(run))), 1)
+
+
+class DeniedRecordTest(unittest.TestCase):
+    """`engine_resume.resumed` over a record that holds denials and no re-ask (the launcher stand-in never
+    prints a reading for an all-out launch, so the record is written by hand)."""
+
+    LEDGER = [{"event": "step_entered", "step": "draft", "visit": 1},
+              {"event": "session_starting", "step": "draft", "visit": 1, "session": "s-1"}]
+
+    def resumed(self, exit_code: int):
+        with tempfile.TemporaryDirectory() as scratch:
+            run = Path(scratch)
+            (run / "sessions").mkdir()
+            denial = {"tool_name": "Bash", "tool_use_id": "toolu_01", "tool_input": {"command": "rm x"}}
+            (run / "sessions/draft.1.json").write_text(json.dumps(
+                {"attempt": 1, "denials": [denial], "exit_code": exit_code}), encoding="utf-8")
+            return engine_resume.resumed(run, self.LEDGER, "draft", 1)
+
+    def test_a_refused_launch_cut_before_its_stop_was_recorded_resumes_with_the_tool_denied_stop(self):
+        resumed = self.resumed(0)
+        self.assertIsNotNone(resumed)
+        self.assertIn(repr("rm x"), resumed.stop)
+
+    def test_an_all_out_launch_holding_denials_is_entered_again_not_stopped_tool_denied(self):
+        self.assertIsNone(self.resumed(engine_session.ALL_OUT_EXIT))
 
 
 if __name__ == "__main__":

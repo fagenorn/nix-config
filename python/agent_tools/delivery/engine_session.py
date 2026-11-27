@@ -4,8 +4,7 @@ A role is the file `~/.claude/agents/<role>.md` (`roles_dir`): its frontmatter
 gives `model`, `effort`, the optional `tools` and `disallowedTools` lists (comma
 separated) and its body is kept as the role's system prompt. The frontmatter
 parser checks no value's fitness for a command line, so `refuse_value` refuses
-any value that would put an option the engine never passes, or a permission
-bypass, into the launch argv.
+any value that would put an option the engine never passes into the launch argv.
 
 `render_prompt` fills each `{{path}}` placeholder of a prompt file with the
 argument words of the step's `in` values.
@@ -19,18 +18,23 @@ reads as the outcome `no-reply`.
 
 `launch_argv` builds the one launch form: the account launcher's print mode
 (`claude-account run -p`) with the role handed over by flags (`--model`,
-`--effort`, `--tools` with `--allowedTools`, or `--disallowedTools`, and the
+`--effort`, `--tools` and `--disallowedTools`, and the
 role body as `--append-system-prompt-file`), the bounds `--max-turns` and
 `--max-budget-usd` from the platform's role table (`ROLE_BOUNDS`, which no
 procedure, project or environment variable changes), the reply schema as
-`--json-schema`, the session id first fixed by the engine, and the permission
-mode `dontAsk`, so a tool the role does not allow is denied rather than asked
-about. A session that hit a usage limit is started again with `--resume <session>` in place of
+`--json-schema`, the session id first fixed by the engine, and
+`--dangerously-skip-permissions`: every agent step runs with permissions skipped and the engine
+passes no permission mode, allow rule or shell rule of its own. A role's `tools` (as `--tools`) and
+`disallowedTools` (as `--disallowedTools`) are tool names from its file, a matter of role. The
+lifecycle guard hook, kept loaded by `session_environment` and the host-settings check, is the one
+control over push, pull request creation and merge, branch deletion, release and detached processes.
+`read_role` refuses a scoped rule in either list (only an `Agent` subagent selector is kept), so a role
+file cannot hand the launch a permission rule.
+A session that hit a usage limit is started again with `--resume <session>` in place of
 `--session-id <session>`, every other word unchanged; the transcripts are shared between accounts,
-so the launcher's next account continues the same session. The engine never passes `--agent`, `--bare`,
-`--setting-sources`, `--dangerously-skip-permissions` or `bypassPermissions`: `--bare` would skip the
-hooks that guard the session, and the others would hand the session its own
-settings or its permissions. The prompt is never in the argv: the tool options
+so the launcher's next account continues the same session. The engine never passes `--agent`, `--bare`
+or `--setting-sources`: `--bare` would skip the hooks that guard the session, and the others would hand
+the session its own settings. The prompt is never in the argv: the tool options
 are variadic and would swallow a positional prompt, so `launch` writes it on
 stdin.
 
@@ -43,20 +47,13 @@ flagged or not (`is_miss`). Any other reading without a usable reply is never re
 run resumes a session its predecessor left interrupted with `CONTINUE_PROMPT`, which asks it to finish
 the task it was given and then give only the structured answer.
 
-The role's `Bash` stays in `--tools` but is preapproved only as the reviewer's
-permitted read-only git inspection (`READ_ONLY_BASH`): under `dontAsk` any other
-shell command is denied, so a session cannot write to the worktree through it.
-`git diff`, `git log` and `git show` write a file given `--output`, which those
-prefix patterns would preapprove, so `GIT_WRITING` is passed as
-`--disallowedTools` (a deny rule is checked before an allow rule). A role that
-needs another shell command lists it in its own `tools` as `Bash(<prefix>:*)`;
-one that is denied a tool call anyway ends the run at the engine's own stop
-`tool-denied` (`engine_shell`), never a graded reply.
+A session denied a tool call anyway (Claude Code still refuses some calls in this mode) ends the run at
+the engine's own stop `tool-denied` (`engine_shell`), never a graded reply. `denial_prompt` asks a denied
+session once more, unless a bound or an API failure ended it: it names the refused calls and the
+session's tools (`session_tools`) and asks it to respect each refusal.
 
-The recorded exception: under the engine only, a step that names its own `worktree` gives a
-`WHOLE_SHELL_ROLES` role the whole `Bash`, `Edit` and `Write` (`Role.whole_shell`, launched in that
-worktree, see `own_worktree`) with `WHOLE_SHELL_DENIED` as deny rules, and the lifecycle guard hook
-still judges every command. No session inherits the repository variables (`REPOSITORY_ENV`).
+A step that names its own `worktree` (only a `WHOLE_SHELL_ROLES` role, see `procedure_check`) runs its
+session there once `own_worktree` confirms it; no session inherits `REPOSITORY_ENV`.
 
 The launcher tells the engine its choice through an answer file: the launch environment carries
 `CLAUDE_ACCOUNT_ANSWER`, the path of a file the launcher writes, and `read_answer` reads it. It holds
@@ -111,7 +108,7 @@ import signal
 import subprocess
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import MappingProxyType
 from typing import Callable, Mapping, Sequence
@@ -119,16 +116,15 @@ from typing import Callable, Mapping, Sequence
 from agent_tools.canonical import (
     parse_rfc3339_utc, reject_duplicate_keys, reject_nonfinite_literal,
 )
-from agent_tools.delivery import engine_stop
+from agent_tools.delivery import engine_ledger, engine_reply, engine_stop
 from agent_tools.delivery.engine_commands import Watchdog, argument
 from agent_tools.delivery.engine_ledger import TOKEN_COUNTS
-from agent_tools.delivery.procedure_terms import PLACEHOLDER_RE, ROLES, TOOL_DENIED, WHOLE_SHELL_ROLES
+from agent_tools.delivery.procedure_terms import PLACEHOLDER_RE, ROLES, TOOL_DENIED
 from agent_tools.skill_lint import parse_frontmatter
 
-FORBIDDEN_WORDS: tuple[str, ...] = (
-    "--agent", "--bare", "--setting-sources", "--dangerously-skip-permissions",
-    "bypassPermissions",
-)
+FORBIDDEN_WORDS: tuple[str, ...] = ("--agent", "--bare", "--setting-sources")
+SCOPED_RULE_RE = re.compile(r"\A(?P<tool>[^()\s]+)\([^()]*\)\Z")
+SELECTOR_TOOLS: tuple[str, ...] = ("Agent",)
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 LAUNCHER: tuple[str, ...] = ("claude-account", "run")
 HOST_SETTINGS_SWITCH = "CLAUDE_ACCOUNT_HOST_SETTINGS"
@@ -138,10 +134,14 @@ CAP_SUBTYPES: Mapping[str, str] = MappingProxyType(
 NOT_STARTED = 127
 STRUCTURED_OUTPUT_EXHAUSTED = "error_max_structured_output_retries"
 MISS_SUBTYPES: tuple[str, ...] = ("success", STRUCTURED_OUTPUT_EXHAUSTED)
-REASK_PROMPT = (
-    "Your last answer was not a valid structured answer. Reply again with only the structured "
-    "answer, a single call of the StructuredOutput tool whose members follow the schema, and no "
-    "other text.")
+REASK_REQUEST = (
+    "Reply again with only the structured answer, a single call of the StructuredOutput tool whose "
+    "members follow the schema, and no other text.")
+DENIAL_GUIDANCE = (
+    "Claude Code refused them. Respect each refusal: do not repeat a refused call or look for another way "
+    "to make it. Finish what you can with this session's tools ({tools}), and say in your reply what a "
+    "refusal kept you from doing. ")
+REASK_PROMPT = f"Your last answer was not a valid structured answer. {REASK_REQUEST}"
 CONTINUE_PROMPT = (
     "Your session was interrupted. Finish the task you were given, then give only the structured "
     "answer, a single call of the StructuredOutput tool whose members follow the schema, and no "
@@ -152,25 +152,12 @@ USAGE_LIMIT = "usage-limit"
 API_ERROR = "api-error"
 GRACE_SECONDS = 5
 DRAIN_SECONDS = 5
-READ_ONLY_BASH: tuple[str, ...] = tuple(
-    f"Bash(git {verb}:*)" for verb in ("diff", "log", "show", "status", "rev-parse", "ls-files",
-                                      "blame", "merge-base"))
-GIT_WRITING: tuple[str, ...] = tuple(
-    f"Bash(git {verb}*--output*)" for verb in ("diff", "log", "show"))
 REPOSITORY_ENV = ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
                   "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE",
                   "GIT_PREFIX", "GIT_IMPLICIT_WORK_TREE", "GIT_SHALLOW_FILE", "GIT_GRAFT_FILE",
                   "GIT_NO_REPLACE_OBJECTS", "GIT_REPLACE_REF_BASE", "GIT_CONFIG",
                   "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT")
 BARE_SWITCH = "CLAUDE_CODE_SIMPLE"
-WHOLE_SHELL_ALLOWED = ("Bash", "Edit", "Write")
-GIT_DENIED = ("push", "stash", "reset --hard", "clean", "checkout --", "branch -D", "branch -d")
-GH_DENIED = ("pr create", "pr merge", "release create")
-WHOLE_SHELL_DENIED: tuple[str, ...] = tuple(
-    f"Bash({form.format(verb)})"
-    for verbs, forms in ((GIT_DENIED, ("git {}", "git {} *", "git * {}", "git * {} *")),
-                         (GH_DENIED, ("gh {}", "gh {} *", "gh * {} *")))
-    for verb in verbs for form in forms)
 WORKTREE_LIST_SECONDS = 30
 DIAGNOSTIC_CHARS = 300
 _USAGE_KEYS = {"input": "input_tokens", "cache_write": "cache_creation_input_tokens",
@@ -189,7 +176,6 @@ class Role:
     tools: tuple[str, ...] | None
     disallowed: tuple[str, ...] | None
     body: str
-    whole_shell: bool = False
 
 
 @dataclass(frozen=True)
@@ -234,11 +220,27 @@ def roles_dir(environ: Mapping[str, str]) -> Path:
 def _names(role: str, field: str, text: str | None) -> tuple[str, ...] | None:
     if text is None:
         return None
-    names = tuple(part.strip() for part in text.split(",") if part.strip())
+    parts, depth, start = [], 0, 0
+    for at, char in enumerate(text):
+        depth += (char == "(") - (char == ")")
+        if depth < 0:
+            break
+        if char == "," and depth == 0:
+            parts.append(text[start:at])
+            start = at + 1
+    parts.append(text[start:])
+    if depth != 0:
+        raise RoleError(f"role {role}: {field} {text!r} has unbalanced brackets")
+    names = tuple(part.strip() for part in parts if part.strip())
     if not names:
         raise RoleError(f"role {role}: {field} holds no tool name")
     for name in names:
         refuse_value(role, field, name)
+        scoped = SCOPED_RULE_RE.match(name)
+        if scoped is None and ("(" in name or ")" in name):
+            raise RoleError(f"role {role}: {field} {name!r} is not a tool name the engine passes")
+        if scoped is not None and scoped.group("tool") not in SELECTOR_TOOLS:
+            raise RoleError(f"role {role}: {field} {name!r} is a scoped rule the engine does not pass")
     return names
 
 
@@ -306,10 +308,14 @@ class EngineStop(Exception):
 
 
 def denied_calls(reading: Reading) -> tuple[str, ...]:
+    return calls_of(reading.denials)
+
+
+def calls_of(denials: Sequence) -> tuple[str, ...]:
     """One text per tool call the session was denied, in order: a shell command whole, any other call
     as its tool name and its input in compact sorted-key JSON."""
     calls = []
-    for entry in reading.denials:
+    for entry in denials:
         if not isinstance(entry, dict):
             calls.append(json.dumps(entry, sort_keys=True))
             continue
@@ -328,6 +334,99 @@ def denial_detail(step: str, calls: Sequence[str]) -> str:
     return (f"Step {step} was denied {count} tool call{'' if count == 1 else 's'}: "
             + "; ".join(repr(call) for call in calls)
             + "; its reply is not graded and the run stops at tool-denied.")
+
+
+def session_tools(role: Role) -> str:
+    """The tools `role`'s launch gives: its `tools` names, or every tool less its `disallowed` names."""
+    tools = ", ".join(role.tools) if role.tools is not None else "every tool"
+    return f"{tools} except {', '.join(role.disallowed)}" if role.disallowed else tools
+
+
+def denial_prompt(role: Role, calls: Sequence[str]) -> str:
+    """The prompt that asks a denied session again: the refused calls, a request to respect them, its tools."""
+    refused = "\n".join(f"- {call!r}" for call in calls)
+    guidance = DENIAL_GUIDANCE.format(tools=session_tools(role))
+    return f"These tool calls were refused:\n{refused}\n\n{guidance}{REASK_REQUEST}"
+
+
+def asked_record(sessions: Path, name: str, visit: int) -> dict | None:
+    """The stored record of the launch a visit's denial re-ask was about, None when the visit made no re-ask.
+
+    `{}` when the re-ask was made but no record of its launch holds denials. A record that carries its
+    `retry` text is a re-ask even where its prompt file was never written."""
+    prompted = (sessions / f"{name}.{visit}.denied.prompt.md").exists()
+    head = f"{name}.{visit}.continue-"
+    attempts = sorted((int(path.name[len(head):-len(".json")]) for path in sessions.glob(f"{head}*.json")
+                       if path.name[len(head):-len(".json")].isdigit()), reverse=True)
+    for path in (*(sessions / f"{head}{attempt}.json" for attempt in attempts),
+                 *(sessions / f"{name}.{visit}{suffix}.json" for suffix in (".resume", ""))):
+        try:  # a continued launch's record is the latest; a miss re-ask's launch stores `.resume`
+            document = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        denials = document.get("denials") if isinstance(document, dict) else None
+        if isinstance(denials, list) and denials and (prompted or "retry" in document):
+            return document
+    return {} if prompted else None
+
+
+def asked_calls(sessions: Path, name: str, visit: int) -> tuple[str, ...] | None:
+    """The calls of the launch a visit's denial re-ask was about, None when the visit made no re-ask."""
+    document = asked_record(sessions, name, visit)
+    return None if document is None else calls_of(document.get("denials", ()))
+
+
+def asked_earlier(sessions: Path, name: str, visit: int) -> list[tuple["Launched", Reading]]:
+    """The measures of the launch a visit's denial re-ask was about, as `summed` takes an earlier launch."""
+    measured = (asked_record(sessions, name, visit) or {}).get("measured")
+    if not isinstance(measured, dict):
+        return []
+    wall, tokens = _amount(measured.get("wall_seconds")) or 0, measured.get("tokens")
+    tokens = {key: _count(tokens.get(key)) for key in TOKEN_COUNTS} if isinstance(tokens, dict) else (
+        dict.fromkeys(TOKEN_COUNTS, 0))
+    return [(Launched(0, b"", b"", wall),
+             Reading(None, None, [], None, wall, _count(measured.get("turns")), tokens,
+                     _amount(measured.get("spend_usd")) or 0))]
+
+
+def summed(launched: Launched, reading: Reading,
+           earlier: Sequence[tuple[Launched, Reading]]) -> tuple[Launched, Reading]:
+    """The final launch and reading with the wall, turns, spend and tokens of each earlier launch added."""
+    for ran, read in earlier:
+        before = read.wall_seconds if read.wall_seconds is not None else ran.wall_seconds
+        launched = replace(launched, wall_seconds=launched.wall_seconds + before)
+        reading = replace(
+            reading, turns=reading.turns + read.turns, spend_usd=reading.spend_usd + read.spend_usd,
+            wall_seconds=(launched.wall_seconds if reading.wall_seconds is None
+                          else reading.wall_seconds + before),
+            tokens={key: reading.tokens[key] + read.tokens[key] for key in reading.tokens})
+    return launched, reading
+
+
+def reading_problem(schema: Mapping, reading: Reading) -> str | None:
+    return ("no structured_output" if reading.reply is None
+            else engine_reply.reply_problem(schema, reading.reply))
+
+
+def store_record(run_dir: Path, visit_of: tuple[str, int, str, int], launched: Launched,
+                 reading: Reading, schema: Mapping, suffix: str, retry: str | None = None,
+                 earlier: Sequence[tuple["Launched", Reading]] = ()) -> None:
+    """Store a launch's record; with `retry`, the prompt that asks its denials again and what the launch and
+    the `earlier` launches of the visit used, so a killed engine sends that prompt on the original session and
+    counts every launch in the visit."""
+    name, visit, session, attempt = visit_of
+    record = {"attempt": attempt, "denials": reading.denials, "exit_code": launched.exit_code,
+              "problem": reading_problem(schema, reading), "prose": reading.prose, "session": session,
+              "subtype": reading.subtype}
+    if retry is not None:
+        used, total = summed(launched, reading, earlier)
+        record["retry"] = retry
+        record["measured"] = {
+            "spend_usd": total.spend_usd, "tokens": total.tokens, "turns": total.turns,
+            "wall_seconds": total.wall_seconds if total.wall_seconds is not None else used.wall_seconds}
+    engine_ledger.store_session_file(
+        run_dir, f"{name}.{visit}{suffix}.json",
+        json.dumps(record, sort_keys=True, separators=(",", ":")).encode("utf-8"))
 
 
 def joined(stops: Sequence[EngineStop]) -> EngineStop:
@@ -465,24 +564,13 @@ def launch_argv(role: Role, schema: Mapping, session: str, system_prompt: Path, 
     argv = [*LAUNCHER, "-p", "--output-format", "json",
             "--json-schema", json.dumps(schema, sort_keys=True, separators=(",", ":")),
             "--resume" if resume else "--session-id", session, "--strict-mcp-config",
-            "--permission-mode", "dontAsk",
+            "--dangerously-skip-permissions",
             "--model", role.model, "--effort", role.effort,
             "--max-turns", str(limits.turns), "--max-budget-usd", f"{limits.spend_usd:.2f}"]
-    disallowed = list(role.disallowed or ())
-    if role.whole_shell:
-        if role.name not in WHOLE_SHELL_ROLES or role.tools is not None:
-            raise RoleError(f"the role {role.name} cannot have the whole shell")
-        argv += ["--allowedTools", ",".join(WHOLE_SHELL_ALLOWED),
-                 "--disallowedTools", ",".join([*disallowed, *WHOLE_SHELL_DENIED])]
-        return (*argv, "--append-system-prompt-file", str(system_prompt))
     if role.tools is not None:
-        allowed = [entry for name in role.tools
-                   for entry in (READ_ONLY_BASH if name == "Bash" else (name,))]
-        argv += ["--tools", ",".join(role.tools), "--allowedTools", ",".join(allowed)]
-        if "Bash" in role.tools:
-            disallowed += GIT_WRITING
-    if role.disallowed is not None or disallowed:
-        argv += ["--disallowedTools", ",".join(disallowed)]
+        argv += ["--tools", ",".join(role.tools)]
+    if role.disallowed is not None:
+        argv += ["--disallowedTools", ",".join(role.disallowed)]
     return (*argv, "--append-system-prompt-file", str(system_prompt))
 
 
