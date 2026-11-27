@@ -768,6 +768,7 @@ class RunReadsEachHostOnce(unittest.TestCase):
         "tests.test_runner_home": ("runner-home",),
         "tests.test_system_packages": ("system-packages",),
         "tests.test_owner_services_units": ("owner-services", "owner-activation"),
+        "tests.test_proof_run_units": ("proof-run",),
         "tests.test_github_runners": ("runners", "runner-triples"),
         "tests.test_platform_package_hosts": ("agent-platform",),
         "tests.test_omlx_declaration": ("omlx",),

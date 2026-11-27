@@ -1,4 +1,4 @@
-"""The eleven-m5 daily proof run as the host configuration evaluates it (issue 1538).
+"""The eleven-m5 daily proof run as the host configuration evaluates it.
 
 Reads the host evaluation from `tests/host_readings.py`, which evaluates the flake from this
 checkout's git tree, so new files must be `git add`-ed first.
@@ -8,7 +8,7 @@ import plistlib
 import unittest
 
 from . import host_readings
-from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures
 
 TIER = "integration"  # evaluates the host configuration
 
