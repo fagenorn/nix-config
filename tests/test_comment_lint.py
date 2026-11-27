@@ -21,6 +21,7 @@ from pathlib import Path
 
 from agent_tools.delivery import comment_lint, comment_syntax, never_rise, rule_ids
 from agent_tools.delivery.comment_syntax import Block
+from agent_tools.delivery.dotnet_solution import SOLUTION_ROOT
 from agent_tools.delivery.never_rise import Rise, Snapshot, Violation
 from tests.test_never_rise import commit_all, fixture_env, git, mark_base, repo, write
 
@@ -607,6 +608,21 @@ class CommandTest(unittest.TestCase):
             root = self.committed(tmp, "x = 1  # why\n")
             done = run_command("--repo-root", str(root))
             self.assertEqual((done.returncode, done.stdout), (0, ""))
+
+    def test_a_planted_csharp_placeholder_under_the_solution_root_counts_and_zero_once_fixed(self):
+        fixtures = REPO_ROOT / "tests/fixtures/dotnet-lint"
+        path = f"{SOLUTION_ROOT}/Planted/Placeholder.cs"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = repo(tmp)
+            write(root, path, (fixtures / "Placeholder.cs.fixture").read_text("utf-8"))
+            commit_all(root)
+            planted = run_command("--repo-root", str(root))
+            write(root, path, (fixtures / "PlaceholderFixed.cs.fixture").read_text("utf-8"))
+            commit_all(root)
+            fixed = run_command("--repo-root", str(root))
+        self.assertEqual(
+            (planted.returncode, planted.stdout), (1, f"B20 {path}:5\nB20 {path}:8\n"))
+        self.assertEqual((fixed.returncode, fixed.stdout), (0, ""))
 
     def test_violations_print_in_rule_order(self):
         with tempfile.TemporaryDirectory() as tmp:
