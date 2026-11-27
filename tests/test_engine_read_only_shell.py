@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import unittest
 from dataclasses import replace
 
@@ -170,6 +171,52 @@ class ReadOnlyShellTest(unittest.TestCase):
                 self.assertEqual(engine_session.shell_rules(role), (bash_words(argv, "--allowedTools"),
                                                                     bash_words(argv, "--disallowedTools")))
         self.assertEqual(engine_session.shell_rules(read_role(AGENTS, "implementer")), ((), ()))
+
+
+PROCEDURES = REPO_ROOT / "python/agent_tools/delivery/procedures"
+
+
+def read_only_steps():
+    for path in sorted(PROCEDURES.glob("*.json")):
+        steps = json.loads(path.read_text(encoding="utf-8")).get("steps")
+        for step in steps if isinstance(steps, list) else []:
+            if step.get("kind") == "agent" and step.get("role") in READ_ONLY_ROLES:
+                yield path.name, step["id"], step["role"], PROCEDURES / step["prompt"], step.get("in", [])
+
+
+class ReadOnlyPromptsTest(unittest.TestCase):
+    def test_no_read_only_step_prompt_asks_for_git_dash_c(self):
+        steps = list(read_only_steps())
+        self.assertTrue(steps)
+        for file, step, role, prompt, _ in steps:
+            with self.subTest(file=file, step=step, role=role):
+                self.assertNotIn("git -C", prompt.read_text(encoding="utf-8"))
+
+    def test_the_git_reads_the_review_prompts_name_are_admitted_for_their_role(self):
+        rows = [
+            ("verify-fix-review.md", "reviewer", "git diff {{round.head}}..{{preflight.branch}}"),
+            ("land-ci-review.md", "reviewer", "git diff {{ci-fix.start_head}}..{{ci-fix.commit}}"),
+            ("land-sync-review.md", "reviewer", "git show --cc {{merge-of.merge_commit}}"),
+            ("land-sync-review.md", "reviewer", "git diff {{merge-of.merge_commit}}..{{merge-of.head}}"),
+            ("land-sync-review.md", "reviewer", "git diff --check {{merge-of.merge_commit}} {{merge-of.head}}"),
+            ("land-sync-rereview.md", "reviewer", "git diff {{merge-fix.start_head}}..{{merge-fix.commit}}"),
+            ("land-sync-rereview.md", "reviewer", "git show --cc {{merge-of.merge_commit}}"),
+            ("direct-review.md", "reviewer",
+             "git diff origin/{{preflight.integration_branch}}...{{preflight.branch}}"),
+        ]
+        for prompt, role, command in rows:
+            with self.subTest(prompt=prompt, command=command):
+                text = (PROCEDURES / prompt).read_text(encoding="utf-8")
+                self.assertIn(command, text)
+                filled = re.sub(r"\{\{[^}]*\}\}", "0123abcd", command)
+                self.assertTrue(read_only_admits(filled, *launch_words(role)), filled)
+
+    def test_the_fix_review_steps_read_the_branch(self):
+        verify = json.loads((PROCEDURES / "verify.json").read_text(encoding="utf-8"))
+        steps = {step["id"]: step for step in verify["steps"]}
+        for name in ("fix-review", "fix-review-again"):
+            with self.subTest(step=name):
+                self.assertIn("preflight.branch", steps[name]["in"])
 
 
 if __name__ == "__main__":
