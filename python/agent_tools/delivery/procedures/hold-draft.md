@@ -1,5 +1,5 @@
 Issue {{run.issue}} was merged as {{read.merge_commit}} with criteria still open. Draft the verification checks that hold it. Change nothing and run nothing but read-only git.
-The diff to ground them in is the merge commit: git show {{read.merge_commit}}, and git diff {{read.merge_commit}}^1 {{read.merge_commit}}.
+The diff to ground them in is the merge commit: git show {{read.merge_commit}}, and git diff '{{read.merge_commit}}^1' {{read.merge_commit}}.
 The open criteria, each with its id, kind and text: {{hold-facts.open}}
 The verification command ids a check may run unattended: {{hold-facts.verification}}
 The criterion ids a look approval already answered, which need no check: {{hold-look.answered}}

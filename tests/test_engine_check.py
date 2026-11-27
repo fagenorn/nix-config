@@ -1333,9 +1333,11 @@ class ShippedProcedureTest(unittest.TestCase):
         self.assertEqual(regrade["role"], "reviewer-lite")
         prompt = (PROCEDURES / "hold-regrade.md").read_text(encoding="utf-8")
         self.assertEqual(prompt.splitlines()[0], "lane: direct.")
-        self.assertIn("git diff {{read.merge_commit}}^1 {{read.merge_commit}}", prompt)
-        self.assertIn("git show {{read.merge_commit}}",
-                      (PROCEDURES / "hold-draft.md").read_text(encoding="utf-8"))
+        self.assertIn("git diff '{{read.merge_commit}}^1' {{read.merge_commit}}", prompt)
+        self.assertNotIn(" {{read.merge_commit}}^1", prompt)
+        draft = (PROCEDURES / "hold-draft.md").read_text(encoding="utf-8")
+        self.assertIn("git show {{read.merge_commit}}", draft)
+        self.assertNotIn(" {{read.merge_commit}}^1", draft)
 
     def test_no_shipped_prompt_asks_for_a_forge_command(self):
         names = ["setup-applies.md", "hold-draft.md", "hold-regrade.md"] + [

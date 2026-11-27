@@ -373,6 +373,8 @@ class ReadOnlyPromptsTest(unittest.TestCase):
             ("land-sync-rereview.md", "reviewer", "git show --cc {{merge-of.merge_commit}}"),
             ("direct-review.md", "reviewer",
              "git diff origin/{{preflight.integration_branch}}...{{preflight.branch}}"),
+            ("hold-regrade.md", "reviewer-lite", "git diff '{{read.merge_commit}}^1' {{read.merge_commit}}"),
+            ("hold-draft.md", "reviewer", "git diff '{{read.merge_commit}}^1' {{read.merge_commit}}"),
         ]
         for prompt, role, command in rows:
             with self.subTest(prompt=prompt, command=command):
