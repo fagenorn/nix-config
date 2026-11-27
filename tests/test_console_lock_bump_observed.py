@@ -13,6 +13,7 @@ from pathlib import Path
 from unittest import mock
 
 from agent_tools.console import lock_bump
+from agent_tools.console import lock_bump_forge
 from agent_tools.console.lock_bump_forge import Checks
 from agent_tools.system import forge_api
 from agent_tools.system.forge_api import ForgeError
@@ -133,6 +134,107 @@ class ObservedTest(unittest.TestCase):
         self.assertTrue(text.endswith(
             'PYTHONPATH=python exec python3 -m agent_tools.console.lock_bump observed "$@"\n'))
         self.assertEqual(committed_mode(SCRIPT), "100755")
+
+
+MERGE = "e" * 40
+PLATFORM = "octo/platform"
+
+
+class Compare(StandIn):
+    def __init__(self, answers):
+        super().__init__(None)
+        self.answers = answers
+
+    def __call__(self, repo, base, head):
+        self.calls.append((repo, base, head))
+        return self.answers[head]
+
+
+class MergedTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.proven = self.tmp / "proven.jsonl"
+        self.proven.write_text("\n".join([
+            proven_line(REV_A, "2026-11-30T06:00:00Z"), proven_line(REV_B, "2026-12-01T06:00:00Z"),
+            proven_line(REV_C, "2026-12-02T06:00:00Z")]) + "\n")
+
+    def observe(self, pulls, answers, checks=Checks("green", HEAD, ())):
+        pages, verdict = StandIn([pulls]), StandIn(checks)
+        compare = Compare(answers)
+        result = lock_bump.observe_merged(REPO, base="main", merge=MERGE, platform_repo=PLATFORM,
+                                          proven=self.proven, pages=pages, verdict=verdict, compare=compare)
+        return result, pages, verdict, compare
+
+    def test_the_first_merged_bump_of_a_proven_revision_holding_the_merge_is_met(self):
+        pulls = [closed(10, f"lock-bump-{REV_C}", "2026-12-03T07:00:00Z"),
+                 closed(9, f"lock-bump-{REV_B}", "2026-12-02T07:00:00Z"),
+                 closed(8, f"lock-bump-{REV_A}", "2026-12-01T07:00:00Z")]
+        result, pages, verdict, compare = self.observe(
+            pulls, {REV_A: "behind", REV_B: "ahead", REV_C: "ahead"})
+        self.assertEqual(result, (0, {"pull": 9, "state": "met"}))
+        self.assertEqual(pages.calls, [(PATH,)])
+        self.assertEqual(compare.calls, [(PLATFORM, MERGE, REV_A), (PLATFORM, MERGE, REV_B)])
+        self.assertEqual(verdict.calls, [(REPO, 9)])
+
+    def test_the_merge_commit_itself_proven_counts(self):
+        pulls = [closed(9, f"lock-bump-{REV_B}", "2026-12-02T07:00:00Z")]
+        result, _, _, _ = self.observe(pulls, {REV_B: "identical"})
+        self.assertEqual(result, (0, {"pull": 9, "state": "met"}))
+
+    def test_no_merged_bump_holding_the_merge_is_not_yet(self):
+        pulls = [closed(9, f"lock-bump-{REV_B}", "2026-12-02T07:00:00Z"),
+                 closed(8, f"lock-bump-{REV_A}", "2026-12-01T07:00:00Z")]
+        result, _, verdict, _ = self.observe(pulls, {REV_A: "behind", REV_B: "diverged"})
+        self.assertEqual(result, (75, {"pull": None, "state": "not_yet"}))
+        self.assertEqual(verdict.calls, [])
+
+    def test_a_merged_bump_of_an_unproven_revision_does_not_count(self):
+        pulls = [closed(11, f"lock-bump-{'f' * 40}", "2026-12-02T07:00:00Z")]
+        result, _, _, compare = self.observe(pulls, {"f" * 40: "ahead"})
+        self.assertEqual(result, (75, {"pull": None, "state": "not_yet"}))
+        self.assertEqual(compare.calls, [])
+
+    def test_the_merge_form_ignores_a_bump_merged_into_another_base(self):
+        pulls = [closed(9, f"lock-bump-{REV_B}", "2026-12-02T07:00:00Z", base="release")]
+        result, _, _, _ = self.observe(pulls, {REV_B: "ahead"})
+        self.assertEqual(result, (75, {"pull": None, "state": "not_yet"}))
+
+    def test_a_merged_bump_holding_the_merge_with_a_red_required_context_is_not_met(self):
+        pulls = [closed(9, f"lock-bump-{REV_B}", "2026-12-02T07:00:00Z")]
+        result, _, _, _ = self.observe(pulls, {REV_B: "ahead"}, Checks("red", HEAD, ("Tests",)))
+        self.assertEqual(result, (1, {"pull": 9, "state": "not_met"}))
+
+    def test_no_proven_record_reads_no_pull(self):
+        self.proven.unlink()
+        pulls = [closed(9, f"lock-bump-{REV_B}", "2026-12-02T07:00:00Z")]
+        result, pages, _, _ = self.observe(pulls, {REV_B: "ahead"})
+        self.assertEqual(result, (75, {"pull": None, "state": "not_yet"}))
+        self.assertEqual(pages.calls, [])
+
+    def test_main_merge_form_refuses_a_missing_platform_repo_a_short_sha_and_both_forms(self):
+        head = ["observed", "--repo", REPO, "--base", "main"]
+        for tail in (["--merge", MERGE], ["--merge", "abc1234", "--platform-repo", PLATFORM],
+                     ["--since", SINCE, "--merge", MERGE, "--platform-repo", PLATFORM],
+                     ["--merge", MERGE, "--platform-repo", PLATFORM, "--within-days", "3"]):
+            with self.subTest(tail=tail), contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as raised:
+                    lock_bump.main(head + tail)
+                self.assertEqual(raised.exception.code, 2)
+
+    def test_main_merge_form_prints_the_met_record(self):
+        out = io.StringIO()
+        pulls = [[closed(9, f"lock-bump-{REV_B}", "2026-12-02T07:00:00Z")]]
+        with mock.patch.object(forge_api, "api_pages", return_value=pulls), \
+                mock.patch.object(forge_api, "run_gh", side_effect=AssertionError("no real gh")), \
+                mock.patch.object(lock_bump_forge.GitHubBumpForge, "compare", return_value="ahead") as compare, \
+                mock.patch.object(lock_bump_forge.GitHubBumpForge, "verdict",
+                                  return_value=Checks("green", HEAD, ())), \
+                contextlib.redirect_stdout(out):
+            code = lock_bump.main(["observed", "--repo", REPO, "--base", "main", "--merge", MERGE,
+                                   "--platform-repo", PLATFORM, "--proven", str(self.proven)])
+        self.assertEqual((code, out.getvalue()), (0, '{"pull":9,"state":"met"}\n'))
+        compare.assert_called_once_with(PLATFORM, MERGE, REV_B)
 
 
 if __name__ == "__main__":

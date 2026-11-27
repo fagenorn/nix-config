@@ -19,12 +19,15 @@ prints one `console: lock_bump <project> <action> <revision> <pull> <issue>` lin
 `console: lock_bump_failed` line when the pass is refused. `start` runs it in a daemon thread every ten
 minutes until its stop event is set, and that event is the pass's `cancel`.
 
-`python -m agent_tools.console.lock_bump observed --repo O/N --base BRANCH --since STAMP [--within-days 7]
-[--proven FILE]` is the evidence check: the revision is the first line of the proven record stamped at or
+`python -m agent_tools.console.lock_bump observed --repo O/N --base BRANCH (--since STAMP [--within-days 7] |
+--merge SHA --platform-repo O/N) [--proven FILE]` is the evidence check, judged on the pull request's required
+contexts as the merge does. With `--since` the revision is the first line of the proven record stamped at or
 after `STAMP` (the activation, `YYYY-MM-DDTHH:MM:SSZ`); the pull request is the one merged into `BRANCH` from
-that revision's `lock-bump-<revision>` branch, judged on its required contexts as the merge does, and merged
-within the days after `STAMP`. It prints one JSON line and exits 0 met, 1 not met (red, late, or the window
-has passed with no merge), 75 not yet, 2 on a forge or record error.
+that revision's `lock-bump-<revision>` branch within the days after `STAMP`. With `--merge` the pull request is
+the first merged into `BRANCH`, in order of merge, from the `lock-bump-<revision>` branch of a proven revision
+that holds the platform commit `SHA`, with no window: the verify block's expiry is it. It prints one JSON line
+and exits 0 met, 1 not met (red, or with `--since` late or the window passed with no merge), 75 not yet, 2 on a
+forge or record error.
 """
 
 from __future__ import annotations
@@ -37,7 +40,7 @@ import sys
 import tempfile
 import threading
 from datetime import datetime, timedelta, timezone
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from pathlib import Path
 from typing import NamedTuple, Protocol, TextIO
 
@@ -343,12 +346,13 @@ def _moment(stamp: str) -> datetime:
     return datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
 
 
-def first_proven_after(proven: Path, since: str) -> str | None:
-    """The revision of the first line of the proven record stamped at or after `since`, else None."""
+def _proven_lines(proven: Path) -> list[tuple[str, str]]:
+    """The (revision, stamp) of every valid line of the proven record, in order; a missing record is empty."""
     try:
         data = Path(proven).read_bytes()
     except FileNotFoundError:
-        return None
+        return []
+    found = []
     for raw in data.split(b"\n"):
         try:
             line = json.loads(raw.decode("utf-8"))
@@ -358,9 +362,35 @@ def first_proven_after(proven: Path, since: str) -> str | None:
             continue
         revision, stamp = line.get("revision"), line.get("proven")
         if (isinstance(revision, str) and REVISION.fullmatch(revision) and isinstance(stamp, str)
-                and STAMP.fullmatch(stamp) and stamp >= since):
-            return revision
-    return None
+                and STAMP.fullmatch(stamp)):
+            found.append((revision, stamp))
+    return found
+
+
+def first_proven_after(proven: Path, since: str) -> str | None:
+    """The revision of the first line of the proven record stamped at or after `since`, else None."""
+    return next((revision for revision, stamp in _proven_lines(proven) if stamp >= since), None)
+
+
+def _merged_bumps(repo: str, base: str, pages: Callable[[str], list],
+                  revisions: Collection[str]) -> list[tuple[str, int, str]]:
+    """The (merged_at, number, revision) of every closed pull request of `repo` that merged a
+    `lock-bump-<revision>` branch of one of `revisions` from `repo` itself into `base`."""
+    merged = []
+    for page in pages(f"repos/{repo}/pulls?state=closed&per_page=100"):
+        for pull in page if isinstance(page, list) else []:
+            if not isinstance(pull, dict):
+                continue
+            head = pull.get("head") if isinstance(pull.get("head"), dict) else {}
+            target = pull.get("base") if isinstance(pull.get("base"), dict) else {}
+            source = head.get("repo") if isinstance(head.get("repo"), dict) else {}
+            sha, number, at = head.get("sha"), pull.get("number"), pull.get("merged_at")
+            revision = revision_of_branch(head.get("ref"))
+            if (isinstance(at, str) and STAMP.fullmatch(at) and revision is not None and revision in revisions
+                    and target.get("ref") == base and source.get("full_name") == repo and isinstance(sha, str)
+                    and approve.COMMIT.fullmatch(sha) and isinstance(number, int) and not isinstance(number, bool)):
+                merged.append((at, number, revision))
+    return merged
 
 
 def observe(repo: str, *, base: str, since: str, proven: Path, pages: Callable[[str], list],
@@ -373,26 +403,33 @@ def observe(repo: str, *, base: str, since: str, proven: Path, pages: Callable[[
     late = now() > deadline
     if revision is None:
         return (1, {"pull": None, "state": "not_met"}) if late else (75, {"pull": None, "state": "not_yet"})
-    merged = []
-    for page in pages(f"repos/{repo}/pulls?state=closed&per_page=100"):
-        for pull in page if isinstance(page, list) else []:
-            head = pull.get("head") if isinstance(pull, dict) else None
-            head = head if isinstance(head, dict) else {}
-            target = pull.get("base") if isinstance(pull.get("base"), dict) else {}
-            source = head.get("repo") if isinstance(head.get("repo"), dict) else {}
-            sha, number, at = head.get("sha"), pull.get("number"), pull.get("merged_at")
-            if (isinstance(at, str) and STAMP.fullmatch(at) and revision_of_branch(head.get("ref")) == revision
-                    and target.get("ref") == base and source.get("full_name") == repo and isinstance(sha, str)
-                    and approve.COMMIT.fullmatch(sha) and isinstance(number, int) and not isinstance(number, bool)):
-                merged.append((at, number))
+    merged = _merged_bumps(repo, base, pages, {revision})
     if not merged:
         return (1, {"pull": None, "state": "not_met"}) if late else (75, {"pull": None, "state": "not_yet"})
-    at, number = min(merged)
+    at, number, _ = min(merged)
     if _moment(at) > deadline:
         return 1, {"pull": number, "state": "not_met"}
     if verdict(repo, number).state == "green":
         return 0, {"pull": number, "state": "met"}
     return 1, {"pull": number, "state": "not_met"}
+
+
+def observe_merged(repo: str, *, base: str, merge: str, platform_repo: str, proven: Path,
+                   pages: Callable[[str], list], verdict: Callable[[str, int], Checks],
+                   compare: Callable[[str, str, str], str]) -> tuple[int, dict]:
+    """The exit code and printed record of the first merged bump, in order of merge, of a proven revision that
+    holds the platform commit `merge`, judged on its required contexts. It reads no clock: the verify block's
+    expiry is the window."""
+    not_yet = (75, {"pull": None, "state": "not_yet"})
+    revisions = {revision for revision, _ in _proven_lines(proven)}
+    if not revisions:
+        return not_yet
+    for _, number, revision in sorted(_merged_bumps(repo, base, pages, revisions)):
+        if compare(platform_repo, merge, revision) in ("ahead", "identical"):
+            if verdict(repo, number).state == "green":
+                return 0, {"pull": number, "state": "met"}
+            return 1, {"pull": number, "state": "not_met"}
+    return not_yet
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -401,21 +438,40 @@ def main(argv: list[str] | None = None) -> int:
     observed = modes.add_parser("observed")
     observed.add_argument("--repo", required=True, metavar="O/N")
     observed.add_argument("--base", required=True, metavar="BRANCH")
-    observed.add_argument("--since", required=True, metavar="STAMP")
-    observed.add_argument("--within-days", type=int, default=WITHIN_DAYS)
+    form = observed.add_mutually_exclusive_group(required=True)
+    form.add_argument("--since", metavar="STAMP")
+    form.add_argument("--merge", metavar="SHA")
+    observed.add_argument("--platform-repo", metavar="O/N")
+    observed.add_argument("--within-days", type=int, default=None)
     observed.add_argument("--proven", type=Path, default=None, metavar="FILE")
     args = parser.parse_args(argv)
-    if re.fullmatch(r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+", args.repo) is None:
+    owner_name = r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+"
+    if re.fullmatch(owner_name, args.repo) is None:
         parser.error("--repo is owner/name")
-    if STAMP.fullmatch(args.since) is None:
-        parser.error("--since is YYYY-MM-DDTHH:MM:SSZ")
-    if args.within_days < 1:
-        parser.error("--within-days is a positive number")
+    if args.since is not None:
+        if STAMP.fullmatch(args.since) is None:
+            parser.error("--since is YYYY-MM-DDTHH:MM:SSZ")
+        if args.platform_repo is not None:
+            parser.error("--platform-repo goes with --merge")
+        within_days = WITHIN_DAYS if args.within_days is None else args.within_days
+        if within_days < 1:
+            parser.error("--within-days is a positive number")
+    else:
+        if REVISION.fullmatch(args.merge) is None:
+            parser.error("--merge is 40 lowercase hex")
+        if args.platform_repo is None or re.fullmatch(owner_name, args.platform_repo) is None:
+            parser.error("--merge needs --platform-repo O/N")
+        if args.within_days is not None:
+            parser.error("--within-days goes with --since")
+    proven, forge = args.proven or proof_run.proven_path(), lock_bump_forge.GitHubBumpForge()
     try:
-        code, record = observe(
-            args.repo, base=args.base, since=args.since, proven=args.proven or proof_run.proven_path(),
-            pages=forge_api.api_pages, verdict=lock_bump_forge.GitHubBumpForge().verdict,
-            within_days=args.within_days)
+        if args.since is not None:
+            code, record = observe(args.repo, base=args.base, since=args.since, proven=proven,
+                                   pages=forge_api.api_pages, verdict=forge.verdict, within_days=within_days)
+        else:
+            code, record = observe_merged(
+                args.repo, base=args.base, merge=args.merge, platform_repo=args.platform_repo, proven=proven,
+                pages=forge_api.api_pages, verdict=forge.verdict, compare=forge.compare)
     except forge_api.ForgeError as error:
         print(f"lock-bump: {error}", file=sys.stderr)
         return 2
