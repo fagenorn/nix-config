@@ -254,6 +254,51 @@ class ShortLaneTest(SlotHarness, unittest.TestCase):
         self.assertGreaterEqual(line["held_seconds"], 1.0)
         self.assertEqual(verify_queue.read_holders(self.slots, verify_queue.SHORT_LANE), [])
 
+    def test_a_short_command_with_its_own_bound_is_ended_at_that_bound_not_the_lane_bound(self):
+        self.declare(verify_short_lane={
+            "slots": 1, "bound_seconds": 30,
+            "commands": {"example/alpha": [{"argv": self.short("lint"), "bound_seconds": 1}]}})
+        code, err = self.finish(
+            self.start("lint", argv=self.short("lint"), cwd=self.worktree("alpha")), timeout=20)
+        self.assertEqual(code, verify_slot.BOUND_EXIT, err)
+        self.assertEqual(err.splitlines().count(verify_slot.SHORT_BOUND_LINE.format(bound=1)), 1)
+        self.assertFalse(self.mark("lint", "end").exists())
+
+    def test_a_short_command_with_a_longer_own_bound_outlives_the_lane_bound(self):
+        self.declare(verify_short_lane={
+            "slots": 1, "bound_seconds": 1,
+            "commands": {"example/alpha": [{"argv": self.short("lint"), "bound_seconds": 30}]}})
+        proc = self.start("lint", argv=self.short("lint"), cwd=self.worktree("alpha"))
+        self.assertTrue(wait_for(self.mark("lint", "start")))
+        time.sleep(2.5)
+        self.release("lint")
+        code, err = self.finish(proc)
+        self.assertEqual(code, 0, err)
+        self.assertNotIn(verify_slot.SHORT_BOUND_LINE.format(bound=1), err.splitlines())
+
+    def test_a_short_command_with_a_longer_own_bound_is_still_ended_at_that_bound(self):
+        self.declare(verify_slots=1, verify_short_lane={
+            "slots": 1, "bound_seconds": 1,
+            "commands": {"example/alpha": [{"argv": self.short("lint"), "bound_seconds": 2}]}})
+        suite = self.start("suite", cwd=self.worktree("alpha-one"))
+        self.assertTrue(wait_for(self.mark("suite", "start")))
+        code, err = self.finish(
+            self.start("lint", argv=self.short("lint"), cwd=self.worktree("alpha-two")), timeout=20)
+        self.assertTrue(self.mark("lint", "start").exists())
+        self.assertEqual([holder.repository for holder in verify_queue.read_holders(self.slots)],
+                         ["example/alpha"])
+        self.assertEqual(code, verify_slot.BOUND_EXIT, err)
+        lines = err.splitlines()
+        self.assertEqual(lines.count(verify_slot.SHORT_BOUND_LINE.format(bound=2)), 1)
+        self.assertNotIn(verify_slot.SHORT_BOUND_LINE.format(bound=1), lines)
+        self.assertFalse(self.mark("lint", "end").exists())
+        self.assertTrue(is_dead(int(self.mark("lint", "pid").read_text())))
+        self.release("suite")
+        self.assertEqual(self.finish(suite)[0], 0)
+        short = next(entry for entry in self.history() if entry["lane"] == "short")
+        self.assertEqual(short["exit"], 124)
+        self.assertGreaterEqual(short["held_seconds"], 2.0)
+
     def test_a_descendant_that_ignores_sigterm_is_killed_before_the_next_short_command_takes_the_slot(self):
         pair_argv = [sys.executable, "-c", PAIR, str(self.marks)]
         self.declare(verify_short_lane={

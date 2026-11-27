@@ -35,7 +35,9 @@ read that day).
 
 Each successful sample also appends one line to `DIR/samples/<day>.jsonl` (directory 0700, file 0600):
 `at`, `used_bytes`, `available_bytes`, `loaded`, `omlx_bytes`, `ci_jobs`, `wired_bytes`,
-`anonymous_bytes`, `compressions_bytes` (null when `vm_stat` prints no `Compressions` line), then
+`anonymous_bytes`, `compressions_bytes` (null when `vm_stat` prints no `Compressions` line), `compressor_bytes`,
+`floor_kills` (the floor record's `kills`, null when the record was not read, so a line holds proof its floor
+events were collected), then
 `sys_footprint_bytes`, `process_footprint_bytes`, `unowned_bytes`, `top_owners`, `census_at` and
 `census_seconds`, which are null without a fresh census, and last `events`, the list of changes since the previous
 sample (RAM disks from `hdiutil info -plist`, the Colima VM from the pid in `--colima-pid-file`, default
@@ -120,6 +122,12 @@ queues `jetsam_priority_unset` once per episode. Each `floor_unmet_recent` entry
 `floor_unmet_seen` to `floor_unmets`, which a record without it counts as 0, so the first episode after
 a healthy sample alerts). A missing or non-JSON record queues nothing.
 
+With `--restart-command` (and the four `--restart-*` numbers) `sample` also runs `omlx_reactive_restart.step`
+after `decide`: it restarts oMLX through that command once unowned plus compressor memory stays over the
+trigger while the server serves no request. Its state is `omlx-restart.json` and its records are
+`omlx-restarts.jsonl` in the state directory; the module docstring has the rules. Without the option
+nothing of it is read or written.
+
 Exit 0: recorded, every alert delivered or recorded. 3: recorded, at least one alert not sent
 (stderr `host alert not sent: <reason>`). 1: `vm_stat`, `sysctl`, `launchctl` or `ps` failed
 or printed nothing parseable (stderr names it; nothing is written). 2: usage. A failed
@@ -140,10 +148,11 @@ import time
 import urllib.parse
 import urllib.request
 from datetime import date, datetime, timedelta
+from functools import partial
 from pathlib import Path
 
 from agent_tools.delivery import verify_history, verify_slot
-from agent_tools.hosts import host_alerts, omlx_memory_events
+from agent_tools.hosts import host_alerts, omlx_memory_events, omlx_reactive_restart
 
 GIB = 1024**3
 PROG = "omlx-memory-watch"
@@ -452,7 +461,8 @@ def _sample_line(reading: dict, now: datetime, census: dict | None, events: list
         "at": now.isoformat(), "used_bytes": reading["used_bytes"], "available_bytes": reading["available_bytes"],
         "loaded": reading["loaded"], "omlx_bytes": reading["omlx_bytes"], "ci_jobs": reading["ci_jobs"],
         "wired_bytes": reading["wired_bytes"], "anonymous_bytes": reading["anonymous_bytes"],
-        "compressions_bytes": reading["compressions_bytes"],
+        "compressions_bytes": reading["compressions_bytes"], "compressor_bytes": reading["compressor_bytes"],
+        "floor_kills": _int((reading["floor"] or {}).get("kills")),
         **{key: found.get(key) for key in keys},
         "census_at": found.get("at"), "census_seconds": found.get("seconds"), "events": events,
     }
@@ -904,6 +914,7 @@ def take_reading(args, previous: dict | None = None) -> dict:
         "fseventsd": read_fseventsd_record(args.fseventsd_record), "floor": floor,
         "wired_bytes": vm["wired"] * page, "anonymous_bytes": vm["anonymous"] * page,
         "compressions_bytes": None if compressions is None else compressions * page,
+        "compressor_bytes": vm["compressor"] * page,
         "census": read_fseventsd_record(args.census_record),
         "observed": _observe(args, processes, (previous or {}).get("history_seen")),
     }
@@ -1004,7 +1015,39 @@ def deliver_pending(state: dict, args, now: datetime) -> bool:
     return failed
 
 
+def _restart_limits(args) -> omlx_reactive_restart.Limits | None:
+    """The reactive restart's limits, None without `--restart-command`; a missing number is a usage error."""
+    if args.restart_command is None:
+        return None
+    numbers = (args.restart_trigger_gib, args.restart_samples, args.restart_room_gib, args.restart_min_minutes)
+    if any(number is None for number in numbers):
+        build_parser().error(
+            "--restart-command needs --restart-trigger-gib, --restart-samples, --restart-room-gib "
+            "and --restart-min-minutes")
+    return omlx_reactive_restart.Limits(
+        str(args.restart_command), args.restart_trigger_gib * GIB, args.restart_samples,
+        args.restart_room_gib * GIB, timedelta(minutes=args.restart_min_minutes))
+
+
+def _restart_step(args, limits, directory: Path, reading: dict, now: datetime, started: float, persist) -> bool:
+    def send(kind: str, text: str, logged: bool) -> str:
+        outcome = host_alerts.deliver(
+            kind, text, settings=args.alert_settings, log=args.alert_log,
+            api=args.telegram_api or host_alerts.API, now=now, record_failure=not logged)
+        if outcome.status == "failed":
+            print(f"host alert not sent: {outcome.error}", file=sys.stderr)
+        return outcome.status
+
+    return omlx_reactive_restart.step(
+        directory, fresh_census(reading["census"], now), reading, now, limits,
+        elapsed=lambda: timedelta(seconds=time.monotonic() - started),
+        gate=partial(omlx_reactive_restart.run_gate, timeout=omlx_reactive_restart.GATE_TIMEOUT_SECONDS),
+        deliver=send, persist=persist)
+
+
 def sample(args) -> int:
+    started = time.monotonic()
+    limits = _restart_limits(args)
     now = args.now if args.now is not None else datetime.now().astimezone()
     directory = args.state_dir
     try:
@@ -1020,12 +1063,23 @@ def sample(args) -> int:
     state, line, record = decide(
         previous, reading, now, args.floor_gib * GIB, args.others_budget_gib * GIB, args.unowned_alert_gib * GIB,
         int(args.verify_alert_gib * GIB))
-    failed = deliver_pending(state, args, now)
     for entry in state["floor_log"]:
         print(entry, end="", flush=True)
     state["floor_log"] = []
     state["last_sample"] = {"day": state["day"], "line": record}
-    write_state(directory, state, line, record)
+    saved = []
+
+    def persist() -> None:
+        # The restart step calls this once its attempt is saved, so the sample line it counts can be recovered.
+        saved.append(True)
+        write_state(directory, state, line, record)
+
+    restart_failed = limits is not None and _restart_step(args, limits, directory, reading, now, started, persist)
+    failed = deliver_pending(state, args, now) or restart_failed
+    if saved:
+        write_state(directory, state, None)
+    else:
+        write_state(directory, state, line, record)
     return 3 if failed else 0
 
 
@@ -1066,6 +1120,9 @@ def build_parser() -> argparse.ArgumentParser:
     one.add_argument("--fseventsd-record", type=Path, default=Path(FSEVENTSD_RECORD))
     one.add_argument("--floor-record", type=Path, default=Path(FLOOR_RECORD))
     one.add_argument("--census-record", type=Path, default=Path(CENSUS_RECORD))
+    one.add_argument("--restart-command", type=Path, default=None)
+    for name in ("trigger-gib", "samples", "room-gib", "min-minutes"):
+        one.add_argument(f"--restart-{name}", type=int, default=None)
     one.add_argument("--now", type=datetime.fromisoformat, default=None)
     trim = commands.add_parser("fseventsd", help="restart fseventsd above its limit and record its size")
     trim.add_argument("--record", type=Path, required=True)

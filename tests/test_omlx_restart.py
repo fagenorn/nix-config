@@ -549,5 +549,258 @@ class RestartGateTest(unittest.TestCase):
         self.assertIn("pending: unrecorded change.", line)
 
 
+class StatusHandler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.server.seen.append((self.path, self.headers.get("Authorization")))
+        status, body, *rest = self.server.answers.get(self.path, (404, "{}"))
+        payload = (body if isinstance(body, str) else json.dumps(body)).encode()
+        self.send_response(status)
+        for name, value in (rest[0] if rest else {}).items():
+            self.send_header(name, value)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def log_message(self, *args):
+        pass
+
+
+class ReactiveGateTest(unittest.TestCase):
+    PINNED = "GLM-5.3-Flash-Abliterated-MLX-4bit"
+    KEY = "reactive-test-key"  # a synthetic credential
+    REASONS = "launchd plist changed: org.nixos.omlx\nmodel GLM-New added\n"
+
+    def status_body(self, **changes):
+        body = {
+            "status": "ok",
+            "models_loaded": 1,
+            "models_loading": 0,
+            "loaded_models": [self.PINNED],
+            "active_requests": 0,
+            "waiting_requests": 0,
+        }
+        return {**body, **changes}
+
+    def status_server(self, answers):
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), StatusHandler)
+        server.answers = answers
+        server.seen = []
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return server
+
+    def setUp(self):
+        scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        self.root = Path(scratch.name)
+        self.state = self.root / "state"
+        self.state.mkdir()
+        self.marker = self.state / ".restart-needed"
+        self.marker.write_text(self.REASONS)
+        self.calls = self.root / "calls"
+        self.stub = self.root / "restart"
+        self.stub.write_text(
+            '#!/bin/sh\nhere="$(dirname "$0")"\necho run >> "$here/calls"\n'
+            '{ echo "$@"; env; } >> "$here/args-env"\n'
+            '[ -e "$here/rc" ] && exit "$(cat "$here/rc")"\nexit 0\n'
+        )
+        self.stub.chmod(0o755)
+        self.reload_stub = self.root / "reload"
+        self.reload_stub.write_text('#!/bin/sh\necho reload >> "$(dirname "$0")/reload-calls"\nexit 0\n')
+        self.reload_stub.chmod(0o755)
+        # Reads like `lsof -F`: the listener's pid, command and uid, and exit 1 when it prints nothing.
+        self.listener = self.root / "listener"
+        self.listener.write_text(
+            '#!/bin/sh\nhere="$(dirname "$0")"\necho "$@" >> "$here/listener-args"\n'
+            'cat "$here/listener-out"\n[ -s "$here/listener-out" ]\n'
+        )
+        self.listener.chmod(0o755)
+        self.listen(f"p4242\ncomlx-server\nu{os.getuid()}\n")
+        self.server = self.status_server(
+            {
+                "/health": (200, serving(1)),
+                "/api/status": (200, self.status_body()),
+            }
+        )
+        self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
+
+    def answer(self, path, status, body, headers=None):
+        self.server.answers[path] = (status, body, headers or {})
+
+    def listen(self, text):
+        (self.root / "listener-out").write_text(text)
+
+    def run_reactive(self, *extra, stdin=None):
+        command = [
+            sys.executable, str(RESTART),
+            "--state-dir", str(self.state),
+            "--restart-bin", str(self.stub),
+            "--reload-bin", str(self.reload_stub),
+            "--listener-bin", str(self.listener),
+            "--health-url", f"{self.base}/health",
+            "--status-url", f"{self.base}/api/status",
+            "--reactive",
+            "--pinned-model", self.PINNED,
+            *extra,
+        ]
+        return subprocess.run(
+            command, text=True, capture_output=True, input=self.KEY + "\n" if stdin is None else stdin
+        )
+
+    def stub_calls(self):
+        return len(self.calls.read_text().splitlines()) if self.calls.exists() else 0
+
+    def reload_calls(self):
+        path = self.root / "reload-calls"
+        return len(path.read_text().splitlines()) if path.exists() else 0
+
+    def assert_deferred(self, result, why):
+        self.assertEqual(result.returncode, 75, result.stderr)
+        self.assertEqual(result.stderr.splitlines(), [f"oMLX: restart deferred ({why})"])
+        self.assertEqual(self.stub_calls(), 0)
+
+    def test_reactive_restarts_an_idle_pinned_only_server_with_the_key_in_the_header(self):
+        before = self.marker.read_bytes()
+        result = self.run_reactive()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr.splitlines(), ["oMLX: restarted (reactive)"])
+        self.assertEqual(self.stub_calls(), 1)
+        self.assertEqual(self.reload_calls(), 0)
+        self.assertEqual(self.marker.read_bytes(), before)
+        self.assertIn(("/api/status", f"Bearer {self.KEY}"), self.server.seen)
+        port = self.server.server_address[1]
+        asked = (self.root / "listener-args").read_text()
+        for needle in (f"-iTCP:{port}", "-sTCP:LISTEN", str(os.getuid())):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, asked)
+
+    def test_the_key_goes_only_to_the_oMLX_server_of_this_account(self):
+        mine = os.getuid()
+        cases = {
+            "another account": (f"p77\ncomlx-server\nu{mine + 1}\n", ()),
+            "another program": (f"p77\ncpython3\nu{mine}\n", ()),
+            "no visible listener": ("", ()),
+            "one listener of another account among ours": (
+                f"p77\ncomlx-server\nu{mine}\np78\ncomlx-server\nu{mine + 1}\n", ()),
+            "a listener tool that cannot run": (None, ("--listener-bin", str(self.root / "absent"))),
+        }
+        for name, (text, extra) in cases.items():
+            with self.subTest(name):
+                self.server.seen.clear()
+                if text is not None:
+                    self.listen(text)
+                self.assert_deferred(self.run_reactive(*extra), "listener is not the oMLX server")
+                self.assertEqual([auth for _, auth in self.server.seen], [None] * len(self.server.seen))
+                self.assertNotIn("/api/status", [path for path, _ in self.server.seen])
+
+    def test_reactive_defers_while_requests_are_active_or_waiting(self):
+        for active, waiting in ((1, 0), (0, 2)):
+            with self.subTest(active=active, waiting=waiting):
+                self.answer("/api/status", 200, self.status_body(active_requests=active, waiting_requests=waiting))
+                self.assert_deferred(self.run_reactive(), f"{active} active, {waiting} waiting requests")
+
+    def test_reactive_defers_while_another_model_is_loaded_or_loading(self):
+        other = "Qwen3.8-Flash-Next-oQ4e-mtp"
+        cases = (
+            (self.status_body(loaded_models=[self.PINNED, other]), f"other model loaded: {other}"),
+            (self.status_body(models_loading=1), "a model is loading"),
+        )
+        for body, why in cases:
+            with self.subTest(why=why):
+                self.answer("/api/status", 200, body)
+                self.assert_deferred(self.run_reactive(), why)
+
+    def test_reactive_defers_when_the_status_cannot_be_read(self):
+        unexpected = "request status unknown: unexpected body"
+        without_waiting = self.status_body()
+        del without_waiting["waiting_requests"]
+        cases = (
+            (401, {"detail": "Invalid API key"}, "request status unknown: status 401"),
+            (200, "not json", unexpected),
+            (200, self.status_body(active_requests=True), unexpected),
+            (200, self.status_body(active_requests=-1), unexpected),
+            (200, self.status_body(waiting_requests=-3), unexpected),
+            (200, without_waiting, unexpected),
+        )
+        for status, body, why in cases:
+            with self.subTest(body=body):
+                self.answer("/api/status", status, body)
+                self.assert_deferred(self.run_reactive(), why)
+
+    def test_reactive_without_a_key_defers_and_asks_nothing(self):
+        self.assert_deferred(self.run_reactive(stdin=""), "API key unreadable")
+        self.assertNotIn("/api/status", [path for path, _ in self.server.seen])
+
+    def test_reactive_defers_for_a_stopped_or_preloading_server(self):
+        closed = socket.socket()
+        closed.bind(("127.0.0.1", 0))
+        port = closed.getsockname()[1]
+        closed.close()
+        with self.subTest(case="stopped"):
+            result = self.run_reactive("--health-url", f"http://127.0.0.1:{port}/health")
+            self.assert_deferred(result, "server not running")
+        with self.subTest(case="preloading"):
+            self.answer("/health", 503, {"status": "loading"})
+            self.assert_deferred(self.run_reactive(), "pinned models still loading")
+
+    def test_reactive_and_now_together_are_refused(self):
+        result = self.run_reactive("--now")
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertEqual((self.stub_calls(), self.reload_calls()), (0, 0))
+
+    def test_the_key_reaches_no_child_argv_environment_or_log(self):
+        result = self.run_reactive()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn(self.KEY, (self.root / "args-env").read_text())
+        self.assertNotIn(self.KEY, result.stdout + result.stderr)
+
+    def test_a_reactive_kill_that_errors_exits_one_and_keeps_the_marker(self):
+        (self.root / "rc").write_text("2")
+        before = self.marker.read_bytes()
+        result = self.run_reactive()
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(result.stderr.splitlines(), ["oMLX: restart failed (exit 2)"])
+        self.assertEqual(self.marker.read_bytes(), before)
+
+    def test_reactive_needs_no_marker_and_creates_none(self):
+        self.marker.unlink()
+        result = self.run_reactive()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.stub_calls(), 1)
+        self.assertFalse(self.marker.exists())
+
+    def test_a_redirected_status_defers_and_sends_the_key_nowhere_else(self):
+        elsewhere = self.status_server({"/api/status": (200, self.status_body())})
+        target = f"http://127.0.0.1:{elsewhere.server_address[1]}/api/status"
+        self.answer("/api/status", 302, {}, {"Location": target})
+        self.assert_deferred(self.run_reactive(), "request status unknown: status 302")
+        self.assertEqual(elsewhere.seen, [])
+
+    def test_a_status_url_off_this_host_defers_without_a_request(self):
+        for flag, url in (
+            ("--status-url", "http://192.0.2.1:8000/api/status"),
+            ("--status-url", "https://127.0.0.1:8000/api/status"),
+            ("--health-url", "http://example.invalid/health"),
+        ):
+            with self.subTest(url=url):
+                self.assert_deferred(self.run_reactive(flag, url), "endpoint is not loopback")
+                self.assertEqual(self.server.seen, [])
+
+    def test_a_server_gone_before_the_signal_is_a_deferral_not_a_restart(self):
+        (self.root / "rc").write_text("1")
+        before = self.marker.read_bytes()
+        result = self.run_reactive()
+        self.assert_deferred_after_call(result, "no server process to signal")
+        self.assertNotIn("restarted", result.stdout + result.stderr)
+        self.assertEqual(self.marker.read_bytes(), before)
+
+    def assert_deferred_after_call(self, result, why):
+        self.assertEqual(result.returncode, 75, result.stderr)
+        self.assertEqual(result.stderr.splitlines(), [f"oMLX: restart deferred ({why})"])
+        self.assertEqual(self.stub_calls(), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

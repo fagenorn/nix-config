@@ -150,7 +150,8 @@ slot is freed.
 Signals. SIGTERM, SIGHUP and SIGINT are handled. While the command runs, the signal is
 forwarded to it and the exit code is `128 + signal` once it has ended (SIGTERM gives 143); a
 short command runs in its own process group and the signal goes to the whole group. A short
-command still running `bound_seconds` after it started has its group sent SIGTERM and, once
+command still running its bound after it started (its own `bound_seconds` when its entry in the
+declaration carries one, else the lane's) has its group sent SIGTERM and, once
 `SHORT_GRACE_SECONDS` have passed with a member left, SIGKILL; the slot is given back only
 after the group is gone, and a signal received meanwhile still gives `128 + signal`. The group
 is told before the bound line is written, and a stderr that cannot be written changes neither.

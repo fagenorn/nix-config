@@ -38,8 +38,9 @@ in
 {
   # Samples memory every minute as the owner and records the day's peaks. Its alerts go through
   # the owner's host-alerts settings file, so no secret is declared here.
+  # The watcher may also restart oMLX, through the gate that waits for no request in flight.
   launchd.daemons.omlx-memory-watch = {
-    command = "${launcher} sample --state-dir ${home}/.omlx/memory --floor-gib ${toString budget.floorGiB} --others-budget-gib ${toString budget.othersBudgetGiB} --omlx-jetsam-priority ${toString budget.omlxJetsamPriority} --host ${config.networking.hostName} --unowned-alert-gib ${toString budget.unownedAlertGiB} --verify-alert-gib ${toString budget.verifyAlertGiB} --fseventsd-record ${record}";
+    command = "${launcher} sample --state-dir ${home}/.omlx/memory --floor-gib ${toString budget.floorGiB} --others-budget-gib ${toString budget.othersBudgetGiB} --omlx-jetsam-priority ${toString budget.omlxJetsamPriority} --host ${config.networking.hostName} --unowned-alert-gib ${toString budget.unownedAlertGiB} --verify-alert-gib ${toString budget.verifyAlertGiB} --restart-command ${config.system.build.omlxRestart}/bin/omlx-restart --restart-trigger-gib ${toString budget.omlxRestartTriggerGiB} --restart-samples ${toString budget.omlxRestartSamples} --restart-room-gib ${toString budget.omlxRestartRoomGiB} --restart-min-minutes ${toString budget.omlxRestartMinMinutes} --fseventsd-record ${record}";
     serviceConfig = {
       UserName = username;
       EnvironmentVariables.HOME = home;
