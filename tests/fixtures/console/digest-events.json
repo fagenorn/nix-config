@@ -503,7 +503,370 @@
    "omitted": 0
   },
   {
-   "name": "delivery rows say nothing yet",
+   "name": "a delivery that ended after the look says one sentence per issue, newest first",
+   "last_looked": "2026-11-11T10:00:00.000000+00:00",
+   "now": "2026-11-11T12:00:00.000000+00:00",
+   "events": [
+    [
+     1,
+     "2026-11-11T09:00:00.000000+00:00",
+     "delivery.seen",
+     "owner/p00",
+     {
+      "session_id": "aaaaaaaa-1111",
+      "run_id": "r1",
+      "moved_ms": 0,
+      "issues": [
+       {
+        "issue": 5,
+        "stage": "landing",
+        "task": null,
+        "tasks": null
+       }
+      ]
+     }
+    ],
+    [
+     2,
+     "2026-11-11T09:01:00.000000+00:00",
+     "delivery.seen",
+     "owner/p00",
+     {
+      "session_id": "bbbbbbbb-2222",
+      "run_id": "r2",
+      "moved_ms": 0,
+      "issues": [
+       {
+        "issue": 9,
+        "stage": "done",
+        "task": null,
+        "tasks": null
+       },
+       {
+        "issue": 10,
+        "stage": "verifying",
+        "task": null,
+        "tasks": null
+       }
+      ]
+     }
+    ],
+    [
+     3,
+     "2026-11-11T10:00:00.000000+00:00",
+     "page.looked",
+     null,
+     {}
+    ],
+    [
+     4,
+     "2026-11-11T10:01:00.000000+00:00",
+     "delivery.seen",
+     "owner/p00",
+     {
+      "session_id": "aaaaaaaa-1111",
+      "run_id": "r1",
+      "moved_ms": 0,
+      "issues": [
+       {
+        "issue": 5,
+        "stage": "done",
+        "task": null,
+        "tasks": null
+       }
+      ]
+     }
+    ],
+    [
+     5,
+     "2026-11-11T10:02:00.000000+00:00",
+     "delivery.seen",
+     "owner/p00",
+     {
+      "session_id": "bbbbbbbb-2222",
+      "run_id": "r2",
+      "moved_ms": 0,
+      "issues": [
+       {
+        "issue": 9,
+        "stage": "done",
+        "task": null,
+        "tasks": null
+       },
+       {
+        "issue": 10,
+        "stage": "done",
+        "task": null,
+        "tasks": null
+       },
+       {
+        "issue": 11,
+        "stage": "building",
+        "task": null,
+        "tasks": null
+       }
+      ]
+     }
+    ],
+    [
+     6,
+     "2026-11-11T10:03:00.000000+00:00",
+     "delivery.gone",
+     "owner/p00",
+     {
+      "session_id": "aaaaaaaa-1111",
+      "run_id": "r1"
+     }
+    ],
+    [
+     7,
+     "2026-11-11T10:04:00.000000+00:00",
+     "delivery.gone",
+     "owner/p01",
+     {
+      "session_id": "bbbbbbbb-2222",
+      "run_id": "r2"
+     }
+    ]
+   ],
+   "recent": [
+    "The delivery of owner/p01 #9 ended: merged.",
+    "The delivery of owner/p01 #10 ended: merged.",
+    "The delivery of owner/p01 #11 ended: stopped at building.",
+    "The delivery of owner/p00 #5 ended: merged."
+   ],
+   "earlier": [],
+   "omitted": 0
+  },
+  {
+   "name": "a delivery that ended before the look says nothing",
+   "last_looked": "2026-11-11T10:00:00.000000+00:00",
+   "now": "2026-11-11T12:00:00.000000+00:00",
+   "events": [
+    [
+     1,
+     "2026-11-11T09:00:00.000000+00:00",
+     "delivery.seen",
+     "owner/p00",
+     {
+      "session_id": "aaaaaaaa-1111",
+      "run_id": "r1",
+      "moved_ms": 0,
+      "issues": [
+       {
+        "issue": 9,
+        "stage": "done",
+        "task": null,
+        "tasks": null
+       }
+      ]
+     }
+    ],
+    [
+     2,
+     "2026-11-11T09:30:00.000000+00:00",
+     "delivery.gone",
+     "owner/p00",
+     {
+      "session_id": "aaaaaaaa-1111",
+      "run_id": "r1"
+     }
+    ],
+    [
+     3,
+     "2026-11-11T10:00:00.000000+00:00",
+     "page.looked",
+     null,
+     {}
+    ],
+    [
+     4,
+     "2026-11-11T10:01:00.000000+00:00",
+     "delivery.seen",
+     "owner/p00",
+     {
+      "session_id": "aaaaaaaa-1111",
+      "run_id": "r2",
+      "moved_ms": 0,
+      "issues": [
+       {
+        "issue": 9,
+        "stage": "done",
+        "task": null,
+        "tasks": null
+       }
+      ]
+     }
+    ]
+   ],
+   "recent": [],
+   "earlier": [],
+   "omitted": 0
+  },
+  {
+   "name": "a delivery states its last stage before the end and says the end once",
+   "last_looked": "2026-11-11T10:00:00.000000+00:00",
+   "now": "2026-11-11T12:00:00.000000+00:00",
+   "events": [
+    [
+     1,
+     "2026-11-11T10:00:00.000000+00:00",
+     "page.looked",
+     null,
+     {}
+    ],
+    [
+     2,
+     "2026-11-11T10:01:00.000000+00:00",
+     "delivery.seen",
+     "owner/p00",
+     {
+      "session_id": "aaaaaaaa-1111",
+      "run_id": "r1",
+      "moved_ms": 0,
+      "issues": [
+       {
+        "issue": 9,
+        "stage": "building",
+        "task": null,
+        "tasks": null
+       }
+      ]
+     }
+    ],
+    [
+     3,
+     "2026-11-11T10:02:00.000000+00:00",
+     "delivery.seen",
+     "owner/p00",
+     {
+      "session_id": "aaaaaaaa-1111",
+      "run_id": "r1",
+      "moved_ms": 0,
+      "issues": [
+       {
+        "issue": 9,
+        "stage": "testing_is_not_a_stage",
+        "task": null,
+        "tasks": null
+       }
+      ]
+     }
+    ],
+    [
+     4,
+     "2026-11-11T10:03:00.000000+00:00",
+     "delivery.seen",
+     "owner/p00",
+     {
+      "session_id": "aaaaaaaa-1111",
+      "run_id": "r1",
+      "moved_ms": 0,
+      "issues": [
+       {
+        "issue": 9,
+        "stage": "verifying",
+        "task": null,
+        "tasks": null
+       }
+      ]
+     }
+    ],
+    [
+     5,
+     "2026-11-11T10:04:00.000000+00:00",
+     "delivery.gone",
+     "owner/p00",
+     {
+      "session_id": "aaaaaaaa-1111",
+      "run_id": "r1"
+     }
+    ],
+    [
+     6,
+     "2026-11-11T10:05:00.000000+00:00",
+     "delivery.gone",
+     "owner/p00",
+     {
+      "session_id": "aaaaaaaa-1111",
+      "run_id": "r1"
+     }
+    ]
+   ],
+   "recent": [
+    "The delivery of owner/p00 #9 ended: stopped at testing."
+   ],
+   "earlier": [],
+   "omitted": 0
+  },
+  {
+   "name": "a run gone without a known earlier seen says nothing",
+   "last_looked": "2026-11-11T10:00:00.000000+00:00",
+   "now": "2026-11-11T12:00:00.000000+00:00",
+   "events": [
+    [
+     1,
+     "2026-11-11T10:00:00.000000+00:00",
+     "page.looked",
+     null,
+     {}
+    ],
+    [
+     2,
+     "2026-11-11T10:01:00.000000+00:00",
+     "delivery.gone",
+     "owner/p00",
+     {
+      "session_id": "aaaaaaaa-1111",
+      "run_id": "r1"
+     }
+    ],
+    [
+     3,
+     "2026-11-11T10:02:00.000000+00:00",
+     "delivery.seen",
+     "owner/p00",
+     {
+      "session_id": "aaaaaaaa-1111",
+      "run_id": "r2",
+      "moved_ms": 0,
+      "issues": [
+       {
+        "issue": 9,
+        "stage": "done",
+        "task": null,
+        "tasks": null
+       }
+      ]
+     }
+    ],
+    [
+     4,
+     "2026-11-11T10:03:00.000000+00:00",
+     "delivery.gone",
+     "owner/p00",
+     {
+      "session_id": "aaaaaaaa-1111",
+      "run_id": "r3"
+     }
+    ],
+    [
+     5,
+     "2026-11-11T10:04:00.000000+00:00",
+     "delivery.gone",
+     "owner/p00",
+     {
+      "session_id": "bbbbbbbb-2222",
+      "run_id": "r2"
+     }
+    ]
+   ],
+   "recent": [],
+   "earlier": [],
+   "omitted": 0
+  },
+  {
+   "name": "a malformed delivery payload says nothing",
    "last_looked": "2026-11-11T10:00:00.000000+00:00",
    "now": "2026-11-11T12:00:00.000000+00:00",
    "events": [
@@ -540,7 +903,46 @@
      "owner/p00",
      {
       "session_id": "aaaaaaaa-1111",
+      "run_id": 7
+     }
+    ],
+    [
+     5,
+     "2026-11-11T10:04:00.000000+00:00",
+     "delivery.gone",
+     null,
+     {
+      "session_id": "aaaaaaaa-1111",
       "run_id": "r1"
+     }
+    ],
+    [
+     6,
+     "2026-11-11T10:05:00.000000+00:00",
+     "delivery.seen",
+     "owner/p00",
+     {
+      "session_id": "bbbbbbbb-2222",
+      "run_id": "r2",
+      "moved_ms": 0,
+      "issues": [
+       {
+        "issue": true,
+        "stage": "done",
+        "task": null,
+        "tasks": null
+       }
+      ]
+     }
+    ],
+    [
+     7,
+     "2026-11-11T10:06:00.000000+00:00",
+     "delivery.gone",
+     "owner/p00",
+     {
+      "session_id": "bbbbbbbb-2222",
+      "run_id": "r2"
      }
     ]
    ],

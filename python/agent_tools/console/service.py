@@ -10317,7 +10317,7 @@ class ConsoleService(ActionPermit):
                     print(f"console: {label}_failed {type(error).__name__}: {error}", file=sys.stderr)
 
     def _fold(self, appended: list[Event]) -> None:
-        new = digest.moments(appended, self._sessions, self._inbox, self._sprints)
+        new = digest.moments(appended, self._sessions, self._inbox, self._sprints, self._deliveries)
         self._looked = digest.last_looked(appended, self._looked)
         self._states = project_states(appended, self._states)
         self._rerun_record = permit.rerun_record(appended, self._rerun_record)

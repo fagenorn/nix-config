@@ -64,9 +64,16 @@ Event kinds read:
   no stop request, and the row's project is a string; a refused or repeated closing, and the closing
   of a sprint the owner stopped, say nothing.
 
-Every other kind says nothing, `goal.stated` included, delivery runs (`delivery.seen`, `delivery.gone`)
-included: the console has no delivery moments yet, and #878 adds them from
-those rows. An event whose payload lacks a required member says nothing.
+- `delivery.seen`, `delivery.gone` (`deliveries.DELIVERY_SEEN`, `DELIVERY_GONE`, #878): a run's issues
+  with their stage, and a run whose journal has no reading any more. A `delivery.seen` says nothing
+  itself; it is folded with `deliveries.delivery_states`, so a seen of an invalid shape is ignored and
+  the last valid one of a run is the run's state. A `delivery.gone` speaks, one moment per issue of
+  the run's state before the row in the run's order, only when the event's project is a str and its
+  payload names a `session_id` and `run_id` (str) of a run the fold knows; a run the log never saw,
+  a run already gone and a malformed payload say nothing.
+
+Every other kind says nothing, `goal.stated` included. An event whose payload lacks a required member
+says nothing.
 
 A moment is made once, when its event is folded, against the session and inbox
 state before that event (`moments`), so the same events always give the same
@@ -119,6 +126,9 @@ withdrawal removes the sprint).
     manager_moved    <title> moved to another account
     quota_resumed    <title> resumed after the quota reset
     project_registered <project_id> was registered.
+    delivery_ended   The delivery of <project_id> #<issue> ended: <how>
+                     (`merged` when the issue's last stage was `done`, else `stopped at <stage>`
+                     with `deliveries.stage_words` of that stage)
 
 An inbox payload needs `project_id` (str), `issue` (int, not bool) and
 `question` (str). A withdrawal needs the event's project (str) and a payload `goal` (str); it
@@ -154,6 +164,8 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
+from agent_tools.console.deliveries import (
+    DELIVERY_GONE, DELIVERY_SEEN, DONE, DeliveryState, delivery_states, stage_words)
 from agent_tools.console.event_log import (
     ADOPTION_REGISTRATION, BRIEF_APPROVED, BRIEF_SENT, GOAL_WITHDRAWN, MANAGER_NUDGED,
     MANAGER_STARTED, MANAGER_WOKEN, QUESTION_ANSWERED, QUESTION_WITHDRAWN, QUESTIONS_ASKED,
@@ -191,6 +203,7 @@ QUOTA_RESUMED = "quota_resumed"
 PROJECT_REGISTERED = "project_registered"
 QUESTION_WITHDRAWN_MOMENT = "question_withdrawn"
 QUESTION_REPLACED_MOMENT = "question_replaced"
+DELIVERY_ENDED = "delivery_ended"
 
 
 @dataclass(frozen=True)
@@ -427,13 +440,32 @@ def _closing_moment(event: Event, before: Mapping[str, SprintState],
             f"The sprint for {event.project} is done: {new.closing.first_line}")
 
 
+def _delivery_moments(event: Event, known: Mapping[tuple[str, str], DeliveryState]) -> list[tuple[str, str]]:
+    """One sentence per issue of the run a `delivery.gone` ends; `known` is the fold before the row."""
+    payload = event.payload
+    if not isinstance(payload, dict) or not isinstance(event.project, str):
+        return []
+    session_id, run_id = payload.get("session_id"), payload.get("run_id")
+    if not isinstance(session_id, str) or not isinstance(run_id, str):
+        return []
+    state = known.get((session_id, run_id))
+    if state is None:
+        return []
+    return [(DELIVERY_ENDED,
+             f"The delivery of {event.project} #{issue.issue} ended: "
+             + ("merged." if issue.stage == DONE else f"stopped at {stage_words(issue.stage)}."))
+            for issue in state.issues]
+
+
 def moments(
     events: Iterable[Event],
     sessions: Mapping[str, SessionState],
     records: Mapping[tuple[str, str], InboxRecord],
     sprints: Mapping[str, SprintState] | None = None,
+    deliveries: Mapping[tuple[str, str], DeliveryState] | None = None,
 ) -> list[Moment]:
     states, held, folded = dict(sessions), dict(records), dict(sprints or {})
+    runs = dict(deliveries or {})
     found = []
     for event in events:
         said = None
@@ -481,6 +513,10 @@ def moments(
             said = refusal
         elif event.kind == SPRINT_CLOSED:
             said = _closing_moment(event, previous, folded)
+        elif event.kind in (DELIVERY_SEEN, DELIVERY_GONE):
+            ended = _delivery_moments(event, runs) if event.kind == DELIVERY_GONE else []
+            runs = delivery_states([event], runs)
+            found.extend(Moment(event.seq, event.at, kind, sentence) for kind, sentence in ended)
         if said is not None:
             found.append(Moment(event.seq, event.at, said[0], said[1]))
     return found
