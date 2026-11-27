@@ -4866,14 +4866,9 @@ def row_check_env(dropped=()):
 
 
 def session_child(argv, env, timeout):
-    """The `CompletedProcess` of `argv`, or None when it ran past `timeout`.
-
-    The child runs once with no stdin, `env`, its output captured as bytes (a
-    caller decodes protocol output strictly, and `bounded_child_diagnostic`
-    replaces an undecodable byte only to show it) and its own session, so one
-    SIGKILL to its process group on the bound takes its descendants with it. The
-    pipes are not read again after the kill; only the direct child is reaped. An
-    `OSError` from starting it propagates.
+    """The `CompletedProcess` of `argv`, or None past `timeout`; an `OSError` from starting it propagates.
+    Stdin is empty and output is bytes, which the caller decodes strictly. The child has its own session, so the
+    SIGKILL to its process group on the bound takes its descendants; the pipes are not read after the kill.
     """
     child = subprocess.Popen(
         argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,

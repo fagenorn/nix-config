@@ -11,7 +11,7 @@ from agent_tools.console import permit
 from agent_tools.console.permit import ALLOW, DENY, ForgeUnreadable, Grant, judge, memoized
 from agent_tools.system import forge_api
 
-from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures
 from .test_console_permit import HEAD, SHA, FakeForge
 
 TIER = "fast"
