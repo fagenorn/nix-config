@@ -1,129 +1,94 @@
 """Claude Code's PreToolUse lifecycle guard for Bash, file edits and MCP tools.
 
-The claude-code module's store wrapper clears NIX_PYTHON* and runs this file
-under `python3 -I` with `--base-policy` naming the store base policy, the only
-source of the trusted members, and `--policy` naming the compiled policy at
-`~/.agents/state/guard/policy.json`, which supplies derived rows alone. The
-wrapper also passes `--derive-bin`, the row check the guard runs for a
-repository with a compiled row before it relies on that row. Any of the three
-flags given after the wrapper's own replaces it, which is how a test loads
-fixtures.
-Standard library only: it imports nothing from the repository's helper package,
-`agent_tools`.
+The claude-code module's store wrapper clears NIX_PYTHON* and runs this file under `python3 -I` with `--base-policy`
+naming the store base policy, the only source of the trusted members, and `--policy` naming the compiled policy at
+`~/.agents/state/guard/policy.json`, which supplies derived rows alone. The wrapper also passes `--derive-bin`, the
+row check the guard runs for a repository with a compiled row before it relies on that row. Any of the three flags
+given after the wrapper's own replaces it, which is how a test loads fixtures. Standard library only: it imports
+nothing from the repository's helper package, `agent_tools`.
 
-The decisions behind the rules below are the records in `docs/areas/guard/adr/`,
-and the compiler that writes the compiled policy is documented in
-`python/agent_tools/guard/guard_policy.py`.
+The decisions behind the rules below are the records in `docs/areas/guard/adr/`, and the compiler that writes the
+compiled policy is documented in `python/agent_tools/guard/guard_policy.py`.
 
 Segments, tokens and verbs
 --------------------------
 
-The hook splits the command into shell segments, tokenises each one, and
-adjudicates a verb wherever a simple command starts: after `(`/`{`/`` ` ``/`$(`/a
-`case` arm, after `!`/`time`/`then`/`do`, and behind `command`/`env`/`sudo`-style
-wrappers, stepping over their option arguments (`env -u NAME`, `sudo -u user`,
-attached and long forms included). It compares token values, so `git  push`,
-`git<TAB>push` and `"git" push` all count. A word whose basename is `git` starts
-a git invocation (a git word that is not a `push` or `branch -d` is judged by
-Transmitting git invocations below): with no global option, or one `-C <dir>`,
-the word after them is its subcommand (`push`, or `branch` then `-d`), and with
-any other global option a `push` or `branch -d` anywhere among its words counts.
-A word whose basename is `gh` counts when its first two words are `pr merge`,
-`pr create`, `release create` or `release new`, or when a flag comes before the
-path's second word and both path words occur in order, so `gh --repo a/b pr
-merge 1` counts and `gh pr view 1 --json mergeable` does not (issue 400).
+The hook splits the command into shell segments, tokenises each one, and adjudicates a verb wherever a simple command
+starts: after `(`/`{`/`` ` ``/`$(`/a `case` arm, after `!`/`time`/`then`/`do`, and behind `command`/`env`/`sudo`-style
+wrappers, stepping over their option arguments (`env -u NAME`, `sudo -u user`, attached and long forms included). It
+compares token values, so `git  push`, `git<TAB>push` and `"git" push` all count. A word whose basename is `git`
+starts a git invocation (a git word that is not a `push` or `branch -d` is judged by Transmitting git invocations
+below): with no global option, or one `-C <dir>`, the word after them is its subcommand (`push`, or `branch` then
+`-d`), and with any other global option a `push` or `branch -d` anywhere among its words counts. A word whose basename
+is `gh` counts when its first two words are `pr merge`, `pr create`, `release create` or `release new`, or when a flag
+comes before the path's second word and both path words occur in order, so `gh --repo a/b pr merge 1` counts and `gh
+pr view 1 --json mergeable` does not (issue 400).
 
-Such an invocation is refused before any repository lookup, its problem ending
-`run git and gh by name, and carry a directory only as git -C <dir>` and followed
-by the accepted-forms clause (see Adjudicated verbs below), when its program is
-named by a path, or it carries a git global option other than one `-C`, a
-repeated `-C`, or a `-C` directory holding whitespace, a quote or a
-shell-active character, or when its run reaches a shell substitution, expansion
-or grouping before its verb is certain: a git run still inside its global
-options or carrying a global option other than `-C`, whose value the walk cannot
-bound (`git -c k=$(…) push …`), or a gh run carrying a flag or ending before its
-third word (`gh pr --repo $(…) merge …`). Then the verb's words among the rest
-of the command's words count, across segment boundaries, so `git -C $(pwd |
-cat) push …` blocks, also when a segment it crosses is judged on its whole text
-as evaluator source or an `env -S` payload (`git -C $(sh -c pwd | cat) push
-…`), and the reason names that invocation continuing past the substitution
-(issue 400 D15, D18, D19). A word taken as a `-C` value is an argument of git,
-never a program; a gh flag between the path words is left to the verb's
-grammar.
+Such an invocation is refused before any repository lookup, its problem ending `run git and gh by name, and carry a
+directory only as git -C <dir>` and followed by the accepted-forms clause (see Adjudicated verbs below), when its
+program is named by a path, or it carries a git global option other than one `-C`, a repeated `-C`, or a `-C`
+directory holding whitespace, a quote or a shell-active character, or when its run reaches a shell substitution,
+expansion or grouping before its verb is certain: a git run still inside its global options or carrying a global
+option other than `-C`, whose value the walk cannot bound (`git -c k=$(…) push …`), or a gh run carrying a flag or
+ending before its third word (`gh pr --repo $(…) merge …`). Then the verb's words among the rest of the command's
+words count, across segment boundaries, so `git -C $(pwd | cat) push …` blocks, also when a segment it crosses is
+judged on its whole text as evaluator source or an `env -S` payload (`git -C $(sh -c pwd | cat) push …`), and the
+reason names that invocation continuing past the substitution (issue 400 D15, D18, D19). A word taken as a `-C` value
+is an argument of git, never a program; a gh flag between the path words is left to the verb's grammar.
 
-A mention that is one quoted token (`echo "gh pr merge …"`), a comment, or a
-heredoc body the guard reads exactly is not a command and never triggers it.
-The guard reads a heredoc exactly only when its delimiter is a bare word
-without quotes, backslashes, `$` or backticks, one single-quoted span, or one
-double-quoted span without a shell-active character, and, under a bare-word
-delimiter, the body holds no `$`, backtick or backslash (the shell runs
-substitutions there). Any other heredoc (ANSI-C `$'EOF'`, locale `$"EOF"`,
-mixed quoting, escapes, an expanding body) makes the command unparseable, so a
-verb anywhere in its text, body included, is refused (issue 651).
+A mention that is one quoted token (`echo "gh pr merge …"`), a comment, or a heredoc body the guard reads exactly is
+not a command and never triggers it. The guard reads a heredoc exactly only when its delimiter is a bare word without
+quotes, backslashes, `$` or backticks, one single-quoted span, or one double-quoted span without a shell-active
+character, and, under a bare-word delimiter, the body holds no `$`, backtick or backslash (the shell runs
+substitutions there). Any other heredoc (ANSI-C `$'EOF'`, locale `$"EOF"`, mixed quoting, escapes, an expanding body)
+makes the command unparseable, so a verb anywhere in its text, body included, is refused (issue 651).
 
-Everything the tokeniser cannot vouch for is refused rather than waved
-through: an unparseable command, shell source handed to an evaluator
-(`eval`/`sh -c`, matched by basename, so `/bin/sh -c` too), a segment in which
-`env` takes `-S`/`--split-string` (judged on its whole text, since env appends
-the remaining words to the split command), and a guarded verb sitting in a
-non-command position (an argument to `xargs`, `timeout`, …) all block. In such
-raw text a verb counts when its words occur in order, the first by basename,
-with the text read twice (words split at whitespace, quotes and shell-active
-characters; and again with quotes and backslashes deleted, since the shell
-glues the pieces into one word) and an attached `-S` payload read as a word,
-and it also counts when its words joined by one space occur as a substring of
-the text or of the text with quotes and backslashes deleted, so `sh -c 'git -C
-x push …'`, `sh -c "g''it push …"`, `env -Sgit push …`, `eval "${CMD:-git push
-…}"` and `sh -c "git branch -df x"` block too.
+Everything the tokeniser cannot vouch for is refused rather than waved through: an unparseable command, shell source
+handed to an evaluator (`eval`/`sh -c`, matched by basename, so `/bin/sh -c` too), a segment in which `env` takes
+`-S`/`--split-string` (judged on its whole text, since env appends the remaining words to the split command), and a
+guarded verb sitting in a non-command position (an argument to `xargs`, `timeout`, …) all block. In such raw text a
+verb counts when its words occur in order, the first by basename, with the text read twice (words split at whitespace,
+quotes and shell-active characters; and again with quotes and backslashes deleted, since the shell glues the pieces
+into one word) and an attached `-S` payload read as a word, and it also counts when its words joined by one space
+occur as a substring of the text or of the text with quotes and backslashes deleted, so `sh -c 'git -C x push …'`, `sh
+-c "g''it push …"`, `env -Sgit push …`, `eval "${CMD:-git push …}"` and `sh -c "git branch -df x"` block too.
 
-The tokeniser approximates bash rather than being bash, which is why it
-refuses whatever it cannot parse. `tests/test_claude_permission_guard.py`
-carries an adversarial table, one case per class of "the parser and the shell
+The tokeniser approximates bash rather than being bash, which is why it refuses whatever it cannot parse.
+`tests/test_claude_permission_guard.py` carries an adversarial table, one case per class of "the parser and the shell
 might disagree", that any change to the guard must keep green.
 
 Detaching words
 ---------------
 
-Before any of the rest, and before its policy loads, the hook refuses the
-detaching words `nohup`, `setsid` and `disown` in every repository (#278),
-naming the Bash tool's `run_in_background: true` as the route. Since issue 656
-it reads no shell syntax for this. A command is refused when one of the words
-appears as a whole word in its raw text, in any case. A whole word has no ASCII
-letter, digit, `_` or `-` after it, and none before it except `c` or `s`, which
-covers env's attached `-S` and `su -c`; a `$` and one digit, `!`, `@` or `*`
-before it also bound it (`$1nohup`), and a `-` default-value operator does too
-(`${x:-nohup}`, `${x-nohup}`, whatever the parameter, `${@:-nohup}` and
-`${a[0]:-nohup}` included, and with the word rebuilt as the deletion copy below
-rebuilds it, `${x:-no''hup}` and `${x:-'n'ohup}`). The same test runs on a copy
-of the text with backslash-newlines deleted, then every `$` before a quote and
-every `\\`, `'`, `"`, `{`, `}` and `,` (`no''hup`, `no$''hup`, `no{,}hup`). The
-refusal names the earliest hit.
+Before any of the rest, and before its policy loads, the hook refuses the detaching words `nohup`, `setsid` and
+`disown` in every repository (#278),
+naming the Bash tool's `run_in_background: true` as the route. Since issue 656 it reads no shell syntax for this. A
+command is refused when one of the words appears as a whole word in its raw text, in any case. A whole word has no
+ASCII letter, digit, `_` or `-` after it, and none before it except `c` or `s`, which covers env's attached `-S` and
+`su -c`; a `$` and one digit, `!`, `@` or `*` before it also bound it (`$1nohup`), and a `-` default-value operator
+does too (`${x:-nohup}`, `${x-nohup}`, whatever the parameter, `${@:-nohup}` and `${a[0]:-nohup}` included, and with
+the word rebuilt as the deletion copy below rebuilds it, `${x:-no''hup}` and `${x:-'n'ohup}`). The same test runs on a
+copy of the text with backslash-newlines deleted, then every `$` before a quote and every `\\`, `'`, `"`, `{`, `}` and
+`,` (`no''hup`, `no$''hup`, `no{,}hup`). The refusal names the earliest hit.
 
-Only two read-only forms are admitted, each read in the issue-418 word grammar
-with every option enumerated. One is a single plain `grep` or `rg` call that
-holds the word only in its search pattern. An option outside the table refuses
-the admission, such as `-f`, `--files`, or rg's `--pre`, `--hostname-bin` and
-`-z`. The other is one `gh issue|pr create|comment` call, optionally after the
-`unset GITHUB_TOKEN && ` scrub, that holds the word only in a quoted
-`--title`/`-t`/`--body`/`-b` value, with no other options than `--repo`,
-`--base` and `--head`. Any other mention, a heredoc body, a comment,
-`nohup.out` and a word handed to `xargs` or `timeout` are refused; a trailing
-`&` passes, and so does a slugged branch or worktree name such as
-`issue-7-refuse-nohup`. A commit message that names a word is refused; reword it
-or use `git commit -F`.
+Only two read-only forms are admitted, each read in the issue-418 word grammar with every option enumerated. One is a
+single plain `grep` or `rg` call that holds the word only in its search pattern. An option outside the table refuses
+the admission, such as `-f`, `--files`, or rg's `--pre`, `--hostname-bin` and `-z`. The other is one `gh issue|pr
+create|comment` call, optionally after the `unset GITHUB_TOKEN && ` scrub, that holds the word only in a quoted
+`--title`/`-t`/`--body`/`-b` value, with no other options than `--repo`, `--base` and `--head`. Any other mention, a
+heredoc body, a comment, `nohup.out` and a word handed to `xargs` or `timeout` are refused; a trailing `&` passes, and
+so does a slugged branch or worktree name such as `issue-7-refuse-nohup`. A commit message that names a word is
+refused; reword it or use `git commit -F`.
 
 Transmitting git invocations
 ----------------------------
 
-A git invocation that could transmit refs and is not an admitted lifecycle form
-is refused as a push (issue 655). `push` and `branch -d` keep the recognition
-above and its messages; every other `git` word, and every word whose basename
-starts with `git-`, is judged by `git_transmit_problem` and refused as
-`lifecycle guard: unsafe push: <problem>; accepted: <push forms>; optional
-prefix: …`. The guard never reads git configuration, so an alias is refused by
-its name, not by what it resolves to. The refusal comes after the
-lifecycle-grammar check (a command that also holds a lifecycle verb keeps its
-grammar refusal) and before any repository context is built, so no git, gh or
+A git invocation that could transmit refs and is not an admitted lifecycle form is refused as a push (issue 655).
+`push` and `branch -d` keep the recognition above and its messages; every other `git` word, and every word whose
+basename starts with `git-`, is judged by `git_transmit_problem` and refused as `lifecycle guard: unsafe push:
+<problem>; accepted: <push forms>; optional prefix: …`. The guard never reads git configuration, so an alias is
+refused by its name, not by what it resolves to. The refusal comes after the lifecycle-grammar check (a command that
+also holds a lifecycle verb keeps its grammar refusal) and before any repository context is built, so no git, gh or
 row-check child runs.
 
 What is refused:
@@ -196,64 +161,45 @@ What is refused:
   bare-word mention such as `printenv CLAUDECODE` refuses too; write `echo
   $CLAUDECODE` instead.
 
-The same rule judges a git word at a command position, at an argument position
-and in raw text. At an argument position it is `git_argument_problem`, whatever
-runs the word (`xargs git p`, `timeout 5 git p`, `find -exec git p`); the guard
-keeps no list of runners. Evaluator text (`eval`, `sh -c`), `env -S` text and
-unparseable or untokenisable text is split at `;`, `&`, `|` and newlines, and
-each piece's raw words, in both quote readings, are walked from every raw git
-word: one whose text ends in `git` after nothing or after `/`, `:`, `=`, `+`,
-`?` or `-`, so `${X:-git} p` is caught. The reason such a refusal reports is the
-evaluator's or the `env -S` one. A mention is judged like a command: `rg -n git
-README.md`, `echo git p` and `nix-shell -p git jq` are refused. Write a mention
-so that no word is a bare `git` followed by a non-local word (`rg -n '[g]it'
-README.md`, `echo 'git p'`); a `git` followed by nothing (`which git`, `brew
-install git`) passes.
+The same rule judges a git word at a command position, at an argument position and in raw text. At an argument
+position it is `git_argument_problem`, whatever runs the word (`xargs git p`, `timeout 5 git p`, `find -exec git p`);
+the guard keeps no list of runners. Evaluator text (`eval`, `sh -c`), `env -S` text and unparseable or untokenisable
+text is split at `;`, `&`, `|` and newlines, and each piece's raw words, in both quote readings, are walked from every
+raw git word: one whose text ends in `git` after nothing or after `/`, `:`, `=`, `+`, `?` or `-`, so `${X:-git} p` is
+caught. The reason such a refusal reports is the evaluator's or the `env -S` one. A mention is judged like a command:
+`rg -n git README.md`, `echo git p` and `nix-shell -p git jq` are refused. Write a mention so that no word is a bare
+`git` followed by a non-local word (`rg -n '[g]it' README.md`, `echo 'git p'`); a `git` followed by nothing (`which
+git`, `brew install git`) passes.
 
-Spellings of a git word that the shell resolves are read too: the word after
-`$` (`$'git' p`, which tokenises to `$git`), a line continuation (`git\\<newline>
-p` is `git p`, in tokenised and raw text alike), a variable the command itself
-assigns a git word (`G=git; $G p`, `export G=/usr/bin/git; "$G" p`, `${G} p`)
-or the output of a substitution that holds one (`G=$(which git); $G p`), a name
-that `hash` or `alias` binds to git (`hash g=/usr/bin/git; g p`, `alias g=git; g
-p`), zsh's `=git p` expansion of the command's path (one leading `=` is
-stripped), the braced default `${G:-git} p` at any position, and a git word
-inside a double-quoted `$(…)` or backtick substitution, refused as `a command
-substitution inside a quoted word cannot be validated` when its text would be
-refused as raw text. A command that has an evaluator at a command position is
-also scanned as a whole, heredoc bodies included, because that evaluator may
-read its source from stdin (`echo 'git p origin t' | sh`, `sh <<'EOF'`).
-Evaluator text carries the same spellings: names it assigns itself or inherits
-from the command (`sh -c 'G=git; $G p'`, `G=git; sh -c '$G p'`), and a third,
-quote-aware reading of each piece in which a quoted global-option operand is one
-word (`sh -c 'git -C "/tmp status" p origin t'`) and a word holding several
-words is read again as text.
+Spellings of a git word that the shell resolves are read too: the word after `$` (`$'git' p`, which tokenises to
+`$git`), a line continuation (`git\\<newline> p` is `git p`, in tokenised and raw text alike), a variable the command
+itself assigns a git word (`G=git; $G p`, `export G=/usr/bin/git; "$G" p`, `${G} p`) or the output of a substitution
+that holds one (`G=$(which git); $G p`), a name that `hash` or `alias` binds to git (`hash g=/usr/bin/git; g p`,
+`alias g=git; g p`), zsh's `=git p` expansion of the command's path (one leading `=` is stripped), the braced default
+`${G:-git} p` at any position, and a git word inside a double-quoted `$(…)` or backtick substitution, refused as `a
+command substitution inside a quoted word cannot be validated` when its text would be refused as raw text. A command
+that has an evaluator at a command position is also scanned as a whole, heredoc bodies included, because that
+evaluator may read its source from stdin (`echo 'git p origin t' | sh`, `sh <<'EOF'`). Evaluator text carries the same
+spellings: names it assigns itself or inherits from the command (`sh -c 'G=git; $G p'`, `G=git; sh -c '$G p'`), and a
+third, quote-aware reading of each piece in which a quoted global-option operand is one word (`sh -c 'git -C "/tmp
+status" p origin t'`) and a word holding several words is read again as text.
 
-Command-running options. An allowlisted subcommand is still refused when it
-carries an option whose value git runs as a command, from
-`GIT_COMMAND_OPTIONS`: `archive --exec`, `clone
---upload-pack`/`-u`/`--config`/`-c`/`--template`, `fetch`/`pull --upload-pack`,
-`grep --open-files-in-pager`/`-O`, `init --template`, `ls-remote
---upload-pack`/`-u` and `rebase --exec`/`-x`. `git_command_option` matches a
-`--` word by its part before any `=` when that part has three or more
-characters and a spelling of the subcommand starts with it (git accepts `--exe`
-and `--upload`), and a short word when any letter of its cluster is a short
-spelling (`-ix`, `-Osh`). Every word after the subcommand is scanned, an option
-value or an operand after `--` included, so a lookalike can only refuse more.
-The check runs inside `git_transmit_problem`, so it applies at a command
-position, an argument position and in raw text alike.
+Command-running options. An allowlisted subcommand is still refused when it carries an option whose value git runs as
+a command, from `GIT_COMMAND_OPTIONS`: `archive --exec`, `clone --upload-pack`/`-u`/`--config`/`-c`/`--template`,
+`fetch`/`pull --upload-pack`, `grep --open-files-in-pager`/`-O`, `init --template`, `ls-remote --upload-pack`/`-u` and
+`rebase --exec`/`-x`. `git_command_option` matches a `--` word by its part before any `=` when that part has three or
+more characters and a spelling of the subcommand starts with it (git accepts `--exe` and `--upload`), and a short word
+when any letter of its cluster is a short spelling (`-ix`, `-Osh`). Every word after the subcommand is scanned, an
+option value or an operand after `--` included, so a lookalike can only refuse more. The check runs inside
+`git_transmit_problem`, so it applies at a command position, an argument position and in raw text alike.
 
-Environment assignments. An assignment that hands git a command or other
-configuration is refused as a push in two places. (a) Every assignment before a
-git word, up to the last operator (`X=1 git …`, `env X=1 git …`, `timeout 5 env
-X=1 git …`), must name a variable in `GIT_ASSIGNMENT_ALLOWED` (tracing, author
-and committer identity, pathspec switches, locale, `TZ`, `TERM` and similar);
-`PATH`, `HOME`, `GIT_SEQUENCE_EDITOR`, `GIT_SSH_COMMAND`, `GIT_EXEC_PATH` and
-every `GIT_CONFIG_*` name are not in it. (b) Anywhere in the command, including
-`export` and `declare` arguments, a standalone assignment, and the raw text of
-an evaluator or quoted substitution, a name starting with `GIT_` that is not
-allowlisted, or one of `GIT_COMMAND_VARIABLES` (`EDITOR`, `VISUAL`, `PAGER`), is
-refused.
+Environment assignments. An assignment that hands git a command or other configuration is refused as a push in two
+places. (a) Every assignment before a git word, up to the last operator (`X=1 git …`, `env X=1 git …`, `timeout 5 env
+X=1 git …`), must name a variable in `GIT_ASSIGNMENT_ALLOWED` (tracing, author and committer identity, pathspec
+switches, locale, `TZ`, `TERM` and similar); `PATH`, `HOME`, `GIT_SEQUENCE_EDITOR`, `GIT_SSH_COMMAND`, `GIT_EXEC_PATH`
+and every `GIT_CONFIG_*` name are not in it. (b) Anywhere in the command, including `export` and `declare` arguments,
+a standalone assignment, and the raw text of an evaluator or quoted substitution, a name starting with `GIT_` that is
+not allowlisted, or one of `GIT_COMMAND_VARIABLES` (`EDITOR`, `VISUAL`, `PAGER`), is refused.
 
 Adjudicated verbs
 -----------------
@@ -288,152 +234,114 @@ The verbs the guard adjudicates are validated against the live repository:
   issues carry a look marker, the owner's look approval of its head (the look
   gate below, issue 1138).
 
-Each may sit behind a credential-scrub prefix (issue 400), spelled exactly
-`unset N && `, `unset N M && `, `env -u N ` or `env -u N -u M ` with single
-spaces and `N`, `M` distinct members of the credential-name set `GITHUB_TOKEN`,
+Each may sit behind a credential-scrub prefix (issue 400), spelled exactly `unset N && `, `unset N M && `, `env -u N `
+or `env -u N -u M ` with single spaces and `N`, `M` distinct members of the credential-name set `GITHUB_TOKEN`,
 `GH_TOKEN` (`unset GITHUB_TOKEN && ` is the spelling derived from
-`bindings.tracker.credential_env.unset_before_invocation`'s exhaustive
-credential-name list), stripped from the start of the whole command so the
-remainder is still judged whole and nothing else can chain. `git push` and `gh
-pr create` take the `env -u` spellings at the start of their own segment (the
-`unset` spelling is an earlier segment there), `git branch -d` takes none, and
-any other `env` option or assignment, `--`, `--unset=` or attached `-uN`
-spelling, repeated name or doubled space leaves the text whole for the grammar
-to refuse.
+`bindings.tracker.credential_env.unset_before_invocation`'s exhaustive credential-name list), stripped from the start
+of the whole command so the remainder is still judged whole and nothing else can chain. `git push` and `gh pr create`
+take the `env -u` spellings at the start of their own segment (the `unset` spelling is an earlier segment there), `git
+branch -d` takes none, and any other `env` option or assignment, `--`, `--unset=` or attached `-uN` spelling, repeated
+name or doubled space leaves the text whole for the grammar to refuse.
 
-The four repository-bound verbs (every one but `git branch -d`) additionally
-require the repository to be inside standing authorization, which means its
-owner is in the base policy's `authorized_owners` or the repository itself has
-a derived row that the row check confirmed in this invocation, and merging
-further requires an open PR based on the default branch (or the repository's
-declared integration branch, which comes from a literal base-policy
-`integration_bases` row or from a confirmed derived row whose two branches
-differ). A default-branch base additionally demands live protection with at
-least one required status check and admin enforcement on the feature arm (or,
-where the forge answers that the repository's plan cannot protect the branch,
-the plan-gated floor below), while a declared integration base is deliberately
-exempt from the protection demand: it is the development-pace branch, and its
-CI gate stays in the shipping flow's wait-for-checks.
+The four repository-bound verbs (every one but `git branch -d`) additionally require the repository to be inside
+standing authorization, which means its owner is in the base policy's `authorized_owners` or the repository itself has
+a derived row that the row check confirmed in this invocation, and merging further requires an open PR based on the
+default branch (or the repository's declared integration branch, which comes from a literal base-policy
+`integration_bases` row or from a confirmed derived row whose two branches differ). A default-branch base additionally
+demands live protection with at least one required status check and admin enforcement on the feature arm (or, where
+the forge answers that the repository's plan cannot protect the branch, the plan-gated floor below), while a declared
+integration base is deliberately exempt from the protection demand: it is the development-pace branch, and its CI gate
+stays in the shipping flow's wait-for-checks.
 
-`git push` and `git branch -d` also take one `git -C <dir>` directly after
-`git` (issue 400), `<dir>` one unquoted word without whitespace, quotes or
-shell-active characters, a relative one joined to the payload `cwd` without
-normalisation: the guard strips it to the canonical command and builds a push's
-repository context (origin slug, `origin/HEAD`, the derived-row lookup and row
-check, and the tag lookup) from that directory, one context per distinct
-directory in a command under the one invocation deadline, while branch deletion
-checks only its spelling; an unresolvable directory is an unknown repository,
-refused as outside standing authorization. The merge's own `gh` lookups run
-with `GITHUB_TOKEN`/`GH_TOKEN` scrubbed from their environment, so they
-authenticate via the gh keyring credential (whose reach covers every
-authorized owner) rather than any ambient environment token, which gh would
-prefer and which may be narrower; a machine with no keyring auth fails closed
-at the lookup.
+`git push` and `git branch -d` also take one `git -C <dir>` directly after `git` (issue 400), `<dir>` one unquoted
+word without whitespace, quotes or shell-active characters, a relative one joined to the payload `cwd` without
+normalisation: the guard strips it to the canonical command and builds a push's repository context (origin slug,
+`origin/HEAD`, the derived-row lookup and row check, and the tag lookup) from that directory, one context per distinct
+directory in a command under the one invocation deadline, while branch deletion checks only its spelling; an
+unresolvable directory is an unknown repository, refused as outside standing authorization. The merge's own `gh`
+lookups run with `GITHUB_TOKEN`/`GH_TOKEN` scrubbed from their environment, so they authenticate via the gh keyring
+credential (whose reach covers every authorized owner) rather than any ambient environment token, which gh would
+prefer and which may be narrower; a machine with no keyring auth fails closed at the lookup.
 
-There is no defer path: once the hook adjudicates a verb it is
-validated-and-allowed or blocked, never handed back to the allowlist
-unexamined, and every uncertainty (unknown repo, unresolvable default branch,
-child timeout, non-zero or unparseable output) blocks.
+There is no defer path: once the hook adjudicates a verb it is validated-and-allowed or blocked, never handed back to
+the allowlist unexamined, and every uncertainty (unknown repo, unresolvable default branch, child timeout, non-zero or
+unparseable output) blocks.
 
-Every accepted spelling has one home, `FORM_TABLE` in this file (issue 402),
-each operation's forms in its template notation (`<slot>` one word, `"<slot>"`
-one free-text word that may begin with `-`, a slot closing a literal word,
-`[…]` an optional group led by its flag, a parenthesised note never matched)
-with three properties: whole-text characters (push and branch deletion), exact
-spelling (merge and release creation: single spaces, double-quoted free text)
-and scrub prefix (every operation but branch deletion). The table is compiled
-first on every invocation inside the unexpected-failure handler, so a template
-that does not compile refuses every Bash call with exit 2 and fails `just
-build`; one shared matcher judges each canonical command against its
-operation's forms in table order, and `canonical_text` reads the scrub-prefix
-property.
+Every accepted spelling has one home, `FORM_TABLE` in this file (issue 402), each operation's forms in its template
+notation (`<slot>` one word, `"<slot>"` one free-text word that may begin with `-`, a slot closing a literal word,
+`[…]` an optional group led by its flag, a parenthesised note never matched) with three properties: whole-text
+characters (push and branch deletion), exact spelling (merge and release creation: single spaces, double-quoted free
+text) and scrub prefix (every operation but branch deletion). The table is compiled first on every invocation inside
+the unexpected-failure handler, so a template that does not compile refuses every Bash call with exit 2 and fails
+`just build`; one shared matcher judges each canonical command against its operation's forms in table order, and
+`canonical_text` reads the scrub-prefix property.
 
-The remote-deletion arm (issue 458) is the push verb's third form, judged after
-the tag and branch arms: exactly `git push origin --delete refs/heads/<branch>`,
-with the push verb's whole-text character rule, credential-scrub prefixes and
-one `git -C <dir>`. The `refs/heads/` literal is the point: git resolves a bare
-`--delete <name>` against the remote's refs and deletes a tag when only a tag
-matches, while the qualified name can only be a branch, so the bare spelling
-stays refused (`missing refs/heads/<branch>`). After standing authorization the
-value takes the branch arm's name rule (so `refs/heads/refs/heads/x` is a
-namespaced ref), then needs a resolvable `origin/HEAD`, and the default branch
-and the repository's declared integration branch are refused as `unsafe push:
-refusing to delete the permanent branch <branch>`. The arm reads no forge
-state: GitHub itself refuses to delete a protected branch, and the delivery's
-ship stage runs the deletion only after verifying the merge and seeing `git
-ls-remote --heads origin <branch>` non-empty.
+The remote-deletion arm (issue 458) is the push verb's third form, judged after the tag and branch arms: exactly `git
+push origin --delete refs/heads/<branch>`, with the push verb's whole-text character rule, credential-scrub prefixes
+and one `git -C <dir>`. The `refs/heads/` literal is the point: git resolves a bare `--delete <name>` against the
+remote's refs and deletes a tag when only a tag matches, while the qualified name can only be a branch, so the bare
+spelling stays refused (`missing refs/heads/<branch>`). After standing authorization the value takes the branch arm's
+name rule (so `refs/heads/refs/heads/x` is a namespaced ref), then needs a resolvable `origin/HEAD`, and the default
+branch and the repository's declared integration branch are refused as `unsafe push: refusing to delete the permanent
+branch <branch>`. The arm reads no forge state: GitHub itself refuses to delete a protected branch, and the delivery's
+ship stage runs the deletion only after verifying the merge and seeing `git ls-remote --heads origin <branch>`
+non-empty.
 
-The effective push URL (issue 655) is checked on every push arm, after
-`ownership_problem` and after the form matches, before the tag, branch or
-remote-deletion arm runs. The guard runs `git -C <dir> remote get-url --push
---all origin` (`PUSH_URL_LOOKUP`) in the judged directory and in the hook's own
-environment, so the git configuration that applies to the push is the one the
-lookup reads (D13). git applies `remote.origin.pushurl`, `url.<base>.insteadOf`
-and `url.<base>.pushInsteadOf` itself; the guard never reimplements the
-rewriting. Every URL the lookup prints (`--all` lists each `pushurl` entry, and
-git pushes to all of them) must parse as a GitHub URL (`git@github.com:`,
-`ssh://git@github.com/`, `https://github.com/` or `http://github.com/`, one
-optional trailing `.git`) whose owner/name slug equals the repository the guard
-judged; a URL that is not GitHub, or names another repository, is refused as
-`unsafe push: origin's push URL <url> does not name <owner/name>`. A lookup that
-times out is refused as `unsafe push: push URL lookup timed out`, and one that
-cannot start, exits non-zero or prints nothing as `unsafe push: cannot resolve
-origin's push URL`. Each is a state refusal with no accepted-forms clause,
-since no rewording of the command changes it; a push whose text matches no form
-keeps its text refusal with accepted forms, whatever the push URL. PR creation,
-merge, release creation and branch deletion never run the lookup.
+The effective push URL (issue 655) is checked on every push arm, after `ownership_problem` and after the form matches,
+before the tag, branch or remote-deletion arm runs. The guard runs `git -C <dir> remote get-url --push --all origin`
+(`PUSH_URL_LOOKUP`) in the judged directory and in the hook's own environment, so the git configuration that applies
+to the push is the one the lookup reads (D13). git applies `remote.origin.pushurl`, `url.<base>.insteadOf` and
+`url.<base>.pushInsteadOf` itself; the guard never reimplements the rewriting. Every URL the lookup prints (`--all`
+lists each `pushurl` entry, and git pushes to all of them) must parse as a GitHub URL (`git@github.com:`,
+`ssh://git@github.com/`, `https://github.com/` or `http://github.com/`, one optional trailing `.git`) whose owner/name
+slug equals the repository the guard judged; a URL that is not GitHub, or names another repository, is refused as
+`unsafe push: origin's push URL <url> does not name <owner/name>`. A lookup that times out is refused as `unsafe push:
+push URL lookup timed out`, and one that cannot start, exits non-zero or prints nothing as `unsafe push: cannot
+resolve origin's push URL`. Each is a state refusal with no accepted-forms clause, since no rewording of the command
+changes it; a push whose text matches no form keeps its text refusal with accepted forms, whatever the push URL. PR
+creation, merge, release creation and branch deletion never run the lookup.
 
-The forge adapter's two mutations are adjudicated too (#124, D9/D10). The
-tag-push arm sits inside the push verb and is judged before the branch arm:
-argv exactly `git push origin refs/tags/<tag>` with `<tag>` a SemVer
-`vMAJOR.MINOR.PATCH` (no leading zeros), standing authorization, and `git
-cat-file -t refs/tags/<tag>` (the base policy `git`, in the push's target
-directory: its `git -C` directory, else the payload `cwd`) printing exactly
-`tag`, so only an existing annotated tag is pushed; any other namespaced push
-keeps its refusal, except the remote-deletion arm's qualified
-`refs/heads/<branch>`, and the branch arm, including the legacy `git push
-origin <tag>`, is unchanged. Release creation (`gh release create`, operation
-`release`, label "release creation") is judged on the whole command like the
-merge, behind the same optional credential-scrub prefix: exactly `gh release
-create <tag> --repo <detected slug> --verify-tag --title "<title>" --notes-file
-<path>`, flags in that order and nothing before or after, a SemVer `<tag>`,
-standing authorization, a title that passes the same free-text check as
-`--subject`, and an absolute `<path>` without whitespace or any shell-active
-character. `--target`, `--draft`, `--prerelease` and every other flag are
-refused, and so is gh's alias `gh release new` (it routes to the same arm,
-whose grammar spells `create`). The feature arm of `gh pr merge` also refuses
-`--delete-branch` when the PR's head is the default branch or the repository's
-declared integration branch (`unsafe merge: --delete-branch would delete the
-permanent branch <head>`), judged after the PR lookup and before any protection
-lookup, and a head that is missing, null, empty or not a string is refused as
-`cannot read the PR head branch` (#116 D5). The guard is on `PATH` as
-`claude-bash-lifecycle-guard` (`home.packages`) so the adapter and the resolver
-find it by name; the registered hook path is unchanged. The spelling fixture
-`tests/fixtures/forge-adapter-spellings.json` drives both the adapter suite and
-the guard's allowed-row table; the guard never reads it at run time. The shape fixture `tests/fixtures/guarded-command-shapes.json` (#351) lists the push (remote deletion included), merge and branch-delete forms the delivery's ship stage spells and the dressed shapes agents reach for, each with the guard's verdict bare, behind `unset GITHUB_TOKEN && ` and behind `env -u GITHUB_TOKEN `; only the guard suite's shape table in `tests/test_claude_permission_guard.py` reads it (no skill-text check reads it any more, so a ship-stage spelling is not checked against it), and the guard never reads it either; its `invocation_shapes` section (issue 400) holds the guard-only rows. `form_values` (issue 402) is guard-only too: one value per guard placeholder, from which the guard suite fills and runs every form a refusal prints.
+The forge adapter's two mutations are adjudicated too (#124, D9/D10). The tag-push arm sits inside the push verb and
+is judged before the branch arm: argv exactly `git push origin refs/tags/<tag>` with `<tag>` a SemVer
+`vMAJOR.MINOR.PATCH` (no leading zeros), standing authorization, and `git cat-file -t refs/tags/<tag>` (the base
+policy `git`, in the push's target directory: its `git -C` directory, else the payload `cwd`) printing exactly `tag`,
+so only an existing annotated tag is pushed; any other namespaced push keeps its refusal, except the remote-deletion
+arm's qualified `refs/heads/<branch>`, and the branch arm, including the legacy `git push origin <tag>`, is unchanged.
+Release creation (`gh release create`, operation `release`, label "release creation") is judged on the whole command
+like the merge, behind the same optional credential-scrub prefix: exactly `gh release create <tag> --repo <detected
+slug> --verify-tag --title "<title>" --notes-file <path>`, flags in that order and nothing before or after, a SemVer
+`<tag>`, standing authorization, a title that passes the same free-text check as `--subject`, and an absolute `<path>`
+without whitespace or any shell-active character. `--target`, `--draft`, `--prerelease` and every other flag are
+refused, and so is gh's alias `gh release new` (it routes to the same arm, whose grammar spells `create`). The feature
+arm of `gh pr merge` also refuses `--delete-branch` when the PR's head is the default branch or the repository's
+declared integration branch (`unsafe merge: --delete-branch would delete the permanent branch <head>`), judged after
+the PR lookup and before any protection lookup, and a head that is missing, null, empty or not a string is refused as
+`cannot read the PR head branch` (#116 D5). The guard is on `PATH` as `claude-bash-lifecycle-guard` (`home.packages`)
+so the adapter and the resolver find it by name; the registered hook path is unchanged. The spelling fixture
+`tests/fixtures/forge-adapter-spellings.json` drives both the adapter suite and the guard's allowed-row table; the
+guard never reads it at run time. The shape fixture `tests/fixtures/guarded-command-shapes.json` (#351) lists the push
+(remote deletion included), merge and branch-delete forms the delivery's ship stage spells and the dressed shapes
+agents reach for, each with the guard's verdict bare, behind `unset GITHUB_TOKEN && ` and behind `env -u GITHUB_TOKEN
+`; only the guard suite's shape table in `tests/test_claude_permission_guard.py` reads it (no skill-text check reads
+it any more, so a ship-stage spelling is not checked against it), and the guard never reads it either; its
+`invocation_shapes` section (issue 400) holds the guard-only rows. `form_values` (issue 402) is guard-only too: one
+value per guard placeholder, from which the guard suite fills and runs every form a refusal prints.
 
-The mergeability check (issue 476) reads two more facts from the same PR
-lookup, whose `--json` field list is
-`state,baseRefName,headRefName,headRefOid,mergeStateStatus,url,statusCheckRollup`.
-Each merge arm runs it after its own shape judgment (the feature arm's
-permanent-head refusal, the release arm's integration-into-default check) and
-before its first gate (the feature arm's integration-base exemption and
-protection lookup, the release arm's rollup predicate), so a PR merged onto a
-declared integration base meets it before the exemption. A `mergeStateStatus`
-of exactly `BEHIND` is refused first, as `unsafe merge: the PR is behind its
-base <base>; repair: sync the branch with <base>, push it and wait for its
-required checks before merging`; then, only when the command carries
-`--match-head-commit`, a value other than the PR's `headRefOid` is refused as
-`unsafe merge: --match-head-commit <given> is not the PR head commit
-<headRefOid>; merge only a head you reviewed`. Any other non-empty merge state
-passes, `UNKNOWN`, `BLOCKED`, `DIRTY` and `UNSTABLE` included, and the check
-reads no protection setting. A `mergeStateStatus` that is missing, not a string
-or empty is refused as `cannot read the PR merge state`, and, with the flag, a
-`headRefOid` that is not 40 lowercase hex characters as `cannot read the PR
-head commit`; without the flag `headRefOid` is neither read nor demanded.
-GitHub stays the authority: it still compares `--match-head-commit` atomically
-with the merge and enforces its own up-to-date rule, which closes the window
-between this check and the merge.
+The mergeability check (issue 476) reads two more facts from the same PR lookup, whose `--json` field list is
+`state,baseRefName,headRefName,headRefOid,mergeStateStatus,url,statusCheckRollup`. Each merge arm runs it after its
+own shape judgment (the feature arm's permanent-head refusal, the release arm's integration-into-default check) and
+before its first gate (the feature arm's integration-base exemption and protection lookup, the release arm's rollup
+predicate), so a PR merged onto a declared integration base meets it before the exemption. A `mergeStateStatus` of
+exactly `BEHIND` is refused first, as `unsafe merge: the PR is behind its base <base>; repair: sync the branch with
+<base>, push it and wait for its required checks before merging`; then, only when the command carries
+`--match-head-commit`, a value other than the PR's `headRefOid` is refused as `unsafe merge: --match-head-commit
+<given> is not the PR head commit <headRefOid>; merge only a head you reviewed`. Any other non-empty merge state
+passes, `UNKNOWN`, `BLOCKED`, `DIRTY` and `UNSTABLE` included, and the check reads no protection setting. A
+`mergeStateStatus` that is missing, not a string or empty is refused as `cannot read the PR merge state`, and, with
+the flag, a `headRefOid` that is not 40 lowercase hex characters as `cannot read the PR head commit`; without the flag
+`headRefOid` is neither read nor demanded. GitHub stays the authority: it still compares `--match-head-commit`
+atomically with the merge and enforces its own up-to-date rule, which closes the window between this check and the
+merge.
 
 The look gate (issue 1138) holds a merge whose issues await the owner's look. Each merge arm runs it right after the
 mergeability check, so before the feature arm's integration-base exemption and protection lookup and before the release
@@ -497,164 +405,114 @@ commit with no object `commit` holding a string `message`. Which issues are mark
 owner's or a member's, naming this issue, this PR and this head, the latest answer deciding), is `look-approval`'s
 contract; `--admin` is in no merge form, so it is refused by the grammar before any lookup.
 
-The plan-gated floor (issue 552) replaces that protection demand for one answer
-only. When the feature arm's protection read of the default branch exits
-non-zero, the guard parses its stdout, gh's response body, and never its
-stderr: the plan-gated answer is a JSON object whose `status` is the string
-`403` and whose `message` is exactly `Upgrade to GitHub Pro or make this
-repository public to enable this feature.`. Only with that answer, and only
-when the repository's confirmed derived row declares at least one required
-check (a row with a problem, a literal `integration_bases` row and a repository
-without a row declare none), is the merge judged by the floor; every other
-non-zero answer (a 404 `Branch not protected`, a 403 for missing admin rights
-or a rate limit, a body that is not JSON, the plan-gated answer without
-declared checks) keeps `protection lookup failed: <diagnostic>`, and a timeout
-or a readable protection object keeps its verdict. The floor starts no child
-and reads only the PR lookup's facts, and the first failure is the verdict: the
-merge must carry `--match-head-commit`, which the mergeability check has held
-to the PR's `headRefOid`, so the rollup judged is the head GitHub merges
-(`unsafe merge: <base> cannot be protected on this repository's plan, so the
-merge must carry --match-head-commit with the reviewed PR head`);
-`statusCheckRollup` must be a list of objects, each a `CheckRun` with a string
-`name` or a `StatusContext` with a string `context` (`unsafe merge: cannot read
-the PR check rollup`); then each declared check, in row order, must be named
-exactly by at least one entry (`unsafe merge: <base> cannot be protected on
-this repository's plan, and the declared required check <name> is missing from
-the PR's check rollup`), and every entry naming it must be green (`unsafe
-merge: <base> cannot be protected on this repository's plan, and the declared
-required check <name> is not green (<observed>)`, the first non-green entry as
-`CheckRun <status>/<conclusion>` or `StatusContext <state>`, a fact that is not
-a string shown as `none`). Entries naming no declared check are ignored. Each
-check is judged by its latest run only (issue 1374): an entry naming it is
-superseded, and not judged, when another entry naming it carries a strictly
-later `startedAt` (GitHub's `YYYY-MM-DDTHH:MM:SSZ`, a real calendar instant from
-1970 on) and its own `startedAt` is readable in that form, and both are the same
-type of entry published by the same `workflowName` (so two workflows' jobs of one
-name never supersede each other); a tie and an entry without a readable
-`startedAt` (absent, malformed, an impossible date, or the `0001-01-01` zero value
-gh exports for a run not yet started) are never superseded, so they are judged. Green
-has one home, from which the release arm's jq predicate is rendered: a
-`CheckRun` whose `status` is `COMPLETED` and whose `conclusion` is `SUCCESS`,
-`SKIPPED` or `NEUTRAL`, or a `StatusContext` whose `state` is `SUCCESS`. A forge
-that later protects the branch answers the read with exit 0, and the protection
-demand governs again with no contract change. A guard-suite test drives the
-floor end to end, with `guard-policy derive` run from source as the row check
+The plan-gated floor (issue 552) replaces that protection demand for one answer only. When the feature arm's
+protection read of the default branch exits non-zero, the guard parses its stdout, gh's response body, and never its
+stderr: the plan-gated answer is a JSON object whose `status` is the string `403` and whose `message` is exactly
+`Upgrade to GitHub Pro or make this repository public to enable this feature.`. Only with that answer, and only when
+the repository's confirmed derived row declares at least one required check (a row with a problem, a literal
+`integration_bases` row and a repository without a row declare none), is the merge judged by the floor; every other
+non-zero answer (a 404 `Branch not protected`, a 403 for missing admin rights or a rate limit, a body that is not
+JSON, the plan-gated answer without declared checks) keeps `protection lookup failed: <diagnostic>`, and a timeout or
+a readable protection object keeps its verdict. The floor starts no child and reads only the PR lookup's facts, and
+the first failure is the verdict: the merge must carry `--match-head-commit`, which the mergeability check has held to
+the PR's `headRefOid`, so the rollup judged is the head GitHub merges (`unsafe merge: <base> cannot be protected on
+this repository's plan, so the merge must carry --match-head-commit with the reviewed PR head`); `statusCheckRollup`
+must be a list of objects, each a `CheckRun` with a string `name` or a `StatusContext` with a string `context`
+(`unsafe merge: cannot read the PR check rollup`); then each declared check, in row order, must be named exactly by at
+least one entry (`unsafe merge: <base> cannot be protected on this repository's plan, and the declared required check
+<name> is missing from the PR's check rollup`), and every entry naming it must be green (`unsafe merge: <base> cannot
+be protected on this repository's plan, and the declared required check <name> is not green (<observed>)`, the first
+non-green entry as `CheckRun <status>/<conclusion>` or `StatusContext <state>`, a fact that is not a string shown as
+`none`). Entries naming no declared check are ignored. Each check is judged by its latest run only (issue 1374): an
+entry naming it is superseded, and not judged, when another entry naming it carries a strictly later `startedAt`
+(GitHub's `YYYY-MM-DDTHH:MM:SSZ`, a real calendar instant from 1970 on) and its own `startedAt` is readable in that
+form, and both are the same type of entry published by the same `workflowName` (so two workflows' jobs of one name
+never supersede each other); a tie and an entry without a readable `startedAt` (absent, malformed, an impossible date,
+or the `0001-01-01` zero value gh exports for a run not yet started) are never superseded, so they are judged. Green
+has one home, from which the release arm's jq predicate is rendered: a `CheckRun` whose `status` is `COMPLETED` and
+whose `conclusion` is `SUCCESS`, `SKIPPED` or `NEUTRAL`, or a `StatusContext` whose `state` is `SUCCESS`. A forge that
+later protects the branch answers the read with exit 0, and the protection demand governs again with no contract
+change. A guard-suite test drives the floor end to end, with `guard-policy derive` run from source as the row check
 over a fixture fleet.
 
-A refusal that lies in the command's text (each recognition refusal, a form the
-matcher refuses, a slot value, a merge arm while another arm remains) reads
-`lifecycle guard: unsafe <operation>: <problem>; accepted: <form>[; or
-<form>…]; optional prefix: env -u GITHUB_TOKEN -u GH_TOKEN | unset GITHUB_TOKEN && |
-env -u GITHUB_TOKEN`, and
-branch deletion, which takes no prefix, omits the last clause. The forms come
-from `FORM_TABLE` in table order: before any PR lookup the whole table, except
-that the merge's release form, noted `(only <integration> into <default>)`, is
-listed only where the repository declares an integration branch distinct from
-its resolved default branch, and after the lookup only the arm the PR admits,
-none when its head is a permanent branch no arm fits. With a repository context
-`<slug>` becomes the detected slug and, once the default branch resolved,
-`<base>` one alternative per authorized base, and the note names both branches
-(`only dev into main`); every other slot stays a placeholder, and a recognition
-refusal, which builds no context, fills nothing and lists the merge's feature
-form alone. A merge's text refusal keeps its first problem and appends `; missing
-<flag>[, <flag>]` for each flag that every merge form requires (`--repo`,
-`--merge`) and the words lack, unless the problem already names it (issue 1592).
-The clause's three spellings (the documented two-name `env -u` spelling first,
-issue 1592) stand for the whole accepted prefix set
-(`unset N && `, `unset N M && `, `env -u N `, `env -u N -u M `, `N` and `M`
-distinct members of `GITHUB_TOKEN`, `GH_TOKEN`). A refusal of the repository or
-the forge state (authorization and row problems, an unresolvable default
-branch, a default-branch push, a permanent-branch deletion, head equal to base,
-a tag that is not an existing annotated tag, every PR, protection and rollup
-lookup or predicate failure, every look-gate lookup or unreadable answer and a
-merge awaiting the owner's look, a PR behind its base, a `--match-head-commit` that
-is not the PR head, every plan-gated floor refusal, an unreadable PR merge
-state or head commit, timeouts, the invocation deadline) names only its
-problem, since no spelling would pass there.
+A refusal that lies in the command's text (each recognition refusal, a form the matcher refuses, a slot value, a merge
+arm while another arm remains) reads `lifecycle guard: unsafe <operation>: <problem>; accepted: <form>[; or <form>…];
+optional prefix: env -u GITHUB_TOKEN -u GH_TOKEN | unset GITHUB_TOKEN && | env -u GITHUB_TOKEN`, and branch deletion,
+which takes no prefix, omits the last clause. The forms come from `FORM_TABLE` in table order: before any PR lookup
+the whole table, except that the merge's release form, noted `(only <integration> into <default>)`, is listed only
+where the repository declares an integration branch distinct from its resolved default branch, and after the lookup
+only the arm the PR admits, none when its head is a permanent branch no arm fits. With a repository context `<slug>`
+becomes the detected slug and, once the default branch resolved, `<base>` one alternative per authorized base, and the
+note names both branches (`only dev into main`); every other slot stays a placeholder, and a recognition refusal,
+which builds no context, fills nothing and lists the merge's feature form alone. A merge's text refusal keeps its
+first problem and appends `; missing <flag>[, <flag>]` for each flag that every merge form requires (`--repo`,
+`--merge`) and the words lack, unless the problem already names it (issue 1592). The clause's three spellings (the
+documented two-name `env -u` spelling first, issue 1592) stand for the whole accepted prefix set (`unset N && `,
+`unset N M && `, `env -u N `, `env -u N -u M `, `N` and `M` distinct members of `GITHUB_TOKEN`, `GH_TOKEN`). A refusal
+of the repository or the forge state (authorization and row problems, an unresolvable default branch, a default-branch
+push, a permanent-branch deletion, head equal to base, a tag that is not an existing annotated tag, every PR,
+protection and rollup lookup or predicate failure, every look-gate lookup or unreadable answer and a merge awaiting
+the owner's look, a PR behind its base, a `--match-head-commit` that is not the PR head, every plan-gated floor
+refusal, an unreadable PR merge state or head commit, timeouts, the invocation deadline) names only its problem, since
+no spelling would pass there.
 
-A lifecycle command (issue 418) is admitted only in an allowlist grammar,
-checked before any other judgement once a lifecycle verb is found: `[unset
-GITHUB_TOKEN && ][cd <dir> && ]<verb> <args>`, where the scrub is one `unset`
-or `env -u` spelling of the credential names (its exact spelling is left to the
-verb's grammar), `<verb>` is `git push`, `git branch -d`, `gh pr create`, `gh pr
-merge` or `gh release create` (`git -C <dir>` before `push` or `branch -d`),
-and every word is plain (`[A-Za-z0-9_./:@%+=,-]`, not beginning with `=`,
-zsh's `=cmd` expansion), single-quoted, or double-quoted without `$`, a
-backtick, a backslash or `!` (so an owner's ship stage and the forge adapter's
-double-quoted text still passes), separated by spaces or tabs. Anything else
-(another segment or operator, a redirection, an expansion, a glob, a comment, a
-newline outside quotes, a quote glued to a word, a wrapper or assignment)
-refuses that verb as `unsafe <operation>: <first thing outside the grammar>; a
-lifecycle verb runs only alone, as ...` with its accepted forms. So the only
-directory change left is that leading `cd`: push and PR creation run in the
-directory it names when it is spelled `cd <dir> && ` with single spaces and
-`<dir>` is absolute with no `..` component (relative names follow `CDPATH`, and
-`..` is logical for `cd`), else they refuse with the `CD_PRELUDE_PROBLEM` text
-(`the directory the verb runs in cannot be resolved: ...`); a `git -C`
-directory joins onto it, and an absolute one stands alone. Merge, release
-creation and branch deletion are judged on the whole command and so still take
-no prelude.
+A lifecycle command (issue 418) is admitted only in an allowlist grammar, checked before any other judgement once a
+lifecycle verb is found: `[unset GITHUB_TOKEN && ][cd <dir> && ]<verb> <args>`, where the scrub is one `unset` or `env
+-u` spelling of the credential names (its exact spelling is left to the verb's grammar), `<verb>` is `git push`, `git
+branch -d`, `gh pr create`, `gh pr merge` or `gh release create` (`git -C <dir>` before `push` or `branch -d`), and
+every word is plain (`[A-Za-z0-9_./:@%+=,-]`, not beginning with `=`, zsh's `=cmd` expansion), single-quoted, or
+double-quoted without `$`, a backtick, a backslash or `!` (so an owner's ship stage and the forge adapter's
+double-quoted text still passes), separated by spaces or tabs. Anything else (another segment or operator, a
+redirection, an expansion, a glob, a comment, a newline outside quotes, a quote glued to a word, a wrapper or
+assignment) refuses that verb as `unsafe <operation>: <first thing outside the grammar>; a lifecycle verb runs only
+alone, as ...` with its accepted forms. So the only directory change left is that leading `cd`: push and PR creation
+run in the directory it names when it is spelled `cd <dir> && ` with single spaces and `<dir>` is absolute with no
+`..` component (relative names follow `CDPATH`, and `..` is logical for `cd`), else they refuse with the
+`CD_PRELUDE_PROBLEM` text (`the directory the verb runs in cannot be resolved: ...`); a `git -C` directory joins onto
+it, and an absolute one stands alone. Merge, release creation and branch deletion are judged on the whole command and
+so still take no prelude.
 
-A named repository (issue 418): a PR creation or merge whose `--repo` names a
-repository other than its directory's, and which has a derived row in the
-compiled policy, is judged against that repository from its row, with no
-checkout read: the context is built from the slug, runs no `git` child, and
-takes the row's `default_branch` as the base once the row check confirms the
-row. A row the check does not confirm refuses with that row problem and never
-falls back to the directory. Without a row for the slug, the directory's
-refusal (`--repo ... is not the current repository ...`) stands. `--body-file`
-there fails closed (`cannot resolve the working tree to check --body-file
-against`), because there is no working tree to place the file against. Release
-creation and pushes stay judged against their directory.
+A named repository (issue 418): a PR creation or merge whose `--repo` names a repository other than its directory's,
+and which has a derived row in the compiled policy, is judged against that repository from its row, with no checkout
+read: the context is built from the slug, runs no `git` child, and takes the row's `default_branch` as the base once
+the row check confirms the row. A row the check does not confirm refuses with that row problem and never falls back to
+the directory. Without a row for the slug, the directory's refusal (`--repo ... is not the current repository ...`)
+stands. `--body-file` there fails closed (`cannot resolve the working tree to check --body-file against`), because
+there is no working tree to place the file against. Release creation and pushes stay judged against their directory.
 
 Pre-push hook
 -------------
 
-`lifecycle_guard.py --mode pre-push -- <remote> <url>` is the guard's second
-entry mode (issue 672), run by git itself as a `pre-push` hook, so the judgement
-does not depend on how a push is spelled: an alias, an `xargs` feed or a `git`
-reached through a wrapper all arrive at the hook as the same facts, the real
-push URL git resolved and one line per ref update on stdin. The hook reads
-those facts only as the text mode's push forms (`PRE_PUSH_FORMS`, pinned equal
-to the ids of `FORM_TABLE["push"]`) and judges them through the predicates the
-text mode shares (`push_url_slug_problem`, `push_arm_problem`,
-`branch_target_problem`, `annotated_tag_problem`), over the same base policy,
-compiled policy and row check, so no push rule is written twice: a branch
-deleted is `delete`, a branch created or fast-forwarded is `branch`, a tag
-created is `tag` (its tag object is the pushed sha), and a forced update, a
-moved or deleted tag and any other ref namespace match no form and are refused.
-The order is standing authorization, then the push URL, then each ref line in
-the order git handed them, and the first refusal wins; empty stdin admits once
-the repository checks pass, and a line that is not four space-separated fields,
-whose two shas are not hex of equal length 40 or 64, or that lacks its newline
-is refused as `cannot read the refs git handed the pre-push hook`.
+`lifecycle_guard.py --mode pre-push -- <remote> <url>` is the guard's second entry mode (issue 672), run by git itself
+as a `pre-push` hook, so the judgement does not depend on how a push is spelled: an alias, an `xargs` feed or a `git`
+reached through a wrapper all arrive at the hook as the same facts, the real push URL git resolved and one line per
+ref update on stdin. The hook reads those facts only as the text mode's push forms (`PRE_PUSH_FORMS`, pinned equal to
+the ids of `FORM_TABLE["push"]`) and judges them through the predicates the text mode shares (`push_url_slug_problem`,
+`push_arm_problem`, `branch_target_problem`, `annotated_tag_problem`), over the same base policy, compiled policy and
+row check, so no push rule is written twice: a branch deleted is `delete`, a branch created or fast-forwarded is
+`branch`, a tag created is `tag` (its tag object is the pushed sha), and a forced update, a moved or deleted tag and
+any other ref namespace match no form and are refused. The order is standing authorization, then the push URL, then
+each ref line in the order git handed them, and the first refusal wins; empty stdin admits once the repository checks
+pass, and a line that is not four space-separated fields, whose two shas are not hex of equal length 40 or 64, or that
+lacks its newline is refused as `cannot read the refs git handed the pre-push hook`.
 
-The hook judges only an agent session, one whose environment holds a non-empty
-`CLAUDECODE` (Claude Code exports it to every Bash child); outside one it
-judges nothing and no compiled policy or row check is read. git exports
-repository-local variables to hooks (`GIT_DIR`, `GIT_WORK_TREE`,
-`GIT_INDEX_FILE` and the rest of `git rev-parse --local-env-vars`), which would
-make the row check's own `git` read the pushing repository in every registered
-root, so `pre_push_main` reads that list with the base policy's `git` and
-removes the names from the row check's environment only, in every session.
-Every other `git` query the judgement makes (the repository's origin and
-default branch, the fast-forward and tag checks) keeps the original
-environment, so the repository git was told to push from, by `GIT_DIR` or
-`--git-dir`, is the one judged wherever the hook's cwd is, including a work
-tree without a `.git` and another checkout; the chained hook gets the original
-environment too. A lookup that fails, times out or prints nothing refuses. A
-refused ref prints `lifecycle guard pre-push: unsafe push: <problem>` on
-stderr, with the text mode's problem wording, and exits 1, which aborts the
-push; a malformed invocation, a bad base policy or an unreadable variable list
-prints `lifecycle guard pre-push: <reason>` and exits 1, and the base policy
-loads first in both modes, so an invalid store policy refuses every push just
-as it blocks every Bash call. This hook is the authoritative check and the text
-guard stays the first line (O1): it refuses early, with accepted forms, what
-the hook would refuse late. `tests/test_git_pre_push_hook.py` runs real `git
-push` through the hook against `agent_tools.guard.push_fixture`, a hermetic fixture
-whose fake ssh carries `git@github.com:<slug>.git` to a local bare repository
-and whose environment drops every inherited `GIT_*` variable, so no rewrite in
-the host's own git configuration can reach a network.
+The hook judges only an agent session, one whose environment holds a non-empty `CLAUDECODE` (Claude Code exports it to
+every Bash child); outside one it judges nothing and no compiled policy or row check is read. git exports
+repository-local variables to hooks (`GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE` and the rest of `git rev-parse
+--local-env-vars`), which would make the row check's own `git` read the pushing repository in every registered root,
+so `pre_push_main` reads that list with the base policy's `git` and removes the names from the row check's environment
+only, in every session. Every other `git` query the judgement makes (the repository's origin and default branch, the
+fast-forward and tag checks) keeps the original environment, so the repository git was told to push from, by `GIT_DIR`
+or `--git-dir`, is the one judged wherever the hook's cwd is, including a work tree without a `.git` and another
+checkout; the chained hook gets the original environment too. A lookup that fails, times out or prints nothing
+refuses. A refused ref prints `lifecycle guard pre-push: unsafe push: <problem>` on stderr, with the text mode's
+problem wording, and exits 1, which aborts the push; a malformed invocation, a bad base policy or an unreadable
+variable list prints `lifecycle guard pre-push: <reason>` and exits 1, and the base policy loads first in both modes,
+so an invalid store policy refuses every push just as it blocks every Bash call. This hook is the authoritative check
+and the text guard stays the first line (O1): it refuses early, with accepted forms, what the hook would refuse late.
+`tests/test_git_pre_push_hook.py` runs real `git push` through the hook against `agent_tools.guard.push_fixture`, a
+hermetic fixture whose fake ssh carries `git@github.com:<slug>.git` to a local bare repository and whose environment
+drops every inherited `GIT_*` variable, so no rewrite in the host's own git configuration can reach a network.
 
 Chaining and git-lfs (D5). A global `core.hooksPath` disables every
 per-repository hook, so the hook judges first and then chains: after an
@@ -690,130 +548,120 @@ by path through `core.fsmonitor`), and `reference-transaction` and
 every repository on every host would pay). `git lfs install` inside a
 repository cannot write the store directory, and no longer needs to.
 
-Installation. `default.nix` builds the store directory `agent-git-hooks`
-(`agentGitHooks`): the `pre-push` wrapper and one chain shim for each name in
-`agentGitHookNames`, and sets `programs.git.settings.core.hooksPath` to it in
-the shared `home/common` module, so every host, darwin and Linux, carries the
-setting with no host or platform condition (O4). The wrapper is the
-`claude-bash-lifecycle-guard` exec line with `--mode pre-push`, the LFS binary
-(when `programs.git.lfs` is enabled) and git's `--` arguments appended, so it
-shares the guard's interpreter, source and three policy arguments
-(`--base-policy`, `--policy`, `--derive-bin`); `tests/test_claude_code_installed.py`
-pins that equality. The derivation's build check fails `just build` on a shim
-that fails the shell dry run, on a `pre-push` that exits non-zero in a scratch
-repository outside an agent session with empty stdin, or on a missing hook
-name. git re-reads its configuration on every invocation, so a session's next
-push after a switch already uses the new path. Test fixtures that push to a
-local remote run git with `GIT_CONFIG_GLOBAL=/dev/null`, because on a switched
-host the managed hook judges every push an agent session's test makes.
+Installation. `default.nix` builds the store directory `agent-git-hooks` (`agentGitHooks`): the `pre-push` wrapper and
+one chain shim for each name in `agentGitHookNames`, and sets `programs.git.settings.core.hooksPath` to it in the
+shared `home/common` module, so every host, darwin and Linux, carries the setting with no host or platform condition
+(O4). The wrapper is the `claude-bash-lifecycle-guard` exec line with `--mode pre-push`, the LFS binary (when
+`programs.git.lfs` is enabled) and git's `--` arguments appended, so it shares the guard's interpreter, source and
+three policy arguments (`--base-policy`, `--policy`, `--derive-bin`); `tests/test_claude_code_installed.py` pins that
+equality. The derivation's build check fails `just build` on a shim that fails the shell dry run, on a `pre-push` that
+exits non-zero in a scratch repository outside an agent session with empty stdin, or on a missing hook name. git
+re-reads its configuration on every invocation, so a session's next push after a switch already uses the new path.
+Test fixtures that push to a local remote run git with `GIT_CONFIG_GLOBAL=/dev/null`, because on a switched host the
+managed hook judges every push an agent session's test makes.
 
 Production rules
 ----------------
 
-A project's declared production commands are refused outside its release path
-(issue 1149, ADR-guard-009). The rules are a derived row's optional `production`
-member, which the compiler copies from the project's contract: `changes`, the
-commands that change its production, `read_only`, the routes that only read it,
-and `release_profile`. A command `{id, argv}` is matched as the verb
-`[basename(argv[0]), *argv[1:]]`, so `/usr/local/bin/kubectl` is the word
-`kubectl`. The rules are read from the compiled policy unconfirmed: they only
-refuse, so the row check never confirms them (and never compares them), and a
-compiled policy that does not load, a row without `production` and a row with
-an empty `changes` refuse nothing.
+A project's declared production commands are refused outside its release path (issue 1149, ADR-guard-009). The rules
+are a derived row's optional `production` member, which the compiler copies from the project's contract: `changes`,
+the commands that change its production, `read_only`, the routes that only read it, and `release_profile`. A command
+`{id, argv}` is matched as the verb `[basename(argv[0]), *argv[1:]]`, so `/usr/local/bin/kubectl` is the word
+`kubectl`. The rules are read from the compiled policy unconfirmed: they only refuse, so the row check never confirms
+them (and never compares them), and a compiled policy that does not load, a row without `production` and a row with an
+empty `changes` refuse nothing.
 
-The check runs on every call after the detaching check and the base policy
-load, before any lifecycle verb is judged. It reuses the segment and token
-readings of the lifecycle verbs, and reads a leading redirection out of the way
-(`>/dev/null ./scripts/deploy.sh` runs the script) and an ANSI-C quoted word as
-its text (`$'just' switch`). The guard reads the command as raw text when
-it cannot be parsed or a segment cannot be tokenised, and reads the text of a
-segment as raw text when a command word is an evaluator (`sh`, `bash`, `eval`,
-...) or an `env -S`, or the program at a command position is in
-`PRODUCTION_RUNNERS` and a later word of its run is an evaluator or `env -S`
-(`timeout 600 sh -c 'just switch'`, `devenv shell -- bash -c ...`). The whole command is
-read as raw text instead when such a segment may take its text from somewhere the
-segments do not show: a pipeline, a shell with no `-c` (it reads a file or stdin), a
-`$` or backtick outside single quotes, a `$`, backtick or `<` in the shell's own text,
-a `<`, `{` or `(` outside every quote, or a file a segment redirects to that the
-shell's text names (`cmd='just switch'; eval "$cmd"`, `echo 'just switch' | { true;
-sh; }`, `echo 'just switch' > f && bash f`). Any other segment is read as a command
-(issue 1192), so words in one quoted argument, a comment or an
-exactly-read heredoc body beside an evaluator are a mention and pass. In raw text a verb counts when
-its words occur in order in either raw reading, or its words joined by one
-space are a substring of the command or of the command with its quotes and
-backslashes deleted, and nothing is lifted. Otherwise a verb of two or more
-words counts at any word whose basename is its first word, when its remaining
-words occur in order in that word's run (up to the next operator), or, when an
-operator cut the run, in the rest of the segment and both raw readings of the
-later segments. A one-word verb has no later words to tell a run of it from a
-mention of it (`git add scripts/deploy.sh`, `--title kubectl`), so it counts
-only at a command position, or at a later word of a run whose command-position
-program is in `PRODUCTION_RUNNERS` (`xargs`, `timeout`, `nice`, `find`, `devenv`
-and the other programs that run a later word as a command). A quoted token that
-holds `$(` or a backtick, or whitespace behind a runner that runs it as shell text
-(`PRODUCTION_SHELL_RUNNERS`: `watch 'just switch'`, `nix-shell --run '...'`,
-`flock f -c '...'`, `parallel`, wherever in the run: `timeout 5 flock f -c '...'`; and the
-first word after `devenv shell`, which splices it unescaped), is also read as raw text alone, with no
-lift, since a substitution runs its text. A quoted word behind any other runner
-(`timeout 5 echo 'just switch'`, `devenv shell -- git commit -m '...'`) is its
-argument, a mention. A parsed match is lifted when its run begins with a
-read-only verb that properly extends the production verb (`kubectl get pods`
-against `kubectl`, not `just build switch` against `just switch`); raw text
-lifts nothing. The release path, `release transaction preview` and
-`release transaction run`, needs no special case: its arguments are inert for a
-one-word verb because they are not at a command position, and a chained or
+The check runs on every call after the detaching check and the base policy load, before any lifecycle verb is judged.
+It reuses the segment and token readings of the lifecycle verbs, and reads a leading redirection out of the way
+(`>/dev/null ./scripts/deploy.sh` runs the script) and an ANSI-C quoted word as its text (`$'just' switch`). The guard
+reads the command as raw text when it cannot be parsed or a segment cannot be tokenised, and reads the text of a
+segment as raw text when a command word is an evaluator (`sh`, `bash`, `eval`, ...) or an `env -S`, or the program at
+a command position is in `PRODUCTION_RUNNERS` and a later word of its run is an evaluator or `env -S` (`timeout 600 sh
+-c 'just switch'`, `devenv shell -- bash -c ...`). The whole command is read as raw text instead when such a segment
+may take its text from somewhere the segments do not show: a pipeline, a shell with no `-c` (it reads a file or
+stdin), a `$` or backtick outside single quotes, a `$`, backtick or `<` in the shell's own text, a `<`, `{` or `(`
+outside every quote, or a file a segment redirects to that the shell's text names (`cmd='just switch'; eval "$cmd"`,
+`echo 'just switch' | { true; sh; }`, `echo 'just switch' > f && bash f`). Any other segment is read as a command
+(issue 1192), so words in one quoted argument, a comment or an exactly-read heredoc body beside an evaluator are a
+mention and pass. In raw text a verb counts when its words occur in order in either raw reading, or its words joined
+by one space are a substring of the command or of the command with its quotes and backslashes deleted, and nothing is
+lifted. Otherwise a verb of two or more words counts at any word whose basename is its first word, when its remaining
+words occur in order in that word's run (up to the next operator), or, when an operator cut the run, in the rest of
+the segment and both raw readings of the later segments. A one-word verb has no later words to tell a run of it from a
+mention of it (`git add scripts/deploy.sh`, `--title kubectl`), so it counts only at a command position, or at a later
+word of a run whose command-position program is in `PRODUCTION_RUNNERS` (`xargs`, `timeout`, `nice`, `find`, `devenv`
+and the other programs that run a later word as a command). A quoted token that holds `$(` or a backtick, or
+whitespace behind a runner that runs it as shell text (`PRODUCTION_SHELL_RUNNERS`: `watch 'just switch'`, `nix-shell
+--run '...'`, `flock f -c '...'`, `parallel`, wherever in the run: `timeout 5 flock f -c '...'`; and the first word
+after `devenv shell`, which splices it unescaped), is also read as raw text alone, with no lift, since a substitution
+runs its text. A quoted word behind any other runner (`timeout 5 echo 'just switch'`, `devenv shell -- git commit -m
+'...'`) is its argument, a mention. A parsed match is lifted when its run begins with a read-only verb that properly
+extends the production verb (`kubectl get pods` against `kubectl`, not `just build switch` against `just switch`); raw
+text lifts nothing. The release path, `release transaction preview` and `release transaction run`, needs no special
+case: its arguments are inert for a one-word verb because they are not at a command position, and a chained or
 substituted production command in them still counts.
 
-Which project's rules refuse depends on the checkout: the payload cwd's
-repository (its `origin` slug). A command that hits a rule while that lookup
-times out or cannot start is refused, since an unreadable checkout is not an
-unregistered one. A command with a word, in either raw reading,
-whose basename is `cd`, `pushd`, `popd` or `chdir` may run elsewhere, so every
-declaring row judges it, the cwd repository first and then by sorted slug. That
-reading is by raw words, not command positions, because a leading redirection
-(`>/dev/null cd dir`) is read as the command word and a double-quoted
-substitution is one token. Inside a row the first rule in `changes` order that
-hits names the refusal, which is one line:
+Which project's rules refuse depends on the checkout: the payload cwd's repository (its `origin` slug). A command that
+hits a rule while that lookup times out or cannot start is refused, since an unreadable checkout is not an
+unregistered one. A command with a word, in either raw reading, whose basename is `cd`, `pushd`, `popd` or `chdir` may
+run elsewhere, so every declaring row judges it, the cwd repository first and then by sorted slug. That reading is by
+raw words, not command positions, because a leading redirection (`>/dev/null cd dir`) is read as the command word and
+a double-quoted substitution is one token. Inside a row the first rule in `changes` order that hits names the refusal,
+which is one line:
 
     lifecycle guard: `<argv>` changes the production of <slug> (production rule
     <id>), so it runs only through the release profile <release_profile> with
     release transaction preview and release transaction run.
 
-The rule a row's `console_activation` names (issue 1193) is approved through the
-console's Activate instead, and its refusal is the second form:
+The rule a row's `console_activation` names (issue 1193) is approved through the console's Activate instead, and its
+refusal is the second form:
 
     lifecycle guard: `<argv>` changes the production of <slug> (production rule
     <id>), so it runs only through the console's Activate, on the line that says
     a console change is not active on this host.
 
-A `gh run rerun` that names its repository with `--repo`, `--repo=...`, `-R`, `-R...`, `-R=...`
-or `-R` behind boolean letters of a short group (`-dR`), read as gh reads them (the word
-after `--job` or `-j` is its value, a redirection is not a word, the last flag wins;
-`HOST/OWNER/REPO` and a trailing `.git` are read, case is ignored) is a command on that
-repository alone (issue 1375): it is judged only against the rules of the project whose
-repository the run names, from any directory and with no repository lookup, so another
-project's `gh run rerun` rule never refuses a rerun of a pull-request check of this
-repository, and the named project's rule refuses it wherever the call runs, with the same
-refusal line. Only the `gh run rerun` flag grammar (`-d`, `--debug`, `--failed`, `-j`,
-`--job`, `-R`, `--repo`, `-h`, `--help`) is modelled, so every other `gh` verb keeps the
-checkout judgement above, and so does a rerun the guard cannot read exactly: no repository
-named, a `$`, backtick, pathname pattern, brace list or `~` in any word (an unquoted
-expansion may split into a later `-R`), an operator after the run in its segment (`$(...)`
-ends it), a redirection glued to a word, a flag or word outside that grammar, a value that
-is not a literal `owner/repo`, a hit read as raw text (`sh -c`, a pipeline, an unparseable
-command) and a verb matched only across an operator. Such a run is judged by the checkout and
-also against every literal repository its flags name. When several runs hit the same rule, the
-repositories they name are joined and the checkout is judged as well when any of them is not
-narrowed, so an unnamed rerun never erases a named one.
+A `gh run rerun` that names its repository with `--repo`, `--repo=...`, `-R`, `-R...`, `-R=...` or `-R` behind boolean
+letters of a short group (`-dR`), read as gh reads them (the word after `--job` or `-j` is its value, a redirection is
+not a word, the last flag wins; `HOST/OWNER/REPO` and a trailing `.git` are read, case is ignored) is a command on
+that repository alone (issue 1375): it is judged only against the rules of the project whose repository the run names,
+from any directory and with no repository lookup, so another project's `gh run rerun` rule never refuses a rerun of a
+pull-request check of this repository, and the named project's rule refuses it wherever the call runs, with the same
+refusal line. Only the `gh run rerun` flag grammar (`-d`, `--debug`, `--failed`, `-j`, `--job`, `-R`, `--repo`, `-h`,
+`--help`) is modelled, so every other `gh` verb keeps the checkout judgement above, and so does a rerun the guard
+cannot read exactly: no repository named, a `$`, backtick, pathname pattern, brace list or `~` in any word (an
+unquoted expansion may split into a later `-R`), an operator after the run in its segment (`$(...)` ends it), a
+redirection glued to a word, a flag or word outside that grammar, a value that is not a literal `owner/repo`, a hit
+read as raw text (`sh -c`, a pipeline, an unparseable command) and a verb matched only across an operator. Such a run
+is judged by the checkout and also against every literal repository its flags name. When several runs hit the same
+rule, the repositories they name are joined and the checkout is judged as well when any of them is not narrowed, so an
+unnamed rerun never erases a named one.
 
-Known limits: a production command reached by another name (a bare `just` that
-runs the default recipe, a script or alias), words fed on stdin, a program's own
-directory option (`env -C`, `make -C`) and a one-word command handed to a program
-outside `PRODUCTION_RUNNERS` (`ssh host kubectl apply`) are not seen. Where the
-text is read raw or behind a runner, a one-word command's name anywhere refuses,
-file arguments included. A command that mentions a directory-changing word
-anywhere is judged against every declaring project. Rewriting the compiled policy
-can remove a project's production refusals, though it still gains no authorization.
+One spelling of that rerun is not a production change, though the project declares a rerun rule: exactly `gh run
+rerun <id> --failed --repo <owner>/<repo>`, single-spaced, after at most one credential-scrub prefix, which is the
+form the console permit grants. The guard then reads the forge, and the narrowed hits of the named project are dropped
+only when every read shows a failed pull request check run of that project's own open pull request at its head: the
+run (an Actions run the pull request triggered, of the project's repository), its jobs (complete, with a failed job
+that is a required check), every pull request the run lists (each readable and a pull request document, one of them
+open, from the project's repository into the row's integration branch, from a branch that is neither long-lived
+branch, at the run's head and branch) and the required checks. The required set is the forge's protection of the
+integration branch, read as the console permit reads it, not the checks the contract declares. The reads inherit the
+session's environment minus the token variables, with `GH_HOST` pinned to github.com (where a host-less `--repo`
+rerun goes), and the jobs are read page by page. The rerun runs in the session's shell, so the guard asks that shell
+(the user's `$SHELL`, as a login, interactive shell) for `$GH_HOST`, `$GH_CONFIG_DIR` and `$XDG_CONFIG_HOME` once per
+command. A shell that cannot be asked, a host other than github.com, a shell `GH_HOST` that is not the hook's own, or
+a `GH_CONFIG_DIR` or `XDG_CONFIG_HOME` that differs from the hook's own leaves the rule in place, so the reads and the
+rerun cannot meet on different hosts. Any other read that fails, times out or answers another shape leaves the rule in
+place, and a deadline too near refuses. Each row is judged by its own integration branch, with every read made once
+per command; a broader rule and every other hit still refuse. The rerun then goes to whatever judges `gh run rerun`
+next: in a manager session, the console permit, with its per-head cap and refusals.
+
+Known limits: a production command reached by another name (a bare `just` that runs the default recipe, a script or
+alias), words fed on stdin, a program's own directory option (`env -C`, `make -C`) and a one-word command handed to a
+program outside `PRODUCTION_RUNNERS` (`ssh host kubectl apply`) are not seen. Where the text is read raw or behind a
+runner, a one-word command's name anywhere refuses, file arguments included. A command that mentions a
+directory-changing word anywhere is judged against every declaring project. Rewriting the compiled policy can remove a
+project's production refusals, though it still gains no authorization. A `GH_HOST` that a startup file sets only for a
+shell other than the one the probe starts is not seen.
 
 Key files and MCP tools
 -----------------------
@@ -832,21 +680,16 @@ slug names the refusal, and no child process runs. The sentence is
     only through the release profile <release_profile> with release transaction
     preview and release transaction run.
 
-A write's path is resolved against `cwd` (a relative path with no absolute `cwd` is
-not judged). Three spellings are checked, each in
-the file system's own case: the path as named with `..` collapsed, the path with
-its directories resolved and the final component kept as named, and its full
-realpath (the file the write reaches). Each spelling is judged in its own checkout,
-the git toplevel of its nearest existing ancestor directory, and that checkout's
-`origin` slug names the project; the spelling is taken relative to the deepest
-ancestor that is that checkout's directory. A write is refused when any spelling
-matches. Globs are matched with `fnmatchcase` on the strings unchanged, as the
-contract matches them (`*` crosses `/`, no casefolding), the first glob in declared
-order naming the refusal. Git runs only after a glob matches a component suffix of
-a spelling, and the base policy is read only then, so an ordinary edit starts no
-child process and a bad base policy refuses only a key-file candidate. A repository
-lookup that fails (times out or cannot start) for a candidate refuses; a compiled
-policy that does not load refuses nothing. The sentence is
+A write's path is resolved against `cwd` (a relative path with no absolute `cwd` is not judged). Three spellings are
+checked, each in the file system's own case: the path as named with `..` collapsed, the path with its directories
+resolved and the final component kept as named, and its full realpath (the file the write reaches). Each spelling is
+judged in its own checkout, the git toplevel of its nearest existing ancestor directory, and that checkout's `origin`
+slug names the project; the spelling is taken relative to the deepest ancestor that is that checkout's directory. A
+write is refused when any spelling matches. Globs are matched with `fnmatchcase` on the strings unchanged, as the
+contract matches them (`*` crosses `/`, no casefolding), the first glob in declared order naming the refusal. Git runs
+only after a glob matches a component suffix of a spelling, and the base policy is read only then, so an ordinary edit
+starts no child process and a bad base policy refuses only a key-file candidate. A repository lookup that fails (times
+out or cannot start) for a candidate refuses; a compiled policy that does not load refuses nothing. The sentence is
 
     `<relative>` is a key file of <slug> (key file glob <glob>), so it changes only
     through the release profile <release_profile> with release transaction preview
@@ -858,28 +701,21 @@ another name, and an MCP tool reached under another name are not seen.
 Guard policy
 ------------
 
-The guard reads two policy files with disjoint closed schemas, and a loader
-refuses a file with any other key set (issue 377 D1). The base policy is a
-store file, `claude-bash-lifecycle-guard-base-policy.json`, built from
-`lifecycleGuardBasePolicy` in `default.nix`: an object with exactly
-`authorized_owners`, `integration_bases`, `git_bin`, `gh_bin` and `jq_bin`,
-which are the literal `authorizedOwners` and `integrationBases` rows (an
-`integration_bases` row exists only for a repository that is not a registered
-project) and the store paths of `git`, `gh` and `jq`. The compiled policy is
-the user state file `~/.agents/state/guard/policy.json`: an object with exactly
-`derived_repositories` and `derivation`. A derived row is an entry of the
-compiled policy's `derived_repositories`, keyed by the exact repository slug,
-`{default_branch, integration_branch, required_checks, evidence}` with an
-optional `production` member (issue 1149: `{changes, read_only, release_profile}`,
-the project's declared production rules as command `{id, argv}` lists, plus, from
-issue 1150, the changing `key_files` globs and `mcp_tools` names), where
-`required_checks` is the sorted list of check names the project's contract
-declares in `bindings.vcs.merge.required_checks`, `[]` when it declares none.
-The row check is the store script `claude-guard-row-check`, which the wrapper
-passes as `--derive-bin` (`python/agent_tools/guard/guard_policy.py` documents the
-script, the compiler and the activation step that writes the compiled policy).
-No member exists in both files, so neither file is a valid instance of the
-other, and each member has one trust rule:
+The guard reads two policy files with disjoint closed schemas, and a loader refuses a file with any other key set
+(issue 377 D1). The base policy is a store file, `claude-bash-lifecycle-guard-base-policy.json`, built from
+`lifecycleGuardBasePolicy` in `default.nix`: an object with exactly `authorized_owners`, `integration_bases`,
+`git_bin`, `gh_bin` and `jq_bin`, which are the literal `authorizedOwners` and `integrationBases` rows (an
+`integration_bases` row exists only for a repository that is not a registered project) and the store paths of `git`,
+`gh` and `jq`. The compiled policy is the user state file `~/.agents/state/guard/policy.json`: an object with exactly
+`derived_repositories` and `derivation`. A derived row is an entry of the compiled policy's `derived_repositories`,
+keyed by the exact repository slug, `{default_branch, integration_branch, required_checks, evidence}` with an optional
+`production` member (issue 1149: `{changes, read_only, release_profile}`, the project's declared production rules as
+command `{id, argv}` lists, plus, from issue 1150, the changing `key_files` globs and `mcp_tools` names), where
+`required_checks` is the sorted list of check names the project's contract declares in
+`bindings.vcs.merge.required_checks`, `[]` when it declares none. The row check is the store script
+`claude-guard-row-check`, which the wrapper passes as `--derive-bin` (`python/agent_tools/guard/guard_policy.py`
+documents the script, the compiler and the activation step that writes the compiled policy). No member exists in both
+files, so neither file is a valid instance of the other, and each member has one trust rule:
 
     authorized_owners          base policy      Store value only.
     integration_bases          base policy      Store value only; the compiled
@@ -899,154 +735,111 @@ other, and each member has one trust rule:
                                                 an object; the guard does not
                                                 interpret it.
 
-The guard loads the base policy on every call, after the detaching-word check.
-It reads the compiled policy on every call that passes the detaching check and
-the base-policy load, for the production rules (issue 1149 D4), and runs the row
-check only for a repository-bound verb (push, PR creation, merge or release
-creation), when it builds the repository context. The compiled policy supplies no value the guard executes, and the guard
-runs only the base policy's three tools, the row check and the look check,
-which it finds by the absolute paths `--derive-bin` and `--look-bin` name. The compiled policy is a user-writable
-state file, because compiling at activation cannot write the store. Since issue
-377 the guard takes no trusted member from it and treats each derived row as a
-claim to be confirmed before it is relied on (issue 377 D1, D2).
+The guard loads the base policy on every call, after the detaching-word check. It reads the compiled policy on every
+call that passes the detaching check and the base-policy load, for the production rules (issue 1149 D4), and runs the
+row check only for a repository-bound verb (push, PR creation, merge or release creation), when it builds the
+repository context. The compiled policy supplies no value the guard executes, and the guard runs only the base
+policy's three tools, the row check and the look check, which it finds by the absolute paths `--derive-bin` and
+`--look-bin` name. The compiled policy is a user-writable state file, because compiling at activation cannot write the
+store. Since issue 377 the guard takes no trusted member from it and treats each derived row as a claim to be
+confirmed before it is relied on (issue 377 D1, D2).
 
-A derived row exists for each registered project whose proof held at that
-compile and whose slug and two branch names `load_compiled_policy` accepts; a
-name it refuses, such as the branch `dev+ci`, costs that project its row
-(`name_unsupported`) instead of making the guard drop the whole compiled
-policy. A row authorizes its own repository and no other of its owner, and its
-`integration_branch` is the repository's integration base when it differs from
-the default branch.
+A derived row exists for each registered project whose proof held at that compile and whose slug and two branch names
+`load_compiled_policy` accepts; a name it refuses, such as the branch `dev+ci`, costs that project its row
+(`name_unsupported`) instead of making the guard drop the whole compiled policy. A row authorizes its own repository
+and no other of its owner, and its `integration_branch` is the repository's integration base when it differs from the
+default branch.
 
-Row check. The guard runs the row check as `<derive-bin> --repository <slug>`,
-and it re-derives that one repository's row from the fleet registry and the
-contract on `origin` with the compiler's own proof. For a repository that has a
-row, the guard checks in this order, and the first failure is the verdict: (1)
-the slug is also a key of the base `integration_bases`, which refuses; (2)
-`origin/HEAD` must name the row's `default_branch` (skipped for a named
-repository, which has no checkout: the row check itself proves the contract's
-default branch against `origin`'s listed default, and the named repository's
-base is the confirmed row's `default_branch`); (3) the row check runs; (4) it
-must have exited 0 with an `outcome` of `derived` whose `row` has the compiled
-row's `default_branch` and `integration_branch`, and then its
-`required_checks`, equal as lists, order included (a report whose
-`row.required_checks` is not a list of strings is unreadable). `evidence` is not
-compared, because its commit moves with every push to the branch. A refusal at
-step 1, 3 or 4 names the repository, the reason (the row check's reason code,
-the differing branches, or `it derives required checks <derived>, the row names
-<compiled>` with each list as compact JSON) and `claude-guard-policy` as the
-repair, except that a row check that timed out at step 3 ends `timed out;
-transient: rerun the command` instead, because a plain rerun clears it and
-recompiling the policy cannot speed it up (issue 476), and that a row check
-refused only for `fetch_failed` or `provider_unproven` names each reason code
-with the failed read's detail (as a message shows a value, cut to 240
-characters) and ends the same way, because the read failed and the policy did
-not (issue 844); step 2's names the live and recorded branch. The check runs
-once per repository context, when that context is built (a command whose pushes name several `git -C` directories
-builds one context per distinct `git -C` directory and one per named
-repository, all under the one invocation deadline), and only for a repository
-that has a row: a repository with no row is judged by the base policy with no
-check and no network read. A repository with a row is judged by the row and
-never falls back to its owner literal when the check fails. Rows are rechecked
-at use, so a registry or contract change that moves a row's branches refuses
-until the next compile (issue 126 D6, narrowed by issue 377 D2); a project
-registered after the last compile has no row until the next one.
+Row check. The guard runs the row check as `<derive-bin> --repository <slug>`, and it re-derives that one repository's
+row from the fleet registry and the contract on `origin` with the compiler's own proof. For a repository that has a
+row, the guard checks in this order, and the first failure is the verdict: (1) the slug is also a key of the base
+`integration_bases`, which refuses; (2) `origin/HEAD` must name the row's `default_branch` (skipped for a named
+repository, which has no checkout: the row check itself proves the contract's default branch against `origin`'s listed
+default, and the named repository's base is the confirmed row's `default_branch`); (3) the row check runs; (4) it must
+have exited 0 with an `outcome` of `derived` whose `row` has the compiled row's `default_branch` and
+`integration_branch`, and then its `required_checks`, equal as lists, order included (a report whose
+`row.required_checks` is not a list of strings is unreadable). `evidence` is not compared, because its commit moves
+with every push to the branch. A refusal at step 1, 3 or 4 names the repository, the reason (the row check's reason
+code, the differing branches, or `it derives required checks <derived>, the row names <compiled>` with each list as
+compact JSON) and `claude-guard-policy` as the repair, except that a row check that timed out at step 3 ends `timed
+out; transient: rerun the command` instead, because a plain rerun clears it and recompiling the policy cannot speed it
+up (issue 476), and that a row check refused only for `fetch_failed` or `provider_unproven` names each reason code
+with the failed read's detail (as a message shows a value, cut to 240 characters) and ends the same way, because the
+read failed and the policy did not (issue 844); step 2's names the live and recorded branch. The check runs once per
+repository context, when that context is built (a command whose pushes name several `git -C` directories builds one
+context per distinct `git -C` directory and one per named repository, all under the one invocation deadline), and only
+for a repository that has a row: a repository with no row is judged by the base policy with no check and no network
+read. A repository with a row is judged by the row and never falls back to its owner literal when the check fails.
+Rows are rechecked at use, so a registry or contract change that moves a row's branches refuses until the next compile
+(issue 126 D6, narrowed by issue 377 D2); a project registered after the last compile has no row until the next one.
 
-The row check runs with stdin at `/dev/null`, its output captured, its own
-process group and the guard's environment without `BASH_ENV`, `ENV` and every
-`BASH_FUNC_` variable, so no shell startup file or exported function can print
-a report the check never derived. It is bounded by the smaller of
-`--derive-timeout-seconds` (15 s) and the time left in the guard's 27-second
-invocation deadline, which every child it starts shares and which keeps the
-verdict ahead of the hook's 30-second timeout (issue 377 D6). It is not started
-when no time is left, and on its bound the guard kills the whole group with
-`SIGKILL`, so the `git`, `ssh` and `gh` grandchildren do not outlive the
-verdict. Once the context exists, no other child starts unless its whole
-`--child-timeout-seconds` bound (5 s) fits before the deadline; `main` also
-checks the deadline at the top of each operation. When it does not fit, the
-guard refuses with its fixed message, that the 27-second invocation deadline
-leaves too little time for the next check so it was not started, and judges no
-later operation of a chained command (issue 377 D12). A child that reaches its
-own bound refuses, so the guard answers without relying on what the harness
-does with a timed-out hook.
+The row check runs with stdin at `/dev/null`, its output captured, its own process group and the guard's environment
+without `BASH_ENV`, `ENV` and every `BASH_FUNC_` variable, so no shell startup file or exported function can print a
+report the check never derived. It is bounded by the smaller of `--derive-timeout-seconds` (15 s) and the time left in
+the guard's 27-second invocation deadline, which every child it starts shares and which keeps the verdict ahead of the
+hook's 30-second timeout (issue 377 D6). It is not started when no time is left, and on its bound the guard kills the
+whole group with `SIGKILL`, so the `git`, `ssh` and `gh` grandchildren do not outlive the verdict. Once the context
+exists, no other child starts unless its whole `--child-timeout-seconds` bound (5 s) fits before the deadline; `main`
+also checks the deadline at the top of each operation. When it does not fit, the guard refuses with its fixed message,
+that the 27-second invocation deadline leaves too little time for the next check so it was not started, and judges no
+later operation of a chained command (issue 377 D12). A child that reaches its own bound refuses, so the guard answers
+without relying on what the harness does with a timed-out hook.
 
-Cost and offline behaviour. On every repository-bound verb in a repository that
-has a row, nix-config included (issue 377 D3), the row check costs one remote
-listing, one fetch only for a branch whose listed commit the checkout lacks, a
-sparse export of the contract and its projection files for each branch read,
-the resolver and one provider read (issue 385). An unreachable `origin` or
-provider fails the check (`fetch_failed` or `provider_unproven`) and refuses
-the verb: there is no fallback to a ref already present or to the unchecked
-row, and no availability is lost, because push, PR creation, merge and release
-creation each need the same remote or provider to succeed. Only a fetch writes
-a ref, so two sessions judged at once contend for a ref lock only when both
-fetch a missing commit into the same registered root; a fetch that loses the
-lock fails `fetch_failed` and refuses, a rerun clears it, and the guard takes
+Cost and offline behaviour. On every repository-bound verb in a repository that has a row, nix-config included (issue
+377 D3), the row check costs one remote listing, one fetch only for a branch whose listed commit the checkout lacks, a
+sparse export of the contract and its projection files for each branch read, the resolver and one provider read (issue
+385). An unreachable `origin` or provider fails the check (`fetch_failed` or `provider_unproven`) and refuses the
+verb: there is no fallback to a ref already present or to the unchecked row, and no availability is lost, because
+push, PR creation, merge and release creation each need the same remote or provider to succeed. Only a fetch writes a
+ref, so two sessions judged at once contend for a ref lock only when both fetch a missing commit into the same
+registered root; a fetch that loses the lock fails `fetch_failed` and refuses, a rerun clears it, and the guard takes
 no lock of its own.
 
-A bad file. The guard opens either policy file without blocking and reads it
-only when the open descriptor is a regular file of at most 1 MiB
-(`POLICY_MAX_BYTES`), so a FIFO, a device such as `/dev/zero` behind a symlink,
-a directory or a file already larger at the open is refused before a byte is
-read, and a file that grows past the cap while read is refused too. A compiled
-policy that is missing, unreadable, not a regular file, over that size, not
-JSON or outside its schema (a #375 seven-member file included, until the next
-compile replaces it) contributes no row, whole file, and blocks nothing the
-base policy allows (issue 377 D4). When a repository-bound verb is then refused
-for standing authorization, the refusal adds the reason and names
-`claude-guard-policy`. This grants nothing: rows only add, a derived-only
-repository loses authorization, and an owner-literal repository is judged as an
-unregistered one, with no row to check `origin/HEAD` against. A base policy
-that is missing, unreadable, not a regular file, over that size or outside its
-schema still blocks every Bash call with `invalid policy`, because it is a
-store file the build check loaded and a bad one is an installation defect.
+A bad file. The guard opens either policy file without blocking and reads it only when the open descriptor is a
+regular file of at most 1 MiB (`POLICY_MAX_BYTES`), so a FIFO, a device such as `/dev/zero` behind a symlink, a
+directory or a file already larger at the open is refused before a byte is read, and a file that grows past the cap
+while read is refused too. A compiled policy that is missing, unreadable, not a regular file, over that size, not JSON
+or outside its schema (a #375 seven-member file included, until the next compile replaces it) contributes no row,
+whole file, and blocks nothing the base policy allows (issue 377 D4). When a repository-bound verb is then refused for
+standing authorization, the refusal adds the reason and names `claude-guard-policy`. This grants nothing: rows only
+add, a derived-only repository loses authorization, and an owner-literal repository is judged as an unregistered one,
+with no row to check `origin/HEAD` against. A base policy that is missing, unreadable, not a regular file, over that
+size or outside its schema still blocks every Bash call with `invalid policy`, because it is a store file the build
+check loaded and a bad one is an installation defect.
 
-Required checks and the schema transition (issues 552, 1149). The loader demands
-that a row's `required_checks` be a list of distinct non-empty strings, the
-resolver's own rule for the contract member, so a contract that resolves always
-yields a row the guard loads; any other value is a malformed row, and the whole
-compiled policy contributes no row. The same holds for the optional
-`production` member: an object with `changes`, `read_only` and
-`release_profile` and optionally `key_files` (a list of non-empty strings),
-`mcp_tools` (a list of `mcp__<server>__<tool>` names) and `console_activation` (a
-non-empty string equal to the `id` of one `changes` entry), the two lists holding `{id, argv}` objects with a non-empty
-`id` and a non-empty `argv` of non-empty strings, and a non-empty
-`release_profile`; any other value drops the whole file. The compiler writes
-`derivation.schema_version` 6, whose `production` also carries `key_files` and
-`mcp_tools` (issue 1150) and, when the contract names one, `console_activation`
-(issue 1193); this guard reads schema 3, 4 and 5 rows as before
-(`production`, `key_files`, `mcp_tools` and `console_activation` are each
-optional). A guard from before issue 1150 reads a schema-5 row as malformed, and
-one from before issue 1193 reads a row carrying `console_activation` as malformed
-and drops the file until its session restarts. A guard
-from before issue 1149, in a session started before the switch, reads a row
-carrying `production` as malformed and drops the whole file, so a repository
-that relies on a derived row is refused until that session restarts; a
-repository authorized by an owner literal keeps its authorization.
+Required checks and the schema transition (issues 552, 1149). The loader demands that a row's `required_checks` be a
+list of distinct non-empty strings, the resolver's own rule for the contract member, so a contract that resolves
+always yields a row the guard loads; any other value is a malformed row, and the whole compiled policy contributes no
+row. The same holds for the optional `production` member: an object with `changes`, `read_only` and `release_profile`
+and optionally `key_files` (a list of non-empty strings), `mcp_tools` (a list of `mcp__<server>__<tool>` names) and
+`console_activation` (a non-empty string equal to the `id` of one `changes` entry), the two lists holding `{id, argv}`
+objects with a non-empty `id` and a non-empty `argv` of non-empty strings, and a non-empty `release_profile`; any
+other value drops the whole file. The compiler writes `derivation.schema_version` 6, whose `production` also carries
+`key_files` and `mcp_tools` (issue 1150) and, when the contract names one, `console_activation`
+(issue 1193); this guard reads schema 3, 4 and 5 rows as before (`production`, `key_files`, `mcp_tools` and
+`console_activation` are each optional). A guard from before issue 1150 reads a schema-5 row as malformed, and
+one from before issue 1193 reads a row carrying `console_activation` as malformed and drops the file until its session
+restarts. A guard from before issue 1149, in a session started before the switch, reads a row carrying `production` as
+malformed and drops the whole file, so a repository that relies on a derived row is refused until that session
+restarts; a repository authorized by an owner literal keeps its authorization.
 
-Literal and derived rows. `guard-policy compile` refuses a project whose slug is
-a key of the base `integration_bases` as `literal_conflict`: the project gets no
-row and the literal row stays, and each compile reports the conflict. The
-compiled policy cannot subtract from the base, so a repository can carry both
-only when the compiled policy was edited or a literal row was added after the
-last compile, and the guard refuses it at step 1 above (issue 377 D5). What the
-guard authorizes is the base `authorized_owners` and `integration_bases` plus
-the derived rows the row check confirms.
+Literal and derived rows. `guard-policy compile` refuses a project whose slug is a key of the base `integration_bases`
+as `literal_conflict`: the project gets no row and the literal row stays, and each compile reports the conflict. The
+compiled policy cannot subtract from the base, so a repository can carry both only when the compiled policy was edited
+or a literal row was added after the last compile, and the guard refuses it at step 1 above (issue 377 D5). What the
+guard authorizes is the base `authorized_owners` and `integration_bases` plus the derived rows the row check confirms.
 
 Tests
 -----
 
-`tests/test_claude_permission_guard.py` takes the built settings through
-`CLAUDE_SETTINGS_PATH` and the built base policy through
-`CLAUDE_GUARD_BASE_POLICY_PATH`, runs under `python3 -m unittest` with `python/`
-on `PYTHONPATH`, and passes a fixture compiled policy and a stub row check on
-every invocation, so it never reads this host's compiled policy or fleet
-registry, and a look check fixture that runs `look-approval judge` from source as
-`--look-bin`. Three tests, `test_a_compiled_policy_round_trips_through_the_guard`,
+`tests/test_claude_permission_guard.py` takes the built settings through `CLAUDE_SETTINGS_PATH` and the built base
+policy through `CLAUDE_GUARD_BASE_POLICY_PATH`, runs under `python3 -m unittest` with `python/` on `PYTHONPATH`, and
+passes a fixture compiled policy and a stub row check on every invocation, so it never reads this host's compiled
+policy or fleet registry, and a look check fixture that runs `look-approval judge` from source as `--look-bin`. Three
+tests, `test_a_compiled_policy_round_trips_through_the_guard`,
 `test_a_compiled_policy_loads_whatever_branch_names_the_fleet_carries` and
-`test_an_arcwave_shaped_project_is_judged_by_its_compiled_row`, run
-`guard-policy derive` from source as the row check over a fixture fleet, and
-`test_the_row_check_never_sees_a_hostile_shell_environment` runs the built
+`test_an_arcwave_shaped_project_is_judged_by_its_compiled_row`, run `guard-policy derive` from source as the row check
+over a fixture fleet, and `test_the_row_check_never_sees_a_hostile_shell_environment` runs the built
 `claude-guard-row-check` with `HOME` at an empty fixture fleet.
 """
 
@@ -4253,6 +4046,197 @@ def gh_named_repository(run, cut):
     return frozenset({slugs[-1]}), False
 
 
+PULL_REQUEST_RERUN = re.compile(
+    r"gh run rerun ([1-9][0-9]{0,17}) --failed --repo ([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+)")
+# The permit's FAILED_CONCLUSIONS, ANY_APP and ACTIONS_APP, copied: the guard imports nothing
+# from `agent_tools`. A check bound to no app (None) counts as the permit counts it.
+JOB_FAILED_CONCLUSIONS = ("failure", "cancelled", "timed_out", "startup_failure")
+REQUIRED_CHECK_APPS = (None, -1, 15368)
+
+
+def pull_request_rerun_form(command):
+    """`(slug, run id)` when `command` is exactly the rerun the console permit grants, else None:
+    `gh run rerun <id> --failed --repo <owner>/<repo>`, single-spaced, after at most one
+    credential-scrub prefix, with no other character, operator, assignment or word, a run id of
+    at most 18 digits, and a repository with no host and no `.git` suffix."""
+    found = PULL_REQUEST_RERUN.fullmatch(strip_scrub_prefix(command))
+    if found is None or found.group(3).endswith(".git"):
+        return None
+    return f"{found.group(2)}/{found.group(3)}".lower(), int(found.group(1))
+
+
+def forge_read(gh_bin, path, deadline, child_timeout, paged=False):
+    """The parsed JSON `gh api path` prints, or None when the read fails, times out or is not
+    JSON; a `paged` read prints the list of every page. The child inherits the environment
+    minus the token variables, with `GH_HOST` set to github.com, as a host-less rerun reaches
+    it. It is bounded when it starts; a deadline too near raises `DeadlineExhausted`, not caught."""
+    timeout = bounded_timeout(deadline, child_timeout)
+    try:
+        done = subprocess.run(
+            [gh_bin, "api", *(["--paginate", "--slurp"] if paged else []), path],
+            capture_output=True, text=True, check=False,
+            env={**gh_lookup_env(), "GH_HOST": "github.com"}, timeout=timeout)
+        return json.loads(done.stdout) if done.returncode == 0 else None
+    except (subprocess.TimeoutExpired, OSError, ValueError, RecursionError):
+        return None
+
+
+def is_count(value):
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def required_check_names(document):
+    """The names of the checks a branch's protection requires, as the console permit reads them, else None."""
+    if not isinstance(document, dict):
+        return None
+    checks, contexts = document.get("checks"), document.get("contexts")
+    if not isinstance(checks, list) or not isinstance(contexts, list):
+        return None
+    required, bound = set(), set()
+    for check in checks:
+        if not isinstance(check, dict) or not isinstance(check.get("context"), str):
+            return None
+        app = check.get("app_id")
+        if app is not None and not is_count(app):
+            return None
+        bound.add(check["context"])
+        if app in REQUIRED_CHECK_APPS:
+            required.add(check["context"])
+    if not all(isinstance(context, str) for context in contexts):
+        return None
+    return required | {context for context in contexts if context not in bound}
+
+
+def run_document_facts(document, slug):
+    """`(head sha, head branch, pull request numbers)` of a pull request's Actions run of `slug`, else None."""
+    if not isinstance(document, dict) or document.get("event") != "pull_request":
+        return None
+    origin, head = document.get("head_repository"), document.get("head_sha")
+    branch, listed = document.get("head_branch"), document.get("pull_requests")
+    if not isinstance(origin, dict) or not isinstance(origin.get("full_name"), str):
+        return None
+    if origin["full_name"].lower() != slug.lower() or not isinstance(branch, str):
+        return None
+    if not isinstance(head, str) or not re.fullmatch(r"[0-9a-f]{40}", head):
+        return None
+    if not isinstance(listed, list) or not all(
+            isinstance(entry, dict) and is_count(entry.get("number")) for entry in listed):
+        return None
+    return head, branch, [entry["number"] for entry in listed]
+
+
+def failed_job_names(pages):
+    """The names of the failed jobs of a complete job listing, the list of its pages, or None
+    when it is not one: every page reports one `total_count`, which the jobs of all pages meet."""
+    if not isinstance(pages, list) or not pages or not all(isinstance(page, dict) for page in pages):
+        return None
+    total = pages[0].get("total_count")
+    if not is_count(total) or any(page.get("total_count") != total for page in pages):
+        return None
+    names, seen = set(), 0
+    for page in pages:
+        if not isinstance(page.get("jobs"), list):
+            return None
+        seen += len(page["jobs"])
+        for job in page["jobs"]:
+            if not isinstance(job, dict) or not isinstance(job.get("name"), str):
+                return None
+            if job.get("conclusion") is not None and not isinstance(job["conclusion"], str):
+                return None
+            if job.get("conclusion") in JOB_FAILED_CONCLUSIONS:
+                names.add(job["name"])
+    return names if seen == total else None
+
+
+def is_own_open_pull_request(document, slug, head, branch, row):
+    """Whether `document`, which `is_pull_request_document` accepts, is an open pull request of
+    `slug` from `branch` at `head`, into the row's integration branch and from neither of its
+    long-lived branches."""
+    source, target = document["head"], document["base"]
+    return (
+        document["state"] == "open"
+        and [source["repo"]["full_name"].lower(), target["repo"]["full_name"].lower()] == [slug.lower()] * 2
+        and source["sha"] == head and source["ref"] == branch and target["ref"] == row["integration_branch"]
+        and branch not in (row["integration_branch"], row["default_branch"])
+    )
+
+
+SHELL_HOST_VARIABLES = ("GH_HOST", "GH_CONFIG_DIR", "XDG_CONFIG_HOME")
+SHELL_HOST_SCRIPT = "".join(f"printf '\\nGUARD-SHELL-{n}<%s>\\n' \"${n}\"; " for n in SHELL_HOST_VARIABLES)
+
+
+def shell_selected_host(deadline, child_timeout):
+    """The `GH_HOST` the session's shell exports ("" when none), else None when the shell cannot be asked
+    or changes `GH_CONFIG_DIR` or `XDG_CONFIG_HOME`, whose configuration gh reads its host from without
+    a `GH_HOST`. The shell is `$SHELL`, an absolute path, started as a login, interactive shell as the
+    session starts it; the last marked line of each variable answers. The child is bounded when it
+    starts; a deadline too near raises `DeadlineExhausted`, not caught."""
+    shell = os.environ.get("SHELL", "")
+    if not os.path.isabs(shell) or not os.access(shell, os.X_OK):
+        return None
+    timeout = bounded_timeout(deadline, child_timeout)
+    try:
+        done = subprocess.run(
+            [shell, "-l", "-i", "-c", SHELL_HOST_SCRIPT], capture_output=True, text=True,
+            check=False, stdin=subprocess.DEVNULL, env=gh_lookup_env(), timeout=timeout)
+    except (subprocess.TimeoutExpired, OSError, ValueError):
+        return None
+    answers = {name: re.findall(rf"^GUARD-SHELL-{name}<([^<>\r\n]*)>$", done.stdout, re.MULTILINE)
+               for name in SHELL_HOST_VARIABLES}
+    if not all(answers.values()) or any(
+            answers[name][-1] != os.environ.get(name, "") for name in SHELL_HOST_VARIABLES[1:]):
+        return None
+    return answers["GH_HOST"][-1]
+
+
+def is_pull_request_document(document):
+    """Whether `document` has the shape of a pull request that `is_own_open_pull_request` reads:
+    a state, and a head and a base that each name a ref and a repository, the head a sha."""
+    def named(side, *members):
+        return (isinstance(side, dict) and isinstance(side.get("repo"), dict)
+                and isinstance(side["repo"].get("full_name"), str)
+                and all(isinstance(side.get(member), str) for member in members))
+    return (isinstance(document, dict) and isinstance(document.get("state"), str)
+            and named(document.get("head"), "sha", "ref") and named(document.get("base"), "ref"))
+
+
+def pull_request_check_run(gh_bin, slug, run_id, row, deadline, child_timeout, memo):
+    """Whether run `run_id` of `slug` is a pull request check run of its own open issue pull
+    request at that pull request's head whose failed job is a check the forge requires of the
+    row's integration branch. Any read that fails, or any other shape, is False. The row's
+    declared `required_checks` are never consulted. `memo`, a dict shared by the calls of one
+    command, holds each read once."""
+    hook_host = os.environ.get("GH_HOST", "").strip().lower()
+    if hook_host not in ("", "github.com"):
+        return False
+    if "shell host" not in memo:
+        memo["shell host"] = shell_selected_host(deadline, child_timeout)
+    if memo["shell host"] is None or memo["shell host"].strip().lower() != hook_host:
+        return False
+
+    def read(path, paged=False):
+        key = (slug.lower(), path)
+        if key not in memo:
+            memo[key] = forge_read(gh_bin, f"repos/{slug}/{path}", deadline, child_timeout, paged)
+        return memo[key]
+
+    run = run_document_facts(read(f"actions/runs/{run_id}"), slug)
+    if run is None:
+        return False
+    head, branch, numbers = run
+    failed = failed_job_names(read(f"actions/runs/{run_id}/jobs?per_page=100", paged=True))
+    if not failed:
+        return False
+    pulls = [read(f"pulls/{number}") for number in numbers]
+    if not all(is_pull_request_document(pull) for pull in pulls):
+        return False
+    if any(is_own_open_pull_request(pull, slug, head, branch, row) for pull in pulls):
+        required = required_check_names(
+            read(f"branches/{row['integration_branch']}/protection/required_status_checks"))
+        return bool(required and failed & required)
+    return False
+
+
 def add_production_hit(hits, hit, named, by_checkout):
     """Record `hit` in `hits`, a map of `(slug, index)` to `(named, by_checkout)`: the
     frozenset of repositories the runs that hit it name, and whether any run is judged by
@@ -4393,7 +4377,7 @@ def production_refusal_text(slug, rule, production):
     )
 
 
-def production_problem_for(command, rows, cwd, git_bin, timeout):
+def production_problem_for(command, rows, cwd, git_bin, gh_bin, deadline, child_timeout):
     """The reason to refuse `command` as a production command, or None.
 
     Only a row whose `production` has a `changes` entry takes part. With no hit nothing
@@ -4402,8 +4386,11 @@ def production_problem_for(command, rows, cwd, git_bin, timeout):
     then by sorted slug; otherwise only that repository's rules refuse. A `gh run rerun` that
     names its repository (`--repo`, `-R`) is judged against that repository's rules from any
     directory, and by the checkout only when some run of the command is not narrowed (issue
-    1375). Inside a row the first
-    rule in `changes` order that hits names the refusal.
+    1375). When the whole command is the permit's own rerun form and the forge shows it to
+    be a pull request check run (`pull_request_check_run`), the narrowed hits of each row that
+    names the project are dropped, each row decided by its own integration branch. Each child
+    is bounded when it starts. Inside a row the first rule in `changes` order that hits names
+    the refusal.
     """
     rules = {
         slug: row["production"] for slug, row in rows.items()
@@ -4412,12 +4399,24 @@ def production_problem_for(command, rows, cwd, git_bin, timeout):
     if not rules:
         return None
     hits, certain = production_hits(command, rules)
+    form = pull_request_rerun_form(command)
+    if form is not None:
+        memo, verdicts = {}, {}
+        for hit in sorted(
+                hit for hit, (named, by_checkout) in hits.items()
+                if hit[0].lower() == form[0] and not by_checkout and named == frozenset({form[0]})):
+            if hit[0] not in verdicts:
+                verdicts[hit[0]] = pull_request_check_run(
+                    gh_bin, hit[0], form[1], rows[hit[0]], deadline, child_timeout, memo)
+            if verdicts[hit[0]]:
+                del hits[hit]
     if not hits:
         return None
     here = None
     if any(by_checkout for _, by_checkout in hits.values()):
         try:
-            here = detect_repository(git_bin, cwd, timeout, strict=True)
+            here = detect_repository(
+                git_bin, cwd, bounded_timeout(deadline, child_timeout), strict=True)
         except RepositoryLookupFailed as error:
             return (f"the repository lookup {error} for a command that may change the "
                     "production of a declared project, so the guard cannot judge it")
@@ -6850,9 +6849,8 @@ def main():
     rows, _reason = load_compiled_policy(args.policy)
     try:
         refusal = production_problem_for(
-            command, rows, payload.get("cwd"), args.git_bin,
-            bounded_timeout(started + INVOCATION_DEADLINE_SECONDS,
-                            args.child_timeout_seconds))
+            command, rows, payload.get("cwd"), args.git_bin, args.gh_bin,
+            started + INVOCATION_DEADLINE_SECONDS, args.child_timeout_seconds)
     except DeadlineExhausted:
         return block(DEADLINE_REFUSAL)
     if refusal is not None:
