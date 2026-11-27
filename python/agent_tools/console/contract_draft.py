@@ -24,8 +24,7 @@ writing, with `adopt_conformance.plan_conformance` over `HEAD`: `protection_afte
 protection file the adoption writes, else the committed one, else None, and `pins_platform` says the
 adoption pins the platform in `devenv.lock` (any failure there gives the committed text and False).
 `attempt` is `{"minutes", "source"}` of `attempt_history.read` (`history` or `fallback`). A set cancel
-reads what git says as empty. `committed_contract(root, cancel=None)` is the JSON of the contract at `HEAD`
-or None, and `signing_committed` reads it only for the signing refusal; neither raises nor writes.
+reads what git says as empty.
 
 `read_hooks(root, cancel, *, search_path=None)` reads the commit hooks and the environment files a
 reconcile plan needs, as `{"hooks", "stranded", "environments"}`; it never raises and never writes. `hooks` are the
@@ -158,8 +157,7 @@ from pathlib import Path
 from agent_tools import canonical
 from agent_tools.console import manager
 from agent_tools.project_contract import (
-    adopt_apply, adopt_conformance, agent_platform, attempt_history, derived_values, hook_install,
-    schema_three)
+    adopt_conformance, agent_platform, attempt_history, derived_values, hook_install, schema_three)
 from agent_tools.system.semver import parse_semver
 
 QUESTION_ID = "contract-draft"
@@ -754,45 +752,6 @@ def binds_environment(root: str) -> bool:
     vcs = bindings.get("vcs") if isinstance(bindings, dict) else None
     commit = vcs.get("commit") if isinstance(vcs, dict) else None
     return isinstance(commit, dict) and "environment" in commit
-
-
-CONTRACT_PATH = ".agents/project.json"
-
-
-def committed_contract(root: str, cancel: threading.Event | None = None) -> object | None:
-    """The JSON value of the contract at the checkout's `HEAD`, or None; never raises, never writes."""
-    try:
-        spec = f"HEAD:{CONTRACT_PATH}"
-        size = _git(root, "cat-file", "-s", spec, cancel=cancel)
-        if size is None or int(size.strip()) > hook_install.TEXT_LIMIT:
-            return None
-        blob = _git(root, "cat-file", "blob", spec, cancel=cancel)
-        return None if blob is None else json.loads(blob.decode("utf-8"))
-    except (ValueError, RecursionError):  # not a size, not UTF-8 (UnicodeDecodeError), not JSON or nested too deep
-        return None
-
-
-def asks_for_signing(contract: object) -> bool:
-    """Whether `contract` is schema 2 (an int, never a bool) and sets `bindings.vcs.commit.signed` to true."""
-    if not isinstance(contract, dict):
-        return False
-    version = contract.get("schema_version")
-    if not isinstance(version, int) or isinstance(version, bool) or version != 2:
-        return False
-    node: object = contract
-    for key in ("bindings", "vcs", "commit"):
-        node = node.get(key) if isinstance(node, dict) else None
-    return isinstance(node, dict) and node.get("signed") is True
-
-
-def signing_committed(root: str, error: Mapping, cancel: threading.Event | None = None) -> bool:
-    """Whether a signing refusal's policy is the schema-2 contract saved at `HEAD`; reads only on a refusal."""
-    try:
-        if error.get("repair_id") != adopt_apply.SIGNING_UNAVAILABLE:
-            return False
-        return asks_for_signing(committed_contract(root, cancel))
-    except Exception:  # total: a failed read is not a committed policy
-        return False
 
 
 def hooks_missing(root: str, cancel: threading.Event | None = None) -> bool:

@@ -313,10 +313,17 @@ class RestartedRegistrationTest(ApproveCase):
         self.listed_and_registered()
 
 
+POINTED = {"error": {**approve_service.SIGNING["error"], "violations": [
+    {"pointer": approve.SIGNING_POINTER, "message": "the contract asks for a signed commit"}]}}
+
+
 class CommittedSigningTest(ApproveCase):
-    def test_a_signing_failure_from_a_committed_schema_two_contract_names_its_settings_and_edits_nothing(self):
-        self.start(Fake(plan=READY, apply_result=approve_service.SIGNING))
+    def signed_checkout(self, result):
+        """A registered checkout whose saved contract (schema 2) asks for signing, and an apply that fails on it."""
+        self.start(Fake(plan=READY, apply_result=result))
         self.repo = reconciled(self.parent, contract=True)
+        (self.repo / "scratch.ignored").write_text("untracked\n")
+        (self.repo / ".git/info/exclude").write_text("scratch.ignored\n")
         contract = self.repo / ".agents/project.json"
         contract.write_text(json.dumps(
             {"schema_version": 2, "bindings": {"vcs": {"commit": {"signed": True}}}}) + "\n")
@@ -324,14 +331,28 @@ class CommittedSigningTest(ApproveCase):
         git(self.repo, "push", "-q", "origin", "main")
         self.registered(self.repo)
         self.settled_row(self.repo)
-        before = (git(self.repo, "status", "--porcelain"), git(self.repo, "rev-parse", "HEAD"),
-                  contract.read_bytes())
+
+    def snapshot(self):
+        """Every ref, the checked-out revision, the status with ignored files, and every file outside .git."""
+        files = {str(path.relative_to(self.repo)): path.read_bytes() for path in sorted(self.repo.rglob("*"))
+                 if path.is_file() and ".git" not in path.relative_to(self.repo).parts}
+        return (git(self.repo, "for-each-ref"), git(self.repo, "rev-parse", "HEAD"),
+                git(self.repo, "status", "--porcelain", "--ignored"), files)
+
+    def test_a_signing_failure_from_a_committed_schema_two_contract_names_its_settings_and_edits_nothing(self):
+        self.signed_checkout(POINTED)
+        git(self.repo, "branch", "other")
+        before = self.snapshot()
         self.run_approval("apply_failed")
         (card,) = self.apply_cards()
         self.assertEqual(card["why"], approve.COMMITTED_SIGNING_NOTE)
         self.assertEqual(card["questions"][0]["options"], ["Apply it again", "Not now"])
         self.assertEqual(card["values"], ["apply", "not_now"])
         self.assertIn("signed changes", card["headline"])
-        self.assertEqual(
-            (git(self.repo, "status", "--porcelain"), git(self.repo, "rev-parse", "HEAD"),
-             contract.read_bytes()), before)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_the_note_follows_the_apply_error_and_not_the_checkout(self):
+        self.signed_checkout(approve_service.SIGNING)
+        self.run_approval("apply_failed")
+        (card,) = self.apply_cards()
+        self.assertEqual(card["why"], approve.SIGNING_NOTE)

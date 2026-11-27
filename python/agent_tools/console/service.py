@@ -7042,11 +7042,11 @@ class ConsoleService(ActionPermit):
                 self._log_approval_error({"stage": "apply", "root": root, "plan_id": plan_id,
                                           "error": result["error"]})
                 kept = approve.retained(plan_id)
-                signed = contract_draft.signing_committed(root, result["error"], stop)
-                reason, note = approve.apply_failure(name, result["error"], kept, committed=signed)
+                reason, note = approve.apply_failure(name, result["error"], kept)
+                evidence = approve.commit_evidence(result["error"], kept)
                 return self._step(shown, plan_id, root, "apply_failed",
                                          reason=approve.reason_of(reason), note=note, kept=kept,
-                                         evidence=approve.commit_evidence(result["error"], kept))
+                                         evidence=evidence)
             branch, commit = result["branch"], result["commit"]
             base = result.get("integration_branch")
             self._append_applied(self._step(

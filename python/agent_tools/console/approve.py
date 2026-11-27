@@ -94,20 +94,21 @@ the first rule that matches: not a `ForgeError` (`UNEXPECTED`), `gh_missing`, `g
 transient `gh_failed`, an HTTP 401 or 403, 422 or 404 read from gh's message, else the forge answered
 in a way the console does not understand. `merge_failure(error)` is the plain words of a failed
 merge, by the same kind of rules (HTTP 409 reads `MOVED`, 405 that the repository's rules do not
-allow the merge yet, 404 that the forge does not know the pull request). `apply_failure(name, error, kept, *, committed=False)` is `(reason, note)`
+allow the merge yet, 404 that the forge does not know the pull request). `apply_failure(name, error, kept)` is `(reason, note)`
 for an apply error object, by the first rule that matches: `plan_stale`; the dirty, retained and
 unavailable worktree repairs; `DISCARD_REPAIR` (`adopt.discard.failed`, a copy that could not be
 removed, noted `RETAINED_NOTE`); `SIGNING_REPAIR` (`adopt.commit.signing_unavailable`, reason
-`SIGNING_REASON`, note `SIGNING_NOTE`, or `COMMITTED_SIGNING_NOTE` when `committed`: the service's
-reading, `contract_draft.signing_committed`, that the contract saved in the repository is schema 2 and
-asks for signing); `COMMIT_REPAIR` (`adopt.commit.failed`); a failed
+`SIGNING_REASON`, note `SIGNING_NOTE`, or `COMMITTED_SIGNING_NOTE` when a violation's pointer is
+`SIGNING_POINTER`: the apply's own word that the contract saved in the repository is schema 2 and
+authors the signing, so the checkout is never read); `COMMIT_REPAIR` (`adopt.commit.failed`); a failed
 `adopt.gate.*` gate; an uninstalled platform manifest (`MANIFEST_NOTE`, which names `just switch`);
 a repair id with a prefix of `APPLY_REASONS`; else `it could not be applied`. It reads no violation
 message, so a formatter's output, a worktree path or a plan id never reaches a card (the service
 logs them), except the failing hook that `commit_evidence(error, None)` names for `COMMIT_REPAIR`
 (reason `the project's <hook> hook stopped saving the adoption's change: <hook_why(exit)>`, note
 `HOOK_NOTE`) and for `SIGNING_REPAIR` (the reason stays `SIGNING_REASON` and the note is
-`hook_signing_note(hook, why)`, two sentences, even when `committed`).
+`hook_signing_note(hook, why, settings=...)`, which also names the repository's settings when they ask
+for the signing; two sentences either way).
 `kept` is not read: no note mentions a leftover copy except `RETAINED_NOTE`, none asks an
 agent to remove anything, and every note is at most two sentences. A signing failure offers only
 `Apply it again` and `Not now`: signing is a platform constant, so no card turns it off
@@ -309,6 +310,9 @@ SIGNING_REPAIR = "adopt.commit.signing_unavailable"
 SIGNING_REASON = ("the project asks for signed changes and this computer could not sign the "
                   "adoption's change")
 SIGNING_NOTE = "Set up a signing key on this computer, then choose Apply it again."
+# The pointer of the violation an apply refuses with when the contract's own `signed` setting asked
+# for the signature (`adopt_apply.SIGNING_POINTER`, the same literal).
+SIGNING_POINTER = "/bindings/vcs/commit/signed"
 COMMITTED_SIGNING_NOTE = ("This project's own settings in its repository ask for signed changes. Set up a "
                           "signing key on this computer and choose Apply it again, or change those settings "
                           "in the repository, then register it again.")
@@ -854,11 +858,12 @@ def hook_why(code: int) -> str:
     return f"it ended with exit status {code}"
 
 
-def hook_signing_note(hook: str, why: str) -> str:
+def hook_signing_note(hook: str, why: str, *, settings: bool = False) -> str:
+    again = ("then choose Apply it again, or change the project's own settings in its repository and "
+             "register it again." if settings else "then choose Apply it again.")
     return (f"The project's {hook} hook also stopped saving the change: {why}. Make it pass in a "
             "fresh copy of the repository, in the development environment the project contract names "
-            "for saving a change or in none when it names none, and set up a signing key on this computer, "
-            "then choose Apply it again.")
+            f"for saving a change or in none when it names none, and set up a signing key on this computer, {again}")
 
 
 def evidence_line(text: str, worktree: str | None) -> str | None:
@@ -901,8 +906,13 @@ def commit_evidence(error: Mapping, kept: Mapping | None) -> dict | None:
             "lines": shown[-EVIDENCE_LINES:]}
 
 
-def apply_failure(name: str, error: Mapping, kept: Mapping | None, *,
-                  committed: bool = False) -> tuple[str, str]:
+def settings_ask_for_signing(error: Mapping) -> bool:
+    violations = error.get("violations")
+    return isinstance(violations, list) and any(
+        isinstance(item, Mapping) and item.get("pointer") == SIGNING_POINTER for item in violations)
+
+
+def apply_failure(name: str, error: Mapping, kept: Mapping | None) -> tuple[str, str]:
     repair = error.get("repair_id") or ""
     commit_note = register.unknown_step(name, "apply").replace("Try again", "Apply it again", 1)
     if error.get("code") == "plan_stale":
@@ -922,9 +932,10 @@ def apply_failure(name: str, error: Mapping, kept: Mapping | None, *,
     found = commit_evidence(error, None) if repair in (SIGNING_REPAIR, COMMIT_REPAIR) else None
     hook = found["hook"] if found else None
     if repair == SIGNING_REPAIR:
+        settings = settings_ask_for_signing(error)
         if hook is None:
-            return (SIGNING_REASON, COMMITTED_SIGNING_NOTE if committed else SIGNING_NOTE)
-        return (SIGNING_REASON, hook_signing_note(hook, found["why"]))
+            return (SIGNING_REASON, COMMITTED_SIGNING_NOTE if settings else SIGNING_NOTE)
+        return (SIGNING_REASON, hook_signing_note(hook, found["why"], settings=settings))
     if repair == COMMIT_REPAIR:
         if hook is None:
             return ("the adoption's change could not be saved", commit_note)
