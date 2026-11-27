@@ -312,6 +312,16 @@ class ReadOnlyShellTest(unittest.TestCase):
                                                                     bash_words(argv, "--disallowedTools")))
         self.assertEqual(engine_session.shell_rules(read_role(AGENTS, "implementer")), ((), ()))
 
+    def test_the_guard_and_the_engine_say_one_refusal_sentence(self):
+        sentence = engine_session.READ_ONLY_REFUSAL
+
+        self.assertEqual(sentence, GUARD.READ_ONLY_SHELL_REFUSAL)
+        for part in ("one plain command per Bash call", "split a pipeline or command list into separate calls",
+                     "no `|`, `;`, `&&`, redirection, expansion", "Read and Grep tools",
+                     *engine_session.READ_ONLY_PROGRAMS):
+            with self.subTest(part=part):
+                self.assertIn(part, sentence)
+
     def test_the_denial_prompt_tells_each_role_what_its_own_launch_allows(self):
         implementer = read_role(AGENTS, "implementer")
         whole = replace(implementer, whole_shell=True)
@@ -320,9 +330,9 @@ class ReadOnlyShellTest(unittest.TestCase):
         plain = engine_session.denial_prompt(implementer, calls)
         whole_shell = engine_session.denial_prompt(whole, calls)
 
-        self.assertIn("Shell rules allowing a command: "
-                      + ", ".join(engine_session.shell_rules(read_role(AGENTS, "reviewer"))[0]), read_only)
-        self.assertIn("No `>` redirection runs.", read_only)
+        self.assertIn(engine_session.READ_ONLY_REFUSAL, read_only)
+        self.assertIn("each with one plain allowed command per call or with the Read and Grep tools", read_only)
+        self.assertNotIn("Shell rules allowing", read_only)
         self.assertNotIn("host", read_only)
         self.assertIn("host settings' own allow rules", plain)
         self.assertNotIn("allowing a command: none", plain)

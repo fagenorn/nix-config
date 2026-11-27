@@ -224,10 +224,12 @@ class DeniedReaskTest(DeniedRun, unittest.TestCase):
         prompt = self.sessions("review.1.denied.prompt.md").read_text(encoding="utf-8")
         self.assertEqual(second["stdin"], prompt)
         self.assertIn(repr(command), prompt)
-        role = engine_session.read_role(self.project.world.home / ".claude/agents", "reviewer")
-        for rules in engine_session.shell_rules(role):
-            for rule in rules:
-                self.assertIn(rule, prompt)
+        self.assertIn(engine_session.READ_ONLY_REFUSAL, prompt)
+        self.assertIn("one plain command per Bash call", prompt)
+        self.assertIn("split a pipeline or command list into separate calls", prompt)
+        self.assertIn("Read and Grep tools", prompt)
+        self.assertNotIn("Shell rules allowing a command", prompt)
+        self.assertNotIn("split at `|`", prompt)
         for name, denials in (("review.1.json", [denial]), ("review.1.denied.json", [])):
             record = json.loads(self.sessions(name).read_text(encoding="utf-8"))
             self.assertEqual(record["denials"], denials, name)

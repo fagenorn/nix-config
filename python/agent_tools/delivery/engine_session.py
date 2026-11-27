@@ -55,8 +55,9 @@ strips `nohup` before matching), and `shell_rules` gives a role's Bash rules. A 
 needs another shell command lists it in its own `tools` as `Bash(<prefix>:*)`;
 one that is denied a tool call anyway ends the run at the engine's own stop
 `tool-denied` (`engine_shell`), never a graded reply. `denial_prompt` tells a denied session which calls
-were refused and what its own launch's shell rules allow (`shell_guidance`: the read-only shapes, the host
-settings' allowances of a plain role, the whole shell of a whole-shell one).
+were refused: a read-only role gets the refusal sentence the guard prints (`READ_ONLY_REFUSAL`), any other
+role its own launch's shell rules (`shell_guidance`: the host settings' allowances of a plain role, the
+whole shell of a whole-shell one).
 
 The recorded exception: under the engine only, a step that names its own `worktree` gives a
 `WHOLE_SHELL_ROLES` role the whole `Bash`, `Edit` and `Write` (`Role.whole_shell`, launched in that
@@ -165,6 +166,11 @@ READ_ONLY_PROGRAMS: tuple[str, ...] = (
     "git log", "git show", "git diff", "git ls-tree", "git ls-files", "git status", "git rev-parse",
     "git merge-base", "grep", "ls", "wc", "cat", "head", "tail", "sed -n")
 READ_ONLY_BASH: tuple[str, ...] = tuple(f"Bash({program}:*)" for program in READ_ONLY_PROGRAMS)
+READ_ONLY_REFUSAL = (
+    "Refused because a read-only session allows only one plain command per Bash call: split a pipeline or "
+    f"command list into separate calls, each one of {', '.join(READ_ONLY_PROGRAMS[:-1])} or "
+    f"{READ_ONLY_PROGRAMS[-1]} with no `|`, `;`, `&&`, redirection, expansion, glob, backslash or git "
+    "`--output`, or use the Read and Grep tools to read and search files.")
 GIT_WRITING: tuple[str, ...] = tuple(
     f"Bash(git {verb}*--output*)" for verb in ("diff", "log", "show"))
 HOST_WRITING: tuple[str, ...] = tuple(
@@ -351,7 +357,9 @@ def denial_detail(step: str, calls: Sequence[str]) -> str:
 
 
 def shell_guidance(role: Role) -> str:
-    """What `role`'s shell runs, said from the rules its launch passes, never from a fixed text."""
+    """What `role`'s shell runs: a read-only role gets `READ_ONLY_REFUSAL`, any other its launch's rules."""
+    if read_only_shell(role):
+        return f"{READ_ONLY_REFUSAL}\n\n"
     allowed, denied = shell_rules(role)
     refusing = f"Shell rules refusing a command: {', '.join(denied) or 'none'}.\n"
     if role.whole_shell:
@@ -376,10 +384,10 @@ def shell_guidance(role: Role) -> str:
 def denial_prompt(role: Role, calls: Sequence[str]) -> str:
     """The prompt that asks a denied session again: the refused calls, `role`'s shell rules, the shapes."""
     refused = "\n".join(f"- {call!r}" for call in calls)
-    return (
-        f"These tool calls were refused:\n{refused}\n\n{shell_guidance(role)}"
-        "Redo the checks the refused calls were for with what the shell rules allow or the file tools. "
-        f"{REASK_REQUEST}")
+    redo = ("Redo the checks the refused calls were for, each with one plain allowed command per call or "
+            "with the Read and Grep tools. " if read_only_shell(role) else
+            "Redo the checks the refused calls were for with what the shell rules allow or the file tools. ")
+    return f"These tool calls were refused:\n{refused}\n\n{shell_guidance(role)}{redo}{REASK_REQUEST}"
 
 
 def asked_calls(sessions: Path, name: str, visit: int) -> tuple[str, ...] | None:
