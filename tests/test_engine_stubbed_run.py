@@ -24,6 +24,8 @@ from agent_tools.delivery.review_findings import Round, dispositions
 from agent_tools.verification import verify_block
 from tests.engine_fixture import AdoptedFixtures, FixtureProject
 from tests.engine_guards import payloads
+from tests.engine_plan_fixtures import (NOHUP_PLAN_TEXT, PLAN_PASS_BLOCKED, PLAN_TEXT, PLANNED, PLANNED_REPLIES,
+                                        REFUSED_REPLIES, REVISED_PLAN_TEXT, REVISED_REPLIES, plan_file)
 from tests.engine_procedure_copies import (PROCEDURES, keeping_the_run, stopping_after_verify,
                                            unstructured_procedures)
 from tests.engine_step_coverage import StepCoverage, test_ids
@@ -73,31 +75,6 @@ RESOLVED = {"reply": {"status": "done", "notes": "n", "tests": ["checks/check_gr
 UPSTREAM_IMPLEMENTED = {**IMPLEMENTED, "upstream": {"path": "fixture/farewell.py", "text": "OTHER = 1\n"}}
 CONFLICTING_MAIN = {"path": "fixture/farewell.py", "text": "OTHER = 1\n"}
 CODEX_LIMIT = {"stdout": json.dumps({"status": 1, "error": "You've hit your usage limit."}), "exit": 1}
-
-PLAN_TEXT = "PLAN: task 1 adds greet() to fixture/greet.py; its proving test is checks/check_greet.py."
-REVISED_PLAN_TEXT = "REVISED PLAN: task 1 adds greet() and names checks/check_greet.py as its proving test."
-NOHUP_PLAN_TEXT = "PLAN: task 1 adds greet(); the doc says never start a run with nohup."
-
-
-def plan_file(text: str) -> dict:
-    """The plan.md a planner session leaves in the worktree: the engine posts the plan from the files."""
-    return {"path": ".superpowers/plans/issue-41/plan.md", "text": text}
-
-
-PLANNED = {"status": "planned", "evidence": PLAN_TEXT, "notes": "", "declines": [],
-           "tasks": [{"n": 1, "title": "Add greet()", "file": "task-1.md"}]}
-PLANNED_ENTRY = {"reply": PLANNED, "leave": plan_file(PLAN_TEXT)}
-REVISED = dict(PLANNED, evidence=REVISED_PLAN_TEXT)
-REVISED_ENTRY = {"reply": REVISED, "leave": plan_file(REVISED_PLAN_TEXT)}
-PLAN_FINDING = {"severity": "important", "file": "task-1.md", "failing_input": "the proving test is not named",
-                "summary": "task 1 names no proving test", "kind": "plan-step-not-executable"}
-PLAN_PASS = {"verdict": "pass", "findings": []}
-PLAN_FINDINGS = {"verdict": "findings", "findings": [PLAN_FINDING]}
-PLAN_PASS_BLOCKED = {"verdict": "pass", "findings": [PLAN_FINDING]}
-PLANNED_REPLIES = {"plan": PLANNED_ENTRY, "plan-review": PLAN_PASS}
-REVISED_REPLIES = {"plan": PLANNED_ENTRY, "plan-review": PLAN_FINDINGS, "plan-revise": REVISED_ENTRY,
-                   "plan-rereview": PLAN_PASS}
-REFUSED_REPLIES = {**REVISED_REPLIES, "plan-rereview": PLAN_FINDINGS}
 
 
 def lite_findings(**members) -> dict:
