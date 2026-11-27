@@ -12,6 +12,30 @@ value is a string (the empty string included: `refusal` judges the rule, so that
 answered as a refusal, not as a malformed request), and returns it. It raises `ValueError`
 otherwise.
 
+`POST /api/account-add` (#1027) runs the same checks with `MAX_ACCOUNT_BYTES` (4096) and
+`account_add.parse_add_request`: 400 `bad account`. Under the lock `_adding` (never `_ingest`) the
+service refuses a name `account_add.refusal` refuses, a name already listed
+(`account <name> already exists`) and, without an account adder, sign-in runs or a sign-in reader,
+every name (`adding an account is not available on this host`): one stderr line `console:
+account_add_refused <reason>` and 409 with the reason, appending nothing. It then calls the adder
+(the launcher's own add), reads the listing again, and a profile not listed is `not_listed`. A
+failed add is one stderr line `console: account_add_failed <name> <kind>` and 502 `the account could
+not be created: <kind>`, appending nothing. An added profile appends one `account.added` row
+`{"by": "owner", "profile": <name>}`, joins the service's profiles at once, and its sign-in status is
+read once (a failed read is one stderr line `console: signin_add_read_failed <profile> <kind or
+Type>` and records nothing) before the sign-in starts as the start route starts it. Before that the
+new profile is granted every registered project's folder trust (`_grant_trust`, cause `account`, one
+`trust.granted` row per project, no lock held), after the adder returned, so the adder's 30 second
+deadline bounds creation only; an unreadable registry grants nothing (`console:
+trust_account_registry_unreadable <name>`) and no grant fails the add. A sign-in that
+cannot start leaves the row and the profile, appends the start route's `failed` row and answers
+502 `the account was added; its sign-in could not start: <kind>`, with `console: signin_start_failed
+<name> <kind>`. Any other exception is `console: account_add_failed <Type>` (never its message) and
+500 `adding the account failed`. Success is `200` `application/json` with the start route's five
+members and `"profile": <name>`; no row, stderr line, view or stream frame carries the link. The
+token is created once in `page-token` beside the event log and reaches a client only inside `GET /`,
+where it replaces the slot in the page's `console-token` meta tag.
+
 Adder. `Adder(command=("claude-account",), environ=None, timeout=ADD_TIMEOUT)` called with a name
 first refuses a name that `refusal` refuses, with `ValueError`, before any process starts. It then
 runs `[*command, "add", name]` with no shell, `stdin` from `DEVNULL`, `stdout` and `stderr` to

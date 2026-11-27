@@ -65,6 +65,8 @@ stream `Content-Length`):
     POST /api/permit 200 application/json, the console judges a manager's merge, rerun or approved action (below)
     POST /api/permission-prompt 200 application/json, a manager's hook holds one Bash prompt on the console (below)
     POST /api/permission-answer 204, a JSON body, the page allows or refuses a manager's held prompt (below)
+    POST /api/host-alerts-save, /api/host-alerts-switch, /api/host-alerts-chats and /api/host-alerts-test
+                    204 or 200 application/json, the page sets up the Telegram alerts (below)
     POST /api/picture 200 application/json, a manager sends one PNG picture (below)
     POST /api/round-answer 204, a JSON body, the page answers one question (below)
     POST /api/recap 200 application/json, a manager reads what it needs to pick a sprint up (below)
@@ -79,7 +81,7 @@ stream `Content-Length`):
                     `/api/approve`, `/api/reply`, `/api/retry-manager`, `/api/message`, `/api/stop`, `/api/exclusion`, `/api/pin`, `/api/brief`, `/api/report`,
                     `/api/close`, `/api/inbox`, `/api/message-reply`, `/api/recap`, `/api/ask`, `/api/withdraw-question`, `/api/notice`, `/api/notices`, `/api/withdraw-notice`, `/api/live-fault`, `/api/permit`,
                     `/api/picture`, `/api/release-card`, `/api/release-answer`, `/api/permission-prompt`,
-                    `/api/permission-answer` and `/api/round-answer`;
+                    `/api/permission-answer`, `/api/host-alerts-save`, `/api/host-alerts-switch`, `/api/host-alerts-chats`, `/api/host-alerts-test` and `/api/round-answer`;
                     `Allow: GET` on `/api/picture/<id>`)
 
 Guest door (#1237, ADR-console-066, #1299, ADR-console-077). With `guest_socket` (`console
@@ -232,22 +234,11 @@ guest_account_change_refused <reason>` and `console: guest_account_change_failed
 sign-out during his removal prints no profile name. No answer or line names a login or a profile. `/api/exclusion` stays owner-only
 on the guest door, his own profile included.
 
-The owner's access-list writes (#1237) are three page writes, `POST /api/share-tailnet`, `POST
-/api/share-colleague` and `POST /api/share-remove` (`SHARE_TAILNET_PATH`, `SHARE_COLLEAGUE_PATH`,
-`SHARE_REMOVE_PATH`), each behind the `_page_write` guard and then `_json_body(MAX_SHARE_BYTES)`
-(4096; 411, 415, 411, 413 as every JSON page write). Their bodies are the exactly-keyed objects
-`guest.parse_sharing` (`{"shared": true|false}`), `guest.parse_colleague`
-(`{"login", "projects"}`) and `guest.parse_removal` (`{"login"}`) read; a body they refuse is `400`
-`bad sharing`, `bad colleague` or `bad removal`. A write refused on its merits (`guest.Refused`:
-a project that is not registered, a login that is not listed) is one stderr line `console:
-share_refused <reason>` and `409` with the reason; any other failure is `console: share_failed
-<Type>: <message>` and `500` `share failed`; no stderr line carries a login or a tailnet name.
-Success appends one row under the console's ingest lock, applies it and answers an empty `204`:
-`ConsoleService.set_sharing` a `sharing.tailnet` row (`{"shared"}`), `set_colleague` a `sharing.colleague` row
-that replaces the login's whole project list, `remove_colleague` a `sharing.removed` row. A
-refusal appends nothing and publishes nothing. Each write publishes, and the guest stream
-re-admits on every publish, so a removed colleague's open stream and a switched-off one's end before any further frame
-(a moved or gone name ends one on the Serve thread's publish), and the next guest request is `403`.
+The owner's access-list writes: see guest.py.
+
+The four Host alerts page writes (`HOST_ALERTS_WRITES`, `POST /api/host-alerts-save`,
+`-switch`, `-chats` and `-test`) run behind the same guard, read `_json_body(host_alerts_panel.MAX_BYTES)`
+and are answered by `ConsoleService.host_alerts_answer`; the wire format is `host_alerts_panel`'s docstring.
 
 Two kinds of write exist. The hook and reading routes append what the proxies and hooks observe:
 `POST /api/hooks` appends session observations, `POST /api/readings` the capacity kinds
@@ -275,7 +266,7 @@ A page write (`PAGE_WRITES`, today `POST /api/looked`, `POST /api/answer`, `POST
 `POST /api/adoption-register`, `POST /api/adoption-merge`, `POST /api/plan-defer`,
 `POST /api/register-confirm`, `POST /api/trust-check`,
 `POST /api/owner-notice`, `POST /api/owner-notice-withdraw`, `POST /api/live-fault-withdraw`, `POST /api/project-question`, `POST /api/activate`,
-`POST /api/share-tailnet`, `POST /api/share-colleague`, `POST /api/share-remove`, `POST /api/guest-account`, `POST /api/guest-signin-code`, `POST /api/guest-signin-cancel`, `POST /api/guest-account-signout` and `POST /api/guest-account-remove` (the last five are the guest's, `GUEST_ACCOUNT_WRITES`: on the owner's port they pass this guard and are then 404 `not found`, the body unread); ADR-console-008, ADR-console-010, ADR-console-011, ADR-console-013) is made by the desk page
+`POST /api/share-tailnet`, `POST /api/share-colleague`, `POST /api/share-remove`, the four `POST /api/host-alerts-*` (`HOST_ALERTS_WRITES`), `POST /api/guest-account`, `POST /api/guest-signin-code`, `POST /api/guest-signin-cancel`, `POST /api/guest-account-signout` and `POST /api/guest-account-remove` (the last five are the guest's, `GUEST_ACCOUNT_WRITES`: on the owner's port they pass this guard and are then 404 `not found`, the body unread); ADR-console-008, ADR-console-010, ADR-console-011, ADR-console-013) is made by the desk page
 alone and goes through one guard, `_page_write`, whatever its route. After the loopback `Host`
 check and before any body is read, exactly one `Origin` header must equal `http://<Host>` (else
 403 `text/plain` `origin refused`) and exactly one `X-Console-Token` header must equal the
@@ -407,29 +398,7 @@ nothing; when the run it was asked of is replaced while it waits it is refused 4
 browser link returns to a loopback port, `unknown` when its return cannot be read, and all of them
 are null with no link. None of these members is in a row, the view or a stream frame.
 
-`POST /api/account-add` (#1027) runs the same checks with `MAX_ACCOUNT_BYTES` (4096) and
-`account_add.parse_add_request`: 400 `bad account`. Under the lock `_adding` (never `_ingest`) the
-service refuses a name `account_add.refusal` refuses, a name already listed
-(`account <name> already exists`) and, without an account adder, sign-in runs or a sign-in reader,
-every name (`adding an account is not available on this host`): one stderr line `console:
-account_add_refused <reason>` and 409 with the reason, appending nothing. It then calls the adder
-(the launcher's own add), reads the listing again, and a profile not listed is `not_listed`. A
-failed add is one stderr line `console: account_add_failed <name> <kind>` and 502 `the account could
-not be created: <kind>`, appending nothing. An added profile appends one `account.added` row
-`{"by": "owner", "profile": <name>}`, joins the service's profiles at once, and its sign-in status is
-read once (a failed read is one stderr line `console: signin_add_read_failed <profile> <kind or
-Type>` and records nothing) before the sign-in starts as the start route starts it. Before that the
-new profile is granted every registered project's folder trust (`_grant_trust`, cause `account`, one
-`trust.granted` row per project, no lock held), after the adder returned, so the adder's 30 second
-deadline bounds creation only; an unreadable registry grants nothing (`console:
-trust_account_registry_unreadable <name>`) and no grant fails the add. A sign-in that
-cannot start leaves the row and the profile, appends the start route's `failed` row and answers
-502 `the account was added; its sign-in could not start: <kind>`, with `console: signin_start_failed
-<name> <kind>`. Any other exception is `console: account_add_failed <Type>` (never its message) and
-500 `adding the account failed`. Success is `200` `application/json` with the start route's five
-members and `"profile": <name>`; no row, stderr line, view or stream frame carries the link. The
-token is created once in `page-token` beside the event log and reaches a client only inside `GET /`,
-where it replaces the slot in the page's `console-token` meta tag.
+POST /api/account-add: see account_add.py.
 
 `POST /api/account-remove` (#1030) runs the same checks with `MAX_REMOVE_BYTES` (4096) and
 `account_remove.parse_remove_request`: 400 `bad removal`. The service refuses, in this order, each
@@ -2023,7 +1992,7 @@ from urllib.parse import parse_qsl
 from agent_tools.claims import owner_actions
 from agent_tools.console import (
     action_permit, project_question, account_add, account_remove, activation, checkout_remote, activation_run, answer, approve, capacity, contract_draft, deliveries, digest, engine_runs, exclusion, idle, inbox,
-    folder_trust, guest, manager, movement, nudge, peer, permission, permit, pin, plan_questions, probe, question_records, prompt_card, register, release_card, revive, pictures, sessions, signin, signin_run, spend, sprints, transcript_digest, write_guard)
+    folder_trust, guest, host_alerts_panel, manager, movement, nudge, peer, permission, permit, pin, plan_questions, probe, question_records, prompt_card, register, release_card, revive, pictures, sessions, signin, signin_run, spend, sprints, transcript_digest, write_guard)
 from agent_tools.console.action_permit import PERMIT_LANDED_SECONDS, ActionPermit
 from agent_tools.console.event_log import (
     BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, FAULT_DECLARED, FAULT_WITHDRAWN, GOAL_STATED, GOAL_WITHDRAWN, MANAGER_FAILED,
@@ -2147,6 +2116,7 @@ GUEST_SIGNIN_CODE_PATH = "/api/guest-signin-code"
 GUEST_SIGNIN_CANCEL_PATH = "/api/guest-signin-cancel"
 GUEST_ACCOUNT_SIGNOUT_PATH = "/api/guest-account-signout"
 GUEST_ACCOUNT_REMOVE_PATH = "/api/guest-account-remove"
+HOST_ALERTS_WRITES = host_alerts_panel.ROUTES
 PAGE_WRITES: frozenset[str] = frozenset({
     LOOKED_PATH, ANSWER_PATH, CHECK_PATH, GOAL_PATH, WITHDRAW_PATH, APPROVE_PATH, REPLY_PATH,
     RETRY_PATH, MESSAGE_PATH, STOP_PATH, ROUND_ANSWER_PATH, CONTINUE_PATH, EXCLUSION_PATH,
@@ -2158,7 +2128,8 @@ PAGE_WRITES: frozenset[str] = frozenset({
     PROJECT_QUESTION_PATH, PROJECT_QUESTION_DELETE_PATH, ACTIVATE_PATH,
     LOOK_RETRY_PATH, SHARE_TAILNET_PATH, SHARE_COLLEAGUE_PATH, SHARE_REMOVE_PATH,
     GUEST_ACCOUNT_PATH, GUEST_SIGNIN_CODE_PATH, GUEST_SIGNIN_CANCEL_PATH,
-    GUEST_ACCOUNT_SIGNOUT_PATH, GUEST_ACCOUNT_REMOVE_PATH, RELEASE_ANSWER_PATH, PROMPT_ANSWER_PATH})
+    GUEST_ACCOUNT_SIGNOUT_PATH, GUEST_ACCOUNT_REMOVE_PATH, RELEASE_ANSWER_PATH,
+    PROMPT_ANSWER_PATH}) | HOST_ALERTS_WRITES
 MAX_SIGNIN_BYTES = 4096
 MAX_ACCOUNT_BYTES = 4096
 MAX_REMOVE_BYTES = 4096
@@ -3946,6 +3917,14 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             self.close_connection = True
             if not self._share_request(console, route):
                 return
+        elif route in HOST_ALERTS_WRITES:
+            self.close_connection = True
+            body = self._json_body(host_alerts_panel.MAX_BYTES)
+            if body is None:
+                return
+            reply = console.host_alerts_answer(route, body)
+            if reply.status != 204:
+                return self._send(reply.status, reply.media, reply.body, ("Connection", "close"))
         else:
             if (self.headers.get("Content-Length", "0") != "0"
                     or self.headers.get("Transfer-Encoding") is not None):
@@ -4617,7 +4596,8 @@ class ConsoleService(ActionPermit):
                  guest_peer_reader: peer.UnixPeerReader | None = peer.unix_reader_for(sys.platform),
                  guest_acl_reader: Callable[[str], bool] | None = guest.acl_reader_for(
                      sys.platform),
-                 engine_runs_root: Path | None = None):
+                 engine_runs_root: Path | None = None,
+                 host_alerts: host_alerts_panel.Panel | None = None):
         if guest_socket is not None and not Path(guest_socket).is_absolute():
             raise GuestSocketError(str(guest_socket), OSError(
                 errno.EINVAL, "the guest socket path is not absolute"))
@@ -4665,6 +4645,9 @@ class ConsoleService(ActionPermit):
         self._answering = False
         self._answer_refusal: dict | None = None
         self._adding = threading.Lock()
+        self._host_alerts = host_alerts
+        self._host_alerts_lock = threading.Lock()
+        self._host_alerts_entry = None if host_alerts is None else host_alerts_panel.entry(host_alerts)
         self._removing: set[str] = set()
         self._client_live: collections.Counter[str] = collections.Counter()  # client runs under a profile in flight
         self._probe_dispatch = self._on_probe_thread if probe_dispatch is None else probe_dispatch
@@ -5186,7 +5169,7 @@ class ConsoleService(ActionPermit):
             pin_launches=self._pin_launches.launched,
             managers=self._launcher is not None, pending=self._pending,
             nudges=self._nudger is not None, looked=self._looked, movement=self._movement, engine_runs=self._engine_states,
-            moves=self._move_notes, issue_titles=self._titles)
+            moves=self._move_notes, issue_titles=self._titles, host_alerts=self._host_alerts_entry)
         return inputs
 
     def _publish(self, *, guests: bool = True) -> None:
@@ -9553,6 +9536,18 @@ class ConsoleService(ActionPermit):
         for sprint_id in reserved:
             self._dispatch_notice_nudge(sprint_id)
         return seq
+
+    def host_alerts_answer(self, route: str, body: bytes) -> host_alerts_panel.Reply:
+        """Answer one Host alerts write on the handler's thread, holding no console lock."""
+        reply, entry = host_alerts_panel.respond(
+            self._host_alerts, route, body, lock=self._host_alerts_lock)
+        if reply.log is not None:
+            print(reply.log, file=sys.stderr)
+        if entry is not None:
+            with self._ingest:
+                self._host_alerts_entry = entry
+                self._publish()
+        return reply
 
     def set_sharing(self, shared: bool) -> None:
         """Append one `sharing.tailnet` row: the guest door's switch, on or off."""

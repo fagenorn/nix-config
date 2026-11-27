@@ -21,6 +21,23 @@ Tailscale client (ADR-console-078). `self_name(status)` takes the parsed `tailsc
 the raw string is ASCII (checked before any case change, because `str.lower` maps U+212A to an
 ASCII `k`) and the result is exactly `<host>.<tailnet>.ts.net`, two labels before `.ts.net` and no
 more (a name with an extra label admits nothing); every other shape is None.
+The owner's access-list writes (#1237) are three page writes, `POST /api/share-tailnet`, `POST
+/api/share-colleague` and `POST /api/share-remove` (`SHARE_TAILNET_PATH`, `SHARE_COLLEAGUE_PATH`,
+`SHARE_REMOVE_PATH`), each behind the `_page_write` guard and then `_json_body(MAX_SHARE_BYTES)`
+(4096; 411, 415, 411, 413 as every JSON page write). Their bodies are the exactly-keyed objects
+`guest.parse_sharing` (`{"shared": true|false}`), `guest.parse_colleague`
+(`{"login", "projects"}`) and `guest.parse_removal` (`{"login"}`) read; a body they refuse is `400`
+`bad sharing`, `bad colleague` or `bad removal`. A write refused on its merits (`guest.Refused`:
+a project that is not registered, a login that is not listed) is one stderr line `console:
+share_refused <reason>` and `409` with the reason; any other failure is `console: share_failed
+<Type>: <message>` and `500` `share failed`; no stderr line carries a login or a tailnet name.
+Success appends one row under the console's ingest lock, applies it and answers an empty `204`:
+`ConsoleService.set_sharing` a `sharing.tailnet` row (`{"shared"}`), `set_colleague` a `sharing.colleague` row
+that replaces the login's whole project list, `remove_colleague` a `sharing.removed` row. A
+refusal appends nothing and publishes nothing. Each write publishes, and the guest stream
+re-admits on every publish, so a removed colleague's open stream and a switched-off one's end before any further frame
+(a moved or gone name ends one on the Serve thread's publish), and the next guest request is `403`.
+
 `status_reader(path)` is the reader of that status: a callable that runs the client at `path` as
 `status --json` (no shell, no other argument, `SERVE_TIMEOUT_SECONDS`) and returns the parsed JSON,
 or None on a nonzero exit, output that is not JSON, an `OSError` or a timeout; it never raises. The
@@ -244,7 +261,7 @@ OWNER_ONLY_INPUTS: Mapping[str, object] = MappingProxyType({
     "pin_launches": (), "registration": None, "adoption_items": (), "release_items": (), "prompt_items": (), "retry_items": (),
     "apply_items": (), "confirm_items": (), "trust_items": (), "failure_items": (),
     "project_questions": None, "sharing": None, "engine_lines": False,
-    "moves": None})
+    "moves": None, "host_alerts": None})
 PASSED_INPUTS = frozenset({"now_ms", "managers", "nudges", "looked"})
 FILTERED_INPUTS = frozenset({"states", "records", "health", "sessions", "deliveries", "sprints",
                              "pending", "movement", "owner_notices", "engine_runs", "issue_titles",
@@ -877,7 +894,7 @@ def scrub(view: Mapping, pool: Mapping | None = None,
     scrubbed.update({"unmanaged": [], "profile_sessions": {}, "signin_runs": {},
                      "accounts_added": [], "pin": None, "pin_launches": [],
                      "registration": None, "digest": None, "activation": None, "spend": None,
-                     "capacity": dict(EMPTY),
+                     "host_alerts": None, "capacity": dict(EMPTY),
                      "own_signin": None if own_signin is None else dict(own_signin),
                      "pool": {**shown, "accounts": [dict(row) for row in shown["accounts"]]}})
     return scrubbed
