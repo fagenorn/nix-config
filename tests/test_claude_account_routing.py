@@ -721,6 +721,22 @@ class SwitchRelaunchTest(LauncherCase):
                                     "--model", "opus"),
                     ["--resume", "sess-1", "--dangerously-skip-permissions", *kept])
 
+    def test_the_relaunch_keeps_the_settings_and_agent_flags_that_restrict_a_bypass_session(self):
+        deny = '{"permissions":{"deny":["Edit"]}}'
+        cases = {
+            "settings json": (("--settings", deny), ["--settings", deny]),
+            "settings equals form": (("--settings=" + deny,), ["--settings=" + deny]),
+            "a read-only agent": (("--agent", "reviewer"), ["--agent", "reviewer"]),
+            "the agent equals form": (("--agent=reviewer",), ["--agent=reviewer"]),
+            "agents json": (("--agents", '{"r":{"tools":["Read"]}}'), ["--agents", '{"r":{"tools":["Read"]}}']),
+        }
+        for name, (given, kept) in cases.items():
+            with self.subTest(name):
+                self.assertEqual(
+                    self.relaunched("--session-id", "sess-1", "--dangerously-skip-permissions", *given,
+                                    "--model", "opus"),
+                    ["--resume", "sess-1", "--dangerously-skip-permissions", *kept])
+
     def test_a_value_list_ends_at_the_next_option_and_nothing_after_the_end_of_options_is_kept(self):
         self.assertEqual(
             self.relaunched("--disallowedTools", "Edit", "Write", "--model", "opus", "--strict-mcp-config",

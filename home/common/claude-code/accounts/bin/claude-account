@@ -611,7 +611,8 @@ cmd_run() {
     [ -n "$session" ] || exit "$status"
     # The conversation carries over with the flags that bound what it may run, never with fewer
     # permissions or wider tools than it started with; its other flags are not repeated.
-    # The tool lists take every value up to the next option, in either spelling or as --flag=value.
+    # The tool lists take every value up to the next option, in either spelling or as --flag=value;
+    # --settings, --agent and --agents take one value, as does --permission-mode.
     carried=()
     while [ $# -gt 0 ]; do
       flag="$1"
@@ -619,9 +620,11 @@ cmd_run() {
       case "$flag" in
         --) break ;;
         --dangerously-skip-permissions|--strict-mcp-config) carried+=("$flag") ;;
-        --tools=*|--allowedTools=*|--allowed-tools=*|--disallowedTools=*|--disallowed-tools=*|--permission-mode=*)
+        --tools=*|--allowedTools=*|--allowed-tools=*|--disallowedTools=*|--disallowed-tools=*|--permission-mode=*|\
+        --settings=*|--agent=*|--agents=*)
           carried+=("$flag") ;;
-        --permission-mode)
+        # --settings carries deny rules that bind in bypass mode; --agent and --agents bound the tools.
+        --permission-mode|--settings|--agent|--agents)
           if [ $# -ge 1 ]; then carried+=("$flag" "$1"); shift; fi ;;
         --tools|--allowedTools|--allowed-tools|--disallowedTools|--disallowed-tools)
           values=()
