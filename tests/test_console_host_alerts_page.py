@@ -1,4 +1,4 @@
-"""The desk page's Host alerts panel (#1713).
+"""The desk page's Host alerts panel.
 
 Run: just agent-workflow-tests
 """
@@ -6,7 +6,7 @@ import json
 import unittest
 
 from agent_tools.console.host_alerts_panel import EMPTY_FEED, PROBLEM
-from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures
 from .test_console_guest_page import GUEST, SHARED_FRAME, SNAP, harness
 from .test_console_page import F3, START, nodes, posted, role, text
 

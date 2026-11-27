@@ -26,7 +26,7 @@ from agent_tools.hosts.host_alerts import Outcome, Settings, TEST_MESSAGE, read_
 
 from . import console_test_support as support
 from .test_host_alerts import NOW, SETTINGS, TEXT, HostAlertsCase
-from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures
 
 TIER = "integration"
 

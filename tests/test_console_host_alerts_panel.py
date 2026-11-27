@@ -48,7 +48,7 @@ from agent_tools.console.host_alerts_panel import (
 )
 from agent_tools.hosts import host_alerts
 from agent_tools.hosts.host_alerts import Settings, read_settings, write_settings
-from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures
 from tests.test_host_alerts import SETTINGS, HostAlertsCase, grow_nested
 
 TIER = "fast"

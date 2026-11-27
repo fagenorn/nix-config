@@ -21,7 +21,7 @@ from agent_tools.hosts.host_alerts import Chat, Settings
 
 from . import console_screenshot_host_alerts as alert_shot
 from . import console_screenshots as shots
-from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures
 from .test_console_screenshots import shot_calls
 
 TIER = "fast"  # a fake page, a loopback stand-in and one fixture tree

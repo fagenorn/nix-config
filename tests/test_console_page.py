@@ -190,7 +190,7 @@ class PageTest(unittest.TestCase):
         # Raised from 72 KB by the merge of #1274, #1432 and #1424 (merged, 74199 bytes), from 73 KB: a long command's
         # permission card summary and fold did not fit, and from 73.5 KB: the done-for-now line and wrap-up did not fit.
         # The phone tap sizes and the End the sprint fold are measured against the merged page.
-        # Raised from 75776: the Host alerts panel (#1713).
+        # Raised from 75776: the Host alerts panel.
         self.assertLess(len(gzip.compress(self.data, 9)), 77312)
 
     def test_the_top_bar_carries_one_spend_link(self) -> None:

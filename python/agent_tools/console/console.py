@@ -75,7 +75,7 @@ and with `status --json` for this host's own tailnet name, the one name the gues
 which tell its own requests from another device's (ADR-console-079). Without it the console never reads Serve, shows
 the state as unchecked and its guest door shares with nobody.
 
-`--host-alerts` (#1713) gives the service the Host alerts panel (`agent_tools.console.host_alerts_panel`) on this
+`--host-alerts` gives the service the Host alerts panel (`agent_tools.console.host_alerts_panel`) on this
 user's `~/.config/host-alerts/telegram.json`, the file the memory watcher reads
 (`agent_tools.hosts.host_alerts.settings_path`, resolved from `HOME` at start); the page then offers
 the owner an Alerts button. Without it there is no panel.

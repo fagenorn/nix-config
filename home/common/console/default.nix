@@ -35,7 +35,7 @@
 # The command also names the guest socket Tailscale Serve proxies to (`--guest-socket`, #1299,
 # ADR-console-077), in a mode-0700 folder the console makes, and, when `agentConsole.tailscale`
 # is set, this host's Tailscale client, and, when `agentConsole.hostAlerts` is set, `--host-alerts`
-# (issue 1713), which shows the Host alerts panel on the owner's settings file.
+# which shows the Host alerts panel on the owner's settings file.
 {
   config,
   lib,
