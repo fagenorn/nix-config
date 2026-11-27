@@ -186,6 +186,7 @@ class DiscoveryTest(LintTestCase):
             "tests/test_a.py", "tests/test_b.py",
             "python/agent_tools/delivery/agnostic_lint.py",
             "python/agent_tools/delivery/context_map_lint.py",
+            "python/agent_tools/delivery/dotnet_format_lint.py",
             "python/agent_tools/skill_lint.py"]))
 
     def test_an_unregistered_file_is_never_read(self):
