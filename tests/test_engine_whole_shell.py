@@ -1,5 +1,5 @@
-"""Contract tests for the direct-lane implementer's whole shell: the session runs in its own worktree with
-`Bash`, `Edit` and `Write` preapproved, the lifecycle guard hook still judging every command.
+"""Contract tests for the direct-lane implementer: the session runs in its own worktree, every session
+with permissions skipped, the lifecycle guard hook judging every command.
 
 The helpers, fixtures and the stand-in launcher are the ones tests/test_engine_session.py defines; the
 stubbed delivery is tests/test_engine_stubbed_run.py's.
@@ -14,21 +14,19 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
 from agent_tools.delivery import engine_guard, engine_session
 from tests.engine_fixture import AdoptedFixtures
 from tests.engine_guards import real_guard
-from tests.engine_permission_model import client_admits
 from tests.engine_procedure_copies import PROCEDURES
 from tests.engine_step_coverage import StepCoverage
 from tests.guard_policy_world import install_platform_manifest_in_environ
 from tests.test_engine_deliver import EngineProject
 from tests.test_engine_session import (
-    NEVER, READ_ONLY, READ_ONLY_DENIED, RESULT_NORMAL, SCHEMA, SESSION, SETTINGS_GUARDED,
-    SETTINGS_UNGUARDED, SYSTEM, copy_roles, install_stub, one_step,
+    RESULT_NORMAL, SCHEMA, SESSION, SETTINGS_GUARDED, SETTINGS_UNGUARDED, SYSTEM, copy_roles,
+    install_stub, one_step,
 )
 from tests.test_engine_stubbed_run import Scenario
 
@@ -49,134 +47,13 @@ def tearDownModule() -> None:
     STEPS.finish(sys.modules[__name__], Scenario)
 
 
-def words_after(argv: tuple[str, ...] | list[str], flag: str) -> list[str]:
-    return argv[argv.index(flag) + 1].split(",")
-
-
-def whole_shell_argv() -> tuple[engine_session.Role, tuple[str, ...]]:
-    role = replace(engine_session.read_role(AGENTS, "implementer"), whole_shell=True)
-    return role, engine_session.launch_argv(role, SCHEMA, SESSION, SYSTEM)
-
-
-WHOLE_SHELL_DENIED = [
-    "Bash(git push)", "Bash(git push *)",
-    "Bash(git * push)", "Bash(git * push *)",
-    "Bash(git stash)", "Bash(git stash *)",
-    "Bash(git * stash)", "Bash(git * stash *)",
-    "Bash(git reset --hard)", "Bash(git reset --hard *)",
-    "Bash(git * reset --hard)", "Bash(git * reset --hard *)",
-    "Bash(git clean)", "Bash(git clean *)",
-    "Bash(git * clean)", "Bash(git * clean *)",
-    "Bash(git checkout --)", "Bash(git checkout -- *)",
-    "Bash(git * checkout --)", "Bash(git * checkout -- *)",
-    "Bash(git branch -D)", "Bash(git branch -D *)",
-    "Bash(git * branch -D)", "Bash(git * branch -D *)",
-    "Bash(git branch -d)", "Bash(git branch -d *)",
-    "Bash(git * branch -d)", "Bash(git * branch -d *)",
-    "Bash(gh pr create)", "Bash(gh pr create *)", "Bash(gh * pr create *)",
-    "Bash(gh pr merge)", "Bash(gh pr merge *)", "Bash(gh * pr merge *)",
-    "Bash(gh release create)", "Bash(gh release create *)", "Bash(gh * release create *)",
-]
-
-
-class WholeShellArgvTest(unittest.TestCase):
-    def test_the_recorded_1639_call_split_one_command_per_call_is_admitted(self):
-        role, argv = whole_shell_argv()
-        allowed, denied = words_after(argv, "--allowedTools"), words_after(argv, "--disallowedTools")
-        w = "/srv/p/.worktrees/worktree-issue-1639"
-
-        commands = [
-            f"git -C {w} rev-parse HEAD",
-            f"git -C {w} status --short",
-            f"git -C {w} log --oneline -3",
-            f"sed -n 70,130p {w}/python/agent_tools/console/prompt_card.py",
-            f"PYTHONPATH={w}/python python3 -m unittest tests.test_x",
-            f"git -C {w} add {w}/python/agent_tools/console/prompt_card.py",
-            f"git -C {w} commit -m 'Read the card once'",
-        ]
-
-        for command in commands:
-            with self.subTest(command):
-                self.assertTrue(client_admits(command, allowed, denied))
-        self.assertEqual(allowed, ["Bash", "Edit", "Write"])
-
-    def test_the_rule_model_reads_the_documented_wildcard_forms(self):
-        cases = [
-            ("Bash(npm run build)", "npm run build", True),
-            ("Bash(npm run build)", "npm run build --watch", False),
-            ("Bash(npm run test *)", "npm run test unit", True),
-            ("Bash(git * main)", "git checkout main", True),
-            ("Bash(git * main)", "git checkout dev", False),
-            ("Bash(* --version)", "node --version", True),
-            ("Bash(npm run test:*)", "npm run test unit", True),
-            ("Bash(npm run test:*)", "npm run test", True),
-            ("Bash(ls *)", "lsof", False),
-        ]
-        for rule, command, expected in cases:
-            with self.subTest(rule=rule, command=command):
-                self.assertEqual(client_admits(command, [rule], []), expected)
-
-    def test_the_whole_shell_denies_each_lifecycle_verb_and_destructive_git_command_in_every_option_form(self):
-        role, argv = whole_shell_argv()
-        allowed, denied = words_after(argv, "--allowedTools"), words_after(argv, "--disallowedTools")
-        refused = [
-            "git push origin b", "git -C /wt push origin b", "git --no-pager push origin b",
-            "git -c core.pager=cat push origin b", "git --git-dir=/wt/.git push", "git stash",
-            "git -C /wt stash pop", "git -C /wt reset --hard HEAD", "git --no-pager reset --hard",
-            "git clean -fd", "git -C /wt clean -fdx", "git -C /wt checkout -- f.py",
-            "git -C /wt branch -D b", "git -C /wt branch -d b",
-            "gh pr create --repo a/b --base main --head b --title t --body b",
-            "gh pr merge 5 --repo a/b --merge --delete-branch", "gh --repo a/b pr merge 5",
-            "gh release create v1",
-        ]
-        admitted = ["git -C /wt checkout --detach", "git -C /wt branch --show-current",
-                    "git -C /wt reset HEAD f.py"]
-
-        for command in refused:
-            with self.subTest(refused=command):
-                self.assertFalse(client_admits(command, allowed, denied))
-        for command in admitted:
-            with self.subTest(admitted=command):
-                self.assertTrue(client_admits(command, allowed, denied))
-        own = len(role.disallowed)
-        self.assertEqual(denied[:own], list(role.disallowed))
-        self.assertEqual(denied[own:], WHOLE_SHELL_DENIED)
-        self.assertEqual(len(WHOLE_SHELL_DENIED), 37)
-
-    def test_a_whole_shell_launch_keeps_the_hooks_and_dont_ask(self):
-        _, argv = whole_shell_argv()
-
-        self.assertTrue(NEVER.isdisjoint(argv))
-        self.assertEqual(argv[argv.index("--permission-mode") + 1], "dontAsk")
-        self.assertNotIn("--tools", argv)
-        self.assertEqual(argv[-2], "--append-system-prompt-file")
-
-    def test_the_other_roles_keep_their_narrow_lists(self):
-        # Each role's baseline, written out here and not read from its role file: a tool added to a role
-        # file changes the launch and fails this table until the table is changed on purpose.
-        expected = {
-            "planner": ("Read,Glob,Grep,Bash,Write,Edit,Skill,Agent(Explore)",
-                        f"Read,Glob,Grep,{READ_ONLY},Write,Edit,Skill,Agent(Explore)", READ_ONLY_DENIED),
-            "reviewer": ("Read,Glob,Grep,Bash,Write,Skill",
-                         f"Read,Glob,Grep,{READ_ONLY},Write,Skill", READ_ONLY_DENIED),
-            "reviewer-lite": ("Read,Glob,Grep,Bash,Write",
-                              f"Read,Glob,Grep,{READ_ONLY},Write", READ_ONLY_DENIED),
-        }
-        for name, (tools, allowed, denied) in expected.items():
-            with self.subTest(name):
-                role = engine_session.read_role(AGENTS, name)
-                argv = engine_session.launch_argv(role, SCHEMA, SESSION, SYSTEM)
-                self.assertEqual(argv[argv.index("--tools") + 1], tools)
-                self.assertEqual(argv[argv.index("--allowedTools") + 1], allowed)
-                self.assertEqual(argv[argv.index("--disallowedTools") + 1], denied)
-                with self.assertRaises(engine_session.RoleError):
-                    engine_session.launch_argv(replace(role, whole_shell=True), SCHEMA, SESSION, SYSTEM)
-
+class ImplementerLaunchTest(unittest.TestCase):
     def test_the_implementer_without_a_worktree_keeps_its_launch(self):
         role = engine_session.read_role(AGENTS, "implementer")
 
         argv = engine_session.launch_argv(role, SCHEMA, SESSION, SYSTEM)
 
+        self.assertIn("--dangerously-skip-permissions", argv)
         self.assertNotIn("--tools", argv)
         self.assertNotIn("--allowedTools", argv)
         self.assertEqual(argv[argv.index("--disallowedTools") + 1], (
@@ -376,11 +253,12 @@ class WholeShellDeliverTest(Scenario):
 
         implement = self.launch(run, "implement")
         self.assertEqual(os.path.realpath(implement["cwd"]), os.path.realpath(run.worktree_path))
-        self.assertIn("--allowedTools", implement["argv"])
-        self.assertEqual(words_after(implement["argv"], "--allowedTools"), ["Bash", "Edit", "Write"])
+        self.assertIn("--dangerously-skip-permissions", implement["argv"])
+        self.assertNotIn("--allowedTools", implement["argv"])
         review = self.launch(run, "lite-review")
         self.assertEqual(os.path.realpath(review["cwd"]), os.path.realpath(run.fixture.root))
-        self.assertNotIn("Bash,Edit,Write", review["argv"])
+        self.assertIn("--dangerously-skip-permissions", review["argv"])
+        self.assertNotIn("--allowedTools", review["argv"])
 
     def test_a_whole_shell_step_on_a_host_without_the_guard_starts_no_run(self):
         run = self.stubbed()

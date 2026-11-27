@@ -250,18 +250,6 @@ class DeniedReaskTest(DeniedRun, unittest.TestCase):
         self.assertAlmostEqual(stored["spend_usd"], 0.3)
         self.assertAlmostEqual(stored["wall_seconds"], 3.0)
 
-    def test_only_a_read_only_shell_role_is_launched_with_the_read_only_shell_switch(self):
-        self.project.env[engine_session.READ_ONLY_SHELL_SWITCH] = "1"  # an inherited switch never reaches a role
-        log = self.answers(canned_result(structured_output=self.verdict("approve")))
-        self.assertEqual(self.project.deliver(self.review(), issue=self.ISSUE).returncode, 0)
-        (reviewer,) = self.launches(log)
-        self.assertEqual(reviewer["read_only_shell"], "1")
-        log = self.answers(canned_result(structured_output=self.verdict("approve")))
-        self.project.deliver(one_step(self.project), issue=self.ISSUE + 1)  # its reply is no matter here
-        implementer = self.launches(log)[-1]
-        self.assertNotIn("--allowedTools", implementer["argv"])  # the plain implementer launch
-        self.assertIsNone(implementer["read_only_shell"])
-
     def test_a_second_denial_stops_at_tool_denied_naming_both_commands(self):
         first, second = bash("git log | head"), bash("git checkout main", "toolu_02")
         log = self.answers(

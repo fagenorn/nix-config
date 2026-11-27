@@ -1280,7 +1280,6 @@ def _visit_session(run_dir: Path, root: str, step: dict, action: engine_core.Sta
         return found
 
     session_dir()
-    role = role if w is None else replace(role, whole_shell=True)
     staged = run_dir / "procedure"
     schema = _load(staged / action.reply)
     if resumed is None:
@@ -1424,7 +1423,7 @@ def _launch_until_answered(
                 engine_session.launch_argv(role, schema, session, system,
                                       resume=attempt > 1 and (resumed is None or resumed.resume
                                                               or attempt > resumed.attempt)),
-                root, text, on_start=on_start, env=engine_session.role_environment(env, role),
+                root, text, on_start=on_start, env=env,
                 timeout=engine_session.bounds(role.name).wall_seconds, stop=stop)
             answer = engine_session.read_answer(answer_path)
         reading = engine_session.read_result(launched.stdout)

@@ -4,8 +4,7 @@ A role is the file `~/.claude/agents/<role>.md` (`roles_dir`): its frontmatter
 gives `model`, `effort`, the optional `tools` and `disallowedTools` lists (comma
 separated) and its body is kept as the role's system prompt. The frontmatter
 parser checks no value's fitness for a command line, so `refuse_value` refuses
-any value that would put an option the engine never passes, or a permission
-bypass, into the launch argv.
+any value that would put an option the engine never passes into the launch argv.
 
 `render_prompt` fills each `{{path}}` placeholder of a prompt file with the
 argument words of the step's `in` values.
@@ -19,18 +18,23 @@ reads as the outcome `no-reply`.
 
 `launch_argv` builds the one launch form: the account launcher's print mode
 (`claude-account run -p`) with the role handed over by flags (`--model`,
-`--effort`, `--tools` with `--allowedTools`, or `--disallowedTools`, and the
+`--effort`, `--tools` and `--disallowedTools`, and the
 role body as `--append-system-prompt-file`), the bounds `--max-turns` and
 `--max-budget-usd` from the platform's role table (`ROLE_BOUNDS`, which no
 procedure, project or environment variable changes), the reply schema as
-`--json-schema`, the session id first fixed by the engine, and the permission
-mode `dontAsk`, so a tool the role does not allow is denied rather than asked
-about. A session that hit a usage limit is started again with `--resume <session>` in place of
+`--json-schema`, the session id first fixed by the engine, and
+`--dangerously-skip-permissions`: every agent step runs with permissions skipped and the engine
+passes no permission mode, allow rule or shell rule of its own. A role's `tools` (as `--tools`) and
+`disallowedTools` (as `--disallowedTools`) are tool names from its file, a matter of role. The
+lifecycle guard hook, kept loaded by `session_environment` and the host-settings check, is the one
+control over push, pull request creation and merge, branch deletion, release and detached processes.
+`read_role` refuses a scoped rule in either list (only an `Agent` subagent selector is kept), so a role
+file cannot hand the launch a permission rule.
+A session that hit a usage limit is started again with `--resume <session>` in place of
 `--session-id <session>`, every other word unchanged; the transcripts are shared between accounts,
-so the launcher's next account continues the same session. The engine never passes `--agent`, `--bare`,
-`--setting-sources`, `--dangerously-skip-permissions` or `bypassPermissions`: `--bare` would skip the
-hooks that guard the session, and the others would hand the session its own
-settings or its permissions. The prompt is never in the argv: the tool options
+so the launcher's next account continues the same session. The engine never passes `--agent`, `--bare`
+or `--setting-sources`: `--bare` would skip the hooks that guard the session, and the others would hand
+the session its own settings. The prompt is never in the argv: the tool options
 are variadic and would swallow a positional prompt, so `launch` writes it on
 stdin.
 
@@ -43,25 +47,13 @@ flagged or not (`is_miss`). Any other reading without a usable reply is never re
 run resumes a session its predecessor left interrupted with `CONTINUE_PROMPT`, which asks it to finish
 the task it was given and then give only the structured answer.
 
-The role's `Bash` stays in `--tools` but is preapproved only as one prefix rule per `READ_ONLY_PROGRAMS`
-entry (`READ_ONLY_BASH`), and the read-only-shell switch makes the lifecycle guard refuse anything that is
-not one plain call of one of them, so a pipeline or command list of allowed parts no longer runs (the
-client alone would split it at `|`, `;`, `&&`, `||` and `&` and admit it); under `dontAsk` any other shell
-command is denied. `READ_ONLY_DENIED` is passed as
-`--disallowedTools` (a deny rule outranks an allow rule from any source): it refuses the git `--output`
-forms, any `>` (even `2>/dev/null`) and, by `HOST_WRITING`, each write the host settings allow. The
-`git -C <dir>` forms are not admitted. The detaching words are the lifecycle guard's to refuse (the client
-strips `nohup` before matching), and `shell_rules` gives a role's Bash rules. A role that
-needs another shell command lists it in its own `tools` as `Bash(<prefix>:*)`;
-one that is denied a tool call anyway ends the run at the engine's own stop
-`tool-denied` (`engine_shell`), never a graded reply. `denial_prompt` asks a denied session once more,
-unless a bound or an API failure ended it: it names the refused calls and the session's tools
-(`session_tools`) and asks it to respect each refusal.
+A session denied a tool call anyway (Claude Code still refuses some calls in this mode) ends the run at
+the engine's own stop `tool-denied` (`engine_shell`), never a graded reply. `denial_prompt` asks a denied
+session once more, unless a bound or an API failure ended it: it names the refused calls and the
+session's tools (`session_tools`) and asks it to respect each refusal.
 
-The recorded exception: under the engine only, a step that names its own `worktree` gives a
-`WHOLE_SHELL_ROLES` role the whole `Bash`, `Edit` and `Write` (`Role.whole_shell`, launched in that
-worktree, see `own_worktree`) with `WHOLE_SHELL_DENIED` as deny rules, and the lifecycle guard hook
-still judges every command. No session inherits the repository variables (`REPOSITORY_ENV`).
+A step that names its own `worktree` (only a `WHOLE_SHELL_ROLES` role, see `procedure_check`) runs its
+session there once `own_worktree` confirms it; no session inherits `REPOSITORY_ENV`.
 
 The launcher tells the engine its choice through an answer file: the launch environment carries
 `CLAUDE_ACCOUNT_ANSWER`, the path of a file the launcher writes, and `read_answer` reads it. It holds
@@ -101,9 +93,6 @@ names the bound the engine's own clock fires.
 `session_environment` drops `CLAUDE_CONFIG_DIR` and sets `CLAUDE_ACCOUNT_HOST_SETTINGS=required`, so the
 launcher starts the client only on `$HOME/.claude/settings.json`, the file `engine deliver` checked. It
 also drops `CLAUDE_CODE_SIMPLE` (`BARE_SWITCH`), the client's bare-mode switch, which would skip the hooks.
-For a read-only shell role (`read_only_shell`) the shell gives the launch `role_environment`: it holds
-`CLAUDE_READ_ONLY_SHELL` (`READ_ONLY_SHELL_SWITCH`), which makes the lifecycle guard admit only one plain read
-per call: the client strips wrappers and splits a command list, so no rule sees the whole call.
 
 This module imports no `engine_core`.
 """
@@ -130,17 +119,15 @@ from agent_tools.canonical import (
 from agent_tools.delivery import engine_ledger, engine_reply, engine_stop
 from agent_tools.delivery.engine_commands import Watchdog, argument
 from agent_tools.delivery.engine_ledger import TOKEN_COUNTS
-from agent_tools.delivery.procedure_terms import PLACEHOLDER_RE, ROLES, TOOL_DENIED, WHOLE_SHELL_ROLES
+from agent_tools.delivery.procedure_terms import PLACEHOLDER_RE, ROLES, TOOL_DENIED
 from agent_tools.skill_lint import parse_frontmatter
 
-FORBIDDEN_WORDS: tuple[str, ...] = (
-    "--agent", "--bare", "--setting-sources", "--dangerously-skip-permissions",
-    "bypassPermissions",
-)
+FORBIDDEN_WORDS: tuple[str, ...] = ("--agent", "--bare", "--setting-sources")
+SCOPED_RULE_RE = re.compile(r"\A(?P<tool>[^()\s]+)\(.*\)\Z")
+SELECTOR_TOOLS: tuple[str, ...] = ("Agent",)
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 LAUNCHER: tuple[str, ...] = ("claude-account", "run")
 HOST_SETTINGS_SWITCH = "CLAUDE_ACCOUNT_HOST_SETTINGS"
-READ_ONLY_SHELL_SWITCH = "CLAUDE_READ_ONLY_SHELL"
 WALL_TIME = "wall-time"
 CAP_SUBTYPES: Mapping[str, str] = MappingProxyType(
     {"error_max_turns": "turns", "error_max_budget_usd": "spend"})
@@ -165,37 +152,12 @@ USAGE_LIMIT = "usage-limit"
 API_ERROR = "api-error"
 GRACE_SECONDS = 5
 DRAIN_SECONDS = 5
-READ_ONLY_PROGRAMS: tuple[str, ...] = (
-    "git log", "git show", "git diff", "git ls-tree", "git ls-files", "git status", "git rev-parse",
-    "git merge-base", "grep", "ls", "wc", "cat", "head", "tail", "sed -n")
-READ_ONLY_BASH: tuple[str, ...] = tuple(f"Bash({program}:*)" for program in READ_ONLY_PROGRAMS)
-READ_ONLY_REFUSAL = (
-    "Refused because a read-only session allows only one plain command per Bash call: split a pipeline or "
-    f"command list into separate calls, each one of {', '.join(READ_ONLY_PROGRAMS[:-1])} or "
-    f"{READ_ONLY_PROGRAMS[-1]} with no `|`, `;`, `&&`, redirection, expansion, glob, backslash or git "
-    "`--output`, or use the Read and Grep tools to read and search files.")
-GIT_WRITING: tuple[str, ...] = tuple(
-    f"Bash(git {verb}*--output*)" for verb in ("diff", "log", "show"))
-HOST_WRITING: tuple[str, ...] = tuple(
-    f"Bash({prefix}:*)" for prefix in (
-        "git fetch", "git push", "git worktree add", "git worktree remove", "git worktree prune",
-        "git branch -d", "gh pr create", "gh pr merge", "gh release create", "forge-issue",
-        "~/.agents/bin/forge-issue"))
-READ_ONLY_DENIED: tuple[str, ...] = (*GIT_WRITING, "Bash(*>*)", *HOST_WRITING)
 REPOSITORY_ENV = ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
                   "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE",
                   "GIT_PREFIX", "GIT_IMPLICIT_WORK_TREE", "GIT_SHALLOW_FILE", "GIT_GRAFT_FILE",
                   "GIT_NO_REPLACE_OBJECTS", "GIT_REPLACE_REF_BASE", "GIT_CONFIG",
                   "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT")
 BARE_SWITCH = "CLAUDE_CODE_SIMPLE"
-WHOLE_SHELL_ALLOWED = ("Bash", "Edit", "Write")
-GIT_DENIED = ("push", "stash", "reset --hard", "clean", "checkout --", "branch -D", "branch -d")
-GH_DENIED = ("pr create", "pr merge", "release create")
-WHOLE_SHELL_DENIED: tuple[str, ...] = tuple(
-    f"Bash({form.format(verb)})"
-    for verbs, forms in ((GIT_DENIED, ("git {}", "git {} *", "git * {}", "git * {} *")),
-                         (GH_DENIED, ("gh {}", "gh {} *", "gh * {} *")))
-    for verb in verbs for form in forms)
 WORKTREE_LIST_SECONDS = 30
 DIAGNOSTIC_CHARS = 300
 _USAGE_KEYS = {"input": "input_tokens", "cache_write": "cache_creation_input_tokens",
@@ -214,7 +176,6 @@ class Role:
     tools: tuple[str, ...] | None
     disallowed: tuple[str, ...] | None
     body: str
-    whole_shell: bool = False
 
 
 @dataclass(frozen=True)
@@ -264,6 +225,9 @@ def _names(role: str, field: str, text: str | None) -> tuple[str, ...] | None:
         raise RoleError(f"role {role}: {field} holds no tool name")
     for name in names:
         refuse_value(role, field, name)
+        scoped = SCOPED_RULE_RE.match(name)
+        if scoped is not None and scoped.group("tool") not in SELECTOR_TOOLS:
+            raise RoleError(f"role {role}: {field} {name!r} is a scoped rule the engine does not pass")
     return names
 
 
@@ -357,31 +321,6 @@ def denial_detail(step: str, calls: Sequence[str]) -> str:
     return (f"Step {step} was denied {count} tool call{'' if count == 1 else 's'}: "
             + "; ".join(repr(call) for call in calls)
             + "; its reply is not graded and the run stops at tool-denied.")
-
-
-def shell_guidance(role: Role) -> str:
-    """What `role`'s shell runs: a read-only role gets `READ_ONLY_REFUSAL`, any other its launch's rules."""
-    if read_only_shell(role):
-        return f"{READ_ONLY_REFUSAL}\n\n"
-    allowed, denied = shell_rules(role)
-    refusing = f"Shell rules refusing a command: {', '.join(denied) or 'none'}.\n"
-    if role.whole_shell:
-        return ("Every shell command is allowed, redirection included, except those a refusing rule matches; "
-                f"the lifecycle guard still judges each one.\n{refusing}")
-    if launch_rules(role)[0] is None:
-        head = ("This role passes no shell allow rule of its own: a command runs only when the host "
-                "settings' own allow rules admit it.\n")
-    else:
-        head = f"Shell rules allowing a command: {', '.join(allowed) or 'none'}.\n"
-    notes = ["A call runs only when every part of it, split at `|`, `;`, `&&`, `||` and `&`, is allowed "
-             "and no part matches a refusing rule."]
-    if "Bash" in allowed:
-        notes.insert(0, "A rule `Bash` alone means every shell command.")
-    if any(rule.endswith(":*)") for rule in allowed):
-        notes.append("`Bash(x:*)` is `x` alone or followed by a space and arguments.")
-    if "Bash(*>*)" in denied:
-        notes.append("No `>` redirection runs.")
-    return f"{head}{refusing}{' '.join(notes)}\n\n"
 
 
 def session_tools(role: Role) -> str:
@@ -566,36 +505,6 @@ def is_miss(reading: Reading) -> bool:
     return not reading.is_error or reading.subtype == STRUCTURED_OUTPUT_EXHAUSTED
 
 
-def read_only_shell(role: Role) -> bool:
-    """True when `role` holds `Bash` as the read-only shapes: it lists the tool and has no whole shell."""
-    return not role.whole_shell and role.tools is not None and "Bash" in role.tools
-
-
-def launch_rules(role: Role) -> tuple[tuple[str, ...] | None, tuple[str, ...] | None]:
-    """The words of the `--allowedTools` and `--disallowedTools` of `role`'s launch; None for a flag it omits."""
-    disallowed = list(role.disallowed or ())
-    if role.whole_shell:
-        if role.name not in WHOLE_SHELL_ROLES or role.tools is not None:
-            raise RoleError(f"the role {role.name} cannot have the whole shell")
-        return WHOLE_SHELL_ALLOWED, (*disallowed, *WHOLE_SHELL_DENIED)
-    allowed = None
-    if role.tools is not None:
-        allowed = tuple(entry for name in role.tools
-                        for entry in (READ_ONLY_BASH if name == "Bash" else (name,)))
-        if read_only_shell(role):
-            disallowed += READ_ONLY_DENIED
-    return allowed, (tuple(disallowed) if role.disallowed is not None or disallowed else None)
-
-
-def shell_rules(role: Role) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    """The Bash words of the allow and of the deny rules `launch_argv` passes for `role`, in argv order."""
-    def bash_words(words: tuple[str, ...] | None) -> tuple[str, ...]:
-        return tuple(word for word in words or () if word == "Bash" or word.startswith("Bash("))
-
-    allowed, denied = launch_rules(role)
-    return bash_words(allowed), bash_words(denied)
-
-
 def launch_argv(role: Role, schema: Mapping, session: str, system_prompt: Path, *,
                 resume: bool = False) -> tuple[str, ...]:
     """The launcher argv of one session; no word of it is a prompt.
@@ -608,19 +517,16 @@ def launch_argv(role: Role, schema: Mapping, session: str, system_prompt: Path, 
         for name in names or ():
             refuse_value(role.name, field, name)
     limits = bounds(role.name)
-    allowed, disallowed = launch_rules(role)
     argv = [*LAUNCHER, "-p", "--output-format", "json",
             "--json-schema", json.dumps(schema, sort_keys=True, separators=(",", ":")),
             "--resume" if resume else "--session-id", session, "--strict-mcp-config",
-            "--permission-mode", "dontAsk",
+            "--dangerously-skip-permissions",
             "--model", role.model, "--effort", role.effort,
             "--max-turns", str(limits.turns), "--max-budget-usd", f"{limits.spend_usd:.2f}"]
     if role.tools is not None:
         argv += ["--tools", ",".join(role.tools)]
-    if allowed is not None:
-        argv += ["--allowedTools", ",".join(allowed)]
-    if disallowed is not None:
-        argv += ["--disallowedTools", ",".join(disallowed)]
+    if role.disallowed is not None:
+        argv += ["--disallowedTools", ",".join(role.disallowed)]
     return (*argv, "--append-system-prompt-file", str(system_prompt))
 
 
@@ -733,14 +639,6 @@ def session_environment(environ: Mapping[str, str]) -> dict[str, str]:
     env = {key: value for key, value in environ.items()
            if key not in ("CLAUDE_CONFIG_DIR", BARE_SWITCH) and key not in REPOSITORY_ENV}
     env[HOST_SETTINGS_SWITCH] = "required"
-    return env
-
-
-def role_environment(environ: Mapping[str, str], role: Role) -> dict[str, str]:
-    """`environ` for `role`'s launch: with the read-only-shell switch for a read-only shell role, else without."""
-    env = {key: value for key, value in environ.items() if key != READ_ONLY_SHELL_SWITCH}
-    if read_only_shell(role):
-        env[READ_ONLY_SHELL_SWITCH] = "1"
     return env
 
 
