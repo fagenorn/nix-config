@@ -79,7 +79,8 @@ Delivery events (the log's rows for the run journals): `delivery.seen` (`DELIVER
 `seen_payload(state)`, `{"session_id", "run_id", "moved_ms", "issues": [{"issue", "stage", "task",
 "tasks", "locking"}, ...]}` with `None` as null, and `delivery.gone` (`DELIVERY_GONE`) carries
 `{"session_id", "run_id"}`. `delivery_states(events, states=None)` folds them onto a `DeliveryState`
-per `(session_id, run_id)`: a `seen` whose `session_id` and `run_id` are str, `moved_ms` an int (not
+per `(session_id, run_id)` (its `project` is the project of the `seen` row, a str or None, and is never
+compared): a `seen` whose `session_id` and `run_id` are str, `moved_ms` an int (not
 a bool) and `issues` a list of dicts each with an int (not bool) `issue`, a `stage` in `STAGES` and
 `task`/`tasks` an int or null and `locking` a bool when present (a row without it reads `False`;
 any other `locking` makes the `seen` invalid) replaces any earlier state; a `seen` of any other shape is ignored
@@ -107,7 +108,7 @@ import os
 import re
 from collections import Counter
 from collections.abc import Collection, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from stat import S_ISREG
 from typing import BinaryIO, Callable, Iterable, Mapping
@@ -601,6 +602,9 @@ class DeliveryState:
     run_id: str
     moved_ms: int
     issues: tuple[IssueStage, ...]
+    # The project of the `delivery.seen` row the state was folded from; never compared, so a reading
+    # equals the state the log holds whatever the project was then.
+    project: str | None = field(default=None, compare=False)
 
 
 def seen_payload(state: DeliveryState) -> dict:
@@ -660,7 +664,8 @@ def delivery_states(
         if event.kind == DELIVERY_SEEN:
             state = _seen_state(payload)
             if state is not None:
-                result[(state.session_id, state.run_id)] = state
+                project = event.project if isinstance(event.project, str) else None
+                result[(state.session_id, state.run_id)] = replace(state, project=project)
         elif event.kind == DELIVERY_GONE:
             session_id, run_id = payload.get("session_id"), payload.get("run_id")
             if isinstance(session_id, str) and isinstance(run_id, str):

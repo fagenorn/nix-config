@@ -630,9 +630,9 @@
     ]
    ],
    "recent": [
-    "The delivery of owner/p01 #9 ended: merged.",
-    "The delivery of owner/p01 #10 ended: merged.",
-    "The delivery of owner/p01 #11 ended: stopped at building.",
+    "The delivery of owner/p00 #9 ended: merged.",
+    "The delivery of owner/p00 #10 ended: merged.",
+    "The delivery of owner/p00 #11 ended: stopped at building.",
     "The delivery of owner/p00 #5 ended: merged."
    ],
    "earlier": [],
@@ -907,16 +907,6 @@
      }
     ],
     [
-     5,
-     "2026-11-11T10:04:00.000000+00:00",
-     "delivery.gone",
-     null,
-     {
-      "session_id": "aaaaaaaa-1111",
-      "run_id": "r1"
-     }
-    ],
-    [
      6,
      "2026-11-11T10:05:00.000000+00:00",
      "delivery.seen",
@@ -947,6 +937,86 @@
     ]
    ],
    "recent": [],
+   "earlier": [],
+   "omitted": 0
+  },
+  {
+   "name": "a delivery last seen under no project says nothing",
+   "last_looked": "2026-11-11T10:00:00.000000+00:00",
+   "now": "2026-11-11T12:00:00.000000+00:00",
+   "events": [
+    [
+     1,
+     "2026-11-11T10:01:00.000000+00:00",
+     "delivery.seen",
+     null,
+     {
+      "session_id": "aaaaaaaa-1111",
+      "run_id": "r1",
+      "moved_ms": 0,
+      "issues": [
+       {
+        "issue": 5,
+        "stage": "done",
+        "task": null,
+        "tasks": null
+       }
+      ]
+     }
+    ],
+    [
+     2,
+     "2026-11-11T10:02:00.000000+00:00",
+     "delivery.gone",
+     "owner/p01",
+     {
+      "session_id": "aaaaaaaa-1111",
+      "run_id": "r1"
+     }
+    ]
+   ],
+   "recent": [],
+   "earlier": [],
+   "omitted": 0
+  },
+  {
+   "name": "a delivery's end names the project it was last seen under, not the one the end carries",
+   "last_looked": "2026-11-11T10:00:00.000000+00:00",
+   "now": "2026-11-11T12:00:00.000000+00:00",
+   "events": [
+    [
+     1,
+     "2026-11-11T10:01:00.000000+00:00",
+     "delivery.seen",
+     "owner/p00",
+     {
+      "session_id": "aaaaaaaa-1111",
+      "run_id": "r1",
+      "moved_ms": 0,
+      "issues": [
+       {
+        "issue": 5,
+        "stage": "done",
+        "task": null,
+        "tasks": null
+       }
+      ]
+     }
+    ],
+    [
+     2,
+     "2026-11-11T10:02:00.000000+00:00",
+     "delivery.gone",
+     null,
+     {
+      "session_id": "aaaaaaaa-1111",
+      "run_id": "r1"
+     }
+    ]
+   ],
+   "recent": [
+    "The delivery of owner/p00 #5 ended: merged."
+   ],
    "earlier": [],
    "omitted": 0
   }

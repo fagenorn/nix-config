@@ -68,9 +68,11 @@ Event kinds read:
   with their stage, and a run whose journal has no reading any more. A `delivery.seen` says nothing
   itself; it is folded with `deliveries.delivery_states`, so a seen of an invalid shape is ignored and
   the last valid one of a run is the run's state. A `delivery.gone` speaks, one moment per issue of
-  the run's state before the row in the run's order, only when the event's project is a str and its
-  payload names a `session_id` and `run_id` (str) of a run the fold knows; a run the log never saw,
-  a run already gone and a malformed payload say nothing.
+  the run's state before the row in the run's order, only when its payload names a `session_id` and
+  `run_id` (str) of a run the fold knows and the project of that run's last valid `delivery.seen` is a
+  str; the sentence names that project, never the one the `gone` row carries (the registry may have
+  moved the repository between the two rows). A run the log never saw, a run already gone, a run last
+  seen under no project and a malformed payload say nothing.
 
 Every other kind says nothing, `goal.stated` included. An event whose payload lacks a required member
 says nothing.
@@ -99,7 +101,8 @@ Sentences (exact). `<headline>` is the first question of an item that has
 questions, else the stored question (`view.item_headline`, so a decision never
 reads its fixed boilerplate); `<where>` is the event's project, else the last
 path segment of the session's repository (`view.repo_name`); a session with no
-repository makes no moment. No sentence names an issue, a session or a path, and none carries a
+repository makes no moment. No sentence names a session or a path, and none names an issue except
+`delivery_ended`, which names its own; none carries a
 goal: `<title>` is `sprints.sprint_title` of the sprint in the fold after the row when the sprint is
 there (so a brief sentence names the title of the brief it reports), else `sprints.goal_title` of
 the row's payload goal; a withdrawal and a held-message resume read the fold before the row (a
@@ -127,6 +130,7 @@ withdrawal removes the sprint).
     quota_resumed    <title> resumed after the quota reset
     project_registered <project_id> was registered.
     delivery_ended   The delivery of <project_id> #<issue> ended: <how>
+                     (<project_id> is the project of the run's last valid `delivery.seen`)
                      (`merged` when the issue's last stage was `done`, else `stopped at <stage>`
                      with `deliveries.stage_words` of that stage)
 
@@ -443,16 +447,16 @@ def _closing_moment(event: Event, before: Mapping[str, SprintState],
 def _delivery_moments(event: Event, known: Mapping[tuple[str, str], DeliveryState]) -> list[tuple[str, str]]:
     """One sentence per issue of the run a `delivery.gone` ends; `known` is the fold before the row."""
     payload = event.payload
-    if not isinstance(payload, dict) or not isinstance(event.project, str):
+    if not isinstance(payload, dict):
         return []
     session_id, run_id = payload.get("session_id"), payload.get("run_id")
     if not isinstance(session_id, str) or not isinstance(run_id, str):
         return []
     state = known.get((session_id, run_id))
-    if state is None:
+    if state is None or not isinstance(state.project, str):
         return []
     return [(DELIVERY_ENDED,
-             f"The delivery of {event.project} #{issue.issue} ended: "
+             f"The delivery of {state.project} #{issue.issue} ended: "
              + ("merged." if issue.stage == DONE else f"stopped at {stage_words(issue.stage)}."))
             for issue in state.issues]
 
