@@ -16,11 +16,13 @@ no markers. A `skipIf` or `skipif` whose first argument (or `condition=`) is the
 name `False`, and a `skipUnless` whose is `True`, never skips and is no marker; any
 other condition is one.
 
-C# markers: C1 `Skip` followed by `=` at the top level of the arguments of a
-`Fact`, `Theory`, `SkippableFact`, `SkippableTheory` or `InlineData` attribute, and
-`Ignore`, `IgnoreReason` or `Explicit` followed by `=` and a value other than `false`
-or `null` at the top level of the arguments of a `TestCase` or `TestCaseSource`
-attribute;
+C# markers: C1 `Skip` followed by `=` (any value), and `Explicit` followed by `=` and a
+value other than `false` or `null`, at the top level of the arguments of a `Fact`,
+`Theory`, `SkippableFact`, `SkippableTheory`, `InlineData`, `MemberData` or
+`ClassData` attribute (a generic name such as `ClassData<TClass>` included for the data-row
+attributes `InlineData`, `MemberData` and `ClassData` only), and `Ignore`, `IgnoreReason` or
+`Explicit` followed by `=` and a value other than `false` or `null` at the top level of the
+arguments of a `TestCase` or `TestCaseSource` attribute (never a generic name);
 C2 an attribute named `Ignore` or `Explicit`; C3 `Skip`, `SkipWhen`, `SkipUnless`
 or `Ignore` after `Assert .` and before `(`, and `If` or `IfNot` after `Skip .`
 and before `(`. Attribute names are compared by their last segment without
@@ -69,14 +71,15 @@ PYTEST_OWNERS = frozenset({"pytest", "mark"})
 PYTEST_NAMES = frozenset({"skip", "skipif", "importorskip"})
 DECORATOR_NAMES = frozenset({"skip", "skipIf", "skipUnless"})
 INERT_CONDITIONS = {"skipIf": "False", "skipif": "False", "skipUnless": "True"}
-CS_SKIP_KEYS = frozenset({"Skip"})
 CS_FACT_KEYS = frozenset({"Skip", "Explicit"})
 CS_IGNORE_KEYS = frozenset({"Ignore", "IgnoreReason", "Explicit"})
 CS_ARGUMENT_KEYS = {
     "Fact": CS_FACT_KEYS, "Theory": CS_FACT_KEYS, "SkippableFact": CS_FACT_KEYS,
-    "SkippableTheory": CS_FACT_KEYS, "InlineData": CS_SKIP_KEYS,
+    "SkippableTheory": CS_FACT_KEYS, "InlineData": CS_FACT_KEYS,
+    "MemberData": CS_FACT_KEYS, "ClassData": CS_FACT_KEYS,
     "TestCase": CS_IGNORE_KEYS, "TestCaseSource": CS_IGNORE_KEYS,
     "TestFixture": CS_IGNORE_KEYS, "TestFixtureSource": CS_IGNORE_KEYS}
+CS_GENERIC_ATTRIBUTES = frozenset({"InlineData", "MemberData", "ClassData"})
 CS_OFF_VALUES = frozenset({"false", "null"})
 CS_DISABLING_ATTRIBUTES = frozenset({"Ignore", "Explicit"})
 CS_ASSERT_NAMES = frozenset({"Skip", "SkipWhen", "SkipUnless", "Ignore"})
@@ -161,6 +164,29 @@ def argument_skips(tokens: tuple[Token, ...], pairs: dict[int, int], open_: int,
     return found
 
 
+def after_type_arguments(tokens: tuple[Token, ...], i: int, end: int) -> int:
+    """The index after the generic type arguments `< ... >` that start at token `i`, else `i`.
+
+    A generic attribute name (`ClassData<TClass>`) carries them before its `(`; they nest and hold
+    only names, dots, commas, `?`, `[`, `]` and `::`. An unclosed or foreign run reads as none.
+    """
+    if i >= end or tokens[i].text != "<":
+        return i
+    depth, j = 0, i
+    while j < end:
+        text = tokens[j].text
+        if text == "<":
+            depth += 1
+        elif text == ">":
+            depth -= 1
+            if depth == 0:
+                return j + 1
+        elif not (tokens[j].kind == "name" or text in (".", ",", "?", "[", "]", "::")):
+            return i
+        j += 1
+    return i
+
+
 def attribute_markers(tokens: tuple[Token, ...], pairs: dict[int, int],
                       section: tuple[int, int]) -> list[int]:
     found, i, end = [], section[0] + 1, section[1] - 1
@@ -175,8 +201,11 @@ def attribute_markers(tokens: tuple[Token, ...], pairs: dict[int, int],
             if tokens[i - 1].text in ("[", ",", ".", ":"):
                 if name in CS_DISABLING_ATTRIBUTES:
                     found.append(i)
-                elif name in CS_ARGUMENT_KEYS and before_paren(tokens, i):
-                    found.extend(argument_skips(tokens, pairs, i + 1, CS_ARGUMENT_KEYS[name]))
+                elif name in CS_ARGUMENT_KEYS:
+                    open_ = after_type_arguments(tokens, i + 1, end) \
+                        if name in CS_GENERIC_ATTRIBUTES else i + 1
+                    if open_ < end and tokens[open_].text == "(":
+                        found.extend(argument_skips(tokens, pairs, open_, CS_ARGUMENT_KEYS[name]))
         i += 1
     return found
 

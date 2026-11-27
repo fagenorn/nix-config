@@ -19,6 +19,7 @@ import unittest
 from pathlib import Path
 
 from agent_tools.delivery import copied_test_lint, never_rise, rule_ids, skipped_test_lint
+from agent_tools.delivery.dotnet_solution import SOLUTION_ROOT
 from agent_tools.delivery.never_rise import Rise, Snapshot, Violation
 
 from .never_rise_world import commit_all, fixture_env, mark_base, repo, write
@@ -119,6 +120,21 @@ class CopiedTestLintTest(unittest.TestCase):
             f"B24 {path}:{n}\n" for path in sorted(shared) for n in source(shared[path])[1])
         self.assertEqual((copies.returncode, copies.stdout), (1, expected))
         self.assertEqual((apart.returncode, apart.stdout), (0, ""))
+
+    def test_a_planted_xunit_copy_under_the_solution_root_counts_and_zero_once_fixed(self):
+        fixtures = REPO_ROOT / "tests/fixtures/dotnet-lint"
+        path = f"{SOLUTION_ROOT}/Planted.Tests/CopiedTests.cs"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = repo(tmp)
+            write(root, path, (fixtures / "CopiedTests.cs.fixture").read_bytes())
+            commit_all(root)
+            planted = self.run_command("--repo-root", str(root))
+            write(root, path, (fixtures / "CopiedTestsFixed.cs.fixture").read_bytes())
+            commit_all(root)
+            fixed = self.run_command("--repo-root", str(root))
+        self.assertEqual(
+            (planted.returncode, planted.stdout), (1, f"B24 {path}:15\nB24 {path}:24\n"))
+        self.assertEqual((fixed.returncode, fixed.stdout), (0, ""))
 
     def test_each_family_reports_its_copies(self):
         files = {"tests/test_p.py": PYTHON_PAIR, "web/a.test.ts": TYPESCRIPT_PAIR,
