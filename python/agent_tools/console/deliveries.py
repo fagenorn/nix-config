@@ -78,17 +78,22 @@ contract's `vcs.branch_pattern` through `resolve_project.resolve`, or None when 
 Delivery events (the log's rows for the run journals): `delivery.seen` (`DELIVERY_SEEN`) carries
 `seen_payload(state)`, `{"session_id", "run_id", "moved_ms", "issues": [{"issue", "stage", "task",
 "tasks", "locking"}, ...]}` with `None` as null, and `delivery.gone` (`DELIVERY_GONE`) carries
-`{"session_id", "run_id"}`. `delivery_states(events, states=None)` folds them onto a `DeliveryState`
+`gone_payload(state)`, `{"session_id", "run_id", "project", "issues": [...]}` where `project` and `issues` (the
+`seen_payload` rows) snapshot the run's last state, so a retention pass that removed the run's `seen` rows
+leaves the ending replayable. `delivery_states(events, states=None)` folds them onto a `DeliveryState`
 per `(session_id, run_id)` (its `project` is the project of the `seen` row, a str or None, and is never
 compared): a `seen` whose `session_id` and `run_id` are str, `moved_ms` an int (not
 a bool) and `issues` a list of dicts each with an int (not bool) `issue`, a `stage` in `STAGES` and
 `task`/`tasks` an int or null and `locking` a bool when present (a row without it reads `False`;
 any other `locking` makes the `seen` invalid) replaces any earlier state; a `seen` of any other shape is ignored
 whole; a `gone` with str `session_id` and `run_id` removes the key; other kinds are ignored, and
-folding onto earlier states equals folding all events. `delivery_changes(states, readings, scanned,
-project_of)` lists what to append: a `seen` for each reading (in key order) that differs from the
-known state, then a `gone` for each known state (in key order) of a scanned session that has no
-reading; a state of a session not scanned yields nothing.
+folding onto earlier states equals folding all events. `apply_delivery(event, states)` applies one event
+in place and returns the state a `gone` ended (the snapshot of its payload for a run `states` does not
+know, when valid). `delivery_changes(states, readings, scanned, project_of, ended=())` lists what to
+append: a `seen` for each reading (in key order) that differs from the known state, then a `gone` for
+each known state (in key order) of a scanned session that has no reading, then a `gone` of the reading
+of each `ended` key; a state of a session not scanned yields nothing. `final_record_ms(journal)` is the
+final record's mtime in ms, None when it cannot be read.
 
 Moved text: `moved_text(elapsed_ms)` turns the time since a journal's last movement into
 `(quiet, text)`. Below 0 counts as 0; under a minute reads `"moved just now"`; under
@@ -241,6 +246,14 @@ def has_final_record(journal: Path) -> bool | Unreadable:
     except OSError as error:
         return Unreadable(_reason(error))
     return True
+
+
+def final_record_ms(journal: Path) -> int | None:
+    """The final record's mtime in ms; None when it is absent or cannot be read. Never raises."""
+    try:
+        return int(os.stat(final_record(journal)).st_mtime * 1000)
+    except OSError:
+        return None
 
 
 QUEUED = "queued"
@@ -652,24 +665,52 @@ def _seen_state(payload: dict) -> DeliveryState | None:
     return DeliveryState(session_id, run_id, moved, issues)
 
 
+def gone_payload(state: DeliveryState) -> dict:
+    """A `delivery.gone` payload: the run's key and a snapshot of its project and issues, so the ending
+    is replayable when the run's `seen` rows have aged out of the log."""
+    return {"session_id": state.session_id, "run_id": state.run_id, "project": state.project,
+            "issues": seen_payload(state)["issues"]}
+
+
+def _gone_snapshot(payload: dict, session_id: str, run_id: str) -> DeliveryState | None:
+    project, rows = payload.get("project"), payload.get("issues")
+    if not isinstance(project, str) or not isinstance(rows, list):
+        return None
+    issues = tuple(_issue_stage(row) for row in rows)
+    if any(issue is None for issue in issues):
+        return None
+    return DeliveryState(session_id, run_id, 0, issues, project)  # type: ignore[arg-type]
+
+
+def apply_delivery(event: Event, states: dict[tuple[str, str], DeliveryState]) -> DeliveryState | None:
+    """Apply one event to `states` in place; the state a valid `gone` ended, else None.
+
+    A `gone` of a run the states know ends that run's last valid state; of an unknown run it ends the
+    snapshot of its own payload when that is valid (`gone_payload`), else nothing.
+    """
+    payload = event.payload
+    if not isinstance(payload, dict):
+        return None
+    if event.kind == DELIVERY_SEEN:
+        state = _seen_state(payload)
+        if state is not None:
+            project = event.project if isinstance(event.project, str) else None
+            states[(state.session_id, state.run_id)] = replace(state, project=project)
+    elif event.kind == DELIVERY_GONE:
+        session_id, run_id = payload.get("session_id"), payload.get("run_id")
+        if isinstance(session_id, str) and isinstance(run_id, str):
+            known = states.pop((session_id, run_id), None)
+            return known if known is not None else _gone_snapshot(payload, session_id, run_id)
+    return None
+
+
 def delivery_states(
     events: Iterable[Event],
     states: Mapping[tuple[str, str], DeliveryState] | None = None,
 ) -> dict[tuple[str, str], DeliveryState]:
     result = dict(states or {})
     for event in events:
-        payload = event.payload
-        if not isinstance(payload, dict):
-            continue
-        if event.kind == DELIVERY_SEEN:
-            state = _seen_state(payload)
-            if state is not None:
-                project = event.project if isinstance(event.project, str) else None
-                result[(state.session_id, state.run_id)] = replace(state, project=project)
-        elif event.kind == DELIVERY_GONE:
-            session_id, run_id = payload.get("session_id"), payload.get("run_id")
-            if isinstance(session_id, str) and isinstance(run_id, str):
-                result.pop((session_id, run_id), None)
+        apply_delivery(event, result)
     return result
 
 
@@ -678,7 +719,9 @@ def delivery_changes(
     readings: Mapping[tuple[str, str], DeliveryState],
     scanned: Iterable[str],
     project_of: Callable[[str], str | None],
+    ended: Iterable[tuple[str, str]] = (),
 ) -> list[tuple[str, str | None, dict]]:
+    """`ended` are runs whose final record the poll read: each, after the rest, gets a `gone` of its reading."""
     scanned = frozenset(scanned)
     changes: list[tuple[str, str | None, dict]] = []
     for key in sorted(readings):
@@ -686,7 +729,10 @@ def delivery_changes(
             changes.append((DELIVERY_SEEN, project_of(key[0]), seen_payload(readings[key])))
     for key in sorted(states):
         if key[0] in scanned and key not in readings:
-            changes.append((DELIVERY_GONE, project_of(key[0]), {"session_id": key[0], "run_id": key[1]}))
+            changes.append((DELIVERY_GONE, project_of(key[0]), gone_payload(states[key])))
+    for key in ended:
+        project = states[key].project if states.get(key) == readings[key] else project_of(key[0])
+        changes.append((DELIVERY_GONE, project_of(key[0]), gone_payload(replace(readings[key], project=project))))
     return changes
 
 

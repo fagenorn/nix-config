@@ -71,8 +71,16 @@ Event kinds read:
   the run's state before the row in the run's order, only when its payload names a `session_id` and
   `run_id` (str) of a run the fold knows and the project of that run's last valid `delivery.seen` is a
   str; the sentence names that project, never the one the `gone` row carries (the registry may have
-  moved the repository between the two rows). A run the log never saw, a run already gone, a run last
-  seen under no project and a malformed payload say nothing.
+  moved the repository between the two rows). A `gone` of a run the fold does not know speaks from the
+  snapshot of its own payload (`deliveries.gone_payload`: `project` and `issues`) when that is valid, so
+  a retention pass that removed the run's `seen` rows does not erase a recent ending. A run the log never
+  saw and gave no snapshot, a run already gone, a run last seen under no project and a malformed payload
+  say nothing. Each row is applied to one mapping in place (`deliveries.apply_delivery`), so a replay costs
+  time and memory linear in its rows.
+- `engine_run.ended` (`engine_runs.ENGINE_RUN_ENDED`): an engine delivery run that ended, one row per run
+  (`engine_runs.py` P10), with payload `issue` (int, not bool), `stage` (str) and `done` (bool) and the
+  row's project (str); it speaks one moment, the same `delivery_ended` sentence, `merged` when `done`.
+  A row lacking one of them says nothing.
 
 Every other kind says nothing, `goal.stated` included. An event whose payload lacks a required member
 says nothing.
@@ -130,9 +138,10 @@ withdrawal removes the sprint).
     quota_resumed    <title> resumed after the quota reset
     project_registered <project_id> was registered.
     delivery_ended   The delivery of <project_id> #<issue> ended: <how>
-                     (<project_id> is the project of the run's last valid `delivery.seen`)
-                     (`merged` when the issue's last stage was `done`, else `stopped at <stage>`
-                     with `deliveries.stage_words` of that stage)
+                     (<project_id> is the project of the run's last valid `delivery.seen`, or of an
+                     `engine_run.ended` row's own project)
+                     (`merged` when the issue's last stage was `done`, or the engine run is done,
+                     else `stopped at <stage>` with `deliveries.stage_words` of that stage)
 
 An inbox payload needs `project_id` (str), `issue` (int, not bool) and
 `question` (str). A withdrawal needs the event's project (str) and a payload `goal` (str); it
@@ -169,7 +178,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 from agent_tools.console.deliveries import (
-    DELIVERY_GONE, DELIVERY_SEEN, DONE, DeliveryState, delivery_states, stage_words)
+    DELIVERY_GONE, DELIVERY_SEEN, DONE, DeliveryState, apply_delivery, stage_words)
+from agent_tools.console.engine_runs import ENGINE_RUN_ENDED
 from agent_tools.console.event_log import (
     ADOPTION_REGISTRATION, BRIEF_APPROVED, BRIEF_SENT, GOAL_WITHDRAWN, MANAGER_NUDGED,
     MANAGER_STARTED, MANAGER_WOKEN, QUESTION_ANSWERED, QUESTION_WITHDRAWN, QUESTIONS_ASKED,
@@ -444,21 +454,26 @@ def _closing_moment(event: Event, before: Mapping[str, SprintState],
             f"The sprint for {event.project} is done: {new.closing.first_line}")
 
 
-def _delivery_moments(event: Event, known: Mapping[tuple[str, str], DeliveryState]) -> list[tuple[str, str]]:
-    """One sentence per issue of the run a `delivery.gone` ends; `known` is the fold before the row."""
-    payload = event.payload
-    if not isinstance(payload, dict):
-        return []
-    session_id, run_id = payload.get("session_id"), payload.get("run_id")
-    if not isinstance(session_id, str) or not isinstance(run_id, str):
-        return []
-    state = known.get((session_id, run_id))
+def _ended_moments(state: DeliveryState | None) -> list[tuple[str, str]]:
+    """One sentence per issue of the run a `delivery.gone` ended; `state` is what that row removed."""
     if state is None or not isinstance(state.project, str):
         return []
     return [(DELIVERY_ENDED,
              f"The delivery of {state.project} #{issue.issue} ended: "
              + ("merged." if issue.stage == DONE else f"stopped at {stage_words(issue.stage)}."))
             for issue in state.issues]
+
+
+def _engine_ended_moment(event: Event) -> tuple[str, str] | None:
+    payload = event.payload
+    if not isinstance(payload, dict) or not isinstance(event.project, str):
+        return None
+    issue, stage, done = payload.get("issue"), payload.get("stage"), payload.get("done")
+    if (not isinstance(issue, int) or isinstance(issue, bool) or not isinstance(stage, str)
+            or not isinstance(done, bool)):
+        return None
+    return (DELIVERY_ENDED, f"The delivery of {event.project} #{issue} ended: "
+            + ("merged." if done else f"stopped at {stage_words(stage)}."))
 
 
 def moments(
@@ -518,9 +533,10 @@ def moments(
         elif event.kind == SPRINT_CLOSED:
             said = _closing_moment(event, previous, folded)
         elif event.kind in (DELIVERY_SEEN, DELIVERY_GONE):
-            ended = _delivery_moments(event, runs) if event.kind == DELIVERY_GONE else []
-            runs = delivery_states([event], runs)
-            found.extend(Moment(event.seq, event.at, kind, sentence) for kind, sentence in ended)
+            found.extend(Moment(event.seq, event.at, kind, sentence)
+                         for kind, sentence in _ended_moments(apply_delivery(event, runs)))
+        elif event.kind == ENGINE_RUN_ENDED:
+            said = _engine_ended_moment(event)
         if said is not None:
             found.append(Moment(event.seq, event.at, said[0], said[1]))
     return found

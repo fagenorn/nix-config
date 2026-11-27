@@ -1887,7 +1887,9 @@ poll publishes, so the minutes since a run moved advance; an unchanged view bump
 journal is read incrementally; one that was truncated or replaced is folded again from its start.
 A run leaves only when its final record exists or its journal is confirmed absent (its listing
 succeeded without it); a journal or a listing that cannot be read keeps the run's last
-observation. A run that names no issue is not listed. A branch names its issue through the
+observation. A run no poll saw whose final record is not older than the poll before (or the console's
+start) started and ended between two polls: it is read once from its start and logged as a `seen` and a
+`gone`; a final record older than that is history and is never read. A run that names no issue is not listed. A branch names its issue through the
 project's configured branch pattern, `branch_pattern_of(repo)` (default
 `deliveries.configured_branch_pattern`, kept once resolved); while it is None no run of that
 repository names an issue, and a run read under another pattern is folded again from its start.
@@ -1898,7 +1900,7 @@ unreadable, again only after it read successfully in between) and `console: jour
 <session_id> <reason>` (a session's journal listing turned unreadable, likewise).
 Engine runs: right after `poll_deliveries()` the same thread calls `poll_engine_runs()`, which reads the runs
 root with `engine_runs.EngineRuns` outside the ingest lock (none without `engine_runs_root`), holds the states in memory,
-never logs and publishes. Stderr lines: `console: engine_run_unreadable <run> <reason>` (once, until it reads again)
+logs only the ending of a run (`engine_run.ended`, once per run, see `engine_runs.py` P10) and publishes. Stderr lines: `console: engine_run_unreadable <run> <reason>` (once, until it reads again)
 and `console: engine_poll_failed <Type>: <message>`.
 
 Spend (#1134): the thread named `SPEND_THREAD`, started by `start()`, calls `poll_spend()` every
@@ -4769,6 +4771,11 @@ class ConsoleService(ActionPermit):
         self._reader = deliveries.JournalReader()
         self._runs: dict[Path, deliveries.RunFold] = {}
         self._run_moves: dict[tuple[str, str], int] = {}
+        # Journals whose final record the last polls handled or baselined, and the time (ms) of the poll
+        # before: a final record newer than it, of a journal not handled, is a run that ended between polls.
+        self._finished: frozenset[Path] = frozenset()
+        self._delivery_floor_ms = int(clock() * 1000)
+        self._engine_ended: frozenset[str] = frozenset()
         self._unreadable: set[str] = set()
         self._engine = None if engine_runs_root is None else engine_runs.EngineRuns(engine_runs_root)
         self._engine_states: tuple = ()
@@ -4912,6 +4919,7 @@ class ConsoleService(ActionPermit):
             self._pin_launches = pin.pin_launches(events)
             self._derive_digest(events)
             self._deliveries = deliveries.delivery_states(events)
+            self._engine_ended = engine_runs.ended_runs(events)
             self._moved = idle.last_moved(events)
             self._sprints = sprints.sprint_states(events)
             self._withdrawn = sprints.withdrawn_ids(events)
@@ -10210,6 +10218,8 @@ class ConsoleService(ActionPermit):
     def poll_deliveries(self) -> list[Event]:
         """Append what the run journals of the live sessions show that the log does not, and publish."""
         folded = self._deliveries
+        floor_ms = int(self._clock() * 1000)
+        finished: set[Path] = set()
         scanned = {sid: s for sid, s in self._sessions.items()
                    if s.state != sessions.ENDED and s.repo is not None}
         projects_dirs = self._projects_dirs()
@@ -10223,6 +10233,7 @@ class ConsoleService(ActionPermit):
                 readings.update({k: v for k, v in folded.items() if k[0] == sid})
                 runs.update({j: f for j, f in self._runs.items() if j.parents[3].name == sid})
                 run_moves.update({k: v for k, v in self._run_moves.items() if k[0] == sid})
+                finished.update(j for j in self._finished if j.parents[3].name == sid)
                 self._warn_once(f"listing {sid}",
                                 f"console: journals_unreadable {sid} {listing.reason}")
                 continue
@@ -10234,9 +10245,15 @@ class ConsoleService(ActionPermit):
                 final = deliveries.has_final_record(journal)
                 # A run that ended between two polls, or while the console was down (the log still
                 # holds it), is read once more, so its close-out reaches the log as the run's last
-                # observation before the run leaves.
-                ended = final is True and (journal in self._runs or key in folded)
+                # observation before the run leaves. So is a run no poll saw before whose final record
+                # is newer than the poll before: it started and ended between two polls. A final record
+                # older than that, or one a poll already handled, is history and is never read.
+                ended = final is True and (
+                    journal in self._runs or key in folded
+                    or (journal not in self._finished
+                        and (deliveries.final_record_ms(journal) or 0) >= self._delivery_floor_ms))
                 if final is True and not ended:
+                    finished.add(journal)
                     self._reader.forget(journal)
                     self._unreadable.discard(path)
                     continue
@@ -10268,6 +10285,7 @@ class ConsoleService(ActionPermit):
                 if issues:
                     readings[key] = deliveries.DeliveryState(sid, key[1], chunk.moved_ms, issues)
                 if ended:
+                    finished.add(journal)
                     self._unreadable.discard(path)
                     if issues:
                         terminal.append(key)
@@ -10276,6 +10294,8 @@ class ConsoleService(ActionPermit):
         for journal in self._runs.keys() - runs.keys():
             self._reader.forget(journal)
         self._runs = runs
+        self._finished = frozenset(finished)
+        self._delivery_floor_ms = floor_ms
         with self._ingest:
             self._run_moves = run_moves
 
@@ -10283,9 +10303,8 @@ class ConsoleService(ActionPermit):
                 repo = scanned[sid].repo
                 return project_for(repo, self._states)
 
-            changes = deliveries.delivery_changes(self._deliveries, readings, scanned, project_of)
-            changes += [(deliveries.DELIVERY_GONE, project_of(sid), {"session_id": sid, "run_id": run})
-                        for sid, run in terminal]
+            changes = deliveries.delivery_changes(
+                self._deliveries, readings, scanned, project_of, terminal)
             appended = self.log.append(changes)
             if appended:
                 self._fold(appended)
@@ -10303,6 +10322,10 @@ class ConsoleService(ActionPermit):
         self._unreadable.difference_update(f"engine {s.run}" for s in poll.states if s.run not in failed)
         with self._ingest:
             self._engine_states = poll.states
+            appended = self.log.append(engine_runs.ended_changes(
+                poll.states, self._engine_ended, int(self._clock() * 1000)))
+            if appended:
+                self._fold(appended)
             self._publish()
 
     def _poll_loop(self) -> None:
@@ -10344,6 +10367,7 @@ class ConsoleService(ActionPermit):
         self._deferred = approve.deferrals(appended, self._deferred)
         self._pin_launches = pin.pin_launches(appended, self._pin_launches)
         self._deliveries = deliveries.delivery_states(appended, self._deliveries)
+        self._engine_ended = engine_runs.ended_runs(appended, self._engine_ended)
         self._moved = idle.last_moved(appended, self._moved)
         self._sprints = sprints.sprint_states(appended, self._sprints)
         self._withdrawn = sprints.withdrawn_ids(appended, self._withdrawn)
