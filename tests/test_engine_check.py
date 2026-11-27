@@ -1438,7 +1438,7 @@ class DeclarationTest(unittest.TestCase):
             "acquire": ("acquired", "already_held", "held_by", "lost_to", "error"),
             "release": ("released", "not_held", "error"),
             "renew": ("renewed", "not_held", "error"),
-            "status": ("free", "held_by", "stale", "error")}))
+            "status": ("free", "held_by", "stale", "takeover-eligible", "error")}))
         self.assertEqual(commands["diff-scope"].outcomes(None), ("ok", "failed"))
         self.assertIsNone(commands["diff-scope"].outcomes("x"))
         self.assertEqual(commands["forge-claim"].outcomes("acquire"),

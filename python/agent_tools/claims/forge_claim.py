@@ -29,7 +29,7 @@ that is not there is success.
 D8, output: every call, a usage error included, prints exactly one JSON object on one stdout
 line with the keys `command`, `repo`, `issue`, `holder`, `verdict`, `comment_id` and `by`.
 Exit 0 carries `acquired`, `already_held`, `renewed`, `released` and every `status` verdict
-(`free`, `held_by`, `stale`); exit 3 is contention (`acquire` answers `held_by` or `lost_to`,
+(`free`, `held_by`, `stale`, `takeover-eligible`); exit 3 is contention (`acquire` answers `held_by` or `lost_to`,
 `renew` and `release` answer `not_held`); exit 1 is a forge error (`verdict: "error"`, `error`
 the `ForgeError` code, `detail`, and `transient`, true when the error is a transport error: a
 `gh` timeout, an HTTP 5xx or a connection failure); exit 2 is usage (`verdict: "error"`,
@@ -54,8 +54,9 @@ claim untouched. A repeat `release` of the newest claim after a complete one lik
 `released` (exit 0) and changes nothing.
 
 D10, owner-action retirement: `renew` and `release` end every live `owner-action` marker that
-names their claim, a `status` whose verdict is `free`, `held_by` or `stale` ends every live
-stale-claim `owner-action` naming a claim other than the holder's, and the `owner-action` label
+names their claim, a `status` whose verdict is `free`, `held_by`, `stale` or `takeover-eligible`
+ends every live stale-claim `owner-action` naming a claim other than the holder's
+(`takeover-eligible` keeps the prompt of the claim it names, for the takeover to retire), and the `owner-action` label
 goes when none of any reason remains live on the issue. Retirement ends only markers that carry a
 `claim` field: a claim-less marker, or a prompt of another reason such as a verify-pending
 prompt, is never ended here and counts as live, so it keeps the label.
@@ -109,6 +110,7 @@ claim's id>` and the former branch when `--branch` is absent; a caller whose `en
 acquires as if the issue were free. The takeover never resets, cleans, stashes or discards the
 worktree: it reports it, reading git with no repository-selecting variable and no optional lock.
 A takeover survives a retry and a re-call: when no claim is live and the issue's newest claim was first ended, in comment order, `holder-gone` by an `end` marker whose `successor` and `sprint` are the caller's, `acquire` finishes the steps left (the `released` edit only when absent, the prompt retirement) and claims as the takeover would; any other first `end`, such as one of `release --reason holder-gone` or another successor's, grants nothing. A caller whose own live claim records its session, its sprint and `took` gets the report again with `already_held`. Within one invocation the tries share the worktree report read before the claim changed hands, so a retry reports what was read then and runs no git command. A claim of the caller's own holder that records another session, gone under the same rule (a batch relaunched under the same holder), is taken over in place: after the same fresh-listing and registry checks it is edited to the caller's `session` and `sprint` and `took=<its own id>`; only when a new listing's winner is that claim and still records them are the owner-action prompts that were live before the edit retired (`renewed`), and `already_held` carries the report; a retry of that invocation retires those prompts only, and a later call none. When a listing shows the claim released, another winner or another session's identity, `acquire` goes on as it would for that winner. A claim that records the caller's session and no `took`, or another sprint, stays `already_held` with no edit.
+`status` answers `takeover-eligible` (exit 0, `by` the holder, `activity_at` null) for a claim of another holder that qualifies, judged before any activity or server-time read; it posts no owner-action prompt and adds no label, so its caller goes on to `acquire`, which decides alone and checks everything again.
 
 The `land` subcommand (`land acquire|release|status|refresh|hold`, issue 629) is the cross-host land lock
 of `agent_tools.claims.forge_land_lock`: `main` routes it there and reports its usage errors in its
@@ -669,6 +671,9 @@ def status(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
         retire_obsolete(args.repo, args.issue, markers, None)
         return 0, _result(args, "free", **report)
     winner = held[0]
+    if _holder_of(winner) != args.holder and claim_takeover.qualifies(winner, os.environ):
+        retire_obsolete(args.repo, args.issue, markers, winner.comment_id)
+        return 0, _result(args, "takeover-eligible", winner.comment_id, _holder_of(winner), **report)
     activity = activity_at(args.repo, winner)
     report["activity_at"] = activity.strftime("%Y-%m-%dT%H:%M:%SZ")
     base = (winner.comment_id, _holder_of(winner))

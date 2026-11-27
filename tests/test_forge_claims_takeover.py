@@ -47,6 +47,7 @@ CALLER = {"pid": 2164, "sessionId": TAKER_SESSION, "cwd": "/x", "procStart": "97
           "pidDomain": PROC_PID_DOMAIN}
 STATUS_OUT = " M a.py\0?? new.txt\0R  moved.py\0old.py\0"
 
+LIST = ["api", "--paginate", "--slurp", f"repos/{SLUG}/issues/{ISSUE}/comments?per_page=100"]
 ENSURE = ["api", "-X", "POST", f"repos/{SLUG}/labels", "-f", "name=in-progress", "-f", "color=FBCA04"]
 ADD = ["api", "-X", "POST", f"repos/{SLUG}/issues/{ISSUE}/labels", "-f", "labels[]=in-progress"]
 REMOVE = ["api", "-X", "DELETE", f"repos/{SLUG}/issues/{ISSUE}/labels/in-progress"]
@@ -1347,6 +1348,83 @@ class TakeoverRecoveryTest(TakeoverWorld):
             self.assertEqual((code, out["verdict"], out["comment_id"]), (0, "already_held", 5))
             self.assertIsNone(out["takeover"])
             self.assertEqual(self.world.argvs("git"), [])
+
+
+class TakeoverStatusTest(TakeoverWorld):
+    def status(self):
+        return run(*common("status", TAKER))
+
+    def test_status_reports_a_takeover_eligible_claim(self):
+        self.store(comment(5, DEAD_CLAIM, T0))
+        self.status_ready()
+
+        code, out = self.status()
+
+        self.assertEqual((code, out["verdict"], out["comment_id"], out["by"]),
+                         (0, "takeover-eligible", 5, DEAD_HOLDER))
+        self.assertEqual((out["activity_at"], out["owner_action_comment_id"], out["owner_action_posted"]),
+                         (None, None, False))
+        self.assertEqual(self.mutations(), [])
+        self.assertEqual(self.world.argvs("gh"), [LIST])
+        self.assertNotIn("takeover", out)
+
+    def test_a_stale_takeover_eligible_claim_posts_no_owner_prompt(self):
+        obsolete = (comment(3, claim_body("x/y", released="done")), comment(29, oa_body(3, "x/y")),
+                    comment(5, DEAD_CLAIM, OLD))
+        cases = (("no prompt yet", (comment(5, DEAD_CLAIM, OLD),), []),
+                 ("its own prompt", (comment(5, DEAD_CLAIM, OLD), comment(30, oa_body(5, DEAD_HOLDER))), []),
+                 ("an obsolete prompt of an older claim", obsolete,
+                  [post(fm.end_body(29, "released")), OA_REMOVE]))
+        for name, comments, mutations in cases:
+            with self.subTest(name):
+                self.fresh_world()
+                self.status_ready()
+                self.store(*comments)
+
+                code, out = self.status()
+
+                self.assertEqual((code, out["verdict"]), (0, "takeover-eligible"))
+                self.assertEqual(self.mutations(), mutations)
+
+    def test_status_keeps_its_verdicts_when_the_claim_does_not_qualify(self):
+        other_host = claim_body(f"not-{HOST}/session-dead", branch=BRANCH, session=DEAD, sprint=SPRINT)
+        cases = (
+            ("other host", (comment(5, other_host, OLD), comment(30, oa_body(5, "x/y"))), None, {},
+             "stale", 30),
+            ("taker of another sprint", (comment(5, DEAD_CLAIM, T0),), None,
+             {"CONSOLE_SPRINT_ID": "fedcba9876543210"}, "held_by", None),
+            ("holder still runs", (comment(5, DEAD_CLAIM, T0),),
+             (self.taker_record(), self.running_record()), {}, "held_by", None),
+            ("caller not in the registry", (comment(5, DEAD_CLAIM, T0),), (), {}, "held_by", None))
+        for name, comments, records, env, verdict, prompt in cases:
+            with self.subTest(name), mock.patch.dict(os.environ, env):
+                self.fresh_world()
+                self.status_ready()
+                self.store(*comments)
+                if records is not None:
+                    self.registry_only(*records)
+
+                code, out = self.status()
+
+                self.assertEqual((code, out["verdict"], out["owner_action_comment_id"]), (0, verdict, prompt))
+
+    def test_a_takeover_eligible_status_is_followed_by_the_takeover(self):
+        self.git_ready()
+        self.status_ready()
+        self.store(comment(5, DEAD_CLAIM, T0))
+
+        code, out = self.status()
+        self.assertEqual((code, out["verdict"]), (0, "takeover-eligible"))
+
+        code, out = run(*common("acquire", TAKER), "--branch", BRANCH)
+
+        self.assertEqual((code, out["verdict"], out["comment_id"]), (0, "acquired", 41))
+        self.assertEqual(out["takeover"], TAKEOVER)
+
+    def test_the_status_verdict_is_declared_to_the_engine(self):
+        declared = Path(__file__).resolve().parents[1] / "python/agent_tools/delivery/command_verdicts.json"
+        self.assertEqual(json.loads(declared.read_text())["forge-claim"]["subcommands"]["status"],
+                         ["free", "held_by", "stale", "takeover-eligible", "error"])
 
 
 if __name__ == "__main__":
