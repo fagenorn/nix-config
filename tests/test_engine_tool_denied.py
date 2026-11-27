@@ -439,6 +439,48 @@ class FanOutDeniedTest(unittest.TestCase):
         for kid in children_of(self.project):
             self.assertEqual(self.project.events(kid)[-1]["event"], "run_done", kid.name)
 
+    def test_a_group_member_cut_after_its_first_denial_is_entered_again_and_asked_again_once_on_its_new_session(self):
+        directory = with_session_files(self.project.procedures(REVIEWS()))
+        def approving() -> engine_session.Launched:
+            return engine_session.Launched(0, canned_result(), b"", 0.1)
+
+        queues, launches = {}, []
+
+        def fake(argv, cwd, prompt, *, on_start, timeout=None, env=None, stop=None):
+            name = Path(argv[-1]).name.split(".")[0]
+            launches.append((name, argv, prompt))
+            on_start(os.getpid())
+            self.answer(env, {"account": "stub"})
+            return queues[name].pop(0)
+
+        with self.project.inside(), mock.patch.object(engine_session, "launch", fake):
+            queues.update(ra=[self.denied("git log | head"), approving()], rb=[approving()])
+            code, line = engine_shell.deliver(1919, directory)
+            self.assertEqual(code, 0, line)
+            (root,) = roots(self.project)
+            path = root / "events.jsonl"
+            lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+            cut = next(i for i, text in enumerate(lines) if json.loads(text)["event"] == "session_answered"
+                       and json.loads(text)["step"] == "ra") + 1
+            path.write_text("".join(lines[:cut]), encoding="utf-8")
+            (root / "results/ra.1.json").unlink()
+            (root / "sessions/ra.1.denied.json").unlink()
+            first = len(launches)
+            queues.update(ra=[self.denied("rm x"), approving()], rb=[approving()])
+
+            code, line = engine_shell.deliver(1919, directory)
+
+        self.assertEqual(code, 0, line)
+        events = self.project.events(root)
+        self.assertEqual(len([e for e in events if e["event"] == "run_continued"]), 1)
+        original = after(next(argv for name, argv, _ in launches if name == "ra"), "--session-id")
+        fresh, asked = [(argv, prompt) for name, argv, prompt in launches[first:] if name == "ra"]
+        self.assertNotEqual(after(fresh[0], "--session-id"), original)
+        self.assertEqual(after(asked[0], "--resume"), after(fresh[0], "--session-id"))
+        self.assertIn(repr("rm x"), asked[1])
+        self.assertNotIn(repr("git log | head"), asked[1])
+        self.assertEqual([e for e in events if e["event"] == "stop_reached" and e["stop"] == "tool-denied"], [])
+
     def faulted(self) -> engine_session.Launched:
         return engine_session.Launched(1, b"", b"the client crashed\n", 0.1)
 

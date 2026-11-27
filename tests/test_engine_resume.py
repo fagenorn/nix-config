@@ -488,6 +488,25 @@ class ResumeTest(unittest.TestCase):
         self.assertEqual(self.entered(run), [1])
         self.assertEqual(run_continued(self.project.events(run)), [])
 
+    def test_a_run_killed_after_the_reask_was_announced_and_before_it_launched_sends_the_saved_reask(self):
+        log = install_answers(self.project, [self.denying("git log | head"), self.normal(), self.normal()])
+        procedures = one_step(self.project)
+        first = self.project.deliver(procedures)
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        (run,) = self.project.runs()
+        retry = (run / "sessions/draft.1.denied.prompt.md").read_text()
+        self.cut(run, "session_resuming",
+                 drop=("results/draft.1.json", "sessions/draft.1.denied.json"))
+        done = self.project.deliver(procedures)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        records = self.records(log)
+        self.assertEqual(len(records), 3)
+        self.assertEqual(after(records[2]["argv"], "--resume"), after(records[0]["argv"], "--session-id"))
+        self.assertEqual(records[2]["stdin"], retry)
+        self.assertIn(repr("git log | head"), retry)
+        self.assertEqual(self.entered(run), [1])
+        self.assertEqual(run_continued(self.project.events(run)), [])
+
     def test_a_denied_visit_whose_reask_was_cut_short_stores_the_turns_and_spend_of_every_launch(self):
         denied = self.project.tmp / "denied-counted.json"
         denied.write_bytes(canned_result(

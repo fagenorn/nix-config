@@ -58,11 +58,16 @@ def resumed(run_dir: Path, ledger: list[dict], name: str, visit: int) -> Resumed
     if any(e["event"] == "stop_reached" for e in ledger[entered[-1]:]):
         return None
     launched = [e["attempt"] for e in here if e["event"] == "session_resuming"]
-    ended = [_recorded(path) for path in (run_dir / "sessions").glob(f"{name}.{visit}.*json")]
-    ended = [document for document in ended if document.get("attempt") == max(launched, default=1)]
+    records = [_recorded(path) for path in (run_dir / "sessions").glob(f"{name}.{visit}.*json")]
+    ended = [document for document in records if document.get("attempt") == max(launched, default=1)]
     retry = next((document["retry"] for document in ended if isinstance(document.get("retry"), str)), None)
     if ended and retry is None:
         return None
+    # the announced re-ask launch never started: send the re-ask its predecessor saved
+    if not ended and launched and here[-1]["event"] == "session_resuming":
+        retry = next((document["retry"] for document in records
+                      if document.get("attempt") == max(launched) - 1
+                      and isinstance(document.get("retry"), str)), None)
     attempt = 2 + len(launched)
     started = any(e["event"] == "process_started" for e in here)
     text = retry or (engine_session.CONTINUE_PROMPT if started else
