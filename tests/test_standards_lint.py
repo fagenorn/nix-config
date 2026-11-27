@@ -7,7 +7,7 @@ from pathlib import Path
 from types import MappingProxyType
 from unittest import mock
 
-from agent_tools.delivery import hint_phases, never_rise, procedure_check, rule_ids, standards_lint
+from agent_tools.delivery import hint_phases, never_rise, procedure_check, routing, rule_ids, standards_lint
 from agent_tools.delivery.never_rise import Rise, Snapshot, Violation
 from agent_tools.project_contract import conformance_checks
 
@@ -448,6 +448,20 @@ class LiveTreeTest(unittest.TestCase):
         text = (REPO_ROOT / "home/common/agent-skills/standards/README.md").read_text(encoding="utf-8")
         self.assertIn(".agents/knowledge/hints/", text)
         self.assertNotIn(".claude/hints/", text)
+
+    def test_a_package_routed_stack_file_header_names_its_packages_and_no_extension(self):
+        stacks = REPO_ROOT / "home/common/agent-skills/standards/stacks"
+        for base, route in routing.PACKAGE_ROUTES.items():
+            triggers = [key for key, names in routing.STACK_SHARDS.items() if base in names]
+            for shard, packages in route.shards.items():
+                with self.subTest(shard=shard):
+                    text = (stacks / shard).read_text(encoding="utf-8")
+                    header = text[:text.index("-->")]
+                    self.assertTrue(text.startswith("<!--"))
+                    for trigger in triggers:
+                        self.assertNotIn(f"*{trigger}" if trigger.startswith(".") else trigger, header)
+                    for package in packages:
+                        self.assertIn(package, header)
         self.assertNotIn("REVIEW-CONTRACT.md", text)
 
 
