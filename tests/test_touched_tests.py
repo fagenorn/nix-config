@@ -27,6 +27,9 @@ from agent_tools.delivery.suite_runner import REPORT_ENV, suite_members
 from agent_tools.delivery.touched_tests import (
     SELECTION_ENV, build_trigger, default_capture, default_execute, main, parse_assignments,
     select, selection)
+from agent_tools.delivery.dotnet_format_lint import Refusal
+from agent_tools.delivery.dotnet_solution import SOLUTION_ROOT
+from agent_tools.delivery.touched_tests import DotnetSelection, dotnet_selection
 
 TIER = "integration"  # MainTest builds a git repository
 
@@ -433,12 +436,191 @@ class MainTest(unittest.TestCase):
         self.assertEqual((code, out), (0, "A=1\n"))
 
 
+class DotnetSelectionTest(unittest.TestCase):
+    def test_each_dotnet_diff_selects_its_row(self):
+        s = SOLUTION_ROOT
+        planted_tests = f"{s}/Planted.Tests/Planted.Tests.csproj"
+        other_tests = f"{s}/Other.Tests/Other.Tests.csproj"
+        projects = [f"{s}/Planted/Planted.csproj", planted_tests, f"{s}/Other/Other.csproj",
+                    other_tests, f"{s}/Lonely/Lonely.csproj"]
+        rows = [
+            ([f"{s}/Planted/Widget.cs"], ((), (planted_tests,))),
+            ([f"{s}/Planted/Deep/Er/Gadget.cs"], ((), (planted_tests,))),
+            ([f"{s}/Planted/Planted.csproj"], ((), (planted_tests,))),
+            ([f"{s}/Planted.Tests/WidgetTests.cs"], ((), (planted_tests,))),
+            ([f"{s}/Other/A.cs", f"{s}/Planted/B.cs", f"{s}/Planted/C.cs"],
+             ((), (other_tests, planted_tests))),
+            ([f"{s}/Lonely/L.cs"], ((f"{s}/Lonely/L.cs",), ())),
+            ([f"{s}/Orphan.cs"], ((f"{s}/Orphan.cs",), ())),
+            ([f"{s}/Directory.Build.props"], ((f"{s}/Directory.Build.props",), ())),
+            ([f"{s}/Planted/packages.lock.json", f"{s}/Planted/Widget.cs"],
+             ((f"{s}/Planted/packages.lock.json",), ())),
+            (["Directory.Build.props", "src/X.cs", "python/pkg/alpha.py", f"{s}/README.md"],
+             ((), ())),
+        ]
+        for changed, (whole, tests) in rows:
+            with self.subTest(changed=changed):
+                self.assertEqual(
+                    dotnet_selection(changed, projects),
+                    DotnetSelection(whole_because=whole, test_projects=tests))
+
+
+class DotnetMainTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.env = hermetic_env(os.environ)
+        patcher = mock.patch.dict(os.environ, self.env, clear=True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        s = SOLUTION_ROOT
+        self.git("init", "-q", "-b", "main")
+        self.write("justfile", "agent-workflow-tests *args:\n  runner {{args}} \\\n"
+                               "    tests/test_alpha.py\n")
+        self.write("tests/test_alpha.py", "from pkg import alpha\n")
+        self.write("python/pkg/alpha.py", "VALUE = 1\n")
+        for name in ("Planted.slnx", "Planted/Planted.csproj", "Planted/Widget.cs",
+                     "Planted.Tests/Planted.Tests.csproj", "Planted.Tests/WidgetTests.cs",
+                     "Other/Other.csproj", "Other.Tests/Other.Tests.csproj"):
+            self.write(f"{s}/{name}", "x\n")
+        self.commit("base")
+        self.calls = []
+        self.environments = []
+        self.tools_asked = []
+
+    def git(self, *args):
+        subprocess.run(["git", "-C", str(self.root), *args], check=True,
+                       capture_output=True, text=True)
+
+    def write(self, name, text):
+        path = self.root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+
+    def commit(self, message):
+        self.git("add", "-A")
+        self.git("-c", "commit.gpgsign=false", "commit", "-q", "-m", message)
+
+    def change(self, *names):
+        for name in names:
+            self.write(name, "changed\n")
+        self.commit("change")
+
+    def stub(self, codes=None):
+        codes = codes or {}
+
+        def execute(argv, cwd, env=None):
+            self.calls.append((argv, cwd))
+            self.environments.append(env)
+            return codes.get(argv[0], codes.get("runner", 0))
+        return execute
+
+    def tools(self, root):
+        self.tools_asked.append(root)
+        return "/tools/bin"
+
+    def run_main(self, *flags, codes=None, dotnet_tools=None):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = main(["--root", str(self.root), "--base", "HEAD~1", "--source-root", "python",
+                         *flags], execute=self.stub(codes), capture=lambda argv, cwd: (0, ""),
+                        dotnet_tools=dotnet_tools or self.tools)
+        return code, out.getvalue(), err.getvalue()
+
+    def test_a_changed_source_runs_its_projects_test_project_and_no_suite_member(self):
+        s = SOLUTION_ROOT
+        self.change(f"{s}/Planted/Widget.cs")
+        code, _, _ = self.run_main("--dotnet-tests")
+        self.assertEqual(self.calls, [(["/tools/bin/dotnet", "test",
+                                        f"{s}/Planted.Tests/Planted.Tests.csproj"], self.root)])
+        self.assertEqual(self.environments[0]["PATH"], "/tools/bin")
+        self.assertEqual(self.environments[0]["DOTNET_CLI_TELEMETRY_OPTOUT"], "1")
+        self.assertEqual(code, 0)
+
+    def test_a_shared_build_file_runs_the_whole_dotnet_test_set(self):
+        s = SOLUTION_ROOT
+        for name in ("Directory.Build.props", "Directory.Packages.props",
+                     "Planted/packages.lock.json", "deps.json"):
+            with self.subTest(name=name):
+                self.calls.clear()
+                self.change(f"{s}/{name}")
+                self.run_main("--dotnet-tests")
+                self.assertEqual([argv for argv, _ in self.calls],
+                                 [["/tools/bin/dotnet", "test", f"{s}/Planted.slnx"]])
+
+    def test_a_python_only_diff_is_unchanged_by_the_dotnet_flag(self):
+        self.change("python/pkg/alpha.py")
+        documents = []
+        for flags in ((), ("--dotnet-tests",)):
+            self.calls.clear()
+            target = self.root / f"selection{len(flags)}.json"
+            with mock.patch.dict(os.environ, {SELECTION_ENV: str(target)}):
+                self.run_main(*flags)
+            self.assertEqual(self.calls, [([*RUNNER, "tests/test_alpha.py"], self.root)])
+            documents.append(target.read_bytes())
+        self.assertEqual(documents[0], documents[1])
+        self.assertNotIn("dotnet", json.loads(documents[1]))
+        self.assertEqual(self.tools_asked, [])
+
+    def test_without_the_flag_a_changed_source_runs_no_dotnet(self):
+        self.change(f"{SOLUTION_ROOT}/Planted/Widget.cs")
+        code, out, _ = self.run_main()
+        self.assertEqual(self.calls, [])
+        self.assertIn("test-touched: no suite member is touched by HEAD~1...HEAD", out)
+        self.assertEqual(code, 0)
+
+    def test_suite_members_run_first_and_the_first_failure_is_the_result(self):
+        self.change("python/pkg/alpha.py", f"{SOLUTION_ROOT}/Planted/Widget.cs")
+        for codes, expected in (({"runner": 0, "/tools/bin/dotnet": 1}, 1),
+                                ({"runner": 3, "/tools/bin/dotnet": 1}, 3)):
+            with self.subTest(codes=codes):
+                self.calls.clear()
+                code, _, _ = self.run_main("--dotnet-tests", codes=codes)
+                self.assertEqual([argv[0] for argv, _ in self.calls],
+                                 [sys.executable, "/tools/bin/dotnet"])
+                self.assertEqual(self.calls[0][0], [*RUNNER, "tests/test_alpha.py"])
+                self.assertEqual(code, expected)
+
+    def test_unavailable_dotnet_tools_exit_2_after_the_suite(self):
+        self.change("python/pkg/alpha.py", f"{SOLUTION_ROOT}/Planted/Widget.cs")
+
+        def refuse(root):
+            raise Refusal("tools_unavailable")
+        code, _, err = self.run_main("--dotnet-tests", dotnet_tools=refuse)
+        self.assertEqual(self.calls, [([*RUNNER, "tests/test_alpha.py"], self.root)])
+        self.assertIn("test-touched: .NET tools unavailable (tools_unavailable)", err)
+        self.assertEqual(code, 2)
+
+    def test_the_selection_file_names_the_dotnet_targets(self):
+        s = SOLUTION_ROOT
+        self.change(f"{s}/Planted/Widget.cs")
+        target = self.root / "selection.json"
+        with mock.patch.dict(os.environ, {SELECTION_ENV: str(target)}):
+            self.run_main("--dotnet-tests")
+        document = json.loads(target.read_text())
+        self.assertEqual(document["dotnet"], [f"{s}/Planted.Tests/Planted.Tests.csproj"])
+        self.assertEqual(document["selected"], [])
+
+    def test_a_whole_set_without_one_solution_fails_before_anything_runs(self):
+        s = SOLUTION_ROOT
+        (self.root / s / "Planted.slnx").unlink()
+        self.change(f"{s}/Directory.Build.props")
+        code, _, err = self.run_main("--dotnet-tests")
+        self.assertEqual(code, 1)
+        self.assertIn("test-touched: no_solution", err)
+        self.assertEqual(self.calls, [])
+
+
 class RecipeTest(unittest.TestCase):
     def setUp(self):
         self.justfile = (REPO_ROOT / "justfile").read_text(encoding="utf-8")
         start = self.justfile.index("\ntest-touched:\n")
         end = self.justfile.find("\n\n", start + 1)
         self.recipe = self.justfile[start:end]
+
+    def test_the_recipe_runs_the_dotnet_tests_a_change_touches(self):
+        self.assertIn("--dotnet-tests", shlex.split(self.recipe.splitlines()[-1]))
 
     def test_the_recipe_pairs_the_lifecycle_guard_with_its_adversarial_table(self):
         guard = "home/common/claude-code/lifecycle_guard.py"
