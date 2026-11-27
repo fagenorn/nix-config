@@ -69,7 +69,8 @@ A changed file named in `SHARED_BUILD_FILES` selects the whole set. A changed `.
 `.csproj` belongs to the `.csproj` in its nearest ancestor directory holding one (a `.csproj`
 counts its own directory); a project whose stem ends `.Tests` is its own target, any other
 project's target is the one project whose stem is `<stem>.Tests`. A path with no project, or
-with no or several test projects, selects the whole set. Any other path selects nothing. The
+with no or several test projects, selects the whole set. With no `.csproj` under the solution
+root, no .NET target is selected. Any other path selects nothing. The
 whole set is the one solution file (a `Refusal` from `solution` prints `test-touched:
 <reason>` and returns 1 before anything runs); otherwise the targets are the sorted test
 projects. The selection file gains `dotnet`, the targets, only when there are some. The

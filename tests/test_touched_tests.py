@@ -464,6 +464,20 @@ class DotnetSelectionTest(unittest.TestCase):
                     dotnet_selection(changed, projects),
                     DotnetSelection(whole_because=whole, test_projects=tests))
 
+    def test_an_ambiguous_project_or_test_project_selects_the_whole_set(self):
+        s = SOLUTION_ROOT
+        rows = [
+            ([f"{s}/Twin/A.csproj", f"{s}/Twin/B.csproj", f"{s}/A.Tests/A.Tests.csproj",
+              f"{s}/B.Tests/B.Tests.csproj"], [f"{s}/Twin/Widget.cs"]),
+            ([f"{s}/Dup/Dup.csproj", f"{s}/One/Dup.Tests/Dup.Tests.csproj",
+              f"{s}/Two/Dup.Tests/Dup.Tests.csproj"], [f"{s}/Dup/Widget.cs"]),
+        ]
+        for projects, changed in rows:
+            with self.subTest(projects=projects):
+                self.assertEqual(
+                    dotnet_selection(changed, projects),
+                    DotnetSelection(whole_because=tuple(changed), test_projects=()))
+
 
 class DotnetMainTest(unittest.TestCase):
     def setUp(self):
@@ -647,6 +661,18 @@ class DotnetMainTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("test-touched: no_solution", err)
         self.assertEqual(self.calls, [])
+
+    def test_a_source_with_no_dotnet_project_in_the_tree_runs_no_dotnet(self):
+        s = SOLUTION_ROOT
+        self.git("rm", "-q", f"{s}/Planted/Planted.csproj",
+                 f"{s}/Planted.Tests/Planted.Tests.csproj", f"{s}/Other/Other.csproj",
+                 f"{s}/Other.Tests/Other.Tests.csproj")
+        self.change(f"{s}/Planted/Widget.cs")
+        code, out, _ = self.run_main("--dotnet-tests")
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.tools_asked, [])
+        self.assertIn("test-touched: no suite member is touched by HEAD~1...HEAD", out)
+        self.assertEqual(code, 0)
 
 
 class RecipeTest(unittest.TestCase):
