@@ -123,7 +123,7 @@ class DeliverTest(HostAlertsCase):
     def test_a_missing_file_logs_the_alert_and_fails(self):
         outcome = self.call()
         error = f"settings file {self.settings} is missing"
-        self.assertEqual(outcome, Outcome("failed", error))
+        self.assertEqual(outcome, Outcome("failed", error, missing=True))
         self.assertEqual(self.bot.requests, [])
         self.assertEqual(self.log.read_text(), f"2026-11-24T12:00:00 jetsam not sent ({error}): {TEXT}\n")
         self.assertEqual(stat.S_IMODE(self.log.stat().st_mode), 0o600)

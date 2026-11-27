@@ -2268,7 +2268,7 @@ class QuestionDeepViewTest(unittest.TestCase):
     """Dig deeper is offered on a light answer, with an estimate; a finished question shows its spend (#1274)."""
 
     P1 = "owner/p01"
-    SPENT = "Spent 1,200 tokens, about $0.42"
+    SPENT = "Spent about $0.42"
 
     @staticmethod
     def spend_of(**sessions_):
@@ -2337,7 +2337,7 @@ class QuestionDeepViewTest(unittest.TestCase):
         self.assertEqual(
             found["l1"]["deep_text"],
             "Dig deeper asks again on a stronger model for up to 20 minutes. "
-            "Earlier deeper answers here spent about 400 tokens, $0.40 each.")
+            "Earlier deeper answers here spent about $0.40 each.")
         bare = self.entries(events[-2:])
         self.assertEqual(
             bare["l1"]["deep_text"],
@@ -3315,14 +3315,14 @@ class QuestionDeepSpendServiceTest(QuestionCase):
                 "type": "assistant", "sessionId": SESSION_ID, "cwd": "/srv/p01",
                 "timestamp": f"{today}T10:00:00.000Z",
                 "message": {"id": "msg_q1", "model": "claude-sonnet-4-6", "content": [],
-                            "usage": {"input_tokens": 40}}}) + "\n")
+                            "usage": {"input_tokens": 1_000_000}}}) + "\n")
             os.utime(path, (self.NOW, self.NOW))
             return self.outcome
 
         svc = self.start(session_dirs=[sessions_dir], clock=lambda: self.NOW, project_asker=writer)
         svc.ask_project_question(WHY, "where does time go?", deep=True)
         question = self.shown(svc)["questions"]["threads"][0]["questions"][0]
-        self.assertTrue(question["spend_text"].startswith("Spent 40 tokens"), question["spend_text"])
+        self.assertEqual(question["spend_text"], "Spent about $3.00")  # a million input tokens at $3 per million
 
 
 class QuestionLifecycleTest(QuestionCase):

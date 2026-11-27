@@ -130,6 +130,12 @@ class ProjectRecordsTest(unittest.TestCase):
             {"issue": 8, "tokens": 0, "dollars": 0.0, "approximate": False,
              "runs": [], "shared_runs": ["wf_b"]}])
 
+    def test_a_delivery_issue_keeps_the_raw_stage_the_sprints_part_keeps(self):
+        rows = [seen(1, P, "s-1", "wf_a", [stage(12, "landing"), stage(13, "verifying"), stage(14, "building")])]
+        issues = records(events=rows)["deliveries"][0]["issues"]
+        self.assertEqual(issues, [{"issue": 12, "stage": "landing"}, {"issue": 13, "stage": "verifying"},
+                                  {"issue": 14, "stage": "building"}])
+
     def test_a_run_is_live_only_when_the_service_says_its_session_is(self):
         r = records()
         self.assertEqual([(d["run_id"], d["live"]) for d in r["deliveries"]],

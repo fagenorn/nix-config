@@ -15,11 +15,11 @@ from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- modul
 
 SECRET_WHY = (
     ".claude/secrets/key.md looks like a secret, so it cannot be answered here: remove it from the "
-    "repository in its own commit, then register the repository again."
+    "repository and save that change on its own, then register the repository again."
 )
 OUTSIDE_WHY = (
     ".claude/link.md points outside the repository, so it cannot be answered here: remove it from "
-    "the repository in its own commit, then register the repository again."
+    "the repository and save that change on its own, then register the repository again."
 )
 NULL_PROJECT_WHY = (
     "The plan cannot tell which project this is, so it cannot be answered here: give the repository "

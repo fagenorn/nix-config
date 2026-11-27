@@ -800,7 +800,9 @@ def check_never_rise(context: "Context") -> "Outcome":
 
     The record enforcers judge both sides. The facts list each record the
     branch adds, for the reviewer to judge against the gate: at most
-    `MAX_FACT_LIST` paths, with the true count beside them. The membership is
+    `MAX_FACT_LIST` paths, with the true count beside them, and
+    `context.added_records` holds every one whole, for the engine's stderr
+    listing (`conformance.ADDED_RECORD_PREFIX`). The membership is
     `record_lint.added_records`'s: each path `git diff-tree -r -M
     --diff-filter=AR --name-status <merge_base> HEAD` names as added or as a
     rename target that `record_lint.is_record_path` accepts, less each
@@ -823,6 +825,7 @@ def check_never_rise(context: "Context") -> "Outcome":
         return Outcome("failed", "history_unavailable", "violations.history.fetch",
                        {"integration_branch": bound_fact(branch)})
     added = record_lint.added_records(verdict)
+    context.added_records = added
     listed = ({"added_records": bound_facts(added), "added_record_count": len(added)}
               if added else {})
     suppressed = verdict.suppressions

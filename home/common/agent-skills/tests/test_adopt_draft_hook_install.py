@@ -41,7 +41,7 @@ FAKE_REVIEW = '#!/bin/sh\necho "fake review command: resolved by the capability 
 SIGNER = ("#!/bin/sh\ncat >/dev/null\n"
           "printf '\\n[GNUPG:] SIG_CREATED D 1 8 00 1700000000 X\\n' >&2\n"
           "printf -- '-----BEGIN PGP SIGNATURE-----\\n\\nx\\n-----END PGP SIGNATURE-----\\n'\n")
-DRAFTED_LINE = "commits run in its development shell: devenv shell"
+DRAFTED_LINE = "changes are saved in its development shell: devenv shell"
 ONE_LINE = "{ ... }: { git-hooks.hooks.needs-dev-shell.enable = true; }\n"
 SWITCHED_OFF = "{ ... }: {\n  git-hooks.hooks.needs-dev-shell.enable = false;\n}\n"
 SWITCHED_OFF_IN_SET = "{ ... }: {\n  git-hooks.hooks.needs-dev-shell = { enable = false; };\n}\n"

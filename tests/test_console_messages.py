@@ -712,7 +712,7 @@ class NudgeServiceTest(MessageRouteTest):
         self.assertFalse(row["ok"])
         self.assertEqual(row["permission"], {
             "mode": "auto",
-            "reason": "production rules declared but not in the guard's policy"})
+            "reason": "production rules declared but not in the safety check's policy"})
 
     def test_an_owners_message_wakes_a_session_absent_from_the_full_listing_with_its_name_and_settings(self):
         svc, sid = self.stopped_with_full_listing(frozenset())

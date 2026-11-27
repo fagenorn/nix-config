@@ -562,7 +562,7 @@ class RegisterRunTest(Case):
         self.assertEqual(
             reg["headline"], f"What the console read from {repo.name}: it has no project contract yet")
         self.assertEqual([q["subject"] for q in reg["questions"]], ["lint-command", "test-command"])
-        self.assertIn("branch finished work merges into: main (read from its remote)",
+        self.assertIn("finished work merges into: main (read from its remote)",
                       [d["line"] for d in reg["draft"]])
         self.assertIn("cannot be derived until its origin remote names a GitHub repository",
                       [d["value"] for d in reg["draft"]])
@@ -1637,10 +1637,10 @@ class DraftRealTest(DraftCase):
     def test_a_repository_with_no_contract_is_drafted_from_its_remote(self):
         reg = self.registered(self.repo)
         self.assertEqual(reg["result"], "drafting")
-        for line in ("branch finished work merges into: trunk (read from its remote)",
+        for line in ("finished work merges into: trunk (read from its remote)",
                      "project id and issue tracker: GitHub, as sample-owner/sample-app "
                      "(read from its remote)",
-                     "checks a pull request must pass: CI (found in its files)"):
+                     "checks a proposed change must pass: CI (found in its files)"):
             self.assertIn(line, [d["line"] for d in reg["draft"]])
         items = self.register_items()
         self.assertEqual([i["subject"] for i in items], ["lint-command", "test-command"])
@@ -1712,7 +1712,7 @@ class DraftNoRemoteTest(DraftCase):
                 "the command could not be read: close every quote and do not end it with a "
                 "backslash")
         self.assertEqual(self.refusal_of(reg["plan_id"], "test-command", "none"),
-                         "Every project has a test command: type the command that runs it.")
+                         "Every project has a command that runs the tests: type that command.")
         self.assertEqual(self.rows("registration.ended"), rows)
         self.assertIn("lint-command", [i["subject"] for i in self.register_items()])
 
@@ -1815,7 +1815,7 @@ class RegisterRemoteTest(Case):
         row = self.settled_row(checkout)
         self.assertEqual(row["result"], "behind")
         self.assertEqual(row["headline"],
-                         "checkout is 1 commit behind its remote, which already has a project contract.")
+                         "checkout is 1 change behind its remote, which already has a project contract.")
         self.assertEqual(fake.calls, [])
         self.assertEqual(reads, [])
         self.assertEqual([p["result"] for _, p in self.rows("registration.ended")], ["behind"])
@@ -1855,7 +1855,7 @@ class RegisterRemoteTest(Case):
         row = self.settled_row(checkout)
         self.assertEqual(row["result"], "failed")
         self.assertEqual(row["headline"],
-                         "checkout could not be updated: it has changes that are not committed.")
+                         "checkout could not be updated: it has changes that are not saved in the repository.")
         self.assertEqual(row["note"], "Update the checkout in a terminal, then choose Try again.")
         self.assertEqual(len([i for i in self.view()["inbox"]["open"]
                               if i["reason"] == "register_failed"]), 1)
@@ -2069,7 +2069,7 @@ class PlanAnswerSecretTest(Case):
         self.assertEqual(
             question["why"],
             ".claude/secrets/key.md looks like a secret, so it cannot be answered here: remove it "
-            "from the repository in its own commit, then register the repository again.")
+            "from the repository and save that change on its own, then register the repository again.")
         self.assertEqual(reg["state"], "draft")
         self.assertEqual(json.loads(self.registry.read_text())["projects"], [])
         self.assertEqual(real_home_state(), before)

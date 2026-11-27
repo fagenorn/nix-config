@@ -27,7 +27,7 @@ fold of its own, so `engine status` and this view agree. The rules the readings 
 - P6. The newest root run of each (project, issue) is shown once it entered a step; a done run or one stopped
   with need `nothing` leaves the page a day after its last event.
 - P7. A fan-out reads `building task n of m` from the newest `call` event since the last step entered.
-- P8. A stop reads `stopped at <name, hyphens as spaces>, needs <need words>`; a need but `nothing` counts in the heading.
+- P8. A stop reads `stopped at <name, hyphens as spaces, or its `STOP_TEXT` words>, needs <need words>`; a need but `nothing` counts in the heading.
 - P9. A sprint reads `sprint_engine` of its issues: a run that reads moving or waiting moves it at once whatever its
   age, a run in any other reading moves nothing, a shown run carries its issue, and the sessions of every run of its
   issues are its engine sessions.
@@ -42,6 +42,7 @@ from typing import BinaryIO, Callable, Collection, Iterable, Mapping
 
 from agent_tools.canonical import parse_rfc3339_utc
 from agent_tools.console import spend as spend_module, sprints
+from agent_tools.console.deliveries import stage_words
 from agent_tools.delivery import engine_ledger
 from agent_tools.delivery.engine_ledger import LedgerError, RunState
 
@@ -49,9 +50,14 @@ READINGS = ("moving", "waiting", "stopped", "not_running", "done")
 WAIT_TEXT = {"usage-limit": "waiting out a usage limit",
              "host-slot": "waiting for a free session slot on this host",
              "lock": sprints.NOW_LOCK_TEXT, "checks": sprints.NOW_CI_TEXT}
-NEED_TEXT = {"owner-decision": "your decision", "owner-look": "your look", "retry": "a retry",
+NEED_TEXT = {"owner-decision": "your decision", "owner-look": "your check of the pictures", "retry": "a retry",
              "nothing": "nothing"}
-NOT_RUNNING_TEXT = "the engine is not running"
+# The built-in stops whose name holds a word the owner is not written to in; the others read as their name.
+STOP_TEXT = {"verify": "testing the change", "verify-unrelated": "a test that fails for another reason",
+             "verify-fix": "fixing a failed test", "verify-fix-review": "reviewing the fix of a failed test",
+             "look-not-on-engine": "a check of the pictures it cannot run",
+             "standard-not-on-engine": "a task it cannot run"}
+NOT_RUNNING_TEXT = "its steps are not running"
 ENDED_SHOWN_MS = 24 * 60 * 60 * 1000
 EVENTS_NAME = "events.jsonl"
 
@@ -60,7 +66,7 @@ def stage_text(state: RunState) -> str | None:
     """The stage in words, with the task of a fan-out; None before the first step."""
     if state.stage == "building" and state.fanout:
         return f"building task {state.fanout['task']} of {state.fanout['tasks']}"
-    return state.stage
+    return stage_words(state.stage) if state.stage else state.stage
 
 
 def reading(state: RunState) -> str:
@@ -85,7 +91,7 @@ def line_text(state: RunState) -> str:
     if kind == "done":
         return "done"
     if kind == "stopped":
-        name = state.stop["name"].replace("-", " ")  # type: ignore[index]
+        name = STOP_TEXT.get(state.stop["name"], state.stop["name"].replace("-", " "))  # type: ignore[index]
         return f"stopped at {name}, needs {NEED_TEXT[state.stop['need']]}"  # type: ignore[index]
     if kind == "not_running":
         return f"{stage_text(state)}, {NOT_RUNNING_TEXT}"

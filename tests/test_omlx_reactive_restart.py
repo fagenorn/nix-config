@@ -136,11 +136,12 @@ class ReactiveRestartTest(RecordsCase):
     def test_a_new_episode_inside_thirty_minutes_waits_for_the_gap(self):
         self.over_at(at("12:00"), at("12:01"), at("12:02"))
         self.over_at(at("12:03"), unowned=UNDER)
-        self.over_at(at("12:04"), at("12:05"), at("12:06"), at("12:31"))
+        self.over_at(at("12:04"), at("12:05"), at("12:06"), at("12:20"), at("12:31"))
         self.assertEqual(len(self.calls()), 1)
-        first, second = self.records()[1:]
+        first, middle, second = self.records()[1:]
         self.assertEqual((first["outcome"], first["at"]), ("deferred", at("12:06")))
         self.assertIn("4 minutes", first["reason"])
+        self.assertEqual((middle["outcome"], middle["at"]), ("deferred", at("12:20")))
         self.assertEqual((second["outcome"], second["at"]), ("deferred", at("12:31")))
         self.assertIn("29 minutes", second["reason"])
         self.assertIn("under 30", second["reason"])
@@ -159,12 +160,13 @@ class ReactiveRestartTest(RecordsCase):
         self.over_at(at("12:03"))
         self.assertEqual(len(self.calls()), 1)
 
-    def test_a_sample_without_a_fresh_census_breaks_the_row(self):
+    def test_a_sample_without_a_fresh_census_holds_the_row(self):
         self.over_at(at("12:00"), at("12:01"))
         self.put_census(census(at="2026-11-24T11:50:00", unowned_bytes=OVER))
         self.sample_at(at("12:02"))
-        self.over_at(at("12:03"))
         self.assertEqual(self.calls(), [])
+        self.over_at(at("12:03"))
+        self.assertEqual(self.calls(), ["--reactive"])
 
     def test_a_figure_exactly_at_the_line_is_not_over_it(self):
         self.over_at(at("12:00"), at("12:01"), at("12:02"), unowned=AT_LINE)
@@ -215,8 +217,19 @@ class ReactiveRestartTest(RecordsCase):
         self.assertEqual(held["limits"], {
             "trigger_bytes": 25 * GIB, "samples": 3, "room_bytes": 16 * GIB, "min_interval_seconds": 1800})
         self.assertEqual(held["since_at"], at("12:00"))
+        self.assertEqual(held["hold_since_at"], at("12:00"))
         self.sample_at(at("12:01"))
         self.assertEqual(json.loads(self.restart_state.read_text())["since_at"], at("12:00"))
+        self.assertEqual(json.loads(self.restart_state.read_text())["hold_since_at"], at("12:00"))
+
+    def test_a_state_an_older_watcher_wrote_gains_the_first_sample_of_the_hold_rule(self):
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        self.restart_state.write_text(json.dumps({
+            "since_at": "2026-11-20T09:00:00", "limits": None, "streak": 0, "episode_done": False,
+            "last_restart_at": None, "attempt": None, "outbox": []}))
+        self.sample_at(at("12:00"))
+        held = json.loads(self.restart_state.read_text())
+        self.assertEqual((held["since_at"], held["hold_since_at"]), ("2026-11-20T09:00:00", at("12:00")))
 
     def test_the_sample_is_recoverable_when_the_gate_runs(self):
         self.over_at(at("12:00"), at("12:01"), at("12:02"))
@@ -245,6 +258,36 @@ class ReactiveRestartTest(RecordsCase):
         self.over_at(at("12:05"))
         self.assertEqual(len(self.calls()), 1)
         self.assertEqual([record["at"] for record in self.records()], [at("12:05")])
+
+    def test_a_host_with_no_alert_settings_restarts_and_holds_the_alert_without_failing(self):
+        self.settings.unlink()
+        self.over_at(at("12:00"), at("12:01"), at("12:02"), at("12:03"))
+        self.assertEqual(self.calls(), ["--reactive"])
+        self.assertEqual(json.loads(self.restart_state.read_text())["outbox"], [])
+        [held] = self.held_restarts()
+        self.assertEqual((held["kind"], held["logged"], held["held"]), ("omlx_restarted", True, True))
+        self.assertIn("oMLX was restarted", held["text"])
+        self.assertEqual(self.bot.requests, [])
+
+    def test_restart_alerts_held_without_settings_become_one_summary_when_they_appear(self):
+        self.settings.unlink()
+        self.over_at(at("12:00"), at("12:01"), at("12:02"))
+        self.over_at(at("12:03"), unowned=UNDER)
+        self.over_at(at("12:33"), at("12:34"), at("12:35"))
+        self.assertEqual(len(self.calls()), 2)
+        [held] = self.held_restarts()
+        self.assertEqual(held["count"], 2)
+        self.settings_on()
+        self.over_at(at("12:36"), unowned=UNDER)
+        [request] = self.bot.requests
+        self.assertIn("alerts were held while host alerts were not configured", request["body"]["text"])
+        self.assertIn("omlx_restarted x2", request["body"]["text"])
+        self.assertEqual(self.held_restarts(), [])
+        self.assertEqual(json.loads((self.state_dir / "memory-watch.json").read_text())["pending"], [])
+
+    def held_restarts(self):
+        pending = json.loads((self.state_dir / "memory-watch.json").read_text())["pending"]
+        return [entry for entry in pending if entry["kind"] == "omlx_restarted"]
 
     def test_an_unreadable_restart_state_makes_no_attempt(self):
         self.state_dir.mkdir(mode=0o700)
@@ -308,6 +351,69 @@ class ReactiveStepTest(unittest.TestCase):
 
     def held(self):
         return json.loads((self.dir / self.m.RESTART_STATE_NAME).read_text())
+
+    def run_clocks(self, *steps):
+        """Step each `(clock, unowned)`; a `unowned` of None is a sample without a fresh census."""
+        for clock, unowned in steps:
+            self.go(clock, unowned=unowned)
+
+    def test_three_fresh_over_samples_inside_fifteen_minutes_split_by_census_less_ones_give_one_attempt(self):
+        self.run_clocks(("12:00", OVER), ("12:03", None), ("12:06", OVER), ("12:09", None))
+        self.assertEqual(self.gate_calls, [])
+        self.run_clocks(("12:12", OVER))
+        self.assertEqual(len(self.gate_calls), 1)
+        [record] = self.records()
+        self.assertEqual((record["outcome"], record["at"], record["streak"]), ("restarted", at("12:12"), 3))
+
+    def test_the_fifteen_minute_limit_is_on_each_gap_so_a_streak_may_span_longer_in_all(self):
+        """Highs at 12:00, 12:08 and 12:22 span 22 minutes; each gap from the last high is within 15, so one attempt."""
+        self.run_clocks(("12:00", OVER), ("12:01", None), ("12:07", None), ("12:08", OVER), ("12:14", None))
+        self.assertEqual(self.gate_calls, [])
+        self.run_clocks(("12:22", OVER))
+        self.assertEqual(len(self.gate_calls), 1)
+        [record] = self.records()
+        self.assertEqual((record["outcome"], record["at"], record["streak"]), ("restarted", at("12:22"), 3))
+
+    def test_a_streak_time_without_a_utc_offset_does_not_stop_the_sampling(self):
+        self.go("12:00")
+        document = self.held()
+        document["streak"], document["streak_at"] = 2, "2026-11-24T11:59:00+00:00"
+        (self.dir / self.m.RESTART_STATE_NAME).write_text(json.dumps(document))
+        self.go("12:01", unowned=None)
+        self.assertEqual(self.held()["streak"], 0)
+        self.assertEqual(self.gate_calls, [])
+        self.go("12:02")
+        self.assertEqual(self.held()["streak"], 1)
+
+    def test_a_census_less_stretch_over_fifteen_minutes_zeroes_the_streak(self):
+        self.run_clocks(("12:00", OVER), ("12:01", OVER), ("12:10", None), ("12:17", None), ("12:18", OVER),
+                        ("12:19", OVER))
+        self.assertEqual(self.gate_calls, [])
+        self.assertEqual(self.held()["streak"], 2)
+        self.run_clocks(("12:20", OVER))
+        self.assertEqual(len(self.gate_calls), 1)
+
+    def test_a_fresh_sample_after_a_gap_over_fifteen_minutes_starts_the_streak_again(self):
+        self.run_clocks(("12:00", OVER), ("12:01", OVER), ("12:17", OVER), ("12:18", OVER))
+        self.assertEqual(self.gate_calls, [])
+        self.run_clocks(("12:19", OVER))
+        self.assertEqual(len(self.gate_calls), 1)
+
+    def test_a_gap_of_exactly_fifteen_minutes_still_holds_the_streak(self):
+        self.run_clocks(("12:00", OVER), ("12:01", OVER), ("12:16", None), ("12:16", OVER))
+        self.assertEqual(len(self.gate_calls), 1)
+
+    def test_a_fresh_sample_at_or_under_the_line_ends_the_episode_across_census_less_samples(self):
+        self.run_clocks(("12:00", OVER), ("12:01", OVER), ("12:02", UNDER), ("12:03", None), ("12:04", OVER),
+                        ("12:05", OVER))
+        self.assertEqual(self.gate_calls, [])
+        self.assertEqual(self.held()["streak"], 2)
+
+    def test_a_census_less_sample_keeps_a_restarted_episode_closed(self):
+        self.run_clocks(("12:00", OVER), ("12:01", OVER), ("12:02", OVER), ("12:03", None))
+        for clock in ("12:40", "12:41", "12:42"):
+            self.go(clock)
+        self.assertEqual(len(self.gate_calls), 1)
 
     def test_a_timed_out_gate_is_ended_with_its_children(self):
         script = self.dir / "slow"

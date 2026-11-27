@@ -1252,7 +1252,7 @@ class RowTest(unittest.TestCase):
         waiting = register.view_entry(None, latest, adoption=self.opened_adoption("open"),
                                       approve=None)
         self.assertEqual(waiting["lines"], [])
-        self.assertEqual(waiting["line"], "The pull request of r is not ready to merge yet.")
+        self.assertEqual(waiting["line"], "The proposed change of r is not ready to merge yet.")
         closed = register.view_entry(
             None, latest, adoption=self.opened_adoption("closed", approve.CLOSED_NOTE),
             approve=None)
@@ -1291,9 +1291,9 @@ class BehindTest(unittest.TestCase):
     def test_a_behind_row_says_the_count_and_whether_the_remote_has_a_contract(self):
         row = register.behind("/x/r", 1, True)
         self.assertEqual(row["headline"],
-                         "r is 1 commit behind its remote, which already has a project contract.")
+                         "r is 1 change behind its remote, which already has a project contract.")
         self.assertEqual(register.behind("/x/r", 3, False)["headline"],
-                         "r is 3 commits behind its remote, which has no project contract yet.")
+                         "r is 3 changes behind its remote, which has no project contract yet.")
         self.assertEqual(row["result"], "behind")
         self.assertEqual(row["note"], register.BEHIND_NOTE)
         self.assertIsNone(row["plan_id"])
@@ -1327,8 +1327,8 @@ class BehindTest(unittest.TestCase):
                          ("/x/r", "update"))
 
     def test_a_failed_update_is_a_try_again_card(self):
-        row = register.update_failed("/x/r", "it has changes that are not committed")
-        self.assertEqual(row["headline"], "r could not be updated: it has changes that are not committed.")
+        row = register.update_failed("/x/r", "it has changes that are not saved in the repository")
+        self.assertEqual(row["headline"], "r could not be updated: it has changes that are not saved in the repository.")
         self.assertEqual(row["note"], "Update the checkout in a terminal, then choose Try again.")
         self.assertEqual(row["result"], "failed")
         latest = {**row, "at": "t"}

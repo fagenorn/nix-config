@@ -40,16 +40,20 @@ def logins_in(text: str) -> list:
 
 
 OWNER_WORDS = (
-    "land lock", "slice", "held", "verify", "brief version", "guard", "rerun", "claim", "look",
-    "live fault", "CI", "pull request",
+    "land lock, merge lock", "pull request, PR", "rerun", "CI", "held issue", "verify, verification",
+    "landed, landing (a change)", "slice", "brief version", "the guard, a guard refusal", "a claim on files",
+    "look card", "live fault", "commit, sha, the head", "on main, the branch", "issue plus a number",
+    "milestone", "Conformance, lint", "fix wave", "activation of the host", "AC plus a number",
+    "stage names used as nouns (final-review, verify-fix and the like)", "ready mode", "sync (with main)",
+    "flaky", "tokens", "worktree, engine, workflow, delivery program",
 )
 
 
 def owner_word_problems(text: str) -> list[str]:
-    """What is wrong with the rendered glossary table of `docs/guides/owner-words.md`, one line each.
+    """What is wrong with the rendered do-not-write table of `docs/guides/owner-words.md`, one line each.
 
     Rows come from `index_table`, so a line in a fence or an HTML comment is not a row. A row with other
-    than two cells, an empty word or gloss, or a word that an earlier row already gave is a problem.
+    than two cells, an empty word or replacement, or a word that an earlier row already gave is a problem.
     """
     problems = []
     seen = set()
@@ -67,7 +71,7 @@ def owner_word_problems(text: str) -> list[str]:
 
 
 def owner_words(text: str) -> set[str]:
-    """The words the rendered glossary table of `docs/guides/owner-words.md` defines."""
+    """The words the rendered do-not-write table of `docs/guides/owner-words.md` defines."""
     return {row[0] for row in index_table(text)[1:] if len(row) == 2}
 
 
@@ -552,12 +556,24 @@ class DocsTreeTest(unittest.TestCase):
                 self.assertIsNotNone(re.search(rf"^\*\*{term}\*\*:", area, re.M))
                 self.assertIn(f"| {term} | Delivery |", context_map)
 
-    def test_the_owner_words_glossary_gives_each_listed_word_a_gloss(self):
+    def test_the_owner_words_list_gives_each_listed_word_a_replacement(self):
         text = (REPO_ROOT / "docs/guides/owner-words.md").read_text(encoding="utf-8")
         self.assertEqual(owner_word_problems(text), [])
         for word in OWNER_WORDS:
             with self.subTest(word=word):
                 self.assertIn(word, owner_words(text))
+
+    def test_the_plain_words_rule_states_the_one_rule(self):
+        rule = (REPO_ROOT / "docs/guides/write-for-the-owner.md").read_text(encoding="utf-8")
+        flat = " ".join(rule.split())
+        self.assertIn("a person who has never seen this system understands each sentence on its own", flat)
+        self.assertIn("never lean on a list of terms", flat)
+        self.assertIn("is only a check's input", flat)
+        self.assertIn("does not clear the warning", flat)
+        for name in ("write-for-the-owner.md", "owner-words.md"):
+            with self.subTest(name=name):
+                text = (REPO_ROOT / "docs/guides" / name).read_text(encoding="utf-8")
+                self.assertIsNone(re.search(r"(?i)gloss", text))
 
     def test_the_glossary_reader_ignores_a_definition_hidden_in_a_comment(self):
         text = (
@@ -570,10 +586,10 @@ class DocsTreeTest(unittest.TestCase):
         text = "| Word | In everyday words |\n|---|---|\n| held | <!-- explanation pending --> |\n"
         self.assertEqual(owner_word_problems(text), ["empty word or gloss: ['held', '<!-- explanation pending -->']"])
 
-    def test_the_land_lock_gloss_names_no_branch_the_project_may_not_have(self):
+    def test_the_land_lock_replacement_names_no_branch_the_project_may_not_have(self):
         text = (REPO_ROOT / "docs/guides/owner-words.md").read_text(encoding="utf-8")
-        gloss = next(row[1] for row in index_table(text)[1:] if row[0] == "land lock")
-        self.assertNotIn("main", gloss)
+        instead = next(row[1] for row in index_table(text)[1:] if row[0] == "land lock, merge lock")
+        self.assertNotIn("main", instead)
 
     def test_the_glossary_reader_reports_a_word_given_twice(self):
         text = "| Word | In everyday words |\n|---|---|\n| held | One. |\n| held | Two. |\n"

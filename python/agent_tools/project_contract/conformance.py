@@ -23,6 +23,12 @@ No report member carries a timestamp or a time, and `FORBIDDEN_MEMBER_NAMES` is
 validated at every object depth so none can be added later without the validator
 refusing it. The one clock read is the opt-in `--lint-times` stopwatch, whose
 line goes to stderr and never into the report.
+
+A `ci` run (no other purpose) also writes one stderr line, `ADDED_RECORD_PREFIX`
+and the path, for each decision record the never-rise check found the branch
+adds, so the job log names every one whatever their number and length; control
+characters and backslashes in a path are backslash-escaped to keep it one line,
+and the report's facts keep their bounds and list at most `MAX_FACT_LIST` of them.
 """
 
 from __future__ import annotations
@@ -50,6 +56,21 @@ from agent_tools.project_contract.conformance_registry import (
 
 
 ENGINE_FAILURE_MESSAGE = "the conformance engine failed unexpectedly"
+ADDED_RECORD_PREFIX = "added record "
+
+
+LINE_BREAKS = frozenset(
+    chr(code) for code in (*range(0x20), *range(0x7F, 0xA0), 0x2028, 0x2029))
+NAMED_ESCAPES = {"\\": "\\\\", "\n": "\\n", "\r": "\\r", "\t": "\\t"}
+
+
+def escape_line_breaks(path: str) -> str:
+    """Contract: `path` with the backslash, each control character and each
+    Unicode line separator written as a backslash escape, so one record is one
+    stderr line and the text decodes back to the path."""
+    return "".join(
+        NAMED_ESCAPES.get(char, f"\\u{ord(char):04x}" if char in LINE_BREAKS else char)
+        for char in path)
 
 
 def load_resolver():
@@ -655,6 +676,9 @@ def command_run(args: argparse.Namespace) -> int:
     report = build_report(args.purpose, context, evaluate(args.purpose, context))
     validate_report(report)
     emit_json(report)
+    if args.purpose == "ci":
+        for path in context.added_records:
+            sys.stderr.write(ADDED_RECORD_PREFIX + escape_line_breaks(path) + "\n")
     record = stopwatch.record() if stopwatch is not None else None
     if record is not None:
         sys.stderr.write(lint_time.record_line(record) + "\n")

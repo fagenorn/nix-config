@@ -41,13 +41,13 @@ HELD_AFTER_MS = 3_600_000
 HELD_HEADLINE = "{title} is holding work and has asked nobody for it"
 HELD_SENTENCE = "Tell the manager what to do from its sprint, or drop the sprint."
 HELD_MIXED_SENTENCE = "Tracker cards link to the tracker; a held sprint is answered from its sprint."
-NOTICE_KIND_TEXT = {"claim": "Claim", "heads-up": "Heads-up", "hand-off": "Hand-off"}
+NOTICE_KIND_TEXT = {"claim": "Files in use", "heads-up": "Heads-up", "hand-off": "Hand-off"}
 NOTICE_UNTIL_TEXT = "until {until}"
 NOTICE_OWNER_TEXT = "for you"
 NOTICE_FOR_TEXT = "for {title}"
 NOTICE_OTHER_TEXT = "for another sprint"
 NOTICE_YOU_TEXT = "You"
-OVERLAP_UNSETTLED_TEXT = ("{first} and {second} both fix a live fault in {files}; "
+OVERLAP_UNSETTLED_TEXT = ("{first} and {second} both fix a fault users meet now in production in {files}; "
                           "the rule could not decide which lands first")
 
 

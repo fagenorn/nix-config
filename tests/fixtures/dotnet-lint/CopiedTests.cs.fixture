@@ -1,0 +1,29 @@
+using Xunit;
+
+namespace Planted;
+
+public sealed class CopiedTests
+{
+    [Fact]
+    public void First()
+    {
+        var total = Sum.Of(2, 3);
+        Assert.Equal(5, total);
+    }
+
+    [Fact]
+    public void Second()
+    {
+        // the same case again
+        var total = Sum.Of(2, 3);
+        Assert.Equal(5, total);
+    }
+
+    [Theory]
+    [InlineData(7)]
+    public void Third(int n)
+    {
+        var total = Sum.Of(2, 3);
+        Assert.Equal(5, total);
+    }
+}

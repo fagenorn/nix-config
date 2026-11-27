@@ -27,7 +27,7 @@ from .test_console_register_service import (
 TIER = "integration"
 
 DECLARED = "{ pkgs, ... }: {\n  git-hooks.hooks.needs-dev-shell.enable = true;\n}\n"
-PROPOSAL = "commits run in its development shell: devenv shell (found in its files)"
+PROPOSAL = "changes are saved in its development shell: devenv shell (found in its files)"
 
 
 BOUND = '{"bindings": {"vcs": {"commit": {"environment": "commit-environment"}}}}\n'
@@ -89,7 +89,7 @@ class HooksMissingCardTest(GlobalHooksPath, unittest.TestCase):
         self.assertEqual(shown["lines"][0], register.HOOKS_LINE)
         self.assertEqual(register.HOOKS_LINE, "installs its git hooks on this host (not installed now)")
         for line in (*shown["lines"], *row["lines"]):
-            self.assertFalse(line.startswith("commits run in its development shell"), line)
+            self.assertFalse(line.startswith("changes are saved in its development shell"), line)
         self.assertEqual(row["lines"], [register.HOOKS_LINE, *register.plan_lines(READY)])
 
     def test_a_ready_plan_of_a_contract_binding_no_commit_environment_leaves_the_hooks_uninstalled(self):
@@ -97,7 +97,7 @@ class HooksMissingCardTest(GlobalHooksPath, unittest.TestCase):
         row = register.hooks_noted(register.summary(str(root), READY))
         self.assertEqual(register.HOOKS_LEFT_LINE,
                          "leaves its git hooks uninstalled on this host "
-                         "(no commit environment to install them in)")
+                         "(no environment for saving changes to install them in)")
         self.assertEqual(row["lines"], [register.HOOKS_LEFT_LINE, *register.plan_lines(READY)])
         shown, _entry = card(row)
         self.assertEqual(shown["lines"][0], register.HOOKS_LEFT_LINE)
@@ -141,7 +141,7 @@ class HooksMissingCardTest(GlobalHooksPath, unittest.TestCase):
         row = register.hooks_noted(register.summary(str(root), READY, draft=fields))
         shown, _entry = card(row)
         latest = {**row, "at": "2026-11-24T08:00:00+00:00", "headline": "H", "plan_id": PID_A}
-        named = ["commits run in its development shell: devenv shell", register.HOOKS_LINE]
+        named = ["changes are saved in its development shell: devenv shell", register.HOOKS_LINE]
         self.assertEqual(row["lines"], [*named, *register.plan_lines(READY)])
         self.assertEqual(contract_draft.DRAFTED_ENVIRONMENT_LINE, named[0])
         self.assertEqual(shown["lines"][:2], named)
@@ -300,7 +300,7 @@ class HooksMissingPictureTest(unittest.TestCase):
         for state in ("register-apply", "register-draft"):
             with self.subTest(state=state):
                 self.assertEqual(self.seeded(state)["lines"],
-                                 ["commits run in its development shell: devenv shell", register.HOOKS_LINE,
+                                 ["changes are saved in its development shell: devenv shell", register.HOOKS_LINE,
                                   *console_screenshots.REGISTER_PLAN_LINES])
 
     def test_the_reconcile_states_keep_today_s_lines(self):

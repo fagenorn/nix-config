@@ -38,6 +38,10 @@ def tearDownModule() -> None:
     STEPS.finish(sys.modules[__name__], Scenario)
 
 
+def part_finished() -> None:
+    STEPS.finish_part(sys.modules[__name__], Scenario)
+
+
 IMPORTANT = {"severity": "important", "file": "fixture/greeting.json:2", "failing_input": "indent 2",
              "summary": "s", "kind": "other"}
 MINOR = dict(IMPORTANT, severity="minor")

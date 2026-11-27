@@ -3,6 +3,7 @@
 Run: just agent-workflow-tests
 """
 import contextlib
+import functools
 import io
 import json
 import shutil
@@ -966,6 +967,42 @@ class ColleagueAccountMoveTest(StopServiceTest):
         svc.remove_account("colleague-1", "colleague-1")
         self.assertEqual(self.stops_in(), [])
         self.assertEqual([call.profile for call in self.launched()], ["zeta"] * 2)
+
+    def test_a_failed_proc_read_never_lets_a_removal_start_a_second_manager(self):
+        kw = support.fake_proc(self.store.parent)
+        proc = kw["proc"]
+        registry = support.profile_dir(self.store, "colleague-1") / "sessions"
+        registry.mkdir()
+        svc = self.begin_pool(count=1, listing=None, session_dirs=[registry])
+        (sid,) = self.sids
+        (registry / "2164.json").write_text(json.dumps({
+            "pid": 2164, "sessionId": FIRST, "cwd": "/srv/p01", "status": "idle",
+            "name": manager.session_name("owner/p01", sid), "procStart": "976",
+            "pidDomain": support.PROC_PID_DOMAIN}))
+        self.now[0] += sprints.STOP_SETTLE_MS // 1000 + 1
+
+        def refused(failure):
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err), self.assertRaises(sprints.Refused) as raised:
+                svc.remove_account("colleague-1", "colleague-1")
+            self.assertEqual(str(raised.exception), account_remove.busy("colleague-1"))
+            self.assertEqual(self.order, [])
+            self.assertEqual(self.launched(), [])
+            self.assertEqual(svc._launching, {})
+            self.assertTrue(self.profile_path("colleague-1").is_dir())
+            self.assertIn(f"console: manager_move_failed {failure}", err.getvalue())
+
+        with mock.patch.object(sessions, "process_matches",
+                               functools.partial(sessions.process_matches, **kw)), \
+                mock.patch.object(sessions, "liveness_unreadable",
+                                  functools.partial(sessions.liveness_unreadable, **kw)):
+            (proc / "2164" / "stat").unlink()
+            (proc / "2164" / "stat").mkdir()
+            refused("IsADirectoryError")
+            (proc / "2164" / "stat").rmdir()
+            (proc / "2164" / "stat").write_text("2164 (a) S " + " ".join(["0"] * 18) + " 976 0 0\n")
+            kw["machine_id"].unlink()
+            refused("OSError")
 
     def test_a_removal_waits_for_a_manager_whose_stop_is_pending(self):
         svc = self.begin_pool()

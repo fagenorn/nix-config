@@ -48,7 +48,8 @@ class VerifySlotTimeoutsTest(unittest.TestCase):
         (path or self.history).write_text("".join(json.dumps(record) + "\n" for record in records))
 
     def env(self):
-        return {**os.environ, "PYTHONPATH": str(ROOT / "python"), "VERIFY_SLOT_DIR": str(self.scratch)}
+        return {**os.environ, "PYTHONPATH": str(ROOT / "python"), "VERIFY_SLOT_DIR": str(self.scratch),
+                "VERIFY_SLOT_FOOTPRINT": str(self.scratch / "no-footprint")}
 
     def run_check(self, *argv):
         return subprocess.run([sys.executable, "-m", "agent_tools.delivery.verify_slot_timeouts", *argv],

@@ -36,6 +36,10 @@ def tearDownModule() -> None:
     STEPS.finish(sys.modules[__name__], Scenario)
 
 
+def part_finished() -> None:
+    STEPS.finish_part(sys.modules[__name__], Scenario)
+
+
 PASS = {"verdict": "pass", "findings": []}
 FINDINGS = {"verdict": "findings", "findings": [FINDING]}
 STOPS = ["land", "claim-lost", "claim", "head-moved", "checks", "checks-fix", "checks-fix-review",
