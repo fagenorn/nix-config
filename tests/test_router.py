@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agent_tools.delivery import router, routing
+from agent_tools.delivery import router, routing, standards_lint
 from agent_tools.delivery.dotnet_solution import SOLUTION_ROOT
 from tests.never_rise_world import commit_all, mark_base, repo, write
 
@@ -76,6 +76,11 @@ class World(unittest.TestCase):
 
     def plan(self):
         return self.route("planning", "--path", "tools/run.py", "--path", "web/page.html")
+
+
+def project_text(*references: str) -> str:
+    items = "".join(f'<PackageReference Include="{name}" Version="1.0.0" />' for name in references)
+    return f'<Project Sdk="Microsoft.NET.Sdk"><ItemGroup>{items}</ItemGroup></Project>'
 
 
 class RouterTest(World):
@@ -146,7 +151,110 @@ class RouterTest(World):
         self.assertIn(b"stacks/typescript-react.md", done.stderr)
 
 
+    def test_a_csharp_path_routes_the_data_and_ai_shards_only_when_its_project_references_them(self):
+        for name, rule in (("dotnet", "NET1"), ("dotnet-data", "NET6"), ("dotnet-ai", "NET9")):
+            write(self.platform, f"stacks/{name}.md", f"# {name}\n\n### {rule}. x\n\nbody\n")
+        for path, references in (
+                ("plain/Plain.csproj", ("xunit.v3",)),
+                ("data/Data.csproj", ("Npgsql.EntityFrameworkCore.PostgreSQL",)),
+                ("ef/Ef.csproj", ("Microsoft.EntityFrameworkCore",)),
+                ("ai/Ai.csproj", ("Microsoft.Agents.AI.OpenAI",)),
+                ("ai2/Ai2.csproj", ("Microsoft.Extensions.AI",)),
+                ("both/Both.csproj", ("Npgsql", "Microsoft.Extensions.AI"))):
+            write(self.repo, path, project_text(*references))
+        data = ["stacks/dotnet-data.md", "stacks/dotnet.md"]
+        ai = ["stacks/dotnet-ai.md", "stacks/dotnet.md"]
+        for path, expected in (
+                ("plain/Widget.cs", ["stacks/dotnet.md"]),
+                ("nowhere/Missing.cs", ["stacks/dotnet.md"]),
+                ("data/Store.cs", data), ("ef/Deep/Model.cs", data), ("data/Data.csproj", data),
+                ("ai/Agent.cs", ai), ("ai2/Agent.cs", ai),
+                ("both/X.cs", ["stacks/dotnet-ai.md", "stacks/dotnet-data.md", "stacks/dotnet.md"])):
+            done = self.route("planning", "--path", path)
+            self.assertEqual(done.returncode, 0, (path, done.stderr))
+            stacks = [s["path"].removeprefix(f"{self.platform}/")
+                      for s in json.loads(done.stdout)["shards"] if s["layer"] == "stack"]
+            self.assertEqual(stacks, expected, path)
+
+
+class PackageRoutingTest(unittest.TestCase):
+    def stacks(self, files: dict[str, str], path: str) -> tuple[str, ...]:
+        project = routing.read_project({name: text.encode() for name, text in files.items()})
+        return routing.routed_stacks(project, path)
+
+    def test_only_the_nearest_project_governs_and_several_in_one_directory_unite(self):
+        files = {
+            "outer/Outer.csproj": project_text("Microsoft.EntityFrameworkCore"),
+            "outer/inner/Inner.csproj": project_text(),
+            "multi/A.csproj": project_text(),
+            "multi/B.csproj": project_text("Microsoft.Extensions.AI")}
+        self.assertEqual(self.stacks(files, "outer/inner/X.cs"), ("dotnet.md",))
+        self.assertEqual(self.stacks(files, "outer/Y.cs"), ("dotnet-data.md", "dotnet.md"))
+        self.assertEqual(self.stacks(files, "multi/Z.cs"), ("dotnet-ai.md", "dotnet.md"))
+
+    def test_inherited_build_files_count_from_the_project_directory_up_and_only_with_a_project(self):
+        files = {
+            "c1/Directory.Build.props": project_text("Microsoft.Extensions.AI"),
+            "c1/app/App.csproj": project_text(),
+            "c2/Directory.Packages.props":
+                '<Project><ItemGroup><GlobalPackageReference Include="Npgsql" Version="1" />'
+                "</ItemGroup></Project>",
+            "c2/app/App.csproj": project_text(),
+            "c3/Directory.Packages.props":
+                '<Project><ItemGroup><PackageVersion Include="Microsoft.EntityFrameworkCore" '
+                'Version="10.0.0" /></ItemGroup></Project>',
+            "c3/app/App.csproj": project_text(),
+            "c4/P.csproj": project_text(),
+            "c4/sub/Directory.Build.props": project_text("Npgsql"),
+            "loose/Directory.Build.props": project_text("Npgsql")}
+        self.assertEqual(self.stacks(files, "c1/app/A.cs"), ("dotnet-ai.md", "dotnet.md"))
+        self.assertEqual(self.stacks(files, "c2/app/A.cs"), ("dotnet-data.md", "dotnet.md"))
+        for path in ("c3/app/A.cs", "c4/sub/Z.cs", "loose/Stray.cs"):
+            self.assertEqual(self.stacks(files, path), ("dotnet.md",), path)
+
+    def test_a_reference_matches_by_id_ignoring_case_at_a_dot_boundary(self):
+        namespaced = (
+            '<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003"><ItemGroup>'
+            '<PackageReference Include="Npgsql" /></ItemGroup></Project>')
+        cases = (
+            (project_text("microsoft.entityframeworkcore.design"), ("dotnet-data.md", "dotnet.md")),
+            (project_text("Microsoft.EntityFrameworkCoreX"), ("dotnet.md",)),
+            (project_text("Other;Npgsql"), ("dotnet-data.md", "dotnet.md")),
+            (namespaced, ("dotnet-data.md", "dotnet.md")),
+            ('<Project><ItemGroup><PackageReference Update="Npgsql" /></ItemGroup></Project>',
+             ("dotnet.md",)),
+            ('<Project><ItemGroup><ProjectReference Include="../data/Data.csproj" />'
+             "</ItemGroup></Project>", ("dotnet.md",)))
+        for number, (text, expected) in enumerate(cases):
+            self.assertEqual(self.stacks({f"d{number}/P.csproj": text}, f"d{number}/X.cs"),
+                             expected, text)
+
+    def test_a_malformed_governing_project_file_is_a_value_error_naming_it(self):
+        project = routing.read_project({"bad/Bad.csproj": b"<Project><ItemGroup>"})
+        with self.assertRaises(ValueError) as failed:
+            routing.routed_stacks(project, "bad/X.cs")
+        self.assertIn("bad/Bad.csproj", str(failed.exception))
+
+    def test_non_dotnet_paths_have_no_manifest_dirs_and_route_by_extension(self):
+        self.assertEqual(routing.manifest_dirs("tools/run.py"), ())
+        self.assertEqual(routing.manifest_dirs("a/b/C.cs"), ("a/b", "a", ""))
+        self.assertEqual(routing.routed_stacks(routing.read_project({}), "tools/run.py"),
+                         ("python.md",))
+
+
 class SinglePathTest(World):
+    def test_single_path_bytes_counts_the_package_shard_its_project_references(self):
+        for name, size in (("dotnet", 100), ("dotnet-data", 200), ("dotnet-ai", 400)):
+            write(self.platform, f"stacks/{name}.md", "x" * size)
+        names = [name for name in REPO_FILES if name.startswith("docs/")]
+        files = {name: (self.repo / name).read_bytes() for name in names}
+        files["data/Data.csproj"] = project_text("Npgsql").encode()
+        project = routing.read_project(files)
+        platform = routing.load_platform(self.platform)
+        expected = sum((self.platform / name).stat().st_size
+                       for name in ("the-bar.md", "stacks/dotnet.md", "stacks/dotnet-data.md"))
+        self.assertEqual(routing.single_path_bytes(project, platform, "data/Store.cs"), expected)
+
     def test_single_path_bytes_is_the_bar_shards_and_area_index(self):
         names = [name for name in REPO_FILES
                  if name.startswith("docs/") and not name.startswith("docs/areas/") or "/adr/" in name]
@@ -167,6 +275,10 @@ class LiveTreeTest(unittest.TestCase):
         for names in routing.STACK_SHARDS.values():
             for name in names:
                 self.assertTrue((stacks / name).is_file(), name)
+        for base, route in routing.PACKAGE_ROUTES.items():
+            self.assertTrue((stacks / base).is_file(), base)
+            for name in route.shards:
+                self.assertTrue((stacks / name).is_file(), name)
 
     def test_a_helper_module_routes_the_bar_the_python_shard_and_the_helper_standards(self):
         standards = REPO_ROOT / "home/common/agent-skills/standards"
@@ -184,16 +296,16 @@ class LiveTreeTest(unittest.TestCase):
                 "docs/standards/package-layout.md")):
             self.assertTrue(path.endswith(suffix), (path, suffix))
 
-    def test_a_dotnet_source_loads_the_dotnet_shards_and_its_areas_index(self):
+    def test_a_dotnet_source_of_the_solution_routes_only_the_dotnet_shard_within_the_b26_budget(self):
         path = f"{SOLUTION_ROOT}/Delivery/Widget.cs"
         standards = REPO_ROOT / "home/common/agent-skills/standards"
         platform = routing.load_platform(standards)
-        project = routing.read_project(router.project_files(REPO_ROOT))
+        project = routing.read_project(router.project_files(REPO_ROOT, [path]))
         loaded = routing.single_path_bytes(project, platform, path)
         areas = [a for a in project.areas if any(routing.glob_matches(g, path) for g in a.globs)]
-        self.assertIn("dotnet.md", routing.stack_shards(path))
+        self.assertEqual(routing.routed_stacks(project, path), ("dotnet.md",))
         self.assertEqual([a.name for a in areas], ["Delivery", "System"])
-        shards = ("the-bar.md", "stacks/dotnet-ai.md", "stacks/dotnet-data.md", "stacks/dotnet.md")
+        shards = ("the-bar.md", "stacks/dotnet.md")
         # The records on disk: every one is indexed as its first line without the "# " plus a
         # newline, so each area's expected index comes from the headings, not from `routing`.
         on_disk = {
@@ -217,6 +329,7 @@ class LiveTreeTest(unittest.TestCase):
         self.assertEqual(
             loaded,
             sum(len(platform.files[k]) for k in shards) + expected_delivery + expected_system)
+        self.assertLessEqual(loaded, standards_lint.ROUTED_SET_BUDGET)
 
 
 if __name__ == "__main__":

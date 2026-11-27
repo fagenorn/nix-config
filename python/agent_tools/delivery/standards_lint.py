@@ -74,7 +74,8 @@ characters, over 100`, and `no planning rule` when the section holds none.
    project shards and its areas' decision index) is over 24,576 bytes is a violation
    `B26 <path>:<bytes>` of measure 1, so a path already over on the merge base does not rise
    when it grows. A snapshot with no path reads nothing; a platform standards directory with
-   no bar, or a routed stack shard it lacks, raises `EnforcerFailed`.
+   no bar, or a routed stack shard it lacks, raises `EnforcerFailed`, as does a project or
+   build file that is not well-formed XML.
 
 With `--index` the problems still print and set exit status 1, and the rule index
 follows them on stdout, computed on the run and written to no file: for each rule
@@ -305,7 +306,7 @@ def routed_set_violations(snapshot: Snapshot) -> list[Violation]:
         sizes: dict[tuple, int] = {}
         found = []
         for path in sorted(snapshot.paths):
-            key = (routing.stack_shards(path),
+            key = (routing.routed_stacks(project, path),
                    tuple(s.path for s in project.shards
                          if any(routing.glob_matches(g, path) for g in s.globs)),
                    tuple(a.name for a in project.areas

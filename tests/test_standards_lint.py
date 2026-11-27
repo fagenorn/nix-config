@@ -409,6 +409,22 @@ class RoutedSetBudgetTest(unittest.TestCase):
         empty = self.snapshot({"a.md": (10, "big/**")})._replace(paths=frozenset())
         self.assertEqual(standards_lint.routed_set_violations(empty), [])
 
+    def test_two_csharp_paths_in_different_projects_are_sized_by_their_own_references(self):
+        write_files(self.root / "standards", {
+            "stacks/dotnet.md": "d" * 4096, "stacks/dotnet-data.md": "e" * 16385})
+        project = ('<Project Sdk="Microsoft.NET.Sdk"><ItemGroup>{}</ItemGroup></Project>')
+        reference = '<PackageReference Include="Microsoft.EntityFrameworkCore" Version="1" />'
+        contents = {
+            "docs/standards/README.md": b"# P\n\n| Shard | governs | Gist |\n|---|---|---|\n",
+            "a/A.csproj": project.format("").encode(),
+            "b/B.csproj": project.format(reference).encode()}
+        snap = Snapshot("a" * 40, {}, contents=MappingProxyType(contents),
+                        paths=frozenset(contents) | {"a/X.cs", "b/Y.cs"})
+
+        self.assertEqual(standards_lint.routed_set_violations(snap),
+                         [Violation("B26", "b/B.csproj", 24577, 1),
+                          Violation("B26", "b/Y.cs", 24577, 1)])
+
     def test_the_enforcer_is_registered_with_the_never_rise_check(self):
         self.assertIn(standards_lint.ROUTED_SET_ENFORCER,
                       conformance_checks.never_rise_enforcers({"bindings": {}}))
