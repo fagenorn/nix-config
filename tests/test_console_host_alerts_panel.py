@@ -1,6 +1,6 @@
 """The console's host alerts panel module: strict bodies, the save merge, owner words, route replies.
 
-Runs `agent_tools.console.host_alerts_panel` against a scratch settings file and a loopback
+Runs `agent_tools.hosts.host_alerts_panel` against a scratch settings file and a loopback
 stand-in for the Telegram bot API: what each body may carry, what a save writes and keeps, what
 the view entry publishes, the owner's sentence for every Telegram reason, and the status, body and
 log line of every route reply, none of which shows the bot token.
@@ -14,8 +14,8 @@ import threading
 import unittest
 from unittest import mock
 
-from agent_tools.console import host_alerts_panel
-from agent_tools.console.host_alerts_panel import (
+from agent_tools.hosts import host_alerts_panel
+from agent_tools.hosts.host_alerts_panel import (
     BAD_BODY,
     CHATS_PATH,
     DELIVERED,

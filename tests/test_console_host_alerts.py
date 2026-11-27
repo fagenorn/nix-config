@@ -18,7 +18,7 @@ from pathlib import Path
 from unittest import mock
 
 from agent_tools.console import console, guest, view
-from agent_tools.console.host_alerts_panel import (
+from agent_tools.hosts.host_alerts_panel import (
     CHATS_PATH, DELIVERED, EMPTY_FEED, NO_TOKEN, NOT_READY, PROBLEM, SAVE_PATH, SWITCH_PATH,
     TEST_PATH, UNAVAILABLE, Panel)
 from agent_tools.hosts import host_alerts

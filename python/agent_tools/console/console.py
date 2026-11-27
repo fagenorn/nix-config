@@ -75,7 +75,7 @@ and with `status --json` for this host's own tailnet name, the one name the gues
 which tell its own requests from another device's (ADR-console-079). Without it the console never reads Serve, shows
 the state as unchecked and its guest door shares with nobody.
 
-`--host-alerts` gives the service the Host alerts panel (`agent_tools.console.host_alerts_panel`) on this
+`--host-alerts` gives the service the Host alerts panel (`agent_tools.hosts.host_alerts_panel`) on this
 user's `~/.config/host-alerts/telegram.json`, the file the memory watcher reads
 (`agent_tools.hosts.host_alerts.settings_path`, resolved from `HOME` at start); the page then offers
 the owner an Alerts button. Without it there is no panel.
@@ -113,9 +113,9 @@ from pathlib import Path
 import agent_tools
 from agent_tools.console import (
     account_add, activation, activation_run, account_remove, approve, inbox, manager, movement, nudge, probe,
-    guest, host_alerts_panel, project_question, register, service, signin, signin_run)
+    guest, project_question, register, service, signin, signin_run)
 from agent_tools.delivery import engine_ledger
-from agent_tools.hosts import host_alerts
+from agent_tools.hosts import host_alerts, host_alerts_panel
 from agent_tools.console.event_log import EventLogError
 from agent_tools.console.write_guard import TokenError
 

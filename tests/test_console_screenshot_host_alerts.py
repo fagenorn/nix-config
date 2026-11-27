@@ -15,7 +15,7 @@ from pathlib import Path
 from unittest import mock
 
 from agent_tools.console import service
-from agent_tools.console.host_alerts_panel import Panel
+from agent_tools.hosts.host_alerts_panel import Panel
 from agent_tools.hosts import host_alerts
 from agent_tools.hosts.host_alerts import Chat, Settings
 

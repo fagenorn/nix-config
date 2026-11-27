@@ -66,7 +66,7 @@ def service_kwargs(constructor, root: Path, api: str) -> dict:
     """The constructor argument that gives a console its Host alerts panel, only when `constructor` takes one."""
     if "host_alerts" not in inspect.signature(constructor).parameters:
         return {}
-    from agent_tools.console.host_alerts_panel import Panel
+    from agent_tools.hosts.host_alerts_panel import Panel
     from agent_tools.hosts.host_alerts import Settings, write_settings
     path = root / "host-alerts" / "telegram.json"
     write_settings(Settings(True, TOKEN, CHAT), path)
