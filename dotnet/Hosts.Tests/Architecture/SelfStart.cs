@@ -5,13 +5,16 @@ namespace AgentTools.Hosts.Tests.Architecture;
 
 public static class SelfStart
 {
-    private static readonly string[] Markers =
+    // The ways a host names its own binary or assembly. Whitespace may sit around each dot.
+    private static readonly Regex[] Markers =
     [
-        "Environment.ProcessPath",
-        "Environment.GetCommandLineArgs",
-        "Process.GetCurrentProcess",
-        "Assembly.GetEntryAssembly",
-        "\"agent-tools\"",
+        new(@"\bEnvironment\s*\.\s*ProcessPath\b"),
+        new(@"\bEnvironment\s*\.\s*GetCommandLineArgs\b"),
+        new(@"\bProcess\s*\.\s*GetCurrentProcess\b"),
+        new(@"\bAssembly\s*\.\s*Get(?:Entry|Executing|Calling)Assembly\b"),
+        // The assembly of a type of the host itself: typeof(Program).Assembly, GetType().Assembly.
+        new(@"\b(?:typeof\s*\([^()]*\)|GetType\s*\(\s*\))\s*\.\s*Assembly\b"),
+        new("\"agent-tools\""),
     ];
 
     // The own-path members of the types above, for a file that reaches them through `using static`
@@ -20,7 +23,7 @@ public static class SelfStart
     [
         ("Environment", ["ProcessPath", "GetCommandLineArgs"]),
         ("Process", ["GetCurrentProcess"]),
-        ("Assembly", ["GetEntryAssembly"]),
+        ("Assembly", ["GetEntryAssembly", "GetExecutingAssembly", "GetCallingAssembly"]),
     ];
 
     // Words that can sit where a pattern's designation does and are never one.
@@ -33,7 +36,6 @@ public static class SelfStart
     private const string DotnetHost = "\"dotnet\"";
     private const string StartInfoType = "ProcessStartInfo";
 
-    private static readonly Regex StaticLaunch = new(@"\bProcess\s*\.\s*Start\s*\(");
     private static readonly Regex InstanceLaunch = new(@"\b([A-Za-z_][A-Za-z0-9_]*)\s*\.\s*Start\s*\(\s*\)");
     private static readonly Regex Identifier = new(@"^[A-Za-z_][A-Za-z0-9_]*$");
     private static readonly Regex Token = new(@"(?<![.\w])[A-Za-z_]\w*");
@@ -81,31 +83,54 @@ public static class SelfStart
         return false;
     }
 
+    // How a file reaches a type without writing its name: whether `using static` brings in its
+    // members, and each alias the file gives it.
+    private static (bool Static, List<string> Aliases) Reach(string text, string type)
+    {
+        var typeName = $@"(?:[\w.]+\s*\.\s*)?{type}";
+        var aliases = Regex.Matches(text, $@"\busing\s+(\w+)\s*=\s*{typeName}\s*;")
+            .Select(alias => Regex.Escape(alias.Groups[1].Value))
+            .ToList();
+        return (Regex.IsMatch(text, $@"\busing\s+static\s+{typeName}\s*;"), aliases);
+    }
+
     private static Func<string, bool> MarkerTest(string text)
     {
         var reached = new List<Regex>();
         foreach (var (type, members) in MarkerTypes)
         {
-            var typeName = $@"(?:[\w.]+\s*\.\s*)?{type}";
-            if (Regex.IsMatch(text, $@"\busing\s+static\s+{typeName}\s*;"))
+            var (viaStatic, aliases) = Reach(text, type);
+            if (viaStatic)
             {
                 reached.AddRange(members.Select(member => new Regex($@"(?<![\w.]){member}\b")));
             }
 
-            foreach (Match alias in Regex.Matches(text, $@"\busing\s+(\w+)\s*=\s*{typeName}\s*;"))
+            foreach (var name in aliases)
             {
-                var name = Regex.Escape(alias.Groups[1].Value);
                 reached.AddRange(members.Select(member => new Regex($@"(?<![\w.]){name}\s*\.\s*{member}\b")));
             }
         }
 
-        return value => Markers.Any(marker => value.Contains(marker, StringComparison.Ordinal))
-            || reached.Any(pattern => pattern.IsMatch(value));
+        return value => Markers.Any(marker => marker.IsMatch(value)) || reached.Any(pattern => pattern.IsMatch(value));
+    }
+
+    // The calls of Process.Start in the file, by its name, by an alias of it, or bare after
+    // `using static`.
+    private static Regex StaticLaunch(string text)
+    {
+        var (viaStatic, aliases) = Reach(text, "Process");
+        var alternatives = new List<string> { $@"\b(?:{string.Join('|', aliases.Prepend("Process"))})\s*\.\s*Start\s*\(" };
+        if (viaStatic)
+        {
+            alternatives.Add(@"(?<![\w.])Start\s*\(");
+        }
+
+        return new Regex(string.Join('|', alternatives));
     }
 
     private static IEnumerable<Parts> Launches(string text)
     {
-        foreach (Match launch in StaticLaunch.Matches(text))
+        foreach (Match launch in StaticLaunch(text).Matches(text))
         {
             var (target, others) = Bind(Arguments(text, launch.Index + launch.Length));
             if (target is null)
@@ -351,7 +376,7 @@ public static class SelfStart
             return;
         }
 
-        foreach (var name in Names(current).Distinct())
+        foreach (var name in Names(current, text).Distinct())
         {
             if (Binding(text, name, before) is not null)
             {
@@ -361,8 +386,9 @@ public static class SelfStart
     }
 
     // The identifiers an expression reads: those outside string literals and, in an interpolated
-    // string, those inside its holes. A member name after a dot is not a variable.
-    private static IEnumerable<string> Names(string expression)
+    // string, those inside its holes. A member name after a dot is not a variable, unless it is read
+    // through `this`, `base` or a type the file declares.
+    private static IEnumerable<string> Names(string expression, string text)
     {
         var code = new StringBuilder();
         var index = 0;
@@ -386,7 +412,18 @@ public static class SelfStart
             index = end;
         }
 
-        return Token.Matches(code.ToString()).Select(match => match.Value);
+        return Token.Matches(code.ToString()).Select(match => match.Value).Concat(OwnMembers(code.ToString(), text));
+    }
+
+    private static IEnumerable<string> OwnMembers(string code, string text)
+    {
+        var owners = Regex.Matches(text, @"\b(?:class|struct|interface|record(?:\s+(?:class|struct))?)\s+(\w+)")
+            .Select(declaration => declaration.Groups[1].Value)
+            .Concat(["this", "base"])
+            .ToHashSet(StringComparer.Ordinal);
+        return Regex.Matches(code, @"(?<!\w)(\w+)\s*\.\s*(?=([A-Za-z_]\w*))")
+            .Where(access => owners.Contains(access.Groups[1].Value))
+            .Select(access => access.Groups[2].Value);
     }
 
     // How many `$` prefix the string that opens at the quote: none for a plain string.
@@ -466,8 +503,9 @@ public static class SelfStart
     }
 
     // Every way the name is bound: an assignment, a field or property initializer, an
-    // expression-bodied member (`name => value`, `name() => value`), a pattern that declares it
-    // (`value is { } name`, `value is not string name`), a deconstruction and a foreach variable.
+    // expression-bodied member (`name => value`, `name() => value`), a block-bodied member (what
+    // its `return`s give), a pattern that declares it (`value is { } name`, `case { } name:`), a
+    // deconstruction and a foreach variable.
     private static List<Bound> Bindings(string text, string name)
     {
         var escaped = Regex.Escape(name);
@@ -482,11 +520,30 @@ public static class SelfStart
             bound.Add(new Bound(Value(text, match.Index + match.Length, ";"), match.Index, false));
         }
 
+        foreach (Match match in Regex.Matches(text, $@"\b{escaped}\s*(?:\([^()]*\))?\s*\{{\s*(?:get\s*\{{\s*)?"))
+        {
+            var start = match.Index + match.Length;
+            var body = text[start..Cut(text, start, string.Empty)];
+            var returned = Regex.Matches(body, @"\breturn\s+").Select(item => Value(body, item.Index + item.Length, ";")).ToList();
+            if (returned.Count > 0)
+            {
+                bound.Add(new Bound(string.Join(' ', returned), match.Index, false));
+            }
+        }
+
         foreach (Match match in Regex.Matches(text, @"\bis\b"))
         {
             if (Designates(text, match.Index + match.Length, name))
             {
                 bound.Add(new Bound(Subject(text, match.Index), match.Index, true));
+            }
+        }
+
+        foreach (Match match in Regex.Matches(text, @"\bcase\b"))
+        {
+            if (Designates(text, match.Index + match.Length, name) && SwitchSubject(text, match.Index) is { } subject)
+            {
+                bound.Add(new Bound(subject, match.Index, true));
             }
         }
 
@@ -519,6 +576,18 @@ public static class SelfStart
         if (NotDesignations.Contains(name))
         {
             return false;
+        }
+
+        var open = start;
+        while (open < text.Length && char.IsWhiteSpace(text[open]))
+        {
+            open++;
+        }
+
+        // A parenthesized pattern declares at its own level once the parenthesis is stripped.
+        if (open < text.Length && text[open] == '(' && Designates(text, open + 1, name))
+        {
+            return true;
         }
 
         var depth = 0;
@@ -556,8 +625,50 @@ public static class SelfStart
             }
         }
 
-        var match = Regex.Match(level.ToString(), $@"(?<![\w.]){Regex.Escape(name)}\b(?![.(])");
-        return match.Success && level.ToString(0, match.Index).Trim().Length > 0;
+        // A `case` guard follows `when` and declares nothing.
+        var pattern = Regex.Split(level.ToString(), @"\bwhen\b")[0];
+        var match = Regex.Match(pattern, $@"(?<![\w.]){Regex.Escape(name)}\b(?![.(])");
+        return match.Success && pattern[..match.Index].Trim().Length > 0;
+    }
+
+    // The expression a `case` label tests: the parenthesized expression before the block of the
+    // switch that holds the label, found by walking back out of the blocks closed since.
+    private static string? SwitchSubject(string text, int caseIndex)
+    {
+        var blocks = 0;
+        for (var index = caseIndex - 1; index >= 0; index--)
+        {
+            if (text[index] == '}')
+            {
+                blocks++;
+            }
+            else if (text[index] == '{' && blocks-- == 0)
+            {
+                return ParenthesizedBefore(text[..index].TrimEnd());
+            }
+        }
+
+        return null;
+    }
+
+    private static string? ParenthesizedBefore(string text)
+    {
+        if (!text.EndsWith(')'))
+        {
+            return null;
+        }
+
+        var depth = 0;
+        for (var index = text.Length - 1; index >= 0; index--)
+        {
+            depth += text[index] switch { ')' => 1, '(' => -1, _ => 0 };
+            if (depth == 0)
+            {
+                return Regex.IsMatch(text[..index], @"\bswitch\s*$") ? text[(index + 1)..^1].Trim() : null;
+            }
+        }
+
+        return null;
     }
 
     // The expression a pattern tests: the text before `is`, back to the nearest separator that is

@@ -82,6 +82,19 @@ public sealed class SelfStartTests
     [InlineData("var (exe, _) = (Environment.ProcessPath!, 1); Process.Start(exe);")]
     [InlineData("var (n, exe) = (1, Environment.ProcessPath!); Process.Start(exe);")]
     [InlineData("foreach (var exe in new[] { Environment.ProcessPath! }) { Process.Start(exe); }")]
+    [InlineData("switch (Environment.ProcessPath) { case { } exe: Process.Start(exe); break; }")]
+    [InlineData("switch (Environment.ProcessPath) { case string exe when exe.Length > 0: Process.Start(exe); break; }")]
+    [InlineData("if (Environment.ProcessPath is ({ } exe)) { Process.Start(exe); }")]
+    [InlineData("class C { static string Self() { return Environment.ProcessPath!; } void Run() { Process.Start(Self()); } }")]
+    [InlineData("class C { static string Exe { get { return Environment.ProcessPath!; } } void Run() { Process.Start(Exe); } }")]
+    [InlineData("class C { static string exe = Environment.ProcessPath!; void Run() { Process.Start(C.exe); } }")]
+    [InlineData("class C { string exe = Environment.ProcessPath!; void Run() { Process.Start(this.exe); } }")]
+    [InlineData("using static System.Diagnostics.Process; Start(Environment.ProcessPath!);")]
+    [InlineData("using P = System.Diagnostics.Process; P.Start(Environment.ProcessPath!);")]
+    [InlineData("Process.Start(Assembly.GetExecutingAssembly().Location);")]
+    [InlineData("Process.Start(typeof(Program).Assembly.Location);")]
+    [InlineData("Process.Start(\"dotnet\", typeof(Program).Assembly.Location);")]
+    [InlineData("Process.Start(Environment .ProcessPath!);")]
     public void StartingTheToolsOwnBinaryIsAViolation(string source)
     {
         Assert.Equal(new[] { OwnBinary }, ViolationsOfHostsSource(source));
@@ -96,7 +109,18 @@ public sealed class SelfStartTests
     [InlineData("class C { void Run() { Process.Start(Git); } static string Self = Environment.ProcessPath!; static string Git = \"git\"; }")]
     [InlineData("class C { void Run() { Process.Start(Git()); } static string Self() => Environment.ProcessPath!; static string Git() => \"git\"; }")]
     [InlineData("foreach (var git in new[] { \"git\" }) { Process.Start(git); } var self = Environment.ProcessPath!;")]
-    public void AnotherProgramBesideAnOwnPathBindingIsNoViolation(string source)
+    [InlineData("switch (Lookup()) { case { } git: Process.Start(git); break; } var self = Environment.ProcessPath!;")]
+    [InlineData("switch (Environment.ProcessPath) { case null: break; } switch (Lookup()) { case { } git: Process.Start(git); break; }")]
+    [InlineData("switch (Lookup()) { case string git when git.Length > Environment.ProcessPath!.Length: Process.Start(git); break; }")]
+    [InlineData("if (Lookup() is ({ } git)) { Process.Start(git); } var self = Environment.ProcessPath!;")]
+    [InlineData("class C { static string Git() { return \"git\"; } static string Own() { return Environment.ProcessPath!; } void Run() { Process.Start(Git()); } }")]
+    [InlineData("class C { static string exe = \"git\"; static string Other = Environment.ProcessPath!; void Run() { Process.Start(C.exe); } }")]
+    [InlineData("using static System.Diagnostics.Process; Start(\"git\"); var self = Environment.ProcessPath!;")]
+    [InlineData("using P = System.Diagnostics.Process; P.Start(\"git\", typeof(Program).Assembly.Location);")]
+    [InlineData("// Process.Start(Environment.ProcessPath!);")]
+    [InlineData("/* Process.Start(Environment.ProcessPath!); */")]
+    [InlineData("/// <summary>Process.Start(Environment.ProcessPath!);</summary>\nvar x = 1;")]
+    public void ASourceThatStartsNoOwnBinaryIsNoViolation(string source)
     {
         Assert.Empty(ViolationsOfHostsSource(source));
     }
@@ -119,15 +143,6 @@ public sealed class SelfStartTests
         planted.Source("Hosts/Spawn.cs", "Process.Start(Environment.ProcessPath!);");
 
         Assert.Equal(new[] { OwnBinary }, SelfStart.Violations(planted.Root));
-    }
-
-    [Theory]
-    [InlineData("// Process.Start(Environment.ProcessPath!);")]
-    [InlineData("/* Process.Start(Environment.ProcessPath!); */")]
-    [InlineData("/// <summary>Process.Start(Environment.ProcessPath!);</summary>\nvar x = 1;")]
-    public void ACommentThatNamesALaunchIsNoViolation(string source)
-    {
-        Assert.Empty(ViolationsOfHostsSource(source));
     }
 
     [Fact]
