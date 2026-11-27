@@ -252,8 +252,10 @@ agent-workflow-tests *args:
     tests/test_omlx_memory_day.py \
     tests/test_omlx_memory_census.py \
     tests/test_omlx_memory_records.py \
+    tests/test_omlx_reactive_restart.py \
     tests/test_omlx_memory_events.py \
     tests/test_omlx_memory_census_day.py \
+    tests/test_omlx_reactive_restart_day.py \
     tests/test_memory_floor.py \
     tests/test_memory_floor_priority.py \
     tests/test_memory_floor_gate.py \
@@ -352,6 +354,7 @@ agent-workflow-tests *args:
     tests/test_suite_tiers.py \
     tests/test_suite_timing.py \
     tests/test_verify_slot.py \
+    tests/test_verify_slot_short_lane.py \
     tests/test_verify_slot_timeouts.py \
     tests/test_verify_queue.py \
     tests/test_verification_command.py \
@@ -364,6 +367,8 @@ agent-workflow-tests *args:
     tests/test_console_view.py \
     tests/test_console_view_action.py \
     tests/test_console_view_lock_place.py \
+    tests/test_console_work_sentence.py \
+    tests/test_console_done_for_now.py \
     tests/test_console_view_held_sprint.py \
     tests/test_console_draft_facts.py \
     tests/test_console_failed_start.py \
@@ -423,6 +428,8 @@ agent-workflow-tests *args:
     tests/test_console_page.py \
     tests/test_console_page_action.py \
     tests/test_console_page_move.py \
+    tests/test_console_page_work.py \
+    tests/test_console_page_done_for_now.py \
     tests/test_console_page_held_sprint.py \
     tests/test_console_long_permission_card.py \
     tests/test_console_controls.py \
@@ -454,6 +461,9 @@ agent-workflow-tests *args:
     tests/test_console_screenshots.py \
     tests/test_console_screenshot_widths.py \
     tests/test_console_permission_shots.py \
+    tests/test_console_control_shots.py \
+    tests/test_console_sprint_end_fold.py \
+    tests/test_console_screenshot_clock.py \
     tests/test_console_sprint_command.py \
     tests/test_console_manager_contract_held.py \
     tests/test_console_sprint_action.py \
@@ -478,6 +488,7 @@ agent-workflow-tests *args:
     tests/test_console_sprint_engine.py \
     tests/test_console_movement.py \
     tests/test_console_movement_check.py \
+    tests/test_console_issue_titles.py \
     tests/test_console_spend.py \
     tests/test_console_engine_spend.py \
     tests/test_console_transcript_digest.py \
@@ -497,6 +508,7 @@ agent-workflow-tests *args:
     home/common/agent-skills/tests/test_program_harness.py \
     home/common/agent-skills/tests/test_deliver_standard_program.py \
     home/common/agent-skills/tests/test_deliver_standard_landing.py \
+    home/common/agent-skills/tests/test_deliver_standard_resume_ahead.py \
     home/common/agent-skills/tests/test_deliver_standard_before_pull_request.py \
     home/common/agent-skills/tests/test_deliver_standard_lane_rule.py \
     home/common/agent-skills/tests/test_deliver_standard_work_rules.py \
@@ -520,7 +532,7 @@ agent-instruction-load *args:
 verify host *args:
   PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.verification.verify_pending run --host {{host}} {{args}}
 
-# Shoot the console's sprint states against a fixture console, 118 PNGs into out (default ~/tmp/clarity-screenshots) (#1086).
+# Shoot the console's sprint states against a fixture console, 120 PNGs into out (default ~/tmp/clarity-screenshots) (#1086).
 console-screenshots out="":
   #!/usr/bin/env bash
   set -euo pipefail

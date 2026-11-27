@@ -121,12 +121,27 @@ every other type do not count; a line that does not parse (a record nested too d
 read incrementally like the held reading (`_TURN_SEEN`, per file identity, through its last complete
 line), so a poll costs what was appended; a file that shrank or was replaced is read again from its
 start, and an incomplete last line is read but not kept. The service uses it to clear a wait.
+
+Issue titles. `read_titles` asks the tracker what its issues are called, so a sprint's now line can
+name the work; no title is read from a report. One GraphQL query (`titles_query`, `titles_argv`) holds one
+`issueOrPullRequest(number: n)` alias `i<n>` per number, in the order given, and `titles_from_answer` reads
+`data.repository.i<n>` for each: a null or absent node is skipped (the number names nothing there), a node that
+is not an object, whose `number` is not that int or whose `title` is not a str, or a `data` or `repository`
+that is not an object, is `ForgeError("payload_invalid")`; a title is collapsed to one line (whitespace runs
+become one space) and an empty one is skipped. `read_titles` makes one call of at most `MAX_TITLES_PER_CALL`
+numbers, the smallest distinct ones the query can name (`MAX_QUERY_NUMBER`, a signed 32-bit `Int`), ascending; `gh` fails the whole call when one number does not resolve, so a `gh_failed` whose error says an issue or pull request did not resolve is asked again in halves, and a number that fails alone stays untitled, while any other failure raises after one call; no numbers makes no call, and `cancelled()` true before the
+call raises `ForgeError("cancelled")`; with no `call` the transport is `forge_api.gh_json(argv, cancelled=...)`.
+`titles_batch(issues, known, asked)` picks which numbers the next poll asks: the outstanding ones (not
+`known`) not yet `asked` in this round, the first `MAX_TITLES_PER_CALL` of them in ascending order; when every
+outstanding number was asked, a new round starts from the smallest. It also returns the new asked set, so a
+number the tracker did not answer for never blocks the numbers behind it, and is asked again in the next
+round. `titles_plan` applies that to the report issues of each project's sprints that have not ended. Nothing here is logged or written.
 """
 
 import json
 import os
 import re
-from collections.abc import Callable, Collection, Iterable, Mapping
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
@@ -134,6 +149,7 @@ from typing import Any
 
 from agent_tools.claims import owner_actions
 from agent_tools.claims.forge_land_lock import LOCK_PREFIX, WAIT_PREFIX, WAITER
+from agent_tools.console import sprints
 from agent_tools.console.deliveries import branch_issue
 from agent_tools.console.sessions import at_ms
 from agent_tools.release.transaction_history import STATES, TERMINALS
@@ -427,6 +443,115 @@ def read_pulls(slug: str, pattern: str | None, *,
         raise ForgeError("cancelled")
     refs = call(locks_argv(slug))
     return pulls_from_answer(first, pattern, locks_from_answer(refs), waiters_from_answer(refs))
+
+
+MAX_TITLES_PER_CALL = 100
+MAX_QUERY_NUMBER = 2 ** 31 - 1
+UNRESOLVED_NUMBER = "Could not resolve to an issue or pull request"
+
+
+def titles_query(numbers: Sequence[int]) -> str:
+    lines = [f"    i{n}: issueOrPullRequest(number: {n}) "
+             "{ ... on Issue { number title } ... on PullRequest { number title } }" for n in numbers]
+    return ("query($owner: String!, $name: String!) {\n  repository(owner: $owner, name: $name) {\n"
+            + "\n".join(lines) + "\n  }\n}")
+
+
+def titles_argv(slug: str, numbers: Sequence[int]) -> list[str]:
+    owner, name = slug.split("/", 1)
+    return ["api", "graphql", "-f", "query=" + titles_query(numbers), "-f", "owner=" + owner,
+            "-f", "name=" + name]
+
+
+def titles_from_answer(answer: object, numbers: Sequence[int]) -> dict[int, str]:
+    repository = _dict(_dict(_dict(answer, "answer").get("data"), "data").get("repository"), "repository")
+    titles: dict[int, str] = {}
+    for number in numbers:
+        node = repository.get(f"i{number}")
+        if node is None:
+            continue
+        node = _dict(node, f"i{number}")
+        if node.get("number") != number or isinstance(node.get("number"), bool):
+            raise _invalid(f"i{number} is another issue")
+        title = node.get("title")
+        if not isinstance(title, str):
+            raise _invalid(f"i{number} title is not a string")
+        title = " ".join(title.split())
+        if title:
+            titles[number] = title
+    return titles
+
+
+def askable(numbers: Iterable[int]) -> list[int]:
+    """The distinct numbers the tracker can be asked about, ascending: the query's `Int` is 32-bit signed."""
+    return sorted({number for number in numbers if 0 < number <= MAX_QUERY_NUMBER})
+
+
+def read_titles(slug: str, numbers: Iterable[int], *,
+                call: Callable[[list[str]], Any] | None = None,
+                cancelled: Callable[[], bool] = lambda: False) -> dict[int, str]:
+    """The titles of the smallest `MAX_TITLES_PER_CALL` askable numbers, in one call; raises `ForgeError`.
+    `gh` fails a whole batch when one number does not resolve (a deleted issue, a typo) and says so
+    (`UNRESOLVED_NUMBER`), so only a batch that failed with that is asked again in halves: a number that
+    fails alone is left untitled, the rest keep theirs. Any other failure (the repository, the credential,
+    the rate limit, the transport) is not about the numbers and raises after the one call."""
+    asked = askable(numbers)[:MAX_TITLES_PER_CALL]
+    if not asked:
+        return {}
+    if call is None:
+        def call(argv: list[str]) -> Any:
+            return forge_api.gh_json(argv, cancelled=cancelled)
+
+    def read(batch: list[int]) -> dict[int, str]:
+        if cancelled():
+            raise ForgeError("cancelled")
+        try:
+            return titles_from_answer(call(titles_argv(slug, batch)), batch)
+        except ForgeError as error:
+            if error.code != "gh_failed" or error.transient or error.exhausted or UNRESOLVED_NUMBER not in error.detail:
+                raise
+            if len(batch) == 1:
+                return {}
+            middle = len(batch) // 2
+            return {**read(batch[:middle]), **read(batch[middle:])}
+
+    return read(asked)
+
+
+def titles_batch(issues: Iterable[int], known: Collection[int],
+                 asked: Collection[int]) -> tuple[list[int], frozenset[int]]:
+    """The numbers to ask next and the asked set after asking them; see the module docstring."""
+    outstanding = askable(set(issues) - set(known))
+    fresh = [number for number in outstanding if number not in asked]
+    if not fresh:
+        asked, fresh = (), outstanding
+    batch = fresh[:MAX_TITLES_PER_CALL]
+    return batch, frozenset((set(asked) & set(outstanding)) | set(batch))
+
+
+def titles_plan(states: Iterable[sprints.SprintState], projects: Collection[str],
+                known: Mapping[str, Mapping[int, str]],
+                asked: Mapping[str, Collection[int]]) -> dict[str, tuple[list[int], frozenset[int]]]:
+    """Per project in `projects` with a sprint not ended, `titles_batch` of the issue numbers its sprints'
+    reports list, given the titles `known` and the numbers `asked` of that project."""
+    wanted: dict[str, set[int]] = {}
+    for state in states:
+        if state.project_id in projects and sprints.ended_at(state) is None:
+            wanted.setdefault(state.project_id, set()).update(
+                issue for issue, _ in (state.report.issues if state.report else ()))
+    return {project_id: titles_batch(issues, known.get(project_id, {}), asked.get(project_id, ()))
+            for project_id, issues in wanted.items()}
+
+
+def session_targets(belong: Mapping, absent: Mapping, nudged: Mapping,
+                    registry: Mapping) -> tuple[SessionTarget, ...]:
+    """The sessions one poll reads for a project: each `belong` session with its registry pid and
+    nudge replies, then each `absent` manager session as `held_only`."""
+    return tuple(
+        SessionTarget(sid, registry[sid].pid if sid in registry else None, belong[sid],
+                      nudged.get(sid, ()))
+        for sid in sorted(belong)) + tuple(
+        SessionTarget(sid, None, absent[sid], (), True) for sid in sorted(absent))
 
 
 def _last_reflog_ms(path: Path) -> int | None:

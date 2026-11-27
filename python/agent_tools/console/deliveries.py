@@ -106,7 +106,7 @@ import json
 import os
 import re
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from stat import S_ISREG
@@ -677,3 +677,83 @@ def delivery_changes(
         if key[0] in scanned and key not in readings:
             changes.append((DELIVERY_GONE, project_of(key[0]), {"session_id": key[0], "run_id": key[1]}))
     return changes
+
+
+# The work words: what a sprint's block says it is working on, by issue title and never by number.
+# Titles come from the tracker read the service makes, never from the report. Pure: no clock, no I/O.
+# Each part is its own line, and each shown title sits in quotation marks. `delivery` is every stage that is not
+# landed, held, queued or dropped, `closed out` included.
+
+NOW_WORKING_TEXT = "Working on: {names}"
+NOW_WORKING_ONE_TEXT = "Working on 1 issue."
+NOW_WORKING_COUNT_TEXT = "Working on {n} issues."
+NOW_MORE_TEXT = "{names} and {n} more"
+NOW_FINISHED_TEXT = "Just finished: {done}"
+NOW_NEXT_TEXT = "Next: {next}"
+WORK_LINE_BREAK = "\n"
+TITLE_QUOTE = "\u201c{title}\u201d"
+NOW_IDLE_WORK_TEXT = "Nothing is being worked on right now."
+
+WORK_GROUPS = ("landed", "delivery", "queued", "held")
+LEGEND_TEXT = {"landed": "{n} done", "delivery": "{n} in work", "queued": "{n} waiting to start",
+               "held": "{n} waiting for a check"}
+_COUNT_KEY = {"landed": "landed", "delivery": "in_delivery", "queued": "queued", "held": "held"}
+_NAMED_AT_MOST = 2
+
+
+def progress_legend(counts: Mapping[str, int]) -> list[dict]:
+    """`{"group", "count", "text"}` for each group with a non-zero count, in `WORK_GROUPS` order."""
+    return [{"group": group, "count": counts[_COUNT_KEY[group]],
+             "text": LEGEND_TEXT[group].format(n=counts[_COUNT_KEY[group]])}
+            for group in WORK_GROUPS if counts[_COUNT_KEY[group]]]
+
+
+def progress_text(counts: Mapping[str, int]) -> str:
+    """The legend texts joined by `, `, or `0 done` when the legend is empty."""
+    return ", ".join(item["text"] for item in progress_legend(counts)) or "0 done"
+
+
+def shown_title(title: str | None, sprint_title: str) -> str | None:
+    """The title in single spaces; None when it is absent, names an issue (`#` and a digit) or repeats the sprint's."""
+    if not title:
+        return None
+    shown = " ".join(title.split())
+    if not shown or re.search(r"#\d", shown):
+        return None
+    if shown.casefold() == " ".join(sprint_title.split()).casefold():
+        return None
+    return shown
+
+
+def _names(issues: Sequence[int], titles: Mapping[int, str], sprint_title: str) -> str | None:
+    """The shown titles of `issues`, at most two in order, then `and n more` for the rest; None when none is shown."""
+    shown = [TITLE_QUOTE.format(title=t) for issue in issues
+             if (t := shown_title(titles.get(issue), sprint_title)) is not None]
+    named = shown[:_NAMED_AT_MOST]
+    if not named:
+        return None
+    more = len(issues) - len(named)
+    text = " and ".join(named) if len(named) == _NAMED_AT_MOST and not more else ", ".join(named)
+    return NOW_MORE_TEXT.format(names=text, n=more) if more else text
+
+
+def work_sentence(groups: Sequence[tuple[int, str]], finished: Collection[int],
+                  titles: Mapping[int, str], sprint_title: str) -> str:
+    """The work lines (in work, just finished, next) by quoted shown title, joined by `WORK_LINE_BREAK`.
+
+    `groups` is `(issue, group)`."""
+    clauses = []
+    working = [issue for issue, group in sorted(groups) if group == "delivery"]
+    if working:
+        names = _names(working, titles, sprint_title)
+        clauses.append(NOW_WORKING_TEXT.format(names=names) if names is not None
+                       else NOW_WORKING_ONE_TEXT if len(working) == 1
+                       else NOW_WORKING_COUNT_TEXT.format(n=len(working)))
+    done = _names(sorted(finished), titles, sprint_title)
+    queued = [issue for issue, group in sorted(groups) if group == "queued"]
+    following = shown_title(titles.get(queued[0]), sprint_title) if queued else None
+    if done:
+        clauses.append(NOW_FINISHED_TEXT.format(done=done))
+    if following:
+        clauses.append(NOW_NEXT_TEXT.format(next=TITLE_QUOTE.format(title=following)))
+    return WORK_LINE_BREAK.join(clauses) or NOW_IDLE_WORK_TEXT

@@ -383,8 +383,9 @@ class CapacityViewTest(unittest.TestCase):
         partial = capacity_view(["a", "idle"], CapacityState({"a": state.readings["a"]}, {}), T)
         self.assertIs(partial["all_out"], False)
         ordinary = derive_view([project], capacity=partial)["statement"]
-        self.assertEqual(ordinary["headline"], "Nothing needs you")
-        self.assertEqual(ordinary["sentence"], "1 registered project, and nothing is waiting on you.")
+        self.assertEqual(ordinary["headline"], "You're done for now")
+        self.assertEqual(ordinary["sentence"],
+                         "No sprint is working; we'll put anything that needs you here.")
 
     def test_no_capacity_argument_equals_the_empty_capacity(self):
         states = [ProjectState("p", "/srv/p", 1, "t1", 2)]

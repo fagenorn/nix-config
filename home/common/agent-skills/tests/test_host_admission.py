@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
@@ -48,7 +49,104 @@ class HostAdmissionTest(unittest.TestCase):
         self.assertEqual(host_admission.repository_verify_slots(eleven, "example/other"), 1)
         self.assertEqual({k: v for k, v in eleven.items()
                           if k not in ("verify_slots", "verify_budget_seconds",
-                                       "verify_repository_slots")}, shared)
+                                       "verify_repository_slots", "verify_short_lane")}, shared)
+
+    def test_the_eleven_m5_declaration_makes_nix_config_lint_short_at_30_seconds_and_conformance_at_90(self):
+        eleven = json.loads((HOST_DECLARATIONS / "eleven-m5.json").read_text(encoding="utf-8"))
+        shared = json.loads(COMMITTED_DECLARATION.read_text(encoding="utf-8"))
+        short = host_admission.short_command
+        self.assertEqual(short(eleven, "fagenorn/nix-config", ["just", "lint"]), (1, 30))
+        self.assertEqual(short(eleven, "fagenorn/nix-config", ["just", "conformance"]), (1, 90))
+        self.assertIsNone(short(eleven, "elevenyellow/jarbird", ["just", "conformance"]))
+        for repository, argv in (("fagenorn/nix-config", ["just", "test-touched"]),
+                                 ("fagenorn/nix-config", ["just", "test"]),
+                                 ("elevenyellow/jarbird", ["just", "lint"])):
+            with self.subTest(repository, argv=argv):
+                self.assertIsNone(short(eleven, repository, argv))
+        self.assertIsNone(short(shared, "fagenorn/nix-config", ["just", "lint"]))
+
+    def test_a_declared_short_command_is_matched_by_repository_and_exact_argv(self):
+        supported = {"claude-code": {"support": "supported", "agent_slots": 7}}
+        value = {**declaration(**supported), "verify_short_lane": {
+            "slots": 2, "bound_seconds": 9,
+            "commands": {"example/alpha": [["just", "lint"], ["make", "fmt"]]}}}
+        self.assertEqual(host_admission.validate_declaration(value), value)
+        short = host_admission.short_command
+        self.assertEqual(short(value, "example/alpha", ["just", "lint"]), (2, 9))
+        self.assertEqual(short(value, "example/alpha", ("make", "fmt")), (2, 9))
+        for repository, argv in (("example/alpha", ["just"]),
+                                 ("example/alpha", ["just", "lint", "--fix"]),
+                                 ("example/beta", ["just", "lint"]),
+                                 (None, ["just", "lint"])):
+            with self.subTest(repository, argv=argv):
+                self.assertIsNone(short(value, repository, argv))
+        self.assertIsNone(short(declaration(**supported), "example/alpha", ["just", "lint"]))
+
+    def test_a_short_command_may_carry_its_own_bound_over_the_lane_bound(self):
+        supported = {"claude-code": {"support": "supported", "agent_slots": 7}}
+        value = {**declaration(**supported), "verify_short_lane": {
+            "slots": 2, "bound_seconds": 9,
+            "commands": {"example/alpha": [
+                ["just", "lint"], {"argv": ["just", "slow"], "bound_seconds": 90}]}}}
+        self.assertEqual(host_admission.validate_declaration(value), value)
+        short = host_admission.short_command
+        self.assertEqual(short(value, "example/alpha", ["just", "lint"]), (2, 9))
+        self.assertEqual(short(value, "example/alpha", ["just", "slow"]), (2, 90))
+        self.assertIsNone(short(value, "example/alpha", ["just", "slow", "--x"]))
+        self.assertIsNone(short(value, "example/beta", ["just", "slow"]))
+        for order in ([["just", "slow"], {"argv": ["just", "slow"], "bound_seconds": 90}],
+                      [{"argv": ["just", "slow"], "bound_seconds": 90}, ["just", "slow"]],
+                      [{"argv": ["just", "slow"], "bound_seconds": 60},
+                       {"argv": ["just", "slow"], "bound_seconds": 90}]):
+            conflicting = {**declaration(**supported), "verify_short_lane": {
+                "slots": 1, "bound_seconds": 9, "commands": {"example/alpha": order}}}
+            with self.subTest(order), self.assertRaises(host_admission.DeclarationError) as raised:
+                host_admission.validate_declaration(conflicting)
+            self.assertEqual(str(raised.exception), "verify_short_lane")
+        agreeing = {**declaration(**supported), "verify_short_lane": {
+            "slots": 1, "bound_seconds": 9, "commands": {
+                "example/alpha": [["just", "slow"], {"argv": ["just", "slow"], "bound_seconds": 9}],
+                "example/beta": [{"argv": ["just", "slow"], "bound_seconds": 90}]}}}
+        self.assertEqual(host_admission.validate_declaration(agreeing), agreeing)
+        good = {"slots": 1, "bound_seconds": 30, "commands": {}}
+        cases = [("missing bound", {"argv": ["just", "slow"]}),
+                 ("missing argv", {"bound_seconds": 90}),
+                 ("extra member", {"argv": ["just", "slow"], "bound_seconds": 90, "live": True}),
+                 ("empty argv", {"argv": [], "bound_seconds": 90}),
+                 ("word not a string", {"argv": ["just", 1], "bound_seconds": 90})]
+        cases += [(f"bound {bad!r}", {"argv": ["just", "slow"], "bound_seconds": bad})
+                  for bad in (0, -1, True, "90", int(threading.TIMEOUT_MAX) + 1)]
+        for label, entry in cases:
+            bad = {**good, "commands": {"example/alpha": [entry]}}
+            with self.subTest(label), self.assertRaises(host_admission.DeclarationError) as raised:
+                host_admission.validate_declaration({**declaration(**supported), "verify_short_lane": bad})
+            self.assertEqual(str(raised.exception), "verify_short_lane")
+
+    def test_a_verify_short_lane_that_is_not_the_declared_shape_is_refused(self):
+        supported = {"claude-code": {"support": "supported", "agent_slots": 7}}
+        good = {"slots": 1, "bound_seconds": 30, "commands": {"example/alpha": [["just", "lint"]]}}
+        lane = lambda **change: {**good, **change}
+        self.assertEqual(host_admission.validate_declaration(
+            {**declaration(**supported), "verify_short_lane": good}),
+            {**declaration(**supported), "verify_short_lane": good})
+        largest = {**declaration(**supported),
+                   "verify_short_lane": lane(bound_seconds=int(threading.TIMEOUT_MAX))}
+        self.assertEqual(host_admission.validate_declaration(largest), largest)
+        cases = [("not an object", "just lint"),
+                 ("missing commands", {"slots": 1, "bound_seconds": 30}),
+                 ("extra member", lane(live=True))]
+        cases += [(f"slots {bad!r}", lane(slots=bad)) for bad in (0, True, "1", 1.5)]
+        cases += [(f"bound {bad!r}", lane(bound_seconds=bad)) for bad in (0, -1, True, int(threading.TIMEOUT_MAX) + 1, 10 ** 310)]
+        cases += [("commands a list", lane(commands=[["just", "lint"]]))]
+        cases += [(f"key {key!r}", lane(commands={key: [["just", "lint"]]}))
+                  for key in ("Example/Alpha", "alpha", "example/..")]
+        cases += [(f"value {bad!r}", lane(commands={"example/alpha": bad}))
+                  for bad in ([], [[]], [["just", 1]], [["just", ""]], "just lint")]
+        for label, bad in cases:
+            with self.subTest(label), self.assertRaises(host_admission.DeclarationError) as raised:
+                host_admission.validate_declaration({**declaration(**supported), "verify_short_lane": bad})
+            self.assertEqual(raised.exception.reason_code, "declaration_invalid")
+            self.assertEqual(str(raised.exception), "verify_short_lane")
 
     def test_every_host_declaration_names_a_flake_host_and_validates(self):
         flake = (REPO / "flake.nix").read_text(encoding="utf-8")

@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.console import console, engine_runs, guest, service, sprints, view
+from agent_tools.console import console, engine_runs, guest, inbox, service, sprints, view
 from agent_tools.console.engine_runs import NO_ENGINE, EngineRuns, SprintEngine
 from agent_tools.delivery import engine, engine_ledger, procedure_check
 from agent_tools.delivery.engine_ledger import RunState
@@ -200,12 +200,13 @@ class SprintEngineTest(unittest.TestCase):
 
     def test_a_moving_run_of_the_sprints_issue_moves_it_and_names_its_sessions(self):
         self.assertEqual(self.read("sprint-moving.jsonl", LIVE), SprintEngine(
-            moving=True, waits=frozenset(), sessions=frozenset({"eng-s1"}), issues=frozenset({41})))
+            moving=True, waits=frozenset(), sessions=frozenset({"eng-s1"}), issues=frozenset({41}),
+            stages=((41, "building", "building"),)))
 
     def test_a_waiting_run_gives_its_wait_kind_and_does_not_read_moving(self):
         self.assertEqual(self.read("sprint-checks.jsonl", LIVE), SprintEngine(
             moving=False, waits=frozenset({"checks"}), sessions=frozenset({"eng-s1"}),
-            issues=frozenset({41})))
+            issues=frozenset({41}), stages=((41, "building", "building"),)))
 
     def test_a_gone_engine_moves_nothing_but_keeps_its_sessions_and_issue(self):
         self.assertEqual(self.read("sprint-moving.jsonl", DEAD), SprintEngine(
@@ -476,7 +477,7 @@ class NeedsYouTest(unittest.TestCase):
         for state in states:
             with self.subTest(reading=engine_runs.reading(state)):
                 statement = self.derive(state)["statement"]
-                self.assertEqual((statement["inbox_items"], statement["headline"]), (0, view.HEADLINE))
+                self.assertEqual((statement["inbox_items"], statement["headline"]), (0, inbox.DONE_HEADLINE))
 
     def test_a_run_of_an_unregistered_project_counts_none(self):
         stopped = bare_state(project="other/app", stage="landing", last_event=LAST_AT,

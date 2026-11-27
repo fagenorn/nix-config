@@ -233,7 +233,7 @@ def _precondition(args, fetch) -> tuple[tuple[int, dict] | None, object, str, li
     except (OSError, ValueError):
         return (NOT_YET, {"status": "no_token"}), *nothing[1:]
     registry = agent_platform.registry_path()
-    entries = service.read_fleet(registry)
+    entries = register.read_fleet(registry)
     if entries is None and os.path.lexists(registry):
         return (NOT_YET, {"status": "registry_unreadable"}), *nothing[1:]
     revision = agent_platform.platform_revision()
