@@ -252,8 +252,10 @@ agent-workflow-tests *args:
     tests/test_omlx_memory_day.py \
     tests/test_omlx_memory_census.py \
     tests/test_omlx_memory_records.py \
+    tests/test_omlx_reactive_restart.py \
     tests/test_omlx_memory_events.py \
     tests/test_omlx_memory_census_day.py \
+    tests/test_omlx_reactive_restart_day.py \
     tests/test_memory_floor.py \
     tests/test_memory_floor_priority.py \
     tests/test_memory_floor_gate.py \
@@ -266,6 +268,7 @@ agent-workflow-tests *args:
     tests/test_console_approved_action_check.py \
     tests/test_console_takeover_merge_check.py \
     tests/test_console_release_rerun_check.py \
+    tests/test_console_production_rerun_check.py \
     tests/test_issue_branch.py \
     tests/test_program_copies.py \
     tests/test_keepalive_end_turn_cap.py \
