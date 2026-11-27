@@ -453,5 +453,33 @@ class RecordFormTest(unittest.TestCase):
                 self.assertEqual(is_record_migration(old, new), expected)
 
 
+class LiveMapTest(unittest.TestCase):
+    PROJECTS = {
+        "Delivery": "Delivery", "Verification": "Verification", "Claims": "Claims",
+        "Release": "Release", "Project contract": "ProjectContract", "Guard": "Guard",
+        "Hosts": "Hosts", "Console": "Console", "System": "System"}
+
+    def test_each_area_governs_its_dotnet_project_and_test_project_and_no_other_does(self):
+        text = (REPO_ROOT / "docs/CONTEXT-MAP.md").read_text()
+        globs = {
+            row[0]: context_map_lint.CODE_RE.findall(row[3])
+            for row in context_map_lint.table_rows(context_map_lint.section(text, "Areas"))}
+        for area, project in self.PROJECTS.items():
+            for path in (f"{SOLUTION_ROOT}/{project}/Widget.cs", f"{SOLUTION_ROOT}/{project}.Tests/WidgetTests.cs"):
+                with self.subTest(area=area, path=path):
+                    self.assertTrue(context_map_lint.governs(path, globs[area]))
+                    for other in self.PROJECTS:
+                        if other != area:
+                            self.assertFalse(context_map_lint.governs(path, globs[other]), other)
+
+    def test_the_live_map_is_clean(self):
+        done = subprocess.run(
+            [sys.executable, "-m", "agent_tools.delivery.context_map_lint",
+             "--repo-root", str(REPO_ROOT.resolve()),
+             "--context-map", str((REPO_ROOT / "docs/CONTEXT-MAP.md").resolve())],
+            text=True, capture_output=True)
+        self.assertEqual(done.returncode, 0, done.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

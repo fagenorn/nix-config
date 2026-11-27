@@ -8,7 +8,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agent_tools.delivery import routing
+from agent_tools.delivery import router, routing
+from agent_tools.delivery.dotnet_solution import SOLUTION_ROOT
 from tests.never_rise_world import commit_all, mark_base, repo, write
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -181,6 +182,19 @@ class LiveTreeTest(unittest.TestCase):
                 "the-bar.md", "stacks/python.md", "docs/standards/agent-helpers.md",
                 "docs/standards/package-layout.md")):
             self.assertTrue(path.endswith(suffix), (path, suffix))
+
+    def test_a_dotnet_source_loads_the_dotnet_shards_and_its_areas_index(self):
+        path = f"{SOLUTION_ROOT}/Delivery/Widget.cs"
+        standards = REPO_ROOT / "home/common/agent-skills/standards"
+        platform = routing.load_platform(standards)
+        project = routing.read_project(router.project_files(REPO_ROOT))
+        loaded = routing.single_path_bytes(project, platform, path)
+        areas = [a for a in project.areas if any(routing.glob_matches(g, path) for g in a.globs)]
+        self.assertIn("dotnet.md", routing.stack_shards(path))
+        self.assertEqual([a.name for a in areas], ["Delivery", "System"])
+        shards = ("the-bar.md", "stacks/dotnet-ai.md", "stacks/dotnet-data.md", "stacks/dotnet.md")
+        self.assertEqual(
+            loaded, sum(len(platform.files[k]) for k in shards) + routing.index_bytes(areas))
 
 
 if __name__ == "__main__":
