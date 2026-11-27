@@ -186,7 +186,9 @@ class Context:
     `root_arg` is `--repo-root` verbatim — None when the flag was omitted, so
     the resolver's ancestor walk runs — while `root` starts at the caller's
     directory and is replaced by the discovered root (D28). `stopwatch` times the
-    never-rise lints when `--lint-times` is given.
+    never-rise lints when `--lint-times` is given. `added_records` is every record
+    the never-rise check found the branch adds, whole and unbounded, for the
+    stderr listing the report's fact bounds cannot carry.
     """
 
     root: Path
@@ -200,6 +202,7 @@ class Context:
     bindings: dict | None = None
     capabilities: dict | None = None
     stopwatch: object | None = None
+    added_records: list = dataclasses.field(default_factory=list)
 
 
 REPAIRS = {

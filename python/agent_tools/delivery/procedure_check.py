@@ -18,7 +18,8 @@ copy is in a format the engine does not read (`engine_shell`).
 
 Step. Common members: `id` (never `run` or `done`), `stage` (one of `STAGES`),
 `kind` (one of `KINDS`), `holds` (one of `HOLDS`, required: how long the step's
-stored result holds when a stopped run continues), `in` (distinct paths,
+stored result holds when a stopped run continues; `read` is `live` for a command that changes nothing, which a
+continue that would resume an interrupted session runs again first, and the session is resumed when it answers as before), `in` (distinct paths,
 `<step id>.<member>` or `run.<input>`), `on` (outcome -> target; required on every step except a group
 member, forbidden on one), `max_visits` (integer >= 1; its presence makes the
 step bounded) and `mutates` (bool). Kind members: `command`: `command`,
@@ -160,7 +161,7 @@ SUBCOMMAND_LISTS: Mapping[tuple[str, str], frozenset[str]] = {
     ("verify-rounds", "retested"): frozenset(),
 }
 
-HOLDS = ("run", "head", "live")
+HOLDS = ("run", "head", "live", "read")
 COMMON_REQUIRED = ("id", "stage", "kind", "holds")
 COMMON_OPTIONAL = ("in", "on", "max_visits", "mutates")
 KIND_MEMBERS = {
@@ -460,6 +461,8 @@ def _step(item: dict, index: int, layout: _Layout, found: _Findings) -> None:
         found.add("invalid_field", f"holds must be one of {', '.join(HOLDS)}.", label)
     if "mutates" in item and not isinstance(item["mutates"], bool):
         found.add("invalid_field", "mutates must be a boolean.", label)
+    if item.get("holds") == "read" and (kind != "command" or item.get("mutates") is True or "wait" in item):
+        found.add("invalid_field", "holds read is for a command step that neither mutates nor waits.", label)
     if "on" in item:
         on = item["on"]
         if not (isinstance(on, dict) and all(_is_text(k) and _is_text(v) for k, v in on.items())):
