@@ -570,13 +570,13 @@ class DeliveryViewTest(unittest.TestCase):
         self.assertEqual(
             delivery_changes(states, {("s1", "wf_1"): moved}, {"s1"}, owner),
             [(DELIVERY_SEEN, "owner/p00", seen_payload(moved))])
-        self.assertEqual(
-            delivery_changes(states, {}, {"s1"}, owner),
-            [(DELIVERY_GONE, "owner/p00", {"session_id": "s1", "run_id": "wf_1"})])
+        gone_1 = {"session_id": "s1", "run_id": "wf_1", "project": None,
+                  "issues": [{"issue": 858, "stage": "building", "task": 1, "tasks": 3, "locking": False}]}
+        gone_2 = {"session_id": "s2", "run_id": "wf_2", "project": None, "issues": []}
+        self.assertEqual(delivery_changes(states, {}, {"s1"}, owner), [(DELIVERY_GONE, "owner/p00", gone_1)])
         self.assertEqual(
             delivery_changes(states, {}, {"s1", "s2"}, owner),
-            [(DELIVERY_GONE, "owner/p00", {"session_id": "s1", "run_id": "wf_1"}),
-             (DELIVERY_GONE, "owner/p00", {"session_id": "s2", "run_id": "wf_2"})])
+            [(DELIVERY_GONE, "owner/p00", gone_1), (DELIVERY_GONE, "owner/p00", gone_2)])
         self.assertEqual(seen_payload(a), {
             "session_id": "s1", "run_id": "wf_1", "moved_ms": 10,
             "issues": [{"issue": 858, "stage": "building", "task": 1, "tasks": 3, "locking": False}]})

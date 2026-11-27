@@ -93,7 +93,9 @@ know, when valid). `delivery_changes(states, readings, scanned, project_of, ende
 append: a `seen` for each reading (in key order) that differs from the known state, then a `gone` for
 each known state (in key order) of a scanned session that has no reading, then a `gone` of the reading
 of each `ended` key; a state of a session not scanned yields nothing. `final_record_ms(journal)` is the
-final record's mtime in ms, None when it cannot be read.
+final record's mtime in ms, None when it cannot be read. `ended_unseen(journal, handled, floor_ms)` is
+true of a run no poll handled whose final record is not older than the poll before (or the console's start):
+it started and ended between two polls, so it is read once from its start and logged as a `seen` and a `gone`.
 
 Moved text: `moved_text(elapsed_ms)` turns the time since a journal's last movement into
 `(quiet, text)`. Below 0 counts as 0; under a minute reads `"moved just now"`; under
@@ -254,6 +256,12 @@ def final_record_ms(journal: Path) -> int | None:
         return int(os.stat(final_record(journal)).st_mtime * 1000)
     except OSError:
         return None
+
+
+def ended_unseen(journal: Path, handled: Collection[Path], floor_ms: int) -> bool:
+    """Whether `journal` ended between two polls: no poll handled it and its final record is not older than
+    `floor_ms` (the time of the poll before). Older than that it is history and is never read."""
+    return journal not in handled and (final_record_ms(journal) or 0) >= floor_ms
 
 
 QUEUED = "queued"

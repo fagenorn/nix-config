@@ -1887,9 +1887,7 @@ poll publishes, so the minutes since a run moved advance; an unchanged view bump
 journal is read incrementally; one that was truncated or replaced is folded again from its start.
 A run leaves only when its final record exists or its journal is confirmed absent (its listing
 succeeded without it); a journal or a listing that cannot be read keeps the run's last
-observation. A run no poll saw whose final record is not older than the poll before (or the console's
-start) started and ended between two polls: it is read once from its start and logged as a `seen` and a
-`gone`; a final record older than that is history and is never read. A run that names no issue is not listed. A branch names its issue through the
+observation. A run that names no issue is not listed. A branch names its issue through the
 project's configured branch pattern, `branch_pattern_of(repo)` (default
 `deliveries.configured_branch_pattern`, kept once resolved); while it is None no run of that
 repository names an issue, and a run read under another pattern is folded again from its start.
@@ -4771,9 +4769,7 @@ class ConsoleService(ActionPermit):
         self._reader = deliveries.JournalReader()
         self._runs: dict[Path, deliveries.RunFold] = {}
         self._run_moves: dict[tuple[str, str], int] = {}
-        # Journals whose final record the last polls handled or baselined, and the time (ms) of the poll
-        # before: a final record newer than it, of a journal not handled, is a run that ended between polls.
-        self._finished: frozenset[Path] = frozenset()
+        self._finished: set[Path] = set()  # journals whose final record a poll handled (`deliveries.ended_unseen`)
         self._delivery_floor_ms = int(clock() * 1000)
         self._engine_ended: frozenset[str] = frozenset()
         self._unreadable: set[str] = set()
@@ -10217,9 +10213,7 @@ class ConsoleService(ActionPermit):
 
     def poll_deliveries(self) -> list[Event]:
         """Append what the run journals of the live sessions show that the log does not, and publish."""
-        folded = self._deliveries
-        floor_ms = int(self._clock() * 1000)
-        finished: set[Path] = set()
+        folded, floor_ms = self._deliveries, int(self._clock() * 1000)
         scanned = {sid: s for sid, s in self._sessions.items()
                    if s.state != sessions.ENDED and s.repo is not None}
         projects_dirs = self._projects_dirs()
@@ -10233,7 +10227,6 @@ class ConsoleService(ActionPermit):
                 readings.update({k: v for k, v in folded.items() if k[0] == sid})
                 runs.update({j: f for j, f in self._runs.items() if j.parents[3].name == sid})
                 run_moves.update({k: v for k, v in self._run_moves.items() if k[0] == sid})
-                finished.update(j for j in self._finished if j.parents[3].name == sid)
                 self._warn_once(f"listing {sid}",
                                 f"console: journals_unreadable {sid} {listing.reason}")
                 continue
@@ -10243,17 +10236,12 @@ class ConsoleService(ActionPermit):
                 key = (sid, journal.parent.name)
                 path = str(journal)
                 final = deliveries.has_final_record(journal)
-                # A run that ended between two polls, or while the console was down (the log still
-                # holds it), is read once more, so its close-out reaches the log as the run's last
-                # observation before the run leaves. So is a run no poll saw before whose final record
-                # is newer than the poll before: it started and ended between two polls. A final record
-                # older than that, or one a poll already handled, is history and is never read.
-                ended = final is True and (
-                    journal in self._runs or key in folded
-                    or (journal not in self._finished
-                        and (deliveries.final_record_ms(journal) or 0) >= self._delivery_floor_ms))
+                # A run that ended between two polls (it may have started in between too), or while the console
+                # was down (the log still holds it), is read once more, so its close-out reaches the log.
+                ended = final is True and (journal in self._runs or key in folded
+                                           or deliveries.ended_unseen(journal, self._finished, self._delivery_floor_ms))
                 if final is True and not ended:
-                    finished.add(journal)
+                    self._finished.add(journal)
                     self._reader.forget(journal)
                     self._unreadable.discard(path)
                     continue
@@ -10264,12 +10252,9 @@ class ConsoleService(ActionPermit):
                 if ended:
                     self._reader.forget(journal)
                 if isinstance(chunk, deliveries.Unreadable):
-                    if key in folded:
-                        readings[key] = folded[key]
-                    if journal in self._runs:
-                        runs[journal] = self._runs[journal]
-                    if key in self._run_moves:
-                        run_moves[key] = self._run_moves[key]
+                    for t, s, k in ((readings, folded, key), (runs, self._runs, journal), (run_moves, self._run_moves, key)):
+                        if k in s:
+                            t[k] = s[k]
                     self._warn_once(path, f"console: journal_unreadable {path} {chunk.reason}")
                     continue
                 self._unreadable.discard(path)
@@ -10285,8 +10270,7 @@ class ConsoleService(ActionPermit):
                 if issues:
                     readings[key] = deliveries.DeliveryState(sid, key[1], chunk.moved_ms, issues)
                 if ended:
-                    finished.add(journal)
-                    self._unreadable.discard(path)
+                    self._finished.add(journal)
                     if issues:
                         terminal.append(key)
                 else:
@@ -10294,18 +10278,11 @@ class ConsoleService(ActionPermit):
         for journal in self._runs.keys() - runs.keys():
             self._reader.forget(journal)
         self._runs = runs
-        self._finished = frozenset(finished)
-        self._delivery_floor_ms = floor_ms
+        self._finished, self._delivery_floor_ms = {j for j in self._finished if j.parents[3].name in scanned}, floor_ms
         with self._ingest:
             self._run_moves = run_moves
-
-            def project_of(sid: str) -> str | None:
-                repo = scanned[sid].repo
-                return project_for(repo, self._states)
-
-            changes = deliveries.delivery_changes(
-                self._deliveries, readings, scanned, project_of, terminal)
-            appended = self.log.append(changes)
+            appended = self.log.append(deliveries.delivery_changes(
+                self._deliveries, readings, scanned, lambda sid: project_for(scanned[sid].repo, self._states), terminal))
             if appended:
                 self._fold(appended)
             self._publish()
@@ -10322,8 +10299,7 @@ class ConsoleService(ActionPermit):
         self._unreadable.difference_update(f"engine {s.run}" for s in poll.states if s.run not in failed)
         with self._ingest:
             self._engine_states = poll.states
-            appended = self.log.append(engine_runs.ended_changes(
-                poll.states, self._engine_ended, int(self._clock() * 1000)))
+            appended = self.log.append(engine_runs.ended_changes(poll.states, self._engine_ended, int(self._clock() * 1000)))
             if appended:
                 self._fold(appended)
             self._publish()
