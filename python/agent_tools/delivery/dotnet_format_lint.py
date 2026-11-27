@@ -25,12 +25,19 @@ the paths relative to the root and comma separated, on stderr, exits 1 and start
 A directory or file under `<root>/dotnet` that cannot be read prints `dotnet-format-lint:
 discovery_failed (<reason>)` on stderr and exits 2; it is never read as empty.
 
-Tools. The SDK comes only from `nix build --no-link --print-out-paths
-<root>#agent-platform.dotnet-tools`, run from the root with stdin closed. That is a
-passthru of the platform package, in no launcher's closure, so the SDK is built only
-when a lint judges .NET sources and the `agent-platform` package stays free of it. The
-build must print exactly one absolute path whose `bin` holds an executable `dotnet`;
-any other outcome prints `dotnet-format-lint: tools_unavailable` on stderr and exits 2.
+Tools. The SDK is the `<root>#agent-platform.dotnet-tools` build, a passthru of the
+platform package in no launcher's closure, so it is built only when a lint judges .NET
+sources and the `agent-platform` package stays free of it. It is cached under
+`<HOME>/.cache/agent-platform/dotnet-tools/<key>`. The key is a SHA-256 over the attribute
+and the bytes of `flake.nix`, `flake.lock` and `lib/agent-tools.nix`, the files the
+attribute's evaluation reads. A link there that leads to an executable `bin/dotnet` is
+used and no `nix` runs. Otherwise the lint runs `nix build --out-link <that path>
+--print-out-paths <root>#agent-platform.dotnet-tools` from the root with stdin closed; the
+out-link is a garbage-collector root. The build must print exactly one absolute path whose
+`bin` holds an executable `dotnet`. A `HOME` that is not absolute, an unreadable key input,
+a cache directory that cannot be created, or any other build outcome prints
+`dotnet-format-lint: tools_unavailable` on stderr and exits 2. An input the attribute
+gains outside those three files must join the key.
 
 The run. `dotnet` runs by its command name, `dotnet format <solution> --verify-no-changes`,
 from `<root>/dotnet` with stdin closed and output inherited, on a `PATH` that is the
@@ -48,6 +55,7 @@ be an absolute directory: <value>` and exits 2.
 """
 
 import argparse
+import hashlib
 import os
 import re
 import shutil
@@ -63,6 +71,8 @@ from agent_tools.delivery.promotion_schema import symlinked_component
 
 COMMAND = "dotnet-format-lint"
 TOOLS_ATTRIBUTE = "agent-platform.dotnet-tools"
+KEY_INPUTS = ("flake.nix", "flake.lock", "lib/agent-tools.nix")
+CACHE_PARTS = (".cache", "agent-platform", "dotnet-tools")
 SOURCE_SUFFIXES = (".cs", ".csproj", ".slnx", ".sln")
 SOLUTION_SUFFIXES = (".slnx", ".sln")
 IGNORED_DIRECTORIES = frozenset({"bin", "obj"})
@@ -163,10 +173,49 @@ def outside_solution(root: Path, chosen: Path, found: Sequence[Path]) -> list[Pa
     return [path for path in found if not covered(path)]
 
 
+def cache_key(root: Path) -> str:
+    """The SHA-256 hex digest over the attribute and the bytes of every `KEY_INPUTS` file.
+
+    Raises `OSError` when a key input cannot be read.
+    """
+    digest = hashlib.sha256(TOOLS_ATTRIBUTE.encode())
+    for name in KEY_INPUTS:
+        data = (root / name).read_bytes()
+        digest.update(name.encode() + b"\0" + str(len(data)).encode() + b"\0" + data)
+    return digest.hexdigest()
+
+
+def cached_tools(link: Path) -> str | None:
+    """`<target>/bin` when `link` is a symlink to an absolute target holding `dotnet`."""
+    try:
+        target = os.readlink(link) if os.path.islink(link) else ""
+    except OSError:
+        return None
+    if not os.path.isabs(target) or shutil.which("dotnet", path=f"{target}/bin") is None:
+        return None
+    return f"{target}/bin"
+
+
 def tools_directory(root: Path) -> str:
-    """The `bin` directory of the built .NET tools, when it holds an executable `dotnet`."""
+    """The `bin` directory of the .NET tools, cached by key, when it holds an executable `dotnet`."""
+    home = os.environ.get("HOME")
+    if not home or not os.path.isabs(home):
+        raise Refusal("tools_unavailable")
+    try:
+        key = cache_key(root)
+    except OSError:
+        raise Refusal("tools_unavailable") from None
+    cache = Path(home).joinpath(*CACHE_PARTS)
+    link = cache / key
+    cached = cached_tools(link)
+    if cached is not None:
+        return cached
+    try:
+        cache.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        raise Refusal("tools_unavailable") from None
     argv = ["nix", "--extra-experimental-features", "nix-command flakes", "build",
-            "--no-link", "--print-out-paths", f"{root}#{TOOLS_ATTRIBUTE}"]
+            "--out-link", str(link), "--print-out-paths", f"{root}#{TOOLS_ATTRIBUTE}"]
     try:
         done = subprocess.run(
             argv, cwd=root, stdin=subprocess.DEVNULL, capture_output=True, text=True,

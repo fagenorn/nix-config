@@ -43,21 +43,29 @@ SLN_FOLDER = ('Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "src", "src",
               ' "{22222222-2222-2222-2222-222222222222}"\nEndProject\n')
 
 
-def stub_text(log: Path, code: int, lines: list[str]) -> str:
+def stub_text(log: Path, code: int, lines: list[str], link: bool = False) -> str:
+    linking = (
+        "if '--out-link' in sys.argv:\n"
+        "    target = sys.argv[sys.argv.index('--out-link') + 1]\n"
+        "    if os.path.islink(target):\n"
+        "        os.unlink(target)\n"
+        f"    os.symlink({lines[0] if lines else ''!r}, target)\n") if link else ""
     return (
         f"#!{sys.executable} -I\n"
         "import json, os, sys\n"
         f"with open({str(log)!r}, 'a') as f:\n"
         "    f.write(json.dumps({'argv': sys.argv, 'env': dict(os.environ),"
         " 'cwd': os.getcwd()}) + '\\n')\n"
+        f"{linking}"
         f"for line in {lines!r}:\n"
         "    print(line)\n"
         f"sys.exit({code})\n")
 
 
-def write_stub(path: Path, log: Path, code: int = 0, lines: list[str] | None = None) -> Path:
+def write_stub(path: Path, log: Path, code: int = 0, lines: list[str] | None = None,
+               link: bool = False) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(stub_text(log, code, lines or []), "utf-8")
+    path.write_text(stub_text(log, code, lines or [], link), "utf-8")
     path.chmod(0o755)
     return path
 
@@ -103,15 +111,25 @@ class LintCase(unittest.TestCase):
             write_stub(out / "bin" / "dotnet", self.dotnet_log, code)
         return out
 
-    def nix(self, code: int = 0, lines: list[str] | None = None) -> None:
-        write_stub(self.stubs / "nix", self.nix_log, code, lines)
+    def nix(self, code: int = 0, lines: list[str] | None = None, link: bool = False) -> None:
+        write_stub(self.stubs / "nix", self.nix_log, code, lines, link)
 
-    def run_lint(self, root: str | Path | None = None, temp: bool = True):
+    @property
+    def cache(self) -> Path:
+        return self.home / ".cache" / "agent-platform" / "dotnet-tools"
+
+    def key_inputs(self) -> None:
+        self.file("flake.nix", "{ }\n")
+        self.file("flake.lock", "{}\n")
+        self.file("lib/agent-tools.nix", "{ }\n")
+
+    def run_lint(self, root: str | Path | None = None, temp: bool = True,
+                 home: str | None = None):
         for log in (self.nix_log, self.dotnet_log):
             log.unlink(missing_ok=True)
         env = {
             "PATH": f"{self.stubs}{os.pathsep}{os.environ['PATH']}",
-            "HOME": str(self.home),
+            "HOME": str(self.home) if home is None else home,
             "PYTHONPATH": str(REPO_ROOT / "python"),
             "DOTNET_FORMAT_LINT_LEAK": "1",
         }
@@ -123,6 +141,7 @@ class LintCase(unittest.TestCase):
             env=env, capture_output=True, text=True, timeout=60)
 
     def planted(self) -> Path:
+        self.key_inputs()
         self.file("dotnet/A/A.cs")
         self.file("dotnet/A/A.csproj")
         return self.file("dotnet/One.slnx", SLNX)
@@ -252,6 +271,7 @@ class ProjectsTest(LintCase):
             self.file("dotnet/A/Deep/B.cs")
 
         def sln():
+            self.key_inputs()
             self.file("dotnet/A/A.cs")
             self.file("dotnet/A/A.csproj")
             self.file("dotnet/One.sln", SLN)
@@ -322,9 +342,14 @@ class RunTest(LintCase):
                 self.assertEqual(Path(nix["argv"][0]).resolve(),
                                  (self.stubs / "nix").resolve())
                 self.assertEqual(Path(nix["cwd"]).resolve(), self.root)
-                self.assertEqual(nix["argv"][1:], [
-                    "--extra-experimental-features", "nix-command flakes", "build",
-                    "--no-link", "--print-out-paths", f"{self.root}#agent-platform.dotnet-tools"])
+                self.assertEqual(nix["argv"][1:4], [
+                    "--extra-experimental-features", "nix-command flakes", "build"])
+                self.assertEqual(nix["argv"][4], "--out-link")
+                self.assertEqual(nix["argv"][6:], [
+                    "--print-out-paths", f"{self.root}#agent-platform.dotnet-tools"])
+                self.assertEqual(len(nix["argv"]), 8)
+                self.assertEqual(Path(nix["argv"][5]).parent, self.cache)
+                self.assertRegex(Path(nix["argv"][5]).name, "^[0-9a-f]{64}$")
                 self.assertEqual(format_argv(slnx),
                                  ["dotnet", "format", str(slnx), "--verify-no-changes"])
                 (dotnet,) = read_log(self.dotnet_log)
@@ -351,6 +376,83 @@ class RunTest(LintCase):
                 result = self.run_lint()
                 self.assertEqual(result.returncode, expected, result.stderr)
                 self.assertEqual(result.stderr.splitlines(), [line])
+
+
+class CacheTest(LintCase):
+    def test_a_second_run_with_unchanged_key_inputs_starts_no_nix(self):
+        self.planted()
+        out = self.tools()
+        self.nix(0, [str(out)], link=True)
+        first = self.run_lint()
+        second = self.run_lint()
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertEqual(second.stdout.splitlines(), ["dotnet-format-lint: passed"])
+        self.assertEqual(read_log(self.nix_log), [])
+        (dotnet,) = read_log(self.dotnet_log)
+        self.assertEqual(Path(dotnet["argv"][0]).resolve(), (out / "bin" / "dotnet").resolve())
+
+    def test_a_changed_key_input_builds_again(self):
+        for name in ("flake.nix", "flake.lock", "lib/agent-tools.nix"):
+            with self.subTest(name):
+                shutil.rmtree(self.home / ".cache", ignore_errors=True)
+                self.planted()
+                self.nix(0, [str(self.tools())], link=True)
+                self.assertEqual(self.run_lint().returncode, 0)
+                with (self.root / name).open("a", encoding="utf-8") as handle:
+                    handle.write("# changed\n")
+                second = self.run_lint()
+                self.assertEqual(second.returncode, 0, second.stderr)
+                self.assertEqual(len(read_log(self.nix_log)), 1)
+                third = self.run_lint()
+                self.assertEqual(third.returncode, 0, third.stderr)
+                self.assertEqual(read_log(self.nix_log), [])
+
+    def test_a_cached_link_without_dotnet_builds_again(self):
+        empty = self.base / "empty-out"
+        (empty / "bin").mkdir(parents=True)
+        for name, target in {"no dotnet": empty, "dangling": self.base / "gone"}.items():
+            with self.subTest(name):
+                shutil.rmtree(self.home / ".cache", ignore_errors=True)
+                self.planted()
+                out = self.tools()
+                self.nix(0, [str(out)], link=True)
+                self.assertEqual(self.run_lint().returncode, 0)
+                (link,) = [p for p in self.cache.iterdir() if p.is_symlink()]
+                os.unlink(link)
+                os.symlink(target, link)
+                result = self.run_lint()
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.splitlines(), ["dotnet-format-lint: passed"])
+                self.assertEqual(len(read_log(self.nix_log)), 1)
+                (dotnet,) = read_log(self.dotnet_log)
+                self.assertEqual(Path(dotnet["argv"][0]).resolve(),
+                                 (out / "bin" / "dotnet").resolve())
+
+    def test_an_unreadable_key_input_or_home_is_tools_unavailable(self):
+        rows = ["flake.nix missing", "flake.lock missing", "lib/agent-tools.nix missing",
+                "relative home", "cache not creatable"]
+        for name in rows:
+            with self.subTest(name):
+                shutil.rmtree(self.root)
+                self.root.mkdir()
+                shutil.rmtree(self.home / ".cache", ignore_errors=True)
+                (self.home / ".cache").unlink(missing_ok=True)
+                self.planted()
+                self.nix(0, [str(self.tools())], link=True)
+                home = None
+                if name.endswith(" missing"):
+                    (self.root / name.removesuffix(" missing")).unlink()
+                elif name == "relative home":
+                    home = "relative-home"
+                else:
+                    (self.home / ".cache").write_text("x\n", "utf-8")
+                result = self.run_lint(home=home)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertEqual(result.stderr.splitlines(),
+                                 ["dotnet-format-lint: tools_unavailable"])
+                self.assertEqual(read_log(self.nix_log), [])
+                self.assertEqual(read_log(self.dotnet_log), [])
 
 
 class RootTest(LintCase):
