@@ -1292,6 +1292,9 @@ def _visit_session(run_dir: Path, root: str, step: dict, action: engine_core.Sta
                                                   role.body.encode("utf-8"))
         engine_ledger.store_session_file(run_dir, f"{name}.{visit}.prompt.md",
                                          prompt.encode("utf-8"))
+    elif resumed.stop is not None:  # the killed engine's `tool-denied` stop, recorded now: nothing is launched
+        return _stop(run_dir, name, procedure_terms.TOOL_DENIED, procedure_terms.TOOL_DENIED_NEED,
+                     resumed.stop, scope.stop)
     else:
         session, system, prompt = resumed.session, resumed.system, resumed.text
         if not (run_dir / "sessions" / f"{name}.{visit}.continue-{resumed.attempt}.prompt.md"

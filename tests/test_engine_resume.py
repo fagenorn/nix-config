@@ -282,10 +282,10 @@ class ResumeTest(unittest.TestCase):
     def records(self, log: Path) -> list[dict]:
         return [json.loads(line) for line in log.read_text().splitlines()]
 
-    def cut(self, run: Path, event: str, *, drop: tuple[str, ...] = ()) -> int:
-        """Cut the ledger right after the first `event` line and delete the named files."""
+    def cut(self, run: Path, event: str, *, drop: tuple[str, ...] = (), nth: int = 1) -> int:
+        """Cut the ledger right after the `nth` `event` line and delete the named files."""
         lines = (run / "events.jsonl").read_text().splitlines(keepends=True)
-        cut = next(i for i, line in enumerate(lines) if json.loads(line)["event"] == event) + 1
+        cut = [i for i, line in enumerate(lines) if json.loads(line)["event"] == event][nth - 1] + 1
         (run / "events.jsonl").write_text("".join(lines[:cut]), encoding="utf-8")
         for name in drop:
             (run / name).unlink()
@@ -506,6 +506,46 @@ class ResumeTest(unittest.TestCase):
         self.assertIn(repr("git log | head"), retry)
         self.assertEqual(self.entered(run), [1])
         self.assertEqual(run_continued(self.project.events(run)), [])
+
+    def test_a_run_killed_after_the_reask_process_started_and_before_it_was_written_sends_the_saved_reask(self):
+        log = install_answers(self.project, [self.denying("git log | head"), self.normal(), self.normal()])
+        procedures = one_step(self.project)
+        first = self.project.deliver(procedures)
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        (run,) = self.project.runs()
+        retry = (run / "sessions/draft.1.denied.prompt.md").read_text()
+        self.cut(run, "process_started", nth=2,
+                 drop=("results/draft.1.json", "sessions/draft.1.denied.json"))
+        self.assertEqual(self.project.events(run)[-1]["event"], "process_started")
+        done = self.project.deliver(procedures)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        records = self.records(log)
+        self.assertEqual(len(records), 3)
+        self.assertEqual(after(records[2]["argv"], "--resume"), after(records[0]["argv"], "--session-id"))
+        self.assertEqual(records[2]["stdin"], retry)
+        self.assertIn(repr("git log | head"), retry)
+        self.assertEqual(self.entered(run), [1])
+
+    def test_a_run_killed_after_the_second_denial_was_saved_and_before_its_stop_was_recorded_stops_naming_both(self):
+        log = install_answers(self.project, [
+            self.denying("git log | head"), self.denying("rm x", "toolu_02"), self.normal()])
+        procedures = one_step(self.project)
+        first = self.project.deliver(procedures)
+        self.assertEqual(first.returncode, 3, first.stdout + first.stderr)
+        (run,) = self.project.runs()
+        lines = (run / "events.jsonl").read_text().splitlines(keepends=True)
+        self.assertEqual(json.loads(lines[-1])["event"], "stop_reached")
+        (run / "events.jsonl").write_text("".join(lines[:-1]), encoding="utf-8")
+        done = self.project.deliver(procedures)
+        self.assertEqual(done.returncode, 3, done.stdout + done.stderr)
+        line = json.loads(done.stdout)
+        self.assertEqual((line["end"], line["need"]), ("tool-denied", "owner-decision"))
+        self.assertLess(line["detail"].index(repr("git log | head")), line["detail"].index(repr("rm x")))
+        self.assertEqual(len(self.records(log)), 2)  # nothing was launched again
+        self.assertEqual(self.entered(run), [1])
+        self.assertEqual(run_continued(self.project.events(run)), [])
+        self.assertEqual([e["stop"] for e in self.project.events(run) if e["event"] == "stop_reached"],
+                         ["tool-denied"])
 
     def second_denial_after_a_cut(self, event: str) -> None:
         log = install_answers(self.project, [

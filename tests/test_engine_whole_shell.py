@@ -325,6 +325,31 @@ class RealGuardTest(unittest.TestCase):
                     self.assertEqual(seen["absent"].get(command), seen["set"].get(command))
 
 
+    def test_in_an_authorized_repository_the_guard_admits_only_a_topic_push_and_the_exact_pull_request_form(self):
+        topic_pr = "gh pr create --repo example/x --base main --head topic --title t --body b"
+        admitted = ("git push origin topic", topic_pr)
+        refused = ("git push origin main", "git push --force origin topic", "git push origin HEAD",
+                   "gh pr create --repo example/x --fill", "gh pr merge 1 --repo example/x --merge",
+                   "gh release create v1 --repo example/x", "nohup git log", "git log & disown")
+        with tempfile.TemporaryDirectory() as tmp:
+            wrapper = real_guard(Path(tmp) / "guard")
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            for argv in (("init", "--quiet"), ("remote", "add", "origin", "git@github.com:example/x.git"),
+                         ("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")):
+                subprocess.run(["git", *argv], cwd=repo, check=True, capture_output=True)
+            absent = {k: v for k, v in os.environ.items() if k != "CLAUDE_READ_ONLY_SHELL"}
+            for name, env in {"absent": absent, "set": {**absent, "CLAUDE_READ_ONLY_SHELL": "1"}}.items():
+                for command in (*admitted, *refused):
+                    with self.subTest(environment=name, command=command):
+                        done = subprocess.run(
+                            [str(wrapper)], input=json.dumps({"tool_name": "Bash", "cwd": str(repo),
+                                                              "tool_input": {"command": command}}),
+                            env=env, cwd=repo, capture_output=True, text=True, timeout=60, check=False)
+                        self.assertEqual(done.returncode, 0 if command in admitted else 2, done.stderr)
+                        self.assertNotIn("outside standing authorization", done.stderr)  # the repository is known
+
+
 class ReadOnlyRoleToolsTest(unittest.TestCase):
     def test_every_role_an_engine_procedure_runs_without_mutating_can_call_bash(self):
         roles: set[str] = set()

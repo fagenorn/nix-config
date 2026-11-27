@@ -3,7 +3,8 @@
 A visit a killed engine left interrupted is continued in the same visit: `resumed` names the session to launch
 again, `open_waits` the waits the killed engine left open. A launch whose record carries a pending denial re-ask
 (`retry`, `engine_session.store_record`) ended before the re-ask was sent, so the visit resumes with that text as
-its prompt. A `call` step a killed engine left interrupted is
+its prompt, and a launch whose record holds a refusal no re-ask followed, its `tool-denied` stop never recorded,
+resumes with that stop (`Resumed.stop`) and launches nothing. A `call` step a killed engine left interrupted is
 continued in the same visit too: `named_children` reads the child runs its `call` events name, and `ended`
 reads how a child run ended, so the continuing call walks the unfinished children again in place and starts none.
 
@@ -41,6 +42,7 @@ class Resumed:
     text: str
     attempt: int
     resume: bool
+    stop: str | None = None  # the detail of a `tool-denied` stop the visit reached and a killed engine never recorded
 
 
 def resumed(run_dir: Path, ledger: list[dict], name: str, visit: int) -> Resumed | None:
@@ -62,9 +64,19 @@ def resumed(run_dir: Path, ledger: list[dict], name: str, visit: int) -> Resumed
     ended = [document for document in records if document.get("attempt") == max(launched, default=1)]
     retry = next((document["retry"] for document in ended if isinstance(document.get("retry"), str)), None)
     if ended and retry is None:
-        return None
-    # a launch announced and never started: send the re-ask the latest earlier record saved, if it saved one
-    if not ended and launched and here[-1]["event"] == "session_resuming":
+        if not any(document.get("denials") for document in ended):
+            return None
+        # the launch ended with a refusal it was not asked about again, and was cut before its stop was recorded
+        refused = [document for document in sorted(records, key=lambda d: d.get("attempt") or 0)
+                   if isinstance(document.get("denials"), list)]
+        calls = tuple(dict.fromkeys(call for document in refused
+                                    for call in engine_session.calls_of(document["denials"])))
+        return Resumed(session=starting[-1]["session"],
+                       system=run_dir / "sessions" / f"{name}.{visit}.system.md", text="",
+                       attempt=2 + len(launched), resume=True, stop=engine_session.denial_detail(name, calls))
+    # a launch announced and cut before it answered, as soon as its process started (the prompt is written after
+    # `process_started`): send the re-ask the latest earlier record saved, if it saved one
+    if not ended and launched and here[-1]["event"] in ("session_resuming", "process_started"):
         earlier = [d for d in records if isinstance(d.get("attempt"), int) and d["attempt"] < max(launched)]
         saved = max(earlier, key=lambda document: document["attempt"], default={}).get("retry")
         retry = saved if isinstance(saved, str) else None

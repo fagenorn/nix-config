@@ -120,7 +120,10 @@ met (0), a later one not met (1); with none it is not met once the clock is past
 no root to judge at all it is likewise not met once the clock is past that bound. A root with no lane grade (it stopped in
 setup, or is still before the grade) is `not_yet` (75) while it has no stop and the clock is inside the window, else
 `lane_unknown` (75), since the record cannot tell a direct issue from a standard one. The report is `{"met",
-"verdict", "anchor", "run", "lane", "stop", "child", "entered", "at"}`.
+"verdict", "anchor", "run", "lane", "stop", "child", "entered", "at"}`. Runs and events are read as the engine's
+ledger reads them (`engine_run_evidence`): a runs root that cannot be listed (an absent one holds none), or a run
+named at or after the anchor's second that does not read as a run, is exit 2 (`runs_unreadable`, `run_unreadable`),
+never a verdict; a root whose events the ledger would not replay has no lane.
 
 `console-notice-lists --port N --notice PROJECT=N1,N2,... [--notice ...]` (`verify_checks.console_notice_lists`,
 issue 1291) reads `GET http://127.0.0.1:N/api/state` (no answer, a status other than 200 or a body that is not a
@@ -175,6 +178,7 @@ from agent_tools.project_contract import agent_platform
 from agent_tools.project_contract.adopt_apply import run_leashed
 from agent_tools.canonical import parse_rfc3339_utc
 from agent_tools.claims import forge_markers, forge_owner_action
+from agent_tools.verification import engine_run_evidence
 from agent_tools.system import forge_api
 from agent_tools.verification import verify_answer, verify_issues
 
@@ -916,38 +920,20 @@ def engine_direct_past_implement(since: str, *, runs_root: Path | None = None, l
 
 
 NOT_DIRECT_STOPS = ("standard-not-on-engine", "look-not-on-engine")
-RUN_ID_RE = re.compile(r"^[1-9][0-9]*-[0-9]{8}T[0-9]{6}Z-[a-z0-9]{4}$")  # the engine ledger's run id shape
 
 
-def _engine_runs(runs_root: Path) -> list[tuple[datetime, str, Path, dict]]:
-    """The (started, id, directory, run.json) of each published run under `runs_root` that parses, earliest first.
+def _root_lane_and_stop(run_dir: Path) -> tuple[str | None, str | None]:
+    """The outcome of a run's first `lane` grade and the `stop` of its last `stop_reached`, each None if absent.
 
-    As the ledger reads a run: the directory is named by a run id and its `run.json` names that run, so an
-    unpublished `.<run id>.tmp` directory is no run."""
-    runs = []
+    Both None when the ledger would not replay the run (`engine_run_evidence.event` refuses a line)."""
     try:
-        names = sorted(path for path in runs_root.iterdir()
-                       if RUN_ID_RE.fullmatch(path.name) and path.is_dir())
-    except OSError:
-        return runs
-    for run_dir in names:
-        try:
-            document = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
-            started = parse_rfc3339_utc(document["started"])
-        except (OSError, ValueError, KeyError, TypeError):
-            continue
-        if isinstance(document, dict) and document.get("run") == run_dir.name:
-            runs.append((started, run_dir.name, run_dir, document))
-    return sorted(runs, key=lambda run: run[:2])
-
-
-def _root_lane_and_stop(events) -> tuple[str | None, str | None]:
-    """The outcome of a run's first `lane` grade and the `stop` of its last `stop_reached`, each None if absent."""
-    lane = next((event.get("outcome") for kind, step, _, event in events
-                 if kind == "transition_taken" and step == "lane"), None)  # a decide step writes no grade
-    stops = [event.get("stop") for kind, _, _, event in events if kind == "stop_reached"]
-    stop = stops[-1] if stops else None
-    return (lane if isinstance(lane, str) else None), (stop if isinstance(stop, str) else None)
+        events = [engine_run_evidence.event(line) for line in engine_run_evidence.lines(run_dir)]
+    except ValueError:
+        return None, None
+    lane = next((event["outcome"] for event in events
+                 if event["event"] == "transition_taken" and event["step"] == "lane"), None)  # a decide step
+    stops = [event["stop"] for event in events if event["event"] == "stop_reached"]  # writes no grade
+    return lane, (stops[-1] if stops else None)
 
 
 def past_setup_verdict(runs_root: Path, anchor: datetime, now: datetime) -> tuple[int, dict]:
@@ -956,11 +942,11 @@ def past_setup_verdict(runs_root: Path, anchor: datetime, now: datetime) -> tupl
               "stop": None, "child": None, "entered": None, "at": None}
     end = anchor + PAST_IMPLEMENT_WINDOW
     whole_second = anchor.replace(microsecond=0)  # the ledger keeps a run's start to the second
-    runs = _engine_runs(runs_root)
+    runs = engine_run_evidence.runs(runs_root, whole_second)
     for started, run_id, run_dir, document in runs:
         if document.get("procedure") != "deliver" or "parent" in document or started < whole_second:
             continue
-        lane, stop = _root_lane_and_stop(_past_implement_events(run_dir))
+        lane, stop = _root_lane_and_stop(run_dir)
         if lane == "standard" or stop in NOT_DIRECT_STOPS:
             continue
         report.update(run=run_id, lane=lane, stop=stop)
@@ -986,39 +972,19 @@ def past_setup_verdict(runs_root: Path, anchor: datetime, now: datetime) -> tupl
     return 75, report
 
 
-ENTRY_MEMBERS = frozenset(("event", "at", "step", "visit", "stage"))
-ENTRY_STAGES = ("setup", "planning", "plan review", "building", "final review",
-                "verifying", "awaiting look", "landing", "closing out", "done")  # the ledger's stages
-
-
 def _first_step_entered(run_dir: Path) -> dict | None:
-    """The first `step_entered` a run's events hold, shaped as the ledger replays it; else None.
+    """The first `step_entered` a run's events hold, as the ledger validates an event; else None.
 
-    None when no complete line up to it parses as an event, or when it lacks a member the ledger requires of a
-    `step_entered` (a step, a visit, a stage), carries another or holds an invalid one: `engine status` cannot
-    show a run whose ledger does not replay."""
-    try:
-        text = (run_dir / "events.jsonl").read_bytes().decode("utf-8")
-    except (OSError, ValueError):
-        return None
-    for line in text.split("\n")[:-1]:  # a last segment with no newline is a write cut short
+    None when a line up to it is one the ledger would refuse (`engine_run_evidence.event`: a `step_entered`
+    needs a step, a visit and a stage, and no other member): `engine status` cannot show a run whose ledger
+    does not replay."""
+    for line in engine_run_evidence.lines(run_dir):
         try:
-            event = json.loads(line)
+            event = engine_run_evidence.event(line)
         except ValueError:
             return None
-        if not isinstance(event, dict) or not isinstance(event.get("event"), str):
-            return None
-        if event["event"] != "step_entered":
-            continue
-        step, visit = event.get("step"), event.get("visit")
-        try:
-            parse_rfc3339_utc(event.get("at"))
-        except ValueError:
-            return None
-        valid = (set(event) == ENTRY_MEMBERS and isinstance(step, str) and re.fullmatch(r"[a-z][a-z0-9-]*", step)
-                 and isinstance(visit, int) and not isinstance(visit, bool) and visit >= 1
-                 and event["stage"] in ENTRY_STAGES)
-        return event if valid else None
+        if event["event"] == "step_entered":
+            return event
     return None
 
 
@@ -1398,7 +1364,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         try:
             code, report = engine_deliver_past_setup(args.since, runs_root=args.runs_root, log=args.log,
                                                      repo_root=args.repo_root)
-        except (ToolError, GitError) as error:
+        except (ToolError, GitError, engine_run_evidence.EvidenceError) as error:
             print(f"verify-checks: {getattr(error, 'kind', 'git_error')}: {error}", file=sys.stderr)
             return 2
         print(json.dumps(report, sort_keys=True))

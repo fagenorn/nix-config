@@ -10,7 +10,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from agent_tools.console import event_log
-from agent_tools.verification import verify_checks
+from agent_tools.delivery import engine_ledger
+from agent_tools.delivery import procedure_terms
+from agent_tools.verification import engine_run_evidence, verify_checks
 
 from tests.test_verify_checks import CHECKS, committed_mode, run_from_root
 
@@ -34,7 +36,8 @@ def write_run(root, label, started, events, procedure, parent=None, directory=No
     """Write the run `label` under `root`: in `directory` (default its id) and claiming `claims` (default its id)."""
     run = Path(root) / (directory or rid(label))
     (run / "results").mkdir(parents=True)
-    document = {"procedure": procedure, "run": claims or rid(label), "started": stamp(started)}
+    document = {"host": "eleven-m5", "inputs": {}, "issue": 1, "platform_revision": "r", "procedure": procedure,
+                "project": "p", "run": claims or rid(label), "sequence": 1, "started": stamp(started)}
     if parent is not None:
         document["parent"] = rid(parent)
     (run / "run.json").write_text(json.dumps(document), encoding="utf-8")
@@ -50,15 +53,15 @@ def entry(at, **members):
 
 def direct_root_events(started=HOUR):
     return [
-        ("step_entered", "start", started, {}),
+        entry(started, step="start"),
         ("transition_taken", "lane", started, {"visit": 1, "outcome": "direct", "to": "direct-lane"}),
-        ("step_entered", "direct-lane", started, {}),
+        entry(started, step="direct-lane", stage="building"),
     ]
 
 
 def standard_root_events(started=HOUR):
     return [
-        ("step_entered", "start", started, {}),
+        entry(started, step="start"),
         ("transition_taken", "lane", started, {"visit": 1, "outcome": "standard", "to": "standard-not-on-engine"}),
         ("stop_reached", "standard-not-on-engine", started,
          {"stop": "standard-not-on-engine", "need": "nothing"}),
@@ -67,7 +70,7 @@ def standard_root_events(started=HOUR):
 
 def setup_stopped_events(started=HOUR):
     return [
-        ("step_entered", "start", started, {}),
+        entry(started, step="start"),
         ("stop_reached", "start", started, {"stop": "tool-denied", "need": "owner-decision"}),
     ]
 
@@ -75,7 +78,7 @@ def setup_stopped_events(started=HOUR):
 def direct_delivery(root, run_id, started, entered):
     """A direct root `run_id`, its setup child and a direct child that enters `preflight` at `entered`."""
     write_run(root, run_id, started, direct_root_events(started), "deliver")
-    write_run(root, f"{run_id}-s", started, [("step_entered", "preflight", started, {})], "setup", parent=run_id)
+    write_run(root, f"{run_id}-s", started, [entry(started)], "setup", parent=run_id)
     events = [] if entered is None else [entry(entered)]
     write_run(root, f"{run_id}-d", started, events, "direct", parent=run_id)
 
@@ -90,7 +93,7 @@ class PastSetupVerdictTest(unittest.TestCase):
 
     def test_a_direct_child_that_entered_a_step_in_time_is_met(self):
         write_run(self.root, "r", HOUR, direct_root_events(), "deliver")
-        write_run(self.root, "s", HOUR, [("step_entered", "preflight", HOUR, {})], "setup", parent="r")
+        write_run(self.root, "s", HOUR, [entry(HOUR)], "setup", parent="r")
         write_run(self.root, "d", HOUR, [entry(2 * HOUR)], "direct", parent="r")
         code, report = self.verdict(3 * HOUR)
         self.assertEqual(code, 0)
@@ -130,7 +133,7 @@ class PastSetupVerdictTest(unittest.TestCase):
                 shutil.rmtree(self.root)
                 self.root.mkdir()
                 write_run(self.root, "r", HOUR, setup_stopped_events(), "deliver")
-                write_run(self.root, "r-s", HOUR, [("step_entered", "preflight", HOUR, {})], "setup", parent="r")
+                write_run(self.root, "r-s", HOUR, [entry(HOUR)], "setup", parent="r")
                 if standard_issue:
                     (self.root / rid("r-s") / "results" / "preflight.1.json").write_text(
                         json.dumps({"issue_text": "a standard-lane issue body"}), encoding="utf-8")
@@ -144,7 +147,7 @@ class PastSetupVerdictTest(unittest.TestCase):
                     self.assertFalse(report["met"])
 
     def test_a_delivery_still_before_its_lane_is_not_yet_then_lane_unknown(self):
-        write_run(self.root, "r", HOUR, [("step_entered", "start", HOUR, {})], "deliver")
+        write_run(self.root, "r", HOUR, [entry(HOUR, step="start")], "deliver")
         code, report = self.verdict(3 * HOUR)
         self.assertEqual((code, report["verdict"], report["run"]), (75, "not_yet", rid("r")))
         code, report = self.verdict(3 * DAY)
@@ -153,7 +156,7 @@ class PastSetupVerdictTest(unittest.TestCase):
     def test_a_delivery_of_an_issue_not_on_the_direct_lane_is_skipped(self):
         cases = {
             "standard": standard_root_events(HOUR),
-            "marked": [("step_entered", "start", HOUR, {}),
+            "marked": [entry(HOUR, step="start"),
                        ("stop_reached", "look-not-on-engine", HOUR,
                         {"stop": "look-not-on-engine", "need": "nothing"})],
         }
@@ -200,7 +203,8 @@ class PastSetupVerdictTest(unittest.TestCase):
     def test_a_child_whose_entry_the_ledger_would_not_replay_is_no_entry(self):
         broken = {"no visit and no stage": {"visit": ..., "stage": ...}, "no stage": {"stage": ...},
                   "no visit": {"visit": ...}, "an unknown stage": {"stage": "somewhere"},
-                  "a zero visit": {"visit": 0}}
+                  "a zero visit": {"visit": 0}, "a step that is no step id": {"step": "Not A Step"},
+                  "an extra member": {"note": "x"}}
         for name, missing in broken.items():
             with self.subTest(name):
                 shutil.rmtree(self.root)
@@ -219,16 +223,152 @@ class PastSetupVerdictTest(unittest.TestCase):
         cases = {
             "an unpublished temporary directory": {"directory": f".{rid('t')}.tmp"},
             "a directory that is no run id": {"directory": "scratch"},
-            "a run.json naming another run": {"claims": rid("other")},
         }
         for name, extra in cases.items():
             with self.subTest(name):
                 shutil.rmtree(self.root)
                 self.root.mkdir()
-                write_run(self.root, "t", HOUR, [("step_entered", "start", HOUR, {})], "deliver", **extra)
+                write_run(self.root, "t", HOUR, [entry(HOUR, step="start")], "deliver", **extra)
                 direct_delivery(self.root, "q", 2 * HOUR, 3 * HOUR)
                 code, report = self.verdict(4 * HOUR)
                 self.assertEqual((code, report["verdict"], report["run"]), (0, "met", rid("q")))
+
+
+    def test_a_fixture_the_checker_calls_met_is_a_run_the_ledger_replays(self):
+        direct_delivery(self.root, "r", HOUR, 2 * HOUR)
+        self.assertEqual(self.verdict(3 * HOUR)[0], 0)
+        for run_dir in sorted(self.root.iterdir()):
+            with self.subTest(run=run_dir.name):
+                self.assertEqual(engine_ledger.read_run(run_dir)["run"], run_dir.name)
+                self.assertTrue(engine_ledger.replay(run_dir / "events.jsonl"))
+
+    def test_a_run_the_ledger_would_not_read_is_an_error_not_an_absent_run(self):
+        broken = {
+            "a run.json naming another run": {"claims": rid("other")},
+            "a run.json missing run members": {"drop": ("host", "platform_revision")},
+            "a run.json that is not json": {"raw": "{"},
+            "a run.json whose start is no instant": {"extra": {"started": "yesterday"}},
+        }
+        for name, how in broken.items():
+            with self.subTest(name):
+                shutil.rmtree(self.root)
+                self.root.mkdir()
+                write_run(self.root, "e", HOUR, direct_root_events(), "deliver", claims=how.get("claims"))
+                document = self.root / rid("e") / "run.json"
+                loaded = json.loads(document.read_text(encoding="utf-8"))
+                loaded = {key: value for key, value in loaded.items() if key not in how.get("drop", ())}
+                document.write_text(how.get("raw") or json.dumps({**loaded, **how.get("extra", {})}),
+                                    encoding="utf-8")
+                direct_delivery(self.root, "q", 5 * HOUR, 6 * HOUR)  # a later success must not stand in for it
+                with self.assertRaises(engine_run_evidence.EvidenceError) as caught:
+                    self.verdict(7 * HOUR)
+                self.assertEqual(caught.exception.kind, "run_unreadable")
+
+    def test_a_run_unreadable_but_named_before_the_anchor_is_no_candidate(self):
+        old = "1-20261126T090000Z-abcd"  # a run id names the second its run started
+        write_run(self.root, "old", -DAY, direct_root_events(-DAY), "deliver", directory=old, claims=old)
+        (self.root / old / "run.json").write_text("{", encoding="utf-8")
+        direct_delivery(self.root, "q", 5 * HOUR, 6 * HOUR)
+        code, report = self.verdict(7 * HOUR)
+        self.assertEqual((code, report["run"]), (0, rid("q")))
+
+    def test_a_runs_directory_that_cannot_be_listed_is_an_error_and_an_absent_one_holds_no_run(self):
+        shutil.rmtree(self.root)
+        self.root.write_text("not a directory", encoding="utf-8")
+        with self.assertRaises(engine_run_evidence.EvidenceError) as caught:
+            self.verdict(3 * DAY)
+        self.assertEqual(caught.exception.kind, "runs_unreadable")
+        self.root.unlink()
+        self.assertEqual(self.verdict(3 * HOUR)[0], 75)
+
+    def test_a_root_whose_events_the_ledger_would_not_replay_has_no_lane(self):
+        write_run(self.root, "r", HOUR, direct_root_events(), "deliver")
+        events = self.root / rid("r") / "events.jsonl"
+        events.write_text(events.read_text(encoding="utf-8") + '{"event": "step_entered", "step": "x"}\n',
+                          encoding="utf-8")
+        write_run(self.root, "d", HOUR, [entry(2 * HOUR)], "direct", parent="r")
+        for now, verdict in ((3 * HOUR, "not_yet"), (3 * DAY, "lane_unknown")):
+            code, report = self.verdict(now)
+            self.assertEqual((code, report["verdict"], report["lane"], report["child"]), (75, verdict, None, None))
+
+
+class LedgerContractTest(unittest.TestCase):
+    """`engine_run_evidence` holds the ledger's contract for what the check reads; each table is the ledger's."""
+
+    def test_its_tables_are_the_ledgers(self):
+        self.assertEqual(engine_run_evidence.RUN_ID_RE.pattern, engine_ledger.RUN_ID_RE.pattern)
+        self.assertEqual(engine_run_evidence.NAME_RE.pattern, procedure_terms.NAME_RE.pattern)
+        self.assertEqual(engine_run_evidence.RUN_MEMBERS, frozenset(engine_ledger.RUN_MEMBERS))
+        self.assertEqual(engine_run_evidence.OPTIONAL_RUN_MEMBERS, frozenset(engine_ledger.OPTIONAL_RUN_MEMBERS))
+        self.assertEqual(engine_run_evidence.STAGES, procedure_terms.STAGES)
+        self.assertEqual(engine_run_evidence.NEEDS, procedure_terms.NEEDS)
+        self.assertEqual({kind: frozenset(members) for kind, members in engine_run_evidence.EVENT_MEMBERS.items()},
+                         dict(engine_ledger.EVENT_MEMBERS))
+        self.assertEqual({kind: frozenset(members) for kind, members in engine_run_evidence.EVENT_OPTIONAL.items()},
+                         dict(engine_ledger.EVENT_OPTIONAL))
+
+    def test_it_accepts_and_refuses_the_lines_the_ledger_does(self):
+        at = stamp(HOUR)
+        good = {"step_entered": {"step": "s", "visit": 1, "stage": "setup"},
+                "transition_taken": {"step": "lane", "visit": 2, "outcome": "direct", "to": "t"},
+                "stop_reached": {"step": "s", "stop": "tool-denied", "need": "owner-decision"},
+                "run_done": {}, "run_continued": {"step": "s", "visit": 1}}
+        lines = [{"event": kind, "at": at, **members} for kind, members in good.items()]
+        entered = good["step_entered"]
+        lines += [{"event": "step_entered", "at": at, **{**entered, **bad}} for bad in (
+            {"step": "Bad"}, {"step": 1}, {"visit": 0}, {"visit": True}, {"visit": "1"}, {"stage": "elsewhere"},
+            {"extra": 1})]
+        lines += [{"event": "step_entered", "at": at, "step": "s", "visit": 1},
+                  {"event": "step_entered", "step": "s", "visit": 1, "stage": "setup"},
+                  {"event": "step_entered", "at": "soon", "step": "s", "visit": 1, "stage": "setup"},
+                  {"event": "stop_reached", "at": at, "step": "s", "stop": "x", "need": "maybe"},
+                  {"event": "unknown", "at": at}, {"event": "run_done", "at": at, "step": "s"}]
+        for document in lines:
+            raw = json.dumps(document).encode("utf-8")
+            with self.subTest(raw=raw):
+                try:
+                    engine_ledger.parse_event_line(raw)
+                    wanted = True
+                except engine_ledger.LedgerError:
+                    wanted = False
+                try:
+                    engine_run_evidence.event(raw)
+                    got = True
+                except ValueError:
+                    got = False
+                self.assertEqual(got, wanted)
+        for raw in (b'{"event": "run_done", "at": "' + at.encode() + b'", "at": "' + at.encode() + b'"}',
+                    b'{"event": "run_done", "at": "' + at.encode() + b'", "x": NaN}', b"[]", b"\xff"):
+            with self.subTest(raw=raw):
+                with self.assertRaises(ValueError):
+                    engine_run_evidence.event(raw)
+
+    def test_it_reads_a_run_as_the_ledger_does(self):
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        cases = {"ok": {}, "a child": {"parent": rid("x")}, "a bad parent": {"parent": "x"},
+                 "a bad sequence": {"sequence": 0}, "a bool sequence": {"sequence": True},
+                 "a bad project": {"project": 1}, "an empty tracker": {"tracker": ""}, "a starter": {"starter": "s"},
+                 "an unknown member": {"note": 1}, "another run": {"run": rid("other")},
+                 "no host": {"host": ...}}
+        for name, change in cases.items():
+            with self.subTest(name):
+                shutil.rmtree(root)
+                write_run(root, "r", HOUR, [], "deliver")
+                path = root / rid("r") / "run.json"
+                document = {**json.loads(path.read_text(encoding="utf-8")), **change}
+                path.write_text(json.dumps({k: v for k, v in document.items() if v is not ...}), encoding="utf-8")
+                try:
+                    engine_ledger.read_run(root / rid("r"))
+                    wanted = True
+                except engine_ledger.LedgerError:
+                    wanted = False
+                try:
+                    engine_run_evidence.read_run(root / rid("r"))
+                    got = True
+                except ValueError:
+                    got = False
+                self.assertEqual(got, wanted)
 
 
 class EngineDeliverPastSetupTest(unittest.TestCase):
@@ -282,6 +422,15 @@ class EngineDeliverPastSetupTest(unittest.TestCase):
             self.assertEqual(verify_checks.engine_deliver_past_setup(
                 self.shas["S"], runs_root=self.runs, log=self.store, repo_root=self.repo,
                 now=ANCHOR + now)[0], code)
+
+    def test_an_unreadable_runs_root_exits_2_with_its_label(self):
+        self.activate()
+        unreadable = self.dir / "runs-file"
+        unreadable.write_text("x", encoding="utf-8")
+        done = run_from_root([WRAPPER, "--since", self.shas["S"], "--runs-root", str(unreadable),
+                              "--log", str(self.store), "--repo-root", str(self.repo)])
+        self.assertEqual(done.returncode, 2, done.stdout + done.stderr)
+        self.assertIn("verify-checks: runs_unreadable:", done.stderr)
 
 
 if __name__ == "__main__":
