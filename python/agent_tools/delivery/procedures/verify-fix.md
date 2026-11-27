@@ -3,7 +3,7 @@ The verification of issue {{run.issue}} failed in the worktree {{preflight.workt
 The problems are:
 {{round.problems}}
 
-A problem with reran true failed again on its one rerun at the same head, so it is not flaky. Find the cause in the branch's diff (git -C {{preflight.worktree_path}} diff origin/{{preflight.integration_branch}}...HEAD), make the smallest fix and commit it. Never weaken, skip or delete a test or a check to make it pass.
+A problem with status finding is a defect a review of an earlier fix of this verification reported (file, failing_input, summary); the earlier fix is already committed on the branch, so fix that defect on top of it. A problem with reran true failed again on its one rerun at the same head, so it is not flaky. Find the cause in the branch's diff (git -C {{preflight.worktree_path}} diff origin/{{preflight.integration_branch}}...HEAD), make the smallest fix and commit it. Never weaken, skip or delete a test or a check to make it pass.
 
 Edit a file outside the branch's diff only when you have established its cause: this branch's change or this delivery's environment. List each such file in outside_diff with file and why.
 

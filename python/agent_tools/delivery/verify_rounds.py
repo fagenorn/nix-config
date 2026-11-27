@@ -2,6 +2,7 @@
 contract and its worktree; nothing here writes.
 
     verify-rounds round --holder H --worktree-path P
+    verify-rounds round-reviewed --holder H --worktree-path P
     verify-rounds fix-range --worktree-path P --head S
     verify-rounds retested --holder H --worktree-path P
 
@@ -25,6 +26,13 @@ run is the last. Each command prints one compact JSON line; a failure prints `{"
 - any other verdict than `failed` or `dirty` is `verify` (`deliver-standard.js:2937`).
 - any `fail` result with `no_slot` true is `verify`, before the dirty problem is looked at, so slot exhaustion
   never reaches a fix (`deliver-standard.js:2912`).
+- (`round-reviewed` only; `round` keeps the verdicts a run saved before this subcommand maps, so a continued
+  older run still validates) a run whose latest narrowing graded `findings` (a fix review with a blocking finding)
+  and that no later fix review has graded, whatever transitions a continue added since, is
+  `fix` while fewer than `FIX_ROUNDS` `fix` entries are over the verify runs, with each blocking finding of the
+  latest fix review added to `problems` as `{id: review, status: finding, summary, file, failing_input, kind,
+  reran: false}`, else `review-spent`; this is answered before the unreviewed-head rule, because the fix moved
+  the head the verification read; the project lead's order is at most two fix rounds.
 - `FIX_ROUNDS` or more `fix` entries over the verify runs is `spent` (`deliver-standard.js:2912`, `vRounds < 2`).
 - otherwise `fix`; `problems` is one entry per `fail` result (`reran` its `reran is True`), then the `?`
   problem when the tree is not `clean` (`DIRTY`) or the verdict is `dirty` on a clean tree (`MOVED`)
@@ -69,10 +77,13 @@ from agent_tools.verification import verified_tree
 VERIFY = "verify"
 VERIFICATION_STEPS = ("checks", "rerun")
 ROUND = "round"
+ROUND_REVIEWED = "round-reviewed"
 FIX = "fix"
 WS_CHECK = "ws-check"
 RETEST = "retest"
 RETESTED = "retested"
+REVIEWS = ("fix-review", "fix-review-again")
+NARROWINGS = ("narrowing", "narrowing-again")
 FIX_ROUNDS = 2
 DIRTY = "the worktree has uncommitted changes, so the verified tree is not the pushed head"
 MOVED = "the head moved while the verification ran, so no result speaks for one commit"
@@ -163,6 +174,24 @@ def _problems(read: Mapping) -> list[dict]:
     return problems
 
 
+def _findings(run: Path) -> list[dict] | None:
+    """The blocking findings of the fix review that a narrowing took to `round` and no later review has
+    graded: a continue's preflight and checks between them never hide the finding. None when there are none."""
+    outstanding = False
+    for event in _events(run):
+        if event["event"] == "transition_taken" and event["step"] in NARROWINGS:
+            outstanding = event["outcome"] == "findings"
+        elif event["event"] == "outcome_graded" and event["step"] in REVIEWS:
+            outstanding = False
+    if not outstanding:
+        return None
+    review = land_tally.latest_result(run, REVIEWS) or {}
+    found = review.get("findings")
+    return [{"id": "review", "status": "finding", "summary": f.get("summary", ""), "file": f.get("file", ""),
+             "failing_input": f.get("failing_input", ""), "kind": f.get("kind", ""), "reran": False}
+            for f in found if isinstance(f, dict) and f.get("severity") != "minor"] if isinstance(found, list) else []
+
+
 def _guards(worktree: str) -> list[dict]:
     root = Path(worktree)
     try:
@@ -178,8 +207,9 @@ def _guards(worktree: str) -> list[dict]:
             for i in ids or verified_tree._run_ids(policy)]
 
 
-def answer(holder: str, worktree: str, root: Path | None = None) -> dict:
-    """The round's `{verdict, head, clean, results, problems, start_head, guards}`."""
+def answer(holder: str, worktree: str, root: Path | None = None, reviewed: bool = False) -> dict:
+    """The round's `{verdict, head, clean, results, problems, start_head, guards}`; `reviewed` (the
+    `round-reviewed` subcommand) also reads a fix review's outstanding findings."""
     runs = verify_runs(holder, root)
     read = land_tally.latest_result(runs[-1], VERIFICATION_STEPS)
     if read is None:
@@ -189,7 +219,11 @@ def answer(holder: str, worktree: str, root: Path | None = None) -> dict:
     results = read.get("results") if isinstance(read.get("results"), list) else []
     start = ""
     verdict = read.get("verdict")
-    if _unreviewed(runs[-1]):
+    findings = _findings(runs[-1]) if reviewed else None
+    if findings is not None:
+        verdict = "review-spent" if land_tally.entered(runs, FIX) >= FIX_ROUNDS else "fix"
+        problems += findings
+    elif _unreviewed(runs[-1]):
         verdict = "verify"
     elif verdict == "passed":
         found = untested_start(runs)
@@ -260,7 +294,8 @@ class _Parser(argparse.ArgumentParser):
 def _parser() -> argparse.ArgumentParser:
     parser = _Parser(prog="verify-rounds")
     commands = parser.add_subparsers(dest="command", required=True, parser_class=_Parser)
-    for name, flags in (("round", ("holder", "worktree-path")), ("fix-range", ("worktree-path", "head")),
+    for name, flags in (("round", ("holder", "worktree-path")), (ROUND_REVIEWED, ("holder", "worktree-path")),
+                        ("fix-range", ("worktree-path", "head")),
                         (RETESTED, ("holder", "worktree-path"))):
         command = commands.add_parser(name)
         for flag in flags:
@@ -273,8 +308,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "fix-range":
             emit(fix_range(args.worktree_path, args.head))
-        elif args.command == "round":
-            emit(answer(args.holder, args.worktree_path))
+        elif args.command in ("round", ROUND_REVIEWED):
+            emit(answer(args.holder, args.worktree_path, reviewed=args.command == ROUND_REVIEWED))
         else:
             emit(retested(args.holder, args.worktree_path))
     except TallyError as error:
