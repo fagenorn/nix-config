@@ -585,8 +585,14 @@ in
 
   # Claude-only bridge orchestration: Codex is the reviewer this skill drives,
   # so it is linked only into ~/.claude/skills.
+  # The review effort is declared once in codex_review_effort.py; the installed
+  # skill is rendered from that declaration, so it never lags a checked-in copy.
   home.file.".claude/skills/codex-collaboration" = {
-    source = ./skills/codex-collaboration;
+    source = pkgs.runCommand "codex-collaboration-skill" { nativeBuildInputs = [ pkgs.python3 ]; } ''
+      cp -R ${./skills/codex-collaboration} "$out"
+      chmod -R u+w "$out"
+      python3 ${../../../python/agent_tools/delivery/codex_review_effort.py} --render-skill "$out"
+    '';
     recursive = true;
   };
 

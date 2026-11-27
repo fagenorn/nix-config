@@ -107,7 +107,7 @@ test:
 
 # Run the suite members this branch touches, or the whole suite when a build input changes (the `test-touched` command).
 test-touched:
-  tools="$(nix build --no-link --print-out-paths '{{justfile_directory()}}#agent-platform.tools')" && test -n "$tools" && AGENT_PLATFORM_TOOLS="$tools/bin" WORKFLOW_POLICY_SURFACE=source PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.delivery.touched_tests --base origin/main --source-root python --pair home/common/claude-code/lifecycle_guard.py=tests/test_claude_permission_guard.py --cover 'python/agent_tools/delivery/engine*.py=tests/test_engine_*.py' --cover 'python/agent_tools/delivery/host_admission.py=tests/test_engine_*.py' --cover 'python/agent_tools/delivery/procedure_check.py=tests/test_engine_*.py' --cover 'python/agent_tools/delivery/procedure_terms.py=tests/test_engine_*.py' --cover 'python/agent_tools/delivery/size_caps.py=tests/test_engine_*.py' --cover 'python/agent_tools/delivery/lane_rule.py=tests/test_engine_*.py' --cover 'python/agent_tools/delivery/rule_reader.py=tests/test_engine_*.py' --cover 'python/agent_tools/delivery/procedures/*=tests/test_engine_*.py' --cover 'tests/engine_*.py=tests/test_engine_*.py' --cover 'tests/fixtures/engine-*=tests/test_engine_*.py' --build-command 'just build' --env-from 'tests/test_claude_permission_guard.py=just claude-guard-test-env' --build-when '*.nix' --build-when flake.lock --build-when .sops.yaml --build-when 'data/*' --build-when 'homebrew/*' --build-when 'patches/*' --build-when 'secrets/*' --build-when 'vars/*'
+  tools="$(nix build --no-link --print-out-paths '{{justfile_directory()}}#agent-platform.tools')" && test -n "$tools" && AGENT_PLATFORM_TOOLS="$tools/bin" WORKFLOW_POLICY_SURFACE=source PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.delivery.touched_tests --base origin/main --source-root python --pair home/common/claude-code/lifecycle_guard.py=tests/test_claude_permission_guard.py --cover 'python/agent_tools/delivery/engine*.py=tests/test_engine_*.py' --cover 'python/agent_tools/delivery/host_admission.py=tests/test_engine_*.py' --cover 'python/agent_tools/delivery/procedure_check.py=tests/test_engine_*.py' --cover 'python/agent_tools/delivery/procedure_terms.py=tests/test_engine_*.py' --cover 'python/agent_tools/delivery/size_caps.py=tests/test_engine_*.py' --cover 'python/agent_tools/delivery/lane_rule.py=tests/test_engine_*.py' --cover 'python/agent_tools/delivery/rule_reader.py=tests/test_engine_*.py' --cover 'python/agent_tools/delivery/procedures/*=tests/test_engine_*.py' --cover 'tests/engine_*.py=tests/test_engine_*.py' --cover 'tests/fixtures/engine-*=tests/test_engine_*.py' --build-command 'just build' --env-from 'tests/test_claude_permission_guard.py=just claude-guard-test-env' --build-when '*.nix' --build-when flake.lock --build-when .sops.yaml --build-when 'data/*' --build-when 'homebrew/*' --build-when 'patches/*' --build-when 'secrets/*' --build-when 'vars/*' --dotnet-tests
 
 # Run Conformance over every rule as the required CI check does (the conformance command).
 conformance:
@@ -211,6 +211,7 @@ agent-workflow-tests *args:
     tests/test_engine_cut_continue.py \
     tests/test_engine_resume.py \
     tests/test_engine_housekeeping.py \
+    tests/test_engine_history_steps.py \
     tests/test_engine_stop.py \
     tests/test_engine_caps.py \
     tests/test_engine_fanout.py \
@@ -219,6 +220,8 @@ agent-workflow-tests *args:
     tests/test_engine_stubbed_run.py \
     tests/test_engine_stubbed_guard.py \
     tests/test_engine_stubbed_world.py \
+    tests/test_proof_run.py \
+    tests/test_bound_issues.py \
     tests/test_engine_step_coverage.py \
     tests/test_independent_review.py \
     tests/test_issue_setup.py \
@@ -455,6 +458,7 @@ agent-workflow-tests *args:
     tests/test_console_inbox.py \
     tests/test_console_tracker.py \
     tests/test_console_digest.py \
+    tests/test_console_delivery_ended.py \
     tests/test_console_writes.py \
     tests/test_console_answer.py \
     tests/test_console_sprints.py \
@@ -517,6 +521,7 @@ agent-workflow-tests *args:
     tests/test_console_guest_account.py \
     tests/test_console_units.py \
     tests/test_owner_services_units.py \
+    tests/test_proof_run_units.py \
     tests/test_system_packages.py \
     home/common/agent-skills/tests/test_program_harness.py \
     home/common/agent-skills/tests/test_deliver_standard_program.py \

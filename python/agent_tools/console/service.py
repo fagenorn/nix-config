@@ -1898,7 +1898,7 @@ unreadable, again only after it read successfully in between) and `console: jour
 <session_id> <reason>` (a session's journal listing turned unreadable, likewise).
 Engine runs: right after `poll_deliveries()` the same thread calls `poll_engine_runs()`, which reads the runs
 root with `engine_runs.EngineRuns` outside the ingest lock (none without `engine_runs_root`), holds the states in memory,
-never logs and publishes. Stderr lines: `console: engine_run_unreadable <run> <reason>` (once, until it reads again)
+logs only the ending of a run (`engine_run.ended`, once per run, see `engine_runs.py` P10) and publishes. Stderr lines: `console: engine_run_unreadable <run> <reason>` (once, until it reads again)
 and `console: engine_poll_failed <Type>: <message>`.
 
 Spend (#1134): the thread named `SPEND_THREAD`, started by `start()`, calls `poll_spend()` every
@@ -4769,6 +4769,9 @@ class ConsoleService(ActionPermit):
         self._reader = deliveries.JournalReader()
         self._runs: dict[Path, deliveries.RunFold] = {}
         self._run_moves: dict[tuple[str, str], int] = {}
+        self._finished: set[Path] = set()  # journals whose final record a poll handled (`deliveries.ended_unseen`)
+        self._delivery_floor_ms = int(clock() * 1000)
+        self._engine_ended: frozenset[str] = frozenset()
         self._unreadable: set[str] = set()
         self._engine = None if engine_runs_root is None else engine_runs.EngineRuns(engine_runs_root)
         self._engine_states: tuple = ()
@@ -4912,6 +4915,7 @@ class ConsoleService(ActionPermit):
             self._pin_launches = pin.pin_launches(events)
             self._derive_digest(events)
             self._deliveries = deliveries.delivery_states(events)
+            self._engine_ended = engine_runs.ended_runs(events)
             self._moved = idle.last_moved(events)
             self._sprints = sprints.sprint_states(events)
             self._withdrawn = sprints.withdrawn_ids(events)
@@ -10209,7 +10213,7 @@ class ConsoleService(ActionPermit):
 
     def poll_deliveries(self) -> list[Event]:
         """Append what the run journals of the live sessions show that the log does not, and publish."""
-        folded = self._deliveries
+        folded, floor_ms = self._deliveries, int(self._clock() * 1000)
         scanned = {sid: s for sid, s in self._sessions.items()
                    if s.state != sessions.ENDED and s.repo is not None}
         projects_dirs = self._projects_dirs()
@@ -10232,11 +10236,12 @@ class ConsoleService(ActionPermit):
                 key = (sid, journal.parent.name)
                 path = str(journal)
                 final = deliveries.has_final_record(journal)
-                # A run that ended between two polls, or while the console was down (the log still
-                # holds it), is read once more, so its close-out reaches the log as the run's last
-                # observation before the run leaves.
-                ended = final is True and (journal in self._runs or key in folded)
+                # A run that ended between two polls (it may have started in between too), or while the console
+                # was down (the log still holds it), is read once more, so its close-out reaches the log.
+                ended = final is True and (journal in self._runs or key in folded
+                                           or deliveries.ended_unseen(journal, self._finished, self._delivery_floor_ms))
                 if final is True and not ended:
+                    self._finished.add(journal)
                     self._reader.forget(journal)
                     self._unreadable.discard(path)
                     continue
@@ -10247,12 +10252,9 @@ class ConsoleService(ActionPermit):
                 if ended:
                     self._reader.forget(journal)
                 if isinstance(chunk, deliveries.Unreadable):
-                    if key in folded:
-                        readings[key] = folded[key]
-                    if journal in self._runs:
-                        runs[journal] = self._runs[journal]
-                    if key in self._run_moves:
-                        run_moves[key] = self._run_moves[key]
+                    for t, s, k in ((readings, folded, key), (runs, self._runs, journal), (run_moves, self._run_moves, key)):
+                        if k in s:
+                            t[k] = s[k]
                     self._warn_once(path, f"console: journal_unreadable {path} {chunk.reason}")
                     continue
                 self._unreadable.discard(path)
@@ -10268,7 +10270,7 @@ class ConsoleService(ActionPermit):
                 if issues:
                     readings[key] = deliveries.DeliveryState(sid, key[1], chunk.moved_ms, issues)
                 if ended:
-                    self._unreadable.discard(path)
+                    self._finished.add(journal)
                     if issues:
                         terminal.append(key)
                 else:
@@ -10276,17 +10278,11 @@ class ConsoleService(ActionPermit):
         for journal in self._runs.keys() - runs.keys():
             self._reader.forget(journal)
         self._runs = runs
+        self._finished, self._delivery_floor_ms = {j for j in self._finished if j.parents[3].name in scanned}, floor_ms
         with self._ingest:
             self._run_moves = run_moves
-
-            def project_of(sid: str) -> str | None:
-                repo = scanned[sid].repo
-                return project_for(repo, self._states)
-
-            changes = deliveries.delivery_changes(self._deliveries, readings, scanned, project_of)
-            changes += [(deliveries.DELIVERY_GONE, project_of(sid), {"session_id": sid, "run_id": run})
-                        for sid, run in terminal]
-            appended = self.log.append(changes)
+            appended = self.log.append(deliveries.delivery_changes(
+                self._deliveries, readings, scanned, lambda sid: project_for(scanned[sid].repo, self._states), terminal))
             if appended:
                 self._fold(appended)
             self._publish()
@@ -10303,6 +10299,9 @@ class ConsoleService(ActionPermit):
         self._unreadable.difference_update(f"engine {s.run}" for s in poll.states if s.run not in failed)
         with self._ingest:
             self._engine_states = poll.states
+            appended = self.log.append(engine_runs.ended_changes(poll.states, self._engine_ended, int(self._clock() * 1000)))
+            if appended:
+                self._fold(appended)
             self._publish()
 
     def _poll_loop(self) -> None:
@@ -10317,7 +10316,7 @@ class ConsoleService(ActionPermit):
                     print(f"console: {label}_failed {type(error).__name__}: {error}", file=sys.stderr)
 
     def _fold(self, appended: list[Event]) -> None:
-        new = digest.moments(appended, self._sessions, self._inbox, self._sprints)
+        new = digest.moments(appended, self._sessions, self._inbox, self._sprints, self._deliveries)
         self._looked = digest.last_looked(appended, self._looked)
         self._states = project_states(appended, self._states)
         self._rerun_record = permit.rerun_record(appended, self._rerun_record)
@@ -10344,6 +10343,7 @@ class ConsoleService(ActionPermit):
         self._deferred = approve.deferrals(appended, self._deferred)
         self._pin_launches = pin.pin_launches(appended, self._pin_launches)
         self._deliveries = deliveries.delivery_states(appended, self._deliveries)
+        self._engine_ended = engine_runs.ended_runs(appended, self._engine_ended)
         self._moved = idle.last_moved(appended, self._moved)
         self._sprints = sprints.sprint_states(appended, self._sprints)
         self._withdrawn = sprints.withdrawn_ids(appended, self._withdrawn)

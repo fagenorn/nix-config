@@ -2,13 +2,15 @@
 
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-from agent_tools.delivery import routing
+from agent_tools.delivery import router, routing
+from agent_tools.delivery.dotnet_solution import SOLUTION_ROOT
 from tests.never_rise_world import commit_all, mark_base, repo, write
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -181,6 +183,40 @@ class LiveTreeTest(unittest.TestCase):
                 "the-bar.md", "stacks/python.md", "docs/standards/agent-helpers.md",
                 "docs/standards/package-layout.md")):
             self.assertTrue(path.endswith(suffix), (path, suffix))
+
+    def test_a_dotnet_source_loads_the_dotnet_shards_and_its_areas_index(self):
+        path = f"{SOLUTION_ROOT}/Delivery/Widget.cs"
+        standards = REPO_ROOT / "home/common/agent-skills/standards"
+        platform = routing.load_platform(standards)
+        project = routing.read_project(router.project_files(REPO_ROOT))
+        loaded = routing.single_path_bytes(project, platform, path)
+        areas = [a for a in project.areas if any(routing.glob_matches(g, path) for g in a.globs)]
+        self.assertIn("dotnet.md", routing.stack_shards(path))
+        self.assertEqual([a.name for a in areas], ["Delivery", "System"])
+        shards = ("the-bar.md", "stacks/dotnet-ai.md", "stacks/dotnet-data.md", "stacks/dotnet.md")
+        # The records on disk: every one is indexed as its first line without the "# " plus a
+        # newline, so each area's expected index comes from the headings, not from `routing`.
+        on_disk = {
+            area: sorted(name for name in os.listdir(REPO_ROOT / "docs/areas" / area / "adr")
+                         if re.fullmatch(r"\d{3}-[a-z0-9-]+\.md", name))
+            for area in ("delivery", "system")}
+
+        def expected_index(area):
+            total = 0
+            for name in on_disk[area]:
+                text = (REPO_ROOT / "docs/areas" / area / "adr" / name).read_text(encoding="utf-8")
+                total += len(text.split("\n", 1)[0].removeprefix("# ").encode("utf-8")) + 1
+            return total
+
+        expected_delivery = expected_index("delivery")
+        expected_system = expected_index("system")
+        self.assertGreater(len(on_disk["delivery"]), 0)
+        self.assertGreater(expected_delivery, 0)
+        self.assertEqual([len(a.records) for a in areas],
+                         [len(on_disk["delivery"]), len(on_disk["system"])])
+        self.assertEqual(
+            loaded,
+            sum(len(platform.files[k]) for k in shards) + expected_delivery + expected_system)
 
 
 if __name__ == "__main__":

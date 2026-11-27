@@ -3,6 +3,9 @@
 Checks that every term in the map's term table resolves to an area file that
 actually defines it, that every file is inside its budget, that every governs:
 glob matches something real, and that every relative link in the map resolves.
+A .cs file under the solution root that no area's governs glob matches is a
+finding, and only those files are read for it. A governs glob under the
+solution root may match nothing yet.
 
 Where the repo has a docs/areas/ directory it also enforces the standard docs
 layout: area directories and map rows agree in both directions, ADR records are
@@ -34,11 +37,16 @@ cannot be started exits 2 and one ended by a signal exits 1.
 
 from __future__ import annotations
 
+import fnmatch
 import os
 import re
 import subprocess
 import sys
-from pathlib import Path
+from collections.abc import Iterable
+from pathlib import Path, PurePosixPath
+
+from agent_tools.delivery.dotnet_format_lint import sources
+from agent_tools.delivery.dotnet_solution import SOLUTION_ROOT
 
 MAP_BUDGET = 150
 AREA_BUDGET_DEFAULT = 200
@@ -75,6 +83,28 @@ def table_rows(block: str | None) -> list[list[str]]:
             continue
         rows.append(cells)
     return rows[1:]
+
+
+def governs(path: str, globs: Iterable[str]) -> bool:
+    """True when `path` (POSIX, relative to the root) matches some glob; `*` stays in one level, `**` spans many."""
+    parts = PurePosixPath(path).parts
+    return any(pattern_parts and _segments_match(parts, pattern_parts)
+               for pattern_parts in map(pattern_segments, globs))
+
+
+def pattern_segments(pattern: str) -> tuple[str, ...]:
+    """A glob's segments as `Path.glob` reads them: a `.` or empty segment is dropped."""
+    return PurePosixPath(pattern).parts
+
+
+def _segments_match(parts: tuple[str, ...], pattern: tuple[str, ...]) -> bool:
+    """Segment-wise match, so it needs no `PurePath.full_match` (Python 3.13)."""
+    if not pattern:
+        return not parts
+    head, rest = pattern[0], pattern[1:]
+    if head == "**":
+        return any(_segments_match(parts[skip:], rest) for skip in range(len(parts) + 1))
+    return bool(parts) and fnmatch.fnmatchcase(parts[0], head) and _segments_match(parts[1:], rest)
 
 
 def budget_of(text: str) -> int | None:
@@ -266,12 +296,23 @@ def check(root: Path, map_path: Path) -> list[str]:
                 matched = None
                 errors.append(f"{rel_map}: area '{name}' has an unparseable glob `{pattern}`")
                 continue
-            if matched is None:
+            if matched is None and pattern_segments(pattern)[:1] != (SOLUTION_ROOT,):
                 errors.append(f"{rel_map}: area '{name}' glob `{pattern}` matches no existing path")
         areas[name] = (area_file, globs)
 
     if not areas:
         errors.append(f"{rel_map}: no '## Areas' table found")
+
+    # Every .NET source belongs to an area.
+    every_glob = [pattern for _file, globs in areas.values() for pattern in globs]
+    try:
+        for source in sources(root):
+            if source.name.endswith(".cs"):
+                relative = source.relative_to(root).as_posix()
+                if not governs(relative, every_glob):
+                    errors.append(f"{relative}: no area's governs glob matches this .NET source")
+    except OSError as error:
+        errors.append(f"{SOLUTION_ROOT}: cannot list the .NET sources ({error.strerror or type(error).__name__})")
 
     # Area files: budget, and the terms they define.
     defined: dict[Path, set[str]] = {}
