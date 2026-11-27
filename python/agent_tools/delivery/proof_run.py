@@ -351,7 +351,7 @@ def prove(tip: Callable[[], str], *, mode: str, root: Callable[[], Path], slug: 
           tracker: FixtureTracker, engine: Callable[[str], Sequence[str]], proven: Path,
           attempts: Path, lock: Path, env: Mapping[str, str] | None = None,
           now: Callable[[], datetime] = _utc_now) -> Outcome:
-    """One attempt on the revision `tip()` names: the lock, the tip, the unmoved check, the reset, the engine.
+    """One attempt on the revision `tip()` names: lock, tip, unmoved check, reset, engine.
 
     The tip is read once the lock is held, so the revision proven is the tip at the time the operation
     ran and never one an earlier caller read before another caller proved a newer one. `root()` names
