@@ -3,6 +3,7 @@
 Run: just agent-workflow-tests
 """
 import contextlib
+import functools
 import io
 import json
 import shutil
@@ -966,6 +967,35 @@ class ColleagueAccountMoveTest(StopServiceTest):
         svc.remove_account("colleague-1", "colleague-1")
         self.assertEqual(self.stops_in(), [])
         self.assertEqual([call.profile for call in self.launched()], ["zeta"] * 2)
+
+    def test_a_failed_proc_read_never_lets_a_removal_start_a_second_manager(self):
+        proc = self.store.parent / "fake-proc"
+        (proc / "self" / "ns").mkdir(parents=True)
+        (proc / "self" / "stat").write_text("1 (x) S")
+        (proc / "self" / "ns" / "pid").symlink_to("pid:[4026532224]")
+        (proc / "2164" / "stat").mkdir(parents=True)
+        machine_id = self.store.parent / "machine-id"
+        machine_id.write_text("21b1c3eb3a554a8792391e610443b8b8\n")
+        registry = support.profile_dir(self.store, "colleague-1") / "sessions"
+        registry.mkdir()
+        svc = self.begin_pool(count=1, listing=None, session_dirs=[registry])
+        (sid,) = self.sids
+        (registry / "2164.json").write_text(json.dumps({
+            "pid": 2164, "sessionId": FIRST, "cwd": "/srv/p01", "status": "idle",
+            "name": manager.session_name("owner/p01", sid), "procStart": "976",
+            "pidDomain": "linux:21b1c3eb3a554a8792391e610443b8b8:pid:[4026532224]"}))
+        self.now[0] += sprints.STOP_SETTLE_MS // 1000 + 1
+        err = io.StringIO()
+        with mock.patch.object(sessions, "process_matches", functools.partial(
+                sessions.process_matches, proc=proc, machine_id=machine_id)):
+            with contextlib.redirect_stderr(err), self.assertRaises(sprints.Refused) as raised:
+                svc.remove_account("colleague-1", "colleague-1")
+        self.assertEqual(str(raised.exception), account_remove.busy("colleague-1"))
+        self.assertEqual(self.order, [])
+        self.assertEqual(self.launched(), [])
+        self.assertEqual(svc._launching, {})
+        self.assertTrue(self.profile_path("colleague-1").is_dir())
+        self.assertIn("console: manager_move_failed IsADirectoryError", err.getvalue())
 
     def test_a_removal_waits_for_a_manager_whose_stop_is_pending(self):
         svc = self.begin_pool()
