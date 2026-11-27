@@ -193,7 +193,7 @@ from agent_tools.delivery import (
     rule_reader,
 )
 from agent_tools.delivery.engine_commands import CommandTable, UnknownCommand
-from agent_tools.delivery.engine_heads import REPOSITORY_ENV, core_events, read_head  # noqa: F401  re-exported: the tests and other modules read them here
+from agent_tools.delivery.engine_heads import REPOSITORY_ENV, core_events, read_head  # noqa: F401  re-exported
 from agent_tools.delivery.engine_ledger import creation_lock_path
 from agent_tools.project_contract import agent_platform, resolve_project
 
