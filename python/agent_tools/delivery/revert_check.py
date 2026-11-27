@@ -11,7 +11,9 @@ information for a reviewer and never blocks. The decision is ADR-delivery-025.
 
 A new test is a `test*` method (`def` or `async def`) directly in a top-level class whose bases reach
 a base named `TestCase` (a bare name or an attribute `x.TestCase`) through classes defined in the
-same file. Its id is `<module>.<Class>.<method>`, `<module>` being the file's path relative to the
+same file or imported into it with `from <module> import <Name>` (followed, at the revision read, into the file
+`<module>` names, relative to the importing file's directory, a directory above it or the root; a file it cannot
+find ends that branch). Its id is `<module>.<Class>.<method>`, `<module>` being the file's path relative to the
 worktree root with `.py` dropped and `/` replaced by `.`. It is new when the file at the merge base
 (absent counts as empty) lacks `<Class>.<method>`. Only `.py` files changed `A` or `M` between the
 merge base and `HEAD` (`git diff --no-renames`) are read, as the blob bytes (so a byte-order mark or a
@@ -22,8 +24,13 @@ The check makes a scratch directory with `tempfile.mkdtemp(prefix="revert-check-
 root>)`, `$REVERT_CHECK_SCRATCH` or else the system temporary directory, made by a guard process in a
 session of its own that removes it again once the checker is gone, whenever that happens (an engine stop
 kills only the checker's group). The directory holds a checkout of the
-merge base (`read-tree` into a private index file, then `checkout-index`; no worktree is registered,
-so no repository-wide `git worktree` command runs) and, per test, a fresh checkout with the `HEAD`
+merge base (`read-tree` into a private index file, then `checkout-index` into a directory made first, so a
+merge base with no file works; no worktree is registered, so no repository-wide `git worktree` command runs).
+The checkout is a repository of its own (`git init`, the merge base's index, a detached `HEAD` at the merge
+base and the run repository's object directory as an alternate), so a test may run `git` there and the run's
+repository is only read. A symlink of the merge base that leads into the run's worktree is pointed at the
+same path of the checkout, so a test never writes through it into the run's worktree. Per test there is
+a fresh checkout with the `HEAD`
 version (bytes) of each file holding a new test written over it, nothing else of the change, so no
 test sees what an earlier one left. A write refuses a path that passes through a symlink of the merge
 base (it would lead out of the scratch), and a new test's top-level directory that holds no
@@ -32,7 +39,8 @@ shadow it. Each new test then runs once as `python -m unittest <id>` with the sc
 working directory, no standard stream inherited, in its own session behind a small watcher that kills
 the session when the checker dies; the guard and the watcher are given the checker's pid, so a checker
 that dies before they start is noticed too; the group is also killed after `TEST_SECONDS`. Exit 0 is still passing, any other
-exit or a timeout is not. The tests' `PYTHONPATH` is the checkout, then `<checkout>/<D>` for each
+exit or a timeout is not; a timeout adds `new tests stopped at the <n> s limit: <ids>` to `reason`, so a test
+the limit interrupted is told from one whose assertion failed. The tests' `PYTHONPATH` is the checkout, then `<checkout>/<D>` for each
 distinct non-empty `D` that is the parent of a top-level package tracked at the merge base (a tracked
 `<pkg>/__init__.py` whose parent directory holds no `__init__.py`), sorted, then the inherited entries
 whose real path is not the run's worktree or inside it, so the reverted source is what a test
@@ -64,6 +72,7 @@ import ast
 import inspect
 import json
 import os
+import posixpath
 import shutil
 import signal
 import subprocess
@@ -154,13 +163,13 @@ sys.exit(child.wait())
 RunGit = Callable[..., "subprocess.CompletedProcess[bytes]"]
 
 
-def _testcase_classes(classes: Mapping[str, ast.ClassDef]) -> set[str]:
-    """The names of the classes whose bases reach `TestCase`, each class visited once."""
+def _testcase_classes(classes: Mapping[str, ast.ClassDef], imported: set[str] = frozenset()) -> set[str]:
+    """The names of the classes whose bases reach `TestCase` (or an imported name in `imported`), each visited once."""
     children: dict[str, list[str]] = {}
     found: set[str] = set()
     for name, node in classes.items():
         for base in node.bases:
-            if (isinstance(base, ast.Name) and base.id == "TestCase") or (
+            if (isinstance(base, ast.Name) and (base.id == "TestCase" or base.id in imported)) or (
                     isinstance(base, ast.Attribute) and base.attr == "TestCase"):
                 found.add(name)
             elif isinstance(base, ast.Name) and base.id in classes:
@@ -174,14 +183,69 @@ def _testcase_classes(classes: Mapping[str, ast.ClassDef]) -> set[str]:
     return found
 
 
-def case_ids(source: str | bytes) -> frozenset[str]:
-    """The `<Class>.<method>` ids of the test methods of one Python file's text or bytes."""
+Load = Callable[[str], "str | bytes | None"]
+
+
+def _module_paths(path: str, module: str | None, level: int) -> list[str]:
+    """The files `from <module> import ...` (with `level` leading dots) in the file `path` may name, in order."""
+    parts = module.split(".") if module else []
+    if not parts:
+        return []
+    directory = posixpath.dirname(path)
+    if level:
+        for _ in range(level - 1):
+            directory = posixpath.dirname(directory)
+        directories = [directory]
+    else:
+        directories = [directory]
+        while directory:
+            directory = posixpath.dirname(directory)
+            directories.append(directory)
+    stems = ["/".join(piece for piece in (base, *parts) if piece) for base in directories]
+    return [name for stem in stems for name in (f"{stem}.py", f"{stem}/__init__.py")]
+
+
+def _reaching(source: str | bytes, path: str, load: Load | None, memo: dict[str, set[str]]) -> set[str]:
+    """The names of the classes of one file that reach `TestCase`, an imported base followed into its file."""
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return set()
+    memo[path] = set()
+    classes = {node.name: node for node in tree.body if isinstance(node, ast.ClassDef)}
+    imports = {(alias.asname or alias.name): (node.module, node.level, alias.name)
+               for node in tree.body if isinstance(node, ast.ImportFrom) for alias in node.names}
+    bases = {base.id for node in classes.values() for base in node.bases
+             if isinstance(base, ast.Name) and base.id in imports and base.id not in classes}
+    imported: set[str] = set()
+    for name in sorted(bases):
+        module, level, original = imports[name]
+        for candidate in _module_paths(path, module, level) if load else ():
+            if candidate not in memo:
+                text = load(candidate)
+                if text is None:
+                    continue
+                memo[candidate] = _reaching(text, candidate, load, memo)
+            if original in memo[candidate]:
+                imported.add(name)
+            break
+    reaching = _testcase_classes(classes, imported)
+    memo[path] = reaching
+    return reaching
+
+
+def case_ids(source: str | bytes, path: str = "", load: Load | None = None) -> frozenset[str]:
+    """The `<Class>.<method>` ids of the test methods of one Python file's text or bytes.
+
+    A base imported with `from <module> import <Name>` is followed into the file `load(<path>)` returns (None
+    for a file that does not exist), `<path>` being the file's path from the repository root; without `load`
+    only the classes of the file itself count."""
     try:
         tree = ast.parse(source)
     except (SyntaxError, ValueError):
         return frozenset()
     classes = {node.name: node for node in tree.body if isinstance(node, ast.ClassDef)}
-    reaching = _testcase_classes(classes)
+    reaching = _reaching(source, path, load, {})
     return frozenset(
         f"{name}.{member.name}"
         for name, node in classes.items() if name in reaching
@@ -217,6 +281,17 @@ def _read(run_git: RunGit, worktree: str, revision: str, path: str) -> bytes | N
     return done.stdout
 
 
+def _loader(run_git: RunGit, worktree: str, revision: str) -> Load:
+    """A `Load` of the files at `revision`, each read once."""
+    cache: dict[str, bytes | None] = {}
+
+    def load(path: str) -> bytes | None:
+        if path not in cache:
+            cache[path] = _read(run_git, worktree, revision, path)
+        return cache[path]
+    return load
+
+
 def _new_tests(worktree: str, base: str, head: str, run_git: RunGit) -> tuple[list[tuple[str, str]], dict[str, bytes]]:
     """The `(path, id)` of each new test, sorted by path then id, and the head blob of each file holding one."""
     done = run_git("-C", worktree, "diff", "--no-renames", "--name-only", "--diff-filter=AM", "-z", base, head)
@@ -224,14 +299,15 @@ def _new_tests(worktree: str, base: str, head: str, run_git: RunGit) -> tuple[li
         raise RuntimeError(f"git diff: {_last_line(done)}")
     found: list[tuple[str, str]] = []
     blobs: dict[str, bytes] = {}
+    loaders = {revision: _loader(run_git, worktree, revision) for revision in (base, head)}
     for path in sorted(name for name in done.stdout.decode(errors="replace").split("\0") if name.endswith(".py")):
         text = _read(run_git, worktree, head, path)
         if text is None:
             raise RuntimeError(f"{path} is not in {head}")
         before = _read(run_git, worktree, base, path)
-        old = case_ids(before) if before is not None else frozenset()
+        old = case_ids(before, path, loaders[base]) if before is not None else frozenset()
         module = path[:-len(".py")].replace("/", ".")
-        added = sorted(case_ids(text) - old)
+        added = sorted(case_ids(text, path, loaders[head]) - old)
         if added:
             blobs[path] = text
             found.extend((path, f"{module}.{case}") for case in added)
@@ -289,15 +365,56 @@ def _write(root: str, path: str, data: bytes) -> None:
         handle.write(data)
 
 
-def _checkout(worktree: str, holder: str, tree: str, blobs: Mapping[str, bytes], run_git: RunGit) -> None:
-    """A fresh checkout of the merge base at `tree` with the head version of each new-test file over it."""
+def _tracked_links(worktree: str, base: str, run_git: RunGit) -> list[str]:
+    """The paths of the symlinks tracked at `base`."""
+    tracked = run_git("-C", worktree, "ls-tree", "-r", "-z", base)
+    if tracked.returncode:
+        raise RuntimeError(f"git ls-tree {base}: {_last_line(tracked)}")
+    entries = (entry.partition("\t") for entry in tracked.stdout.decode(errors="replace").split("\0"))
+    return [name for meta, _, name in entries if meta.startswith("120000 ")]
+
+
+def _object_directory(worktree: str, run_git: RunGit) -> str:
+    done = run_git("-C", worktree, "rev-parse", "--path-format=absolute", "--git-path", "objects")
+    if done.returncode:
+        raise OSError(f"git rev-parse --git-path objects: {_last_line(done)}")
+    return done.stdout.decode(errors="replace").strip()
+
+
+def _confine_links(worktree: str, tree: str, links: Sequence[str]) -> None:
+    """Point each symlink of the checkout that leads into the run's worktree at the same path of the checkout."""
+    run = os.path.realpath(worktree)
+    for name in links:
+        link = os.path.join(tree, name)
+        target = os.path.realpath(link)
+        if target == run or target.startswith(run + os.sep):
+            os.unlink(link)
+            os.symlink(os.path.join(tree, os.path.relpath(target, run)), link)
+
+
+def _checkout(worktree: str, holder: str, tree: str, blobs: Mapping[str, bytes], run_git: RunGit, *,
+              base: str, links: Sequence[str], objects: str) -> None:
+    """A fresh checkout of the merge base at `tree` with the head version of each new-test file over it.
+
+    The checkout is a repository of its own whose index is the merge base's and whose objects are the run
+    repository's, read through `objects/info/alternates`, so a test may run `git` there."""
     try:
         force_remove(tree)
     except FileNotFoundError:
         pass
+    os.makedirs(tree)
     done = run_git("-C", worktree, "checkout-index", "-a", "-f", f"--prefix={tree}/", index=os.path.join(holder, "index"))
     if done.returncode:
         raise OSError(f"git checkout-index: {_last_line(done)}")
+    done = run_git("init", "-q", "--template=", tree)
+    if done.returncode:
+        raise OSError(f"git init: {_last_line(done)}")
+    shutil.copyfile(os.path.join(holder, "index"), os.path.join(tree, ".git", "index"))
+    with open(os.path.join(tree, ".git", "HEAD"), "w") as handle:
+        handle.write(base + "\n")
+    with open(os.path.join(tree, ".git", "objects", "info", "alternates"), "wb") as handle:
+        handle.write(os.fsencode(objects) + b"\n")
+    _confine_links(worktree, tree, links)
     for path, data in sorted(blobs.items()):
         _write(tree, path, data)
     for top in sorted({path.split("/")[0] for path in blobs if "/" in path}):
@@ -326,8 +443,12 @@ def _guard(scratch_root: str | None) -> tuple["subprocess.Popen[str]", str]:
     return guard, holder
 
 
+class _TimedOut(Exception):
+    """A test ran past its time limit and its session was killed."""
+
+
 def _passes(identifier: str, scratch: str, env: Mapping[str, str], test_seconds: float) -> bool:
-    """Whether the test exits 0; an OSError when the watcher could not start it."""
+    """Whether the test exits 0; an OSError when the watcher could not start it, `_TimedOut` when it ran too long."""
     process = subprocess.Popen(
         [sys.executable, "-I", "-c", WATCHER, identifier, str(os.getpid()), TEST_PYTHON], cwd=scratch,
         env=dict(env), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
@@ -335,7 +456,7 @@ def _passes(identifier: str, scratch: str, env: Mapping[str, str], test_seconds:
     try:
         _, error = process.communicate(timeout=test_seconds)
     except subprocess.TimeoutExpired:
-        return False
+        raise _TimedOut(identifier) from None
     finally:
         try:
             os.killpg(process.pid, signal.SIGKILL)
@@ -379,17 +500,20 @@ def _run_in_scratch(worktree: str, result: dict, found: list[tuple[str, str]], b
                     run_git: RunGit, environ: Mapping[str, str], scratch_root: str | None, test_seconds: float,
                     budget_seconds: float, started: float) -> None:
     guard = holder = None
+    timed_out: list[str] = []
     try:
         try:
             guard, holder = _guard(scratch_root)
             done = run_git("-C", worktree, "read-tree", result["base"], index=os.path.join(holder, "index"))
             if done.returncode:
                 raise OSError(f"git read-tree: {_last_line(done)}")
+            objects = _object_directory(worktree, run_git)
         except (OSError, subprocess.SubprocessError) as error:
             result["reason"] = f"the scratch worktree could not be made: {error}"
             return
         tree = os.path.join(holder, "tree")
         inits = _tracked_inits(worktree, result["base"], run_git)
+        links = _tracked_links(worktree, result["base"], run_git)
         env = {name: value for name, value in environ.items() if name not in REPOSITORY_ENV}
         env["PYTHONPYCACHEPREFIX"] = os.path.join(holder, "pycache")
         for ran, (_, identifier) in enumerate(found):
@@ -397,10 +521,13 @@ def _run_in_scratch(worktree: str, result: dict, found: list[tuple[str, str]], b
                 result["reason"] = (f"the check ran out of its {budget_seconds:g} s budget "
                                     f"after {ran} of {len(found)} new tests")
                 break
-            _checkout(worktree, holder, tree, blobs, run_git)
+            _checkout(worktree, holder, tree, blobs, run_git, base=result["base"], links=links, objects=objects)
             env["PYTHONPATH"] = _python_path(tree, worktree, environ.get("PYTHONPATH", ""), inits)
             try:
                 passed = _passes(identifier, tree, env, test_seconds)
+            except _TimedOut:
+                timed_out.append(identifier)
+                continue
             except OSError as error:
                 result["reason"] = f"a test could not be started: {error}"
                 break
@@ -409,6 +536,9 @@ def _run_in_scratch(worktree: str, result: dict, found: list[tuple[str, str]], b
     except Exception as error:
         result["reason"] = f"the check failed: {type(error).__name__}: {error}"
     finally:
+        if timed_out:
+            message = f"new tests stopped at the {test_seconds:g} s limit: {', '.join(timed_out)}"
+            result["reason"] = f"{result['reason']} {message}".strip()
         removed = True
         if holder is not None:
             removed = _remove(holder, result)

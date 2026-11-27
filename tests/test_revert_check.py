@@ -229,6 +229,86 @@ class CheckTest(unittest.TestCase):
         self.assertEqual(case_ids(source), frozenset({"A.test_a", "B.test_b", "C.test_c"}))
         self.assertEqual(case_ids("def broken(:"), frozenset())
 
+    def test_case_ids_follow_an_imported_base_into_its_file(self):
+        files = {
+            "tests/base.py": "import unittest\n\nclass Scenario(unittest.TestCase): pass\n\nclass Plain: pass\n",
+            "tests/mid.py": "from tests.base import Scenario as S\n\nclass Mid(S): pass\n",
+            "tests/loop_a.py": "from tests.loop_b import B\n\nclass A(B): pass\n",
+            "tests/loop_b.py": "from tests.loop_a import A\n\nclass B(A): pass\n",
+            "tests/pkg/__init__.py": "from tests.base import Scenario\n\nclass Packaged(Scenario): pass\n"}
+        source = (
+            "from tests.mid import Mid\nfrom tests.base import Plain\nfrom .base import Scenario\n"
+            "from tests.loop_a import A\nfrom tests.missing import Gone\nfrom tests.pkg import Packaged\n"
+            "from tests.nowhere import Missing\n\n"
+            "class One(Mid):\n    def test_one(self): pass\n\n"
+            "class Two(Plain):\n    def test_two(self): pass\n\n"
+            "class Three(Scenario):\n    def test_three(self): pass\n\n"
+            "class Four(A):\n    def test_four(self): pass\n\n"
+            "class Five(Gone):\n    def test_five(self): pass\n\n"
+            "class Six(Packaged):\n    def test_six(self): pass\n")
+        self.assertEqual(case_ids(source, "tests/test_x.py", files.get),
+                         frozenset({"One.test_one", "Three.test_three", "Six.test_six"}))
+        self.assertEqual(case_ids(source, "tests/test_x.py"), frozenset())
+
+    def test_a_new_test_of_a_class_with_an_imported_testcase_base_is_listed_and_run(self):
+        repository = FixtureRepository(self, {
+            "checks/base_scenario.py": "import unittest\n\n\nclass Scenario(unittest.TestCase):\n    pass\n"})
+        repository.commit({"checks/check_sub.py": (
+            "from checks.base_scenario import Scenario\n\n\nclass SubCheck(Scenario):\n"
+            "    def test_sub(self):\n        self.assertTrue(True)\n")})
+        result = check(str(repository.worktree), "main", scratch_root=scratch_directory(self), environ=os.environ)
+        self.assertEqual(result["new_tests"], ["checks.check_sub.SubCheck.test_sub"])
+        self.assertEqual(result["still_passing"], result["new_tests"])
+        self.assertEqual(result["reason"], "")
+
+    def test_a_symlink_of_the_merge_base_into_the_run_worktree_is_never_written_through(self):
+        repository = FixtureRepository(self, {"data/out.txt": "original\n"})
+        os.makedirs(repository.main / "fixtures")
+        os.symlink(repository.worktree / "data/out.txt", repository.main / "fixtures/output")
+        repository.commit_in(repository.main, "an absolute link into the run worktree")
+        repository.git(repository.main, "push", "-q", "origin", "main")
+        repository.git(repository.main, "fetch", "-q", "origin")
+        repository.git(repository.worktree, "merge", "-q", "--ff-only", "main")
+        repository.commit({"checks/check_writer.py": (
+            "import unittest\n\n\nclass WriterCheck(unittest.TestCase):\n"
+            "    def test_writes(self):\n        open('fixtures/output', 'w').write('overwritten\\n')\n")})
+        before = repository.snapshot()
+        result = check(str(repository.worktree), "main", scratch_root=scratch_directory(self), environ=os.environ)
+        self.assertEqual(result["still_passing"], ["checks.check_writer.WriterCheck.test_writes"])
+        self.assertEqual((repository.worktree / "data/out.txt").read_text(), "original\n")
+        self.assertEqual(repository.snapshot(), before)
+
+    def test_a_merge_base_with_no_file_still_runs_the_independent_test(self):
+        repository = FixtureRepository(self)
+        repository.git(repository.main, "rm", "-rq", "fixture", "checks")
+        repository.commit_in(repository.main, "empty")
+        repository.git(repository.main, "push", "-q", "origin", "main")
+        repository.git(repository.main, "fetch", "-q", "origin")
+        repository.git(repository.worktree, "merge", "-q", "--ff-only", "main")
+        self.assertEqual(repository.git(repository.worktree, "ls-files").strip(), "")
+        repository.commit({FAREWELL_PATH: FAREWELL_SOURCE, "checks/check_mixed.py": (
+            "import unittest\n\n\nclass MixedCheck(unittest.TestCase):\n"
+            "    def test_needs_source(self):\n        from fixture.farewell import farewell\n"
+            "        self.assertEqual(farewell('Ada'), 'Goodbye, Ada.')\n\n"
+            "    def test_independent(self):\n        self.assertTrue(True)\n")})
+        result = check(str(repository.worktree), "main", scratch_root=scratch_directory(self), environ=os.environ)
+        self.assertEqual(result["new_tests"], ["checks.check_mixed.MixedCheck.test_independent",
+                                               "checks.check_mixed.MixedCheck.test_needs_source"])
+        self.assertEqual(result["still_passing"], ["checks.check_mixed.MixedCheck.test_independent"])
+        self.assertEqual(result["reason"], "")
+
+    def test_a_test_may_run_git_in_the_checkout_of_the_merge_base(self):
+        repository = FixtureRepository(self, {"README.md": "read me\n"})
+        repository.commit({"checks/check_git.py": (
+            "import subprocess\nimport unittest\n\n\nclass GitCheck(unittest.TestCase):\n"
+            "    def test_tracks_the_readme(self):\n"
+            "        subprocess.run(['git', 'ls-files', '--error-unmatch', 'README.md'], check=True)\n"
+            "        subprocess.run(['git', 'cat-file', '-e', 'HEAD:README.md'], check=True)\n")})
+        before = repository.snapshot()
+        result = check(str(repository.worktree), "main", scratch_root=scratch_directory(self), environ=os.environ)
+        self.assertEqual(result["still_passing"], ["checks.check_git.GitCheck.test_tracks_the_readme"])
+        self.assertEqual(repository.snapshot(), before)
+
     def test_the_reverted_package_root_wins_and_the_run_worktree_is_not_imported(self):
         repository = FixtureRepository(self, {
             "src/pkg/__init__.py": "", "src/pkg/calc.py": "def add(a, b):\n    return a + b\n"})
@@ -428,6 +508,7 @@ class CheckTest(unittest.TestCase):
                        environ=os.environ, test_seconds=1)
         self.assertEqual(result["new_tests"], ["checks.check_slow.SlowCheck.test_sleeps"])
         self.assertEqual(result["still_passing"], [])
+        self.assertEqual(result["reason"], "new tests stopped at the 1 s limit: checks.check_slow.SlowCheck.test_sleeps")
         self.assertLess(time.monotonic() - started, 20)
 
     def test_a_spent_budget_runs_no_further_test_and_says_so(self):
