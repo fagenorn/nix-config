@@ -10,15 +10,16 @@ that lands on a retired schema is `BumpRefused` before any file is touched.
 
 `GitBuilder` builds the bump commit. Every child runs in its own group with no stdin, no `GITHUB_TOKEN`,
 `GH_TOKEN` or repository selector, and a set `cancel` ends the build with `approve.Cancelled`. `pin` checks
-that `origin` of the checkout is the project, fetches the base and reads the lock's pinned revision there.
-`build` returns `Built(branch, commit)`. It reuses a bump branch already on the remote only after `verify`
-shows its head locks the proven revision (anything else is `BumpRefused`, never reused); else it takes the proven revision's package (whose record
-must be that revision of the platform repository), makes a scratch worktree at the base, writes the bumped
-lock, runs the migrations the revision requires and its projections with the package's own tools, commits
-signed as the contract's `bindings.vcs.commit.signed` says (never as the host's default does) and pushes
-that commit to the bump branch without force. `verify` fetches the bump branch and refuses unless its tip
-is the named head and the lock at that head pins the proven revision. The worktree and its directory are
-removed on every outcome.
+that `origin` of the checkout is the project, fetches the base and reads the lock's pinned revision at the
+base commit it resolves, which the next `build` of that base then uses, never a later read of the base.
+`build` returns `Built(branch, commit)`. It takes the proven revision's package (whose record must be that
+revision of the platform repository), makes a scratch worktree at that base commit, writes the bumped
+lock, runs the migrations the revision requires and its projections with the package's own tools and commits
+signed as the contract's `bindings.vcs.commit.signed` says (never as the host's default does). A bump branch
+already on the remote is reused only when its tree equals that commit's tree (anything else is
+`BumpRefused`); else the commit is pushed to the bump branch without force. `verify` fetches the bump
+branch and refuses unless its tip is the named head and the lock at that head pins the proven revision. The
+worktree and its directory are removed on every outcome.
 """
 
 from __future__ import annotations
@@ -178,6 +179,7 @@ class GitBuilder:
         self._package = package or (
             lambda revision, cancel: nix_package(platform_repo, revision, cancel, timeout=timeout))
         self._origin_check = origin_check or checked_origin
+        self._inspected: dict[tuple[str, str], str] = {}
 
     def _git(self, root: Path, step: str, cancel, *args: str, ok: Sequence[int] = (0,)):
         return _run(["git", "-C", str(root), *args], step, cancel, self._timeout, ok)
@@ -186,8 +188,17 @@ class GitBuilder:
         self._origin_check(root, slug)
         self._git(root, "the base fetch", cancel, "fetch", "--quiet", "--no-tags", "origin",
                   f"+refs/heads/{base}:refs/remotes/origin/{base}")
-        shown = self._git(root, "the lock read", cancel, "show", f"origin/{base}:{adopt_conformance.LOCK_FILE}")
+        commit = self._base_commit(root, base, cancel)
+        shown = self._git(root, "the lock read", cancel, "show", f"{commit}:{adopt_conformance.LOCK_FILE}")
+        self._inspected[(str(root), base)] = commit
         return pinned_revision(shown.stdout)
+
+    def _base_commit(self, root: Path, base: str, cancel) -> str:
+        done = self._git(root, "the base read", cancel, "rev-parse", "--verify", f"refs/remotes/origin/{base}")
+        commit = done.stdout.decode().strip()
+        if approve.COMMIT.fullmatch(commit) is None:
+            raise BumpRefused("the base has no readable commit")
+        return commit
 
     def _record(self, out: Path, revision: str) -> dict:
         found = _json_file(out / "share" / "agent-platform" / "platform-revision.json", "the package's revision")
@@ -218,31 +229,48 @@ class GitBuilder:
         branch = branch_for(revision)
         found = self._git(root, "the bump branch read", cancel, "ls-remote", "--exit-code", "origin",
                           f"refs/heads/{branch}", ok=(0, 2))
+        head = None
         if found.returncode == 0:
             words = found.stdout.decode("utf-8", "replace").split()
             head = words[0] if words else ""
             if approve.COMMIT.fullmatch(head) is None:
                 raise BumpRefused("the bump branch has no readable head")
-            self.verify(root, slug, revision, head, cancel)
-            return Built(branch, head)
         out = self._package(revision, cancel)
         record = self._record(out, revision)
         manifest = _json_file(out / "share" / "agent-platform" / "platform-manifest.json", "the package's manifest")
+        base_commit = self._inspected.pop((str(root), base), None) or self._base_commit(root, base, cancel)
         scratch = Path(tempfile.mkdtemp(prefix="lock-bump-"))
         tree = scratch / "tree"
         try:
-            self._git(root, "the worktree", cancel, "worktree", "add", "--quiet", "--detach", str(tree),
-                      f"origin/{base}")
+            self._git(root, "the worktree", cancel, "worktree", "add", "--quiet", "--detach", str(tree), base_commit)
             signing = self._edit(tree, out, manifest, record, cancel)
             self._git(tree, "the staging", cancel, "add", "--all")
             self._git(tree, "the commit", cancel, "commit", "--quiet", "--no-verify", signing, "-m",
                       f"Bump the agent platform to {revision[:12]}")
             commit = self._git(tree, "the commit read", cancel, "rev-parse", "HEAD").stdout.decode().strip()
+            if head is not None:
+                self._same_tree(root, branch, head, commit, cancel)
+                return Built(branch, head)
             self._git(root, "the push", cancel, "push", "--quiet", "--no-follow-tags", "origin",
                       f"{commit}:refs/heads/{branch}")
         finally:
             self._clean(root, tree, scratch)
         return Built(branch, commit)
+
+    def _same_tree(self, root: Path, branch: str, head: str, built: str, cancel) -> None:
+        """Refuse unless the remote bump branch is at `head` and its tree is the tree of the generated `built`."""
+        self._git(root, "the bump branch fetch", cancel, "fetch", "--quiet", "--no-tags", "origin",
+                  f"+refs/heads/{branch}:refs/remotes/origin/{branch}")
+        tip = self._git(root, "the bump branch read", cancel, "rev-parse", "--verify",
+                        f"refs/remotes/origin/{branch}").stdout.decode().strip()
+        if tip != head:
+            raise BumpRefused(f"the bump branch moved from {head[:12]} to {tip[:12]}")
+        trees = []
+        for commit in (head, built):
+            trees.append(self._git(root, "the tree read", cancel, "rev-parse", "--verify",
+                                   f"{commit}^{{tree}}").stdout.decode().strip())
+        if trees[0] != trees[1]:
+            raise BumpRefused(f"the bump branch at {head[:12]} differs from the bump of the proven revision")
 
     def _edit(self, tree: Path, out: Path, manifest: object, record: dict, cancel) -> str:
         lock_file = tree / adopt_conformance.LOCK_FILE

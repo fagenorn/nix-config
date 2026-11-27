@@ -12,6 +12,7 @@ from agent_tools.console import lock_bump
 from agent_tools.console.lock_bump import Step
 from agent_tools.console.lock_bump_forge import Checks, OpenBump
 from agent_tools.console.lock_bump_tree import BumpRefused, Built, branch_for, revision_of_branch
+from tests.accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures
 
 TIER = "fast"
 
@@ -67,12 +68,15 @@ class FakeTracker:
         self.issues = []
         self.known = {}
         self.finds = []
+        self.stopped = False
 
     def find(self, project, revision):
         self.finds.append((project, revision))
         return self.known.get((project, revision))
 
     def create(self, title, body):
+        if self.stopped:
+            raise RuntimeError("console stopped")
         self.issues.append((title, body))
         return 500 + len(self.issues)
 
@@ -257,6 +261,27 @@ class RedTest(PassCase):
         self.assertEqual(steps, [Step(PROJECT, "red_known", REV_B, 9, 77, None)])
         self.assertEqual((self.record()["outcome"], self.record()["issue"]), ("red", 77))
 
+    def test_a_stop_before_the_issue_is_filed_keeps_the_red_decision_and_a_green_rerun_never_merges(self):
+        self.red_bump()
+        self.tracker.stopped = True
+        with self.assertRaises(RuntimeError):
+            self.run_pass()
+        self.assertEqual((self.record()["outcome"], self.record()["issue"]), ("red", None))
+        self.tracker.stopped = False
+        self.forge.states[9] = Checks("green", HEAD, ())
+        steps = self.run_pass()
+        self.assertEqual(steps, [Step(PROJECT, "filed", REV_B, 9, 501, None)])
+        self.assertEqual((self.forge.named("merge"), self.record()["issue"]), ([], 501))
+
+    def test_a_stop_after_the_issue_is_filed_before_it_is_saved_finds_that_issue_and_never_merges(self):
+        self.red_bump()
+        self.remember(REV_B, "red", pull=9)
+        self.tracker.known[(PROJECT, REV_B)] = 77
+        self.forge.states[9] = Checks("green", HEAD, ())
+        steps = self.run_pass()
+        self.assertEqual(steps, [Step(PROJECT, "red_known", REV_B, 9, 77, None)])
+        self.assertEqual((self.forge.named("merge"), self.tracker.issues, self.record()["issue"]), ([], [], 77))
+
     def test_a_red_bump_closed_by_hand_is_retried_only_by_a_newer_revision(self):
         self.remember(REV_B, "red", issue=501)
         self.assertEqual(self.run_pass()[0].action, "done")
@@ -306,20 +331,31 @@ class PlatformTrackerTest(unittest.TestCase):
             seen.append(path)
             return pages
 
-        return lock_bump.PlatformTracker("octo/platform", pages=read, create=lambda *a: 1), seen
+        return lock_bump.PlatformTracker("octo/platform", pages=read, create=lambda *a: 1,
+                                         author=lambda: "console-bot"), seen
 
     def test_the_issue_with_this_projects_and_revisions_marker_is_found(self):
         marker = lock_bump.red_marker(PROJECT, REV_B)
         other = lock_bump.red_marker(PROJECT, REV_A)
-        pages = [[{"number": 3, "body": f"x\n\n{other}"}, {"number": 4, "body": "none"}],
-                 [{"number": 5, "body": f"x\n\n{marker}", "pull_request": {}},
-                  {"number": 6, "body": f"x\n\n{marker}"}]]
+        mine = {"login": "Console-Bot"}
+        pages = [[{"number": 3, "body": f"x\n\n{other}", "user": mine}, {"number": 4, "body": "none", "user": mine}],
+                 [{"number": 5, "body": f"x\n\n{marker}", "user": mine, "pull_request": {}},
+                  {"number": 6, "body": f"x\n\n{marker}", "user": mine}]]
         tracker, seen = self.tracker(pages)
         self.assertEqual(tracker.find(PROJECT, REV_B), 6)
         self.assertEqual(seen, ["repos/octo/platform/issues?state=all&per_page=100"])
 
     def test_no_marker_finds_none(self):
-        tracker, _ = self.tracker([[{"number": 3, "body": None}, {"number": 4, "body": "no marker"}]])
+        mine = {"login": "console-bot"}
+        tracker, _ = self.tracker([[{"number": 3, "body": None, "user": mine},
+                                    {"number": 4, "body": "no marker", "user": mine}]])
+        self.assertIsNone(tracker.find(PROJECT, REV_B))
+
+    def test_a_marker_in_an_issue_of_another_author_is_not_this_bumps_report(self):
+        marker = lock_bump.red_marker(PROJECT, REV_B)
+        pages = [[{"number": 3, "body": f"x\n\n{marker}", "user": {"login": "someone-else"}},
+                  {"number": 4, "body": f"x\n\n{marker}"}, {"number": 5, "body": f"x\n\n{marker}", "user": None}]]
+        tracker, _ = self.tracker(pages)
         self.assertIsNone(tracker.find(PROJECT, REV_B))
 
 

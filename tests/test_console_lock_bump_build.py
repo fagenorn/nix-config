@@ -14,6 +14,7 @@ from unittest import mock
 
 from agent_tools.console import approve, lock_bump_tree
 from agent_tools.console.lock_bump_tree import BumpRefused, Built, GitBuilder, branch_for, bumped_lock
+from tests.accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures
 from tests.test_console_lock_bump_tree import REV_A, REV_B, document, dumped, record
 
 TIER = "integration"  # it builds a sandbox git repository and runs git
@@ -182,20 +183,46 @@ class BuildTest(BuildFixture):
         self.assertNotEqual(code, 0)
         self.assertEqual(len(self.trees()), 1)
 
-    def test_an_existing_bump_branch_holding_the_bump_is_reused_without_a_second_build(self):
+    def test_an_existing_bump_branch_whose_tree_is_the_generated_bump_is_reused_without_a_second_push(self):
         branch = branch_for(REV_B)
         first = self.builder.build(self.root, SLUG, "main", REV_B)
         self.package_calls.clear()
         self.assertEqual(self.builder.build(self.root, SLUG, "main", REV_B), first)
-        self.assertEqual(self.package_calls, [])
+        self.assertEqual(self.package_calls, [REV_B])
         self.assertEqual(self.pushed(branch), first.commit)
+        self.assertEqual(len(self.trees()), 1)
 
     def test_an_existing_bump_branch_that_is_unchanged_main_is_refused_not_reused(self):
         branch = branch_for(REV_B)
         self.git("push", "-q", "origin", f"HEAD:refs/heads/{branch}", cwd=self.root)
-        with self.assertRaisesRegex(BumpRefused, "does not lock"):
+        with self.assertRaisesRegex(BumpRefused, "differs"):
             self.builder.build(self.root, SLUG, "main", REV_B)
-        self.assertEqual(self.package_calls, [])
+
+    def test_an_existing_bump_branch_pinning_the_revision_with_stale_projections_is_refused(self):
+        branch = branch_for(REV_B)
+        self.git("checkout", "-q", "-b", "stale", cwd=self.root)
+        (self.root / "devenv.lock").write_bytes(bumped_lock(dumped(document()), record(REV_B)))
+        (self.root / "AGENTS.md").write_bytes(b"stale\n")
+        (self.root / "unrelated.txt").write_bytes(b"extra\n")
+        self.git("add", "--all", cwd=self.root)
+        self.git("commit", "-q", "--no-gpg-sign", "-m", "stale", cwd=self.root)
+        self.git("push", "-q", "origin", f"HEAD:refs/heads/{branch}", cwd=self.root)
+        stale = self.pushed(branch)
+        with self.assertRaisesRegex(BumpRefused, "differs"):
+            self.builder.build(self.root, SLUG, "main", REV_B)
+        self.assertEqual(self.pushed(branch), stale)
+        self.assertEqual(len(self.trees()), 1)
+
+    def test_the_bump_is_built_on_the_base_commit_the_pin_inspected(self):
+        inspected = self.git("rev-parse", "refs/remotes/origin/main", cwd=self.root)
+        self.builder.pin(self.root, SLUG, "main")
+        self.publish({"devenv.lock": bumped_lock(dumped(document()), record(REV_C)), "AGENTS.md": b"newer\n"})
+        self.git("fetch", "-q", cwd=self.root)
+        branch = self.builder.build(self.root, SLUG, "main", REV_B).branch
+        self.assertEqual(self.git("rev-list", "--parents", "-n", "1", branch, cwd=self.origin).split()[1:],
+                         [inspected])
+        locked = json.loads(self.show(branch, "devenv.lock"))["nodes"]["agent-platform"]["locked"]
+        self.assertEqual(locked, record(REV_B))
 
     def test_verify_refuses_a_head_the_branch_is_no_longer_at(self):
         built = self.builder.build(self.root, SLUG, "main", REV_B)

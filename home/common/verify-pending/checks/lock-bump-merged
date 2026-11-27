@@ -1,4 +1,5 @@
 #!/bin/sh
 # Checks the first revision proven after --since (STAMP) merged green in 7 days, or (--merge SHA --platform-repo O/N)
-# the first merged bump of a proven revision holding that commit; exits 0 met, 1 not met, 75 not yet, 2 forge error.
+# the first bump of a proven revision merged green within 7 days of the activation holding that commit; exits 0 met,
+# 1 not met, 75 not yet, 2 forge or store error.
 PYTHONPATH=python exec python3 -m agent_tools.console.lock_bump observed "$@"

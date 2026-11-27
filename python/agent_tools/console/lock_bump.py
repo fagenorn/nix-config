@@ -10,8 +10,10 @@ required checks (`merged` on green only when its head is the recorded built comm
 record is not open is `done` and never opened again, so the next proven revision is the retry; otherwise
 a lock that is behind `latest` gets one built branch and one pull request (`opened`). The record is written
 after each forge write. A red bump is never merged or closed by the pass before a newer revision arrives,
-even when a later reading is green. Before it files a red issue the pass looks for one already carrying that
-project-and-revision marker in the platform repository, so a lost answer files no second issue. `commit` is
+even when a later reading is green. The red outcome is recorded before its issue is filed, and a red record
+with no issue gets one on a later pass. Before it files, the pass looks for an issue by its own account
+carrying that project-and-revision marker in the platform repository, so a lost answer files no second
+issue and another author's marker is ignored. `commit` is
 the built commit of the bump, or null for a bump found open with no record.
 
 `Bumper` is the console's pass: it reads the registry and the latest proven revision, runs `bump_pass` and
@@ -20,14 +22,16 @@ prints one `console: lock_bump <project> <action> <revision> <pull> <issue>` lin
 minutes until its stop event is set, and that event is the pass's `cancel`.
 
 `python -m agent_tools.console.lock_bump observed --repo O/N --base BRANCH (--since STAMP [--within-days 7] |
---merge SHA --platform-repo O/N) [--proven FILE]` is the evidence check, judged on the pull request's required
-contexts as the merge does. With `--since` the revision is the first line of the proven record stamped at or
-after `STAMP` (the activation, `YYYY-MM-DDTHH:MM:SSZ`); the pull request is the one merged into `BRANCH` from
-that revision's `lock-bump-<revision>` branch within the days after `STAMP`. With `--merge` the pull request is
-the first merged into `BRANCH`, in order of merge, from the `lock-bump-<revision>` branch of a proven revision
-that holds the platform commit `SHA`, with no window: the verify block's expiry is it. It prints one JSON line
-and exits 0 met, 1 not met (red, or with `--since` late or the window passed with no merge), 75 not yet, 2 on a
-forge or record error.
+--merge SHA --platform-repo O/N [--store FILE]) [--proven FILE]` is the evidence check, judged on the pull
+request's required contexts as the merge does, and met only when the lock of the merged tree pins the revision.
+With `--since` the revision is the first line of the proven record stamped at or after `STAMP` (the activation,
+`YYYY-MM-DDTHH:MM:SSZ`); the pull request is the one merged into `BRANCH` from that revision's
+`lock-bump-<revision>` branch within the days after `STAMP`. With `--merge` the activation is the first
+successful one in the console's event store (`--store`) whose commit holds the platform commit `SHA`, and the
+pull request is the first merged into `BRANCH` after it, in order of merge, from the `lock-bump-<revision>`
+branch of a proven revision that holds `SHA`, within the seven days after it. It prints one JSON line and
+exits 0 met, 1 not met (red, a lock that does not pin the revision, or a merge past the window or, with
+`--since`, no merge by then), 75 not yet, 2 on a forge, store or record error.
 """
 
 from __future__ import annotations
@@ -36,6 +40,7 @@ import argparse
 import json
 import os
 import re
+import sqlite3
 import sys
 import tempfile
 import threading
@@ -44,7 +49,7 @@ from collections.abc import Callable, Collection, Mapping, Sequence
 from pathlib import Path
 from typing import NamedTuple, Protocol, TextIO
 
-from agent_tools.console import approve
+from agent_tools.console import activation_check, approve, service
 from agent_tools.console import lock_bump_forge
 from agent_tools.console.lock_bump_forge import Checks, GitHubBumpForge, OpenBump
 from agent_tools.console.lock_bump_tree import BumpRefused, Built, GitBuilder, branch_for, revision_of_branch
@@ -239,7 +244,9 @@ def _settle(project, latest, number, record, forge, tracker, builder, root, save
         save({**record, "outcome": checks.state})
         return Step(project, "ended", latest, number, record["issue"], checks.state)
     if record["outcome"] == "red":
-        return Step(project, "red_known", latest, number, record["issue"], None)
+        if record["issue"] is not None:
+            return Step(project, "red_known", latest, number, record["issue"], None)
+        return _report(project, latest, number, record, checks.failing, tracker, save)
     if checks.state == "green":
         if record["commit"] is not None and checks.head != record["commit"]:
             return Step(project, "unverified", latest, number, record["issue"], "head moved")
@@ -251,34 +258,54 @@ def _settle(project, latest, number, record, forge, tracker, builder, root, save
         save({**record, "outcome": "merged"})
         return Step(project, "merged", latest, number, record["issue"], None)
     if checks.state == "red":
-        known = tracker.find(project, latest)
-        issue = known if known is not None else tracker.create(
-            *_issue_text(project, latest, number, checks.failing))
-        save({**record, "outcome": "red", "issue": issue})
-        return Step(project, "red_known" if known is not None else "filed", latest, number, issue, None)
+        red = {**record, "outcome": "red"}
+        save(red)
+        return _report(project, latest, number, red, checks.failing, tracker, save)
     return Step(project, "pending", latest, number, record["issue"], None)
+
+
+def _report(project, latest, number, red, failing, tracker, save) -> Step:
+    """The red issue of a bump already recorded red: the one on the tracker, else a new one, then recorded."""
+    known = tracker.find(project, latest)
+    issue = known if known is not None else tracker.create(
+        *_issue_text(project, latest, number, failing or ("a required check",)))
+    save({**red, "issue": issue})
+    return Step(project, "red_known" if known is not None else "filed", latest, number, issue, None)
+
+
+def _account_login() -> object:
+    user = forge_api.api_get("user")
+    return user.get("login") if isinstance(user, dict) else None
 
 
 class PlatformTracker:
     def __init__(self, platform_repo: str, *, pages: Callable[[str], list] = forge_api.api_pages,
-                 create: Callable[[str, str, str], int] = forge_api.create_issue):
+                 create: Callable[[str, str, str], int] = forge_api.create_issue,
+                 author: Callable[[], object] = lambda: _account_login()):
         self._platform_repo = platform_repo
         self._pages = pages
         self._create = create
+        self._author = author
 
     def create(self, title: str, body: str) -> int:
         return self._create(self._platform_repo, title, body)
 
     def find(self, project: str, revision: str) -> int | None:
-        """The number of an issue of the platform repository that carries the red marker of this bump."""
+        """The number of an issue of the platform repository, filed by the account this pass runs as, that
+        carries the red marker of this bump."""
         marker = red_marker(project, revision)
+        login = self._author()
+        if not isinstance(login, str) or not login:
+            raise forge_api.ForgeError("payload_invalid", "the account the pass runs as has no login")
         for page in self._pages(f"repos/{self._platform_repo}/issues?state=all&per_page=100"):
             for issue in page if isinstance(page, list) else []:
                 if not isinstance(issue, dict) or "pull_request" in issue:
                     continue
-                number, body = issue.get("number"), issue.get("body")
+                number, body, user = issue.get("number"), issue.get("body"), issue.get("user")
+                filed_by = user.get("login") if isinstance(user, dict) else None
                 if (isinstance(body, str) and marker in body.splitlines() and isinstance(number, int)
-                        and not isinstance(number, bool)):
+                        and not isinstance(number, bool) and isinstance(filed_by, str)
+                        and filed_by.casefold() == login.casefold()):
                     return number
         return None
 
@@ -373,8 +400,8 @@ def first_proven_after(proven: Path, since: str) -> str | None:
 
 
 def _merged_bumps(repo: str, base: str, pages: Callable[[str], list],
-                  revisions: Collection[str]) -> list[tuple[str, int, str]]:
-    """The (merged_at, number, revision) of every closed pull request of `repo` that merged a
+                  revisions: Collection[str]) -> list[tuple[str, int, str, str]]:
+    """The (merged_at, number, revision, merge commit) of every closed pull request of `repo` that merged a
     `lock-bump-<revision>` branch of one of `revisions` from `repo` itself into `base`."""
     merged = []
     for page in pages(f"repos/{repo}/pulls?state=closed&per_page=100"):
@@ -385,19 +412,21 @@ def _merged_bumps(repo: str, base: str, pages: Callable[[str], list],
             target = pull.get("base") if isinstance(pull.get("base"), dict) else {}
             source = head.get("repo") if isinstance(head.get("repo"), dict) else {}
             sha, number, at = head.get("sha"), pull.get("number"), pull.get("merged_at")
-            revision = revision_of_branch(head.get("ref"))
+            tree, revision = pull.get("merge_commit_sha"), revision_of_branch(head.get("ref"))
             if (isinstance(at, str) and STAMP.fullmatch(at) and revision is not None and revision in revisions
                     and target.get("ref") == base and source.get("full_name") == repo and isinstance(sha, str)
-                    and approve.COMMIT.fullmatch(sha) and isinstance(number, int) and not isinstance(number, bool)):
-                merged.append((at, number, revision))
+                    and approve.COMMIT.fullmatch(sha) and isinstance(number, int) and not isinstance(number, bool)
+                    and isinstance(tree, str) and approve.COMMIT.fullmatch(tree)):
+                merged.append((at, number, revision, tree))
     return merged
 
 
 def observe(repo: str, *, base: str, since: str, proven: Path, pages: Callable[[str], list],
-            verdict: Callable[[str, int], Checks], now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+            verdict: Callable[[str, int], Checks], pinned: Callable[[str, str], str | None],
+            now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
             within_days: int = WITHIN_DAYS) -> tuple[int, dict]:
     """The exit code and printed record of the bump of the first proven revision after `since`, merged into
-    `base` within `within_days` and judged on its required contexts."""
+    `base` within `within_days`, whose merged lock pins that revision, judged on its required contexts."""
     deadline = _moment(since) + timedelta(days=within_days)
     revision = first_proven_after(proven, since)
     late = now() > deadline
@@ -406,29 +435,53 @@ def observe(repo: str, *, base: str, since: str, proven: Path, pages: Callable[[
     merged = _merged_bumps(repo, base, pages, {revision})
     if not merged:
         return (1, {"pull": None, "state": "not_met"}) if late else (75, {"pull": None, "state": "not_yet"})
-    at, number, _ = min(merged)
+    at, number, revision, tree = min(merged)
     if _moment(at) > deadline:
         return 1, {"pull": number, "state": "not_met"}
-    if verdict(repo, number).state == "green":
+    return _judged(repo, number, revision, tree, verdict, pinned)
+
+
+def _judged(repo: str, number: int, revision: str, tree: str, verdict: Callable[[str, int], Checks],
+            pinned: Callable[[str, str], str | None]) -> tuple[int, dict]:
+    """Met when the lock of the merged tree pins `revision` and the pull's required contexts are green."""
+    if pinned(repo, tree) == revision and verdict(repo, number).state == "green":
         return 0, {"pull": number, "state": "met"}
     return 1, {"pull": number, "state": "not_met"}
 
 
+def activated_at(rows: Sequence[tuple[str, Mapping]], merge: str,
+                 contains: Callable[[str, str], bool | None]) -> datetime | None:
+    """When the first successful activation in the console's (`at`, payload) rows whose commit holds `merge`
+    finished, else None; an activation whose containment is undecided does not count."""
+    for at, payload in rows:
+        commit = payload.get("commit")
+        if payload.get("ok") is not True or not isinstance(commit, str) or not contains(merge, commit):
+            continue
+        try:
+            moment = datetime.fromisoformat(at)
+        except ValueError:
+            continue
+        return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
+    return None
+
+
 def observe_merged(repo: str, *, base: str, merge: str, platform_repo: str, proven: Path,
-                   pages: Callable[[str], list], verdict: Callable[[str, int], Checks],
-                   compare: Callable[[str, str, str], str]) -> tuple[int, dict]:
-    """The exit code and printed record of the first merged bump, in order of merge, of a proven revision that
-    holds the platform commit `merge`, judged on its required contexts. It reads no clock: the verify block's
-    expiry is the window."""
+                   activated: datetime | None, pages: Callable[[str], list],
+                   verdict: Callable[[str, int], Checks], compare: Callable[[str, str, str], str],
+                   pinned: Callable[[str, str], str | None]) -> tuple[int, dict]:
+    """The exit code and printed record of the first bump merged after `activated`, in order of merge, of a proven
+    revision that holds the platform commit `merge`: not met when merged more than `WITHIN_DAYS` days after
+    `activated`, else judged as `observe` does. No activation yet is not yet."""
     not_yet = (75, {"pull": None, "state": "not_yet"})
     revisions = {revision for revision, _ in _proven_lines(proven)}
-    if not revisions:
+    if not revisions or activated is None:
         return not_yet
-    for _, number, revision in sorted(_merged_bumps(repo, base, pages, revisions)):
-        if compare(platform_repo, merge, revision) in ("ahead", "identical"):
-            if verdict(repo, number).state == "green":
-                return 0, {"pull": number, "state": "met"}
+    for at, number, revision, tree in sorted(_merged_bumps(repo, base, pages, revisions)):
+        if _moment(at) < activated or compare(platform_repo, merge, revision) not in ("ahead", "identical"):
+            continue
+        if _moment(at) > activated + timedelta(days=WITHIN_DAYS):
             return 1, {"pull": number, "state": "not_met"}
+        return _judged(repo, number, revision, tree, verdict, pinned)
     return not_yet
 
 
@@ -444,6 +497,7 @@ def main(argv: list[str] | None = None) -> int:
     observed.add_argument("--platform-repo", metavar="O/N")
     observed.add_argument("--within-days", type=int, default=None)
     observed.add_argument("--proven", type=Path, default=None, metavar="FILE")
+    observed.add_argument("--store", type=Path, default=None, metavar="FILE")
     args = parser.parse_args(argv)
     owner_name = r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+"
     if re.fullmatch(owner_name, args.repo) is None:
@@ -453,6 +507,8 @@ def main(argv: list[str] | None = None) -> int:
             parser.error("--since is YYYY-MM-DDTHH:MM:SSZ")
         if args.platform_repo is not None:
             parser.error("--platform-repo goes with --merge")
+        if args.store is not None:
+            parser.error("--store goes with --merge")
         within_days = WITHIN_DAYS if args.within_days is None else args.within_days
         if within_days < 1:
             parser.error("--within-days is a positive number")
@@ -467,11 +523,18 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.since is not None:
             code, record = observe(args.repo, base=args.base, since=args.since, proven=proven,
-                                   pages=forge_api.api_pages, verdict=forge.verdict, within_days=within_days)
+                                   pages=forge_api.api_pages, verdict=forge.verdict, pinned=forge.pinned,
+                                   within_days=within_days)
         else:
+            rows = activation_check.read_stamped(args.store or service.default_store())
+            activated = activated_at(rows, args.merge, activation_check.git_contains(Path.cwd()))
             code, record = observe_merged(
                 args.repo, base=args.base, merge=args.merge, platform_repo=args.platform_repo, proven=proven,
-                pages=forge_api.api_pages, verdict=forge.verdict, compare=forge.compare)
+                activated=activated, pages=forge_api.api_pages, verdict=forge.verdict, compare=forge.compare,
+                pinned=forge.pinned)
+    except (sqlite3.Error, OSError) as error:
+        print(f"lock-bump: the activation record cannot be read: {error}", file=sys.stderr)
+        return 2
     except forge_api.ForgeError as error:
         print(f"lock-bump: {error}", file=sys.stderr)
         return 2

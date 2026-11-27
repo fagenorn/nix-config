@@ -6,17 +6,20 @@ import contextlib
 import io
 import json
 import shutil
+import sqlite3
 import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.console import lock_bump
+from agent_tools.console import activation_check, lock_bump
 from agent_tools.console import lock_bump_forge
 from agent_tools.console.lock_bump_forge import Checks
+from agent_tools.console.lock_bump_tree import revision_of_branch
 from agent_tools.system import forge_api
 from agent_tools.system.forge_api import ForgeError
+from tests.accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures
 from tests.test_verify_checks import committed_mode
 
 TIER = "fast"
@@ -32,7 +35,7 @@ NOW = datetime(2026, 12, 3, tzinfo=timezone.utc)
 
 
 def closed(number, ref, merged_at, base="main"):
-    return {"number": number, "merged_at": merged_at, "base": {"ref": base},
+    return {"number": number, "merged_at": merged_at, "base": {"ref": base}, "merge_commit_sha": f"{number:040x}",
             "head": {"ref": ref, "sha": HEAD, "repo": {"full_name": REPO}}}
 
 
@@ -50,6 +53,19 @@ class StandIn:
         return self.answer
 
 
+class Pinned(StandIn):
+    """The revision each merged tree's lock pins: the pull's own branch revision unless `overrides` says else."""
+
+    def __init__(self, pulls, overrides=None):
+        super().__init__(None)
+        self.answers = {pull["merge_commit_sha"]: revision_of_branch(pull["head"]["ref"]) for pull in pulls}
+        self.answers.update(overrides or {})
+
+    def __call__(self, repo, sha):
+        self.calls.append((repo, sha))
+        return self.answers[sha]
+
+
 class ObservedTest(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
@@ -59,11 +75,17 @@ class ObservedTest(unittest.TestCase):
                       proven_line(REV_C, "2026-12-02T06:00:00Z")]
         self.proven.write_text("\n".join(self.lines) + "\n")
 
-    def observe(self, pulls, answer=Checks("green", HEAD, ()), now=NOW):
-        pages, verdict = StandIn([pulls]), StandIn(answer)
+    def observe(self, pulls, answer=Checks("green", HEAD, ()), now=NOW, overrides=None):
+        pages, verdict, pinned = StandIn([pulls]), StandIn(answer), Pinned(pulls, overrides)
         result = lock_bump.observe(REPO, base="main", since=SINCE, proven=self.proven, pages=pages, verdict=verdict,
-                                   now=lambda: now)
+                                   pinned=pinned, now=lambda: now)
         return result, pages, verdict
+
+    def test_a_bump_whose_merged_lock_still_pins_the_predecessor_is_not_met(self):
+        pulls = [closed(9, f"lock-bump-{REV_B}", "2026-12-01T07:00:00Z")]
+        result, _, verdict = self.observe(pulls, overrides={f"{9:040x}": REV_A})
+        self.assertEqual(result, (1, {"pull": 9, "state": "not_met"}))
+        self.assertEqual(verdict.calls, [])
 
     def test_the_first_proven_revision_after_activation_merged_green_is_met(self):
         pulls = [closed(9, f"lock-bump-{REV_B}", "2026-12-01T07:00:00Z"), closed(8, f"lock-bump-{REV_A}", None)]
@@ -150,6 +172,35 @@ class Compare(StandIn):
         return self.answers[head]
 
 
+ACTIVATED = datetime(2026, 12, 1, tzinfo=timezone.utc)
+
+
+def finished(at, commit, ok=True):
+    return at, {"ok": ok, "commit": commit}
+
+
+class ActivationTest(unittest.TestCase):
+    def test_the_first_successful_activation_holding_the_merge_gives_the_window_start(self):
+        rows = [finished("2026-11-29T00:00:00.000000+00:00", MERGE, ok=False),
+                finished("2026-11-30T00:00:00.000000+00:00", REV_A),
+                finished("2026-12-01T10:30:00.123456+00:00", REV_B),
+                finished("2026-12-02T00:00:00.000000+00:00", REV_C)]
+        seen = []
+
+        def contains(merge, commit):
+            seen.append(commit)
+            return {REV_A: False, REV_B: True, REV_C: True}[commit]
+
+        self.assertEqual(lock_bump.activated_at(rows, MERGE, contains),
+                         datetime(2026, 12, 1, 10, 30, 0, 123456, tzinfo=timezone.utc))
+        self.assertEqual(seen, [REV_A, REV_B])
+
+    def test_no_activation_holding_the_merge_or_an_undecided_one_gives_none(self):
+        rows = [finished("2026-12-01T00:00:00.000000+00:00", REV_A), finished("not a time", REV_B)]
+        self.assertIsNone(lock_bump.activated_at(rows, MERGE, lambda merge, commit: None))
+        self.assertIsNone(lock_bump.activated_at(rows, MERGE, lambda merge, commit: commit == REV_B))
+
+
 class MergedTest(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
@@ -159,12 +210,43 @@ class MergedTest(unittest.TestCase):
             proven_line(REV_A, "2026-11-30T06:00:00Z"), proven_line(REV_B, "2026-12-01T06:00:00Z"),
             proven_line(REV_C, "2026-12-02T06:00:00Z")]) + "\n")
 
-    def observe(self, pulls, answers, checks=Checks("green", HEAD, ())):
-        pages, verdict = StandIn([pulls]), StandIn(checks)
+    def observe(self, pulls, answers, checks=Checks("green", HEAD, ()), activated=ACTIVATED, overrides=None):
+        pages, verdict, pinned = StandIn([pulls]), StandIn(checks), Pinned(pulls, overrides)
         compare = Compare(answers)
         result = lock_bump.observe_merged(REPO, base="main", merge=MERGE, platform_repo=PLATFORM,
-                                          proven=self.proven, pages=pages, verdict=verdict, compare=compare)
+                                          proven=self.proven, activated=activated, pages=pages, verdict=verdict,
+                                          compare=compare, pinned=pinned)
         return result, pages, verdict, compare
+
+    def test_a_bump_merged_after_the_seven_days_from_activation_is_not_met(self):
+        pulls = [closed(9, f"lock-bump-{REV_B}", "2026-12-08T00:00:01Z")]
+        result, _, verdict, _ = self.observe(pulls, {REV_B: "ahead"})
+        self.assertEqual(result, (1, {"pull": 9, "state": "not_met"}))
+        self.assertEqual(verdict.calls, [])
+
+    def test_a_bump_merged_on_the_last_day_from_activation_is_judged(self):
+        pulls = [closed(9, f"lock-bump-{REV_B}", "2026-12-08T00:00:00Z")]
+        result, _, verdict, _ = self.observe(pulls, {REV_B: "ahead"})
+        self.assertEqual(result, (0, {"pull": 9, "state": "met"}))
+        self.assertEqual(verdict.calls, [(REPO, 9)])
+
+    def test_a_bump_merged_before_the_activation_does_not_count(self):
+        pulls = [closed(9, f"lock-bump-{REV_B}", "2026-11-30T23:59:59Z")]
+        result, _, verdict, compare = self.observe(pulls, {REV_B: "ahead"})
+        self.assertEqual(result, (75, {"pull": None, "state": "not_yet"}))
+        self.assertEqual((compare.calls, verdict.calls), ([], []))
+
+    def test_no_activation_holding_the_merge_reads_no_pull(self):
+        pulls = [closed(9, f"lock-bump-{REV_B}", "2026-12-02T07:00:00Z")]
+        result, pages, _, _ = self.observe(pulls, {REV_B: "ahead"}, activated=None)
+        self.assertEqual(result, (75, {"pull": None, "state": "not_yet"}))
+        self.assertEqual(pages.calls, [])
+
+    def test_a_merged_bump_whose_lock_pins_another_revision_is_not_met(self):
+        pulls = [closed(9, f"lock-bump-{REV_B}", "2026-12-02T07:00:00Z")]
+        result, _, verdict, _ = self.observe(pulls, {REV_B: "ahead"}, overrides={f"{9:040x}": REV_A})
+        self.assertEqual(result, (1, {"pull": 9, "state": "not_met"}))
+        self.assertEqual(verdict.calls, [])
 
     def test_the_first_merged_bump_of_a_proven_revision_holding_the_merge_is_met(self):
         pulls = [closed(10, f"lock-bump-{REV_C}", "2026-12-03T07:00:00Z"),
@@ -227,14 +309,30 @@ class MergedTest(unittest.TestCase):
         pulls = [[closed(9, f"lock-bump-{REV_B}", "2026-12-02T07:00:00Z")]]
         with mock.patch.object(forge_api, "api_pages", return_value=pulls), \
                 mock.patch.object(forge_api, "run_gh", side_effect=AssertionError("no real gh")), \
+                mock.patch.object(activation_check, "read_stamped",
+                                  return_value=[finished("2026-12-01T00:00:00.000000+00:00", MERGE)]) as store, \
                 mock.patch.object(lock_bump_forge.GitHubBumpForge, "compare", return_value="ahead") as compare, \
+                mock.patch.object(lock_bump_forge.GitHubBumpForge, "pinned", return_value=REV_B) as pinned, \
                 mock.patch.object(lock_bump_forge.GitHubBumpForge, "verdict",
                                   return_value=Checks("green", HEAD, ())), \
                 contextlib.redirect_stdout(out):
             code = lock_bump.main(["observed", "--repo", REPO, "--base", "main", "--merge", MERGE,
-                                   "--platform-repo", PLATFORM, "--proven", str(self.proven)])
+                                   "--platform-repo", PLATFORM, "--proven", str(self.proven),
+                                   "--store", str(self.tmp / "events.sqlite3")])
         self.assertEqual((code, out.getvalue()), (0, '{"pull":9,"state":"met"}\n'))
         compare.assert_called_once_with(PLATFORM, MERGE, REV_B)
+        pinned.assert_called_once_with(REPO, f"{9:040x}")
+        store.assert_called_once_with(self.tmp / "events.sqlite3")
+
+    def test_main_merge_form_maps_an_unreadable_store_to_two(self):
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(activation_check, "read_stamped", side_effect=sqlite3.OperationalError("no store")), \
+                mock.patch.object(forge_api, "api_pages", side_effect=AssertionError("no forge read")), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = lock_bump.main(["observed", "--repo", REPO, "--base", "main", "--merge", MERGE,
+                                   "--platform-repo", PLATFORM, "--proven", str(self.proven)])
+        self.assertEqual((code, out.getvalue()), (2, ""))
+        self.assertTrue(err.getvalue().startswith("lock-bump: "))
 
 
 if __name__ == "__main__":

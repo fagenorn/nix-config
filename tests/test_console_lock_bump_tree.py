@@ -7,6 +7,7 @@ import unittest
 
 from agent_tools.console import lock_bump_tree
 from agent_tools.console.lock_bump_tree import BumpRefused, branch_for, bumped_lock, pinned_revision, required_migrations
+from tests.accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures
 
 TIER = "fast"
 

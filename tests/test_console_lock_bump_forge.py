@@ -2,10 +2,13 @@
 
 Run: just agent-workflow-tests
 """
+import base64
 import unittest
 
 from agent_tools.console.lock_bump_forge import Checks, GitHubBumpForge, OpenBump, QUERY
 from agent_tools.system.forge_api import ForgeError
+from tests.accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures
+from tests.test_console_lock_bump_tree import dumped, document
 
 TIER = "fast"
 
@@ -45,11 +48,13 @@ def context(name, state="SUCCESS", required=True):
     return {"__typename": "StatusContext", "context": name, "state": state, "isRequired": required}
 
 
-def reading(nodes, state="OPEN", merge_state="CLEAN", head=H, next_page=False):
+def reading(nodes, state="OPEN", merge_state="CLEAN", head=H, next_page=False, cursor="c1", protected=None):
+    rule = None if protected is None else {"requiredStatusChecks": [{"context": name} for name in protected]}
     return {"data": {"repository": {"pullRequest": {
         "state": state, "headRefOid": head, "mergeStateStatus": merge_state,
+        "baseRef": {"branchProtectionRule": rule},
         "commits": {"nodes": [{"commit": {"statusCheckRollup": {"contexts": {
-            "pageInfo": {"hasNextPage": next_page}, "nodes": nodes}}}}]}}}}}
+            "pageInfo": {"hasNextPage": next_page, "endCursor": cursor}, "nodes": nodes}}}}]}}}}}
 
 
 def graphql_argv(number=7):
@@ -86,9 +91,41 @@ class ChecksTest(unittest.TestCase):
     def test_a_merged_pull_reads_merged(self):
         self.assertEqual(self.checks(reading([], state="MERGED")), Checks("merged", H, ()))
 
-    def test_a_second_page_of_contexts_is_unreadable(self):
+    def test_every_page_of_contexts_is_read_through_its_cursor(self):
+        gh = Scripted(reading([run("Tests")], next_page=True, cursor="c1"),
+                      reading([run("Conformance", "FAILURE")], cursor="c2"))
+        self.assertEqual(GitHubBumpForge(gh_json=gh).checks(SLUG, 7), Checks("red", H, ("Conformance",)))
+        self.assertEqual([argv for argv, _ in gh.calls], [graphql_argv(), graphql_argv() + ["-f", "after=c1"]])
+
+    def test_a_next_page_without_a_new_cursor_is_unreadable(self):
+        for cursor in (None, "", "c1"):
+            gh = Scripted(reading([run("Tests")], next_page=True, cursor="c1"),
+                          reading([run("Tests")], next_page=True, cursor=cursor))
+            with self.subTest(cursor=cursor), self.assertRaises(ForgeError):
+                GitHubBumpForge(gh_json=gh).checks(SLUG, 7)
+
+    def test_a_head_that_moves_between_pages_is_unreadable(self):
+        gh = Scripted(reading([run("Tests")], next_page=True), reading([run("Tests")], head="e" * 40))
         with self.assertRaises(ForgeError):
-            self.checks(reading([run("Tests")], next_page=True))
+            GitHubBumpForge(gh_json=gh).checks(SLUG, 7)
+
+    def test_a_protected_context_that_never_reported_keeps_the_verdict_from_green(self):
+        answer = reading([run("Tests")], state="MERGED", protected=["Tests", "Conformance"])
+        self.assertEqual(GitHubBumpForge(gh_json=Scripted(answer)).verdict(SLUG, 7), Checks("pending", H, ()))
+
+    def test_every_protected_context_reported_green_reads_green(self):
+        answer = reading([run("Tests", required=False), context("Conformance")], state="MERGED",
+                         protected=["Tests", "Conformance"])
+        self.assertEqual(GitHubBumpForge(gh_json=Scripted(answer)).verdict(SLUG, 7), Checks("green", H, ()))
+
+    def test_the_lock_pinned_at_a_commit_is_read_from_the_forge(self):
+        text = base64.encodebytes(dumped(document())).decode()
+        gh = Scripted({"encoding": "base64", "content": text}, {"encoding": "none", "content": ""})
+        forge = GitHubBumpForge(gh_json=gh)
+        self.assertEqual(forge.pinned(SLUG, H), REV_A)
+        self.assertEqual(gh.calls[0][0], ["api", f"repos/{SLUG}/contents/devenv.lock?ref={H}"])
+        with self.assertRaises(ForgeError):
+            forge.pinned(SLUG, H)
 
     def test_the_verdict_of_a_merged_pull_judges_only_its_required_contexts(self):
         gh = Scripted(reading([run("Tests"), context("Conformance"), run("Lint", "FAILURE", required=False)],
