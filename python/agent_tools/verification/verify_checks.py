@@ -108,6 +108,23 @@ else the first `step_entered` after that grade, at or before anchor plus two day
 with none it is not met once the clock is past that bound, else `not_yet`. The report is `{"met", "verdict",
 "anchor", "run", "implement", "entered", "at"}`.
 
+`engine-deliver-past-setup --since SHA [--runs-root DIR] [--log PATH] [--repo-root DIR]`
+(`verify_checks.engine_deliver_past_setup`) is met when the first direct-lane engine delivery after activation had a
+direct child run enter a step within two days of the activation. The anchor is found as `engine-direct-past-implement`
+finds it (none: `not_yet`, 75). The roots are the runs under `--runs-root` whose `run.json` has procedure `deliver`, no
+`parent` and a `started` at or after the anchor's whole second, by `(started, id)`. A root whose first `lane` transition (a decide step's grade) is `standard` or
+whose last `stop_reached` is `standard-not-on-engine` or `look-not-on-engine` is skipped; the first other root is
+judged and no later root stands in for it. With lane `direct`, the first `step_entered` among the root's direct child
+runs (`parent` the root, procedure `direct`) whose entry has the step, visit and stage the ledger requires, at or before anchor plus two days, is
+met (0), a later one not met (1); with none it is not met once the clock is past that bound, else `not_yet`; with
+no root to judge at all it is likewise not met once the clock is past that bound. A root with no lane grade (it stopped in
+setup, or is still before the grade) is `not_yet` (75) while it has no stop and the clock is inside the window, else
+`lane_unknown` (75), since the record cannot tell a direct issue from a standard one. The report is `{"met",
+"verdict", "anchor", "run", "lane", "stop", "child", "entered", "at"}`. Runs and events are read as the engine's
+ledger reads them (`engine_run_evidence`): a runs root that cannot be listed (an absent one holds none), or a run
+named at or after the anchor's second that does not read as a run, is exit 2 (`runs_unreadable`, `run_unreadable`),
+never a verdict; a root whose events the ledger would not replay has no lane.
+
 `console-notice-lists --port N --notice PROJECT=N1,N2,... [--notice ...]` (`verify_checks.console_notice_lists`,
 issue 1291) reads `GET http://127.0.0.1:N/api/state` (no answer, a status other than 200 or a body that is not a
 JSON object is `unreachable`, exit 75) and looks up each wanted project among the entries of `"type": "project"`,
@@ -161,6 +178,7 @@ from agent_tools.project_contract import agent_platform
 from agent_tools.project_contract.adopt_apply import run_leashed
 from agent_tools.canonical import parse_rfc3339_utc
 from agent_tools.claims import forge_markers, forge_owner_action
+from agent_tools.verification import engine_run_evidence
 from agent_tools.system import forge_api
 from agent_tools.verification import verify_answer, verify_issues
 
@@ -901,6 +919,87 @@ def engine_direct_past_implement(since: str, *, runs_root: Path | None = None, l
                                   now if now is not None else _utcnow())
 
 
+NOT_DIRECT_STOPS = ("standard-not-on-engine", "look-not-on-engine")
+
+
+def _root_lane_and_stop(run_dir: Path) -> tuple[str | None, str | None]:
+    """The outcome of a run's first `lane` grade and the `stop` of its last `stop_reached`, each None if absent.
+
+    Both None when the ledger would not replay the run (`engine_run_evidence.event` refuses a line)."""
+    try:
+        events = [engine_run_evidence.event(line) for line in engine_run_evidence.lines(run_dir)]
+    except ValueError:
+        return None, None
+    lane = next((event["outcome"] for event in events
+                 if event["event"] == "transition_taken" and event["step"] == "lane"), None)  # a decide step
+    stops = [event["stop"] for event in events if event["event"] == "stop_reached"]  # writes no grade
+    return lane, (stops[-1] if stops else None)
+
+
+def past_setup_verdict(runs_root: Path, anchor: datetime, now: datetime) -> tuple[int, dict]:
+    """The first direct-lane delivery from `anchor` on had a direct child run enter a step in time."""
+    report = {"met": False, "verdict": "not_yet", "anchor": _stamp(anchor), "run": None, "lane": None,
+              "stop": None, "child": None, "entered": None, "at": None}
+    end = anchor + PAST_IMPLEMENT_WINDOW
+    whole_second = anchor.replace(microsecond=0)  # the ledger keeps a run's start to the second
+    runs = engine_run_evidence.runs(runs_root, whole_second)
+    for started, run_id, run_dir, document in runs:
+        if document.get("procedure") != "deliver" or "parent" in document or started < whole_second:
+            continue
+        lane, stop = _root_lane_and_stop(run_dir)
+        if lane == "standard" or stop in NOT_DIRECT_STOPS:
+            continue
+        report.update(run=run_id, lane=lane, stop=stop)
+        if lane != "direct":
+            if stop is None and now <= end:
+                return 75, report
+            return 75, {**report, "verdict": "lane_unknown"}
+        for _, child_id, child_dir, child in runs:
+            if child.get("parent") != run_id or child.get("procedure") != "direct":
+                continue
+            entered = _first_step_entered(child_dir)
+            if entered is not None:
+                at = parse_rfc3339_utc(entered["at"])
+                report.update(child=child_id, entered=entered["step"], at=_stamp(at))
+                if at <= end:
+                    return 0, {**report, "met": True, "verdict": "met"}
+                return 1, {**report, "verdict": "not_met"}
+        if now > end:
+            return 1, {**report, "verdict": "not_met"}
+        return 75, report
+    if now > end:
+        return 1, {**report, "verdict": "not_met"}
+    return 75, report
+
+
+def _first_step_entered(run_dir: Path) -> dict | None:
+    """The first `step_entered` a run's events hold, as the ledger validates an event; else None.
+
+    None when a line up to it is one the ledger would refuse (`engine_run_evidence.event`: a `step_entered`
+    needs a step, a visit and a stage, and no other member): `engine status` cannot show a run whose ledger
+    does not replay."""
+    for line in engine_run_evidence.lines(run_dir):
+        try:
+            event = engine_run_evidence.event(line)
+        except ValueError:
+            return None
+        if event["event"] == "step_entered":
+            return event
+    return None
+
+
+def engine_deliver_past_setup(since: str, *, runs_root: Path | None = None, log: Path | None = None,
+                              repo_root: Path = Path("."), now: datetime | None = None) -> tuple[int, dict]:
+    """The first direct engine delivery after activation of `since` got past setup within two days."""
+    store = log if log is not None else agent_platform.state_root() / "console" / "events.sqlite3"
+    anchor = _manager_merge_anchor(_log_rows(store, ("activation.finished",)), since, repo_root)
+    if anchor is None:
+        return 75, {"met": False, "verdict": "not_yet", "anchor": None, "run": None, "lane": None,
+                    "stop": None, "child": None, "entered": None, "at": None}
+    return past_setup_verdict(runs_root if runs_root is not None else agent_platform.engine_runs_root(), anchor,
+                              now if now is not None else _utcnow())
+
+
 def _proxy_answers(port: int, timeout: float) -> bool:
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
     try:
@@ -1203,6 +1302,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     past_implement.add_argument("--runs-root", type=Path)
     past_implement.add_argument("--log", type=Path)
     past_implement.add_argument("--repo-root", type=Path, default=Path("."))
+    past_setup = checks.add_parser(
+        "engine-deliver-past-setup",
+        help="the first direct engine delivery after activation had a direct child run enter a step in time")
+    past_setup.add_argument("--since", type=_merge_sha, required=True)
+    past_setup.add_argument("--runs-root", type=Path)
+    past_setup.add_argument("--log", type=Path)
+    past_setup.add_argument("--repo-root", type=Path, default=Path("."))
     notices = checks.add_parser(
         "console-notice-lists",
         help="issue 1291: the owner's notice for each project names every one of its issues")
@@ -1250,6 +1356,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             code, report = engine_direct_past_implement(args.since, runs_root=args.runs_root, log=args.log,
                                                         repo_root=args.repo_root)
         except (ToolError, GitError) as error:
+            print(f"verify-checks: {getattr(error, 'kind', 'git_error')}: {error}", file=sys.stderr)
+            return 2
+        print(json.dumps(report, sort_keys=True))
+        return code
+    if args.check == "engine-deliver-past-setup":
+        try:
+            code, report = engine_deliver_past_setup(args.since, runs_root=args.runs_root, log=args.log,
+                                                     repo_root=args.repo_root)
+        except (ToolError, GitError, engine_run_evidence.EvidenceError) as error:
             print(f"verify-checks: {getattr(error, 'kind', 'git_error')}: {error}", file=sys.stderr)
             return 2
         print(json.dumps(report, sort_keys=True))

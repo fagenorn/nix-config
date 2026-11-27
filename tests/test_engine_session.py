@@ -7,6 +7,7 @@ stand-in launcher (tests/fixtures/engine-session/claude_stub.py).
 
 from __future__ import annotations
 
+import ast
 import json
 import os
 import re
@@ -196,11 +197,11 @@ class RoleTest(unittest.TestCase):
     def test_a_role_value_that_would_put_a_forbidden_word_in_the_argv_is_refused(self):
         cases = (
             ("model", {"model": "--agent"}),
-            ("effort", {"effort": "bypassPermissions"}),
+            ("effort", {"effort": "x--bare"}),
             ("model", {"model": "opus --bare"}),
             ("tools", {"tools": "Read, --bare"}),
             ("disallowedTools", {"disallowedTools": "Write, --dangerously-skip-permissions"}),
-            ("tools", {"tools": "Read,bypassPermissions"}),
+            ("tools", {"tools": "Read,x--agent"}),
             ("tools", {"tools": "Read, --setting-sources"}),
             ("effort", {"effort": "high medium"}),
         )
@@ -211,9 +212,31 @@ class RoleTest(unittest.TestCase):
                     read_role(self.directory, "planner")
                 self.assertIn(field, str(caught.exception))
                 self.assertIn("planner", str(caught.exception))
-        self.put("planner", role_text(tools="Read, Bash(git status:*)"))
+
+    def test_a_scoped_rule_in_a_role_file_is_refused_and_an_agent_selector_is_kept(self):
+        cases = (
+            ("tools", {"tools": "Read, Bash(git status:*)"}),
+            ("disallowedTools", {"disallowedTools": "Write, Bash(rm:*)"}),
+            ("tools", {"tools": "Read, Edit(/srv/**)"}),
+            ("tools", {"tools": "Read, Bash(git log:*, git show:*)"}),
+            ("disallowedTools", {"disallowedTools": "Write, Bash(rm -rf:*, git push:*)"}),
+            ("tools", {"tools": "Read, Edit(/srv/a/**, /srv/b/**)"}),
+            ("tools", {"tools": "Read, Bash(git log:*"}),
+            ("tools", {"tools": "Read, git show:*)"}),
+            ("tools", {"tools": "Read, Agent(Explore)Bash(x)"}),
+        )
+        for field, fields in cases:
+            with self.subTest(fields=fields):
+                self.put("planner", role_text(**fields))
+                with self.assertRaises(RoleError) as caught:
+                    read_role(self.directory, "planner")
+                self.assertIn(field, str(caught.exception))
+                self.assertIn("planner", str(caught.exception))
+        self.put("planner", role_text(tools="Read, Agent(Explore)"))
+        self.assertEqual(read_role(self.directory, "planner").tools, ("Read", "Agent(Explore)"))
+        self.put("planner", role_text(tools="Read, Agent(Explore, Plan), Grep"))
         self.assertEqual(read_role(self.directory, "planner").tools,
-                         ("Read", "Bash(git status:*)"))
+                         ("Read", "Agent(Explore, Plan)", "Grep"))
 
 
 class PromptTest(unittest.TestCase):
@@ -236,41 +259,62 @@ SESSION = "0b0b8a8e-6f0e-4d47-9d6a-3f1f2b9c1a11"
 SYSTEM = Path("/run/sessions/review.1.system.md")
 REVIEWER = Role("reviewer", "opus", "high", ("Read", "Bash"), None, "body\n")
 IMPLEMENTER = Role("implementer", "opus", "high", None, ("Workflow", "Artifact"), "")
-NEVER = {"--agent", "--bare", "--setting-sources", "--dangerously-skip-permissions",
-         "bypassPermissions"}
+NEVER = {"--agent", "--bare", "--setting-sources", "--permission-mode", "--allowedTools"}
 LAUNCHER_STANDIN = (
     "import subprocess,sys; subprocess.Popen([sys.executable, '-c', "
     "\"import os,sys,time; open(sys.argv[1], 'w').write(str(os.getpid())); time.sleep(60)\", "
     "sys.argv[1]]).wait()")
 
 
-GIT_READ_ONLY = ("Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git status:*),"
-                 "Bash(git rev-parse:*),Bash(git ls-files:*),Bash(git blame:*),"
-                 "Bash(git merge-base:*)")
-# `git diff`, `git log` and `git show` all write a file given `--output=<file>`; the prefix
-# patterns above would preapprove that, so these deny rules (checked first) refuse it.
-GIT_WRITING = ("Bash(git diff*--output*),Bash(git log*--output*),Bash(git show*--output*)")
+SHELL_WORDS = ("Bash(", "dontAsk", "bypassPermissions", "CLAUDE_READ_ONLY_SHELL", "--allowedTools",
+               "--permission-mode")
+
+
+def docstring_ids(tree: ast.AST) -> set[int]:
+    """The ids of the string constants that are the docstring of the module or of a def or class."""
+    found = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            first = node.body[0] if node.body else None
+            if (isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant)
+                    and isinstance(first.value.value, str)):
+                found.add(id(first.value))
+    return found
 
 
 class LaunchArgvTest(unittest.TestCase):
-    def test_bash_is_never_preapproved_as_a_whole(self):
-        role = Role("reviewer", "opus", "high", ("Read", "Bash", "Skill"), None, "")
-        argv = launch_argv(role, SCHEMA, SESSION, SYSTEM)
-        self.assertEqual(after(list(argv), "--tools"), "Read,Bash,Skill")
-        allowed = after(list(argv), "--allowedTools").split(",")
-        self.assertNotIn("Bash", allowed)
-        self.assertEqual(allowed, ["Read", *GIT_READ_ONLY.split(","), "Skill"])
+    def test_every_role_file_launches_with_permissions_skipped_and_no_rule_of_its_own(self):
+        for name in ROLE_NAMES:
+            with self.subTest(role=name):
+                role = read_role(AGENTS, name)
+                text = (AGENTS / f"{name}.md").read_text(encoding="utf-8")
+                argv = list(launch_argv(role, SCHEMA, SESSION, SYSTEM))
+                self.assertIn("--dangerously-skip-permissions", argv)
+                for word in ("--permission-mode", "--allowedTools", "--agent", "--bare",
+                             "--setting-sources"):
+                    self.assertNotIn(word, argv)
+                self.assertFalse([word for word in argv if "Bash(" in word])
+                for field, flag in (("tools", "--tools"), ("disallowedTools", "--disallowedTools")):
+                    value = frontmatter(text, field)
+                    if value is None:
+                        self.assertNotIn(flag, argv)
+                    else:
+                        self.assertEqual(after(argv, flag), names(value))
 
-    def test_the_git_commands_that_write_a_file_through_output_are_denied(self):
-        argv = launch_argv(REVIEWER, SCHEMA, SESSION, SYSTEM)
-        self.assertEqual(after(list(argv), "--disallowedTools"), GIT_WRITING)
+    def test_no_engine_module_carries_a_shell_rule_or_a_permission_mode(self):
+        directory = REPO_ROOT / "python/agent_tools/delivery"
+        for path in (*sorted(directory.glob("engine_*.py")), directory / "procedure_terms.py"):
+            with self.subTest(file=path.name):
+                tree = ast.parse(path.read_text(encoding="utf-8"))
+                skipped = docstring_ids(tree)
+                for node in ast.walk(tree):
+                    if (isinstance(node, ast.Constant) and isinstance(node.value, str)
+                            and id(node) not in skipped):
+                        for word in SHELL_WORDS:
+                            self.assertNotIn(word, node.value, f"line {node.lineno}")
 
-    def test_the_output_denial_joins_a_roles_own_disallowed_tools_and_needs_bash(self):
-        both = Role("reviewer", "opus", "high", ("Read", "Bash"), ("Write",), "")
-        self.assertEqual(after(list(launch_argv(both, SCHEMA, SESSION, SYSTEM)),
-                               "--disallowedTools"), f"Write,{GIT_WRITING}")
-        no_shell = Role("reviewer", "opus", "high", ("Read",), None, "")
-        self.assertNotIn("--disallowedTools", launch_argv(no_shell, SCHEMA, SESSION, SYSTEM))
+    def test_the_forbidden_words_keep_only_what_would_drop_the_guard_hook(self):
+        self.assertEqual(engine_session.FORBIDDEN_WORDS, ("--agent", "--bare", "--setting-sources"))
 
     def test_the_argv_is_the_launcher_print_form_with_the_role_by_flags(self):
         self.assertEqual(launch_argv(REVIEWER, SCHEMA, SESSION, SYSTEM), (
@@ -278,10 +322,9 @@ class LaunchArgvTest(unittest.TestCase):
             '{"properties":{"verdict":{"enum":["approve","revise"]}},'
             '"required":["verdict"],"type":"object"}',
             "--session-id", "0b0b8a8e-6f0e-4d47-9d6a-3f1f2b9c1a11", "--strict-mcp-config",
-            "--permission-mode", "dontAsk", "--model", "opus", "--effort", "high",
+            "--dangerously-skip-permissions", "--model", "opus", "--effort", "high",
             "--max-turns", "150", "--max-budget-usd", "15.00",
-            "--tools", "Read,Bash", "--allowedTools", f"Read,{GIT_READ_ONLY}",
-            "--disallowedTools", GIT_WRITING,
+            "--tools", "Read,Bash",
             "--append-system-prompt-file", "/run/sessions/review.1.system.md"))
 
     def test_a_resume_names_the_session_by_resume_and_never_session_id(self):
@@ -309,17 +352,17 @@ class LaunchArgvTest(unittest.TestCase):
         at = argv.index("--append-system-prompt-file")
         self.assertEqual(argv[at - 2:at], ("--disallowedTools", "Workflow,Artifact"))
 
-    def test_no_argv_word_hands_the_session_an_agent_bare_or_bypass(self):
+    def test_no_argv_word_hands_the_session_an_agent_bare_mode_or_its_own_settings(self):
         for role in (REVIEWER, IMPLEMENTER):
             with self.subTest(role=role.name):
                 argv = launch_argv(role, SCHEMA, SESSION, SYSTEM)
                 self.assertTrue(NEVER.isdisjoint(argv))
-                self.assertEqual(argv[argv.index("--permission-mode") + 1], "dontAsk")
+                self.assertIn("--dangerously-skip-permissions", argv)
 
     def test_a_role_value_that_would_hand_over_control_is_refused(self):
         cases = {
             "model": Role("reviewer", "--agent", "high", None, None, ""),
-            "effort": Role("reviewer", "opus", "bypassPermissions", None, None, ""),
+            "effort": Role("reviewer", "opus", "x--setting-sources", None, None, ""),
             "tools": Role("reviewer", "opus", "high", ("Read", "--bare"), None, ""),
             "disallowed": Role("reviewer", "opus", "high", None,
                                ("--dangerously-skip-permissions",), ""),
@@ -711,7 +754,7 @@ class DeliverSessionTest(unittest.TestCase):
                     if e["event"] == "session_starting" and e["step"] == step]
         return event
 
-    def test_each_role_file_reaches_the_stub_by_flags_and_never_as_agent_bare_or_bypass(self):
+    def test_each_role_file_reaches_the_stub_with_permissions_skipped_on_the_host_settings(self):
         project = self.project
         log = install_stub(project, RESULT_NORMAL)
         roles = ROLE_NAMES
@@ -740,7 +783,9 @@ class DeliverSessionTest(unittest.TestCase):
             self.assertEqual(uuid.UUID(session).version, 4)
             self.assertEqual(session, event["session"])
             ids.append(session)
-            self.assertEqual(after(argv, "--permission-mode"), "dontAsk")
+            self.assertIn("--dangerously-skip-permissions", argv)
+            self.assertNotIn("--permission-mode", argv)
+            self.assertEqual(line["host_settings"], "required")
             self.assertIn("--strict-mcp-config", argv)
             self.assertEqual(line["cwd"], os.path.realpath(project.root))
             self.assertEqual(line["stdin"], "Draft issue 1514.\n")
@@ -749,21 +794,15 @@ class DeliverSessionTest(unittest.TestCase):
             tools = frontmatter(text, "tools")
             if role == "implementer":
                 self.assertNotIn("--tools", argv)
-                self.assertNotIn("--allowedTools", argv)
                 self.assertEqual(after(argv, "--disallowedTools"),
                                  names(frontmatter(text, "disallowedTools")))
             else:
                 self.assertEqual(after(argv, "--tools"), names(tools))
-                self.assertEqual(after(argv, "--allowedTools"),
-                                 names(tools).replace("Bash", GIT_READ_ONLY))
-                if "Bash" in tools:
-                    self.assertEqual(after(argv, "--disallowedTools"), GIT_WRITING)
-                else:
-                    self.assertNotIn("--disallowedTools", argv)
+                self.assertNotIn("--disallowedTools", argv)
+            self.assertNotIn("--allowedTools", argv)
             self.assertEqual(Path(after(argv, "--append-system-prompt-file")).read_text(
                 encoding="utf-8"), text.partition("\n---\n")[2])
-            for word in ("--agent", "--bare", "--setting-sources",
-                         "--dangerously-skip-permissions", "bypassPermissions"):
+            for word in ("--agent", "--bare", "--setting-sources", "--allowedTools"):
                 self.assertNotIn(word, argv)
             self.assertEqual(event["account"], "console")
         self.assertEqual(len(set(ids)), 4)
@@ -958,6 +997,32 @@ class DeliverSessionTest(unittest.TestCase):
                     self.fail(f"process {pid} outlived the wall-time ending")
                 time.sleep(0.05)
 
+    def test_a_session_denied_and_past_its_wall_bound_stops_at_tool_denied_without_a_reask(self):
+        project = self.project
+        log = project.tmp / "denying.log"
+        document = json.loads(RESULT_NORMAL.read_text(encoding="utf-8"))
+        document["permission_denials"] = [{"tool_name": "Bash", "tool_use_id": "toolu_04",
+                                           "tool_input": {"command": "make build"}}]
+        script = project.tmp / "denying_claude.py"
+        script.write_text(
+            "import sys, time\n"
+            "sys.stdin.read()\n"
+            f"open({str(log)!r}, 'a').write('launch\\n')\n"
+            f"sys.stdout.write({json.dumps(document)!r})\n"
+            "sys.stdout.flush()\n"
+            "time.sleep(60)\n", encoding="utf-8")
+        launcher = project.bin / "claude-account"
+        launcher.write_text(f"#!/bin/sh\nexec {sys.executable} {script}\n", encoding="utf-8")
+        launcher.chmod(0o755)
+        bounds = {**engine_session.ROLE_BOUNDS, "implementer": engine_session.Bounds(3, 300, 20.0)}
+        with project.inside(), mock.patch.object(engine_session, "ROLE_BOUNDS", bounds):
+            code, line = engine_shell.deliver(1520, self.capped_procedures())
+        self.assertEqual(code, 3, line)
+        self.assertEqual((line["end"], line["need"]), ("tool-denied", "owner-decision"))
+        self.assertIn(repr("make build"), line["detail"])
+        self.assertEqual(log.read_text(encoding="utf-8").splitlines(), ["launch"])
+        self.assertEqual(list(self.run_dir().glob("sessions/*.denied.prompt.md")), [])
+
     @staticmethod
     def kill_quietly(pid: int) -> None:
         try:
@@ -969,12 +1034,13 @@ class DeliverSessionTest(unittest.TestCase):
         document = json.loads(RESULT_MAX_TURNS.read_text(encoding="utf-8"))
         document["permission_denials"] = [{"tool_name": "Bash", "tool_use_id": "toolu_03",
                                            "tool_input": {"command": "make build"}}]
-        install_stub(self.project, json.dumps(document).encode("utf-8"), exit=1)
+        log = install_stub(self.project, json.dumps(document).encode("utf-8"), exit=1)
         done = self.project.deliver(self.capped_procedures(), issue=1520)
         self.assertEqual(done.returncode, 3, done.stderr)
         line = json.loads(done.stdout)
         self.assertEqual((line["end"], line["need"]), ("tool-denied", "owner-decision"))
         self.assertIn(repr("make build"), line["detail"])
+        self.assertEqual(len(log.read_text(encoding="utf-8").splitlines()), 1)
         run = self.run_dir()
         self.assertFalse((run / "results/draft.1.json").exists())
         self.assertNotIn("outcome_graded", [e["event"] for e in self.project.events(run)])
@@ -1390,16 +1456,20 @@ class DeliverSessionTest(unittest.TestCase):
         self.assertEqual(session, after(argv, "--resume"))
 
     def test_a_role_file_that_does_not_read_refuses_the_run_before_any_session(self):
-        for name in ("no file", "a model that is an option"):
+        edits = {
+            "a model that is an option": (r"^model: .*$", "model: --dangerously-skip-permissions"),
+            "a scoped shell rule": (r"^(model: .*)$", r"\1\ntools: Read, Bash(git status:*)"),
+        }
+        for name in ("no file", *edits):
             with self.subTest(name):
                 project = EngineProject(self)
                 project.env.pop("CLAUDE_ACCOUNT", None)
                 if name != "no file":
                     copy_roles(project, "implementer")
                     path = project.world.home / ".claude/agents/implementer.md"
-                    path.write_text(re.sub(r"^model: .*$", "model: --dangerously-skip-permissions",
-                                           path.read_text(encoding="utf-8"), flags=re.M),
-                                    encoding="utf-8")
+                    pattern, replacement = edits[name]
+                    path.write_text(re.sub(pattern, replacement, path.read_text(encoding="utf-8"),
+                                           flags=re.M), encoding="utf-8")
                 log = install_stub(project, RESULT_NORMAL)
                 done = project.deliver(one_step(project), issue=1514)
                 self.assertEqual(done.returncode, 2, done.stderr)

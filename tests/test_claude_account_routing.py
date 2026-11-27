@@ -152,7 +152,7 @@ class LauncherCase(unittest.TestCase):
         return "http://127.0.0.1:%d" % listener.getsockname()[1]
 
     def run_launcher(self, proxy_url, env=None, substitute=True, without_curl_and_jq=False, console_url=None,
-                     client=None, prelude=None):
+                     client=None, prelude=None, args=()):
         """`claude-account run` from a fresh copy of the mod, as a finished process.
 
         `without_curl_and_jq` points the copy's CURL and JQ at paths that do not exist; `client` is the
@@ -179,7 +179,7 @@ class LauncherCase(unittest.TestCase):
         child = {key: os.environ[key] for key in ("PATH", "TMPDIR") if key in os.environ}
         child.update(HOME=str(home), CLAUDE_ACCOUNTS_DIR=str(self.root / "accounts-state"),
                      CLAUDE_BIN=client or shutil.which("env"), **{**self.switch, **(env or {})})
-        argv = [shutil.which("bash"), str(script), "run"]
+        argv = [shutil.which("bash"), str(script), "run", *args]
         if prelude is not None:
             argv = [argv[0], "-c", prelude + '; exec "$0" "$1" run', argv[0], str(script)]
         return subprocess.run(argv, cwd=work, env=child,
@@ -676,6 +676,145 @@ class ProfileChoiceTest(LauncherCase):
                 environment = self.launch(self.closed(), self.answer_env(), console_url=url)
                 self.assertEqual(self.chosen(environment), self.path("a"))
                 self.assertEqual(self.answer.read_text(), '{"account":"a"}\n')
+
+
+class SwitchRelaunchTest(LauncherCase):
+    """A session that asks for an account switch is relaunched with every flag it started with that restricts it."""
+
+    switch = {"CLAUDE_CACHE_PROXY": "0"}
+
+    def relaunched(self, *args: str) -> list[str]:
+        """The words the second launch of a session that asked for a switch got, one per line."""
+        seen = self.root / "argv.log"
+        for leftover in (seen, self.root / "first"):
+            leftover.unlink(missing_ok=True)
+        client = self.root / "client"
+        client.write_text(
+            "#!/bin/sh\n"
+            'printf "%%s\\n" "$@" >>%s\n'
+            'echo "--launch-end" >>%s\n'
+            'if [ ! -e %s/first ]; then touch %s/first; mkdir -p "$CLAUDE_ACCOUNTS_DIR/switch"; '
+            'printf "default\\tsess-1\\n" >"$CLAUDE_ACCOUNTS_DIR/switch/$CLAUDE_ACCOUNT_LAUNCHER"; fi\n'
+            % (seen, seen, self.root, self.root))
+        client.chmod(0o755)
+        done = self.run_launcher(
+            self.closed(), env={"CLAUDE_ACCOUNT": "default"}, client=str(client), args=args)
+        self.assertEqual((done.returncode, done.stderr), (0, ""))
+        launches = seen.read_text().split("--launch-end\n")
+        self.assertEqual(len(launches), 3)
+        return launches[1].splitlines()
+
+    def test_the_relaunch_keeps_every_form_of_a_tool_list_flag(self):
+        cases = {
+            "the dashed alias": (("--disallowed-tools", "Edit"), ["--disallowed-tools", "Edit"]),
+            "the equals form": (("--disallowedTools=Edit",), ["--disallowedTools=Edit"]),
+            "the dashed equals form": (("--disallowed-tools=Edit",), ["--disallowed-tools=Edit"]),
+            "the allow list alias": (("--allowed-tools", "Read", "Grep"), ["--allowed-tools", "Read", "Grep"]),
+            "every listed value": (("--disallowedTools", "Edit", "Write"), ["--disallowedTools", "Edit", "Write"]),
+            "an empty list": (("--tools", ""), ["--tools", ""]),
+            "the permission mode equals form": (("--permission-mode=plan",), ["--permission-mode=plan"]),
+        }
+        for name, (given, kept) in cases.items():
+            with self.subTest(name):
+                self.assertEqual(
+                    self.relaunched("--session-id", "sess-1", "--dangerously-skip-permissions", *given,
+                                    "--model", "opus"),
+                    ["--resume", "sess-1", "--dangerously-skip-permissions", *kept])
+
+    def test_the_relaunch_keeps_every_flag_that_restricts_a_bypass_session(self):
+        deny = '{"permissions":{"deny":["Edit"]}}'
+        agents = '{"r":{"tools":["Read"]}}'
+        plugin_url = "https://plugins.invalid/p.zip"
+        cases = {
+            "settings json": (("--settings", deny), ["--settings", deny]),
+            "settings equals form": (("--settings=" + deny,), ["--settings=" + deny]),
+            "a read-only agent": (("--agent", "reviewer"), ["--agent", "reviewer"]),
+            "the agent equals form": (("--agent=reviewer",), ["--agent=reviewer"]),
+            "agents json": (("--agents", agents), ["--agents", agents]),
+            "restricted mode": (("--restricted",), ["--restricted"]),
+            "safe mode": (("--safe-mode",), ["--safe-mode"]),
+            "bare mode": (("--bare",), ["--bare"]),
+            "no slash commands": (("--disable-slash-commands",), ["--disable-slash-commands"]),
+            "no chrome": (("--no-chrome",), ["--no-chrome"]),
+            "the permission mode": (("--permission-mode", "plan"), ["--permission-mode", "plan"]),
+            "setting sources": (("--setting-sources", "project"), ["--setting-sources", "project"]),
+            "the setting sources equals form": (("--setting-sources=project",), ["--setting-sources=project"]),
+            "an empty setting sources list": (("--setting-sources", ""), ["--setting-sources", ""]),
+            "a plugin dir": (("--plugin-dir", "/opt/deny-hooks"), ["--plugin-dir", "/opt/deny-hooks"]),
+            "every plugin dir": (
+                ("--plugin-dir", "/a", "--plugin-dir", "/b.zip"), ["--plugin-dir", "/a", "--plugin-dir", "/b.zip"]),
+            "the plugin dir equals form": (("--plugin-dir=/a",), ["--plugin-dir=/a"]),
+            "a plugin url": (("--plugin-url", plugin_url), ["--plugin-url", plugin_url]),
+            "the plugin url equals form": (("--plugin-url=" + plugin_url,), ["--plugin-url=" + plugin_url]),
+            "the agents equals form": (("--agents=" + agents,), ["--agents=" + agents]),
+            "a settings file path": (
+                ("--settings", "/etc/claude/deny.json"), ["--settings", "/etc/claude/deny.json"]),
+        }
+        for name, (given, kept) in cases.items():
+            with self.subTest(name):
+                self.assertEqual(
+                    self.relaunched("--session-id", "sess-1", "--dangerously-skip-permissions", *given,
+                                    "--model", "opus"),
+                    ["--resume", "sess-1", "--dangerously-skip-permissions", *kept])
+
+    def test_an_option_value_is_never_read_as_a_flag_on_the_relaunch(self):
+        bypass = "--dangerously-skip-permissions"
+        cases = {
+            "a dropped option's value": (("--system-prompt", bypass), []),
+            "a dropped list's first value": (("--add-dir", bypass), []),
+            "the short name option": (("-n", bypass), []),
+            "a short cluster ending in the name option": (("-cn", bypass), []),
+            "a hidden prompt file option": (("--system-prompt-file", bypass), []),
+            "a carried list's first value": (("--tools", bypass), ["--tools", bypass]),
+            "a carried option's value": (("--settings", bypass), ["--settings", bypass]),
+            "an optional value never takes an option": (
+                ("--debug", "--strict-mcp-config"), ["--strict-mcp-config"]),
+        }
+        for name, (given, kept) in cases.items():
+            with self.subTest(name):
+                self.assertEqual(
+                    self.relaunched("--session-id", "sess-1", *given, "--model", "opus"),
+                    ["--resume", "sess-1", *kept])
+
+    def test_the_relaunch_drops_the_flags_that_only_widen_or_bind_no_tool(self):
+        self.assertEqual(
+            self.relaunched("--session-id", "sess-1", "--dangerously-skip-permissions", "--add-dir", "/x",
+                            "--mcp-config", "m.json", "--allow-dangerously-skip-permissions", "--chrome",
+                            "--ide", "--brief", "--system-prompt", "be brief", "--append-system-prompt",
+                            "and kind", "--effort", "high", "-n", "a name", "--model", "opus"),
+            ["--resume", "sess-1", "--dangerously-skip-permissions"])
+
+    def test_a_value_list_ends_at_the_next_option_and_nothing_after_the_end_of_options_is_kept(self):
+        self.assertEqual(
+            self.relaunched("--disallowedTools", "Edit", "Write", "--model", "opus", "--strict-mcp-config",
+                            "--", "--tools", "Bash", "--dangerously-skip-permissions"),
+            ["--resume", "sess-1", "--disallowedTools", "Edit", "Write", "--strict-mcp-config"])
+
+    def test_the_relaunch_keeps_the_permission_and_tool_flags_of_the_first_launch(self):
+        seen = self.root / "argv.log"
+        client = self.root / "client"
+        client.write_text(
+            "#!/bin/sh\n"
+            'echo "$*" >>%s\n'
+            'if [ ! -e %s/first ]; then touch %s/first; mkdir -p "$CLAUDE_ACCOUNTS_DIR/switch"; '
+            'printf "default\\tsess-1\\n" >"$CLAUDE_ACCOUNTS_DIR/switch/$CLAUDE_ACCOUNT_LAUNCHER"; fi\n'
+            % (seen, self.root, self.root))
+        client.chmod(0o755)
+        done = self.run_launcher(
+            self.closed(), env={"CLAUDE_ACCOUNT": "default"}, client=str(client),
+            args=("--session-id", "sess-1", "--dangerously-skip-permissions", "--tools", "Read,Grep",
+                  "--disallowedTools", "Edit", "--strict-mcp-config", "--model", "opus"))
+        self.assertEqual((done.returncode, done.stderr), (0, ""))
+        first, second = seen.read_text().splitlines()
+        self.assertIn("--dangerously-skip-permissions", first)
+        self.assertEqual(second.split()[:2], ["--resume", "sess-1"])
+        for flag in ("--dangerously-skip-permissions", "--tools Read,Grep", "--disallowedTools Edit",
+                     "--strict-mcp-config"):
+            self.assertIn(flag, second)
+        self.assertNotIn("--session-id", second)
+
+    def closed(self):
+        return "http://127.0.0.1:%d" % closed_port()
 
 
 if __name__ == "__main__":
