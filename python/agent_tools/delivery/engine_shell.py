@@ -44,7 +44,7 @@ its stdout: the same session is then resumed once (`session_resuming`, `--resume
 both launches (in a continued visit a miss is `no-reply` at once, see "Continuing"). Any other reading with no usable reply is a `Fault`. A session denied a tool call (any
 tool, the resume launches included) is not graded: its reply may rest on a check it never ran. It is asked once more on the same
 session (`--resume`, `engine_session.denial_prompt`, stored as `<step>.<visit>.denied.prompt.md`, its record `.denied.json`); a second
-denial, a denial a bound or a usage-limit or API error came with, or one in a continued visit ends the run at the engine's own
+denial, or a denial a bound or a usage-limit or API error came with, ends the run at the engine's own
 stop `tool-denied` (need `owner-decision`, exit 3), its detail naming every distinct denied call of the visit and an open usage-limit
 wait ended first. After that re-ask a miss is `no-reply`. A
 group or a call records one stop joining its members' or children's. Before each launch, the resumes included,
@@ -80,8 +80,8 @@ is appended and no new visit starts. The session recorded for the visit is launc
 (2 plus its `session_resuming` events), with `session_resuming` before every launch: `--resume <session>` with
 `engine_session.CONTINUE_PROMPT` when a process of the visit had started, else `--session-id <session>` with the
 stored `prompt.md`. The launch's prompt is stored as `sessions/<step>.<visit>.continue-<attempt>.prompt.md` when
-absent, and each record as `.continue-<attempt>.json`. The continued launches are not re-asked, so a miss is
-`no-reply` and a denial is not re-asked either; every later launch of the visit resumes. A visit with a stored result (with or without its outcome) or
+absent, and each record as `.continue-<attempt>.json`. A miss on a continued launch is `no-reply` at once; a denial is
+asked again once unless the visit's persisted `.denied.prompt.md` shows it already was; every later launch of the visit resumes. A visit with a stored result (with or without its outcome) or
 a recorded stop after its entry (`quota-wait`, `tool-denied`, `stopped-by-request`) or a launch that ended with its record stored (a
 `Fault` such as no structured reply; each record names its `attempt`) is not resumed but
 rewound to a new visit as before, its `run_continued` clearing the stop and closing an open usage-limit wait. A resumed visit
@@ -1368,7 +1368,8 @@ def _launch_until_answered(
     `API_RETRY_SECONDS`), a first miss (`REASK_PROMPT`) or a first denial (`denial_prompt`), once each; return the
     first launch that is none of these, with its record stored and the wait ended (the launches asked again
     summed in the measurements), the `quota-wait` stop (wait open; unrecorded with `defer`) and whether the
-    outcome is `no-reply`. With `resumed` the first launch is its attempt and no later launch is asked again."""
+    outcome is `no-reply`. With `resumed` the first launch is its attempt, a miss on it is `no-reply`, and a denial
+    on it is asked again only when the visit has not already asked one (`asked_calls`)."""
     name, visit, session = visit_of
     role, schema, system = launch_of
     attempt, limited, waiting, released, retried, no_reply = (
@@ -1424,7 +1425,7 @@ def _launch_until_answered(
                 engine_session.launch_argv(role, schema, session, system,
                                       resume=attempt > 1 and (resumed is None or resumed.resume
                                                               or attempt > resumed.attempt)),
-                root, text, on_start=on_start, env=env,
+                root, text, on_start=on_start, env=engine_session.role_environment(env, role),
                 timeout=engine_session.bounds(role.name).wall_seconds, stop=stop)
             answer = engine_session.read_answer(answer_path)
         reading = engine_session.read_result(launched.stdout)
@@ -1438,7 +1439,7 @@ def _launch_until_answered(
             event("session_answered", step=name, visit=visit, session=session, attempt=attempt,
                   account=account)
         if calls := engine_session.denied_calls(reading):  # a reported refusal outranks a bound
-            if (asked is None and resumed is None and not launched.timed_out
+            if (asked is None and not launched.timed_out
                     and reading.subtype not in engine_session.CAP_SUBTYPES
                     and reading.api_failure is None):
                 record(launched, reading)

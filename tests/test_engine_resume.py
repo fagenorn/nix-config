@@ -393,18 +393,47 @@ class ResumeTest(unittest.TestCase):
             {"tool_name": "Bash", "tool_use_id": ident, "tool_input": {"command": command}}]))
         return {"stdout": str(path), "exit": 0, "account": "p1"}
 
-    def test_a_denial_on_the_continued_resume_stops_at_tool_denied_with_no_second_ask(self):
-        log = install_answers(self.project, [self.hang(), self.denying("rm x")])
+    def test_a_first_denial_on_the_continued_resume_is_asked_again_once(self):
+        log = install_answers(self.project, [self.hang(), self.denying("rm x"), self.normal()])
+        procedures = one_step(self.project)
+        self.kill_during_hang(procedures, log, 1)
+        done = self.project.deliver(procedures)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        records = self.records(log)
+        self.assertEqual(len(records), 3)
+        self.assertEqual(after(records[2]["argv"], "--resume"), after(records[0]["argv"], "--session-id"))
+        (run,) = self.project.runs()
+        (prompt,) = (run / "sessions").glob("*.denied.prompt.md")
+        self.assertEqual(records[2]["stdin"], prompt.read_text())
+        self.assertIn(repr("rm x"), prompt.read_text())
+        self.assertNotIn("tool-denied", [e.get("stop") for e in self.project.events(run)])
+
+    def test_a_second_denial_after_the_continued_reask_stops_at_tool_denied_naming_both(self):
+        log = install_answers(self.project, [
+            self.hang(), self.denying("git log | head"), self.denying("rm x", "toolu_02")])
         procedures = one_step(self.project)
         self.kill_during_hang(procedures, log, 1)
         done = self.project.deliver(procedures)
         self.assertEqual(done.returncode, 3, done.stdout + done.stderr)
         line = json.loads(done.stdout)
         self.assertEqual(line["end"], "tool-denied")
-        self.assertIn(repr("rm x"), line["detail"])
+        self.assertLess(line["detail"].index(repr("git log | head")), line["detail"].index(repr("rm x")))
         (run,) = self.project.runs()
-        self.assertEqual(len(self.records(log)), 2)
-        self.assertEqual(list((run / "sessions").glob("*.denied.prompt.md")), [])
+        self.assertEqual(len(self.records(log)), 3)
+        self.assertEqual(len(list((run / "sessions").glob("*.denied.prompt.md"))), 1)
+
+    def test_a_continued_denial_reask_cut_short_names_both_calls_when_the_visit_continues_again(self):
+        log = install_answers(self.project, [
+            self.hang(), self.denying("git log | head"), self.hang(), self.denying("rm x", "toolu_02")])
+        procedures = one_step(self.project)
+        self.kill_during_hang(procedures, log, 1)
+        self.kill_during_hang(procedures, log, 3)
+        done = self.project.deliver(procedures)
+        self.assertEqual(done.returncode, 3, done.stdout + done.stderr)
+        line = json.loads(done.stdout)
+        self.assertEqual(line["end"], "tool-denied")
+        self.assertEqual(len(self.records(log)), 4)
+        self.assertLess(line["detail"].index(repr("git log | head")), line["detail"].index(repr("rm x")))
 
     def test_a_denial_reask_cut_short_names_both_calls_when_the_visit_continues(self):
         log = install_answers(self.project, [

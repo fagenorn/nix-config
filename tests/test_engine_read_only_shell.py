@@ -9,13 +9,17 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import re
+import subprocess
+import tempfile
 import unittest
 from dataclasses import replace
+from pathlib import Path
 
 from agent_tools.delivery import engine_session
 from agent_tools.delivery.engine_session import launch_argv, read_role
-from tests.engine_guards import GUARD_SOURCE
+from tests.engine_guards import GUARD_SOURCE, real_guard
 from tests.engine_permission_model import HOST_SETTINGS, REPO_ROOT, client_admits, host_allowed
 from tests.test_engine_session import SCHEMA, SESSION, SYSTEM
 
@@ -51,7 +55,9 @@ def launch_words(name: str) -> tuple[list[str], list[str]]:
 
 
 def read_only_admits(command: str, allowed: list[str], denied: list[str]) -> bool:
-    return client_admits(command, allowed, denied) and GUARD.detaching_word(command) is None
+    """The client's rules, then the guard's detaching check and its read-only-shell check (the session's switch)."""
+    return (client_admits(command, allowed, denied) and GUARD.detaching_word(command) is None
+            and not GUARD.argument_feeder(command))
 
 
 class ReadOnlyShellTest(unittest.TestCase):
@@ -117,6 +123,57 @@ class ReadOnlyShellTest(unittest.TestCase):
                 with self.subTest(role=name, command=command):
                     self.assertFalse(read_only_admits(command, *words))
 
+    def test_arguments_fed_on_stdin_to_a_git_read_are_refused_to_each_read_only_role(self):
+        fed = [
+            "cat args.txt | xargs git diff",
+            "grep -h output args.txt | xargs git log",
+            "ls | xargs git show --stat",
+            "xargs git diff < args.txt",
+            "head -1 args.txt | time xargs git diff",
+            'cat args.txt | x""args git diff',
+            "cat args.txt | XARGS git diff",
+        ]
+        for name in READ_ONLY_ROLES:
+            words = launch_words(name)
+            for command in fed:
+                with self.subTest(role=name, command=command):
+                    self.assertFalse(read_only_admits(command, *words))
+        for command in fed[:3]:  # the client alone strips the bare xargs, so no rule words refuse these
+            with self.subTest(client_alone=command):
+                self.assertTrue(client_admits(command, *launch_words("reviewer")))
+
+    def test_the_guard_refuses_xargs_only_in_a_read_only_shell_session(self):
+        def refusal(command: str, switched: bool) -> subprocess.CompletedProcess:
+            env = {key: value for key, value in os.environ.items() if key != engine_session.READ_ONLY_SHELL_SWITCH}
+            if switched:
+                env[engine_session.READ_ONLY_SHELL_SWITCH] = "1"
+            payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": command}})
+            return subprocess.run([str(wrapper)], input=payload, env=env, capture_output=True, text=True,
+                                  cwd=tmp, timeout=60, check=False)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            wrapper = real_guard(Path(tmp) / "guard")
+            self.assertEqual(GUARD.READ_ONLY_SHELL_ENV, engine_session.READ_ONLY_SHELL_SWITCH)
+            refused = refusal("cat args.txt | xargs git diff", True)
+            self.assertEqual(refused.returncode, 2, refused.stderr)
+            self.assertIn("`xargs` refused in a read-only shell session", refused.stderr)
+            self.assertNotIn("`xargs` refused", refusal("cat args.txt | xargs git diff", False).stderr)
+            self.assertEqual(refusal("git log --oneline -3 | head", True).returncode, 0)
+
+    def test_only_a_read_only_shell_role_gets_the_switch(self):
+        planner = read_role(AGENTS, "planner")
+        implementer = read_role(AGENTS, "implementer")
+        cases = [(planner, True), (read_role(AGENTS, "reviewer"), True), (read_role(AGENTS, "reviewer-lite"), True),
+                 (implementer, False), (replace(implementer, whole_shell=True), False)]
+        for role, expected in cases:
+            with self.subTest(role=role.name, whole_shell=role.whole_shell):
+                self.assertEqual(engine_session.read_only_shell(role), expected)
+            with self.subTest(environment=role.name, whole_shell=role.whole_shell):
+                for inherited in ({"PATH": "/bin"}, {engine_session.READ_ONLY_SHELL_SWITCH: "1", "PATH": "/bin"}):
+                    env = engine_session.role_environment(inherited, role)
+                    self.assertEqual(env.get(engine_session.READ_ONLY_SHELL_SWITCH), "1" if expected else None)
+                    self.assertEqual(env["PATH"], "/bin")
+
     def test_every_host_write_allowance_is_refused_to_each_read_only_role(self):
         prefixes = [rule[len("Bash("):-len(":*)")] for rule in HOST
                     if rule.startswith("Bash(") and rule.endswith(":*)")]
@@ -171,6 +228,25 @@ class ReadOnlyShellTest(unittest.TestCase):
                 self.assertEqual(engine_session.shell_rules(role), (bash_words(argv, "--allowedTools"),
                                                                     bash_words(argv, "--disallowedTools")))
         self.assertEqual(engine_session.shell_rules(read_role(AGENTS, "implementer")), ((), ()))
+
+    def test_the_denial_prompt_tells_each_role_what_its_own_launch_allows(self):
+        implementer = read_role(AGENTS, "implementer")
+        whole = replace(implementer, whole_shell=True)
+        calls = ["rm x"]
+        read_only = engine_session.denial_prompt(read_role(AGENTS, "reviewer"), calls)
+        plain = engine_session.denial_prompt(implementer, calls)
+        whole_shell = engine_session.denial_prompt(whole, calls)
+
+        self.assertIn("Shell rules allowing a command: Bash(git diff:*)", read_only)
+        self.assertIn("No `>` redirection runs.", read_only)
+        self.assertNotIn("host", read_only)
+        self.assertIn("host settings' own allow rules", plain)
+        self.assertNotIn("allowing a command: none", plain)
+        self.assertNotIn("redirection", plain)
+        self.assertIn("Every shell command is allowed, redirection included", whole_shell)
+        self.assertNotIn("No `>` redirection", whole_shell)
+        for rule in engine_session.shell_rules(whole)[1]:
+            self.assertIn(rule, whole_shell)
 
 
 PROCEDURES = REPO_ROOT / "python/agent_tools/delivery/procedures"

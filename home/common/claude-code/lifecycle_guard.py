@@ -80,6 +80,16 @@ heredoc body, a comment, `nohup.out` and a word handed to `xargs` or `timeout` a
 so does a slugged branch or worktree name such as `issue-7-refuse-nohup`. A commit message that names a word is
 refused; reword it or use `git commit -F`.
 
+Read-only shell sessions
+------------------------
+
+A session whose environment holds a non-empty `CLAUDE_READ_ONLY_SHELL` (the engine sets it for a role that holds
+`Bash` only as read-only shapes) has its Bash calls refused when the raw text, or its deletion copy, holds the whole
+word `xargs`, in any case and bounded as a detaching word is. The client strips a bare `xargs` before it matches a
+rule, so no allow or deny rule can see the arguments it feeds a git read from stdin (`--output=<file>` writes a
+file); the refusal names the file tools and a command that names its arguments. It runs after the detaching check
+and before the policy loads, and an unset or empty variable leaves every other session as it was.
+
 Transmitting git invocations
 ----------------------------
 
@@ -1007,6 +1017,16 @@ DETACHING_DEFAULT_PATTERN = re.compile(
 # quote (`no$''hup`), then every backslash, quote, brace and comma, which
 # rebuilds `no''hup`, `no\hup` and `no{,}hup`.
 DETACHING_DELETED = re.compile(r"\$(?=['\"])|[\\'\"{},]")
+# A read-only shell session (the engine's roles that hold `Bash` as read-only shapes) is refused the word that
+# hands a command its arguments on stdin, bounded as a detaching word is.
+READ_ONLY_SHELL_ENV = "CLAUDE_READ_ONLY_SHELL"
+ARGUMENT_FEEDER_PATTERN = re.compile(
+    r"(?:(?<![A-Za-z0-9_-])|(?<=[cs])|(?<=\$[0-9!@*]))xargs(?![A-Za-z0-9_-])",
+    re.IGNORECASE | re.ASCII,
+)
+ARGUMENT_FEEDER_REFUSAL = (
+    "`xargs` refused in a read-only shell session: it hands the command after it arguments from stdin that no "
+    "shell rule can read; use the file tools, or a command that names its arguments")
 CD_PRELUDE_PROBLEM = (
     "the directory the verb runs in cannot be resolved: a directory change is "
     "accepted only as one leading cd <absolute directory> && before a single "
@@ -3021,6 +3041,11 @@ def detaching_word(command):
         if word is not None:
             return None if detaching_mention_allowed(command) else word
     return None
+
+
+def argument_feeder(command):
+    """True when `command`, read as `detaching_word` reads it, holds the word `xargs`."""
+    return any(ARGUMENT_FEEDER_PATTERN.search(text) for text in detaching_texts(command))
 
 
 def lifecycle_words(command):
@@ -6833,6 +6858,8 @@ def main():
     word = detaching_word(command)
     if word is not None:
         return block(f"detaching command `{word}` refused: {DETACHING_ROUTES}")
+    if os.environ.get(READ_ONLY_SHELL_ENV) and argument_feeder(command):
+        return block(ARGUMENT_FEEDER_REFUSAL)
 
     base, reason = load_base_policy(args.base_policy)
     if base is None:

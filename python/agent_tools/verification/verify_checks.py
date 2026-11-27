@@ -915,13 +915,18 @@ def engine_direct_past_implement(since: str, *, runs_root: Path | None = None, l
 
 
 NOT_DIRECT_STOPS = ("standard-not-on-engine", "look-not-on-engine")
+RUN_ID_RE = re.compile(r"^[1-9][0-9]*-[0-9]{8}T[0-9]{6}Z-[a-z0-9]{4}$")  # the engine ledger's run id shape
 
 
 def _engine_runs(runs_root: Path) -> list[tuple[datetime, str, Path, dict]]:
-    """The (started, id, directory, run.json) of each run under `runs_root` that parses, earliest first."""
+    """The (started, id, directory, run.json) of each published run under `runs_root` that parses, earliest first.
+
+    As the ledger reads a run: the directory is named by a run id and its `run.json` names that run, so an
+    unpublished `.<run id>.tmp` directory is no run."""
     runs = []
     try:
-        names = sorted(path for path in runs_root.iterdir() if path.is_dir())
+        names = sorted(path for path in runs_root.iterdir()
+                       if RUN_ID_RE.fullmatch(path.name) and path.is_dir())
     except OSError:
         return runs
     for run_dir in names:
@@ -930,7 +935,7 @@ def _engine_runs(runs_root: Path) -> list[tuple[datetime, str, Path, dict]]:
             started = parse_rfc3339_utc(document["started"])
         except (OSError, ValueError, KeyError, TypeError):
             continue
-        if isinstance(document, dict):
+        if isinstance(document, dict) and document.get("run") == run_dir.name:
             runs.append((started, run_dir.name, run_dir, document))
     return sorted(runs, key=lambda run: run[:2])
 

@@ -1,5 +1,6 @@
 """`verify_checks.past_setup_verdict` and the `engine-deliver-past-setup` wrapper: the first direct-lane engine
 delivery after activation got past setup, a direct child run entering a step within two days."""
+import hashlib
 import json
 import shutil
 import subprocess
@@ -24,12 +25,18 @@ def stamp(offset):
     return (ANCHOR + offset).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def write_run(root, run_id, started, events, procedure, parent=None):
-    run = Path(root) / run_id
+def rid(label):
+    """The run id a fixture's short label stands for: the shape the ledger names a run with."""
+    return f"1-20261127T090000Z-{hashlib.sha1(label.encode()).hexdigest()[:4]}"
+
+
+def write_run(root, label, started, events, procedure, parent=None, directory=None, claims=None):
+    """Write the run `label` under `root`: in `directory` (default its id) and claiming `claims` (default its id)."""
+    run = Path(root) / (directory or rid(label))
     (run / "results").mkdir(parents=True)
-    document = {"procedure": procedure, "run": run_id, "started": stamp(started)}
+    document = {"procedure": procedure, "run": claims or rid(label), "started": stamp(started)}
     if parent is not None:
-        document["parent"] = parent
+        document["parent"] = rid(parent)
     (run / "run.json").write_text(json.dumps(document), encoding="utf-8")
     lines = [json.dumps({"event": event, "step": step, "at": stamp(at), **extra})
              for event, step, at, extra in events]
@@ -84,9 +91,9 @@ class PastSetupVerdictTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertTrue(report["met"])
         self.assertEqual(report["verdict"], "met")
-        self.assertEqual(report["run"], "r")
+        self.assertEqual(report["run"], rid("r"))
         self.assertEqual(report["lane"], "direct")
-        self.assertEqual(report["child"], "d")
+        self.assertEqual(report["child"], rid("d"))
         self.assertEqual(report["entered"], "preflight")
         self.assertEqual(report["at"], stamp(2 * HOUR))
         self.assertEqual(report["anchor"], stamp(timedelta(0)))
@@ -99,23 +106,23 @@ class PastSetupVerdictTest(unittest.TestCase):
                 write_run(self.root, "r", HOUR, setup_stopped_events(), "deliver")
                 write_run(self.root, "r-s", HOUR, [("step_entered", "preflight", HOUR, {})], "setup", parent="r")
                 if standard_issue:
-                    (self.root / "r-s" / "results" / "preflight.1.json").write_text(
+                    (self.root / rid("r-s") / "results" / "preflight.1.json").write_text(
                         json.dumps({"issue_text": "a standard-lane issue body"}), encoding="utf-8")
                 direct_delivery(self.root, "q", 5 * HOUR, 6 * HOUR)
                 for now in (3 * HOUR, 3 * DAY):
                     code, report = self.verdict(now)
                     self.assertEqual(code, 75)
                     self.assertEqual(report["verdict"], "lane_unknown")
-                    self.assertEqual(report["run"], "r")
+                    self.assertEqual(report["run"], rid("r"))
                     self.assertEqual(report["stop"], "tool-denied")
                     self.assertFalse(report["met"])
 
     def test_a_delivery_still_before_its_lane_is_not_yet_then_lane_unknown(self):
         write_run(self.root, "r", HOUR, [("step_entered", "start", HOUR, {})], "deliver")
         code, report = self.verdict(3 * HOUR)
-        self.assertEqual((code, report["verdict"], report["run"]), (75, "not_yet", "r"))
+        self.assertEqual((code, report["verdict"], report["run"]), (75, "not_yet", rid("r")))
         code, report = self.verdict(3 * DAY)
-        self.assertEqual((code, report["verdict"], report["run"]), (75, "lane_unknown", "r"))
+        self.assertEqual((code, report["verdict"], report["run"]), (75, "lane_unknown", rid("r")))
 
     def test_a_delivery_of_an_issue_not_on_the_direct_lane_is_skipped(self):
         cases = {
@@ -132,14 +139,14 @@ class PastSetupVerdictTest(unittest.TestCase):
                 direct_delivery(self.root, "q", 2 * HOUR, 3 * HOUR)
                 code, report = self.verdict(4 * HOUR)
                 self.assertEqual(code, 0)
-                self.assertEqual(report["run"], "q")
+                self.assertEqual(report["run"], rid("q"))
 
     def test_a_direct_delivery_whose_child_entered_late_or_never_is_not_met(self):
         direct_delivery(self.root, "r", HOUR, 3 * DAY)
         code, report = self.verdict(4 * DAY)
         self.assertEqual(code, 1)
         self.assertEqual(report["verdict"], "not_met")
-        self.assertEqual(report["child"], "r-d")
+        self.assertEqual(report["child"], rid("r-d"))
         shutil.rmtree(self.root)
         self.root.mkdir()
         direct_delivery(self.root, "r", HOUR, None)
@@ -156,6 +163,22 @@ class PastSetupVerdictTest(unittest.TestCase):
         self.assertEqual(code, 75)
         self.assertEqual(report["verdict"], "not_yet")
         self.assertIsNone(report["run"])
+
+
+    def test_a_directory_the_ledger_never_published_is_never_a_run(self):
+        cases = {
+            "an unpublished temporary directory": {"directory": f".{rid('t')}.tmp"},
+            "a directory that is no run id": {"directory": "scratch"},
+            "a run.json naming another run": {"claims": rid("other")},
+        }
+        for name, extra in cases.items():
+            with self.subTest(name):
+                shutil.rmtree(self.root)
+                self.root.mkdir()
+                write_run(self.root, "t", HOUR, [("step_entered", "start", HOUR, {})], "deliver", **extra)
+                direct_delivery(self.root, "q", 2 * HOUR, 3 * HOUR)
+                code, report = self.verdict(4 * HOUR)
+                self.assertEqual((code, report["verdict"], report["run"]), (0, "met", rid("q")))
 
 
 class EngineDeliverPastSetupTest(unittest.TestCase):
@@ -204,7 +227,7 @@ class EngineDeliverPastSetupTest(unittest.TestCase):
         self.assertEqual(met.returncode, 0, met.stderr)
         self.assertTrue(json.loads(met.stdout)["met"])
         for child in ("r", "r-s", "r-d"):
-            shutil.rmtree(self.runs / child)
+            shutil.rmtree(self.runs / rid(child))
         self.assertEqual(run_from_root(argv).returncode, 75)
 
 

@@ -54,7 +54,8 @@ strips `nohup` before matching), and `shell_rules` gives a role's Bash rules. A 
 needs another shell command lists it in its own `tools` as `Bash(<prefix>:*)`;
 one that is denied a tool call anyway ends the run at the engine's own stop
 `tool-denied` (`engine_shell`), never a graded reply. `denial_prompt` tells a denied session which calls
-were refused and its role's shell rules.
+were refused and what its own launch's shell rules allow (`shell_guidance`: the read-only shapes, the host
+settings' allowances of a plain role, the whole shell of a whole-shell one).
 
 The recorded exception: under the engine only, a step that names its own `worktree` gives a
 `WHOLE_SHELL_ROLES` role the whole `Bash`, `Edit` and `Write` (`Role.whole_shell`, launched in that
@@ -99,6 +100,9 @@ names the bound the engine's own clock fires.
 `session_environment` drops `CLAUDE_CONFIG_DIR` and sets `CLAUDE_ACCOUNT_HOST_SETTINGS=required`, so the
 launcher starts the client only on `$HOME/.claude/settings.json`, the file `engine deliver` checked. It
 also drops `CLAUDE_CODE_SIMPLE` (`BARE_SWITCH`), the client's bare-mode switch, which would skip the hooks.
+For a read-only shell role (`read_only_shell`) the shell gives the launch `role_environment`: it holds
+`CLAUDE_READ_ONLY_SHELL` (`READ_ONLY_SHELL_SWITCH`), which makes the lifecycle guard refuse `xargs`: the client
+strips a bare `xargs`, so no rule sees the arguments it feeds a git read from stdin (`--output=<file>`).
 
 This module imports no `engine_core`.
 """
@@ -135,6 +139,7 @@ FORBIDDEN_WORDS: tuple[str, ...] = (
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 LAUNCHER: tuple[str, ...] = ("claude-account", "run")
 HOST_SETTINGS_SWITCH = "CLAUDE_ACCOUNT_HOST_SETTINGS"
+READ_ONLY_SHELL_SWITCH = "CLAUDE_READ_ONLY_SHELL"
 WALL_TIME = "wall-time"
 CAP_SUBTYPES: Mapping[str, str] = MappingProxyType(
     {"error_max_turns": "turns", "error_max_budget_usd": "spend"})
@@ -344,18 +349,35 @@ def denial_detail(step: str, calls: Sequence[str]) -> str:
             + "; its reply is not graded and the run stops at tool-denied.")
 
 
+def shell_guidance(role: Role) -> str:
+    """What `role`'s shell runs, said from the rules its launch passes, never from a fixed text."""
+    allowed, denied = shell_rules(role)
+    refusing = f"Shell rules refusing a command: {', '.join(denied) or 'none'}.\n"
+    if role.whole_shell:
+        return ("Every shell command is allowed, redirection included, except those a refusing rule matches; "
+                f"the lifecycle guard still judges each one.\n{refusing}")
+    if launch_rules(role)[0] is None:
+        head = ("This role passes no shell allow rule of its own: a command runs only when the host "
+                "settings' own allow rules admit it.\n")
+    else:
+        head = f"Shell rules allowing a command: {', '.join(allowed) or 'none'}.\n"
+    notes = ["A call runs only when every part of it, split at `|`, `;`, `&&`, `||` and `&`, is allowed "
+             "and no part matches a refusing rule."]
+    if "Bash" in allowed:
+        notes.insert(0, "A rule `Bash` alone means every shell command.")
+    if any(rule.endswith(":*)") for rule in allowed):
+        notes.append("`Bash(x:*)` is `x` alone or followed by a space and arguments.")
+    if "Bash(*>*)" in denied:
+        notes.append("No `>` redirection runs.")
+    return f"{head}{refusing}{' '.join(notes)}\n\n"
+
+
 def denial_prompt(role: Role, calls: Sequence[str]) -> str:
     """The prompt that asks a denied session again: the refused calls, `role`'s shell rules, the shapes."""
-    allowed, denied = shell_rules(role)
     refused = "\n".join(f"- {call!r}" for call in calls)
     return (
-        f"These tool calls were refused:\n{refused}\n\n"
-        f"Shell rules allowing a command: {', '.join(allowed) or 'none'}.\n"
-        f"Shell rules refusing a command: {', '.join(denied) or 'none'}.\n"
-        "A rule `Bash` alone means every shell command. A call runs only when every part of it, split at "
-        "`|`, `;`, `&&`, `||` and `&`, matches an allowed rule and no part matches a refusing one. "
-        "`Bash(x:*)` is `x` alone or followed by a space and arguments. No `>` redirection runs.\n\n"
-        "Redo the checks the refused calls were for with those shapes or the file tools. "
+        f"These tool calls were refused:\n{refused}\n\n{shell_guidance(role)}"
+        "Redo the checks the refused calls were for with what the shell rules allow or the file tools. "
         f"{REASK_REQUEST}")
 
 
@@ -363,9 +385,13 @@ def asked_calls(sessions: Path, name: str, visit: int) -> tuple[str, ...] | None
     """The calls of the launch a visit's denial re-ask was about, None when the visit made no re-ask."""
     if not (sessions / f"{name}.{visit}.denied.prompt.md").exists():
         return None
-    for suffix in (".resume", ""):  # a miss re-ask's launch stores `.resume`; the denied one is the latest
-        try:
-            document = json.loads((sessions / f"{name}.{visit}{suffix}.json").read_text(encoding="utf-8"))
+    head = f"{name}.{visit}.continue-"
+    attempts = sorted((int(path.name[len(head):-len(".json")]) for path in sessions.glob(f"{head}*.json")
+                       if path.name[len(head):-len(".json")].isdigit()), reverse=True)
+    for path in (*(sessions / f"{head}{attempt}.json" for attempt in attempts),
+                 *(sessions / f"{name}.{visit}{suffix}.json" for suffix in (".resume", ""))):
+        try:  # a continued launch's record is the latest; a miss re-ask's launch stores `.resume`
+            document = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
         denials = document.get("denials") if isinstance(document, dict) else None
@@ -524,6 +550,11 @@ def is_miss(reading: Reading) -> bool:
     return not reading.is_error or reading.subtype == STRUCTURED_OUTPUT_EXHAUSTED
 
 
+def read_only_shell(role: Role) -> bool:
+    """True when `role` holds `Bash` as the read-only shapes: it lists the tool and has no whole shell."""
+    return not role.whole_shell and role.tools is not None and "Bash" in role.tools
+
+
 def launch_rules(role: Role) -> tuple[tuple[str, ...] | None, tuple[str, ...] | None]:
     """The words of the `--allowedTools` and `--disallowedTools` of `role`'s launch; None for a flag it omits."""
     disallowed = list(role.disallowed or ())
@@ -535,7 +566,7 @@ def launch_rules(role: Role) -> tuple[tuple[str, ...] | None, tuple[str, ...] | 
     if role.tools is not None:
         allowed = tuple(entry for name in role.tools
                         for entry in (READ_ONLY_BASH if name == "Bash" else (name,)))
-        if "Bash" in role.tools:
+        if read_only_shell(role):
             disallowed += READ_ONLY_DENIED
     return allowed, (tuple(disallowed) if role.disallowed is not None or disallowed else None)
 
@@ -686,6 +717,14 @@ def session_environment(environ: Mapping[str, str]) -> dict[str, str]:
     env = {key: value for key, value in environ.items()
            if key not in ("CLAUDE_CONFIG_DIR", BARE_SWITCH) and key not in REPOSITORY_ENV}
     env[HOST_SETTINGS_SWITCH] = "required"
+    return env
+
+
+def role_environment(environ: Mapping[str, str], role: Role) -> dict[str, str]:
+    """`environ` for `role`'s launch: with the read-only-shell switch for a read-only shell role, else without."""
+    env = {key: value for key, value in environ.items() if key != READ_ONLY_SHELL_SWITCH}
+    if read_only_shell(role):
+        env[READ_ONLY_SHELL_SWITCH] = "1"
     return env
 
 
