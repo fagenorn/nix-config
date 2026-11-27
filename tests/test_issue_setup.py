@@ -75,6 +75,17 @@ class JudgeTest(unittest.TestCase):
             "# T\n\nB\n\n## Comment 1\n\nc1\n\n## Comment 2\n\nc2")
         self.assertEqual(issue_setup.issue_text({"title": "T", "body": None}, []), "# T\n\n")
 
+    def test_merged_refs_lists_each_merged_pull_and_whether_it_closes_the_issue(self):
+        self.assertEqual(
+            issue_setup.merged_refs([MERGED, dict(MENTION, number=10), ELSEWHERE], 7),
+            [{"number": 9, "closes": True}, {"number": 10, "closes": False}])
+
+    def test_planning_paths_reads_the_lane_rule_grammar_and_drops_line_references(self):
+        text = ("Fix `a/b.py:12`, `c.md`, src/new.py:3-9 and `x+y@2/z.py`. "
+                "Not ../c.md, /etc/hosts or https://x.org/a/b.py")
+        self.assertEqual(issue_setup.planning_paths(text),
+                         ["a/b.py", "c.md", "src/new.py", "x+y@2/z.py"])
+
 
 def run_setup(env, *args):
     """The child process of `issue-setup <args>`: (exit status, the one JSON line it printed)."""
@@ -258,6 +269,76 @@ class ForgeCommandTest(unittest.TestCase):
         self.assertTrue(report["worktree_path"].endswith("/.worktrees/worktree-issue-7-add-a-greeting"))
         self.assertEqual(report["integration_branch"], "main")
         self.assertIn("Say hi.", report["issue_text"])
+
+    def routing_world(self, *, bar=True, shard=True, worktree=True):
+        """Write or leave out the platform bar and python shard and the issue worktree."""
+        standards = Path(self.env["HOME"]) / ".agents/standards"
+        (standards / "stacks").mkdir(parents=True, exist_ok=True)
+        if bar:
+            (standards / "the-bar.md").write_text("# The bar\n\n### B1. One\n\nbody\n", encoding="utf-8")
+        if shard:
+            (standards / "stacks/python.md").write_text("# Python\n\n### P1. One\n\nbody\n",
+                                                        encoding="utf-8")
+        w = resolve_project.resolve(str(self.root))["bindings"]["vcs"]["worktree"]
+        tree = self.root / w["root"] / (w["prefix"] + "issue-7-add-a-greeting")
+        if worktree:
+            tree.mkdir(parents=True, exist_ok=True)
+        return standards, tree
+
+    def plan_preflight(self):
+        return run_setup(self.env, "plan-preflight", "--repo-root", str(self.root), "--issue", "7")
+
+    def issue(self, body):
+        return {"number": 7, "title": "Add a greeting", "body": body, "state": "open", "labels": []}
+
+    def test_plan_preflight_routes_the_named_files_in_the_issue_worktree(self):
+        standards, worktree = self.routing_world()
+        hint = worktree / ".agents/knowledge/hints/planning.md"
+        hint.parent.mkdir(parents=True)
+        hint.write_text("hint\n", encoding="utf-8")
+        self.register_reads(self.issue("Fix `src/a.py:3` and add `src/new.py`; see https://x.org/src/b.py."),
+                            pulls=[MENTION])
+        code, report = self.plan_preflight()
+        self.assertEqual((code, report["verdict"]), (0, "clear"), (report, self.forge.calls()))
+        self.assertNotIn("merged_refs", report)
+        self.assertEqual(report["route_detail"], "")
+        self.assertEqual(report["routed"]["stage"], "planning")
+        self.assertEqual(report["routed"]["change"], {"diff": None, "paths": ["src/a.py", "src/new.py"]})
+        self.assertEqual([s["path"] for s in report["routed"]["shards"]],
+                         [str(standards / "the-bar.md"), str(standards / "stacks/python.md")])
+        self.assertEqual(report["routed"]["hint"]["path"], str(hint))
+
+    def test_plan_preflight_routes_nothing_and_says_why_when_it_cannot_route(self):
+        rows = [
+            ("Say hi.", {}, lambda r: "the issue names no path"),
+            ("Fix `src/a.py`.", {"worktree": False},
+             lambda r: f"the worktree {r['worktree_path']} does not exist"),
+            ("Fix `src/a.py`.", {"bar": False}, lambda r: None),
+            ("Fix `src/a.py`.", {"shard": False}, lambda r: "router: the platform has no stacks/python.md"),
+        ]
+        for body, world, detail in rows:
+            with self.subTest(body=body, world=world):
+                self.setUp()
+                self.routing_world(**world)
+                self.register_reads(self.issue(body))
+                code, report = self.plan_preflight()
+                self.assertEqual((code, report["verdict"]), (0, "clear"), report)
+                self.assertIsNone(report["routed"])
+                want = detail(report)
+                if want is None:
+                    self.assertTrue(report["route_detail"].startswith("router: no the-bar.md in "),
+                                    report["route_detail"])
+                else:
+                    self.assertEqual(report["route_detail"], want)
+
+    def test_preflight_reports_the_merged_references_and_routes_nothing(self):
+        self.routing_world()
+        self.register_reads(self.issue("Fix `src/a.py`."), pulls=[MENTION])
+        code, report = self.preflight()
+        self.assertEqual((code, report["verdict"]), (0, "clear"), report)
+        self.assertEqual(report["merged_refs"], [{"number": 9, "closes": False}])
+        self.assertNotIn("routed", report)
+        self.assertNotIn("route_detail", report)
 
     def test_preflight_refuses_a_closed_issue_with_closed(self):
         self.register_reads({"number": 7, "title": "Add a greeting", "body": "", "state": "closed",

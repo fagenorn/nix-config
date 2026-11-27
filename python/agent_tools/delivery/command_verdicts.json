@@ -93,6 +93,14 @@
         "posted",
         "error"
       ],
+      "plan-preflight": [
+        "clear",
+        "closed",
+        "parked",
+        "duplicate",
+        "open-pr",
+        "error"
+      ],
       "plan-read": [
         "read",
         "error"
