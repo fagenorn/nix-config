@@ -331,6 +331,41 @@ class ContinueTest(unittest.TestCase):
         self.assertEqual(stored["base"], {"ref": "refs/remotes/origin/main", "sha": merge_base})
         self.assertEqual(stored["head"], head_of(project, side))
 
+    def test_a_result_naming_another_head_or_merge_base_than_the_one_held_ends_the_step_out_of_bounds(self):
+        for command in ("standin-misrouted-base", "standin-misrouted-head"):
+            with self.subTest(command):
+                project = EngineProject(self)
+                b = step("b", command, "g", holds="head", on={"ok": "g", "failed": "needs-owner", "out-of-bounds": "moved"})
+                b.update({"in": ["p.path", "p.branch"], "repository": "p.path", "base": "p.branch"})
+                procedures = self.checkout_procedures(project, [b], {
+                    "needs-owner": {"need": "owner-decision", "reenter": "g"},
+                    "moved": {"need": "owner-decision", "reenter": "b"}}, "standin-based")
+                project.world.git(project.tmp / "side", "commit", "--quiet", "--allow-empty", "-m", "side")
+                done = project.deliver(procedures)
+                self.assertEqual(done.returncode, 3, done.stdout + done.stderr)
+                self.assertEqual(json.loads(done.stdout)["end"], "moved")
+                run = project.runs()[0]
+                self.assertEqual(json.loads((run / "results/b.1.json").read_text()), {"bound": "head-moved"})
+                (stored,) = [e for e in project.events(run) if e["event"] == "result_stored" and e["step"] == "b"]
+                self.assertEqual(stored["outcome"], "out-of-bounds")
+                self.assertFalse({"head", "base"} & set(stored))
+
+    def test_a_checkout_holding_a_nul_is_refused_without_running_its_command(self):
+        project = EngineProject(self)
+        b = step("b", "count-b", "g", holds="head", refused="bad")
+        b.update({"in": ["p.path", "p.branch"], "repository": "p.path", "base": "p.branch"})
+        procedures = project.procedures(
+            [step("p", "standin-nul", "b"), b, step("g", "standin-gate", "done")],
+            stops={"bad": {"need": "owner-decision", "reenter": "b"},
+                   "needs-owner": {"need": "owner-decision", "reenter": "g"}})
+        done = project.deliver(procedures)
+        self.assertEqual(done.returncode, 3, done.stdout + done.stderr)
+        self.assertEqual(json.loads(done.stdout)["end"], "bad")
+        self.assertEqual(project.calls("b"), 0)
+        result = json.loads((project.runs()[0] / "results/b.1.json").read_text())
+        self.assertEqual(result["verdict"], "refused")
+        self.assertTrue(result["reason"].startswith("repository p.path is not an absolute path"), result)
+
     def test_a_continue_after_the_integration_branch_took_the_topics_commits_runs_the_step_again(self):
         project = EngineProject(self)
         procedures, side = self.based_procedures(project)

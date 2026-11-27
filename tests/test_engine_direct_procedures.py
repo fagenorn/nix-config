@@ -26,9 +26,10 @@ ROUTED = {"routed_files": ["/s/the-bar.md"], "diff": f"{SHA}..{SHA}", "head": SH
 
 
 STANDARDS_DIRECTORIES = (REPO_ROOT / "home/common/agent-skills/standards", REPO_ROOT / "docs/standards")
-SHARD_WORD = re.compile(r"\bshards?\b|\bglobs?\b|\bintersect\w*|the-bar|stacks/", re.IGNORECASE)
+SHARD_WORD = re.compile(r"\bshards?\b|\bglobs?\b[^.]*\b(match\w*|govern\w*)\b|\b(match\w*|govern\w*)\b[^.]*\bglobs?\b"
+                        r"|\bintersect\w*|the-bar|stacks/", re.IGNORECASE)
 CHOICE_WORD = re.compile(r"\b(choose|chooses|choosing|pick|picks|picking|select|selects|selecting|applicable)\b"
-                         r"|\bwhich\b[^.]*\bapply\b", re.IGNORECASE)
+                         r"|\bwhich(ever)?\b[^.]*\b(apply|applies|match|matches)\b", re.IGNORECASE)
 STANDARDS_WORD = re.compile(r"\b(standards?|shards?|stacks?|rules? files?)\b", re.IGNORECASE)
 MARKERS = "#-*>| "
 # A long sentence may be any part of a rule, but a short one counts only when it is a whole rule sentence.
@@ -309,6 +310,17 @@ class RoutedPromptTest(unittest.TestCase):
                 self.assertTrue(PREFLIGHT_PATHS <= set(producer["in"]))
                 self.assertEqual(producer["subcommand"], ROUTE_SUBCOMMANDS[item["stage"]])
 
+    def test_each_fix_prompt_names_the_stored_review_range_never_the_moving_base(self):
+        direct = load(PROCEDURES, "direct")
+        for fix, route in (("lite-fix", "route-lite"), ("escalated-fix", "route-lite"),
+                           ("full-fix", "route-full")):
+            with self.subTest(step=fix):
+                item = step(direct, fix)
+                prompt = (PROCEDURES / item["prompt"]).read_text(encoding="utf-8")
+                self.assertIn("{{" + route + ".diff}}", prompt)
+                self.assertNotIn("integration_branch", prompt)
+                self.assertIn(route + ".diff", item["in"])
+
     def test_no_shipped_prompt_holds_standards_text_or_asks_for_shards(self):
         self.assertEqual(prompt_defects(PROCEDURES), [])
 
@@ -330,13 +342,17 @@ class RoutedPromptTest(unittest.TestCase):
         only = [("direct-review.md", "standards-choice")]
         for text, expected in (("Choose the shards that apply to this change.", both),
                                ("Choose the applicable standards files for this diff.", only),
-                               ("Pick which rules files apply\nhere.", only)):
+                               ("Pick which rules files apply\nhere.", only),
+                               ("Read whichever standards match the changed files.", only),
+                               ("Read the standards whose globs match the changed files.",
+                                [("direct-review.md", "shard-word")])):
             with self.subTest(text=text):
                 self.assertEqual(prompt_defects(with_appended(text)), expected)
 
     def test_the_prompt_check_passes_ordinary_words(self):
         for text in ("Keep the global settings as they are; select the test files you changed.",
                      "Give the rule's id, as B8.",
+                     "Run the glob tests.",
                      "Keep defense in depth in mind."):
             with self.subTest(text=text):
                 self.assertEqual(prompt_defects(with_appended(text)), [])

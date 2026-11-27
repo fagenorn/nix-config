@@ -36,7 +36,8 @@ The packet goes on stdin, with no positional argument and no diff: the operation
 directory, worktree, branch and shas; the scope; the criteria and issue number (routing context);
 the declared verification ids (context only) and the `AGENTS.md`/`CLAUDE.md` that exist at the
 worktree root; the routed files (`--routed-files`, required: a JSON list of path strings, written as
-`Routed files:` one per line where the standards paths once stood, with no fallback); the read-only
+`Routed files (a JSON list of paths):` and that list on the next line, whole, so a path holding a newline stays one
+path, where the standards paths once stood, with no fallback); the read-only
 rules; and the reviewer output contract as a requirement. A slice's packet is DIFF-REVIEW.md's
 over-budget form: a scoped scope paragraph, the slice's paths with their `changed_lines` and the
 per-path `git diff` protocol, and the requirement that the review start with `scoped to <N> of <M>
@@ -229,7 +230,7 @@ def packet(args: argparse.Namespace, snapshot: Mapping, base: str, head: str,
         "Context only, not a request to run anything (the runtime is read-only): the project verifies "
         f"with {', '.join(snapshot['bindings']['workflow']['verification'])}.\nApplicable instruction "
         "files:\n" + "\n".join(context),
-        "Routed files:\n" + "\n".join(args.routed_files),
+        "Routed files (a JSON list of paths):\n" + json.dumps(args.routed_files),
         "Read-only rules:\n" + READ_ONLY_RULES,
     ]
     requirement = OUTPUT_CONTRACT

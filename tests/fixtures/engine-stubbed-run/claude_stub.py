@@ -14,8 +14,6 @@ new HEAD. An entry may carry more effects beside `commit`, each answered with th
 origin and merges `origin/main` into the worktree (a conflict is resolved with the given files and
 committed, or aborted when `resolve` is absent); `"same_head": {"worktree"}` answers
 `start_head` and `commit` both as the worktree's HEAD and commits nothing;
-`"advance": {"worktree"}` moves the worktree's `refs/remotes/origin/main` to its HEAD (a fetch that
-brought the branch into `main`), after `same_head` and before `leave`, moving no head and committing nothing;
 `"leave": {"worktree", "path", "text"}` writes that file in the worktree after every other effect
 and neither adds nor commits it (one untracked file, no head moved). It appends `{"argv", "key", "prompt"}` as one JSON line to `<log>`, `key` being the
 step id (never the visit), writes `{"account": "stub"}` to the file named by
@@ -118,11 +116,6 @@ def same_head_effect(effect: dict) -> str:
     return git_in(effect["worktree"], "rev-parse", "HEAD").stdout.strip()
 
 
-def advance_effect(effect: dict) -> None:
-    """Move the worktree's `refs/remotes/origin/main` to its HEAD, as a fetch that brought the branch in."""
-    git_in(effect["worktree"], "update-ref", "refs/remotes/origin/main", "HEAD")
-
-
 def leave_effect(effect: dict) -> None:
     """Write the effect's file in the worktree and leave it untracked."""
     target = Path(effect["worktree"]) / effect["path"]
@@ -146,8 +139,6 @@ def run_entry(result: dict, scenario: dict, name: str | None) -> None:
                 merge_effect(entry["merge"])
             if "same_head" in entry:
                 reply["start_head"] = reply["commit"] = same_head_effect(entry["same_head"])
-            if "advance" in entry:
-                advance_effect(entry["advance"])
             if "leave" in entry:
                 leave_effect(entry["leave"])
             entry = reply

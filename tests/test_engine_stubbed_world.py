@@ -211,21 +211,6 @@ class StubTest(unittest.TestCase):
         self.assertEqual((reply["start_head"], reply["commit"], reply["status"]), (head, head, "done"))
         self.assertEqual(git(run, "rev-parse", "HEAD"), head)
 
-    def test_the_advance_effect_moves_the_integration_ref_to_the_head_and_keeps_the_head(self):
-        run = StubbedRun(self)
-        root = str(run.fixture.root)
-        before = git(run, "rev-parse", "refs/remotes/origin/main")
-
-        reply = self.play(run, {"reply": {"status": "done"}, "advance": {"worktree": root},
-                                "commit": {"worktree": root, "path": "fixture/new.txt", "text": "x\n"}})
-
-        head = git(run, "rev-parse", "HEAD")
-        self.assertNotEqual(head, before)
-        self.assertEqual(reply["commit"], head)
-        self.assertEqual(git(run, "rev-parse", "refs/remotes/origin/main"), head)
-        self.assertEqual(git(run, "status", "--porcelain"), "")
-        self.assertEqual(reply["status"], "done")
-
     def test_the_merge_effect_commits_a_clean_merge_of_main(self):
         run = StubbedRun(self)
         root = self.diverged(run)
@@ -302,10 +287,6 @@ class StubTest(unittest.TestCase):
         run = StubbedRun(self, replies={"fix": {"reply": {"status": "done"},
                                                 "leave": {"path": "fixture/scratch.txt", "text": "x\n"}}})
         self.assertEqual(run.replies["fix"]["leave"]["worktree"], str(run.worktree_path))
-
-    def test_the_world_fills_the_worktree_an_advance_effect_names_none_of(self):
-        run = StubbedRun(self, replies={"fix": {"reply": {"status": "done"}, "advance": {}}})
-        self.assertEqual(run.replies["fix"]["advance"]["worktree"], str(run.worktree_path))
 
 
     def test_a_resumed_session_that_answered_replays_its_answer_and_commits_nothing(self):

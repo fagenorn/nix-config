@@ -193,7 +193,7 @@ from agent_tools.delivery import (
     rule_reader,
 )
 from agent_tools.delivery.engine_commands import CommandTable, UnknownCommand
-from agent_tools.delivery.engine_heads import REPOSITORY_ENV, core_events, read_head  # noqa: F401
+from agent_tools.delivery.engine_heads import REPOSITORY_ENV, core_events, read_head  # noqa: F401  re-exported: the tests and other modules read them here
 from agent_tools.delivery.engine_ledger import creation_lock_path
 from agent_tools.project_contract import agent_platform, resolve_project
 
@@ -1050,13 +1050,25 @@ def _visit(run_dir: Path, table: CommandTable, step: dict, action: engine_core.R
         engine_ledger.append_event(run_dir, {"event": "wait_ended", "at": _now(), "wait": wait})
     after = engine_heads.read_mark(held, ref) if step["holds"] == "head" else None
     try:
-        if repository is not None and before != after:
+        if repository is not None and (before != after or _names_another_range(ran.result, before, ref)):
             _head_moved(run_dir, step, name, visit, ran.wall_seconds, member, key)
         else:
             _grade_command(run_dir, step, name, visit, ran, before if before == after else None, member,
                            repository, key)
     finally:  # forwarding a diagnostic never decides whether the step is graded
         _forward(ran.stderr)
+
+
+def _names_another_range(result: dict, mark: engine_heads.Mark | None, ref: str | None) -> bool:
+    """True when a step holding a merge base got a result naming a `head` or `merge_base` other than the mark's.
+
+    The mark read before and after the process can be the same while the process read another one in
+    between (a ref that moved and moved back), so the range a result names is compared with the mark too.
+    """
+    if ref is None or mark is None or not isinstance(result, dict):
+        return False
+    held = {"head": mark.head, "merge_base": mark.base and mark.base["sha"]}
+    return any(name in result and result[name] != value for name, value in held.items())
 
 
 def _forward(diagnostic: bytes) -> None:

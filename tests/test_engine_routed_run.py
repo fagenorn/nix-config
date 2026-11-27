@@ -15,7 +15,7 @@ from pathlib import Path
 
 from agent_tools.delivery import independent_review
 from tests.engine_fixture import AdoptedFixtures
-from tests.engine_guards import payloads
+from tests.engine_guards import payloads, standin_guard, write_settings
 from tests.engine_procedure_copies import stopping_after_verify
 from tests.engine_step_coverage import StepCoverage
 from tests.engine_stubbed_world import IMPLEMENTED, StubbedRun
@@ -56,8 +56,7 @@ def routed_of(prompt: str) -> list[str]:
 
 def routed_section(stdin: str) -> list[str]:
     lines = stdin.splitlines()
-    rest = lines[lines.index("Routed files:") + 1:]
-    return rest[:rest.index("")] if "" in rest else rest
+    return json.loads(lines[lines.index("Routed files (a JSON list of paths):") + 1])
 
 
 def stored_event(run_dir: Path, step: str, visit: int = 1) -> dict:
@@ -110,6 +109,8 @@ class RouteTest(Scenario):
         self.assertEqual(stored_event(direct, "route-lite")["base"],
                          {"ref": "refs/remotes/origin/main", "sha": merge_base})
         self.assertEqual(routed_of(self.launch(run, "lite-fix")["prompt"]), routed)
+        self.assertIn(f"git diff {merge_base}..{head})", self.launch(run, "lite-fix")["prompt"])
+        self.assertNotIn("is the base", self.launch(run, "lite-fix")["prompt"])
         reviews = [shlex.split(p["payload"]["tool_input"]["command"]) for p in payloads(run.guard_log)]
         reviews = [argv for argv in reviews if "agent_tools.delivery.independent_review" in argv]
         self.assertEqual(len(reviews), 1)
@@ -125,8 +126,12 @@ class RouteTest(Scenario):
         self.assertEqual(routed_of(self.launch(run, "lite-rereview")["prompt"]), fixed)
 
     def test_both_reviewers_read_the_routed_merge_base_though_the_integration_ref_moves_after_routing(self):
-        run = self.stubbed(review_code=[CODEX_CLEAN],
-                           replies={"lite-review": {"reply": UNNAMED_LITE, "advance": {}}})
+        run = self.stubbed(review_code=[CODEX_CLEAN], replies={"lite-review": UNNAMED_LITE})
+        # The ref moves in the guard that judges the independent review's command, so it has moved before
+        # that command starts, never racing the Claude reviewer for the first read.
+        write_settings(run.world.home, str(standin_guard(
+            run.tmp, "moving-guard", "moving", "agent_tools.delivery.independent_review",
+            str(run.worktree_path), "tee", str(run.guard_log), str(run.tmp / "real-guard"))))
 
         self.finish(run, "direct-review", "owner-decision")
 

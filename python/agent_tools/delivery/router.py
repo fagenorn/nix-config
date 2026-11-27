@@ -18,7 +18,9 @@ commits and no ref, so a later fetch cannot change it); it refuses a `--branch` 
 is not that sha, and no unqualified name reaches Git; both branch names must be literal branch names
 (`git check-ref-format`), never a revision expression. Its document also carries `diff` (that range),
 `head` and `merge_base` (those shas) as members of their own, so a consumer reads the revision the files
-were routed for; the flag form's `head` and `merge_base` are null. Every Git read is of `--repo-root`'s (or the worktree's) repository, whatever
+were routed for; the flag form's `head` and `merge_base` are null. The engine form reads the project's routing
+inputs (the Layer-2 shards and index, the map, the records) and the citations of the changed files from `head`'s
+commit, so an unstaged edit changes neither; the flag form reads the working tree. Every Git read is of `--repo-root`'s (or the worktree's) repository, whatever
 `GIT_DIR` and its siblings name. Exit 0 with that line, 2 with one `router: <reason>`
 line on stderr and nothing on stdout for a misuse.
 """
@@ -55,7 +57,35 @@ def regular_size(path: Path) -> int | None:
     return path.stat().st_size if path.is_file() else None
 
 
-def project_files(root: Path) -> dict[str, bytes]:
+def git_bytes(root: Path, *args: str) -> bytes:
+    """One Git read of `root`'s own repository: the variables that select another one are dropped."""
+    env = {k: v for k, v in os.environ.items() if k not in REPOSITORY_ENV}
+    try:
+        done = subprocess.run(["git", "-C", str(root), *args], capture_output=True,
+                              stdin=subprocess.DEVNULL, timeout=GIT_TIMEOUT, env=env)
+    except (OSError, subprocess.SubprocessError) as error:
+        raise Misuse(f"cannot read git {' '.join(args)}: {error}") from error
+    if done.returncode != 0:
+        reason = " ".join(done.stderr.decode("utf-8", errors="replace").split())
+        raise Misuse(f"cannot read git {' '.join(args)}: {reason}")
+    return done.stdout
+
+
+def committed_files(root: Path, commit: str) -> dict[str, bytes]:
+    """The inputs `read_project` reads, as `commit` holds them (the working tree is not read)."""
+    listing = git_bytes(root, "ls-tree", "-r", "-z", commit, "--", "docs").split(b"\0")
+    found = {}
+    for row in listing:
+        info, _, raw = row.partition(b"\t")
+        name = raw.decode("utf-8", errors="surrogateescape")
+        if info.split(b" ")[:1] in ([b"100644"], [b"100755"]) and routing.is_input(name):
+            found[name] = git_bytes(root, "cat-file", "blob", f"{commit}:{name}")
+    return found
+
+
+def project_files(root: Path, commit: str | None = None) -> dict[str, bytes]:
+    if commit is not None:
+        return committed_files(root, commit)
     found = {}
     patterns = (f"{routing.LAYER2_DIR}/*.md", routing.CONTEXT_MAP, "docs/areas/*/adr/*.md")
     for pattern in patterns:
@@ -74,17 +104,8 @@ def check_path(path: str) -> str:
 
 
 def git_read(root: Path, *args: str) -> str:
-    """One Git read of `root`'s own repository: the variables that select another one are dropped."""
-    env = {k: v for k, v in os.environ.items() if k not in REPOSITORY_ENV}
-    try:
-        done = subprocess.run(["git", "-C", str(root), *args], capture_output=True,
-                              stdin=subprocess.DEVNULL, timeout=GIT_TIMEOUT, env=env)
-    except (OSError, subprocess.SubprocessError) as error:
-        raise Misuse(f"cannot read git {' '.join(args)}: {error}") from error
-    if done.returncode != 0:
-        reason = " ".join(done.stderr.decode("utf-8", errors="replace").split())
-        raise Misuse(f"cannot read git {' '.join(args)}: {reason}")
-    return done.stdout.decode("utf-8", errors="replace").strip()
+    """One Git read of `root`'s own repository, as stripped text."""
+    return git_bytes(root, *args).decode("utf-8", errors="replace").strip()
 
 
 def diff_paths(root: Path, change: str) -> list[str]:
@@ -120,13 +141,25 @@ def rules(text: bytes) -> list[str]:
     return [f"{prefix}{number}" for prefix, number, _ in ids]
 
 
-def must_read(root: Path, project: routing.Project, paths: list[str]) -> list[dict]:
+def committed_text(root: Path, commit: str, path: str) -> str | None:
+    """The text of `path` as `commit` holds it, None when the commit holds no such file."""
+    kind = git_bytes(root, "ls-tree", "-z", commit, "--", path).split(b"\t")[0].split(b" ")[:2]
+    if kind not in ([b"100644", b"blob"], [b"100755", b"blob"]):
+        return None
+    return git_bytes(root, "cat-file", "blob", f"{commit}:{path}").decode("utf-8", errors="replace")
+
+
+def must_read(root: Path, project: routing.Project, paths: list[str],
+              commit: str | None = None) -> list[dict]:
     known = {r.id: r for area in project.areas for r in area.records}
     cited: set[str] = set()
     for path in paths:
-        target = root / path
-        if target.is_file():
-            text = target.read_text(encoding="utf-8", errors="replace")
+        if commit is not None:
+            text = committed_text(root, commit, path)
+        else:
+            target = root / path
+            text = target.read_text(encoding="utf-8", errors="replace") if target.is_file() else None
+        if text is not None:
             cited.update(f"ADR-{slug}-{number}" for slug, number in CITATION_RE.findall(text))
     records = sorted((known[i] for i in cited if i in known), key=lambda r: r.path)
     return [{"id": r.id, "path": str(root / r.path), "bytes": len(project.files[r.path])}
@@ -136,7 +169,8 @@ def must_read(root: Path, project: routing.Project, paths: list[str]) -> list[di
 def route(args: argparse.Namespace, root: Path, platform_dir: Path) -> dict:
     paths = change_paths(args, root)
     platform = routing.load_platform(platform_dir)
-    project = routing.read_project(project_files(root))
+    pinned = getattr(args, "head", None)  # the commit the route is for: read the project at it, not the tree
+    project = routing.read_project(project_files(root, pinned))
     names = sorted({name for path in paths for name in routing.stack_shards(path)})
     shards = [{"layer": "bar", "path": str(platform_dir / routing.BAR),
                "bytes": len(platform.files[routing.BAR]), "rules": rules(platform.files[routing.BAR])}]
@@ -154,7 +188,7 @@ def route(args: argparse.Namespace, root: Path, platform_dir: Path) -> dict:
     hint_path = root / hint_phases.HINT_DIR / hint_phases.hint_file(args.stage)
     size = regular_size(hint_path)
     hint = None if size is None else {"path": str(hint_path), "bytes": size}
-    required = must_read(root, project, paths)
+    required = must_read(root, project, paths, pinned)
     areas = [a for a in project.areas
              if any(routing.glob_matches(g, p) for g in a.globs for p in paths)]
     index = [{"area": a.name, "records": [routing.index_line(r) for r in a.records]} for a in areas]

@@ -124,13 +124,13 @@ def read_mark(root: str, ref: str | None = None) -> Mark:
 def base_of(step: Mapping, args: Sequence[tuple[str, object]]) -> str | None:
     """The `origin` remote-tracking ref of the step's `base` branch, None when it names none.
 
-    Raises `CheckoutRefused` when the path's value is not a non-empty string that is no option.
+    Raises `CheckoutRefused` when the path's value is not a non-empty string that is no option and holds no NUL.
     """
     path = step.get("base")
     if path is None:
         return None
     value = dict(args).get(path)
-    if not (isinstance(value, str) and value and not value.startswith("-")):
+    if not (isinstance(value, str) and value and "\0" not in value and not value.startswith("-")):
         raise CheckoutRefused(f"base {path} is not a branch name: {value!r}")
     return f"refs/remotes/origin/{value}"
 
@@ -138,13 +138,13 @@ def base_of(step: Mapping, args: Sequence[tuple[str, object]]) -> str | None:
 def checkout_of(step: Mapping, args: Sequence[tuple[str, object]]) -> str | None:
     """The checkout the step's `repository` path names, None when it names none.
 
-    Raises `CheckoutRefused` when the path's value is not a string that is an absolute path.
+    Raises `CheckoutRefused` when the path's value is not a string that is an absolute path without a NUL.
     """
     path = step.get("repository")
     if path is None:
         return None
     value = dict(args).get(path)
-    if not (isinstance(value, str) and os.path.isabs(value)):
+    if not (isinstance(value, str) and "\0" not in value and os.path.isabs(value)):
         raise CheckoutRefused(f"repository {path} is not an absolute path: {value!r}")
     return value
 

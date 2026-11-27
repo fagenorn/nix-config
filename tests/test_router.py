@@ -186,6 +186,19 @@ class EngineFormTest(World):
         self.assertEqual(git(self.repo, "diff", "--name-only", doc["diff"]).split(),
                          ["tools/run.py", "web/page.html"])
 
+    def test_the_engine_form_reads_citations_and_project_inputs_from_the_routed_commit_not_the_tree(self):
+        clean = json.loads(self.engine("building", *self.engine_flags()).stdout)
+        write(self.repo, "tools/run.py", "x = 1\n")
+        write(self.repo, "docs/standards/README.md", REPO_FILES["docs/standards/README.md"].replace(
+            "| [web.md](./web.md) | `web/**` | W. |\n", ""))
+        edited = self.engine("building", *self.engine_flags())
+        self.assertEqual(edited.returncode, 0, edited.stderr)
+        self.assertEqual(json.loads(edited.stdout), clean)
+        self.assertEqual([m["id"] for m in clean["must_read"]], ["ADR-beta-001"])
+        self.assertIn(f"{self.repo}/docs/standards/web.md", clean["routed_files"])
+        flag = json.loads(self.route("building", "--diff", f"{self.base}..HEAD").stdout)
+        self.assertEqual(flag["must_read"], [])
+
     def test_routed_files_list_every_shard_then_the_hint_then_the_must_read_records(self):
         for stage in ("final review", "building"):
             with self.subTest(stage=stage):

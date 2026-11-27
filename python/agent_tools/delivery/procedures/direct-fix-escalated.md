@@ -1,4 +1,4 @@
-Fix the review findings of issue {{run.issue}} in the worktree {{preflight.worktree_path}} on branch {{preflight.branch}} (origin/{{preflight.integration_branch}} is the base). Work only there: run git as git -C <worktree> and name every file by its absolute path. Never push, open a pull request, run git stash, run sed -i or run a destructive git command.
+Fix the review findings of issue {{run.issue}} in the worktree {{preflight.worktree_path}} on branch {{preflight.branch}} (the findings are of the diff {{route-lite.diff}}, read with git diff {{route-lite.diff}}). Work only there: run git as git -C <worktree> and name every file by its absolute path. Never push, open a pull request, run git stash, run sed -i or run a destructive git command.
 
 Routed files (the standards, hints and decision records routed to this change; read them and no other standards): {{route-lite.routed_files}}
 

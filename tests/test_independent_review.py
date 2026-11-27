@@ -43,6 +43,13 @@ LIMIT = {"stdout": json.dumps({"status": 1, "error": "You've hit your usage limi
          "exit": 1}
 
 
+def routed_in(stdin: str) -> list[str]:
+    """The routed files of a packet: the JSON list on the line after its `Routed files` heading."""
+    lines = stdin.split("\n")
+    heading = next(index for index, line in enumerate(lines) if line.startswith("Routed files"))
+    return json.loads(lines[heading + 1])
+
+
 class ReviewCase(unittest.TestCase):
     def arrange(self, answers, *, supported=True, argv=None, files=("src/a.py",)):
         self.world = GuardPolicyWorld(self)
@@ -117,9 +124,19 @@ class ReviewTest(ReviewCase):
 
         self.assertEqual(code, 0, reply)
         (call,) = self.calls()
-        self.assertIn("Routed files:\n/s/the-bar.md\n/s/stacks/python.md", call["stdin"])
+        self.assertEqual(routed_in(call["stdin"]), ["/s/the-bar.md", "/s/stacks/python.md"])
         self.assertNotIn("Standards:", call["stdin"])
         self.assertNotIn("stacks/\n", call["stdin"])
+
+    def test_a_routed_path_holding_a_newline_stays_one_path_in_the_packet(self):
+        self.arrange([CLEAN_ANSWER])
+        routed = ["/s/the-bar.md", "/w/odd\nname/docs/standards/web.md"]
+
+        code, reply = self.run_review(routed=routed)
+
+        self.assertEqual(code, 0, reply)
+        (call,) = self.calls()
+        self.assertEqual(routed_in(call["stdin"]), routed)
 
     def test_a_review_without_routed_files_is_a_usage_error(self):
         self.arrange([CLEAN_ANSWER])

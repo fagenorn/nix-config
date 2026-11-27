@@ -158,6 +158,9 @@ class EngineProject:
             "standin-branch": entry("emit", "0", '{"verdict":"ok","branch":"issue-7-topic"}'),
             "standin-side": entry("emit", "0", json.dumps({"path": str(self.tmp / "side")})),
             "standin-based": entry("emit", "0", json.dumps({"path": str(self.tmp / "side"), "branch": "main"})),
+            "standin-misrouted-base": entry("emit", "0", json.dumps({"verdict": "ok", "merge_base": "1" * 40})),
+            "standin-misrouted-head": entry("emit", "0", json.dumps({"verdict": "ok", "head": "2" * 40})),
+            "standin-nul": entry("emit", "0", '{"path":"/tmp/a\\u0000b","branch":"main"}'),
             "standin-relative": entry("emit", "0", '{"path":"relative/dir"}'),
             "standin-listed": entry("emit", "0", '{"path":["x"]}'),
         })
